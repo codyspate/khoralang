@@ -256,3 +256,58 @@ pub fn main() -> Int {
     );
     assert_eq!(ran.err, "", "a silent logger writes nothing: {:?}", ran.err);
 }
+
+/// **A line logged inside a span carries the span's ids, and nobody passed
+/// them.** This is the correlation the module's documentation used to describe
+/// as a limitation: there was no current span, so a function that wanted its
+/// log lines findable from a trace had to be handed the span it was in.
+///
+/// The tracer here is a value rather than an installed capability, and the
+/// logger never sees it. What connects them is `std::trace::current`, which is
+/// per fiber and ambient — so this asserts the ids appear at all, and that the
+/// line logged after the span has gone carries neither.
+#[test]
+fn a_line_logged_inside_a_span_carries_its_ids() {
+    let ran = run(
+        "log_correlated",
+        &format!(
+            "module demo::main;
+import std::clock::{{Clock}};
+import std::core::{{List, Option}};
+import std::log::{{Severity, Log, info}};
+import std::trace::{{Context, Span, Status, Tracer, around, current}};
+
+fn fixed_tracer() -> Tracer {{
+  handler for Tracer {{
+    start: fn (name, _attributes) => {{
+      context: {{ trace_high: 1, trace_low: 2, span: 3, sampled: true }},
+      parent: 0,
+      name: name,
+    }},
+    finish: fn (_span, _status) => (),
+    event: fn (_span, _name, _attributes) => (),
+  }}
+}}
+
+fn work() -> () with {{ log: Log }} {{
+  info(\"inside\");
+}}
+
+pub fn main() -> Int {{{FIXED}
+  with {{ log: Log::json_using(Severity::Info, fixed) }} {{
+    around(fixed_tracer(), \"request\", fn () => work());
+    work()
+  }};
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        ran.err,
+        "{\"timestamp\":1757021376817,\"level\":\"info\",\"message\":\"inside\",\
+         \"trace_id\":\"00000000000000010000000000000002\",\"span_id\":\"0000000000000003\"}\n\
+         {\"timestamp\":1757021376817,\"level\":\"info\",\"message\":\"inside\"}\n",
+        "inside the span the ids are there; outside it there is no field at all"
+    );
+}

@@ -41,13 +41,20 @@ measuring is a tracer that takes production down.
 A failed POST is not raised either: the exporting fiber has nobody to tell, and
 raising would either kill it or need a handler the service never asked for.
 
-## Two things it does not do yet
+## Parents
 
-**Spans have no parents.** `Tracer` has no operation that says "inside this
-one", so a nested `around` starts a second trace rather than a child span. The
-wire format handles parents — `wire.kh` renders `parentSpanId` when a span has
-one, and a test covers it — so what is missing is a way for the effect to say
-so, which is `std::trace`'s to add.
+`start` asks `std::trace::current` what this fiber is already inside, and takes
+the trace id, the sampling decision and the parent from it. A nested `around`
+is a child span; a fiber spawned inside one keeps the trace, because the
+runtime copies the current span into a child when the child is created. Only a
+span with nothing above it invents a trace id.
+
+This used to say spans had no parents, and that what was missing was a way for
+the effect to say so. That is what was added: an operation still cannot see the
+`around` above it on the stack — it runs where the effect is performed — so the
+enclosing span is kept per fiber and read rather than passed.
+
+## One thing it does not do yet
 
 **Attributes given to `start` are not exported.** They are handed to the
 operation and this handler drops them, because `finish` is where a span becomes

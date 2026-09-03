@@ -63,7 +63,7 @@ import std::clock::{Clock};
 import std::core::{Channel, Fiber, List, Map, Nursery, Option};
 import std::random::{Random};
 import std::net::http::{Call, HttpClient};
-import std::trace::{Context, Span, Tracer};
+import std::trace::{Context, Span, Tracer, current};
 import otlp::wire::{Finished, request};
 
 /// What the handler sends to the fiber that owns the batch.
@@ -150,24 +150,39 @@ impl Exporter {
   pub fn tracer(self, clock: Clock, random: Random) -> Tracer {
     let reports = self.reports;
     handler for Tracer {
-      // **A fresh trace per span, and no parent.** `Span` carries the context
-      // it belongs to and nothing here knows what is above it: `Tracer` has no
-      // operation that says "inside this one", so a nested `around` starts a
-      // second trace rather than a child span. That is a limitation of the
-      // effect rather than of this exporter, and it is written down in the
-      // package's README rather than papered over with a guess.
+      // **Inside whatever this fiber is already inside.** `std::trace::current`
+      // is the enclosing span, kept per fiber by the runtime and inherited
+      // across a spawn, so a nested `around` is a child span and a request that
+      // fans out into three fibers is one trace.
+      //
+      // A child keeps the trace id and the sampling decision and takes only a
+      // new span id. Sampling is decided once at the root and carried
+      // unchanged: a trace half of whose spans were dropped is not a trace, it
+      // is a gap that reads as a span that never finished.
       start: fn (name, _attributes) => {
         let id = random.int();
         let _ = Channel::send(reports, Report::Began(id, clock.unix_millis()));
-        {
-          context: {
-            trace_high: random.int(),
-            trace_low: random.int(),
-            span: id,
-            sampled: true,
+        match current() {
+          Option::Some(inside) => {
+            context: {
+              trace_high: inside.trace_high,
+              trace_low: inside.trace_low,
+              span: id,
+              sampled: inside.sampled,
+            },
+            parent: inside.span,
+            name: name,
           },
-          parent: 0,
-          name: name,
+          Option::None => {
+            context: {
+              trace_high: random.int(),
+              trace_low: random.int(),
+              span: id,
+              sampled: true,
+            },
+            parent: 0,
+            name: name,
+          },
         }
       },
       // The start is not here to be had, so `started` is left at zero and the

@@ -45,6 +45,19 @@ use crate::counters::COUNTER_ORDER;
 /// Fiber ids, handed out on first use and never reused.
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
+/// The span a fiber is inside, as `std::trace::Context` holds it.
+///
+/// All zeroes means the fiber is inside no span, because a span id of zero is
+/// already how `Span::parent` says "this is a root". [`crate::span`] has the
+/// argument.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub(crate) struct SpanContext {
+    pub(crate) trace_high: i64,
+    pub(crate) trace_low: i64,
+    pub(crate) span: i64,
+    pub(crate) sampled: bool,
+}
+
 /// What belongs to a fiber rather than to a thread.
 pub(crate) struct Fiber {
     /// Only ever compared for equality. Never zero, so zero can mean "nobody".
@@ -91,6 +104,18 @@ pub(crate) struct Fiber {
     /// a raw `Box` with no handle a fiber could hold, so the variable has to
     /// outlive it independently.
     parked_on: Mutex<Option<Arc<Condvar>>>,
+    /// The span this fiber is inside, for `std::trace`. [`crate::span`].
+    ///
+    /// Here rather than in thread-local storage for the reason at the top of
+    /// this module: two fibers serving two requests are inside two different
+    /// spans at the same instant, and a slot on the thread answers about
+    /// whichever request the worker last touched.
+    ///
+    /// A `Mutex` because a `Fiber` is shared through an `Arc` and this is not
+    /// `Copy` into an atomic. It is never contended in practice -- only the
+    /// running fiber touches its own slot, and a canceller does not read it --
+    /// and a span begins far less often than a cancellation point is checked.
+    span: Mutex<SpanContext>,
 }
 
 impl Fiber {
@@ -106,11 +131,25 @@ impl Fiber {
             spawned: false,
             wait: crate::wait::Wait::default(),
             parked_on: Mutex::new(None),
+            span: Mutex::new(SpanContext::default()),
         }
     }
 
     /// A fiber somebody spawned.
+    ///
+    /// **The current span is inherited here, and this is the only place it
+    /// could be.** This runs on the spawning side, before the child exists, so
+    /// the value copied is the spawner's own and no synchronisation is needed.
+    /// It is what makes a request that fans out into three fibers one trace
+    /// rather than four: `std::trace` has no other way to know what a child
+    /// was started from, because a closure crossing a fiber boundary carries
+    /// its captures and not its caller.
+    ///
+    /// A copy rather than a share. What the child opens afterwards is the
+    /// child's business, and a slot both could write would leave the parent
+    /// holding a span it never entered.
     pub(crate) fn spawned() -> Arc<Fiber> {
+        let inherited = current(|spawner| spawner.span());
         Arc::new(Fiber {
             id: next_id(),
             cancelled: AtomicUsize::new(0),
@@ -120,12 +159,29 @@ impl Fiber {
             spawned: true,
             wait: crate::wait::Wait::default(),
             parked_on: Mutex::new(None),
+            span: Mutex::new(inherited),
         })
     }
 
     /// Where this fiber is in the sleep/wake protocol.
     pub(crate) fn wait(&self) -> &crate::wait::Wait {
         &self.wait
+    }
+
+    /// The span this fiber is inside. All zeroes when it is inside none.
+    pub(crate) fn span(&self) -> SpanContext {
+        // A poisoned lock would mean a panic while holding four words of
+        // plain data, which cannot leave them inconsistent. Reporting no
+        // current span is better than a second panic on the way out of the
+        // first one.
+        self.span.lock().map(|held| *held).unwrap_or_default()
+    }
+
+    /// Makes `context` the span this fiber is inside.
+    pub(crate) fn set_span(&self, context: SpanContext) {
+        if let Ok(mut held) = self.span.lock() {
+            *held = context;
+        }
     }
 
     pub(crate) fn id(&self) -> usize {

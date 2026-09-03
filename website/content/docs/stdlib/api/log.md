@@ -88,11 +88,21 @@ so a caller can attach the trace and span it belongs to:
 log.record(Severity::Warn, "retrying", [text("trace_id", trace_id(span.context))])
 ```
 
-**Attached by the caller rather than found automatically**, and that is a
-limitation rather than a design. `std::trace` has no notion of a *current*
-span — `Span` carries a `parent` field that nothing ever sets — so there is
-nothing ambient for a logger to read. When the tracer learns which span is
-running, this is where the correlation goes.
+**`trace_id` and `span_id` are added by the handler, not by the caller.**
+A line logged inside an `around` carries the ids of the span it was logged
+in, because `std::trace::current` is ambient and per fiber; a line logged
+outside every span carries neither, rather than carrying zeros. Nothing has
+to be threaded through a signature to make a log line findable from a
+trace, which was the whole point of the exercise.
+
+```text
+{"timestamp":1757021376817,"level":"info","message":"charging",
+ "trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","span_id":"00f067aa0ba902b7"}
+```
+
+Attributes named `trace_id` or `span_id` are still written, after these and
+by the same rule as `level` and `message`: silently dropping somebody's
+field is worse than a duplicate key a collector will show them.
 
 ## Types
 

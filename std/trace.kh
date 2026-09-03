@@ -19,6 +19,33 @@ module std::trace;
 //! library concern at all: it is a property of the scheduler, and it is exactly
 //! where every other ecosystem's tracing leaks.
 //!
+//! # The current span
+//!
+//! [`current`] is the span this fiber is inside, and it is the propagation the
+//! paragraph above promises. `around` installs a span for the duration of a
+//! body and puts back the enclosing one on every path out, including a raise
+//! and a cancellation; a handler's `start` reads it and takes the trace id, the
+//! sampling decision and the parent from it.
+//!
+//! **A fiber inherits its spawner's current span**, copied at the moment the
+//! child is created, so a request that fans out into four fibers is one trace
+//! rather than five. A copy rather than a share: what a child opens is the
+//! child's, and a slot both could write would leave the spawner holding a span
+//! it never entered.
+//!
+//! Why ambient at all, when the rest of this language is about saying what you
+//! use: an effect operation runs where the effect is *performed*, not where the
+//! handler was installed, so `start` cannot see the `around` above it on the
+//! stack and cannot require a capability of its own. Threading the span through
+//! every signature was the alternative, and it is the one that makes a library
+//! untraceable unless every function in it agrees to carry a parameter it has
+//! no use for.
+//!
+//! **This did not work until it did.** For as long as this paragraph has been
+//! here, `Span::parent` was written `0` at every call site in the repository:
+//! a nested `around` began a second trace, and the OTLP exporter carried a
+//! comment saying so. The claim was the design and not the behaviour.
+//!
 //! What is *not* here: OTLP, Datadog's protocol, Prometheus, batching, retry,
 //! and every sampling policy beyond a head sampler. All of it is a vendor's
 //! release cadence attached to a network protocol, which is the same argument
@@ -191,21 +218,33 @@ fn spanned<A, 'ef, 'er>(
   with { 'ef | scope: Scope }
   raises 'er
 {
+  let outer = current();
   let span = tracer.start(name, List::Nil);
   let ended = { done: false };
-  acquire(ended, fn state => unfinished(tracer, span, state));
+  acquire(ended, fn state => leaving(tracer, span, outer, state));
+  entering(span.context);
   let answer = body()!;
   ended.done = true;
+  leave_to(outer);
   tracer.finish(span, Status::Ok);
   answer
 }
 
-/// Ends a span that got out without being ended.
+/// Leaving the span: put the enclosing one back, and end this one if the body
+/// did not.
 ///
-/// Reached only when `body` did not return: a raise, or a cancellation. Both
-/// are failures of the operation the span names, so both are `Failed` — an
-/// interrupted request did not succeed, whatever else is true of it.
-fn unfinished(tracer: Tracer, span: Span, ended: Ended) -> () {
+/// **The restore is unconditional and the finish is not.** A body that returned
+/// has already done both, and this runs anyway because it is registered with a
+/// region; a body that raised or was cancelled did neither. Restoring twice
+/// writes the same four words, and leaving the *current span* pointing at a
+/// span that has ended is the failure that would make every later span in the
+/// fiber a child of a corpse.
+///
+/// Both non-returning paths are failures of the operation the span names, so
+/// both are `Failed` — an interrupted request did not succeed, whatever else is
+/// true of it.
+fn leaving(tracer: Tracer, span: Span, outer: Option<Context>, ended: Ended) -> () {
+  leave_to(outer);
   if ended.done { () } else { tracer.finish(span, Status::Failed("did not complete")) }
 }
 
@@ -228,16 +267,86 @@ fn reported<A, E: Show, 'ef, 'er>(
   with { 'ef | scope: Scope }
   raises 'er
 {
+  let outer = current();
   let span = tracer.start(name, List::Nil);
   let ended = { done: false };
-  acquire(ended, fn state => unfinished(tracer, span, state));
+  acquire(ended, fn state => leaving(tracer, span, outer, state));
+  entering(span.context);
   let answer = body()!;
   ended.done = true;
+  leave_to(outer);
   match answer {
     Result::Ok(_) => tracer.finish(span, Status::Ok),
     Result::Err(problem) => tracer.finish(span, Status::Failed(problem.show())),
   }
   answer
+}
+
+/// The span this fiber is inside, or `None` at the top.
+///
+/// **A handler's `start` is expected to call this**, and it is the whole of
+/// what a handler has to do to produce a trace rather than a pile of unrelated
+/// one-span traces: take the trace id and the parent from what comes back, or
+/// begin a fresh trace when nothing does.
+///
+/// ```khora
+/// start: fn (name, _attributes) => match current() {
+///   Option::Some(inside) => {
+///     context: { trace_high: inside.trace_high, trace_low: inside.trace_low,
+///                span: random.int(), sampled: inside.sampled },
+///     parent: inside.span,
+///     name: name,
+///   },
+///   Option::None => { ... a new trace ... },
+/// }
+/// ```
+///
+/// # Why an operation has to ask rather than be told
+///
+/// An effect operation runs where the effect is *performed*, not where the
+/// handler was installed, so it cannot see the `around` above it on the stack
+/// and cannot require a capability of its own. The enclosing span therefore has
+/// to be somewhere ambient, and the only thing that survives what a span has to
+/// survive — a spawn, a steal, a wake and a cancellation — is the fiber. This
+/// reads a slot the runtime keeps per fiber, which `spanned` sets for the
+/// duration of a body and puts back on every path out.
+///
+/// # What it does across a spawn
+///
+/// A fiber inherits its spawner's current span at the moment it is created, so
+/// work that fans out stays one trace. It inherits a *copy*: a span the child
+/// opens afterwards is the child's, and does not become the parent's when the
+/// child returns.
+pub fn current() -> Option<Context> {
+  let span = khora_span_id();
+  if span == 0 {
+    Option::None
+  } else {
+    Option::Some({
+        trace_high: khora_span_trace_high(),
+        trace_low: khora_span_trace_low(),
+        span: span,
+        sampled: khora_span_sampled() != 0,
+      })
+  }
+}
+
+/// Makes `context` the span this fiber is inside.
+fn entering(context: Context) -> () {
+  khora_span_set(
+    context.trace_high,
+    context.trace_low,
+    context.span,
+    if context.sampled { 1 } else { 0 },
+  )
+}
+
+/// Puts back whatever was current before, including nothing.
+fn leave_to(outer: Option<Context>) -> () {
+  match outer {
+    Option::Some(context) => entering(context),
+    Option::None => khora_span_set(0, 0, 0, 0),
+  }
 }
 
 /// A `Text` attribute, which is most of them.
@@ -256,6 +365,21 @@ pub fn flag(name: String, value: Bool) -> Attribute {
 }
 
 impl Context {
+  /// The trace id, as thirty-two lower-case hex digits.
+  ///
+  /// The form every collector indexes and every log line carries, and the
+  /// reason it is here rather than assembled by each caller: a trace id
+  /// written as two decimal integers cannot be pasted into the search box of
+  /// anything.
+  pub fn trace_id(self) -> String {
+    hex16(self.trace_high) + hex16(self.trace_low)
+  }
+
+  /// The span id, as sixteen lower-case hex digits.
+  pub fn span_id(self) -> String {
+    hex16(self.span)
+  }
+
   /// A context that names no trace.
   pub fn none() -> Context {
     { trace_high: 0, trace_low: 0, span: 0, sampled: false }
@@ -362,3 +486,29 @@ impl Eq for Context {
 impl Show for Context {
   fn show(self) -> String { Context::to_traceparent(self) }
 }
+
+/// The trace id's high half, or zero when this fiber is inside no span.
+///
+/// Four readers and one writer rather than one call handing over a record:
+/// only scalars and pointers cross the boundary, and a span begins rarely
+/// enough that four loads are not worth a shape to marshal.
+extern fn khora_span_trace_high() -> Int;
+
+/// The trace id's low half, or zero.
+extern fn khora_span_trace_low() -> Int;
+
+/// The innermost span's id, or zero when this fiber is inside none.
+///
+/// Zero needs no separate flag for "none": it is already how `Span::parent`
+/// says a span is a root.
+extern fn khora_span_id() -> Int;
+
+/// Whether the current trace is being recorded, as 0 or 1.
+///
+/// An `Int` because nothing else in `std` returns a `Bool` across the
+/// boundary, and one bit in a register is the sort of thing two calling
+/// conventions answer differently.
+extern fn khora_span_sampled() -> Int;
+
+/// Makes this the span the fiber is inside; a `span` of zero, none of them.
+extern fn khora_span_set(trace_high: Int, trace_low: Int, span: Int, sampled: Int) -> ();

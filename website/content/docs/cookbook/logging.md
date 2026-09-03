@@ -80,28 +80,36 @@ two you send it to.
 
 ## Correlating with a trace
 
-Attach the ids of the span you are inside:
+Nothing to do. A line logged inside a span carries that span's ids:
 
 ```khora
-import otlp::wire::{hex16, trace_id};
-
-fn work(span: Span) -> () with { log: Log } {
-  log.record(Severity::Info, "processing", [
-    text("trace_id", trace_id(span.context)),
-    text("span_id", hex16(span.context.span)),
-  ]);
+fn work() -> () with { log: Log } {
+  info("processing");
 }
+
+around(tracer, "request", fn () => work())
 ```
 
-Every collector worth using will then show the log lines beside the span, and
-the field names above are the ones OpenTelemetry already expects.
+```text
+{"timestamp":1757021376823,"level":"info","message":"processing","trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","span_id":"00f067aa0ba902b7"}
+```
 
-**The span has to be passed in, and that is a limitation rather than a
-design.** `std::trace` has no notion of a *current* span — `Span` carries a
-`parent` field that nothing ever sets — so there is nothing ambient for a
-logger to read, and a function that wants to correlate must be handed the span
-it belongs to. When the tracer learns which span is running, this is the page
-that changes.
+`work` says nothing about tracing, takes no span, and is not passed the tracer.
+The handler asks [`current`](/docs/stdlib/api/trace/) what the fiber is inside
+and writes the ids if there is an answer — and writes neither field if there is
+not, rather than thirty-two zeros a collector would group every unparented line
+under.
+
+The field names are the ones OpenTelemetry expects, so a collector shows the
+lines beside the span without being configured to.
+
+**This works across a spawn**, which is the case it exists for: a fiber
+inherits its spawner's current span when it is created, so a request that fans
+out into four fibers is one trace. It inherits a copy — a span the child opens
+is the child's, and does not become the parent's when the child returns.
+
+A line logged outside every span carries no ids, which is correct and is why
+the field is absent rather than empty.
 
 ## Choosing a level
 

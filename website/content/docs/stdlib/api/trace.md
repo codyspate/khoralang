@@ -24,6 +24,33 @@ surviving a spawn, a steal, a wake and a cancellation — which is not a
 library concern at all: it is a property of the scheduler, and it is exactly
 where every other ecosystem's tracing leaks.
 
+## The current span
+
+[`current`] is the span this fiber is inside, and it is the propagation the
+paragraph above promises. `around` installs a span for the duration of a
+body and puts back the enclosing one on every path out, including a raise
+and a cancellation; a handler's `start` reads it and takes the trace id, the
+sampling decision and the parent from it.
+
+**A fiber inherits its spawner's current span**, copied at the moment the
+child is created, so a request that fans out into four fibers is one trace
+rather than five. A copy rather than a share: what a child opens is the
+child's, and a slot both could write would leave the spawner holding a span
+it never entered.
+
+Why ambient at all, when the rest of this language is about saying what you
+use: an effect operation runs where the effect is *performed*, not where the
+handler was installed, so `start` cannot see the `around` above it on the
+stack and cannot require a capability of its own. Threading the span through
+every signature was the alternative, and it is the one that makes a library
+untraceable unless every function in it agrees to carry a parameter it has
+no use for.
+
+**This did not work until it did.** For as long as this paragraph has been
+here, `Span::parent` was written `0` at every call site in the repository:
+a nested `around` began a second trace, and the OTLP exporter carried a
+comment saying so. The claim was the design and not the behaviour.
+
 What is *not* here: OTLP, Datadog's protocol, Prometheus, batching, retry,
 and every sampling policy beyond a head sampler. All of it is a vendor's
 release cadence attached to a network protocol, which is the same argument
@@ -233,6 +260,27 @@ is released at the call.
 impl Context
 ```
 
+#### trace_id
+
+```khora
+pub fn trace_id(self) -> String
+```
+
+The trace id, as thirty-two lower-case hex digits.
+
+The form every collector indexes and every log line carries, and the
+reason it is here rather than assembled by each caller: a trace id
+written as two decimal integers cannot be pasted into the search box of
+anything.
+
+#### span_id
+
+```khora
+pub fn span_id(self) -> String
+```
+
+The span id, as sixteen lower-case hex digits.
+
 #### none
 
 ```khora
@@ -350,6 +398,48 @@ The difference from `around` is what reaches the span's status: this reads
 the `Result` and puts the error's own text on it, where `around` can only
 say that the body did not return. Reach for this when the failure has
 something to say, which is most of the time.
+
+### current
+
+```khora
+pub fn current() -> Option<Context>
+```
+
+The span this fiber is inside, or `None` at the top.
+
+**A handler's `start` is expected to call this**, and it is the whole of
+what a handler has to do to produce a trace rather than a pile of unrelated
+one-span traces: take the trace id and the parent from what comes back, or
+begin a fresh trace when nothing does.
+
+```khora
+start: fn (name, _attributes) => match current() {
+  Option::Some(inside) => {
+    context: { trace_high: inside.trace_high, trace_low: inside.trace_low,
+               span: random.int(), sampled: inside.sampled },
+    parent: inside.span,
+    name: name,
+  },
+  Option::None => { ... a new trace ... },
+}
+```
+
+#### Why an operation has to ask rather than be told
+
+An effect operation runs where the effect is *performed*, not where the
+handler was installed, so it cannot see the `around` above it on the stack
+and cannot require a capability of its own. The enclosing span therefore has
+to be somewhere ambient, and the only thing that survives what a span has to
+survive — a spawn, a steal, a wake and a cancellation — is the fiber. This
+reads a slot the runtime keeps per fiber, which `spanned` sets for the
+duration of a body and puts back on every path out.
+
+#### What it does across a spawn
+
+A fiber inherits its spawner's current span at the moment it is created, so
+work that fans out stays one trace. It inherits a *copy*: a span the child
+opens afterwards is the child's, and does not become the parent's when the
+child returns.
 
 ### text
 
