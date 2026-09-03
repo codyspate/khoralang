@@ -1612,6 +1612,203 @@ fn an_imported_name_is_not_offered_a_second_import() {
     assert!(found[0].1.starts_with('1'), "{offered:?}");
 }
 
+/// The completion items for a position, as (label, sortText, insertText).
+fn insertions_at(
+    w: &Workspace,
+    file: &Path,
+    text: &str,
+    line: u32,
+    character: u32,
+) -> Vec<(String, String, String)> {
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(file, text),
+        completion(file, line, character, 9),
+        exit(),
+    ]);
+    result_of(&replies, 9)
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|item| {
+            let label =
+                item.get("label").and_then(Value::as_str).unwrap_or_default().to_string();
+            (
+                label.clone(),
+                item.get("sortText").and_then(Value::as_str).unwrap_or_default().to_string(),
+                item.get("insertText").and_then(Value::as_str).unwrap_or(&label).to_string(),
+            )
+        })
+        .collect()
+}
+
+/// **The completion no other language has to answer.** A `with` block is where
+/// a capability stops being a requirement, and writing one means naming the
+/// effect, then every operation it declares, then a closure of the right arity
+/// for each -- all of it in a declaration somewhere else.
+#[test]
+fn a_with_row_offers_a_whole_handler() {
+    let text = "module main;\n\
+                \n\
+                pub effect Chime {\n\
+                \x20 now: () -> Int,\n\
+                \x20 at: (Int, Int) -> Int,\n\
+                }\n\
+                \n\
+                fn go() -> Int {\n\
+                \x20 with { } { 1 }\n\
+                }\n";
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+
+    // The cursor just inside the `with {`.
+    let offered = insertions_at(&w, &file, text, 8, 9);
+    let (_, _, insert) = offered
+        .iter()
+        .find(|(label, _, _)| label == "Chime")
+        .unwrap_or_else(|| panic!("a handler for `Chime`: {offered:?}"));
+    assert_eq!(
+        insert,
+        "chime: handler for Chime { now: fn () => todo(), at: fn (a, b) => todo() }",
+        "{offered:?}"
+    );
+}
+
+/// **The case this is actually asked in.** `with {` and nothing after it is a
+/// syntax error, and the node that would say what the brace belongs to is
+/// exactly the node that does not exist yet -- so the row is found by reading
+/// tokens backwards rather than by walking up the tree.
+#[test]
+fn a_half_typed_with_row_still_knows_what_it_is() {
+    let text = "module main;\n\
+                \n\
+                pub effect Chime {\n\
+                \x20 now: () -> Int,\n\
+                }\n\
+                \n\
+                fn go() -> Int {\n\
+                \x20 with {\n\
+                }\n";
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+
+    let offered = insertions_at(&w, &file, text, 7, 8);
+    let (_, _, insert) = offered
+        .iter()
+        .find(|(label, _, _)| label == "Chime")
+        .unwrap_or_else(|| panic!("a handler for `Chime`: {offered:?}"));
+    assert!(insert.starts_with("chime: handler for Chime"), "{offered:?}");
+}
+
+/// One entry further along the same row, which arrives on a comma rather than
+/// a brace and has to walk back over what is already written to find it.
+#[test]
+fn a_second_entry_in_a_with_row_is_still_a_with_row() {
+    let text = "module main;\n\
+                \n\
+                pub effect Chime {\n\
+                \x20 now: () -> Int,\n\
+                }\n\
+                \n\
+                pub type Db;\n\
+                \n\
+                fn go() -> Int {\n\
+                \x20 with { db: Db, } { 1 }\n\
+                }\n";
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+
+    let offered = insertions_at(&w, &file, text, 9, 17);
+    let (_, _, insert) = offered
+        .iter()
+        .find(|(label, _, _)| label == "Chime")
+        .unwrap_or_else(|| panic!("a handler for `Chime`: {offered:?}"));
+    assert!(insert.starts_with("chime: handler for Chime"), "{offered:?}");
+}
+
+/// **The label is the requirement's, not one made up from the type.** `std`
+/// installs `LLMService` as `ai`, which no rule derives; the call inside the
+/// block is what says so, and an entry that answers it has to be spelled the
+/// way it asked.
+#[test]
+fn the_handler_is_labelled_the_way_the_requirement_asked() {
+    let text = "module main;\n\
+                \n\
+                pub effect Chime {\n\
+                \x20 now: () -> Int,\n\
+                }\n\
+                \n\
+                fn stamp() -> Int with { ticker: Chime } { ticker.now() }\n\
+                \n\
+                fn go() -> Int {\n\
+                \x20 with { } { stamp() }\n\
+                }\n";
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+
+    let offered = insertions_at(&w, &file, text, 9, 9);
+    let (_, sort, insert) = offered
+        .iter()
+        .find(|(label, _, _)| label == "Chime")
+        .unwrap_or_else(|| panic!("a handler for `Chime`: {offered:?}"));
+    assert!(insert.starts_with("ticker: handler for Chime"), "{offered:?}");
+    // And first: it is not one of several plausible entries, it is the one.
+    assert!(sort.starts_with('0'), "{offered:?}");
+}
+
+/// **A signature's `with` holds types, not handlers.** The same three
+/// characters open both rows, and a handler skeleton offered in a signature is
+/// nonsense.
+#[test]
+fn a_signature_row_offers_the_type_rather_than_a_handler() {
+    let text = "module main;\n\
+                \n\
+                pub effect Chime {\n\
+                \x20 now: () -> Int,\n\
+                }\n\
+                \n\
+                fn go() -> Int with { } { 1 }\n";
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+
+    let offered = insertions_at(&w, &file, text, 6, 22);
+    let (_, _, insert) = offered
+        .iter()
+        .find(|(label, _, _)| label == "Chime")
+        .unwrap_or_else(|| panic!("`Chime` as a type: {offered:?}"));
+    assert_eq!(insert, "chime: Chime", "{offered:?}");
+}
+
+/// An effect from another module comes with the `import` that brings it in,
+/// the same as any other name from elsewhere.
+#[test]
+fn an_effect_from_another_module_brings_its_import() {
+    let chimes = "module chimes;\n\npub effect Chime {\n  now: () -> Int,\n}\n";
+    let main = "module main;\n\nfn go() -> Int {\n  with { } { 1 }\n}\n";
+    let w = workspace(&[("src/chimes.kh", chimes), ("src/main.kh", main)]);
+    let file = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, main),
+        completion(&file, 3, 9, 9),
+        exit(),
+    ]);
+    let item = result_of(&replies, 9)
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|item| item.get("label") == Some(&json!("Chime")))
+        .expect("`Chime` from `chimes`");
+    assert_eq!(
+        item.pointer("/additionalTextEdits/0/newText").and_then(Value::as_str),
+        Some("import chimes::{Chime};\n\n"),
+        "{item}"
+    );
+}
+
 /// **The `///` arrives when the item is looked at, not when the list is built.**
 /// Reading the documentation of every public name in a workspace to fill a list
 /// where one of them gets read cost 100ms a keystroke against something the

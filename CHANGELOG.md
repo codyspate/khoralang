@@ -418,6 +418,29 @@ it will behave differently now.
   conditional -- an `if` branch, a `match` arm, a lambda body, the far side of
   `&&` -- because hoisting code out of those runs it when the program said not
   to.
+- **Completion inside a `with { .. }` writes the whole handler.** A `with`
+  block is where a capability stops being a requirement and becomes something
+  the code supplies, and writing one by hand means naming the effect, then
+  every operation it declares, then a closure of the right arity for each --
+  all of it in a declaration usually in another file. Now the effect's name is
+  enough: `Clock` inserts
+  `clock: handler for Clock { now: fn () => todo() }`, arities read from the
+  operations' own types.
+
+  **The label comes from the requirement where there is one.** `std` installs
+  `LLMService` as `ai`, which no rule derives from the type -- but the calls
+  inside the block say what they still need, and an entry that answers a
+  requirement has to be spelled the way the requirement is. An outstanding
+  `ticker: Clock` is offered as `ticker: handler for Clock { .. }`, sorted
+  ahead of everything else, because it is not one of several plausible entries
+  but the one.
+
+  A signature's `with` is told apart from an expression's and offers types
+  rather than handlers -- the same three characters open both rows and want
+  opposite things. Both are read from the token stream backwards rather than
+  from the tree, because `with {` with nothing after it is a syntax error and
+  the node that would say what the brace belongs to is exactly the node that
+  does not exist yet.
 - **Completion offers names the file has not imported, and writes the import.**
   A name had to be in scope before it could be completed, which is the wrong
   way round: the import is the thing you wanted the editor to write. Every

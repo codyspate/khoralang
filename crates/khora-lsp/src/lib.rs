@@ -36,6 +36,7 @@
 #![deny(missing_docs)]
 
 mod assists;
+mod handlers;
 mod members;
 mod completion;
 mod definition;
@@ -1318,7 +1319,14 @@ impl Server {
                     // client sorts by this rather than by the order sent.
                     "sortText": format!(
                         "{}{}",
-                        if candidate.import.is_some() { '2' } else { '1' },
+                        match (candidate.wanted, candidate.import.is_some()) {
+                            // The handler that answers a requirement the code
+                            // actually has is not one of several plausible
+                            // entries; it is the one.
+                            (true, _) => '0',
+                            (false, false) => '1',
+                            (false, true) => '2',
+                        },
                         candidate.label,
                     ),
                 });
@@ -1328,6 +1336,11 @@ impl Server {
                 // documentation" for a name that simply is not a declaration.
                 if let Some(docs) = candidate.documentation {
                     item["documentation"] = json!({ "kind": "markdown", "value": docs });
+                }
+                if let Some(insert) = candidate.insert {
+                    // The label is what somebody types to find it; this is
+                    // what they wanted written. A whole handler is not a name.
+                    item["insertText"] = json!(insert);
                 }
                 if let Some(module) = candidate.source {
                     // Where it comes from, drawn to the right of the name --

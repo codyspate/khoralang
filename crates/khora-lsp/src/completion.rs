@@ -56,10 +56,21 @@
 //! The documentation arrives through `completionItem/resolve`, for the one item
 //! the reader highlighted.
 //!
-//! Nothing after a `with {` yet. The roadmap wants the handlers that satisfy a
-//! row there, which needs the row at the cursor and the set of handlers that
-//! could produce it; both exist, and joining them is a piece of work rather
-//! than an afternoon.
+//! # Inside a `with { .. }`
+//!
+//! The one completion Khora needs that no other language has to answer, and
+//! `handlers.rs` has the detail. Two rows are spelled the same and want
+//! opposite things — a signature's `with` holds types, an expression's holds
+//! handlers — and in an expression the entry offered is a whole handler with
+//! every operation the effect declares.
+//!
+//! **The label comes from the requirement where there is one.** `std` installs
+//! `LLMService` as `ai`, which no rule derives from the type; but the calls
+//! inside the block say what they still need, and a row entry that answers a
+//! requirement has to be spelled the way the requirement is. So an outstanding
+//! `ai: LLMService` is offered as `ai: handler for LLMService { .. }`, first,
+//! and only where nothing is outstanding does the label fall back to a name
+//! made from the effect.
 
 use khora_db::{Db, SourceFile, SourceRoot};
 use khora_hir::ItemKind;
@@ -91,15 +102,35 @@ pub struct Candidate {
     /// The edit that brings the name in, for a candidate that is not in scope.
     ///
     /// Sent as `additionalTextEdits`, so accepting the completion writes the
-    /// name and the `import` in one keystroke.
+    /// name and the `import` together.
     pub import: Option<(TextRange, String)>,
+    /// What to insert, where that is not the label.
+    ///
+    /// A handler is a whole row entry and the label is the effect's name,
+    /// because the name is what somebody types to find it and the entry is
+    /// what they wanted written.
+    pub insert: Option<String>,
+    /// Sorted ahead of everything else when set.
+    ///
+    /// For the handler that answers a requirement the enclosing code actually
+    /// has: it is not one of several plausible entries, it is the one.
+    pub wanted: bool,
 }
 
 impl Candidate {
     /// A candidate with nothing to say about itself: a local, an imported
     /// alias, anything whose declaration is not in reach here.
     fn plain(label: String, kind: CompletionItemKind, detail: Option<String>) -> Candidate {
-        Candidate { label, kind, detail, documentation: None, source: None, import: None }
+        Candidate {
+            label,
+            kind,
+            detail,
+            documentation: None,
+            source: None,
+            import: None,
+            insert: None,
+            wanted: false,
+        }
     }
 }
 
@@ -131,6 +162,16 @@ pub fn at(
         }
         Some(SyntaxKind::COLON_COLON) => {
             after_colons(db, root, file, &anchor.expect("just matched")).unwrap_or_default()
+        }
+        // `with {` and `with { db: Db, ` both land on a brace or a comma
+        // whose row is a `with`, which is a different question from either of
+        // the two below it.
+        Some(SyntaxKind::L_BRACE) | Some(SyntaxKind::COMMA)
+            if anchor.as_ref().and_then(crate::handlers::row_at).is_some() =>
+        {
+            let at = anchor.as_ref().expect("just matched");
+            let row = crate::handlers::row_at(at).expect("just matched");
+            in_with_row(db, file, known, &tree, offset, row)
         }
         // `import m::{` and `import m::{X, ` both land on a brace or a comma
         // inside an import list.
@@ -202,6 +243,111 @@ fn from_elsewhere(
             candidate.import = Some((fix.range, fix.replacement));
             out.push(candidate);
         }
+    }
+    out
+}
+
+/// What can be written in a `with` row.
+///
+/// A signature's row takes types, an expression's takes handlers, and the two
+/// are told apart in `handlers::row_at`. Everything reachable is offered either
+/// way -- this file's declarations first, then the workspace with the `import`
+/// that would bring one in.
+fn in_with_row(
+    db: &dyn Db,
+    file: SourceFile,
+    known: &[SourceFile],
+    tree: &khora_syntax::SyntaxNode,
+    offset: TextSize,
+    row: crate::handlers::Row,
+) -> Vec<Candidate> {
+    let text = file.text(db);
+    let existing = crate::imports::declared_in(tree);
+    let here = khora_hir::module_api(db, file).module.as_ref().map(crate::imports::written);
+    // What the code in this function still has to be given. Empty while the
+    // block is too broken to check, which is exactly why there is a fallback.
+    let outstanding = outstanding_labels(db, file, offset);
+
+    let mut out = Vec::new();
+    let mut offer = |decl: &khora_syntax::ast::EffectDecl, module: Option<&str>| {
+        let Some(name) = decl.name().and_then(|n| n.ident()) else { return };
+        // The requirement's own spelling where there is one: a row entry that
+        // answers `ai: LLMService` has to be called `ai`.
+        let asked = outstanding.iter().find(|(_, ty)| *ty == name).map(|(label, _)| label.clone());
+        let label = asked.clone().unwrap_or_else(|| crate::handlers::label_for(&name));
+        let insert = match row {
+            crate::handlers::Row::Installed => crate::handlers::skeleton(decl, &label),
+            crate::handlers::Row::Declared => Some(format!("{label}: {name}")),
+        };
+        let Some(insert) = insert else { return };
+
+        let mut candidate = Candidate::plain(
+            name.clone(),
+            CompletionItemKind::INTERFACE,
+            Some(insert.clone()),
+        );
+        candidate.insert = Some(insert);
+        candidate.wanted = asked.is_some();
+        if let Some(module) = module {
+            let Some(fix) = crate::imports::edit_among(&existing, tree, text, module, &name) else {
+                return;
+            };
+            candidate.source = Some(module.to_string());
+            candidate.import = Some((fix.range, fix.replacement));
+        }
+        out.push(candidate);
+    };
+
+    for decl in crate::handlers::declared_in(tree) {
+        offer(&decl, None);
+    }
+    for other in known {
+        if *other == file {
+            continue;
+        }
+        let Some(module) = khora_hir::module_api(db, *other).module.as_ref().map(crate::imports::written)
+        else {
+            continue;
+        };
+        if here.as_deref() == Some(module.as_str()) {
+            continue;
+        }
+        for decl in crate::handlers::declared_in(&khora_db::parse(db, *other).syntax()) {
+            offer(&decl, Some(&module));
+        }
+    }
+    out
+}
+
+/// The capabilities calls in the enclosing function still have to be given.
+///
+/// `(label, the head of the type)`, which is what it takes to match a
+/// requirement to an effect declared somewhere. Empty when the cursor is not
+/// inside a body the checker could make sense of, which while a `with {` is
+/// half typed is often.
+fn outstanding_labels(db: &dyn Db, file: SourceFile, offset: TextSize) -> Vec<(String, String)> {
+    let checked = khora_types::checked(db, file);
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (name, body) in khora_hir::body::bodies(db, file) {
+        if !body.exprs().any(|(id, _)| body.range(id).contains_inclusive(offset)) {
+            continue;
+        }
+        let Some(types) = checked.bodies.iter().find(|(n, _)| n == name).map(|(_, t)| t) else {
+            continue;
+        };
+        for (_, rows) in types.calls_with_rows() {
+            let Some(khora_types::Type::Row { fields, .. }) = rows.requires.as_ref() else {
+                continue;
+            };
+            for (label, ty) in fields {
+                let head = ty.to_string();
+                let head = head.split(['<', ' ']).next().unwrap_or_default().to_string();
+                if !head.is_empty() && !out.iter().any(|(seen, _)| seen == label) {
+                    out.push((label.clone(), head));
+                }
+            }
+        }
+        break;
     }
     out
 }
@@ -385,6 +531,8 @@ fn in_scope(db: &dyn Db, file: SourceFile, offset: TextSize) -> Vec<Candidate> {
                 documentation: None,
                 source: None,
                 import: None,
+                insert: None,
+                wanted: false,
             });
         }
         break;
@@ -450,6 +598,8 @@ fn described(db: &dyn Db, file: SourceFile, item: &khora_hir::Item) -> Candidate
             documentation: explained.docs,
             source: None,
             import: None,
+            insert: None,
+            wanted: false,
         },
         None => Candidate::plain(
             item.name.clone(),
