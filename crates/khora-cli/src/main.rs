@@ -1264,11 +1264,16 @@ fn lsp() -> Result<()> {
              at it instead."
         );
     }
-    let stdin = std::io::stdin();
-    let mut input = stdin.lock();
+    // **`BufReader<Stdin>` rather than `stdin().lock()`.** The server reads on
+    // a thread of its own so that it can see what is already queued and check
+    // a run of keystrokes once instead of once each; a `StdinLock` holds a
+    // mutex guard and cannot cross a thread boundary. `Stdin` itself can, and
+    // does its own locking per read, which is the same thing at this
+    // granularity because nothing else in this process reads stdin.
+    let input = std::io::BufReader::new(std::io::stdin());
     let stdout = std::io::stdout();
     let mut output = stdout.lock();
-    khora_lsp::serve(&mut input, &mut output)
+    khora_lsp::serve(input, &mut output)
 }
 
 /// Formats files in place, or reports which would change.

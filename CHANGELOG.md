@@ -373,6 +373,16 @@ it will behave differently now.
 
 ### Added
 
+- **The server takes messages in batches, and honours `$/cancelRequest`.** It
+  is still one thread doing one thing at a time; what changed is that it can
+  see the queue before it starts. Typing ten characters used to be ten
+  `didChange` notifications and so ten full type-checks, nine of whose answers
+  were obsolete before they were computed. Every edit is still applied, since
+  each is measured against the last, and the file is checked once at the end.
+  A request the same batch cancels is answered with the protocol's
+  `RequestCancelled` rather than computed, which a strictly serial loop can
+  never do: the cancel always arrives after the work it wanted to stop.
+
 - **Rename reaches the whole workspace.** It refused to leave a body until the
   two things that made it unsafe were answered: a declaration's range covers
   its whole body, so renaming through it would have replaced the body too, and

@@ -70,11 +70,50 @@ pub use position::{Encoding, LineIndex};
 pub use transport::{read_message, write_message};
 
 /// Runs until the client says to stop.
-pub fn serve(input: &mut impl BufRead, output: &mut impl Write) -> Result<()> {
+///
+/// **Messages are taken in batches of whatever has already arrived.** The
+/// server is still one thread doing one thing at a time; what changes is that
+/// it can see the queue before it starts. Typing ten characters used to be ten
+/// `didChange` notifications and so ten full type-checks, nine of whose
+/// answers were obsolete before they were computed. Now the ten edits are all
+/// applied — they must be, each is measured against the last — and the file is
+/// checked once, at the end.
+///
+/// A reader thread is what makes the queue visible. It does nothing but frame
+/// messages and hand them over, so the database still has one owner and there
+/// is still no locking.
+pub fn serve(input: impl BufRead + Send + 'static, output: &mut impl Write) -> Result<()> {
+    let (sender, receiver) = std::sync::mpsc::channel::<String>();
+
+    // **Detached, not scoped.** A scoped thread is joined when this function
+    // returns, and this one is blocked inside `read`: after `exit` the server
+    // has nothing more to do and the client has not closed the pipe yet, so
+    // joining means waiting for input that will never come. `khora lsp` hung
+    // on exit for exactly that reason, and the gate caught it.
+    //
+    // The cost of detaching is a thread parked on a read that nobody will
+    // answer. In `khora lsp` the process ends immediately afterwards; for any
+    // other caller it ends when the stream does.
+    std::thread::spawn(move || {
+        let mut input = input;
+        // The stream ending, or giving us something that is not a message,
+        // both mean there is nothing more to read; the main loop stops when
+        // the channel closes either way.
+        while let Ok(Some(text)) = read_message(&mut input) {
+            if sender.send(text).is_err() {
+                break;
+            }
+        }
+    });
+
     let mut server = Server::default();
-    while let Some(text) = read_message(input)? {
-        let message: Value = serde_json::from_str(&text).context("a message that is JSON")?;
-        for reply in server.handle(&message) {
+    while let Ok(text) = receiver.recv() {
+        let mut batch = vec![text];
+        // Everything else already waiting, without blocking for more.
+        while let Ok(more) = receiver.try_recv() {
+            batch.push(more);
+        }
+        for reply in server.handle_batch(&batch)? {
             write_message(output, &serde_json::to_string(&reply)?)?;
         }
         if server.finished {
@@ -103,6 +142,11 @@ pub struct Server {
     fmt: khora_fmt::Options,
     /// Set by `exit`, and by `shutdown` followed by a closed stream.
     pub finished: bool,
+    /// Apply an edit without reporting on it.
+    ///
+    /// Set for every edit in a batch but the last, so a run of keystrokes is
+    /// spliced in full and checked once.
+    quiet: bool,
 }
 
 impl Default for Server {
@@ -115,11 +159,65 @@ impl Default for Server {
             levels: HashMap::new(),
             fmt: khora_fmt::Options::default(),
             finished: false,
+            quiet: false,
         }
     }
 }
 
 impl Server {
+    /// Answers a batch of messages that arrived together.
+    ///
+    /// Two things are decided here that cannot be decided one message at a
+    /// time. A request the batch also cancels is answered with the
+    /// protocol's cancellation error rather than computed, which is what
+    /// `$/cancelRequest` is for and what a strictly serial loop can never
+    /// honour — the cancel always arrives after the work it wanted to stop.
+    /// And a run of edits publishes diagnostics once at the end rather than
+    /// once each, because every answer but the last is obsolete before it is
+    /// written.
+    pub fn handle_batch(&mut self, batch: &[String]) -> Result<Vec<Value>> {
+        let mut messages = Vec::with_capacity(batch.len());
+        for text in batch {
+            messages.push(
+                serde_json::from_str::<Value>(text).context("a message that is JSON")?,
+            );
+        }
+
+        let cancelled: Vec<Value> = messages
+            .iter()
+            .filter(|m| m.get("method").and_then(Value::as_str) == Some("$/cancelRequest"))
+            .filter_map(|m| m.pointer("/params/id").cloned())
+            .collect();
+
+        // The last edit in the batch is the one whose diagnostics are worth
+        // computing; the ones before it are applied and not reported.
+        let last_edit = messages.iter().rposition(|m| {
+            matches!(
+                m.get("method").and_then(Value::as_str),
+                Some("textDocument/didChange") | Some("textDocument/didOpen")
+            )
+        });
+
+        let mut out = Vec::new();
+        for (at, message) in messages.iter().enumerate() {
+            if let Some(id) = message.get("id") {
+                if cancelled.contains(id) {
+                    // -32800 is `RequestCancelled`. A client that asked us to
+                    // stop still needs an answer, or it waits for ever.
+                    out.push(error(id.clone(), -32800, "cancelled by the client"));
+                    continue;
+                }
+            }
+            self.quiet = last_edit.is_some_and(|last| at < last);
+            out.extend(self.handle(message));
+            if self.finished {
+                break;
+            }
+        }
+        self.quiet = false;
+        Ok(out)
+    }
+
     /// Answers one message with zero or more of its own.
     ///
     /// A notification produces no reply and may still produce a notification of
@@ -467,6 +565,9 @@ impl Server {
             return Vec::new();
         }
         drop(parsed);
+        if self.quiet {
+            return Vec::new();
+        }
         self.publish_open()
     }
 

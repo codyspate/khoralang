@@ -33,67 +33,6 @@ fn url_of(path: &Path) -> String {
     url::Url::from_file_path(path).expect("a file URL").to_string()
 }
 
-/// A reader that does something once, part-way through the script.
-///
-/// **For the notifications that are about the disk.** A watcher event says a
-/// file appeared, and a test of it has to have the file appear *after*
-/// `initialize` has read the workspace — otherwise the server already had it
-/// and the notification proves nothing. The script is one buffer handed to
-/// `serve`, so the only place to put a side effect between two messages is in
-/// the reader that hands them over.
-struct Interrupting<F: FnMut()> {
-    data: Vec<u8>,
-    at: usize,
-    after: usize,
-    done: bool,
-    act: F,
-}
-
-impl<F: FnMut()> std::io::Read for Interrupting<F> {
-    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
-        if !self.done && self.at >= self.after {
-            self.done = true;
-            (self.act)();
-        }
-        let left = self.data.len().saturating_sub(self.at);
-        let n = left.min(out.len());
-        out[..n].copy_from_slice(&self.data[self.at..self.at + n]);
-        self.at += n;
-        Ok(n)
-    }
-}
-
-/// Runs a script, performing `act` once the first `before` messages have been
-/// handed to the server.
-fn session_interrupted(messages: &[Value], before: usize, act: impl FnMut()) -> Vec<Value> {
-    let mut framed: Vec<Vec<u8>> = Vec::new();
-    for message in messages {
-        let mut one = Vec::new();
-        write_message(&mut one, &serde_json::to_string(message).expect("json")).expect("writing");
-        framed.push(one);
-    }
-    let after: usize = framed.iter().take(before).map(Vec::len).sum();
-    let data: Vec<u8> = framed.concat();
-
-    // Wrapped rather than implementing `BufRead` by hand: `serve` reads framed
-    // messages, and a buffered reader over the interrupting one still asks it
-    // for bytes in the order the script is in, which is what the side effect
-    // is timed against.
-    let mut input = std::io::BufReader::with_capacity(
-        1,
-        Interrupting { data, at: 0, after, done: false, act },
-    );
-    let mut output = Vec::new();
-    khora_lsp::serve(&mut input, &mut output).expect("the server should not fail");
-
-    let mut replies = Vec::new();
-    let mut reading = output.as_slice();
-    while let Some(text) = read_message(&mut reading).expect("reading a reply") {
-        replies.push(serde_json::from_str(&text).expect("a reply that is JSON"));
-    }
-    replies
-}
-
 /// Runs a script and returns everything the server said.
 fn session(messages: &[Value]) -> Vec<Value> {
     let mut input = Vec::new();
@@ -102,7 +41,7 @@ fn session(messages: &[Value]) -> Vec<Value> {
             .expect("writing");
     }
     let mut output = Vec::new();
-    khora_lsp::serve(&mut input.as_slice(), &mut output).expect("the server should not fail");
+    khora_lsp::serve(std::io::Cursor::new(input), &mut output).expect("the server should not fail");
 
     let mut replies = Vec::new();
     let mut reading = output.as_slice();
@@ -329,34 +268,40 @@ fn the_manifest_decides_how_loud_a_lint_is() {
     assert!(last_diagnostics(&replies).is_empty(), "`allow` should be silent: {replies:?}");
 }
 
-/// Editing is the whole point: the second set of diagnostics must reflect the
-/// second version of the file, not the first.
+/// Editing is the whole point: the diagnostics must reflect the version of the
+/// file that the edits settle on.
+///
+/// **Driven a batch at a time**, because `serve` reports once per batch and a
+/// test that sends everything at once and then counts reports is asserting a
+/// race rather than a behaviour.
 #[test]
 fn an_edit_republishes() {
     let w = workspace(&[("src/main.kh", "module app::main;\n")]);
     let path = w.root.join("src/main.kh");
-    let replies = session(&[
-        initialize(&w.root),
-        did_open(&path, "module app::main;\nfn f() -> Int { \"text\" }\n"),
-        did_change(&path, "module app::main;\nfn f() -> Int { 1 }\n"),
-        exit(),
-    ]);
+    let mut server = khora_lsp::Server::default();
 
-    let published: Vec<_> = replies
-        .iter()
-        .filter(|r| {
-            r.get("method").and_then(Value::as_str) == Some("textDocument/publishDiagnostics")
-        })
-        .collect();
-    assert_eq!(published.len(), 2, "one per edit: {replies:?}");
-    assert!(
-        !published[0].pointer("/params/diagnostics").unwrap().as_array().unwrap().is_empty(),
-        "the broken version"
+    batch(&mut server, &[initialize(&w.root)]);
+    let broken = batch(
+        &mut server,
+        &[did_open(&path, "module app::main;\nfn f() -> Int { \"text\" }\n")],
     );
-    assert!(
-        published[1].pointer("/params/diagnostics").unwrap().as_array().unwrap().is_empty(),
-        "the fixed version must clear them: {published:?}"
+    let fixed = batch(
+        &mut server,
+        &[did_change(&path, "module app::main;\nfn f() -> Int { 1 }\n")],
     );
+
+    let count = |replies: &[Value]| -> Option<usize> {
+        replies
+            .iter()
+            .filter(|r| {
+                r.get("method").and_then(Value::as_str) == Some("textDocument/publishDiagnostics")
+            })
+            .filter_map(|r| r.pointer("/params/diagnostics")?.as_array().map(Vec::len))
+            .next_back()
+    };
+
+    assert!(count(&broken).is_some_and(|n| n > 0), "the broken version: {broken:?}");
+    assert_eq!(count(&fixed), Some(0), "and then the fixed one: {fixed:?}");
 }
 
 /// A file the workspace scan never saw — a scratch buffer — still gets
@@ -1939,6 +1884,10 @@ fn closing_a_file_clears_its_diagnostics() {
 /// server used to drop it, so a file written by `git checkout` or `khora new`
 /// stayed invisible and every name it defined read as unresolved until
 /// somebody restarted the server.
+///
+/// **Driven a batch at a time**, which is also what lets the file be created
+/// at the right moment: between two calls rather than by timing a side effect
+/// against a stream.
 #[test]
 fn a_file_created_outside_the_editor_joins_the_root() {
     let w = workspace(&[(
@@ -1947,39 +1896,41 @@ fn a_file_created_outside_the_editor_joins_the_root() {
     )]);
     let main = w.root.join("src/main.kh");
     let later = w.root.join("src/later.kh");
-
     let text = std::fs::read_to_string(&main).expect("main");
-    let writing = later.clone();
-    // Written once `initialize` and `didOpen` have gone through, so the
-    // workspace scan genuinely did not see it. That is the situation the
-    // notification exists for.
-    let replies = session_interrupted(
-        &[
-            initialize(&w.root),
-            did_open(&main, &text),
-            json!({
-                "jsonrpc": "2.0", "method": "workspace/didChangeWatchedFiles",
-                "params": { "changes": [{ "uri": url_of(&later), "type": 1 }] }
-            }),
-            exit(),
-        ],
-        2,
-        move || {
-            std::fs::write(&writing, "module p::later;\npub fn answer() -> Int { 42 }\n")
-                .expect("writing the new file");
-        },
+
+    let mut server = khora_lsp::Server::default();
+    let before = batch(&mut server, &[initialize(&w.root), did_open(&main, &text)]);
+
+    let count = |replies: &[Value]| -> Option<usize> {
+        replies
+            .iter()
+            .filter(|r| {
+                r.get("method").and_then(Value::as_str) == Some("textDocument/publishDiagnostics")
+            })
+            .filter_map(|r| r.pointer("/params/diagnostics")?.as_array().map(Vec::len))
+            .next_back()
+    };
+
+    assert!(
+        count(&before).is_some_and(|n| n > 0),
+        "before the file arrived, the import cannot resolve: {before:?}"
     );
 
-    let counts: Vec<usize> =
-        published(&replies).into_iter().filter(|(uri, _)| *uri == url_of(&main)).map(|(_, n)| n).collect();
-    assert!(
-        counts.first().is_some_and(|n| *n > 0),
-        "before the file arrived, the import cannot resolve: {counts:?}"
+    std::fs::write(&later, "module p::later;\npub fn answer() -> Int { 42 }\n")
+        .expect("writing the new file");
+
+    let after = batch(
+        &mut server,
+        &[json!({
+            "jsonrpc": "2.0", "method": "workspace/didChangeWatchedFiles",
+            "params": { "changes": [{ "uri": url_of(&later), "type": 1 }] }
+        })],
     );
+
     assert_eq!(
-        counts.last(),
-        Some(&0),
-        "and once it has, the server should say the file is fine without a restart: {counts:?}"
+        count(&after),
+        Some(0),
+        "and once it has, the server says the file is fine without a restart: {after:?}"
     );
 }
 
@@ -2482,15 +2433,14 @@ fn a_ranged_edit_is_applied_to_the_document() {
         exit(),
     ]);
 
+    // The script arrives as one batch, so what is reported is the state the
+    // edits settle on -- which is the whole point of batching, and is
+    // checked directly in `a_run_of_edits_is_reported_once`.
     let seen = published(&replies);
-    assert!(
-        seen.first().is_some_and(|(_, n)| *n > 0),
-        "the file starts broken: {seen:?}"
-    );
     assert_eq!(
         seen.last().map(|(_, n)| *n),
         Some(0),
-        "and the edit fixes it, which it can only do if the splice landed: {seen:?}"
+        "the edit fixes the file, which it can only do if the splice landed: {seen:?}"
     );
 }
 
@@ -3005,4 +2955,138 @@ fn the_structure_capabilities_are_declared() {
     let caps = replies[0].pointer("/result/capabilities").cloned().unwrap_or(Value::Null);
     assert!(caps.get("foldingRangeProvider").is_some(), "{caps}");
     assert!(caps.get("selectionRangeProvider").is_some(), "{caps}");
+}
+
+// --- batching, and the cancellation it makes possible ----------------------
+
+/// One batch, handed to the server as a batch.
+///
+/// **`serve` batches whatever has already arrived, which depends on when the
+/// client sent it.** That is right for a server and wrong for a test: asserting
+/// "exactly one report" through the socket asserts a race. `handle_batch` is
+/// the unit that decides, so it is what these drive.
+fn batch(server: &mut khora_lsp::Server, messages: &[Value]) -> Vec<Value> {
+    let framed: Vec<String> =
+        messages.iter().map(|m| serde_json::to_string(m).expect("json")).collect();
+    server.handle_batch(&framed).expect("the server should not fail")
+}
+
+/// **Nine of ten answers are obsolete before they are written.** Typing ten
+/// characters is ten `didChange` notifications; every edit has to be applied,
+/// because each is measured against the one before it, but only the last is
+/// worth type-checking.
+#[test]
+fn a_run_of_edits_is_reported_once() {
+    let source = "module p::main;\npub fn go() -> Int { 0 }\n";
+    let w = workspace(&[("src/main.kh", source)]);
+    let main = w.root.join("src/main.kh");
+    let at = source.lines().nth(1).expect("a line").find('0').expect("the literal") as u32;
+
+    let mut server = khora_lsp::Server::default();
+    batch(&mut server, &[initialize(&w.root), did_open(&main, source)]);
+
+    let edits: Vec<Value> = (0..6)
+        .map(|i| did_change_range(&main, (1, at + i), (1, at + i), "7"))
+        .collect();
+    let replies = batch(&mut server, &edits);
+
+    let reports: Vec<&Value> = replies
+        .iter()
+        .filter(|r| {
+            r.get("method").and_then(Value::as_str) == Some("textDocument/publishDiagnostics")
+        })
+        .collect();
+    assert_eq!(reports.len(), 1, "six edits, one report: {reports:?}");
+}
+
+/// Each edit is still applied, or the document would be wrong.
+///
+/// Proved by building a name out of the edits: `t()` becomes `total()`, which
+/// resolves only if all four landed. A missed edit leaves an unresolved name,
+/// which is a diagnostic rather than a silent difference.
+#[test]
+fn every_edit_in_the_run_is_still_applied() {
+    let source = "module p::main;\npub fn total() -> Int { 1 }\npub fn go() -> Int { t() }\n";
+    let w = workspace(&[("src/main.kh", source)]);
+    let main = w.root.join("src/main.kh");
+    let at = source.lines().nth(2).expect("a line").find("t()").expect("the call") as u32;
+
+    let mut server = khora_lsp::Server::default();
+    batch(&mut server, &[initialize(&w.root), did_open(&main, source)]);
+
+    let edits: Vec<Value> = "otal"
+        .chars()
+        .enumerate()
+        .map(|(i, letter)| {
+            let column = at + 1 + i as u32;
+            did_change_range(&main, (2, column), (2, column), &letter.to_string())
+        })
+        .collect();
+    let replies = batch(&mut server, &edits);
+
+    let left = replies
+        .iter()
+        .filter(|r| {
+            r.get("method").and_then(Value::as_str) == Some("textDocument/publishDiagnostics")
+        })
+        .filter_map(|r| r.pointer("/params/diagnostics")?.as_array().map(Vec::len))
+        .next_back();
+    assert_eq!(left, Some(0), "`total()` resolves only if every edit landed: {replies:?}");
+}
+
+/// **A cancel that arrives with the request it cancels is honoured.** In a
+/// strictly serial loop it never could be: the cancel is always read after the
+/// work it wanted to stop had already been done.
+#[test]
+fn a_cancelled_request_is_answered_with_the_cancellation_error() {
+    let source = "module p::main;\npub fn go() -> Int { 1 }\n";
+    let w = workspace(&[("src/main.kh", source)]);
+    let main = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main, source),
+        json!({
+            "jsonrpc": "2.0", "id": 11, "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": url_of(&main) },
+                "position": { "line": 1, "character": 23 }
+            }
+        }),
+        json!({ "jsonrpc": "2.0", "method": "$/cancelRequest", "params": { "id": 11 } }),
+        exit(),
+    ]);
+
+    let reply = replies.iter().find(|r| r.get("id") == Some(&json!(11))).expect("an answer");
+    assert_eq!(
+        reply.pointer("/error/code"),
+        Some(&json!(-32800)),
+        "the protocol's RequestCancelled, so the client is not left waiting: {reply}"
+    );
+}
+
+/// A request nobody cancelled is answered normally, even when a cancel for
+/// something else arrives in the same batch.
+#[test]
+fn a_cancel_for_another_request_leaves_this_one_alone() {
+    let source = "module p::main;\npub fn go() -> Int { 1 }\n";
+    let w = workspace(&[("src/main.kh", source)]);
+    let main = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main, source),
+        json!({
+            "jsonrpc": "2.0", "id": 12, "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": url_of(&main) },
+                "position": { "line": 1, "character": 23 }
+            }
+        }),
+        json!({ "jsonrpc": "2.0", "method": "$/cancelRequest", "params": { "id": 999 } }),
+        exit(),
+    ]);
+
+    let reply = replies.iter().find(|r| r.get("id") == Some(&json!(12))).expect("an answer");
+    assert!(reply.get("error").is_none(), "this one was not cancelled: {reply}");
 }
