@@ -400,6 +400,29 @@ it will behave differently now.
   - `cannot find `prnt`; did you mean `print`?` becomes the name it meant;
   - a record literal missing a field gets the field, with `todo()` in it, found
     by counting braces forward from the field the checker did read.
+- **The trait members an impl has not written, written out.** `this impl is
+  missing `cmp`` names the member; what it takes and what it answers are in a
+  trait declaration in another file, spelled against `Self`. The action copies
+  the declaration's own text, swaps `Self` for the type being implemented, and
+  gives it a `todo()` body -- copied rather than rendered from a type, so what
+  lands is what the trait author wrote rather than the checker's normalisation
+  of it. Nothing is offered when any one of the named members cannot be found,
+  because half an answer here leaves the reader working out which half.
+- **Assists, which answer where the cursor is rather than what is wrong.** A
+  quick fix is applied by somebody who read four words of a message they did
+  not go looking for, and `fixes.rs` holds a hard rule about that; an assist is
+  asked for, so it may restructure code. Two to begin with: writing an inferred
+  `let` type down as text, which the inlay hint could only draw, and lifting a
+  selected expression into a `let` above its statement. The extraction refuses
+  where the walk from the selection to its statement crosses anything
+  conditional -- an `if` branch, a `match` arm, a lambda body, the far side of
+  `&&` -- because hoisting code out of those runs it when the program said not
+  to.
+- **The server says which code action kinds it has.** `codeActionProvider` was
+  a bare `true`, which tells a client nothing and gets the server asked for
+  everything every time; it now names `quickfix`, `refactor.rewrite` and
+  `refactor.extract`. A client filling one menu asks for that menu, and the
+  assists it did not ask for are skipped rather than computed and discarded.
 - **A lens for what a function absorbs**, in both halves. Khora's rows are
   transitive, so a lens repeating a signature would be noise -- except where a
   `catch` stops a failure reaching it, or a `with` block answers a requirement

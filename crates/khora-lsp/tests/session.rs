@@ -109,6 +109,14 @@ fn initialize_answers_with_what_the_server_can_do() {
     assert!(result.pointer("/capabilities/hoverProvider").is_some(), "{result}");
     // Incremental sync: `TextDocumentSyncKind::INCREMENTAL` is 2.
     assert_eq!(result.pointer("/capabilities/textDocumentSync"), Some(&json!(2)));
+    // **The kinds, so a client filling one menu asks for one menu.** A server
+    // that answers `true` here is asked for everything every time, and the
+    // assists are then computed and thrown away.
+    assert_eq!(
+        result.pointer("/capabilities/codeActionProvider/codeActionKinds"),
+        Some(&json!(["quickfix", "refactor.rewrite", "refactor.extract"])),
+        "{result}"
+    );
 }
 
 /// The client offered UTF-8 first, so the server should take it and say so —
@@ -1535,6 +1543,177 @@ fn an_ordinary_call_is_not_annotated() {
 
 // --- quick fixes ------------------------------------------------------------
 
+/// A code action request for a selection, with no diagnostics attached.
+fn assist_at(path: &Path, line: u32, from: u32, to: u32, id: i64) -> Value {
+    json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/codeAction",
+        "params": {
+            "textDocument": { "uri": url_of(path) },
+            "range": {
+                "start": { "line": line, "character": from },
+                "end": { "line": line, "character": to }
+            },
+            "context": { "diagnostics": [] }
+        }
+    })
+}
+
+/// The assists offered for a selection, as (title, kind).
+fn assists_for(text: &str, line: u32, from: u32, to: u32) -> Vec<(String, String)> {
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, text),
+        assist_at(&file, line, from, to, 4),
+        exit(),
+    ]);
+    result_of(&replies, 4)
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|a| {
+            Some((
+                a.get("title")?.as_str()?.to_string(),
+                a.get("kind")?.as_str()?.to_string(),
+            ))
+        })
+        .collect()
+}
+
+/// The one assist's edits applied to `text`, and its title.
+fn assist_applied(text: &str, line: u32, from: u32, to: u32) -> (String, String) {
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, text),
+        assist_at(&file, line, from, to, 4),
+        exit(),
+    ]);
+    let offered = result_of(&replies, 4);
+    let list = offered.as_array().expect("a list");
+    assert_eq!(list.len(), 1, "exactly one assist: {offered}");
+    let title = list[0].get("title").and_then(Value::as_str).expect("a title").to_string();
+    let edits = list[0]
+        .pointer("/edit/changes")
+        .and_then(Value::as_object)
+        .and_then(|c| c.values().next())
+        .and_then(Value::as_array)
+        .expect("edits")
+        .clone();
+
+    let mut spans: Vec<(usize, usize, String)> = edits
+        .iter()
+        .map(|edit| {
+            let at = |which: &str| {
+                let l = edit
+                    .pointer(&format!("/range/{which}/line"))
+                    .and_then(Value::as_u64)
+                    .expect("a line") as usize;
+                let c = edit
+                    .pointer(&format!("/range/{which}/character"))
+                    .and_then(Value::as_u64)
+                    .expect("a character") as usize;
+                text.split_inclusive('\n').take(l).map(str::len).sum::<usize>() + c
+            };
+            let new = edit.get("newText").and_then(Value::as_str).unwrap_or_default().to_string();
+            (at("start"), at("end"), new)
+        })
+        .collect();
+    // Later edits first, so an earlier one's offsets stay true.
+    spans.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
+    let mut out = text.to_string();
+    for (start, end, new) in spans {
+        out.replace_range(start..end, &new);
+    }
+    (title, out)
+}
+
+/// A binding whose type the source does not say: the initializer's name is
+/// `origin`, not `Point`, so nothing on the line answers "what is `p`".
+const INFERRED: &str = "module main;\n\
+\n\
+type Point = { x: Int };\n\
+\n\
+fn origin() -> Point { { x: 0 } }\n\
+\n\
+fn go() -> Int {\n\
+\x20 let p = origin();\n\
+\x20 p.x\n\
+}\n";
+
+/// **The inlay hint made text.** A hint cannot be copied, disappears when the
+/// setting is off, and is absent from the diff a reviewer reads; writing it
+/// down is the difference between the compiler knowing a type and the file
+/// saying it.
+#[test]
+fn a_binding_with_no_annotation_is_offered_its_inferred_type() {
+    let (title, after) = assist_applied(INFERRED, 7, 6, 6);
+    assert!(title.contains("`Point`"), "{title}");
+    assert!(after.contains("let p: Point = origin();"), "{after}");
+}
+
+/// A binding whose type the author already wrote gets nothing: the assist
+/// exists to say something the file does not, not to rewrite what it does.
+#[test]
+fn a_binding_that_says_its_type_is_offered_no_annotation() {
+    let text = INFERRED.replace("let p =", "let p: Point =");
+    let offered = assists_for(&text, 7, 6, 6);
+    assert!(offered.is_empty(), "{offered:?}");
+}
+
+/// **A selected expression, lifted into a `let` above its statement**, with the
+/// statement's own indentation copied onto the new line.
+#[test]
+fn a_selected_expression_is_offered_an_extraction() {
+    let text = "module main;\n\nfn go(a: Int, b: Int) -> Int {\n  a + (b + 1)\n}\n";
+    let (title, after) = assist_applied(text, 3, 6, 13);
+    assert!(title.contains("Extract"), "{title}");
+    assert!(after.contains("  let extracted = (b + 1);\n  a + extracted"), "{after}");
+}
+
+/// **The refusal is the feature.** Hoisting the right side of `&&` above the
+/// statement makes code run that the `&&` exists to skip, so nothing is
+/// offered there rather than an edit that quietly changes the program.
+#[test]
+fn an_expression_that_may_not_run_is_offered_no_extraction() {
+    let text =
+        "module main;\n\nfn go(a: Bool, b: Bool) -> Bool {\n  let both = a && (b && a);\n  both\n}\n";
+    let offered = assists_for(text, 3, 18, 26);
+    assert!(
+        !offered.iter().any(|(title, _)| title.contains("Extract")),
+        "the far side of `&&` is not always run: {offered:?}"
+    );
+}
+
+/// A client that asks only for quick fixes is not answered with refactorings,
+/// which it would filter out after paying for them to be computed.
+#[test]
+fn a_client_asking_only_for_quick_fixes_gets_no_assists() {
+    let text = INFERRED;
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, text),
+        json!({
+            "jsonrpc": "2.0", "id": 4, "method": "textDocument/codeAction",
+            "params": {
+                "textDocument": { "uri": url_of(&file) },
+                "range": {
+                    "start": { "line": 7, "character": 6 },
+                    "end": { "line": 7, "character": 6 }
+                },
+                "context": { "diagnostics": [], "only": ["quickfix"] }
+            }
+        }),
+        exit(),
+    ]);
+    assert_eq!(result_of(&replies, 4), json!([]));
+}
+
 /// A code action request carrying the diagnostics the client already has.
 fn code_action(path: &Path, diagnostics: Vec<Value>, id: i64) -> Value {
     json!({
@@ -1671,6 +1850,33 @@ fn applied_with_helper(text: &str, needle: &str) -> (String, String) {
     let w = workspace(&[("src/helper.kh", helper), ("src/main.kh", text)]);
     let file = w.root.join("src/main.kh");
     fix_in(&w, &file, text, needle)
+}
+
+/// **The signature is the whole value of this one.** The message names `cmp`
+/// and nothing else; what it takes and what it answers are in another file,
+/// written against `Self`. Transcribing that by hand is where a second error
+/// about a mismatched signature comes from.
+#[test]
+fn an_impl_missing_a_member_is_offered_the_signature() {
+    let shapes = "module shapes;\n\n\
+                  pub type Ordering = | Less | Same | More;\n\n\
+                  pub trait Rank {\n\
+                  \x20 fn cmp(self, other: Self) -> Ordering;\n\
+                  }\n";
+    let main = "module main;\n\n\
+                import shapes::{Rank, Ordering};\n\n\
+                type Point = { x: Int };\n\n\
+                impl Rank for Point {\n\
+                }\n";
+    let w = workspace(&[("src/shapes.kh", shapes), ("src/main.kh", main)]);
+    let file = w.root.join("src/main.kh");
+    let (title, after) = fix_in(&w, &file, main, "this impl is missing `cmp`");
+
+    assert!(title.contains("`Rank`"), "{title}");
+    assert!(
+        after.contains("fn cmp(self, other: Point) -> Ordering { todo() }"),
+        "`Self` becomes the type being implemented: {after}"
+    );
 }
 
 /// **An unused import takes its comma with it**, which is the whole difficulty:
@@ -3175,25 +3381,33 @@ fn every_edit_in_the_run_is_still_applied() {
 /// **A cancel that arrives with the request it cancels is honoured.** In a
 /// strictly serial loop it never could be: the cancel is always read after the
 /// work it wanted to stop had already been done.
+///
+/// Driven through `handle_batch` for the reason the tests above it are: through
+/// the socket, whether the cancel lands in the same batch as the request it
+/// cancels is decided by how fast the reader thread ran, so a test that asserts
+/// it there asserts a race. It passed nearly always, which is the worse way for
+/// a race to fail.
 #[test]
 fn a_cancelled_request_is_answered_with_the_cancellation_error() {
     let source = "module p::main;\npub fn go() -> Int { 1 }\n";
     let w = workspace(&[("src/main.kh", source)]);
     let main = w.root.join("src/main.kh");
 
-    let replies = session(&[
-        initialize(&w.root),
-        did_open(&main, source),
-        json!({
-            "jsonrpc": "2.0", "id": 11, "method": "textDocument/hover",
-            "params": {
-                "textDocument": { "uri": url_of(&main) },
-                "position": { "line": 1, "character": 23 }
-            }
-        }),
-        json!({ "jsonrpc": "2.0", "method": "$/cancelRequest", "params": { "id": 11 } }),
-        exit(),
-    ]);
+    let mut server = khora_lsp::Server::default();
+    batch(&mut server, &[initialize(&w.root), did_open(&main, source)]);
+    let replies = batch(
+        &mut server,
+        &[
+            json!({
+                "jsonrpc": "2.0", "id": 11, "method": "textDocument/hover",
+                "params": {
+                    "textDocument": { "uri": url_of(&main) },
+                    "position": { "line": 1, "character": 23 }
+                }
+            }),
+            json!({ "jsonrpc": "2.0", "method": "$/cancelRequest", "params": { "id": 11 } }),
+        ],
+    );
 
     let reply = replies.iter().find(|r| r.get("id") == Some(&json!(11))).expect("an answer");
     assert_eq!(

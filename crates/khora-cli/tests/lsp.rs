@@ -177,7 +177,15 @@ fn it_advertises_what_the_extension_relies_on() {
     assert!(caps.get("renameProvider").is_some(), "{caps}");
     assert!(caps.get("semanticTokensProvider").is_some(), "{caps}");
     assert_eq!(caps.get("inlayHintProvider"), Some(&serde_json::json!(true)), "{caps}");
-    assert_eq!(caps.get("codeActionProvider"), Some(&serde_json::json!(true)), "{caps}");
+    // **The kinds, not a bare `true`.** A client that knows what a server has
+    // asks for the one menu it is filling; one told only "yes" asks for
+    // everything on every keystroke, and the assists are then computed and
+    // thrown away.
+    assert_eq!(
+        caps.pointer("/codeActionProvider/codeActionKinds"),
+        Some(&serde_json::json!(["quickfix", "refactor.rewrite", "refactor.extract"])),
+        "{caps}"
+    );
     assert!(caps.get("signatureHelpProvider").is_some(), "{caps}");
     assert!(caps.get("codeLensProvider").is_some(), "{caps}");
     assert!(caps.get("textDocumentSync").is_some(), "{caps}");

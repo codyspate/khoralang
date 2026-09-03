@@ -35,6 +35,8 @@
 
 #![deny(missing_docs)]
 
+mod assists;
+mod members;
 mod completion;
 mod definition;
 mod explain;
@@ -405,7 +407,23 @@ impl Server {
                         },
                     ),
                 ),
-                code_action_provider: Some(lsp_types::CodeActionProviderCapability::Simple(true)),
+                // **The kinds, rather than a bare `true`.** A client that
+                // knows what a server offers asks for the one menu it is
+                // filling -- VS Code's Refactor menu sends `only: [refactor]`
+                // -- and a server that says nothing is asked for everything
+                // every time. Saying it here is what lets `code_actions` skip
+                // the work rather than compute assists and throw them away.
+                code_action_provider: Some(lsp_types::CodeActionProviderCapability::Options(
+                    lsp_types::CodeActionOptions {
+                        code_action_kinds: Some(vec![
+                            lsp_types::CodeActionKind::QUICKFIX,
+                            lsp_types::CodeActionKind::REFACTOR_REWRITE,
+                            lsp_types::CodeActionKind::REFACTOR_EXTRACT,
+                        ]),
+                        resolve_provider: Some(false),
+                        ..Default::default()
+                    },
+                )),
                 code_lens_provider: Some(lsp_types::CodeLensOptions { resolve_provider: Some(false) }),
                 signature_help_provider: Some(lsp_types::SignatureHelpOptions {
                     // `(` opens the popup and `,` moves it to the next
@@ -1024,6 +1042,51 @@ impl Server {
             .unwrap_or_default();
 
         let mut out = Vec::new();
+        // **What the editor asked for.** A client that wants only quick fixes
+        // says so, and answering with a refactoring it filters out costs the
+        // work of computing one. An absent `only` means everything.
+        let wanted = params
+            .pointer("/context/only")
+            .and_then(Value::as_array)
+            .map(|kinds| {
+                kinds.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>()
+            });
+        let asked_for = |kind: &str| {
+            wanted.as_ref().is_none_or(|only| {
+                only.iter().any(|want| kind == want || kind.starts_with(&format!("{want}.")))
+            })
+        };
+
+        // Assists come from where the cursor is rather than from a diagnostic,
+        // so they are offered whether or not anything is wrong.
+        if assists::KINDS.iter().any(|kind| asked_for(kind)) {
+            if let Some(selection) = range_of(params, index, self.encoding) {
+                for assist in assists::at(&self.db, file, selection) {
+                    if !asked_for(assist.kind) {
+                        continue;
+                    }
+                    out.push(json!({
+                        "title": assist.title,
+                        "kind": assist.kind,
+                        "edit": { "changes": { url.as_str(): assist
+                            .edits
+                            .iter()
+                            .map(|edit| json!({
+                                "range": Range {
+                                    start: index.position(edit.range.start(), self.encoding),
+                                    end: index.position(edit.range.end(), self.encoding),
+                                },
+                                "newText": edit.replacement,
+                            }))
+                            .collect::<Vec<_>>() }},
+                    }));
+                }
+            }
+        }
+        if !asked_for("quickfix") {
+            return Some(Value::Array(out));
+        }
+
         // **Titles already offered.** Two diagnostics on one line often name
         // the same missing type -- `cannot resolve `List::length`` and
         // ``[a, b, c]` builds a `List`` both do -- and the same action twice
@@ -1040,6 +1103,7 @@ impl Server {
             // almost always the only fix anybody wants, and an editor offers
             // the first action on the keystroke.
             let mut offered = self.import_fixes(file, &tree, text, message);
+            offered.extend(self.member_fixes(&tree, text, message, range));
             offered.extend(fixes::for_diagnostic(
                 message,
                 code,
@@ -1107,6 +1171,84 @@ impl Server {
             }
         }
         out
+    }
+
+    /// The trait members an impl is missing, written out with their signatures.
+    ///
+    /// **The signature is the whole value here.** `this impl is missing `cmp``
+    /// names the member and nothing else, and finding out what `cmp` takes
+    /// means opening the trait in another file, reading it, and typing it back
+    /// in with `Self` swapped for the type being implemented. That is a
+    /// transcription job, and getting one character of it wrong produces a
+    /// second error about the signature not matching.
+    ///
+    /// Bodies are `todo()`, for the reason the match arms are: a plausible
+    /// default would be a wrong answer where the error was a refusal.
+    fn member_fixes(
+        &self,
+        tree: &khora_syntax::SyntaxNode,
+        text: &str,
+        message: &str,
+        range: text_size::TextRange,
+    ) -> Vec<fixes::Fix> {
+        use khora_syntax::ast::{ImplDecl, TraitDecl};
+
+        let Some((names, trait_name)) = members::missing(message) else { return Vec::new() };
+        let Some(imp) = tree
+            .descendants()
+            .filter_map(ImplDecl::cast)
+            .find(|node| node.syntax().text_range().contains_range(range))
+        else {
+            return Vec::new();
+        };
+        // What `Self` means inside this impl, which the trait writes and the
+        // impl has to spell out.
+        let Some(me) = imp.self_type().map(|ty| ty.syntax().text().to_string()) else {
+            return Vec::new();
+        };
+
+        let Some(root) = khora_db::source_root(&self.db) else { return Vec::new() };
+        let graph = khora_hir::module_graph(&self.db, root);
+        let Some(declaration) = graph.paths().find_map(|module| {
+            let file = graph.file(module)?;
+            let item = khora_hir::item_map(&self.db, file).item(&trait_name)?;
+            let found = khora_db::parse(&self.db, file)
+                .syntax()
+                .descendants()
+                .filter_map(TraitDecl::cast)
+                .find(|node| node.syntax().text_range() == item.range)?;
+            Some(found)
+        }) else {
+            return Vec::new();
+        };
+
+        let written: Vec<String> = names
+            .iter()
+            .filter_map(|name| {
+                let member = declaration
+                    .functions()
+                    .find(|f| f.name().and_then(|n| n.ident()).as_deref() == Some(name.as_str()))?;
+                Some(members::body_for(&member.syntax().text().to_string(), &me))
+            })
+            .collect();
+        if written.len() != names.len() {
+            // A member whose signature could not be read would be written as a
+            // guess, and half an answer here is worse than none: the reader
+            // would have to notice which half.
+            return Vec::new();
+        }
+
+        let Some(fix) = members::insertion(text, imp.syntax().text_range(), &written) else {
+            return Vec::new();
+        };
+        vec![fixes::Fix {
+            title: format!(
+                "Write the missing member{} from `{trait_name}`",
+                if names.len() == 1 { "" } else { "s" }
+            ),
+            range: fix.0,
+            replacement: fix.1,
+        }]
     }
 
     /// What each call costs, shown after the call.
