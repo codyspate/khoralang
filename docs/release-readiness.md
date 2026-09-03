@@ -13,7 +13,7 @@ A section is complete only when its behavior is implemented, documented, tested,
 ## Current state
 
 Scored against the tree, item by item, against what is in the repository rather
-than against the roadmap's account of itself. **193 of 222**, and re-scored
+than against the roadmap's account of itself. **194 of 222**, and re-scored
 whenever a section moves.
 
 **The number is counted, not typed.** `scripts/check-readiness.sh` counts the
@@ -173,7 +173,7 @@ Peak requests per second alone is not a release gate. A production runtime must 
 - [x] Trace context is carried automatically across fiber spawn, scheduling, stealing, wake and cancellation according to the documented model. **Done:** `tests/trace.rs`: the sampled flag is carried.
 - [x] W3C `traceparent` parsing/formatting is covered by conformance-style tests.
 - [x] A no-op tracer remains cheap enough that disabled tracing is a viable production configuration. **Done:** `the_default_tracer_records_nothing_and_stays_out_of_the_way`.
-- [ ] At least one real exporter/integration exists, preferably OTLP/OpenTelemetry, outside `std`. **Left:** None. `std::trace` says explicitly that OTLP is not `std`'s job, and nothing outside `std` provides one.
+- [x] At least one real exporter/integration exists, preferably OTLP/OpenTelemetry, outside `std`. **Done:** `packages/otlp` is a `Tracer` that batches finished spans and posts them as OTLP/HTTP JSON to a collector, outside `std` for the reason `std::trace` gives -- a wire protocol with its own release cadence does not belong in a library that promises not to break. The queue is `dropping` and a failed POST is swallowed, because a tracer that can stall the service it measures is one that takes production down. Twelve tests assert against the rendered bytes rather than the values going in; one of them found the resource's `service.name` being sent as a bare string where OTLP wants an `AnyValue`, which a collector drops without saying so. Two limits are `std::trace`'s rather than the protocol's and are written in the package's README: spans have no parents, because the effect has no operation that says "inside this one", and attributes given to `start` are dropped.
 - [ ] A reference service demonstrates an incoming HTTP trace flowing through application work, spawned fibers and database operations with correct parent/child relationships. **Left:** two thirds of it. `examples/ledger_service` takes a `Tracer` through its handlers and wraps each database operation in `around_result` — `entries.create`, `entries.list` — so an incoming request does flow through application work into the database with a span around it. It spawns no fibers, so the part of the item that is actually about parent/child relationships across a `nursery` is undemonstrated.
 - [ ] Logging guidance explains how logs correlate with traces and fiber/request context. **Left:** nothing written. `/docs/cookbook/tracing/` covers spans and does not mention logs, and there is no logging capability in `std` for it to correlate with — so this needs a decision about what logging *is* here before it needs a page.
 - [x] Metrics/exporter responsibilities are clearly separated between `std` vocabulary/runtime context and external packages. **Done:** `/docs/stdlib/api/trace` — "Why this is `std`'s and the exporter is not".

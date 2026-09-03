@@ -1,0 +1,112 @@
+module otlp::wire_test;
+
+//! What a collector actually receives.
+//!
+//! **Asserted against the bytes, not against a record.** Every mistake this
+//! format invites is a rendering mistake -- a trimmed id, a timestamp as a
+//! number, a `parentSpanId` of zeros -- and a test that checked the values
+//! going in would pass through all of them.
+
+import std::core::{List, assert};
+import std::trace::{Context, Span, Status, Value, flag, number, text};
+import otlp::wire::{Finished, hex16, request, trace_id};
+
+/// A span with everything filled in, for the tests to vary.
+fn span(parent: Int) -> Span {
+  {
+    context: { trace_high: 1, trace_low: 2, span: 42, sampled: true },
+    parent: parent,
+    name: "entries.create",
+  }
+}
+
+fn finished(parent: Int, status: Status) -> Finished {
+  {
+    span: span(parent),
+    status: status,
+    started: 1700000000000000000,
+    ended: 1700000000123000000,
+    attributes: [text("db.system", "postgresql"), number("rows", 3), flag("cached", false)],
+  }
+}
+
+test "an id is sixteen hex characters, padded" {
+  assert(hex16(42) == "000000000000002a");
+  assert(hex16(0) == "0000000000000000");
+}
+
+/// **A negative id is an ordinary id.** `Random::int` draws all sixty-four bits
+/// and so is negative about half the time; `Int::shr` is arithmetic, so a
+/// renderer written as "halve until zero" would not terminate for half of them.
+test "a negative id renders as its unsigned bits" {
+  assert(hex16(0 - 1) == "ffffffffffffffff");
+  assert(hex16(0 - 2) == "fffffffffffffffe");
+}
+
+test "a trace id is the two halves, high first" {
+  let context: Context = { trace_high: 1, trace_low: 2, span: 0, sampled: true };
+  assert(trace_id(context) == "00000000000000010000000000000002");
+}
+
+/// **Times are strings.** A JSON number is a double in most readers and a
+/// nanosecond timestamp is about 2^60, which a double cannot hold exactly -- a
+/// collector given a number rounds the span to the nearest few hundred
+/// nanoseconds.
+test "times are sent as quoted decimals" {
+  let body = request("checkout", [finished(0, Status::Ok)]);
+  assert(String::contains(body, "\"startTimeUnixNano\":\"1700000000000000000\""));
+  assert(String::contains(body, "\"endTimeUnixNano\":\"1700000000123000000\""));
+}
+
+/// **A root span omits the field rather than sending zeros.** Sixteen zeros is
+/// a valid-looking id, and a collector that takes it draws the trace with a
+/// parent nobody ever sent.
+test "a root span has no parentSpanId at all" {
+  let body = request("checkout", [finished(0, Status::Ok)]);
+  assert(!String::contains(body, "parentSpanId"));
+}
+
+test "a child span names its parent" {
+  let body = request("checkout", [finished(7, Status::Ok)]);
+  assert(String::contains(body, "\"parentSpanId\":\"0000000000000007\""));
+}
+
+test "a failure carries its code and its message" {
+  let body = request("checkout", [finished(0, Status::Failed("insufficient funds"))]);
+  assert(String::contains(body, "\"code\":2"));
+  assert(String::contains(body, "\"message\":\"insufficient funds\""));
+}
+
+test "a success carries the code and no message" {
+  let body = request("checkout", [finished(0, Status::Ok)]);
+  assert(String::contains(body, "\"code\":1"));
+  assert(!String::contains(body, "message"));
+}
+
+/// Each `Value` becomes the `AnyValue` field OTLP names for its type, and an
+/// integer attribute is a string for the same reason a timestamp is.
+test "attributes keep their types" {
+  let body = request("checkout", [finished(0, Status::Ok)]);
+  assert(String::contains(body, "\"stringValue\":\"postgresql\""));
+  assert(String::contains(body, "\"intValue\":\"3\""));
+  assert(String::contains(body, "\"boolValue\":false"));
+}
+
+test "the service name reaches the resource" {
+  let body = request("checkout", [finished(0, Status::Ok)]);
+  assert(String::contains(body, "\"key\":\"service.name\""));
+  assert(String::contains(body, "\"stringValue\":\"checkout\""));
+}
+
+/// The envelope, which every collector matches on before it reads anything.
+test "the request is one resourceSpans with one scopeSpans in it" {
+  let body = request("checkout", [finished(0, Status::Ok)]);
+  assert(String::contains(body, "\"resourceSpans\""));
+  assert(String::contains(body, "\"scopeSpans\""));
+  assert(String::contains(body, "\"name\":\"khora\""));
+}
+
+test "an empty batch is still a well-formed request" {
+  let body = request("checkout", []);
+  assert(String::contains(body, "\"spans\":[]"));
+}

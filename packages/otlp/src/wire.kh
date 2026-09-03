@@ -1,0 +1,178 @@
+module otlp::wire;
+
+//! A finished span, as OTLP/HTTP JSON says it.
+//!
+//! **JSON rather than protobuf**, and the choice is not laziness. The OTLP
+//! specification defines both over HTTP and every collector that speaks the
+//! protobuf one also speaks this; what protobuf buys is bytes on the wire, and
+//! what it costs is a schema compiler, a code generator, and a dependency this
+//! repository does not have. A span is a few hundred bytes either way and they
+//! are sent in batches. When somebody is exporting enough spans for the
+//! difference to show, they will know it, and this file is where they would
+//! change it.
+//!
+//! # What the shape has to be
+//!
+//! One `ExportTraceServiceRequest`, which is resource, then scope, then spans:
+//!
+//! ```json
+//! { "resourceSpans": [ { "resource": { "attributes": [..] },
+//!     "scopeSpans": [ { "scope": { "name": "khora" }, "spans": [ .. ] } ] } ] }
+//! ```
+//!
+//! Two things in it are easy to get subtly wrong and are therefore written out
+//! here rather than left to a reader.
+//!
+//! **Ids are hex, fixed width, lower case.** A trace id is 32 characters and a
+//! span id is 16, zero-padded, and a collector that receives fewer silently
+//! drops the span rather than saying so. Khora's `Context` keeps the trace id
+//! as two `Int`s because W3C's is 128 bits and an `Int` is 64, so the high half
+//! is rendered first and both halves are padded.
+//!
+//! **Times are nanoseconds since 1970, as a decimal *string*.** Not a number:
+//! JSON numbers are doubles in most readers and a nanosecond timestamp is
+//! about 2^60, which a double cannot hold exactly. The specification says
+//! string for exactly this reason, and a collector given a number rounds the
+//! timestamp to the nearest few hundred nanoseconds.
+
+import std::core::{List};
+import std::json::{Field, Json, encode, member, object};
+import std::trace::{Attribute, Context, Span, Status, Value};
+
+/// A span that has ended, with the two times a wire format needs.
+///
+/// `Span` on its own cannot be exported: it says what the span *is* and not
+/// when it happened, because `std::trace` deliberately has no clock in it. The
+/// exporter reads one and puts the readings here.
+pub type Finished = {
+  span: Span,
+  status: Status,
+  /// Nanoseconds since 1970 when the span began.
+  started: Int,
+  /// Nanoseconds since 1970 when it ended.
+  ended: Int,
+  attributes: List<Attribute>,
+};
+
+/// The whole request body for a batch of spans.
+pub fn request(service: String, spans: List<Finished>) -> String {
+  encode(object([
+        member("resourceSpans", Json::Array([
+              object([
+                  member("resource", object([
+                        member("attributes", Json::Array([
+                              // **Wrapped, like every other attribute.** OTLP's `value` is an
+                              // `AnyValue`, which is an object naming the type; a bare string
+                              // there is dropped by the collector rather than refused, so the
+                              // service is simply missing from every span it draws.
+                              keyed("service.name", object([member("stringValue", Json::Text(service))])),
+                            ])),
+                      ])),
+                  member("scopeSpans", Json::Array([
+                        object([
+                            member("scope", object([member("name", Json::Text("khora"))])),
+                            member("spans", Json::Array(List::map(spans, rendered))),
+                          ]),
+                      ])),
+                ]),
+            ])),
+      ]))
+}
+
+/// One span, in the shape the collector reads.
+///
+/// `kind` is 1, `SPAN_KIND_INTERNAL`. Khora's `Span` does not carry a kind, and
+/// inventing one from the name would be a guess a reader could not correct.
+fn rendered(finished: Finished) -> Json {
+  let span = finished.span;
+  let fields: List<Field> = [
+    member("traceId", Json::Text(trace_id(span.context))),
+    member("spanId", Json::Text(hex16(span.context.span))),
+    member("name", Json::Text(span.name)),
+    member("kind", Json::of_int(1)),
+    member("startTimeUnixNano", Json::Text(Int::to_string(finished.started))),
+    member("endTimeUnixNano", Json::Text(Int::to_string(finished.ended))),
+    member("attributes", Json::Array(List::map(finished.attributes, attribute))),
+    member("status", status(finished.status)),
+  ];
+  // **A root span omits `parentSpanId` rather than sending zeros.** Sixteen
+  // zeros is a valid-looking id, and a collector that takes it draws the trace
+  // with a parent nobody ever sent.
+  if span.parent == 0 {
+    object(fields)
+  } else {
+    object(List::concat(fields, [member("parentSpanId", Json::Text(hex16(span.parent)))]))
+  }
+}
+
+/// `{ "key": .., "value": { "stringValue": .. } }`, which is OTLP's `KeyValue`.
+fn attribute(each: Attribute) -> Json {
+  keyed(each.name, match each.value {
+      Value::Text(text) => object([member("stringValue", Json::Text(text))]),
+      Value::Number(number) => object([member("intValue", Json::Text(Int::to_string(number)))]),
+      Value::Decimal(number) => object([member("doubleValue", Json::of_float(number))]),
+      Value::Flag(flag) => object([member("boolValue", Json::Bool(flag))]),
+    })
+}
+
+/// A `KeyValue` whose value has already been rendered.
+fn keyed(name: String, value: Json) -> Json {
+  object([member("key", Json::Text(name)), member("value", value)])
+}
+
+/// `1` is `STATUS_CODE_OK` and `2` is `STATUS_CODE_ERROR`.
+///
+/// The message goes only on the error, which is what the specification says:
+/// a `message` beside `OK` is ignored by every collector and confusing in the
+/// one place somebody reads the raw payload.
+fn status(status: Status) -> Json {
+  match status {
+    Status::Ok => object([member("code", Json::of_int(1))]),
+    Status::Failed(why) =>
+      object([member("code", Json::of_int(2)), member("message", Json::Text(why))]),
+  }
+}
+
+/// The 32 hex characters of a trace id, high half first.
+pub fn trace_id(context: Context) -> String {
+  hex16(context.trace_high) + hex16(context.trace_low)
+}
+
+/// One `Int` as exactly sixteen lower-case hex characters.
+///
+/// **Always sixteen, never trimmed.** A span id of `2a` and a span id of
+/// `000000000000002a` are the same number and different strings, and a
+/// collector compares the strings.
+///
+/// **Counted down from the top rather than divided from the bottom**, which is
+/// the shape a negative id forces. `Int::shr` is arithmetic -- `Int` has no
+/// logical shift, and says so -- so halving a negative number never reaches
+/// zero and a loop that stopped there would not terminate for half the ids a
+/// random generator produces. Masking a fixed sixteen nibbles has no stopping
+/// condition to get wrong: for every shift here the four bits taken are real
+/// bits of the value, and the sign extension above them is masked away.
+pub fn hex16(value: Int) -> String {
+  nibbles(value, 15, "")
+}
+
+/// The nibble at `place`, then the ones below it.
+fn nibbles(value: Int, place: Int, done: String) -> String {
+  let digit = digit_of(Int::and(Int::shr(value, place * 4), 15));
+  if place == 0 { done + digit } else { nibbles(value, place - 1, done + digit) }
+}
+
+/// One hex digit, lower case.
+fn digit_of(nibble: Int) -> String {
+  if nibble < 10 {
+    Int::to_string(nibble)
+  } else {
+    match nibble {
+      10 => "a",
+      11 => "b",
+      12 => "c",
+      13 => "d",
+      14 => "e",
+      _ => "f",
+    }
+  }
+}

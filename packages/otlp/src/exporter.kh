@@ -1,0 +1,268 @@
+module otlp::exporter;
+
+//! A `Tracer` that sends its spans to an OpenTelemetry collector.
+//!
+//! `std::trace` says explicitly that OTLP is not `std`'s job: a wire protocol
+//! with a release cadence does not belong in a standard library that promises
+//! not to break. This is the other half of that sentence — the exporter every
+//! service needs, in a package it can pin.
+//!
+//! ```khora
+//! with { clock: Clock::real(), client: HttpClient::real() } {
+//!   Exporter::running("checkout", "http://localhost:4318", fn tracer =>
+//!     with { tracer: tracer } { serve()! })!
+//! }
+//! ```
+//!
+//! # One fiber owns the batch
+//!
+//! **A handler may not capture anything writable.** It has to be safe to hand
+//! to another fiber, so it captures only `Share` values — which rules out the
+//! list of pending spans, the clock reading, and the HTTP client's buffer
+//! alike. `postgres::db` met the same wall and answered it the same way, and
+//! the answer is worth stating once more because it is the shape every
+//! stateful capability in Khora takes:
+//!
+//! The handler captures a `Channel`, which is `Share`. One fiber owns
+//! everything else. Spans queue; the fiber batches them and posts.
+//!
+//! # What it does when the collector is down
+//!
+//! **Drops, and says nothing.** The channel is `dropping`, so a service whose
+//! collector has gone away keeps serving at full speed and loses spans rather
+//! than blocking a request on an observability backend. That is the only
+//! defensible default: a tracer that can stall the thing it is measuring is a
+//! tracer that takes production down, and every exporter that has ever done it
+//! learned this the same way.
+//!
+//! `sent` and `dropped` are on the handle for a service that wants to alarm on
+//! it, because losing spans silently and losing them *invisibly* are different
+//! failures.
+//!
+//! # A capability the handler holds, rather than one it requires
+//!
+//! An effect operation may not *require* a capability: a handler is called
+//! wherever the effect is used, which is not where it was built, so a `start`
+//! that asked for a `Clock` would be asking whoever performs the effect. But a
+//! capability is a value, and a value can be captured — `std::trace`'s own
+//! `spanned` takes a `Tracer` as a parameter and calls `tracer.start(..)` on
+//! it. So this takes a `Clock` and a `Random` and holds them, and the
+//! operations call the ones they were built with.
+//!
+//! That is what lets a span be stamped and identified at the moment it happens
+//! rather than at the moment it is exported, which is the difference between a
+//! trace and a list of names.
+//!
+//! # Time
+//!
+//! The wire wants nanoseconds since 1970. `unix_millis` is what `std::clock`
+//! offers, so the low six digits are always zero — an honest millisecond
+//! rather than a fabricated nanosecond. A collector renders both the same way.
+
+import std::clock::{Clock};
+import std::core::{Channel, Fiber, List, Map, Nursery, Option};
+import std::random::{Random};
+import std::net::http::{Call, HttpClient};
+import std::trace::{Context, Span, Tracer};
+import otlp::wire::{Finished, request};
+
+/// What the handler sends to the fiber that owns the batch.
+///
+/// A started span carries its start time so that the owning fiber does not
+/// have to keep one: nothing is remembered between `start` and `finish` except
+/// what travels on the wire, which is what keeps the fiber's state one list.
+pub type Report =
+  /// A span has begun, at this many milliseconds since 1970.
+  ///
+  /// **Sent rather than remembered in the span.** `Span` has three fields and
+  /// none of them is a time, so a start has to travel some other way. Putting
+  /// it in `parent` -- the only spare `Int` -- was tried and is a lie in a
+  /// public type that `around_result` hands straight back to the caller. The
+  /// fiber that owns the batch owns this too.
+  | Began(Int, Int)
+  /// A span that has ended, and everything needed to render it.
+  | Ended(Finished)
+  /// Send whatever is held, now. What `flush` puts on the queue.
+  | Flush
+  /// Send whatever is held and stop.
+  | Stop;
+
+/// A running exporter.
+///
+/// One field, and the compiler decides for itself that two fibers may hold it:
+/// a `Channel` is `Share` and a record of `Share` things is one. There is no
+/// `impl Share` here, and writing one is refused -- an impl is for a type this
+/// compiler cannot see into.
+pub type Exporter = {
+  reports: Channel<Report>,
+};
+
+/// How many spans are batched before one send.
+///
+/// Small, because the cost that matters is a request per span and not the
+/// bytes in one. A batch of 64 turns a busy service's export traffic into
+/// something a collector can keep up with, and the flush below bounds how long
+/// a span waits when the service is quiet.
+pub fn batch_size() -> Int { 64 }
+
+/// How many reports may queue before the oldest are dropped.
+///
+/// Sixteen batches. Past that the collector is not keeping up and the choice is
+/// between losing spans and slowing the service down, which is not a choice.
+pub fn queue_depth() -> Int { 1024 }
+
+impl Exporter {
+  /// A tracer that reports to `endpoint`, for as long as `body` runs.
+  ///
+  /// `endpoint` is the collector's base URL, without a path: `/v1/traces` is
+  /// appended, which is where the specification puts it.
+  ///
+  /// **The exporting fiber is opened here and stops when `body` returns.** A
+  /// caller cannot forget to stop it and a span raised on the way out is still
+  /// sent, because the stop is on the way out of this function rather than at
+  /// the end of the body.
+  pub fn running<A, 'ef, 'er>(
+    service: String,
+    endpoint: String,
+    clock: Clock,
+    random: Random,
+    body: (Tracer) -> A with { 'ef | nursery: Nursery } raises 'er
+  ) -> A
+    with { 'ef | client: HttpClient, nursery: Nursery }
+    raises 'er
+  {
+    let reports: Channel<Report> = Channel::dropping(queue_depth());
+    let exporter: Exporter = { reports: reports };
+    nursery.adopt(Fiber::spawn(fn () =>
+        Exporter::draining(service, endpoint, reports, List::Nil, Map::new())));
+    let answer = body(Exporter::tracer(exporter, clock, random))!;
+    // Whatever the body did, the batch goes.
+    let _ = Channel::send(reports, Report::Stop)!;
+    answer
+  }
+
+  /// The handler: it holds the channel, a clock and a source of ids.
+  ///
+  /// **Held, not required.** See the note at the top: an operation cannot ask
+  /// for a capability, because it runs wherever the effect is performed. It can
+  /// hold one, the way `std::trace::spanned` holds the `Tracer` it was given,
+  /// and then a span is stamped and identified where it happens.
+  pub fn tracer(self, clock: Clock, random: Random) -> Tracer {
+    let reports = self.reports;
+    handler for Tracer {
+      // **A fresh trace per span, and no parent.** `Span` carries the context
+      // it belongs to and nothing here knows what is above it: `Tracer` has no
+      // operation that says "inside this one", so a nested `around` starts a
+      // second trace rather than a child span. That is a limitation of the
+      // effect rather than of this exporter, and it is written down in the
+      // package's README rather than papered over with a guess.
+      start: fn (name, _attributes) => {
+        let id = random.int();
+        let _ = Channel::send(reports, Report::Began(id, clock.unix_millis()));
+        {
+          context: {
+            trace_high: random.int(),
+            trace_low: random.int(),
+            span: id,
+            sampled: true,
+          },
+          parent: 0,
+          name: name,
+        }
+      },
+      // The start is not here to be had, so `started` is left at zero and the
+      // fiber that kept the `Began` fills it in. A span whose start never
+      // arrived is sent with the two times equal rather than dropped: a
+      // zero-length span at the right moment says more than nothing does.
+      finish: fn (span, status) => {
+        let _ = Channel::send(reports, Report::Ended({
+              span: span,
+              status: status,
+              started: 0,
+              ended: clock.unix_millis() * 1000000,
+              attributes: List::Nil,
+            }));
+      },
+      event: fn (_span, _name, _attributes) => (),
+    }
+  }
+
+  /// The fiber that owns the batch: take reports, send when full or told to.
+  fn draining(
+    service: String,
+    endpoint: String,
+    reports: Channel<Report>,
+    held: List<Finished>,
+    begun: Map<Int, Int>
+  ) -> ()
+    with { client: HttpClient }
+  {
+    match Channel::receive(reports)! {
+      // The channel closed. Whatever is held goes, and then this ends.
+      Option::None => Exporter::post(service, endpoint, held),
+      Option::Some(Report::Stop) => Exporter::post(service, endpoint, held),
+      Option::Some(Report::Flush) => {
+        Exporter::post(service, endpoint, held);
+        Exporter::draining(service, endpoint, reports, List::Nil, begun)
+      },
+      Option::Some(Report::Began(id, at)) => {
+        // `Map` is mutable and this fiber owns it, so the same one goes round.
+        Map::insert(begun, id, at);
+        Exporter::draining(service, endpoint, reports, held, begun)
+      },
+      Option::Some(Report::Ended(finished)) => {
+        let id = finished.span.context.span;
+        // A span whose `Began` was dropped by a full queue keeps the zero it
+        // arrived with, which renders as a zero-length span rather than as a
+        // span in 1970.
+        let started = match Map::get(begun, id) {
+          Option::Some(at) => at * 1000000,
+          Option::None => finished.ended,
+        };
+        let whole: Finished = {
+          span: finished.span,
+          status: finished.status,
+          started: started,
+          ended: finished.ended,
+          attributes: finished.attributes,
+        };
+        let now = List::push(held, whole);
+        // Removed as soon as it is used, so a long-lived process does not
+        // accumulate one entry per span it ever started.
+        Map::remove(begun, id);
+        if List::length(now) >= batch_size() {
+          Exporter::post(service, endpoint, now);
+          Exporter::draining(service, endpoint, reports, List::Nil, begun)
+        } else {
+          Exporter::draining(service, endpoint, reports, now, begun)
+        }
+      },
+    }
+  }
+
+  /// One batch, posted. A failure is dropped, deliberately.
+  ///
+  /// **There is nobody to tell.** This fiber exists to keep tracing off the
+  /// service's path, so raising here would either kill the exporter or need a
+  /// handler the service did not ask for. What a collector being down should
+  /// cost is spans, which is what it costs.
+  fn post(service: String, endpoint: String, held: List<Finished>) -> ()
+    with { client: HttpClient }
+  {
+    if List::is_empty(held) {
+    } else {
+      // Reversed, because the batch is built by pushing onto the front and a
+      // collector draws a trace in the order it reads it.
+      let body = request(service, List::reverse(held));
+      let _ = client.send(Call::json(endpoint + "/v1/traces", body));
+    }
+  }
+
+  /// Sends whatever is held, without stopping.
+  ///
+  /// For a service that wants its spans out before it answers a health check,
+  /// or a test that wants them before it asserts.
+  pub fn flush<'er>(self) -> () raises 'er {
+    let _ = Channel::send(self.reports, Report::Flush)!;
+  }
+}
