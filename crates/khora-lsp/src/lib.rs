@@ -1135,10 +1135,16 @@ impl Server {
         // subexpression names no declaration and its type is the whole of
         // what can be said about it.
         if let Some(explained) = self.explain_at(file, offset) {
+            // **The declaration, and what it is here.** A generic signature
+            // says `A`; at a call site `A` is something in particular, and
+            // which one cannot be read off the declaration. That is the half
+            // the old type-only hover had and this one would otherwise have
+            // lost.
+            let here = best.as_ref().map(|(_, ty)| ty.as_str());
             return Some(Hover {
                 contents: HoverContents::Markup(MarkupContent {
                     kind: MarkupKind::Markdown,
-                    value: explained.markdown(),
+                    value: explained.markdown_at(here),
                 }),
                 range: best.map(|(range, _)| index.range(range, self.encoding)),
             });

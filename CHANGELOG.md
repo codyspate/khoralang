@@ -373,6 +373,14 @@ it will behave differently now.
 
 ### Added
 
+- **Hovering a generic call shows what the type variables became.** A
+  declaration says `A`; at the call site `A` is something in particular, and
+  which one it is cannot be read off the declaration. The instantiated type
+  leads and the generic form sits under it as *declared as*, which is the
+  order TypeScript uses and for the same reason: the substitution is the part
+  a reader cannot work out. Shown only for a generic declaration, since for
+  anything else it repeats the signature in a second notation.
+
 - **"did you mean" on an unresolved name.** An unresolved `prnt` now ends its
   message with *did you mean `print`?* when exactly one name in reach is close
   enough. Edit distance against the locals, this file's declarations and what

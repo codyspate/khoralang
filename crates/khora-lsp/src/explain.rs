@@ -34,13 +34,41 @@ pub struct Explained {
     pub signature: String,
     /// The `///` block above it, joined, or `None` when there is none.
     pub docs: Option<String>,
+    /// Whether the declaration takes type parameters.
+    ///
+    /// **The one case where the signature is not the whole answer.** A
+    /// generic declaration says `A`, and at a call site `A` is something in
+    /// particular; which one it is cannot be worked out from the declaration
+    /// and is usually the thing the reader is hovering to find out.
+    pub generic: bool,
 }
 
 impl Explained {
-    /// Markdown for a hover or a completion item: the signature in a Khora
-    /// code fence, then the prose.
-    pub fn markdown(&self) -> String {
-        let mut out = format!("```khora\n{}\n```", self.signature);
+    /// Markdown for a hover: what this use of the declaration is, then the
+    /// declaration itself, then the prose.
+    ///
+    /// `here` is the checked type of the expression under the cursor, and it
+    /// leads when the declaration is generic — at a call site `A` is something
+    /// in particular, and that is the half a reader cannot work out for
+    /// themselves. For anything else it would repeat the signature below it in
+    /// a second notation, so it is left out.
+    pub fn markdown_at(&self, here: Option<&str>) -> String {
+        let mut out = String::new();
+        match (self.generic, here) {
+            // **The instantiated type first, and the declaration under
+            // it.** At a call site `A` is something in particular, and
+            // which one it is cannot be read off the declaration -- so it
+            // is the answer, and the generic form is the reference below
+            // it. TypeScript orders them this way for the same reason.
+            (true, Some(here)) => {
+                out.push_str(&format!("```khora\n{here}\n```"));
+                out.push_str(&format!(
+                    "\n\ndeclared as:\n\n```khora\n{}\n```",
+                    self.signature
+                ));
+            }
+            _ => out.push_str(&format!("```khora\n{}\n```", self.signature)),
+        }
         if let Some(docs) = &self.docs {
             out.push_str("\n\n");
             out.push_str(docs);
@@ -57,7 +85,11 @@ impl Explained {
 pub fn at(db: &dyn Db, file: SourceFile, range: TextRange) -> Option<Explained> {
     let parsed = khora_db::parse(db, file);
     let node = declaration_covering(&parsed.syntax(), range)?;
-    Some(Explained { signature: signature_of(&node), docs: docs_of(&node) })
+    Some(Explained {
+        signature: signature_of(&node),
+        docs: docs_of(&node),
+        generic: is_generic(&node),
+    })
 }
 
 /// The innermost declaration whose range covers `range`.
@@ -77,6 +109,22 @@ fn declaration_covering(root: &SyntaxNode, range: TextRange) -> Option<SyntaxNod
         }
     }
     best
+}
+
+/// Whether the declaration takes type parameters.
+///
+/// Asked of the syntax rather than of the checked types, because this decides
+/// what to *show* and the author's `<A, B>` is what makes the signature
+/// ambiguous on its own.
+fn is_generic(node: &SyntaxNode) -> bool {
+    use khora_syntax::ast::AstNode;
+    if let Some(f) = khora_syntax::ast::FnDecl::cast(node.clone()) {
+        return f.type_params().is_some();
+    }
+    if let Some(t) = khora_syntax::ast::TypeDecl::cast(node.clone()) {
+        return t.type_params().is_some();
+    }
+    false
 }
 
 fn is_declaration(kind: SyntaxKind) -> bool {
