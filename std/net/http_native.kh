@@ -1,10 +1,10 @@
 module std::net::http;
 
-import std::core::{Array, ChildFailed, Eq, Fiber, List, Map, Nursery, Option, Result, Scope, SharedFn, Show, Split, attempt, bounded_nursery, scoped};
+import std::core::{Array, ChildFailed, Eq, Fiber, List, Map, Nursery, Option, Result, Scope, SharedFn, Show, Split, acquire, attempt, bounded_nursery, scoped};
 import std::permissions::{granted_host};
 import std::permissions::grants::{network};
 import std::net::socket::{accept_on, connect_to, invalid_handle, listen_on, receive, set_receive_timeout, shut, start, transmit};
-import std::net::tls::{TlsClient, TlsConnection, TlsError, TlsServer, client as tls_client, connect as tls_connect, receive as tls_receive, secure, server as tls_server, shut as tls_shut, transmit as tls_transmit};
+import std::net::tls::{TlsClient, TlsConnection, TlsError, TlsServer, client as tls_client, connect as tls_connect, receive as tls_receive, secure, server as tls_server, set_receive_timeout as tls_set_receive_timeout, shut as tls_shut, transmit as tls_transmit};
 import std::json::{encode};
 import std::schema::{Encode, Raw};
 
@@ -1325,8 +1325,27 @@ impl Router {
       // database pool, a rate-limited API — wants its own smaller bound
       // around that work rather than a smaller number here. See
       // `/docs/cookbook/bounded-concurrency/`.
-      bounded_nursery(256, fn () => Router::serve_forever(router, server)!)!
+      // **The region is opened here rather than asked of the caller.** The
+      // socket's whole life is this call, so the scope that closes it belongs
+      // in this call; requiring `scope` from every caller would be a breaking
+      // change that bought nothing.
+      scoped(fn () => Router::held_open(router, server)!)!
     }
+  }
+
+  /// The serving loop, with the listening socket registered for release.
+  ///
+  /// **Registered rather than closed after the loop, because the loop does not
+  /// end.** It is left by the process stopping, by a raise, or by this fiber
+  /// being cancelled, and only a region runs on all three. Without it a
+  /// cancelled `listen` left the port bound for the life of the process, which
+  /// is what a test that stops a server and binds the port again sees.
+  fn held_open<'er>(router: Router<'er>, server: Int) -> ()
+    with { scope: Scope }
+    raises 'er + HttpError + ChildFailed
+  {
+    let held = acquire(server, fn s => shut(s));
+    bounded_nursery(256, fn () => Router::serve_forever(router, held)!)!
   }
 
   /// The same, over TLS.
@@ -1449,7 +1468,24 @@ impl Router {
   /// this function cannot name a constructor of it. Catching *whatever* is the
   /// one thing naming constructors cannot express, and the reason a total
   /// wildcard arm exists at all.
+  ///
+  /// **The close is registered rather than written after the catch**, because
+  /// the catch does not cover the third way out. A fiber serving a connection
+  /// can be cancelled -- by its nursery ending, or by the server shutting down
+  /// -- and cancellation unwinds without running the line below the block. The
+  /// region runs on every exit, which is the whole reason `Scope` exists.
+  ///
+  /// Registered *instead of*, not as well as: `shut` on a TLS transport frees
+  /// the session, so closing twice is a double free rather than a wasted call.
   fn serve_connection<'er>(router: Router<'er>, transport: Transport) -> () {
+    scoped(fn () => Router::served(router, transport))
+  }
+
+  /// The body of `serve_connection`, inside the region that closes the socket.
+  fn served<'er>(router: Router<'er>, transport: Transport) -> ()
+    with { scope: Scope }
+  {
+    acquire(transport, fn t => t.shut());
     // Before anything is read. `read_request` keeps reading until the request
     // is complete, which is the only correct thing to do and is also how a
     // fiber gets parked forever by a client that stops talking. Ten seconds is
@@ -1459,8 +1495,7 @@ impl Router {
       _ => {
         transport.transmit(Response::rendered(Response::text(500, "handler failed")));
       },
-    };
-    transport.shut()
+    }
   }
 
   /// Answers every request on one connection, until the client stops.
@@ -1689,11 +1724,12 @@ pub fn default_answer_limit() -> Int { 65536 }
 
 /// How long to wait for bytes that are not arriving, in milliseconds.
 ///
-/// **Only on the plain path.** `set_receive_timeout` takes a socket, and the
-/// TLS client hands back a session with the socket already inside it, so an
-/// `https` call has no deadline yet. That is a real gap and it is named here
-/// rather than in a comment nobody reads: a TLS server that accepts the
-/// connection and then says nothing holds the fiber until the process ends.
+/// **On both paths now.** It was the plain one only, because
+/// `set_receive_timeout` takes a socket and a TLS session owns its socket
+/// rather than handing it back -- so a TLS server that accepted the connection
+/// and then said nothing held the fiber until the process ended.
+/// `std::net::tls` sets the deadline on the socket underneath, and `dial` uses
+/// it for `https` exactly as it does for `http`.
 pub fn default_answer_timeout() -> Int { 30000 }
 
 impl HttpClient {
@@ -1750,10 +1786,13 @@ fn attempted(url: Url, call: Call, limit: Int) -> Result<Answer, CallError>
 {
   match dial(url) {
     Result::Err(why) => Result::Err(why),
+    // **Registered, for the reason `serve_connection` registers its own.** A
+    // call cancelled mid-`converse` used to leave the socket open, and over
+    // TLS the session with it; the scope this already runs in closes both
+    // however the call ends.
     Result::Ok(transport) => {
-      let answer = converse(transport, call, url, limit);
-      transport.shut();
-      answer
+      let held = acquire(transport, fn t => t.shut());
+      converse(held, call, url, limit)
     },
   }
 }
@@ -1771,7 +1810,13 @@ fn dial(url: Url) -> Result<Transport, CallError>
   if url.secure {
     match attempt(fn () => tls_connect(tls_client()!, url.host, url.port)!) {
       Result::Err(why) => Result::Err(CallError::Insecure(tls_reason(why))),
-      Result::Ok(session) => Result::Ok(over_tls(session)),
+      Result::Ok(session) => {
+        // The same deadline the plain path gets, and for the same reason: a
+        // peer that accepts and then says nothing must not hold this fiber
+        // for the life of the process.
+        tls_set_receive_timeout(session, default_answer_timeout());
+        Result::Ok(over_tls(session))
+      },
     }
   } else {
     let socket = connect_to(url.host, url.port);

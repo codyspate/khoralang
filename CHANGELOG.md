@@ -169,6 +169,30 @@ it will behave differently now.
 
 ### Fixed
 
+- **A cancelled fiber left its socket open, and a server never gave its port
+  back.** `std::net::socket` registered no release at all, so a socket was
+  closed only by a normal return -- which is the one exit a server never takes.
+  `Router::held_open` registers the listening socket's close with a region and
+  `Router::served` registers the connection's, so both are closed by a raise
+  and by a cancellation as well as by returning. `HttpClient`'s transport is
+  registered the same way, in the region the call already ran in.
+
+  The close moved rather than being added twice: `shut` on a TLS transport
+  frees the session, so closing it a second time would be a double free.
+  `net_cancel.rs` proves both ends -- a cancelled fiber's port binds again,
+  which it could not while the first listener was open, and a peer sees the
+  connection close.
+
+- **An `https` client had no read deadline, so a quiet server held a fiber for
+  ever.** The plain path has set one on the socket since the reactor did;
+  `set_receive_timeout` takes a *socket* and a TLS session owns its socket
+  rather than handing it back, so `https` had nothing. That is the shape of a
+  slowloris, and it worked over `https` and not over `http`.
+  `std::net::tls::set_receive_timeout` sets the deadline on the socket
+  underneath, where the reactor's timer lives, and `dial` uses it for `https`
+  exactly as it does for `http`.
+
+
 - **Only the first import was ever consulted for a bare imported name.**
   `resolve_through_imports` used `?` where it meant `continue`, so a file that
   said `import std::core::{print};` before `import app::helper::{twice};`

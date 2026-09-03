@@ -30,6 +30,7 @@ extern fn khora_tls_accept(server: Ptr, socket: Int) -> Ptr;
 extern fn khora_tls_read(connection: Ptr, into: Ptr, length: Int) -> Int;
 extern fn khora_tls_write(connection: Ptr, from: Ptr, length: Int) -> Int;
 extern fn khora_tls_close(connection: Ptr) -> ();
+extern fn khora_tls_set_timeout(connection: Ptr, millis: Int) -> I32;
 extern fn khora_tls_client_open(extra: Ptr, extra_len: Int) -> Ptr;
 extern fn khora_tls_client_close(client: Ptr) -> ();
 extern fn khora_tls_connect(client: Ptr, host: Ptr, host_len: Int, port: Int) -> Ptr;
@@ -143,6 +144,22 @@ pub fn receive(connection: TlsConnection, into: Array<U8>) -> Int {
 pub fn transmit(connection: TlsConnection, text: String) -> Int {
   String::with_data(text, fn (bytes, length) =>
     khora_tls_write(connection.session, bytes, length))
+}
+
+/// How long a read on this connection may wait before it gives up.
+///
+/// **The `https` half of `set_receive_timeout`.** The plain path sets a
+/// deadline on the socket; a TLS session owns its socket rather than handing it
+/// back, so until this existed a secured connection had no deadline at all and
+/// a peer that accepted and then said nothing held a fiber until the process
+/// ended. That is the shape of a slowloris, and it worked over `https` and not
+/// over `http`.
+///
+/// It is set on the socket underneath, where the reactor's timer lives; TLS
+/// never learns about it. A read that runs out fails, which every caller here
+/// already treats as a connection to give up on.
+pub fn set_receive_timeout(connection: TlsConnection, millis: Int) -> Bool {
+  khora_tls_set_timeout(connection.session, millis) == I32::of(0)
 }
 
 /// Says goodbye properly, then closes the socket.

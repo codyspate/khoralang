@@ -53,6 +53,14 @@ impl Secured {
             Secured::Calling(stream) => stream,
         }
     }
+
+    /// The socket underneath, which is what a deadline is set on.
+    fn socket(&self) -> Socket {
+        match self {
+            Secured::Serving(stream) => stream.sock.0,
+            Secured::Calling(stream) => stream.sock.0,
+        }
+    }
 }
 
 /// What either side needs once the handshake is done.
@@ -397,6 +405,36 @@ pub unsafe extern "C" fn khora_tls_connect(
         return std::ptr::null_mut();
     }
     Box::into_raw(Box::new(Secured::Calling(StreamOwned::new(connection, stream)))).cast()
+}
+
+/// How long a read on this session may wait before it reports a timeout.
+///
+/// **The gap this closes.** `khora_net_set_timeout` takes a socket, and a TLS
+/// session owns its socket rather than handing it back -- so until this
+/// existed, `https` had no deadline at all and a server that accepted a
+/// connection and then said nothing held a fiber until the process ended. The
+/// plain path has had `set_receive_timeout` since the reactor did.
+///
+/// Set on the socket rather than on the session, because that is where the
+/// reactor's timer lives; rustls never learns about it and does not need to. A
+/// read that runs out fails, which is what every caller already treats as a
+/// connection to give up on.
+///
+/// Answers 0 on success and -1 if the connection is null, matching the socket
+/// call it forwards to.
+///
+/// # Safety
+///
+/// `connection` must be null or have come from [`khora_tls_accept`] or
+/// [`khora_tls_connect`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_tls_set_timeout(connection: *mut u8, millis: i64) -> i32 {
+    if connection.is_null() {
+        return -1;
+    }
+    // SAFETY: per the contract above.
+    let secured = unsafe { &*connection.cast::<Secured>() };
+    crate::net::khora_net_set_timeout(secured.socket(), millis)
 }
 
 /// Reads at most `len` plaintext bytes, or 0 at the end, or -1 on failure.

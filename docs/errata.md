@@ -3121,3 +3121,50 @@ in the experiment that knew.
 A measurement of a system that the system itself can check should be checked
 against it. It took one twenty-line server with a counter in it to overturn
 three phases of recorded numbers.
+
+## 78. A program that has accepted a connection stops for two minutes
+
+Found by a test that was written for something else. `net_cancel.rs` proves a
+cancelled fiber gives its socket back, and the peer at the other end saw the
+close in 24 milliseconds -- then the program did not reach its *next line* for
+another 120.0 seconds. Every run, to within a few milliseconds of exactly two
+minutes.
+
+    T listening   22.5 ms     the program announced its port
+    T connected   24.0 ms     the peer connected
+    T read        24.1 ms     the peer saw the connection close
+    (the program's next `print`)          +120.03 s
+
+**It is not about cancellation and not about the fix that test covers.** The
+same delay appears when the fiber returns normally, when it raises, and when it
+is cancelled. It appears whether the close is registered with a region or
+written out by hand. What every case has in common is that `accept_on` returned
+a connection: a program that binds a port and closes it without accepting
+anything is unaffected, and the same test's listening-socket half -- bind,
+cancel, bind again -- finishes in milliseconds.
+
+The two minutes are spent somewhere between the region closing the accepted
+socket and the next statement running. The peer's evidence puts `shut` well
+before the delay rather than inside it, so this is not `closesocket` blocking:
+something in the runtime is waiting, and 120 seconds is not a number anything
+in `khora-rt` names -- there is no `from_secs(120)` in it.
+
+**What it costs today.** Nothing in production, because the servers in
+`examples/` never leave their accept loops: `Router::listen` runs until the
+process is killed, so no Khora program in this repository has ever reached the
+line after one. It would cost everything for a server that shuts down
+gracefully, which is a thing a server should be able to do, and it makes any
+test that accepts a connection and then asserts something cost two minutes.
+`net_cancel.rs` sidesteps it by asserting at the peer and killing the child
+rather than reading to end-of-file, with a comment pointing here.
+
+Recorded rather than fixed: the fix is in the reactor or in the scheduler's
+idea of outstanding work, and finding it wants a debugger on a stopped process
+rather than another test. It is open in `docs/release-readiness.md` under the
+scheduler.
+
+**The lesson is the one this file keeps having.** The delay had been in the
+runtime for as long as `accept_on` has existed and nothing noticed, because
+every program that accepts a connection also never stops accepting. A test
+written for a different claim found it in its first run, and only because it
+timed the wrong thing on purpose.
