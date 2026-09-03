@@ -169,6 +169,21 @@ it will behave differently now.
 
 ### Fixed
 
+- **Only the first import was ever consulted for a bare imported name.**
+  `resolve_through_imports` used `?` where it meant `continue`, so a file that
+  said `import std::core::{print};` before `import app::helper::{twice};`
+  could not resolve `twice`: looking for it in `std::core` failed and ended
+  the search. Every real file has more than one import, so this was the common
+  case, and it was invisible because the tests each had one import.
+  Go-to-definition, hover, references and rename were all affected.
+- **Go-to-definition on a method landed nowhere.** `khora_hir` did not collect
+  impl members at all, so `Int::to_string` -- the commonest shape of call in
+  the language -- resolved to nothing and hovering one showed a type where its
+  author had written a sentence. `ItemMap` records the functions inside `impl`
+  blocks now, with their ranges, kept apart from `items` so two impls for one
+  type still cannot collide. An inherent method is preferred to a trait one,
+  because that is what a call resolves to.
+
 - **A backtick string had no rule in the editor grammar, so its contents were
   highlighted as code.** Not merely uncolored: the template's keywords and
   numbers lit up, and a `"` inside one opened a string that ran on and
@@ -357,6 +372,13 @@ it will behave differently now.
   passed to `List::map` — which the Guide had been showing all along.
 
 ### Added
+
+- **"did you mean" on an unresolved name.** An unresolved `prnt` now ends its
+  message with *did you mean `print`?* when exactly one name in reach is close
+  enough. Edit distance against the locals, this file's declarations and what
+  it imported, with two guards: the distance has to be small relative to the
+  name, so a two-letter name gets nothing, and a tie suggests nothing at all,
+  because two equally close names is a menu rather than an answer.
 
 - **`textDocument/documentHighlight`.** Every mention of the name under the
   cursor, in the file being read. The same search `references` runs, narrowed

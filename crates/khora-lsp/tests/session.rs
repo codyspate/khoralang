@@ -2154,3 +2154,162 @@ fn a_local_is_offered_without_an_empty_documentation_panel() {
         "a local has nothing to document, so the field is absent: {total}"
     );
 }
+
+/// **The form people actually write.** `import helper::{add};` and then a
+/// bare `add(1, 2)` is the whole point of a named import, and go-to-definition
+/// on it used to answer nothing while the qualified `helper::add` worked. So
+/// the feature was there and missing exactly where it is used.
+#[test]
+fn a_bare_imported_name_finds_its_declaration() {
+    let helper = "module helper;\n\n/// Adds, and says so.\npub fn add(a: Int, b: Int) -> Int { a + b }\n";
+    let main = "module main;\n\nimport helper::{add};\n\nfn go() -> Int { add(1, 2) }\n";
+    let w = workspace(&[("src/helper.kh", helper), ("src/main.kh", main)]);
+    let main_path = w.root.join("src/main.kh");
+
+    let column = main.lines().nth(4).expect("a fifth line").find("add").expect("the call") as u32;
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main_path, main),
+        definition(&main_path, 4, column + 1, 2),
+        json!({
+            "jsonrpc": "2.0", "id": 3, "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": url_of(&main_path) },
+                "position": { "line": 4, "character": column + 1 }
+            }
+        }),
+        exit(),
+    ]);
+
+    let found = result_of(&replies, 2);
+    let uri = found.get("uri").and_then(Value::as_str).unwrap_or_default();
+    assert!(uri.ends_with("helper.kh"), "a bare imported name still names another file: {found}");
+
+    let hovered = result_of(&replies, 3)
+        .pointer("/contents/value")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    assert!(hovered.contains("pub fn add(a: Int, b: Int) -> Int"), "{hovered:?}");
+    assert!(hovered.contains("Adds, and says so."), "and its documentation: {hovered:?}");
+}
+
+/// A method reached through its type: `Int::to_string`, which is the commonest
+/// shape of call in the language and resolved to nothing at all.
+///
+/// The name resolver reads `Type::method` as one only when the type is
+/// declared in the same file, and `Int` is declared nowhere — it is the
+/// language's own. So this asks the impl blocks directly, after resolution has
+/// had its turn.
+#[test]
+fn a_method_on_a_type_finds_the_impl_that_declares_it() {
+    let source = "module main;\n\
+pub type Celsius = { degrees: Int };\n\
+\n\
+impl Celsius {\n\
+  /// Freezing, in this scale.\n\
+  pub fn freezing() -> Celsius { { degrees: 0 } }\n\
+}\n\
+\n\
+fn go() -> Celsius { Celsius::freezing() }\n";
+    let w = workspace(&[("src/main.kh", source)]);
+    let main_path = w.root.join("src/main.kh");
+
+    let line = source.lines().nth(8).expect("the call");
+    let column = line.find("freezing").expect("the method") as u32;
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main_path, source),
+        definition(&main_path, 8, column + 1, 2),
+        json!({
+            "jsonrpc": "2.0", "id": 3, "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": url_of(&main_path) },
+                "position": { "line": 8, "character": column + 1 }
+            }
+        }),
+        exit(),
+    ]);
+
+    let found = result_of(&replies, 2);
+    assert_eq!(
+        found.pointer("/range/start/line"),
+        Some(&json!(5)),
+        "the `fn` inside the impl, not the impl block and not the type: {found}"
+    );
+
+    let hovered = result_of(&replies, 3)
+        .pointer("/contents/value")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    assert!(hovered.contains("pub fn freezing() -> Celsius"), "{hovered:?}");
+    assert!(hovered.contains("Freezing, in this scale."), "{hovered:?}");
+}
+
+/// An inherent method wins over a trait method of the same name, because that
+/// is what the call resolves to.
+#[test]
+fn an_inherent_method_is_preferred_to_a_trait_one() {
+    let source = "module main;\n\
+import std::core::{Show};\n\
+pub type Tag = { n: Int };\n\
+\n\
+impl Show for Tag {\n\
+  fn show(self) -> String { \"trait\" }\n\
+}\n\
+\n\
+impl Tag {\n\
+  /// The one a call means.\n\
+  pub fn show(self) -> String { \"inherent\" }\n\
+}\n\
+\n\
+fn go(t: Tag) -> String { Tag::show(t) }\n";
+    let w = workspace(&[("src/main.kh", source)]);
+    let main_path = w.root.join("src/main.kh");
+
+    let line = source.lines().nth(13).expect("the call");
+    let column = line.rfind("show").expect("the method") as u32;
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main_path, source),
+        definition(&main_path, 13, column + 1, 2),
+        exit(),
+    ]);
+
+    let found = result_of(&replies, 2);
+    assert_eq!(
+        found.pointer("/range/start/line"),
+        Some(&json!(10)),
+        "the inherent `show`, not the trait impl's: {found}"
+    );
+}
+
+/// The same, with the module path a package actually uses.
+///
+/// A package's modules are `pkg::main` and `pkg::library`, not the bare
+/// `main` and `helper` the tests above use, and a two-segment path is a
+/// different lookup in the module graph.
+#[test]
+fn a_bare_import_from_a_nested_module_finds_its_declaration() {
+    let library = "module probe::library;\n\n/// Doubles it.\npub fn twice(n: Int) -> Int { n * 2 }\n";
+    // With an unrelated `std` import above it, which is what a real file has.
+    let main = "module probe::main;\n\nimport std::core::{print};\nimport probe::library::{twice};\n\nfn go() -> Int { twice(21) }\n";
+    let w = workspace(&[("src/library.kh", library), ("src/main.kh", main)]);
+    let main_path = w.root.join("src/main.kh");
+
+    let column = main.lines().nth(5).expect("a sixth line").find("twice").expect("the call") as u32;
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main_path, main),
+        definition(&main_path, 5, column + 1, 2),
+        exit(),
+    ]);
+
+    let found = result_of(&replies, 2);
+    let uri = found.get("uri").and_then(Value::as_str).unwrap_or_default();
+    assert!(
+        uri.ends_with("library.kh"),
+        "a nested module path is still a module path: {found}"
+    );
+}

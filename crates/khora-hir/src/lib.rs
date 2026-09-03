@@ -193,6 +193,16 @@ pub struct ItemMap {
     /// The file's tests, in written order.
     pub tests: Vec<TestItem>,
     pub variants: Vec<Variant>,
+    /// The functions inside this file's `impl` blocks.
+    ///
+    /// **Kept apart from `items` rather than added to it.** An impl has no
+    /// name of its own and two impls of different traits for one type would
+    /// collide as items; a method is reached through its type, never as a bare
+    /// name. But it does have a *place*, and until this existed nothing
+    /// recorded it -- which is why go-to-definition on `Int::to_string` landed
+    /// nowhere and hovering one showed a type where its author had written a
+    /// sentence.
+    pub methods: Vec<Method>,
     pub imports: Vec<Import>,
     pub errors: Vec<HirError>,
 }
@@ -206,6 +216,32 @@ impl ItemMap {
     pub fn variants_of<'a>(&'a self, type_name: &'a str) -> impl Iterator<Item = &'a Variant> + 'a {
         self.variants.iter().filter(move |v| v.type_name == type_name)
     }
+
+    /// A method on `type_name`, preferring an inherent one.
+    ///
+    /// **Inherent first, because that is what a call resolves to.** A type
+    /// with its own `show` and a `Show` impl has two, and the one written
+    /// directly on the type is the one a reader means.
+    pub fn method(&self, type_name: &str, name: &str) -> Option<&Method> {
+        let matching =
+            |m: &&Method| m.type_name == type_name && m.name == name;
+        self.methods
+            .iter()
+            .find(|m| matching(m) && m.trait_name.is_none())
+            .or_else(|| self.methods.iter().find(matching))
+    }
+}
+
+/// A function inside an `impl`, and where it is written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Method {
+    /// The type the impl is for, as written: `Int` for `impl Int { .. }`.
+    pub type_name: String,
+    /// The trait, or `None` for an inherent impl.
+    pub trait_name: Option<String>,
+    pub name: String,
+    /// The function's own range, not the impl block's.
+    pub range: TextRange,
 }
 
 /// One declaration, as another file can observe it.
@@ -419,7 +455,23 @@ fn collect_decl(decl: &ast::Decl, map: &mut ItemMap) {
         // type it is written for, never referred to directly. Recording it as
         // an item would give two impls of different traits for one type a
         // spurious duplicate-name error.
-        ast::Decl::Impl(_) => return,
+        //
+        // Its *functions* are recorded, in `methods`, because they have places
+        // even though the block has no name.
+        ast::Decl::Impl(i) => {
+            let Some(type_name) = i.self_type().and_then(head_name) else { return };
+            let trait_name = i.trait_().and_then(head_name);
+            for function in i.functions() {
+                let Some(name) = function.name().and_then(|n| n.ident()) else { continue };
+                map.methods.push(Method {
+                    type_name: type_name.clone(),
+                    trait_name: trait_name.clone(),
+                    name,
+                    range: function.syntax().text_range(),
+                });
+            }
+            return;
+        }
         ast::Decl::Effect(e) => {
             (e.name(), ItemKind::Effect, e.is_exported(), e.syntax().text_range())
         }
@@ -1013,6 +1065,17 @@ pub enum Resolution {
     Unsupported(&'static str),
 }
 
+/// The name at the head of a type: `List` for `List<Int>`, `Int` for `Int`.
+///
+/// An impl is written for a constructor, and the arguments are what make it
+/// generic rather than part of which type it is on.
+fn head_name(ty: ast::Type) -> Option<String> {
+    match ty {
+        ast::Type::Path(path) => path.path()?.segments().last()?.ident(),
+        _ => None,
+    }
+}
+
 /// Resolves a `::` path as written in `file`.
 ///
 /// Locals do not participate: `x::foo` where `x` is a binding is an error that
@@ -1148,13 +1211,20 @@ fn resolve_through_imports(
     map: &ItemMap,
     name: &str,
 ) -> Option<Resolution> {
+    // **`continue`, not `?`.** Each of the three lookups below used to end the
+    // whole search when it missed, so only the *first* import was ever
+    // consulted: a file that said `import std::core::{print};` before
+    // `import app::helper::{twice};` could not resolve `twice`, because
+    // looking for it in `std::core` failed and took the rest of the list with
+    // it. Every real file has more than one import, so this was the common
+    // case, and it was invisible because a test with one import passes.
     for import in &map.imports {
-        let target = graph.file(&import.path)?;
+        let Some(target) = graph.file(&import.path) else { continue };
         let target_map = item_map(db, target);
         match &import.kind {
             ImportKind::Named(names) => {
-                let imported = names.iter().find(|n| n.alias == name)?;
-                let item = target_map.item(&imported.name)?;
+                let Some(imported) = names.iter().find(|n| n.alias == name) else { continue };
+                let Some(item) = target_map.item(&imported.name) else { continue };
                 if item.is_public {
                     return Some(Resolution::Item {
                         module: import.path.clone(),
@@ -1179,6 +1249,74 @@ fn resolve_through_imports(
     None
 }
 
+/// The name somebody probably meant, out of the ones that were in reach.
+///
+/// **A misspelling is the commonest error a compiler sees and the least
+/// informative one it reported.** "cannot find `prnt` in this scope" is true
+/// and leaves the reader to find the difference themselves, which for a long
+/// name or an unfamiliar library is a search rather than a glance.
+///
+/// Edit distance, with two rules that keep it from guessing:
+///
+/// - **The distance has to be small relative to the name.** A third of its
+///   length, so `prnt` finds `print` and `x` does not find `y`. Single-letter
+///   names have no near neighbours worth naming.
+/// - **Only one suggestion, and only if it is clearly the closest.** Two
+///   candidates at the same distance is not a suggestion, it is a menu, and a
+///   reader who takes the first is as likely to be wrong as right.
+///
+/// Case is ignored while comparing, so `Print` is offered for `print`, which
+/// is a mistake people make constantly between a type and a function.
+pub fn did_you_mean<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> Option<String> {
+    if name.chars().count() < 3 {
+        return None;
+    }
+    let limit = (name.chars().count() / 3).max(1);
+    let wanted = name.to_lowercase();
+
+    let mut best: Option<(usize, &str)> = None;
+    let mut tied = false;
+    for candidate in candidates {
+        if candidate == name {
+            // The name is in reach after all, so whatever went wrong here is
+            // not a spelling.
+            return None;
+        }
+        let distance = edit_distance(&wanted, &candidate.to_lowercase());
+        if distance > limit {
+            continue;
+        }
+        match best {
+            Some((seen, _)) if distance > seen => {}
+            Some((seen, _)) if distance == seen => tied = true,
+            _ => {
+                best = Some((distance, candidate));
+                tied = false;
+            }
+        }
+    }
+    match best {
+        Some((_, candidate)) if !tied => Some(candidate.to_string()),
+        _ => None,
+    }
+}
+
+/// Levenshtein distance, two rows at a time.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    let mut current = vec![0usize; b.len() + 1];
+    for (i, ca) in a.chars().enumerate() {
+        current[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != *cb);
+            current[j + 1] = (previous[j] + cost).min(previous[j + 1] + 1).min(current[j] + 1);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[b.len()]
+}
+
 /// Whether `name` is a type the language provides rather than a module does.
 ///
 /// **Kept in step with `khora_types::syntax::named_type` by a test, not by
@@ -1198,5 +1336,62 @@ pub fn is_builtin_type(name: &str) -> bool {
     match (letters.next(), letters.as_str()) {
         (Some('I' | 'U'), bits) => matches!(bits, "8" | "16" | "32" | "64"),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod did_you_mean_tests {
+    use super::did_you_mean;
+
+    fn suggest(name: &str, candidates: &[&str]) -> Option<String> {
+        did_you_mean(name, candidates.iter().copied())
+    }
+
+    #[test]
+    fn a_transposition_is_found() {
+        assert_eq!(suggest("prnt", &["print", "parse"]), Some("print".to_string()));
+        assert_eq!(suggest("lenght", &["length", "list"]), Some("length".to_string()));
+    }
+
+    /// Case is ignored, because confusing a type with a function of the same
+    /// word is a mistake people make constantly.
+    #[test]
+    fn case_alone_is_a_misspelling() {
+        assert_eq!(suggest("Print", &["print"]), Some("print".to_string()));
+    }
+
+    /// **Two equally close names is a menu, not a suggestion.** A reader who
+    /// takes the first is as likely to be wrong as right, and a wrong
+    /// suggestion is worse than none: it sends them to change the wrong line.
+    #[test]
+    fn a_tie_suggests_nothing() {
+        assert_eq!(suggest("cat", &["car", "bat"]), None);
+    }
+
+    /// A short name has no near neighbours worth naming: at two characters
+    /// every other two-character name is one edit away.
+    #[test]
+    fn a_short_name_gets_no_suggestion() {
+        assert_eq!(suggest("xy", &["ab", "xz"]), None);
+    }
+
+    /// The distance has to be small *relative to the name*, so a long name may
+    /// be two edits out and a short one may not.
+    #[test]
+    fn a_distant_name_is_not_offered() {
+        assert_eq!(suggest("print", &["parse"]), None);
+        assert_eq!(suggest("configuration", &["configurations"]), Some("configurations".to_string()));
+    }
+
+    /// If the name is in reach after all, whatever went wrong is not a
+    /// spelling and saying "did you mean the thing you wrote" would be absurd.
+    #[test]
+    fn an_exact_match_suggests_nothing() {
+        assert_eq!(suggest("print", &["print", "prnt"]), None);
+    }
+
+    #[test]
+    fn nothing_close_suggests_nothing() {
+        assert_eq!(suggest("wibble", &["print", "length"]), None);
     }
 }

@@ -964,6 +964,26 @@ impl<'a> Ctx<'a> {
             .unwrap_or_else(here)
     }
 
+    /// The name in reach that `wanted` was probably a misspelling of.
+    ///
+    /// Everything a bare mention could have resolved to, in the order a
+    /// resolution would have tried them: the locals in scope, then this file's
+    /// own declarations and its module-level constants, then what it imported.
+    /// A name that is genuinely unreachable gets no suggestion rather than the
+    /// nearest thing in the whole program, which would send a reader after an
+    /// import they do not want.
+    fn nearest_name(&self, wanted: &str) -> Option<String> {
+        let locals = self.scopes.iter().flatten().map(|(name, _)| name.as_str());
+        let items = self.map.items.iter().map(|item| item.name.as_str());
+        let constants = self.constants.iter().map(|(name, _)| name.as_str());
+        let imported = self.scope.names.iter().map(|(name, _)| name.as_str());
+        let variants = self.scope.variants.iter().map(|v| v.name.as_str());
+        crate::did_you_mean(
+            wanted,
+            locals.chain(items).chain(constants).chain(imported).chain(variants),
+        )
+    }
+
     fn error(&mut self, message: impl Into<String>, range: TextRange) {
         let range = self.shifted(range);
         self.body.errors.push(HirError { message: message.into(), range });

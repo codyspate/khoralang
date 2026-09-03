@@ -171,13 +171,39 @@ pub fn at(db: &dyn Db, root: SourceRoot, file: SourceFile, offset: TextSize) -> 
     // In `std::core::print`, clicking `core` should reach the module and
     // clicking `print` the function, and truncating is the whole of the
     // difference between those two answers.
-    let by_path = segments_through(&path, offset)
-        .and_then(|segments| khora_hir::resolve_path(db, root, file, &segments).ok())
+    let segments = segments_through(&path, offset);
+    let by_path = segments
+        .as_ref()
+        .and_then(|segments| khora_hir::resolve_path(db, root, file, segments).ok())
         .and_then(|resolution| locate(db, root, &resolution));
 
-    by_path.or_else(|| {
-        local_binding_at(db, file, offset).map(|local| Definition { file, range: local.binding })
-    })
+    by_path
+        .or_else(|| segments.as_deref().and_then(|segments| method_by_name(db, root, segments)))
+        .or_else(|| {
+            local_binding_at(db, file, offset).map(|local| Definition { file, range: local.binding })
+        })
+}
+
+/// `Type::method`, when the name resolver could not say what `Type` is.
+///
+/// **The resolver only reads `Type::method` as one when the type is declared
+/// in the same file.** `Int`, `String` and `List` are not declared anywhere —
+/// they are the language's own, and the checker knows them by other means — so
+/// `Int::to_string` reaches no resolution at all and go-to-definition on the
+/// commonest call in the language answered with nothing.
+///
+/// An editor can afford to be more willing than a compiler here. If the path
+/// is two segments and there is exactly one method of that name on that type
+/// anywhere in the graph, that is the answer; a wrong jump is recoverable and
+/// no jump is what this replaces. It runs only after resolution has failed, so
+/// nothing it does can override a real answer.
+fn method_by_name(db: &dyn Db, root: SourceRoot, segments: &[String]) -> Option<Definition> {
+    let [type_name, method] = segments else { return None };
+    if !type_name.starts_with(char::is_uppercase) {
+        return None;
+    }
+    let graph = &khora_hir::module_graph(db, root);
+    method_on(db, graph, type_name, method)
 }
 
 /// The innermost `PATH` covering `offset`.
@@ -239,16 +265,45 @@ fn locate(db: &dyn Db, root: SourceRoot, resolution: &Resolution) -> Option<Defi
         // the name and the type and nothing else — so this lands on the type
         // that declares it, which is where a reader wants to end up anyway.
         Resolution::Variant { module, type_name, .. } => item_in(db, graph, module, type_name),
-        // The trait, for the reason in the module documentation: impl members
-        // are not collected, so there is no method to land on.
-        Resolution::TraitItem { owner, .. } => {
-            graph.paths().find_map(|module| {
-                let found = item_in(db, graph, module, owner)?;
-                Some(found)
-            })
-        }
+        // **The method first, and the trait only if there is no method.**
+        // `owner` is written as it appears, so `Int::to_string` and
+        // `Show::show` both arrive here and mean different things: the first
+        // names a type and wants the function inside an `impl Int`, the
+        // second names a trait and wants the declaration in it. Impl members
+        // are collected now, so the first has somewhere to land -- it used to
+        // fall through to a search for a trait called `Int`, find nothing,
+        // and answer with no definition at all.
+        Resolution::TraitItem { owner, name } => method_on(db, graph, owner, name)
+            .or_else(|| graph.paths().find_map(|module| item_in(db, graph, module, owner))),
         Resolution::Unsupported(_) => None,
     }
+}
+
+/// A method `name` written in an `impl` for `type_name`, wherever it is.
+///
+/// **Every module, because an impl does not have to be beside its type.** A
+/// trait impl is written where either the trait or the type is, and for a
+/// method on a `std` type declared in an application that is a third file
+/// again. The type's own module is tried first so an inherent method wins
+/// over a trait one with the same name.
+fn method_on(
+    db: &dyn Db,
+    graph: &khora_hir::ModuleGraph,
+    type_name: &str,
+    name: &str,
+) -> Option<Definition> {
+    let mut fallback = None;
+    for module in graph.paths() {
+        let Some(file) = graph.file(module) else { continue };
+        let map: &ItemMap = khora_hir::item_map(db, file);
+        let Some(method) = map.method(type_name, name) else { continue };
+        let found = Definition { file, range: method.range };
+        if method.trait_name.is_none() {
+            return Some(found);
+        }
+        fallback.get_or_insert(found);
+    }
+    fallback
 }
 
 fn item_in(

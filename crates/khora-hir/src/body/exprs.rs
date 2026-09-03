@@ -525,7 +525,13 @@ impl<'a> Ctx<'a> {
             if !self.lambdas.is_empty() {
                 return self.invented_capability(only, range);
             }
-            self.error(format!("cannot find `{only}` in this scope"), range);
+            let message = match self.nearest_name(only) {
+                Some(near) => {
+                    format!("cannot find `{only}` in this scope; did you mean `{near}`?")
+                }
+                None => format!("cannot find `{only}` in this scope"),
+            };
+            self.error(message, range);
             return self.add_expr(Expr::Unresolved(only.clone()), range);
         }
 
