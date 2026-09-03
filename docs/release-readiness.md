@@ -13,7 +13,7 @@ A section is complete only when its behavior is implemented, documented, tested,
 ## Current state
 
 Scored against the tree, item by item, against what is in the repository rather
-than against the roadmap's account of itself. **195 of 222**, and re-scored
+than against the roadmap's account of itself. **196 of 222**, and re-scored
 whenever a section moves.
 
 **The number is counted, not typed.** `scripts/check-readiness.sh` counts the
@@ -22,6 +22,16 @@ while the boxes said 150, for long enough that the wrong figure was quoted in a
 status report before anybody added them up. It understated in the other
 direction too: five items sat open whose `**Left:**` described conditions fixed
 commits earlier. Arithmetic is now checked; the annotations still need reading.
+
+**Last read, rather than last counted: 2026-09-03.** Every open item was
+checked against the repository, and against the compiler wherever a claim could
+be run rather than read. Four notes had drifted since the last pass: two of
+Phase 12's named remainders were closed, the unresolved-name rendering was
+fixed, and a cookbook page one item said was missing turned out to exist. None
+of that changed the count by much and all of it changed what was worth doing
+next, which is the whole use of the gate — a score nobody re-reads decays
+silently, and the annotations are where the decay lives. Add the date when you
+read them.
 
 **A score is only as good as the reading behind it.** Section 3 was scored at
 2/6 by somebody who had not opened `crates/khora-codegen-llvm/tests/db.rs`, and
@@ -86,9 +96,9 @@ was the single fact behind three unticked items in §18; `examples/khq` is about
 
 ## 1. Language and compiler correctness
 
-- [ ] Phase 12 is complete, including all implementation work that remains in its entries rather than only the currently landed subset. **Left:** two of #140's remainders are Phase-12-shaped and both still hold: `khora run src/a.kh` inside a package builds and runs the *package's* program rather than the file named, and an unused *type* import warns nothing. Multiple binaries per package landed in #162.
+- [ ] Phase 12 is complete, including all implementation work that remains in its entries rather than only the currently landed subset. **Left:** three entries are partial, and they are not the ones this said. Both of #140's named remainders are closed: `khora run src/a.kh` inside a package refuses and names `src/bin/` rather than silently running the package's program, and an unused *type* import warns like any other. What is actually open is in the roadmap's own headings -- 12.2 cross-compilation is "step one done", 12.4 debug information has line tables and locals but not heap layout, and 12.9 supply chain has the SBOM and not the signature.
 - [x] Every known silent-miscompile, silently ignored annotation, unresolved-name hole, and misleading diagnostic discovered during Phase 12 has either been fixed or promoted to a release-blocking issue. **Done:** #143 fixed (errata 62); #142 and #108 are tracked and listed under Known limitations.
-- [ ] The compiler rejects unresolved type names, unresolved trait bounds, contradictory annotations, and unsupported constructs at the source location that caused the problem. **Left:** An unresolved name renders identically to the real type — ``expected `X`, found `X``` beside "cannot find type `X`".
+- [x] The compiler rejects unresolved type names, unresolved trait bounds, contradictory annotations, and unsupported constructs at the source location that caused the problem. **Done:** the rendering complaint this carried is fixed. An unresolved name no longer collides with the real type -- a mismatch between `a::Widget` and an unimported `Widget` reads ``expected `a::Widget`, found `Widget` ``, qualified exactly where it would otherwise say the same word twice, and `khora-types`' `an_ordinary_mismatch_is_not_qualified` keeps the qualification from spreading to mismatches that do not need it. Checked against the compiler: an unresolved type, an unresolved bound and a return that disagrees with its body each report once, with a sentence naming both sides, and the caret is under the *body* rather than the signature.
 - [x] Type inference and lowering have regression coverage for closures, generics, traits, effect rows, handlers, capabilities, higher-kinded types, ADTs, pattern matching and annotations. **Done:** 2,107 tests; `khora-types/tests` and `khora-codegen-llvm/tests` carry a file per feature.
 - [x] Common invalid programs produce diagnostics that describe the programmer's problem rather than an internal compiler phase.
 - [x] A deliberate invalid-program corpus tests diagnostic text, ranges and recovery for common mistakes. **Done:** `crates/khora-diagnostics/tests` and `khora-codegen-llvm/tests/errors.rs`.
@@ -175,7 +185,7 @@ Peak requests per second alone is not a release gate. A production runtime must 
 - [x] A no-op tracer remains cheap enough that disabled tracing is a viable production configuration. **Done:** `the_default_tracer_records_nothing_and_stays_out_of_the_way`.
 - [x] At least one real exporter/integration exists, preferably OTLP/OpenTelemetry, outside `std`. **Done:** `packages/otlp` is a `Tracer` that batches finished spans and posts them as OTLP/HTTP JSON to a collector, outside `std` for the reason `std::trace` gives -- a wire protocol with its own release cadence does not belong in a library that promises not to break. The queue is `dropping` and a failed POST is swallowed, because a tracer that can stall the service it measures is one that takes production down. Twelve tests assert against the rendered bytes rather than the values going in; one of them found the resource's `service.name` being sent as a bare string where OTLP wants an `AnyValue`, which a collector drops without saying so. Two limits are `std::trace`'s rather than the protocol's and are written in the package's README: spans have no parents, because the effect has no operation that says "inside this one", and attributes given to `start` are dropped.
 - [ ] A reference service demonstrates an incoming HTTP trace flowing through application work, spawned fibers and database operations with correct parent/child relationships. **Left:** two thirds of it. `examples/ledger_service` takes a `Tracer` through its handlers and wraps each database operation in `around_result` — `entries.create`, `entries.list` — so an incoming request does flow through application work into the database with a span around it. It spawns no fibers, so the part of the item that is actually about parent/child relationships across a `nursery` is undemonstrated.
-- [ ] Logging guidance explains how logs correlate with traces and fiber/request context. **Left:** nothing written. `/docs/cookbook/tracing/` covers spans and does not mention logs, and there is no logging capability in `std` for it to correlate with — so this needs a decision about what logging *is* here before it needs a page.
+- [ ] Logging guidance explains how logs correlate with traces and fiber/request context. **Left:** nothing written, and the blocker is a decision rather than a page. `/docs/cookbook/tracing/` exists and covers spans; it does not contain the word "log". There is no logging capability in `std` for logs to correlate *with* -- no `effect Log`, nothing that carries a request id -- so what this needs first is a decision about what logging is here: a capability like `Tracer`, a package, or deliberately neither.
 - [x] Metrics/exporter responsibilities are clearly separated between `std` vocabulary/runtime context and external packages. **Done:** `/docs/stdlib/api/trace` — "Why this is `std`'s and the exporter is not".
 
 ---
@@ -469,11 +479,11 @@ Private testing is not a separate product milestone, but public release requires
 - [x] CI is green on every production-supported platform. **Done:** ubuntu, macos and windows in `ci.yml`.
 - [x] Baseline/compiler tests, runtime stress, HTTP conformance, examples, docs links/snippets and package-resolution tests pass for the exact release candidate. **Done:** `scripts/baseline.sh`: 2,107 tests, conformance, corpus, packages, cache and the Linux runtime through WSL2.
 - [x] Release artifacts are produced by automation from the release tag.
-- [ ] Documentation deployed to `khoralang.com` is generated from that same release/tag.
+- [ ] Documentation deployed to `khoralang.com` is generated from that same release/tag. **Left:** it is generated from `main`. `.github/workflows/docs.yml` triggers on `push` to `branches: [main]` under `website/**`, so the site tracks the branch rather than the tag -- which is right while there is no release and wrong the moment there is one. Closing this is a trigger and a checkout, not a rewrite, and it belongs with the tagging in the item above.
 - [x] Checksums/provenance/release notes are published together. **Done:** all three in the job that uploads. Checksums were already there; provenance is the attestation above; the notes are cut from `CHANGELOG.md` by `scripts/release-notes.sh` rather than written a second time, and a version with no entry stops the release rather than shipping a blank body. Notes are applied only when nobody has written one, so an edited draft is a decision rather than something to overwrite.
 - [x] Known limitations are current and prominent. **Done:** `/docs/limitations`, linked from the docs index.
 - [ ] The release candidate has completed the external-user validation above.
-- [ ] This document has been scored against the release candidate itself, item by item, and re-scored at every subsequent candidate. **Left:** scored against the *tree*, item by item, in #173 — every open item checked against what is in the repository, with the compiler run where a claim could be run. That is the method the item asks for, applied to the wrong artifact: there is no final candidate yet, so what has been scored is `main`. Repeat against the tag. A gate nobody scores is a gate nobody passes or fails.
+- [ ] This document has been scored against the release candidate itself, item by item, and re-scored at every subsequent candidate. **Left:** the tag, and only the tag. Scored against the tree twice now -- #173, and again on 2026-09-03 with every open item checked against what is in the repository and the compiler run wherever a claim could be run. The second pass found four notes that had drifted from the tree: two of Phase 12's named remainders were fixed, the unresolved-name rendering was fixed, and the tracing cookbook it said was missing exists. That is the argument for the item rather than against it -- a gate scored once decays, and the decay is invisible until somebody re-reads it. What is still owed is a pass against a `v0.1.0` tag rather than against `main`.
 
 ### Definition of public-release ready
 
