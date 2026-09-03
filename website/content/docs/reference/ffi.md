@@ -155,6 +155,50 @@ When fibers become M:N over a fixed set of workers, blocking on one *will* occup
 
 An ordinary foreign call also cannot secretly suspend Khora while foreign stack or thread-affine state remains live around the call.
 
+## Callbacks C keeps and calls later
+
+A C caller may take the address of a `pub extern fn` and call it whenever it
+likes — a signal handler, a callback registered with a library, a thread of its
+own. Three questions decide whether that is safe, and all three have answers.
+
+**The pointer lasts as long as the process.** A `pub extern fn` is an exported
+symbol in the shared library, not a value that was allocated: its address is
+fixed once the library is loaded and stays valid until it is unloaded. There is
+nothing to free and nothing to keep alive.
+
+**A Khora closure cannot be exported at all, and is not a callback you can
+hand out.** A closure is a code pointer *and* the values it captured; the code
+pointer alone cannot be called, and there is no C type for the pair. If a
+foreign API wants a callback with user data, export a `pub extern fn` taking a
+`Ptr` and let C pass its own context through it.
+
+**The runtime must already be running.** An exported function may allocate,
+raise, or trap, and all three need the runtime that the library's own
+initialisation starts. Calling an export before the library is loaded is not a
+Khora question; calling one *after* it has been unloaded is undefined in the
+same way calling any unloaded symbol is.
+
+**Re-entrancy is allowed and is an ordinary call.** C entering Khora while
+another Khora call is already on the stack — a callback invoked from inside a
+foreign function that Khora itself called — is a nested call on the same
+thread and needs nothing special. What it does not do is join the outer call:
+it is a separate exported boundary with its own error handling, so a `raises`
+row is discharged there rather than travelling out through the foreign frames
+in between, which could not carry it. A trap is process-fatal by default in a
+callback exactly as it is anywhere else; where the host has opted into
+export-boundary containment, the callback is its own boundary and not part of
+the outer one.
+
+Two rules from elsewhere on this page apply with particular force here, because
+a retained callback is exactly where they get broken:
+
+- The callback may be entered on **any** host thread, including one Khora has
+  never seen (`Libraries may be called from several host threads`).
+- Anything the callback was handed — a borrowed buffer, a `Ptr` into Khora
+  memory — is valid for that call and no longer, so a callback that stores one
+  for the next invocation is storing a dangling pointer
+  (`Borrow buffers for one call`).
+
 ## Libraries may be called from several host threads
 
 A library build cannot assume that the host calls it from only one OS thread. Python, Node, C/C++, or another embedding process controls which host threads enter exported functions.
