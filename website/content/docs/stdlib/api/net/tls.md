@@ -182,6 +182,25 @@ Sends `text`, all of it, or -1.
 All or nothing, unlike `send`: a partial write of an encrypted record is not
 something a caller can resume, so the runtime finishes it or fails.
 
+### set_receive_timeout
+
+```khora
+pub fn set_receive_timeout(connection: TlsConnection, millis: Int) -> Bool
+```
+
+How long a read on this connection may wait before it gives up.
+
+**The `https` half of `set_receive_timeout`.** The plain path sets a
+deadline on the socket; a TLS session owns its socket rather than handing it
+back, so until this existed a secured connection had no deadline at all and
+a peer that accepted and then said nothing held a fiber until the process
+ended. That is the shape of a slowloris, and it worked over `https` and not
+over `http`.
+
+It is set on the socket underneath, where the reactor's timer lives; TLS
+never learns about it. A read that runs out fails, which every caller here
+already treats as a connection to give up on.
+
 ### shut
 
 ```khora

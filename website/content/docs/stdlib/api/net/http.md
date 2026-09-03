@@ -1205,11 +1205,12 @@ pub fn default_answer_timeout() -> Int
 
 How long to wait for bytes that are not arriving, in milliseconds.
 
-**Only on the plain path.** `set_receive_timeout` takes a socket, and the
-TLS client hands back a session with the socket already inside it, so an
-`https` call has no deadline yet. That is a real gap and it is named here
-rather than in a comment nobody reads: a TLS server that accepts the
-connection and then says nothing holds the fiber until the process ends.
+**On both paths now.** It was the plain one only, because
+`set_receive_timeout` takes a socket and a TLS session owns its socket
+rather than handing it back -- so a TLS server that accepted the connection
+and then said nothing held the fiber until the process ended.
+`std::net::tls` sets the deadline on the socket underneath, and `dial` uses
+it for `https` exactly as it does for `http`.
 
 ### parse_url
 
