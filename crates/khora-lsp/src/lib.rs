@@ -261,6 +261,15 @@ impl Server {
             ("textDocument/completion", Some(id)) => {
                 vec![ok(id, self.completion(&params).unwrap_or(Value::Null))]
             }
+            // **The item comes back whole.** A client merges what the server
+            // returns over what it sent, and a reply missing `label` or
+            // `additionalTextEdits` is a completion that inserts nothing or
+            // forgets its import -- so an item this cannot say more about is
+            // returned exactly as it arrived.
+            ("completionItem/resolve", Some(id)) => {
+                let resolved = self.resolve_completion(&params).unwrap_or(params.clone());
+                vec![ok(id, resolved)]
+            }
             ("textDocument/references", Some(id)) => {
                 vec![ok(id, self.references(&params).unwrap_or(Value::Null))]
             }
@@ -382,6 +391,15 @@ impl Server {
                     // nothing typed after it -- which is when somebody wants
                     // the list most -- would offer nothing.
                     trigger_characters: Some(vec![".".to_string(), ":".to_string()]),
+                    // **The documentation is fetched for the one item the
+                    // reader looked at, not for all of them.** Completion now
+                    // offers every public name in the workspace, and reading
+                    // the `///` above each of a thousand declarations to fill a
+                    // list where one gets read cost 100ms a keystroke against a
+                    // workspace the size of `std`. Doing it on resolve costs a
+                    // lookup when an item is highlighted, and nothing at all
+                    // for the rest.
+                    resolve_provider: Some(true),
                     ..Default::default()
                 }),
                 semantic_tokens_provider: Some(
@@ -1285,13 +1303,24 @@ impl Server {
         let (file, offset) = self.locate(params)?;
         let root = khora_db::source_root(&self.db)?;
 
-        let items: Vec<Value> = completion::at(&self.db, root, file, offset)
+        let index = LineIndex::new(file.text(&self.db));
+        let known: Vec<SourceFile> = self.files.values().copied().collect();
+
+        let items: Vec<Value> = completion::at(&self.db, root, file, offset, &known)
             .into_iter()
             .map(|candidate| {
                 let mut item = json!({
                     "label": candidate.label,
                     "kind": candidate.kind,
                     "detail": candidate.detail,
+                    // **In scope first.** A local named `rows` must not be
+                    // outranked by three hundred names from `std`, and the
+                    // client sorts by this rather than by the order sent.
+                    "sortText": format!(
+                        "{}{}",
+                        if candidate.import.is_some() { '2' } else { '1' },
+                        candidate.label,
+                    ),
                 });
                 // Markdown, and only when there is some: an empty
                 // documentation field makes an editor draw a blank panel
@@ -1300,10 +1329,54 @@ impl Server {
                 if let Some(docs) = candidate.documentation {
                     item["documentation"] = json!({ "kind": "markdown", "value": docs });
                 }
+                if let Some(module) = candidate.source {
+                    // Where it comes from, drawn to the right of the name --
+                    // which is the one thing that distinguishes two names that
+                    // are otherwise the same word.
+                    item["labelDetails"] = json!({ "description": module });
+                    // Enough to find the declaration again on resolve, and no
+                    // range: the file may be edited between the list being
+                    // built and an item in it being highlighted.
+                    item["data"] = json!({ "module": module, "name": candidate.label });
+                }
+                if let Some((range, text)) = candidate.import {
+                    item["additionalTextEdits"] = json!([{
+                        "range": Range {
+                            start: index.position(range.start(), self.encoding),
+                            end: index.position(range.end(), self.encoding),
+                        },
+                        "newText": text,
+                    }]);
+                }
                 item
             })
             .collect();
         Some(Value::Array(items))
+    }
+
+    /// The documentation for one completion item, fetched when it is looked at.
+    ///
+    /// The `data` a candidate carries is the module it comes from and its name,
+    /// which is all it takes to find the declaration again -- and deliberately
+    /// not a range, since the file may have been edited between the list being
+    /// built and an item in it being highlighted.
+    fn resolve_completion(&self, item: &Value) -> Option<Value> {
+        let module = item.pointer("/data/module").and_then(Value::as_str)?;
+        let name = item.pointer("/data/name").and_then(Value::as_str)?;
+
+        let root = khora_db::source_root(&self.db)?;
+        let graph = khora_hir::module_graph(&self.db, root);
+        let path = graph.paths().find(|p| p.to_string() == module.replace("::", "."))?.clone();
+        let file = graph.file(&path)?;
+        let declared = khora_hir::item_map(&self.db, file).item(name)?.clone();
+        let explained = explain::at(&self.db, file, declared.range)?;
+
+        let mut out = item.clone();
+        out["detail"] = json!(explained.signature);
+        if let Some(docs) = explained.docs {
+            out["documentation"] = json!({ "kind": "markdown", "value": docs });
+        }
+        Some(out)
     }
 
     /// Every mention of the thing under the cursor.

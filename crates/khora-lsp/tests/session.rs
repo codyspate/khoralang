@@ -1541,6 +1541,151 @@ fn an_ordinary_call_is_not_annotated() {
     assert!(hint_labels(&replies, 2).is_empty(), "{:?}", hint_labels(&replies, 2));
 }
 
+/// The completion items for a position, as (label, sortText, the import it
+/// carries).
+fn completions_at(
+    w: &Workspace,
+    file: &Path,
+    text: &str,
+    line: u32,
+    character: u32,
+) -> Vec<(String, String, Option<String>)> {
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(file, text),
+        completion(file, line, character, 9),
+        exit(),
+    ]);
+    result_of(&replies, 9)
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|item| {
+            (
+                item.get("label").and_then(Value::as_str).unwrap_or_default().to_string(),
+                item.get("sortText").and_then(Value::as_str).unwrap_or_default().to_string(),
+                item.pointer("/additionalTextEdits/0/newText")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            )
+        })
+        .collect()
+}
+
+/// **The completion people actually use in a typed language.** You do not go
+/// looking for `twice` in `helper`; you type it and expect the editor to write
+/// the import. Until this existed a name had to be imported before it could be
+/// completed, which is the wrong way round.
+#[test]
+fn a_name_from_another_module_completes_and_brings_its_import() {
+    let helper = "module helper;\n\npub fn twice(a: Int) -> Int { a + a }\n";
+    let main = "module main;\n\nfn go() -> Int {\n  1\n}\n";
+    let w = workspace(&[("src/helper.kh", helper), ("src/main.kh", main)]);
+    let file = w.root.join("src/main.kh");
+
+    let offered = completions_at(&w, &file, main, 3, 3);
+    let (_, sort, edit) = offered
+        .iter()
+        .find(|(label, _, _)| label == "twice")
+        .expect("`twice` should be offered from `helper`");
+    assert_eq!(edit.as_deref(), Some("import helper::{twice};\n\n"), "{offered:?}");
+    // Below everything in scope: a local must not be outranked by the
+    // workspace.
+    assert!(sort.starts_with('2'), "{offered:?}");
+}
+
+/// A name already imported is offered once, in scope, with no import attached
+/// -- an edit there would write a second `import` for something that already
+/// had one.
+#[test]
+fn an_imported_name_is_not_offered_a_second_import() {
+    let helper = "module helper;\n\npub fn twice(a: Int) -> Int { a + a }\n";
+    let main = "module main;\n\nimport helper::{twice};\n\nfn go() -> Int {\n  twice(1)\n}\n";
+    let w = workspace(&[("src/helper.kh", helper), ("src/main.kh", main)]);
+    let file = w.root.join("src/main.kh");
+
+    let offered = completions_at(&w, &file, main, 5, 3);
+    let found: Vec<_> = offered.iter().filter(|(label, _, _)| label == "twice").collect();
+    assert_eq!(found.len(), 1, "{offered:?}");
+    assert_eq!(found[0].2, None, "already in scope: {offered:?}");
+    assert!(found[0].1.starts_with('1'), "{offered:?}");
+}
+
+/// **The `///` arrives when the item is looked at, not when the list is built.**
+/// Reading the documentation of every public name in a workspace to fill a list
+/// where one of them gets read cost 100ms a keystroke against something the
+/// size of `std`; on resolve it costs a lookup, once, for the one item the
+/// reader highlighted.
+#[test]
+fn a_completion_from_elsewhere_gets_its_documentation_on_resolve() {
+    let helper =
+        "module helper;\n\n/// Twice as much as it was.\npub fn twice(a: Int) -> Int { a + a }\n";
+    let main = "module main;\n\nfn go() -> Int {\n  1\n}\n";
+    let w = workspace(&[("src/helper.kh", helper), ("src/main.kh", main)]);
+    let file = w.root.join("src/main.kh");
+
+    let mut server = khora_lsp::Server::default();
+    batch(&mut server, &[initialize(&w.root), did_open(&file, main)]);
+    let listed = batch(&mut server, &[completion(&file, 3, 3, 9)]);
+    let item = result_in(&listed, 9)
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|item| item.get("label") == Some(&json!("twice")))
+        .expect("`twice` should be offered");
+
+    // The list itself says nothing about it beyond where it comes from.
+    assert_eq!(item.get("documentation"), None, "{item}");
+    assert_eq!(item.pointer("/data/module"), Some(&json!("helper")), "{item}");
+
+    let resolved = batch(
+        &mut server,
+        &[json!({ "jsonrpc": "2.0", "id": 10, "method": "completionItem/resolve", "params": item })],
+    );
+    let filled = result_in(&resolved, 10);
+    assert_eq!(
+        filled.pointer("/documentation/value").and_then(Value::as_str),
+        Some("Twice as much as it was."),
+        "{filled}"
+    );
+    // **Whole, not just the new parts.** A client merges the reply over what it
+    // sent, so an item that came back without its import would insert the name
+    // and forget the `import`.
+    assert_eq!(filled.get("label"), Some(&json!("twice")), "{filled}");
+    assert!(filled.get("additionalTextEdits").is_some(), "{filled}");
+}
+
+/// An item this knows nothing more about comes back exactly as it arrived,
+/// rather than as an error or a null the client would merge over its own.
+#[test]
+fn resolving_an_item_with_nothing_to_add_returns_it_unchanged() {
+    let w = workspace(&[("src/main.kh", "module main;\n")]);
+    let mut server = khora_lsp::Server::default();
+    batch(&mut server, &[initialize(&w.root)]);
+
+    let sent = json!({ "label": "whatever", "kind": 3 });
+    let replies = batch(
+        &mut server,
+        &[json!({ "jsonrpc": "2.0", "id": 7, "method": "completionItem/resolve", "params": sent })],
+    );
+    assert_eq!(result_in(&replies, 7), json!({ "label": "whatever", "kind": 3 }));
+}
+
+/// Nothing from elsewhere after a `.`, where the question is "what can this
+/// value do" and an unrelated free function is not an answer to it.
+#[test]
+fn a_method_position_is_not_filled_with_the_workspace() {
+    let helper = "module helper;\n\npub fn twice(a: Int) -> Int { a + a }\n";
+    let main = "module main;\n\nfn go(s: String) -> Int {\n  s.\n}\n";
+    let w = workspace(&[("src/helper.kh", helper), ("src/main.kh", main)]);
+    let file = w.root.join("src/main.kh");
+
+    let offered = completions_at(&w, &file, main, 3, 4);
+    assert!(!offered.iter().any(|(label, _, _)| label == "twice"), "{offered:?}");
+}
+
 // --- quick fixes ------------------------------------------------------------
 
 /// A code action request for a selection, with no diagnostics attached.
@@ -3303,6 +3448,15 @@ fn the_structure_capabilities_are_declared() {
 
 // --- batching, and the cancellation it makes possible ----------------------
 
+/// The `result` of the reply with this id, from a batch's replies.
+fn result_in(replies: &[Value], id: i64) -> Value {
+    replies
+        .iter()
+        .find(|r| r.get("id") == Some(&json!(id)))
+        .and_then(|r| r.get("result").cloned())
+        .unwrap_or(Value::Null)
+}
+
 /// One batch, handed to the server as a batch.
 ///
 /// **`serve` batches whatever has already arrived, which depends on when the
@@ -3708,3 +3862,4 @@ fn a_function_that_declares_its_failure_gets_no_lens() {
         "and so does `risky`: {lenses:?}"
     );
 }
+

@@ -23,7 +23,7 @@
 //! | `.` | the methods of the receiver's type |
 //! | `Type::` | that type's own methods and constructors |
 //! | `import m::{` | what `m` exports |
-//! | anything else | locals, this file's declarations, and what it imported |
+//! | anything else | locals, this file's declarations and imports, and every public name in the workspace |
 //!
 //! Which one applies is decided by looking *backwards* from the cursor, since
 //! what has been typed is behind it and what is being asked about is not there
@@ -35,6 +35,27 @@
 //! all three, and doing them here as well means two answers that disagree
 //! about which is best.
 //!
+//! # Names that are not in scope yet
+//!
+//! The plain case offers what every module exports, not only what this file
+//! imported, and a candidate that is not in scope carries the `import` that
+//! would bring it in. **This is the completion people actually use in a typed
+//! language**: you do not go looking for `chunked` in `std::list`, you type
+//! `chun` and expect the editor to know. Until this existed, a name had to be
+//! imported before it could be completed, which is the wrong way round — the
+//! import is the thing you wanted the editor to write.
+//!
+//! They sort below everything in scope. A local named `rows` must not be
+//! outranked by three hundred names from `std`, and an editor sorts by the
+//! `sortText` the server gives it.
+//!
+//! **They are cheap on purpose.** A candidate from elsewhere carries a name, a
+//! kind and its module, and nothing else: reading the `///` above each of a
+//! thousand declarations to fill a list where one of them gets read measured
+//! 100ms a keystroke against a workspace the shape of `std`, and 6ms without.
+//! The documentation arrives through `completionItem/resolve`, for the one item
+//! the reader highlighted.
+//!
 //! Nothing after a `with {` yet. The roadmap wants the handlers that satisfy a
 //! row there, which needs the row at the cursor and the set of handlers that
 //! could produce it; both exist, and joining them is a piece of work rather
@@ -45,7 +66,7 @@ use khora_hir::ItemKind;
 use khora_syntax::ast::{AstNode, Path};
 use khora_syntax::{SyntaxKind, SyntaxToken};
 use lsp_types::CompletionItemKind;
-use text_size::TextSize;
+use text_size::{TextRange, TextSize};
 
 /// One thing that could be typed here.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,18 +84,36 @@ pub struct Candidate {
     /// wrote is what tells you whether it is the one you want. `std` has one
     /// on nearly everything, and none of it was reaching the editor.
     pub documentation: Option<String>,
+    /// The module a not-yet-imported name comes from, to show beside it.
+    ///
+    /// `None` for everything already in scope, which is most of the list.
+    pub source: Option<String>,
+    /// The edit that brings the name in, for a candidate that is not in scope.
+    ///
+    /// Sent as `additionalTextEdits`, so accepting the completion writes the
+    /// name and the `import` in one keystroke.
+    pub import: Option<(TextRange, String)>,
 }
 
 impl Candidate {
     /// A candidate with nothing to say about itself: a local, an imported
     /// alias, anything whose declaration is not in reach here.
     fn plain(label: String, kind: CompletionItemKind, detail: Option<String>) -> Candidate {
-        Candidate { label, kind, detail, documentation: None }
+        Candidate { label, kind, detail, documentation: None, source: None, import: None }
     }
 }
 
 /// What could be written at `offset`.
-pub fn at(db: &dyn Db, root: SourceRoot, file: SourceFile, offset: TextSize) -> Vec<Candidate> {
+///
+/// `known` is every file the server has, which is what lets the plain case
+/// offer a name this file has not imported yet.
+pub fn at(
+    db: &dyn Db,
+    root: SourceRoot,
+    file: SourceFile,
+    offset: TextSize,
+    known: &[SourceFile],
+) -> Vec<Candidate> {
     let tree = khora_db::parse(db, file).syntax();
 
     // Backwards, because what decides the context is what has been typed.
@@ -100,8 +139,71 @@ pub fn at(db: &dyn Db, root: SourceRoot, file: SourceFile, offset: TextSize) -> 
         {
             in_scope_of_import(db, root, file, anchor.as_ref()).unwrap_or_default()
         }
-        _ => in_scope(db, file, offset),
+        _ => {
+            let mut out = in_scope(db, file, offset);
+            out.extend(from_elsewhere(db, file, known, &tree, &out));
+            out
+        }
     }
+}
+
+/// Every public name in the workspace that this file has not got.
+///
+/// **The import is computed here rather than when the completion is accepted**,
+/// because an editor applies `additionalTextEdits` without asking the server
+/// again. That makes the cost the thing to watch: `imports::declared_in` walks
+/// the file once, and each candidate then costs a comparison against the
+/// imports already written rather than another walk.
+fn from_elsewhere(
+    db: &dyn Db,
+    file: SourceFile,
+    known: &[SourceFile],
+    tree: &khora_syntax::SyntaxNode,
+    taken: &[Candidate],
+) -> Vec<Candidate> {
+    let here = khora_hir::module_api(db, file).module.as_ref().map(crate::imports::written);
+    let text = file.text(db);
+    let existing = crate::imports::declared_in(tree);
+
+    let mut out = Vec::new();
+    for other in known {
+        if *other == file {
+            continue;
+        }
+        let Some(module) = khora_hir::module_api(db, *other).module.as_ref().map(crate::imports::written)
+        else {
+            continue;
+        };
+        if here.as_deref() == Some(module.as_str()) {
+            continue;
+        }
+        for item in &khora_hir::module_api(db, *other).items {
+            if !item.is_public {
+                continue;
+            }
+            // A name already offered is already reachable, and offering it
+            // twice with an import attached would put an import in the file
+            // for something that did not need one.
+            if taken.iter().any(|seen| seen.label == item.name) {
+                continue;
+            }
+            // `None` means the name is already imported from here, or arrives
+            // through a glob -- either way there is nothing to add.
+            let Some(fix) = crate::imports::edit_among(&existing, tree, text, &module, &item.name)
+            else {
+                continue;
+            };
+            let mut candidate = Candidate::plain(
+                item.name.clone(),
+                kind_of(item.kind),
+                Some(item.kind.describe().to_string()),
+            );
+            candidate.source = Some(module.clone());
+            candidate.import = Some((fix.range, fix.replacement));
+            out.push(candidate);
+        }
+    }
+    out
 }
 
 /// The nearest token before this one that is not whitespace or a comment.
@@ -281,6 +383,8 @@ fn in_scope(db: &dyn Db, file: SourceFile, offset: TextSize) -> Vec<Candidate> {
                 kind: CompletionItemKind::VARIABLE,
                 detail: types.map(|t| t.local(id).to_string()),
                 documentation: None,
+                source: None,
+                import: None,
             });
         }
         break;
@@ -344,6 +448,8 @@ fn described(db: &dyn Db, file: SourceFile, item: &khora_hir::Item) -> Candidate
             kind: kind_of(item.kind),
             detail: Some(explained.signature.clone()),
             documentation: explained.docs,
+            source: None,
+            import: None,
         },
         None => Candidate::plain(
             item.name.clone(),

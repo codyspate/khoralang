@@ -418,6 +418,21 @@ it will behave differently now.
   conditional -- an `if` branch, a `match` arm, a lambda body, the far side of
   `&&` -- because hoisting code out of those runs it when the program said not
   to.
+- **Completion offers names the file has not imported, and writes the import.**
+  A name had to be in scope before it could be completed, which is the wrong
+  way round: the import is the thing you wanted the editor to write. Every
+  public name in the workspace is offered now, shown with the module it comes
+  from, and accepting one inserts the name and the `import` together --
+  merged into an existing `import` of that module where there is one, and
+  placed in sorted order among the others where there is not. They sort below
+  everything already in scope, so a local named `rows` is not outranked by
+  three hundred names from `std`.
+- **The `///` on a completion arrives when the item is looked at.** The server
+  answers `completionItem/resolve`, and the list itself now carries a name, a
+  kind and the module. Reading the documentation of every public name in a
+  workspace to fill a list where one of them gets read cost 100ms a keystroke
+  against something the size of `std`, measured; on resolve it costs one lookup
+  for the one item highlighted.
 - **The server says which code action kinds it has.** `codeActionProvider` was
   a bare `true`, which tells a client nothing and gets the server asked for
   everything every time; it now names `quickfix`, `refactor.rewrite` and

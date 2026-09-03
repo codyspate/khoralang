@@ -92,7 +92,7 @@ pub fn providers(db: &dyn Db, files: &[SourceFile], name: &str, skip: &str) -> V
 /// parse, and compared unequal to the `std::core` already imported two lines
 /// above, so it also failed to merge and added a second import of the same
 /// module. One wrong separator, three wrong behaviours.
-fn written(path: &khora_hir::ModulePath) -> String {
+pub fn written(path: &khora_hir::ModulePath) -> String {
     path.segments().join("::")
 }
 
@@ -102,13 +102,30 @@ fn written(path: &khora_hir::ModulePath) -> String {
 /// about the name: a module already imported gains an entry in the braces it
 /// already has, and one that is not gains a line.
 pub fn edit(tree: &SyntaxNode, text: &str, module: &str, name: &str) -> Option<Fix> {
-    let existing: Vec<ImportDecl> = tree
-        .descendants()
+    edit_among(&declared_in(tree), tree, text, module, name)
+}
+
+/// Every `import` in a file, in the order they are written.
+///
+/// **Collected once and handed back.** Completion asks for an edit per
+/// candidate and there may be hundreds on one keystroke; walking the whole file
+/// for each of them is the same answer computed hundreds of times.
+pub fn declared_in(tree: &SyntaxNode) -> Vec<ImportDecl> {
+    tree.descendants()
         .filter(|node| node.kind() == SyntaxKind::IMPORT_DECL)
         .filter_map(ImportDecl::cast)
-        .collect();
+        .collect()
+}
 
-    for decl in &existing {
+/// `edit`, given the imports already found.
+pub fn edit_among(
+    existing: &[ImportDecl],
+    tree: &SyntaxNode,
+    text: &str,
+    module: &str,
+    name: &str,
+) -> Option<Fix> {
+    for decl in existing {
         let path = decl.path().map(|p| p.text_path()).unwrap_or_default();
         if path != module {
             continue;
