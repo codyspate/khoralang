@@ -42,6 +42,7 @@ mod fixes;
 mod imports;
 mod hints;
 mod position;
+mod reach;
 mod references;
 mod semantic;
 mod signature;
@@ -982,6 +983,21 @@ impl Server {
                 })
             })
             .collect();
+
+        // **What a function absorbs, which its signature deliberately does not
+        // say.** Khora's rows are transitive, so a lens repeating a signature
+        // would be noise -- except where a `with` block or a `catch` stops
+        // something reaching it. That is the line worth marking, and nothing
+        // else in the editor marks it.
+        let mut out = out;
+        for found in reach::in_file(&self.db, file) {
+            let Some(title) = found.title() else { continue };
+            let start = index.position(found.at.start(), self.encoding);
+            out.push(json!({
+                "range": { "start": start, "end": start },
+                "command": { "title": title, "command": "" },
+            }));
+        }
         Some(Value::Array(out))
     }
 

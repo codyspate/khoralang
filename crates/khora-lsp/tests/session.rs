@@ -3090,3 +3090,224 @@ fn a_cancel_for_another_request_leaves_this_one_alone() {
     let reply = replies.iter().find(|r| r.get("id") == Some(&json!(12))).expect("an answer");
     assert!(reply.get("error").is_none(), "this one was not cancelled: {reply}");
 }
+
+// --- the assists the diagnostics already half-write ------------------------
+
+/// The diagnostic whose message contains `needle`, and the actions offered for
+/// it, in one round trip each.
+fn actions_for(root: &Path, file: &Path, text: &str, needle: &str) -> Vec<Value> {
+    let reported = session(&[initialize(root), did_open(file, text), exit()]);
+    let found = last_diagnostics(&reported)
+        .iter()
+        .find(|d| d.get("message").and_then(Value::as_str).is_some_and(|m| m.contains(needle)))
+        .cloned()
+        .unwrap_or_else(|| panic!("no diagnostic mentioning {needle:?}"));
+
+    let replies = session(&[
+        initialize(root),
+        did_open(file, text),
+        code_action(file, vec![found], 2),
+        exit(),
+    ]);
+    result_of(&replies, 2).as_array().cloned().unwrap_or_default()
+}
+
+/// The `newText` of every edit an action carries.
+fn edits_of(action: &Value) -> Vec<String> {
+    action
+        .pointer("/edit/changes")
+        .and_then(Value::as_object)
+        .map(|changes| {
+            changes
+                .values()
+                .filter_map(Value::as_array)
+                .flatten()
+                .filter_map(|e| e.get("newText")?.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `` the call needs `!` `` names one edit in one place, so it is one.
+#[test]
+fn a_call_that_can_leave_the_function_is_offered_the_mark() {
+    let text = "module main;\n\
+pub type Broke = | Badly;\n\
+fn risky() -> Int raises Broke { raise Broke::Badly }\n\
+pub fn go() -> Int raises Broke {\n\
+  risky()\n\
+}\n";
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+
+    let actions = actions_for(&w.root, &file, text, "so the call needs `!`");
+    let offered = actions
+        .iter()
+        .find(|a| a.get("title").and_then(Value::as_str).is_some_and(|t| t.contains("`!`")))
+        .unwrap_or_else(|| panic!("no mark offered: {actions:?}"));
+    assert_eq!(edits_of(offered), vec!["!".to_string()], "{offered}");
+}
+
+/// **A bare constructor name is a binding, not a match.** The checker names the
+/// missing cases unqualified, and an arm reading `Green => ..` binds every
+/// remaining value to a new local called `Green`. The program then compiles and
+/// is wrong. So the qualification is copied from the arms already written.
+#[test]
+fn missing_arms_are_written_the_way_the_match_writes_them() {
+    let text = "module main;\n\
+pub type Colour = | Red | Green | Blue;\n\
+pub fn name(c: Colour) -> String {\n\
+  match c {\n\
+    Colour::Red => \"red\",\n\
+  }\n\
+}\n";
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+
+    let actions = actions_for(&w.root, &file, text, "not exhaustive");
+    let offered = actions
+        .iter()
+        .find(|a| a.get("title").and_then(Value::as_str).is_some_and(|t| t.contains("missing")))
+        .unwrap_or_else(|| panic!("no arms offered: {actions:?}"));
+
+    let written = edits_of(offered).join("");
+    assert!(written.contains("Colour::Green =>"), "qualified like its neighbour: {written:?}");
+    assert!(written.contains("Colour::Blue =>"), "and both of them: {written:?}");
+    assert!(
+        !written.contains("\n  Green"),
+        "never bare, which would bind rather than match: {written:?}"
+    );
+}
+
+/// Both missing cases in one action, rather than the same action twice with a
+/// recompile between.
+#[test]
+fn every_missing_arm_is_written_at_once() {
+    let text = "module main;\n\
+pub type Colour = | Red | Green | Blue;\n\
+pub fn name(c: Colour) -> String {\n\
+  match c {\n\
+    Colour::Red => \"red\",\n\
+  }\n\
+}\n";
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+
+    let actions = actions_for(&w.root, &file, text, "not exhaustive");
+    let offered = actions
+        .iter()
+        .find(|a| a.get("title").and_then(Value::as_str).is_some_and(|t| t.contains("missing")))
+        .expect("an action");
+    assert_eq!(
+        offered.get("title").and_then(Value::as_str),
+        Some("Add the 2 missing arms"),
+        "{offered}"
+    );
+}
+
+/// The body is `()` rather than an invented `todo`, so the error that remains
+/// is the type checker's own and names what the arm has to produce.
+#[test]
+fn a_written_arm_leaves_a_hole_the_checker_describes() {
+    let text = "module main;\n\
+pub type Colour = | Red | Green;\n\
+pub fn name(c: Colour) -> String {\n\
+  match c {\n\
+    Colour::Red => \"red\",\n\
+  }\n\
+}\n";
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+
+    let actions = actions_for(&w.root, &file, text, "not exhaustive");
+    let offered = actions
+        .iter()
+        .find(|a| a.get("title").and_then(Value::as_str).is_some_and(|t| t.contains("missing")))
+        .expect("an action");
+    let written = edits_of(offered).join("");
+    assert!(written.contains("=> (),"), "a real value, so the error is a type error: {written:?}");
+    assert!(!written.contains("todo"), "Khora has no `todo` to write: {written:?}");
+}
+
+// --- the lens for what a function absorbs ----------------------------------
+
+/// Every code lens in a file, as (line, title).
+fn lenses_in(replies: &[Value], id: i64) -> Vec<(u64, String)> {
+    result_of(replies, id)
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|l| {
+            Some((
+                l.pointer("/range/start/line")?.as_u64()?,
+                l.pointer("/command/title")?.as_str()?.to_string(),
+            ))
+        })
+        .collect()
+}
+
+const ABSORBS: &str = "module p::main;\n\
+import std::core::{print};\n\
+\n\
+pub type Broke = | Badly;\n\
+\n\
+fn risky() -> Int raises Broke { raise Broke::Badly }\n\
+\n\
+fn passes_it_on() -> Int raises Broke { risky()! }\n\
+\n\
+pub fn takes_it_on() -> Int {\n\
+  risky()! catch { _ => 0 }\n\
+}\n";
+
+/// **A signature says what a function asks of its caller; nothing said what it
+/// takes on itself.** `takes_it_on` catches the failure, so its signature
+/// mentions no error at all, and that is the line worth marking.
+#[test]
+fn a_function_that_catches_says_so_in_a_lens() {
+    let w = workspace(&[("src/main.kh", ABSORBS)]);
+    let main = w.root.join("src/main.kh");
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main, ABSORBS),
+        json!({
+            "jsonrpc": "2.0", "id": 5, "method": "textDocument/codeLens",
+            "params": { "textDocument": { "uri": url_of(&main) } }
+        }),
+        exit(),
+    ]);
+
+    let lenses = lenses_in(&replies, 5);
+    assert!(
+        lenses.iter().any(|(line, title)| *line == 9 && title == "catches Broke"),
+        "the function that catches: {lenses:?}"
+    );
+}
+
+/// A function that passes the failure on is absorbing nothing, and its
+/// signature already says everything. A lens there would repeat the line above
+/// it, which is the noise this deliberately does not add.
+#[test]
+fn a_function_that_declares_its_failure_gets_no_lens() {
+    let w = workspace(&[("src/main.kh", ABSORBS)]);
+    let main = w.root.join("src/main.kh");
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main, ABSORBS),
+        json!({
+            "jsonrpc": "2.0", "id": 5, "method": "textDocument/codeLens",
+            "params": { "textDocument": { "uri": url_of(&main) } }
+        }),
+        exit(),
+    ]);
+
+    let lenses = lenses_in(&replies, 5);
+    assert!(
+        !lenses.iter().any(|(line, _)| *line == 7),
+        "`passes_it_on` declares `raises Broke`: {lenses:?}"
+    );
+    assert!(
+        !lenses.iter().any(|(line, _)| *line == 5),
+        "and so does `risky`: {lenses:?}"
+    );
+}

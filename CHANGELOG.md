@@ -373,6 +373,20 @@ it will behave differently now.
 
 ### Added
 
+- **Two assists the diagnostics already half-wrote.** The message saying a
+  call needs its `!` names one edit in one place, so it is offered as one.
+  The message saying a `match` is not exhaustive names the missing cases, and
+  every one of them is written at once, qualified the way the arms already
+  there are written -- a bare constructor name is a *binding*, so
+  `Green => ..` would match everything and compile, which is the one outcome
+  worse than an error. The body is `()` rather than an invented `todo`, so what
+  remains is the type checker's own message naming what the arm has to
+  produce.
+- **A lens for what a function absorbs.** Khora's rows are transitive, so a
+  lens repeating a signature would be noise -- except where a `catch` stops a
+  failure reaching it. `catches DbError` above a function whose signature
+  mentions no error is the line the type system deliberately hides.
+
 - **The server takes messages in batches, and honours `$/cancelRequest`.** It
   is still one thread doing one thing at a time; what changed is that it can
   see the queue before it starts. Typing ten characters used to be ten

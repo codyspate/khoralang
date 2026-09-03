@@ -113,6 +113,8 @@ pub fn for_diagnostic(
         None => {
             let mut out = for_parse_error(message, range);
             out.extend(enclosing.and_then(|sig| for_missing_clause(message, sig)));
+            out.extend(for_missing_try(message, range, at));
+            out.extend(for_missing_arms(message, range, at));
             out
         }
     }
@@ -184,6 +186,123 @@ fn add_to_raises(entry: &str, sig: &Signature) -> Option<Fix> {
         range: TextRange::new(row.range.start() + TextSize::of(kept), row.range.end()),
         replacement: format!(" + {entry}"),
     })
+}
+
+/// `` the call needs `!`: write `f(..)!` `` — so write it.
+///
+/// **The message already contains the edit**, which is this module's whole
+/// rule for what qualifies. A call that can leave the function is marked at
+/// the call rather than at the signature, and the mark is one character in one
+/// place: there is nothing to choose.
+fn for_missing_try(message: &str, range: TextRange, at: &str) -> Option<Fix> {
+    if !message.contains("so the call needs `!`") {
+        return None;
+    }
+    // Appended to what the diagnostic covers rather than inserted at an
+    // offset, because the range is the call and the `!` goes after all of it.
+    let trimmed = at.trim_end();
+    if trimmed.is_empty() || trimmed.ends_with('!') {
+        return None;
+    }
+    Some(Fix {
+        title: "Add `!` to say this call can leave the function".to_string(),
+        range: TextRange::new(range.start() + TextSize::of(trimmed), range.end()),
+        replacement: at[trimmed.len()..].to_string() + "!",
+    })
+}
+
+/// `` this `match` is not exhaustive: pattern `Blue` not covered `` — so cover
+/// it.
+///
+/// **The checker names the pattern, which is the part a person cannot work
+/// out from the error.** Writing the arm from there is mechanical: it goes
+/// before the closing brace, indented like the arms above it, with a body of
+/// `()` so the program still does not compile until somebody says what the
+/// case means. An arm that silently returned a plausible value would turn a
+/// refusal into a wrong answer, which is the one outcome worse than an error.
+///
+/// **`()` rather than a `todo`, because Khora has no `todo`.** Rust's assist
+/// writes `todo!()` and can, because the macro exists; inventing a name here
+/// would fail with "cannot find `todo` in this scope", which tells the author
+/// nothing about the arm. The unit value is real, so the error is the type
+/// checker's own -- *expected `String`, found `()`* -- pointing at the arm and
+/// naming what it has to produce. Where the match is already `()`-typed the
+/// stub simply compiles, which is right.
+fn for_missing_arms(message: &str, range: TextRange, at: &str) -> Option<Fix> {
+    if !message.contains("not exhaustive") {
+        return None;
+    }
+    // The checker joins several with `, ` between backticks, and all of them
+    // are missing, so all of them are written. One arm at a time would mean
+    // applying the same action once per case with a recompile between.
+    let named = message.rsplit_once("pattern `")?.1.rsplit_once("` not covered")?.0;
+    let patterns: Vec<&str> = named.split("`, `").filter(|p| !p.is_empty()).collect();
+    if patterns.is_empty() {
+        return None;
+    }
+
+    // The closing brace of the `match`, and the indentation of whatever the
+    // last arm was written at. Read from the text the diagnostic covers, so a
+    // file indented with tabs gets tabs.
+    let close = at.rfind('}')?;
+    let before = &at[..close];
+    let last = before.rfind('\n')? + 1;
+    let indent: String =
+        before[last..].chars().take_while(|c| c.is_whitespace() && *c != '\n').collect();
+    let inner = if indent.is_empty() { "  ".to_string() } else { indent.clone() };
+
+    // **A bare constructor name is a binding, not a match.** The checker names
+    // the missing cases unqualified -- `Green` -- and an arm reading
+    // `Green => ..` binds every remaining value to a new local called `Green`
+    // and matches all of them. The program then compiles and is wrong, and the
+    // arm after it is reported unreachable, which is a confusing way to
+    // discover that an assist did this to you.
+    //
+    // So the qualification is copied from the arms already written rather than
+    // guessed: a match whose arms say `Colour::Red` gets `Colour::Green`, and
+    // one whose arms are bare -- because the constructors were imported -- gets
+    // bare. A match with no arms at all says nothing about which, and is
+    // offered nothing.
+    let qualifier = qualifier_in(before)?;
+
+    let title = match patterns.as_slice() {
+        [one] => format!("Add the missing `{qualifier}{one}` arm"),
+        many => format!("Add the {} missing arms", many.len()),
+    };
+    let written: String = patterns
+        .iter()
+        .map(|pattern| format!("{inner}{qualifier}{pattern} => (),\n"))
+        .collect();
+    Some(Fix {
+        title,
+        range: TextRange::empty(range.start() + TextSize::of(before)),
+        replacement: format!("{written}{indent}"),
+    })
+}
+
+/// How the arms already written spell a constructor: `Colour::` or nothing.
+///
+/// `None` when there are no arms to copy from, which is the case where this
+/// cannot be answered and so is not guessed at.
+fn qualifier_in(arms: &str) -> Option<String> {
+    let mut seen = false;
+    for line in arms.lines() {
+        let Some((pattern, _)) = line.split_once("=>") else { continue };
+        let pattern = pattern.trim();
+        if pattern.is_empty() {
+            continue;
+        }
+        seen = true;
+        if let Some((head, _)) = pattern.split_once("::") {
+            let head = head.trim();
+            if !head.is_empty() {
+                return Some(format!("{head}::"));
+            }
+        }
+    }
+    // Arms exist and none of them qualifies, so the constructors are in scope
+    // unqualified and a bare pattern is what this file writes.
+    seen.then(String::new)
 }
 
 /// The two parser messages that name a keyword to swap.
