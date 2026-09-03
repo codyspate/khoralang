@@ -153,6 +153,8 @@ mod print;
 #[cfg(not(target_family = "wasm"))]
 mod random;
 #[cfg(not(target_family = "wasm"))]
+#[cfg(target_os = "linux")]
+mod epoll;
 mod reactor;
 #[cfg(not(target_family = "wasm"))]
 mod region;
