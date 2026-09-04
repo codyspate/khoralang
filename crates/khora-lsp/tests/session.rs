@@ -2122,6 +2122,153 @@ fn an_extracted_function_that_can_fail_says_so_and_is_called_with_a_mark() {
 {said:?}");
 }
 
+// --- calls and pipelines ---------------------------------------------------
+
+/// **`f(x)` becomes `x |> f`.**
+#[test]
+fn a_one_argument_call_can_become_a_pipeline() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn double(n: Int) -> Int { n * 2 }\n\n",
+        "fn go(n: Int) -> Int {\n",
+        "  double(n)\n",
+        "}\n",
+    );
+    let (_, after) = assist_named(text, 5, 3, 3, "as a pipeline");
+    assert!(after.contains("n |> double"), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// **A call of two arguments is not**, because the pipe fills the first
+/// position and the rest would have to stay behind.
+#[test]
+fn a_two_argument_call_is_not_offered_a_pipeline() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn add(a: Int, b: Int) -> Int { a + b }\n\n",
+        "fn go(n: Int) -> Int {\n",
+        "  add(n, 1)\n",
+        "}\n",
+    );
+    let offered = assists_for(text, 5, 3, 3);
+    assert!(
+        !offered.iter().any(|(title, _)| title.contains("as a pipeline")),
+        "the second argument has nowhere to go: {offered:?}"
+    );
+}
+
+/// **And back**, for a pipeline one stage long.
+#[test]
+fn a_one_stage_pipeline_can_become_a_call() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn double(n: Int) -> Int { n * 2 }\n\n",
+        "fn go(n: Int) -> Int {\n",
+        "  n |> double\n",
+        "}\n",
+    );
+    let (_, after) = assist_named(text, 5, 4, 4, "pipeline as a call");
+    assert!(after.contains("double(n)"), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// **A lambda body gets braces**, which is where the second statement goes.
+#[test]
+fn a_lambda_body_can_become_a_block() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn apply(f: (Int) -> Int, n: Int) -> Int { f(n) }\n\n",
+        "fn go(n: Int) -> Int {\n",
+        "  apply(fn x => x * 2, n)\n",
+        "}\n",
+    );
+    let (_, after) = assist_named(text, 5, 14, 14, "block body");
+    assert!(after.contains("fn x => { x * 2 }"), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// **An underscore parameter gets a name**, for a lambda that grew a use.
+#[test]
+fn an_unnamed_lambda_parameter_can_be_named() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn apply(f: (Int) -> Int, n: Int) -> Int { f(n) }\n\n",
+        "fn go(n: Int) -> Int {\n",
+        "  apply(fn _ => 1, n)\n",
+        "}\n",
+    );
+    let (_, after) = assist_named(text, 5, 12, 12, "Name the parameter");
+    assert!(after.contains("fn value => 1"), "{after}");
+    // **The result warns, and that is right.** A parameter named and not yet
+    // used is exactly what "bound and never read" is for, and it is the state
+    // somebody is in for the two seconds between naming it and using it. So
+    // this asserts the edit rather than silence.
+    let said = complaints(&after);
+    assert!(
+        said.iter().all(|line| line.contains("never read")),
+        "nothing but the unused warning: {said:?}"
+    );
+}
+
+// --- literals --------------------------------------------------------------
+
+/// **`"a " + name + "!"` becomes `"a ${name}!"`.**
+///
+/// The whole chain at once, not the innermost `+`: a three-piece message is
+/// one edit, which is what somebody asking for it meant.
+#[test]
+fn a_concatenated_message_becomes_one_interpolated_string() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn go(name: String) -> String {\n",
+        "  \"hello \" + name + \"!\"\n",
+        "}\n",
+    );
+    let (_, after) = assist_named(text, 3, 12, 12, "interpolated");
+    assert!(after.contains("\"hello ${name}!\""), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// **Arithmetic is not a message.** A `+` chain with no string literal in it is
+/// left alone, or every sum in the file would be offered a rewrite into
+/// nonsense.
+#[test]
+fn adding_numbers_is_not_offered_an_interpolation() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn go(a: Int, b: Int) -> Int {\n",
+        "  a + b\n",
+        "}\n",
+    );
+    let offered = assists_for(text, 3, 4, 4);
+    assert!(
+        !offered.iter().any(|(title, _)| title.contains("interpolated")),
+        "there is no string here: {offered:?}"
+    );
+}
+
+/// **A long number gets its digits grouped**, which is the one typo that looks
+/// exactly like the right answer.
+#[test]
+fn a_long_number_can_have_its_digits_grouped() {
+    let text = concat!("module main;\n\n", "fn go() -> Int {\n", "  1000000\n", "}\n");
+    let (title, after) = assist_named(text, 3, 4, 4, "Group the digits");
+    assert!(title.contains("1_000_000"), "{title}");
+    assert!(after.contains("  1_000_000"), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// A short one is not: three digits need no counting.
+#[test]
+fn a_short_number_is_not_offered_grouping() {
+    let text = concat!("module main;\n\n", "fn go() -> Int {\n", "  100\n", "}\n");
+    let offered = assists_for(text, 3, 4, 4);
+    assert!(
+        !offered.iter().any(|(title, _)| title.contains("Group the digits")),
+        "nothing to count: {offered:?}"
+    );
+}
+
 // --- declarations ----------------------------------------------------------
 
 /// **`pub` added, and the title says what it costs.** Everything a module
