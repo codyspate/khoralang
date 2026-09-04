@@ -103,6 +103,13 @@ step 'an item you cannot call from its signature has an example'
 # install or where. `check-api-examples.sh` has the argument.
 sh "$root/scripts/check-api-examples.sh"
 
+step 'every way the backend can refuse a program is classified'
+# A rule the type checker does not know is a rule the editor cannot show: the
+# LSP publishes the parser, the checker and the lints, and nothing from
+# lowering. Two rules were found down there and moved up; this is what stops a
+# third arriving unnoticed. `scripts/check-backend-rules.sh` has the argument.
+sh "$root/scripts/check-backend-rules.sh"
+
 step 'a design document does not name a test that is gone'
 # The other half of "name the invariant and the test that protects it": a
 # citation outliving the test it names leaves an inventory entry reading like a

@@ -75,8 +75,64 @@ fn declaration(p: &mut Parser<'_>) {
             p.bump_any();
             declaration(p);
         }
+        // **A word from another language, in the position it would hold
+        // there.** `struct Point { .. }` is not a typo -- it is somebody
+        // writing the language they already know -- and "expected a
+        // declaration" is true, unhelpful, and gives them nothing to search
+        // for. Naming the Khora spelling turns a wall into a redirection.
+        //
+        // Only in declaration position, so a binding called `class` is an
+        // ordinary identifier everywhere else.
+        IDENT if instead_of(p.nth_text(0)).is_some() => {
+            let said = instead_of(p.nth_text(0)).expect("just matched");
+            p.error(said.to_string());
+            p.bump_any();
+            declaration(p);
+        }
         _ => p.err_recover("expected a declaration", Parser::at_decl_start),
     }
+}
+
+/// What to say about a declaration keyword from another language.
+///
+/// **One sentence each, rather than a shared template.** The template written
+/// first produced *"Khora has no `async`: every function may suspend, so there
+/// is no separate colour for one that does, so write `fn`"* -- two `so`s, and
+/// an instruction that did not follow from the reason. The reason and the
+/// instruction are different shapes for different words, so each writes its
+/// own.
+///
+/// The reason is the half worth having. Somebody who typed `struct` knows what
+/// they meant; what they need is to learn that Khora declares every shape with
+/// one word, so they stop looking for the other one.
+fn instead_of(written: &str) -> Option<&'static str> {
+    Some(match written {
+        "struct" | "class" | "record" => {
+            "Khora has no `struct`. One word declares every shape: a record is \
+             `type Point = { x: Int }`"
+        }
+        "enum" | "union" => {
+            "Khora has no `enum`. A variant type uses the same word as a record: \
+             `type Colour = | Red | Green`"
+        }
+        "interface" | "protocol" => {
+            "Khora has no `interface`. A set of operations a type can implement is a `trait`"
+        }
+        "func" | "function" | "def" | "fun" => "A function is declared with `fn`",
+        "var" | "val" => {
+            "Khora has no `var`. A binding inside a function is `let`; at module level it is \
+             `const`"
+        }
+        "namespace" | "package" => {
+            "Khora has no `namespace`. A file says which module it is on its first line, as \
+             `module app::main;`"
+        }
+        "async" => {
+            "Khora has no `async`. Every function may suspend, so there is nothing to mark \
+             and no second colour of function to call it from"
+        }
+        _ => return None,
+    })
 }
 
 fn module_decl(p: &mut Parser<'_>) {

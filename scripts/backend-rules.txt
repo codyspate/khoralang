@@ -1,0 +1,75 @@
+# Every way `khora-codegen-llvm`'s lowering can refuse a program.
+#
+# `scripts/check-backend-rules.sh` fails when this list and the code disagree.
+# The list is not documentation -- it is the place a question gets asked, once
+# per message: **can a program that passes `khora check` reach this?**
+#
+#   - If it can, the rule is a *language* rule and belongs in `khora-types`,
+#     because the editor publishes what the checker says and nothing from here.
+#     The backend then keeps its copy as an assertion about what reaches it.
+#   - If it cannot, it is a statement about the compiler -- an operation the
+#     backend does not implement, a shape the checker should already have
+#     refused -- and belongs exactly where it is.
+#
+# Two rules failed that question and have moved: raising a type no declaration
+# names, and an integer literal wider than an `Int`. Both type-checked cleanly
+# and were refused at build time, which no editor could show.
+#
+# Everything below has been read and is the second kind. Most say so in their
+# own words: "is not an operation the backend knows", "which is a compiler
+# bug", "has no machine type". The arity and shape checks are the checker's job
+# and are duplicated here because lowering cannot proceed without the answer --
+# a redundant check is the right shape for that, and a *sole* check is not.
+
+`Char::{name}` is not a character operation
+`Char::{name}` takes one argument
+`Float::to_int` takes one number
+`Ptr::{name}` takes no arguments but `self`
+`String::from_bytes` takes an `Array<U8>`
+`String::{name}` takes a string
+`attempt` produces a `Result`
+`attempt` produces a `Result`, which has `Ok` and `Err`
+`attempt` takes a function to run
+`break` outside a loop
+`continue` outside a loop
+`with_c_string` takes a body to lend the string to
+`with_c_string` takes a function to run
+`with_data` takes a body to lend the data to
+`with_data` takes a function to run
+`{cell}` is not a shared cell
+`{channel}` is not a channel
+`{fiber}` is not a fiber, so it cannot be joined
+`{label}` has no storage, which is a compiler bug
+`{name}` has a type the backend cannot represent
+`{name}` has no field `{label}`
+`{name}` has no signature to call through
+`{name}` has no storage, which is a compiler bug
+`{name}` is not a record
+`{other}` is not an array
+`{other}` is not an error type, so it cannot be raised
+`{owner}::to_float` takes one number
+`{owner}::{case}` is not a constructor
+`{owner}::{name}` takes one argument
+`{owner}::{name}` takes two arguments
+`{owner}` has no fields
+`{text}` does not fit in an `Int`
+`{text}` is not a number this target can hold
+`{type_name}` has no field `{label}`
+`{type_name}` is not a record
+`{ty}` is not a tuple
+`{what}` is about bytes, and `{element}` is not one
+`{wrapped}` is not a `SharedFn`
+a `match` needs at least one arm
+a capability has no machine type
+a closure parameter has no machine type
+a closure's result has no machine type
+an array of that element type cannot be read
+only a record's field can be assigned to
+this binding has no storage, which is a compiler bug
+this closure has no lifted function, which is a compiler bug
+this closure has no tag, which is a compiler bug
+this closure was never declared, which is a compiler bug
+this expression cannot be assigned to
+this expression did not survive the front end
+this pattern does not name a constructor
+this record has no type, which is a compiler bug
