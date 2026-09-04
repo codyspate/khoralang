@@ -83,7 +83,8 @@ pages](/docs/migration/) map familiar concepts onto these.
 
 ## Working on a program
 
-- [Modules and packages](./modules-and-packages/) — the manifest, `src/bin`, dependencies, the lockfile, publishing, toolchain pinning, and package boundaries.
+- [Modules and packages](./modules-and-packages/) — `src/bin`, dependencies, the lockfile, publishing, and package boundaries.
+- [The manifest](./manifest/) — every table in `khora.toml`: the required `[toolchain]` pin, `[package]`, workspaces, permissions, dependencies, lints, and tasks.
 - [Testing and benchmarks](./testing/) — `khora test` and `khora bench`, supplying capabilities to a test, build profiles, and CI.
 - [Lints](./lints/) — the twelve checks `khora check` runs, their default levels, and how to set them in `[lints]`.
 - [Debugging a program](./debugging/) — backtraces, debug information, what a debugger can and cannot be relied on for.

@@ -55,7 +55,7 @@ fn world(body: &str) -> World {
     let home = tmp.path().join("home");
     let project = tmp.path().join("project");
     std::fs::create_dir_all(project.join("src")).expect("a src directory");
-    std::fs::write(project.join("khora.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\n")
+    std::fs::write(project.join("khora.toml"), pinned("[package]\nname = \"app\"\nversion = \"0.1.0\"\n"))
         .expect("a manifest");
     std::fs::write(project.join("src").join("main.kh"), body).expect("a source file");
     World { _tmp: tmp, home, project, story: std::cell::RefCell::new(String::new()) }
@@ -162,7 +162,7 @@ fn a_new_project_on_a_used_cache_is_a_quiet_first_build() {
     std::fs::create_dir_all(other.join("src")).expect("a src directory");
     std::fs::write(
         other.join("khora.toml"),
-        "[package]\nname = \"other\"\nversion = \"0.1.0\"\n",
+        pinned("[package]\nname = \"other\"\nversion = \"0.1.0\"\n"),
     )
     .expect("a manifest");
     std::fs::write(
@@ -389,4 +389,19 @@ fn a_library_build_caches_its_header_too() {
         std::fs::read_to_string(&header).expect("the header").contains("answer"),
         "and it should be the real one"
     );
+}
+
+/// A manifest with the `[toolchain]` table every project now needs.
+///
+/// **A pin is required, and these fixtures live in the system temporary
+/// directory** -- unlike the suites under `CARGO_TARGET_TMPDIR`, which sit
+/// inside this repository and inherit its pin by the same upward walk a real
+/// project uses. There is nothing above these, so they carry their own.
+///
+/// It names the version under test. That is the binary these tests are about to
+/// run, so the pin resolves to "the one already running" and no handover
+/// happens -- which is what keeps this a fixture detail rather than a thing the
+/// tests have to think about.
+fn pinned(manifest: &str) -> String {
+    format!("{manifest}\n[toolchain]\nversion = \"{}\"\n", khora_toolchain::RUNNING)
 }

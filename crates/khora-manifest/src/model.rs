@@ -89,7 +89,6 @@ pub(crate) struct RawPackage {
     pub(crate) version: Maybe<String>,
     pub(crate) authors: Option<Maybe<Vec<String>>>,
     pub(crate) publish: Option<Maybe<bool>>,
-    pub(crate) edition: Option<Maybe<String>>,
 }
 
 /// Why `name` is not a package name, if it is not.
@@ -123,31 +122,56 @@ fn not_a_package_name(name: &str) -> Option<String> {
     None
 }
 
-/// Every edition this toolchain understands.
+/// Why `pin` is not a version this toolchain can act on, if it is not.
 ///
-/// **Checked, because it was not.** `edition = "1999"` resolved, checked and
-/// built without a word. The field is inert today -- nothing reads it but the
-/// workspace-inheritance bookkeeping -- which is exactly why an unknown value
-/// had nothing to go wrong with and so nothing to notice.
+/// **A pin that cannot be resolved must fail at the manifest and not at the
+/// handover.** The version named here decides which binary runs, and that
+/// decision is made before `clap` has parsed anything -- so a typo that reaches
+/// it comes back as "0.2.O is not installed" listing the versions that are,
+/// which reads as a missing toolchain rather than as a letter O in a number.
 ///
-/// That is the argument for checking it now rather than when it starts to
-/// matter. The two ways to write a value that is not in this list are a typo,
-/// where the line the author thought they were writing was doing nothing; and
-/// an edition newer than this toolchain, where the right answer is "get a newer
-/// `khora`" and the wrong one is to build the project under rules it did not
-/// ask for. Neither is served by silence.
-const EDITIONS: [&str; 1] = ["2026"];
-
-/// The edition a new package is written with.
-///
-/// The last of [`EDITIONS`], so the scaffold cannot fall behind the validator:
-/// adding one here is adding it there. `khora new` used to write no `edition`
-/// line at all outside a workspace, while `getting-started/first-project.md`
-/// shows one and says the manifest "selects the language edition" -- so the
-/// first thing a newcomer compared against the documentation disagreed with it.
-pub fn newest_edition() -> &'static str {
-    EDITIONS[EDITIONS.len() - 1]
+/// The rule is deliberately shallow: two channel names, or something shaped
+/// like a version. It is not a semver parser, because this crate does not need
+/// to *order* the value -- `khora-toolchain` does that, against the toolchains
+/// it can see -- and a stricter rule here would reject a real release the day
+/// the numbering scheme grows a part.
+fn not_a_pin(pin: &str) -> Option<String> {
+    if pin == "latest" || pin == "latest.rc" {
+        return None;
+    }
+    let looks_like_a_version = pin
+        .split(['.', '-', '+'])
+        .next()
+        .is_some_and(|first| !first.is_empty() && first.chars().all(|c| c.is_ascii_digit()));
+    if looks_like_a_version {
+        return None;
+    }
+    Some(format!(
+        "`{pin}` is not a version or a channel. Write the version you want -- `0.2.0` -- or \
+         `latest` for the newest release installed on this machine, or `latest.rc` to include \
+         release candidates. There are no ranges: a pin exists so that two machines run the \
+         same compiler"
+    ))
 }
+
+/// Why there is no `edition` here any more.
+///
+/// **It answered a question `[toolchain]` answers better.** An edition was
+/// going to be how a project said which Khora it was written for, and it was
+/// bad at it in two directions: `2026` did not name a compiler anybody could
+/// install, and it was inert -- nothing read it, so `edition = "1999"` built
+/// silently until a validator was added for a field that still did nothing.
+///
+/// `[toolchain] version` names a compiler that exists, is required, and
+/// actually selects the binary that runs. Two fields for one question meant
+/// one of them was going to be wrong, and it was going to be the one nothing
+/// enforced.
+///
+/// The key is not merely dropped from this schema. [`crate::audit`] keeps it
+/// as [`crate::audit::Schema::Removed`], so a manifest that still has the line
+/// is told what replaced it rather than that the key is unrecognized.
+const _EDITION_IS_GONE: () = ();
+
 
 impl RawManifest {
     /// Whether anything here says `workspace = true`.
@@ -161,7 +185,6 @@ impl RawManifest {
                 matches!(raw.version, Maybe::FromWorkspace),
                 matches!(raw.authors, Some(Maybe::FromWorkspace)),
                 matches!(raw.publish, Some(Maybe::FromWorkspace)),
-                matches!(raw.edition, Some(Maybe::FromWorkspace)),
             ];
             fields.into_iter().any(|asked| asked)
         });
@@ -195,12 +218,10 @@ impl RawManifest {
                     Maybe::resolve(Some(raw.version), shared.and_then(|s| s.version.clone()));
                 let authors = Maybe::resolve(raw.authors, shared.and_then(|s| s.authors.clone()));
                 let publish = Maybe::resolve(raw.publish, shared.and_then(|s| s.publish));
-                let edition = Maybe::resolve(raw.edition, shared.and_then(|s| s.edition.clone()));
                 for (field, missing) in [
                     ("version", version.is_missing()),
                     ("authors", authors.is_missing()),
                     ("publish", publish.is_missing()),
-                    ("edition", edition.is_missing()),
                 ] {
                     if missing {
                         return Err(inheritance_error(
@@ -223,25 +244,11 @@ impl RawManifest {
                     return Err(ManifestError::invalid_value("package.name", why));
                 }
 
-                let edition = edition.into_option();
-                if let Some(named) = edition.as_deref() {
-                    if !EDITIONS.contains(&named) {
-                        return Err(ManifestError::invalid_value(
-                            "package.edition",
-                            format!(
-                                "`{named}` is not an edition this toolchain knows; it has {}. A newer one means the project wants a newer `khora`, and a typo means this line was doing nothing",
-                                EDITIONS.join(" and "),
-                            ),
-                        ));
-                    }
-                }
-
                 Some(Package {
                     name: raw.name,
                     version,
                     authors: authors.into_option().unwrap_or_default(),
                     publish: publish.into_option(),
-                    edition,
                 })
             }
         };
@@ -323,7 +330,15 @@ impl RawManifest {
             fmt,
             lints,
             dependencies: self.dependencies,
-            toolchain: self.toolchain,
+            toolchain: match self.toolchain {
+                Some(toolchain) => {
+                    if let Some(why) = not_a_pin(&toolchain.version) {
+                        return Err(ManifestError::invalid_value("toolchain.version", why));
+                    }
+                    Some(toolchain)
+                }
+                None => None,
+            },
             build: self.build,
             tasks: self.tasks,
         })
@@ -470,9 +485,6 @@ pub struct WorkspacePackage {
     /// What members take with `publish.workspace = true`.
     #[serde(default)]
     pub publish: Option<bool>,
-    /// The edition members take with `edition.workspace = true`.
-    #[serde(default)]
-    pub edition: Option<String>,
 }
 
 /// The `[package]` table.
@@ -505,12 +517,6 @@ pub struct Package {
     /// A `path` dependency ignores it — that is your own working copy.
     #[serde(default)]
     pub publish: Option<bool>,
-    /// Language edition, such as `2026`.
-    ///
-    /// Left as a string rather than an enum: editions are minted over time, and
-    /// an unknown one has to reach the driver as a "this toolchain is too old"
-    /// diagnostic rather than as a parse failure here.
-    pub edition: Option<String>,
 }
 
 /// What an unmentioned category grants.
@@ -1040,15 +1046,38 @@ impl<'de> Visitor<'de> for LintVisitor {
 ///
 /// A version named here and not installed is an error, never a fallback. See
 /// `khora-toolchain`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Toolchain {
-    /// An exact version. No ranges, and no channels.
+    /// Which Khora builds this project: an exact version, or a channel.
     ///
-    /// A range would need a resolver and would reintroduce the thing a pin
-    /// exists to remove: two machines agreeing on the constraint and
-    /// disagreeing on the compiler.
-    #[serde(default)]
-    pub version: Option<String>,
+    /// **Required, because the table exists to answer one question and a
+    /// `[toolchain]` that does not answer it is furniture.** It is not an
+    /// `Option`, so an empty table is serde's "missing field `version`"
+    /// reported at the table's own span rather than a pin that silently is not
+    /// one.
+    ///
+    /// **An exact version is the one to commit.** `0.2.0` means every machine
+    /// runs the same compiler, which is the whole reason a pin exists. There
+    /// are no *ranges*: a range needs a resolver, and a resolver reintroduces
+    /// exactly what the pin removes -- two machines agreeing on the constraint
+    /// and disagreeing on the compiler.
+    ///
+    /// **`latest` and `latest.rc` are channels, and are deliberately not
+    /// reproducible.** They mean "the newest toolchain installed on this
+    /// machine" -- stable only, or release candidates too -- so the same commit
+    /// builds under different compilers on different machines, and under a new
+    /// one on this machine the moment anything installs it. That is a real cost
+    /// and they exist anyway, because the project that most needs to build
+    /// against the newest compiler is the one developing the compiler. Use them
+    /// while testing; write a version when the answer has to be the same twice.
+    ///
+    /// **Resolved against what is installed, never over the network.** A
+    /// channel that asked GitHub what the newest release was would put an HTTP
+    /// request in front of every `khora` invocation, including the ones an
+    /// editor makes on every keystroke, and would make the compiler unusable on
+    /// a train. `khora update` is how a new toolchain arrives; a channel only
+    /// decides which of the ones already here to run.
+    pub version: String,
 }
 
 /// One entry of the `[dependencies]` table.

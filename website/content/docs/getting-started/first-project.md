@@ -19,14 +19,22 @@ hello_khora/
     └── main.kh
 ```
 
-The manifest names the package and selects the language edition:
+The manifest names the package and says which Khora builds it:
 
 ```toml
 [package]
 name = "hello_khora"
 version = "0.1.0"
-edition = "2026"
+
+# Which Khora builds this project. Required.
+[toolchain]
+version = "0.2.0"
 ```
+
+The `[toolchain]` version is required, and it is what makes a project build the
+same way on the next machine: run any command here with a different Khora on
+your path and it hands the command over to the one this project asks for. Every
+key is in [the manifest reference](/docs/reference/manifest/).
 
 ## Write some Khora
 

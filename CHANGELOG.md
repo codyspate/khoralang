@@ -12,10 +12,62 @@ it will behave differently now.
 
 ## 0.2.0 — 2026-09-04
 
-An editor release. Everything here is about what Khora tells you while you are
-writing it, and nothing changes what a program means.
+An editor release, and one manifest change. Everything else here is about what
+Khora tells you while you are writing it, and nothing changes what a program
+means.
 
 ### Breaking
+
+- **`[toolchain] version` is now required, and `edition` is gone.** Both halves
+  of one change: two fields were answering the question *which Khora builds
+  this?* and only one of them could.
+
+  `edition = "2026"` named a year rather than a compiler. Nothing read it — it
+  was inert by design, waiting for an editions mechanism that does not exist —
+  so an unknown value had nothing to go wrong with, which is why it took until
+  `0.1.0` for anybody to notice that `edition = "1999"` built without a word.
+  It is removed. A manifest that still carries the line gets a warning naming
+  what replaced it, and builds.
+
+  `[toolchain] version` names a compiler that exists and selects the binary that
+  runs: the build, the tests, `khora fmt` and the editor's language server all
+  follow it. Requiring it is what makes "this project builds the same way on
+  your machine" true by default rather than by convention. A project without one
+  now stops, with the two lines to add in the message — the table name, the key
+  and the quoting are not things anybody should have to guess at.
+
+  Two consequences worth knowing:
+
+  - **In a workspace the pin belongs at the root.** The search walks up from
+    wherever you are to the nearest manifest that has one, and it no longer
+    stops at the first manifest it finds — which it did, so a member with no
+    `[toolchain]` reported that the project pinned nothing while the root above
+    it pinned something.
+  - **The machine default now only governs directories that are not projects.**
+    Inside a project the pin answers, because there is always a pin.
+
+  `khora new` writes the pin, and does not write one into a member of a
+  workspace that already has it. Run it against an existing project and the
+  message tells you what to add.
+
+- **A pin may be `latest` or `latest.rc`.** The newest toolchain installed on
+  this machine, release candidates excluded or included.
+
+  **They are deliberately not reproducible**, which is the opposite of what a
+  pin is for, and they exist anyway: the project that most wants to build
+  against whatever compiler was installed this morning is the one developing the
+  compiler. Write a version for anything you want built the same way twice.
+
+  Both resolve against installed toolchains and never over the network — a
+  channel that asked GitHub for the newest release would put an HTTP request in
+  front of every `khora` invocation, including the ones an editor makes on every
+  keystroke.
+
+  This needed the version ordering fixed first. `Version` derived `Ord`, which
+  compares `pre: Option<String>` with `None` below `Some` — so `0.2.0` sorted
+  *below* `0.2.0-rc.1`, and "the newest stable release" would have chosen a
+  release candidate. It now implements the precedence rules from the
+  specification, including that `rc.2 < rc.10`.
 
 - **Two rules moved from the code generator into the type checker, so
   `khora check` now refuses programs it used to accept.** Raising a type no

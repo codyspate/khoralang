@@ -44,13 +44,13 @@ fn failure(manifest: &Path) -> String {
 fn a_member_takes_every_shared_field() {
     let root = workspace(
         "all_fields",
-        "\n[workspace.package]\nversion = \"0.4.0\"\nedition = \"2026\"\n\
+        "\n[workspace.package]\nversion = \"0.4.0\"\n\
          authors = [\"A Name <a@example.com>\"]\npublish = true\n",
     );
     let manifest = member(
         &root,
         "alpha",
-        "[package]\nname = \"alpha\"\nversion.workspace = true\nedition.workspace = true\n\
+        "[package]\nname = \"alpha\"\nversion.workspace = true\n\
          authors.workspace = true\npublish.workspace = true\n",
     );
 
@@ -61,7 +61,6 @@ fn a_member_takes_every_shared_field() {
         .expect("a package");
     assert_eq!(package.name, "alpha");
     assert_eq!(package.version, "0.4.0");
-    assert_eq!(package.edition.as_deref(), Some("2026"));
     assert_eq!(package.authors, vec!["A Name <a@example.com>".to_string()]);
     assert_eq!(package.publish, Some(true));
 }
@@ -237,7 +236,7 @@ fn the_root_tables_are_not_unknown_keys() {
     // manifest that uses it.
     let parsed = Manifest::parse(
         "[workspace]\nmembers = [\"packages/*\"]\n\n\
-         [workspace.package]\nversion = \"0.4.0\"\nedition = \"2026\"\nauthors = []\n\
+         [workspace.package]\nversion = \"0.4.0\"\nauthors = []\n\
          publish = false\n\n\
          [workspace.permissions]\ndefault = \"deny\"\n\n\
          [workspace.fmt]\nindent-width = 2\n\n\

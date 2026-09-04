@@ -117,6 +117,11 @@ step 'a design document does not name a test that is gone'
 sh "$root/scripts/check-cited-tests.sh"
 
 step 'every unsafe block has an argument'
+# The repository's own pin, against the version it builds. Cheap, and the
+# failure it prevents presents as a broken checkout rather than as a version
+# mismatch. `scripts/check-pin.sh` has the argument.
+sh "$root/scripts/check-pin.sh"
+
 sh "$root/scripts/no-bare-unsafe.sh"
 
 step 'no doc comment on the wrong item'

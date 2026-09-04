@@ -38,6 +38,18 @@ enum Schema {
 
 static OPEN: Schema = Schema::Open;
 
+/// `edition` said which Khora a project wanted and could not deliver one.
+///
+/// It named a year rather than a compiler, nothing read it, and `[toolchain]`
+/// now answers the same question with a version that actually selects the
+/// binary that runs. Kept here so the line gets a sentence instead of
+/// "unrecognized key".
+static EDITION: Schema = Schema::Removed(
+    "`[toolchain]` says which Khora builds this project, and an edition named a year that \
+     nothing read. Delete the line; put `version = \"...\"` under `[toolchain]` if it is not \
+     there already",
+);
+
 static ROOT: Schema = Schema::Fields(&[
     ("package", &PACKAGE),
     ("workspace", &WORKSPACE),
@@ -72,7 +84,7 @@ static POLICY: Schema = Schema::Fields(&[
 static WORKSPACE_PACKAGE: Schema = Schema::Fields(&[
     ("version", &OPEN),
     ("authors", &OPEN),
-    ("edition", &OPEN),
+    ("edition", &EDITION),
     ("publish", &OPEN),
 ]);
 
@@ -80,7 +92,7 @@ static PACKAGE: Schema = Schema::Fields(&[
     ("name", &OPEN),
     ("version", &OPEN),
     ("authors", &OPEN),
-    ("edition", &OPEN),
+    ("edition", &EDITION),
     ("publish", &OPEN),
 ]);
 

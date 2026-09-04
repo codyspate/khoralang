@@ -1194,6 +1194,30 @@ fn managed_binary() -> bool {
     exe.starts_with(&home)
 }
 
+/// What to tell somebody whose project does not say which Khora it needs.
+///
+/// **The message has to carry the fix, because the fix is two lines of TOML
+/// nobody can guess.** "Missing [toolchain]" names the hole and leaves the
+/// reader to work out the key, the quoting, and which of the versions they have
+/// installed to write.
+///
+/// It names the version now running as the one to write. That is the version
+/// that just got far enough to produce this message, so it is the one known to
+/// work, and writing it down makes the next run identical to this one -- which
+/// is the whole point of a pin.
+fn unpinned_message(manifest: &Path) -> String {
+    format!(
+        "{} does not say which Khora builds this project, and that is required.\n\n\
+         Add this to it:\n\n    [toolchain]\n    version = \"{}\"\n\n\
+         That is the version running now. `latest` takes the newest release \
+         installed on this machine instead, and `latest.rc` includes release \
+         candidates -- neither is reproducible, so they are for testing rather \
+         than for a project you want built the same way twice.",
+        manifest.display(),
+        khora_toolchain::RUNNING,
+    )
+}
+
 /// Hands this invocation to the toolchain the project pins, if that is not us.
 ///
 /// **Before `clap` sees anything**, so that a project pinning a version with
@@ -1214,7 +1238,13 @@ fn hand_over_if_pinned() {
     // the decision being asked about.
     // `khora update` is the other one, for the same reason: it is how a broken
     // default gets replaced.
-    if matches!(std::env::args().nth(1).as_deref(), Some("toolchain") | Some("update")) {
+    // `khora new` is the third: it runs *before* there is a project, so there
+    // is nothing for it to be dispatched by, and the pin it is about to write
+    // should be the version somebody chose to run.
+    if matches!(
+        std::env::args().nth(1).as_deref(),
+        Some("toolchain") | Some("update") | Some("new")
+    ) {
         return;
     }
 
@@ -1223,7 +1253,11 @@ fn hand_over_if_pinned() {
     // that presents as a hang.
     let active = std::env::var(khora_toolchain::ACTIVE).ok();
     let here = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let pin = khora_toolchain::pinned_version(&here);
+    let status = khora_toolchain::pin_status(&here);
+    let pin = match &status {
+        khora_toolchain::Pin::Found(version) => Some(version.clone()),
+        _ => None,
+    };
     // **A missing pin and a missing default are not the same failure.** A pin
     // is what the project requires, so a version that is not installed stops
     // the command. A default is a preference expressed once, possibly on
@@ -1231,6 +1265,44 @@ fn hand_over_if_pinned() {
     // every unpinned directory over that would be a machine somebody has to
     // repair before they can use it.
     let from_pin = pin.is_some();
+    // **A project must say which Khora builds it.** `NoProject` is an empty
+    // directory, which is entitled to no opinion -- `khora --version` has to
+    // work anywhere. The other two failures are both real and read differently,
+    // so they are reported differently.
+    //
+    // Skipped once a handover has happened: the process that handed over
+    // already checked, and failing here would report it twice.
+    //
+    // **`khora lsp` is exempt**, and it is the one exemption that is about the
+    // reader rather than about recovery. An editor starts the server by running
+    // `khora lsp` in the project directory; a server that exits during startup
+    // reaches the reader as "the language server crashed", with the reason in a
+    // log they have no reason to open. Refusing to start would trade every
+    // diagnostic in the file they are looking at for one they cannot see. The
+    // pin still selects the server's version when there is a pin -- that is
+    // decided below -- and the first `khora check` in a terminal still says
+    // what is missing, in a place somebody is reading.
+    let editor = matches!(std::env::args().nth(1).as_deref(), Some("lsp"));
+    if active.is_none() && !editor {
+        match &status {
+            khora_toolchain::Pin::Missing(manifest) => {
+                eprintln!("khora: {}", unpinned_message(manifest));
+                std::process::exit(1);
+            }
+            // **Reported here because nowhere else reports it.** The rest of
+            // the CLI defers a manifest error that carries a line and a column
+            // to "`khora check` on the manifest", which does not exist:
+            // `khora check khora.toml` reads it as Khora source. That was
+            // survivable while the manifest was optional decoration. It is not
+            // now that a project without a readable pin is a project that
+            // cannot say which compiler builds it.
+            khora_toolchain::Pin::Unreadable(why) => {
+                eprintln!("khora: {why}");
+                std::process::exit(1);
+            }
+            khora_toolchain::Pin::Found(_) | khora_toolchain::Pin::NoProject => {}
+        }
+    }
     // **A machine default may only redirect a managed binary**, and a compiler
     // you built and ran by path is not one.
     //

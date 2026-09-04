@@ -57,7 +57,7 @@ fn new_inside_a_sharing_workspace_inherits() {
     // inheritance existed to prevent.
     let root = workspace(
         "new_inherits",
-        "\n[workspace.package]\nversion = \"0.4.0\"\nedition = \"2026\"\n\
+        "\n[workspace.package]\nversion = \"0.4.0\"\n\
          \n[workspace.fmt]\nindent-width = 2\n",
     );
 
@@ -67,31 +67,60 @@ fn new_inside_a_sharing_workspace_inherits() {
     let manifest = std::fs::read_to_string(root.join("packages").join("alpha").join("khora.toml"))
         .expect("the new manifest");
     assert!(manifest.contains("version.workspace = true"), "{manifest}");
-    assert!(manifest.contains("edition.workspace = true"), "{manifest}");
     assert!(manifest.contains("[fmt]\nworkspace = true"), "{manifest}");
     assert!(!manifest.contains("0.4.0"), "the value should not be copied: {manifest}");
 }
 
-/// A package with nothing to inherit from writes both fields out.
+/// A package with nothing above it writes its own version and its own pin.
 ///
-/// The edition was the one it left off, while
-/// `getting-started/first-project.md` shows `edition = "2026"` and says the
-/// manifest "selects the language edition" -- so the very first thing a
-/// newcomer compares against the documentation disagreed with it.
+/// **The pin is the field a project cannot do without**, so the scaffold is
+/// where a newcomer must first meet it: `[toolchain]` is required, and a
+/// starting manifest that omitted it would fail the first command run against
+/// it. It names the version doing the scaffolding, because that is the one
+/// known to work with the project just written.
 #[test]
-fn new_outside_a_workspace_writes_a_version_and_an_edition() {
-    let root = scratch("new_solo");
+fn new_outside_a_workspace_writes_a_version_and_a_pin() {
+    // **Not `scratch`, which is under `CARGO_TARGET_TMPDIR` and therefore
+    // inside this repository** -- whose root manifest pins a toolchain, which
+    // the walk would find, which is the whole thing this test is about not
+    // finding. "Outside a workspace" has to mean outside this one too.
+    let tmp = tempfile::tempdir().expect("a temporary directory");
+    let root = tmp.path().to_path_buf();
 
     let (ok, output) = run(&root, &["new", "solo"]);
     assert!(ok, "{output}");
     let manifest =
         std::fs::read_to_string(root.join("solo").join("khora.toml")).expect("the new manifest");
     assert!(manifest.contains("version = \"0.1.0\""), "{manifest}");
+    assert!(manifest.contains("[toolchain]"), "{manifest}");
     assert!(
-        manifest.contains(&format!("edition = \"{}\"", khora_manifest::newest_edition())),
+        manifest.contains(&format!("version = \"{}\"", khora_toolchain::RUNNING)),
         "{manifest}"
     );
     assert!(!manifest.contains("workspace"), "{manifest}");
+    assert!(!manifest.contains("edition"), "edition is gone: {manifest}");
+}
+
+/// A member does not repeat the pin the workspace above it already carries.
+///
+/// Two places to write one answer is two places for it to disagree, and the
+/// walk that finds a pin passes through the member's manifest on its way to the
+/// root -- so the member saying nothing is the member agreeing.
+#[test]
+fn new_inside_a_pinned_workspace_does_not_repeat_the_pin() {
+    let root = scratch("new_pinned");
+    std::fs::create_dir_all(root.join("packages")).expect("a workspace");
+    std::fs::write(
+        root.join("khora.toml"),
+        "[workspace]\nmembers = [\"packages/*\"]\n\n[toolchain]\nversion = \"0.2.0\"\n",
+    )
+    .expect("a root manifest");
+
+    let (ok, output) = run(&root, &["new", "packages/member"]);
+    assert!(ok, "{output}");
+    let manifest = std::fs::read_to_string(root.join("packages").join("member").join("khora.toml"))
+        .expect("the new manifest");
+    assert!(!manifest.contains("[toolchain]"), "the root already pins one: {manifest}");
 }
 
 #[test]

@@ -1,7 +1,6 @@
 [package]
 name = "postgres"
 version.workspace = true
-edition.workspace = true
 # Offered for other people to depend on. Absent means no: a pushed repository
 # is already fetchable, so the active choice is the one written down, and this
 # repository is mostly a compiler with one library in it.

@@ -19,7 +19,7 @@
 use std::fmt;
 
 /// A parsed semantic version.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Version {
     /// Incompatible changes.
     pub major: u64,
@@ -27,12 +27,78 @@ pub struct Version {
     pub minor: u64,
     /// Compatible fixes.
     pub patch: u64,
-    /// `-alpha.1`, without the dash. Ordering ignores it, which is wrong in
-    /// general and irrelevant here: nothing compares versions yet, and when
-    /// something does it will need the full precedence rules from the spec.
+    /// `-alpha.1`, without the dash. Significant to ordering, and lower than
+    /// the same version without one -- see the [`Ord`] implementation.
     pub pre: Option<String>,
     /// `+build.5`, without the plus. Never significant to anything.
     pub build: Option<String>,
+}
+
+/// Precedence, by the rules in the specification.
+///
+/// **Derived once, and derived wrong.** `#[derive(Ord)]` compares the fields in
+/// order and reaches `pre: Option<String>`, where `None < Some(_)` -- so
+/// `0.2.0` sorted *below* `0.2.0-rc.1`, exactly backwards, a release candidate
+/// ranking above the release it was a candidate for. It did not matter while
+/// nothing compared versions. `[toolchain] version = "latest"` compares them:
+/// it means the newest stable toolchain installed, and under the derived order
+/// "newest stable" would have picked a candidate.
+///
+/// So the spec's rules, which are not the obvious ones:
+///
+/// - A version with a prerelease is *less than* the same version without.
+/// - Prereleases compare identifier by identifier, split on `.`.
+/// - An all-digits identifier compares numerically and ranks below one that is
+///   not, so `rc.2 < rc.10` rather than `rc.10 < rc.2` as strings.
+/// - Running out of identifiers first is lower: `rc < rc.1`.
+///
+/// Build metadata is ignored, which the spec also requires.
+impl Ord for Version {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        (self.major, self.minor, self.patch)
+            .cmp(&(other.major, other.minor, other.patch))
+            .then_with(|| match (self.pre.as_deref(), other.pre.as_deref()) {
+                (None, None) => Ordering::Equal,
+                // A release outranks any candidate for it.
+                (None, Some(_)) => Ordering::Greater,
+                (Some(_), None) => Ordering::Less,
+                (Some(ours), Some(theirs)) => precedence(ours, theirs),
+            })
+    }
+}
+
+impl PartialOrd for Version {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Compares two prerelease strings, identifier by identifier.
+fn precedence(ours: &str, theirs: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let mut ours = ours.split('.');
+    let mut theirs = theirs.split('.');
+    loop {
+        match (ours.next(), theirs.next()) {
+            (None, None) => return Ordering::Equal,
+            // Fewer identifiers is lower precedence, so `rc` is below `rc.1`.
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(a), Some(b)) => {
+                let order = match (a.parse::<u64>(), b.parse::<u64>()) {
+                    (Ok(a), Ok(b)) => a.cmp(&b),
+                    // Numeric identifiers always rank below alphanumeric ones.
+                    (Ok(_), Err(_)) => Ordering::Less,
+                    (Err(_), Ok(_)) => Ordering::Greater,
+                    (Err(_), Err(_)) => a.cmp(b),
+                };
+                if order != Ordering::Equal {
+                    return order;
+                }
+            }
+        }
+    }
 }
 
 impl Version {
@@ -202,5 +268,58 @@ mod tests {
         all.sort();
         let order: Vec<String> = all.iter().map(Version::to_string).collect();
         assert_eq!(order, ["0.9.0", "0.10.0", "1.0.0", "1.0.1", "2.0.0"]);
+    }
+}
+
+#[cfg(test)]
+mod precedence_tests {
+    use super::*;
+
+    fn v(text: &str) -> Version {
+        Version::parse(text).expect("a version")
+    }
+
+    /// **The bug the derived ordering had**, and the reason `latest` needs
+    /// this: a release outranks its own candidates.
+    #[test]
+    fn a_release_outranks_its_candidates() {
+        assert!(v("0.2.0") > v("0.2.0-rc.1"));
+        assert!(v("0.2.0") > v("0.2.0-rc.3"));
+    }
+
+    /// String ordering puts `rc.10` below `rc.2`. Numeric identifiers compare
+    /// as numbers, so it does not.
+    #[test]
+    fn numeric_identifiers_compare_as_numbers() {
+        assert!(v("0.1.0-rc.10") > v("0.1.0-rc.2"));
+    }
+
+    /// Fewer identifiers is lower precedence.
+    #[test]
+    fn a_shorter_prerelease_is_lower() {
+        assert!(v("0.1.0-rc") < v("0.1.0-rc.1"));
+    }
+
+    /// A numeric identifier ranks below an alphanumeric one.
+    #[test]
+    fn numbers_rank_below_words() {
+        assert!(v("0.1.0-1") < v("0.1.0-alpha"));
+    }
+
+    /// The ordinary case still works, and build metadata is ignored.
+    #[test]
+    fn the_triple_leads_and_build_metadata_does_not_count() {
+        assert!(v("0.10.0") > v("0.2.0"));
+        assert_eq!(v("0.1.0+a").cmp(&v("0.1.0+b")), std::cmp::Ordering::Equal);
+    }
+
+    /// Sorting a realistic set of installed toolchains puts the newest
+    /// release last and every candidate below its release.
+    #[test]
+    fn a_set_of_toolchains_sorts_the_way_latest_needs() {
+        let mut have = [v("0.2.0"), v("0.1.0"), v("0.2.0-rc.1"), v("0.1.0-rc.10")];
+        have.sort();
+        let names: Vec<String> = have.iter().map(|v| v.to_string()).collect();
+        assert_eq!(names, ["0.1.0-rc.10", "0.1.0", "0.2.0-rc.1", "0.2.0"]);
     }
 }

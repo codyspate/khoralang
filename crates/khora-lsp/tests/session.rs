@@ -5448,3 +5448,56 @@ fn the_editor_shows_an_integer_literal_that_does_not_fit() {
         "the editor should say so: {said:?}"
     );
 }
+
+/// **The server starts in a project with no pin, and says so.**
+///
+/// `[toolchain]` is required and every other command refuses without it. The
+/// server is exempt, because an editor starts it on the reader's behalf and a
+/// process that exits during startup reaches them as "the language server
+/// crashed" -- trading every diagnostic in the file they have open for one they
+/// cannot see. It is exempt from the *refusal*, not from the fact: the fact
+/// goes to `window/showMessage`, which is a place they are already looking.
+#[test]
+fn a_project_with_no_pin_gets_a_message_rather_than_a_dead_server() {
+    let w = workspace(&[
+        ("khora.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n"),
+        ("src/main.kh", "module app::main;\n\npub fn main() -> Int {\n  0\n}\n"),
+    ]);
+    let replies = session(&[initialize(&w.root), exit()]);
+
+    let told = replies
+        .iter()
+        .find(|reply| reply.get("method").and_then(Value::as_str) == Some("window/showMessage"))
+        .expect("the reader should be told");
+    let text = told.pointer("/params/message").and_then(Value::as_str).expect("a message");
+    assert!(text.contains("which Khora"), "{text}");
+    assert!(text.contains("[toolchain]"), "it should name the fix: {text}");
+    // Warning, not Error: the file still checks and its diagnostics are right.
+    assert_eq!(told.pointer("/params/type").and_then(Value::as_i64), Some(2));
+
+    // And the server really did start.
+    assert!(
+        replies.iter().any(|reply| reply.pointer("/result/capabilities").is_some()),
+        "the server should have answered `initialize`"
+    );
+}
+
+/// A project that pins one says nothing, which is the ordinary case.
+#[test]
+fn a_pinned_project_is_not_told_anything() {
+    let w = workspace(&[
+        (
+            "khora.toml",
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[toolchain]\nversion = \"0.2.0\"\n",
+        ),
+        ("src/main.kh", "module app::main;\n\npub fn main() -> Int {\n  0\n}\n"),
+    ]);
+    let replies = session(&[initialize(&w.root), exit()]);
+
+    assert!(
+        !replies
+            .iter()
+            .any(|reply| reply.get("method").and_then(Value::as_str) == Some("window/showMessage")),
+        "{replies:?}"
+    );
+}

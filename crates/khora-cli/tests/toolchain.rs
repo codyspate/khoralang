@@ -94,12 +94,39 @@ fn link(w: &World, version: &str) {
 /// The version this test binary's `khora` reports itself as.
 const RUNNING: &str = env!("CARGO_PKG_VERSION");
 
+/// **A project with no pin is refused, and told what to write.**
+///
+/// This used to be `with_no_pin_the_running_toolchain_is_used`, and the
+/// toolchain that ran was whichever one happened to be on the path -- which is
+/// the thing a pin exists to stop. A project that does not say which compiler
+/// builds it is a project that builds differently on the next machine, and the
+/// only moment anybody is in a position to fix that cheaply is the first time
+/// they are told.
+///
+/// The message carries the two lines to add, because they are two lines nobody
+/// can guess: the table name, the key, the quoting, and which of the versions
+/// on the machine to name.
 #[test]
-fn with_no_pin_the_running_toolchain_is_used() {
+fn a_project_with_no_pin_is_refused() {
     let w = world(None);
     let (ok, output) = khora(&w, &w.project, &["check", "src/main.kh"]);
+    assert!(!ok, "an unpinned project should be refused: {output}");
+    assert!(output.contains("does not say which Khora"), "{output}");
+    assert!(output.contains("[toolchain]"), "it should carry the fix: {output}");
+    assert!(output.contains(RUNNING), "and the version to write: {output}");
+}
+
+/// A directory that is not a project gets no opinion about toolchains.
+///
+/// `khora --version` has to work in an empty directory, and `khora new` has to
+/// run in one before there is a manifest to pin anything in.
+#[test]
+fn a_directory_with_no_manifest_is_not_a_project() {
+    let w = world(None);
+    let elsewhere = w.project.parent().expect("a parent").join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("a directory");
+    let (ok, output) = khora(&w, &elsewhere, &["--version"]);
     assert!(ok, "{output}");
-    assert!(output.contains("no errors"), "{output}");
 }
 
 #[test]
@@ -267,17 +294,24 @@ fn a_missing_pin_is_reported_rather_than_the_default() {
 /// **A default naming something that is gone warns and carries on.**
 ///
 /// The opposite of what a missing *pin* does, and deliberately: a default may
-/// name a toolchain removed months ago, and refusing every command in every
-/// unpinned directory would be a machine somebody has to repair before they can
-/// use it — including with the command that repairs it.
+/// name a toolchain removed months ago, and refusing every command over that
+/// would be a machine somebody has to repair before they can use it --
+/// including with the command that repairs it.
+///
+/// **Run outside a project, because that is now the only place a default
+/// decides anything.** A pin is required, so inside a project the pin answers;
+/// the default is what governs the directories that are not projects. That
+/// narrowing came with the requirement and is worth having a test notice.
 #[test]
 fn a_default_that_is_not_installed_does_not_stop_anything() {
     let w = world(None);
     let installed = bootstrap(&w);
     std::fs::write(w.home.join("default"), "9.9.9\n").expect("the default");
+    let elsewhere = w.project.parent().expect("a parent").join("no_project");
+    std::fs::create_dir_all(&elsewhere).expect("a directory");
 
-    let (ok, output) = run(&w, &installed, &w.project, &["check", "src/main.kh"]);
-    assert!(ok, "a missing default must not stop a build: {output}");
+    let (ok, output) = run(&w, &installed, &elsewhere, &["--version"]);
+    assert!(ok, "a missing default must not stop a command: {output}");
     assert!(output.contains("your default is Khora 9.9.9"), "{output}");
     assert!(output.contains("toolchain default --none"), "{output}");
 }

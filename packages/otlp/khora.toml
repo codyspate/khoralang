@@ -1,7 +1,6 @@
 [package]
 name = "otlp"
 version.workspace = true
-edition.workspace = true
 # Offered for other people to depend on, like `postgres`: an exporter is the
 # one thing every service needs and the one thing `std::trace` deliberately
 # will not carry.

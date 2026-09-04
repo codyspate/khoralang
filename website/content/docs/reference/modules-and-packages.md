@@ -21,11 +21,14 @@ A minimal package:
 [package]
 name = "orders"
 version = "0.1.0"
-edition = "2026"
+
+[toolchain]
+version = "0.2.0"
 ```
 
-Source lives under `src/`. [Your first Khora
-project](/docs/getting-started/first-project/) builds one end to end.
+Source lives under `src/`. [The manifest](/docs/reference/manifest/) documents
+every table; [your first Khora project](/docs/getting-started/first-project/)
+builds one end to end.
 
 ## Paths versus fields
 
@@ -181,16 +184,22 @@ unfinished experiment, because it happened to sit in a repository you fetched.
 
 ## Toolchain pinning
 
-A package can pin the compiler it expects:
+Every project says which compiler builds it, and the field is required:
 
 ```toml
 [toolchain]
 version = "0.2.0"
 ```
 
-The pin takes precedence over the machine default. See
-[Installation](/docs/getting-started/installation/#pin-a-project-to-a-compiler-version)
-for toolchain management.
+The pin takes precedence over the machine default, and a pinned version that is
+not installed stops the command rather than building with a different compiler.
+In a workspace it belongs at the root, where members inherit it.
+
+`latest` and `latest.rc` are also accepted, and mean the newest toolchain
+installed on this machine — not reproducible, and useful while testing.
+[The manifest](/docs/reference/manifest/#toolchain--which-khora-builds-this) has
+the detail; [Installation](/docs/getting-started/installation/#pin-a-project-to-a-compiler-version)
+covers toolchain management.
 
 ## Package boundaries
 

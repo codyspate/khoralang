@@ -18,7 +18,7 @@ fn package(root: &std::path::Path, name: &str, version: &str, dependencies: &str
     std::fs::write(
         root.join("khora.toml"),
         format!(
-            "[package]\nname = \"{name}\"\nversion = \"{version}\"\nedition = \"2026\"\n\
+            "[package]\nname = \"{name}\"\nversion = \"{version}\"\n\
              {dependencies}"
         ),
     )

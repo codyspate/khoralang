@@ -13,7 +13,7 @@ use khora_manifest::{granted_host, granted_name, granted_path, Category, Manifes
 
 fn permissions(table: &str) -> Permissions {
     let text =
-        format!("[package]\nname = \"p\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n{table}");
+        format!("[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n{table}");
     Manifest::parse(&text).expect("a manifest").manifest.permissions
 }
 

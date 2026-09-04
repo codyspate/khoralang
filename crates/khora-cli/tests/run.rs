@@ -23,7 +23,7 @@ fn world(body: &str) -> World {
     let home = tmp.path().join("home");
     let project = tmp.path().join("project");
     std::fs::create_dir_all(project.join("src")).expect("a src directory");
-    std::fs::write(project.join("khora.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\n")
+    std::fs::write(project.join("khora.toml"), pinned("[package]\nname = \"app\"\nversion = \"0.1.0\"\n"))
         .expect("a manifest");
     std::fs::write(project.join("src").join("main.kh"), body).expect("a source file");
     World { _tmp: tmp, home, project }
@@ -180,7 +180,7 @@ fn a_workspace_root_has_no_one_program_to_run() {
     let root = w.project.join("mono");
     std::fs::create_dir_all(root.join("packages").join("alpha").join("src"))
         .expect("a member");
-    std::fs::write(root.join("khora.toml"), "[workspace]\nmembers = [\"packages/*\"]\n")
+    std::fs::write(root.join("khora.toml"), pinned("[workspace]\nmembers = [\"packages/*\"]\n"))
         .expect("a root manifest");
     std::fs::write(
         root.join("packages").join("alpha").join("khora.toml"),
@@ -209,7 +209,7 @@ fn build_refuses_a_workspace_root_the_same_way() {
     let root = w.project.join("mono");
     std::fs::create_dir_all(root.join("packages").join("alpha").join("src"))
         .expect("a member");
-    std::fs::write(root.join("khora.toml"), "[workspace]\nmembers = [\"packages/*\"]\n")
+    std::fs::write(root.join("khora.toml"), pinned("[workspace]\nmembers = [\"packages/*\"]\n"))
         .expect("a root manifest");
     std::fs::write(
         root.join("packages").join("alpha").join("khora.toml"),
@@ -258,7 +258,7 @@ fn check_bare_and_check_dot_are_the_same_command() {
         )
         .expect("a member source");
     }
-    std::fs::write(root.join("khora.toml"), "[workspace]\nmembers = [\"packages/*\"]\n")
+    std::fs::write(root.join("khora.toml"), pinned("[workspace]\nmembers = [\"packages/*\"]\n"))
         .expect("a root manifest");
 
     let (bare_code, bare) = khora(&w, &root, &["check"]);
@@ -284,7 +284,7 @@ fn fmt_bare_and_fmt_dot_are_the_same_command() {
         "module alpha::lib;\n\npub fn go() -> Int {\n  1\n}\n",
     )
     .expect("a member source");
-    std::fs::write(root.join("khora.toml"), "[workspace]\nmembers = [\"packages/*\"]\n")
+    std::fs::write(root.join("khora.toml"), pinned("[workspace]\nmembers = [\"packages/*\"]\n"))
         .expect("a root manifest");
 
     let (bare_code, bare) = khora(&w, &root, &["fmt", "--check"]);
@@ -322,8 +322,8 @@ fn run_can_start_the_program_in_another_directory() {
     );
     std::fs::write(
         w.project.join("khora.toml"),
-        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
-         [permissions.fs]\nread = [\"./beside.txt\"]\n",
+        pinned("[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [permissions.fs]\nread = [\"./beside.txt\"]\n"),
     )
     .expect("a manifest");
     std::fs::write(w.project.join("beside.txt"), "here").expect("a file beside the package");
@@ -391,4 +391,19 @@ fn what_a_build_makes_goes_in_the_build_directory() {
     let (code, again) = khora(&w, &w.project, &["run", "."]);
     assert_eq!(code, Some(0), "{again}");
     assert!(again.contains("reused"), "run should have found what build made:\n{again}");
+}
+
+/// A manifest with the `[toolchain]` table every project now needs.
+///
+/// **A pin is required, and these fixtures live in the system temporary
+/// directory** -- unlike the suites under `CARGO_TARGET_TMPDIR`, which sit
+/// inside this repository and inherit its pin by the same upward walk a real
+/// project uses. There is nothing above these, so they carry their own.
+///
+/// It names the version under test. That is the binary these tests are about to
+/// run, so the pin resolves to "the one already running" and no handover
+/// happens -- which is what keeps this a fixture detail rather than a thing the
+/// tests have to think about.
+fn pinned(manifest: &str) -> String {
+    format!("{manifest}\n[toolchain]\nversion = \"{}\"\n", khora_toolchain::RUNNING)
 }

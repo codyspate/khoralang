@@ -38,10 +38,22 @@ fn sources(db: &KhoraDatabase) -> Vec<SourceFile> {
     out
 }
 
-/// A port unlikely to be anybody else's. The application hard-codes 8080, so
-/// this is the one thing the test cannot choose — it kills whatever is left of
-/// a previous run instead of failing on a port it does not own.
-const PORT: u16 = 8080;
+/// A port unlikely to be anybody else's, which 8080 was not.
+///
+/// **This used to be 8080, and 8080 is the most likely port on any machine to
+/// belong to something else.** The application hard-codes it, so the test
+/// cannot pick a free one; what it can do is not pick the default port of every
+/// development server ever written. A developer with their own service running
+/// watched this test bind nothing, connect to *their* program, send it a
+/// request it had no route for, and wait for an answer that was never coming.
+///
+/// Below the Windows dynamic range, which starts at 49152, so it is also not a
+/// port the operating system will hand to somebody else on its own.
+///
+/// The test kills the child it started and nothing else. An earlier version of
+/// this comment claimed it killed whatever was on the port, which would have
+/// been a test that terminates a stranger's process; it never did that.
+const PORT: u16 = 47821;
 
 #[test]
 fn the_reference_application_serves_a_request() {
@@ -113,6 +125,14 @@ fn the_reference_application_serves_a_request() {
 /// Connects, sends one request, and reads the answer to the end.
 fn ask(child: &mut std::process::Child) -> Option<String> {
     let mut socket = connect_retrying()?;
+    // **No read deadline, and that was tried.** `read_to_string` runs to EOF, and
+    // a `SO_RCVTIMEO` on this socket made it return the timeout instead of the
+    // answer even though the answer arrives in milliseconds — the response was
+    // read and then thrown away with the error, so the test failed ten seconds
+    // later saying the analyzer never answered, which was the opposite of true.
+    // The hang it was meant to prevent came from talking to somebody else's
+    // server on 8080; the port above is the fix for that, and this is left
+    // alone.
     socket
         .write_all(b"POST /analyze/acc_9921 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n")
         .ok()?;

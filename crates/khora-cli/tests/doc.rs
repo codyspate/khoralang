@@ -253,7 +253,7 @@ fn the_sweep_stays_scoped_across_runs() {
 fn a_package_documents_itself_by_default() {
     let tmp = tempfile::tempdir().expect("a temporary directory");
     let root = tmp.path();
-    write(&root.join("khora.toml"), "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n");
+    write(&root.join("khora.toml"), &pinned("[package]\nname = \"probe\"\nversion = \"0.1.0\"\n"));
     write(&root.join("src").join("main.kh"), "module probe::main;\n//! A probe.\npub fn f() -> Int { 1 }\n");
 
     let out = Command::new(khora())
@@ -286,4 +286,19 @@ fn nothing_to_document_is_a_refusal_that_says_what_to_do() {
     let said = String::from_utf8_lossy(&out.stderr);
     assert!(said.contains("no `khora.toml`"), "it says why: {said}");
     assert!(said.contains("khora doc src"), "and what to type: {said}");
+}
+
+/// A manifest with the `[toolchain]` table every project now needs.
+///
+/// **A pin is required, and these fixtures live in the system temporary
+/// directory** -- unlike the suites under `CARGO_TARGET_TMPDIR`, which sit
+/// inside this repository and inherit its pin by the same upward walk a real
+/// project uses. There is nothing above these, so they carry their own.
+///
+/// It names the version under test. That is the binary these tests are about to
+/// run, so the pin resolves to "the one already running" and no handover
+/// happens -- which is what keeps this a fixture detail rather than a thing the
+/// tests have to think about.
+fn pinned(manifest: &str) -> String {
+    format!("{manifest}\n[toolchain]\nversion = \"{}\"\n", khora_toolchain::RUNNING)
 }

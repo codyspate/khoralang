@@ -26,7 +26,7 @@ fn member(root: &Path, name: &str, source: &str) {
     std::fs::create_dir_all(directory.join("src")).expect("a member directory");
     std::fs::write(
         directory.join("khora.toml"),
-        format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2026\"\n"),
+        format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n"),
     )
     .expect("writing a member manifest");
     std::fs::write(directory.join("src").join("lib.kh"), source)
@@ -150,7 +150,7 @@ fn member_needing(root: &Path, name: &str, needs: &str) {
     std::fs::write(
         directory.join("khora.toml"),
         format!(
-            "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n\
+            "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n\n\
              [dependencies]\n{needs} = {{ path = \"../{needs}\" }}\n"
         ),
     )

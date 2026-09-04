@@ -142,25 +142,131 @@ pub fn installed() -> Result<Vec<Toolchain>> {
     Ok(out)
 }
 
-/// The version a project asks for, if it asks.
+/// What a directory's manifests say about which Khora to run.
 ///
-/// Walks up from `start` to the nearest `khora.toml`, the same way everything
-/// else finds a manifest. A manifest that does not parse contributes no pin
-/// rather than failing: `khora check` on the manifest is the command whose job
-/// it is to complain about the manifest, and refusing to start the compiler at
-/// all would mean the error could never be shown.
-pub fn pinned_version(start: &Path) -> Option<String> {
+/// **"No pin" and "no answer" are different**, and telling them apart is the
+/// whole reason this is not just an `Option`. A pin is required, so a project
+/// without one has to be stopped -- but a manifest that does not parse has not
+/// said it has no pin, it has said nothing at all, and reporting *that* as a
+/// missing `[toolchain]` tells somebody to add a table they are looking at.
+/// It was how `[toolchain]` with a typo in the version came back as "this
+/// project does not say which Khora builds it".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pin {
+    /// A manifest named a version, or a channel.
+    Found(String),
+    /// Every manifest up the tree parsed, and none of them pins anything.
+    ///
+    /// The path is the nearest one, which is where the pin should go.
+    Missing(PathBuf),
+    /// A manifest could not be read, so it has not answered. Carries the
+    /// rendered error, which already names the file, because **nothing else
+    /// reports this one**.
+    ///
+    /// The obvious thing was to stay quiet and leave it to the command that
+    /// checks manifests. There is no such command: `khora check khora.toml`
+    /// reads it as Khora source and says `expected a declaration` at
+    /// `[package]`. So a `[toolchain]` with no `version` in it -- a project
+    /// with no working pin, now that a pin is required -- produced no
+    /// diagnostic from any command at all.
+    Unreadable(String),
+    /// No manifest anywhere above. Not a Khora project, and entitled to no
+    /// opinion: `khora --version` in an empty directory has to work.
+    NoProject,
+}
+
+/// Walks up from `start` looking for a pin.
+///
+/// **Does not stop at the first manifest it finds.** A workspace member has its
+/// own manifest and almost never its own pin -- two members built together
+/// under different compilers is not a thing anybody means -- so stopping there
+/// found the member's, saw no `[toolchain]`, and reported that the project pins
+/// nothing. The pin belongs to the workspace, and the workspace is further up.
+pub fn pin_status(start: &Path) -> Pin {
     let mut here: Option<&Path> =
         Some(if start.is_dir() { start } else { start.parent().unwrap_or(Path::new(".")) });
+    let mut nearest = None;
     while let Some(dir) = here {
         let candidate = dir.join("khora.toml");
         if candidate.is_file() {
-            let parsed = khora_manifest::Manifest::load(&candidate).ok()?;
-            return parsed.manifest.toolchain.and_then(|t| t.version);
+            let parsed = match khora_manifest::Manifest::load(&candidate) {
+                Ok(parsed) => parsed,
+                Err(why) => return Pin::Unreadable(why.to_string()),
+            };
+            if let Some(toolchain) = parsed.manifest.toolchain {
+                return Pin::Found(toolchain.version);
+            }
+            nearest.get_or_insert(candidate);
         }
         here = dir.parent();
     }
-    None
+    match nearest {
+        Some(path) => Pin::Missing(path),
+        None => Pin::NoProject,
+    }
+}
+
+/// The version a project asks for, if it asks.
+///
+/// [`pin_status`] with the reasons for `None` collapsed, for the callers that
+/// only need the version.
+pub fn pinned_version(start: &Path) -> Option<String> {
+    match pin_status(start) {
+        Pin::Found(version) => Some(version),
+        _ => None,
+    }
+}
+
+/// A pin that names "the newest one" rather than a version.
+///
+/// **Resolved against installed toolchains, never over the network.** Asking
+/// GitHub which release is newest would put an HTTP request in front of every
+/// `khora` invocation -- including the ones an editor makes while somebody
+/// types -- so a channel here means the newest toolchain *on this machine*.
+/// `khora update` is what makes a new one available; a channel decides which
+/// of the ones already present to run.
+///
+/// The cost is that a channel is not reproducible, and that is the point of it:
+/// the project that most wants to build against whatever compiler was
+/// installed this morning is the one developing the compiler. A project that
+/// needs the same answer twice writes a version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Channel {
+    /// `latest`: the newest release, candidates excluded.
+    Stable,
+    /// `latest.rc`: the newest of anything, candidates included.
+    Any,
+}
+
+impl Channel {
+    /// The channel `pin` names, if it names one.
+    pub fn of(pin: &str) -> Option<Channel> {
+        match pin {
+            "latest" => Some(Channel::Stable),
+            "latest.rc" => Some(Channel::Any),
+            _ => None,
+        }
+    }
+
+    /// The newest installed version this channel accepts.
+    ///
+    /// `running` is a candidate alongside `have`, so that a binary somebody
+    /// built, or a machine before its first `khora toolchain install`, still
+    /// resolves to something. A version that does not parse is skipped rather
+    /// than ordered arbitrarily -- a directory under `toolchains` is named by
+    /// whoever created it, and one named `scratch` is not a release.
+    pub fn newest(self, running: &str, have: &[Toolchain]) -> Option<String> {
+        have.iter()
+            .map(|t| t.version.as_str())
+            .chain(std::iter::once(running))
+            .filter_map(|text| khora_manifest::Version::parse(text).ok().map(|v| (v, text)))
+            .filter(|(version, _)| match self {
+                Channel::Any => true,
+                Channel::Stable => version.pre.is_none(),
+            })
+            .max_by(|(a, _), (b, _)| a.cmp(b))
+            .map(|(_, text)| text.to_string())
+    }
 }
 
 /// What to do about a pin.
@@ -186,6 +292,26 @@ pub enum Decision {
 /// version, or a mislinked toolchain becomes an infinite chain of `exec`s.
 pub fn decide(pin: Option<&str>, running: &str, active: Option<&str>, have: &[Toolchain]) -> Decision {
     let Some(wanted) = pin else { return Decision::Proceed };
+    // **A channel is resolved here, against what is installed.** `latest` is
+    // not a version anybody can hand over to, and it must become one before
+    // any of the comparisons below mean anything. The candidates are the
+    // installed toolchains plus the binary already running, so a machine with
+    // an empty `toolchains` directory still resolves rather than reporting
+    // that `latest` is not installed.
+    let resolved;
+    let wanted = match Channel::of(wanted) {
+        None => wanted,
+        Some(channel) => match channel.newest(running, have) {
+            Some(version) => {
+                resolved = version;
+                resolved.as_str()
+            }
+            // Only reachable when the running version does not parse, since it
+            // is always a candidate. Proceeding is the right answer: there is
+            // nothing else to run.
+            None => return Decision::Proceed,
+        },
+    };
     if wanted == running {
         return Decision::Proceed;
     }

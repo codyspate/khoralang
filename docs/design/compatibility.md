@@ -173,6 +173,14 @@ path, because the first widely-used package that does not move pins everyone.
 
 Pre-1.0 there are no editions, because there is nothing to migrate *from*.
 
+**There is no `edition` key either, as of 0.2.0.** There was one, holding
+`"2026"`, reserved against the day this section becomes real. Reserving it cost
+more than it saved: it named a year rather than a compiler, so people read it as
+the answer to *which Khora builds this?* and wrote it expecting the effect that
+`[toolchain] version` actually has. Two fields for one question, and the one
+nothing enforced was the one that was going to be wrong. When editions arrive
+they get a key then, named for what they are.
+
 ## Before 1.0
 
 The promise is procedural rather than substantive.

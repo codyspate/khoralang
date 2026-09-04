@@ -232,7 +232,6 @@ fn a_path_dependency_comes_from_the_manifest() {
         "[package]
 name = \"app\"
 version = \"0.1.0\"
-edition = \"2026\"
 
 [dependencies]
 \"acme.greet\" = { path = \"../greet\" }
@@ -297,7 +296,6 @@ fn a_version_dependency_says_what_is_missing() {
         "[package]
 name = \"app\"
 version = \"0.1.0\"
-edition = \"2026\"
 
 [dependencies]
 \"acme.json\" = { version = \"1.0.0\" }
@@ -385,7 +383,7 @@ fn check_package(name: &str, files: &[(&str, &str)]) -> (bool, String) {
     (out.status.success(), text)
 }
 
-const MANIFEST: &str = "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2026\"\n";
+const MANIFEST: &str = "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n";
 
 /// **Two files may not declare the same module, and `check` says so.**
 ///

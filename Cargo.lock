@@ -674,6 +674,7 @@ dependencies = [
  "khora-lint",
  "khora-manifest",
  "khora-syntax",
+ "khora-toolchain",
  "khora-types",
  "lsp-types",
  "rowan",

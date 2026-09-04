@@ -20,7 +20,7 @@ fn package(directory: &Path, name: &str) {
     std::fs::create_dir_all(directory).expect("a package directory");
     std::fs::write(
         directory.join("khora.toml"),
-        format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2026\"\n"),
+        format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n"),
     )
     .expect("writing a package manifest");
 }

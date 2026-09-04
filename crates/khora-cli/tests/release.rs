@@ -30,7 +30,8 @@ fn fixture(name: &str) -> PathBuf {
     std::fs::write(
         root.join("khora.toml"),
         "# A comment that was written to be read.\n[workspace]\nmembers = [\"packages/*\"]\n\n\
-         [workspace.package]\nversion = \"0.4.0\"\nedition = \"2026\"\n",
+         [workspace.package]\nversion = \"0.4.0\"\nauthors = [\"A Name <a@example.com>\"]\n\n\
+         [toolchain]\nversion = \"0.2.0\"\n",
     )
     .expect("the root manifest");
     for member in ["alpha", "beta"] {
@@ -117,7 +118,14 @@ fn a_level_writes_the_version_and_nothing_else() {
         text.contains("# A comment that was written to be read."),
         "re-serializing would have eaten the comments: {text}"
     );
-    assert!(text.contains("edition = \"2026\""), "{text}");
+    assert!(
+        text.contains("authors = [\"A Name <a@example.com>\"]"),
+        "only the version should have moved: {text}"
+    );
+    assert!(
+        text.contains("[toolchain]\nversion = \"0.2.0\""),
+        "the pin is not the package version and must not move with it: {text}"
+    );
 }
 
 #[test]

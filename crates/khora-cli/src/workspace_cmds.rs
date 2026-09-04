@@ -9,6 +9,39 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use khora_manifest::Manifest;
 
+/// Whether a manifest above `directory` already says which Khora to use.
+///
+/// `khora_toolchain::pinned_version` walks up from a path to the nearest pin,
+/// which is the same walk every command does, so asking it is asking the
+/// question the way it will actually be answered. `directory` does not exist as
+/// a package yet when this is called for the first time -- it has an empty
+/// `khora.toml` and nothing else -- and an empty manifest contributes no pin, so
+/// the walk passes straight over it to the workspace above.
+///
+/// **Made absolute first, because the walk cannot climb out of a relative
+/// path.** `khora new packages/member` hands this `packages/member`, whose
+/// ancestors are `packages` and then the empty path, which has no parent -- so
+/// the walk ended two directories below the workspace root and reported that
+/// nothing above pinned anything.
+///
+/// **And started at the parent, because `directory` already holds a manifest
+/// and it is a lie.** The scaffold writes an empty `khora.toml` first, so that
+/// `packages/*` matches the directory and the membership question below has
+/// something to answer. Inside a workspace that empty file does not load -- the
+/// root lists it as a member and it declares no package -- and a manifest that
+/// does not load stops the walk, because a manifest that cannot be read has not
+/// said it has no pin. So the walk stopped at the placeholder, every one of
+/// these scaffolds decided nothing above it pinned anything, and every member
+/// got its own copy of the root's pin. Above means above.
+fn pinned_above(directory: &Path) -> bool {
+    let absolute = match std::env::current_dir() {
+        Ok(cwd) => cwd.join(directory),
+        Err(_) => directory.to_path_buf(),
+    };
+    let Some(above) = absolute.parent() else { return false };
+    khora_toolchain::pinned_version(above).is_some()
+}
+
 /// Scaffolds a package at `directory`.
 ///
 /// **The manifest it writes depends on where it lands.** Inside a workspace
@@ -45,18 +78,25 @@ pub fn new(directory: &Path, library: bool) -> Result<()> {
     let shared = shared_fields(directory);
     let mut manifest = format!("[package]\nname = \"{name}\"\n");
     manifest.push_str(if shared.version { "version.workspace = true\n" } else { "version = \"0.1.0\"\n" });
-    if shared.edition {
-        manifest.push_str("edition.workspace = true\n");
-    } else {
-        // Written out when there is no workspace to inherit it from, rather
-        // than left off. An absent `edition` is a package that does not say
-        // which language it is in, and the page a newcomer follows shows one.
-        manifest.push_str(&format!("edition = \"{}\"\n", khora_manifest::newest_edition()));
-    }
     if library {
         manifest.push_str(
             "# Offered for other people to depend on. Absent means no.\npublish = true\n",
         );
+    }
+    // **Which Khora builds this, written into the first manifest anybody
+    // sees.** A pin is required, and the version to write is the one doing the
+    // writing: a scaffold that guessed would be wrong the first time somebody
+    // ran an older `khora new`, and one that wrote a channel would hand a
+    // newcomer a project that builds differently on their colleague's machine.
+    //
+    // Not written when a manifest above already pins one. The pin is found by
+    // walking up, so a member that repeats it has said the same thing twice and
+    // created somewhere for the two to disagree.
+    if !pinned_above(directory) {
+        manifest.push_str(&format!(
+            "\n# Which Khora builds this project. Required.\n[toolchain]\nversion = \"{}\"\n",
+            khora_toolchain::RUNNING,
+        ));
     }
     if shared.fmt {
         manifest.push_str("\n[fmt]\nworkspace = true\n");
@@ -134,13 +174,12 @@ pub fn new(directory: &Path, library: bool) -> Result<()> {
 /// Which fields the enclosing workspace root offers to share.
 struct Shared {
     version: bool,
-    edition: bool,
     fmt: bool,
     lints: bool,
 }
 
 fn shared_fields(directory: &Path) -> Shared {
-    let none = Shared { version: false, edition: false, fmt: false, lints: false };
+    let none = Shared { version: false, fmt: false, lints: false };
     let Some(root) = enclosing_root(directory) else { return none };
     let Ok(parsed) = Manifest::load(&root.join("khora.toml")) else { return none };
     let Some(table) = parsed.manifest.workspace else { return none };
@@ -153,7 +192,7 @@ fn shared_fields(directory: &Path) -> Shared {
     let package = table.package.unwrap_or_default();
     Shared {
         version: package.version.is_some(),
-        edition: package.edition.is_some(),
+
         fmt: table.fmt.is_some(),
         lints: !table.lints.is_empty(),
     }

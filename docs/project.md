@@ -203,7 +203,11 @@ The manifest features unified toolchain configurations, Deno-style OS capability
 name = "risk_analyzer"
 version = "0.1.0"
 authors = ["Engineering Team <dev@khora.internal>"]
-edition = "2026"
+
+# Which Khora builds this project. Required. `latest` and `latest.rc` name the
+# newest toolchain installed on this machine instead, and are not reproducible.
+[toolchain]
+version = "0.2.0"
 
 # Which capabilities this program may hold — checked when it is compiled.
 # Which host or path each may be used with — checked where the access happens.
@@ -263,7 +267,12 @@ exclude = ["examples/scratch"]
 # What a member takes with `field.workspace = true`.
 [workspace.package]
 version = "0.1.0"
-edition = "2026"
+
+# The pin belongs to the workspace rather than to each member: the search walks
+# up to the nearest manifest that has one, and two members of one workspace
+# built under different compilers is not a thing anybody means.
+[toolchain]
+version = "0.2.0"
 
 [workspace.fmt]
 indent-style = "space"
@@ -334,7 +343,6 @@ A member takes a shared value by asking for it:
 [package]
 name = "postgres"
 version.workspace = true
-edition.workspace = true
 publish = true          # not inherited: exactly one thing here is a library
 
 [fmt]

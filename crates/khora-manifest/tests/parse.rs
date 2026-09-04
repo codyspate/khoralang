@@ -8,7 +8,7 @@ use khora_manifest::{IndentStyle, LintLevel, Manifest, ManifestError, Parsed, Wa
 /// that forgets this crate fails here instead of silently diverging.
 ///
 /// **By path rather than `include_str!`**, because the example is a workspace
-/// member: it takes its version, its edition and its `[fmt]` table from the
+/// member: it takes its version and its `[fmt]` table from the
 /// root, and text alone cannot find a root. That is the whole of what
 /// `Manifest::load` is for. Roadmap 14.14.
 const EXAMPLE: &str =
@@ -47,11 +47,10 @@ fn the_reference_manifest_parses_with_no_warnings() {
     assert_eq!(manifest.package().expect("a package").name, "risk_analyzer");
     assert_eq!(manifest.package().expect("a package").version, "0.1.0");
     assert_eq!(manifest.package().expect("a package").authors, ["Engineering Team <dev@khora.internal>"]);
-    assert_eq!(manifest.package().expect("a package").edition.as_deref(), Some("2026"));
 
     assert_eq!(
         manifest.permissions.network.as_deref(),
-        Some(["0.0.0.0:8080".to_string(), "*.internal:5432".to_string()].as_slice()),
+        Some(["0.0.0.0:47821".to_string(), "*.internal:5432".to_string()].as_slice()),
         "grants survive verbatim: the checker needs the text the author wrote in order \
          to point at the offending one"
     );
@@ -102,7 +101,6 @@ fn every_key_the_schema_documents_is_recognized() {
         name = "p"
         version = "0.1.0"
         authors = ["A <a@example.com>"]
-        edition = "2026"
         publish = true
 
         [permissions]
@@ -146,7 +144,6 @@ fn a_package_table_is_enough() {
     let manifest = parsed.manifest;
     assert_eq!(manifest.package().expect("a package").name, "p");
     assert!(manifest.package().expect("a package").authors.is_empty(), "`authors` should default to empty");
-    assert_eq!(manifest.package().expect("a package").edition, None);
     assert_eq!(manifest.permissions, Default::default(), "no grants means no capabilities");
     assert_eq!(manifest.fmt, None, "an absent `[fmt]` must stay distinguishable from an empty one");
     assert_eq!(manifest.build, None);
@@ -503,7 +500,6 @@ fn a_quoted_dotted_dependency_is_one_key() {
         "[package]
 name = \"p\"
 version = \"0.1.0\"
-edition = \"2026\"
 
 [dependencies]
 \"acme.json\" = { version = \"1.0.0\" }
@@ -527,7 +523,6 @@ fn a_dependency_with_no_source_is_not_located() {
         "[package]
 name = \"p\"
 version = \"0.1.0\"
-edition = \"2026\"
 
 [dependencies]
 \"acme.json\" = {}
@@ -551,7 +546,6 @@ fn every_supported_key_is_recognized_by_the_audit() {
 name = "a"
 version = "0.1.0"
 authors = ["Someone <s@example.com>"]
-edition = "2026"
 
 [toolchain]
 version = "0.1.0"
@@ -597,13 +591,30 @@ depends_on = ["test"]
 
 /// The audit still has to catch a genuine typo, or the test above could be
 /// satisfied by an audit that warns about nothing.
+///
+/// **The typo used to be `toolchain.verison`, and that is now an error rather
+/// than a warning** -- a misspelled `version` leaves `[toolchain]` without the
+/// field it requires, so the manifest does not parse at all and never reaches
+/// the audit. Which is the better outcome for that key, and no use as a test of
+/// the audit. `package.authros` is a key nothing requires, so it still gets
+/// there.
 #[test]
 fn a_misspelled_key_is_still_caught() {
-    let text = "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\n\
-                [toolchain]\nverison = \"0.1.0\"\n";
+    let text = "[package]\nname = \"a\"\nversion = \"0.1.0\"\nauthros = []\n";
     let parsed = Manifest::parse(text).expect("it parses");
     assert_eq!(parsed.warnings.len(), 1, "{:?}", parsed.warnings);
-    assert!(parsed.warnings[0].to_string().contains("toolchain.verison"), "{:?}", parsed.warnings);
+    assert!(parsed.warnings[0].to_string().contains("package.authros"), "{:?}", parsed.warnings);
+}
+
+/// **A misspelled `version` under `[toolchain]` is an error**, and worth its
+/// own test now that it is. The table has one required field; misspelling it
+/// means the table does not have it.
+#[test]
+fn a_misspelled_pin_is_an_error_rather_than_a_warning() {
+    let text = "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\n\
+                [toolchain]\nverison = \"0.1.0\"\n";
+    let why = parse_error(text).to_string();
+    assert!(why.contains("version"), "{why}");
 }
 
 #[test]
@@ -611,7 +622,7 @@ fn the_toolchain_version_is_read() {
     let text = "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\n\
                 [toolchain]\nversion = \"0.2.0\"\n";
     let parsed = Manifest::parse(text).expect("a well-formed manifest");
-    assert_eq!(parsed.manifest.toolchain.and_then(|t| t.version).as_deref(), Some("0.2.0"));
+    assert_eq!(parsed.manifest.toolchain.expect("a pin").version, "0.2.0");
 }
 
 /// `publish` has three states and only one of them is yes, which is the point:

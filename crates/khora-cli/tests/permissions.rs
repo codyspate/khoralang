@@ -41,7 +41,7 @@ fn reaching_package(at: &Path) -> String {
     // fixture is standing in for a library somebody published.
     write(
         &at.join("khora.toml"),
-        "[package]\nname = \"reaching\"\nversion = \"0.1.0\"\npublish = true\n",
+        &pinned("[package]\nname = \"reaching\"\nversion = \"0.1.0\"\npublish = true\n"),
     );
     write(
         &at.join("src").join("reaching.kh"),
@@ -67,11 +67,11 @@ fn check_with(permissions: &str) -> (bool, String) {
     let app = tmp.path().join("app");
     write(
         &app.join("khora.toml"),
-        &format!(
+        &pinned(&format!(
             "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
              {permissions}\n\
              [dependencies]\nreaching = {{ git = \"{url}\", rev = \"main\" }}\n"
-        ),
+        )),
     );
     write(&app.join("src").join("main.kh"), "module app::main;\n\npub fn main() -> () {}\n");
 
@@ -156,8 +156,8 @@ fn granted_project(name: &str) -> PathBuf {
     std::fs::create_dir_all(root.join("data")).expect("a data directory");
     std::fs::write(
         root.join("khora.toml"),
-        "[package]\nname = \"granted\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n\
-         [permissions.fs]\nread = [\"data/**\"]\nwrite = [\"data/**\"]\n",
+        pinned("[package]\nname = \"granted\"\nversion = \"0.1.0\"\n\n\
+         [permissions.fs]\nread = [\"data/**\"]\nwrite = [\"data/**\"]\n"),
     )
     .expect("a manifest");
     std::fs::write(
@@ -235,7 +235,7 @@ fn no_permissions_table_grants_everything() {
     let root = granted_project("perm_absent");
     std::fs::write(
         root.join("khora.toml"),
-        "[package]\nname = \"granted\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+        pinned("[package]\nname = \"granted\"\nversion = \"0.1.0\"\n"),
     )
     .expect("a manifest without permissions");
     std::fs::create_dir_all(root.join("secrets")).expect("a secrets directory");
@@ -263,7 +263,7 @@ fn narrowed_project(name: &str, table: &str) -> PathBuf {
     std::fs::create_dir_all(root.join("src")).expect("a src directory");
     std::fs::write(
         root.join("khora.toml"),
-        format!("[package]\nname = \"narrowed\"\nversion = \"0.1.0\"\nedition = \"2026\"\n{table}"),
+        pinned(&format!("[package]\nname = \"narrowed\"\nversion = \"0.1.0\"\n{table}")),
     )
     .expect("a manifest");
     std::fs::write(
@@ -365,7 +365,7 @@ fn build_alone(permissions: &str) -> (bool, String) {
     let app = tmp.path().join("app");
     write(
         &app.join("khora.toml"),
-        &format!("[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n{permissions}"),
+        &pinned(&format!("[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n{permissions}")),
     );
     write(
         &app.join("src").join("main.kh"),
@@ -421,4 +421,19 @@ fn a_package_that_lists_itself_may_declare_extern() {
 fn a_package_with_no_permissions_table_may_still_declare_extern() {
     let (ok, output) = build_alone("");
     assert!(ok, "no table should grant everything:\n{output}");
+}
+
+/// A manifest with the `[toolchain]` table every project now needs.
+///
+/// **A pin is required, and these fixtures live in the system temporary
+/// directory** -- unlike the suites under `CARGO_TARGET_TMPDIR`, which sit
+/// inside this repository and inherit its pin by the same upward walk a real
+/// project uses. There is nothing above these, so they carry their own.
+///
+/// It names the version under test. That is the binary these tests are about to
+/// run, so the pin resolves to "the one already running" and no handover
+/// happens -- which is what keeps this a fixture detail rather than a thing the
+/// tests have to think about.
+fn pinned(manifest: &str) -> String {
+    format!("{manifest}\n[toolchain]\nversion = \"{}\"\n", khora_toolchain::RUNNING)
 }

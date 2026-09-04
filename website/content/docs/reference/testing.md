@@ -1,7 +1,7 @@
 ---
 title: Testing and benchmarks
 sidebar:
-  order: 19
+  order: 20
 ---
 
 `test` and `bench` are declarations, not a naming convention, and they live

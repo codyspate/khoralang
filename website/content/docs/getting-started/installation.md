@@ -103,14 +103,18 @@ Updating does not remove the version it replaces, so rolling back is a toolchain
 
 ## Pin a project to a compiler version
 
-A project can select its compiler in `khora.toml`:
+Every project says which compiler builds it, in `khora.toml`:
 
 ```toml
 [toolchain]
 version = "0.2.0"
 ```
 
+**The field is required.** A project without it stops with a message carrying the two lines to add — the version, the quoting and the table name are not things anybody should have to guess.
+
 A project pin takes precedence over your machine default. If the pinned version is not installed, Khora stops rather than silently building the project with a different compiler.
+
+`latest` and `latest.rc` are accepted in place of a version, and mean the newest toolchain installed on this machine, release candidates excluded or included. They resolve whenever they are read, so they are not reproducible — write a version for a project you want built the same way twice.
 
 That makes the compiler version part of the reproducible project configuration:
 

@@ -13,7 +13,7 @@ fn project(at: &Path, lints: &str) {
     std::fs::create_dir_all(at.join("src")).expect("a src directory");
     std::fs::write(
         at.join("khora.toml"),
-        format!("[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\n{lints}"),
+        pinned(&format!("[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\n{lints}")),
     )
     .expect("writing the manifest");
     std::fs::write(
@@ -121,4 +121,19 @@ fn a_file_outside_any_package_still_checks() {
     assert!(out.status.success(), "{text}");
     assert!(text.contains("[dangling-expression]"), "{text}");
     assert!(!text.contains("khora.toml"), "no complaint about a manifest nobody wrote:\n{text}");
+}
+
+/// A manifest with the `[toolchain]` table every project now needs.
+///
+/// **A pin is required, and these fixtures live in the system temporary
+/// directory** -- unlike the suites under `CARGO_TARGET_TMPDIR`, which sit
+/// inside this repository and inherit its pin by the same upward walk a real
+/// project uses. There is nothing above these, so they carry their own.
+///
+/// It names the version under test. That is the binary these tests are about to
+/// run, so the pin resolves to "the one already running" and no handover
+/// happens -- which is what keeps this a fixture detail rather than a thing the
+/// tests have to think about.
+fn pinned(manifest: &str) -> String {
+    format!("{manifest}\n[toolchain]\nversion = \"{}\"\n", khora_toolchain::RUNNING)
 }

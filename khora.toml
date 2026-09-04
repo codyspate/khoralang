@@ -15,6 +15,23 @@
 # `khora.toml` at all, which is the same reason `khora check std` is still its
 # own line in the baseline.
 
+# Which Khora builds this project. Required of every project, including this
+# one.
+#
+# **It must equal the version in `Cargo.toml`, and `scripts/check-pin.sh` is
+# what keeps it there.** A locally built compiler reports `Cargo.toml`'s
+# version as its own, and a pin is satisfied by an exact match -- so while these
+# two agree, every `khora` in this tree runs the one `cargo build` just made.
+# When they disagree it hands over to an installed release instead, and the
+# symptom is `std` errors citing paths under `~/.khora`.
+#
+# Not `latest` or `latest.rc`, which are the other two things this field takes.
+# Those mean "the newest toolchain installed on this machine", and the newest
+# toolchain on the machine of somebody developing the compiler is exactly the
+# thing that should not be building the compiler.
+[toolchain]
+version = "0.2.0"
+
 [workspace]
 members = ["examples/*", "packages/*", "bench/*"]
 
@@ -26,7 +43,6 @@ members = ["examples/*", "packages/*", "bench/*"]
 # know what it *is* is to read two files and remember which wins.
 [workspace.package]
 version = "0.1.0"
-edition = "2026"
 
 # The formatter, in one place.
 #

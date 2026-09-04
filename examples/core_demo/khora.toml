@@ -1,4 +1,3 @@
 [package]
 name = "core_demo"
 version.workspace = true
-edition.workspace = true

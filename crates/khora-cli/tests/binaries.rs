@@ -35,9 +35,17 @@ fn world(programs: &[&str]) -> World {
     let home = tmp.path().join("home");
     let project = tmp.path().join("project");
     std::fs::create_dir_all(project.join("src").join("bin")).expect("a src/bin directory");
+    // **The pin, because a project without one is refused.** These projects
+    // live in the system temporary directory rather than under `target/`, so
+    // there is no manifest above them to inherit one from. It names the version
+    // under test, which is the one about to run.
     std::fs::write(
         project.join("khora.toml"),
-        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+        format!(
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+             [toolchain]\nversion = \"{}\"\n",
+            khora_toolchain::RUNNING,
+        ),
     )
     .expect("a manifest");
     std::fs::write(

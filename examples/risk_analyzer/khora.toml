@@ -2,7 +2,6 @@
 name = "risk_analyzer"
 version.workspace = true
 authors = ["Engineering Team <dev@khora.internal>"]
-edition.workspace = true
 
 # What this program may reach outside itself.
 #
@@ -13,7 +12,7 @@ edition.workspace = true
 #
 # A missing table grants everything: nothing here is a tax on getting started.
 [permissions]
-network = ["0.0.0.0:8080", "*.internal:5432"]
+network = ["0.0.0.0:47821", "*.internal:5432"]
 env = ["DB_*"]
 
 [permissions.fs]

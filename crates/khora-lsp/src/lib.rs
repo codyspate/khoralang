@@ -144,6 +144,20 @@ pub struct Server {
     /// command line is the worst possible kind: every save fights the last
     /// build, and the diff blames whoever touched the file.
     fmt: khora_fmt::Options,
+    /// Something to say to the reader once, as soon as there is a client to
+    /// say it to.
+    ///
+    /// **The project's toolchain pin, when there isn't one.** `[toolchain]` is
+    /// required, and every other command refuses without it -- but the server
+    /// is the one `khora` an editor starts on the reader's behalf, and a
+    /// process that exits during startup reaches them as "the language server
+    /// crashed", with the reason in a log they have no reason to open. So the
+    /// server starts, and says so where they are already looking.
+    ///
+    /// Held rather than sent because `initialize` returns one result and the
+    /// notification has to follow it: a server that talks before the client has
+    /// been answered is talking to something that is not listening yet.
+    notice: Option<String>,
     /// Set by `exit`, and by `shutdown` followed by a closed stream.
     pub finished: bool,
     /// Apply an edit without reporting on it.
@@ -162,6 +176,7 @@ impl Default for Server {
             encoding: Encoding::default(),
             levels: HashMap::new(),
             fmt: khora_fmt::Options::default(),
+            notice: None,
             finished: false,
             quiet: false,
         }
@@ -233,7 +248,20 @@ impl Server {
         let params = message.get("params").cloned().unwrap_or(Value::Null);
 
         match (method, id) {
-            ("initialize", Some(id)) => vec![ok(id, self.initialize(&params))],
+            ("initialize", Some(id)) => {
+                let reply = ok(id, self.initialize(&params));
+                let mut out = vec![reply];
+                if let Some(message) = self.notice.take() {
+                    // `2` is Warning in the protocol's `MessageType`. Not an
+                    // error: the file in front of them still checks, and every
+                    // diagnostic in it is still right.
+                    out.push(notification(
+                        "window/showMessage",
+                        json!({ "type": 2, "message": message }),
+                    ));
+                }
+                out
+            }
             ("shutdown", Some(id)) => vec![ok(id, Value::Null)],
             ("textDocument/hover", Some(id)) => {
                 vec![ok(id, self.hover(&params).map_or(Value::Null, to_value))]
@@ -357,6 +385,7 @@ impl Server {
             .unwrap_or(Encoding::Utf16);
 
         if let Some(root) = workspace_root(params) {
+            self.notice = pin_notice(&root);
             self.load(&root);
         }
 
@@ -1860,4 +1889,29 @@ fn error(id: Value, code: i32, message: &str) -> Value {
 
 fn notification(method: &str, params: Value) -> Value {
     json!({ "jsonrpc": "2.0", "method": method, "params": params })
+}
+
+/// What to tell the reader about this project's toolchain pin, if anything.
+///
+/// **The server is exempt from the requirement and not from the question.**
+/// `khora check` in a terminal refuses an unpinned project outright, because
+/// somebody is reading its output; an editor's server that did the same would
+/// take away every diagnostic in the file they have open in exchange for one
+/// they cannot see. So it starts, and puts the same fact in the notification
+/// area.
+///
+/// A project that pins something is the ordinary case and says nothing.
+fn pin_notice(root: &Path) -> Option<String> {
+    match khora_toolchain::pin_status(root) {
+        khora_toolchain::Pin::Found(_) | khora_toolchain::Pin::NoProject => None,
+        khora_toolchain::Pin::Missing(manifest) => Some(format!(
+            "{} does not say which Khora builds this project. Add a `[toolchain]` table \
+             with a `version` to it -- every `khora` command outside this editor asks for \
+             one.",
+            manifest.display(),
+        )),
+        khora_toolchain::Pin::Unreadable(why) => {
+            Some(format!("This project's manifest could not be read: {why}"))
+        }
+    }
 }

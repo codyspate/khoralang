@@ -1,7 +1,6 @@
 [package]
 name = "khq"
 version.workspace = true
-edition.workspace = true
 
 # What this program may reach outside itself.
 #
