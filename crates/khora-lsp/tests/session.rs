@@ -1924,7 +1924,6 @@ fn assists_for(text: &str, line: u32, from: u32, to: u32) -> Vec<(String, String
         .collect()
 }
 
-/// The one assist's edits applied to `text`, and its title.
 /// Applies the one assist whose title contains `want`, and answers the file
 /// afterwards.
 ///
