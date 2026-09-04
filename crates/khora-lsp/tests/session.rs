@@ -2020,7 +2020,7 @@ fn go() -> Int {\n\
 /// saying it.
 #[test]
 fn a_binding_with_no_annotation_is_offered_its_inferred_type() {
-    let (title, after) = assist_applied(INFERRED, 7, 6, 6);
+    let (title, after) = assist_named(INFERRED, 7, 6, 6, "inferred type");
     assert!(title.contains("`Point`"), "{title}");
     assert!(after.contains("let p: Point = origin();"), "{after}");
 }
@@ -2031,7 +2031,12 @@ fn a_binding_with_no_annotation_is_offered_its_inferred_type() {
 fn a_binding_that_says_its_type_is_offered_no_annotation() {
     let text = INFERRED.replace("let p =", "let p: Point =");
     let offered = assists_for(&text, 7, 6, 6);
-    assert!(offered.is_empty(), "{offered:?}");
+    // Inlining is offered here and is a different question: what this pins is
+    // that an annotation somebody wrote is not offered a second one.
+    assert!(
+        !offered.iter().any(|(title, _)| title.contains("inferred type")),
+        "an annotated binding has nothing to write: {offered:?}"
+    );
 }
 
 /// **A selected expression, lifted into a `let` above its statement**, with the
@@ -2115,6 +2120,235 @@ fn an_extracted_function_that_can_fail_says_so_and_is_called_with_a_mark() {
     assert!(said.is_empty(), "the extraction did not compile:
 {after}
 {said:?}");
+}
+
+// --- capabilities and failures ---------------------------------------------
+
+/// The head every effect-assist fixture shares.
+const RAISING: &str = concat!(
+    "module main;\n\n",
+    "import std::core::{Result, attempt, todo};\n\n",
+    "pub type Oops = | Bad;\n\n",
+    "fn risky() -> Int raises Oops { 1 }\n\n",
+);
+
+/// **A `!` is offered a `catch` with the arm that covers everything.**
+#[test]
+fn a_failing_call_is_offered_a_catch() {
+    let text = format!("{RAISING}fn go() -> Int raises Oops {{\n  risky()!\n}}\n");
+    let (title, after) = assist_named(&text, 9, 4, 4, "catch");
+    assert!(title.contains("catch"), "{title}");
+    assert!(after.contains("risky()! catch { failure => todo() }"), "{after}");
+}
+
+/// **And `attempt`, which is the other way out.** `!` sends the failure up;
+/// `attempt` turns it into a value to branch on here.
+#[test]
+fn a_failing_call_is_offered_attempt() {
+    let text = format!("{RAISING}fn go() -> Int raises Oops {{\n  risky()!\n}}\n");
+    let (_, after) = assist_named(&text, 9, 4, 4, "attempt");
+    assert!(after.contains("attempt(fn () => risky()!)"), "{after}");
+}
+
+/// **A call already inside `attempt` is not offered another**, which is the
+/// check that stops the assist stacking wrappers on each keystroke.
+#[test]
+fn a_call_already_attempted_is_not_offered_attempt_again() {
+    let text = format!(
+        "{RAISING}fn go() -> Result<Int, Oops> {{\n  attempt(fn () => risky()!)\n}}\n"
+    );
+    let offered = assists_for(&text, 9, 20, 20);
+    assert!(
+        !offered.iter().any(|(title, _)| title.contains("attempt")),
+        "it is already attempted: {offered:?}"
+    );
+}
+
+/// **The way back out of `attempt`.**
+#[test]
+fn an_attempt_can_become_a_raise() {
+    let text = format!(
+        "{RAISING}fn go() -> Result<Int, Oops> {{\n  attempt(fn () => risky()!)\n}}\n"
+    );
+    let (_, after) = assist_named(&text, 9, 3, 3, "Raise it");
+    assert!(after.contains("  risky()!"), "{after}");
+    assert!(!after.contains("attempt(fn"), "{after}");
+}
+
+/// **A postfix `with` becomes a block**, which is what somebody wants the
+/// moment there is more than one expression under it.
+#[test]
+fn a_postfix_with_can_become_a_block() {
+    let text = concat!(
+        "module main;\n\n",
+        "pub effect Log { record: (String) -> () }\n\n",
+        "fn quiet() -> Log { handler for Log { record: fn _m => () } }\n\n",
+        "fn note() -> () with { log: Log } { log.record(\"x\") }\n\n",
+        "fn go() -> () {\n",
+        "  note() with { log: quiet() }\n",
+        "}\n",
+    );
+    assert!(complaints(text).is_empty(), "the fixture must compile: {:?}", complaints(text));
+    let (_, after) = assist_named(text, 9, 10, 10, "as a block");
+    assert!(after.contains("with { log: quiet() } {"), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// **And a block holding one expression becomes postfix.**
+#[test]
+fn a_with_block_around_one_expression_can_become_postfix() {
+    let text = concat!(
+        "module main;\n\n",
+        "pub effect Log { record: (String) -> () }\n\n",
+        "fn quiet() -> Log { handler for Log { record: fn _m => () } }\n\n",
+        "fn note() -> () with { log: Log } { log.record(\"x\") }\n\n",
+        "fn go() -> () {\n",
+        "  with { log: quiet() } { note() }\n",
+        "}\n",
+    );
+    assert!(complaints(text).is_empty(), "the fixture must compile: {:?}", complaints(text));
+    let (_, after) = assist_named(text, 9, 3, 3, "after the expression");
+    assert!(after.contains("note() with { log: quiet() }"), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+// --- bindings --------------------------------------------------------------
+
+/// **A binding used once is replaced by what it held.**
+#[test]
+fn a_binding_used_once_can_be_inlined() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn go(a: Int, b: Int) -> Int {\n",
+        "  let sum = a + b;\n",
+        "  sum * 2\n",
+        "}\n",
+    );
+    let (title, after) = assist_named(text, 3, 6, 6, "Inline");
+    assert!(title.contains("Inline `sum`"), "{title}");
+    assert!(after.contains("  (a + b) * 2"), "the brackets matter: {after}");
+    assert!(!after.contains("let sum"), "the binding should be gone: {after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// **A binding used twice is not**, unless what it holds costs nothing to
+/// repeat. `count()` twice is two calls, and whether that is the same program
+/// depends on what `count` does.
+#[test]
+fn a_binding_used_twice_is_not_inlined_when_it_holds_work() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn count() -> Int { 1 }\n\n",
+        "fn go() -> Int {\n",
+        "  let n = count();\n",
+        "  n + n\n",
+        "}\n",
+    );
+    let offered = assists_for(text, 5, 6, 6);
+    assert!(
+        !offered.iter().any(|(title, _)| title.contains("Inline")),
+        "two uses would be two calls: {offered:?}"
+    );
+}
+
+/// A literal costs nothing to repeat, so two uses are fine.
+#[test]
+fn a_binding_holding_a_literal_is_inlined_however_often_it_is_used() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn go() -> Int {\n",
+        "  let n = 2;\n",
+        "  n + n\n",
+        "}\n",
+    );
+    let (_, after) = assist_named(text, 3, 6, 6, "Inline");
+    assert!(after.contains("  2 + 2"), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// **A `mut` binding is not inlined**, because a binding that is written to is
+/// not its initializer.
+#[test]
+fn a_mutable_binding_is_not_inlined() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn go() -> Int {\n",
+        "  let mut n = 1;\n",
+        "  n = n + 1;\n",
+        "  n\n",
+        "}\n",
+    );
+    let offered = assists_for(text, 3, 10, 10);
+    assert!(
+        !offered.iter().any(|(title, _)| title.contains("Inline")),
+        "a binding that is written to is not what it started as: {offered:?}"
+    );
+}
+
+/// **A type the checker would have inferred is offered for removal**, which is
+/// the way back from `Write the inferred type`.
+#[test]
+fn a_redundant_type_annotation_can_be_removed() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn go() -> Int {\n",
+        "  let n: Int = 1;\n",
+        "  n\n",
+        "}\n",
+    );
+    let (_, after) = assist_named(text, 3, 6, 6, "inferred");
+    assert!(after.contains("  let n = 1;"), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// **`mut` that nothing uses is offered for removal.**
+#[test]
+fn an_unused_mut_can_be_removed() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn go() -> Int {\n",
+        "  let mut n = 1;\n",
+        "  n\n",
+        "}\n",
+    );
+    let (_, after) = assist_named(text, 3, 10, 10, "Remove `mut`");
+    assert!(after.contains("  let n = 1;"), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// **And `mut` that something writes to is not.** The control for the test
+/// above: without it, that one passes just as well if the assist never
+/// recognised a `let` at all.
+#[test]
+fn a_mut_that_is_written_to_is_kept() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn go() -> Int {\n",
+        "  let mut n = 1;\n",
+        "  n = n + 1;\n",
+        "  n\n",
+        "}\n",
+    );
+    let offered = assists_for(text, 3, 10, 10);
+    assert!(
+        !offered.iter().any(|(title, _)| title.contains("Remove `mut`")),
+        "something assigns to it: {offered:?}"
+    );
+}
+
+/// **`_name` back to `name`**, for a binding that grew a use.
+#[test]
+fn an_underscored_binding_can_be_renamed_back() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn go() -> Int {\n",
+        "  let _n = 1;\n",
+        "  2\n",
+        "}\n",
+    );
+    let (title, after) = assist_named(text, 3, 7, 7, "Rename to");
+    assert!(title.contains("`n`"), "{title}");
+    assert!(after.contains("let n = 1;"), "{after}");
 }
 
 // --- control flow ----------------------------------------------------------

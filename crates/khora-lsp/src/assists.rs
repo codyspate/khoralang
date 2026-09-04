@@ -41,6 +41,8 @@
 //! what every call site demanded, so the new function's `with` and `raises`
 //! clauses are read off rather than inferred a second time by an editor.
 
+mod bindings;
+mod effects;
 mod flow;
 
 use std::collections::BTreeMap;
@@ -87,6 +89,8 @@ pub fn at(db: &dyn Db, file: SourceFile, selection: TextRange) -> Vec<Assist> {
     out.extend(extract(&tree, text, selection));
     out.extend(extract_function(db, file, &tree, text, selection));
     out.extend(flow::assists(&tree, text, selection));
+    out.extend(bindings::assists(db, file, &tree, text, selection));
+    out.extend(effects::assists(&tree, text, selection));
     out
 }
 
