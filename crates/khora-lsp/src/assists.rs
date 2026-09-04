@@ -42,8 +42,11 @@
 //! clauses are read off rather than inferred a second time by an editor.
 
 mod bindings;
+mod decls;
 mod effects;
 mod flow;
+mod imports;
+mod matching;
 
 use std::collections::BTreeMap;
 
@@ -91,6 +94,9 @@ pub fn at(db: &dyn Db, file: SourceFile, selection: TextRange) -> Vec<Assist> {
     out.extend(flow::assists(&tree, text, selection));
     out.extend(bindings::assists(db, file, &tree, text, selection));
     out.extend(effects::assists(&tree, text, selection));
+    out.extend(matching::assists(&tree, text, selection));
+    out.extend(imports::assists(&tree, text, selection));
+    out.extend(decls::assists(&tree, text, selection));
     out
 }
 

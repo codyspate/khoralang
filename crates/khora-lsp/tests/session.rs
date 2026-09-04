@@ -2122,6 +2122,242 @@ fn an_extracted_function_that_can_fail_says_so_and_is_called_with_a_mark() {
 {said:?}");
 }
 
+// --- declarations ----------------------------------------------------------
+
+/// **`pub` added, and the title says what it costs.** Everything a module
+/// exports is a promise it cannot take back quietly.
+#[test]
+fn a_declaration_can_be_exported_and_the_title_says_what_that_means() {
+    let text = concat!("module main;\n\n", "fn go() -> Int { 1 }\n");
+    let (title, after) = assist_named(text, 2, 3, 3, "Export it");
+    assert!(title.contains("promise"), "{title}");
+    assert!(after.contains("pub fn go()"), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// And taken off again, which is always safe.
+#[test]
+fn an_exported_declaration_can_stop_being_one() {
+    let text = concat!("module main;\n\n", "pub fn go() -> Int { 1 }\n");
+    let (_, after) = assist_named(text, 2, 7, 7, "Stop exporting");
+    assert!(after.contains("fn go()") && !after.contains("pub fn"), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// A declaration already public is not offered `pub` again.
+#[test]
+fn an_exported_declaration_is_not_offered_pub_twice() {
+    let text = concat!("module main;\n\n", "pub fn go() -> Int { 1 }\n");
+    let offered = assists_for(text, 2, 7, 7);
+    assert!(
+        !offered.iter().any(|(title, _)| title.contains("Export it")),
+        "it already is: {offered:?}"
+    );
+}
+
+/// **A `///` block started, and left empty for somebody to write.**
+#[test]
+fn an_undocumented_declaration_is_offered_a_comment() {
+    let text = concat!("module main;\n\n", "fn go() -> Int { 1 }\n");
+    let (_, after) = assist_named(text, 2, 3, 3, "documentation comment");
+    assert!(after.contains("/// \nfn go()"), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// One that already has a block is left alone, however short it is.
+#[test]
+fn a_documented_declaration_is_not_offered_another_comment() {
+    let text = concat!("module main;\n\n", "/// Answers.\nfn go() -> Int { 1 }\n");
+    let offered = assists_for(text, 3, 3, 3);
+    assert!(
+        !offered.iter().any(|(title, _)| title.contains("documentation comment")),
+        "it has one: {offered:?}"
+    );
+}
+
+/// **The clauses go after the return type**, which is the placement somebody
+/// writing one by hand gets wrong when the return type contains a brace.
+#[test]
+fn a_with_clause_lands_after_a_record_return_type() {
+    let text = concat!("module main;\n\n", "fn go() -> { n: Int } { { n: 1 } }\n");
+    let (_, after) = assist_named(text, 2, 3, 3, "`with` clause");
+    assert!(after.contains("-> { n: Int } with {  } {"), "the record type is not the body: {after}");
+}
+
+/// A signature that already says `raises` is not offered a second clause.
+#[test]
+fn a_signature_with_raises_is_not_offered_another() {
+    let text = concat!(
+        "module main;\n\n",
+        "pub type Oops = | Bad;\n\n",
+        "fn go() -> Int raises Oops { 1 }\n",
+    );
+    let offered = assists_for(text, 4, 3, 3);
+    assert!(
+        !offered.iter().any(|(title, _)| title.contains("`raises` clause")),
+        "it has one: {offered:?}"
+    );
+}
+
+// --- imports ---------------------------------------------------------------
+
+/// **Two imports of one module fold into one**, keeping the order the names
+/// were written in.
+#[test]
+fn two_imports_of_one_module_merge() {
+    let text = concat!(
+        "module main;\n\n",
+        "import std::core::{Option};\n",
+        "import std::core::{Result};\n\n",
+        "fn go() -> Int { 1 }\n",
+    );
+    let (title, after) = assist_named(text, 2, 5, 5, "Merge");
+    assert!(title.contains("std::core"), "{title}");
+    assert!(after.contains("import std::core::{Option, Result};"), "{after}");
+    assert!(!after.contains("import std::core::{Result};"), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// A file with one import of a module has nothing to merge, and says nothing.
+#[test]
+fn a_lone_import_is_not_offered_a_merge() {
+    let text = concat!(
+        "module main;\n\n",
+        "import std::core::{Option};\n\n",
+        "fn go() -> Int { 1 }\n",
+    );
+    let offered = assists_for(text, 2, 5, 5);
+    assert!(
+        !offered.iter().any(|(title, _)| title.contains("Merge")),
+        "there is only one: {offered:?}"
+    );
+}
+
+/// **Names out of order are offered an order**, and names already in one are
+/// not offered an edit that changes nothing.
+#[test]
+fn names_out_of_order_can_be_sorted() {
+    let text = concat!(
+        "module main;\n\n",
+        "import std::core::{Result, Option};\n\n",
+        "fn go() -> Int { 1 }\n",
+    );
+    let (_, after) = assist_named(text, 2, 5, 5, "Sort");
+    assert!(after.contains("{Option, Result}"), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+
+    let tidy = text.replace("{Result, Option}", "{Option, Result}");
+    let offered = assists_for(&tidy, 2, 5, 5);
+    assert!(
+        !offered.iter().any(|(title, _)| title.contains("Sort")),
+        "already sorted: {offered:?}"
+    );
+}
+
+/// **One import per name**, for a list that has grown past reading.
+#[test]
+fn an_import_list_can_be_split() {
+    let text = concat!(
+        "module main;\n\n",
+        "import std::core::{Option, Result};\n\n",
+        "fn go() -> Int { 1 }\n",
+    );
+    let (_, after) = assist_named(text, 2, 5, 5, "Split into one");
+    assert!(after.contains("import std::core::{Option};"), "{after}");
+    assert!(after.contains("import std::core::{Result};"), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+// --- matching --------------------------------------------------------------
+
+/// **A two-arm `match` on a `Bool` is an `if` written the long way.**
+#[test]
+fn a_boolean_match_can_become_an_if() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn go(ready: Bool) -> Int {\n",
+        "  match ready {\n",
+        "    true => 1,\n",
+        "    false => 2,\n",
+        "  }\n",
+        "}\n",
+    );
+    let (_, after) = assist_named(text, 3, 3, 3, "as an `if`");
+    assert!(after.contains("if ready { 1 } else { 2 }"), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// **Written the other way round, the branches swap with it.**
+#[test]
+fn a_boolean_match_written_false_first_keeps_its_answers() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn go(ready: Bool) -> Int {\n",
+        "  match ready {\n",
+        "    false => 2,\n",
+        "    true => 1,\n",
+        "  }\n",
+        "}\n",
+    );
+    let (_, after) = assist_named(text, 3, 3, 3, "as an `if`");
+    assert!(after.contains("if ready { 1 } else { 2 }"), "the arms follow their patterns: {after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// **A `match` over constructors is not an `if`**, and rewriting it as one
+/// would throw away the exhaustiveness the compiler is about to check.
+#[test]
+fn a_match_over_constructors_is_not_offered_an_if() {
+    let text = concat!(
+        "module main;\n\n",
+        "pub type Colour = | Red | Green;\n\n",
+        "fn go(c: Colour) -> Int {\n",
+        "  match c {\n",
+        "    Colour::Red => 1,\n",
+        "    Colour::Green => 2,\n",
+        "  }\n",
+        "}\n",
+    );
+    let offered = assists_for(text, 5, 3, 3);
+    assert!(
+        !offered.iter().any(|(title, _)| title.contains("as an `if`")),
+        "two constructors are not two booleans: {offered:?}"
+    );
+}
+
+/// **And an `if` becomes a `match`**, which is where it goes when the
+/// condition is about to become three cases.
+#[test]
+fn an_if_can_become_a_match() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn go(ready: Bool) -> Int {\n",
+        "  if ready { 1 } else { 2 }\n",
+        "}\n",
+    );
+    let (_, after) = assist_named(text, 3, 3, 3, "as a `match`");
+    assert!(after.contains("match ready {"), "{after}");
+    assert!(after.contains("true => 1,"), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// An arm added below the cursor's, with the comma the last one was missing.
+#[test]
+fn an_arm_can_be_added_below_the_cursor() {
+    let text = concat!(
+        "module main;\n\n",
+        "pub type Colour = | Red | Green;\n\n",
+        "fn go(c: Colour) -> Int {\n",
+        "  match c {\n",
+        "    Colour::Red => 1,\n",
+        "    Colour::Green => 2,\n",
+        "  }\n",
+        "}\n",
+    );
+    let (_, after) = assist_named(text, 6, 8, 8, "arm below");
+    assert!(after.contains("_ => todo()"), "{after}");
+}
+
 // --- capabilities and failures ---------------------------------------------
 
 /// The head every effect-assist fixture shares.
