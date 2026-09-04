@@ -55,11 +55,46 @@ impl<'a> Parser<'a> {
     pub(crate) fn new(lexed: &LexedStr<'a>) -> Parser<'a> {
         let mut kinds = Vec::with_capacity(lexed.len());
         let mut ranges = Vec::with_capacity(lexed.len());
+        // **A token the lexer could not read is reported here, once, where it
+        // is.** Left to reach the grammar, it breaks whatever rule was in
+        // progress and that is what gets reported: `1 @ 2` and `0xFF` both
+        // came back as *this `{` is never closed*, naming a brace on the line
+        // above. The parser was not wrong -- by the time it gave up the block
+        // really was unclosed -- but an editor draws that underline where the
+        // message points, and it pointed at the wrong line.
+        //
+        // The token is **kept**, not dropped. `event.rs` replays the parser's
+        // events against the lexer's own tokens and asserts the two agree one
+        // for one, so removing one here desynchronises the tree builder. What
+        // this does is say something true about the token first; the grammar
+        // then does whatever it was going to do, and the honest message is the
+        // one at the top.
+        let mut errors = Vec::new();
         for i in 0..lexed.len() {
-            if !lexed.kind(i).is_trivia() {
-                kinds.push(lexed.kind(i));
-                ranges.push(lexed.range(i));
+            let kind = lexed.kind(i);
+            if kind.is_trivia() {
+                continue;
             }
+            let range = lexed.range(i);
+            let written = &lexed.source()[usize::from(range.start())..usize::from(range.end())];
+            if kind == EOF {
+                // Nothing to say about the end of the file.
+            } else if kind == SyntaxKind::LEX_ERROR {
+                errors.push(ParseError {
+                    message: format!("`{written}` is not something Khora reads as a token"),
+                    range,
+                });
+            } else if let Some(base) = base_of(written) {
+                errors.push(ParseError {
+                    message: format!(
+                        "`{written}` is {base}, and Khora has no {base} literals: numbers are \
+                         decimal, and `_` may separate their digits"
+                    ),
+                    range,
+                });
+            }
+            kinds.push(kind);
+            ranges.push(range);
         }
         let end = text_size::TextSize::new(lexed.source().len() as u32);
         kinds.push(EOF);
@@ -72,7 +107,7 @@ impl<'a> Parser<'a> {
             pos: 0,
             steps: 0,
             events: Vec::new(),
-            errors: Vec::new(),
+            errors,
             record_literals_allowed: true,
         }
     }
@@ -525,3 +560,20 @@ fn take_unicode(chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>) -> U
     if char::from_u32(value).is_some() { Unicode::Ok } else { Unicode::NotACharacter }
 }
 
+/// The base a literal was written in, when it is one Khora does not have.
+///
+/// The lexer matches `0x..`, `0b..` and `0o..` as integer literals so that
+/// nothing downstream has a new kind to handle; this is what recognises them
+/// again. Checked on the text rather than the kind for exactly that reason.
+fn base_of(written: &str) -> Option<&'static str> {
+    let mut bytes = written.bytes();
+    if bytes.next() != Some(b'0') {
+        return None;
+    }
+    match bytes.next() {
+        Some(b'x' | b'X') => Some("hexadecimal"),
+        Some(b'o' | b'O') => Some("octal"),
+        Some(b'b' | b'B') => Some("binary"),
+        _ => None,
+    }
+}

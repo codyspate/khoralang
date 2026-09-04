@@ -40,6 +40,23 @@ enum Tok {
     FloatLit,
     #[regex(r"[0-9][0-9_]*")]
     IntLit,
+
+    /// `0xFF`, `0b1010`, `0o17` — a base Khora does not have.
+    ///
+    /// **Matched so that it can be refused by name.** Khora has decimal
+    /// integer literals and `_` as a separator, and nothing else. Without this
+    /// pattern the `0` lexes as an integer and `xFF` as an identifier, and the
+    /// parser reports whatever those two break next: for `{ 0xFF }` that is
+    /// *this `{` is never closed*, pointing at a brace on the line above. An
+    /// editor draws that underline in the wrong place, which is worse than
+    /// drawing none.
+    ///
+    /// The digits are matched loosely — `[0-9A-Fa-f_]` for every base — so
+    /// that `0b12` is one token to complain about rather than a token and a
+    /// half. Nothing here is deciding whether the digits are valid for the
+    /// base; the answer is the same either way.
+    #[regex(r"0[xXbBoO][0-9A-Fa-f_]+")]
+    BasedLit,
     #[token("\"", lex_string)]
     // A backtick literal is the *same token*: a `String` either way, so the
     // parser, the type checker and the backend never learn there were two
@@ -279,6 +296,13 @@ fn to_kind(tok: Tok, text: &str) -> SyntaxKind {
         Tok::BlockComment => S::BLOCK_COMMENT,
         Tok::FloatLit => S::FLOAT_LIT,
         Tok::IntLit => S::INT_LIT,
+        // **An `INT_LIT`, deliberately.** The whole point of matching `0xFF`
+        // is to say something about it, and the saying happens in the parser
+        // -- but the tree the parser builds is checked against the lexer's own
+        // kinds token for token, so inventing a kind here desynchronises them.
+        // Lexing it as the thing it was trying to be keeps every later pass
+        // unchanged, and the parser recognises it by its text.
+        Tok::BasedLit => S::INT_LIT,
         Tok::DecimalLit => S::DECIMAL_LIT,
         Tok::StringLit => S::STRING_LIT,
         Tok::CharLit => S::CHAR_LIT,

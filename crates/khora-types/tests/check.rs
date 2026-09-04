@@ -971,3 +971,50 @@ fn the_largest_int_is_accepted() {
 fn a_separated_literal_is_measured_without_its_underscores() {
     assert_clean("module m;\nfn go() -> Int { 9_223_372_036_854_775_807 }\n");
 }
+
+/// **The unreachable arm names its cause, when the cause is the trap.**
+///
+/// A bare name in a pattern is a *binding*, so `Red => ..` where `Colour::Red`
+/// was meant matches every colour and the arm after it is dead. The program
+/// compiles and answers `Red`'s body for green, which is the worst shape a
+/// mistake can have — and the old message reported only the symptom, pointing
+/// at the arm that was written correctly.
+#[test]
+fn a_bare_constructor_name_says_it_is_a_binding() {
+    assert_reports(
+        "module m;\npub type Colour = | Red | Green;\nfn go(c: Colour) -> Int { match c { Red => 1, Green => 2 } }\n",
+        "binds every value",
+    );
+}
+
+/// And it names the line to type, not a shape to fill in.
+#[test]
+fn the_suggestion_names_the_scrutinees_own_type() {
+    assert_reports(
+        "module m;\npub type Colour = | Red | Green;\nfn go(c: Colour) -> Int { match c { Red => 1, Green => 2 } }\n",
+        "`Colour::Red`",
+    );
+}
+
+/// **A binding that is not a constructor keeps the plain message.**
+///
+/// `n` is somebody capturing the value, which is an ordinary thing to write —
+/// and an arm after it really is unreachable for the ordinary reason. Without
+/// this the improvement above would be a wrong explanation attached to every
+/// catch-all in the tree.
+#[test]
+fn an_ordinary_binding_is_not_blamed_for_being_a_constructor() {
+    let db = KhoraDatabase::new();
+    let found = errors(
+        &db,
+        "module m;\npub type Colour = | Red | Green;\nfn go(c: Colour) -> Int { match c { n => 1, Colour::Green => 2 } }\n",
+    );
+    assert!(
+        found.iter().any(|e| e.contains("unreachable")),
+        "the second arm is still dead: {found:?}"
+    );
+    assert!(
+        !found.iter().any(|e| e.contains("binds every value")),
+        "`n` is a capture, not a mistyped constructor: {found:?}"
+    );
+}

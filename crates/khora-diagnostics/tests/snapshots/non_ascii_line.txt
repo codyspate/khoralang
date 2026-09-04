@@ -1,3 +1,9 @@
+error: `~` is not something Khora reads as a token
+ --> src/main.kh:2:25
+  |
+2 | const s = "héllo wörld" ~ 1;
+  |                         ^
+
 error: expected `;`
  --> src/main.kh:2:25
   |

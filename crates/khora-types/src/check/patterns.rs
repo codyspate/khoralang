@@ -152,8 +152,43 @@ impl<'a> Checker<'a> {
         }
 
         for index in usefulness::unreachable_arms(&patterns, &column, &resolve) {
-            if let Some(arm) = unguarded.get(index) {
-                self.error("this arm is unreachable", self.body.range(arm.body));
+            let Some(arm) = unguarded.get(index) else { continue };
+            // **Say why, when the why is the trap.** A bare name in a pattern
+            // is a *binding*, so `Red => ..` where `Colour::Red` was meant
+            // matches every colour and the arm after it is unreachable. The
+            // program compiles and answers `Red`'s body for green, which is
+            // the worst shape a mistake can have -- and reporting only the
+            // symptom points at the arm that is right.
+            //
+            // Looked for among the arms *before* this one, since only those
+            // can be what swallowed it, and only where the name is one the
+            // scrutinee's own type declares: a binding called `n` is somebody
+            // capturing the value and means nothing is wrong.
+            let swallowed = unguarded[..index].iter().find_map(|earlier| {
+                let Pat::Bind(local) = self.body.pat(earlier.pat) else { return None };
+                let name = &self.body.local(*local).name;
+                let ColumnType::Finite(ctors) = &column else { return None };
+                ctors
+                    .iter()
+                    .any(|ctor| matches!(ctor, Ctor::Variant { name: case, .. } if case == name))
+                    .then(|| name.clone())
+            });
+            // The scrutinee's own type, so the suggestion is a line somebody
+            // can type rather than a shape to fill in.
+            let owner = match scrutinee_ty {
+                Type::Adt { name, .. } => name.clone(),
+                other => other.to_string(),
+            };
+            match swallowed {
+                Some(name) => self.error(
+                    format!(
+                        "this arm is unreachable: an earlier arm is the bare name `{name}`, \
+                         which binds every value rather than matching the case -- write it \
+                         qualified, as `{owner}::{name}`"
+                    ),
+                    self.body.range(arm.body),
+                ),
+                None => self.error("this arm is unreachable", self.body.range(arm.body)),
             }
         }
     }
