@@ -44,11 +44,13 @@
 mod bindings;
 mod calls;
 mod decls;
+mod docs;
 mod effects;
 mod flow;
 mod imports;
 mod literals;
 mod matching;
+mod patterns;
 mod statements;
 mod types;
 
@@ -105,6 +107,8 @@ pub fn at(db: &dyn Db, file: SourceFile, selection: TextRange) -> Vec<Assist> {
     out.extend(calls::assists(&tree, text, selection));
     out.extend(types::assists(&tree, text, selection));
     out.extend(statements::assists(&tree, text, selection));
+    out.extend(patterns::assists(db, file, &tree, text, selection));
+    out.extend(docs::assists(&tree, text, selection));
     out
 }
 

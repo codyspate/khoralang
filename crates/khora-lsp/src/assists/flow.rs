@@ -25,6 +25,8 @@ pub fn assists(tree: &SyntaxNode, text: &str, selection: TextRange) -> Vec<Assis
     out.extend(split_and(tree, text, selection));
     out.extend(remove_parens(tree, text, selection));
     out.extend(flip_comparison(tree, text, selection));
+    out.extend(chain_to_match(tree, text, selection));
+    out.extend(unwrap_block(tree, text, selection));
     out.extend(de_morgan(tree, text, selection));
     out.extend(parenthesise(tree, text, selection));
     out
@@ -411,5 +413,108 @@ fn parenthesise(tree: &SyntaxNode, text: &str, selection: TextRange) -> Option<A
             range: node.text_range(),
             replacement: format!("({})", text_of(text, &node)),
         }],
+    })
+}
+
+/// **`if a { x } else if b { y } else { z }` becomes a `match`.**
+///
+/// A chain of three or more is a case analysis that has been written as a
+/// sequence of unrelated questions, and reading one means holding every
+/// earlier condition in your head to know what the third arm means. A `match`
+/// with guards says the same thing in a shape that is read downwards.
+///
+/// Three, not two: two branches are an `if` and turning them into a `match`
+/// is ceremony. `matching.rs` has that one for the `Bool` case where it is
+/// worth it.
+fn chain_to_match(tree: &SyntaxNode, text: &str, selection: TextRange) -> Option<Assist> {
+    let node = covering(tree, selection, SyntaxKind::IF_EXPR)?;
+    // Only from the top of a chain: an inner `if` is part of this one.
+    if node.parent().is_some_and(|p| p.kind() == SyntaxKind::IF_EXPR) {
+        return None;
+    }
+
+    let mut steps: Vec<(String, String)> = Vec::new();
+    let mut otherwise: Option<String> = None;
+    let mut here = node.clone();
+    loop {
+        let mut children = here.children();
+        let condition = children.next()?;
+        let block = children.next().filter(|n| n.kind() == SyntaxKind::BLOCK)?;
+        steps.push((text_of(text, &condition), body_of(text, &block)));
+        match children.next() {
+            Some(next) if next.kind() == SyntaxKind::IF_EXPR => here = next,
+            Some(block) if block.kind() == SyntaxKind::BLOCK => {
+                otherwise = Some(body_of(text, &block));
+                break;
+            }
+            _ => break,
+        }
+    }
+    // **Three branches, not three conditions.** `if / else if / else` has two
+    // conditions and three answers, and it is the shape this is for -- counting
+    // the conditions rejected exactly the chain worth rewriting.
+    if steps.len() + usize::from(otherwise.is_some()) < 3 {
+        return None;
+    }
+
+    let indent = indent_of(text, &node);
+    let mut arms: Vec<String> =
+        steps.iter().map(|(when, then)| format!("_ if {when} => {then}")).collect();
+    arms.push(match otherwise {
+        Some(last) => format!("_ => {last}"),
+        // Without an `else` the chain answers `()` when nothing matched, and
+        // a `match` has to say so or it is not exhaustive.
+        None => "_ => ()".to_string(),
+    });
+
+    Some(Assist {
+        title: "Write the `if` chain as a `match`".to_string(),
+        kind: "refactor.rewrite",
+        edits: vec![Edit {
+            range: node.text_range(),
+            replacement: format!(
+                "match () {{\n{indent}  {}\n{indent}}}",
+                arms.join(&format!(",\n{indent}  "))
+            ),
+        }],
+    })
+}
+
+/// A block's contents without its braces.
+fn body_of(text: &str, block: &SyntaxNode) -> String {
+    let whole = text_of(text, block);
+    let trimmed = whole.trim();
+    trimmed
+        .strip_prefix('{')
+        .and_then(|rest| rest.strip_suffix('}'))
+        .map(|inner| inner.trim().to_string())
+        .unwrap_or_else(|| trimmed.to_string())
+}
+
+/// **A block holding one statement, unwrapped.**
+///
+/// `{ x }` becomes `x` where a block was only ever punctuation. Offered for a
+/// block that is somebody's arm or lambda body rather than a function's, since
+/// a function body is a block by grammar and unwrapping it would not parse.
+fn unwrap_block(tree: &SyntaxNode, text: &str, selection: TextRange) -> Option<Assist> {
+    let node = covering(tree, selection, SyntaxKind::BLOCK_EXPR)?;
+    let parent = node.parent()?;
+    if !matches!(parent.kind(), SyntaxKind::MATCH_ARM | SyntaxKind::LAMBDA_EXPR) {
+        return None;
+    }
+    let mut inside = node.children();
+    let only = inside.next()?;
+    if inside.next().is_some() {
+        return None;
+    }
+    // A statement with a semicolon is not an expression, and dropping the
+    // braces would leave one where a value is expected.
+    if only.kind() == SyntaxKind::EXPR_STMT {
+        return None;
+    }
+    Some(Assist {
+        title: "Remove the block".to_string(),
+        kind: "refactor.rewrite",
+        edits: vec![Edit { range: node.text_range(), replacement: text_of(text, &only) }],
     })
 }

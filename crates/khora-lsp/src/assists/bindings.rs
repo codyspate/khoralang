@@ -31,6 +31,7 @@ pub fn assists(
     out.extend(drop_annotation(db, file, tree, text, selection));
     out.extend(unprefix(tree, text, selection));
     out.extend(drop_mut(db, file, tree, selection));
+    out.extend(extract_every(tree, text, selection));
     out.extend(add_mut(tree, text, selection));
     out
 }
@@ -345,4 +346,77 @@ fn add_mut(tree: &SyntaxNode, text: &str, selection: TextRange) -> Option<Assist
             replacement: " mut".to_string(),
         }],
     })
+}
+
+/// **A repeated expression bound once, and every copy replaced.**
+///
+/// The extraction in `assists.rs` replaces the selection. This finds the other
+/// places the same expression is written and replaces those too, which is what
+/// somebody means by "extract this": a second copy left behind is the bug the
+/// refactoring was supposed to prevent.
+///
+/// Text equality rather than structural, deliberately. Two expressions that
+/// are spelled the same are the same expression to a reader, and one that is
+/// spelled differently is a decision this should not make for them.
+fn extract_every(tree: &SyntaxNode, text: &str, selection: TextRange) -> Option<Assist> {
+    if selection.is_empty() {
+        return None;
+    }
+    let node = tree.descendants().find(|n| n.text_range() == selection)?;
+    if !matches!(
+        node.kind(),
+        SyntaxKind::CALL_EXPR | SyntaxKind::FIELD_EXPR | SyntaxKind::BIN_EXPR | SyntaxKind::PATH_EXPR
+    ) {
+        return None;
+    }
+    let written = text_of(text, &node);
+
+    // Every other node with the same text, inside the same function.
+    let owner = node.ancestors().find(|a| a.kind() == SyntaxKind::FN_DECL)?;
+    let same: Vec<SyntaxNode> = owner
+        .descendants()
+        .filter(|n| n.kind() == node.kind())
+        .filter(|n| text_of(text, n) == written)
+        .collect();
+    if same.len() < 2 {
+        return None;
+    }
+
+    // The statement to put the binding above: the first occurrence's.
+    let first = same.first()?;
+    let statement = statement_of(first)?;
+    let indent = indent_of(text, &statement);
+
+    let mut edits: Vec<Edit> = same
+        .iter()
+        .map(|at| Edit { range: at.text_range(), replacement: "extracted".to_string() })
+        .collect();
+    edits.push(Edit {
+        range: TextRange::empty(statement.text_range().start()),
+        replacement: format!("let extracted = {written};\n{indent}"),
+    });
+    Some(Assist {
+        title: format!("Extract all {} occurrences into a `let`", same.len()),
+        kind: "refactor.extract",
+        edits,
+    })
+}
+
+/// The statement a node sits in.
+fn statement_of(node: &SyntaxNode) -> Option<SyntaxNode> {
+    let mut here = node.clone();
+    loop {
+        let parent = here.parent()?;
+        if parent.kind() == SyntaxKind::BLOCK {
+            return Some(here);
+        }
+        here = parent;
+    }
+}
+
+/// The whitespace in front of the line a node starts on.
+fn indent_of(text: &str, node: &SyntaxNode) -> String {
+    let start = usize::from(node.text_range().start());
+    let line = text[..start].rfind('\n').map_or(0, |at| at + 1);
+    text[line..start].chars().take_while(|c| *c == ' ' || *c == '\t').collect()
 }

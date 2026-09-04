@@ -1925,22 +1925,14 @@ fn assists_for(text: &str, line: u32, from: u32, to: u32) -> Vec<(String, String
 }
 
 /// The one assist's edits applied to `text`, and its title.
-fn assist_applied(text: &str, line: u32, from: u32, to: u32) -> (String, String) {
-    chosen_assist(text, line, from, to, None)
-}
-
-/// [`assist_applied`], choosing among several by a word in the title.
+/// Applies the one assist whose title contains `want`, and answers the file
+/// afterwards.
+///
+/// **Naming the assist is not optional any more.** One selection is offered
+/// several — extracting into a binding and into a function are both reasonable
+/// answers to the same gesture — so a helper that took whichever came first
+/// would pin the order of a list nothing promises to order.
 fn assist_named(text: &str, line: u32, from: u32, to: u32, want: &str) -> (String, String) {
-    chosen_assist(text, line, from, to, Some(want))
-}
-
-fn chosen_assist(
-    text: &str,
-    line: u32,
-    from: u32,
-    to: u32,
-    wanted: Option<&str>,
-) -> (String, String) {
     let w = workspace(&[("src/main.kh", text)]);
     let file = w.root.join("src/main.kh");
     let replies = session(&[
@@ -1951,20 +1943,10 @@ fn chosen_assist(
     ]);
     let offered = result_of(&replies, 4);
     let list = offered.as_array().expect("a list");
-    // **One selection may be offered several assists**, which it could not be
-    // when the only extraction was the `let`. Extracting a selection into a
-    // binding and into a function are both reasonable answers to the same
-    // gesture, so the caller says which one it meant.
-    let chosen = match wanted {
-        Some(want) => list
-            .iter()
-            .find(|a| a.get("title").and_then(Value::as_str).is_some_and(|t| t.contains(want)))
-            .unwrap_or_else(|| panic!("no assist matching `{want}`: {offered}")),
-        None => {
-            assert_eq!(list.len(), 1, "exactly one assist: {offered}");
-            &list[0]
-        }
-    };
+    let chosen = list
+        .iter()
+        .find(|a| a.get("title").and_then(Value::as_str).is_some_and(|t| t.contains(want)))
+        .unwrap_or_else(|| panic!("no assist matching `{want}`: {offered}"));
     let title = chosen.get("title").and_then(Value::as_str).expect("a title").to_string();
     let edits = chosen
         .pointer("/edit/changes")
@@ -2120,6 +2102,127 @@ fn an_extracted_function_that_can_fail_says_so_and_is_called_with_a_mark() {
     assert!(said.is_empty(), "the extraction did not compile:
 {after}
 {said:?}");
+}
+
+// --- patterns, docs, and the rest ------------------------------------------
+
+/// **The one that needs the checker: a `_` arm written out as its cases.**
+///
+/// A wildcard is how a `match` stops being exhaustive without stopping
+/// compiling, so the day a variant is added every `match` ending in `_` sends
+/// the new one down the default path with no diagnostic. The type comes from
+/// the checker and the cases from the item map.
+#[test]
+fn a_wildcard_arm_can_be_written_out_as_its_cases() {
+    let text = concat!(
+        "module main;\n\n",
+        "pub type Colour = | Red | Green | Blue;\n\n",
+        "fn go(c: Colour) -> Int {\n",
+        "  match c {\n",
+        "    Colour::Red => 1,\n",
+        "    _ => 0,\n",
+        "  }\n",
+        "}\n",
+    );
+    // Line 7 is the `_` arm; line 6 is `Colour::Red`, which is a different
+    // question and the one this pointed at first.
+    let (title, after) = assist_named(text, 7, 4, 4, "the `_` covers");
+    assert!(title.contains("2 case"), "Red is already written: {title}");
+    assert!(after.contains("Colour::Green => 0"), "{after}");
+    assert!(after.contains("Colour::Blue => 0"), "{after}");
+    // **Qualified, because a bare constructor name in a pattern is a binding.**
+    // `Green => ..` would match everything and compile.
+    assert!(!after.contains("\n    Green =>"), "a bare name is a binding: {after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// A `match` that already names every case has nothing to expand.
+#[test]
+fn a_wildcard_covering_nothing_new_is_not_offered_an_expansion() {
+    let text = concat!(
+        "module main;\n\n",
+        "pub type Colour = | Red | Green;\n\n",
+        "fn go(c: Colour) -> Int {\n",
+        "  match c {\n",
+        "    Colour::Red => 1,\n",
+        "    Colour::Green => 2,\n",
+        "    _ => 0,\n",
+        "  }\n",
+        "}\n",
+    );
+    let offered = assists_for(text, 8, 4, 4);
+    assert!(
+        !offered.iter().any(|(title, _)| title.contains("the `_` covers")),
+        "every case is already written: {offered:?}"
+    );
+}
+
+/// **`//` promoted to `///`, and the title says that publishes it.**
+#[test]
+fn a_comment_can_become_documentation() {
+    let text = concat!("module main;\n\n", "// Answers.\nfn go() -> Int { 1 }\n");
+    let (title, after) = assist_named(text, 2, 4, 4, "documentation");
+    assert!(title.contains("publishes"), "{title}");
+    assert!(after.contains("/// Answers."), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// **An example block, in the shape the gate counts.**
+#[test]
+fn a_doc_comment_can_be_given_an_example_block() {
+    let text = concat!("module main;\n\n", "/// Answers.\nfn go() -> Int { 1 }\n");
+    let (_, after) = assist_named(text, 2, 4, 4, "example block");
+    assert!(after.contains("/// ```khora"), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// **An `if` chain of three becomes a `match`**, which is read downwards.
+#[test]
+fn a_three_step_if_chain_becomes_a_match() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn go(n: Int) -> Int {\n",
+        "  if n < 0 { 1 } else if n == 0 { 2 } else { 3 }\n",
+        "}\n",
+    );
+    let (_, after) = assist_named(text, 3, 3, 3, "chain as a `match`");
+    assert!(after.contains("_ if n < 0 => 1"), "{after}");
+    assert!(after.contains("_ if n == 0 => 2"), "{after}");
+    assert!(after.contains("_ => 3"), "{after}");
+}
+
+/// Two branches are an `if`, and turning them into a `match` is ceremony.
+#[test]
+fn a_two_branch_if_is_not_offered_a_chain_rewrite() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn go(n: Int) -> Int {\n",
+        "  if n < 0 { 1 } else { 2 }\n",
+        "}\n",
+    );
+    let offered = assists_for(text, 3, 3, 3);
+    assert!(
+        !offered.iter().any(|(title, _)| title.contains("chain as a `match`")),
+        "two branches are an `if`: {offered:?}"
+    );
+}
+
+/// **Every occurrence at once**, because a second copy left behind is the bug
+/// the refactoring was supposed to prevent.
+#[test]
+fn a_repeated_expression_can_be_extracted_everywhere() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn cost(n: Int) -> Int { n * 3 }\n\n",
+        "fn go(n: Int) -> Int {\n",
+        "  cost(n) + cost(n)\n",
+        "}\n",
+    );
+    let (title, after) = assist_named(text, 5, 2, 9, "all 2 occurrences");
+    assert!(title.contains("all 2"), "{title}");
+    assert!(after.contains("let extracted = cost(n);"), "{after}");
+    assert!(after.contains("extracted + extracted"), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
 }
 
 // --- the last five ---------------------------------------------------------
