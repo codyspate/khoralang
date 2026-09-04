@@ -10,6 +10,76 @@ answer that is now right, then the rest. A bug that produced a *silently wrong*
 answer is listed under Breaking as well as Fixed, because code written around
 it will behave differently now.
 
+## 0.2.0 — 2026-09-04
+
+An editor release. Everything here is about what Khora tells you while you are
+writing it, and nothing changes what a program means.
+
+### Breaking
+
+- **Two rules moved from the code generator into the type checker, so
+  `khora check` now refuses programs it used to accept.** Raising a type no
+  `type` declaration names — `raises String` — and an integer literal wider
+  than an `Int`. Neither has ever *built*: the code generator refused both, and
+  the only thing that changed is when you are told.
+
+  It is listed here rather than under Fixed because of one workflow: a project
+  whose CI runs `khora check` and not `khora build` will see a failure it did
+  not see before. That project was already broken; it just had no way to know.
+  It is also why this is `0.2.0` and not `0.1.1`: before 1.0 the minor is
+  where a breaking change goes, and a new refusal is breaking to somebody even
+  when every program it refuses was already wrong.
+
+  The reason it matters beyond the two rules is that `khora-lsp` publishes what
+  the parser, the checker and the lints say and nothing from lowering — so a
+  rule enforced during code generation is one **no editor can show**, at any
+  point, on any platform. `scripts/check-backend-rules.sh` is a new gate that
+  makes every one of the 52 remaining backend refusals a decision somebody has
+  recorded, so a third does not arrive unnoticed.
+
+### Fixed
+
+- **An unreadable token is reported where it is.** `0xFF`, `0b1010` and `1 @ 2`
+  all used to come back as ``this `{` is never closed``, naming a brace on the
+  line above — an underline your editor drew on code that was correct. Numeric
+  bases Khora does not have are now named as such, and say what it does have:
+  decimal digits, with `_` free to separate them.
+- **An unreachable `match` arm names its cause.** `Red => 1` where
+  `Colour::Red` was meant reported the *next* arm — the one written correctly —
+  as unreachable. A bare name in a pattern is a binding, so it had matched
+  every colour. The message now says so and gives the line to write.
+- **A declaration keyword from another language is redirected.** `struct`,
+  `class`, `enum`, `interface`, `func`, `var`, `namespace` and `async` name the
+  Khora spelling instead of *expected a declaration*. `enum` shows the variant
+  syntax, because being told only "write `type`" leaves you looking for a
+  separate word for cases; `async` is told the distinction does not exist here
+  rather than that it is a rename.
+
+### Editor
+
+- **Sixty-two new assists**, bringing the total offered under the cursor from
+  two to sixty-four. They are in ten groups: control flow, bindings,
+  capabilities and failures, matching, patterns, imports, declarations, types,
+  calls and pipelines, statements, literals and documentation.
+
+  The ones worth finding first:
+
+  - **Extract into a function**, on an expression or a block. The `with` and
+    `raises` clauses are written from what the calls inside actually demanded —
+    the checker records that at every call site, so the signature is correct by
+    construction rather than inferred a second time by an editor.
+  - **Write out the cases a `_` arm covers.** A wildcard is how a `match` stops
+    being exhaustive without stopping compiling: add a variant, and every
+    `match` that names its cases fails loudly while every `match` ending in `_`
+    sends the new one down the default path in silence.
+  - **Lift a lambda into a function**, with the parameter and answer types the
+    checker gave it.
+  - `catch` and `attempt` in both directions, a `with` in both spellings, and a
+    handler written from an effect declaration.
+
+  Every editor gets all of them. There is one implementation and it is
+  `khora lsp`; `editors/` is configuration.
+
 ## Unreleased
 
 ### Changed
