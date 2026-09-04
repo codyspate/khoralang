@@ -52,6 +52,18 @@ Completion offers every public name in the workspace, not only what the file has
 
 Assists are the other half, and answer a different question: not what is wrong, but what you want done where the cursor is. A `let` with no annotation offers to write its inferred type down as text, which an inlay hint can only draw. A selected expression offers to become a `let` above the statement it was in. That one refuses where lifting it would cross something conditional, an `if` branch, a `match` arm, a lambda body, or the far side of `&&`, because running code the program said to skip is not a refactoring.
 
+A selection also offers to become a **function**, and that one is offered in all the places the `let` refuses: hoisting a expression runs it earlier, and a call left where the expression was runs at exactly the same moment. Blocks count here too, so selecting a run of statements and naming them is one keystroke.
+
+What it writes is the interesting part. Parameters are the bindings the selection uses and does not declare, typed from the checker; the return type is the selection's own; and the `with` and `raises` clauses are written from what the calls inside actually demanded. So extracting three lines that reach a database and can fail produces
+
+```khora
+fn extracted(id: Int) -> Row with { db: Db } raises DbError {
+  one_row(db.query("select .. where id = ?", [Cell::Number(id)])!)!
+}
+```
+
+with the call site given its `!`. Nothing about the selection said `Db` — the checker recorded what each call needed while it was type-checking, and the assist reads it back rather than working it out again. It refuses a selection containing a `with` block or a `catch`, because those *answer* a row and the signature would then over-state what escapes; and a block that assigns to a binding it did not declare, because a parameter is a value and the write would land on a copy.
+
 A code lens marks what a function absorbs rather than passes on: `installs { db } · catches DbError` above a function whose signature mentions neither. Rows are transitive, so a lens repeating a signature would be noise; a `with` block and a `catch` are the two places that stops being true, and they are what the type system deliberately hides.
 
 Rename edits the declaration, every use, and the import that brings the name into each file. Where a file imports under an alias, the import's original name is renamed and the alias is left alone, because the alias is that file's own word for it. A trait member and a constructor are still refused, each with a sentence saying why: a trait member's name belongs to the trait and to every impl of it, and a constructor has no recorded range to edit.

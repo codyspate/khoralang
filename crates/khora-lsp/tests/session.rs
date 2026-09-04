@@ -1926,6 +1926,21 @@ fn assists_for(text: &str, line: u32, from: u32, to: u32) -> Vec<(String, String
 
 /// The one assist's edits applied to `text`, and its title.
 fn assist_applied(text: &str, line: u32, from: u32, to: u32) -> (String, String) {
+    chosen_assist(text, line, from, to, None)
+}
+
+/// [`assist_applied`], choosing among several by a word in the title.
+fn assist_named(text: &str, line: u32, from: u32, to: u32, want: &str) -> (String, String) {
+    chosen_assist(text, line, from, to, Some(want))
+}
+
+fn chosen_assist(
+    text: &str,
+    line: u32,
+    from: u32,
+    to: u32,
+    wanted: Option<&str>,
+) -> (String, String) {
     let w = workspace(&[("src/main.kh", text)]);
     let file = w.root.join("src/main.kh");
     let replies = session(&[
@@ -1936,9 +1951,22 @@ fn assist_applied(text: &str, line: u32, from: u32, to: u32) -> (String, String)
     ]);
     let offered = result_of(&replies, 4);
     let list = offered.as_array().expect("a list");
-    assert_eq!(list.len(), 1, "exactly one assist: {offered}");
-    let title = list[0].get("title").and_then(Value::as_str).expect("a title").to_string();
-    let edits = list[0]
+    // **One selection may be offered several assists**, which it could not be
+    // when the only extraction was the `let`. Extracting a selection into a
+    // binding and into a function are both reasonable answers to the same
+    // gesture, so the caller says which one it meant.
+    let chosen = match wanted {
+        Some(want) => list
+            .iter()
+            .find(|a| a.get("title").and_then(Value::as_str).is_some_and(|t| t.contains(want)))
+            .unwrap_or_else(|| panic!("no assist matching `{want}`: {offered}")),
+        None => {
+            assert_eq!(list.len(), 1, "exactly one assist: {offered}");
+            &list[0]
+        }
+    };
+    let title = chosen.get("title").and_then(Value::as_str).expect("a title").to_string();
+    let edits = chosen
         .pointer("/edit/changes")
         .and_then(Value::as_object)
         .and_then(|c| c.values().next())
@@ -2011,21 +2039,365 @@ fn a_binding_that_says_its_type_is_offered_no_annotation() {
 #[test]
 fn a_selected_expression_is_offered_an_extraction() {
     let text = "module main;\n\nfn go(a: Int, b: Int) -> Int {\n  a + (b + 1)\n}\n";
-    let (title, after) = assist_applied(text, 3, 6, 13);
-    assert!(title.contains("Extract"), "{title}");
+    let (title, after) = assist_named(text, 3, 6, 13, "`let`");
+    assert!(title.contains("Extract into a `let`"), "{title}");
     assert!(after.contains("  let extracted = (b + 1);\n  a + extracted"), "{after}");
 }
 
+/// Every diagnostic in `text`, which is how the tests below check that an
+/// extraction produced a program rather than a plausible-looking one.
+fn complaints(text: &str) -> Vec<String> {
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+    let replies = session(&[initialize(&w.root), did_open(&file, text), exit()]);
+    last_diagnostics(&replies)
+        .iter()
+        .filter_map(|d| d.get("message").and_then(Value::as_str).map(str::to_string))
+        .collect()
+}
+
+/// **The extracted program still compiles**, which is the assertion the others
+/// are shorthand for.
+///
+/// An assist that writes a signature can be wrong in a way no string
+/// comparison catches: a capability left out of the row, a `!` missing at the
+/// call, a parameter type that does not name a type. So this one applies the
+/// edit and hands the result back to the server, and asserts it has nothing to
+/// say about it.
+#[test]
+fn an_extracted_function_compiles() {
+    let text = concat!(
+        "module main;\n\n",
+        "pub effect Log { record: (String) -> () }\n\n",
+        "fn note(m: String) -> () with { log: Log } { log.record(m) }\n\n",
+        "fn go(n: Int) -> Int with { log: Log } {\n",
+        "  note(\"x\");\n",
+        "  n\n",
+        "}\n",
+    );
+    assert!(complaints(text).is_empty(), "the fixture itself must compile: {:?}", complaints(text));
+
+    let (_, after) = assist_named(text, 7, 2, 11, "function");
+    let said = complaints(&after);
+    assert!(said.is_empty(), "the extraction did not compile:\n{after}\n{said:?}");
+}
+
+/// **A selection that can fail gets a `raises` clause and a `!` at the call.**
+///
+/// The failure has to go somewhere, and where it was going before is the
+/// enclosing function. An extraction that wrote the clause and forgot the `!`
+/// would compile the new function and break the old one.
+#[test]
+fn an_extracted_function_that_can_fail_says_so_and_is_called_with_a_mark() {
+    let text = concat!(
+        "module main;
+
+",
+        "pub type Oops = | Bad;
+
+",
+        "fn risky() -> Int raises Oops { 1 }
+
+",
+        "fn go() -> Int raises Oops {
+",
+        "  risky()!
+",
+        "}
+",
+    );
+    assert!(complaints(text).is_empty(), "the fixture must compile: {:?}", complaints(text));
+
+    let (_, after) = assist_named(text, 7, 2, 10, "function");
+    assert!(after.contains("raises Oops"), "the clause should be written: {after}");
+    assert!(after.contains("extracted()!"), "the call needs the mark: {after}");
+    let said = complaints(&after);
+    assert!(said.is_empty(), "the extraction did not compile:
+{after}
+{said:?}");
+}
+
+// --- control flow ----------------------------------------------------------
+
+/// **An inverted `if` runs the same branch for the same input.**
+///
+/// The condition flips to its opposite comparison rather than growing a `!`,
+/// because a negation somebody has to read is worse than the one they wrote.
+#[test]
+fn an_if_with_both_branches_can_be_inverted() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn go(n: Int) -> Int {\n",
+        "  if n < 10 { 1 } else { 2 }\n",
+        "}\n",
+    );
+    let (title, after) = assist_named(text, 3, 5, 5, "Invert");
+    assert!(title.contains("Invert"), "{title}");
+    assert!(after.contains("if n >= 10 { 2 } else { 1 }"), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// `<` inverts to `>=` and not to `>`, because the third case is what makes it
+/// a comparison rather than a coin toss.
+#[test]
+fn inverting_a_comparison_keeps_the_case_it_did_not_mention() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn go(n: Int) -> Int {\n",
+        "  if n <= 10 { 1 } else { 2 }\n",
+        "}\n",
+    );
+    let (_, after) = assist_named(text, 3, 5, 5, "Invert");
+    assert!(after.contains("if n > 10"), "`<=` inverts to `>`: {after}");
+}
+
+/// **Two `if`s that hold nothing else become one `&&`**, which tests the same
+/// things in the same order and skips the same work.
+#[test]
+fn nested_ifs_merge_into_one_condition() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn go(a: Bool, b: Bool) -> Int {\n",
+        "  if a { if b { 1 } else { 0 } } else { 0 }\n",
+        "}\n",
+    );
+    // The inner `if` has an `else`, so the merge would change which code runs.
+    let offered = assists_for(text, 3, 5, 5);
+    assert!(
+        !offered.iter().any(|(title, _)| title.contains("Merge")),
+        "an inner `else` belongs to the inner condition: {offered:?}"
+    );
+}
+
+/// The shape that does merge: neither has an `else`, and the outer holds only
+/// the inner.
+#[test]
+fn a_bare_nested_if_merges() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn go(a: Bool, b: Bool) -> () {\n",
+        "  if a { if b { report() } }\n",
+        "}\n\n",
+        "fn report() -> () { () }\n",
+    );
+    let (_, after) = assist_named(text, 3, 5, 5, "Merge");
+    assert!(after.contains("if a && b {"), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// **`a < b` flips to `b > a`**, operator turned round with the operands so it
+/// answers the same question.
+#[test]
+fn a_comparison_can_be_read_the_other_way_round() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn go(a: Int, b: Int) -> Bool {\n",
+        "  a < b\n",
+        "}\n",
+    );
+    let (title, after) = assist_named(text, 3, 4, 4, "Flip");
+    assert!(title.contains("`>`"), "{title}");
+    assert!(after.contains("  b > a"), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// **`+` is not offered**, even though the arithmetic commutes: the operands
+/// are expressions, and swapping them swaps the order two calls happen in.
+#[test]
+fn addition_is_not_offered_a_flip() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn go(a: Int, b: Int) -> Int {\n",
+        "  a + b\n",
+        "}\n",
+    );
+    let offered = assists_for(text, 3, 4, 4);
+    assert!(
+        !offered.iter().any(|(title, _)| title.contains("Flip")),
+        "swapping operands swaps evaluation order: {offered:?}"
+    );
+}
+
+/// An `if` with no `else` is offered one, in the right place.
+#[test]
+fn an_if_without_an_else_is_offered_one() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn go(a: Bool) -> () {\n",
+        "  if a { report() }\n",
+        "}\n\n",
+        "fn report() -> () { () }\n",
+    );
+    let (_, after) = assist_named(text, 3, 5, 5, "else");
+    assert!(after.contains("} else {"), "{after}");
+}
+
+/// **A block is what people actually extract**, and it is the kind the `let`
+/// deliberately leaves out.
+#[test]
+fn a_selected_block_becomes_a_function() {
+    let text = concat!(
+        "module main;
+
+",
+        "fn go(a: Int) -> Int {
+",
+        "  { let doubled = a + a; doubled + 1 }
+",
+        "}
+",
+    );
+    assert!(complaints(text).is_empty(), "the fixture must compile: {:?}", complaints(text));
+
+    let (_, after) = assist_named(text, 3, 2, 38, "function");
+    assert!(after.contains("fn extracted(a: Int) -> Int"), "{after}");
+    let said = complaints(&after);
+    assert!(said.is_empty(), "the extraction did not compile:
+{after}
+{said:?}");
+}
+
+/// **A block that writes to a binding it did not declare is refused.**
+///
+/// A parameter is a value, so the write would land on a copy and the original
+/// would quietly stop changing -- an extraction that compiles and is wrong,
+/// which is the worst kind. The closure route to the same mistake is already a
+/// compile error; this is the one that is not.
+#[test]
+fn a_block_that_assigns_to_an_outer_binding_is_not_extracted() {
+    let text = concat!(
+        "module main;
+
+",
+        "fn go() -> Int {
+",
+        "  let mut n = 0;
+",
+        "  { n = n + 1; n }
+",
+        "}
+",
+    );
+    assert!(complaints(text).is_empty(), "the fixture must compile: {:?}", complaints(text));
+
+    let offered = assists_for(text, 4, 2, 18);
+    assert!(
+        !offered.iter().any(|(title, _)| title.contains("function")),
+        "the write would land on a parameter: {offered:?}"
+    );
+
+    // **The control, and it is not optional.** The assertion above passes just
+    // as well if the block was never recognised at all, which would make it a
+    // test of nothing. The same block with the write removed has to be
+    // offered, and the only difference between the two is the assignment.
+    let readable = text.replace("{ n = n + 1; n }", "{ let m = n + 1; m }");
+    assert!(complaints(&readable).is_empty(), "{:?}", complaints(&readable));
+    let offered = assists_for(&readable, 4, 2, 22);
+    assert!(
+        offered.iter().any(|(title, _)| title.contains("function")),
+        "a block that only reads is extractable, so the refusal above is about the write and          not about blocks: {offered:?}"
+    );
+}
+
+/// **A selected expression becomes a function, and the signature is written.**
+///
+/// The parameter is the one local the selection uses and does not bind, and
+/// its type is the checker's. `a` is not a parameter because the selection
+/// does not mention it.
+#[test]
+fn a_selected_expression_is_offered_a_function() {
+    let text = "module main;\n\nfn go(a: Int, b: Int) -> Int {\n  a + (b + 1)\n}\n";
+    let (title, after) = assist_named(text, 3, 6, 13, "function");
+    assert!(title.contains("Extract into a function"), "{title}");
+    assert!(after.contains("fn extracted(b: Int) -> Int {"), "{after}");
+    assert!(after.contains("  a + extracted(b)"), "{after}");
+}
+
+/// **The capability row is written from what the calls inside demanded.**
+///
+/// This is the half a Rust equivalent has no analogue for: the extracted
+/// function needs `with { log: Log }` and nothing in the selection says so --
+/// the checker recorded it at the call while it was type-checking, and the
+/// assist reads it back.
+#[test]
+fn an_extracted_function_declares_the_capability_it_needs() {
+    let text = concat!(
+        "module main;\n\n",
+        "pub effect Log { record: (String) -> () }\n\n",
+        "fn note(m: String) -> () with { log: Log } { log.record(m) }\n\n",
+        "fn go(n: Int) -> Int with { log: Log } {\n",
+        "  note(\"x\");\n",
+        "  n\n",
+        "}\n",
+    );
+    let line = 7;
+    let (_, after) = assist_named(text, line, 2, 11, "function");
+    assert!(
+        after.contains("with { log: Log }") && after.contains("fn extracted("),
+        "the extracted function should declare the capability: {after}"
+    );
+}
+
+/// **A selection containing a `with` block is refused.**
+///
+/// A handler *discharges* a row, and the rows are unioned from what each call
+/// demanded before anything answered it -- so the signature would declare a
+/// capability the extracted code supplies itself. Refused exactly rather than
+/// guessed at.
+#[test]
+fn a_selection_that_installs_a_capability_is_not_extracted() {
+    let text = concat!(
+        "module main;\n\n",
+        "pub effect Log { record: (String) -> () }\n\n",
+        "fn quiet() -> Log { handler for Log { record: fn _m => () } }\n\n",
+        "fn note(m: String) -> () with { log: Log } { log.record(m) }\n\n",
+        "fn go() -> Int {\n",
+        "  with { log: quiet() } { note(\"x\") };\n",
+        "  0\n",
+        "}\n",
+    );
+    let offered = assists_for(text, 9, 2, 36);
+    assert!(
+        !offered.iter().any(|(title, _)| title.contains("function")),
+        "a selection that answers its own row has no honest signature: {offered:?}"
+    );
+}
+
+/// **Offered where the `let` is refused**, which is the point of having both.
+///
+/// Hoisting the right side of `&&` runs code the `&&` exists to skip. A *call*
+/// left where the expression was runs at exactly the same moment, so there is
+/// nothing to refuse.
+#[test]
+fn a_function_is_offered_where_a_binding_would_reorder_the_program() {
+    let text =
+        "module main;\n\nfn go(a: Bool, b: Bool) -> Bool {\n  let both = a && (b && a);\n  both\n}\n";
+    let offered = assists_for(text, 3, 18, 26);
+    assert!(
+        !offered.iter().any(|(title, _)| title.contains("into a `let`")),
+        "the binding still reorders: {offered:?}"
+    );
+    assert!(
+        offered.iter().any(|(title, _)| title.contains("into a function")),
+        "a call does not reorder anything, so it should be offered: {offered:?}"
+    );
+}
+
 /// **The refusal is the feature.** Hoisting the right side of `&&` above the
-/// statement makes code run that the `&&` exists to skip, so nothing is
+/// statement makes code run that the `&&` exists to skip, so no *binding* is
 /// offered there rather than an edit that quietly changes the program.
+///
+/// Extracting a function is offered, and that is not an exception to this: a
+/// call left where the expression was runs exactly when the expression did.
+/// `a_function_is_offered_where_a_binding_would_reorder_the_program` is the
+/// other half, and the pair is the whole distinction.
 #[test]
 fn an_expression_that_may_not_run_is_offered_no_extraction() {
     let text =
         "module main;\n\nfn go(a: Bool, b: Bool) -> Bool {\n  let both = a && (b && a);\n  both\n}\n";
     let offered = assists_for(text, 3, 18, 26);
     assert!(
-        !offered.iter().any(|(title, _)| title.contains("Extract")),
+        !offered.iter().any(|(title, _)| title.contains("into a `let`")),
         "the far side of `&&` is not always run: {offered:?}"
     );
 }
