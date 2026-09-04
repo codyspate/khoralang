@@ -97,6 +97,12 @@ step 'no text a quoting slip mangled'
 # that reached `main` before it existed.
 sh "$root/scripts/no-mangled-text.sh"
 
+step 'a design document does not name a test that is gone'
+# The other half of "name the invariant and the test that protects it": a
+# citation outliving the test it names leaves an inventory entry reading like a
+# guarantee and pointing at nothing.
+sh "$root/scripts/check-cited-tests.sh"
+
 step 'every unsafe block has an argument'
 sh "$root/scripts/no-bare-unsafe.sh"
 

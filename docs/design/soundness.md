@@ -133,6 +133,26 @@ and reintroduces a fiber reading another fiber's cancellation flag — which is
 how it was found. `a_fiber_keeps_its_identity_across_workers` is the test, and
 it failed `left: 30, right: 28` as soon as migration became common.
 
+**That test used to be able to pass having proved nothing**, and this section
+was citing it as the protection anyway. It asserted that a fiber's identity was
+stable across a suspension, which is also true of a fiber that spent its whole
+life on one worker — and migration happens when a worker steals, which is a
+race rather than a promise. It is `crate::migration` now, under the same name,
+and it parks fibers and has a thread that is not a worker wake them, so the
+task goes to the shared queue and *any* worker may take it -- migration
+becomes the normal case rather than a steal to wait for.
+`nothing_a_fiber_owns_follows_its_worker` is where the work is: it checks the
+identity, the cancellation flag and the current span together, seeded
+differently per fiber so that a slot belonging to the worker shows up as one
+fiber reading another's value rather than as nothing at all.
+
+`scripts/check-cited-tests.sh` is a gate step now: every backticked
+`snake_case` name of three or more words in this document and in
+`scheduler.md` has to appear somewhere in `crates/`. It catches the next stage
+of this decay — the citation outliving the test — and not this one, which is a
+test that exists and does less than the sentence naming it claims. No script
+can check that; a reader can.
+
 ## `unsafe impl Send`
 
 Three, all in `khora-rt`, and each carries its argument at the impl.

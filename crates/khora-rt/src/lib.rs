@@ -146,6 +146,7 @@ mod fiber;
 mod fs;
 mod heap;
 #[cfg(not(target_family = "wasm"))]
+mod migration;
 mod net;
 #[cfg(not(target_family = "wasm"))]
 mod nursery;

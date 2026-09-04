@@ -691,6 +691,43 @@ pub(crate) fn waker_for_current() -> Option<Waker> {
 /// sleeping.
 // Private, because `Shared` is: a waker outside this module goes through
 // `Scheduler::wake_fiber`, and a reactor will go through the same door.
+/// Makes a parked fiber runnable again.
+///
+/// # The ownership invariant, which this function is where you break
+///
+/// **A `Task` has exactly one owner at every instant.** It is a moved value,
+/// so at any moment it is in exactly one place -- the shared queue, one
+/// worker's queue, the parked map, a worker's stack frame, or gone -- and
+/// [`Shared::audit`] is the arithmetic that says so. Two owners means the same
+/// fiber stack resumed from two threads, which is not a data race that shows
+/// up as a wrong number: it is two threads running one coroutine.
+///
+/// A wake is the one operation that could produce a second owner, because it
+/// arrives from outside and knows nothing about what the fiber is doing. Any
+/// number of them can arrive for one fiber, from any number of threads, at any
+/// point in the park. **Two claims stop it, and both are needed:**
+///
+/// 1. `state.wake()` is a compare-exchange from `WAITING`. Exactly one caller
+///    sees `true`; every other one returns above, having left the notification
+///    standing for whoever waits next.
+/// 2. `parked.remove(&fiber)` takes the task out of the map. Exactly one
+///    caller gets `Some`, and it is holding the only copy from that point on.
+///
+/// Neither alone is enough. Without the first, two wakes both find the task
+/// and one of them injects a fiber that is already running. Without the
+/// second, the winner of the compare-exchange could race the *worker* that is
+/// still filing the task -- which is why the `Some`-less branch below returns
+/// rather than treating a missing entry as an error.
+///
+/// Both happen under `shared.parked`'s lock, which is the same lock the worker
+/// parks with, so a wake cannot land between the worker reading the state and
+/// filing the task.
+///
+/// `in_transit` is the third place a task can be, and exists so the audit
+/// still balances while this function is carrying one between the map and a
+/// queue.
+///
+/// `an_avalanche_of_wakes_resumes_a_fiber_once` is the test.
 fn wake(shared: &Arc<Shared>, fiber: usize, state: &Wait) {
     shared.counts.wakes.fetch_add(1, Ordering::Relaxed);
 
@@ -704,9 +741,19 @@ fn wake(shared: &Arc<Shared>, fiber: usize, state: &Wait) {
     }
     let Some(task) = parked.remove(&fiber) else {
         // Suspended but not filed yet: its worker still holds it and will see
-        // `NOTIFIED` when it looks.
+        // `NOTIFIED` when it looks. Not an error, and not something to assert
+        // against -- it is the second claim doing its job, and the worker is
+        // the owner in this branch.
         return;
     };
+    // Won both claims, so this thread is the sole owner until `inject`. A
+    // second winner would have to have come through `state.wake()` returning
+    // true twice for one park, which is the thing the compare-exchange makes
+    // impossible.
+    debug_assert!(
+        !parked.contains_key(&fiber),
+        "the parked map held two entries for fiber {fiber}, so two threads own one task",
+    );
     // In this thread's hands from here until `inject`, and in no queue.
     shared.in_transit.fetch_add(1, Ordering::AcqRel);
     drop(parked);
@@ -2076,26 +2123,95 @@ mod tests {
         assert!(!sleep_until(std::time::Instant::now()));
     }
 
-    /// A fiber's identity has to be right on whichever worker picked it up,
-    /// which is the whole reason `current` came before any of this.
-    #[test]
-    fn a_fiber_keeps_its_identity_across_workers() {
-        let matched = Arc::new(AtomicUsize::new(0));
-        let pool = Scheduler::new(4);
+    // `a_fiber_keeps_its_identity_across_workers` used to live here, and it
+    // never checked that a fiber changed worker. It asserted that an identity
+    // was stable across a suspension, which is also true of a fiber that spent
+    // its whole life on one thread -- so on a run where nothing migrated it
+    // passed having tested nothing, and `docs/design/soundness.md` named it as
+    // the test protecting thread-affinity.
+    //
+    // It is `crate::migration` now, under the same name so that every citation
+    // still resolves, and it retries until it observes a migration.
 
-        for _ in 0..64 {
-            let hits = matched.clone();
-            let task = Task::new(move || {
-                let first = crate::current::current(|f| f.id());
-                for _ in 0..8 {
-                    suspend();
-                    assert_eq!(crate::current::current(|f| f.id()), first, "identity changed");
+    /// **One park, one resumption, however many wakes arrive.**
+    ///
+    /// The release gate asks that every runnable `Task` have exactly one owner
+    /// at every instant, and that wake tokens never create a second. `wake`
+    /// carries the argument; this is the part that can fail.
+    ///
+    /// Each fiber parks and is then woken by every thread at once. A runtime
+    /// where two wakes could both claim a parked task would inject it twice,
+    /// and the fiber would resume twice from one park -- so the assertion is
+    /// that resumptions equal parks, not that nothing crashed. The audit is
+    /// checked as well, because a task injected twice is also a task counted
+    /// twice.
+    #[test]
+    fn an_avalanche_of_wakes_resumes_a_fiber_once() {
+        const FIBERS: usize = 24;
+        const PARKS: usize = 8;
+        const SHOUTERS: usize = 4;
+
+        let resumed = Arc::new(AtomicUsize::new(0));
+        let parked = Arc::new(Mutex::new(Vec::<Waker>::new()));
+
+        let pool = Scheduler::new(4);
+        for _ in 0..FIBERS {
+            let woke = resumed.clone();
+            let box_office = parked.clone();
+            pool.spawn(Task::new(move || {
+                for _ in 0..PARKS {
+                    let Some(waker) = waker_for_current() else { break };
+                    // Handed out before parking, so the shouters below can
+                    // reach a fiber that is not yet asleep -- which is the
+                    // race the second claim in `wake` exists for.
+                    box_office.lock().unwrap().push(waker);
+                    park_current();
+                    woke.fetch_add(1, Ordering::SeqCst);
                 }
-                hits.fetch_add(1, Ordering::SeqCst);
-            });
-            pool.spawn(task);
+            }));
         }
+
+        // Wake everything, repeatedly, from several threads at once. Every
+        // wake after the first for a given park is the one that must not find
+        // a task to take.
+        let stop = Arc::new(AtomicUsize::new(0));
+        let shouters: Vec<_> = (0..SHOUTERS)
+            .map(|_| {
+                let box_office = parked.clone();
+                let finished = stop.clone();
+                std::thread::spawn(move || {
+                    while finished.load(Ordering::SeqCst) == 0 {
+                        let wakers: Vec<Waker> = box_office.lock().unwrap().drain(..).collect();
+                        for waker in &wakers {
+                            waker.wake();
+                            waker.wake();
+                        }
+                        std::thread::yield_now();
+                    }
+                })
+            })
+            .collect();
+
         pool.drain();
-        assert_eq!(matched.load(Ordering::SeqCst), 64);
+        stop.store(1, Ordering::SeqCst);
+        for shouter in shouters {
+            let _ = shouter.join();
+        }
+
+        assert_eq!(
+            resumed.load(Ordering::SeqCst),
+            FIBERS * PARKS,
+            "a fiber resumed a different number of times than it parked, so a park was claimed \
+             twice or not at all"
+        );
+
+        let audit = pool.audit();
+        assert_eq!(audit.parked, 0, "a fiber was left parked: {audit:?}");
+        assert_eq!(audit.in_transit, 0, "a task was left in transit: {audit:?}");
+        assert_eq!(
+            audit.spawned, audit.completed,
+            "every fiber spawned should have completed exactly once: {audit:?}"
+        );
     }
 }
+
