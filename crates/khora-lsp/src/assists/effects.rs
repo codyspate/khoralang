@@ -22,6 +22,8 @@ pub fn assists(tree: &SyntaxNode, text: &str, selection: TextRange) -> Vec<Assis
     out.extend(wrap_in_catch(tree, selection));
     out.extend(wrap_in_attempt(tree, text, selection));
     out.extend(unwrap_attempt(tree, text, selection));
+    out.extend(add_catch_arm(tree, text, selection));
+    out.extend(catch_to_attempt(tree, text, selection));
     out.extend(wrap_in_scoped(tree, text, selection));
     out.extend(postfix_with_to_block(tree, text, selection));
     out.extend(block_with_to_postfix(tree, text, selection));
@@ -222,4 +224,67 @@ fn indent_of(text: &str, node: &SyntaxNode) -> String {
     let start = usize::from(node.text_range().start());
     let line = text[..start].rfind('\n').map_or(0, |at| at + 1);
     text[line..start].chars().take_while(|c| *c == ' ' || *c == '\t').collect()
+}
+
+/// **An arm added to a `catch`.**
+///
+/// A `catch` over named constructors has to be exhaustive, so the arm somebody
+/// needs next is the one the compiler is about to ask for. The comma is the
+/// fiddly part, exactly as it is for a `match`.
+fn add_catch_arm(tree: &SyntaxNode, text: &str, selection: TextRange) -> Option<Assist> {
+    let node = covering(tree, selection, SyntaxKind::CATCH_EXPR)?;
+    let last = node.children().filter(|n| n.kind() == SyntaxKind::MATCH_ARM).last()?;
+    let after = &text[usize::from(last.text_range().end())..];
+    let comma = if after.trim_start().starts_with(',') { "" } else { "," };
+    Some(Assist {
+        title: "Add an arm to the `catch`".to_string(),
+        kind: "refactor.rewrite",
+        edits: vec![Edit {
+            range: TextRange::empty(last.text_range().end()),
+            replacement: format!("{comma} _ => todo()"),
+        }],
+    })
+}
+
+/// **`x! catch { .. }` becomes `match attempt(fn () => x!) { .. }`.**
+///
+/// The same handling written the other way. `catch` reads better when the
+/// arms are short and the answer is a value; `attempt` reads better when the
+/// `Result` is going to be passed on, because it is already one.
+///
+/// The arms move across untouched: a `catch` arm and a `match` arm are the
+/// same syntax, and what changes is only what they are matching on -- so the
+/// `Err` wrapper goes on and this leaves the patterns to whoever wrote them.
+fn catch_to_attempt(tree: &SyntaxNode, text: &str, selection: TextRange) -> Option<Assist> {
+    let node = covering(tree, selection, SyntaxKind::CATCH_EXPR)?;
+    let subject = node.children().next()?;
+    let arms: Vec<SyntaxNode> =
+        node.children().filter(|n| n.kind() == SyntaxKind::MATCH_ARM).collect();
+    if arms.is_empty() {
+        return None;
+    }
+
+    let indent = indent_of(text, &node);
+    let written: Vec<String> = arms
+        .iter()
+        .map(|arm| {
+            let mut parts = arm.children();
+            let pattern = parts.next().map(|p| text_of(text, &p)).unwrap_or_default();
+            let body = parts.last().map(|b| text_of(text, &b)).unwrap_or_default();
+            format!("Result::Err({}) => {}", pattern.trim(), body.trim())
+        })
+        .collect();
+
+    Some(Assist {
+        title: "Handle it as a `Result` instead".to_string(),
+        kind: "refactor.rewrite",
+        edits: vec![Edit {
+            range: node.text_range(),
+            replacement: format!(
+                "match attempt(fn () => {}) {{\n{indent}  Result::Ok(answer) => answer,\n{indent}  {}\n{indent}}}",
+                text_of(text, &subject),
+                written.join(&format!(",\n{indent}  "))
+            ),
+        }],
+    })
 }

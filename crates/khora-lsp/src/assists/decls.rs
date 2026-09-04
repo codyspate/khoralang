@@ -13,17 +13,25 @@
 //! requires a capability for an example. Starting the block with the headings
 //! it will be judged on is cheaper than being told later.
 
+use khora_db::{Db, SourceFile};
 use khora_syntax::{SyntaxKind, SyntaxNode};
 use text_size::TextRange;
 
 use super::{Assist, Edit, covering};
 
 /// Every declaration assist available at the cursor.
-pub fn assists(tree: &SyntaxNode, text: &str, selection: TextRange) -> Vec<Assist> {
+pub fn assists(
+    db: &dyn Db,
+    file: SourceFile,
+    tree: &SyntaxNode,
+    text: &str,
+    selection: TextRange,
+) -> Vec<Assist> {
     let mut out = Vec::new();
     out.extend(export(tree, text, selection));
     out.extend(unexport(tree, text, selection));
     out.extend(document(tree, text, selection));
+    out.extend(write_return_type(db, file, tree, text, selection));
     out.extend(add_raises(tree, text, selection));
     out.extend(add_with(tree, text, selection));
     out
@@ -191,4 +199,63 @@ fn indent_of(text: &str, node: &SyntaxNode) -> String {
     let start = usize::from(node.text_range().start());
     let line = text[..start].rfind('\n').map_or(0, |at| at + 1);
     text[line..start].chars().take_while(|c| *c == ' ' || *c == '\t').collect()
+}
+
+/// **A function with no return type gets the one it already has.**
+///
+/// The same argument as writing a `let`'s inferred type: the compiler knows
+/// it, a reader does not, and a signature is the one place in a Khora file
+/// that is read far more often than it is written. A function whose answer
+/// type is only discoverable by reading its body is one nobody can call
+/// without reading its body.
+///
+/// Refused when the checker did not finish, and when the answer is `()` --
+/// which is what a function with no arrow already says.
+fn write_return_type(
+    db: &dyn Db,
+    file: SourceFile,
+    tree: &SyntaxNode,
+    text: &str,
+    selection: TextRange,
+) -> Option<Assist> {
+    let node = covering(tree, selection, SyntaxKind::FN_DECL)?;
+    // An arrow already there is the author saying it.
+    if node.children_with_tokens().any(|e| e.kind() == SyntaxKind::THIN_ARROW) {
+        return None;
+    }
+    let body = node.children().find(|n| n.kind() == SyntaxKind::BLOCK)?;
+    let written = body_type(db, file, body.text_range())?;
+    if written == "()" {
+        return None;
+    }
+
+    // Before the clauses and the body, which is where an arrow goes.
+    let at = node
+        .children()
+        .filter(|n| n.text_range().end() <= body.text_range().start())
+        .map(|n| n.text_range().end())
+        .max()?;
+    let _ = text;
+    Some(Assist {
+        title: format!("Write the return type, `{written}`"),
+        kind: "refactor.rewrite",
+        edits: vec![Edit { range: TextRange::empty(at), replacement: format!(" -> {written}") }],
+    })
+}
+
+/// The type the checker gave the expression covering `at`.
+fn body_type(db: &dyn Db, file: SourceFile, at: TextRange) -> Option<String> {
+    let checked = khora_types::checked(db, file);
+    for (owner, body) in khora_hir::body::bodies(db, file) {
+        let Some(id) = body.exprs().map(|(id, _)| id).find(|id| body.range(*id) == at) else {
+            continue;
+        };
+        let types = checked.bodies.iter().find(|(n, _)| n == owner).map(|(_, t)| t)?;
+        let written = types.of(id).to_string();
+        if written.contains('?') {
+            return None;
+        }
+        return Some(written);
+    }
+    None
 }

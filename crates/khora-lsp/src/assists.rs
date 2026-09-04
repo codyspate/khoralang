@@ -102,9 +102,9 @@ pub fn at(db: &dyn Db, file: SourceFile, selection: TextRange) -> Vec<Assist> {
     out.extend(effects::assists(&tree, text, selection));
     out.extend(matching::assists(&tree, text, selection));
     out.extend(imports::assists(&tree, text, selection));
-    out.extend(decls::assists(&tree, text, selection));
+    out.extend(decls::assists(db, file, &tree, text, selection));
     out.extend(literals::assists(&tree, text, selection));
-    out.extend(calls::assists(&tree, text, selection));
+    out.extend(calls::assists(db, file, &tree, text, selection));
     out.extend(types::assists(&tree, text, selection));
     out.extend(statements::assists(&tree, text, selection));
     out.extend(patterns::assists(db, file, &tree, text, selection));

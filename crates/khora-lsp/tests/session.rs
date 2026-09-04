@@ -2104,6 +2104,74 @@ fn an_extracted_function_that_can_fail_says_so_and_is_called_with_a_mark() {
 {said:?}");
 }
 
+// --- signatures the checker already knows ----------------------------------
+
+/// **A function with no return type gets the one it already has.**
+///
+/// The same argument as writing a `let`'s inferred type: a signature is read
+/// far more often than it is written, and a function whose answer type is only
+/// discoverable by reading its body is one nobody can call without reading it.
+#[test]
+fn a_function_without_a_return_type_is_offered_its_own() {
+    let text = concat!("module main;\n\n", "fn go(n: Int) {\n", "  n + 1\n", "}\n");
+    let (title, after) = assist_named(text, 2, 3, 3, "return type");
+    assert!(title.contains("`Int`"), "{title}");
+    assert!(after.contains("fn go(n: Int) -> Int {"), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// A function answering `()` already says so by having no arrow.
+#[test]
+fn a_function_answering_nothing_is_not_offered_a_return_type() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn report() -> () { () }\n\n",
+        "fn go() {\n",
+        "  report()\n",
+        "}\n",
+    );
+    let offered = assists_for(text, 4, 3, 3);
+    assert!(
+        !offered.iter().any(|(title, _)| title.contains("return type")),
+        "no arrow already means `()`: {offered:?}"
+    );
+}
+
+/// **A lambda lifted into a function, with the checker's types rather than a
+/// guess.** The first version wrote `Int` everywhere, which is a plausible
+/// wrong answer and worse than a hole.
+#[test]
+fn a_lambda_lifted_into_a_function_carries_its_real_types() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn apply(f: (String) -> Int, s: String) -> Int { f(s) }\n\n",
+        "fn go(s: String) -> Int {\n",
+        "  apply(fn word => String::byte_length(word), s)\n",
+        "}\n",
+    );
+    let (_, after) = assist_named(text, 5, 14, 14, "Lift the lambda");
+    assert!(after.contains("fn lifted(word: String) -> Int"), "not `Int` twice: {after}");
+    assert!(after.contains("apply(lifted, s)"), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// **An arm added to a `catch`**, which has to be exhaustive over the
+/// constructors it names.
+#[test]
+fn a_catch_is_offered_another_arm() {
+    let text = concat!(
+        "module main;\n\n",
+        "import std::core::{todo};\n\n",
+        "pub type Oops = | Bad | Worse;\n\n",
+        "fn risky() -> Int raises Oops { 1 }\n\n",
+        "fn go() -> Int {\n",
+        "  risky()! catch { Oops::Bad => 0, Oops::Worse => 1 }\n",
+        "}\n",
+    );
+    let (_, after) = assist_named(text, 9, 22, 22, "arm to the `catch`");
+    assert!(after.contains("_ => todo()"), "{after}");
+}
+
 // --- patterns, docs, and the rest ------------------------------------------
 
 /// **The one that needs the checker: a `_` arm written out as its cases.**
