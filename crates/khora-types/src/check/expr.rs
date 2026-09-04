@@ -32,7 +32,16 @@ impl<'a> Checker<'a> {
                         self.check_literal_fits(&text, kind, range);
                         Type::Fixed(kind)
                     }
-                    _ => Type::Int,
+                    // **A literal too wide for an `Int` is caught here now.**
+                    // `check_literal_fits` says "the `Int` path reports its own
+                    // version of this" and there was no such path: a bare
+                    // literal of twenty-three digits type-checked, and the
+                    // code generator refused it at `khora build` with a
+                    // message no editor could show.
+                    _ => {
+                        self.check_int_literal(&text, range);
+                        Type::Int
+                    }
                 },
                 Literal::Float(_) => Type::Float,
                 Literal::Str(_) => Type::Str,
@@ -201,6 +210,35 @@ impl<'a> Checker<'a> {
             Expr::Raise(error) => {
                 let ty = self.infer(error);
                 let ty = self.unifier.zonk(&ty);
+                // **Only a declared type can be raised, and this used to be
+                // the code generator's rule alone.** `raises String` passed
+                // `khora check` and every editor, and failed at `khora build`
+                // with a message nobody working in a file could see -- because
+                // the LSP publishes what the parser, the checker and the lints
+                // say, and the rule lived below all three.
+                //
+                // A rule the editor cannot show is a rule somebody meets at
+                // the end of the loop rather than while writing the line, so
+                // it belongs here and the backend keeps its copy as an
+                // assertion about what reaches it.
+                //
+                // `Param` is allowed: a generic `raises E` is settled by the
+                // caller, and monomorphization hands the backend the concrete
+                // type. A variable or an unknown is not yet decided, and
+                // guessing at one is how a checker invents an error about a
+                // program that has none.
+                if !matches!(
+                    ty,
+                    Type::Unknown | Type::Var(_) | Type::Adt { .. } | Type::Param(_) | Type::Never
+                ) {
+                    self.error(
+                        format!(
+                            "`{ty}` is not an error type, so it cannot be raised: \
+                             an error type is one a `type` declaration names"
+                        ),
+                        range,
+                    );
+                }
                 if !matches!(ty, Type::Unknown | Type::Var(_)) {
                     self.demanded.push(Demand {
                         // A `raise` is the mark: there is no call to write `!`

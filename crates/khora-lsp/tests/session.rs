@@ -5415,3 +5415,36 @@ fn a_function_that_declares_its_failure_gets_no_lens() {
     );
 }
 
+
+// --- rules the editor can now show -----------------------------------------
+
+/// **A rule the type checker does not know is a rule the editor cannot show.**
+///
+/// `diagnostics` publishes the parser's errors, then the checker's, then the
+/// lints, and stops. Nothing in that chain runs the code generator — so a rule
+/// enforced during lowering produced a program the editor called clean and
+/// `khora build` refused, which is the worst place to learn a language rule
+/// because it is the furthest from the line that broke it.
+///
+/// Both of these were down there. These are the tests that they have come up,
+/// asserted where it matters: at the thing that draws the underline.
+#[test]
+fn the_editor_shows_that_a_string_cannot_be_raised() {
+    let text = "module main;\n\nfn boom() -> Int raises String { raise(\"no\") }\n";
+    let said = complaints(text);
+    assert!(
+        said.iter().any(|line| line.contains("not an error type")),
+        "the editor should say so, not `khora build`: {said:?}"
+    );
+}
+
+/// The same, for a literal wider than an `Int`.
+#[test]
+fn the_editor_shows_an_integer_literal_that_does_not_fit() {
+    let text = "module main;\n\nfn go() -> Int { 99999999999999999999999 }\n";
+    let said = complaints(text);
+    assert!(
+        said.iter().any(|line| line.contains("does not fit in an `Int`")),
+        "the editor should say so: {said:?}"
+    );
+}

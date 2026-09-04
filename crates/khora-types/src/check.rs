@@ -262,8 +262,8 @@ impl<'a> Checker<'a> {
     fn check_literal_fits(&mut self, text: &str, kind: IntKind, range: TextRange) {
         let cleaned = text.replace('_', "");
         let Ok(value) = cleaned.parse::<i128>() else {
-            // Too wide for even an i128, so certainly too wide for this. The
-            // `Int` path reports its own version of this.
+            // Too wide for even an i128, so certainly too wide for this.
+            // [`Self::check_int_literal`] is the `Int` path's version.
             self.error(format!("`{text}` does not fit in `{}`", kind.name()), range);
             return;
         };
@@ -273,6 +273,30 @@ impl<'a> Checker<'a> {
                 format!(
                     "`{text}` does not fit in `{}`, which holds {lo} to {hi}",
                     kind.name()
+                ),
+                range,
+            );
+        }
+    }
+
+    /// Whether a literal with no fixed-width hint fits in an `Int`.
+    ///
+    /// `Int` is 64 bits, so this is `i64::from_str`. Written separately from
+    /// [`Self::check_literal_fits`] because the fixed-width one has a range to
+    /// name and this one does not: every `Int` has the same bounds, and
+    /// printing them is what tells a reader whether their number is close or
+    /// absurd.
+    ///
+    /// The code generator keeps its own copy, which is now an assertion about
+    /// what reaches it rather than the only place the rule lives.
+    fn check_int_literal(&mut self, text: &str, range: TextRange) {
+        let cleaned = text.replace('_', "");
+        if cleaned.parse::<i64>().is_err() {
+            self.error(
+                format!(
+                    "`{text}` does not fit in an `Int`, which holds {} to {}",
+                    i64::MIN,
+                    i64::MAX
                 ),
                 range,
             );

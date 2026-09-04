@@ -900,3 +900,74 @@ fn a_function_typed_annotation_reaches_the_closure() {
     assert_reports("module m;\nfn f() -> Int { let g: (Int) -> Int = fn x => \"s\"; 0 }\n", "expected `Int`, found `String`");
     assert_reports("module m;\nfn f() -> String { let g: (Int) -> Int = fn x => x; g(1) }\n", "returns `String`");
 }
+
+// --- rules that used to live only in the code generator --------------------
+//
+// **A rule the type checker does not know is a rule the editor cannot show.**
+// `khora-lsp` publishes what the parser, the checker and the lints say, and
+// nothing else -- so a rule enforced during lowering is one a developer meets
+// at `khora build`, after the loop they were working in said the program was
+// fine. Both of these were down there.
+
+/// **Only a declared type can be raised.**
+///
+/// `raises String` type-checked and every editor stayed quiet; `khora build`
+/// refused it. The backend keeps its copy as an assertion about what reaches
+/// it, and this is the one a person sees.
+#[test]
+fn a_type_no_declaration_names_cannot_be_raised() {
+    assert_reports(
+        "module m;\nfn boom() -> Int raises String { raise(\"no\") }\n",
+        "not an error type",
+    );
+}
+
+/// And a declared one is fine, which is the half that stops the rule being a
+/// blanket refusal.
+#[test]
+fn a_declared_type_can_be_raised() {
+    assert_clean(
+        "module m;\npub type Oops = | Bad;\nfn boom() -> Int raises Oops { raise Oops::Bad }\n",
+    );
+}
+
+/// A generic error type is settled by the caller, so the checker cannot judge
+/// it and must not try.
+#[test]
+fn a_generic_error_type_is_left_to_the_caller() {
+    assert_clean(
+        "module m;\nfn rethrow<E>(e: E) -> Int raises E { raise e }\n",
+    );
+}
+
+/// **A literal too wide for an `Int`.**
+///
+/// `check_literal_fits` said "the `Int` path reports its own version of this",
+/// and there was no such path.
+#[test]
+fn an_integer_literal_wider_than_int_is_refused() {
+    assert_reports(
+        "module m;\nfn go() -> Int { 99999999999999999999999 }\n",
+        "does not fit in an `Int`",
+    );
+}
+
+/// The bounds are named, because what a reader needs to know is whether their
+/// number is close or absurd.
+#[test]
+fn the_int_bounds_are_named_when_a_literal_misses_them() {
+    assert_reports("module m;\nfn go() -> Int { 99999999999999999999999 }\n", "9223372036854775807");
+}
+
+/// The largest `Int` there is, which is the case an off-by-one in the bound
+/// would refuse.
+#[test]
+fn the_largest_int_is_accepted() {
+    assert_clean("module m;\nfn go() -> Int { 9223372036854775807 }\n");
+}
+
+/// Separators do not change what a literal is worth.
+#[test]
+fn a_separated_literal_is_measured_without_its_underscores() {
+    assert_clean("module m;\nfn go() -> Int { 9_223_372_036_854_775_807 }\n");
+}
