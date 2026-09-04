@@ -302,6 +302,42 @@ pub fn default_version() -> Option<String> {
     }
 }
 
+/// The version that will actually run in an unpinned directory.
+///
+/// **Not [`crate::RUNNING`], and the difference is a bug that shipped.**
+/// `khora update` is deliberately never handed over to another toolchain --
+/// it is how a broken default gets replaced, so dispatching it *through* the
+/// default would make an unusable default unfixable. The consequence is that
+/// it always executes `<home>/bin/khora`, the bootstrap binary the installer
+/// unpacked, whose compiled-in version is whatever was current the day it was
+/// written and never changes again.
+///
+/// So `update` compared the newest release against its own build version. A
+/// machine bootstrapped at `0.1.0-rc.3` reported `0.1.0-rc.3 -> 0.1.0` on
+/// every run for ever: eighty megabytes downloaded, a default set that was
+/// already set, and a report of success. Nothing was broken except the
+/// question -- `khora --version` said `0.1.0` throughout, because that path
+/// does hand over.
+///
+/// The default is what an unpinned directory gets, so the default is what
+/// "what you have" means. `RUNNING` is the fallback for a binary somebody
+/// built, where there is no home to consult.
+pub fn in_use() -> String {
+    chosen(default_version())
+}
+
+/// [`in_use`]'s decision, with the reading of the disk taken out.
+///
+/// Separate so it can be tested without a `KHORA_HOME`. The first version of
+/// these tests set that variable, and `set_var` is process-wide while cargo
+/// runs a binary's tests on several threads -- so three tests that each wanted
+/// their own home raced over one, and the suite passed or failed depending on
+/// which won. The part that was wrong is this line; it needs no environment to
+/// state.
+fn chosen(default: Option<String>) -> String {
+    default.unwrap_or_else(|| crate::RUNNING.to_string())
+}
+
 /// Makes `version` what an unpinned directory gets.
 pub fn set_default(version: &str) -> Result<()> {
     let have = super::installed()?;
@@ -664,5 +700,29 @@ mod tests {
         std::fs::write(work.path().join("surprise.txt"), b"hello").expect("a file");
         let why = place(work.path(), "9.9.9").expect_err("it should refuse");
         assert!(format!("{why}").contains("may not be a Khora release"), "{why}");
+    }
+}
+
+#[cfg(test)]
+mod in_use_tests {
+    use super::*;
+
+    /// **The bug, as an assertion.** `update` is never handed over, so it runs
+    /// the bootstrap binary, whose version is frozen at whatever the installer
+    /// unpacked. Comparing the newest release against *that* reported an
+    /// upgrade on every run for ever. The default is what will actually run,
+    /// and the default is the answer.
+    #[test]
+    fn the_default_wins_over_the_running_binary() {
+        assert_eq!(chosen(Some("9.9.9".to_string())), "9.9.9");
+        assert_ne!("9.9.9", crate::RUNNING, "the point is that these differ");
+    }
+
+    /// With no default -- a binary somebody built, or a home before the first
+    /// install -- there is nothing to consult, and the running one is the
+    /// honest answer.
+    #[test]
+    fn with_no_default_the_running_binary_is_the_answer() {
+        assert_eq!(chosen(None), crate::RUNNING);
     }
 }

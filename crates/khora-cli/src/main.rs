@@ -1153,22 +1153,26 @@ fn update(pre: bool) -> Result<bool> {
         khora_toolchain::install::Wanted::Latest
     };
     let version = khora_toolchain::install::resolve(&wanted)?;
+    // **What will run, not what is running.** `update` is never handed over --
+    // it is how a broken default gets replaced -- so it always executes the
+    // bootstrap binary, whose own version is frozen at whatever the installer
+    // unpacked. `install::in_use` carries the whole story.
+    let current = khora_toolchain::install::in_use();
 
-    if version == khora_toolchain::RUNNING
-        && khora_toolchain::install::default_version().as_deref() == Some(version.as_str())
-    {
+    if current == version {
         println!("Khora {version} is the newest release, and is what you have.");
         return Ok(true);
     }
 
-    println!("Khora {} → {version}", khora_toolchain::RUNNING);
+    println!("Khora {current} → {version}");
     println!("  downloading and verifying");
     khora_toolchain::install::install(&version)?;
     khora_toolchain::install::set_default(&version)?;
     println!("  installed, and now the default");
-    println!("\nGo back with:  khora toolchain default {}", khora_toolchain::RUNNING);
+    println!("\nGo back with:  khora toolchain default {current}");
     Ok(true)
 }
+
 
 /// Whether the running executable is one `KHORA_HOME` manages.
 ///
