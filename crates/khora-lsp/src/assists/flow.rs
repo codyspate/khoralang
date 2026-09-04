@@ -25,6 +25,8 @@ pub fn assists(tree: &SyntaxNode, text: &str, selection: TextRange) -> Vec<Assis
     out.extend(split_and(tree, text, selection));
     out.extend(remove_parens(tree, text, selection));
     out.extend(flip_comparison(tree, text, selection));
+    out.extend(de_morgan(tree, text, selection));
+    out.extend(parenthesise(tree, text, selection));
     out
 }
 
@@ -302,7 +304,24 @@ fn negated(condition: &str) -> String {
             return trimmed.replace(from, to);
         }
     }
-    format!("!({trimmed})")
+    // **Brackets only where they hold something together.** `!(a)` is correct
+    // and reads as though the author was unsure; a name, a field access or a
+    // call has nothing inside it for the `!` to bind past, and the whole point
+    // of `de_morgan` is producing a condition somebody would have written.
+    if atom(trimmed) { format!("!{trimmed}") } else { format!("!({trimmed})") }
+}
+
+/// Whether an expression binds tighter than a prefix `!` already.
+///
+/// A name, a path, a field access or a call: no operator at the top, so
+/// nothing for the `!` to reach past. Checked by looking for the operators
+/// rather than by parsing, because the operand has already been parsed and
+/// this is deciding how to *write* it.
+fn atom(written: &str) -> bool {
+    !written.is_empty()
+        && !written.contains(' ')
+        && !written.starts_with('!')
+        && !written.starts_with('(')
 }
 
 /// A condition wrapped in parentheses if it needs them to sit beside `&&`.
@@ -317,4 +336,80 @@ fn indent_of(text: &str, node: &SyntaxNode) -> String {
     let start = usize::from(node.text_range().start());
     let line = text[..start].rfind('\n').map_or(0, |at| at + 1);
     text[line..start].chars().take_while(|c| *c == ' ' || *c == '\t').collect()
+}
+
+/// **`!(a && b)` becomes `!a || !b`.**
+///
+/// De Morgan, and it is here because the mistake it prevents is the common
+/// one: people distribute the `!` and leave the `&&` alone, which is a
+/// different condition that agrees with the original exactly half the time.
+///
+/// Offered on a `!` whose operand is a parenthesised `&&` or `||`, which is
+/// the only shape where the answer is unambiguous.
+fn de_morgan(tree: &SyntaxNode, text: &str, selection: TextRange) -> Option<Assist> {
+    let node = covering(tree, selection, SyntaxKind::PREFIX_EXPR)?;
+    if !node.children_with_tokens().any(|e| e.kind() == SyntaxKind::BANG) {
+        return None;
+    }
+    let operand = node.children().next()?;
+    let inner = if operand.kind() == SyntaxKind::PAREN_EXPR {
+        operand.children().next()?
+    } else {
+        operand.clone()
+    };
+    if inner.kind() != SyntaxKind::BIN_EXPR {
+        return None;
+    }
+
+    let (joined, becomes) = if inner
+        .children_with_tokens()
+        .any(|e| e.kind() == SyntaxKind::AMP_AMP)
+    {
+        (SyntaxKind::AMP_AMP, "||")
+    } else if inner.children_with_tokens().any(|e| e.kind() == SyntaxKind::PIPE_PIPE) {
+        (SyntaxKind::PIPE_PIPE, "&&")
+    } else {
+        return None;
+    };
+    let _ = joined;
+
+    let (left, right) = {
+        let mut sides = inner.children();
+        (sides.next()?, sides.next()?)
+    };
+    Some(Assist {
+        title: format!("Distribute the `!` over the `{becomes}`"),
+        kind: "refactor.rewrite",
+        edits: vec![Edit {
+            range: node.text_range(),
+            replacement: format!(
+                "{} {becomes} {}",
+                negated(&text_of(text, &left)),
+                negated(&text_of(text, &right))
+            ),
+        }],
+    })
+}
+
+/// **Parentheses put round the selected expression.**
+///
+/// The mirror of removing them, and the one that is always safe: brackets
+/// round a whole expression change nothing, and the reason to want them is
+/// that the precedence is right and unobvious.
+fn parenthesise(tree: &SyntaxNode, text: &str, selection: TextRange) -> Option<Assist> {
+    if selection.is_empty() {
+        return None;
+    }
+    let node = tree
+        .descendants()
+        .filter(|n| n.text_range() == selection)
+        .find(|n| n.kind() == SyntaxKind::BIN_EXPR)?;
+    Some(Assist {
+        title: "Put it in parentheses".to_string(),
+        kind: "refactor.rewrite",
+        edits: vec![Edit {
+            range: node.text_range(),
+            replacement: format!("({})", text_of(text, &node)),
+        }],
+    })
 }

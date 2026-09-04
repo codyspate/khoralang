@@ -20,6 +20,7 @@ pub fn assists(tree: &SyntaxNode, text: &str, selection: TextRange) -> Vec<Assis
     out.extend(sort_names(tree, text, selection));
     out.extend(merge_duplicates(tree, text, selection));
     out.extend(split_list(tree, text, selection));
+    out.extend(sort_declarations(tree, text, selection));
     out
 }
 
@@ -143,4 +144,50 @@ fn indent_of(text: &str, node: &SyntaxNode) -> String {
     let start = usize::from(node.text_range().start());
     let line = text[..start].rfind('\n').map_or(0, |at| at + 1);
     text[line..start].chars().take_while(|c| *c == ' ' || *c == '\t').collect()
+}
+
+/// **The import lines themselves put in order, by module.**
+///
+/// Separate from sorting the names inside one, and useful for the same reason:
+/// a file whose imports are in a fixed order is one where a reader can find
+/// out whether something is imported by looking rather than by reading.
+///
+/// Only when they are contiguous. Imports separated by a declaration are not a
+/// block to sort, and moving one across a declaration is a bigger claim than
+/// this makes.
+fn sort_declarations(tree: &SyntaxNode, text: &str, selection: TextRange) -> Option<Assist> {
+    let here = covering(tree, selection, SyntaxKind::IMPORT_DECL)?;
+    let all: Vec<SyntaxNode> = tree
+        .descendants()
+        .filter(|n| n.kind() == SyntaxKind::IMPORT_DECL)
+        .collect();
+    if all.len() < 2 || !all.iter().any(|n| n.text_range() == here.text_range()) {
+        return None;
+    }
+
+    // Contiguous: nothing but whitespace between one and the next.
+    for pair in all.windows(2) {
+        let gap = &text[usize::from(pair[0].text_range().end())..usize::from(pair[1].text_range().start())];
+        if !gap.chars().all(char::is_whitespace) {
+            return None;
+        }
+    }
+
+    let written: Vec<String> =
+        all.iter().map(|n| text[usize::from(n.text_range().start())..usize::from(n.text_range().end())].to_string()).collect();
+    let mut sorted = written.clone();
+    sorted.sort();
+    if sorted == written {
+        return None;
+    }
+
+    let indent = indent_of(text, &all[0]);
+    Some(Assist {
+        title: "Sort the imports".to_string(),
+        kind: "refactor.rewrite",
+        edits: vec![Edit {
+            range: TextRange::new(all[0].text_range().start(), all[all.len() - 1].text_range().end()),
+            replacement: sorted.join(&format!("\n{indent}")),
+        }],
+    })
 }

@@ -49,6 +49,8 @@ mod flow;
 mod imports;
 mod literals;
 mod matching;
+mod statements;
+mod types;
 
 use std::collections::BTreeMap;
 
@@ -101,6 +103,8 @@ pub fn at(db: &dyn Db, file: SourceFile, selection: TextRange) -> Vec<Assist> {
     out.extend(decls::assists(&tree, text, selection));
     out.extend(literals::assists(&tree, text, selection));
     out.extend(calls::assists(&tree, text, selection));
+    out.extend(types::assists(&tree, text, selection));
+    out.extend(statements::assists(&tree, text, selection));
     out
 }
 

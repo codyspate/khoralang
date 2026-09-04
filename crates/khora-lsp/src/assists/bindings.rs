@@ -31,6 +31,7 @@ pub fn assists(
     out.extend(drop_annotation(db, file, tree, text, selection));
     out.extend(unprefix(tree, text, selection));
     out.extend(drop_mut(db, file, tree, selection));
+    out.extend(add_mut(tree, text, selection));
     out
 }
 
@@ -317,4 +318,31 @@ fn with_line(text: &str, node: &SyntaxNode) -> TextRange {
     let end = usize::from(node.text_range().end());
     let to = text[end..].find('\n').map_or(text.len(), |at| end + at + 1);
     TextRange::new((from as u32).into(), (to as u32).into())
+}
+
+/// **`mut` added to a binding that has none.**
+///
+/// The other direction from `drop_mut`, and unconditional where that one is
+/// careful: adding `mut` to a binding nothing writes to costs a warning, and
+/// leaving it off one that is written to costs a compile error somebody has to
+/// read. The cheap mistake is the one to make easy to fix.
+fn add_mut(tree: &SyntaxNode, text: &str, selection: TextRange) -> Option<Assist> {
+    let node = covering(tree, selection, SyntaxKind::LET_DECL)?;
+    let parts = binding(&node)?;
+    if parts.is_mut {
+        return None;
+    }
+    let keyword = node
+        .children_with_tokens()
+        .filter_map(|e| e.into_token())
+        .find(|t| t.kind() == SyntaxKind::LET_KW)?;
+    let _ = text;
+    Some(Assist {
+        title: "Make it `mut`".to_string(),
+        kind: "refactor.rewrite",
+        edits: vec![Edit {
+            range: TextRange::empty(keyword.text_range().end()),
+            replacement: " mut".to_string(),
+        }],
+    })
 }

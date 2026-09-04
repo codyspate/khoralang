@@ -25,6 +25,7 @@ pub fn assists(tree: &SyntaxNode, text: &str, selection: TextRange) -> Vec<Assis
     out.extend(if_to_match(tree, text, selection));
     out.extend(add_arm(tree, text, selection));
     out.extend(add_guard(tree, text, selection));
+    out.extend(block_arm(tree, text, selection));
     out
 }
 
@@ -185,4 +186,26 @@ fn indent_of(text: &str, node: &SyntaxNode) -> String {
     let start = usize::from(node.text_range().start());
     let line = text[..start].rfind('\n').map_or(0, |at| at + 1);
     text[line..start].chars().take_while(|c| *c == ' ' || *c == '\t').collect()
+}
+
+/// **An arm's body given a block.**
+///
+/// `Case => value` becomes `Case => { value }`, which is where the second
+/// statement goes. The same argument as the lambda one, and the same mistake
+/// it prevents: braces added by hand to an arm are added around the comma
+/// about as often as inside it.
+fn block_arm(tree: &SyntaxNode, text: &str, selection: TextRange) -> Option<Assist> {
+    let node = covering(tree, selection, SyntaxKind::MATCH_ARM)?;
+    let parts = arm(&node)?;
+    if matches!(parts.body.kind(), SyntaxKind::BLOCK | SyntaxKind::BLOCK_EXPR) {
+        return None;
+    }
+    Some(Assist {
+        title: "Give the arm a block body".to_string(),
+        kind: "refactor.rewrite",
+        edits: vec![Edit {
+            range: parts.body.text_range(),
+            replacement: format!("{{ {} }}", text_of(text, &parts.body)),
+        }],
+    })
 }

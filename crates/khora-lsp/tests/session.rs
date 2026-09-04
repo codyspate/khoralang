@@ -2122,6 +2122,202 @@ fn an_extracted_function_that_can_fail_says_so_and_is_called_with_a_mark() {
 {said:?}");
 }
 
+// --- the last five ---------------------------------------------------------
+
+/// **`!(a && b)` becomes `!a || !b`**, and the `||` is the whole point: the
+/// common mistake is distributing the `!` and leaving the `&&` alone, which
+/// agrees with the original exactly half the time.
+#[test]
+fn a_negated_conjunction_distributes_properly() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn go(a: Bool, b: Bool) -> Bool {\n",
+        "  !(a && b)\n",
+        "}\n",
+    );
+    let (title, after) = assist_named(text, 3, 2, 2, "Distribute");
+    assert!(title.contains("`||`"), "the operator turns over: {title}");
+    assert!(after.contains("!a || !b"), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// The other direction, `!(a || b)` to `!a && !b`.
+#[test]
+fn a_negated_disjunction_distributes_properly() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn go(a: Bool, b: Bool) -> Bool {\n",
+        "  !(a || b)\n",
+        "}\n",
+    );
+    let (_, after) = assist_named(text, 3, 2, 2, "Distribute");
+    assert!(after.contains("!a && !b"), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// **`mut` added**, which is unconditional where removing it is careful: the
+/// cheap mistake is the one to make easy to fix.
+#[test]
+fn a_binding_can_be_made_mutable() {
+    let text = concat!("module main;\n\n", "fn go() -> Int {\n", "  let n = 1;\n", "  n\n", "}\n");
+    let (_, after) = assist_named(text, 3, 6, 6, "Make it `mut`");
+    assert!(after.contains("let mut n = 1;"), "{after}");
+}
+
+/// **The import lines put in order**, which is separate from ordering the
+/// names inside one.
+#[test]
+fn the_import_lines_can_be_sorted() {
+    let text = concat!(
+        "module main;\n\n",
+        "import std::json::{Json};\n",
+        "import std::core::{Option};\n\n",
+        "fn go() -> Int { 1 }\n",
+    );
+    let (_, after) = assist_named(text, 2, 5, 5, "Sort the imports");
+    let core = after.find("std::core").expect("core");
+    let json = after.find("std::json").expect("json");
+    assert!(core < json, "core comes first: {after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// **An arm's body given a block**, which is where the second statement goes.
+#[test]
+fn a_match_arm_can_get_a_block_body() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn go(ready: Bool) -> Int {\n",
+        "  match ready {\n",
+        "    true => 1,\n",
+        "    false => 2,\n",
+        "  }\n",
+        "}\n",
+    );
+    let (_, after) = assist_named(text, 4, 6, 6, "block body");
+    assert!(after.contains("true => { 1 },"), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+// --- statements, loops and tests -------------------------------------------
+
+/// **`while c { .. }` becomes a `loop` with the break at the top**, which is
+/// where a hand-written one goes about half the time.
+#[test]
+fn a_while_can_become_a_loop() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn go() -> () {\n",
+        "  let mut n = 0;\n",
+        "  while n < 3 {\n",
+        "    n = n + 1;\n",
+        "  }\n",
+        "}\n",
+    );
+    let (_, after) = assist_named(text, 4, 3, 3, "as a `loop`");
+    assert!(after.contains("loop {"), "{after}");
+    assert!(after.contains("if !(n < 3) { break };"), "the break goes first: {after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// **A `test` block named after the function**, in the sentence form the rest
+/// of the tree uses.
+#[test]
+fn a_function_is_offered_a_test() {
+    let text = concat!("module main;\n\n", "fn charge() -> Int { 1 }\n");
+    let (title, after) = assist_named(text, 2, 4, 4, "test for");
+    assert!(title.contains("`charge`"), "{title}");
+    assert!(after.contains("test \"charge "), "{after}");
+}
+
+/// **And a benchmark**, which is a different question with the same shape: a
+/// measurement with an `assert` in it measures the assertion.
+#[test]
+fn a_function_is_offered_a_benchmark() {
+    let text = concat!("module main;\n\n", "fn charge() -> Int { 1 }\n");
+    let (_, after) = assist_named(text, 2, 4, 4, "benchmark for");
+    assert!(after.contains("bench \"charge\""), "{after}");
+    assert!(!after.contains("bench \"charge\" {\n  assert"), "a bench asserts nothing: {after}");
+}
+
+/// **A discarded answer given a name.** The opposite of inlining, for when a
+/// call's result turns out to matter.
+#[test]
+fn a_discarded_call_can_be_bound() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn work() -> Int { 1 }\n\n",
+        "fn go() -> () {\n",
+        "  work();\n",
+        "}\n",
+    );
+    let (_, after) = assist_named(text, 5, 3, 3, "Bind the answer");
+    assert!(after.contains("let answer = work();"), "{after}");
+}
+
+// --- types and what is generated from them ---------------------------------
+
+/// **A whole handler written from the effect declaration.**
+///
+/// Every operation, with a closure of the right arity. The list comes from the
+/// declaration, which is the difference between this and typing it out.
+#[test]
+fn an_effect_is_offered_a_handler_written_from_its_operations() {
+    let text = concat!(
+        "module main;\n\n",
+        "pub effect Clock {\n",
+        "  now: () -> Int,\n",
+        "  sleep: (Int) -> (),\n",
+        "}\n",
+    );
+    let (title, after) = assist_named(text, 2, 12, 12, "handler for");
+    assert!(title.contains("`Clock`"), "{title}");
+    assert!(after.contains("handler for Clock"), "{after}");
+    assert!(after.contains("now:"), "every operation: {after}");
+    assert!(after.contains("sleep:"), "every operation: {after}");
+}
+
+/// **An `impl` block, with the type's own parameters carried over.**
+#[test]
+fn a_generic_type_is_offered_an_impl_with_its_parameters() {
+    let text = concat!("module main;\n\n", "pub type Box<A> = { held: A };\n");
+    let (_, after) = assist_named(text, 2, 10, 10, "`impl` block");
+    assert!(after.contains("impl<A> Box<A> {"), "the parameters come too: {after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// **A case added to a variant type, with the `|` that introduces it.**
+#[test]
+fn a_variant_type_is_offered_another_case() {
+    let text = concat!("module main;\n\n", "pub type Colour = | Red | Green;\n");
+    let (_, after) = assist_named(text, 2, 20, 20, "Add a case");
+    assert!(after.contains("| Case"), "{after}");
+}
+
+/// **A field added to a record type, with the comma decided by what is there.**
+#[test]
+fn a_record_type_is_offered_another_field() {
+    let text = concat!("module main;\n\n", "pub type Point = { x: Int, y: Int };\n");
+    let (_, after) = assist_named(text, 2, 20, 20, "Add a field");
+    assert!(after.contains("y: Int, field: Int"), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// **`derive(Show)` above a type that has none**, and nothing for one that has.
+#[test]
+fn a_type_without_a_derive_is_offered_one() {
+    let text = concat!("module main;\n\n", "pub type Point = { x: Int };\n");
+    let (_, after) = assist_named(text, 2, 10, 10, "Derive");
+    assert!(after.contains("derive(Show)\npub type Point"), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+
+    let already = "module main;\n\nderive(Show)\npub type Point = { x: Int };\n";
+    let offered = assists_for(already, 3, 10, 10);
+    assert!(
+        !offered.iter().any(|(title, _)| title.contains("Derive")),
+        "it has one: {offered:?}"
+    );
+}
+
 // --- calls and pipelines ---------------------------------------------------
 
 /// **`f(x)` becomes `x |> f`.**
