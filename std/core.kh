@@ -5452,6 +5452,28 @@ pub fn nursery<A, 'ef, 'er>(body: () -> A with { 'ef | nursery: Nursery } raises
 /// slowly, which for a server means accepting more slowly, which the listening
 /// socket's backlog is already built to absorb: overload becomes latency
 /// instead of collapse.
+///
+/// ```khora
+/// import std::core::{ChildFailed, Fiber, Nursery, bounded_nursery, print};
+///
+/// fn handle(job: Int) -> () { print("job ${job}") }
+///
+/// fn launch() -> () with { nursery: Nursery } {
+///   let mut next = 0;
+///   while next < 1000 {
+///     let job = next;
+///     nursery.adopt(Fiber::spawn(fn () => handle(job)));
+///     next = next + 1;
+///   }
+/// }
+///
+/// pub fn main() raises ChildFailed { bounded_nursery(64, launch)! }
+/// ```
+///
+/// The producer slows down at the boundary where it creates work rather than
+/// filling an unbounded queue somewhere else. **The limit admits `limit + 1`
+/// live children**, because `Fiber::spawn` starts the child before `adopt`
+/// blocks; subtract one where it stands for a real resource.
 pub fn bounded_nursery<A, 'ef, 'er>(
   limit: Int,
   body: () -> A with { 'ef | nursery: Nursery } raises 'er
@@ -5487,6 +5509,23 @@ pub fn bounded_nursery<A, 'ef, 'er>(
 /// and the error passes straight through.
 ///
 /// **A named function or a lambda**, for the reason on `nursery`.
+///
+/// ```khora
+/// import std::core::{Scope, acquire, scoped};
+/// import std::net::socket::{listen_on, shut};
+///
+/// fn serve() -> () with { scope: Scope } {
+///   let server = acquire(listen_on(8080), fn s => shut(s));
+///   answer(server)
+/// }
+///
+/// pub fn main() -> Int { scoped(fn () => serve()); 0 }
+/// ```
+///
+/// `scoped` is where the releases run, and they run on **every** way out --
+/// a return, a raise, or a cancellation. That last one is why this exists
+/// rather than a close written after the loop: a cancelled fiber never
+/// reaches the line after the loop.
 pub fn scoped<A, 'ef, 'er>(body: () -> A with { 'ef | scope: Scope } raises 'er) -> A
   with 'ef
   raises 'er
@@ -5501,6 +5540,21 @@ pub fn scoped<A, 'ef, 'er>(body: () -> A with { 'ef | scope: Scope } raises 'er)
 ///
 /// The generic half of `Scope`, kept out of the effect so the operation can
 /// stay a plain closure. `release` is called with `value` when the region ends.
+///
+/// ```khora
+/// import std::core::{Scope, acquire};
+/// import std::fs::{FsRead, open, close};
+///
+/// fn reading(path: String) -> Int with { scope: Scope, reads: FsRead } {
+///   let file = acquire(open(path), fn f => close(f));
+///   count(file)
+/// }
+/// ```
+///
+/// Registered with the enclosing `scoped`, and it returns the value so the
+/// acquisition and the release are one expression. Written as two statements
+/// -- take it, then remember to close it -- the second is the one a
+/// cancellation skips.
 pub fn acquire<A, 'ef>(value: A, release: (A) -> ()) -> A
   with { 'ef | scope: Scope }
 {

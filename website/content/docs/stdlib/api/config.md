@@ -71,6 +71,29 @@ The schema's shape decides which variables are read and what they are
 called; the schema's decoder decides what they mean. A record schema is
 what this is for: a bare `int()` at the top level has no name to read.
 
+```khora
+import std::config::{read, report};
+import std::env::{Env};
+import std::schema::{Decode};
+
+derive(Decode)
+pub type Settings = { listen_port: Int, database_url: String };
+
+pub fn main() -> Int {
+  with { env: Env::real() } {
+    match read(Settings::schema()) {
+      Validated::Valid(settings) => start(settings),
+      Validated::Invalid(problems) => { print(report(problems)); 1 },
+    }
+  }
+}
+```
+
+The shape decides the variable names: `listen_port` is read from
+`LISTEN_PORT`. A record written once with `derive(Decode)` reads from the
+environment, a request body and a test fixture alike, which is what it
+means for the schema to be a property of the type.
+
 ### variables
 
 ```khora

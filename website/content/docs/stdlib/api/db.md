@@ -447,3 +447,24 @@ The row is the *caller's*, deliberately. A transaction over a body that can
 fail its own way keeps that failure's type — folding it into `DbError`
 would be the loss `Result<A, DbError>` already declines to take.
 
+```khora
+import std::db::{Cell, Db, DbError, transaction};
+
+fn transfer(from: Int, to: Int, amount: Int) -> Result<(), DbError>
+  with { db: Db }
+{
+  transaction(fn () =>
+    match db.execute("update accounts set balance = balance - ? where id = ?",
+                     [Cell::Number(amount), Cell::Number(from)]) {
+      Result::Err(problem) => Result::Err(problem),
+      Result::Ok(_) => db.execute("update accounts set balance = balance + ? where id = ?",
+                                  [Cell::Number(amount), Cell::Number(to)]),
+    })
+}
+```
+
+There is no connection parameter. `with { db: Db }` is the function's
+authority to run statements, and the caller supplies it at a boundary --
+which is what keeps a transaction from turning the capability back into
+plumbing threaded through every signature.
+

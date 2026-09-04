@@ -318,6 +318,19 @@ pub fn trace(message: String) ->() with { log: Log }
 
 The finest detail.
 
+```khora
+import std::log::{Log, trace};
+
+fn charge(amount: Int) -> Int with { log: Log } {
+  trace("charging");
+  amount
+}
+```
+
+**The handler decides whether this is written, not the caller.** A
+caller that checked the level itself would have to know the
+configuration, which is what the capability keeps away from it.
+
 ### debug
 
 ```khora
@@ -325,6 +338,19 @@ pub fn debug(message: String) ->() with { log: Log }
 ```
 
 What a developer wants while working on this code.
+
+```khora
+import std::log::{Log, debug};
+
+fn charge(amount: Int) -> Int with { log: Log } {
+  debug("charging");
+  amount
+}
+```
+
+**The handler decides whether this is written, not the caller.** A
+caller that checked the level itself would have to know the
+configuration, which is what the capability keeps away from it.
 
 ### info
 
@@ -334,6 +360,19 @@ pub fn info(message: String) ->() with { log: Log }
 
 What an operator wants while the program is behaving.
 
+```khora
+import std::log::{Log, info};
+
+fn charge(amount: Int) -> Int with { log: Log } {
+  info("charging");
+  amount
+}
+```
+
+**The handler decides whether this is written, not the caller.** A
+caller that checked the level itself would have to know the
+configuration, which is what the capability keeps away from it.
+
 ### warn
 
 ```khora
@@ -342,6 +381,19 @@ pub fn warn(message: String) ->() with { log: Log }
 
 Something is wrong and the program is carrying on.
 
+```khora
+import std::log::{Log, warn};
+
+fn charge(amount: Int) -> Int with { log: Log } {
+  warn("charging");
+  amount
+}
+```
+
+**The handler decides whether this is written, not the caller.** A
+caller that checked the level itself would have to know the
+configuration, which is what the capability keeps away from it.
+
 ### error
 
 ```khora
@@ -349,6 +401,19 @@ pub fn error(message: String) ->() with { log: Log }
 ```
 
 Something is wrong and something did not happen.
+
+```khora
+import std::log::{Log, error};
+
+fn charge(amount: Int) -> Int with { log: Log } {
+  error("charging");
+  amount
+}
+```
+
+**The handler decides whether this is written, not the caller.** A
+caller that checked the level itself would have to know the
+configuration, which is what the capability keeps away from it.
 
 ### eprint
 

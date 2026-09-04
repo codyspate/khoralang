@@ -328,6 +328,28 @@ rather than strings: a file is bytes, and whether they are text is a
 question with a wrong answer. This one takes the optimistic view and is
 named for it.
 
+```khora
+import std::fs::{FsRead, read_text};
+
+fn settings() -> String with { reads: FsRead } raises IoError {
+  read_text("config.toml")!
+}
+
+pub fn main() -> Int {
+  with { reads: FsRead::real() } {
+    match attempt(fn () => settings()!) {
+      Result::Ok(text) => print(text),
+      Result::Err(_) => print("no config"),
+    }
+  };
+  0
+}
+```
+
+`FsRead::real()` reaches the actual filesystem and is checked against the
+`[permissions.fs]` your manifest grants. A test installs a handler of its
+own instead, which is the whole reason this is a capability.
+
 ### write_text
 
 ```khora
@@ -336,6 +358,18 @@ pub fn write_text(path: String, text: String) ->() with { writes: FsWrite } rais
 
 Writes text to a file, replacing whatever was there.
 
+```khora
+import std::fs::{FsWrite, write_text};
+
+fn save(report: String) -> () with { writes: FsWrite } raises IoError {
+  write_text("report.txt", report)!
+}
+```
+
+`writes`, not `fs`: the label is chosen by the function being called, and
+reading and writing are separate capabilities so that a function which only
+reads cannot quietly gain the ability to overwrite.
+
 ### append_text
 
 ```khora
@@ -343,6 +377,17 @@ pub fn append_text(path: String, text: String) ->() with { writes: FsWrite } rai
 ```
 
 Adds text to the end of a file, creating it when it is not there.
+
+```khora
+import std::fs::{FsWrite, append_text};
+
+fn note(line: String) -> () with { writes: FsWrite } raises IoError {
+  append_text("audit.log", line + "\n")!
+}
+```
+
+No newline is added, because a caller appending a fragment did not ask for
+one. Add it yourself, as above.
 
 ### chunk_size
 
@@ -386,6 +431,19 @@ delivered whether or not the file ends with a newline -- a file ending
 mid-line has a last line, and silently dropping it is the bug this note
 exists to prevent.
 
+```khora
+import std::fs::{FsRead, fold_lines};
+
+fn longest(path: String) -> Int with { reads: FsRead } raises IoError {
+  fold_lines(path, 0, fn (so_far, line) =>
+    if String::length(line) > so_far { String::length(line) } else { so_far })!
+}
+```
+
+The file is read a line at a time rather than into one string, so a log
+bigger than memory is still foldable. `start` is the answer for an empty
+file, which is why it is a value rather than an `Option`.
+
 ### copy
 
 ```khora
@@ -403,6 +461,17 @@ third thing that agreed with the other two.
 capabilities and says so, where every other helper here needs one.
 
 The whole file passes through memory, which is the same limit `read` has.
+
+```khora
+import std::fs::{FsRead, FsWrite, copy};
+
+fn back_up() -> () with { reads: FsRead, writes: FsWrite } raises IoError {
+  copy("ledger.db", "ledger.db.bak")!
+}
+```
+
+Two labels in one row, and both are needed at the call: a function that
+declared only `reads` would not compile against this.
 
 ### join
 

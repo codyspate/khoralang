@@ -96,7 +96,25 @@ pub type TlsConnection = { session: Ptr };
 /// PEM rather than DER because that is the shape a certificate arrives in —
 /// from a file, a secret store, or an ACME client — and converting is work
 /// every caller would repeat.
+///
+/// ```khora
+/// import std::core::{Scope, scoped};
+/// import std::fs::{FsRead, read_text};
+/// import std::net::tls::{server};
+///
+/// fn settings() -> TlsServer
+///   with { scope: Scope, reads: FsRead }
+///   raises TlsError
+/// {
+///   server(read_text("cert.pem")!, read_text("key.pem")!)!
+/// }
+/// ```
+///
+/// `scope` is in the row because the settings own a handle the runtime has to
+/// close: `acquire` registers that with the enclosing `scoped`, so it goes
+/// back on every way out including a cancellation.
 pub fn server(certificate: String, key: String) -> TlsServer
+
   with { scope: Scope }
   raises TlsError
 {
@@ -198,7 +216,23 @@ impl Share for TlsClient {}
 /// stale between releases without telling anybody.
 ///
 /// Released when the enclosing scope ends, like a server.
+///
+/// ```khora
+/// import std::core::{Scope};
+/// import std::net::tls::{client, connect, transmit};
+///
+/// fn ask(host: String) -> Int with { scope: Scope } raises TlsError {
+///   let caller = client()!;
+///   let session = connect(caller, host, 443)!;
+///   transmit(session, "GET / HTTP/1.1\r\nHost: " + host + "\r\n\r\n")
+/// }
+/// ```
+///
+/// Verifies against the machine's own trust store, which is what a client
+/// talking to the public internet wants. `trusting` is the one for a private
+/// certificate authority.
 pub fn client() -> TlsClient
+
   with { scope: Scope }
   raises TlsError
 {
@@ -212,7 +246,24 @@ pub fn client() -> TlsClient
 /// verification off**: every library offers one, and it is how verification
 /// comes to be off in production. Naming the certificate you mean to trust is
 /// the same amount of typing and leaves a reviewer something to look at.
+///
+/// ```khora
+/// import std::fs::{FsRead, read_text};
+/// import std::net::tls::{trusting};
+///
+/// fn internal() -> TlsClient
+///   with { scope: Scope, reads: FsRead }
+///   raises TlsError
+/// {
+///   trusting(read_text("internal-ca.pem")!)!
+/// }
+/// ```
+///
+/// **In addition to the machine's trust store, not instead of it.** A client
+/// that had to choose would make talking to an internal service and talking to
+/// the public internet mutually exclusive.
 pub fn trusting(extra: String) -> TlsClient
+
   with { scope: Scope }
   raises TlsError
 {

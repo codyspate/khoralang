@@ -277,6 +277,21 @@ two sides have been running for different lengths of time, and `Spaced`
 only stays drift-free because it answers `attempt * millis` rather than
 `millis`.
 
+```khora
+import std::resilience::{Schedule};
+
+let plan = Schedule::Exponential(100, 200, 30000);
+// How long to wait before the third attempt, 250ms in.
+match Schedule::next_after(plan, 2, 250) {
+  Option::Some(millis) => sleep(millis),
+  Option::None => give_up(),
+}
+```
+
+`None` means the schedule is finished, which is how `retry` knows to
+stop. Exposed because a caller driving its own loop -- a queue consumer
+deciding when to redeliver -- needs the *decision* without the waiting.
+
 ## Functions
 
 ### retry
@@ -298,6 +313,27 @@ caller who wanted neither reaches for `Schedule::times`, and still declares
 both — which is honest, since the policy is a value and could have been a
 jittered one.
 
+```khora
+import std::clock::{Clock};
+import std::random::{Random};
+import std::resilience::{Schedule, retry};
+
+fn fetch() -> String with { client: HttpClient } raises HttpError { .. }
+
+fn fetch_hard() -> String
+  with { client: HttpClient, clock: Clock, random: Random }
+  raises HttpError
+{
+  retry(Schedule::Exponential(100, 200, 30000), fn () => fetch()!)!
+}
+```
+
+**`clock` and `random` are in the row, and both have to be.** Waiting is
+something the caller grants -- a retry that slept without saying so would
+have latency invisible in its type, and a test could not make it instant --
+and the jitter is drawn from `random` rather than invented, so a thousand
+clients that failed together do not come back together.
+
 ### retry_while
 
 ```khora
@@ -315,6 +351,26 @@ failure is worth trying again* is knowledge about the error.
 
 Retrying a 404 is the failure this exists to prevent, and it costs the
 caller one `fn`.
+
+```khora
+import std::resilience::{Schedule, retry_while};
+
+fn load(id: Int) -> Row
+  with { db: Db, clock: Clock, random: Random }
+  raises DbError
+{
+  retry_while(Schedule::times(3), fn problem =>
+    match problem {
+      DbError::Disconnected(_) => true,
+      DbError::Rejected(_) => false,
+      DbError::RolledBack(_) => false,
+    }, fn () => fetch(id)!)!
+}
+```
+
+The predicate is the point: a dropped connection is worth another go and a
+rejected statement is not, and retrying the second one just fails again
+three times more slowly.
 
 ### retry_counting
 
@@ -338,6 +394,20 @@ The **last** failure is the one reported, for the reason `retry` gives: it
 is the one that stopped the retrying, and an earlier error is something
 that was already recovered from.
 
+```khora
+import std::resilience::{Attempts, Schedule, retry_counting};
+
+fn fetch_reporting() -> Attempts<String, HttpError>
+  with { client: HttpClient, clock: Clock, random: Random }
+{
+  retry_counting(Schedule::times(5), fn _e => true, fn () => fetch()!)
+}
+```
+
+The count comes back with the answer, which is what a caller logs or turns
+into a metric. `retry` throws it away, which is right when nobody was
+going to look at it.
+
 ### repeat
 
 ```khora
@@ -351,4 +421,19 @@ The other half of `retry`, and the one a poller is written with:
 `repeat(Schedule::Spaced(30000), fn () => reconcile()!)` is "every thirty
 seconds until something breaks". The count comes back so a caller can tell
 "the schedule ended" from "it never ran".
+
+```khora
+import std::resilience::{Schedule, repeat};
+
+fn poll_forever() -> Int
+  with { clock: Clock, random: Random, client: HttpClient }
+  raises HttpError
+{
+  repeat(Schedule::Spaced(30000), fn () => check_health()!)!
+}
+```
+
+The mirror of `retry`: it runs the body again while it *succeeds* and stops
+at the first failure, answering how many times it ran. `Spaced` rather than
+`Exponential` because a poller wants a grid it does not drift off.
 

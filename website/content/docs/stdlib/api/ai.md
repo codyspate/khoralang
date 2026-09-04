@@ -328,6 +328,26 @@ a JSON Schema, is what the model is told to produce; its decoder is what
 reads the answer back, reporting every problem. A type that derives
 `Decode` needs nothing else to be extracted.
 
+```khora
+import std::ai::{Model, Prompt, extract};
+import std::schema::{Decode};
+
+derive(Decode)
+pub type Invoice = { total_minor: Int, currency: String };
+
+fn read_invoice(text: String) -> Invoice
+  with { model: Model }
+  raises ModelError
+{
+  extract(Prompt::of("Read this invoice: " + text))!
+}
+```
+
+Nothing else is written. The type's shape is rendered as a JSON Schema and
+is what the model is told to produce, and its decoder reads the answer
+back -- so a model that answers with a string where a number belongs is a
+`Rejection` naming the field, not a wrong number.
+
 ### embed
 
 ```khora
@@ -340,6 +360,21 @@ An embedding of a known width.
 numbers out of a model that returns 1536, so asking for a `Dim` is asking a
 question, and a `Dim` that does not match the answer is a `ModelError`. The
 old declaration made it a caller-chosen parameter, which said otherwise.
+
+```khora
+import std::ai::{Embedder, embed};
+
+fn similarity(a: String, b: String) -> Float
+  with { embedder: Embedder }
+  raises ModelError
+{
+  Embedding::cosine(embed::<1536>(a)!, embed::<1536>(b)!)
+}
+```
+
+The dimension is in the type, so two embeddings from different models
+cannot be compared by accident -- which is a mistake that otherwise
+produces a plausible number rather than an error.
 
 ### cosine_similarity
 

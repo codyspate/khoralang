@@ -113,3 +113,17 @@ through rather than quietly becoming the default: a program told it may not
 read `DATABASE_URL` and silently given `localhost` is a program that starts
 and does the wrong thing, which is worse than one that stops and says why.
 
+```khora
+import std::env::{Env, variable_or};
+
+fn port() -> Int with { env: Env } raises EnvError {
+  match Int::of_string(variable_or("PORT", "8080")!) {
+    Option::Some(n) => n,
+    Option::None => 8080,
+  }
+}
+```
+
+The `!` is there because a *denial* is a failure rather than a missing
+value, which is the distinction the paragraph above is about.
+

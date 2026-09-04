@@ -13,7 +13,7 @@ A section is complete only when its behavior is implemented, documented, tested,
 ## Current state
 
 Scored against the tree, item by item, against what is in the repository rather
-than against the roadmap's account of itself. **211 of 222**, and re-scored
+than against the roadmap's account of itself. **212 of 222**, and re-scored
 whenever a section moves. Five moved with `v0.1.0` -- the tag itself, the
 scoring pass against it, and the three documentation-versioning items the
 release turned from theory into something a reader can open. The sixth and seventh are
@@ -23,7 +23,8 @@ missing tests, and they found erratum 80. The eighth and ninth are the two
 fiber-migration items, settled by running the scheduler backend and checking
 what survives a fiber changing worker; the tenth and eleventh are the scheduler
 ownership invariant and the soundness inventory, and scoring the second found a
-cited test that could pass having proved nothing.
+cited test that could pass having proved nothing. The twelfth is examples on
+the API that needs them most, where the work was deciding which those are.
 
 **The number is counted, not typed.** `scripts/check-readiness.sh` counts the
 boxes and fails the baseline when this line disagrees with them. It said 153
@@ -402,7 +403,11 @@ step. `/docs/guide/*` redirects.
 
 - [x] Searchable API documentation exists for public `std` modules and exported symbols. **Done:** 21 generated pages under `/docs/stdlib/api/`.
 - [x] API docs are generated or validated from the source of the corresponding compiler release so they cannot drift silently. **Done:** `khora doc std --check` fails the gate when a page is stale.
-- [ ] Important APIs include examples, not only signatures. **Left:** Coverage is uneven; nothing checks that an exported item has an example.
+- [x] Important APIs include examples, not only signatures. **Done, with the rule written down because the rule is the whole question.** `std` documents around 1,100 items and demanding an example on each would mean writing one for `unix_millis: () -> Int`, whose two sentences already say everything; a rule that produces a thousand pieces of ceremony is one people route around. So the line is **an item that requires a capability**: a signature saying `with { db: Db }` tells a reader that something must be installed and nothing about which handler, where, or what the block around the call looks like, and that is the question a reader has before any other. Thirty items matched and had no example; all thirty have one now, and `scripts/check-api-examples.sh` is a gate step.
+
+  **Higher-order functions are deliberately outside the rule, and the first draft had them in.** `(A) -> B` in a parameter position also needs something written before the call, and `List::map` deserves an example as much as anything here -- but that rule flagged 1,057 items, which is most of the library. A gate nobody can finish is a gate somebody turns off. Those examples are worth writing and are not this item.
+
+  Two things the checker had to learn. An item's *first* ```khora fence is the signature the generator emits, so an example is a **second** one -- counting fences alone reported 99% coverage when the real figure was 1%. And a `///` block may contain its own `# Sections`, which the generator renders at an item's heading level: treating every heading as an item both invented items and split real ones, hiding an example written below the first prose heading. A heading is an item only when its signature follows it.
 - [x] The linter's checks have a public reference page listing each check, its default level and how to configure it in `khora.toml`. **Done:** #151. `/docs/reference/lints/` — fifteen checks, a default level each, and the `[lints]` table that overrides them.
 
 ### Cookbook

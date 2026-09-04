@@ -153,6 +153,18 @@ impl Process {
 /// worked and there is text, or it did not and there is nothing useful to do
 /// with whatever came out. Written once here rather than as the same three
 /// lines at every call site, the way `std::env`'s `variable_or` is.
+///
+/// ```khora
+/// import std::process::{Process, checked_output};
+///
+/// fn revision() -> String with { process: Process } raises ProcessError {
+///   checked_output("git", ["rev-parse", "--short", "HEAD"])!
+/// }
+/// ```
+///
+/// Each argument crosses whole, so nothing here is quoted and nothing is
+/// parsed on the way: a path with a space in it is one argument with a space
+/// in it. `process.shell` is the other thing, and is named for what it does.
 pub fn checked_output(program: String, arguments: List<String>) -> String
   with { process: Process }
   raises ProcessError

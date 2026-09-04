@@ -97,6 +97,12 @@ step 'no text a quoting slip mangled'
 # that reached `main` before it existed.
 sh "$root/scripts/no-mangled-text.sh"
 
+step 'an item you cannot call from its signature has an example'
+# Not every item: the rule is items requiring a capability, because a
+# signature saying `with { db: Db }` says nothing about which handler to
+# install or where. `check-api-examples.sh` has the argument.
+sh "$root/scripts/check-api-examples.sh"
+
 step 'a design document does not name a test that is gone'
 # The other half of "name the invariant and the test that protects it": a
 # citation outliving the test it names leaves an inventory entry reading like a

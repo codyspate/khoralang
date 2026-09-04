@@ -327,26 +327,91 @@ fn shown(value: Value) -> String {
 // there is one path to a handler rather than six.
 
 /// The finest detail.
+///
+/// ```khora
+/// import std::log::{Log, trace};
+///
+/// fn charge(amount: Int) -> Int with { log: Log } {
+///   trace("charging");
+///   amount
+/// }
+/// ```
+///
+/// **The handler decides whether this is written, not the caller.** A
+/// caller that checked the level itself would have to know the
+/// configuration, which is what the capability keeps away from it.
 pub fn trace(message: String) -> () with { log: Log } {
   log.record(Severity::Trace, message, List::Nil)
 }
 
 /// What a developer wants while working on this code.
+///
+/// ```khora
+/// import std::log::{Log, debug};
+///
+/// fn charge(amount: Int) -> Int with { log: Log } {
+///   debug("charging");
+///   amount
+/// }
+/// ```
+///
+/// **The handler decides whether this is written, not the caller.** A
+/// caller that checked the level itself would have to know the
+/// configuration, which is what the capability keeps away from it.
 pub fn debug(message: String) -> () with { log: Log } {
   log.record(Severity::Debug, message, List::Nil)
 }
 
 /// What an operator wants while the program is behaving.
+///
+/// ```khora
+/// import std::log::{Log, info};
+///
+/// fn charge(amount: Int) -> Int with { log: Log } {
+///   info("charging");
+///   amount
+/// }
+/// ```
+///
+/// **The handler decides whether this is written, not the caller.** A
+/// caller that checked the level itself would have to know the
+/// configuration, which is what the capability keeps away from it.
 pub fn info(message: String) -> () with { log: Log } {
   log.record(Severity::Info, message, List::Nil)
 }
 
 /// Something is wrong and the program is carrying on.
+///
+/// ```khora
+/// import std::log::{Log, warn};
+///
+/// fn charge(amount: Int) -> Int with { log: Log } {
+///   warn("charging");
+///   amount
+/// }
+/// ```
+///
+/// **The handler decides whether this is written, not the caller.** A
+/// caller that checked the level itself would have to know the
+/// configuration, which is what the capability keeps away from it.
 pub fn warn(message: String) -> () with { log: Log } {
   log.record(Severity::Warn, message, List::Nil)
 }
 
 /// Something is wrong and something did not happen.
+///
+/// ```khora
+/// import std::log::{Log, error};
+///
+/// fn charge(amount: Int) -> Int with { log: Log } {
+///   error("charging");
+///   amount
+/// }
+/// ```
+///
+/// **The handler decides whether this is written, not the caller.** A
+/// caller that checked the level itself would have to know the
+/// configuration, which is what the capability keeps away from it.
 pub fn error(message: String) -> () with { log: Log } {
   log.record(Severity::Error, message, List::Nil)
 }

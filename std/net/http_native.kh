@@ -1383,6 +1383,23 @@ impl Router {
   ///
   /// The configuration is released when the caller's scope ends, which for a
   /// server is usually the program's.
+  ///
+  /// ```khora
+  /// import std::fs::{FsRead, read_text};
+  /// import std::net::http::{Router, listen_tls};
+  ///
+  /// pub fn main() -> Int {
+  ///   with { reads: FsRead::real() } {
+  ///     Router::new()
+  ///       |> Router::get("/health", SharedFn::of(fn _ => Response::ok("ok")))
+  ///       |> Router::listen_tls(8443, read_text("cert.pem")!, read_text("key.pem")!)
+  ///   };
+  ///   0
+  /// }
+  /// ```
+  ///
+  /// PEM text rather than paths, because a certificate arrives from a file, a
+  /// secret store or an ACME client, and only one of those is a path.
   pub fn listen_tls<'er>(router: Router<'er>, port: Int, certificate: String, key: String) -> ()
     with { scope: Scope }
     raises 'er + HttpError + TlsError + ChildFailed
@@ -1408,6 +1425,20 @@ impl Router {
   ///
   /// A failed handshake ends that fiber quietly rather than the loop — on a
   /// public port it is the ordinary case, not an incident.
+  ///
+  /// ```khora
+  /// import std::net::socket::{listen_on};
+  /// import std::net::tls::{server};
+  ///
+  /// fn serve(router: Router<'er>) -> () with { scope: Scope } raises TlsError {
+  ///   let settings = server(certificate, key)!;
+  ///   Router::serve_secured(router, listen_on(8443), settings)
+  /// }
+  /// ```
+  ///
+  /// The socket is already bound, which is what this has that `listen_tls`
+  /// does not: a caller that wants the port opened on its own terms -- an
+  /// inherited descriptor, a chosen backlog -- hands one over here.
   pub fn serve_secured<'er>(router: Router<'er>, server: Int, settings: TlsServer) -> ()
     with { nursery: Nursery }
     raises 'er + HttpError
@@ -1438,6 +1469,21 @@ impl Router {
   /// `listen` is the one to call: it binds the port and then this. Taking an
   /// already-bound socket is for a caller that wants to bind it themselves —
   /// a test on port zero, a socket inherited from a supervisor.
+  ///
+  /// ```khora
+  /// import std::net::http::{Router};
+  /// import std::net::socket::{listen_on};
+  ///
+  /// pub fn main() -> Int {
+  ///   Router::new()
+  ///     |> Router::get("/health", SharedFn::of(fn _ => Response::ok("ok")))
+  ///     |> Router::serve_forever(listen_on(8080));
+  ///   0
+  /// }
+  /// ```
+  ///
+  /// It does not return. A connection is served on a fiber of its own, and a
+  /// trap inside a handler ends that fiber rather than the server.
   pub fn serve_forever<'er>(router: Router<'er>, server: Int) -> ()
     with { nursery: Nursery }
     raises 'er + HttpError
