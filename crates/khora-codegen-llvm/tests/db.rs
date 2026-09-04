@@ -39,7 +39,7 @@ fn run(name: &str, body: &str) -> String {
 fn run_with(name: &str, items: &str, body: &str) -> String {
     let main = format!(
         r#"module demo::main;
-import std::core::{{Eq, Fiber, List, Option, Result, Show, Validated, acquire, attempt, print, scoped}};
+import std::core::{{Eq, Fiber, List, Option, Result, Share, Shared, Show, Validated, acquire, attempt, print, scoped}};
 import std::db::{{Cell, Db, DbError, Row, transaction}};
 import std::decimal::{{Decimal}};
 import std::schema::{{Decode, Raw, Rejection, list}};
@@ -591,4 +591,212 @@ fn shown(answer: Validated<List<Entry>, Rejection>) -> String {
          x\n\
          Raw::Sequence([Raw::Number(1)])\n"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The connection goes away
+// ---------------------------------------------------------------------------
+//
+// **Network loss is not a statement being refused, and the difference is the
+// pool.** An engine that rejects a statement has answered: the transaction can
+// be rolled back, the connection is fine, and handing it back is right. A
+// connection that *died* has answered nothing -- what was sent may or may not
+// have arrived -- so the connection is unusable and the next borrower must not
+// be given it.
+//
+// `broken` is how the handler is told, and these pin which failures reach it.
+// Testing this found that a commit failing with `Disconnected` did not: it was
+// treated exactly like a commit the engine refused, so a connection lost
+// mid-commit went back to the pool as healthy.
+
+/// A handler whose connection dies at a chosen point.
+///
+/// `where_it_dies` picks the operation that reports `Disconnected`; everything
+/// else works. `rollback` fails too whenever the connection is already gone,
+/// which is what a real one does -- there is no socket left to send it on.
+const DYING: &str = r#"
+fn dying(where_it_dies: String) -> Db {
+  let gone = Shared::of(false);
+  handler for Db {
+    query: fn (_sql, _binds) => Result::Ok(List::Nil),
+    execute: fn (_sql, _binds) =>
+      if where_it_dies.eq("execute") {
+        Shared::set(gone, true);
+        print("execute lost the connection");
+        Result::Err(DbError::Disconnected("the server went away"))
+      } else {
+        Result::Ok(1)
+      },
+    begin: fn () =>
+      if where_it_dies.eq("begin") {
+        Shared::set(gone, true);
+        print("begin lost the connection");
+        Result::Err(DbError::Disconnected("the server went away"))
+      } else {
+        print("begin");
+        Result::Ok(())
+      },
+    commit: fn () =>
+      if where_it_dies.eq("commit") {
+        Shared::set(gone, true);
+        print("commit lost the connection");
+        Result::Err(DbError::Disconnected("the server went away"))
+      } else if where_it_dies.eq("refuse-commit") {
+        print("commit refused");
+        Result::Err(DbError::Rejected("a deferred constraint"))
+      } else {
+        print("commit");
+        Result::Ok(())
+      },
+    rollback: fn () =>
+      if Shared::get(gone) {
+        print("rollback had no connection");
+        Result::Err(DbError::Disconnected("the server went away"))
+      } else {
+        print("rollback");
+        Result::Ok(())
+      },
+    broken: fn () => print("the handler was told the connection is broken"),
+  }
+}
+"#;
+
+/// **A connection lost mid-body: rolled back as far as anything can be, and
+/// the handler told.**
+///
+/// The rollback cannot succeed either -- there is nothing to send it on -- so
+/// this is the case where the transaction's fate is genuinely unknown, and the
+/// only correct thing left is to stop anybody reusing the connection.
+#[test]
+fn a_connection_lost_during_the_body_tells_the_handler() {
+    let out = run_with(
+        "db_lost_body",
+        &format!(
+            r#"{DYING}
+fn worker() -> () {{
+  with {{ db: dying("execute") }} {{
+    let answer: Result<Int, DbError> = transaction(fn () =>
+      match db.execute("insert", List::Nil) {{
+        Result::Err(problem) => Result::Err(problem),
+        Result::Ok(_) => Result::Ok(1),
+      }});
+    match answer {{
+      Result::Ok(_) => print("committed, which is wrong"),
+      Result::Err(problem) => print(problem.show()),
+    }}
+  }}
+}}
+"#
+        ),
+        r#"  worker();"#,
+    );
+    assert!(out.contains("execute lost the connection"), "the body should have failed: {out:?}");
+    assert!(out.contains("rollback had no connection"), "a rollback should be tried: {out:?}");
+    assert!(
+        out.contains("the handler was told the connection is broken"),
+        "a rollback that could not be sent leaves the state unknown, and the handler has to be \
+         told so the connection is not reused: {out:?}"
+    );
+    assert!(!out.contains("committed, which is wrong"), "nothing should commit: {out:?}");
+    assert!(
+        out.contains("the server went away"),
+        "the caller should be told the reason, not just that something failed: {out:?}"
+    );
+}
+
+/// **A connection lost during the commit tells the handler.**
+///
+/// The one this found. It used to be indistinguishable from a commit the
+/// engine refused: `Result::Err(problem) => Result::Err(problem)` and nothing
+/// else, so the connection went back to the pool with a `COMMIT` that may or
+/// may not have been executed on the other end of a dead socket.
+#[test]
+fn a_connection_lost_during_the_commit_tells_the_handler() {
+    let out = run_with(
+        "db_lost_commit",
+        &format!(
+            r#"{DYING}
+fn worker() -> () {{
+  with {{ db: dying("commit") }} {{
+    let answer: Result<Int, DbError> = transaction(fn () => Result::Ok(1));
+    match answer {{
+      Result::Ok(_) => print("committed, which is wrong"),
+      Result::Err(problem) => print(problem.show()),
+    }}
+  }}
+}}
+"#
+        ),
+        r#"  worker();"#,
+    );
+    assert!(out.contains("commit lost the connection"), "the commit should have failed: {out:?}");
+    assert!(
+        out.contains("the handler was told the connection is broken"),
+        "a commit that never reached the server leaves the transaction's outcome unknown: {out:?}"
+    );
+    assert!(!out.contains("committed, which is wrong"), "nothing committed: {out:?}");
+}
+
+/// **A commit the engine *refused* does not tell the handler**, and this is
+/// the guard against the fix above being "always call `broken`".
+///
+/// A deferred constraint violation is an answer. The transaction is over, the
+/// connection is healthy, and throwing it away on every failed commit would
+/// empty a pool under exactly the load that needs one.
+#[test]
+fn a_refused_commit_leaves_the_connection_alone() {
+    let out = run_with(
+        "db_refused_commit",
+        &format!(
+            r#"{DYING}
+fn worker() -> () {{
+  with {{ db: dying("refuse-commit") }} {{
+    let answer: Result<Int, DbError> = transaction(fn () => Result::Ok(1));
+    match answer {{
+      Result::Ok(_) => print("committed, which is wrong"),
+      Result::Err(problem) => print(problem.show()),
+    }}
+  }}
+}}
+"#
+        ),
+        r#"  worker();"#,
+    );
+    assert!(out.contains("commit refused"), "the commit should have been refused: {out:?}");
+    assert!(
+        !out.contains("the handler was told the connection is broken"),
+        "the engine answered, so the connection is fine and must stay in the pool: {out:?}"
+    );
+    assert!(out.contains("a deferred constraint"), "the reason should reach the caller: {out:?}");
+}
+
+/// **A connection already gone when the transaction begins tells the handler.**
+///
+/// The same argument at the other end: a `BEGIN` that could not be sent leaves
+/// a connection nothing else should borrow.
+#[test]
+fn a_connection_lost_at_begin_tells_the_handler() {
+    let out = run_with(
+        "db_lost_begin",
+        &format!(
+            r#"{DYING}
+fn worker() -> () {{
+  with {{ db: dying("begin") }} {{
+    let answer: Result<Int, DbError> = transaction(fn () => Result::Ok(1));
+    match answer {{
+      Result::Ok(_) => print("committed, which is wrong"),
+      Result::Err(problem) => print(problem.show()),
+    }}
+  }}
+}}
+"#
+        ),
+        r#"  worker();"#,
+    );
+    assert!(out.contains("begin lost the connection"), "begin should have failed: {out:?}");
+    assert!(
+        out.contains("the handler was told the connection is broken"),
+        "a connection that could not begin a transaction is not one to hand on: {out:?}"
+    );
+    assert!(!out.contains("rollback"), "there is no transaction to roll back: {out:?}");
 }

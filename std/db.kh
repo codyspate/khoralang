@@ -202,7 +202,13 @@ pub fn transaction<A, 'ef, 'er>(
   raises 'er
 {
   match db.begin() {
-    Result::Err(problem) => Result::Err(problem),
+    // A `BEGIN` that could not be sent because the connection is gone leaves
+    // an unusable connection, exactly as a lost commit does. A `BEGIN` the
+    // engine refused does not.
+    Result::Err(problem) => {
+      told_if_disconnected(problem);
+      Result::Err(problem)
+    },
     Result::Ok(_) => scoped(fn () => guarded(body))!,
   }
 }
@@ -251,10 +257,39 @@ fn guarded<A, 'ef, 'er>(
     Result::Ok(answer) => {
       settled.done = true;
       match db.commit() {
-        Result::Err(problem) => Result::Err(problem),
+        // **A refused commit and a lost connection are not the same failure**,
+        // and this used to treat them as one. An engine that *refuses* a
+        // commit -- a deferred constraint, a serialization failure -- has
+        // answered: the transaction is over, the connection is fine, and
+        // handing it back to a pool is right. A connection that *died* during
+        // the commit has answered nothing. The `COMMIT` may or may not have
+        // reached the server, so the transaction's outcome is unknown, and the
+        // connection is certainly unusable. Returning that to a pool hands the
+        // next borrower a socket with an unfinished transaction on the other
+        // end of it.
+        Result::Err(problem) => {
+          told_if_disconnected(problem);
+          Result::Err(problem)
+        },
         Result::Ok(_) => Result::Ok(answer),
       }
     },
+  }
+}
+
+/// Tells the handler its connection is gone, when that is what happened.
+///
+/// **Only for `Disconnected`.** `broken` means *this connection cannot be used
+/// again*, so saying it about a statement the engine rejected would throw away
+/// a perfectly good connection on every constraint violation. A rollback that
+/// fails is different and is unconditional: whatever the reason, the
+/// transaction's state is then unknown, which is the thing `broken` exists to
+/// report.
+fn told_if_disconnected(problem: DbError) -> () with { db: Db } {
+  match problem {
+    DbError::Disconnected(_) => db.broken(),
+    DbError::Rejected(_) => (),
+    DbError::RolledBack(_) => (),
   }
 }
 

@@ -3250,3 +3250,56 @@ two thousand programs. A checked-in test for `std::log` alone would have passed:
 the module works, the logging works, six tests cover it. What failed was a
 program that had nothing to do with it.
 
+## 80. A connection lost during `COMMIT` went back to the pool as healthy
+
+`std::db::transaction` ended its happy path like this:
+
+```khora
+Result::Ok(answer) => {
+  settled.done = true;
+  match db.commit() {
+    Result::Err(problem) => Result::Err(problem),
+    Result::Ok(_) => Result::Ok(answer),
+  }
+},
+```
+
+One arm for every way a commit can fail, and there are two kinds.
+
+**An engine that *refuses* a commit has answered.** A deferred constraint, a
+serialization failure: the transaction is over, the connection is fine, and
+returning it to a pool is right. Calling `broken` there would throw away a
+working connection on every constraint violation, which is exactly the load
+that needs a pool.
+
+**A connection that *died* during the commit has answered nothing.** The
+`COMMIT` may have reached the server and been executed, or it may not have left
+the machine. The transaction's outcome is unknown and unknowable from here, and
+the connection is certainly unusable. Under the old arm it was reported as an
+ordinary failure and the connection went back to the pool, where the next
+borrower got a socket with an unfinished transaction on the other end of it.
+
+The rollback paths already got this right — a rollback that fails calls
+`broken` unconditionally, and `undo` calls it on the cancellation path, which
+was errata 13.3's fix. The commit path was never given the same treatment, and
+neither was `begin`.
+
+### The fix, and what it deliberately does not do
+
+`told_if_disconnected` calls `broken` for `DbError::Disconnected` and for
+nothing else, on the `begin` and `commit` failure paths. Not unconditionally:
+`broken` means *this connection cannot be used again*, and saying that about a
+statement the engine rejected is the opposite error.
+
+`a_refused_commit_leaves_the_connection_alone` is the guard against exactly
+that over-correction, and it is the reason the fix is a match on the variant
+rather than a call added to a failure arm.
+
+### How it was found
+
+Scoring `docs/release-readiness.md` §"Connection and transaction failure
+behavior is tested under cancellation and network loss", which said cancellation
+was covered thoroughly and network loss not at all. Writing the missing tests is
+what read the commit arm closely enough to notice that it has to answer two
+different questions.
+
