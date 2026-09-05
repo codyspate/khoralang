@@ -178,3 +178,34 @@ candidates — is a question this did not open.
 
 **Packages were not audited.** `packages/postgres` is not `std` and does not
 carry `std`'s promise. The same test could be pointed at it.
+
+## Since: `std::ai` is gone
+
+**2026-09-05.** The paragraph above says no type, trait or free function was
+removed. A module's worth has been now, so the 390 this document opens with was
+counted before it: **21 public items left `std`.**
+
+`std::ai` was two modules wearing one name, and they deserved opposite answers.
+
+**The tensor half is deleted** -- `Device`, `Scalar`, `Tuple`, `F32`, `Tensor`,
+`Tensor::zeros`, `Embedding`, `matmul`, `embed`, `cosine_similarity`. Ten items,
+of which five were declarations with no body. No `.kh` file in the repository
+called any of them, and the module's own doc examples imported `Model` and
+`Embedder` -- two types that have never existed. A shape-checked tensor is a
+good idea; this was the idea rather than the thing, and 1.0 would have promised
+it for a decade. The const-generic machinery it was meant to demonstrate is
+covered by `khora-types/tests/const_generics.rs`, which defines its own
+`Matrix` and never imported this.
+
+**The inference half moved to `packages/ai`** -- `Message`, `Prompt` with its
+six builders, `ModelError`, `LLMService`, `extract`. Eleven items, all with
+bodies and one real caller in `examples/risk_analyzer`, which still builds and
+still serves a request. It is a vocabulary for an interface no two providers
+agree on, and that is the argument against `std` rather than against the code:
+`role` is a `String` precisely because the set of roles keeps moving, and a
+package can follow that where a compatibility promise cannot.
+
+**What this changes about the audit.** Finding 1 asked whether every item was
+documented, and the answer made 94 items get a sentence. The better question is
+the one this pass asked -- whether an item would survive a stranger asking what
+it is for -- and it is not one a test can fail on.

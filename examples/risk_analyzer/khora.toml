@@ -30,7 +30,13 @@ cyclomatic-complexity = { level = "warn", max = 15 }
 # `std` is not here: the standard library is found beside the compiler, the way
 # `rustc` finds its sysroot. A line every package repeats and none can get
 # wrong is not a line worth writing.
+#
+# `ai` is here for the opposite reason. It was `std::ai` and is a package now --
+# `packages/ai/src/llm.kh` has the argument -- so the program that uses a model
+# says which model vocabulary it agreed to, exactly as `ledger_service` names
+# `postgres`.
 [dependencies]
+ai = { path = "../../packages/ai" }
 
 # Sandboxed WASM build plugins replace arbitrary build.rs execution.
 [build]

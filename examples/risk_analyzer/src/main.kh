@@ -2,7 +2,7 @@ module risk_analyzer::main;
 
 import std::core::{ChildFailed, Eq, List, Option, Scope, SharedFn, Show, assert, print};
 import std::net::http::{HttpError, Request, Response, Router};
-import std::ai::{LLMService, ModelError, Prompt, extract};
+import ai::llm::{LLMService, ModelError, Prompt, extract};
 import std::schema::{Decode, Encode};
 
 /// How bad it is, and why.

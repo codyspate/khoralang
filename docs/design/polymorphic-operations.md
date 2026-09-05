@@ -8,8 +8,8 @@ and a binary.
 
 ## What was written
 
-`std::ai` declared inference as a capability, and asked one of its operations to
-be polymorphic:
+`std::ai` -- `packages/ai` since the surface audit -- declared inference as a
+capability, and asked one of its operations to be polymorphic:
 
 ```khora
 pub effect LLMService {

@@ -116,7 +116,7 @@ while":
 | TLS, crypto | Correctness is a specialist matter and a bug is a breach. |
 | Compression | Decades of tuned code behind an API with nothing to improve. |
 | The operating system | It *is* the C ABI. There is no alternative. |
-| Numeric kernels (BLAS and similar) | `std::ai` promises tensors; nobody hand-writes GEMM. |
+| Numeric kernels (BLAS and similar) | Nobody hand-writes GEMM. There is no tensor type in the tree to promise them against, though: `std::ai` declared one and it was deleted unused -- `docs/design/std-surface.md`. |
 | An embedded database | SQLite, compiled into the runtime the way `rustls` is. A storage engine is a specialist matter for the same reason crypto is, and a program that cannot persist anything is a demo. |
 
 **A database goes in `std` only if it is embedded.** SQLite belongs there: it is

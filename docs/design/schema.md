@@ -246,7 +246,7 @@ A source may describe the path its own way: `std::config` prints
 | command line | `Raw::of_arguments_for(shape, args)`; a `Bool` field is a switch | `struct` or a derived record |
 | query, headers, params | `Raw::of_map` | the same |
 | database rows | `Row::to_raw`, `Row::sequence` | `list(Entry::schema())` |
-| a model's answer | `std::ai::extract<A: Decode>` renders the shape into the prompt | the derived schema |
+| a model's answer | `ai::llm::extract<A: Decode>` renders the shape into the prompt | the derived schema |
 
 `std::config` is a source and nothing else now: `read(schema)`, `variables(shape)`
 for the names a deployment needs before the program starts, `describe` and

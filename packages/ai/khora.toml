@@ -1,0 +1,16 @@
+[package]
+name = "ai"
+version.workspace = true
+# Offered for other people to depend on, like `postgres` and `otlp`. What it
+# offers is an agreement rather than an implementation: the effect a caller
+# names when it wants a model, so that the provider is the caller's choice.
+publish = true
+
+# `extract` reaches nothing but `std::json` and `std::schema`, both of which are
+# `std`'s to declare, and the effect itself reaches nothing at all -- a handler
+# does. Nothing here declares an `extern fn` of its own, so this package needs
+# no entry in the parent's `[permissions] extern` list -- see
+# `docs/design/permissions.md`.
+
+[fmt]
+workspace = true

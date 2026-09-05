@@ -1,23 +1,31 @@
-module std::ai;
+module ai::llm;
 
-//! Model inference as a capability, and tensors whose shapes are checked.
+//! Model inference as a capability.
 //!
-//! Two things that look unrelated and are the same argument. A program that
-//! calls a model is a program that reaches the network, spends money and
-//! returns something different every time, so `LLMService` is an effect and
-//! the `with` clause says which functions can do it. A program that multiplies
-//! two tensors is a program where a shape mismatch is discoverable before it
-//! runs, so `Tensor` carries its device, its shape and its element type in
-//! the type and `matmul` unifies the shared dimension.
+//! A program that calls a model reaches the network, spends money and returns
+//! something different every time, so `LLMService` is an effect and the `with`
+//! clause says which functions may do it.
 //!
-//! # What this is not
+//! # Why this is a package and not `std`
 //!
-//! **Not an implementation of anything.** There is no HTTP here, no tokenizer,
-//! no BLAS. [The ecosystem design note](https://github.com/codyspate/khoralang/blob/main/docs/design/ecosystem.md) puts numeric kernels and vendor clients
-//! in packages for the reason it puts database drivers there: what belongs in
-//! `std` is the vocabulary two packages must agree on to exchange a value, and
-//! the effect declaration that lets a caller say what it needs without naming
-//! a provider.
+//! It was `std::ai` until it was read with 1.0 in mind. Every public item in
+//! `std` is a promise for the life of a major version, and this is a vocabulary
+//! for an interface that no two providers have agreed on yet -- `role` is a
+//! `String` here precisely because the set of roles keeps moving. A package can
+//! follow that; `std` would have to be widened by a compatibility promise every
+//! time a vendor added a word.
+//!
+//! [The ecosystem design note](https://github.com/codyspate/khoralang/blob/main/docs/design/ecosystem.md) already put vendor clients here, for the same
+//! reason it puts database drivers here. This module is the half of the old
+//! `std::ai` that had an implementation and a caller; the tensor half -- a
+//! shape-checked `Tensor`, `matmul`, `Embedding` and `cosine_similarity` -- was
+//! deleted rather than moved. It declared functions with no bodies, nothing in
+//! the repository called any of them, and its own doc examples imported two
+//! types that never existed.
+//!
+//! **Still not an implementation of anything.** There is no HTTP here and no
+//! tokenizer: what a package this size can honestly offer is the effect
+//! declaration that lets a caller say what it needs without naming a provider.
 //!
 //! `extract` is the shape of the whole module. A caller writes
 //! `let report: Report = extract(prompt)!` and `LLMService` never learns that
@@ -28,78 +36,6 @@ module std::ai;
 import std::core::{List, Option, Redacted, Result, Validated};
 import std::json::{JsonError, encode, parse};
 import std::schema::{Decode, Problem, Raw, Rejection, Schema, Shape};
-
-/// Where a tensor's memory lives.
-///
-/// Carried in the type, so a program that multiplies a CPU tensor by a GPU one
-/// is refused rather than copying silently. Provisional along with the rest of
-/// this module.
-pub type Device =
-  | Cpu
-  | Cuda(device_id: Int)
-  | Metal
-  | Npu;
-
-/// The kind of an element type: what may appear as a tensor's `T`.
-///
-/// A kind rather than a type — nothing is a value of `Scalar`. It exists so
-/// that `Tensor<D, Shape, T>` can say what `T` is allowed to be.
-pub type Scalar;
-
-/// The kind of a shape: what may appear as a tensor's `Shape`.
-///
-/// `(M, K)` is a value of this kind, not a value of any type. Matching two
-/// shapes is ordinary unification, which is what makes a mismatched product a
-/// type error.
-pub type Tuple;
-
-/// Thirty-two-bit floating point, as an element type.
-pub type F32;
-
-/// A tensor, with its device, its shape and its element type in the type.
-///
-/// **The shape is not a runtime field.** `Tensor<Cpu, (1536), F32>` and
-/// `Tensor<Cpu, (768), F32>` are different types, so a dimension mismatch is
-/// discovered by the checker rather than asserted at the first multiply. That
-/// is the whole argument for this being in `std` while the kernels are not:
-/// the vocabulary two packages must agree on is here, and the arithmetic is
-/// somebody else's.
-pub type Tensor<D: Device, Shape: Tuple, T: Scalar>;
-
-/// A one-dimensional CPU tensor of a known width.
-///
-/// The shape a vector database and an embedding model have to agree on, spelled
-/// once: `Embedding<1536, F32>`.
-///
-/// **A type of its own, not another name for the tensor inside it.** Khora has
-/// no transparent alias: `type X = Y` wraps, so an `Embedding` is built with
-/// `Embedding(t)` and opened with `match e { Embedding(t) => t }`. That is the
-/// right way round here — a tensor of the correct shape is not automatically
-/// an embedding, and handing a model's output straight to a distance function
-/// without saying which is which is the mistake this module is meant to make
-/// hard.
-pub type Embedding<const Dim: Int, T: Scalar> = Tensor<Device::Cpu, (Dim), T>;
-
-impl<D: Device, Shape: Tuple, T: Scalar> Tensor<D, Shape, T> {
-  /// A tensor of the given shape, every element zero.
-  ///
-  /// The shape is passed as a value and read back as a type, so
-  /// `Tensor::zeros((1536))` has the shape `Embedding<1536, F32>` wraps —
-  /// `Embedding(Tensor::zeros((1536)))` is the embedding. Provisional along
-  /// with the rest of this module.
-  pub fn zeros(shape: Shape) -> Tensor<D, Shape, T>;
-}
-
-/// The matrix product, with the shared dimension checked by the type system.
-///
-/// `K` appears in both arguments, so it has to unify: an `(M, K)` times a
-/// `(J, N)` does not compile, and no assertion runs to discover it. Declared
-/// rather than implemented — [the ecosystem design note](https://github.com/codyspate/khoralang/blob/main/docs/design/ecosystem.md) puts the kernel in a
-/// package.
-pub fn matmul<D: Device, const M: Int, const K: Int, const N: Int, T: Scalar>(
-  a: Tensor<D, (M, K), T>,
-  b: Tensor<D, (K, N), T>
-) -> Tensor<D, (M, N), T>;
 
 /// One turn of a conversation: who said it, and what they said.
 ///
@@ -229,17 +165,17 @@ pub effect LLMService {
 /// `Decode` needs nothing else to be extracted.
 ///
 /// ```khora
-/// import std::ai::{Model, Prompt, extract};
+/// import ai::llm::{LLMService, ModelError, Prompt, extract};
 /// import std::schema::{Decode};
 ///
 /// derive(Decode)
 /// pub type Invoice = { total_minor: Int, currency: String };
 ///
 /// fn read_invoice(text: String) -> Invoice
-///   with { model: Model }
+///   with { ai: LLMService }
 ///   raises ModelError
 /// {
-///   extract(Prompt::of("Read this invoice: " + text))!
+///   extract(Prompt::new() |> Prompt::user("Read this invoice: " + text))!
 /// }
 /// ```
 ///
@@ -272,40 +208,3 @@ fn not_json(why: JsonError) -> Rejection {
   + why.expected + " was expected";
   { path: List::Nil, secret: false, problem: Problem::Wrong("a JSON document", Redacted::of(found)) }
 }
-
-/// An embedding of a known width.
-///
-/// **The width is the model's, not the caller's.** Nobody can choose to get 768
-/// numbers out of a model that returns 1536, so asking for a `Dim` is asking a
-/// question, and a `Dim` that does not match the answer is a `ModelError`. The
-/// old declaration made it a caller-chosen parameter, which said otherwise.
-///
-/// ```khora
-/// import std::ai::{Embedder, embed};
-///
-/// fn similarity(a: String, b: String) -> Float
-///   with { embedder: Embedder }
-///   raises ModelError
-/// {
-///   Embedding::cosine(embed::<1536>(a)!, embed::<1536>(b)!)
-/// }
-/// ```
-///
-/// The dimension is in the type, so two embeddings from different models
-/// cannot be compared by accident -- which is a mistake that otherwise
-/// produces a plausible number rather than an error.
-pub fn embed<const Dim: Int>(text: String) -> Embedding<Dim, F32>
-
-  with { ai: LLMService }
-  raises ModelError;
-
-/// How alike two embeddings are, from -1 to 1.
-///
-/// **Both must have the same width**, and the type says so rather than a
-/// length check discovering it: comparing a 1536-wide embedding with a
-/// 768-wide one is refused by the checker. Declared rather than implemented,
-/// like `matmul` — the arithmetic belongs in a package.
-pub fn cosine_similarity<const Dim: Int>(
-  a: Embedding<Dim, F32>,
-  b: Embedding<Dim, F32>
-) -> Float;

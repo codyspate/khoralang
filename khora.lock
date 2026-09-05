@@ -8,6 +8,11 @@
 version = 1
 
 [[package]]
+name = "ai"
+source = "path"
+path = "packages/ai"
+
+[[package]]
 name = "postgres"
 source = "path"
 path = "packages/postgres"

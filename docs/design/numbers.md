@@ -362,8 +362,9 @@ type exists to prevent. It is a trap now, and there is a test.
 
 ## Not yet
 
-- **`Float32`.** One float type is enough until something needs the other, and
-  `std::ai`'s tensors are where it will come from.
+- **`Float32`.** One float type is enough until something needs the other. That
+  was going to be `std::ai`'s tensors, which were deleted unused, so the demand
+  now has to come from something real or not at all.
 - **Bytes back into a string.** `String::bytes` goes one way; the other way has
   to answer what happens to bytes that are not UTF-8, and the honest answer is
   a `Result` rather than a trap — bytes off a socket are data, not a

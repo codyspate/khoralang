@@ -21,7 +21,15 @@ use khora_db::{KhoraDatabase, SourceFile, SourceRoot};
 fn sources(db: &KhoraDatabase) -> Vec<SourceFile> {
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
     let mut out = Vec::new();
-    let mut stack = vec![repo.join("std"), repo.join("examples").join("risk_analyzer")];
+    // `packages/ai` as well as `std`: the model vocabulary this program calls
+    // was `std::ai` until it was read with 1.0 in mind. `khora build` finds it
+    // through the manifest's `[dependencies]`; this test assembles the source
+    // roots itself and so has to be told.
+    let mut stack = vec![
+        repo.join("std"),
+        repo.join("packages").join("ai"),
+        repo.join("examples").join("risk_analyzer"),
+    ];
     while let Some(here) = stack.pop() {
         for entry in std::fs::read_dir(&here).expect("a readable directory") {
             let path = entry.expect("an entry").path();
