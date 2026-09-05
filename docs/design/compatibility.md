@@ -213,6 +213,17 @@ Stating the policy is not meeting it. 1.0 is blocked on at least:
   `impl` — a method without it is its module's, so the 24 helpers that were
   promises by accident are no longer. Roadmap 13.11,
   `docs/design/std-surface.md`.
+- ~~**A rule for what `std` may contain.**~~ Done, and it is not the one that
+  was in use: `docs/design/std-admission.md`. The floor is mechanical -- what
+  the compiler names, and what the runtime implements -- and everything above it
+  answers "would two independent packages have to *agree* on this, or could each
+  bring its own". The first removal it implies, `std::ai`, is done.
+- **A way to say "not settled yet".** There is none: no `unstable`, no
+  `preview`, nothing. So at 1.0 every item in `std` freezes at the same moment,
+  on a library whose oldest line is weeks old, and every admission question is
+  binary when the honest answer is usually "ask again in a year".
+  `std-admission.md` proposes two shapes. **This is the largest thing this
+  document lists and does not have.**
 - **Editions**, if anything before 1.0 needs one.
 
 ## Not decided here

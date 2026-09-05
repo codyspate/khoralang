@@ -71,7 +71,16 @@ different language.
 
 1. **Higher-kinded types are core, not optional.** They are what Rust
    structurally cannot express, and they carry `Traversable`, `Stream`, generic
-   combinators and user abstractions. Note that direct-style effects
+   combinators and user abstractions.
+
+   **Two of those three are not yet real, and the entry is kept honest rather
+   than quietly satisfied.** `Stream` does not exist. `Traversable`, `Functor`
+   and `Applicative` are exported and no program in this repository uses any of
+   them -- they appear only in compiler tests. So the most expensive commitment
+   in this document is currently the least exercised code in the library. The
+   answer is not to withdraw it: it is `Stream`, built to fuse, with a program
+   that needs it. `docs/design/beyond-effect.md` argues why that is also the
+   best showcase the effect system has. Note that direct-style effects
    deliberately reduce the need for `Monad` specifically — there is no monadic
    plumbing left to abstract over — so HKT is justified by containers and
    typeclasses, not by the effect system.
@@ -97,8 +106,11 @@ different language.
 
    This replaces first-class Rust interop, which was the original answer. Not
    because it would be hard, but because it does not skip the work it appears
-   to skip: Khora has no byte buffers, so no crate can hand it one, and every
-   primitive a binding would need is one the language needs anyway. An
+   to skip: Khora has no *borrowed* buffer -- no `&[u8]`, no lifetime to hand
+   across the boundary -- so a crate's zero-copy API has nothing to bind to, and
+   every primitive it would need is one the language needs anyway. (`Array<U8>`
+   is a byte buffer and `std::net::socket::receive` fills one; what is missing
+   is the borrow, which is the whole of the interop problem.) An
    ecosystem strategy that makes the strongest competitor a dependency is also
    answering the wrong question.
 
