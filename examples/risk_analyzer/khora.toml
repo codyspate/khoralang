@@ -23,9 +23,16 @@ write = ["./tmp/**"]
 [fmt]
 workspace = true
 
+# `unused-capability`, singular. It was `unused-capabilities` here, which is not
+# a lint, so the strictest setting in the repository's most-read example had
+# been doing nothing. `khora check` says so -- "is not a lint, so it does
+# nothing" -- and the warning was scrolling past above a clean result.
+#
+# `cyclomatic-complexity` went with it rather than being corrected: there is no
+# such lint to correct it to. Configuring one that does not exist is how a
+# manifest comes to describe a policy nobody is keeping.
 [lints]
-unused-capabilities = "deny"
-cyclomatic-complexity = { level = "warn", max = 15 }
+unused-capability = "deny"
 
 # `std` is not here: the standard library is found beside the compiler, the way
 # `rustc` finds its sysroot. A line every package repeats and none can get
