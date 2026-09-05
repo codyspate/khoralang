@@ -167,7 +167,7 @@ khora test packages/postgres
 The driver is tested against a real one, which is skipped unless asked for:
 
 ```
-KHORA_POSTGRES=1 cargo test -p khora-codegen-llvm --features llvm --test postgres
+KHORA_POSTGRES=1 cargo test -p khora-codegen-llvm --features llvm --test suite -- postgres::
 ```
 
 `docker-compose.yml` brings a server up on **5433**, deliberately not 5432, so

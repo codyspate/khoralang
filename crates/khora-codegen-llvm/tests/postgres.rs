@@ -18,7 +18,7 @@
 //!
 //! ```text
 //! docker compose -f packages/postgres/docker-compose.yml up -d
-//! KHORA_POSTGRES=1 cargo test -p khora-codegen-llvm --features llvm --test postgres
+//! KHORA_POSTGRES=1 cargo test -p khora-codegen-llvm --features llvm --test suite -- postgres::
 //! ```
 //!
 //! [`against_a_real_server`] then runs, and it is the one that can find what a

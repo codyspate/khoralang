@@ -1,7 +1,7 @@
 # A PostgreSQL to develop the driver against.
 #
 #   docker compose -f packages/postgres/docker-compose.yml up -d
-#   KHORA_POSTGRES=1 cargo test -p khora-codegen-llvm --features llvm --test postgres
+#   KHORA_POSTGRES=1 cargo test -p khora-codegen-llvm --features llvm --test suite -- postgres::
 #
 # The tests do not need this. `crates/khora-codegen-llvm/tests/postgres.rs`
 # carries a server of its own — enough of the protocol to complete a handshake

@@ -33,6 +33,17 @@ The `llvm` feature is what turns on code generation. Without it the compiler
 parses, resolves and type checks, which is enough for a great deal of the work
 and much faster to build.
 
+**The front end fits a small machine, and that is a supported way to work on
+Khora.** Measured on a two-core container with 2 GB of memory: a cold
+`cargo test --workspace --no-run` -- every crate, every dependency and all of
+its test binaries -- took 93 seconds and peaked at 893 MB. Nothing swapped.
+If you are working on the parser, the resolver, the type checker, the formatter
+or the language server, you need no LLVM and no large machine, and
+`sh scripts/setup-llvm.sh` is a step you can skip entirely.
+
+The backend is heavier but not by as much as it looks: with LLVM it peaks
+around 1 GB and wants roughly 4 GB to be comfortable alongside a test run.
+
 ## The gate
 
 ```sh
@@ -52,9 +63,14 @@ status rather than its last line; a failing step in the middle scrolls away.
 Two smaller loops for while you work:
 
 ```sh
-cargo nextest run -p khora-types            # one crate
-cargo nextest run --features llvm -E 'binary(fibers)'   # one file of end-to-end tests
+cargo nextest run -p khora-types                        # one crate
+cargo nextest run --features llvm -E 'test(/^fibers::/)' # one file of end-to-end tests
 ```
+
+**That filter used to be `binary(fibers)`.** `khora-codegen-llvm`'s end-to-end
+tests were sixty-eight executables, each linking the whole compiler and all of
+LLVM; they are modules of one binary now, so a file is selected by the module
+its tests are in rather than by a binary name.
 
 ## House rules
 
