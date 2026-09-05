@@ -228,7 +228,18 @@ step 'the packages pass their own tests'
 # A package whose tests nobody runs is a package with no tests. `khora test`
 # compiles the `test` blocks into their own executable and runs it — the same
 # path a user of the language would take.
+#
+# **`otlp` was not here and it has twelve of them.** The sentence above states
+# the rule and the line below it kept one package, so twelve tests asserting
+# the rendered OTLP bytes -- the ones that caught `service.name` going out as a
+# bare string where the protocol wants an `AnyValue`, which a collector drops
+# in silence -- had been running nowhere since they were written. They pass, so
+# this widens the gate rather than fixing anything, which is the good case.
+#
+# `packages/ai` is deliberately absent: it has no `test` blocks. When it gets
+# one it belongs here, and this comment is the reminder.
 "$khora" test packages/postgres
+"$khora" test packages/otlp
 
 step 'every reference application builds'
 # `ledger_service` is here for the same reason the packages are: it depends on
