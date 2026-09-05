@@ -82,6 +82,28 @@ case "$(uname -s)" in
         if ! command -v brew >/dev/null 2>&1; then
             if [ "$(uname -s)" = Linux ] && command -v apt-get >/dev/null 2>&1; then
                 say "No Homebrew. Using apt.llvm.org, which needs sudo."
+
+                # apt.llvm.org's `llvm.sh` asks `lsb_release` for the
+                # distribution codename, and `lsb-release` is not part of a
+                # base Debian or Ubuntu image -- only of the desktop and CI
+                # ones. It does not fail where it looks, either: `DISTRO=`
+                # comes out empty and the run ends at
+                #
+                #     lsb_release: command not found
+                #
+                # having added no repository and installed nothing. `set -e`
+                # does stop us there, so the failure is at least loud -- it is
+                # simply about a package nobody would connect to LLVM.
+                # GitHub's runner image ships it, so CI has never taken this
+                # path and a clean Debian container was the first thing to.
+                #
+                # It is 30 kB and we are already holding sudo.
+                if ! command -v lsb_release >/dev/null 2>&1; then
+                    say "Installing lsb-release, which apt.llvm.org's script reads."
+                    sudo apt-get update -qq
+                    sudo apt-get install -y -qq lsb-release
+                fi
+
                 tmp=$(mktemp -d)
                 curl -fsSL https://apt.llvm.org/llvm.sh -o "$tmp/llvm.sh"
                 chmod +x "$tmp/llvm.sh"
@@ -107,8 +129,22 @@ case "$(uname -s)" in
                 #     rust-lld: error: unable to find library -lzstd
                 #
                 # after compiling the entire workspace.
+                #
+                # `zlib1g-dev` is the third of exactly the same shape, found on
+                # Debian trixie after the other two were fixed. `llvm-config
+                # --system-libs` answers `-lz -lzstd -lxml2 -lz3 -lffi`, and of
+                # those five only zlib has no -dev package pulled in by
+                # `llvm-$MAJOR-dev`'s own dependencies. Same symptom, same
+                # place, one library further along:
+                #
+                #     rust-lld: error: unable to find library -lz
+                #
+                # Anything added to LLVM's --system-libs in a future release
+                # will land here the same way, so the check worth running on a
+                # clean machine is that list against `ls /usr/lib/*/lib*.so`.
                 say "Adding the libraries llvm-sys links against."
-                sudo apt-get install -y "llvm-$MAJOR-dev" "libpolly-$MAJOR-dev" libzstd-dev
+                sudo apt-get install -y "llvm-$MAJOR-dev" "libpolly-$MAJOR-dev" \
+                    libzstd-dev zlib1g-dev
 
                 prefix="/usr/lib/llvm-$MAJOR"
             else
