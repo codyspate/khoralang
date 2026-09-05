@@ -174,6 +174,7 @@ pub type Shape =
   | Default(inner: Shape)
   | Keyed(wire: String, inner: Shape)
   | Refined(inner: Shape, rule: Rule)
+  | Via(inner: Shape, becomes: String)
   | Secret(inner: Shape)
   | Closed(inner: Shape)
   | Described(inner: Shape, text: String)
@@ -196,6 +197,20 @@ builds `Cases`, [`Schema::lazy`] builds `Lazy`. `Struct` is what
 itself has a shape at all; a walker forces it, and a walker that can meet
 the same name twice keeps a visited set. It is also why `Show` is written
 by hand below: nothing can be derived over a closure.
+
+#### Via
+
+```khora
+| Via(inner: Shape, becomes: String)
+```
+
+A value that arrives as one thing and becomes another: the wire shape,
+and the name of what it turns into. `Via(String, "Timestamp")` is a
+string on the wire and a `Timestamp` in the program.
+
+**The wire shape is the one that renders**, because the producer has to
+send that and not the domain type; the name goes out as JSON Schema's
+`format`, which is the keyword for exactly this.
 
 ### Named
 
@@ -1268,6 +1283,38 @@ A condition on a value that is otherwise the right shape.
 `"between 1 and 65535"` reads as *port must be between 1 and 65535*. The
 named rules below carry their bounds as structure instead, which is what a
 rendered document needs; this is for the rule the vocabulary lacks.
+
+### via
+
+```khora
+pub fn via<A, B: Show>(inner: Schema<B>, becomes: String, forward: (B) -> Option<A>) -> Schema<A>
+```
+
+A value whose wire form is not its domain form.
+
+`refine` narrows a type to itself; this changes it. The wire carries a `B`
+and the program gets an `A`, so a timestamp may travel as a string, an
+amount as digits, an identifier as text -- without the record that holds it
+knowing, and without a second pass over the decoded value to fix it up.
+
+```khora
+pub fn timestamp() -> Schema<Timestamp> {
+  via(string(), "Timestamp", fn text => Timestamp::parse(text))
+}
+```
+
+**`Option` rather than a `Rejection`**, because the caller does not know
+where in the document it is standing; the path belongs to the schema and is
+attached here. A `None` reads exactly like a primitive that did not match --
+`wanted a Timestamp, found "not a date"` -- which is the point: a value that
+arrives in the wrong form should not report differently depending on whether
+the conversion was built in.
+
+**One direction only, and deliberately.** [`Encode`] is a separate trait for
+the reason its own documentation gives -- a `Redacted` decodes and has no
+wire form at all -- so a type built with this implements `Encode` itself if
+it has one. Folding a `back` in here would promise a round trip that
+`Redacted` is a standing counterexample to.
 
 ### between
 

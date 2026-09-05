@@ -988,3 +988,66 @@ fn main() -> Int {{
     );
     assert_eq!(out, "c explain 2 .name\nc should be true or false, and is \".name\"\n");
 }
+
+const HEAD5: &str = "module main;
+
+import std::core::{List, Option, Result, Show, Validated, print};
+import std::json::{encode};
+import std::schema::{Raw, Rejection, Schema, Shape, string, via};
+
+pub type Level = | Low | High;
+
+/// A string on the wire, a variant in the program. The record that holds one
+/// does not know the difference, which is the whole point of `via`.
+fn level() -> Schema<Level> {
+  via(string(), \"Level\", fn t =>
+    if t == \"low\" {
+      Option::Some(Level::Low)
+    } else if t == \"high\" {
+      Option::Some(Level::High)
+    } else {
+      Option::None
+    })
+}
+
+fn said(v: Validated<Level, Rejection>) -> String {
+  match Validated::to_result(v) {
+    Result::Ok(l) => match l { Level::Low => \"low\", Level::High => \"high\" },
+    Result::Err(errors) =>
+      List::fold(errors, \"\", fn (acc, e) => acc + Rejection::describe(e) + \"; \"),
+  }
+}
+";
+
+/// **A value may arrive as one thing and become another.** `refine` narrows a
+/// type to itself; `via` changes it, which is what a timestamp travelling as a
+/// string needs and what nothing before this could say.
+///
+/// Three claims. The conversion runs and the program gets the domain type. A
+/// conversion that refuses reports like a primitive that did not match, because
+/// a caller should not be able to tell whether the reader was built in. And the
+/// rendered JSON Schema describes the *wire* form -- a producer has to send a
+/// string, not a `Level` -- with the domain name as `format`, which is the
+/// keyword JSON Schema has for exactly this.
+#[test]
+fn a_value_can_arrive_as_one_thing_and_become_another() {
+    let out = run(
+        "schema_via",
+        &format!(
+            "{HEAD5}
+fn main() -> Int {{
+  print(said(Schema::decode(level(), Raw::Text(\"high\"))));
+  print(said(Schema::decode(level(), Raw::Text(\"sideways\"))));
+  print(encode(Shape::to_json_schema(level().shape)));
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        out,
+        "high\n\
+         the value should be Level, and is sideways; \n\
+         {\"format\":\"Level\",\"type\":\"string\"}\n"
+    );
+}

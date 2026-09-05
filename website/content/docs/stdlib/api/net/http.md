@@ -683,9 +683,8 @@ pub fn with_header(self, name: String, value: String) -> Response
 
 The same response with one more header on it.
 
-A new response rather than a mutated one, like `Prompt`'s builders and
-for the same reason: a half-built response cannot be shared and then
-changed underneath its other holder.
+A new response rather than a mutated one: a half-built response cannot be
+shared and then changed underneath its other holder.
 
 #### rendered
 

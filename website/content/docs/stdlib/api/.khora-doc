@@ -1,7 +1,6 @@
 # Written by `khora doc`. It lists the pages this directory's
 # generator owns, and is what lets a later run delete a page whose
 # module is gone without touching anything it did not write.
-ai.md
 clock.md
 config.md
 core.md

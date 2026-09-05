@@ -284,6 +284,7 @@ fn is_switch(shape: Shape, name: String) -> Bool {
     Shape::Nullable(inner) => is_switch(inner, name),
     Shape::Default(inner) => is_switch(inner, name),
     Shape::Refined(inner, _rule) => is_switch(inner, name),
+    Shape::Via(inner, _becomes) => is_switch(inner, name),
     Shape::Closed(inner) => is_switch(inner, name),
     Shape::Described(inner, _text) => is_switch(inner, name),
     Shape::Lazy(_name, inner) => is_switch(inner(), name),
@@ -298,6 +299,7 @@ fn is_bool(shape: Shape) -> Bool {
     Shape::Default(inner) => is_bool(inner),
     Shape::Keyed(_wire, inner) => is_bool(inner),
     Shape::Refined(inner, _rule) => is_bool(inner),
+    Shape::Via(inner, _becomes) => is_bool(inner),
     Shape::Described(inner, _text) => is_bool(inner),
     _ => false,
   }
@@ -488,6 +490,14 @@ pub type Shape =
   | Default(inner: Shape)
   | Keyed(wire: String, inner: Shape)
   | Refined(inner: Shape, rule: Rule)
+  /// A value that arrives as one thing and becomes another: the wire shape,
+  /// and the name of what it turns into. `Via(String, "Timestamp")` is a
+  /// string on the wire and a `Timestamp` in the program.
+  ///
+  /// **The wire shape is the one that renders**, because the producer has to
+  /// send that and not the domain type; the name goes out as JSON Schema's
+  /// `format`, which is the keyword for exactly this.
+  | Via(inner: Shape, becomes: String)
   | Secret(inner: Shape)
   | Closed(inner: Shape)
   | Described(inner: Shape, text: String)
@@ -525,6 +535,7 @@ impl Show for Shape {
       Shape::Default(inner) => "Default(" + Show::show(inner) + ")",
       Shape::Keyed(wire, inner) => "Keyed(" + wire + ", " + Show::show(inner) + ")",
       Shape::Refined(inner, rule) => "Refined(" + Show::show(inner) + ", " + Show::show(rule) + ")",
+      Shape::Via(inner, becomes) => "Via(" + Show::show(inner) + ", " + becomes + ")",
       Shape::Secret(inner) => "Secret(" + Show::show(inner) + ")",
       Shape::Closed(inner) => "Closed(" + Show::show(inner) + ")",
       Shape::Described(inner, text) => "Described(" + Show::show(inner) + ", " + text + ")",
@@ -548,6 +559,7 @@ impl Shape {
       Shape::Default(inner) => Shape::keys(inner),
       Shape::Keyed(_wire, inner) => Shape::keys(inner),
       Shape::Refined(inner, _rule) => Shape::keys(inner),
+      Shape::Via(inner, _becomes) => Shape::keys(inner),
       Shape::Secret(inner) => Shape::keys(inner),
       Shape::Closed(inner) => Shape::keys(inner),
       Shape::Described(inner, _text) => Shape::keys(inner),
@@ -565,6 +577,7 @@ impl Shape {
       Shape::Nullable(inner) => Shape::wire_key(inner),
       Shape::Default(inner) => Shape::wire_key(inner),
       Shape::Refined(inner, _rule) => Shape::wire_key(inner),
+      Shape::Via(inner, _becomes) => Shape::wire_key(inner),
       Shape::Secret(inner) => Shape::wire_key(inner),
       Shape::Closed(inner) => Shape::wire_key(inner),
       Shape::Described(inner, _text) => Shape::wire_key(inner),
@@ -1131,6 +1144,47 @@ fn checked<A>(inner: Schema<A>, rule: Rule, holds: (A) -> Bool) -> Schema<A> {
   }
 }
 
+/// A value whose wire form is not its domain form.
+///
+/// `refine` narrows a type to itself; this changes it. The wire carries a `B`
+/// and the program gets an `A`, so a timestamp may travel as a string, an
+/// amount as digits, an identifier as text -- without the record that holds it
+/// knowing, and without a second pass over the decoded value to fix it up.
+///
+/// ```khora
+/// pub fn timestamp() -> Schema<Timestamp> {
+///   via(string(), "Timestamp", fn text => Timestamp::parse(text))
+/// }
+/// ```
+///
+/// **`Option` rather than a `Rejection`**, because the caller does not know
+/// where in the document it is standing; the path belongs to the schema and is
+/// attached here. A `None` reads exactly like a primitive that did not match --
+/// `wanted a Timestamp, found "not a date"` -- which is the point: a value that
+/// arrives in the wrong form should not report differently depending on whether
+/// the conversion was built in.
+///
+/// **One direction only, and deliberately.** [`Encode`] is a separate trait for
+/// the reason its own documentation gives -- a `Redacted` decodes and has no
+/// wire form at all -- so a type built with this implements `Encode` itself if
+/// it has one. Folding a `back` in here would promise a round trip that
+/// `Redacted` is a standing counterexample to.
+pub fn via<A, B: Show>(inner: Schema<B>, becomes: String, forward: (B) -> Option<A>) -> Schema<A> {
+  {
+    shape: Shape::Via(inner.shape, becomes),
+    read: fn (path, value) =>
+    Validated::and_then((inner.read)(path, value), fn b =>
+      match forward(b) {
+        Option::Some(a) => Validated::of(a),
+        Option::None => Validated::error({
+            path: path,
+            secret: false,
+            problem: Problem::Wrong(becomes, Redacted::of(Show::show(b))),
+          }),
+      }),
+  }
+}
+
 /// Whether `low <= a <= high`.
 fn within<A: Ord>(a: A, low: A, high: A) -> Bool {
   match a.cmp(low) {
@@ -1266,6 +1320,7 @@ fn rename_shape(shape: Shape, wire: String, field: String) -> Shape {
     Shape::Closed(inner) => Shape::Closed(rename_shape(inner, wire, field)),
     Shape::Described(inner, text) => Shape::Described(rename_shape(inner, wire, field), text),
     Shape::Refined(inner, rule) => Shape::Refined(rename_shape(inner, wire, field), rule),
+    Shape::Via(inner, becomes) => Shape::Via(rename_shape(inner, wire, field), becomes),
     other => other,
   }
 }
@@ -1636,6 +1691,10 @@ fn render(shape: Shape, state: Rendering) -> (Json, Rendering) {
       let (one, after) = render(inner, state);
       (ruled(one, inner, rule), after)
     },
+    Shape::Via(inner, becomes) => {
+      let (one, after) = render(inner, state);
+      (with_key(one, "format", Json::Text(becomes)), after)
+    },
     Shape::Secret(inner) => {
       let (one, after) = render(inner, state);
       (with_key(one, "writeOnly", Json::Bool(true)), after)
@@ -1668,6 +1727,7 @@ fn is_required(shape: Shape) -> Bool {
     Shape::Default(_inner) => false,
     Shape::Keyed(_wire, inner) => is_required(inner),
     Shape::Refined(inner, _rule) => is_required(inner),
+    Shape::Via(inner, _becomes) => is_required(inner),
     Shape::Secret(inner) => is_required(inner),
     Shape::Closed(inner) => is_required(inner),
     Shape::Described(inner, _text) => is_required(inner),
@@ -1731,6 +1791,7 @@ fn numeric(shape: Shape) -> Bool {
     Shape::Float => true,
     Shape::Keyed(_wire, inner) => numeric(inner),
     Shape::Refined(inner, _rule) => numeric(inner),
+    Shape::Via(inner, _becomes) => numeric(inner),
     Shape::Secret(inner) => numeric(inner),
     Shape::Described(inner, _text) => numeric(inner),
     Shape::Default(inner) => numeric(inner),
