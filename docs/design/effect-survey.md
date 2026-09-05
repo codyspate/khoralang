@@ -399,11 +399,50 @@ land in Khora's favour:
   assigned*. An end marker is the same trick one id further down — one control
   path instead of two.
 
-**The call, and it is worth a spike before anything else: how does an effect row
-attach to a trait method?** `khora-types/src/traits.rs` already parses `with` and
-`raises` on a trait method signature, but no `std` trait uses a row *variable*
-and `Functor::map` has no row at all. Half a day of spiking decides whether
-`Stream` is library work or type-system work.
+**The call, and it was worth a spike before anything else: how does an effect
+row attach to a trait method?** Spiked 2026-09-05. Two corrections to the
+question first: `khora-types/src/traits.rs` does parse `with` and `raises` on a
+trait method, and **`Functor::map` does carry a row variable in its own row** --
+`fn map<A, B, 'ef, 'er>(..) -> Self<B> with 'ef raises 'er`. What was true is
+that its row is sourced from an *argument*, and `Stream::next` has no argument
+to source one from: its row comes from the implementation.
+
+**The answer is that `Stream` is library work, and only if it is not a trait.**
+Four shapes were tried, checked, and where they checked, run.
+
+| Shape | Result |
+| --- | --- |
+| Trait method with a *concrete* row | Works, and the diagnostic is right |
+| Trait with a **row parameter**, `trait Source<'ef>` | Not solved from the impl: ``'ef` is a type the caller chooses` |
+| Trait with an **associated effect row**, `type Effects` | **Does not work.** `with Self::Effects` is read as a capability *named* `Self::Effects`, so no handler can supply it -- a program inside `with { tick: clock }` is still refused |
+| **A record holding a closure**, parameterised by a row | **Works, compiles and runs** |
+
+The last one is the design, and it is the shape this repository already uses
+twice. `Schema<A>` is a record holding a `read` closure; and Effect v4's channel
+is, in its own words, a function from an upstream pull to a downstream pull.
+
+```khora
+pub type Source<A, 'ef> = { next: () -> Option<A> with 'ef };
+
+fn ticks() -> Source<Int, { tick: Tick }> { { next: fn () => Option::Some(tick.now()) } }
+
+fn first<A, 'ef>(s: Source<A, 'ef>) -> Option<A> with 'ef { (s.next)() }
+```
+
+A polymorphic consumer, a concrete producer, and a real handler satisfying the
+row -- it prints `42`. No type-system work is required to have a `Stream` whose
+pull performs effects, which is the whole question this entry existed to ask.
+
+**A diagnostic bug found on the way, and it should be fixed before `Stream`
+rather than after.** When the missing capability comes from a row rather than a
+label, `Clause::describe` formats it as `{label}: {ty}` with the whole row in
+both halves:
+
+    error: `Src::next` needs `tick: Tick`, which this function does not require            (right)
+    error: `Source2::next` needs `{ tick: Tick }: { tick: Tick }`, which this ...          (wrong)
+
+`crates/khora-types/src/check.rs`, `Clause::describe`. Every reader who writes a
+stream and forgets the row meets the second one.
 
 Also worth taking from Eio rather than Effect: the split between a **byte**
 source/sink and an **element** stream. HTTP bodies want the first; a windowed

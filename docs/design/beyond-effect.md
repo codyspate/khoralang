@@ -51,6 +51,14 @@ closure of closures inherits Effect's ceiling permanently.
 types are *for*, and it does not exist. This is the largest gap against the
 thesis and the best showcase for the effect system.
 
+**The design is not open, and this note does not own it.**
+`docs/design/effect-survey.md` §3.4 has it: what Effect v4 converged on, why
+`Chunk` is not worth copying, end-of-stream as a reserved error id, the
+byte-source versus element-stream split from Eio, the fan-out deadlock to design
+out -- and the spike result that says a `Stream` whose pull performs effects is
+a record holding a closure rather than a trait, and needs no type-system work.
+What is *this* note's is only the claim that it must fuse. Read §3.4 first.
+
 ## 2. Record every effect, and replay it
 
 The idea with the widest gap between "Khora can" and "Effect cannot".
