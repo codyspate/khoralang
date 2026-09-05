@@ -56,7 +56,7 @@ fn where_the_time_goes() {
     ensure_runtime();
     let runtime = seconds(started);
 
-    let directory = std::env::temp_dir().join("khora-phases");
+    let directory = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("phases");
     std::fs::create_dir_all(&directory).expect("a directory");
     let exe = directory.join(if cfg!(windows) { "p.exe" } else { "p" });
 
@@ -116,7 +116,7 @@ fn where_a_real_build_spends_it() {
     gather(&std_dir, &mut paths);
     paths.sort();
 
-    let directory = std::env::temp_dir().join("khora-phases");
+    let directory = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("phases");
     std::fs::create_dir_all(&directory).expect("a directory");
     let exe = directory.join(if cfg!(windows) { "big.exe" } else { "big" });
 

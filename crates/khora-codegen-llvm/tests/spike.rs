@@ -7,7 +7,10 @@
 
 #[test]
 fn emits_links_and_runs_a_native_executable() {
-    let dir = std::env::temp_dir().join("khora-spike");
+    // `CARGO_TARGET_TMPDIR` rather than `/tmp`: one shared path belongs to
+    // whoever made it first, and a second user gets a permission error that
+    // reads like a code generator bug. `compile.rs` has the account.
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("spike");
     std::fs::create_dir_all(&dir).expect("creating temp dir");
     let obj = dir.join("spike.o");
     let exe = dir.join(if cfg!(windows) { "spike.exe" } else { "spike" });

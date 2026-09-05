@@ -28,8 +28,17 @@ struct Ran {
 ///
 /// Per test, because tests run in parallel and `compile` writes an object file
 /// and an executable next to each other under names it derives from `out`.
+///
+/// **Under `target/`, not `/tmp`.** `std::env::temp_dir()` is one path shared
+/// by everything on the machine, so the directory belongs to whoever created it
+/// first: run this suite as one user and then as another and the second gets
+/// `writing /tmp/khora-codegen-tests/../program.o: "Permission denied"` from
+/// forty-eight tests at once, which reads like a broken code generator. Two
+/// checkouts on one machine collide the same way, silently, by writing over
+/// each other. `CARGO_TARGET_TMPDIR` is per target directory -- so per checkout
+/// and per user -- and `cargo clean` takes it away, which `/tmp` never did.
 fn workspace(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("khora-codegen-tests").join(name);
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("codegen-tests").join(name);
     std::fs::create_dir_all(&dir).expect("creating a test directory");
     dir
 }
