@@ -334,7 +334,26 @@ fn main() -> Int {
 /// the only way to say the difference is the path.
 #[test]
 fn punctuation_in_an_argument_is_not_a_second_command() {
-    let (program, flag) = if cfg!(windows) { ("cmd", "/c") } else { ("sh", "-c") };
+    // **The two platforms need different argument lists to ask the same
+    // question, and this asked `sh` the Windows one.** `cmd /c` takes what
+    // follows as one command line, so `cmd /c echo "a & b ; c"` echoes the
+    // punctuation. `sh -c` does not: the argument after the flag is the
+    // *program text* and everything after it binds to `$0`, `$1`... -- so
+    // `sh -c echo "a & b ; c"` runs `echo` with no arguments and prints an
+    // empty line. The first half came back empty and the failure read
+    // "one argument, punctuation and all: " with nothing after the colon,
+    // which looks like a bug in `output` and is a bug in the test. It had
+    // never passed on Linux or macOS.
+    //
+    // On POSIX the honest spelling is no shell at all, which is what the doc
+    // comment above says is being demonstrated: hand `/bin/echo` one argument
+    // and watch it come back whole. `sh -c` stays out of the half of the test
+    // that is about there being no shell.
+    let (program, arguments) = if cfg!(windows) {
+        ("cmd", "[\"/c\", \"echo\", \"a & b ; c\"]")
+    } else {
+        ("/bin/echo", "[\"a & b ; c\"]")
+    };
     let out = run(
         "process_injection",
         &format!(
@@ -342,7 +361,7 @@ fn punctuation_in_an_argument_is_not_a_second_command() {
 fn work() -> String with {{ process: Process }} {{
   // One argument, whatever is in it.
   let safe = match attempt(fn () =>
-    process.output(\"{program}\", [\"{flag}\", \"echo\", \"a & b ; c\"])!) {{
+    process.output(\"{program}\", {arguments})!) {{
     Result::Err(error) => reason(error),
     Result::Ok(done) => String::trim(done.text),
   }};

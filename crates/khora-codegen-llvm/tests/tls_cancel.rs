@@ -259,7 +259,7 @@ fn client_watching_for_close(port: u16) -> (bool, f64) {
          \x20   closed = True\n\
          sys.stdout.write('%s %.3f' % (closed, time.time() - began))\n"
     );
-    let out = Command::new("python")
+    let out = Command::new(harness::python())
         .arg("-c")
         .arg(&script)
         .output()

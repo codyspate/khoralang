@@ -1,8 +1,8 @@
 """How long the compiler takes, where the time goes, and whether that moved.
 
-    python scripts/compiler-perf.py                    # measure and print
-    python scripts/compiler-perf.py --check            # compare against the baseline
-    python scripts/compiler-perf.py --write-baseline   # record a new one
+    python3 scripts/compiler-perf.py                    # measure and print
+    python3 scripts/compiler-perf.py --check            # compare against the baseline
+    python3 scripts/compiler-perf.py --write-baseline   # record a new one
 
 **Build times are measured with a release-built compiler.** A debug-built
 compiler is between five and ten times slower and is not the thing anybody

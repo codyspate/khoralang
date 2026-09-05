@@ -1,7 +1,7 @@
 """Where the test suite spends its time.
 
     cargo nextest run --workspace --features llvm --no-fail-fast > run.log 2>&1
-    python scripts/test-timing.py run.log
+    python3 scripts/test-timing.py run.log
 
 Prints in-binary time by crate, the slowest binaries, and the slowest
 individual tests. Wall clock is much lower than the total because nextest runs

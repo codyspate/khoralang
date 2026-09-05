@@ -1,6 +1,6 @@
 """A bill of materials for the Khora toolchain itself.
 
-    python scripts/toolchain-sbom.py > khora-toolchain.cdx.json
+    python3 scripts/toolchain-sbom.py > khora-toolchain.cdx.json
 
 `khora sbom` answers this question for a Khora *package*: what does the thing I
 am building pull in. This answers it for the compiler somebody is building

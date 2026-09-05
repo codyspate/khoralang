@@ -581,7 +581,21 @@ fn main() -> Int {{
 "
         ),
     );
-    assert_eq!(ran.stdout, "2\na.txt b.txt \ngone\n", "two names, then the directory is gone");
+    // **The order was never the claim.** `read_dir` reports what a directory
+    // holds; the order it reports in is the filesystem's, and nothing promises
+    // it. This asserted the whole line -- `a.txt b.txt ` -- and so passed one
+    // run and failed the next on the same binary, with `b.txt a.txt`, which
+    // reads like a bug in `read_dir` and is a bug in the test.
+    //
+    // Sorting here rather than in the program under test, because a `read_dir`
+    // that sorted would be answering a different question and hiding this one.
+    let mut lines = ran.stdout.lines();
+    assert_eq!(lines.next(), Some("2"), "two entries");
+    let mut names: Vec<&str> =
+        lines.next().expect("the listing").split_whitespace().collect();
+    names.sort_unstable();
+    assert_eq!(names, ["a.txt", "b.txt"], "both names, in whichever order readdir gave them");
+    assert_eq!(lines.next(), Some("gone"), "the directory is gone");
     assert_eq!(ran.code, Some(0));
 }
 

@@ -23,7 +23,7 @@ says how much of the library is the response rather than the request.
 rustc -O -o bench/loadgen.exe bench/loadgen.rs
 rustc -O -o bench/control_keepalive.exe bench/control_keepalive.rs
 cargo run -p khora-cli --features llvm -- build bench/service
-KHORA_PROFILE=release python bench/measure.py
+KHORA_PROFILE=release python3 bench/measure.py
 ```
 
 `measure.py` starts each server in turn, walks a ladder against it, repeats the

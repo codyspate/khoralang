@@ -99,7 +99,7 @@ fn python_tls_roundtrip(port: u16, send: &str) -> String {
          \x20   got += chunk\n\
          sys.stdout.write(got.decode())\n"
     );
-    let out = Command::new("python")
+    let out = Command::new(harness::python())
         .arg("-c")
         .arg(&script)
         .output()

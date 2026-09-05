@@ -5,6 +5,31 @@ use std::process::Command;
 use std::sync::OnceLock;
 use std::time::SystemTime;
 
+/// The Python interpreter's name on this machine.
+///
+/// **`python` is not a command on a current Debian or Ubuntu.** The name was
+/// freed when Python 2 was removed and comes back only if somebody installs
+/// `python-is-python3`, which a clean container does not have. Two TLS tests
+/// drove their client with `Command::new("python")`, so on Linux they failed
+/// at `.expect("python should run")` -- and the message that reached the log
+/// was `the python client failed:`, which reads like the Khora server refused
+/// a handshake rather than like a missing interpreter.
+///
+/// Looked up once and remembered: this runs per test, and the tests that use
+/// it are the ones already paying for a TLS handshake.
+pub fn python() -> &'static str {
+    static FOUND: OnceLock<&'static str> = OnceLock::new();
+    FOUND.get_or_init(|| {
+        for name in ["python3", "python"] {
+            let ran = Command::new(name).arg("--version").output();
+            if ran.is_ok_and(|out| out.status.success()) {
+                return name;
+            }
+        }
+        panic!("neither `python3` nor `python` is on PATH; the TLS tests drive their client with it")
+    })
+}
+
 /// Makes sure the runtime archive exists and is current.
 ///
 /// `cargo test -p khora-codegen-llvm` builds `khora-rt`'s *rlib*, because that

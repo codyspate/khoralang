@@ -1,6 +1,6 @@
 """Every server, one sitting, with the four conditions checked rather than hoped.
 
-    python bench/measure.py
+    python3 bench/measure.py
 
 `/docs/performance/` says what would have to be true before a throughput number
 is published, and this script is that list turned into a program:
