@@ -496,6 +496,20 @@ impl<'a> Checker<'a> {
             if let Err(why) = self.unifier.unify(&promise, &row) {
                 self.error(
                     match why {
+                        // A `with` entry whose label is not an identifier did
+                        // not come from `{ name: Type }`; it came from a bare
+                        // type in the clause, which `row_of_syntax` labels
+                        // after itself. Saying "needs `X: X`" sends the reader
+                        // hunting for a capability. Name the real mistake.
+                        unify::Mismatch::Missing { label, ty }
+                            if !clause.label_is_well_formed(&label) =>
+                        {
+                            format!(
+                                "`{callee}` requires `{ty}`, which is a type rather than a \
+                                 capability: a `with` clause takes `{{ name: Type }}` or a row \
+                                 variable, so nothing can supply this"
+                            )
+                        }
                         unify::Mismatch::Missing { label, ty } => format!(
                             "`{callee}` needs `{}`, which this function does not {}",
                             clause.describe(&label, &ty),

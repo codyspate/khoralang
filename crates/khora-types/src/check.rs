@@ -49,6 +49,36 @@ impl Clause {
             Clause::Raises => format!("{ty}"),
         }
     }
+
+    /// Whether an entry of this row could have come from a well-formed clause.
+    ///
+    /// **A `with` entry is labelled by the programmer and a `raises` entry is
+    /// labelled after its own type**, so only the first can be malformed --
+    /// and it is malformed exactly when the label is not an identifier.
+    ///
+    /// Not when the label is merely *unusual*: `with Ledger` comes out as an
+    /// entry labelled `Ledger` of type `Ledger`, and `with { Ledger: handler }`
+    /// supplies it. That is writable, so it is a style to dislike rather than
+    /// an error to report. A label carrying `::` or braces is not writable by
+    /// anybody, which is the line.
+    ///
+    /// `row_of_syntax` shares one fallback arm between the two clauses, and
+    /// that arm labels an entry after its own type. For `raises DbError` that
+    /// is the intended reading. For `with Self::Effects` it is not: the entry
+    /// comes out labelled `Self::Effects` of type `Self::Effects`, which no
+    /// handler can supply because no handler can be given that name. The
+    /// message said `needs `{ tick: Tick }: { tick: Tick }`` and sent the
+    /// reader looking for a capability instead of at their clause.
+    fn label_is_well_formed(self, label: &str) -> bool {
+        match self {
+            Clause::Raises => true,
+            Clause::Requires => {
+                let mut chars = label.chars();
+                chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                    && chars.all(|c| c.is_alphanumeric() || c == '_')
+            }
+        }
+    }
 }
 
 /// One effect a body's call sites asked of the function containing them.

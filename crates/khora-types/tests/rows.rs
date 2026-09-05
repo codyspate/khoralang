@@ -69,6 +69,41 @@ fn a_capability_the_caller_lacks_is_rejected_by_name() {
     );
 }
 
+/// **A `with` clause naming a bare type is diagnosed as the clause it is, not
+/// as a capability nobody supplied.**
+///
+/// `row_of_syntax` shares its fallback arm between `with` and `raises`, and
+/// that arm labels an entry after its own type -- right for `raises DbError`,
+/// wrong for `with Ledger`, which comes out as an entry called `Ledger` of type
+/// `Ledger` that no handler can be given the name to satisfy. The old message
+/// was ``needs `Ledger: Ledger``` and sent the reader looking for a capability
+/// instead of at the clause they had written. Found while spiking `Stream`,
+/// where `with Self::Effects` is the shape somebody reaches for first --
+/// `docs/design/effect-survey.md` 3.4.
+#[test]
+fn a_with_clause_naming_a_type_says_so() {
+    // The malformed clause has to be on the *callee*: that is what puts the
+    // unusable entry in the demand the call site is measured against. A caller
+    // that writes one declares a capability nobody can supply, which is also
+    // wrong and is not what this reports -- see the note below.
+    assert_reports(
+        &format!(
+            "{SERVICES}fn broken(id: Int) -> Int with m::Ledger;\n\
+             pub fn f(id: Int) -> Int {{ broken(id) }}\n"
+        ),
+        "which is a type rather than a capability",
+    );
+    // **`with Ledger` is not the same mistake and is not reported.** A bare
+    // *name* comes out as an entry labelled `Ledger` of type `Ledger`, and
+    // `with { Ledger: handler }` supplies exactly that -- unconventional, since
+    // capabilities are lowercase by habit, but writable and therefore not
+    // broken. Only a label nobody could write is.
+    assert_clean(&format!(
+        "{SERVICES}fn named() -> Int with Ledger;\n\
+         pub fn f(id: Int) -> Int with {{ Ledger: Ledger }} {{ named() }}\n"
+    ));
+}
+
 /// No clause at all means the closed empty row, so nothing is required and
 /// nothing may be called that requires anything.
 #[test]
