@@ -169,11 +169,25 @@ sh scripts/check-maintainer-notes.sh > /dev/null
 bash scripts/no-maintainer-notes.sh
 
 step 'the hand-written examples compile'
-# **The generated pages were the only ones anything checked.** `khora doc std
-# --check` keeps the 993 examples under `stdlib/api` honest, because they come
-# from `///` comments this gate already compiles. The 580 in the Guide, the
-# Reference and the Cookbook — the pages somebody reads first — had never been
-# compiled at all, and 55 of them did not.
+# **The 580 in the Guide, the Reference and the Cookbook had never been
+# compiled at all, and 55 of them did not.** That is what this step is for.
+#
+# **The 993 under `stdlib/api` are still not compiled, and the sentence that
+# stood here said they were.** It argued that `khora doc std --check` keeps
+# them honest "because they come from `///` comments this gate already
+# compiles". Neither half is true. `khora check std` type-checks the standard
+# library's *code*; `khora doc std --check` compares a generated page against
+# the comment it was generated from. Nothing looks inside the fenced blocks in
+# those comments, and `check-docs.sh` skips `stdlib/api` outright.
+#
+# The proof is `std::ai`: both its examples imported `Model` and `Embedder`,
+# types that have never existed in this repository, and no gate ever said so.
+# They were found by reading the module in order to delete it.
+#
+# Closing this means running the loop below over `stdlib/api` too -- 993 more
+# blocks against roughly 200 today, so it is a real cost and a decision. What
+# is not a decision is the claim: a gate may be narrow, and may not say it is
+# wide.
 #
 # About three minutes, nearly all of it `khora parse` starting up. It is slower
 # than every other step here and is worth it: a documentation example that no
