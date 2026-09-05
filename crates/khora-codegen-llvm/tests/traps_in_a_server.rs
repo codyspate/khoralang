@@ -26,7 +26,19 @@ use khora_db::{KhoraDatabase, SourceFile, SourceRoot};
 
 /// Its own port: `tests/http.rs` explains why two servers in one binary is a
 /// bind failure and a connection reset rather than two results.
-const PORT: u16 = 18733;
+///
+/// **It was 18733, which is `http_layers.rs`'s.** Both files said "its own
+/// port" in a comment and both picked the same number, which is what happens
+/// when the way to choose one is to read every other file and remember. They
+/// did not collide often: `http_layers` is in `.config/nextest.toml`'s
+/// `networked` group and this is not, so whether they overlap is a scheduling
+/// accident rather than a rule. The symptom when they do is this file failing
+/// to bind and reporting a connection reset -- a server bug that is not one.
+///
+/// The ports in use, so the next one is chosen by looking in one place:
+/// 18732 `http`, 18733 `http_layers`, 18734 here, 18847 `tls_cancel`,
+/// 18961 and 18962 `net_cancel`, 18971 and 18972 `tls`, 47821 `reference`.
+const PORT: u16 = 18734;
 
 const DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 
