@@ -11,7 +11,7 @@
 //! thing arrived on. A test that captured them together would pass on the bug
 //! this module exists to fix.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::Command;

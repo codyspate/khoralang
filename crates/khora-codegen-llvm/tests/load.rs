@@ -21,7 +21,7 @@
 //! ever reached. One cell rather than two, because a peak read from a second
 //! cell is a peak read from a different moment.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 

@@ -10,7 +10,7 @@
 //!
 //! Wrapping is still reachable, by name, for the places that genuinely want it.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::Command;

@@ -14,7 +14,7 @@
 //! anybody — `docs/design/compatibility.md` decides that when memory is
 //! allocated is not observable, which is what makes phase 9 legal at all.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::Command;

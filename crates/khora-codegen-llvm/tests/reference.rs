@@ -10,7 +10,7 @@
 //! handler runs with the `ai` and `ledger` capabilities its signature asked
 //! for.
 
-mod harness;
+use crate::harness;
 
 use std::io::{Read, Write};
 use std::path::PathBuf;

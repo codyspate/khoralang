@@ -7,7 +7,7 @@
 //! is foreign, which is the claim these tests are really checking: a format
 //! this ordinary should need no help from the compiler.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 

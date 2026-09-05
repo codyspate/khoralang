@@ -7,7 +7,7 @@
 //! has to be present at once. The same constraint C++ templates and Rust
 //! generics have, and the reason a symbol carries the module that defines it.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::Command;

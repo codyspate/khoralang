@@ -12,7 +12,7 @@
 //! That is also a stronger test than a timing one would be. "It took about
 //! 700ms" cannot tell 100+200+400 from 300+400 — the recorded sequence can.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 

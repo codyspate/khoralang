@@ -7,7 +7,7 @@
 //! written in Khora: the C conventions, the region that closes the file, the
 //! effect that gates access to it.
 
-mod harness;
+use crate::harness;
 
 use std::path::{Path, PathBuf};
 

@@ -19,7 +19,7 @@
 //! like `effects.rs`: these are questions about the expander, and answering
 //! them should not depend on which impls `std/core.kh` happens to have today.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::Command;

@@ -7,7 +7,7 @@
 //! any of it. That is the point: if slicing a string needed the compiler's
 //! help, so would everything above it.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 

@@ -12,7 +12,7 @@
 //! is a stronger test of the contract than any database would be: it can say
 //! *rollback happened and commit did not*, which is the whole claim.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 

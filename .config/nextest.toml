@@ -21,10 +21,15 @@ threads-required = 'num-test-threads'
 [test-groups.networked]
 max-threads = 4
 
+# These named binaries, back when every file in `tests/` was its own
+# executable. They are modules of one binary now --
+# `crates/khora-codegen-llvm/tests/suite.rs` says why -- so the same set is
+# named by the module a test's path starts with. `binary(...)` matched on
+# substring, so `binary(http)` covered `http_layers` and `http_client` and
+# `binary(tls)` covered `tls_cancel`; the two regexes keep exactly that.
 [[profile.default.overrides]]
 filter = '''
-    binary(http) or binary(http_layers) or binary(http_client)
-    or binary(reference) or binary(sockets) or binary(tls)
-    or binary(postgres) or binary(load)
+    test(/^http/) or test(/^tls/) or test(/^reference::/)
+    or test(/^sockets::/) or test(/^postgres::/) or test(/^load::/)
 '''
 test-group = 'networked'

@@ -8,7 +8,7 @@
 //! comparison follows the type's signedness, and a conversion either fits or
 //! stops. `docs/design/numbers.md`.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::Command;

@@ -8,7 +8,7 @@
 //! stated: the first is the sum every language's floating point gets wrong,
 //! and the rest are what a ledger actually does.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 

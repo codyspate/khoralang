@@ -32,7 +32,7 @@
 //! must finish with the connection in seconds, against a floor of sixty that
 //! the platform imposes on the old behaviour.
 
-mod harness;
+use crate::harness;
 
 use std::io::Read;
 use std::path::{Path, PathBuf};

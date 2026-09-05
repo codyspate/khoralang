@@ -6,7 +6,7 @@
 //! nothing a Khora program did could depend on anything outside its own
 //! source — every path, port and setting was compiled in.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 

@@ -8,7 +8,7 @@
 //! the pieces phase 6 added really do compose into a data structure, and that a
 //! round trip of inserts and removals leaves nothing behind.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::Command;

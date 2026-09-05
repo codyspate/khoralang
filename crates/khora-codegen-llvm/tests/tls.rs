@@ -22,7 +22,7 @@
 //! They are **test** certificates with their private keys beside them in a
 //! public repository. Anything using them in earnest deserves what it gets.
 
-mod harness;
+use crate::harness;
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;

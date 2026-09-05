@@ -8,7 +8,7 @@
 //! dynamic lookup, or a stack map — which is the whole point of the decision,
 //! and what these tests are really pinning.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::Command;

@@ -7,7 +7,7 @@
 //! live: the source's indentation comes off, and `${..}` interpolates the same
 //! way it does in a quoted literal.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::Command;

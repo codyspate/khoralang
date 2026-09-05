@@ -52,7 +52,7 @@
 //! order matters — see the test — and the sibling waits before failing so the
 //! holder is certainly inside the wait rather than still being spawned.
 
-mod harness;
+use crate::harness;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

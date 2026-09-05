@@ -10,6 +10,18 @@
 //!     cargo test -p khora-codegen-llvm --features llvm --test suite -- arithmetic::
 //!
 //! **A new test file is not discovered.** Add it below; nothing else looks.
+//!
+//! # What is deliberately *not* here
+//!
+//! `debugging.rs`, `portability.rs` and `targets.rs` set `KHORA_TARGET` or
+//! `KHORA_EMIT_LLVM` with `std::env::set_var`, and the environment belongs to
+//! the process, not the test. Each of those files already takes a lock against
+//! its own tests; what a lock cannot do is stop the sixty-five modules here
+//! from reading a variable while it is set. Being separate binaries is what
+//! kept them apart, and it was load-bearing: consolidating them made a Linux
+//! build select `socket_windows.kh` and fail to link `WSAStartup`, in fifteen
+//! tests that never mention a target. They stay separate binaries, declared in
+//! `Cargo.toml`.
 
 mod harness;
 
@@ -23,7 +35,6 @@ mod combinators;
 mod compile;
 mod config;
 mod db;
-mod debugging;
 mod decimal;
 mod derive;
 mod effects;
@@ -50,7 +61,6 @@ mod net_cancel;
 mod newtypes;
 mod packages;
 mod phases;
-mod portability;
 mod postgres;
 mod process_cancel;
 mod process;
@@ -70,7 +80,6 @@ mod sleeping;
 mod sockets;
 mod spike;
 mod strings;
-mod targets;
 mod testing;
 mod text;
 mod time;

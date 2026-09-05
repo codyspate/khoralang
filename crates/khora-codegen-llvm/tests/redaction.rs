@@ -9,7 +9,7 @@
 //! build failure. That difference is the thing worth testing, so these tests
 //! check the *absence* of an instance as carefully as the presence of one.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 

@@ -21,7 +21,7 @@
 //! workers all sleep and all finish, which is false if a sleep holds a worker
 //! and the pool is smaller than the crew.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 

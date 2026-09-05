@@ -28,7 +28,7 @@
 //! by the consumer's checker, and that monomorphization crosses a package
 //! boundary.
 
-mod harness;
+use crate::harness;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

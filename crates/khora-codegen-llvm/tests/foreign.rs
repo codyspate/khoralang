@@ -9,7 +9,7 @@
 //! not read — the same shape of mistake as errata 35, which cost a day and
 //! reported every failing test as passing.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 

@@ -18,7 +18,7 @@
 //! carrying one positional field — so construction, patterns, `derive`, drop
 //! glue and code generation are all the paths that existed.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::Command;

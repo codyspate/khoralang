@@ -14,7 +14,7 @@
 //! carries `dllexport`. A library whose every artifact is present and none of
 //! whose symbols are reachable is exactly the failure this file exists to catch.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::Command;

@@ -6,6 +6,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+# Cargo builds one executable per file in `tests/`, and each of them links this
+# crate, the whole front end, and all of LLVM from scratch. Sixty-eight times.
+# `tests/suite.rs` declares them as modules instead, so that link happens once.
+autotests = false
+
 [features]
 # Off by default: enabling it requires the pinned LLVM 22.1 toolchain.
 # See docs/llvm-setup.md for the two workarounds it needs.
@@ -42,3 +47,21 @@ inkwell = { version = "0.10", default-features = false, features = [
 [dev-dependencies]
 khora-pkg.workspace = true
 tempfile = "3"
+
+[[test]]
+name = "suite"
+path = "tests/suite.rs"
+
+# Three files that `std::env::set_var` and therefore cannot share a process
+# with the suite -- `tests/suite.rs` has the failure that proved it.
+[[test]]
+name = "debugging"
+path = "tests/debugging.rs"
+
+[[test]]
+name = "portability"
+path = "tests/portability.rs"
+
+[[test]]
+name = "targets"
+path = "tests/targets.rs"

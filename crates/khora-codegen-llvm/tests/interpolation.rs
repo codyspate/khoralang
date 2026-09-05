@@ -19,7 +19,7 @@
 //! nested string — because without it `"${f("x")}"` ends at the third quote and
 //! the rest of the line lexes as code.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::Command;

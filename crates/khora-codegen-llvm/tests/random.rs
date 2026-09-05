@@ -18,7 +18,7 @@
 //! Compiled against `std` itself rather than a copy, because the point of most
 //! of these is that the library composes.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::Command;

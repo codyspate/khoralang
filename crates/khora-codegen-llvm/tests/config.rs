@@ -7,7 +7,7 @@
 //! provider is a capability, so a test can swap it. If these tests needed
 //! `std::env::set_var` to exist, the argument would be wrong.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 

@@ -40,7 +40,7 @@
 //! The assertion is therefore a clock as well as a byte count: the read must
 //! come back well inside the timeout it was given.
 
-mod harness;
+use crate::harness;
 
 use std::io::BufRead;
 use std::path::PathBuf;

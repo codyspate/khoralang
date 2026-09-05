@@ -12,7 +12,7 @@
 //! gets its connection reset. Sharing one process and sending several requests
 //! down several connections is what the server is built for anyway.
 
-mod harness;
+use crate::harness;
 
 use std::io::{Read, Write};
 use std::path::PathBuf;

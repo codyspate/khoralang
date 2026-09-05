@@ -8,7 +8,7 @@
 //! cycle constructible for the first time, so Perceus stops being provably
 //! complete here — see `docs/design/memory.md` §2 and §5a.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::Command;

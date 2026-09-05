@@ -7,7 +7,7 @@
 //! writes the vector, in Khora, out of an array and the mutable fields from
 //! 6.1, which is the pair phase 6 exists to make possible.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::Command;

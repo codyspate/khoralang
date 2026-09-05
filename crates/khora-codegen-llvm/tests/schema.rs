@@ -7,7 +7,7 @@
 //! field, a decimal survives exactly, and a secret never reaches the message.
 //! Roadmap #141, `docs/design/schema.md`.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::Command;

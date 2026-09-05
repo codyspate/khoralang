@@ -8,7 +8,7 @@
 //! these pin is the visible half of that: every test runs, each one's verdict
 //! is its own, and the suite's exit status is whether they all passed.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};

@@ -10,9 +10,8 @@
 //! the whole file compiles to nothing so the default `cargo test` stays green.
 #![cfg(feature = "llvm")]
 
-mod harness;
 
-use harness::ensure_runtime;
+use crate::harness::ensure_runtime;
 
 use std::path::PathBuf;
 use std::process::Command;

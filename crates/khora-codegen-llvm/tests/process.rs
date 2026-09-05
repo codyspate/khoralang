@@ -12,7 +12,7 @@
 //! of the capability: one substitutes a handler and the code under test cannot
 //! tell, the other shows that without the row there is nothing to substitute.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::Command;

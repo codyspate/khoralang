@@ -16,7 +16,7 @@
 //! whether these particular types carry the impls, which is a fact about
 //! `std/` and has to be read from `std/`.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::Command;

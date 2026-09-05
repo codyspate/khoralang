@@ -19,7 +19,7 @@
 //! isolation. A test that checked a single span's fields would have passed
 //! against the version with no parents at all.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::Command;

@@ -58,7 +58,10 @@ down)
     ;;
 test)
     sh "$0" up
-    KHORA_POSTGRES=1 cargo test -p khora-codegen-llvm --features llvm --test postgres
+    # `--test suite` and then a module filter: the tests in `tests/postgres.rs`
+    # are `postgres::*` in the one binary this crate now builds.
+    # `crates/khora-codegen-llvm/tests/suite.rs` says why.
+    KHORA_POSTGRES=1 cargo test -p khora-codegen-llvm --features llvm --test suite -- postgres::
     ;;
 *)
     echo "usage: sh scripts/postgres.sh [up|down|test]" >&2

@@ -8,7 +8,7 @@
 //! trace they are in, and that failure is invisible until somebody looks at a
 //! dashboard and finds half a request.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 

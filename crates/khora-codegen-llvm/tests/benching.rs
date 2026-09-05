@@ -9,7 +9,7 @@
 //! `a_bench_build_contains_only_benches`: the failure it catches is a build
 //! that succeeds and reports nothing.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::Command;

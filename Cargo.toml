@@ -76,10 +76,17 @@ codegen-units = 1
 # than a debugging aid, and `opt-level = 3` is what was actually missing.
 # Test binaries carry line tables rather than full debug information.
 #
-# There are thirty integration test binaries and each links the whole compiler
-# and LLVM, so writing complete PDBs for all of them is a third of the time it
-# takes to get from an edit to a result: 25.5 seconds to link them all, against
-# 17.7 with this.
+# There are seventy-five integration test binaries, and writing complete PDBs
+# for all of them is a third of the time it takes to get from an edit to a
+# result: 25.5 seconds to link them all, against 17.7 with this.
+#
+# That measurement was taken when there were a hundred and forty-two of them
+# and sixty-eight linked LLVM, before `khora-codegen-llvm`'s tests became
+# modules of one binary -- `crates/khora-codegen-llvm/tests/suite.rs` says why.
+# The absolute seconds are therefore stale and the setting is not: what it is
+# chosen on is the ratio, and the crate whose binaries were most expensive to
+# link is the one that now links once. It has not been re-measured on the
+# machine those numbers came from.
 #
 # `[profile.test]` and not `[profile.dev]`, so `cargo build -p khora-cli` — the
 # binary anybody would actually attach a debugger to — is untouched. A panic in

@@ -12,7 +12,7 @@
 //! flow's answer would pass just as happily if the desugaring quietly meant
 //! something slightly different.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::Command;

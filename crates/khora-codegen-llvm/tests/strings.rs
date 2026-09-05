@@ -6,7 +6,7 @@
 //! it is UTF-8, so a character is one to four of them, and a `length` that
 //! quietly meant one of the two would be wrong for half its callers.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::Command;

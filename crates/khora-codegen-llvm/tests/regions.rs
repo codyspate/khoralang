@@ -9,7 +9,7 @@
 //! end of a block, an early `return`, a raise passing through — are paths code
 //! generation already emitted. Nothing here needed a new rule about unwinding.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::Command;

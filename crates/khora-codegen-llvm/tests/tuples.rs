@@ -18,7 +18,7 @@
 //! layout, so `(1, 2)` type checked and then failed with a message naming an
 //! internal phase number.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::Command;

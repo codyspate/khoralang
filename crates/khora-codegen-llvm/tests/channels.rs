@@ -14,7 +14,7 @@
 //! a program that slowly runs out of memory, which no test asserting on output
 //! would catch.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};

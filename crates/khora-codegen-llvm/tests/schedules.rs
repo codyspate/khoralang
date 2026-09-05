@@ -7,7 +7,7 @@
 //! — `retry`, `repeat` — is ordinary Khora written against that choice, which
 //! is the claim these tests are really checking.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::Command;

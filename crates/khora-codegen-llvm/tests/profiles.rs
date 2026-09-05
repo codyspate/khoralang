@@ -14,7 +14,7 @@
 //!   Windows and that a build with debug information is not, so the profile
 //!   that ships has to be the one without.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::Command;

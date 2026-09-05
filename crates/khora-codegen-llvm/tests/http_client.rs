@@ -13,7 +13,7 @@
 //! explains why: cargo runs a binary's tests concurrently, and two tests each
 //! binding a port is one failure and one reset.
 
-mod harness;
+use crate::harness;
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};

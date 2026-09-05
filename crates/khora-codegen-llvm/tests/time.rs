@@ -7,7 +7,7 @@
 //! are known independently — a leap day, a century that is not a leap year, a
 //! date before 1970, and the weekday of a day everyone can look up.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 

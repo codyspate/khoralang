@@ -10,7 +10,7 @@
 //! ISO C — it is Winsock or it is Berkeley sockets, and choosing between them
 //! needs conditional compilation, which the language does not have yet.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 

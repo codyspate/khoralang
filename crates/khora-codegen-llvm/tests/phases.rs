@@ -25,11 +25,10 @@
 
 #![cfg(feature = "llvm")]
 
-mod harness;
 
 use std::time::Instant;
 
-use harness::ensure_runtime;
+use crate::harness::ensure_runtime;
 use khora_db::{KhoraDatabase, SourceFile, SourceRoot};
 
 /// The shape of the programs the codegen suite actually compiles: small.

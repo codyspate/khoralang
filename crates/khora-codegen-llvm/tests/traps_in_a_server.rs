@@ -17,7 +17,7 @@
 //! Asserting only that the trap kills the server would leave the other half
 //! untested and would pass just as well if the wrapper caught nothing at all.
 
-mod harness;
+use crate::harness;
 
 use std::io::{Read, Write};
 use std::path::PathBuf;

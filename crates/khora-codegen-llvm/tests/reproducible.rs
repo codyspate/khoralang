@@ -18,7 +18,7 @@
 //! which is a stronger claim than a signature over an artifact nobody can
 //! reproduce.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 

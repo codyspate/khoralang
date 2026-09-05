@@ -21,7 +21,7 @@
 //! about not *repeating* the fields that do not change, not about changing
 //! `old`.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::Command;

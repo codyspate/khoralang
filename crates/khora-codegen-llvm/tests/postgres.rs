@@ -27,7 +27,7 @@
 //! a message rather than failing, because a suite that needs Docker to pass is
 //! a suite that does not run.
 
-mod harness;
+use crate::harness;
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};

@@ -7,7 +7,7 @@
 //! `Array<U8>` and lent as a `Ptr`, because no struct crosses the C ABI.
 //! `docs/design/ffi.md`.
 
-mod harness;
+use crate::harness;
 
 use std::io::{Read, Write};
 use std::path::PathBuf;

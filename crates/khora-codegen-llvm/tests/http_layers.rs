@@ -24,7 +24,7 @@
 //! One `#[test]`, for the reason `http.rs` gives: a server needs a port, and
 //! cargo runs a binary's tests concurrently.
 
-mod harness;
+use crate::harness;
 
 use std::io::{Read, Write};
 use std::path::PathBuf;

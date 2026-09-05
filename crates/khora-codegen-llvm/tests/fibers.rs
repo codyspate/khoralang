@@ -8,7 +8,7 @@
 //! does not change when the implementation does — a handle you can join and
 //! cancel, and a release that waits.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::Command;

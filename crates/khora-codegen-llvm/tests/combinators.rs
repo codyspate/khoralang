@@ -20,7 +20,7 @@
 //! Compiled against `std` itself rather than a copy, because the claim is about
 //! the signatures `std` actually ships.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::Command;

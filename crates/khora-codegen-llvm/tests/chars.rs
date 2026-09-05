@@ -11,7 +11,7 @@
 //! `crates/khora-syntax/src/lexer.rs` has the tests for that; what is here is
 //! the consequence — that both spellings still mean what they meant.
 
-mod harness;
+use crate::harness;
 
 use std::path::PathBuf;
 use std::process::Command;
