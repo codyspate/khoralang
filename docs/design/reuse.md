@@ -603,19 +603,38 @@ references, `khora_drop_reuse` finds it shared and returns no token, and
 `khora_alloc_reuse` allocates instead of building where the `Cons` was. Sound,
 and it says that nothing in any loop is ever handed over.
 
-**A spike on the `loop-lastuse-spike` branch takes that 1,000 to 0**, with the
-walk still summing correctly, on four changes: a real backward-liveness fixed
-point over the body, an assignment ending what its binding held, a take
-clearing the slot even where nothing unwinds, and a `break` taking its live set
-from after the loop rather than from the back edge.
+**A spike on the `loop-lastuse` branch takes that 1,000 to 0**, and a `List`
+folded through `Iterator` from 1,001 to 1, with both still answering
+correctly. Four changes: a real backward-liveness fixed point over the body, an
+assignment ending what its binding held, a take clearing the slot even where
+nothing unwinds, and a `break` taking its live set from after the loop rather
+than from the back edge.
 
-The fourth is unsound and it is the one the win rests on — with it reverted the
-other three buy nothing, and with it in, `std`'s own pipeline overflows the
-stack on a ten-element range. It is not a bug to chase. It is precisely what §1
-above lists as the hard part and does not attempt: a `break` leaves scopes
-early, so what a frame owns there depends on how far execution got, and the
-cleanup stack is positional. **Fusion in this language is that paragraph, and
-not a representation change and not an LLVM flag.**
+**It cannot land, and the reason is not the one it looks like.** All 2,480
+tests pass. The reference application under `scripts/http_conformance.sh` then
+answers `GET /health` and dies on the first `POST` with a body, and with
+`KHORA_BACKTRACE=1` it says `the stack ran out` before the segfault --
+*infinite recursion*, not a wild write. Which names the mechanism: a take
+inside a loop makes a cell look uniquely owned, `khora_drop_reuse` hands back a
+token for memory something still refers to, and the structure rebuilt in that
+cell points at itself. `Dict` walks itself recursively and never bottoms out.
+§2 above says the rule is narrow because "anything it wrongly accepted would be
+a leak"; this is that, arriving as a cycle.
+
+Bisected against that repro, it is **the fixed point itself** -- walking a loop
+body and recording takes there at all. Not the branch handling, not the
+`break` set, not the assignment kill: each of those was reverted in turn and
+the crash stayed, and turning the fixed point off with all three still in place
+fixed it. They are also worth nothing alone, 1,018 allocations against 1,000,
+because without the walk no take inside a loop is ever recorded.
+
+So §1's hard part is harder than the `break` paragraph makes it sound. It is
+not only that a frame's ownership at an early exit is path-dependent; it is
+that handing a binding over inside a loop feeds `plan_reuse`, and reuse is
+where a wrong answer stops being a missed optimization and becomes a cycle.
+**Fusion in this language is still that section, and not a representation
+change and not an LLVM flag** -- but it needs the two analyses considered
+together rather than one after the other.
 
 Unboxing small values — `docs/roadmap.md` §"Unboxed records", which
 `bench/iteration` has measured the cost of for `for` loops since before these
