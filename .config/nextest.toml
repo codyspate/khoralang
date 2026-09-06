@@ -11,7 +11,17 @@
 # at a time, so the server never saw two at once and the test correctly refused
 # to pass. The guard did its job — this is how it is given what it needs.
 [[profile.default.overrides]]
-filter = 'test(=a_server_under_more_load_than_it_can_serve_answers_everybody)'
+# **The name gained a module prefix and this is an *exact* match.** The tests of
+# `khora-codegen-llvm` were sixty-eight binaries and are modules of one now, so
+# this test is `load::a_server_...` rather than `a_server_...`. The filter went
+# on matching nothing, the reservation stopped applying, and the test was
+# starved by the rest of the workspace and refused to pass -- which is the guard
+# below doing its job, reported as a failure of the thing it protects.
+#
+# It survived a push because it only appears under the whole workspace's
+# parallelism; `-p khora-codegen-llvm` alone never has enough running to starve
+# it. `scripts/baseline.sh` is the thing that catches this.
+filter = 'test(=load::a_server_under_more_load_than_it_can_serve_answers_everybody)'
 threads-required = 'num-test-threads'
 
 # Everything that binds a socket, kept to a few at a time. The ports are all
