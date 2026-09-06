@@ -411,6 +411,16 @@ pub enum Pat {
         resolution: crate::Resolution,
         fields: Vec<PatId>,
     },
+    /// `Type { field, other: pattern }`.
+    ///
+    /// Fields are named rather than positional, so the order they are written
+    /// in carries no meaning and a pattern may leave one out. Which field each
+    /// one is stands in the declaration, and only the checker and the backend
+    /// know it -- the label is all this carries.
+    Record {
+        resolution: crate::Resolution,
+        fields: Vec<(String, PatId)>,
+    },
     Tuple(Vec<PatId>),
 }
 

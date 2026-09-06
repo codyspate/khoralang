@@ -291,6 +291,11 @@ impl<'a> Planner<'a> {
                     self.gather_bound(field, found);
                 }
             }
+            Pat::Record { fields, .. } => {
+                for (_, field) in fields.clone() {
+                    self.gather_bound(field, found);
+                }
+            }
             _ => {}
         }
     }

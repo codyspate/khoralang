@@ -373,3 +373,89 @@ fn main() -> Int {
         "{found:?}"
     );
 }
+
+/// A record pattern's own preamble: a record, and a variant with named fields.
+const SHAPES: &str = "module t;
+fn print(value: Int);
+extern fn khora_print_int(value: Int);
+
+pub type Thing = { a: Int, b: Int, c: Int };
+pub type Shape = | Circle(r: Int) | Rect(w: Int, h: Int);
+";
+
+/// **`{ name }` binds, and a field left out is not a field left unmatched.**
+///
+/// The three things a positional pattern cannot do: name the fields, write
+/// them in an order the declaration did not, and mention only some of them.
+/// The last is why `Pat::Record` carries labels rather than a position —
+/// leaving `c` out has to mean "anything", not "nothing there".
+#[test]
+fn a_record_pattern_binds_by_name_in_any_order() {
+    let ran = run(
+        "record_pattern_names",
+        &format!(
+            "{SHAPES}
+fn main() -> Int {{
+  let t: Thing = {{ a: 1, b: 2, c: 3 }};
+  match t {{ Thing {{ a, b, c }} => {{ print(a); print(b); print(c); }} }}
+  match t {{ Thing {{ c, a }} => {{ print(c); print(a); }} }}
+  match t {{ Thing {{ b: n }} => print(n + 10) }}
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "1\n2\n3\n3\n1\n12\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// A variant's cases carry names too, so they can be matched by them — and a
+/// sub-pattern that can fail still decides which arm runs.
+#[test]
+fn a_variant_case_matches_by_field_name() {
+    let ran = run(
+        "record_pattern_variant",
+        &format!(
+            "{SHAPES}
+fn area(s: Shape) -> Int {{
+  match s {{
+    Shape::Circle {{ r }} => r * r * 3,
+    Shape::Rect {{ w: 1, h }} => h,
+    Shape::Rect {{ w, h }} => w * h,
+  }}
+}}
+
+fn main() -> Int {{
+  print(area(Shape::Circle(2)));
+  print(area(Shape::Rect(1, 9)));
+  print(area(Shape::Rect(3, 4)));
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "12\n9\n12\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// A field the type does not have is the reader's typo, and saying which one
+/// it was is the whole of the help.
+#[test]
+fn a_record_pattern_naming_an_unknown_field_is_refused() {
+    let errors = refused(
+        "record_pattern_unknown_field",
+        &format!(
+            "{SHAPES}
+fn main() -> Int {{
+  let t: Thing = {{ a: 1, b: 2, c: 3 }};
+  match t {{ Thing {{ d }} => print(d) }}
+  0
+}}
+"
+        ),
+    );
+    assert!(
+        errors.iter().any(|e| e.contains("has no field `d`")),
+        "expected a message naming the field: {errors:?}"
+    );
+}

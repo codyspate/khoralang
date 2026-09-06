@@ -318,7 +318,8 @@ impl<'ctx> Lower<'_, 'ctx> {
     pub(super) fn owner_of(&self, pat: khora_hir::body::PatId) -> Option<String> {
         match self.body.pat(pat) {
             khora_hir::body::Pat::Path(r)
-            | khora_hir::body::Pat::TupleStruct { resolution: r, .. } => match r {
+            | khora_hir::body::Pat::TupleStruct { resolution: r, .. }
+            | khora_hir::body::Pat::Record { resolution: r, .. } => match r {
                 khora_hir::Resolution::Variant { type_name, .. } => Some(type_name.clone()),
                 _ => None,
             },
@@ -611,6 +612,19 @@ impl<'ctx> Lower<'_, 'ctx> {
                     seen.push(tag);
                     plan.push(Some(tag));
                 }
+                // As `TupleStruct`. Which fields the pattern names does not
+                // change what the switch tests, only what is bound after it.
+                Pat::Record { resolution, fields } => {
+                    if !fields.iter().all(|(_, f)| self.is_irrefutable(*f)) {
+                        return None;
+                    }
+                    let tag = self.tag_of(resolution)?;
+                    if seen.contains(&tag) {
+                        return None;
+                    }
+                    seen.push(tag);
+                    plan.push(Some(tag));
+                }
                 _ => return None,
             }
         }
@@ -767,6 +781,24 @@ impl<'ctx> Lower<'_, 'ctx> {
                 self.at(matched);
                 self.test_fields(object, &info, &fields, 0, success, failure);
             }
+            // As `TupleStruct`: the tag first, then the fields -- except that
+            // which field each sub-pattern is standing in front of comes from
+            // its name rather than from where it was written.
+            Pat::Record { resolution, fields } => {
+                let Some((tag, info)) = self.variant_of(&resolution) else {
+                    self.fail("this pattern does not name a constructor", range);
+                    return;
+                };
+                let info = self.at_this_instantiation(ty, info);
+                let object = value.into_pointer_value();
+                let loaded = runtime::load_tag(self.be.ctx, &self.be.builder, object);
+                let expected = self.be.ctx.i32_type().const_int(tag as u64, false);
+                let matched = self.block("case");
+                self.branch_on_equal(loaded, expected, matched, failure);
+
+                self.at(matched);
+                self.test_named_fields(object, &info, &fields, 0, success, failure);
+            }
             // **No tag to test.** A tuple has one shape, so matching one is
             // only its elements — and whether *they* match is `test_fields`,
             // the same walk a constructor's payload gets. The layout comes from
@@ -828,6 +860,39 @@ impl<'ctx> Lower<'_, 'ctx> {
         self.test_fields(object, info, fields, index + 1, success, failure);
     }
 
+    /// [`Self::test_fields`], for a pattern that names its fields.
+    ///
+    /// The index into the object is looked up per field instead of being the
+    /// position in the list, so the pattern may write them in any order; one
+    /// it does not mention is not walked at all, which is what makes leaving a
+    /// field out mean "anything".
+    pub(super) fn test_named_fields(
+        &mut self,
+        object: PointerValue<'ctx>,
+        info: &VariantInfo,
+        fields: &[(String, PatId)],
+        index: usize,
+        success: BasicBlock<'ctx>,
+        failure: BasicBlock<'ctx>,
+    ) {
+        if index >= fields.len() {
+            self.br(success);
+            return;
+        }
+        let (label, pat) = (fields[index].0.clone(), fields[index].1);
+        let found = info.field(&label).map(|(at, t)| (at, t.clone()));
+        // A field the declaration does not have was reported by the checker.
+        let (Some((at, field_ty)), false) = (found, self.is_irrefutable(pat)) else {
+            self.test_named_fields(object, info, fields, index + 1, success, failure);
+            return;
+        };
+        let value = self.load_field(object, at, &field_ty);
+        let next = self.block("field.next");
+        self.test_pattern(pat, value, &field_ty, next, failure);
+        self.at(next);
+        self.test_named_fields(object, info, fields, index + 1, success, failure);
+    }
+
     pub(super) fn branch_on_equal(
         &mut self,
         value: inkwell::values::IntValue<'ctx>,
@@ -882,6 +947,28 @@ impl<'ctx> Lower<'_, 'ctx> {
                     let field_ty = match self.body.pat(*field) {
                         Pat::Bind(local) => self.types.local(*local).clone(),
                         _ => info.fields.get(index).cloned().unwrap_or(Type::Unknown),
+                    };
+                    let loaded = self.load_field(object, index, &field_ty);
+                    self.bind_pattern(*field, loaded, &field_ty);
+                }
+            }
+            // As `TupleStruct`, with the index read out of the declaration by
+            // name. The binding's own type wins over the declared one for the
+            // same reason it does there: at `Mapped<List<Int>, Int>` the
+            // declared type of `inner` is still `I`.
+            Pat::Record { resolution, fields } => {
+                let Some((_, info)) = self.variant_of(&resolution) else { return };
+                let info = self.at_this_instantiation(ty, info);
+                let object = value.into_pointer_value();
+                for (label, field) in fields.iter() {
+                    let Some((index, declared)) =
+                        info.field(label).map(|(i, t)| (i, t.clone()))
+                    else {
+                        continue;
+                    };
+                    let field_ty = match self.body.pat(*field) {
+                        Pat::Bind(local) => self.types.local(*local).clone(),
+                        _ => declared,
                     };
                     let loaded = self.load_field(object, index, &field_ty);
                     self.bind_pattern(*field, loaded, &field_ty);

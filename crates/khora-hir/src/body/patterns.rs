@@ -37,9 +37,29 @@ impl<'a> Ctx<'a> {
                 let fields = p.fields().map(|f| self.lower_pat(&f, is_mut)).collect();
                 self.add_pat(Pat::Tuple(fields), range)
             }
-            ast::Pat::Record(_) => {
-                self.error("record patterns are not supported yet", range);
-                self.add_pat(Pat::Missing, range)
+            // **`{ name }` binds `name`; `{ name: pattern }` matches it.**
+            // The shorthand is the common one and it is the reason a field
+            // holds an optional sub-pattern rather than a required one: with
+            // no pattern written there is nothing to lower, and the field's
+            // own label is what the binding is called.
+            ast::Pat::Record(p) => {
+                let resolution = self.resolve_record_path(p.path().as_ref(), range);
+                let fields = p
+                    .fields()
+                    .filter_map(|f| {
+                        let name = f.name()?.ident()?;
+                        let sub = match f.pat() {
+                            Some(sub) => self.lower_pat(&sub, is_mut),
+                            None => {
+                                let field = f.syntax().text_range();
+                                let local = self.declare(name.clone(), is_mut, field);
+                                self.add_pat(Pat::Bind(local), field)
+                            }
+                        };
+                        Some((name, sub))
+                    })
+                    .collect();
+                self.add_pat(Pat::Record { resolution, fields }, range)
             }
         }
     }
@@ -96,6 +116,51 @@ impl<'a> Ctx<'a> {
 
         self.error(format!("cannot find constructor `{}`", segments.join("::")), range);
         crate::Resolution::Unsupported("unresolved constructor")
+    }
+
+    /// The path in `Type { .. }`, which may name a record type directly.
+    ///
+    /// **A record type is its own one case and is deliberately not a
+    /// constructor.** `collect_decl` records a self-named constructor for
+    /// `type UserId = Int` and pointedly not for `type Pair = { a, b }`,
+    /// because `Pair(3, "hi")` is not how one is made -- a record names its
+    /// fields. In a *pattern* the same name has no other reading, and
+    /// `khora-types` already keeps a record type as one `VariantInfo` named
+    /// after the type, so this resolves to the case the checker and the
+    /// backend both look for.
+    ///
+    /// Everything else -- `Type::Case { .. }` for a variant with named fields,
+    /// and a wrapper's self-named case -- is the ordinary pattern path.
+    pub(super) fn resolve_record_path(
+        &mut self,
+        path: Option<&ast::Path>,
+        range: TextRange,
+    ) -> crate::Resolution {
+        let segments: Vec<String> = path
+            .map(|p| p.segments().filter_map(|s| s.ident()).collect())
+            .unwrap_or_default();
+
+        if let [only] = segments.as_slice() {
+            let is_case = self
+                .map
+                .variants_of(only)
+                .chain(self.scope.variants_of(only))
+                .any(|v| &v.name == only);
+            let names_a_type = self
+                .map
+                .item(only)
+                .is_some_and(|i| matches!(i.kind, crate::ItemKind::Type))
+                || self.scope.origins.iter().any(|o| &o.local == only);
+            if !is_case && names_a_type {
+                return crate::Resolution::Variant {
+                    module: self.home_of_type(only),
+                    type_name: only.clone(),
+                    name: only.clone(),
+                };
+            }
+        }
+
+        self.resolve_pattern_path(path, range)
     }
 
     pub(super) fn lower_match(&mut self, e: &ast::MatchExpr, range: TextRange) -> ExprId {

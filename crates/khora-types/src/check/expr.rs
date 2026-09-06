@@ -1215,9 +1215,9 @@ impl<'a> Checker<'a> {
         let mut everything = false;
         for arm in arms {
             let owner = match self.body.pat(arm.pat) {
-                Pat::Path(r) | Pat::TupleStruct { resolution: r, .. } => {
-                    variant_case(r).map(|(_, t, _)| t)
-                }
+                Pat::Path(r)
+                | Pat::TupleStruct { resolution: r, .. }
+                | Pat::Record { resolution: r, .. } => variant_case(r).map(|(_, t, _)| t),
                 _ => None,
             };
             // **A binding catches everything a `_` does, and names it.** The
@@ -1277,7 +1277,7 @@ impl<'a> Checker<'a> {
                 // the message that can actually be acted on.
                 if !matches!(
                     self.body.pat(arm.pat),
-                    Pat::Path(_) | Pat::TupleStruct { .. } | Pat::Missing
+                    Pat::Path(_) | Pat::TupleStruct { .. } | Pat::Record { .. } | Pat::Missing
                 ) {
                     self.error(
                         "a `catch` arm has to name an error constructor, since it is the \
@@ -1323,7 +1323,9 @@ impl<'a> Checker<'a> {
                 .iter()
                 .filter(|a| {
                     matches!(self.body.pat(a.pat),
-                        Pat::Path(r) | Pat::TupleStruct { resolution: r, .. }
+                        Pat::Path(r)
+                        | Pat::TupleStruct { resolution: r, .. }
+                        | Pat::Record { resolution: r, .. }
                             if variant_case(r).is_some_and(|(_, t, _)| &t == owner))
                 })
                 .cloned()

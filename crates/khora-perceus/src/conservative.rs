@@ -92,6 +92,13 @@ impl<'a> Planner<'a> {
                     self.bind(field, owned);
                 }
             }
+            // Named rather than positional, and the names are nothing to do
+            // with ownership -- what each sub-pattern binds is.
+            Pat::Record { fields, .. } => {
+                for (_, field) in fields {
+                    self.bind(field, owned);
+                }
+            }
             Pat::Wildcard | Pat::Literal(_) | Pat::Path(_) | Pat::Missing => {}
         }
     }

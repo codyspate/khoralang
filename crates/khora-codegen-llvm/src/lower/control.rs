@@ -180,6 +180,19 @@ impl<'ctx> Lower<'_, 'ctx> {
                         .zip(&only.fields)
                         .all(|(p, t)| self.destructures_irrefutably(*p, t))
             }
+            // As `TupleStruct`, by name. A field the pattern leaves out
+            // constrains nothing and cannot make it refutable.
+            Pat::Record { fields, .. } => {
+                let variants = self.be.instantiated_variants(ty);
+                if variants.len() != 1 {
+                    return false;
+                }
+                let only = &variants[0];
+                fields.clone().iter().all(|(label, p)| match only.field(label) {
+                    Some((_, t)) => self.destructures_irrefutably(*p, t),
+                    None => false,
+                })
+            }
             Pat::Literal(_) | Pat::Path(_) => false,
         }
     }

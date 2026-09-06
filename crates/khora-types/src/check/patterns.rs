@@ -37,6 +37,40 @@ impl<'a> Checker<'a> {
                     self.bind_pattern(*field, &field_ty);
                 }
             }
+            // **Named, so a field may be left out and the order means
+            // nothing.** `VariantInfo::labels` said matching "never needed
+            // these"; a record pattern is the thing that does, and the index
+            // it finds there is what says which declared type the binding got.
+            Pat::Record { resolution, fields } => {
+                let variant = variant_case(&resolution)
+                    .and_then(|(h, t, n)| self.types.variant_of(h.as_ref(), &t, &n))
+                    .cloned();
+                let mapping = variant
+                    .as_ref()
+                    .map(|v| self.substitution_for(&v.type_name, ty))
+                    .unwrap_or_default();
+                let borrowed: HashMap<&str, Type> =
+                    mapping.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+
+                for (label, field) in fields.iter() {
+                    let declared = variant.as_ref().and_then(|v| {
+                        v.labels.iter().position(|l| l == label).and_then(|i| v.fields.get(i))
+                    });
+                    let field_ty = match declared {
+                        Some(declared) => unify::substitute(declared, &borrowed),
+                        None => {
+                            if let Some(v) = variant.as_ref() {
+                                self.error(
+                                    format!("`{}` has no field `{label}`", v.name),
+                                    self.body.pat_range(*field),
+                                );
+                            }
+                            Type::Unknown
+                        }
+                    };
+                    self.bind_pattern(*field, &field_ty);
+                }
+            }
             Pat::Tuple(fields) => {
                 // **A tuple pattern against something that is not a tuple is
                 // an error here**, and used to be an error nowhere.
@@ -223,6 +257,31 @@ impl<'a> Checker<'a> {
                     .and_then(|(h, t, n)| self.types.variant_of(h.as_ref(), &t, &n))
                 {
                     Some(v) => Pattern::Constructor { ctor: ctor_for(self.types, v), fields: sub },
+                    None => Pattern::Wildcard,
+                }
+            }
+            // **Put back in the declaration's order**, because usefulness
+            // works positionally and a record pattern does not: it may write
+            // its fields in any order and leave any of them out. One left out
+            // constrains nothing, which is a wildcard.
+            Pat::Record { resolution, fields } => {
+                match variant_case(resolution)
+                    .and_then(|(h, t, n)| self.types.variant_of(h.as_ref(), &t, &n))
+                {
+                    Some(v) => {
+                        let sub = v
+                            .labels
+                            .iter()
+                            .map(|label| {
+                                fields
+                                    .iter()
+                                    .find(|(l, _)| l == label)
+                                    .map(|(_, p)| self.to_pattern(*p))
+                                    .unwrap_or(Pattern::Wildcard)
+                            })
+                            .collect();
+                        Pattern::Constructor { ctor: ctor_for(self.types, v), fields: sub }
+                    }
                     None => Pattern::Wildcard,
                 }
             }

@@ -1055,6 +1055,17 @@ impl HandlerExpr {
     }
 }
 
+impl RecordPatField {
+    pub fn name(&self) -> Option<Name> {
+        child(&self.0)
+    }
+    /// The sub-pattern in `name: Pattern`, absent in the `{ name }`
+    /// shorthand -- which binds `name` itself.
+    pub fn pat(&self) -> Option<Pat> {
+        child(&self.0)
+    }
+}
+
 impl RecordExprField {
     pub fn name(&self) -> Option<Name> {
         child(&self.0)
