@@ -128,6 +128,15 @@ pub(crate) fn row_of_syntax(
             match &ty {
                 // A bare row variable is the whole row.
                 Type::Param(name) if name.starts_with('\'') => Type::row(Vec::new(), Some(ty)),
+                // **And so is an associated item**, which is what lets a trait
+                // say "my implementations decide what this requires":
+                // `fn next(self) -> .. with Self::Effects`. Opaque here and
+                // resolved per impl, exactly as `Self::Item` is -- the row's
+                // tail is the natural place for something whose fields are not
+                // known yet.
+                Type::Assoc { .. } if kind == RowClause::Requires => {
+                    Type::row(Vec::new(), Some(ty))
+                }
                 _ => match error_label(other, generics, homes) {
                     Some(entry) => Type::row(vec![entry], None),
                     None => Type::empty_row(),

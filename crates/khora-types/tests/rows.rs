@@ -213,6 +213,54 @@ fn a_closure_carries_a_concrete_row() {
     );
 }
 
+const ASSOC: &str = "module m;\n\
+                    pub effect Tick { now: () -> Int }\n\
+                    pub trait Source {\n\
+                      type Item;\n\
+                      type Effects;\n\
+                      fn next(self) -> Self::Item with Self::Effects;\n\
+                    }\n\
+                    pub type Ticker = { n: Int };\n\
+                    impl Source for Ticker {\n\
+                      type Item = Int;\n\
+                      type Effects = { tick: Tick };\n\
+                      fn next(self) -> Int with { tick: Tick } { tick.now() }\n\
+                    }\n";
+
+/// **A trait can say that its implementations decide what it requires.**
+///
+/// `with Self::Effects` is an associated item in row position, resolved per
+/// impl exactly as `Self::Item` is. It is what lets one abstraction cover both
+/// a pure iterator and an effectful stream -- `Effects = {}` and
+/// `Effects = { fs: FsRead }` are the same trait -- where Rust needs `Iterator`
+/// and `Stream` and Effect needs `Iterable` and `Stream`.
+///
+/// It used to be read as a capability *named* `Self::Effects`, which no `with`
+/// block could write, so it passed a bare declaration and failed the moment a
+/// handler was asked for. Both halves are asserted here, because the first one
+/// alone is what made the old behaviour look correct.
+#[test]
+fn a_trait_can_leave_its_row_to_its_implementations() {
+    // Resolved through the impl: the requirement is the impl's row, and the
+    // message names the capability rather than the associated item.
+    assert_reports(
+        &format!("{ASSOC}fn drain(t: Ticker) -> Int {{ Source::next(t) }}\n"),
+        "needs `tick: Tick`",
+    );
+    // A caller that has it is fine.
+    assert_clean(&format!(
+        "{ASSOC}fn drain(t: Ticker) -> Int with {{ tick: Tick }} {{ Source::next(t) }}\n"
+    ));
+    // And a generic consumer stays abstract in it.
+    assert_clean(&format!(
+        "{ASSOC}fn drain<S: Source>(s: S) -> S::Item with S::Effects {{ Source::next(s) }}\n"
+    ));
+    assert_reports(
+        &format!("{ASSOC}fn drain<S: Source>(s: S) -> S::Item {{ Source::next(s) }}\n"),
+        "S::Effects",
+    );
+}
+
 /// No clause at all means the closed empty row, so nothing is required and
 /// nothing may be called that requires anything.
 #[test]

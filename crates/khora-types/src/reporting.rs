@@ -214,6 +214,19 @@ pub(crate) fn malformed_with_clause_errors(db: &dyn Db, file: SourceFile) -> Vec
     let homes = crate::type_homes(db, file);
     let mut found = Vec::new();
     for decl in parsed.source_file().decls() {
+        // **Every type parameter anywhere in the declaration**, so that
+        // `with S::Effects` is recognised as an associated item rather than a
+        // two-segment path nobody declared. Deliberately an over-approximation,
+        // the same one `unresolved_type_errors` makes: a method's `T` counts
+        // for its sibling, which can only ever make this report less.
+        let mut params: HashSet<String> = HashSet::new();
+        params.insert("Self".to_string());
+        for param in decl.syntax().descendants().filter(|n| n.kind() == khora_syntax::SyntaxKind::TYPE_PARAM) {
+            let Some(param) = ast::TypeParam::cast(param) else { continue };
+            if let Some(name) = param.name().and_then(|n| n.ident()) {
+                params.insert(name);
+            }
+        }
         for node in decl.syntax().descendants() {
             let Some(clause) = ast::WithClause::cast(node) else { continue };
             let Some(ast::Type::Path(path_type)) = clause.row() else { continue };
@@ -230,6 +243,17 @@ pub(crate) fn malformed_with_clause_errors(db: &dyn Db, file: SourceFile) -> Vec
             // point of the feature: the fields are spliced in.
             if homes.row(&written).is_some() {
                 continue;
+            }
+            // `Self::Effects`, or `S::Effects` for a type parameter `S`: an
+            // associated item, which is how a trait says that its
+            // implementations decide what it requires. Opaque, not malformed.
+            let mut segments = path.segments().filter_map(|s| s.ident());
+            if let (Some(first), Some(_), None) =
+                (segments.next(), segments.next(), segments.next())
+            {
+                if params.contains(&first) {
+                    continue;
+                }
             }
             let segments: Vec<String> = path.segments().filter_map(|s| s.ident()).collect();
             // `with { name: Effects }` is good advice for `m::Ledger` and bad

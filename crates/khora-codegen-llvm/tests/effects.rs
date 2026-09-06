@@ -138,6 +138,49 @@ fn main() -> Int {{
     assert_eq!(ran.code, Some(0));
 }
 
+/// **A trait may leave its row to its implementations**, and the handler
+/// reaches the impl through it.
+///
+/// `with Self::Effects` is an associated item in row position, resolved per
+/// impl the way `Self::Item` is. One trait then covers both a pure iterator and
+/// an effectful stream, where Rust needs `Iterator` and `Stream` and Effect
+/// needs `Iterable` and `Stream`.
+///
+/// Running it is the assertion that matters. The earlier reading -- a
+/// capability *named* `Self::Effects`, which nothing could supply -- also
+/// type-checked a bare declaration, and only asking for a handler exposed it.
+#[test]
+fn a_trait_leaves_its_row_to_its_implementations() {
+    let ran = run(
+        "assoc_effect_row",
+        &format!(
+            "{LEDGER}
+pub trait Source {{
+  type Item;
+  type Effects;
+  fn read(self) -> Self::Item with Self::Effects;
+}}
+
+pub type Account = {{ id: Int }};
+
+impl Source for Account {{
+  type Item = Int;
+  type Effects = {{ ledger: Ledger }};
+  fn read(self) -> Int with {{ ledger: Ledger }} {{ ledger.balance(self.id) }}
+}}
+
+fn main() -> Int {{
+  let live = handler for Ledger {{ balance: fn id => id * 10 }};
+  with {{ ledger: live }} {{ print(Source::read({{ id: 4 }})); }}
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "40\n");
+    assert_eq!(ran.code, Some(0));
+}
+
 /// A function that requires a capability passes it on without naming it at the
 /// call — that is the point of evidence being a parameter rather than a lookup.
 #[test]
