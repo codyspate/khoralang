@@ -118,10 +118,70 @@ pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
     all.extend(trait_errors(db, file).iter().cloned());
     all.extend(shadowed_name_errors(db, file));
     all.extend(malformed_with_clause_errors(db, file));
+    all.extend(row_fields_must_be_effects(db, file));
     all.extend(crate::unresolved::unresolved_type_errors(db, file));
     all.extend(crate::exports::export_errors(db, file));
     all.extend(check_file(db, file).iter().cloned());
     all
+}
+
+/// A `row` whose fields are not capabilities.
+///
+/// **This is the reason a row is its own declaration.** `type Deps = { db: Db }`
+/// could have been reused in `with` position and spliced, and nothing could
+/// then have asked whether `Db` was an effect -- a record's fields are ordinary
+/// types and `{ db: Int }` is a perfectly good record. A row is not: every
+/// entry is a capability, so `row Deps = { db: Int }` is refused here rather
+/// than becoming a requirement no handler can satisfy and failing at each call
+/// site with a message about `Int`.
+///
+/// A field whose type resolves to nothing is left alone; that is
+/// [`crate::unresolved::unresolved_type_errors`]'s to report, and saying it
+/// twice helps nobody.
+pub(crate) fn row_fields_must_be_effects(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
+    let items = khora_hir::item_map(db, file);
+    let scope = khora_hir::file_scope(db, file);
+    let kind_of = |name: &str| -> Option<khora_hir::ItemKind> {
+        items
+            .items
+            .iter()
+            .find(|i| i.name == name)
+            .map(|i| i.kind)
+            .or_else(|| scope.origins.iter().find(|o| o.local == name).map(|o| o.kind))
+    };
+
+    let mut found = Vec::new();
+    for decl in khora_db::parse(db, file).source_file().decls() {
+        let ast::Decl::Row(r) = decl else { continue };
+        let Some(body) = r.definition() else { continue };
+        for field in body.fields() {
+            let (Some(label), Some(ast::Type::Path(p))) = (
+                field.name().and_then(|n| n.ident()),
+                field.ty(),
+            ) else {
+                continue;
+            };
+            let Some(name) = p.path().map(|path| path.text_path()) else { continue };
+            // A builtin is declared nowhere, so `kind_of` cannot see it and
+            // `row Deps = { count: Int }` would have passed in silence.
+            let described = match kind_of(&name) {
+                Some(khora_hir::ItemKind::Effect) => continue,
+                Some(other) => other.describe(),
+                None if crate::COMPILER_KNOWN.contains(&name.as_str()) => "built-in type",
+                // Unresolved is somebody else's error.
+                None => continue,
+            };
+            found.push(HirError {
+                message: format!(
+                    "`{label}: {name}` is not a capability: a `row` names the effects a \
+                     function requires, and `{name}` is a {described}. Every field of a row \
+                     is something a `with` block supplies a handler for"
+                ),
+                range: field.syntax().text_range(),
+            });
+        }
+    }
+    found
 }
 
 /// A `with` clause that names a type rather than a row.
@@ -151,6 +211,7 @@ pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
 /// `docs/design/effect-survey.md` 3.4 has how this was found.
 pub(crate) fn malformed_with_clause_errors(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
     let parsed = khora_db::parse(db, file);
+    let homes = crate::type_homes(db, file);
     let mut found = Vec::new();
     for decl in parsed.source_file().decls() {
         for node in decl.syntax().descendants() {
@@ -165,6 +226,11 @@ pub(crate) fn malformed_with_clause_errors(db: &dyn Db, file: SourceFile) -> Vec
                 continue;
             }
             let written = path.text_path();
+            // `with Deps` where `Deps` is a `row` declaration is the whole
+            // point of the feature: the fields are spliced in.
+            if homes.row(&written).is_some() {
+                continue;
+            }
             let segments: Vec<String> = path.segments().filter_map(|s| s.ident()).collect();
             // `with { name: Effects }` is good advice for `m::Ledger` and bad
             // advice for `Self::Effects`, where the last segment is an

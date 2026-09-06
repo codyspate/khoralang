@@ -39,12 +39,27 @@ pub(crate) fn union_operands(ty: &ast::Type) -> Vec<ast::Type> {
     u.operands().flat_map(|operand| union_operands(&operand)).collect()
 }
 
-/// Reads a `with` or `raises` clause into a row./// Reads a `with` or `raises` clause into a row.
+/// Which clause a row is being read for.
+///
+/// The two are lowered by the same function and differ in one place: a `with`
+/// clause may name a `row` declaration, and a `raises` clause may not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RowClause {
+    Requires,
+    Raises,
+}
+
+/// Reads a `with` or `raises` clause into a row.
 ///
 /// Absent means the closed empty row: a function with no clause requires
 /// nothing and raises nothing, which is what makes those the safe defaults and
 /// what an entry point has to reduce to.
-pub(crate) fn row_of_syntax(clause: Option<&ast::Type>, generics: &[String], homes: &TypeHomes) -> Type {
+pub(crate) fn row_of_syntax(
+    clause: Option<&ast::Type>,
+    kind: RowClause,
+    generics: &[String],
+    homes: &TypeHomes,
+) -> Type {
     let Some(clause) = clause else { return Type::empty_row() };
     match clause {
         // `with { ledger: Ledger | 'e }`
@@ -90,8 +105,25 @@ pub(crate) fn row_of_syntax(clause: Option<&ast::Type>, generics: &[String], hom
             }
             Type::row(fields, tail)
         }
-        // `raises DbError`, or a bare `'r`.
+        // `raises DbError`, `with Deps`, or a bare `'r`.
         other => {
+            // **A `row` declaration is spliced, not labelled.** `with Deps`
+            // means the capabilities `Deps` names, so the fields replace the
+            // clause outright -- a row is structural and there is nothing to
+            // point at. Only for `with`: a row in a `raises` clause would put
+            // capability entries in an error row, which is a different mistake
+            // and is reported rather than obeyed.
+            if kind == RowClause::Requires {
+                if let ast::Type::Path(p) = other {
+                    if p.row_var().is_none() {
+                        if let Some(name) = p.path().map(|path| path.text_path()) {
+                            if let Some(fields) = homes.row(&name) {
+                                return Type::row(fields.to_vec(), None);
+                            }
+                        }
+                    }
+                }
+            }
             let ty = type_of_syntax(Some(other), generics, homes);
             match &ty {
                 // A bare row variable is the whole row.
@@ -149,11 +181,13 @@ pub(crate) fn type_of_syntax(ty: Option<&ast::Type>, generics: &[String], homes:
                 ret: Box::new(ret),
                 requires: Box::new(row_of_syntax(
                     f.with_clause().and_then(|c| c.row()).as_ref(),
+                    RowClause::Requires,
                     generics,
                     homes,
                 )),
                 raises: Box::new(row_of_syntax(
                     f.raises_clause().and_then(|c| c.row()).as_ref(),
+                    RowClause::Raises,
                     generics,
                     homes,
                 )),
@@ -194,7 +228,7 @@ pub(crate) fn type_of_syntax(ty: Option<&ast::Type>, generics: &[String], homes:
         // and the same shape as errata 30 three lines above -- a type the
         // converter did not recognise became the one that agrees with
         // everything, so the signature passed by saying nothing.
-        ast::Type::Record(_) => row_of_syntax(Some(ty), generics, homes),
+        ast::Type::Record(_) => row_of_syntax(Some(ty), RowClause::Requires, generics, homes),
         // **Parentheses around a type mean grouping and nothing else.** This
         // fell to the arm below, and `Unknown` agrees with everything -- so
         // `fn f(xs: List<(Int)>)` accepted a `List<String>` and said nothing.

@@ -106,6 +106,38 @@ fn main() -> Int {{
     assert_eq!(ran.code, Some(0));
 }
 
+/// **A `row` names a set of capabilities and is spliced where it is written.**
+///
+/// The declaration is the only new thing: everything after it -- the evidence
+/// parameter, the handler, the `with` block -- is what a longhand clause
+/// compiles to, because `with Deps` *is* `with { ledger: Ledger, ticks: Ticks }`
+/// by the time anything downstream sees it. Running it is the check that the
+/// splice reaches code generation and not merely the checker.
+#[test]
+fn a_row_names_a_set_of_capabilities() {
+    let ran = run(
+        "row_capabilities",
+        &format!(
+            "{LEDGER}
+pub effect Ticks {{ now: () -> Int }}
+
+pub row Deps = {{ ledger: Ledger, ticks: Ticks }};
+
+fn audited(id: Int) -> Int with Deps {{ ledger.balance(id) + ticks.now() }}
+
+fn main() -> Int {{
+  let live = handler for Ledger {{ balance: fn id => id * 10 }};
+  let clock = handler for Ticks {{ now: fn () => 2 }};
+  with {{ ledger: live, ticks: clock }} {{ print(audited(4)); }}
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "42\n");
+    assert_eq!(ran.code, Some(0));
+}
+
 /// A function that requires a capability passes it on without naming it at the
 /// call — that is the point of evidence being a parameter rather than a lookup.
 #[test]

@@ -66,6 +66,11 @@ pub(crate) fn unresolved_type_errors(db: &dyn Db, file: SourceFile) -> Vec<HirEr
             if resolves(&name, &in_scope, homes) {
                 continue;
             }
+            // A `row` declaration is not a type and so is not in `homes`, but
+            // `with Deps` names one and is not a missing type.
+            if homes.row(&name).is_some() {
+                continue;
+            }
             found.push(HirError {
                 message: format!(
                     "cannot find type `{name}` in this scope; nothing declared or imported \

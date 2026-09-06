@@ -129,6 +129,57 @@ fn a_declaration_with_an_unusable_with_clause_is_reported_where_it_is_written() 
     ));
 }
 
+const EFFECTS: &str = "module m;\n\
+                       pub effect Db { query: (String) -> Int }\n\
+                       pub effect Ticks { now: () -> Int }\n\
+                       pub type Ledger;\n";
+
+/// **A `row` is a name for a set of capabilities, and nothing more.**
+///
+/// `with Deps` and `with { db: Db, ticks: Ticks }` are the same requirement, so
+/// each satisfies the other. That is what makes a row structural: it is spliced
+/// where it is written rather than pointed at, and the checker never learns the
+/// name -- which is why the failure below names `ticks: Ticks` and not `Deps`.
+#[test]
+fn a_row_is_its_expansion() {
+    assert_clean(&format!(
+        "{EFFECTS}pub row Deps = {{ db: Db, ticks: Ticks }};\n\
+         fn work() -> Int with Deps {{ db.query(\"x\") + ticks.now() }}\n\
+         fn longhand() -> Int with {{ db: Db, ticks: Ticks }} {{ work() }}\n\
+         fn by_name() -> Int with Deps {{ longhand() }}\n"
+    ));
+    assert_reports(
+        &format!(
+            "{EFFECTS}pub row Deps = {{ db: Db, ticks: Ticks }};\n\
+             fn work() -> Int with Deps {{ db.query(\"x\") + ticks.now() }}\n\
+             fn caller() -> Int {{ work() }}\n"
+        ),
+        "which this function does not require",
+    );
+}
+
+/// **Every field of a row is a capability, and the declaration is where that is
+/// checked.** This is the reason a row is its own declaration rather than a
+/// record type reused in `with` position: a record's fields are ordinary types,
+/// so nothing could ask, and `row Deps = { db: Int }` would become a
+/// requirement no handler can satisfy, failing at each call site with a message
+/// about `Int`.
+///
+/// A built-in is caught too. It is declared nowhere, so the lookup that finds
+/// `Ledger` cannot see `Int` at all.
+#[test]
+fn a_row_field_that_is_not_a_capability_is_refused() {
+    assert_reports(
+        &format!("{EFFECTS}pub row Deps = {{ ledger: Ledger }};\n"),
+        "`ledger: Ledger` is not a capability",
+    );
+    assert_reports(
+        &format!("{EFFECTS}pub row Deps = {{ count: Int }};\n"),
+        "`Int` is a built-in type",
+    );
+    assert_clean(&format!("{EFFECTS}pub row Deps = {{ db: Db, ticks: Ticks }};\n"));
+}
+
 /// No clause at all means the closed empty row, so nothing is required and
 /// nothing may be called that requires anything.
 #[test]

@@ -42,7 +42,8 @@ nothing else* is what question 3 is for.
 
 ### Kept, because the rule is silent
 
-`effect`, `with`, `raises`, `raise`, `catch`, `handler`, `context`, `forall`.
+`effect`, `with`, `raises`, `raise`, `catch`, `handler`, `context`, `row`,
+`forall`.
 
 These name things none of Go, Rust or TypeScript has. The tie-breaker explicitly
 does not apply where Khora is doing something the competitive set cannot; the
@@ -229,3 +230,33 @@ Three rules, each picked so a reader can predict it:
 - **`impl Eq Int { .. }`** — the trait form with `for` left out — is caught and
   named. The inherent form makes it parse far enough that the default error
   would otherwise be a confusing `expected {`.
+
+### `row`, and why it is contextual
+
+`row Deps = { db: Db, clock: Clock };` names a set of capabilities, so a service
+that needs six of them says so once. It is the type-level counterpart of
+`context`, which names a bundle of the handlers that supply them.
+
+**It is recognised only at declaration position**, like `handler`, `context`,
+`test`, `bench` and `derive`. `std::db` exports a `Row` and about eighty places
+name a local `row`; reserving the word outright would rename all of them for a
+declaration form nobody writes twice a day. No declaration may begin with a bare
+identifier, so there is nothing to disambiguate.
+
+**It is a declaration of its own rather than a record type reused in `with`
+position.** `type Deps = { db: Db }` declares a newtype that wraps a record --
+nominal, constructible, distinct from every other record with those fields --
+and splicing its fields into an effect row would be reading a nominal
+declaration structurally, in one position only. Naming the row outright says
+what is meant, and it lets the checker insist every field is an effect, which a
+record type cannot be asked: `row Deps = { count: Int }` is refused at the
+declaration rather than becoming a requirement no handler can satisfy.
+
+**A row is spliced, not referred to.** `with Deps` and
+`with { db: Db, clock: Clock }` are the same requirement and each satisfies the
+other; the checker never learns the name, which is why a caller that forgets one
+is told it needs `clock: Clock` rather than `Deps`. That is what structural
+means, and it is why a row cannot be used where a type is wanted.
+
+Composition -- `with { Deps | 'r }`, or two rows added together -- is not
+supported. Whole-row only until something needs more.

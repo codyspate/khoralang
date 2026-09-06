@@ -17,6 +17,12 @@ use std::time::SystemTime;
 ///
 /// Looked up once and remembered: this runs per test, and the tests that use
 /// it are the ones already paying for a TLS handshake.
+/// **`#[allow(dead_code)]` because this module has four homes.** `suite`,
+/// `debugging`, `portability` and `targets` each declare `mod harness;`, so
+/// every one of them compiles this file, and only `suite` drives a Python
+/// client. Without the allow, `clippy -D warnings` fails on the three that do
+/// not -- which the gate runs and `cargo test` does not.
+#[allow(dead_code)]
 pub fn python() -> &'static str {
     static FOUND: OnceLock<&'static str> = OnceLock::new();
     FOUND.get_or_init(|| {

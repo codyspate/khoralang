@@ -472,6 +472,14 @@ pub struct TypeHomes {
     /// Local spelling to the module that declares it and the name it is
     /// declared under.
     by_name: HashMap<String, (khora_hir::ModulePath, String)>,
+    /// Local spelling of a `row` declaration to the capabilities it names.
+    ///
+    /// **Rows are kept apart from `by_name` because a row is not a type.** A
+    /// type name resolves to a *declaration* -- `Type::Adt(module, name)`,
+    /// nominal, needing nothing else -- and a `with Deps` has to become the
+    /// fields themselves, because a row is structural and there is nothing to
+    /// point at. So this holds the expansion rather than the home.
+    rows: HashMap<String, Vec<(String, Type)>>,
 }
 
 impl TypeHomes {
@@ -482,6 +490,11 @@ impl TypeHomes {
     /// not resolve, and that is an error somebody else reports.
     pub fn of(&self, local: &str) -> Option<(khora_hir::ModulePath, String)> {
         self.by_name.get(local).cloned()
+    }
+
+    /// The capabilities a `row` names, or `None` for anything else.
+    pub fn row(&self, local: &str) -> Option<&[(String, Type)]> {
+        self.rows.get(local).map(Vec::as_slice)
     }
 
     /// Records a declaration this file makes itself.
@@ -513,7 +526,51 @@ pub fn type_homes(db: &dyn Db, file: SourceFile) -> TypeHomes {
                 .or_insert_with(|| (origin.module.clone(), origin.name.clone()));
         }
     }
+
+    // **Rows last, because their fields are types and the names have to be in
+    // place first.** A row's fields are read with the homes built above, so a
+    // `row Deps = { db: Db }` in a file that imported `Db` resolves it the same
+    // way the signature below it would.
+    collect_rows(db, file, &mut homes);
     homes
+}
+
+/// Fills in [`TypeHomes::rows`]: this file's own `row` declarations, and the
+/// ones it imported.
+///
+/// **An imported row is expanded here rather than pointed at.** A type crosses
+/// a module boundary as `(module, name)` and needs nothing else, because it is
+/// nominal. A row is structural: `with Deps` has to *become* `{ db: Db }`, so
+/// the declaring file is parsed and its fields are read. `source_root` is what
+/// makes that reachable from a per-file query.
+fn collect_rows(db: &dyn Db, file: SourceFile, homes: &mut TypeHomes) {
+    let take = |source: SourceFile, declared: &str, local: &str, homes: &mut TypeHomes| {
+        for decl in khora_db::parse(db, source).source_file().decls() {
+            let ast::Decl::Row(r) = decl else { continue };
+            if r.name().and_then(|n| n.ident()).as_deref() != Some(declared) {
+                continue;
+            }
+            let Some(body) = r.definition() else { continue };
+            let (labels, types) = crate::syntax::record_fields(&body, &[], homes);
+            homes.rows.insert(local.to_string(), labels.into_iter().zip(types).collect());
+        }
+    };
+
+    for item in &khora_hir::item_map(db, file).items {
+        if item.kind == khora_hir::ItemKind::Row {
+            take(file, &item.name, &item.name, homes);
+        }
+    }
+
+    let Some(root) = khora_db::source_root(db) else { return };
+    let graph = khora_hir::module_graph(db, root);
+    for origin in &khora_hir::file_scope(db, file).origins {
+        if origin.kind != khora_hir::ItemKind::Row {
+            continue;
+        }
+        let Some(source) = graph.file(&origin.module) else { continue };
+        take(source, &origin.name, &origin.local, homes);
+    }
 }
 
 /// Whether an item is something a type name can refer to.

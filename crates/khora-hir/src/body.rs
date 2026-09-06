@@ -593,6 +593,10 @@ pub fn bodies(db: &dyn Db, file: SourceFile) -> Vec<(String, Body)> {
         })
         .collect();
 
+    // Every `row` this file can name, gathered once. `with Deps` needs its
+    // labels at lowering time, before any type is known.
+    let rows = row_labels(db, file);
+
     let mut out: Vec<(String, Body)> = parse
         .source_file()
         .decls()
@@ -601,7 +605,7 @@ pub fn bodies(db: &dyn Db, file: SourceFile) -> Vec<(String, Body)> {
                 let lowered = (|| {
                     let name = f.name()?.ident()?;
                     let body = f.body()?;
-                    Some((name, lower_function(map, scope, &contexts, &constants, &f, &body)))
+                    Some((name, lower_function(map, scope, &contexts, &constants, &rows, &f, &body)))
                 })();
                 lowered.into_iter().collect::<Vec<_>>()
             }
@@ -609,9 +613,9 @@ pub fn bodies(db: &dyn Db, file: SourceFile) -> Vec<(String, Body)> {
             // implementation, and it has to be checked like any other.
             ast::Decl::Trait(t) => {
                 let owner = t.name().and_then(|n| n.ident()).unwrap_or_default();
-                methods(map, scope, &contexts, &constants, &owner, t.functions())
+                methods(map, scope, &contexts, &constants, &rows, &owner, t.functions())
             }
-            ast::Decl::Impl(i) => methods(map, scope, &contexts, &constants, &impl_key(&i), i.functions()),
+            ast::Decl::Impl(i) => methods(map, scope, &contexts, &constants, &rows, &impl_key(&i), i.functions()),
             _ => Vec::new(),
         })
         .collect();
@@ -629,7 +633,7 @@ pub fn bodies(db: &dyn Db, file: SourceFile) -> Vec<(String, Body)> {
     // author has something to change.
     for (imp, from) in crate::derive::derived(db, file).declarations() {
         for (key, mut body) in
-            methods(map, scope, &contexts, &constants, &impl_key(&imp), imp.functions())
+            methods(map, scope, &contexts, &constants, &rows, &impl_key(&imp), imp.functions())
         {
             body.blame(from.at);
             out.push((key, body));
@@ -720,6 +724,7 @@ fn methods(
     scope: &crate::FileScope,
     contexts: &[(String, ast::ContextDecl)],
     constants: &[(String, ast::ConstDecl)],
+    rows: &[(String, Vec<String>)],
     owner: &str,
     functions: impl Iterator<Item = ast::FnDecl>,
 ) -> Vec<(String, Body)> {
@@ -729,7 +734,7 @@ fn methods(
             let body = f.body()?;
             Some((
                 format!("{owner}::{name}"),
-                lower_function(map, scope, contexts, constants, &f, &body),
+                lower_function(map, scope, contexts, constants, rows, &f, &body),
             ))
         })
         .collect()
@@ -740,6 +745,7 @@ fn lower_function(
     scope: &crate::FileScope,
     contexts: &[(String, ast::ContextDecl)],
     constants: &[(String, ast::ConstDecl)],
+    rows: &[(String, Vec<String>)],
     decl: &ast::FnDecl,
     block: &ast::Block,
 ) -> Body {
@@ -785,7 +791,7 @@ fn lower_function(
     let mut labels: Vec<String> = decl
         .with_clause()
         .and_then(|c| c.row())
-        .map(|row| capability_labels(&row))
+        .map(|row| capability_labels(&row, rows))
         .unwrap_or_default();
     labels.sort();
     labels.dedup();
@@ -805,10 +811,66 @@ fn lower_function(
 ///
 /// With a tail they nest inside it rather than beside it, so both places have
 /// to be read — the same trap `khora-types` hit.
-fn capability_labels(row: &ast::Type) -> Vec<String> {
-    let ast::Type::Record(r) = row else { return Vec::new() };
-    let nested: Vec<ast::Field> = r.row_tail().map(|t| t.fields().collect()).unwrap_or_default();
-    r.fields().chain(nested).filter_map(|f| f.name().and_then(|n| n.ident())).collect()
+///
+/// **A `row` declaration is looked up rather than read.** `with Deps` puts
+/// `Deps`'s labels in scope, and only the labels: a body needs the names, and
+/// what type each one has is the checker's business.
+fn capability_labels(row: &ast::Type, rows: &[(String, Vec<String>)]) -> Vec<String> {
+    match row {
+        ast::Type::Record(r) => {
+            let nested: Vec<ast::Field> =
+                r.row_tail().map(|t| t.fields().collect()).unwrap_or_default();
+            r.fields().chain(nested).filter_map(|f| f.name().and_then(|n| n.ident())).collect()
+        }
+        ast::Type::Path(p) if p.row_var().is_none() => {
+            let Some(name) = p.path().map(|path| path.text_path()) else { return Vec::new() };
+            rows.iter().find(|(n, _)| *n == name).map(|(_, l)| l.clone()).unwrap_or_default()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Every `row` this file can name, with the labels it puts in scope.
+///
+/// Its own declarations and the ones it imported. An imported row is read out
+/// of the declaring file, which `source_root` makes reachable — the same route
+/// `khora-types` takes for the field *types*.
+fn row_labels(db: &dyn Db, file: SourceFile) -> Vec<(String, Vec<String>)> {
+    fn take(
+        db: &dyn Db,
+        source: SourceFile,
+        declared: &str,
+        local: &str,
+        out: &mut Vec<(String, Vec<String>)>,
+    ) {
+        for decl in khora_db::parse(db, source).source_file().decls() {
+            let ast::Decl::Row(r) = decl else { continue };
+            if r.name().and_then(|n| n.ident()).as_deref() != Some(declared) {
+                continue;
+            }
+            let Some(body) = r.definition() else { continue };
+            let labels =
+                body.fields().filter_map(|f| f.name().and_then(|n| n.ident())).collect();
+            out.push((local.to_string(), labels));
+        }
+    }
+
+    let mut out = Vec::new();
+    for item in &item_map(db, file).items {
+        if item.kind == crate::ItemKind::Row {
+            take(db, file, &item.name, &item.name, &mut out);
+        }
+    }
+    let Some(root) = khora_db::source_root(db) else { return out };
+    let graph = crate::module_graph(db, root);
+    for origin in &crate::file_scope(db, file).origins {
+        if origin.kind != crate::ItemKind::Row {
+            continue;
+        }
+        let Some(source) = graph.file(&origin.module) else { continue };
+        take(db, source, &origin.name, &origin.local, &mut out);
+    }
+    out
 }
 
 struct Ctx<'a> {

@@ -465,9 +465,19 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
                     .return_type()
                     .map_or(Type::Unit, |t| type_of_syntax(Some(&t), &generics, homes));
                 let requires =
-                    row_of_syntax(f.with_clause().and_then(|c| c.row()).as_ref(), &generics, homes);
+                    row_of_syntax(
+                        f.with_clause().and_then(|c| c.row()).as_ref(),
+                        crate::syntax::RowClause::Requires,
+                        &generics,
+                        homes,
+                    );
                 let raises =
-                    row_of_syntax(f.raises_clause().and_then(|c| c.row()).as_ref(), &generics, homes);
+                    row_of_syntax(
+                        f.raises_clause().and_then(|c| c.row()).as_ref(),
+                        crate::syntax::RowClause::Raises,
+                        &generics,
+                        homes,
+                    );
                 map.signatures.insert(
                     name,
                     Signature {

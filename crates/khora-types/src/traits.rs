@@ -513,9 +513,19 @@ fn method_def(
         .unwrap_or_default();
     let ret = f.return_type().map_or(Type::Unit, |t| type_of_syntax(Some(&t), &generics, homes));
     let requires =
-        crate::row_of_syntax(f.with_clause().and_then(|c| c.row()).as_ref(), &generics, homes);
+        crate::row_of_syntax(
+            f.with_clause().and_then(|c| c.row()).as_ref(),
+            crate::syntax::RowClause::Requires,
+            &generics,
+            homes,
+        );
     let raises =
-        crate::row_of_syntax(f.raises_clause().and_then(|c| c.row()).as_ref(), &generics, homes);
+        crate::row_of_syntax(
+            f.raises_clause().and_then(|c| c.row()).as_ref(),
+            crate::syntax::RowClause::Raises,
+            &generics,
+            homes,
+        );
 
     Some(MethodDef {
         name,
