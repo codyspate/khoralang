@@ -822,6 +822,68 @@ pub fn row_label(ty: &Type) -> String {
     }
 }
 
+/// Resolves every projection whose owner an impl can be found for.
+///
+/// **`substitute` cannot do this and monomorphization has to.** Substituting
+/// `I := Counted` turns `I::Item` into `Counted::Item` and stops, because a
+/// mapping is all it has and a projection needs the impl table. The checker
+/// normalizes through [`Unifier::with_assoc`]; without the same step after
+/// specialization the backend meets `Counted::Item` and reports a type it
+/// "cannot represent yet" -- which is what every generic adapter over
+/// `Iterator` produced, since `Mapped<I, B>`'s `next` is written in terms of
+/// `I::Item`.
+///
+/// `depth` guards a binding that projects through itself. A `type Item =
+/// Self::Item` is refused elsewhere; this is here so that a way of writing it
+/// that is not refused stops rather than recurring forever.
+pub fn normalize_projections(ty: &Type, assoc: &[AssocBinding]) -> Type {
+    normalize_projections_to(ty, assoc, 16)
+}
+
+fn normalize_projections_to(ty: &Type, assoc: &[AssocBinding], depth: u32) -> Type {
+    if depth == 0 {
+        return ty.clone();
+    }
+    let go = |t: &Type| normalize_projections_to(t, assoc, depth);
+    match ty {
+        Type::Assoc { owner, name } => {
+            let owner = go(owner);
+            let unresolved = || Type::Assoc { owner: Box::new(owner.clone()), name: name.clone() };
+            let Some(head) = head_name(&owner) else { return unresolved() };
+            let Some(binding) = assoc.iter().find(|b| b.head == head && b.name == *name) else {
+                return unresolved();
+            };
+            // The impl's own parameters come from the owner, so
+            // `List<Int>::Item` under `impl<A> Iterator for List<A>` projects
+            // to `Int` rather than to a rigid `A`.
+            let mut mapping = HashMap::new();
+            match_type(&binding.self_type, &owner, &binding.generics, &mut mapping);
+            let value = substitute(&binding.value, &mapping);
+            normalize_projections_to(&value, assoc, depth - 1)
+        }
+        Type::Fn { params, ret, requires, raises } => Type::Fn {
+            params: params.iter().map(&go).collect(),
+            ret: Box::new(go(ret)),
+            requires: Box::new(go(requires)),
+            raises: Box::new(go(raises)),
+        },
+        Type::Adt { name, home, args } => Type::Adt {
+            name: name.clone(),
+            home: home.clone(),
+            args: args.iter().map(&go).collect(),
+        },
+        Type::Applied { head, args } => {
+            Type::Applied { head: Box::new(go(head)), args: args.iter().map(&go).collect() }
+        }
+        Type::Tuple(items) => Type::Tuple(items.iter().map(&go).collect()),
+        Type::Row { fields, tail } => Type::row(
+            fields.iter().map(|(l, t)| (l.clone(), go(t))).collect(),
+            tail.as_ref().map(|t| go(t)),
+        ),
+        other => other.clone(),
+    }
+}
+
 /// Rewrites rigid parameters according to `mapping`.
 pub fn substitute(ty: &Type, mapping: &HashMap<&str, Type>) -> Type {
     match ty {

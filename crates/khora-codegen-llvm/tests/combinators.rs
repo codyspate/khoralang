@@ -283,3 +283,22 @@ pub fn main() -> () {
     // 0+1+2+3+4, then 7 three times.
     assert_eq!(out, "10\n21\n");
 }
+
+/// **A generic impl's associated projections are resolved before code
+/// generation**, which is what an adapter over an iterator is made of.
+///
+/// `impl<I: Walk, B> Walk for Mapped<I, B>` writes its `step` in terms of
+/// `I::Item`. Substituting `I := Counted` turns that into `Counted::Item` and
+/// stops, because `substitute` holds a mapping and resolving a projection needs
+/// the impl that binds `Item`. The checker normalizes through
+/// `Unifier::with_assoc`; monomorphization did not, so the backend met
+/// `Counted::Item` and reported a type it "cannot represent yet".
+///
+/// `peek` covers the same gap in a *signature*: a default method whose return
+/// type is the projection was emitted with it intact.
+#[test]
+fn a_generic_adapter_resolves_its_projections() {
+    let out = run("adapter_projection", "module main;\nimport std::core::{Step, print};\n\npub trait Walk {\n  type Item;\n  type Effects;\n  fn step(self) -> Step<Self, Self::Item> with Self::Effects;\n  /// A default method whose *signature* mentions the projection.\n  fn peek(self) -> Step<Self, Self::Item> with Self::Effects { Walk::step(self) }\n}\n\npub type Mapped<I, B> = { inner: I, f: (I::Item) -> B };\n\nimpl<I: Walk, B> Walk for Mapped<I, B> {\n  type Item = B;\n  type Effects = I::Effects;\n  fn step(self) -> Step<Mapped<I, B>, B> with Self::Effects {\n    match Walk::step(self.inner) {\n      Step::Done => Step::Done,\n      Step::Yield(rest, item) => Step::Yield({ inner: rest, f: self.f }, (self.f)(item)),\n    }\n  }\n}\n\npub type Counted = { at: Int, to: Int };\nimpl Walk for Counted {\n  type Item = Int;\n  type Effects = {};\n  fn step(self) -> Step<Counted, Int> {\n    if self.at >= self.to { Step::Done } else { Step::Yield({ at: self.at + 1, to: self.to }, self.at) }\n  }\n}\n\npub fn main() -> () {\n  let src: Counted = { at: 0, to: 5 };\n  let doubled: Mapped<Counted, Int> = { inner: src, f: fn n => n * 2 };\n  let mut total = 0;\n  let mut cur = doubled;\n  loop {\n    match Walk::step(cur) {\n      Step::Done => break,\n      Step::Yield(next, item) => { total = total + item; cur = next; },\n    }\n  }\n  print(Int::to_string(total));\n  match Walk::peek(src) {\n    Step::Yield(_r, item) => print(Int::to_string(item)),\n    Step::Done => print(Int::to_string(0)),\n  }\n}");
+    // 2*(0+1+2+3+4), then the first item of the source.
+    assert_eq!(out, "20\n0\n");
+}

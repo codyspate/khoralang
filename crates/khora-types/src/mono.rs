@@ -374,12 +374,15 @@ fn walk(db: &dyn Db, files: &[SourceFile]) -> Instances {
             .zip(&instance.args)
             .map(|(g, a)| (g.as_str(), a.clone()))
             .collect();
-        let specialized = generic.specialized(&mapping);
+        let assoc = unit.types.traits.assoc_bindings();
+        let specialized = generic.specialized(&mapping, &assoc);
         let owner = instance.symbol();
 
         for (site, (callee, args)) in specialized.instantiations() {
-            let resolved: Vec<Type> =
-                args.iter().map(|a| unify::substitute(a, &mapping)).collect();
+            let resolved: Vec<Type> = args
+                .iter()
+                .map(|a| unify::normalize_projections(&unify::substitute(a, &mapping), &assoc))
+                .collect();
 
             // A call written against a trait is emitted as a call to the impl.
             let mention = Instance {

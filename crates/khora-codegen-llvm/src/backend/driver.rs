@@ -575,6 +575,18 @@ fn specialized_signature(
         .zip(&instance.args)
         .map(|(g, a)| (g.as_str(), a.clone()))
         .collect();
+    // **And projections resolved.** Substituting `Self := Two` turns
+    // `Self::Item` into `Two::Item` and stops; the impl is what says it is
+    // `Int`. A default method that mentions an associated type in its
+    // signature -- which every `Iterator` combinator does -- otherwise reaches
+    // here as a type the backend cannot lay out.
+    let assoc = types.traits.assoc_bindings();
+    let settle = |t: &Type| {
+        khora_types::unify::normalize_projections(
+            &khora_types::unify::substitute(t, &mapping),
+            &assoc,
+        )
+    };
     Some(Signature {
         // A specialization of a Khora body, so never foreign: a generic
         // `extern` has no single machine signature and is refused before this.
@@ -584,18 +596,14 @@ fn specialized_signature(
         // row whether it returns a tagged value, and a `with 'r` clause knows
         // neither until `'r` does. Copying them unsubstituted made a
         // row-polymorphic function look like it needed nothing.
-        requires: khora_types::unify::substitute(&signature.requires, &mapping),
-        raises: khora_types::unify::substitute(&signature.raises, &mapping),
+        requires: settle(&signature.requires),
+        raises: settle(&signature.raises),
         generics: Vec::new(),
         // A specialized signature has no parameters left, so it can carry no
         // bounds either: whatever they required was settled before this ran.
         bounds: Vec::new(),
-        params: signature
-            .params
-            .iter()
-            .map(|p| khora_types::unify::substitute(p, &mapping))
-            .collect(),
-        ret: khora_types::unify::substitute(&signature.ret, &mapping),
+        params: signature.params.iter().map(&settle).collect(),
+        ret: settle(&signature.ret),
     })
 }
 

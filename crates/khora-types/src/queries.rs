@@ -109,23 +109,28 @@ impl BodyTypes {
     }
 
     /// This body's types with `mapping` applied, which is one specialization.
-    pub fn specialized(&self, mapping: &HashMap<&str, Type>) -> BodyTypes {
+    ///
+    /// **And projections resolved, which substituting cannot do.** `I := Counted`
+    /// turns `I::Item` into `Counted::Item` and no further, because a mapping is
+    /// all `substitute` has; resolving it needs the impl that binds `Item`. The
+    /// checker normalizes through `Unifier::with_assoc` and a specialization has
+    /// to do the same, or the backend is handed `Counted::Item` and cannot lay it
+    /// out -- which is what every generic adapter over `Iterator` produced, since
+    /// `Mapped<I, B>`'s `next` is written in terms of `I::Item`.
+    pub fn specialized(
+        &self,
+        mapping: &HashMap<&str, Type>,
+        assoc: &[unify::AssocBinding],
+    ) -> BodyTypes {
+        let settle = |t: &Type| unify::normalize_projections(&unify::substitute(t, mapping), assoc);
         BodyTypes {
-            exprs: self
-                .exprs
-                .iter()
-                .map(|(k, v)| (*k, unify::substitute(v, mapping)))
-                .collect(),
-            locals: self
-                .locals
-                .iter()
-                .map(|(k, v)| (*k, unify::substitute(v, mapping)))
-                .collect(),
+            exprs: self.exprs.iter().map(|(k, v)| (*k, settle(v))).collect(),
+            locals: self.locals.iter().map(|(k, v)| (*k, settle(v))).collect(),
             instantiations: self
                 .instantiations
                 .iter()
                 .map(|(k, (name, args))| {
-                    let args = args.iter().map(|a| unify::substitute(a, mapping)).collect();
+                    let args = args.iter().map(&settle).collect();
                     (*k, (name.clone(), args))
                 })
                 .collect(),
