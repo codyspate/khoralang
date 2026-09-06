@@ -104,6 +104,31 @@ fn a_with_clause_naming_a_type_says_so() {
     ));
 }
 
+/// **A function declaring an unusable `with` clause is told so at the
+/// declaration**, whether or not anybody calls it.
+///
+/// The call-site message only reaches the file doing the calling; when the bad
+/// clause is somebody else's, that file has no error to show its author. This
+/// fires against the clause itself. `docs/design/effect-survey.md` 3.4.
+#[test]
+fn a_declaration_with_an_unusable_with_clause_is_reported_where_it_is_written() {
+    assert_reports(
+        &format!("{SERVICES}fn broken(id: Int) -> Int with m::Ledger;\n"),
+        "names a type, not a row",
+    );
+    // Uncalled, and still reported: the declaration is the mistake.
+    assert_reports(
+        &format!("{SERVICES}fn broken(id: Int) -> Int with m::Ledger;\n"),
+        "Give it a label: `with { name: Ledger }`",
+    );
+    // A bare name is writable, and a row variable is the whole row. Neither is
+    // this mistake.
+    assert_clean(&format!("{SERVICES}fn named() -> Int with Ledger;\n"));
+    assert_clean(&format!(
+        "{SERVICES}fn poly<'r>(f: () -> Int with 'r) -> Int with 'r {{ f() }}\n"
+    ));
+}
+
 /// No clause at all means the closed empty row, so nothing is required and
 /// nothing may be called that requires anything.
 #[test]

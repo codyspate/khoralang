@@ -117,10 +117,76 @@ pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
     }
     all.extend(trait_errors(db, file).iter().cloned());
     all.extend(shadowed_name_errors(db, file));
+    all.extend(malformed_with_clause_errors(db, file));
     all.extend(crate::unresolved::unresolved_type_errors(db, file));
     all.extend(crate::exports::export_errors(db, file));
     all.extend(check_file(db, file).iter().cloned());
     all
+}
+
+/// A `with` clause that names a type rather than a row.
+///
+/// **A capability is supplied under a label**, so a `with` clause wants
+/// `{ name: Type }` or a row variable. `row_of_syntax` shares its fallback arm
+/// with `raises`, and that arm labels an entry after its own type -- right for
+/// `raises DbError`, and for `with` it produces an entry whose label is the
+/// type as written.
+///
+/// When the type is a bare name that is writable: `with Ledger` becomes an
+/// entry called `Ledger`, and `with { Ledger: handler }` supplies it.
+/// Unconventional, since capabilities are lowercase by habit, but not wrong.
+///
+/// When it is a *path* it is not writable by anybody. `with Self::Effects` --
+/// the shape somebody writing a `Stream` reaches for first -- becomes an entry
+/// labelled `Self::Effects`, and no `with` block can name it. The call site
+/// says so now (`check.rs`, `Clause::label_is_well_formed`), but only for the
+/// callee; a function declaring one is the mistake itself and is reported here,
+/// against the clause, whether or not anybody calls it.
+///
+/// **Both this and the call-site message exist, and neither is redundant.**
+/// This one fires against the declaration, so it is what the author of the bad
+/// clause sees. The call-site one fires in whichever file *calls* it, which is
+/// where the declaration is somebody else's and this error is not in view.
+///
+/// `docs/design/effect-survey.md` 3.4 has how this was found.
+pub(crate) fn malformed_with_clause_errors(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
+    let parsed = khora_db::parse(db, file);
+    let mut found = Vec::new();
+    for decl in parsed.source_file().decls() {
+        for node in decl.syntax().descendants() {
+            let Some(clause) = ast::WithClause::cast(node) else { continue };
+            let Some(ast::Type::Path(path_type)) = clause.row() else { continue };
+            // `with 'r` is the whole row and is exactly right.
+            if path_type.row_var().is_some() {
+                continue;
+            }
+            let Some(path) = path_type.path() else { continue };
+            if path.segments().count() <= 1 {
+                continue;
+            }
+            let written = path.text_path();
+            let segments: Vec<String> = path.segments().filter_map(|s| s.ident()).collect();
+            // `with { name: Effects }` is good advice for `m::Ledger` and bad
+            // advice for `Self::Effects`, where the last segment is an
+            // associated type and not an effect at all.
+            let fix = match segments.first().map(String::as_str) {
+                Some("Self") => "Give it a label: `with { name: Type }`".to_string(),
+                _ => format!(
+                    "Give it a label: `with {{ name: {} }}`",
+                    segments.last().cloned().unwrap_or_default()
+                ),
+            };
+            found.push(HirError {
+                message: format!(
+                    "`with {written}` names a type, not a row. A capability is supplied under \
+                     a label, so this asks for one called `{written}`, which no `with` block \
+                     can write. {fix}"
+                ),
+                range: clause.syntax().text_range(),
+            });
+        }
+    }
+    found
 }
 
 /// Refuses a declaration that takes a name the compiler already means.
