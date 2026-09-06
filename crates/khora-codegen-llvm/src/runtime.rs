@@ -6,6 +6,7 @@
 //! disagreeing is a heap that corrupts silently and crashes somewhere else
 //! entirely.
 
+use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
 use inkwell::values::{FunctionValue, IntValue, PointerValue};
@@ -312,7 +313,7 @@ impl<'ctx> Runtime<'ctx> {
             module.add_function(name, ty, Some(Linkage::External))
         };
 
-        Runtime {
+        let runtime = Runtime {
             alloc: declare("khora_alloc", ptr.fn_type(&[i64t.into(), i32t.into()], false)),
             dup: declare("khora_dup", void.fn_type(&[ptr.into()], false)),
             // `drop_fields` is `Option<extern "C" fn(*mut u8)>` on the Rust
@@ -490,9 +491,58 @@ impl<'ctx> Runtime<'ctx> {
             bench_run: declare("khora_bench_run", i32t.fn_type(&[], false)),
             region_close_root: declare("khora_region_close_root", void.fn_type(&[], false)),
             trap: declare("llvm.trap", void.fn_type(&[], false)),
+        };
+
+        // **What the allocator is allowed to do, said out loud.** Declared
+        // bare, `khora_alloc` is a call LLVM must assume reads and writes every
+        // byte the program can name, and whose result may alias anything
+        // already live. Neither is true. The cost is not only the allocations
+        // that survive: an opaque call in the middle of a loop is a barrier to
+        // forwarding a store or hoisting a load for every *other* value there,
+        // and an allocation is in the middle of every loop that builds
+        // anything.
+        //
+        // `crates/khora-rt/src/heap.rs` is the evidence for each claim below.
+        // What this does *not* buy is the allocation going away --
+        // `docs/design/reuse.md` has the measurement and the two things still
+        // in the way.
+        let attr =
+            |name: &str, value: u64| ctx.create_enum_attribute(Attribute::get_named_enum_kind_id(name), value);
+        for allocator in [runtime.alloc, runtime.alloc_reuse] {
+            // Fresh memory: nothing live at the call site refers to it. This is
+            // the claim `realloc` carries, and `khora_alloc_reuse` earns it the
+            // same way -- the token it spends is dead the moment it is handed
+            // over, so the pointer coming back aliases nothing the caller may
+            // still legally use.
+            allocator.add_attribute(AttributeLoc::Return, attr("noalias", 0));
+            // Out of memory aborts. An `extern "C"` frame would abort anyway
+            // rather than let a panic out, so this is true however it fails.
+            allocator.add_attribute(AttributeLoc::Function, attr("nounwind", 0));
+            // The global allocator, two counters and a thread-local: memory no
+            // IR in this module can name. It never calls back into generated
+            // code, which is what makes that the *whole* of what it touches.
+            allocator
+                .add_attribute(AttributeLoc::Function, attr("memory", INACCESSIBLE_MEM_READWRITE));
         }
+
+        runtime
     }
 }
+
+/// `memory(inaccessiblemem: readwrite)`, encoded.
+///
+/// LLVM packs one two-bit `ModRef` per location into the `memory` attribute's
+/// value. `InaccessibleMem` is location 1, so this is `ModRef` -- both bits --
+/// shifted up by two, leaving argument memory and every other location at
+/// `NoModRef`.
+///
+/// The number is checked rather than trusted. LLVM prints attributes in
+/// canonical form, so `the_allocator_says_what_it_touches` asks it to render
+/// the module and fails unless the declaration comes back reading exactly
+/// `memory(inaccessiblemem: readwrite)`. A layout change on LLVM's side turns
+/// into a failing test rather than an allocator quietly claiming to touch
+/// argument memory.
+const INACCESSIBLE_MEM_READWRITE: u64 = 3 << 2;
 
 /// A pointer to `offset` bytes past an object pointer.
 ///
@@ -583,5 +633,57 @@ pub fn element_pointer<'ctx>(
         builder
             .build_in_bounds_gep(ctx.i8_type(), object, &[offset], "element.ptr")
             .expect("addressing an element")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Runtime, INACCESSIBLE_MEM_READWRITE};
+    use inkwell::context::Context;
+    use inkwell::targets::TargetData;
+
+    /// The allocator's declaration says what it touches, in LLVM's own words.
+    ///
+    /// `INACCESSIBLE_MEM_READWRITE` is a bit pattern whose meaning belongs to
+    /// LLVM, so asserting we wrote `12` would only restate the constant. This
+    /// asks LLVM to render the module and reads the attribute group back: if a
+    /// future release renumbers its memory locations, `12` starts meaning
+    /// something else and this says so.
+    #[test]
+    fn the_allocator_says_what_it_touches() {
+        assert_eq!(INACCESSIBLE_MEM_READWRITE, 12, "location 1, both ModRef bits");
+
+        let ctx = Context::create();
+        let module = ctx.create_module("attributes");
+        let target = TargetData::create("e-m:e-i64:64-f80:128-n8:16:32:64-S128");
+        let _ = Runtime::declare(&ctx, &module, &target);
+        let ir = module.print_to_string().to_string();
+
+        let declaration = ir
+            .lines()
+            .find(|line| line.starts_with("declare") && line.contains("@khora_alloc("))
+            .expect("`khora_alloc` is declared")
+            .to_string();
+
+        // A return attribute is printed on the declaration; function
+        // attributes go in a numbered group at the end of the module.
+        assert!(declaration.contains("noalias"), "fresh memory: {declaration}");
+        let group = declaration
+            .rsplit('#')
+            .next()
+            .and_then(|n| n.split_whitespace().next())
+            .expect("an attribute group on the declaration")
+            .to_string();
+        let attributes = ir
+            .lines()
+            .find(|line| line.starts_with(&format!("attributes #{group} =")))
+            .unwrap_or_else(|| panic!("group #{group} is defined:\n{ir}"))
+            .to_string();
+
+        assert!(attributes.contains("nounwind"), "{attributes}");
+        assert!(
+            attributes.contains("memory(inaccessiblemem: readwrite)"),
+            "the encoding no longer means what it did: {attributes}"
+        );
     }
 }
