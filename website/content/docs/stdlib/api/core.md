@@ -248,6 +248,30 @@ pub type Range = | Of(from: Int, to: Int);
 
 `Range::Of(from, to)` yields `from` up to but not including `to`.
 
+### Mapped
+
+```khora
+pub type Mapped<I, B> = { inner: I, f: (I::Item) -> B };
+```
+
+`it.map(f)`: the same walk, with each item put through `f`.
+
+### Filtered
+
+```khora
+pub type Filtered<I> = { inner: I, keep: (I::Item) -> Bool };
+```
+
+`it.filter(keep)`: the items `keep` answers true for.
+
+### Taken
+
+```khora
+pub type Taken<I> = { inner: I, left: Int };
+```
+
+`it.take(n)`: at most the first `n` items.
+
 ### Never
 
 ```khora
@@ -833,6 +857,60 @@ fn next(self) -> Step<Self, Self::Item> with Self::Effects
 ```
 
 The next item and the iterator that follows it, or `Done`.
+
+##### map
+
+```khora
+fn map<B>(self, f: (Self::Item) -> B) -> Mapped<Self, B>
+```
+
+Each item put through `f`. Nothing is pulled until something asks.
+
+##### filter
+
+```khora
+fn filter(self, keep: (Self::Item) -> Bool) -> Filtered<Self>
+```
+
+The items `keep` answers true for.
+
+##### take
+
+```khora
+fn take(self, n: Int) -> Taken<Self>
+```
+
+At most the first `n`.
+
+##### fold
+
+```khora
+fn fold<B>(self, init: B, f: (B, Self::Item) -> B) -> B with Self::Effects
+```
+
+Walks to the end, carrying `init` through `f`.
+
+**The consumer is where the effects happen.** `map` and `filter` build a
+description and require nothing; this is what pulls, so this is what
+carries `Self::Effects` -- which is why a pipeline over a file asks for
+`fs` at the fold and not at the `map`.
+
+##### each
+
+```khora
+fn each(self, f: (Self::Item) ->()) ->() with Self::Effects
+```
+
+`f` on each item, for the effect rather than the answer.
+
+##### count
+
+```khora
+fn count(self) -> Int with Self::Effects
+```
+
+How many items it yields. Walks the whole thing, so it is not free on a
+stream that reads a socket.
 
 ### Functor
 
@@ -5116,6 +5194,98 @@ type Effects = {};
 ```khora
 fn next(self) -> Step<List<A>, A>
 ```
+
+### Iterator for Mapped<I, B>
+
+```khora
+impl<I: Iterator, B> Iterator for Mapped<I, B>
+```
+
+#### Associated types
+
+##### Item
+
+```khora
+type Item = B;
+```
+
+##### Effects
+
+```khora
+type Effects = I::Effects;
+```
+
+#### Functions
+
+##### next
+
+```khora
+fn next(self) -> Step<Mapped<I, B>, B> with Self::Effects
+```
+
+### Iterator for Filtered<I>
+
+```khora
+impl<I: Iterator> Iterator for Filtered<I>
+```
+
+#### Associated types
+
+##### Item
+
+```khora
+type Item = I::Item;
+```
+
+##### Effects
+
+```khora
+type Effects = I::Effects;
+```
+
+#### Functions
+
+##### next
+
+```khora
+fn next(self) -> Step<Filtered<I>, I::Item> with Self::Effects
+```
+
+**One `next` may pull many times**, which is the whole of what a filter
+is: it walks until something is kept or the source runs out, so a caller
+never sees a step that yielded nothing.
+
+### Iterator for Taken<I>
+
+```khora
+impl<I: Iterator> Iterator for Taken<I>
+```
+
+#### Associated types
+
+##### Item
+
+```khora
+type Item = I::Item;
+```
+
+##### Effects
+
+```khora
+type Effects = I::Effects;
+```
+
+#### Functions
+
+##### next
+
+```khora
+fn next(self) -> Step<Taken<I>, I::Item> with Self::Effects
+```
+
+**The count is checked before the pull**, so `take(0)` on a stream that
+reads a socket reads nothing at all. A `take` that pulled first and then
+discarded would be a different program.
 
 ### Functor for Option
 
