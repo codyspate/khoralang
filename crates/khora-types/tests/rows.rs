@@ -180,6 +180,39 @@ fn a_row_field_that_is_not_a_capability_is_refused() {
     assert_clean(&format!("{EFFECTS}pub row Deps = {{ db: Db, ticks: Ticks }};\n"));
 }
 
+/// **A closure carries a row variable**, which is what every stream adapter
+/// needs: `map` builds a closure that must promise the row the stream it wraps
+/// requires.
+///
+/// This failed until `absorb_requires` learned to absorb a rigid *tail*. It
+/// walked a demand's labels and left its tail alone, so `{ | 'ef }` -- no
+/// labels at all, which is what calling a `() -> A with 'ef` closure asks for
+/// -- had nothing to absorb and escaped to the enclosing function, which was
+/// told it could not assume `'ef` was `{}`. The concrete-row case below always
+/// worked, which is what made it a defect rather than a rule.
+/// `docs/design/effect-survey.md` 3.4.
+#[test]
+fn a_closure_can_carry_a_row_variable() {
+    assert_clean(
+        "module m;\n\
+         pub type Box<'ef> = { run: () -> Int with 'ef };\n\
+         fn wrap<'ef>(inner: Box<'ef>) -> Box<'ef> {{ { run: fn () => (inner.run)() } }}\n",
+    );
+}
+
+/// The same wrapper with a concrete row, which is what makes the case above a
+/// defect rather than a rule: absorbing a demand into a closure works, and
+/// stops working when the row is a variable.
+#[test]
+fn a_closure_carries_a_concrete_row() {
+    assert_clean(
+        "module m;\n\
+         pub effect Tick { now: () -> Int }\n\
+         pub type Box = { run: () -> Int with { tick: Tick } };\n\
+         fn wrap(inner: Box) -> Box { { run: fn () => (inner.run)() } }\n",
+    );
+}
+
 /// No clause at all means the closed empty row, so nothing is required and
 /// nothing may be called that requires anything.
 #[test]

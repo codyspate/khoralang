@@ -295,6 +295,23 @@ impl<'a> Checker<'a> {
     pub(super) fn absorb_requires(&mut self, before: usize) -> Type {
         let window: Vec<Demand> = self.demanded.split_off(before);
         let mut mine: Vec<(String, Type)> = Vec::new();
+        // **A rigid tail is absorbed too, and used not to be.**
+        //
+        // This walked `fields` and left `tail` alone, so a demand of `{ | 'ef }`
+        // -- no labels at all, which is what calling a `() -> A with 'ef`
+        // closure asks for -- had nothing to absorb and escaped to the
+        // enclosing function, which was then told it could not assume `'ef` was
+        // `{}`. The same call with a concrete row worked, which is what made it
+        // a defect rather than a rule.
+        //
+        // It is the same argument as for a label: a row variable is not a
+        // binding, so a closure cannot resolve one lexically, and charging it
+        // to the enclosing function is wrong twice over -- that function does
+        // not perform the effect and is not the one being asked. An adapter
+        // like `map` *builds* a closure that will perform it; requiring the row
+        // to construct a pipeline rather than to consume it is what makes a
+        // stream not lazy. `docs/design/effect-survey.md` 3.4.
+        let mut absorbed_tail: Option<Type> = None;
 
         let kept: Vec<Demand> = window
             .into_iter()
@@ -328,7 +345,20 @@ impl<'a> Checker<'a> {
                         mine.push((label, ty));
                     }
                 }
-                demand.row = Type::row(left, tail.map(|t| *t));
+                // Only a *rigid* tail. A unification variable is an
+                // inference artefact that may still turn out to be empty, and
+                // absorbing one would invent a requirement nobody wrote.
+                let tail = match tail.map(|t| *t) {
+                    Some(Type::Param(name)) if name.starts_with('\'') => {
+                        let rest = Type::Param(name);
+                        if absorbed_tail.is_none() {
+                            absorbed_tail = Some(rest);
+                        }
+                        None
+                    }
+                    other => other,
+                };
+                demand.row = Type::row(left, tail);
                 demand
             })
             .collect();
@@ -337,7 +367,7 @@ impl<'a> Checker<'a> {
         // parameters in. Two places agreeing on an order is how errata 33
         // happened; one of them sorting is how it does not happen again.
         mine.sort_by(|(a, _), (b, _)| a.cmp(b));
-        Type::row(mine, None)
+        Type::row(mine, absorbed_tail)
     }
 
     /// Reports a binding that has the right name and the wrong type.

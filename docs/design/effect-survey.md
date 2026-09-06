@@ -444,6 +444,47 @@ both halves:
 `crates/khora-types/src/check.rs`, `Clause::describe`. Every reader who writes a
 stream and forgets the row meets the second one.
 
+**One blocker found and fixed.** The shape above is right, and writing against
+it turned up a defect first: **a closure could not carry a row variable**, which
+is what every adapter needs.
+
+    pub type Box<'ef> = { run: () -> Int with 'ef };
+    fn wrap<'ef>(inner: Box<'ef>) -> Box<'ef> { { run: fn () => (inner.run)() } }
+    // was: `run` cannot be called here: `'ef` is a type the caller chooses,
+    //      so it cannot be assumed to be `{}`
+
+`absorb_requires` walked a demand's *labels* and left its *tail* alone, so
+`{ | 'ef }` -- no labels at all, which is what calling a `() -> A with 'ef`
+closure asks for -- had nothing to absorb and escaped to the enclosing function.
+The same wrapper with a concrete row always worked, which is what made it a
+defect rather than a rule. A rigid tail is absorbed now, on the same argument
+the labels are: a row variable is not a binding, so a closure cannot resolve one
+lexically, and charging it to the enclosing function is wrong twice over -- that
+function does not perform the effect and is not the one being asked.
+
+The workaround would have cost the feature. Declaring `with 'ef` on the adapter
+compiles, and means a caller supplies the capability to *construct* a pipeline
+rather than to consume it; a stream that reads its source when you assemble it
+is not lazy. `map` and `zip` over an effectful stream both compile now.
+
+**What is left is hiding the state.** Successor passing works and needs no
+mutation -- just as well, since a closure cannot mutate a capture and a `Shared`
+cell would put a lock on every element -- but `Stream<S, A, 'ef>` puts the state
+in the type. `map` keeps `S`; `zip` makes it `(S1, S2)` and it grows from there,
+so it leaks into every signature a stream appears in. Rust hides it behind
+`impl Iterator`, Effect behind an existential. That is the remaining question
+and it is a language one.
+
+**What was already known, and is still right.** `Iterator`'s
+`next(self) -> Step<Self, Self::Item>` is the successor-passing shape a pull
+stream wants, and it works today for a *stateful* stream: threading the state
+through `Step` needs no mutation and no `Shared` cell, which is good, because a
+closure cannot mutate a capture and `Shared` would put a lock on every element.
+What it cannot do is hide the state: `map` keeps `S`, but `zip` makes it
+`(S1, S2)` and it grows from there, so the state type leaks into every
+signature. Hiding it needs an existential, which is the *second* reason this is
+not purely library work.
+
 Also worth taking from Eio rather than Effect: the split between a **byte**
 source/sink and an **element** stream. HTTP bodies want the first; a windowed
 reconciliation feed wants the second. Effect conflates them behind `Chunk`.
