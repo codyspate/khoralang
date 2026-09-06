@@ -524,75 +524,104 @@ materialises its output. Flat is not free, though — each `next` allocates its
 see churn. The two measurements answer different questions and only the
 allocation count answers this one.
 
-Three things stand between that number and zero, and they are independent.
+Where that number comes from is not where it looks. Two answers that sound
+obvious were measured and are wrong, and the one that is right is already in
+this document, one section up.
 
-### The allocator is opaque to LLVM
+### It is not that LLVM cannot see through the pipeline
 
-`khora_alloc` is declared with no attributes at all:
+The pipeline is six functions deep and none of it is inlined at `O2`, so the
+first guess is that the stages never meet. Forced together with
+`-inline-threshold=100000`, they do: `live_during` disappears entirely and the
+specialized `fold` absorbs `Mapped::next` and `Filtered::next` into one
+function of ninety-nine basic blocks. **It still contains six `khora_alloc`
+calls.** Inlining was never the thing in the way.
 
-```llvm
-declare ptr @khora_alloc(i64, i32) local_unnamed_addr
-```
+Nor is it that the objects escape. Inside that fused function every allocation
+has exactly three uses and not one is passed to a call other than a drop. The
+only thing resembling an escape is a `phi` merging the heap `Step::Yield` with
+`@kh$case$Step::Done`, which is a global — the two cases of one enum having
+two representations is why the value is a pointer at all.
 
-So LLVM assumes it may read and write every byte of memory the program can
-name, and that the pointer it returns may alias anything. Neither is true: the
-implementation in `crates/khora-rt/src/heap.rs` touches the global allocator,
-two counters and a thread-local, never calls back into generated code, and
-returns fresh memory. `noalias` on the return and
-`memory(inaccessiblemem: readwrite)` are both sound and neither is stated.
-The cost is not only the allocations that survive — an opaque call in the
-middle of a loop is a barrier to store forwarding and to hoisting for every
-*other* value in that loop.
+### It is not that the allocator is unannotated either
 
-### The counters make allocation observable
+It *was* unannotated, and that is worth fixing on its own account: an opaque
+call in the middle of a loop is a barrier to forwarding a store or hoisting a
+load for every other value in that loop. `khora_alloc` now carries `noalias`
+on its return, `nounwind`, and `memory(inaccessiblemem: readwrite)`, all three
+true of `crates/khora-rt/src/heap.rs` and none of them stated before.
 
-Above, this document says that when memory is allocated is not observable, and
-cites `docs/design/compatibility.md` deciding so in advance "precisely so this
-work would be legal".
+It changed the allocation count by nothing at all — 3,506 before and 3,506
+after. Going further does not help either: declaring the pair
+`allockind("alloc,uninitialized")`/`allockind("free")` with a matching
+`alloc-family`, which is what LLVM's heap-to-stack transform reads, leaves the
+fused function byte-identical at 595 lines and six allocations.
 
-The runtime does not hold up that end. Every `khora_alloc` unconditionally
-performs two atomic read-modify-writes:
+There is a reason no annotation can be enough. Every `khora_alloc`
+unconditionally performs two atomic read-modify-writes:
 
 ```rust
 ALLOC_COUNT.fetch_add(1, COUNTER_ORDER);
 LIVE_COUNT.fetch_add(1, COUNTER_ORDER);
 ```
 
-`crates/khora-rt/src/counters.rs` opens by saying "None of it is load-bearing",
-and it is in every release binary. That makes removing an allocation not merely
-hard for the optimiser but **illegal**: the counters are a side effect, and a
-correct compiler must keep them. The instrument this phase measures itself with
-is also the thing preventing the phase from succeeding.
+`crates/khora-rt/src/counters.rs` opens by saying "None of it is
+load-bearing", and it is in every release binary. Removing an allocation is
+therefore not merely hard for the optimiser but **illegal**: the counters are a
+side effect and a correct compiler must keep them. This document says above
+that allocation timing is unobservable, citing a decision taken in advance
+"precisely so this work would be legal"; the runtime does not hold up that end.
+Whatever else changes, the counters want to be a runtime feature the test
+harness turns on and a shipped program does not — and both have to be possible
+in the same build, or the exit criterion cannot be checked in a binary it can
+be met in.
 
-The exit criterion — zero allocations for a `map` over a uniquely-owned list —
-therefore cannot be met while the counters are compiled in unconditionally, and
-cannot be *checked* if they are compiled out. Both need to be possible in the
-same build of the compiler: the counters want to be a runtime feature that the
-test harness turns on and a shipped program does not.
+### It is §1, and the shape of the evidence is unusually clean
 
-### Every construction is a heap object
+Three walks over the same thousand-element list, counted:
 
-`Range::Of(from + 1, to)` is two integers and it becomes a heap allocation with
-a header and a refcount, because there is no other representation for a
-constructed value. So does the `Step` wrapping it, and so does each adapter
-record an inner stage hands outward. Six of the seven allocations a yielded
-element costs are values that are born, read once by the next stage, and die
-without their address ever being taken.
+| walk | allocations |
+| --- | --- |
+| recursive rebuild — `Cons(head + 1, increment(tail))` | 0 |
+| `for n in xs`, which builds a `Step` per element | 1,000 |
+| a hand-written `loop`/`match`, which builds nothing | 0 |
 
-§1 and §4 make each of those cheaper or shorter-lived. None of them makes a
-two-word record stop being a heap object, and that is the largest of the three
-by some distance — it is a change to how values are represented, not to where
-reference-count operations go.
+And, narrower still, the same `Iterator::next` reached two ways — recursively,
+and from a `loop` — is 0 allocations against 1,000. The callee is identical.
+Reuse fires perfectly through a recursive frame and not at all through a back
+edge.
 
-### What this implies about ordering
+The cause is one rule in `lastuse.rs`:
 
-The first two are small and the third is not, which inverts the obvious order.
-Attributes on the allocator are a contained change to
-`crates/khora-codegen-llvm/src/runtime.rs`. Making the counters opt-out is
-mostly test plumbing, and every leak assertion in the repository reads them, so
-the default has to stay on. Both are worth doing before any of §1, because
-until they are done **no measurement of this phase can distinguish work that
-succeeded from work the optimiser was forbidden to keep.**
+```rust
+// A loop's body may run many times, so a read in it is never a last
+// use — the next turn may want the value again.
+```
+
+So a cursor is copied on the way into `next`, the cell arrives with two
+references, `khora_drop_reuse` finds it shared and returns no token, and
+`khora_alloc_reuse` allocates instead of building where the `Cons` was. Sound,
+and it says that nothing in any loop is ever handed over.
+
+**A spike on the `loop-lastuse-spike` branch takes that 1,000 to 0**, with the
+walk still summing correctly, on four changes: a real backward-liveness fixed
+point over the body, an assignment ending what its binding held, a take
+clearing the slot even where nothing unwinds, and a `break` taking its live set
+from after the loop rather than from the back edge.
+
+The fourth is unsound and it is the one the win rests on — with it reverted the
+other three buy nothing, and with it in, `std`'s own pipeline overflows the
+stack on a ten-element range. It is not a bug to chase. It is precisely what §1
+above lists as the hard part and does not attempt: a `break` leaves scopes
+early, so what a frame owns there depends on how far execution got, and the
+cleanup stack is positional. **Fusion in this language is that paragraph, and
+not a representation change and not an LLVM flag.**
+
+Unboxing small values — `docs/roadmap.md` §"Unboxed records", which
+`bench/iteration` has measured the cost of for `for` loops since before these
+combinators existed — is still worth doing and would remove the stores and the
+reference counting that survive after this. It is not what stands between a
+combinator pipeline and zero allocations.
 
 ## What this does not change
 
