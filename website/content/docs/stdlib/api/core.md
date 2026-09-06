@@ -804,12 +804,32 @@ type Item;
 
 What the iteration yields.
 
+##### Effects
+
+```khora
+type Effects;
+```
+
+**What pulling from it requires**, which is what makes this one trait
+rather than two.
+
+`Effects = {}` is an ordinary iterator over something already in memory:
+`Range` and `List` below, and a `for` loop over either asks its enclosing
+function for nothing. `Effects = { fs: FsRead }` is a stream of the lines
+of a file, and a `for` loop over *that* requires `fs` of whoever wrote it,
+because pulling the next line reads the disk.
+
+Rust needs `Iterator`, `Stream` and `AsyncIterator` for this, and Effect
+needs `Iterable` and `Stream`, because in both of them an effect changes a
+function's *type*. Here it is a row, and a row can be empty -- so one
+trait, one set of combinators, written once.
+
 #### Functions
 
 ##### next
 
 ```khora
-fn next(self) -> Step<Self, Self::Item>
+fn next(self) -> Step<Self, Self::Item> with Self::Effects
 ```
 
 The next item and the iterator that follows it, or `Done`.
@@ -4999,6 +5019,12 @@ impl Iterator for Range
 type Item = Int;
 ```
 
+##### Effects
+
+```khora
+type Effects = {};
+```
+
 #### Functions
 
 ##### next
@@ -5075,6 +5101,12 @@ impl<A> Iterator for List<A>
 
 ```khora
 type Item = A;
+```
+
+##### Effects
+
+```khora
+type Effects = {};
 ```
 
 #### Functions

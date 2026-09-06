@@ -467,7 +467,31 @@ compiles, and means a caller supplies the capability to *construct* a pipeline
 rather than to consume it; a stream that reads its source when you assemble it
 is not lazy. `map` and `zip` over an effectful stream both compile now.
 
-**What is left is hiding the state.** Successor passing works and needs no
+**Done, and not as a new type.** `Iterator` carries the row:
+
+    pub trait Iterator {
+      type Item;
+      type Effects;
+      fn next(self) -> Step<Self, Self::Item> with Self::Effects;
+    }
+
+`Effects = {}` is `Range` and `List`, and a `for` over either asks its enclosing
+function for nothing. `Effects = { fs: FsRead }` is the lines of a file, and the
+same `for` requires `fs` of whoever wrote it. **One trait**, one set of
+combinators, written once -- where Rust needs `Iterator`, `Stream` and
+`AsyncIterator`, and Effect needs `Iterable` and `Stream`, because in both an
+effect changes a function's *type* rather than being a row that can be empty.
+
+Two compiler changes made it possible, both of them defects rather than
+features: a closure could not carry a row variable, and `with Self::Effects` was
+read as a capability *named* that. Neither was about streams; both were found by
+trying to write one.
+
+**And the state problem dissolved with it.** `Self` is the state, so nothing
+leaks: the `Stream<S, A, 'ef>` shape below was the thing that needed an
+existential, and a trait needs none.
+
+**What the record shape was for.** Successor passing works and needs no
 mutation -- just as well, since a closure cannot mutate a capture and a `Shared`
 cell would put a lock on every element -- but `Stream<S, A, 'ef>` puts the state
 in the type. `map` keeps `S`; `zip` makes it `(S1, S2)` and it grows from there,

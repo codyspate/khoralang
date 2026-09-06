@@ -228,3 +228,58 @@ fn main() -> Int {{
     );
     assert_eq!(out, "mapped 11 12\nkept 2 3\ntotal 6\n");
 }
+
+/// **One `for` loop, over an iterator and over a stream.**
+///
+/// `Iterator::next` requires `Self::Effects`, so an implementation decides
+/// whether pulling costs anything. `Range` says `{}` and a `for` over it asks
+/// its enclosing function for nothing; a source whose `next` performs an effect
+/// says so, and the same `for` requires it of whoever wrote it.
+///
+/// Rust needs `Iterator`, `Stream` and `AsyncIterator` to say this, and Effect
+/// needs `Iterable` and `Stream`, because in both an effect changes a
+/// function's *type*. Here it is a row, and a row can be empty -- so one trait,
+/// and one set of combinators written once.
+#[test]
+fn a_for_loop_walks_a_pure_iterator_and_an_effectful_one() {
+    let out = run(
+        "iterator_effects",
+        "module main;
+import std::core::{Iterator, Range, Step, print};
+
+pub effect Tick { now: () -> Int }
+
+pub type Ticks = { left: Int };
+
+impl Iterator for Ticks {
+  type Item = Int;
+  type Effects = { tick: Tick };
+  fn next(self) -> Step<Ticks, Int> with { tick: Tick } {
+    if self.left <= 0 { Step::Done } else { Step::Yield({ left: self.left - 1 }, tick.now()) }
+  }
+}
+
+const clock = handler for Tick { now: fn () => 7 };
+
+fn pure_sum() -> Int {
+  let mut total = 0;
+  for n in Range::Of(0, 5) { total = total + n; }
+  total
+}
+
+fn tick_sum() -> Int with { tick: Tick } {
+  let mut total = 0;
+  let src: Ticks = { left: 3 };
+  for n in src { total = total + n; }
+  total
+}
+
+pub fn main() -> () {
+  print(Int::to_string(pure_sum()));
+  with { tick: clock } { print(Int::to_string(tick_sum())) }
+}
+",
+    );
+    // 0+1+2+3+4, then 7 three times.
+    assert_eq!(out, "10\n21\n");
+}
