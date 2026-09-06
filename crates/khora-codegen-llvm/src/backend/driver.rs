@@ -192,10 +192,20 @@ pub(super) fn build(
     // One emitted function per *specialization*, not per source function: a
     // generic body has no machine representation until its type arguments are
     // known, and a generic function nobody calls is not emitted at all.
+    // **Whole-program, because a generic body is specialized at types its own
+    // module never saw.** `Mapped<I, B>`'s `next` lives in `std::core` and is
+    // compiled at an iterator the application declared; resolving `I::Item` and
+    // `I::Effects` needs that application's impl, which `std::core`'s own map
+    // does not contain. Same argument as `mono`'s merged `Traits`.
+    let assoc: Vec<khora_types::unify::AssocBinding> = files
+        .iter()
+        .flat_map(|f| khora_types::type_map(db, *f).traits.assoc_bindings())
+        .collect();
+
     for (instance, _) in &mono.instances {
         let home = mono.home(&instance.symbol());
         let scope = home.map(|h| khora_types::type_map(db, h)).unwrap_or(&types);
-        if let Some(signature) = specialized_signature(scope, instance) {
+        if let Some(signature) = specialized_signature(scope, instance, &assoc) {
             backend.register_instance(&instance.symbol(), signature);
         }
     }
@@ -564,6 +574,7 @@ fn declare_closures(
 fn specialized_signature(
     types: &TypeMap,
     instance: &khora_types::mono::Instance,
+    assoc: &[khora_types::unify::AssocBinding],
 ) -> Option<Signature> {
     let signature = types.signatures.get(&instance.function)?;
     if instance.args.is_empty() {
@@ -580,11 +591,10 @@ fn specialized_signature(
     // `Int`. A default method that mentions an associated type in its
     // signature -- which every `Iterator` combinator does -- otherwise reaches
     // here as a type the backend cannot lay out.
-    let assoc = types.traits.assoc_bindings();
     let settle = |t: &Type| {
         khora_types::unify::normalize_projections(
             &khora_types::unify::substitute(t, &mapping),
-            &assoc,
+            assoc,
         )
     };
     Some(Signature {

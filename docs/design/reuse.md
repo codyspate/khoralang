@@ -502,6 +502,98 @@ The test is a counting-allocator assertion in the codegen suite, in the shape
 first, marked as the target, and watched to fail — a phase whose exit criterion
 passes before the work starts was measuring the wrong thing.
 
+## What a combinator pipeline actually costs
+
+`std::core::Iterator` now carries an effect row and ships `map`, `filter`,
+`take`, `fold`, `each` and `count`, so the workload this document was written
+against can be measured directly rather than described. Counted with
+`khora_alloc_count()` over `filter |> map |> fold` on a `Range`:
+
+| n (input elements) | allocations |
+| --- | --- |
+| 1,000 | 3,506 |
+| 2,000 | 7,006 |
+
+**Three and a half allocations per input element, and the release build is
+byte-for-byte the same number as the debug build.** LLVM removes none of them.
+
+`combinators::a_pipeline_materialises_nothing` pins the half of this that is
+already right: live objects during the walk are flat in `n`, so no stage
+materialises its output. Flat is not free, though — each `next` allocates its
+`Step` and its successor record and then frees them, and a live count cannot
+see churn. The two measurements answer different questions and only the
+allocation count answers this one.
+
+Three things stand between that number and zero, and they are independent.
+
+### The allocator is opaque to LLVM
+
+`khora_alloc` is declared with no attributes at all:
+
+```llvm
+declare ptr @khora_alloc(i64, i32) local_unnamed_addr
+```
+
+So LLVM assumes it may read and write every byte of memory the program can
+name, and that the pointer it returns may alias anything. Neither is true: the
+implementation in `crates/khora-rt/src/heap.rs` touches the global allocator,
+two counters and a thread-local, never calls back into generated code, and
+returns fresh memory. `noalias` on the return and
+`memory(inaccessiblemem: readwrite)` are both sound and neither is stated.
+The cost is not only the allocations that survive — an opaque call in the
+middle of a loop is a barrier to store forwarding and to hoisting for every
+*other* value in that loop.
+
+### The counters make allocation observable
+
+Above, this document says that when memory is allocated is not observable, and
+cites `docs/design/compatibility.md` deciding so in advance "precisely so this
+work would be legal".
+
+The runtime does not hold up that end. Every `khora_alloc` unconditionally
+performs two atomic read-modify-writes:
+
+```rust
+ALLOC_COUNT.fetch_add(1, COUNTER_ORDER);
+LIVE_COUNT.fetch_add(1, COUNTER_ORDER);
+```
+
+`crates/khora-rt/src/counters.rs` opens by saying "None of it is load-bearing",
+and it is in every release binary. That makes removing an allocation not merely
+hard for the optimiser but **illegal**: the counters are a side effect, and a
+correct compiler must keep them. The instrument this phase measures itself with
+is also the thing preventing the phase from succeeding.
+
+The exit criterion — zero allocations for a `map` over a uniquely-owned list —
+therefore cannot be met while the counters are compiled in unconditionally, and
+cannot be *checked* if they are compiled out. Both need to be possible in the
+same build of the compiler: the counters want to be a runtime feature that the
+test harness turns on and a shipped program does not.
+
+### Every construction is a heap object
+
+`Range::Of(from + 1, to)` is two integers and it becomes a heap allocation with
+a header and a refcount, because there is no other representation for a
+constructed value. So does the `Step` wrapping it, and so does each adapter
+record an inner stage hands outward. Six of the seven allocations a yielded
+element costs are values that are born, read once by the next stage, and die
+without their address ever being taken.
+
+§1 and §4 make each of those cheaper or shorter-lived. None of them makes a
+two-word record stop being a heap object, and that is the largest of the three
+by some distance — it is a change to how values are represented, not to where
+reference-count operations go.
+
+### What this implies about ordering
+
+The first two are small and the third is not, which inverts the obvious order.
+Attributes on the allocator are a contained change to
+`crates/khora-codegen-llvm/src/runtime.rs`. Making the counters opt-out is
+mostly test plumbing, and every leak assertion in the repository reads them, so
+the default has to stay on. Both are worth doing before any of §1, because
+until they are done **no measurement of this phase can distinguish work that
+succeeded from work the optimiser was forbidden to keep.**
+
 ## What this does not change
 
 **Nothing a program can observe.** `docs/design/compatibility.md` decides that

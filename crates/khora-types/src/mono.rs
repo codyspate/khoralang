@@ -374,7 +374,14 @@ fn walk(db: &dyn Db, files: &[SourceFile]) -> Instances {
             .zip(&instance.args)
             .map(|(g, a)| (g.as_str(), a.clone()))
             .collect();
-        let assoc = unit.types.traits.assoc_bindings();
+        // **Whole-program, for the reason `select_impl_in` is.** A generic is
+        // compiled once per type it is used at, and that type's impl is often
+        // in a module the generic has never heard of: `Mapped<I, B>`'s `next`
+        // lives in `std::core` and is specialized at an iterator the
+        // application declared, whose `type Item` `std::core` cannot see. The
+        // unit's own bindings resolve `Range::Item` and leave `Ticks::Item`
+        // for the backend to trip over.
+        let assoc = whole.assoc_bindings();
         let specialized = generic.specialized(&mapping, &assoc);
         let owner = instance.symbol();
 
@@ -483,7 +490,22 @@ fn defining(units: &[Unit<'_>], from: usize, name: &str) -> Option<(usize, Strin
     //
     // A bare name this file neither defines nor imports is a C symbol it
     // declared, and the caller's `None` branch handles it.
-    if !name.contains('#') {
+    // **A trait's *default* method is `Iterator::count`: `::` but no `#`.**
+    // `select_impl` returns `None` for a method an impl leaves to the trait and
+    // keeps the trait's own key, so no impl head is in the name. It travelled
+    // in with its trait exactly as a compound key does, and searching for it is
+    // safe for the same reason the `#` case is: the name resolves to a trait
+    // this file can see, which an `extern fn` somebody declared never does.
+    //
+    // Without this a default body worked in the module that declared the trait
+    // and nowhere else -- `Iterator::count has no body, so there is nothing to
+    // call`, about a body that is sitting in `std::core`. Nothing had noticed
+    // because no `std` trait had a default body until `Iterator` grew its
+    // combinators.
+    let names_a_trait_method = name.split_once("::").is_some_and(|(owner, method)| {
+        units[from].types.traits.traits.get(owner).is_some_and(|d| d.method(method).is_some())
+    });
+    if !name.contains('#') && !names_a_trait_method {
         return None;
     }
 

@@ -302,3 +302,132 @@ fn a_generic_adapter_resolves_its_projections() {
     // 2*(0+1+2+3+4), then the first item of the source.
     assert_eq!(out, "20\n0\n");
 }
+
+/// `filter`, `map` and `fold` over a `Range`, composed as methods on the
+/// trait rather than as free functions over a concrete type.
+///
+/// The adapters are generic records -- `Mapped<Filtered<Range>, Int>` here --
+/// so this only compiles once monomorphization can resolve `I::Item` through
+/// a chain of them.
+#[test]
+fn combinators_compose_over_a_range() {
+    let out = run(
+        "combinators_range",
+        r#"module main;
+import std::core::{Iterator, Range, print};
+
+pub fn main() -> () {
+  let total = Iterator::fold(
+    Iterator::map(Iterator::filter(Range::Of(0, 10), fn i => i % 2 == 0), fn i => i * 2),
+    0,
+    fn (acc, i) => acc + i,
+  );
+  print(Int::to_string(total));
+}
+"#,
+    );
+    // 0 2 4 6 8, doubled, summed.
+    assert_eq!(out.trim(), "40");
+}
+
+/// `take` and `count` over a `List`, which is a different `impl Iterator`.
+#[test]
+fn take_and_count_walk_a_list() {
+    let out = run(
+        "combinators_take",
+        r#"module main;
+import std::core::{Iterator, List, print};
+
+pub fn main() -> () {
+  print(Int::to_string(Iterator::count(Iterator::take([1, 2, 3, 4, 5], 2))));
+}
+"#,
+    );
+    assert_eq!(out.trim(), "2");
+}
+
+/// The adapters are effect-polymorphic: a source whose `next` performs an
+/// effect carries that row out through `map` and `fold`.
+///
+/// This is what `type Effects` on the trait buys. Without it `Iterator` would
+/// be a pure-only interface and an effectful source could not implement it,
+/// which is the trap Rust's `Iterator` is in.
+#[test]
+fn combinators_carry_the_sources_effect_row() {
+    let out = run(
+        "combinators_effects",
+        r#"module main;
+import std::core::{Iterator, Step, print};
+
+pub effect Tick { now: () -> Int }
+
+pub type Ticks = { left: Int };
+
+impl Iterator for Ticks {
+  type Item = Int;
+  type Effects = { tick: Tick };
+  fn next(self) -> Step<Ticks, Int> with { tick: Tick } {
+    if self.left <= 0 { Step::Done } else { Step::Yield({ left: self.left - 1 }, tick.now()) }
+  }
+}
+
+const clock = handler for Tick { now: fn () => 3 };
+
+pub fn main() -> () {
+  let src: Ticks = { left: 3 };
+  with { tick: clock } {
+    print(Int::to_string(Iterator::fold(Iterator::map(src, fn n => n * 2), 0, fn (acc, n) => acc + n)))
+  }
+}
+"#,
+    );
+    // Three ticks of 3, doubled, summed.
+    assert_eq!(out.trim(), "18");
+}
+
+/// A pipeline holds a bounded number of objects however long the source is.
+///
+/// Sampled *during* the fold, on the last element, so it sees what is live
+/// mid-walk rather than after cleanup. A stage that materialised its output
+/// -- the way a `map` that builds a list does -- would grow with `n`; these
+/// hand each element straight to the next stage.
+///
+/// Note what this does *not* say: the count being flat rules out
+/// accumulation, not per-element churn. Each `next` still allocates its
+/// `Step` and its successor record, and `docs/design/reuse.md` has the
+/// measurement and what removing them needs.
+#[test]
+fn a_pipeline_materialises_nothing() {
+    let out = run(
+        "combinators_live",
+        r#"module main;
+import std::core::{Iterator, Range, print};
+
+extern fn khora_live_count() -> Int;
+
+fn live_during(n: Int) -> Int {
+  Iterator::fold(
+    Iterator::map(Iterator::filter(Range::Of(0, n), fn i => i % 2 == 0), fn i => i * 2),
+    0,
+    fn (acc, i) => if i >= (n - 2) * 2 { khora_live_count() } else { acc },
+  )
+}
+
+pub fn main() -> () {
+  print(Int::to_string(live_during(100)));
+  print(Int::to_string(live_during(1000)));
+  print(Int::to_string(live_during(10000)));
+}
+"#,
+    );
+    let counts: Vec<&str> = out.trim().lines().collect();
+    assert_eq!(counts.len(), 3, "three samples: {out}");
+    assert_eq!(
+        counts[0], counts[1],
+        "live objects grew between n=100 and n=1000: {out}"
+    );
+    assert_eq!(
+        counts[1], counts[2],
+        "live objects grew between n=1000 and n=10000: {out}"
+    );
+}

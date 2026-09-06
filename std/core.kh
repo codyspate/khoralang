@@ -1531,6 +1531,52 @@ pub trait Iterator {
   type Effects;
   /// The next item and the iterator that follows it, or `Done`.
   fn next(self) -> Step<Self, Self::Item> with Self::Effects;
+
+  /// Each item put through `f`. Nothing is pulled until something asks.
+  fn map<B>(self, f: (Self::Item) -> B) -> Mapped<Self, B> {
+    { inner: self, f: f }
+  }
+
+  /// The items `keep` answers true for.
+  fn filter(self, keep: (Self::Item) -> Bool) -> Filtered<Self> {
+    { inner: self, keep: keep }
+  }
+
+  /// At most the first `n`.
+  fn take(self, n: Int) -> Taken<Self> {
+    { inner: self, left: n }
+  }
+
+  /// Walks to the end, carrying `init` through `f`.
+  ///
+  /// **The consumer is where the effects happen.** `map` and `filter` build a
+  /// description and require nothing; this is what pulls, so this is what
+  /// carries `Self::Effects` -- which is why a pipeline over a file asks for
+  /// `fs` at the fold and not at the `map`.
+  fn fold<B>(self, init: B, f: (B, Self::Item) -> B) -> B with Self::Effects {
+    let mut carried = init;
+    let mut cursor = self;
+    loop {
+      match Iterator::next(cursor) {
+        Step::Done => break carried,
+        Step::Yield(rest, item) => {
+          carried = f(carried, item);
+          cursor = rest;
+        },
+      }
+    }
+  }
+
+  /// `f` on each item, for the effect rather than the answer.
+  fn each(self, f: (Self::Item) -> ()) -> () with Self::Effects {
+    Iterator::fold(self, (), fn (_acc, item) => f(item))
+  }
+
+  /// How many items it yields. Walks the whole thing, so it is not free on a
+  /// stream that reads a socket.
+  fn count(self) -> Int with Self::Effects {
+    Iterator::fold(self, 0, fn (n, _item) => n + 1)
+  }
 }
 
 /// `Range::Of(from, to)` yields `from` up to but not including `to`.
@@ -1767,6 +1813,86 @@ impl<A> Iterator for List<A> {
     match self {
       List::Nil => Step::Done,
       List::Cons(h, t) => Step::Yield(t, h),
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Iterator adapters
+// ---------------------------------------------------------------------------
+//
+// **A record per adapter, the way Rust does it, and for the same reason.** Each
+// wraps the iterator it came from and implements `Iterator` itself, so a chain
+// is a nest of records whose `next` calls the one inside it. Whole-program
+// monomorphization makes every one of those calls direct and known, which is
+// what lets a `map` over a `filter` over a `Range` come out as one loop with
+// nothing allocated between the stages.
+//
+// The alternative -- a closure per stage, the shape Effect's `Stream` has --
+// costs an indirect call and a heap value per element and cannot fuse.
+//
+// **Each adapter's row is the row of what it wraps.** `Effects = I::Effects`,
+// so mapping a pure function over a file's lines still requires `fs` and
+// nothing more. The function itself is pure: an *effectful* `f` would make the
+// adapter's row the union of two, and a union in an associated type is not
+// something this can spell yet. `List::map` takes an effectful function and is
+// the thing to reach for until it can.
+
+/// `it.map(f)`: the same walk, with each item put through `f`.
+pub type Mapped<I, B> = { inner: I, f: (I::Item) -> B };
+
+impl<I: Iterator, B> Iterator for Mapped<I, B> {
+  type Item = B;
+  type Effects = I::Effects;
+  fn next(self) -> Step<Mapped<I, B>, B> with Self::Effects {
+    match Iterator::next(self.inner) {
+      Step::Done => Step::Done,
+      Step::Yield(rest, item) => Step::Yield({ inner: rest, f: self.f }, (self.f)(item)),
+    }
+  }
+}
+
+/// `it.filter(keep)`: the items `keep` answers true for.
+pub type Filtered<I> = { inner: I, keep: (I::Item) -> Bool };
+
+impl<I: Iterator> Iterator for Filtered<I> {
+  type Item = I::Item;
+  type Effects = I::Effects;
+  /// **One `next` may pull many times**, which is the whole of what a filter
+  /// is: it walks until something is kept or the source runs out, so a caller
+  /// never sees a step that yielded nothing.
+  fn next(self) -> Step<Filtered<I>, I::Item> with Self::Effects {
+    let mut cur = self.inner;
+    loop {
+      match Iterator::next(cur) {
+        Step::Done => break Step::Done,
+        Step::Yield(rest, item) => if (self.keep)(item) {
+          break Step::Yield({ inner: rest, keep: self.keep }, item)
+        } else {
+          cur = rest
+        },
+      }
+    }
+  }
+}
+
+/// `it.take(n)`: at most the first `n` items.
+pub type Taken<I> = { inner: I, left: Int };
+
+impl<I: Iterator> Iterator for Taken<I> {
+  type Item = I::Item;
+  type Effects = I::Effects;
+  /// **The count is checked before the pull**, so `take(0)` on a stream that
+  /// reads a socket reads nothing at all. A `take` that pulled first and then
+  /// discarded would be a different program.
+  fn next(self) -> Step<Taken<I>, I::Item> with Self::Effects {
+    if self.left <= 0 {
+      Step::Done
+    } else {
+      match Iterator::next(self.inner) {
+        Step::Done => Step::Done,
+        Step::Yield(rest, item) => Step::Yield({ inner: rest, left: self.left - 1 }, item),
+      }
     }
   }
 }

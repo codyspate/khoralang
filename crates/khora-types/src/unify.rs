@@ -876,10 +876,24 @@ fn normalize_projections_to(ty: &Type, assoc: &[AssocBinding], depth: u32) -> Ty
             Type::Applied { head: Box::new(go(head)), args: args.iter().map(&go).collect() }
         }
         Type::Tuple(items) => Type::Tuple(items.iter().map(&go).collect()),
-        Type::Row { fields, tail } => Type::row(
-            fields.iter().map(|(l, t)| (l.clone(), go(t))).collect(),
-            tail.as_ref().map(|t| go(t)),
-        ),
+        Type::Row { fields, tail } => {
+            let mut fields: Vec<(String, Type)> =
+                fields.iter().map(|(l, t)| (l.clone(), go(t))).collect();
+            // **A tail that resolves to a row is spliced, not nested**, the
+            // same way `substitute` splices `{ a | 'e }` with `'e := { b }`.
+            // `with I::Effects` is a row whose *tail* is the projection, so
+            // normalizing it produces exactly this shape -- and a row nested
+            // in a tail names no labels, so the evidence a function was handed
+            // could not be found and every call through an adapter reported
+            // the capability "not in scope".
+            match tail.as_ref().map(|t| go(t)) {
+                Some(Type::Row { fields: more, tail }) => {
+                    fields.extend(more);
+                    Type::row(fields, tail.map(|t| *t))
+                }
+                other => Type::row(fields, other),
+            }
+        }
         other => other.clone(),
     }
 }
