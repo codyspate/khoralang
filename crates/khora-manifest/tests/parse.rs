@@ -63,23 +63,26 @@ fn the_reference_manifest_parses_with_no_warnings() {
     assert_eq!(fmt.indent_style, Some(IndentStyle::Space));
     assert_eq!(fmt.indent_width, Some(2));
 
+    // **Which lints the example configures is not this test's business**, and
+    // it was written as though it were: it pinned `cyclomatic-complexity` and
+    // `unused-capabilities`, one lint that does not exist and one misspelling
+    // of `unused-capability`, so correcting the example broke a test about the
+    // parser. The property it was reaching for -- that a bare level and a table
+    // land in the same map -- has its own synthetic test below,
+    // `lints_accept_a_bare_level_or_a_table`, which is where it belongs.
     assert_eq!(
         manifest.lints.keys().collect::<Vec<_>>(),
-        ["cyclomatic-complexity", "unused-capabilities"],
-        "both lint spellings should land in the same map"
+        ["unused-capability"],
+        "a `[lints]` entry lands in the map under the name as written"
     );
-    assert_eq!(manifest.lints["unused-capabilities"].level, LintLevel::Deny);
-    assert_eq!(manifest.lints["cyclomatic-complexity"].level, LintLevel::Warn);
-    assert_eq!(
-        manifest.lints["cyclomatic-complexity"].option("max").and_then(toml::Value::as_integer),
-        Some(15),
-        "lint-defined options should be kept as written"
-    );
+    assert_eq!(manifest.lints["unused-capability"].level, LintLevel::Deny);
 
-    assert!(
-        manifest.dependencies.is_empty(),
-        "`std` is found beside the compiler rather than declared, so the reference \
-         application depends on nothing yet"
+    // `std` is found beside the compiler rather than declared. `ai` is
+    // declared, because it stopped being `std::ai` -- `docs/design/std-surface.md`.
+    assert_eq!(
+        manifest.dependencies.keys().collect::<Vec<_>>(),
+        ["ai"],
+        "the reference application depends on the package the model vocabulary moved to"
     );
 
     let build = manifest.build.expect("the reference manifest configures `[build]`");
