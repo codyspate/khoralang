@@ -191,7 +191,7 @@ fn from_paths(db: &dyn Db, root: SourceRoot, file: SourceFile, out: &mut Vec<Tok
         let last = match khora_hir::resolve_path(db, root, file, &names) {
             Ok(Resolution::Item { kind, .. }) => Some(match kind {
                 ItemKind::Type => TYPE,
-                ItemKind::Trait | ItemKind::Effect => INTERFACE,
+                ItemKind::Trait | ItemKind::Effect | ItemKind::Row => INTERFACE,
                 ItemKind::Context => NAMESPACE,
                 ItemKind::Function => FUNCTION,
                 ItemKind::Const => VARIABLE,

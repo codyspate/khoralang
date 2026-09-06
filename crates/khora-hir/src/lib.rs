@@ -54,6 +54,8 @@ pub enum ItemKind {
     Function,
     Const,
     Context,
+    /// `row Deps = { db: Db };` — a name for a set of capabilities.
+    Row,
 }
 
 impl ItemKind {
@@ -62,6 +64,7 @@ impl ItemKind {
             ItemKind::Type => "type",
             ItemKind::Trait => "trait",
             ItemKind::Effect => "effect",
+            ItemKind::Row => "row",
             ItemKind::Function => "function",
             ItemKind::Const => "constant",
             ItemKind::Context => "context",
@@ -474,6 +477,9 @@ fn collect_decl(decl: &ast::Decl, map: &mut ItemMap) {
         }
         ast::Decl::Effect(e) => {
             (e.name(), ItemKind::Effect, e.is_exported(), e.syntax().text_range())
+        }
+        ast::Decl::Row(r) => {
+            (r.name(), ItemKind::Row, r.is_exported(), r.syntax().text_range())
         }
         ast::Decl::Context(c) => {
             (c.name(), ItemKind::Context, c.is_exported(), c.syntax().text_range())

@@ -199,6 +199,15 @@
           }
         },
         {
+          "comment": "`row Deps = { .. };` is a keyword only at the start of a declaration. `row` is an ordinary word for a database row and `Row` is a type in `std::db`, so anything not in declaration position is left alone.",
+          "match": "^\\s*(?:pub\\s+)?(row)\\b(?=\\s)",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.khora"
+            }
+          }
+        },
+        {
           "comment": "`test \"name\" { .. }` and `bench \"name\" { .. }`: the name string is what distinguishes the declaration from a call.",
           "match": "\\b(test|bench)\\b(?=\\s*\")",
           "captures": {

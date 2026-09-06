@@ -57,6 +57,7 @@ pub enum SyntaxKind {
     FOR_KW,
     IN_KW,
     CONTEXT_KW,
+    ROW_KW,
     CATCH_KW,
     TEST_KW,
     BENCH_KW,
@@ -131,6 +132,8 @@ pub enum SyntaxKind {
     /// The `A + B` after `:` on a type parameter, a trait, or an impl.
     TYPE_BOUNDS,
     EFFECT_DECL,
+    /// `row Deps = { db: Db };` — a name for a set of capabilities.
+    ROW_DECL,
     CONTEXT_DECL,
     TEST_DECL,
     BENCH_DECL,
@@ -377,7 +380,7 @@ keywords! {
     "false" => FALSE_KW,
 }
 
-// Reserving these four would cost more than it buys: they are the obvious names
+// Reserving these would cost more than it buys: they are the obvious names
 // for a request callback, a dependency bundle, a variable under test and a
 // benchmark input, and `std/net/http_native.kh` already had to rename a parameter away
 // from `handler` once. Rust keeps `test` usable as an identifier for the same
@@ -391,6 +394,11 @@ contextual_keywords! {
     "handler" => HANDLER_KW,
     "in" => IN_KW,
     "context" => CONTEXT_KW,
+    // `row Deps = { .. }`, and only at declaration position. `row` and `Row`
+    // are ordinary words -- `std::db` exports a `Row` and eighty places name a
+    // local `row` -- so reserving it outright would rename them for one
+    // declaration form nobody writes twice a day.
+    "row" => ROW_KW,
     "test" => TEST_KW,
     "bench" => BENCH_KW,
     // `derive(..)` only, and only immediately before `type`. Rust spells it as

@@ -99,6 +99,7 @@ fn kind_of(kind: ItemKind) -> SymbolKind {
         ItemKind::Type => SymbolKind::STRUCT,
         ItemKind::Trait => SymbolKind::INTERFACE,
         ItemKind::Effect => SymbolKind::INTERFACE,
+        ItemKind::Row => SymbolKind::INTERFACE,
         ItemKind::Context => SymbolKind::NAMESPACE,
         ItemKind::Function => SymbolKind::FUNCTION,
         ItemKind::Const => SymbolKind::CONSTANT,

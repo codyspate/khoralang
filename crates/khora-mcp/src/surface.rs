@@ -71,6 +71,7 @@ fn describe(kind: ItemKind) -> &'static str {
         ItemKind::Function => "function",
         ItemKind::Const => "constant",
         ItemKind::Context => "context",
+        ItemKind::Row => "row",
     }
 }
 

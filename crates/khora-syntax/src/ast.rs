@@ -98,6 +98,7 @@ ast_node!(AssocTypeDecl, ASSOC_TYPE_DECL);
 ast_node!(TypeBounds, TYPE_BOUNDS);
 ast_node!(EffectDecl, EFFECT_DECL);
 ast_node!(ContextDecl, CONTEXT_DECL);
+ast_node!(RowDecl, ROW_DECL);
 ast_node!(TestDecl, TEST_DECL);
 ast_node!(BenchDecl, BENCH_DECL);
 ast_node!(WithClause, WITH_CLAUSE);
@@ -123,6 +124,7 @@ ast_enum!(Decl {
     Test(TestDecl),
     Bench(BenchDecl),
     Fn(FnDecl),
+    Row(RowDecl),
     Const(ConstDecl),
 });
 
@@ -1104,5 +1106,19 @@ impl RecordPat {
 impl TuplePat {
     pub fn fields(&self) -> impl Iterator<Item = Pat> {
         children(&self.0)
+    }
+}
+
+impl RowDecl {
+    pub fn is_exported(&self) -> bool {
+        token(&self.0, PUB_KW).is_some()
+    }
+    pub fn name(&self) -> Option<Name> {
+        child(&self.0)
+    }
+    /// The `{ db: Db, .. }` body. `None` when the declaration is malformed,
+    /// which the parser has already reported.
+    pub fn definition(&self) -> Option<RecordType> {
+        child(&self.0)
     }
 }

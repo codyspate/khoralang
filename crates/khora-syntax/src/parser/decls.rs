@@ -3,7 +3,8 @@
 use super::exprs::{block, expr};
 use super::patterns::pattern;
 use super::types::{
-    bounds, effect_clauses, field, name, name_ref, path, type_, type_params, variant_type,
+    bounds, effect_clauses, field, name, name_ref, path, record_type, type_, type_params,
+    variant_type,
 };
 use super::Parser;
 use crate::kind::SyntaxKind::*;
@@ -43,6 +44,7 @@ fn declaration(p: &mut Parser<'_>) {
             const_decl(p);
         }
         IDENT if p.at_contextual(CONTEXT_KW) => context_decl(p),
+        IDENT if p.at_contextual(ROW_KW) => row_decl(p),
         IDENT if p.at_contextual(TEST_KW) || p.at_contextual(BENCH_KW) => test_decl(p),
         IDENT if p.at_contextual(EXTERN_KW) => fn_decl(p),
         IDENT if p.at_contextual(DERIVE_KW) => type_decl(p),
@@ -57,6 +59,7 @@ fn declaration(p: &mut Parser<'_>) {
                 const_decl(p);
             }
             IDENT if p.nth_at_contextual(1, CONTEXT_KW) => context_decl(p),
+            IDENT if p.nth_at_contextual(1, ROW_KW) => row_decl(p),
             IDENT if p.nth_at_contextual(1, EXTERN_KW) => fn_decl(p),
             _ => p.err_recover(
                 "expected `type`, `trait`, `effect`, `context`, `fn`, `extern` or `const` \
@@ -419,6 +422,39 @@ fn context_decl(p: &mut Parser<'_>) {
         p.close(R_BRACE, brace);
     }
     m.complete(p, CONTEXT_DECL);
+}
+
+/// `pub? row Name "=" "{" ( Ident ":" Type "," )* "}" ";"`
+///
+/// A name for a set of capabilities, so a service that needs six of them says
+/// so once. The type-level counterpart of `context`, which names a bundle of
+/// the handlers that *supply* them.
+///
+/// **A row is structural and a `type` is not**, which is why this is its own
+/// declaration rather than a record type reused in `with` position. `type Deps
+/// = { db: Db }` declares a newtype that wraps a record -- a value somebody can
+/// construct, nominally distinct from every other record with those fields.
+/// Splicing its fields into an effect row would be reading a nominal
+/// declaration structurally, in one position only. Naming the row outright says
+/// what is meant, and lets the checker insist every field is an effect, which a
+/// record type cannot be asked.
+fn row_decl(p: &mut Parser<'_>) {
+    let m = p.start();
+    p.eat(PUB_KW);
+    p.bump_contextual(ROW_KW);
+    name(p);
+    if p.expect(EQ) {
+        // The body is a record type and nothing else: a row has labels, and
+        // `row Deps = Db;` would be asking for the shorthand this exists to
+        // replace.
+        if p.at(L_BRACE) {
+            record_type(p);
+        } else {
+            p.error("a `row` is a set of labelled capabilities: `row Deps = { db: Db };`");
+        }
+    }
+    p.expect(SEMICOLON);
+    m.complete(p, ROW_DECL);
 }
 
 /// `pub? fn name<Params>?(params) ("->" Type)? EffectClause* ( Block | ";" )`

@@ -657,6 +657,9 @@ fn kind_of(kind: ItemKind) -> CompletionItemKind {
         ItemKind::Type => CompletionItemKind::STRUCT,
         ItemKind::Trait => CompletionItemKind::INTERFACE,
         ItemKind::Effect => CompletionItemKind::INTERFACE,
+        // A row names a set of capabilities, so it completes like the
+        // interface each of its fields is.
+        ItemKind::Row => CompletionItemKind::INTERFACE,
         ItemKind::Context => CompletionItemKind::MODULE,
         ItemKind::Function => CompletionItemKind::FUNCTION,
         ItemKind::Const => CompletionItemKind::CONSTANT,

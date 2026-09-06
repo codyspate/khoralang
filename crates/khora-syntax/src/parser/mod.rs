@@ -168,6 +168,7 @@ impl<'a> Parser<'a> {
     pub(crate) fn at_decl_start(&self) -> bool {
         self.current().is_decl_start()
             || self.at_contextual(CONTEXT_KW)
+            || self.at_contextual(ROW_KW)
             || self.at_contextual(TEST_KW)
             || self.at_contextual(BENCH_KW)
             || self.at_contextual(DERIVE_KW)

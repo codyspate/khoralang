@@ -240,7 +240,7 @@ fn type_param(p: &mut Parser<'_>) {
 /// The same production covers records (`{ role: String }`), capability rows
 /// (`{ ledger: Ledger | 'r }`), row merges (`{ 'r1 | 'r2 }`) and the closed
 /// empty row `{}`.
-fn record_type(p: &mut Parser<'_>) -> CompletedMarker {
+pub(super) fn record_type(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     let brace = p.open(L_BRACE);
     loop {
