@@ -12,6 +12,16 @@
 
 use super::*;
 
+/// How many turns of a loop to walk before giving up on a fixed point.
+///
+/// Liveness settles in two turns for a loop that carries nothing and three for
+/// most that do, so this is slack rather than a budget. It is a bound rather
+/// than a `while` because the cost compounds through nesting -- an inner loop
+/// is re-walked once per turn of the outer one -- and a body that would take
+/// many turns is one where the conservative answer is close to the true one
+/// anyway.
+const TURNS: usize = 8;
+
 impl<'a> Planner<'a> {
     /// Hands a binding's reference to its last use instead of copying it.
     ///
@@ -153,18 +163,98 @@ impl<'a> Planner<'a> {
                 self.live_before(scrutinee, &live)
             }
 
-            // A loop's body may run many times, so a read in it is never a last
-            // use — the next turn may want the value again.
-            Expr::While { condition, body } => {
-                let mut live = after.clone();
-                live.extend(self.reads_in(condition));
-                live.extend(self.reads_in(body));
-                live
-            }
+            // **A loop's liveness is a fixed point, not a set of reads.**
+            //
+            // What is live at the end of one turn is what the next turn reads,
+            // which is what is live at the start of a turn — so the answer
+            // defines itself and has to be found by iterating. Every read in
+            // the body used to stand in for it, which is sound and says that
+            // nothing in any loop is ever a last use. That is the whole of why
+            // `for x in xs` allocates: the `Step` is built from a cell whose
+            // reference was copied on the way in, so `khora_drop_reuse` finds
+            // it shared, hands back no token, and the constructor allocates.
+            // The same walk written as recursion allocates nothing.
+            //
+            // Started from what is live after the loop and grown, so it is
+            // reached from below: every intermediate answer is *smaller* than
+            // the truth, and the loop stops the first time a turn adds
+            // nothing. Bounded by the body's bindings, so it terminates.
+            //
+            // Over-approximating here costs a copy nobody needed.
+            // Under-approximating frees something still in use, so where this
+            // does not settle it falls back to the reads, which is the old
+            // answer and the safe one.
+            //
+            // **The trial turns must not record.** `live_before` decides each
+            // read as it passes and writes that into the plan, so a turn run
+            // against a set that later grows leaves behind a take the grown set
+            // forbids. The plan is put back between turns, and the walk that
+            // records is the last one, over the settled set.
             Expr::Loop { body } => {
+                if self.holds_a_continue(body) {
+                    let mut live = after.clone();
+                    live.extend(self.reads_in(body));
+                    return live;
+                }
+                let saved = self.plan.clone();
                 let mut live = after.clone();
-                live.extend(self.reads_in(body));
-                live
+                let mut settled = false;
+                for _ in 0..TURNS {
+                    self.loop_exits.push(after.clone());
+                    let mut turn = self.live_before(body, &live);
+                    self.loop_exits.pop();
+                    self.plan = saved.clone();
+                    turn.extend(after.iter().copied());
+                    if turn.is_subset(&live) {
+                        settled = true;
+                        break;
+                    }
+                    live.extend(turn);
+                }
+                if !settled {
+                    live.extend(self.reads_in(body));
+                    return live;
+                }
+                self.loop_exits.push(after.clone());
+                let settled = self.live_before(body, &live);
+                self.loop_exits.pop();
+                settled
+            }
+            // As `Loop`, with the condition read on the way into every turn and
+            // once more on the way out.
+            Expr::While { condition, body } => {
+                if self.holds_a_continue(body) {
+                    let mut live = after.clone();
+                    live.extend(self.reads_in(condition));
+                    live.extend(self.reads_in(body));
+                    return live;
+                }
+                let saved = self.plan.clone();
+                let mut live = after.clone();
+                let mut settled = false;
+                for _ in 0..TURNS {
+                    self.loop_exits.push(after.clone());
+                    let inside = self.leaving_or_turning_again(body, &live, after);
+                    let mut turn = self.live_before(condition, &inside);
+                    self.loop_exits.pop();
+                    self.plan = saved.clone();
+                    turn.extend(after.iter().copied());
+                    if turn.is_subset(&live) {
+                        settled = true;
+                        break;
+                    }
+                    live.extend(turn);
+                }
+                if !settled {
+                    live.extend(self.reads_in(condition));
+                    live.extend(self.reads_in(body));
+                    return live;
+                }
+                self.loop_exits.push(after.clone());
+                let inside = self.leaving_or_turning_again(body, &live, after);
+                let settled = self.live_before(condition, &inside);
+                self.loop_exits.pop();
+                settled
             }
 
             // A closure's body runs when it is called, which is not here.
@@ -176,9 +266,25 @@ impl<'a> Planner<'a> {
             }
 
             // A write is not a read, and the value written is evaluated first.
+            //
+            // **Assigning a binding ends what it was holding.** The assignment
+            // drops the old value itself, so nothing after this point can want
+            // it and the read that handed it on may be a last use. Leaving it
+            // live is what kept `for x in xs` allocating: the cell reaches
+            // `khora_drop_reuse` with the loop's copy still outstanding, no
+            // token comes back, and the `Step` is allocated instead of built
+            // where the `Cons` was.
+            //
+            // Only a whole binding is ended. `s.f = v` reads `s` to find the
+            // field and leaves it holding everything else.
             Expr::Assign { target, value } => {
                 let mut live = after.clone();
-                live.extend(self.reads_in(target));
+                match self.body.expr(target).clone() {
+                    Expr::Local(local) => {
+                        live.remove(&local);
+                    }
+                    _ => live.extend(self.reads_in(target)),
+                }
                 self.live_before(value, &live)
             }
 
@@ -233,7 +339,20 @@ impl<'a> Planner<'a> {
             // and with a *later* use the binding stays live and everything
             // works. Only the exact middle case is wrong.
             Expr::Shown(inner) => self.live_before(inner, after),
-            Expr::Break(Some(v)) => self.live_before(v, after),
+            // **A `break` leaves for after the loop, not for the next turn.**
+            // What is live where it lands is the enclosing loop's own `after`,
+            // and reading the ambient set instead would claim everything the
+            // body reads is still wanted -- which makes a binding the body
+            // reassigns every turn live across its own read, and so never
+            // handed over. That is the difference between a loop that reuses
+            // the cell it matched and one that allocates.
+            Expr::Break(value) => {
+                let exit = self.loop_exits.last().cloned().unwrap_or_else(|| after.clone());
+                match value {
+                    Some(v) => self.live_before(v, &exit),
+                    None => exit,
+                }
+            }
 
             // Unreachable while `unwinds` guards this pass, and conservative if
             // that ever changes.
@@ -245,6 +364,52 @@ impl<'a> Planner<'a> {
 
             _ => after.clone(),
         }
+    }
+
+    /// What a `while`'s condition is standing in front of.
+    ///
+    /// **A `while` leaves through its condition**, so what is live after the
+    /// loop is live at the test as surely as what the next turn reads is.
+    /// Walking the body and handing the condition only *that* says the exit
+    /// path wants nothing, and a binding the body reassigns each turn is then
+    /// dead at the test -- handed over there, and read again by whatever the
+    /// loop was computing it for.
+    ///
+    /// `fresh_code` in the link shortener is the shape:
+    ///
+    /// ```khora
+    /// let mut code = draw_code();
+    /// while Dict::contains(taken, code) && tries < 10 { code = draw_code(); .. };
+    /// code
+    /// ```
+    ///
+    /// The condition took `code`, the loop then ended, and the function
+    /// returned the slot it had just cleared. A `loop` does not need this: it
+    /// leaves through `break`, which reads `loop_exits` for the same set.
+    fn leaving_or_turning_again(&mut self, body: ExprId, back: &Live, after: &Live) -> Live {
+        let mut live = self.live_before(body, back);
+        live.extend(after.iter().copied());
+        live
+    }
+
+    /// Whether anything inside `id` jumps back to a loop head.
+    ///
+    /// A `continue` goes to the back edge, and what is live there is the whole
+    /// of what the next turn reads -- not what follows the `continue` in its
+    /// block, which is nothing. Threading the back edge's set to it needs the
+    /// same stack `loop_exits` is, and until something wants it a loop holding
+    /// one keeps the conservative answer instead: sound, and `std` has no
+    /// `continue` in it to lose anything by.
+    ///
+    /// A `continue` belonging to a *nested* loop disqualifies the outer one
+    /// too. Also conservative, and it saves asking which loop each one means.
+    pub(super) fn holds_a_continue(&self, id: ExprId) -> bool {
+        if matches!(self.body.expr(id), Expr::Continue) {
+            return true;
+        }
+        let mut found = false;
+        self.each_child(id, &mut |child| found = found || self.holds_a_continue(child));
+        found
     }
 
     /// The arms of a branch, and the releases the ones that do not consume owe.
@@ -296,11 +461,26 @@ impl<'a> Planner<'a> {
         }
         candidates.retain(|local| !inside.contains(local));
         for local in candidates {
+            // **A branch can only settle a binding that is dead after it.**
+            // Releasing at the head of the arms that did not take it is right
+            // when control leaves the branch afterwards, and wrong the moment
+            // it can come back. A loop's `match` with one arm that breaks out
+            // holding the binding and one that falls through to the back edge
+            // would release it in the arm that is about to go round and read it
+            // again.
+            //
+            // `Filtered::next` is that shape exactly -- `break Step::Yield({
+            // inner: rest, keep: self.keep }, item)` against `cur = rest` --
+            // and it took `std`'s own pipeline off the stack. Nothing had
+            // reached it before because no take was ever recorded inside a
+            // loop body, so no branch inside one ever had anything to settle.
+            //
             // Every arm either takes it, or does not touch it at all.
-            let settled = takes
-                .iter()
-                .zip(&uses)
-                .all(|(take, use_)| take.contains(&local) || !use_.contains(&local));
+            let settled = !after.contains(&local)
+                && takes
+                    .iter()
+                    .zip(&uses)
+                    .all(|(take, use_)| take.contains(&local) || !use_.contains(&local));
             if !settled {
                 // Some arm reads it without taking it. Put the copies back and
                 // leave the binding to its block.
@@ -318,6 +498,18 @@ impl<'a> Planner<'a> {
             consumed.push(local);
         }
 
+        // **What is live before a branch is what its arms want, and nothing
+        // else.** Each arm was walked against `after`, so a binding the branch
+        // does not settle is already carried out by whichever arm still wants
+        // it; one that every arm consumes is put back by `consumed`, because it
+        // has to be live on the way in to be consumed at all.
+        //
+        // Adding `after` wholesale on top of that was the conservative answer
+        // and it costs the case this pass exists for: a binding every arm
+        // *ends* -- by assigning it, the way a loop reassigns the cursor it
+        // walks -- came back live, so the read that fed the branch could never
+        // be its last use. That is `for x in xs` allocating a `Step` per
+        // element where the same walk written as recursion allocates none.
         let mut live = Live::new();
         for arm in before {
             live.extend(arm);
@@ -325,7 +517,6 @@ impl<'a> Planner<'a> {
         for local in consumed {
             live.insert(local);
         }
-        live.extend(after.iter().copied());
         live
     }
 }

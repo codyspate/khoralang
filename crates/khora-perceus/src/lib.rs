@@ -235,6 +235,7 @@ pub fn plan(body: &Body, types: &khora_types::BodyTypes, defined: &Defined) -> R
         reads: Vec::new(),
         unowned: Live::new(),
         unwinds: false,
+        loop_exits: Vec::new(),
     };
     planner.plan_function();
     planner.settle_last_uses();
@@ -319,6 +320,8 @@ struct Planner<'a> {
     /// depend on how far execution got, which `docs/design/reuse.md` §1 does
     /// not attempt — so a body that can unwind keeps the conservative plan.
     unwinds: bool,
+    /// What is live *after* each enclosing loop, innermost last.
+    loop_exits: Vec<Live>,
 }
 
 // One module per pass. An inherent impl may be split across modules of one

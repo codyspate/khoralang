@@ -177,19 +177,25 @@ impl<'ctx> Lower<'_, 'ctx> {
         // binding — its last use, handed the reference the binding was holding
         // — or for one of the other reasons a read needs no copy of its own.
         //
-        // **A take in a body that can unwind clears the slot.** The block still
-        // lists the binding among what it releases, because a `raise` passing
-        // through before this point has to release it; clearing the slot is
-        // what stops the block releasing it again after. It makes "has this
-        // been handed on" a question the slot answers at run time rather than
-        // one the lowering position would have to answer at compile time — and
-        // the lowering position cannot, because two paths reach it in different
-        // states. `docs/design/reuse.md` §1.
+        // **A take clears the slot.** It makes "has this been handed on" a
+        // question the slot answers at run time rather than one the lowering
+        // position would have to answer at compile time — and the lowering
+        // position cannot, because two paths reach it in different states.
+        // `docs/design/reuse.md` §1.
         //
-        // Where nothing can unwind the answer is static, the block never lists
-        // the binding at all, and this store would be dead. That is the common
-        // case and it keeps costing nothing.
-        if self.plan.unwinds && self.plan.takes.contains(&id) {
+        // Two things ask that question. A `raise` passing through before this
+        // point has to release the binding, so the block still lists it and
+        // clearing is what stops it being released twice. And an *assignment*
+        // reads the slot to drop what it is overwriting — so a binding whose
+        // reference has been handed on must not still be sitting there, or the
+        // assignment frees it a second time. The second is why this is no
+        // longer conditional on the body unwinding: a loop that reassigns the
+        // binding it walks does not unwind and gets here every turn.
+        //
+        // `khora_drop` returns on null, so the store is all that is needed and
+        // the drop it disarms costs a branch. Where neither question is asked
+        // the store is dead and LLVM removes it.
+        if self.plan.takes.contains(&id) {
             let zero = self.be.zero_value(&ty);
             self.be.builder.build_store(slot, zero).expect("clearing a taken slot");
         }
