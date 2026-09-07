@@ -1844,10 +1844,16 @@ pub type Mapped<I, B> = { inner: I, f: (I::Item) -> B };
 impl<I: Iterator, B> Iterator for Mapped<I, B> {
   type Item = B;
   type Effects = I::Effects;
+  /// **Taken apart rather than read from.** `self.inner` *copies* the source
+  /// out of the adapter, so it reaches the inner `next` shared and the cell it
+  /// matched cannot be built in. Destructuring hands it over instead, which is
+  /// what a record pattern is for here.
   fn next(self) -> Step<Mapped<I, B>, B> with Self::Effects {
-    match Iterator::next(self.inner) {
-      Step::Done => Step::Done,
-      Step::Yield(rest, item) => Step::Yield({ inner: rest, f: self.f }, (self.f)(item)),
+    match self {
+      Mapped { inner, f } => match Iterator::next(inner) {
+        Step::Done => Step::Done,
+        Step::Yield(rest, item) => Step::Yield({ inner: rest, f: f }, (f)(item)),
+      },
     }
   }
 }
@@ -1862,16 +1868,20 @@ impl<I: Iterator> Iterator for Filtered<I> {
   /// is: it walks until something is kept or the source runs out, so a caller
   /// never sees a step that yielded nothing.
   fn next(self) -> Step<Filtered<I>, I::Item> with Self::Effects {
-    let mut cur = self.inner;
-    loop {
-      match Iterator::next(cur) {
-        Step::Done => break Step::Done,
-        Step::Yield(rest, item) => if (self.keep)(item) {
-          break Step::Yield({ inner: rest, keep: self.keep }, item)
-        } else {
-          cur = rest
-        },
-      }
+    match self {
+      Filtered { inner, keep } => {
+        let mut cur = inner;
+        loop {
+          match Iterator::next(cur) {
+            Step::Done => break Step::Done,
+            Step::Yield(rest, item) => if (keep)(item) {
+              break Step::Yield({ inner: rest, keep: keep }, item)
+            } else {
+              cur = rest
+            },
+          }
+        }
+      },
     }
   }
 }
@@ -1886,13 +1896,16 @@ impl<I: Iterator> Iterator for Taken<I> {
   /// reads a socket reads nothing at all. A `take` that pulled first and then
   /// discarded would be a different program.
   fn next(self) -> Step<Taken<I>, I::Item> with Self::Effects {
-    if self.left <= 0 {
-      Step::Done
-    } else {
-      match Iterator::next(self.inner) {
-        Step::Done => Step::Done,
-        Step::Yield(rest, item) => Step::Yield({ inner: rest, left: self.left - 1 }, item),
-      }
+    match self {
+      Taken { inner, left } =>
+        if left <= 0 {
+          Step::Done
+        } else {
+          match Iterator::next(inner) {
+            Step::Done => Step::Done,
+            Step::Yield(rest, item) => Step::Yield({ inner: rest, left: left - 1 }, item),
+          }
+        },
     }
   }
 }
