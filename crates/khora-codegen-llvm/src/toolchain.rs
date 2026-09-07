@@ -241,10 +241,18 @@ fn cross_archive() -> &'static str {
 /// counters are diagnostic — allocation behaviour is not part of the language's
 /// promise — and are here because a host just told a trap was contained is
 /// entitled to check that the memory came back.
+///
+/// **`khora_enable_counters` comes with them because counting is off until
+/// something asks.** A program gets the call emitted into its `main` when it
+/// declares a counter; a library has no `main`, so a host that wants a number
+/// asks for one first and gets `-1` if it forgets. That is the honest failure:
+/// zero is what a leak check hopes to see, and answering it without having
+/// counted would be a lie a host could not detect.
 const LIBRARY_CONTROL: &[&str] = &[
     "khora_set_trap_policy",
     "khora_trapped",
     "khora_clear_trap",
+    "khora_enable_counters",
     "khora_live_count",
     "khora_alloc_count",
 ];

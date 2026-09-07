@@ -7,6 +7,9 @@
 
 use super::*;
 
+/// The counters a program can name, and the reason `main` switches them on.
+const COUNTERS: &[&str] = &["khora_live_count", "khora_alloc_count", "khora_reset_counters"];
+
 impl<'ctx> Backend<'ctx> {
     /// Ends the region that lasts as long as the program does.
     ///
@@ -265,6 +268,23 @@ impl<'ctx> Backend<'ctx> {
             self.builder
                 .build_call(self.rt.single_threaded, &[], "")
                 .expect("declaring the program single-threaded");
+        }
+
+        // **And only for a program that asked to count.** The allocation
+        // counters cost two atomic read-modify-writes each, which is 114ms
+        // against 85ms on `bench/iteration` and about a tenth of
+        // `std::net::http`'s throughput -- and the reuse path pays them even
+        // where nothing is allocated. Off by default, switched on here.
+        //
+        // Whether the program asked is whether it declared one: a bodyless
+        // `extern fn khora_live_count() -> Int;` leaves a declaration in this
+        // module and nothing else does. So no flag has to be passed and no
+        // test had to change, which for two hundred and thirty of them
+        // mattered.
+        if COUNTERS.iter().any(|name| self.module.get_function(name).is_some()) {
+            self.builder
+                .build_call(self.rt.enable_counters, &[], "")
+                .expect("switching the counters on");
         }
 
         let call = self.builder.build_call(khora_main, &[], "result").expect("calling main");

@@ -122,7 +122,9 @@ unsafe fn release_now(ptr: *mut u8, drop_fields: Option<extern "C" fn(*mut u8)>)
     // callback has already released everything the object owned.
     unsafe { dealloc(ptr, layout) };
 
-    LIVE_COUNT.fetch_sub(1, COUNTER_ORDER);
+    if crate::counters::counting() {
+        LIVE_COUNT.fetch_sub(1, COUNTER_ORDER);
+    }
     crate::contain::forget(ptr);
 }
 
@@ -164,8 +166,10 @@ pub extern "C" fn khora_alloc(size: u64, tag: u32) -> *mut u8 {
             .write(KhoraHeader { refcount: AtomicU64::new(1), tag, field_bytes });
     }
 
-    ALLOC_COUNT.fetch_add(1, COUNTER_ORDER);
-    LIVE_COUNT.fetch_add(1, COUNTER_ORDER);
+    if crate::counters::counting() {
+        ALLOC_COUNT.fetch_add(1, COUNTER_ORDER);
+        LIVE_COUNT.fetch_add(1, COUNTER_ORDER);
+    }
     // Only while a guarded export call is on this thread's stack, which is a
     // thread-local read and a not-taken branch everywhere else.
     // `crate::contain` has the cost note.
@@ -324,7 +328,9 @@ pub unsafe extern "C" fn khora_drop_reuse(
         drain();
     }
 
-    LIVE_COUNT.fetch_sub(1, COUNTER_ORDER);
+    if crate::counters::counting() {
+        LIVE_COUNT.fetch_sub(1, COUNTER_ORDER);
+    }
     ptr
 }
 
@@ -379,7 +385,9 @@ pub unsafe extern "C" fn khora_alloc_reuse(token: *mut u8, size: u64, tag: u32) 
             .cast::<KhoraHeader>()
             .write(KhoraHeader { refcount: AtomicU64::new(1), tag, field_bytes });
     }
-    LIVE_COUNT.fetch_add(1, COUNTER_ORDER);
+    if crate::counters::counting() {
+        LIVE_COUNT.fetch_add(1, COUNTER_ORDER);
+    }
     token
 }
 
@@ -509,5 +517,7 @@ pub(crate) unsafe fn release_raw(ptr: *mut u8) {
     // SAFETY: `ptr` came from `alloc_zeroed` with exactly this layout, and the
     // caller guarantees nothing else reaches it.
     unsafe { dealloc(ptr, layout) };
-    LIVE_COUNT.fetch_sub(1, COUNTER_ORDER);
+    if crate::counters::counting() {
+        LIVE_COUNT.fetch_sub(1, COUNTER_ORDER);
+    }
 }

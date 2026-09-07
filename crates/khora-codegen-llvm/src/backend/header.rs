@@ -52,6 +52,10 @@ pub(crate) fn render(guard: &str, exports: &[(String, Signature)]) -> String {
     let _ = writeln!(out, "   allocation behaviour is not part of the language's promise. Here");
     let _ = writeln!(out, "   because a host just told a trap was contained is entitled to");
     let _ = writeln!(out, "   check that the memory came back. */");
+    // Counting is off until something asks, and a library has no `main` for
+    // the compiler to ask in. A host calling either counter without this gets
+    // `-1` rather than a zero it would read as "nothing leaked".
+    let _ = writeln!(out, "void khora_enable_counters(void);");
     let _ = writeln!(out, "long long khora_live_count(void);");
     let _ = writeln!(out, "long long khora_alloc_count(void);");
     out.push('\n');
