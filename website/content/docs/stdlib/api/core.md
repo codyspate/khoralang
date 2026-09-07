@@ -5223,6 +5223,11 @@ type Effects = I::Effects;
 fn next(self) -> Step<Mapped<I, B>, B> with Self::Effects
 ```
 
+**Taken apart rather than read from.** `self.inner` *copies* the source
+out of the adapter, so it reaches the inner `next` shared and the cell it
+matched cannot be built in. Destructuring hands it over instead, which is
+what a record pattern is for here.
+
 ### Iterator for Filtered<I>
 
 ```khora
