@@ -5,10 +5,25 @@ import std::clock::{Clock};
 
 // What `for` costs against the two ways of writing the same loop by hand.
 //
-// **The idiomatic spelling is the slowest one, by 3.6x.** `for x in xs { .. }`
-// desugars to a `loop` over `Step`, and `Step` is an ordinary Khora ADT — so
-// every element of every `for` loop in the language allocates a heap object,
-// counts a reference up and counts it back down.
+// **The idiomatic spelling is the slowest one, by six times.** `for x in xs
+// { .. }` desugars to a `loop` over `Step`, and `Step` is an ordinary Khora
+// ADT, so there is one of them per element of every `for` loop in the
+// language.
+//
+// **It no longer allocates them, and that changed nothing.** A `for` over a
+// list used to cost one allocation an element and now costs none: the loop
+// hands its cursor over, so the `Cons` it matched arrives unshared and the
+// `Step` is built in it. Counted with `khora_alloc_count`, exactly zero. The
+// time did not move — 114ms against 17ms before, 114ms against 17ms after.
+//
+// Which is the most useful thing this benchmark has said. The cost was never
+// the *allocation*; it is the object existing at all. Per element the reuse
+// path still calls `khora_drop_reuse` and `khora_alloc_reuse`, writes a
+// header, stores two fields and loads them back — where the hand-written loop
+// loads a tag and two fields and adds. Removing a hundred per cent of the
+// allocations bought nought per cent of the time, which is as clean a reading
+// as this will ever give: what is left is reference counting and indirection,
+// and only not building the object removes those.
 //
 // The third shape is the one that says where the cost is. `List::fold` builds
 // a closure too, and it is exactly as fast as the hand-written `while`: one
@@ -20,10 +35,11 @@ import std::clock::{Clock};
 // `for_each(fn x => { total = total + x })` is refused and every loop body
 // that keeps a running total is refused with it.
 //
-// So this is a benchmark waiting on unboxing. `docs/roadmap.md`, under
-// "Unboxed records", carries the argument; a two-field variant returned in
-// registers rather than allocated is what closes the gap, and it closes it for
-// everything shaped this way rather than for `for` alone.
+// So this is a benchmark waiting on unboxing, and now with a measurement
+// behind it rather than an argument. `docs/roadmap.md`, under "Unboxed
+// records": a two-field variant returned in registers rather than built is
+// what closes the gap, and it closes it for everything shaped this way rather
+// than for `for` alone.
 
 fn build(n: Int) -> List<Int> {
   let mut xs: List<Int> = List::Nil;
