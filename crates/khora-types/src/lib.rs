@@ -12,6 +12,7 @@ pub mod derive;
 pub mod foreign;
 pub mod mono;
 pub mod traits;
+pub mod unboxed;
 pub mod unify;
 pub mod usefulness;
 
