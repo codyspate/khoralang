@@ -136,7 +136,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             ("empty", []) => {
                 let array_ty = self.types.of(site).clone();
                 let element = self.array_element(&array_ty, range)?;
-                let boxed = is_boxed(&element);
+                let boxed = is_boxed(&element, &self.be.unboxed);
                 let glue = if boxed { self.be.drop_glue(&element) } else { self.be.null_pointer() };
                 let len = self.be.ctx.i64_type().const_zero();
                 // The fill is written once per slot, and there are no slots.
@@ -164,7 +164,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let len = self.expr(*length)?.into_int_value();
                 let value = self.expr(*fill)?;
 
-                let boxed = is_boxed(&element);
+                let boxed = is_boxed(&element, &self.be.unboxed);
                 let glue = if boxed { self.be.drop_glue(&element) } else { self.be.null_pointer() };
                 let word = self.be.to_word(value);
                 let flag = self.be.ctx.i8_type().const_int(u64::from(boxed), false);
@@ -221,7 +221,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .expect("reading an element");
                 // The array keeps its own reference to the element, so the
                 // caller is handed one of its own.
-                if is_boxed(&element) {
+                if is_boxed(&element, &self.be.unboxed) {
                     self.dup(value);
                 }
                 self.release_unless_lent(*array, object.into(), &array_ty);
@@ -235,7 +235,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let new = self.expr(*value)?;
                 let slot = self.array_slot(object, at, Self::stride(&element));
 
-                if is_boxed(&element) {
+                if is_boxed(&element, &self.be.unboxed) {
                     let llvm_ty = self.be.llvm_type(&element).expect("a boxed type is a pointer");
                     let old = self
                         .be

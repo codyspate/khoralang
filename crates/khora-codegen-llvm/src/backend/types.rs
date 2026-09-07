@@ -148,7 +148,7 @@ impl<'ctx> Backend<'ctx> {
             let block = self.ctx.append_basic_block(function, &format!("release.{name}"));
             self.builder.position_at_end(block);
             let ty = Type::adt(name);
-            if is_boxed(&ty) {
+            if is_boxed(&ty, &self.unboxed) {
                 let value = self.word_to_value(word, &ty);
                 let glue = self.drop_glue(&ty);
                 let drop = self.rt.drop;

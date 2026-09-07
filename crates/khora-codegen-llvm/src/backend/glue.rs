@@ -106,7 +106,7 @@ impl<'ctx> Backend<'ctx> {
         // whether `Box<A>` owns anything always answers no — and every
         // `Box<String>` in the program leaks its contents.
         let variants = self.instantiated_variants(ty);
-        if !variants.iter().any(|v| v.fields.iter().any(is_boxed)) {
+        if !variants.iter().any(|v| v.fields.iter().any(|t| is_boxed(t, &self.unboxed))) {
             self.drop_glue.insert(key, None);
             return self.null_pointer();
         }
@@ -225,7 +225,7 @@ impl<'ctx> Backend<'ctx> {
                 .fields
                 .iter()
                 .enumerate()
-                .filter(|(_, ty)| is_boxed(ty))
+                .filter(|(_, ty)| is_boxed(ty, &self.unboxed))
                 .map(|(i, ty)| (i, ty.clone()))
                 .collect();
             // A variant with nothing to release needs no case at all: the

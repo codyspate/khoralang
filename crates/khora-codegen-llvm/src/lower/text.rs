@@ -164,7 +164,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 // An array of Khora objects is an array of counted pointers,
                 // and handing those to a foreign function is the mistake the
                 // whole boundary exists to prevent.
-                if is_boxed(&element) {
+                if is_boxed(&element, &self.be.unboxed) {
                     return self.fail(
                         format!(
                             "an `Array<{element}>` holds reference-counted objects, so its \

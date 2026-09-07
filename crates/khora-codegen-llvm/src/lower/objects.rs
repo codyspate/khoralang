@@ -45,7 +45,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         let new = self.expr(value)?;
 
         let slot = runtime::field_pointer(self.be.ctx, &self.be.builder, object, index as u64);
-        if is_boxed(&field_ty) {
+        if is_boxed(&field_ty, &self.be.unboxed) {
             let llvm_ty = self.be.llvm_type(&field_ty).expect("a boxed type is a pointer");
             let old = self
                 .be
@@ -145,7 +145,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                     continue;
                 };
                 let carried = self.load_field(from, index, &field_ty);
-                if is_boxed(&field_ty) {
+                if is_boxed(&field_ty, &self.be.unboxed) {
                     self.dup(carried);
                 }
                 self.store_field(object, index, carried, &field_ty);
@@ -192,7 +192,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         // The field is borrowed out of the record, and the record was owned by
         // this expression, so reading one keeps the field alive past the
         // release of what held it.
-        if is_boxed(&field_ty) {
+        if is_boxed(&field_ty, &self.be.unboxed) {
             self.dup(value);
         }
         self.drop(object.into(), &owner);

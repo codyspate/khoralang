@@ -18,13 +18,20 @@ fn plan(db: &dyn Db, text: &str, function: &str) -> RcPlan {
         .unwrap_or_else(|| panic!("no function `{function}`"))
 }
 
+/// Nothing is held inline in these tests: they are about which *shapes* carry
+/// a count, and an empty answer is the representation this crate had before
+/// unboxing existed.
+fn nothing_unboxed() -> khora_types::unboxed::Unboxed {
+    khora_types::unboxed::Unboxed::default()
+}
+
 const ADT: &str = "module m;\npub type R = | A | B(n: Int);\n";
 
 #[test]
 fn machine_words_are_not_counted() {
-    assert!(!is_boxed(&Type::Int));
-    assert!(!is_boxed(&Type::Bool));
-    assert!(!is_boxed(&Type::Unit));
+    assert!(!is_boxed(&Type::Int, &nothing_unboxed()));
+    assert!(!is_boxed(&Type::Bool, &nothing_unboxed()));
+    assert!(!is_boxed(&Type::Unit, &nothing_unboxed()));
 
     let db = KhoraDatabase::new();
     let p = plan(&db, "module m;\nfn f(a: Int) -> Int { let b = a; b }\n", "f");
@@ -34,8 +41,8 @@ fn machine_words_are_not_counted() {
 
 #[test]
 fn strings_and_adts_are_counted() {
-    assert!(is_boxed(&Type::Str));
-    assert!(is_boxed(&Type::adt("R")));
+    assert!(is_boxed(&Type::Str, &nothing_unboxed()));
+    assert!(is_boxed(&Type::adt("R"), &nothing_unboxed()));
 }
 
 /// An owned parameter is released — unless the body hands its reference on,

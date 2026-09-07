@@ -122,6 +122,9 @@ pub(crate) fn emit_closure<'ctx>(
         return;
     };
     let empty = RcPlan::default();
+    // A handle rather than a borrow: `be` is about to be held mutably by the
+    // lowering, and the answer to "is this boxed" is needed inside it.
+    let unboxed = be.unboxed.clone();
 
     let entry = be.ctx.append_basic_block(function, "entry");
     be.builder.position_at_end(entry);
@@ -174,7 +177,7 @@ pub(crate) fn emit_closure<'ctx>(
         let Some(slot) = lower.slots.get(&local).copied() else { continue };
         let Some(value) = function.get_nth_param(index as u32 + 1) else { continue };
         lower.be.builder.build_store(slot, value).expect("storing a lambda parameter");
-        if is_boxed(types.local(local)) {
+        if is_boxed(types.local(local), &unboxed) {
             owned.push(Cleanup::Local(local));
         }
     }
@@ -199,7 +202,7 @@ pub(crate) fn emit_closure<'ctx>(
     let base = params.len() + 1;
     for (offset, (label, ty)) in handed.into_iter().enumerate() {
         let Some(value) = function.get_nth_param((base + offset) as u32) else { continue };
-        if !named.contains(&label) && is_boxed(&ty) {
+        if !named.contains(&label) && is_boxed(&ty, &unboxed) {
             owned.push(Cleanup::Temp(value, ty));
         }
         lower.incoming.insert(label, value);
@@ -219,7 +222,7 @@ pub(crate) fn emit_closure<'ctx>(
         let Some(slot) = lower.slots.get(&local).copied() else { continue };
         let Some(value) = lower.incoming.get(label).copied() else { continue };
         lower.be.builder.build_store(slot, value).expect("storing a named capability");
-        if is_boxed(types.local(local)) {
+        if is_boxed(types.local(local), &unboxed) {
             owned.push(Cleanup::Local(local));
         }
     }
@@ -497,7 +500,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             let Some(value) = self.function.get_nth_param((base + offset) as u32) else {
                 continue;
             };
-            if !named.contains(&label) && is_boxed(&ty) {
+            if !named.contains(&label) && is_boxed(&ty, &self.be.unboxed) {
                 owned.push(Cleanup::Temp(value, ty));
             }
             self.incoming.insert(label, value);

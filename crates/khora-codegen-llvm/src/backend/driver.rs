@@ -244,7 +244,7 @@ pub(super) fn build(
         // Planned per *specialization*: `A` is unboxed in the generic body and
         // a counted pointer at `A = List<Int>`, so one plan for both is wrong
         // for whichever it was not made for.
-        let plan = khora_perceus::plan(body, instance_types, &defined);
+        let plan = khora_perceus::plan(body, instance_types, &defined, &backend.unboxed);
         backend.source = source_of(db, mono, &instance.symbol());
         enter_debug_scope(db, &mut backend, mono, instance, body, &instance.symbol(), None);
         crate::lower::emit_function(
@@ -267,7 +267,7 @@ pub(super) fn build(
             continue;
         };
         let Some(body) = body_of(owner) else { continue };
-        let plan = khora_perceus::plan(body, owner_types, &defined);
+        let plan = khora_perceus::plan(body, owner_types, &defined, &backend.unboxed);
         // A lifted lambda belongs to the file its enclosing function came
         // from, and reads in a backtrace under the name of that function —
         // there is nothing else to call it, and a bare symbol would be worse.

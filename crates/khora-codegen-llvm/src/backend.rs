@@ -262,6 +262,12 @@ pub(crate) struct Backend<'ctx> {
     /// its cause, so it is worth one branch on a call that starts a thread to
     /// turn it into a message. `docs/design/reuse.md` §4.
     pub single_threaded: bool,
+    /// Which types are held inline rather than behind a header.
+    ///
+    /// Whole-program, because it is a property of a type's declaration and
+    /// every module has to agree: two files disagreeing about whether a `Step`
+    /// is a pointer would pass one to a function expecting the other.
+    pub(crate) unboxed: std::rc::Rc<khora_types::unboxed::Unboxed>,
     pub ctx: &'ctx Context,
     pub module: Module<'ctx>,
     pub builder: Builder<'ctx>,
@@ -419,6 +425,7 @@ impl<'ctx> Backend<'ctx> {
             // Set by `build` once the reachable set is known. Assuming threads
             // until told otherwise is the safe direction.
             single_threaded: false,
+            unboxed: std::rc::Rc::new(khora_types::unboxed::Unboxed::default()),
             ctx,
             module,
             builder: ctx.create_builder(),

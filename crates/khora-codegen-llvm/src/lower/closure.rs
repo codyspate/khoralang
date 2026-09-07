@@ -71,7 +71,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             // The closure outlives this expression and now holds its own
             // reference. This is the one place a capture is counted; the
             // closure's drop glue is the matching release.
-            if is_boxed(ty) {
+            if is_boxed(ty, &self.be.unboxed) {
                 self.dup(value);
             }
             self.store_field(object, index + CLOSURE_CAPTURE_BASE, value, ty);
@@ -234,7 +234,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         // out from under the caller still running in it.
         let owned = !matches!(self.body.expr(callee), Expr::LambdaSelf);
         let callee_ty = self.types.of(callee).clone();
-        self.scopes.push(if owned && is_boxed(&callee_ty) {
+        self.scopes.push(if owned && is_boxed(&callee_ty, &self.be.unboxed) {
             vec![Cleanup::Temp(closure.into(), callee_ty)]
         } else {
             Vec::new()

@@ -82,7 +82,7 @@ impl<'a> Planner<'a> {
     pub(super) fn bind(&mut self, pat: PatId, owned: &mut Vec<LocalId>) {
         match self.body.pat(pat).clone() {
             Pat::Bind(local) => {
-                if is_boxed(self.types.local(local)) {
+                if is_boxed(self.types.local(local), self.unboxed) {
                     self.plan.boxed.insert(local);
                     owned.push(local);
                 }

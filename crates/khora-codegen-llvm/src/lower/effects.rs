@@ -96,7 +96,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let held = self.expr(*value)?;
                 let word = self.be.to_word(held);
                 let boxed = self.be.ctx.bool_type().const_int(
-                    u64::from(is_boxed(&value_ty)),
+                    u64::from(is_boxed(&value_ty, &self.be.unboxed)),
                     false,
                 );
                 let glue = self.be.drop_glue(&value_ty);
@@ -242,7 +242,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let room = self.expr(*capacity)?;
                 let when_full = self.be.ctx.i64_type().const_int(strategy, false);
                 let boxed =
-                    self.be.ctx.bool_type().const_int(u64::from(is_boxed(&held)), false);
+                    self.be.ctx.bool_type().const_int(u64::from(is_boxed(&held, &self.be.unboxed)), false);
                 let glue = self.be.drop_glue(&held);
                 let open = self.be.rt.channel_open;
                 Some(
@@ -613,7 +613,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 // always a boxed `Adt`, which the runtime knows; only the
                 // successful word needs describing.
                 let boxed =
-                    self.be.ctx.bool_type().const_int(u64::from(is_boxed(&answers)), false);
+                    self.be.ctx.bool_type().const_int(u64::from(is_boxed(&answers, &self.be.unboxed)), false);
                 let value_glue = self.be.drop_glue(&answers);
                 let spawn = self.be.rt.fiber_spawn;
                 let fiber = self

@@ -48,7 +48,7 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// the field-dropping callback and the deallocation. The common case is a
     /// decrement and a branch that is not taken.
     pub(super) fn drop(&mut self, value: BasicValueEnum<'ctx>, ty: &Type) {
-        if !is_boxed(ty) {
+        if !is_boxed(ty, &self.be.unboxed) {
             return;
         }
         let glue = self.be.drop_glue(ty);

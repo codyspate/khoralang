@@ -1046,7 +1046,7 @@ impl Cycles<'_> {
         // lint cannot have — the module documentation above says a warning
         // people learn to ignore is worse than no warning, and this is how
         // that starts.
-        if !khora_perceus::is_boxed(self.types.of(value)) {
+        if !khora_perceus::is_boxed(self.types.of(value), &khora_types::unboxed::Unboxed::default()) {
             return;
         }
 

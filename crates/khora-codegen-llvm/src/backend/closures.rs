@@ -115,7 +115,7 @@ impl<'ctx> Backend<'ctx> {
     /// function type, and two lambdas with the same signature capture entirely
     /// different things. The tag is what distinguishes them.
     pub(super) fn closure_glue(&mut self) -> PointerValue<'ctx> {
-        if !self.closures.iter().any(|c| c.captures.iter().any(|(_, t)| is_boxed(t))) {
+        if !self.closures.iter().any(|c| c.captures.iter().any(|(_, t)| is_boxed(t, &self.unboxed))) {
             return self.null_pointer();
         }
         if let Some(Some(f)) = self.drop_glue.get(CLOSURE_GLUE) {
@@ -153,7 +153,7 @@ impl<'ctx> Backend<'ctx> {
                 .captures
                 .iter()
                 .enumerate()
-                .filter(|(_, (_, ty))| is_boxed(ty))
+                .filter(|(_, (_, ty))| is_boxed(ty, &self.unboxed))
                 // Field 0 holds the function pointer, so capture `i` is field
                 // `i + 1`.
                 .map(|(i, (_, ty))| (i + CLOSURE_CAPTURE_BASE, ty.clone()))

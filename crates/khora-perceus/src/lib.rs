@@ -214,7 +214,13 @@ impl Defined {
 ///
 /// `Unknown` counts as unboxed: it only appears downstream of an error, and a
 /// spurious `drop` on a machine word is a wild free.
-pub fn is_boxed(ty: &Type) -> bool {
+pub fn is_boxed(ty: &Type, unboxed: &khora_types::unboxed::Unboxed) -> bool {
+    // **An unboxed ADT carries no count**: it is held inline, so there is no
+    // header to hold one and nothing to release. Its *fields* may still be
+    // counted, and the drop glue for the value it sits in is what does that.
+    if unboxed.holds(ty) {
+        return false;
+    }
     // A closure is an ordinary heap object — a function pointer and its
     // captures under the usual header — and so is a tuple.
     matches!(ty, Type::Str | Type::Adt { .. } | Type::Fn { .. } | Type::Tuple(_))
@@ -226,7 +232,12 @@ pub fn is_boxed(ty: &Type) -> bool {
 /// depends on the instantiation: `A` in `fn id<A>` is never boxed, and the
 /// same body at `A = List<Int>` holds a pointer that must be counted. Errata
 /// 24.
-pub fn plan(body: &Body, types: &khora_types::BodyTypes, defined: &Defined) -> RcPlan {
+pub fn plan(
+    body: &Body,
+    types: &khora_types::BodyTypes,
+    defined: &Defined,
+    unboxed: &khora_types::unboxed::Unboxed,
+) -> RcPlan {
     let mut planner = Planner {
         body,
         plan: RcPlan::default(),
@@ -235,6 +246,7 @@ pub fn plan(body: &Body, types: &khora_types::BodyTypes, defined: &Defined) -> R
         reads: Vec::new(),
         unowned: Live::new(),
         unwinds: false,
+        unboxed,
         loop_exits: Vec::new(),
     };
     planner.plan_function();
@@ -251,6 +263,7 @@ pub fn plan(body: &Body, types: &khora_types::BodyTypes, defined: &Defined) -> R
 pub fn rc_plans(db: &dyn Db, file: SourceFile) -> Vec<(String, RcPlan)> {
     let checked = khora_types::checked(db, file);
     let empty = khora_types::BodyTypes::default();
+    let unboxed = khora_types::unboxed::Unboxed::default();
 
     // Every body in the *program*: a package may implement `Shared::get`
     // elsewhere, and noticing that is the point of the set.
@@ -273,7 +286,7 @@ pub fn rc_plans(db: &dyn Db, file: SourceFile) -> Vec<(String, RcPlan)> {
             // freed twice.
             let body_types =
                 checked.bodies.iter().find(|(n, _)| n == name).map(|(_, t)| t).unwrap_or(&empty);
-            (name.clone(), plan(body, body_types, &defined))
+            (name.clone(), plan(body, body_types, &defined, &unboxed))
         })
         .collect()
 }
@@ -320,6 +333,8 @@ struct Planner<'a> {
     /// depend on how far execution got, which `docs/design/reuse.md` §1 does
     /// not attempt — so a body that can unwind keeps the conservative plan.
     unwinds: bool,
+    /// Which types are held inline rather than behind a header.
+    unboxed: &'a khora_types::unboxed::Unboxed,
     /// What is live *after* each enclosing loop, innermost last.
     loop_exits: Vec<Live>,
 }

@@ -46,7 +46,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         // through here and has to release it. `emit_arms` empties this level
         // for the length of each arm's body, which is the only stretch where
         // the release has already happened.
-        self.scopes.push(if is_boxed(&scrutinee_ty) {
+        self.scopes.push(if is_boxed(&scrutinee_ty, &self.be.unboxed) {
             vec![Cleanup::Temp(value, scrutinee_ty.clone())]
         } else {
             Vec::new()
@@ -454,7 +454,7 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// is what makes it worth trying at all. `docs/design/reuse.md` §2.
     pub(super) fn release_scrutinee(&mut self, value: BasicValueEnum<'ctx>, ty: &Type, arm: ExprId) {
         let sites = self.plan.reuse_sites(arm).to_vec();
-        if sites.is_empty() || !is_boxed(ty) {
+        if sites.is_empty() || !is_boxed(ty, &self.be.unboxed) {
             self.drop(value, ty);
             return;
         }

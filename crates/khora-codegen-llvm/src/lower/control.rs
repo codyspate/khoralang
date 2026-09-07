@@ -29,7 +29,7 @@ impl<'ctx> Lower<'_, 'ctx> {
 
         let new = self.expr(value)?;
 
-        if is_boxed(&ty) {
+        if is_boxed(&ty, &self.be.unboxed) {
             let llvm_ty = self.be.llvm_type(&ty).expect("a boxed type is a pointer");
             let old = self
                 .be
@@ -204,7 +204,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         self.bound_locals(pat, &mut locals);
         for local in locals {
             let ty = self.types.local(local).clone();
-            if !is_boxed(&ty) {
+            if !is_boxed(&ty, &self.be.unboxed) {
                 continue;
             }
             let Some(slot) = self.slots.get(&local).copied() else { continue };
