@@ -185,6 +185,36 @@ the caveats, and the numbers do not travel without them.
 - Parsing one 80-byte HTTP request went from **2,440ns to 1,555ns** over phase
   9, and a browser's fourteen-header request from 14,560ns to 7,345ns.
 
+A second machine, because one is not a measurement: four cores, Linux, same
+method, `bench/measure.json`. The shape holds and one number does not.
+
+| | req/s | p50 | peak RSS |
+| --- | --- | --- | --- |
+| Khora floor | 109,224 | 56us | 6.2 MB |
+| Rust thread per conn | 92,533 | 253us | 3.4 MB |
+| Khora `std::net::http` | 53,907 | 196us | 7.0 MB |
+| Go `net/http` | 41,781 | 99us | 12.2 MB |
+| Bun `Bun.serve` | 28,646 | 204us | 27.2 MB |
+| Node `node:http` | 13,859 | 474us | 90.2 MB |
+
+- The floor above the Rust control again, by about the same margin, which is
+  the one reading that has now been taken twice on unlike machines.
+- **The library costs half the floor here rather than a quarter.** Four cores
+  against sixteen, and the parsing and routing are the part that does not
+  parallelise into spare ones. The Windows figure is not wrong; it is the one
+  that had more machine to spend.
+- Above Go's `net/http` rather than a little under it. **That does not settle
+  it either way.** Khora and the Rust control were still climbing when the
+  ladder ran out, Go and Node were not, so the comparison flatters neither
+  side cleanly -- and Bun and Node's spread was over 1.14x, which is noise
+  worth more than the gap to Go on a bad day.
+- Memory leads again, and by more than rate does: a seventh of Node's, a third
+  of Bun's, roughly half of Go's.
+
+`bench/peers/bun_health.ts` is new here and uses `Bun.serve` rather than the
+`node:http` shim Bun also runs, on the same principle as the Go peer: the
+comparison worth making is against what a team would actually write.
+
 What that supports is a narrow claim, and it should be made narrowly: **Khora's
 reference-counted, garbage-collector-free runtime is not the bottleneck in a
 network service, and it holds a service in a fraction of the memory.** It does

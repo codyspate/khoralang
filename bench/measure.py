@@ -54,6 +54,7 @@ SERVERS = [
     ("Node node:http", 18955, ["node", os.path.join(PEERS, "node_health.mjs"), "18955"]),
     ("C# ASP.NET Core", 18956, ["dotnet", os.path.join(PEERS, "dotnet_health", "bin", "Release", "net8.0", "dotnet_health.dll"), "18956"]),
     ("Java JDK HttpServer", 18957, ["java", "-cp", PEERS, "JavaHealth", "18957"]),
+    ("Bun Bun.serve", 18958, ["bun", os.path.join(PEERS, "bun_health.ts"), "18958"]),
 ]
 
 LADDER = [16, 32, 64, 128]

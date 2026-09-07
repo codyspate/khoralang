@@ -48,6 +48,18 @@ bench/*.pdb
 /bench/*/src/release.pdb
 /bench/measure.json
 
+# The benchmark's controls and peers, which `bench/README.md` tells you to
+# build right where they sit -- `rustc -O -o bench/loadgen bench/loadgen.rs`.
+# Not `build/`, because they are not `khora build`'s output and have no
+# manifest to put one under.
+/bench/loadgen
+/bench/control
+/bench/control_keepalive
+/bench/peers/go_health
+/bench/peers/dotnet_health/bin/
+/bench/peers/dotnet_health/obj/
+/bench/peers/*.class
+
 # What `scripts/package.sh` assembles. Built on demand and published by the
 # release workflow; never committed.
 /dist/
