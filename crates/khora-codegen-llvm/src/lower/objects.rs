@@ -113,6 +113,12 @@ impl<'ctx> Lower<'_, 'ctx> {
             return self.fail(format!("`{name}` is not a record"), range);
         };
 
+        // An inline record is built in registers, base and all.
+        let built = self.types.of(id).clone();
+        if self.be.unboxed.holds(&built) {
+            return self.build_record_inline(&built, &info, fields, base, range);
+        }
+
         // **The base first, because it is written first and can diverge.**
         // `{ ..old, x: 1 }` evaluates `old` before `1`, which is the order the
         // reader sees.
@@ -326,6 +332,58 @@ impl<'ctx> Lower<'_, 'ctx> {
             .basic()
             .expect("khora_alloc_reuse returns a pointer")
             .into_pointer_value()
+    }
+
+    /// A record literal, held inline.
+    ///
+    /// `{ ..old, x: 1 }` reads the fields it does not name straight out of the
+    /// base's registers rather than out of a heap object, and there is nothing
+    /// to release afterwards -- the base was a value, not a reference to one.
+    /// Evaluation order is unchanged: the base first, because it is written
+    /// first and can diverge, then the fields as written.
+    fn build_record_inline(
+        &mut self,
+        ty: &Type,
+        info: &VariantInfo,
+        fields: &[(String, ExprId)],
+        base: Option<ExprId>,
+        range: TextRange,
+    ) -> Flow<'ctx> {
+        let Some(shape) = self.be.unboxed_type(ty) else {
+            return self.fail(format!("`{ty}` has no inline layout"), range);
+        };
+        let taken_from = match base {
+            Some(base) => Some(self.expr(base)?.into_struct_value()),
+            None => None,
+        };
+        let mut written = Vec::with_capacity(fields.len());
+        for (label, value) in fields {
+            written.push((label.clone(), self.expr(*value)?));
+        }
+
+        let mut value: inkwell::values::AggregateValueEnum<'ctx> = shape.get_undef().into();
+        for (index, label) in info.labels.iter().enumerate() {
+            let at = self.be.unboxed_field_at(ty, index);
+            let field = match written.iter().find(|(w, _)| w == label) {
+                Some((_, v)) => *v,
+                None => match taken_from {
+                    Some(from) => self
+                        .be
+                        .builder
+                        .build_extract_value(from, at, "inline.carried")
+                        .expect("carrying a field from the base"),
+                    // The checker refuses a literal that names neither every
+                    // field nor a base, so there is nothing to read here.
+                    None => return self.fail(format!("`{label}` was not given"), range),
+                },
+            };
+            value = self
+                .be
+                .builder
+                .build_insert_value(value, field, at, "inline.field")
+                .expect("writing an inline field");
+        }
+        Some(value.into_struct_value().into())
     }
 
     /// Builds an unboxed value in registers.

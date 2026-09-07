@@ -537,7 +537,11 @@ impl<'ctx> Lower<'_, 'ctx> {
             return;
         }
 
-        if let Some(plan) = self.switch_plan(arms, scrutinee_ty) {
+        // **A type with one case has no tag to switch on.** Held inline it is
+        // its fields and nothing else, so field zero is the first field rather
+        // than a discriminant -- and a `match` on it always takes its one arm.
+        let switchable = !(self.be.unboxed.holds(scrutinee_ty) && self.be.cases_of(scrutinee_ty) <= 1);
+        if let Some(plan) = self.switch_plan(arms, scrutinee_ty).filter(|_| switchable) {
             let tag = self.case_of(value, scrutinee_ty);
             let mut cases = Vec::new();
             let mut default = None;
