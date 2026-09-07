@@ -377,7 +377,7 @@ struct Lower<'a, 'ctx> {
     /// never more than one outstanding: an arm nested inside another arm's
     /// constructor arguments would be a second, and `reuse_site` declines to
     /// promise one while a promise is already open.
-    reuse: Option<(ExprId, PointerValue<'ctx>)>,
+    reuse: Option<(Vec<ExprId>, PointerValue<'ctx>)>,
     loops: Vec<LoopFrame<'ctx>>,
     catches: Vec<CatchFrame<'ctx>>,
     /// The evidence this function was handed, by label.

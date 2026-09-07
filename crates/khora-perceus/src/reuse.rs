@@ -23,16 +23,16 @@ impl<'a> Planner<'a> {
         let Some(root) = self.body.root else { return };
         let mut found = Vec::new();
         self.collect_reuse(root, &mut found);
-        for (arm, site) in found {
-            self.plan.reuse.insert(arm, site);
+        for (arm, sites) in found {
+            self.plan.reuse.insert(arm, sites);
         }
     }
 
-    pub(super) fn collect_reuse(&self, id: ExprId, found: &mut Vec<(ExprId, ExprId)>) {
+    pub(super) fn collect_reuse(&self, id: ExprId, found: &mut Vec<(ExprId, Vec<ExprId>)>) {
         if let Expr::Match { arms, .. } = self.body.expr(id) {
             for arm in arms {
-                if let Some(site) = self.reusable_site(arm.body) {
-                    found.push((arm.body, site));
+                if let Some(sites) = self.reusable_site(arm.body) {
+                    found.push((arm.body, sites));
                 }
             }
         }
@@ -40,18 +40,66 @@ impl<'a> Planner<'a> {
     }
 
     /// The constructor an arm may build in the matched cell, if this arm may.
-    pub(super) fn reusable_site(&self, body: ExprId) -> Option<ExprId> {
-        let builds = match self.body.expr(body) {
-            Expr::Record { .. } => true,
-            Expr::Call { callee, .. } => {
-                matches!(self.body.expr(*callee), Expr::Path(khora_hir::Resolution::Variant { .. }))
-            }
-            _ => false,
-        };
-        if !builds || self.may_leave_early(body) {
+    pub(super) fn reusable_site(&self, body: ExprId) -> Option<Vec<ExprId>> {
+        if self.may_leave_early(body) {
             return None;
         }
-        Some(body)
+        let mut sites = Vec::new();
+        self.constructors_on_every_path(body, &mut sites).then_some(sites)
+    }
+
+    /// Whether every path through `id` ends at a constructor, collecting them.
+    ///
+    /// **The token has no owner, so it must be spent on every path**, and that
+    /// is the whole of the rule. Requiring the arm's body to *be* the
+    /// constructor made it true by making there be one path; descending
+    /// through a branch keeps it true as long as no arm of that branch is
+    /// anything else. One arm that is not sinks the whole attempt, because a
+    /// path that reaches no constructor is memory nothing frees.
+    ///
+    /// This is what `Range::next` and `Filtered::next` needed: both write an
+    /// `if` where the rule was looking for a constructor, so neither could
+    /// ever build in the cell it had just taken apart.
+    fn constructors_on_every_path(&self, id: ExprId, sites: &mut Vec<ExprId>) -> bool {
+        match self.body.expr(id) {
+            Expr::Record { .. } => {
+                sites.push(id);
+                true
+            }
+            // **A case with no payload is still an allocation**: it has a tag,
+            // and a tag lives in a header. `Step::Done` is one, and it is the
+            // other half of `Range::next`'s `if`.
+            Expr::Path(khora_hir::Resolution::Variant { .. }) => {
+                sites.push(id);
+                true
+            }
+            Expr::Call { callee, .. }
+                if matches!(
+                    self.body.expr(*callee),
+                    Expr::Path(khora_hir::Resolution::Variant { .. })
+                ) =>
+            {
+                sites.push(id);
+                true
+            }
+            Expr::If { then_branch, else_branch: Some(otherwise), .. } => {
+                let (then_branch, otherwise) = (*then_branch, *otherwise);
+                self.constructors_on_every_path(then_branch, sites)
+                    && self.constructors_on_every_path(otherwise, sites)
+            }
+            // Only an `if`, and deliberately not a nested `match`: a `match`
+            // makes a token of its own for each of its arms, and two live at
+            // once is a question this does not need to answer to reach the
+            // shapes that wanted it.
+            //
+            // A block reaches its tail, and what its statements do on the way
+            // is `may_leave_early`'s question rather than this one.
+            Expr::Block { tail: Some(tail), .. } => {
+                let tail = *tail;
+                self.constructors_on_every_path(tail, sites)
+            }
+            _ => false,
+        }
     }
 
     /// Whether anything inside `id` can leave the frame without reaching the

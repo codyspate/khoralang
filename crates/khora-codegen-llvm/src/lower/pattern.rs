@@ -453,10 +453,11 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// one comparison at run time rather than a proof at compile time, which
     /// is what makes it worth trying at all. `docs/design/reuse.md` §2.
     pub(super) fn release_scrutinee(&mut self, value: BasicValueEnum<'ctx>, ty: &Type, arm: ExprId) {
-        let Some(site) = self.plan.reuse_site(arm).filter(|_| is_boxed(ty)) else {
+        let sites = self.plan.reuse_sites(arm).to_vec();
+        if sites.is_empty() || !is_boxed(ty) {
             self.drop(value, ty);
             return;
-        };
+        }
         let glue = self.be.drop_glue(ty);
         let drop_reuse = self.be.rt.drop_reuse;
         let token = self
@@ -468,14 +469,14 @@ impl<'ctx> Lower<'_, 'ctx> {
             .basic()
             .expect("khora_drop_reuse returns a pointer")
             .into_pointer_value();
-        self.reuse = Some((site, token));
+        self.reuse = Some((sites, token));
     }
 
     /// Frees a token the arm did not spend.
     ///
-    /// Unreachable by the planner's rule — the arm's body *is* the constructor
-    /// — and emitted anyway, because the failure mode of being wrong about
-    /// that is memory nothing owns and no counter is watching.
+    /// Unreachable by the planner's rule — every path through the arm ends at
+    /// a constructor — and emitted anyway, because the failure mode of being
+    /// wrong about that is memory nothing owns and no counter is watching.
     pub(super) fn discard_unspent_token(&mut self) {
         let Some((_, token)) = self.reuse.take() else { return };
         let free_reuse = self.be.rt.free_reuse;

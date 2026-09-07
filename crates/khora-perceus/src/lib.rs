@@ -76,7 +76,7 @@ pub struct RcPlan {
     /// path** — which is why the rule is so narrow: the arm's body has to *be*
     /// the constructor and nothing in it may leave the frame early, leaving
     /// exactly one path from release to allocation. `docs/design/reuse.md` §2.
-    pub reuse: HashMap<ExprId, ExprId>,
+    pub reuse: HashMap<ExprId, Vec<ExprId>>,
     /// Reads that took the binding's reference rather than copying it.
     ///
     /// Not the complement of `dups`: a borrow copies nothing either, and so
@@ -120,9 +120,12 @@ impl RcPlan {
         self.arm_binds.get(&arm).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
-    /// The constructor this arm may build in the cell it matched, if any.
-    pub fn reuse_site(&self, arm: ExprId) -> Option<ExprId> {
-        self.reuse.get(&arm).copied()
+    /// The constructors this arm may build in the cell it matched.
+    ///
+    /// More than one where the arm branches: each path through it builds
+    /// exactly one, which is what lets the token be spent on all of them.
+    pub fn reuse_sites(&self, arm: ExprId) -> &[ExprId] {
+        self.reuse.get(&arm).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     /// Whether this local holds a reference-counted object rather than a

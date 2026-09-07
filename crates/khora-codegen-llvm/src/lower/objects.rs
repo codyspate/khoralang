@@ -300,14 +300,37 @@ impl<'ctx> Lower<'_, 'ctx> {
     }
 
     /// Hands over the reuse token if it was promised to this expression.
+    ///
+    /// Cleared once spent, so a second constructor further along the same path
+    /// allocates rather than building where the first one already did. An arm
+    /// that branches promises the token to a site in each branch, and the
+    /// branch lowering puts it back between them: one path, one spend.
     pub(super) fn take_reuse_token(&mut self, site: ExprId) -> Option<PointerValue<'ctx>> {
-        match self.reuse {
-            Some((promised, token)) if promised == site => {
+        match &self.reuse {
+            Some((promised, token)) if promised.contains(&site) => {
+                let token = *token;
                 self.reuse = None;
                 Some(token)
             }
             _ => None,
         }
+    }
+
+    /// The token as it stands, to be put back before the next branch.
+    pub(super) fn held_reuse_token(&self) -> Option<(Vec<ExprId>, PointerValue<'ctx>)> {
+        self.reuse.clone()
+    }
+
+    /// Puts back what [`Self::held_reuse_token`] took a copy of.
+    ///
+    /// **Not a second token.** The same runtime value, offered again to a
+    /// branch the lowering has not walked yet -- only one of them runs, so
+    /// only one of them spends it.
+    pub(super) fn restore_reuse_token(
+        &mut self,
+        held: Option<(Vec<ExprId>, PointerValue<'ctx>)>,
+    ) {
+        self.reuse = held;
     }
 
     /// A fresh heap object with room for `fields` words, under `tag`.

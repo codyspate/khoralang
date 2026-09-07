@@ -251,6 +251,14 @@ impl<'ctx> Lower<'_, 'ctx> {
         let slot = self.result_slot(&result_ty);
         let mut reached = 0;
 
+        // **Both sides are offered the same reuse token.** An arm whose body
+        // is an `if` promises the token to a constructor in each branch, and
+        // only one branch runs -- so putting it back before the second is
+        // offering the one token again rather than handing out two. Without
+        // this the branch lowered first would spend it and the other would
+        // allocate, leaving the token unspent at run time on that path.
+        let held = self.held_reuse_token();
+
         self.at(then_block);
         self.release_at_arm(then_branch);
         if let Some(value) = self.expr(then_branch) {
@@ -259,6 +267,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             reached += 1;
         }
 
+        self.restore_reuse_token(held);
         self.at(else_block);
         let value = match else_branch {
             Some(else_branch) => {

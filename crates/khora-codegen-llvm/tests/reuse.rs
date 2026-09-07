@@ -120,3 +120,48 @@ fn a_uniquely_owned_walk_allocates_nothing() {
     assert_eq!(lines[0], "65", "the walk should sum 2..=11");
     assert_eq!(lines[1], "0", "a uniquely-owned walk should reuse every cell it consumes");
 }
+
+/// `Range::next` writes an `if` where reuse used to look for a constructor.
+///
+/// It matches the `Range` cell and then branches -- `Step::Done` one way, a
+/// fresh `Range` inside a `Step::Yield` the other -- so the arm's body was not
+/// itself a constructor and the cell it had just taken apart could never be
+/// built in. Both leaves *are* constructors, which is all the token needs: one
+/// path, one spend.
+///
+/// Walked recursively so the cell arrives uniquely owned; a loop copies its
+/// cursor and there would be no token to spend either way, which is
+/// `docs/design/reuse.md` §1 and not this.
+const RANGE_WALK: &str = "module main;
+import std::core::{Iterator, Range, Step, print};
+
+extern fn khora_alloc_count() -> Int;
+extern fn khora_reset_counters();
+
+fn walk(r: Range) -> Int {
+  match Iterator::next(r) {
+    Step::Done => 0,
+    Step::Yield(rest, item) => item + walk(rest),
+  }
+}
+
+pub fn main() -> () {
+  khora_reset_counters();
+  let total = walk(Range::Of(0, 10));
+  print(Int::to_string(total));
+  print(Int::to_string(khora_alloc_count()))
+}
+";
+
+/// **A branch is one path to a constructor, not none.**
+///
+/// Counted over five hundred elements this is 519 allocations where it was
+/// 1,019 -- one per element rather than two, because the `Range` the next step
+/// walks is now built in the cell the last one was matched out of.
+#[test]
+fn a_constructor_in_each_branch_still_reuses() {
+    let out = run("reuse_range_walk", RANGE_WALK);
+    let lines: Vec<&str> = out.trim().lines().collect();
+    assert_eq!(lines[0], "45", "the walk should sum 0..=9");
+    assert_eq!(lines[1], "17", "one allocation an element, not two");
+}
