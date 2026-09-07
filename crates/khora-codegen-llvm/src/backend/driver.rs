@@ -142,6 +142,21 @@ pub(super) fn build(
 
     let context = Context::create();
     let mut backend = Backend::new(&context, &name, types.clone(), &machine);
+    // **Whole-program, and decided once.** Whether a `Step` is a pointer or
+    // three registers has to be the same answer in every module, or one would
+    // hand the other a shape it cannot read. `KHORA_UNBOXED=0` turns it off,
+    // for bisecting a miscompile against the representation rather than
+    // against the change that exposed it.
+    // **Off by default while it is being built.** Laying a value out flat
+    // touches every place representation is decided -- construction, field
+    // reads, matching, the word a tagged return carries, the C boundary -- and
+    // a half-finished answer to any of them is a miscompile rather than a
+    // slower program. `KHORA_UNBOXED=1` turns it on; the gate runs both ways
+    // until it can be the default.
+    backend.unboxed = std::rc::Rc::new(match std::env::var("KHORA_UNBOXED").as_deref() {
+        Ok("1") => khora_types::unboxed::decide(&types, khora_types::unboxed::Fields::Scalars),
+        _ => khora_types::unboxed::Unboxed::default(),
+    });
 
     // **Debug info, before anything is emitted.** A `DISubprogram` has to be
     // attached to a function before that function's instructions are built,

@@ -187,6 +187,19 @@ impl<'ctx> Lower<'_, 'ctx> {
             return self.fail(format!("`{name}` has no field `{label}`"), range);
         };
 
+        // An inline value has no memory to load from: the field is already in
+        // a register beside the others.
+        if self.be.unboxed.holds(&owner) {
+            let whole = self.expr(base)?;
+            let at = self.be.unboxed_field_at(&owner, index);
+            let read = self
+                .be
+                .builder
+                .build_extract_value(whole.into_struct_value(), at, "inline.read")
+                .expect("reading an inline field");
+            return Some(read);
+        }
+
         let object = self.expr(base)?.into_pointer_value();
         let value = self.load_field(object, index, &field_ty);
         // The field is borrowed out of the record, and the record was owned by
@@ -221,6 +234,14 @@ impl<'ctx> Lower<'_, 'ctx> {
                 format!("`{owner}::{case}` takes {} field(s)", info.fields.len()),
                 range,
             );
+        }
+
+        // **An unboxed value is built, not allocated**, and that includes the
+        // cases with no fields: `Step::Done` held inline is a tag in a
+        // register, so it cannot be the shared object below.
+        let built = self.types.of(site).clone();
+        if self.be.unboxed.holds(&built) {
+            return self.construct_inline(&built, tag, args, range);
         }
 
         // **A case with no fields is one object for the whole program.** It
@@ -305,6 +326,43 @@ impl<'ctx> Lower<'_, 'ctx> {
             .basic()
             .expect("khora_alloc_reuse returns a pointer")
             .into_pointer_value()
+    }
+
+    /// Builds an unboxed value in registers.
+    ///
+    /// No allocation, no header, no reference count -- the value *is* the
+    /// aggregate. A case that carries nothing leaves the payload undefined,
+    /// which nothing reads: the tag says which case it is, and every arm that
+    /// looks at a field has tested the tag first.
+    fn construct_inline(
+        &mut self,
+        ty: &Type,
+        tag: u32,
+        args: &[ExprId],
+        range: TextRange,
+    ) -> Flow<'ctx> {
+        let Some(shape) = self.be.unboxed_type(ty) else {
+            return self.fail(format!("`{ty}` has no inline layout"), range);
+        };
+        let mut value: inkwell::values::AggregateValueEnum<'ctx> = shape.get_undef().into();
+        if self.be.cases_of(ty) > 1 {
+            let which = self.be.ctx.i32_type().const_int(u64::from(tag), false);
+            value = self
+                .be
+                .builder
+                .build_insert_value(value, which, 0, "case")
+                .expect("writing an inline tag");
+        }
+        for (index, arg) in args.iter().enumerate() {
+            let field = self.expr(*arg)?;
+            let at = self.be.unboxed_field_at(ty, index);
+            value = self
+                .be
+                .builder
+                .build_insert_value(value, field, at, "inline.field")
+                .expect("writing an inline field");
+        }
+        Some(value.into_struct_value().into())
     }
 
     /// Hands over the reuse token if it was promised to this expression.

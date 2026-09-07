@@ -53,13 +53,29 @@ const MAX_DEPTH: usize = 16;
 /// every generic type, which is every type this exists for. So the
 /// declarations are what is kept, and the arguments go in when the question is
 /// asked.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Unboxed {
     declarations: HashMap<TypeId, (Vec<String>, Vec<VariantInfo>)>,
+    fields: Fields,
+}
+
+/// Which fields an unboxed value may carry.
+///
+/// **A staging control, and it is meant to be removed.** A value held inline
+/// with a pointer among its fields needs those fields counted when it is
+/// copied and released when it is dropped -- there is no header to hang that
+/// on any more. `Scalars` is the half of the change that needs none of it, so
+/// that laying values out flat can be proved before ownership moves too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fields {
+    /// Words only: nothing inside is reference counted.
+    Scalars,
+    /// Pointers too, each counted by the value that holds them.
+    Any,
 }
 
 /// Indexes a program's declarations. The deciding happens per use.
-pub fn decide(map: &TypeMap) -> Unboxed {
+pub fn decide(map: &TypeMap, fields: Fields) -> Unboxed {
     let mut declarations: HashMap<TypeId, (Vec<String>, Vec<VariantInfo>)> = HashMap::new();
     for v in &map.variants {
         let id = (v.type_name.clone(), v.home.clone());
@@ -71,7 +87,7 @@ pub fn decide(map: &TypeMap) -> Unboxed {
             .unwrap_or_default();
         declarations.entry(id).or_insert_with(|| (params, Vec::new())).1.push(v.clone());
     }
-    Unboxed { declarations }
+    Unboxed { declarations, fields }
 }
 
 impl Unboxed {
@@ -144,6 +160,9 @@ impl Unboxed {
         {
             return false;
         }
+        if self.fields == Fields::Scalars && fields.iter().any(|f| self.counted(f)) {
+            return false;
+        }
         seen.push(id);
         let total: usize =
             tag_words(variants.len()) + fields.iter().map(|f| self.words(f, seen)).sum::<usize>();
@@ -173,6 +192,18 @@ impl Unboxed {
         let inner: usize = fields.iter().map(|f| self.words(f, seen)).sum();
         seen.pop();
         tag_words(variants.len()) + inner
+    }
+
+    /// Whether a field is a pointer somebody has to count.
+    ///
+    /// An unboxed field is not: it is laid out inline, and whatever *it* holds
+    /// is asked about in turn.
+    fn counted(&self, field: &Type) -> bool {
+        match field {
+            Type::Str | Type::Fn { .. } | Type::Tuple(_) => true,
+            Type::Adt { .. } => !self.holds(field),
+            _ => false,
+        }
     }
 
     /// Whether a type's fields lead back to it.
@@ -238,6 +269,14 @@ fn collect_adts(ty: &Type, out: &mut Vec<TypeId>) {
 /// is the difference between `Step<Range, Int>` fitting and not.
 fn tag_words(cases: usize) -> usize {
     usize::from(cases > 1)
+}
+
+impl Default for Unboxed {
+    /// Nothing inline, which is what every representation decision answered
+    /// before this module existed.
+    fn default() -> Self {
+        Unboxed { declarations: HashMap::new(), fields: Fields::Scalars }
+    }
 }
 
 /// A declared field type with this use's arguments put in.

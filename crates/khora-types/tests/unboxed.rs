@@ -58,7 +58,7 @@ fn core(name: &str, args: Vec<Type>) -> Type {
 #[test]
 fn the_shapes_iteration_needs() {
     let (_db, map) = merged();
-    let u = khora_types::unboxed::decide(&map);
+    let u = khora_types::unboxed::decide(&map, khora_types::unboxed::Fields::Any);
 
     let list_int = core("List", vec![Type::Int]);
     let range = core("Range", vec![]);
@@ -88,7 +88,7 @@ fn the_shapes_iteration_needs() {
 #[test]
 fn a_single_case_type_carries_no_tag() {
     let (_db, map) = merged();
-    let u = khora_types::unboxed::decide(&map);
+    let u = khora_types::unboxed::decide(&map, khora_types::unboxed::Fields::Any);
     let range = core("Range", vec![]);
     assert_eq!(u.payload(&range).map(|f| f.len()), Some(2), "`from` and `to`");
     assert!(u.holds(&core("Step", vec![range, Type::Int])), "a tag, a Range and an item");
@@ -98,10 +98,26 @@ fn a_single_case_type_carries_no_tag() {
 ///
 /// The one criterion here that is about meaning rather than layout: a write
 /// through one holder has to be seen by another, and passing a copy loses it.
+/// `Fields::Scalars` is the staged half: laid out flat, nothing inside to
+/// count. `Step<List<Int>, Int>` holds a pointer, so it waits for `Any`.
+#[test]
+fn the_scalar_only_stage_takes_the_flat_ones() {
+    let (_db, map) = merged();
+    let u = khora_types::unboxed::decide(&map, khora_types::unboxed::Fields::Scalars);
+    let range = core("Range", vec![]);
+    assert!(u.holds(&range), "two integers and nothing counted");
+    assert!(u.holds(&core("Step", vec![range, Type::Int])), "a tag and three words");
+    assert!(
+        !u.holds(&core("Step", vec![core("List", vec![Type::Int]), Type::Int])),
+        "holds a `List` pointer, so it waits for the half that counts fields"
+    );
+    assert!(!u.holds(&core("Pair", vec![Type::Str, Type::Int])), "a `String` is counted");
+}
+
 #[test]
 fn a_mutable_field_keeps_its_pointer() {
     let (_db, map) = merged();
-    let u = khora_types::unboxed::decide(&map);
+    let u = khora_types::unboxed::decide(&map, khora_types::unboxed::Fields::Any);
     let mutable: Vec<&khora_types::VariantInfo> =
         map.variants.iter().filter(|v| v.mutable.iter().any(|m| *m)).collect();
     assert!(!mutable.is_empty(), "`std` has at least one, or this proves nothing");

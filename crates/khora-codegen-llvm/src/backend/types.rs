@@ -40,6 +40,11 @@ impl<'ctx> Backend<'ctx> {
             // pointer to one exactly as a record is. Nothing else about it is
             // special — the same header, the same counting, the same generated
             // `drop_fields`.
+            // An unboxed ADT is the aggregate itself rather than a pointer to
+            // one. Asked first, because everything below assumes a pointer.
+            Type::Adt { .. } if self.unboxed.holds(ty) => {
+                self.unboxed_type(ty).map(Into::into)
+            }
             Type::Ptr | Type::Str | Type::Adt { .. } | Type::Fn { .. } | Type::Tuple(_) => {
                 Some(self.ctx.ptr_type(AddressSpace::default()).into())
             }
@@ -59,6 +64,41 @@ impl<'ctx> Backend<'ctx> {
             | Type::Row { .. } => None,
             Type::Never | Type::Unknown => None,
         }
+    }
+
+    /// The aggregate an unboxed value *is*.
+    ///
+    /// `{ [i32 tag,] field, .. }` — the tag only where there is something to
+    /// discriminate. A record has one case, so one shape, so nothing to store:
+    /// `Range` is `{ i64, i64 }` and not `{ i32, i64, i64 }`. That is a word
+    /// off every record in the language.
+    ///
+    /// No header. That is the whole point: sixteen bytes of refcount, tag and
+    /// width exist so that a *shared* object can be counted and taken apart,
+    /// and an inline value is neither shared nor counted.
+    pub fn unboxed_type(&self, ty: &Type) -> Option<inkwell::types::StructType<'ctx>> {
+        let payload = self.unboxed.payload(ty)?;
+        let mut parts: Vec<BasicTypeEnum<'ctx>> = Vec::with_capacity(payload.len() + 1);
+        if self.cases_of(ty) > 1 {
+            parts.push(self.ctx.i32_type().into());
+        }
+        for field in &payload {
+            parts.push(self.llvm_type(field)?);
+        }
+        Some(self.ctx.struct_type(&parts, false))
+    }
+
+    /// How many cases a type declares, which decides whether it needs a tag.
+    pub fn cases_of(&self, ty: &Type) -> usize {
+        match ty {
+            Type::Adt { name, home, .. } => self.variants_in(home.as_ref(), name).len(),
+            _ => 0,
+        }
+    }
+
+    /// Where a field sits in an unboxed value: after the tag, if there is one.
+    pub fn unboxed_field_at(&self, ty: &Type, index: usize) -> u32 {
+        (index + usize::from(self.cases_of(ty) > 1)) as u32
     }
 
     /// `{ i32 which, i64 payload }` — what a fallible function returns.
@@ -205,8 +245,80 @@ impl<'ctx> Backend<'ctx> {
                 .build_bit_cast(f, self.ctx.i64_type(), "float.word")
                 .expect("a float as a word")
                 .into_int_value(),
+            // **An inline value that will not fit in a word is boxed to
+            // cross.** A tagged return, a handler's answer and the C boundary
+            // all carry exactly one machine word, and an aggregate of two or
+            // more is not one. `docs/roadmap.md` § Unboxed records anticipated
+            // this for FFI and it is the same answer here: laid out flat where
+            // it is used, put back in a box where it has to travel as a word.
+            //
+            // No worse than before, because these boundaries carried a pointer
+            // to a heap object already. The value is spilled here and reloaded
+            // by `word_to_value`, which frees the box.
+            BasicValueEnum::StructValue(v) => self.spill_to_word(v),
             other => other.into_int_value(),
         }
+    }
+
+    /// Puts an inline value in a box so it can cross as one word.
+    fn spill_to_word(&self, value: inkwell::values::StructValue<'ctx>) -> inkwell::values::IntValue<'ctx> {
+        let fields = value.get_type().count_fields();
+        let bytes = self.ctx.i64_type().const_int(u64::from(fields) * 8, false);
+        let object = self
+            .builder
+            .build_call(self.rt.alloc, &[bytes.into(), self.ctx.i32_type().const_zero().into()], "spill")
+            .expect("boxing an inline value to cross a word")
+            .try_as_basic_value()
+            .basic()
+            .expect("khora_alloc returns a pointer")
+            .into_pointer_value();
+        for index in 0..fields {
+            let field = self
+                .builder
+                .build_extract_value(value, index, "spill.field")
+                .expect("reading an inline field");
+            let slot = crate::runtime::field_pointer(self.ctx, &self.builder, object, u64::from(index));
+            self.builder.build_store(slot, field).expect("spilling an inline field");
+        }
+        self.builder
+            .build_ptr_to_int(object, self.ctx.i64_type(), "spill.word")
+            .expect("a spilled value as a word")
+    }
+
+    /// Reads a spilled inline value back and frees the box it crossed in.
+    fn reload_from_word(
+        &self,
+        word: inkwell::values::IntValue<'ctx>,
+        shape: inkwell::types::StructType<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        let ptr = self.ctx.ptr_type(AddressSpace::default());
+        let object = self
+            .builder
+            .build_int_to_ptr(word, ptr, "spilled")
+            .expect("a word as a spilled value");
+        let mut value: inkwell::values::AggregateValueEnum<'ctx> = shape.get_undef().into();
+        for index in 0..shape.count_fields() {
+            let field_ty = shape.get_field_type_at_index(index).expect("a field");
+            let slot = crate::runtime::field_pointer(self.ctx, &self.builder, object, u64::from(index));
+            let read = self
+                .builder
+                .build_load(field_ty, slot, "reload.field")
+                .expect("reading a spilled field");
+            value = self
+                .builder
+                .build_insert_value(value, read, index, "reload")
+                .expect("rebuilding an inline value");
+        }
+        // The box existed only to cross. Nothing else refers to it, and under
+        // `Fields::Scalars` it holds nothing that needs releasing first.
+        self.builder
+            .build_call(
+                self.rt.drop,
+                &[object.into(), ptr.const_null().into()],
+                "",
+            )
+            .expect("freeing the box a value crossed in");
+        value.into_struct_value().into()
     }
 
     /// The inverse: a word read back as a value of `ty`.
@@ -230,6 +342,7 @@ impl<'ctx> Backend<'ctx> {
                 .builder
                 .build_bit_cast(word, f, "word.float")
                 .expect("a word as a float"),
+            Some(BasicTypeEnum::StructType(shape)) => self.reload_from_word(word, shape),
             _ => word.into(),
         }
     }
@@ -244,6 +357,10 @@ impl<'ctx> Backend<'ctx> {
             Some(BasicTypeEnum::PointerType(p)) => p.const_null().into(),
             Some(BasicTypeEnum::IntType(i)) => i.const_zero().into(),
             Some(BasicTypeEnum::FloatType(f)) => f.const_zero().into(),
+            // An inline value's empty state is zero in every field. Nothing
+            // reads it -- a slot is written before it is used -- but a slot
+            // has to start somewhere and a struct cannot start as an `i64`.
+            Some(BasicTypeEnum::StructType(s)) => s.const_zero().into(),
             _ => self.ctx.i64_type().const_zero().into(),
         }
     }

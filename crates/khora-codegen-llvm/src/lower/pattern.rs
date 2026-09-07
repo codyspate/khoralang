@@ -538,7 +538,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         }
 
         if let Some(plan) = self.switch_plan(arms, scrutinee_ty) {
-            let tag = runtime::load_tag(self.be.ctx, &self.be.builder, value.into_pointer_value());
+            let tag = self.case_of(value, scrutinee_ty);
             let mut cases = Vec::new();
             let mut default = None;
             for (index, entry) in plan.into_iter().enumerate() {
@@ -762,8 +762,13 @@ impl<'ctx> Lower<'_, 'ctx> {
                     self.fail("this pattern does not name a constructor", range);
                     return;
                 };
-                let loaded =
-                    runtime::load_tag(self.be.ctx, &self.be.builder, value.into_pointer_value());
+                // A type with one case has nothing to discriminate: the
+                // pattern names the only shape there is.
+                if self.be.unboxed.holds(ty) && self.be.cases_of(ty) <= 1 {
+                    self.br(success);
+                    return;
+                }
+                let loaded = self.case_of(value, ty);
                 let expected = self.be.ctx.i32_type().const_int(tag as u64, false);
                 self.branch_on_equal(loaded, expected, success, failure);
             }
@@ -773,6 +778,10 @@ impl<'ctx> Lower<'_, 'ctx> {
                     return;
                 };
                 let info = self.at_this_instantiation(ty, info);
+                if self.be.unboxed.holds(ty) {
+                    self.test_inline(value, ty, tag, &fields, success, failure);
+                    return;
+                }
                 let object = value.into_pointer_value();
                 let loaded = runtime::load_tag(self.be.ctx, &self.be.builder, object);
                 let expected = self.be.ctx.i32_type().const_int(tag as u64, false);
@@ -861,6 +870,89 @@ impl<'ctx> Lower<'_, 'ctx> {
         self.test_fields(object, info, fields, index + 1, success, failure);
     }
 
+    /// A value's case, wherever it is kept.
+    ///
+    /// In a header for a boxed value, and beside the fields for an inline one.
+    /// Every test of a tag goes through here so that neither shape has to be
+    /// remembered at the point of asking.
+    fn case_of(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        ty: &Type,
+    ) -> inkwell::values::IntValue<'ctx> {
+        if self.be.unboxed.holds(ty) {
+            return self
+                .be
+                .builder
+                .build_extract_value(value.into_struct_value(), 0, "inline.case")
+                .expect("reading an inline tag")
+                .into_int_value();
+        }
+        runtime::load_tag(self.be.ctx, &self.be.builder, value.into_pointer_value())
+    }
+
+    /// Tests an inline value's case, and then its fields.
+    ///
+    /// The tag is beside the fields in a register rather than in a header, so
+    /// there is nothing to load and nothing that could be null. A type with
+    /// one case tests nothing at all: one shape means the pattern always
+    /// matches, and the fields decide.
+    fn test_inline(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        ty: &Type,
+        tag: u32,
+        fields: &[PatId],
+        success: BasicBlock<'ctx>,
+        failure: BasicBlock<'ctx>,
+    ) {
+        let whole = value.into_struct_value();
+        let matched = if self.be.cases_of(ty) > 1 {
+            let held = self.case_of(value, ty);
+            let expected = self.be.ctx.i32_type().const_int(u64::from(tag), false);
+            let block = self.block("inline.case.matched");
+            self.branch_on_equal(held, expected, block, failure);
+            self.at(block);
+            block
+        } else {
+            self.be.builder.get_insert_block().expect("a block to test in")
+        };
+        let _ = matched;
+        self.test_inline_fields(whole, ty, fields, 0, success, failure);
+    }
+
+    /// The fields of an inline value, in order, each tested where it can fail.
+    fn test_inline_fields(
+        &mut self,
+        whole: inkwell::values::StructValue<'ctx>,
+        ty: &Type,
+        fields: &[PatId],
+        index: usize,
+        success: BasicBlock<'ctx>,
+        failure: BasicBlock<'ctx>,
+    ) {
+        if index >= fields.len() {
+            self.br(success);
+            return;
+        }
+        if self.is_irrefutable(fields[index]) {
+            self.test_inline_fields(whole, ty, fields, index + 1, success, failure);
+            return;
+        }
+        let payload = self.be.unboxed.payload(ty).unwrap_or_default();
+        let field_ty = payload.get(index).cloned().unwrap_or(Type::Unknown);
+        let at = self.be.unboxed_field_at(ty, index);
+        let read = self
+            .be
+            .builder
+            .build_extract_value(whole, at, "inline.test")
+            .expect("reading an inline field");
+        let next = self.block("inline.field.next");
+        self.test_pattern(fields[index], read, &field_ty, next, failure);
+        self.at(next);
+        self.test_inline_fields(whole, ty, fields, index + 1, success, failure);
+    }
+
     /// [`Self::test_fields`], for a pattern that names its fields.
     ///
     /// The index into the object is looked up per field instead of being the
@@ -927,6 +1019,24 @@ impl<'ctx> Lower<'_, 'ctx> {
             Pat::TupleStruct { resolution, fields } => {
                 let Some((_, info)) = self.variant_of(&resolution) else { return };
                 let info = self.at_this_instantiation(ty, info);
+                if self.be.unboxed.holds(ty) {
+                    for (index, field) in fields.iter().enumerate() {
+                        let declared =
+                            info.fields.get(index).cloned().unwrap_or(Type::Unknown);
+                        let field_ty = match self.body.pat(*field) {
+                            Pat::Bind(local) => self.types.local(*local).clone(),
+                            _ => declared,
+                        };
+                        let at = self.be.unboxed_field_at(ty, index);
+                        let read = self
+                            .be
+                            .builder
+                            .build_extract_value(value.into_struct_value(), at, "inline.bound")
+                            .expect("reading an inline field");
+                        self.bind_pattern(*field, read, &field_ty);
+                    }
+                    return;
+                }
                 let object = value.into_pointer_value();
                 for (index, field) in fields.iter().enumerate() {
                     // **The binding's own type, not the variant's declared
