@@ -236,6 +236,14 @@ impl<'ctx> Lower<'_, 'ctx> {
         // `khora_drop` need not know a static from anything else, and cannot
         // take it to zero.
         if info.fields.is_empty() {
+            // **A static case cannot build in the cell it was promised, so it
+            // gives the cell back.** A branch is one path to a constructor and
+            // the token has to leave the frame on all of them; where the
+            // constructor turns out to be a constant there is nothing to build
+            // in, and the alternative to freeing here is the merge block
+            // freeing memory the *other* branch has already reused and
+            // returned.
+            self.discard_token_at(site);
             return Some(self.be.static_variant(owner, case, tag).into());
         }
 
@@ -313,6 +321,19 @@ impl<'ctx> Lower<'_, 'ctx> {
                 Some(token)
             }
             _ => None,
+        }
+    }
+
+    /// Gives back a token this site was promised but cannot spend.
+    ///
+    /// Only when it was promised to *this* site: an ordinary constant case
+    /// somewhere inside an arm has nothing to do with the token, and freeing
+    /// it there would take the cell out from under the constructor that is
+    /// going to build in it.
+    pub(super) fn discard_token_at(&mut self, site: ExprId) {
+        let promised = matches!(&self.reuse, Some((sites, _)) if sites.contains(&site));
+        if promised {
+            self.discard_unspent_token();
         }
     }
 

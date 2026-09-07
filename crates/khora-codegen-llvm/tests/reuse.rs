@@ -165,3 +165,50 @@ fn a_constructor_in_each_branch_still_reuses() {
     assert_eq!(lines[0], "45", "the walk should sum 0..=9");
     assert_eq!(lines[1], "17", "one allocation an element, not two");
 }
+
+/// **A branch that builds a constant has to give the cell back.**
+///
+/// `std::resilience` has this shape and it found the bug: a case with no
+/// fields is one static object for the whole program, so it allocates nothing
+/// and cannot build in the cell the arm was promised. Freeing the token where
+/// the branches join instead frees memory the *other* branch has already
+/// reused and returned -- which comes back as a tag that matches no arm, and
+/// `llvm.trap`.
+///
+/// The live count is the assertion that matters. A double free shows up as a
+/// crash only when the allocator reuses the memory quickly enough, and this
+/// ran to completion with the wrong answer before it ever did.
+const BRANCHED_TO_A_CONSTANT: &str = "module main;
+import std::core::{Option, print};
+
+extern fn khora_live_count() -> Int;
+
+fn capped(o: Option<Int>, limit: Int) -> Option<Int> {
+  match o {
+    Option::None => Option::None,
+    Option::Some(at) => if at < limit { Option::Some(at) } else { Option::None },
+  }
+}
+
+pub fn main() -> () {
+  let mut i = 0;
+  let mut kept = 0;
+  while i < 200 {
+    kept = kept + (match capped(Option::Some(i), 100) {
+      Option::Some(v) => v,
+      Option::None => 0,
+    });
+    i = i + 1;
+  };
+  print(Int::to_string(kept));
+  print(Int::to_string(khora_live_count()))
+}
+";
+
+#[test]
+fn a_branch_that_builds_a_constant_frees_the_token() {
+    let out = run("reuse_constant_branch", BRANCHED_TO_A_CONSTANT);
+    let lines: Vec<&str> = out.trim().lines().collect();
+    assert_eq!(lines[0], "4950", "the kept values are 0..=99");
+    assert_eq!(lines[1], "0", "nothing left over, and nothing freed twice");
+}
