@@ -5284,6 +5284,44 @@ work is sound — 13.6 audited it, ThreadSanitizer is clean, the baseline is
 green on three platforms. What has not happened is anybody reading it as a
 stranger would and asking whether it is *good*, as opposed to correct.
 
+### What was measured afterwards, which narrows it further
+
+The paragraph above says a `for` loop "allocates a heap object, counts a
+reference up and counts it back down". **The first third is no longer true and
+it changed nothing**, which is the most useful thing this argument has
+acquired.
+
+A loop hands its cursor over now, so the `Cons` reaches `List::next` unshared
+and the `Step` is built in the cell it matched. Counted with
+`khora_alloc_count` over a thousand-element walk: zero, where it was one an
+element. On a four-core Linux machine, `bench/iteration`:
+
+| | with the allocation | without it |
+| --- | --- | --- |
+| `for x in xs { total = total + x }` | 114 ms | 114 ms |
+
+Removing a hundred per cent of the allocations bought none of the time. The
+cost was never the allocation; it is the object *existing*. Per element the
+reuse path still calls `khora_drop_reuse` and `khora_alloc_reuse`, writes a
+header, stores two fields and loads them back, where the hand-written loop
+loads a tag and two fields and adds.
+
+Two things follow, and the second is the point.
+
+**The allocation counters were a quarter of it.** Two atomic
+read-modify-writes per allocation, which the reuse path pays as well -- so a
+`for` loop that allocates nothing was still paying them twice an element.
+Switched off unless a program asks, `for` goes 114 ms to 83 ms and
+`std::net::http` from 53,907 requests a second to 59,058. That is a real
+saving and it is *not* this section: it made the object cheaper to have, not
+unnecessary.
+
+**What is left is 83 ms against 18 ms**, and every remaining millisecond is
+the `Step`. The gap has closed from 6.3x to 4.6x without touching it, which
+is as far as making allocation cheaper can go: there is no allocation left to
+make cheaper. Everything from here is the two runtime calls and the header,
+and the only thing that removes those is not building the object.
+
 ### The finding that starts it, because it is not a matter of taste
 
 **26% of the non-blank lines in `crates/` are comments.** 19,647 lines of
