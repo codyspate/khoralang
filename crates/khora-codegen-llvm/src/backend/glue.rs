@@ -152,9 +152,20 @@ impl<'ctx> Backend<'ctx> {
                 mutable: vec![false; items.len()],
             }];
         }
-        let Type::Adt { name, args, .. } = ty else { return Vec::new() };
+        let Type::Adt { name, args, home } = ty else { return Vec::new() };
         let declared = self.variants_for(ty);
-        let generics = self.types.adts.get(name).cloned().unwrap_or_default();
+        // **By module first.** `adts` is keyed by name alone and the
+        // whole-program merge keeps whichever declaration it met first, so a
+        // program with a `Pair` of its own left `std`'s `Pair<K, V>` with no
+        // parameters -- and a field declared `K` was laid out as the machine
+        // word an unsubstituted variable gets, then read as a `String`.
+        let generics = self
+            .types
+            .adts_in
+            .get(&(name.clone(), home.clone()))
+            .or_else(|| self.types.adts.get(name))
+            .cloned()
+            .unwrap_or_default();
         if args.is_empty() || generics.is_empty() {
             return declared;
         }

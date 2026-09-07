@@ -528,3 +528,75 @@ store b
 ", "each impl belongs to its own type");
     assert_eq!(ran.code, Some(0));
 }
+
+/// **A type's generic parameters belong to its declaring module, not to its
+/// name.**
+///
+/// `TypeMap::adts` is keyed by name alone and the whole-program merge keeps
+/// whichever declaration it met first. So a program whose own `Pair` was
+/// merged first left the library's `Pair<K, V>` with no parameters at all:
+/// nothing substituted `K`, the field stayed a type variable, and a `String`
+/// was laid out and loaded as the machine word an unsubstituted variable gets.
+/// The compiler then asked a pointer of an integer -- inside a closure, in a
+/// module the program never mentions.
+///
+/// That last part is what made it so bad to meet. `main` here does not import
+/// the library's `Pair`, refer to it, or know it exists; it declares a type
+/// that happens to share its name. With `std` in place of `lib`,
+/// `pub type Pair = { .. }` and `pub type Result = { .. }` each crashed the
+/// compiler with an internal error naming neither the type nor the file it was
+/// written in.
+///
+/// **`main` is listed first on purpose.** The merge takes the first
+/// declaration it sees, so the order decides which of the two loses its
+/// parameters, and only one order reproduces it.
+///
+/// Sibling of the drop-glue-by-printed-name bug above: the same cause, in a
+/// different map that forgot to ask *whose*.
+#[test]
+fn a_generic_type_keeps_its_parameters_beside_a_same_named_one() {
+    let ran = run(
+        "same_name_generic_parameters",
+        &[
+            (
+                "main",
+                "module demo::main;
+import demo::lib::{lookup};
+
+extern fn khora_print_int(value: Int);
+fn print(value: Int);
+
+// The same name, declared here, and nothing like the other one: no
+// parameters, and fields the other does not have. Nothing below mentions
+// `demo::lib::Pair`.
+pub type Pair = { a: Int, b: Int };
+
+pub fn main() -> Int {
+  print(lookup(\"answer\"));
+  print(lookup(\"other\"));
+  let mine: Pair = { a: 2, b: 40 };
+  print(mine.a + mine.b);
+  0
+}
+",
+            ),
+            (
+                "lib",
+                "module demo::lib;
+pub type Pair<K, V> = { key: K, value: V };
+
+/// A closure over the pair, because that is where it fell over: the compare
+/// wants a `String` and the field arrived as the word an unsubstituted `K` is
+/// laid out as.
+pub fn lookup(name: String) -> Int {
+  let held: Pair<String, Int> = { key: \"answer\", value: 42 };
+  let same = fn (q: Pair<String, Int>) => q.key == name;
+  if same(held) { held.value } else { 0 }
+}
+",
+            ),
+        ],
+    );
+    assert_eq!(ran.stdout, "42\n0\n42\n");
+    assert_eq!(ran.code, Some(0));
+}

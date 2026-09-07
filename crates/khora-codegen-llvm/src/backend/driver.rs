@@ -484,6 +484,12 @@ fn merged_types(db: &dyn Db, files: &[SourceFile]) -> TypeMap {
         for (name, generics) in &map.adts {
             out.adts.entry(name.clone()).or_insert_with(|| generics.clone());
         }
+        // **First file wins in `adts`, which is why `adts_in` exists.** Two
+        // modules declaring the same type name have one entry between them
+        // there; keyed by module as well, they each keep their own.
+        for (key, generics) in &map.adts_in {
+            out.adts_in.entry(key.clone()).or_insert_with(|| generics.clone());
+        }
         for (name, kind) in &map.kinds {
             out.kinds.entry(name.clone()).or_insert_with(|| kind.clone());
         }

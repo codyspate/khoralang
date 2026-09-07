@@ -38,6 +38,22 @@ pub struct TypeMap {
     pub(crate) reachable_adts: HashMap<String, Vec<String>>,
     /// Generic parameters of each declared type, by name.
     pub adts: HashMap<String, Vec<String>>,
+    /// The same, by the module that declares the type as well as its name.
+    ///
+    /// **A name is not enough to find a type's parameters.** Two modules may
+    /// each declare a `Pair`, and the whole-program merge keeps whichever it
+    /// saw first -- so a program declaring its own `Pair` gave `std`'s
+    /// `Pair<K, V>` no parameters at all. Nothing substituted `K`, the field
+    /// stayed a type variable, and a `String` was loaded as the machine word a
+    /// variable is laid out as. The compiler then asked a pointer of an
+    /// integer, inside a closure in `std::schema`, about a declaration in a
+    /// file that never mentioned it.
+    ///
+    /// Keyed rather than replacing `adts` because the name-keyed map is what
+    /// twenty other places want -- they ask about a type the file in hand can
+    /// see, where the name is unambiguous. This one is for the places holding
+    /// a `Type`, which knows its module.
+    pub adts_in: HashMap<(String, Option<khora_hir::ModulePath>), Vec<String>>,
     /// The traits and impls this file declares.
     pub traits: traits::Traits,
     /// The kind of every named type, so an impl can be checked against the
@@ -64,22 +80,56 @@ pub struct TypeMap {
 }
 
 impl TypeMap {
-    /// Whether a recorded variant is the one being asked about.
-    ///
-    /// A `home` of `None` asks by name alone, which is what a caller holding
-    /// only a spelling can do — the compiler's own types, and the backend,
-    /// which works on names monomorphization has already made unique. A
-    /// `Some` asks exactly, and every lookup driven by a [`Type`] does.
-    fn is_the_same_type(v: &VariantInfo, home: Option<&khora_hir::ModulePath>, name: &str) -> bool {
-        v.type_name == name && home.is_none_or(|wanted| v.home.as_ref() == Some(wanted))
-    }
 
     pub(crate) fn variants_of(
         &self,
         home: Option<&khora_hir::ModulePath>,
         type_name: &str,
     ) -> Vec<&VariantInfo> {
-        self.variants.iter().filter(|v| Self::is_the_same_type(v, home, type_name)).collect()
+        self.variants_named(home, type_name, None)
+    }
+
+    /// The variants of one type, never two.
+    ///
+    /// **A lookup with no home used to answer with every type of that name at
+    /// once**, so two modules declaring a `Result` gave one list of `Ok`,
+    /// `Err`, `Result`. A variant's index in that list is its tag, so the
+    /// second module's record was built and matched as case 2 of a type with
+    /// one case, and the field at that offset was read as whatever happened to
+    /// be there. Naming a `Pair` or a `Result` is an ordinary thing to do and
+    /// it crashed the compiler.
+    ///
+    /// Where the home is known this is the filter it always was. Where it is
+    /// not, the groups are kept apart and the one holding `case` wins -- a
+    /// case name is the evidence available about which type was meant --
+    /// falling back to the first group, so the answer is one type's list
+    /// either way.
+    fn variants_named(
+        &self,
+        home: Option<&khora_hir::ModulePath>,
+        type_name: &str,
+        case: Option<&str>,
+    ) -> Vec<&VariantInfo> {
+        let matching = self.variants.iter().filter(|v| v.type_name == type_name);
+        if let Some(wanted) = home {
+            return matching.filter(|v| v.home.as_ref() == Some(wanted)).collect();
+        }
+
+        let mut groups: Vec<(Option<&khora_hir::ModulePath>, Vec<&VariantInfo>)> = Vec::new();
+        for v in matching {
+            let key = v.home.as_ref();
+            match groups.iter_mut().find(|(h, _)| *h == key) {
+                Some((_, group)) => group.push(v),
+                None => groups.push((key, vec![v])),
+            }
+        }
+        if let Some(case) = case {
+            if let Some((_, group)) = groups.iter().find(|(_, g)| g.iter().any(|v| v.name == case))
+            {
+                return group.clone();
+            }
+        }
+        groups.into_iter().next().map(|(_, g)| g).unwrap_or_default()
     }
 
     /// A constructor, found by the type it belongs to *and* its own name.
@@ -94,9 +144,7 @@ impl TypeMap {
         type_name: &str,
         case: &str,
     ) -> Option<&VariantInfo> {
-        self.variants
-            .iter()
-            .find(|v| v.name == case && Self::is_the_same_type(v, home, type_name))
+        self.variants_named(home, type_name, Some(case)).into_iter().find(|v| v.name == case)
     }
 
     /// The variant a type's own record shape is recorded as, found by identity.
@@ -502,6 +550,7 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
                 let generics = generic_names(e.type_params().as_ref());
                 consts.insert(name.clone(), vec![false; generics.len()]);
                 map.adts.insert(name.clone(), generics.clone());
+                map.adts_in.insert((name.clone(), here.clone()), generics.clone());
 
                 let mut labels = Vec::new();
                 let mut fields = Vec::new();
@@ -532,6 +581,7 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
                     .unwrap_or_default();
                 consts.insert(type_name.clone(), is_const);
                 map.adts.insert(type_name.clone(), generics.clone());
+                map.adts_in.insert((type_name.clone(), here.clone()), generics.clone());
                 map.declared_here.insert(type_name.clone());
                 // `type Point = { x: Int, y: Int }` is one variant carrying
                 // named fields — the same shape a constructor already has, so

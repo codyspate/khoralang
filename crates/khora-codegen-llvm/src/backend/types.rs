@@ -322,15 +322,55 @@ impl<'ctx> Backend<'ctx> {
         home: Option<&khora_hir::ModulePath>,
         type_name: &str,
     ) -> Vec<VariantInfo> {
-        self.types
-            .variants
-            .iter()
-            .filter(|v| {
-                v.type_name == type_name
-                    && home.is_none_or(|wanted| v.home.as_ref() == Some(wanted))
-            })
-            .cloned()
-            .collect()
+        self.variants_named(home, type_name, None)
+    }
+
+    /// The variants of one type, never two.
+    ///
+    /// **A lookup with no home used to answer with every type of that name at
+    /// once.** Two modules declaring a `Result` produced one list of
+    /// `Ok`, `Err`, `Result` -- and since a variant's index in the list *is*
+    /// its tag, the second module's record was built and matched under tag 2
+    /// of a type that has one case. The failure was a field loaded at the
+    /// wrong offset, so it surfaced as the backend asking a pointer of an
+    /// integer, a long way from the declaration that caused it.
+    ///
+    /// Naming a `Pair` or a `Result` is an ordinary thing to do and it
+    /// crashed the compiler; `docs/errata.md` 46 is the same bug where the
+    /// home was recorded but not consulted.
+    ///
+    /// Where the home is known this is the filter it always was. Where it is
+    /// not -- the compiler's own references to `Ordering` and friends, which
+    /// name a type without saying whose -- the groups are kept apart and the
+    /// one holding `case` wins, because a case name is the evidence available
+    /// about which type was meant. Failing that, the first group, so the
+    /// answer is one type's list either way.
+    fn variants_named(
+        &self,
+        home: Option<&khora_hir::ModulePath>,
+        type_name: &str,
+        case: Option<&str>,
+    ) -> Vec<VariantInfo> {
+        let matching = self.types.variants.iter().filter(|v| v.type_name == type_name);
+        if let Some(wanted) = home {
+            return matching.filter(|v| v.home.as_ref() == Some(wanted)).cloned().collect();
+        }
+
+        let mut groups: Vec<(Option<&khora_hir::ModulePath>, Vec<VariantInfo>)> = Vec::new();
+        for v in matching {
+            let key = v.home.as_ref();
+            match groups.iter_mut().find(|(h, _)| *h == key) {
+                Some((_, group)) => group.push(v.clone()),
+                None => groups.push((key, vec![v.clone()])),
+            }
+        }
+        if let Some(case) = case {
+            if let Some((_, group)) = groups.iter().find(|(_, g)| g.iter().any(|v| v.name == case))
+            {
+                return group.clone();
+            }
+        }
+        groups.into_iter().next().map(|(_, g)| g).unwrap_or_default()
     }
 
     /// The variants of the declaration this type *is*, in declaration order.
@@ -367,7 +407,7 @@ impl<'ctx> Backend<'ctx> {
         type_name: &str,
         case: &str,
     ) -> Option<(u32, VariantInfo)> {
-        let variants = self.variants_in(home, type_name);
+        let variants = self.variants_named(home, type_name, Some(case));
         let tag = variants.iter().position(|v| v.name == case)?;
         Some((tag as u32, variants[tag].clone()))
     }
