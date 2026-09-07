@@ -5494,6 +5494,45 @@ they could fix themselves.
 A codebase that is 26% comment, where the comments are a diary, answers that
 question badly no matter how good the language is.
 
+## Where Khora can pass Effect, and what of it is tracked
+
+`docs/design/beyond-effect.md` argues six places the language can go past the
+thing it is aimed at rather than draw level with it, and ends with an order to
+do them in. It was linked from `vision.md` and from nothing else -- not from
+here, not from the release gate -- so four of the six were written down and
+then tracked nowhere. That is worse than duplication: a design document is not
+a tracker, and nobody reads one to find out what is left.
+
+Where they now live:
+
+| | where it is tracked |
+| --- | --- |
+| 1. `Stream`, built fusible | Half done and split. One trait rather than two is shipped -- `Iterator` carries `type Effects`, so an effectful source *is* a stream. The fusion half is § "Unboxed records" above: what remains per element is the `Step` existing. |
+| 2. `Schema` transformation (`via`) | **Done.** `std::schema::via`. |
+| 3. A stability tier | The **release gate**, §15. It is not a feature: it decides what the tag promises. |
+| 4. Record every effect, and replay it | Below. |
+| 5. Deterministic concurrency testing | Below. |
+| 6. `khora audit`, generators, `--trace-effects` | Below. |
+
+### Record and replay, deterministic scheduling, and the rest
+
+Not started, and none of them is a release gate: a first public release that
+cannot replay an effect log is a release, not a broken promise. They are here
+so that "not started" is recorded somewhere a person looks, rather than
+inferred from a design document's silence.
+
+The order in `beyond-effect.md` still holds, with one correction: it put
+`Schema` transformation first as a day's work that unblocks two others, and
+that is done. The stability tier is next by its own argument -- it "makes
+everything else cheaper to land", because a preview namespace is what lets a
+combinator ship, be used, and be *fixed*.
+
+**What makes these worth more than their size suggests** is that each one is
+something the effect system already has the information for and other languages
+do not. Recording every effect is a handler; replaying one is a different
+handler; a deterministic scheduler is the same trick applied to the runtime.
+That is the argument in `beyond-effect.md` and it is not repeated here.
+
 ## When can libraries be written?
 
 The question A6 was really about, and the phases answer it in two steps.
