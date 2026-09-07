@@ -610,28 +610,32 @@ assignment ending what its binding held, a take clearing the slot even where
 nothing unwinds, and a `break` taking its live set from after the loop rather
 than from the back edge.
 
-**It cannot land, and the reason is not the one it looks like.** All 2,480
-tests pass. The reference application under `scripts/http_conformance.sh` then
-answers `GET /health` and dies on the first `POST` with a body, and with
-`KHORA_BACKTRACE=1` it says `the stack ran out` before the segfault --
-*infinite recursion*, not a wild write. Which names the mechanism: a take
-inside a loop makes a cell look uniquely owned, `khora_drop_reuse` hands back a
-token for memory something still refers to, and the structure rebuilt in that
-cell points at itself. `Dict` walks itself recursively and never bottoms out.
-§2 above says the rule is narrow because "anything it wrongly accepted would be
-a leak"; this is that, arriving as a cycle.
+**It cannot land.** All 2,480 tests pass. The reference application under
+`scripts/http_conformance.sh` then answers `GET /health` and dies on the first
+`POST` with a body, and with `KHORA_BACKTRACE=1` it says `the stack ran out`
+before the segfault -- *infinite recursion*, not a wild write.
 
 Bisected against that repro, it is **the fixed point itself** -- walking a loop
-body and recording takes there at all. Not the branch handling, not the
-`break` set, not the assignment kill: each of those was reverted in turn and
-the crash stayed, and turning the fixed point off with all three still in place
-fixed it. They are also worth nothing alone, 1,018 allocations against 1,000,
-because without the walk no take inside a loop is ever recorded.
+body and recording takes there at all. Not the branch handling, not the `break`
+set, not the assignment kill: each of those was reverted in turn and the crash
+stayed, and turning the fixed point off with all three still in place fixed it.
+They are also worth nothing alone, 1,018 allocations against 1,000, because
+without the walk no take inside a loop is ever recorded.
 
-So §1's hard part is harder than the `break` paragraph makes it sound. It is
-not only that a frame's ownership at an early exit is path-dependent; it is
-that handing a binding over inside a loop feeds `plan_reuse`, and reuse is
-where a wrong answer stops being a missed optimization and becomes a cycle.
+**And it is not reuse.** The obvious reading of a cycle is that a take made a
+cell look uniquely owned, `khora_drop_reuse` handed back a token for memory
+something still referred to, and the structure rebuilt in that cell pointed at
+itself -- §2's "anything it wrongly accepted would be a leak", arriving as a
+cycle. That reading is wrong: with reuse planning switched off altogether the
+same repro still hangs. So the fixed point miscounts references on its own,
+in the `dup`, take and release placement §1 is about, before reuse is reached
+at all.
+
+Which is the more useful answer, and a narrower one. It also says how to find
+it, because three diagnoses in a row were wrong here: the question to ask a
+candidate is what `khora_live_count` says on a small program, not whether a
+web server survives. A wrong count is the bug; a crash is only the version of
+it that got unlucky with the allocator.
 **Fusion in this language is still that section, and not a representation
 change and not an LLVM flag** -- but it needs the two analyses considered
 together rather than one after the other.
