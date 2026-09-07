@@ -532,3 +532,45 @@ fn main() -> Int raises Oops {{ work()!; 0 }}
     assert_eq!(ran.stdout, "", "the arm did not run");
     assert_eq!(ran.code, Some(130));
 }
+
+/// **A record that happens to be called `Region` is not a region.**
+///
+/// The six types whose release belongs to the runtime -- a region, a fiber, a
+/// nursery, a cell, a channel, an array -- were recognised by their bare name.
+/// So a program declaring `pub type Region = { .. }` had its record released
+/// through `khora_region_release`, which walked two integers as a finalizer
+/// list and recursed until the stack ran out. The program never mentioned
+/// regions; `Region` is simply a word.
+///
+/// What separates them is that the runtime's six are declared *opaque* --
+/// `pub type Region;`, a name with no body, which is the language's way of
+/// saying the layout belongs to the runtime and Khora cannot look inside. A
+/// record has fields. Asking that needs no module threaded through the
+/// backend, which is why it is the check rather than comparing homes.
+///
+/// This file's other tests declare the opaque one and cover the other side.
+/// `docs/errata.md` 46 is the same family: a name is not an identity.
+#[test]
+fn a_record_named_region_is_not_the_runtimes() {
+    let ran = run(
+        "region_name_collision",
+        "module t;
+fn print(value: Int);
+extern fn khora_live_count() -> Int;
+
+// No `Region::open` anywhere, and nothing opaque: this is a plain record that
+// happens to share the runtime type's name.
+pub type Region = { held: String, count: Int };
+
+fn work() -> Int {
+  let r: Region = { held: \"kept\", count: 41 };
+  print(r.count + 1);
+  0
+}
+
+fn main() -> Int { print(work()); print(khora_live_count()); 0 }
+",
+    );
+    assert_eq!(ran.stdout, "42\n0\n0\n", "the record is ordinary, and nothing is left over");
+    assert_eq!(ran.code, Some(0));
+}

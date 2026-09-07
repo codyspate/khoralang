@@ -35,25 +35,39 @@ impl<'ctx> Backend<'ctx> {
             _ => return self.null_pointer(),
         };
 
+        // **The runtime's own types are the opaque ones.** Each of the six
+        // below is declared `pub type Region;` -- a name with no body, which
+        // is what says the runtime owns the layout and Khora cannot look
+        // inside. A program declaring its own `Region` declares a record, and
+        // matching on the bare name handed that record the runtime's region
+        // teardown: `khora_region_release` walked two integers as a finalizer
+        // list and recursed until the stack ran out, on a program that never
+        // mentioned regions.
+        //
+        // Asking whether the type has fields is the whole of the distinction
+        // and needs no module to be threaded here. `docs/errata.md` 46 is the
+        // same family: a name is not an identity.
+        let is_the_runtimes = self.variants_for(ty).is_empty();
+
         // A region's release is the runtime's, not one generated from a field
         // layout: its finalizers live Rust-side because deferring grows the
         // list, and nothing in Khora grows a value in place. Everything else
         // about a region is ordinary — reference counted, released by the same
         // `khora_drop` every other object goes through — which is what makes
         // its finalizers run on the paths that already release a local.
-        if name == runtime::REGION_TYPE {
+        if is_the_runtimes && name == runtime::REGION_TYPE {
             return self.rt.region_release.as_global_value().as_pointer_value();
         }
 
         // A fiber handle's release joins the fiber. Same reasoning as a
         // region's, and the same payoff: the paths that already release a
         // binding are the paths a child has to be waited for on.
-        if name == runtime::FIBER_TYPE {
+        if is_the_runtimes && name == runtime::FIBER_TYPE {
             return self.rt.fiber_release.as_global_value().as_pointer_value();
         }
 
         // A nursery's release cancels its children and waits for them.
-        if name == runtime::FIBERS_TYPE {
+        if is_the_runtimes && name == runtime::FIBERS_TYPE {
             return self.rt.fibers_release.as_global_value().as_pointer_value();
         }
 
@@ -61,20 +75,20 @@ impl<'ctx> Backend<'ctx> {
         // the value sits behind a lock it owns, and it was told how to release
         // it when the cell was opened rather than here — generated code cannot
         // reach through a `Mutex`.
-        if name == runtime::SHARED_TYPE {
+        if is_the_runtimes && name == runtime::SHARED_TYPE {
             return self.rt.shared_release.as_global_value().as_pointer_value();
         }
 
         // A channel's release frees the queue and everything abandoned in it,
         // for the same reason: the values are behind a lock the runtime owns.
-        if name == runtime::CHANNEL_TYPE {
+        if is_the_runtimes && name == runtime::CHANNEL_TYPE {
             return self.rt.channel_release.as_global_value().as_pointer_value();
         }
 
         // An array's release loops over its elements. The loop is the
         // runtime's because the length is a run-time value; what to do with
         // one element is generated, and travels in the object.
-        if name == runtime::ARRAY_TYPE {
+        if is_the_runtimes && name == runtime::ARRAY_TYPE {
             return self.rt.array_release.as_global_value().as_pointer_value();
         }
 
