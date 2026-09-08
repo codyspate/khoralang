@@ -126,3 +126,48 @@ fn a_mutable_field_keeps_its_pointer() {
         assert!(!u.holds(&ty), "`{}` has a `mut` field and must stay boxed", v.type_name);
     }
 }
+
+/// A slot two variants disagree about has to agree about being a pointer.
+///
+/// **The rule above it admits scalars and pointers into one word, which is
+/// true of how a slot is read and false of how it is released.** The
+/// reference-counting plan works from a slot's static type and cannot consult
+/// the tag, so a slot holding an `Int` under one variant and a counted pointer
+/// under the other gets one plan for both -- and `Result<Int, E>` with a boxed
+/// `E` is exactly that: `khora check` clean, `khora build` clean, and the
+/// program decrementing a refcount through the integer 5. It died with SIGILL
+/// on the *success* path, which is the tell: `Ok` is the variant whose word is
+/// not a pointer.
+///
+/// A boxed ADT reaches that slot precisely because it is boxed -- one word,
+/// and it fails the "is it laid out flat" test *because* it is a pointer --
+/// so nothing before this asked the question. Roadmap 16.6.
+#[test]
+fn a_shared_slot_may_not_mix_a_pointer_with_a_scalar() {
+    let (_db, map) = merged();
+    let u = khora_types::unboxed::decide(&map, khora_types::unboxed::Fields::Any);
+
+    let list_int = core("List", vec![Type::Int]);
+    assert!(!u.holds(&list_int), "the premise: a List is behind a pointer");
+
+    assert!(
+        !u.holds(&core("Result", vec![Type::Int, list_int.clone()])),
+        "`Ok` carries an Int and `Err` carries a counted pointer; one slot cannot \
+         be released both ways"
+    );
+    assert!(
+        !u.holds(&core("Result", vec![list_int.clone(), Type::Int])),
+        "and the same the other way round"
+    );
+
+    // The two agreeing cases still hold, because the reason to refuse is the
+    // disagreement rather than the pointer.
+    assert!(
+        u.holds(&core("Result", vec![Type::Int, Type::Bool])),
+        "two scalars share a word"
+    );
+    assert!(
+        u.holds(&core("Result", vec![list_int.clone(), list_int])),
+        "and two counted pointers share one plan"
+    );
+}

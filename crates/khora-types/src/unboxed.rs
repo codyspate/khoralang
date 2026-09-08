@@ -235,6 +235,28 @@ impl Unboxed {
             if here.iter().any(|t| self.words(t, seen) != 1 || self.qualifies(t, seen)) {
                 return None;
             }
+            // **And they must agree about whether that word is counted.**
+            //
+            // The rule above admits scalars and pointers into one slot, which
+            // is true of how they are *read*. It is not true of how they are
+            // released: the reference-counting plan plans a slot from its
+            // static type and cannot consult the tag, so a slot holding a
+            // pointer under one variant and an integer under the other is
+            // released one way for both. `Result<Int, Bad>` where `Bad` is
+            // boxed is exactly that shape -- slot zero is an `Int` under `Ok`
+            // and a counted pointer under `Err` -- and it compiled, then
+            // decremented a refcount through the integer 5. `khora check` and
+            // `khora build` were both clean and the program died with SIGILL
+            // on the *success* path.
+            //
+            // A boxed ADT slips past the check above precisely because it is
+            // boxed: one word, and `qualifies` is false *because* it is a
+            // pointer. So the pointer-ness has to be asked about directly.
+            // Roadmap 16.6.
+            let counted = self.counted(first);
+            if here.iter().any(|t| self.counted(t) != counted) {
+                return None;
+            }
             total += 1;
         }
         Some(total)
