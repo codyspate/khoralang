@@ -171,7 +171,7 @@ fn a_constructor_in_each_branch_still_reuses() {
     // branch shape it guards is still compiled, and the walks over `List` in
     // this file are recursive, so they are boxed either way and keep testing
     // it. Delete the branch when the flag goes.
-    let inline = std::env::var("KHORA_UNBOXED").as_deref() == Ok("1");
+    let inline = khora_codegen_llvm::unboxing_enabled();
     let expected = if inline { "6" } else { "17" };
     assert_eq!(lines[1], expected, "one allocation an element, not two");
 }

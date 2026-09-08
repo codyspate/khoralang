@@ -144,18 +144,21 @@ pub(super) fn build(
     let mut backend = Backend::new(&context, &name, types.clone(), &machine);
     // **Whole-program, and decided once.** Whether a `Step` is a pointer or
     // three registers has to be the same answer in every module, or one would
-    // hand the other a shape it cannot read. `KHORA_UNBOXED=0` turns it off,
-    // for bisecting a miscompile against the representation rather than
-    // against the change that exposed it.
-    // **Off by default while it is being built.** Laying a value out flat
-    // touches every place representation is decided -- construction, field
-    // reads, matching, the word a tagged return carries, the C boundary -- and
-    // a half-finished answer to any of them is a miscompile rather than a
-    // slower program. `KHORA_UNBOXED=1` turns it on; the gate runs both ways
-    // until it can be the default.
-    backend.unboxed = std::rc::Rc::new(match std::env::var("KHORA_UNBOXED").as_deref() {
-        Ok("1") => khora_types::unboxed::decide(&types, khora_types::unboxed::Fields::Any),
-        _ => khora_types::unboxed::Unboxed::default(),
+    // hand the other a shape it cannot read.
+    //
+    // **On, and `KHORA_UNBOXED=0` turns it off.** The switch stays until the
+    // baseline has run with it on somewhere other than Linux: how a small
+    // aggregate is passed and returned is a decision the target makes, and
+    // `docs/errata.md` 35 is the day that cost when x86-64 Windows disagreed
+    // with LLVM about a sixteen-byte one. The widths here come from LLVM's own
+    // data layout, which is the right defence and is untested off one machine.
+    //
+    // Until then it is also what a bisect needs: a miscompile can be put to
+    // the representation or to the change that exposed it in one run.
+    backend.unboxed = std::rc::Rc::new(if crate::unboxing_enabled() {
+        khora_types::unboxed::decide(&types, khora_types::unboxed::Fields::Any)
+    } else {
+        khora_types::unboxed::Unboxed::default()
     });
 
     // **Debug info, before anything is emitted.** A `DISubprogram` has to be

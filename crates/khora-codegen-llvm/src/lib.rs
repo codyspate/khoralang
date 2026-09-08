@@ -41,6 +41,20 @@ mod lower;
 mod runtime;
 mod timings;
 
+/// Whether small values are laid out flat rather than behind a header.
+///
+/// **On unless `KHORA_UNBOXED=0` says otherwise**, and the switch is here
+/// rather than read at each use so that the compiler and the build cache
+/// cannot disagree about it -- a cache keyed on a different answer from the
+/// one the compiler used hands back an artifact built the other way, which
+/// `docs/errata.md` 85 is the cost of.
+///
+/// Anything but `0` is on, including the `1` that used to be how it was turned
+/// on, so a script that sets it keeps working.
+pub fn unboxing_enabled() -> bool {
+    !matches!(std::env::var("KHORA_UNBOXED").as_deref(), Ok("0"))
+}
+
 #[cfg(feature = "llvm")]
 pub use backend::{
     compile, compile_benches, compile_library, compile_library_with, compile_tests, compile_with,

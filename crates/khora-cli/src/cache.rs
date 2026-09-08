@@ -272,11 +272,14 @@ impl Cache {
         // `KHORA_UNBOXED` decides whether a small record is a heap object or a
         // machine word, which changes every object file the compiler emits and
         // nothing the key would otherwise see. Without it, a build with the
-        // flag on is handed the artifact built with it off -- silently, and
-        // reported as reused, which is a confusing way to measure nothing.
+        // switch flipped is handed the artifact built the other way --
+        // silently, and reported as reused, which is a confusing way to
+        // measure nothing. `docs/errata.md` 85.
         //
-        // Any staging switch of this kind belongs here for the same reason.
-        field(std::env::var("KHORA_UNBOXED").unwrap_or_default().as_bytes());
+        // The *answer* rather than the variable, so that unset and `1` -- two
+        // spellings of the same build -- share a key instead of each paying
+        // for the other's miss. Any staging switch of this kind belongs here.
+        field(&[u8::from(khora_codegen_llvm::unboxing_enabled())]);
 
         // Sorted by content rather than by path, so the order does not depend
         // on where the checkout is. Paths join the key only when debug

@@ -67,9 +67,10 @@ pub struct Unboxed {
 /// `Scalars` is the half of the change that needs none of it, and it existed so
 /// that laying values out flat could be proved before ownership moved too.
 ///
-/// Both halves are built and `KHORA_UNBOXED=1` decides with `Any`. What keeps
-/// `Scalars` here is the tests below, which read the two answers against `std`
-/// and are the clearest statement of what the second half added.
+/// Both halves are built, and `Any` is what a build decides with unless
+/// `KHORA_UNBOXED=0` turns the whole thing off. What keeps `Scalars` here is
+/// the tests below, which read the two answers against `std` and are the
+/// clearest statement of what the second half added.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fields {
     /// Words only: nothing inside is reference counted.

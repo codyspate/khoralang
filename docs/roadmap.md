@@ -5276,8 +5276,8 @@ is neither `d64` nor `d128` but the box around both.
 
 ### Where it got to — both halves built, still behind the flag
 
-`KHORA_UNBOXED=1`, and the whole codegen suite passes with it on and with it
-off: 703 of 703 either way. The five things the list above asks for are there,
+On by default, with `KHORA_UNBOXED=0` to turn it off, and the whole codegen
+suite passes both ways: 703 of 703 either way. The five things the list above asks for are there,
 and the two departures from it are recorded in `docs/errata.md` 81 and 82.
 
 **The staging control has done its work.** `Fields::Scalars` existed so that
@@ -5314,9 +5314,10 @@ pointer per element is what a linked list is.
 
 ### What is left is two decisions, and neither is a defect
 
-**One: does the flag become the default, and then go?**
+**One: does the flag become the default, and then go?** Half answered — it is
+the default now, and the switch stays until the second half is.
 
-Nothing found so far argues against it. The suite is green both ways, twice
+Nothing found argues against the flip. The suite is green both ways, twice
 over. Cold-building `examples/ledger_service` costs 14.3 s with values held
 inline against 14.6 s without, and the executable is 10,383,640 bytes against
 10,419,616 — so the change is not paid for in compile time or in size, it is
@@ -5326,14 +5327,19 @@ criterion is decided once over the whole program's declarations; a library's
 outward surface is the C ABI, where an aggregate is boxed to cross, which the
 32 tests in `foreign` and `exporting` exercise with the flag on.
 
-**What actually stands in the way is that all of this is one machine.** The
-baseline is green on three platforms and this has been run on one, and layout
-is exactly the kind of question that differs between them — `docs/errata.md` 35
-is a Windows x86-64 disagreement about how a sixteen-byte aggregate returns,
-which cost a day. The widths here come from LLVM's own data layout rather than
-from arithmetic, which is the right defence, but it is a defence that has not
-been tested anywhere else. **Run the baseline on macOS and Windows with the
-flag on; that is the whole of what is missing.**
+**What kept the switch is that all of this is one machine.** The baseline is
+green on three platforms and this has been run on one, and layout is exactly
+the kind of question that differs between them — `docs/errata.md` 35 is a
+Windows x86-64 disagreement about how a sixteen-byte aggregate returns, which
+cost a day. The widths here come from LLVM's own data layout rather than from
+arithmetic, which is the right defence, but it is a defence that has not been
+tested anywhere else.
+
+So the default moved and the escape hatch did not: **`KHORA_UNBOXED=0` stays
+until the baseline is green with values held inline on macOS and Windows**, at
+which point there is nothing left for it to do and it goes. Until then it is
+also what a bisect wants, since a miscompile can be put to the representation
+or to the change that exposed it in one run.
 
 **Two: how wide should the criterion be?** It is deliberately narrow, and every
 part of it except the last is a number to raise with a benchmark:
