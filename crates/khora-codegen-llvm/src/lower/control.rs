@@ -29,8 +29,8 @@ impl<'ctx> Lower<'_, 'ctx> {
 
         let new = self.expr(value)?;
 
-        if is_boxed(&ty, &self.be.unboxed) {
-            let llvm_ty = self.be.llvm_type(&ty).expect("a boxed type is a pointer");
+        if self.be.owns_a_reference(&ty) {
+            let llvm_ty = self.be.llvm_type(&ty).expect("an owning binding has a machine type");
             let old = self
                 .be
                 .builder
@@ -204,7 +204,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         self.bound_locals(pat, &mut locals);
         for local in locals {
             let ty = self.types.local(local).clone();
-            if !is_boxed(&ty, &self.be.unboxed) {
+            if !self.be.owns_a_reference(&ty) {
                 continue;
             }
             let Some(slot) = self.slots.get(&local).copied() else { continue };
@@ -214,7 +214,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 .builder
                 .build_load(llvm_ty, slot, "bound")
                 .expect("loading a destructured binding");
-            self.dup(value);
+            self.retain(value, &ty);
         }
     }
 

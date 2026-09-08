@@ -105,8 +105,13 @@ impl<'ctx> Backend<'ctx> {
         // field is a parameter, which is never boxed, so asking the declaration
         // whether `Box<A>` owns anything always answers no — and every
         // `Box<String>` in the program leaks its contents.
+        // And ask whether a field *owns* something rather than whether it is a
+        // pointer: a field held inline is not counted itself and still holds
+        // whatever its own fields hold, so an object with nothing but inline
+        // fields was freed with no glue at all -- and everything inside those
+        // fields leaked, once per object.
         let variants = self.instantiated_variants(ty);
-        if !variants.iter().any(|v| v.fields.iter().any(|t| is_boxed(t, &self.unboxed))) {
+        if !variants.iter().any(|v| v.fields.iter().any(|t| self.owns_a_reference(t))) {
             self.drop_glue.insert(key, None);
             return self.null_pointer();
         }
@@ -222,11 +227,15 @@ impl<'ctx> Backend<'ctx> {
         let mut cases = Vec::new();
         for (tag, variant) in self.instantiated_variants(ty).into_iter().enumerate() {
             let (at, _) = self.field_layout(&variant.fields);
+            // **Owning is not the same as being a pointer.** A field held
+            // inline is not itself counted and still holds what its own fields
+            // hold, so an object whose `Step` is laid out flat releases that
+            // `Step`'s `List` and nothing releases it otherwise.
             let owned: Vec<(u64, Type)> = variant
                 .fields
                 .iter()
                 .enumerate()
-                .filter(|(_, ty)| is_boxed(ty, &self.unboxed))
+                .filter(|(_, ty)| self.owns_a_reference(ty))
                 .map(|(i, ty)| (at[i], ty.clone()))
                 .collect();
             // A variant with nothing to release needs no case at all: the
@@ -241,14 +250,12 @@ impl<'ctx> Backend<'ctx> {
 
             for (index, field_ty) in owned {
                 let slot = runtime::field_pointer(self.ctx, &self.builder, object, index);
-                let value = self
-                    .builder
-                    .build_load(self.ctx.ptr_type(AddressSpace::default()), slot, "child")
-                    .expect("loading an owned field");
-                let glue = self.drop_glue(&field_ty);
-                self.builder
-                    .build_call(self.rt.drop, &[value.into(), glue.into()], "")
-                    .expect("dropping a field");
+                let held = self
+                    .llvm_type(&field_ty)
+                    .unwrap_or_else(|| self.ctx.ptr_type(AddressSpace::default()).into());
+                let value =
+                    self.builder.build_load(held, slot, "child").expect("loading an owned field");
+                self.adjust_held(value, &field_ty, Adjust::Down);
             }
             self.builder.build_unconditional_branch(done).expect("branch to the return");
         }

@@ -20,6 +20,23 @@ pub const ARRAY_LEN_FIELD: usize = 0;
 pub const ARRAY_GLUE_FIELD: usize = 1;
 /// Field index of the flag saying whether elements are counted at all.
 pub const ARRAY_BOXED_FIELD: usize = 2;
+
+/// What an array's `boxed` field says about its elements.
+///
+/// **Three answers rather than two**, because a value held inline is neither
+/// of the first two: it is not a counted pointer, and it is not inert either.
+/// It holds whatever its own fields hold, and the array is what owns those for
+/// as long as the element sits in it.
+///
+/// The difference is what a release does with a slot. A pointer slot is read
+/// and the pointer released; an inline slot is not read at all -- its
+/// *address* is handed to the element's routine, because the value is there
+/// rather than somewhere it points to.
+pub const ELEMENTS_ARE_INERT: u8 = 0;
+/// Each slot holds a counted pointer, released with `glue`.
+pub const ELEMENTS_ARE_POINTERS: u8 = 1;
+/// Each slot holds a value, and `glue` releases what that value holds.
+pub const ELEMENTS_ARE_INLINE: u8 = 2;
 /// Field index of the element size in bytes: 1, 2, 4 or 8.
 ///
 /// An `Array<U8>` is a byte per element, not a word per element. A byte buffer
@@ -84,7 +101,7 @@ pub unsafe extern "C" fn khora_array_new(
     if !matches!(stride, 1 | 2 | 4 | 8) && usize::from(stride) % FIELD_WORD != 0 {
         fatal("an array element must be 1, 2, 4 bytes or a whole number of words wide");
     }
-    if usize::from(stride) > FIELD_WORD && boxed != 0 {
+    if usize::from(stride) > FIELD_WORD && boxed == ELEMENTS_ARE_POINTERS {
         fatal("a counted element is a pointer, so it is one word wide");
     }
     let len = len as usize;
@@ -110,7 +127,7 @@ pub unsafe extern "C" fn khora_array_new(
         let base = object.add(KHORA_FIELD_OFFSET).cast::<usize>();
         base.add(ARRAY_LEN_FIELD).write(len);
         base.add(ARRAY_GLUE_FIELD).write(glue.map_or(0, |g| g as usize));
-        base.add(ARRAY_BOXED_FIELD).write(usize::from(boxed != 0));
+        base.add(ARRAY_BOXED_FIELD).write(usize::from(boxed));
         base.add(ARRAY_STRIDE_FIELD).write(stride);
 
         // Every slot holds the same value and every slot owns it, so the count
@@ -122,18 +139,26 @@ pub unsafe extern "C" fn khora_array_new(
         // targets Khora has are little-endian. A big-endian port would take the
         // *high* bytes, and this is where it would say so.
         //
-        // **An element wider than a word arrives by address instead**, because
-        // a word cannot carry one. `fill` is then a pointer to `stride` bytes
+        // **An element held inline arrives by address instead**, because the
+        // slot holds the value rather than a pointer to it and a word cannot
+        // carry one that is wider. `fill` is then a pointer to `stride` bytes
         // the caller keeps alive across this call, which is what the safety
         // note above means by "must be ... a live Khora object" for the boxed
         // case and means literally here.
+        //
+        // By the flag and not by the width: a value held inline that happens
+        // to fit in a word is still a value, and reading the word's *bytes*
+        // would store the address of it in every slot.
         let elements = base.add(ARRAY_HEADER_FIELDS).cast::<u8>();
         let word = fill.to_le_bytes();
-        let source: *const u8 =
-            if stride > FIELD_WORD { fill as usize as *const u8 } else { word.as_ptr() };
+        let source: *const u8 = if boxed == ELEMENTS_ARE_INLINE {
+            fill as usize as *const u8
+        } else {
+            word.as_ptr()
+        };
         for index in 0..len {
             elements.add(index * stride).copy_from_nonoverlapping(source, stride);
-            if boxed != 0 {
+            if boxed == ELEMENTS_ARE_POINTERS {
                 khora_dup(fill as *mut u8);
             }
         }
@@ -156,7 +181,8 @@ pub unsafe extern "C" fn khora_array_release(array: *mut u8) {
     if array.is_null() {
         return;
     }
-    if array_word(array, ARRAY_BOXED_FIELD) == 0 {
+    let holding = array_word(array, ARRAY_BOXED_FIELD) as u8;
+    if holding == ELEMENTS_ARE_INERT {
         return;
     }
     let len = array_word(array, ARRAY_LEN_FIELD);
@@ -169,6 +195,23 @@ pub unsafe extern "C" fn khora_array_release(array: *mut u8) {
         } else {
             unsafe { Some(std::mem::transmute::<usize, extern "C" fn(*mut u8)>(glue)) }
         };
+
+    // An inline element is released where it lies, so its routine is handed
+    // the slot rather than what the slot holds -- and the slots are its own
+    // width apart rather than a word.
+    if holding == ELEMENTS_ARE_INLINE {
+        let Some(release) = glue else { return };
+        let stride = array_word(array, ARRAY_STRIDE_FIELD);
+        for index in 0..len {
+            // SAFETY: every element slot is within the allocation and holds a
+            // value of the type `release` was generated for, or the zeroes
+            // `khora_alloc` left, which its null guards tolerate.
+            unsafe {
+                release(array.add(KHORA_FIELD_OFFSET + ARRAY_HEADER_FIELDS * FIELD_WORD + index * stride));
+            }
+        }
+        return;
+    }
 
     for index in 0..len {
         debug_assert_eq!(

@@ -61,11 +61,15 @@ pub struct Unboxed {
 
 /// Which fields an unboxed value may carry.
 ///
-/// **A staging control, and it is meant to be removed.** A value held inline
-/// with a pointer among its fields needs those fields counted when it is
-/// copied and released when it is dropped -- there is no header to hang that
-/// on any more. `Scalars` is the half of the change that needs none of it, so
-/// that laying values out flat can be proved before ownership moves too.
+/// **It was a staging control and its work is done.** A value held inline with
+/// a pointer among its fields needs those fields counted when it is copied and
+/// released when it is dropped -- there is no header to hang that on any more.
+/// `Scalars` is the half of the change that needs none of it, and it existed so
+/// that laying values out flat could be proved before ownership moved too.
+///
+/// Both halves are built and `KHORA_UNBOXED=1` decides with `Any`. What keeps
+/// `Scalars` here is the tests below, which read the two answers against `std`
+/// and are the clearest statement of what the second half added.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fields {
     /// Words only: nothing inside is reference counted.

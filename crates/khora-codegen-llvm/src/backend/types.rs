@@ -251,14 +251,19 @@ impl<'ctx> Backend<'ctx> {
                 // goes.** Nowhere else frees it: an arm that *reads* the error
                 // gets it back through `word_to_value`, which frees the box on
                 // the way, and this is the path where nobody read it.
+                //
+                // With the box goes what the error held, which is what makes
+                // this `spill_glue` and the reload's free a null one: there,
+                // the value has been read out and holds its own fields again.
                 let ptr = self.ctx.ptr_type(AddressSpace::default());
                 let spilled = self
                     .builder
                     .build_int_to_ptr(word, ptr, "spilled")
                     .expect("a word as the box an error crossed in");
+                let glue = self.spill_glue(&ty);
                 let drop = self.rt.drop;
                 self.builder
-                    .build_call(drop, &[spilled.into(), ptr.const_null().into()], "")
+                    .build_call(drop, &[spilled.into(), glue.into()], "")
                     .expect("freeing the box a caught error crossed in");
             }
             self.builder.build_unconditional_branch(done).expect("leaving a release case");
@@ -377,8 +382,11 @@ impl<'ctx> Backend<'ctx> {
             .builder
             .build_load(shape, slot, "reload")
             .expect("reading a spilled value");
-        // The box existed only to cross. Nothing else refers to it, and under
-        // `Fields::Scalars` it holds nothing that needs releasing first.
+        // The box existed only to cross, and the value has just been read out
+        // of it -- so whatever it held is held by the value now, and freeing
+        // the box must *not* release it. Null glue, and that is the whole
+        // difference between this and `spill_glue`, which is for a box a
+        // structure keeps.
         self.builder
             .build_call(
                 self.rt.drop,

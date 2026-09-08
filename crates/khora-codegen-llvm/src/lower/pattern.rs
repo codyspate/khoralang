@@ -46,7 +46,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         // through here and has to release it. `emit_arms` empties this level
         // for the length of each arm's body, which is the only stretch where
         // the release has already happened.
-        self.scopes.push(if is_boxed(&scrutinee_ty, &self.be.unboxed) {
+        self.scopes.push(if self.be.owns_a_reference(&scrutinee_ty) {
             vec![Cleanup::Temp(value, scrutinee_ty.clone())]
         } else {
             Vec::new()
@@ -509,7 +509,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 .builder
                 .build_load(llvm_ty, slot, "arm.bound")
                 .expect("loading an arm binding to copy");
-            self.dup(value);
+            self.retain(value, &ty);
             // A binding the body hands on is released by whoever took it.
             if !self.plan.moved.contains(&local) {
                 cleanups.push(Cleanup::Local(local));

@@ -82,7 +82,10 @@ impl<'a> Planner<'a> {
     pub(super) fn bind(&mut self, pat: PatId, owned: &mut Vec<LocalId>) {
         match self.body.pat(pat).clone() {
             Pat::Bind(local) => {
-                if is_boxed(self.types.local(local), self.unboxed) {
+                // **Owning, not being a pointer.** A binding of a type held
+                // inline is not counted itself and still holds what its fields
+                // hold, so it needs the same plan a boxed one gets.
+                if owns_a_reference(self.types.local(local), self.unboxed) {
                     self.plan.boxed.insert(local);
                     owned.push(local);
                 }

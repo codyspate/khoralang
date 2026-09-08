@@ -72,9 +72,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             // The closure outlives this expression and now holds its own
             // reference. This is the one place a capture is counted; the
             // closure's drop glue is the matching release.
-            if is_boxed(ty, &self.be.unboxed) {
-                self.dup(value);
-            }
+            self.retain(value, ty);
             self.store_field(object, at[index], value, ty);
         }
 

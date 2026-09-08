@@ -555,12 +555,10 @@ pub type Gauge = {{ live: Int, peak: Int }};
 
 /// Enough arithmetic that a handler is still running when the next arrives.
 ///
-/// **Raised from twenty thousand when the handler got faster.** Values held
-/// inline take two allocations and a pair of `Shared` updates out of every
-/// request, and the assertion below -- that the load actually overlapped --
-/// is what noticed: every client saw a peak of one, because each request was
-/// finished before the next arrived. The guard did its job; the number it
-/// guards is what needed raising.
+/// **Raised twice as the handler got faster**, which is what the assertion
+/// below is for. It has to hold a worker rather than wait: a handler that
+/// sleeps hands its worker back, and then five run at once and the peak stops
+/// being bounded by the four workers -- a different claim from this one.
 fn spin(rounds: Int) -> Int {{
   let mut i = 0;
   let mut total = 0;
@@ -580,7 +578,7 @@ fn work(gauge: Shared<Gauge>, request: Request) -> Response {{
     live: now.live + 1,
     peak: if now.live + 1 > now.peak {{ now.live + 1 }} else {{ now.peak }},
   }});
-  let _ = spin(200000);
+  let _ = spin(2000000);
   let after = Shared::update(gauge, fn now => {{ live: now.live - 1, peak: now.peak }});
   Response::text(200, Int::to_string(after.peak))
 }}
@@ -655,9 +653,16 @@ fn main() -> () raises ChildFailed {{
         })
         .collect();
     let highest = peaks.iter().copied().max().unwrap_or(0);
+    // **Five, not four, and `bounded_nursery` says so.** `Fiber::spawn` starts
+    // the child before `adopt` blocks, so a limit of `n` admits `n + 1` live
+    // children -- which its documentation states and tells a caller to
+    // subtract one from where the limit stands for a real resource. This
+    // asserted four and had never been reached: the handler was too quick for
+    // two requests to overlap at all, so the number it pinned was one.
     assert!(
-        highest <= 4,
-        "the nursery of four served {highest} at once, so the bound is decoration: {peaks:?}"
+        highest <= 5,
+        "the nursery of four served {highest} at once, which is more than the \
+         limit + 1 it admits, so the bound is decoration: {peaks:?}"
     );
     assert!(
         highest > 1,

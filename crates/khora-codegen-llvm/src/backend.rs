@@ -208,6 +208,8 @@ mod entry;
 mod exports;
 mod functions;
 mod glue;
+mod inline;
+use inline::Adjust;
 mod header;
 mod shims;
 mod statics;
@@ -352,6 +354,18 @@ pub(crate) struct Backend<'ctx> {
     plain_trampolines: HashMap<(usize, String), FunctionValue<'ctx>>,
     /// One change shim per value type, keyed by how the type prints.
     change_shims: HashMap<String, FunctionValue<'ctx>>,
+    /// The routine that releases what a value held inline holds, by type key.
+    ///
+    /// `None` for a type that holds nothing counted, which is most of them.
+    /// See [`Backend::inline_release`].
+    inline_releases: HashMap<String, Option<FunctionValue<'ctx>>>,
+    /// The same, for adding a reference. [`Backend::inline_retain`].
+    inline_retains: HashMap<String, Option<FunctionValue<'ctx>>>,
+    /// `drop_fields` for the box an inline value crosses a word boundary in.
+    ///
+    /// Keyed by the type held rather than by the box, which has no type of its
+    /// own. See [`Backend::spill_glue`].
+    spill_glue: HashMap<String, Option<FunctionValue<'ctx>>>,
     /// One `String` object per distinct literal, shared by every mention.
     static_strings: HashMap<String, PointerValue<'ctx>>,
     /// One object per field-less constructor, shared by every mention.
@@ -457,6 +471,9 @@ impl<'ctx> Backend<'ctx> {
             trampolines: HashMap::new(),
             plain_trampolines: HashMap::new(),
             change_shims: HashMap::new(),
+            inline_releases: HashMap::new(),
+            inline_retains: HashMap::new(),
+            spill_glue: HashMap::new(),
             static_strings: HashMap::new(),
             static_variants: HashMap::new(),
             modify_shims: HashMap::new(),

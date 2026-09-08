@@ -3368,3 +3368,80 @@ release first. Everything then balances against machinery that already existed:
 The general shape is worth keeping: **a representation change is not finished
 when values are built and read correctly.** It is finished when everything that
 *holds* one agrees about who owns it.
+
+## 83. Owning a reference is not the same as being one
+
+The first half of unboxing was staged behind `Fields::Scalars`: a value could
+be held inline only if it held nothing counted. That is the half where a
+representation change is only about *shape*, and it is why every question the
+backend asked was still spelled `is_boxed`.
+
+The second half breaks that. A `Step` laid out flat carries a `List`; a
+`Pair<String, Json>` carries two pointers. The value has no header, so nothing
+counts *it* — and it still holds references that somebody has to release. Every
+place that asked "is this a pointer" in order to decide "does this need
+counting" was then asking the wrong question, and the answer it got was no.
+
+`owns_a_reference` is the right question: true for a boxed value, true for an
+inline value whose fields hold one, false for a machine word. Five places were
+asking the other one, and each was a leak with its own shape:
+
+- **A lambda's parameters.** A closure handed an inline value released nothing,
+  so `List::fold(Map::entries(m), ..., fn (out, pair) => ...)` leaked both
+  halves of every entry. This was the one that surfaced, as three objects per
+  member of a parsed JSON object.
+- **An object's drop glue.** Generated at all only if some field was a pointer,
+  so a `Result<Scanned, JsonError>` — two fields, both inline — was freed with
+  no glue and everything inside both of them leaked.
+- **A record update.** `{ ..old, x: 1 }` reads the fields it keeps out of the
+  base's registers and does not release the base, which is right; what it also
+  has to do is release the field it writes *over*, since that was the base's
+  last hold on it.
+- **Reading a field.** `p.key` on an inline `p` took a reference to the field
+  and released the value it came out of — the trade the boxed path had always
+  made, and a no-op for both halves while only scalars were held inline.
+- **Assignment**, to a local or to a field, which overwrites something that may
+  be the last hold on what it points at.
+
+Two more places needed a shape rather than a predicate. An **array** element
+held inline is neither a counted pointer nor inert, so the runtime's `boxed`
+flag grew a third answer and the release walks slot *addresses* rather than
+what the slots point at. And a value the runtime **holds** as one word crosses
+in a box; that box now carries drop glue of its own, so what the value holds
+goes when the box does — while the hand-off case still frees its box with null
+glue, because there the value has been read back out and holds its own fields
+again.
+
+The counting itself is a generated routine per type: `kh$retain$T` and
+`kh$release$T`, taking the aggregate by value, guarded on the tag where there
+is one. Three unrelated callers need the same walk — a binding going out of
+scope, a field of a boxed object, the box a value crossed in — and three copies
+of a tag guard is three places to get it wrong.
+
+## 84. A load test that had never once seen the load overlap
+
+`a_server_under_more_load_than_it_can_serve_answers_everybody` offers a server
+twenty-four simultaneous clients and reads back, from each answer, the most
+handlers that had ever been running at once. It asserts two things about that
+peak: that it stayed inside the nursery's bound of four, and — the guard the
+author wrote against the test proving nothing — that it was greater than one.
+
+The second assertion started failing, with every client reporting a peak of
+exactly one. The cause is not a defect: values held inline take two
+allocations and a pair of `Shared` updates out of every request, so each
+handler finished before the next arrived. The work per request is a constant in
+the test and it had to go up.
+
+**And then the first assertion failed, which is the part worth recording.**
+With the requests actually overlapping, four workers served *five* at once —
+and `bounded_nursery` says so in its own documentation: "the limit admits
+`limit + 1` live children, because `Fiber::spawn` starts the child before
+`adopt` blocks; subtract one where it stands for a real resource." The test
+asserted `<= 4` against a contract that promises `<= 5`, and had never been
+reached, because a peak of one satisfies both.
+
+So the guard did exactly what a guard is for, twice over: it refused to pass
+vacuously, and the moment the test measured anything it found an expectation
+that had never been true. **A number that has never been reached is not an
+assertion, it is a comment** — and the way to tell the difference is to assert
+that the thing under test actually happened.

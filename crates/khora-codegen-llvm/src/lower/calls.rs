@@ -280,9 +280,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 // name for. Passed on as it arrived, with a `dup` to match the
                 // ownership every other argument has.
                 if let Some(value) = self.incoming.get(&label).copied() {
-                    if is_boxed(&ty, &self.be.unboxed) {
-                        self.dup(value);
-                    }
+                    self.retain(value, &ty);
                     out.push(value);
                     continue;
                 }
@@ -306,9 +304,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             // Passed owned, as every other argument is: the callee's plan
             // releases it where its body ends, so the caller hands over a
             // reference of its own rather than lending the one it holds.
-            if is_boxed(&ty, &self.be.unboxed) {
-                self.dup(value);
-            }
+            self.retain(value, &ty);
             out.push(value);
         }
         Some(out)

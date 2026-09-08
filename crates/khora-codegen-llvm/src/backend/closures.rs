@@ -115,7 +115,7 @@ impl<'ctx> Backend<'ctx> {
     /// function type, and two lambdas with the same signature capture entirely
     /// different things. The tag is what distinguishes them.
     pub(super) fn closure_glue(&mut self) -> PointerValue<'ctx> {
-        if !self.closures.iter().any(|c| c.captures.iter().any(|(_, t)| is_boxed(t, &self.unboxed))) {
+        if !self.closures.iter().any(|c| c.captures.iter().any(|(_, t)| self.owns_a_reference(t))) {
             return self.null_pointer();
         }
         if let Some(Some(f)) = self.drop_glue.get(CLOSURE_GLUE) {
@@ -154,7 +154,7 @@ impl<'ctx> Backend<'ctx> {
             let owned: Vec<(u64, Type)> = held
                 .into_iter()
                 .enumerate()
-                .filter(|(_, ty)| is_boxed(ty, &self.unboxed))
+                .filter(|(_, ty)| self.owns_a_reference(ty))
                 .map(|(i, ty)| (at[i], ty))
                 .collect();
             if owned.is_empty() {
@@ -167,14 +167,14 @@ impl<'ctx> Backend<'ctx> {
 
             for (index, field_ty) in owned {
                 let slot = runtime::field_pointer(self.ctx, &self.builder, object, index);
+                let held = self
+                    .llvm_type(&field_ty)
+                    .unwrap_or_else(|| self.ctx.ptr_type(AddressSpace::default()).into());
                 let value = self
                     .builder
-                    .build_load(self.ctx.ptr_type(AddressSpace::default()), slot, "captured")
+                    .build_load(held, slot, "captured")
                     .expect("loading a captured field");
-                let glue = self.drop_glue(&field_ty);
-                self.builder
-                    .build_call(self.rt.drop, &[value.into(), glue.into()], "")
-                    .expect("dropping a capture");
+                self.adjust_held(value, &field_ty, Adjust::Down);
             }
             self.builder.build_unconditional_branch(done).expect("branch to the return");
         }

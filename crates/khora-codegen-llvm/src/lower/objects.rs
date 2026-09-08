@@ -51,8 +51,9 @@ impl<'ctx> Lower<'_, 'ctx> {
         let new = self.expr(value)?;
 
         let slot = runtime::field_pointer(self.be.ctx, &self.be.builder, object, at);
-        if is_boxed(&field_ty, &self.be.unboxed) {
-            let llvm_ty = self.be.llvm_type(&field_ty).expect("a boxed type is a pointer");
+        if self.be.owns_a_reference(&field_ty) {
+            let llvm_ty =
+                self.be.llvm_type(&field_ty).expect("an owning field has a machine type");
             let old = self
                 .be
                 .builder
@@ -163,9 +164,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                     continue;
                 };
                 let carried = self.load_field(from, at[index], &field_ty);
-                if is_boxed(&field_ty, &self.be.unboxed) {
-                    self.dup(carried);
-                }
+                self.retain(carried, &field_ty);
                 self.store_field(object, at[index], carried, &field_ty);
             }
             let owner = self.types.of(base).clone();
@@ -215,6 +214,13 @@ impl<'ctx> Lower<'_, 'ctx> {
                 .builder
                 .build_extract_value(whole.into_struct_value(), at, "inline.read")
                 .expect("reading an inline field");
+            // The same trade the boxed path makes below, and for the same
+            // reason: the field outlives the value it was read out of, so it
+            // takes a reference of its own before that value goes. Both are
+            // no-ops for a value of nothing but machine words, which is why
+            // this could be left out while only those were held inline.
+            self.retain(read, &field_ty);
+            self.drop(whole, &owner);
             return Some(read);
         }
 
@@ -224,9 +230,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         // The field is borrowed out of the record, and the record was owned by
         // this expression, so reading one keeps the field alive past the
         // release of what held it.
-        if is_boxed(&field_ty, &self.be.unboxed) {
-            self.dup(value);
-        }
+        self.retain(value, &field_ty);
         self.drop(object.into(), &owner);
         Some(value)
     }
@@ -364,8 +368,12 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// A record literal, held inline.
     ///
     /// `{ ..old, x: 1 }` reads the fields it does not name straight out of the
-    /// base's registers rather than out of a heap object, and there is nothing
-    /// to release afterwards -- the base was a value, not a reference to one.
+    /// base's registers rather than out of a heap object. The base itself is
+    /// not released -- it was a value, not a reference to one -- but what it
+    /// *held* still has to be accounted for: the fields carried over move from
+    /// the base to the new value, and the fields written over are the base's
+    /// last hold on whatever was in them.
+    ///
     /// Evaluation order is unchanged: the base first, because it is written
     /// first and can diverge, then the fields as written.
     fn build_record_inline(
@@ -388,11 +396,29 @@ impl<'ctx> Lower<'_, 'ctx> {
             written.push((label.clone(), self.expr(*value)?));
         }
 
-        let mut value: inkwell::values::AggregateValueEnum<'ctx> = shape.get_undef().into();
+        // Zero rather than undef, so that a field the loop below leaves alone
+        // -- there are none today, and a `poison` in a value something else
+        // may release is the wrong thing to leave behind if there ever are.
+        let mut value: inkwell::values::AggregateValueEnum<'ctx> = shape.const_zero().into();
+        let held = self.be.unboxed.payload(ty).unwrap_or_default();
         for (index, label) in info.labels.iter().enumerate() {
             let at = self.be.unboxed_field_at(ty, index);
+            let field_ty = held.get(index).cloned().unwrap_or(Type::Unknown);
             let field = match written.iter().find(|(w, _)| w == label) {
-                Some((_, v)) => *v,
+                Some((_, v)) => {
+                    // The base's field is overwritten here, and the base is
+                    // not released afterwards, so this is the only place its
+                    // hold on what was in that field can be let go.
+                    if let Some(from) = taken_from {
+                        let replaced = self
+                            .be
+                            .builder
+                            .build_extract_value(from, at, "inline.replaced")
+                            .expect("reading the field being written over");
+                        self.drop(replaced, &field_ty);
+                    }
+                    *v
+                }
                 None => match taken_from {
                     Some(from) => self
                         .be

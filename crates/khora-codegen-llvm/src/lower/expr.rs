@@ -169,7 +169,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         // The plan decides this, not the type: the value outlives the read, so
         // it needs its own reference.
         if self.plan.needs_dup(id) {
-            self.dup(value);
+            self.retain(value, &ty);
             return Some(value);
         }
 

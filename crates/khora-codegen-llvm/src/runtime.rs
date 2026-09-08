@@ -96,6 +96,13 @@ pub const STRING_TAG: u64 = 0;
 /// Field index of a string's byte length. The bytes follow it immediately.
 pub const STRING_LEN_FIELD: u64 = 0;
 
+/// What an array's header says about its elements. `khora_rt::array`.
+pub const ELEMENTS_ARE_INERT: u8 = khora_rt::ELEMENTS_ARE_INERT;
+/// Each slot holds a counted pointer.
+pub const ELEMENTS_ARE_POINTERS: u8 = khora_rt::ELEMENTS_ARE_POINTERS;
+/// Each slot holds a value, and its glue releases what that value holds.
+pub const ELEMENTS_ARE_INLINE: u8 = khora_rt::ELEMENTS_ARE_INLINE;
+
 /// Byte offset from a string object to its first byte.
 pub const STRING_BYTES_OFFSET: u64 = FIELD_OFFSET + FIELD_WORD;
 

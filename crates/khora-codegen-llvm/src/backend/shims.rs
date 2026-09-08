@@ -203,11 +203,7 @@ impl<'ctx> Backend<'ctx> {
         let slot = runtime::field_pointer(self.ctx, &self.builder, object, index);
         let llvm = self.llvm_type(ty).unwrap_or_else(|| self.ctx.i64_type().into());
         let value = self.builder.build_load(llvm, slot, "field").expect("loading a field");
-        if is_boxed(ty, &self.unboxed) {
-            self.builder
-                .build_call(self.rt.dup, &[value.into()], "")
-                .expect("keeping a field past its record");
-        }
+        self.adjust_held(value, ty, Adjust::Up);
         value
     }
 }

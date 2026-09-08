@@ -154,7 +154,7 @@ pub(super) fn build(
     // slower program. `KHORA_UNBOXED=1` turns it on; the gate runs both ways
     // until it can be the default.
     backend.unboxed = std::rc::Rc::new(match std::env::var("KHORA_UNBOXED").as_deref() {
-        Ok("1") => khora_types::unboxed::decide(&types, khora_types::unboxed::Fields::Scalars),
+        Ok("1") => khora_types::unboxed::decide(&types, khora_types::unboxed::Fields::Any),
         _ => khora_types::unboxed::Unboxed::default(),
     });
 

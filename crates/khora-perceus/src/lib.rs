@@ -128,8 +128,10 @@ impl RcPlan {
         self.reuse.get(&arm).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
-    /// Whether this local holds a reference-counted object rather than a
-    /// machine word, and so has to be released at all.
+    /// Whether this local owns a reference that has to be released.
+    ///
+    /// A counted object, or a value held inline that holds one. Not a machine
+    /// word, which owns nothing.
     pub fn is_boxed(&self, local: LocalId) -> bool {
         self.boxed.contains(&local)
     }
@@ -224,6 +226,27 @@ pub fn is_boxed(ty: &Type, unboxed: &khora_types::unboxed::Unboxed) -> bool {
     // A closure is an ordinary heap object — a function pointer and its
     // captures under the usual header — and so is a tuple.
     matches!(ty, Type::Str | Type::Adt { .. } | Type::Fn { .. } | Type::Tuple(_))
+}
+
+/// Whether a value of this type owns a reference somebody has to release.
+///
+/// **Not the same question as [`is_boxed`], and the difference is the whole
+/// of the second half of unboxing.** A boxed value owns itself: one header,
+/// one count, released once. An inline value owns nothing of its own -- there
+/// is no header on it to count -- but it *holds* whatever its fields hold, and
+/// a copy of the value is a copy of every pointer in it. So a `Step` laid out
+/// flat over a `List` still needs a `dup` where it is copied and a release
+/// where the copy goes, and the work moves from the value to its fields.
+///
+/// Everything `Fields::Scalars` allowed answers no, which is why this question
+/// did not have to exist before.
+pub fn owns_a_reference(ty: &Type, unboxed: &khora_types::unboxed::Unboxed) -> bool {
+    if is_boxed(ty, unboxed) {
+        return true;
+    }
+    unboxed
+        .payload(ty)
+        .is_some_and(|fields| fields.iter().any(|f| owns_a_reference(f, unboxed)))
 }
 
 /// Plans reference counting for one body at one set of types.

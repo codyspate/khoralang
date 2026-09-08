@@ -35,7 +35,7 @@ use inkwell::{AddressSpace, AtomicOrdering, AtomicRMWBinOp, IntPredicate};
 use khora_hir::body::{
     BinOp, Body, Expr, ExprId, Literal, LocalId, MatchArm, Pat, PatId, Stmt, UnOp,
 };
-use khora_perceus::{is_boxed, RcPlan};
+use khora_perceus::{is_boxed, owns_a_reference, RcPlan};
 use khora_types::{BodyTypes, Type, VariantInfo};
 use text_size::TextRange;
 
@@ -175,7 +175,11 @@ pub(crate) fn emit_closure<'ctx>(
         let Some(slot) = lower.slots.get(&local).copied() else { continue };
         let Some(value) = function.get_nth_param(index as u32 + 1) else { continue };
         lower.be.builder.build_store(slot, value).expect("storing a lambda parameter");
-        if is_boxed(types.local(local), &unboxed) {
+        // **Owning, not being a pointer.** A parameter held inline is not
+        // counted itself and still holds what its fields hold, so a lambda
+        // handed one and never released it leaked what it was given -- once a
+        // call, which a `fold` over a map turns into once an entry.
+        if owns_a_reference(types.local(local), &unboxed) {
             owned.push(Cleanup::Local(local));
         }
     }
@@ -200,7 +204,7 @@ pub(crate) fn emit_closure<'ctx>(
     let base = params.len() + 1;
     for (offset, (label, ty)) in handed.into_iter().enumerate() {
         let Some(value) = function.get_nth_param((base + offset) as u32) else { continue };
-        if !named.contains(&label) && is_boxed(&ty, &unboxed) {
+        if !named.contains(&label) && owns_a_reference(&ty, &unboxed) {
             owned.push(Cleanup::Temp(value, ty));
         }
         lower.incoming.insert(label, value);
@@ -220,7 +224,11 @@ pub(crate) fn emit_closure<'ctx>(
         let Some(slot) = lower.slots.get(&local).copied() else { continue };
         let Some(value) = lower.incoming.get(label).copied() else { continue };
         lower.be.builder.build_store(slot, value).expect("storing a named capability");
-        if is_boxed(types.local(local), &unboxed) {
+        // **Owning, not being a pointer.** A parameter held inline is not
+        // counted itself and still holds what its fields hold, so a lambda
+        // handed one and never released it leaked what it was given -- once a
+        // call, which a `fold` over a map turns into once an entry.
+        if owns_a_reference(types.local(local), &unboxed) {
             owned.push(Cleanup::Local(local));
         }
     }
@@ -498,7 +506,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             let Some(value) = self.function.get_nth_param((base + offset) as u32) else {
                 continue;
             };
-            if !named.contains(&label) && is_boxed(&ty, &self.be.unboxed) {
+            if !named.contains(&label) && self.be.owns_a_reference(&ty) {
                 owned.push(Cleanup::Temp(value, ty));
             }
             self.incoming.insert(label, value);

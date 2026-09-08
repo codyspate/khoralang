@@ -100,7 +100,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .ctx
                     .bool_type()
                     .const_int(u64::from(self.be.counted_across(&value_ty)), false);
-                let glue = self.be.drop_glue(&value_ty);
+                let glue = self.be.holding_glue(&value_ty);
                 let open = self.be.rt.shared_open;
                 Some(
                     self.be
@@ -253,7 +253,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let when_full = self.be.ctx.i64_type().const_int(strategy, false);
                 let boxed =
                     self.be.ctx.bool_type().const_int(u64::from(self.be.counted_across(&held)), false);
-                let glue = self.be.drop_glue(&held);
+                let glue = self.be.holding_glue(&held);
                 let open = self.be.rt.channel_open;
                 Some(
                     self.be
@@ -672,7 +672,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 // successful word needs describing.
                 let boxed =
                     self.be.ctx.bool_type().const_int(u64::from(self.be.counted_across(&answers)), false);
-                let value_glue = self.be.drop_glue(&answers);
+                let value_glue = self.be.holding_glue(&answers);
                 let spawn = self.be.rt.fiber_spawn;
                 let fiber = self
                     .be

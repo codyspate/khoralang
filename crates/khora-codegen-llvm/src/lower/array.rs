@@ -40,6 +40,73 @@ impl<'ctx> Lower<'_, 'ctx> {
         }
     }
 
+    /// What an array's header should say about its elements, and how to let
+    /// one go.
+    ///
+    /// Three answers rather than two: a counted pointer, a value held inline,
+    /// or neither. See `khora_rt::array`'s constants, which is where the
+    /// difference is spelled out.
+    fn element_kind(&mut self, element: &Type) -> (u8, PointerValue<'ctx>) {
+        if is_boxed(element, &self.be.unboxed) {
+            return (runtime::ELEMENTS_ARE_POINTERS, self.be.drop_glue(element));
+        }
+        if self.be.unboxed.holds(element) {
+            return (runtime::ELEMENTS_ARE_INLINE, self.be.element_glue(element));
+        }
+        (runtime::ELEMENTS_ARE_INERT, self.be.null_pointer())
+    }
+
+    /// Counts one reference per slot for a fill the runtime copied blindly.
+    ///
+    /// A loop rather than a multiply, because a reference count is not a
+    /// number the generated code may reach into: the value may hold several
+    /// pointers, and each of them is `khora_dup`'s business.
+    fn retain_per_slot(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        element: &Type,
+        length: IntValue<'ctx>,
+    ) {
+        if self.be.inline_retain(element).is_none() {
+            return;
+        }
+        let i64t = self.be.ctx.i64_type();
+        let counter = self.entry_slot(i64t.into(), "filled");
+        self.be.builder.build_store(counter, i64t.const_zero()).expect("starting the count");
+        let test = self.block("fill.test");
+        let body = self.block("fill.body");
+        let done = self.block("fill.done");
+        self.br(test);
+
+        self.at(test);
+        let seen = self
+            .be
+            .builder
+            .build_load(i64t, counter, "filled.now")
+            .expect("reading the count")
+            .into_int_value();
+        let more = self
+            .be
+            .builder
+            .build_int_compare(IntPredicate::ULT, seen, length, "fill.more")
+            .expect("comparing against the length");
+        self.be
+            .builder
+            .build_conditional_branch(more, body, done)
+            .expect("branching on the count");
+
+        self.at(body);
+        self.retain(value, element);
+        let next = self
+            .be
+            .builder
+            .build_int_add(seen, i64t.const_int(1, false), "filled.next")
+            .expect("counting one more slot");
+        self.be.builder.build_store(counter, next).expect("storing the count");
+        self.br(test);
+        self.at(done);
+    }
+
     /// Continues only if `index` is below `length`; otherwise stops the
     /// program, saying which index and what length.
     ///
@@ -137,12 +204,11 @@ impl<'ctx> Lower<'_, 'ctx> {
             ("empty", []) => {
                 let array_ty = self.types.of(site).clone();
                 let element = self.array_element(&array_ty, range)?;
-                let boxed = is_boxed(&element, &self.be.unboxed);
-                let glue = if boxed { self.be.drop_glue(&element) } else { self.be.null_pointer() };
+                let (holding, glue) = self.element_kind(&element);
                 let len = self.be.ctx.i64_type().const_zero();
                 // The fill is written once per slot, and there are no slots.
                 let fill = self.be.ctx.i64_type().const_zero();
-                let flag = self.be.ctx.i8_type().const_int(u64::from(boxed), false);
+                let flag = self.be.ctx.i8_type().const_int(u64::from(holding), false);
                 let stride = self.be.ctx.i8_type().const_int(self.stride(&element), false);
                 let new = self.be.rt.array_new;
                 let array = self
@@ -165,14 +231,15 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let len = self.expr(*length)?.into_int_value();
                 let value = self.expr(*fill)?;
 
-                let boxed = is_boxed(&element, &self.be.unboxed);
-                let glue = if boxed { self.be.drop_glue(&element) } else { self.be.null_pointer() };
+                let (holding, glue) = self.element_kind(&element);
                 let width = self.stride(&element);
-                // **A fill wider than a word is passed by address.** Every
-                // slot gets a copy of the same bytes, and a word cannot carry
-                // three of them. The template is a stack slot of this frame,
-                // which outlives the call that reads it.
-                let word = if width > runtime::FIELD_WORD {
+                // **A fill held inline is passed by address.** Every slot gets
+                // a copy of the same bytes, and the slot holds the value
+                // rather than a pointer to it -- so `to_word`, which would box
+                // it to fit, is exactly the wrong answer. The template is a
+                // stack slot of this frame, which outlives the call that reads
+                // it.
+                let word = if holding == runtime::ELEMENTS_ARE_INLINE {
                     let template = self.entry_slot(value.get_type(), "fill");
                     self.be.builder.build_store(template, value).expect("writing the fill");
                     self.be
@@ -182,7 +249,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 } else {
                     self.be.to_word(value)
                 };
-                let flag = self.be.ctx.i8_type().const_int(u64::from(boxed), false);
+                let flag = self.be.ctx.i8_type().const_int(u64::from(holding), false);
                 let stride = self.be.ctx.i8_type().const_int(width, false);
                 let new = self.be.rt.array_new;
                 let array = self
@@ -197,7 +264,14 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .expect("an array is a value");
-                // Every slot took its own reference; this one was the caller's.
+                // Every slot took its own reference. The runtime counts them
+                // for a pointer, which it understands; for a value held inline
+                // it copied the bytes and cannot know what is inside them, so
+                // the references those bytes hold are counted here, once a
+                // slot. Then the caller's own goes.
+                if holding == runtime::ELEMENTS_ARE_INLINE {
+                    self.retain_per_slot(value, &element, len);
+                }
                 self.drop(value, &element);
                 Some(array)
             }
@@ -235,9 +309,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .expect("reading an element");
                 // The array keeps its own reference to the element, so the
                 // caller is handed one of its own.
-                if is_boxed(&element, &self.be.unboxed) {
-                    self.dup(value);
-                }
+                self.retain(value, &element);
                 self.release_unless_lent(*array, object.into(), &array_ty);
                 Some(value)
             }
@@ -249,8 +321,11 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let new = self.expr(*value)?;
                 let slot = self.array_slot(object, at, self.stride(&element));
 
-                if is_boxed(&element, &self.be.unboxed) {
-                    let llvm_ty = self.be.llvm_type(&element).expect("a boxed type is a pointer");
+                // A slot that owns something has to let go of it, whether it
+                // holds a pointer or a value that holds one.
+                if self.be.owns_a_reference(&element) {
+                    let llvm_ty =
+                        self.be.llvm_type(&element).expect("an owning element has a machine type");
                     let old = self
                         .be
                         .builder

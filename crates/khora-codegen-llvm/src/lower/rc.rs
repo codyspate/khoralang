@@ -20,6 +20,24 @@ impl<'ctx> Lower<'_, 'ctx> {
     ///
     /// The runtime's `khora_dup` stays, because `khora-rt` is a C ABI anything
     /// may link against, and it is still what a hand-written extern uses.
+    /// Adds a reference to whatever in this value is counted.
+    ///
+    /// The general form of [`Self::dup`], and what a call site that has a type
+    /// in hand should use. A pointer is the value itself; an inline value is
+    /// its *fields*, because there is no header on it to count and a copy of
+    /// it is a copy of every reference in it; anything else owns nothing.
+    pub(super) fn retain(&mut self, value: BasicValueEnum<'ctx>, ty: &Type) {
+        if is_boxed(ty, &self.be.unboxed) {
+            self.dup(value);
+            return;
+        }
+        let Some(walk) = self.be.inline_retain(ty) else { return };
+        self.be
+            .builder
+            .build_call(walk, &[value.into()], "")
+            .expect("keeping what an inline value holds");
+    }
+
     pub(super) fn dup(&mut self, value: BasicValueEnum<'ctx>) {
         let object = value.into_pointer_value();
         let bump = self.block("dup.bump");
@@ -49,6 +67,14 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// decrement and a branch that is not taken.
     pub(super) fn drop(&mut self, value: BasicValueEnum<'ctx>, ty: &Type) {
         if !is_boxed(ty, &self.be.unboxed) {
+            // Not a reference, but it may hold some: an inline value has no
+            // count of its own and releases what its fields hold instead.
+            if let Some(walk) = self.be.inline_release(ty) {
+                self.be
+                    .builder
+                    .build_call(walk, &[value.into()], "")
+                    .expect("releasing what an inline value holds");
+            }
             return;
         }
         let glue = self.be.drop_glue(ty);

@@ -5274,6 +5274,28 @@ Not scheduled. Written down because the throughput goal is new information and
 it changes which of the numeric questions is worth answering first — the answer
 is neither `d64` nor `d128` but the box around both.
 
+### Where it got to — both halves built, still behind the flag
+
+`KHORA_UNBOXED=1`, and the whole codegen suite passes with it on and with it
+off: 703 of 703 either way. The five things the list above asks for are there,
+and the two departures from it are recorded in `docs/errata.md` 81 and 82.
+
+**The staging control has done its work.** `Fields::Scalars` existed so that
+laying values out flat could be proved before ownership moved with them, and
+the flag now decides with `Fields::Any`: a value held inline may hold counted
+pointers, and
+what it holds is counted by generated `kh$retain$T` and `kh$release$T` routines
+rather than by a header it does not have. `docs/errata.md` 83 is the list of
+places that had to learn the difference between *being* a reference and
+*owning* one, and the shape of each mistake.
+
+What remains before the flag can go away is a decision rather than a defect:
+the criterion is deliberately narrow — one carrying variant, three fields, four
+words, nothing recursive, nothing `mut` — and every one of those numbers is
+"raise it with a benchmark rather than an argument". `Array<Decimal>` is
+contiguous now; `docs/design/ffi.md`'s boundary boxes an aggregate to cross it,
+which is what the list above anticipated.
+
 ## Phase 15 — The Torvalds test
 
 **A named standard the codebase has to pass**, after which it should be
