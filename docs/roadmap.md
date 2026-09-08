@@ -5596,6 +5596,439 @@ they could fix themselves.
 A codebase that is 26% comment, where the comments are a diary, answers that
 question badly no matter how good the language is.
 
+## Phase 16 — The 1.0 audit, and the four things it found that were not on the list
+
+`docs/design/compatibility.md` § "What 1.0 requires that does not exist yet"
+names three open items: a stability tier for `std`, package identity, and
+editions-if-needed. That list was written by asking *what has this project
+decided not to decide*. This phase is what came back from asking the other
+question — **what is already shipped, frozen by the tag, and wrong** — in two
+passes that were not looking for each other's findings: a direct audit of the
+freeze surfaces, and five agents given only the public documentation and told to
+write real programs.
+
+The list was good. It was also answering the wrong question, and the difference
+is worth stating because it decides how the remaining time is spent: **nothing
+below is a feature that is missing. Everything below is a promise that is
+already made and is not true.** A stability tier can be designed after 1.0 slips;
+a security control that is documented, tested and wired to nothing cannot be.
+
+### The one that is a wrong answer
+
+**16.6 A shared variant slot could hold a pointer under one tag and an integer
+under the other, and the release plan had one answer for both.** Seventeen
+lines, `khora check` clean, `khora build` clean, and the program dies with
+`SIGILL` -- on the **success** path:
+
+```khora
+pub type Currency = | USD | EUR;
+
+pub type Bad =
+  | Currencies(left: Currency)
+  | NoLines(id: Int);
+
+fn work() -> Int raises Bad { 5 }
+
+pub fn main() -> Int {
+  match attempt(fn () => work()!) {
+    Result::Ok(v) => { print("ok ${v}"); 0 },
+    Result::Err(_) => { print("err"); 1 },
+  }
+}
+```
+
+`KHORA_UNBOXED=0` prints `ok 5`. So this is a regression in the two commits
+that flipped values-held-inline to the default and taught variants to share
+their slots, and the escape hatch that "has nothing left to do" once macOS and
+Windows are green is currently the only thing standing between this shape and a
+crash.
+
+**The rule that admits a disagreeing slot is right about reading and wrong
+about releasing.** `slot_words` lets two variants share a word when neither
+side is an aggregate laid out flat, because a pointer goes in as its address
+and an integer as its bits and both come back out at one width. The
+reference-counting plan does not get to consult the tag: it plans a slot from
+its static type. So `Result<Int, Bad>` with `Bad` boxed is one slot that is an
+`Int` under `Ok` and a counted pointer under `Err`, released the same way for
+both -- and the release ran a decrement through the integer `5`.
+
+A boxed ADT reaches that slot *precisely because it is boxed*: one word, and it
+fails the "is this laid out flat" test on the grounds that it is a pointer.
+Every guard in front of the slot was about inline aggregates, and nothing asked
+the question the plan actually needs answered. One line, and the shape now
+refuses to share:
+
+```rust
+let counted = self.counted(first);
+if here.iter().any(|t| self.counted(t) != counted) {
+    return None;
+}
+```
+
+The bisect is worth keeping, because three of its four legs look like the
+fourth: a direct `match` on the same type is fine, an `Int` field in place of
+the enum is fine, and a *single*-case `Bad` is fine. Only two carrying cases
+with a boxed error reach it. `Result<Json, JsonError>` was already boxed for a
+different reason -- errata 86 -- which is why nothing in `std` tripped over it.
+
+**It costs the benchmark nothing**, which was the open question: the fix boxes
+strictly more, so `bench/iteration` was re-run both ways. 38 ms held inline
+against 82 ms boxed, where the numbers above this section were 33 and 79 on a
+quieter machine -- the same 2.2x, and the shapes the section is about are
+untouched, because `Step` has one carrying variant and a slot no variant
+disagrees about. What loses its inline layout is exactly `Result<scalar,
+boxed>`, which was being laid out wrongly.
+
+**What this says about 16.4 and about the flag.** The roadmap's own argument
+for keeping `KHORA_UNBOXED` was that layout is the kind of question that
+differs between platforms and this had been run on one. That was the right
+instinct and the wrong reason: the defect is not a platform disagreement, it is
+plain wrong on the machine the work was done on, for a shape no test in the
+tree has. `Result<Int, E>` over a user-declared error enum is not exotic --
+it is what `attempt` produces every time somebody calls it -- and the first
+person to write one outside this repository found it in an afternoon.
+
+### The one that changes the release date
+
+**16.1 `[permissions] default = "deny"` grants everything.** A manifest whose
+entire permissions table is that one line reads `/etc/hostname` and prints it.
+`reference/manifest.md` calls it "the strict posture: one line, set once, and
+every capability after it is a deliberate edit."
+
+`granted_source` (`khora-cli/src/main.rs:2133`) reads `permissions.fs`, `.env`
+and `.network` and **never reads `permissions.default`**. When all three are
+absent it returns `None`, which leaves the permissive checked-in
+`std/grants.kh` in place; a category that *is* absent while others are present
+falls back to `**` and `*`. So the strict posture is inert in both directions.
+
+**What makes this the entry worth reading twice** is not the bug, which is four
+lines. `Permissions::grants(category)` in `khora-manifest/src/model.rs:614`
+implements the rule *correctly* — an unlisted category falls back to `default` —
+and its only callers are ten assertions in `tests/permissions.rs` and
+`tests/inherit.rs`, including `assert!(!strict.grants(Category::Fs))` and
+``assert!(!permissions.grants(Category::Fs), "`default = \"deny\"` came too")``.
+The tests pass. The logic is right. Nothing in a build calls the function.
+
+That is the failure mode 13.x already caught once and wrote a gate step for —
+"a cited test that could pass having proved nothing" — recurring on the security
+boundary and failing open. `scripts/check-cited-tests.sh` checks that a named
+test exists. It cannot check that anything calls the code the test covers, and
+this is what that gap looks like when it lands somewhere that matters.
+
+Two things ride along, found while confirming it:
+
+- **`std::process` bypasses every `fs` grant.** In one program, with
+  `read = ["./data/**"]`: `read_text("/etc/hostname")` is refused and
+  `checked_output("cat", ["/etc/hostname"])` returns the file. There is no
+  `process` permission category, so holding `Process` is unbounded authority —
+  and with 16.1 there is currently no way to deny it at all.
+- **The audit does not descend into a permission category.**
+  `audit.rs:99-106` maps `fs`, `network`, `env` and `extern` to `Schema::Open`.
+  `[permissions.fs]` with `read`, then `env` and `extern` written under it,
+  puts two grants in a table where they mean nothing and `khora check` reports
+  `no errors`. The unknown-key audit that catches `[packge]` — with a message
+  that says "this program is running unsandboxed" — stops one level above the
+  place that sentence is about.
+
+### The two soundness holes
+
+**16.2 A capability escapes its handler's scope.** Eighteen lines:
+
+```khora
+fn leak() -> (() -> String) with { store: Store } {
+  fn () => store.get("k")
+}
+```
+
+The returned closure is typed with an **empty** capability row. It is called in
+`main`, outside any `with`, and invokes the handler. `capabilities.md` promises
+the opposite in as many words: the operation runs "inside the block, and not
+later through a deferred effect value that outlived its handler". The handler
+in the reproducer is a pure closure so the program merely prints; a handler
+holding a `Region` that has been released is the same program with a
+use-after-free in it.
+
+`capability-passing.md` decided that a lambda "resolves a capability lexically
+if it can and requires it if it cannot". Both halves are implemented. What is
+missing is the third case: a lambda that resolves lexically and then *outlives
+the resolution*, which is the one the return type has to carry and does not.
+
+**16.3 Coherence is per-file, not per-program.** Two `impl Label for Int` in one
+file are correctly rejected. In two modules of the *same package* both are
+accepted, `check` says `no errors`, and the program silently takes one.
+
+D6 says "Rust's coherence rules", and `associated-items.md` rests `Schema::Spec`
+resolution on **one impl per (trait, head)**. That rule holds within a file.
+Package identity (10.2) is already named as what the orphan rule waits for, and
+it is worth being exact that **10.2 would not fix this**: the two impls here are
+in one package, and the check that is missing is a global one over the program's
+own modules rather than anything about package boundaries.
+
+### The gate cannot see the thing it is protecting
+
+**16.4 `khora-rt`'s tests do not compile in release.** `coro::resuming_now()` is
+`#[cfg(debug_assertions)]`; `soak.rs` calls it unconditionally at 423, 520, 524,
+827 and 830. It is not instrumentation — it backs the closing assertion of both
+adversarial tests:
+
+```rust
+assert_eq!(crate::coro::resuming_now(), 0, "a worker is still inside a fiber\n{context}");
+```
+
+So `cargo test -p khora-rt --release` fails with five `E0425`s, and `khora-rt`
+is the only crate in the workspace that does. `scripts/baseline.sh` runs
+`cargo nextest run --workspace` in debug, and clippy is `--all-targets` in debug
+too, which is why five years of green said nothing about it.
+
+The consequence is the finding rather than the compile error, which is one
+`cfg`: **the adversarial scheduler tests have never run optimized**, and an
+optimizer reordering the accesses they are about is the reason to run them.
+`a_long_soak_over_many_seeds` and `fibers_at_scale` are `#[ignore]`d and appear
+in no workflow or script, so they run only by hand, and only in debug.
+
+### What the freeze covers that nobody has audited
+
+`compatibility.md`'s breaking table freezes six surfaces. The `std` audit
+(13.11) covered one of them. The others:
+
+| Surface | State |
+| --- | --- |
+| `std` signatures and behaviour | Audited for *coverage* in 13.11 — every item documented. Never audited for *truth*: `print`'s own comment says it should be an effect and is not; `http_native.kh:1485` tells a reader to design around per-fiber trap containment that `traps.md` says does not exist and forbids; `core.kh:5452` states siblings are cancelled on first failure where the limitations page measures that as arbitrarily late. 695 public items, 6,343 lines of `///`, 50 never-compiled code blocks, four falsehoods found by accident. |
+| Manifest keys | `[build] target` and `plugin` are documented as working and read by nothing — `target` silently produces a host binary, and `plugin` is `project.md` §4.1's sandbox boundary. This is `edition = "1999"` a second and third time, except documented as functional. `fs` means a `{read, write}` table under `[permissions]` and a list under `[workspace.policy]`, and the reference shows the list form for both. |
+| Language syntax | `docs/grammar.ebnf` — 210 lines, served to MCP clients and mirrored into the public reference — is missing `derive`, `\|\|>`, record update, backtick strings and `extern`. Nothing checks it against the parser. |
+| CLI flags | `khora lex` and `khora parse` are unhidden top-level commands that print `SOURCE_FILE@0..51` / `MODULE_DECL` / `NAME_REF`. The same table freezes CLI meanings and declares compiler internals unstable. |
+| Lockfile format | Versioned, forward-refusing, with a clear message. **The one surface that is ready.** |
+| Environment variables | Not in the table at all. 34 are read. `KHORA_FIBERS` changes observable behaviour by 180x under cancellation and `KHORA_UNBOXED` changes value representation, so two of them are semantics rather than configuration. |
+
+And the freeze has no escape hatch in either direction: there is no
+`unstable`/`preview`/`experimental` marker at any level — keyword, attribute or
+manifest — and no reserved-for-future keywords, so with no editions mechanism
+every future keyword is a breaking change. Reserving a handful costs nothing
+today and is impossible afterwards.
+
+### What structured concurrency actually does, measured
+
+**16.7 The nursery's promises are order-dependent, and two of them are not
+kept.** Written by an agent building a job runner against the public
+documentation, and every number below is over 20-25 runs on both backends.
+
+- **A fiber parked in `Fiber::wait` or `Fiber::join` cannot be cancelled, and
+  then runs its body to completion anyway.** Cancel at 100 ms against a 2000 ms
+  child: the cancel lands after 1952 ms on threads and 1984 ms on the
+  scheduler, with the child's body completed, in 20 runs out of 20 on both. The
+  control with no child stops in 0-2 ms. `reference/concurrency.md` says
+  `Channel::send` and `receive` "are the only two operations in `std::core`
+  with no bound on how long they may wait"; `wait` and `join` are equally
+  unbounded, are not cancellation points, and carry no row that would say so.
+  Any overall-deadline pattern is built on this, and does not work.
+- **"The first failure cancels the siblings" holds only when the doomed child
+  was adopted first.** Twelve children, failure at 10 ms: adopted first, 11 of
+  11 siblings cancelled in 2-8 ms; adopted in the middle, 52% of runs cancel
+  nothing at all; adopted last, **0 of 11 cancelled in 25 runs out of 25** --
+  everyone completes and the nursery returns its count 421 ms later. A nursery
+  reaps handles oldest-first, so a failure behind a slow sibling is invisible
+  until that sibling finishes. The limitations page says "The group does
+  collapse"; it does, eventually, and `std`'s own comment said so without the
+  qualifier until this entry.
+- **A bounded nursery starts children after a sibling has already failed** --
+  a median of 6.5 of the 10 remaining, with work continuing 406 ms past the
+  failure.
+- **`bounded_nursery(0, ..)` and negative limits are silently unbounded**, 200
+  children at once, where `Channel::bounded(0)` documents its clamp to one.
+
+**And one the documentation is wrong about in the safe direction.** The
+channel fan-in serialisation the reference cites as the reason it cannot offer
+`race` or `timeout` -- "two 2000 ms fibers take 4.8 seconds that way against
+2.8" -- **does not reproduce**: 2072 ms by channel, 2105 ms by handles, 2122 ms
+by `join_all`. So the combinators are being refused on evidence that has
+expired, which is worth as much as the other direction: a promise nobody can
+rely on and a feature nobody needs to withhold are the same kind of mistake.
+
+### `std::json` accepts documents no other parser will
+
+**16.8** Leading zeros -- `01`, `007`, `-01` -- parse, and re-emit verbatim, so
+`encode(parse(x))` can produce output every other JSON implementation rejects
+and `{"price": 007}` decodes as a price. Unescaped control characters inside
+strings are accepted too. The rest of the number grammar is conformant, which
+is what makes these look like oversights rather than a position.
+
+**`Decimal` came out of the same session unmarked**, and that is worth
+recording because it is where the effort went: every rounding mode at every
+exact half in both signs, `1/3` and `1/7` to 38 places, comparison across a
+2^127 significand against 1e-38, all eight overflow trap sites, and
+`Int::of_string` at the boundaries, all checked against Python's `decimal` and
+all exact. The saturation bug the docs confess to is fixed. Money is the thing
+this language most needs to be right about and it is right.
+
+### The diagnostics regression, which is small and reads badly
+
+**16.5 Every entry-point check is invisible to `khora check` and blames a
+standard-library file.** All six live in
+`khora-codegen-llvm/src/backend/entry.rs` (196, 203, 210, 217, 241, 372) and
+report with `TextRange::empty(0.into())` — offset zero of whatever file sorts
+first, which is `std/clock_native.kh`. Three lines is enough:
+
+```khora
+module minrepro::main;
+
+fn main(x: Int) -> () {}
+```
+
+`khora check .` says `no errors, 1 warning(s)`. `khora build .` says
+
+```
+error: `main` cannot take parameters yet; command-line arguments arrive with the standard library
+ --> /general/khoralang/std/clock_native.kh:1:1
+  |
+1 | module std::clock;
+```
+
+A package with no `main` at all is `no errors` to `check`, and its build
+failure additionally carries seventeen spaces of Rust source indentation into
+the terminal. Tier 2 (`check` disagreeing with `build`) and wrong-file
+attribution are both recorded in Phase 14 as found and fixed; both are live
+here, on the first program a newcomer writes wrongly.
+
+`report_manifest_warnings` has the same shape: one call site,
+`khora-cli/src/main.rs:701`, inside `check_one`. `build`, `run`, `test`, `bench`
+and `doc` never print a manifest warning.
+
+### 16.9 `khora run scratch.kh` built into the toolchain's own directory
+
+Errata 56 fixed this shape once, for `khora build --lib` inside a package: the
+entry point was "the first input containing `fn main(`", `inputs` carries the
+standard library as well as the program, and which file sorts first depends on
+where the package happens to live. The fix compared each candidate against the
+package root.
+
+**Outside a package that comparison was `true` for everything**, because there
+was no root to compare against -- so a bare file went back to searching `std`,
+matched `/// pub fn main() -> Int {` in a *doc comment* in
+`std/config_native.kh`, and built and ran `/…/std/config_native`, leaving an
+executable and an object file in the toolchain's own directory and naming them
+in every later diagnostic. `khora test` had the same shape one function over,
+still on the unguarded `inputs.first()`.
+
+With no package, the file the user named is the only thing that is theirs.
+Three details came out of fixing it: the comparison has to canonicalize both
+sides, or `scratch.kh` and `/home/me/scratch.kh` are one file that compares
+unequal; the output directory has to be `.` rather than the empty path, or the
+artifact is a bare name that `Command::new` looks up on `PATH` instead of the
+directory it was just written to; and the `fn main(` search is a text match
+that a doc comment satisfies, which is what made `std` a candidate at all.
+
+
+### The order this gets worked in
+
+16.6 first, because it is the only wrong answer on this page and a systems
+language may not have one. Then 16.1 in full, including the `process` category
+and the nested-key audit, because a security control that is documented and
+inert is the only remaining item worse than not having the feature. Then 16.4, because it is one
+`cfg` and it is what has to be true before any evidence about the scheduler
+means anything. Then 16.5 and the manifest keys, which are cheap and are what a
+newcomer meets first. Then 16.2 and 16.3, which are real compiler work and the
+two items on this page that could move the date on their own.
+
+The documentation defects are not batched at the end. Each one gets fixed with
+the code it describes, because every one of them was written *correctly
+somewhere* — the limitations page knows the fiber backends are distinguishable,
+`traps.md` knows a trap ends the server, `capabilities.md` knows the right
+`[permissions.fs]` shape — and filed on a different page from the claim it
+refutes. That is the actual failure and batching would repeat it.
+
+### The gate was red on `main`, in three unrelated ways
+
+Not found by looking. Each one surfaced because running `scripts/baseline.sh`
+end to end is what verifying this phase's fixes required, and nothing else in
+the session had reason to.
+
+- **`cargo test --workspace --doc`**, a gate step, failed on a Khora sample
+  indented four spaces inside a Rust `///` in `lower.rs`. Rustdoc treats an
+  indented block as Rust and compiled it: `expected one of ->, where, or {,
+  found with`. Fenced as `text` now.
+- **`cargo test -p khora-rt --release` did not compile at all**, which is 16.4
+  and is the one with consequences.
+- **`scripts/check-backend-rules.sh` failed**: the commit that let variants
+  share their slots added two refusal messages and classified neither, so the
+  step whose whole purpose is to ask "can a program that passes `khora check`
+  reach this?" had not been asked about the newest code in the compiler. Both
+  are the second kind and now say why.
+
+**The common shape is worth more than the three fixes.** Every one of them is a
+step that exists to catch a class of mistake, failing quietly, for long enough
+that the failure became the normal output. A gate nobody runs to completion is
+a gate that has stopped being one -- and `docs/design/testing.md`'s argument
+for the whole apparatus is that the alternative is believing things. Two of the
+three were introduced by the two most recent commits on the branch.
+
+There is a fourth, smaller: the no-backend build -- the configuration that step
+exists for -- has been warning about dead code in `khora-cli`'s tests and in
+`khora-codegen-llvm/src/timings.rs`. The first is fixed; the second is left,
+named here rather than silently tidied, because it is not this phase's.
+
+### Where this got to
+
+Everything below is on a green `scripts/baseline.sh`, and each fix was checked
+by putting the defect back and watching the new test fail -- which is the only
+thing that separates a regression test from a test.
+
+**Closed.**
+
+- **16.6**, the miscompile. Four lines in `unboxed.rs`, and `bench/iteration`
+  re-run both ways to prove the layout work it constrains still pays: 38 ms
+  held inline against 82 ms boxed.
+- **16.1**, in the half that was a security control: `default` is read,
+  `[permissions.fs]` no longer swallows misplaced keys, and five tests drive
+  the built binary rather than the manifest parser -- because the reason this
+  went unnoticed is that the only tests were on a function nothing called.
+- **16.4**, `fiber-audit`, and the adversarial tests plus a three-minute soak
+  run optimized for the first time. Both pass. `baseline.sh` runs them.
+- **16.5**, both halves. `khora check` catches a bad `main` at the span the
+  author wrote, so the language server is no longer green on a program that
+  cannot build; and an error with no location says so instead of borrowing
+  `inputs[0]`'s. Manifest warnings now reach `build`, `run`, `test` and
+  `bench`.
+- **16.8** and **16.9**.
+- The grammar, with `scripts/check-grammar.sh` in the gate; the manifest
+  reference, with a test that parses every `toml` block on the page; and the
+  documentation contradictions, each fixed next to the claim it refuted.
+- A doctest in `lower.rs` that had been failing on `main` -- a Khora sample
+  indented four spaces in a Rust `///`, which rustdoc compiles as Rust. So
+  `cargo test --workspace --doc`, a gate step, was red before any of this
+  started.
+
+**Open, and the two that could move the date are the two soundness holes.**
+
+- **16.2** (a capability outliving its handler) and **16.3** (coherence
+  per-file rather than per-program). Both are compiler work rather than
+  repairs, and both are wrong answers of the kind 16.6 was.
+- **16.7**, all of it. `Fiber::wait` not being a cancellation point is the
+  sharpest: it is measured, it is 20 runs out of 20 on both backends, and every
+  deadline pattern is built on it. `std`'s own comment now says what is
+  actually true about sibling cancellation, which is a smaller fix than making
+  it true.
+- The `process` permission category, without which `[permissions.fs]` is
+  advisory for any program holding `Process`.
+- The stability tier, the reserved keywords, and the audit of 6,343 lines of
+  `///` prose for truth rather than coverage -- which is what found three of
+  the four documentation defects on this page, by accident, while looking for
+  something else.
+
+### What the audit did not find, which is worth as much
+
+No wrong numeric answers. No compiler crash, no ICE, no internal error across
+roughly forty programs. `[permissions.fs]` enforcement is exact once the table
+is written in the shape the compiler wants. The lockfile is right. The
+compiler-known-name collision, the `reference-cycle` lint, the `derive(Eq)`
+field explanation and the `for`-needs-`Step` message are as good as diagnostics
+get, which is what makes 16.5 jarring rather than characteristic. Four agents
+who had never seen the language shipped four working programs against the public
+documentation alone, and one of them reported that the generics, effects, traits
+and failures pages were sufficient to write an effect-polymorphic library
+without reading the compiler.
+
+---
+
 ## Where Khora can pass Effect, and what of it is tracked
 
 `docs/design/beyond-effect.md` argues six places the language can go past the
