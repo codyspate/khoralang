@@ -13,7 +13,6 @@
 
 use super::*;
 
-use inkwell::IntPredicate;
 
 impl<'ctx> Backend<'ctx> {
     /// Whether a value of this type owns a reference somebody has to release.
@@ -24,20 +23,6 @@ impl<'ctx> Backend<'ctx> {
     /// allowed, and why this question did not exist before.
     pub fn owns_a_reference(&self, ty: &Type) -> bool {
         khora_perceus::owns_a_reference(ty, &self.unboxed)
-    }
-
-    /// The tag of the one variant that carries the payload.
-    ///
-    /// `None` where every case is nullary, or where there is only one and so
-    /// nothing to discriminate. The criterion allows exactly one carrying
-    /// case, which is what makes a single guard enough: the fields are live
-    /// under that tag and under no other.
-    fn carrying_case(&self, ty: &Type) -> Option<u32> {
-        if self.cases_of(ty) <= 1 {
-            return None;
-        }
-        let variants = self.variants_for(ty);
-        variants.iter().position(|v| !v.fields.is_empty()).map(|i| i as u32)
     }
 
     /// The routine that releases what an inline value holds, or `None` where
@@ -68,11 +53,12 @@ impl<'ctx> Backend<'ctx> {
             return *found;
         }
 
-        let payload = self.unboxed.payload(ty).unwrap_or_default();
+        let payloads = self.unboxed.payloads(ty).unwrap_or_default();
         let shape = self.unboxed_type(ty);
+        let owning = payloads.iter().any(|(_, f)| f.iter().any(|t| self.owns_a_reference(t)));
         let answer = match shape {
-            Some(shape) if payload.iter().any(|f| self.owns_a_reference(f)) => {
-                Some(self.emit_inline_walk(ty, &key, shape, &payload, adjust))
+            Some(shape) if owning => {
+                Some(self.emit_inline_walk(ty, &key, shape, &payloads, adjust))
             }
             _ => None,
         };
@@ -96,7 +82,7 @@ impl<'ctx> Backend<'ctx> {
         ty: &Type,
         key: &str,
         shape: inkwell::types::StructType<'ctx>,
-        payload: &[Type],
+        payloads: &[(u32, Vec<Type>)],
         adjust: Adjust,
     ) -> FunctionValue<'ctx> {
         let verb = match adjust {
@@ -122,38 +108,40 @@ impl<'ctx> Backend<'ctx> {
             .expect("the value to walk")
             .into_struct_value();
 
-        // The payload belongs to one case, so under any other tag those
-        // registers hold nothing and touching them is a wild free.
-        if let Some(carrying) = self.carrying_case(ty) {
-            let held = self.ctx.append_basic_block(f, "carrying");
+        // **Only the slots this value's own tag names.** A variant's payload
+        // is live under its tag and under no other, and the slots are shared,
+        // so walking the wrong variant's field list reads one thing as
+        // another -- a wild free in one direction and a leak in the other.
+        //
+        // Where there is nothing to discriminate the guard is not emitted at
+        // all, which is every record and every type that had a single carrier
+        // before unions.
+        if self.cases_of(ty) > 1 {
             let tag = self
                 .builder
                 .build_extract_value(whole, 0, "case")
                 .expect("reading an inline tag")
                 .into_int_value();
-            let expected = self.ctx.i32_type().const_int(u64::from(carrying), false);
-            let is_carrying = self
-                .builder
-                .build_int_compare(IntPredicate::EQ, tag, expected, "carries")
-                .expect("comparing a tag");
-            self.builder
-                .build_conditional_branch(is_carrying, held, done)
-                .expect("guarding a payload walk");
-            self.builder.position_at_end(held);
-        }
-
-        for (index, field) in payload.iter().enumerate() {
-            if !self.owns_a_reference(field) {
-                continue;
+            let mut arms = Vec::with_capacity(payloads.len());
+            for (case, fields) in payloads {
+                if !fields.iter().any(|t| self.owns_a_reference(t)) {
+                    continue;
+                }
+                let block = self.ctx.append_basic_block(f, &format!("case.{case}"));
+                arms.push((self.ctx.i32_type().const_int(u64::from(*case), false), block));
+                self.builder.position_at_end(block);
+                self.walk_fields(whole, ty, fields, adjust);
+                self.builder.build_unconditional_branch(done).expect("leaving a case");
             }
-            let at = self.unboxed_field_at(ty, index);
-            let value = self
-                .builder
-                .build_extract_value(whole, at, "held")
-                .expect("reading an inline field");
-            self.adjust_held(value, field, adjust);
+            self.builder.position_at_end(entry);
+            // Everything else -- a nullary case, or one that holds nothing
+            // counted -- falls through to the return.
+            self.builder.build_switch(tag, done, &arms).expect("switching on an inline tag");
+        } else {
+            let fields = payloads.first().map(|(_, f)| f.as_slice()).unwrap_or(&[]);
+            self.walk_fields(whole, ty, fields, adjust);
+            self.builder.build_unconditional_branch(done).expect("leaving the walk");
         }
-        self.builder.build_unconditional_branch(done).expect("leaving the walk");
 
         self.builder.position_at_end(done);
         self.builder.build_return(None).expect("returning from an inline walk");
@@ -161,6 +149,23 @@ impl<'ctx> Backend<'ctx> {
             self.builder.position_at_end(block);
         }
         f
+    }
+
+    /// Every field of one variant that holds something counted.
+    fn walk_fields(
+        &mut self,
+        whole: inkwell::values::StructValue<'ctx>,
+        ty: &Type,
+        fields: &[Type],
+        adjust: Adjust,
+    ) {
+        for (index, field) in fields.iter().enumerate() {
+            if !self.owns_a_reference(field) {
+                continue;
+            }
+            let value = self.read_inline(whole, ty, index, field);
+            self.adjust_held(value, field, adjust);
+        }
     }
 
     /// One field: a pointer counted directly, an inline value walked in turn.

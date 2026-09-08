@@ -208,12 +208,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         // a register beside the others.
         if self.be.unboxed.holds(&owner) {
             let whole = self.expr(base)?;
-            let at = self.be.unboxed_field_at(&owner, index);
-            let read = self
-                .be
-                .builder
-                .build_extract_value(whole.into_struct_value(), at, "inline.read")
-                .expect("reading an inline field");
+            let read = self.be.read_inline(whole.into_struct_value(), &owner, index, &field_ty);
             // The same trade the boxed path makes below, and for the same
             // reason: the field outlives the value it was read out of, so it
             // takes a reference of its own before that value goes. Both are
@@ -402,7 +397,6 @@ impl<'ctx> Lower<'_, 'ctx> {
         let mut value: inkwell::values::AggregateValueEnum<'ctx> = shape.const_zero().into();
         let held = self.be.unboxed.payload(ty).unwrap_or_default();
         for (index, label) in info.labels.iter().enumerate() {
-            let at = self.be.unboxed_field_at(ty, index);
             let field_ty = held.get(index).cloned().unwrap_or(Type::Unknown);
             let field = match written.iter().find(|(w, _)| w == label) {
                 Some((_, v)) => {
@@ -410,31 +404,19 @@ impl<'ctx> Lower<'_, 'ctx> {
                     // not released afterwards, so this is the only place its
                     // hold on what was in that field can be let go.
                     if let Some(from) = taken_from {
-                        let replaced = self
-                            .be
-                            .builder
-                            .build_extract_value(from, at, "inline.replaced")
-                            .expect("reading the field being written over");
+                        let replaced = self.be.read_inline(from, ty, index, &field_ty);
                         self.drop(replaced, &field_ty);
                     }
                     *v
                 }
                 None => match taken_from {
-                    Some(from) => self
-                        .be
-                        .builder
-                        .build_extract_value(from, at, "inline.carried")
-                        .expect("carrying a field from the base"),
+                    Some(from) => self.be.read_inline(from, ty, index, &field_ty),
                     // The checker refuses a literal that names neither every
                     // field nor a base, so there is nothing to read here.
                     None => return self.fail(format!("`{label}` was not given"), range),
                 },
             };
-            value = self
-                .be
-                .builder
-                .build_insert_value(value, field, at, "inline.field")
-                .expect("writing an inline field");
+            value = self.be.write_inline(value, ty, index, field);
         }
         Some(value.into_struct_value().into())
     }
@@ -455,7 +437,11 @@ impl<'ctx> Lower<'_, 'ctx> {
         let Some(shape) = self.be.unboxed_type(ty) else {
             return self.fail(format!("`{ty}` has no inline layout"), range);
         };
-        let mut value: inkwell::values::AggregateValueEnum<'ctx> = shape.get_undef().into();
+        // **Zero, not undef.** Where variants share the slots a short one
+        // leaves the tail untouched, and the walk that releases what a value
+        // holds reads only the slots its own tag names -- but a `poison` in a
+        // register that is copied around is a hazard for the sake of nothing.
+        let mut value: inkwell::values::AggregateValueEnum<'ctx> = shape.const_zero().into();
         if self.be.cases_of(ty) > 1 {
             let which = self.be.ctx.i32_type().const_int(u64::from(tag), false);
             value = self
@@ -466,12 +452,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         }
         for (index, arg) in args.iter().enumerate() {
             let field = self.expr(*arg)?;
-            let at = self.be.unboxed_field_at(ty, index);
-            value = self
-                .be
-                .builder
-                .build_insert_value(value, field, at, "inline.field")
-                .expect("writing an inline field");
+            value = self.be.write_inline(value, ty, index, field);
         }
         Some(value.into_struct_value().into())
     }

@@ -786,7 +786,8 @@ impl<'ctx> Lower<'_, 'ctx> {
                 };
                 let info = self.at_this_instantiation(ty, info);
                 if self.be.unboxed.holds(ty) {
-                    self.test_inline(value, ty, tag, &fields, success, failure);
+                    let on = Inline { whole: value.into_struct_value(), ty: ty.clone() };
+                    self.test_inline(&on, tag, &info.fields, &fields, success, failure);
                     return;
                 }
                 let object = value.into_pointer_value();
@@ -912,33 +913,31 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// matches, and the fields decide.
     fn test_inline(
         &mut self,
-        value: BasicValueEnum<'ctx>,
-        ty: &Type,
+        on: &Inline<'ctx>,
         tag: u32,
+        held: &[Type],
         fields: &[PatId],
         success: BasicBlock<'ctx>,
         failure: BasicBlock<'ctx>,
     ) {
-        let whole = value.into_struct_value();
-        let matched = if self.be.cases_of(ty) > 1 {
-            let held = self.case_of(value, ty);
+        if self.be.cases_of(&on.ty) > 1 {
+            let found = self.case_of(on.whole.into(), &on.ty);
             let expected = self.be.ctx.i32_type().const_int(u64::from(tag), false);
             let block = self.block("inline.case.matched");
-            self.branch_on_equal(held, expected, block, failure);
+            self.branch_on_equal(found, expected, block, failure);
             self.at(block);
-            block
-        } else {
-            self.be.builder.get_insert_block().expect("a block to test in")
-        };
-        let _ = matched;
-        self.test_inline_fields(whole, ty, fields, 0, success, failure);
+        }
+        // **This arm's field types, not the type's.** Where variants share
+        // their slots the same register is an integer under one tag and a
+        // pointer under the next, and the arm that matched is what says which.
+        self.test_inline_fields(on, held, fields, 0, success, failure);
     }
 
     /// The fields of an inline value, in order, each tested where it can fail.
     fn test_inline_fields(
         &mut self,
-        whole: inkwell::values::StructValue<'ctx>,
-        ty: &Type,
+        on: &Inline<'ctx>,
+        held: &[Type],
         fields: &[PatId],
         index: usize,
         success: BasicBlock<'ctx>,
@@ -949,21 +948,15 @@ impl<'ctx> Lower<'_, 'ctx> {
             return;
         }
         if self.is_irrefutable(fields[index]) {
-            self.test_inline_fields(whole, ty, fields, index + 1, success, failure);
+            self.test_inline_fields(on, held, fields, index + 1, success, failure);
             return;
         }
-        let payload = self.be.unboxed.payload(ty).unwrap_or_default();
-        let field_ty = payload.get(index).cloned().unwrap_or(Type::Unknown);
-        let at = self.be.unboxed_field_at(ty, index);
-        let read = self
-            .be
-            .builder
-            .build_extract_value(whole, at, "inline.test")
-            .expect("reading an inline field");
+        let field_ty = held.get(index).cloned().unwrap_or(Type::Unknown);
+        let read = self.be.read_inline(on.whole, &on.ty, index, &field_ty);
         let next = self.block("inline.field.next");
         self.test_pattern(fields[index], read, &field_ty, next, failure);
         self.at(next);
-        self.test_inline_fields(whole, ty, fields, index + 1, success, failure);
+        self.test_inline_fields(on, held, fields, index + 1, success, failure);
     }
 
     /// [`Self::test_inline`], for a pattern that names its fields.
@@ -1011,12 +1004,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             self.test_inline_named_fields(on, info, fields, index + 1, success, failure);
             return;
         };
-        let at = self.be.unboxed_field_at(&on.ty, position);
-        let read = self
-            .be
-            .builder
-            .build_extract_value(on.whole, at, "inline.test")
-            .expect("reading an inline field");
+        let read = self.be.read_inline(on.whole, &on.ty, position, &field_ty);
         let next = self.block("inline.field.next");
         self.test_pattern(pat, read, &field_ty, next, failure);
         self.at(next);
@@ -1098,12 +1086,15 @@ impl<'ctx> Lower<'_, 'ctx> {
                             Pat::Bind(local) => self.types.local(*local).clone(),
                             _ => declared,
                         };
-                        let at = self.be.unboxed_field_at(ty, index);
-                        let read = self
-                            .be
-                            .builder
-                            .build_extract_value(value.into_struct_value(), at, "inline.bound")
-                            .expect("reading an inline field");
+                        // Read at the *declared* type, which is what the
+                        // slot holds; bound at the binding's own, which is
+                        // what the leaf was checked as.
+                        let read = self.be.read_inline(
+                            value.into_struct_value(),
+                            ty,
+                            index,
+                            info.fields.get(index).unwrap_or(&field_ty),
+                        );
                         self.bind_pattern(*field, read, &field_ty);
                     }
                     return;
@@ -1153,12 +1144,12 @@ impl<'ctx> Lower<'_, 'ctx> {
                             Pat::Bind(local) => self.types.local(*local).clone(),
                             _ => declared,
                         };
-                        let at = self.be.unboxed_field_at(ty, index);
-                        let read = self
-                            .be
-                            .builder
-                            .build_extract_value(value.into_struct_value(), at, "inline.bound")
-                            .expect("reading an inline field");
+                        let read = self.be.read_inline(
+                            value.into_struct_value(),
+                            ty,
+                            index,
+                            info.field(label).map(|(_, t)| t).unwrap_or(&field_ty),
+                        );
                         self.bind_pattern(*field, read, &field_ty);
                     }
                     return;

@@ -24,7 +24,7 @@ use std::collections::HashMap;
 /// the other's layout.
 pub type TypeId = (String, Option<khora_hir::ModulePath>);
 
-/// How many fields an unboxed type may carry.
+/// How many fields an unboxed type may carry, in its widest variant.
 ///
 /// Three, because that is what `Step` needs -- a tag, the successor and the
 /// item -- and an aggregate that size still returns in registers on every
@@ -34,8 +34,10 @@ pub const MAX_PAYLOAD_FIELDS: usize = 3;
 /// How many words an unboxed value may occupy in total, tag included.
 ///
 /// Counted transitively, because an unboxed field is laid out inline and its
-/// own fields with it. Four, so that a `Step` holding a successor and an item
-/// fits and a nest of records does not quietly become a memcpy.
+/// own fields with it, and across variants, because they share the space
+/// rather than each having their own. Four, so that a `Step` holding a
+/// successor and an item fits and a nest of records does not quietly become a
+/// memcpy.
 pub const MAX_WORDS: usize = 4;
 
 /// How deep to look before giving up and leaving a type boxed.
@@ -104,13 +106,18 @@ impl Unboxed {
     /// no finite size. Caught transitively by the `seen` stack, so a type
     /// holding a record that holds itself is refused with it.
     ///
-    /// **Does one variant carry the payload?** A record has exactly one, and
-    /// so do `Option`, `Step` and `Range`. Two variants carrying *different*
-    /// payloads need a union and a size taken across them, which is a later
-    /// question; nullary cases alongside are free, since they lay out nothing.
+    /// **If more than one variant carries a payload, is every field a word?**
+    /// A record has one carrier, and so do `Option`, `Step` and `Range`; those
+    /// are laid out at their own field types and nothing about them changed.
+    /// `Result` has two, carrying different things, so the two share their
+    /// space -- and sharing is defined here only for fields a machine word
+    /// wide, because that is the width every one of them can be read at.
+    /// `Result<Int, String>` qualifies and `Result<Decimal, E>` does not,
+    /// since a `Decimal` held inline is three words and there is no one width
+    /// to share. Nullary cases alongside are free, since they lay out nothing.
     ///
-    /// **Is the payload small?** [`MAX_PAYLOAD_FIELDS`], counted in fields,
-    /// because every field is a machine word in this representation.
+    /// **Is the payload small?** [`MAX_PAYLOAD_FIELDS`] fields, in the widest
+    /// variant, and [`MAX_WORDS`] words across the whole value.
     ///
     /// **Is anything `mut`?** A record with a mutable field has observable
     /// identity after all -- a write through one holder must be seen by
@@ -122,18 +129,39 @@ impl Unboxed {
 
     /// The fields an unboxed value carries, at this instantiation.
     ///
+    /// The *first* carrying variant's, which is the only one for a record and
+    /// for every type that qualified before unions did. Where there are two,
+    /// ask [`Self::payloads`] instead: this one answers about a variant it
+    /// does not name, which is only ever right when there is a single choice.
+    ///
     /// Empty where every case is nullary, which is a tag and nothing else.
     /// `None` where the type is boxed.
     pub fn payload(&self, ty: &Type) -> Option<Vec<Type>> {
+        Some(self.payloads(ty)?.into_iter().next().map(|(_, f)| f).unwrap_or_default())
+    }
+
+    /// Every carrying variant's fields, by its index among the declared cases.
+    ///
+    /// The index is the tag: the declarations are kept in the order the type
+    /// map reports them, which is the order the backend counts tags in.
+    ///
+    /// Empty where every case is nullary. `None` where the type is boxed.
+    pub fn payloads(&self, ty: &Type) -> Option<Vec<(u32, Vec<Type>)>> {
         if !self.holds(ty) {
             return None;
         }
         let Type::Adt { name, home, args } = ty else { return Some(Vec::new()) };
         let (params, variants) = self.declarations.get(&(name.clone(), home.clone()))?;
-        Some(match variants.iter().find(|v| !v.fields.is_empty()) {
-            Some(v) => v.fields.iter().map(|f| substituted(f, params, args)).collect(),
-            None => Vec::new(),
-        })
+        Some(
+            variants
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| !v.fields.is_empty())
+                .map(|(tag, v)| {
+                    (tag as u32, v.fields.iter().map(|f| substituted(f, params, args)).collect())
+                })
+                .collect(),
+        )
     }
 
     fn qualifies(&self, ty: &Type, seen: &mut Vec<TypeId>) -> bool {
@@ -148,31 +176,68 @@ impl Unboxed {
         }
         let carrying: Vec<&VariantInfo> =
             variants.iter().filter(|v| !v.fields.is_empty()).collect();
-        if carrying.len() > 1 {
-            return false;
+        if carrying.is_empty() {
+            return true;
         }
-        let Some(one) = carrying.first() else { return true };
-        if one.fields.len() > MAX_PAYLOAD_FIELDS {
+        if carrying.iter().any(|v| v.fields.len() > MAX_PAYLOAD_FIELDS) {
             return false;
         }
         if self.reaches_itself(&id) {
             return false;
         }
 
-        let fields: Vec<Type> =
-            one.fields.iter().map(|f| substituted(f, params, args)).collect();
-        if fields.iter().any(|f| matches!(f, Type::Var(_) | Type::Param(_) | Type::Assoc { .. } | Type::Applied { .. }))
-        {
+        let payloads: Vec<Vec<Type>> = carrying
+            .iter()
+            .map(|v| v.fields.iter().map(|f| substituted(f, params, args)).collect())
+            .collect();
+        let mut every = payloads.iter().flatten();
+        if every.clone().any(|f| {
+            matches!(f, Type::Var(_) | Type::Param(_) | Type::Assoc { .. } | Type::Applied { .. })
+        }) {
             return false;
         }
-        if self.fields == Fields::Scalars && fields.iter().any(|f| self.counted(f)) {
+        if self.fields == Fields::Scalars && every.any(|f| self.counted(f)) {
             return false;
         }
+
         seen.push(id);
-        let total: usize =
-            tag_words(variants.len()) + fields.iter().map(|f| self.words(f, seen)).sum::<usize>();
+        let held = self.slot_words(&payloads, seen);
         seen.pop();
-        total <= MAX_WORDS
+        let Some(held) = held else { return false };
+        tag_words(variants.len()) + held <= MAX_WORDS
+    }
+
+    /// How wide the shared slots are, or `None` where they cannot be shared.
+    ///
+    /// **Slot `i` holds field `i` of whichever variant the tag names.** Where
+    /// the variants agree about what that is, the slot is that type and as
+    /// wide as it likes -- which is every type with a single carrying case, so
+    /// a `Range` inside a `Step` is two words laid out where they fall and
+    /// nothing about it changed.
+    ///
+    /// Where they disagree, the slot has to hold either, and the only width
+    /// both can be read at is a machine word: a pointer goes in as its
+    /// address, a float as its bits, a narrow integer widened. **A value held
+    /// inline cannot**, because it is an aggregate and there is no bit pattern
+    /// of one that fits in a register the other variant reads as a pointer --
+    /// so a slot two variants disagree about admits scalars and pointers and
+    /// refuses anything laid out flat. `docs/errata.md` 86.
+    fn slot_words(&self, payloads: &[Vec<Type>], seen: &mut Vec<TypeId>) -> Option<usize> {
+        let widest = payloads.iter().map(Vec::len).max().unwrap_or(0);
+        let mut total = 0;
+        for index in 0..widest {
+            let here: Vec<&Type> = payloads.iter().filter_map(|p| p.get(index)).collect();
+            let first = *here.first()?;
+            if here.iter().all(|t| *t == first) {
+                total += self.words(first, seen);
+                continue;
+            }
+            if here.iter().any(|t| self.words(t, seen) != 1 || self.qualifies(t, seen)) {
+                return None;
+            }
+            total += 1;
+        }
+        Some(total)
     }
 
     /// How many machine words a value of this type occupies inline.
@@ -190,11 +255,19 @@ impl Unboxed {
             return 1;
         }
         let Some((params, variants)) = self.declarations.get(&id) else { return 1 };
-        let Some(one) = variants.iter().find(|v| !v.fields.is_empty()) else { return 1 };
-        let fields: Vec<Type> =
-            one.fields.iter().map(|f| substituted(f, params, args)).collect();
+        let carrying: Vec<Vec<Type>> = variants
+            .iter()
+            .filter(|v| !v.fields.is_empty())
+            .map(|v| v.fields.iter().map(|f| substituted(f, params, args)).collect())
+            .collect();
+        if carrying.is_empty() {
+            return 1;
+        }
         seen.push(id);
-        let inner: usize = fields.iter().map(|f| self.words(f, seen)).sum();
+        // The slots, because the variants share them rather than each getting
+        // their own -- so what a value of this type occupies is what the union
+        // of them needs, which is the same number the layout is built from.
+        let inner = self.slot_words(&carrying, seen).unwrap_or(0);
         seen.pop();
         tag_words(variants.len()) + inner
     }

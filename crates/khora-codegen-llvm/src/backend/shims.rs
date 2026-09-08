@@ -150,15 +150,8 @@ impl<'ctx> Backend<'ctx> {
             // Held inline, so the halves are already in registers and there is
             // no carrier to release: it was a value, not a reference to one.
             let whole = changed.into_struct_value();
-            let at = |i| self.unboxed_field_at(carrier, i);
-            let next = self
-                .builder
-                .build_extract_value(whole, at(0), "changed.state")
-                .expect("reading the new state");
-            let result = self
-                .builder
-                .build_extract_value(whole, at(1), "changed.result")
-                .expect("reading the answer");
+            let next = self.read_inline(whole, carrier, 0, state);
+            let result = self.read_inline(whole, carrier, 1, answer);
             for (value, ty) in [(next, state), (result, answer)] {
                 if is_boxed(ty, &self.unboxed) {
                     self.builder

@@ -244,9 +244,13 @@ pub fn owns_a_reference(ty: &Type, unboxed: &khora_types::unboxed::Unboxed) -> b
     if is_boxed(ty, unboxed) {
         return true;
     }
-    unboxed
-        .payload(ty)
-        .is_some_and(|fields| fields.iter().any(|f| owns_a_reference(f, unboxed)))
+    // **Every carrying variant, not the first one.** `Validated` is `Valid(A)`
+    // and `Invalid(List<E>)`; asking about the first says a value of it owns
+    // nothing, so a copy took no reference and both copies released -- a
+    // double free three layers from anything about layout.
+    unboxed.payloads(ty).is_some_and(|cases| {
+        cases.iter().any(|(_, fields)| fields.iter().any(|f| owns_a_reference(f, unboxed)))
+    })
 }
 
 /// Plans reference counting for one body at one set of types.

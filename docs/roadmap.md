@@ -5344,10 +5344,21 @@ or to the change that exposed it in one run.
 **Two: how wide should the criterion be?** It is deliberately narrow, and every
 part of it except the last is a number to raise with a benchmark:
 
-- **One variant may carry a payload.** This is the expensive one, because it
-  refuses `Result<A, E>` — two carrying cases — and `Result` is everywhere.
-  Widening it needs a union layout and a size taken across the variants, which
-  is real work rather than a constant.
+- ~~**One variant may carry a payload.**~~ **Done, and half of what it promised.**
+  Variants share their slots now, so `HttpError`, `DbError`, `IoError`,
+  `ProcessError`, `CallError`, `Rule` and `Validated<A, Rejection>` are held
+  inline — sixteen shapes in one ordinary program, and they are the types every
+  fallible call carries.
+
+  Slot `i` is that variant's field `i`: the field's own type where the variants
+  agree about it, and a machine word where they disagree, since a slot cannot
+  be three words under one tag and one under the next. **So
+  `Result<Json, JsonError>` is still boxed, and `docs/errata.md` 86 is why it
+  is worth knowing:** `JsonError` is a two-word record held inline, and that is
+  precisely what stops the `Result` around it sharing slot zero. The two rules
+  pull against each other, and removing the tension means laying a union out in
+  *words* rather than in fields — a recursive layout rather than a comparison,
+  and the next thing to do here if `Result` is judged worth it.
 - **Three fields, four words**, counted transitively. Raising either widens
   what fits; both were chosen so that `Step` fits and a nest of records does
   not quietly become a memcpy.

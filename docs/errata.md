@@ -3464,3 +3464,80 @@ The key now includes it. The general rule is the one the entry above about
 debug paths already made: **anything that changes the output and is not a
 source file has to be in the key**, and an environment variable is the easiest
 kind to forget because it does not appear in any file the build reads.
+
+## 86. Holding the error inline is what stops the `Result` being held inline
+
+Two variants may now share their slots, so a type with more than one carrying
+case can be held inline: `HttpError`, `DbError`, `IoError`, `ProcessError`,
+`CallError`, `Rule` with its nine cases, and `Validated<A, Rejection>` all
+stopped being heap objects. Sixteen shapes in one ordinary program, and they
+are the types every fallible call carries.
+
+Slot `i` holds field `i` of whichever variant the tag names. Where the variants
+agree about what that is, the slot is that type and as wide as it likes. Where
+they disagree it has to hold either, and the only width both can be read at is
+a machine word — a pointer as its address, a float as its bits, a narrow
+integer widened.
+
+**A first attempt made that rule per *field* rather than per *slot*: every
+field of every carrying variant had to be one word.** It is the same rule for
+scalars and wrong in both directions. It refused two variants that agree on a
+two-word field, which needs no sharing at all. And it admitted a one-word
+*aggregate* — `NotFound(id: Int)` is a single case with a single field, so it
+is `{ i64 }`, one word and not a scalar — which produced `bitcast { i64 } to
+i64`, an invalid instruction LLVM's own verifier caught, and on the read side
+an `i64` handed to something expecting a struct. Forty-three tests, from one
+sentence that was true of widths and false of shapes.
+
+**And it is why `Result<Json, JsonError>` is still boxed, which is the part
+worth keeping.** `JsonError` is `{ at: Int, expected: String }` — two scalars,
+no `mut`, one case — so it qualifies on its own and is held inline as two
+words. That is exactly what disqualifies the `Result` around it: an `Ok`
+carrying one word and an `Err` carrying two disagree about slot zero, and a
+value laid out flat has no bit pattern that fits in a register the other
+variant reads as a pointer.
+
+So the two rules pull against each other. Inlining a small error record saves
+an allocation on the error path and costs the union on every call that returns
+one. Nothing here decides which is worth more; it is written down because the
+answer is not obvious and the interaction is invisible from either rule alone.
+
+What would remove the tension is laying a union out in *words* rather than in
+fields, so a two-word variant spans two slots and a one-word variant spans one,
+and a multi-word field is rebuilt from its slots when it is read. That is a
+recursive layout rather than a comparison, and it is the next thing to do here
+if `Result` is judged worth it.
+
+## 87. "Does this own a reference" was answered by the first case only
+
+`owns_a_reference` decides whether a value needs counting at all: a boxed one
+does, an inline one does if its fields do, a machine word does not. For an
+inline value it asked `payload`, which answers with the **first** carrying
+variant's fields — the only one there was, until variants could share slots.
+
+`Validated<A, E>` is `Valid(A)` and `Invalid(List<E>)`. The first carries
+nothing counted, so the answer was no, so the reference-counting plan left the
+type out entirely: a copy took no reference. Meanwhile the `match` inside
+`unwrap_or` released one, because *that* path asks the backend, which walks
+every carrying case. Retain from one predicate and release from another, and
+
+```khora
+let failed = nothing("no host");
+print(Validated::unwrap_or(failed, 0).show());
+print(match Validated::to_result(failed) { .. })
+```
+
+reads a freed list on the second line and dies with SIGILL.
+
+**The asymmetry is the lesson, not the missing case.** Two predicates answered
+"is this counted" and only one of them had been taught about unions, so the
+program retained under one rule and released under the other. A single
+predicate would have been wrong in both directions at once, which is a leak or
+a double free — and either is easier to find than half of each.
+
+The guard is `redaction::a_validated_read_twice_keeps_its_errors`, and it is
+there rather than in `compile::two_cases_share_one_slot` because the latter has
+exactly the same shape — a first carrying case owning nothing — and stayed
+green through the bug. A test that would have caught it is the only kind worth
+calling a regression test, so this one was checked against the defect before
+being believed.

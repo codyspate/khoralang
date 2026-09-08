@@ -77,15 +77,166 @@ impl<'ctx> Backend<'ctx> {
     /// width exist so that a *shared* object can be counted and taken apart,
     /// and an inline value is neither shared nor counted.
     pub fn unboxed_type(&self, ty: &Type) -> Option<inkwell::types::StructType<'ctx>> {
-        let payload = self.unboxed.payload(ty)?;
-        let mut parts: Vec<BasicTypeEnum<'ctx>> = Vec::with_capacity(payload.len() + 1);
+        let mut parts: Vec<BasicTypeEnum<'ctx>> = Vec::new();
         if self.cases_of(ty) > 1 {
             parts.push(self.ctx.i32_type().into());
         }
-        for field in &payload {
-            parts.push(self.llvm_type(field)?);
-        }
+        parts.extend(self.inline_slots(ty)?);
         Some(self.ctx.struct_type(&parts, false))
+    }
+
+    /// What the slots after the tag hold.
+    ///
+    /// **One carrying case: its own fields, at their own types.** A `Range` is
+    /// `{ i64, i64 }` and a `Step<List<Int>, Int>` is `{ i32, ptr, i64 }` --
+    /// the layout every unboxed type had before there was more than one
+    /// carrier, and it is untouched.
+    ///
+    /// **Two or more: they share the slots**, so slot `i` holds one variant's
+    /// field `i` or another's. Where the variants agree about what that is,
+    /// the slot keeps the type; where they disagree it is a machine word, and
+    /// the field is converted going in and coming back out. `Result<Int,
+    /// String>` is `{ i32, i64 }` -- an integer under one tag and a pointer
+    /// under the other, in the same register.
+    ///
+    /// The criterion admits a union only where every field is a word wide, so
+    /// slot `i` is field `i` for every variant and there is no arithmetic
+    /// here: what a field costs cannot depend on which tag it arrived under.
+    fn inline_slots(&self, ty: &Type) -> Option<Vec<BasicTypeEnum<'ctx>>> {
+        let payloads = self.unboxed.payloads(ty)?;
+        let widest = payloads.iter().map(|(_, f)| f.len()).max().unwrap_or(0);
+        let mut slots = Vec::with_capacity(widest);
+        for index in 0..widest {
+            let mut held: Option<BasicTypeEnum<'ctx>> = None;
+            let mut agreed = true;
+            for (_, fields) in &payloads {
+                let Some(field) = fields.get(index) else { continue };
+                let shape = self.llvm_type(field)?;
+                match held {
+                    None => held = Some(shape),
+                    Some(seen) if seen == shape => {}
+                    Some(_) => agreed = false,
+                }
+            }
+            slots.push(match held {
+                Some(shape) if agreed => shape,
+                // Disagreed, or no variant reaches this far -- a word either
+                // way, which is what the criterion promised every field is.
+                _ => self.ctx.i64_type().into(),
+            });
+        }
+        Some(slots)
+    }
+
+    /// Reads one field out of a value held inline.
+    ///
+    /// **The one place a field's own type and the slot it lives in are told
+    /// apart.** They are the same thing wherever a type has a single carrying
+    /// case, and they part company when two variants share a slot and want it
+    /// read as different things.
+    pub fn read_inline(
+        &self,
+        whole: inkwell::values::StructValue<'ctx>,
+        ty: &Type,
+        index: usize,
+        field_ty: &Type,
+    ) -> BasicValueEnum<'ctx> {
+        let at = self.unboxed_field_at(ty, index);
+        let raw = self
+            .builder
+            .build_extract_value(whole, at, "inline.read")
+            .expect("reading an inline field");
+        match self.llvm_type(field_ty) {
+            Some(want) if want != raw.get_type() => self.unpacked_from_slot(raw, want),
+            _ => raw,
+        }
+    }
+
+    /// Writes one field into a value held inline. The inverse of the above.
+    pub fn write_inline(
+        &self,
+        whole: inkwell::values::AggregateValueEnum<'ctx>,
+        ty: &Type,
+        index: usize,
+        value: BasicValueEnum<'ctx>,
+    ) -> inkwell::values::AggregateValueEnum<'ctx> {
+        let at = self.unboxed_field_at(ty, index);
+        let slot = self
+            .unboxed_type(ty)
+            .and_then(|shape| shape.get_field_type_at_index(at))
+            .unwrap_or(value.get_type());
+        let stored =
+            if slot == value.get_type() { value } else { self.packed_into_slot(value, slot) };
+        self.builder
+            .build_insert_value(whole, stored, at, "inline.field")
+            .expect("writing an inline field")
+    }
+
+    /// A value as the shared slot holds it: the bits, not a box.
+    ///
+    /// Deliberately not [`Self::to_word`], which puts an aggregate on the heap
+    /// to cross a boundary. A slot is not a boundary -- it is a register the
+    /// variants take turns in -- and the criterion refuses a union whose
+    /// fields are not each a word, so there is never an aggregate here.
+    fn packed_into_slot(
+        &self,
+        value: BasicValueEnum<'ctx>,
+        slot: BasicTypeEnum<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        let word = self.ctx.i64_type();
+        let bits = match value {
+            BasicValueEnum::PointerValue(p) => self
+                .builder
+                .build_ptr_to_int(p, word, "slot.in")
+                .expect("a pointer in a shared slot")
+                .into(),
+            BasicValueEnum::IntValue(i) if i.get_type().get_bit_width() < 64 => self
+                .builder
+                .build_int_z_extend(i, word, "slot.in")
+                .expect("widening into a shared slot")
+                .into(),
+            BasicValueEnum::FloatValue(f) => self
+                .builder
+                .build_bit_cast(f, word, "slot.in")
+                .expect("a float in a shared slot"),
+            other => other,
+        };
+        if bits.get_type() == slot {
+            return bits;
+        }
+        // A slot the variants agreed on, reached with a value of another
+        // shape, is a layout the two halves disagree about. Nothing should
+        // produce one; a bitcast is the honest failure if something does.
+        self.builder.build_bit_cast(bits, slot, "slot.in").expect("a value in its slot")
+    }
+
+    /// The inverse of [`Self::packed_into_slot`]: a slot's bits read back as
+    /// the field's own type.
+    fn unpacked_from_slot(
+        &self,
+        raw: BasicValueEnum<'ctx>,
+        want: BasicTypeEnum<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        let BasicValueEnum::IntValue(bits) = raw else {
+            return self.builder.build_bit_cast(raw, want, "slot.out").expect("a slot as its field");
+        };
+        match want {
+            BasicTypeEnum::PointerType(p) => self
+                .builder
+                .build_int_to_ptr(bits, p, "slot.out")
+                .expect("a slot as a pointer")
+                .into(),
+            BasicTypeEnum::IntType(i) if i.get_bit_width() < 64 => self
+                .builder
+                .build_int_truncate(bits, i, "slot.out")
+                .expect("a slot as a narrow integer")
+                .into(),
+            BasicTypeEnum::FloatType(f) => self
+                .builder
+                .build_bit_cast(bits, f, "slot.out")
+                .expect("a slot as a float"),
+            _ => raw,
+        }
     }
 
     /// How many cases a type declares, which decides whether it needs a tag.

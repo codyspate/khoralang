@@ -418,7 +418,6 @@ impl<'ctx> Lower<'_, 'ctx> {
         let value = self.be.word_to_value(word, &field_ty);
         let some_value: BasicValueEnum<'ctx> = match inline {
             Some(shape) => {
-                let at = self.be.unboxed_field_at(option_ty, 0);
                 let tagged = self
                     .be
                     .builder
@@ -429,12 +428,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                         "some.case",
                     )
                     .expect("writing an inline tag");
-                self.be
-                    .builder
-                    .build_insert_value(tagged, value, at, "some.field")
-                    .expect("writing the received value")
-                    .into_struct_value()
-                    .into()
+                self.be.write_inline(tagged, option_ty, 0, value).into_struct_value().into()
             }
             None => {
                 let (_, words) = self.be.field_layout(std::slice::from_ref(&field_ty));

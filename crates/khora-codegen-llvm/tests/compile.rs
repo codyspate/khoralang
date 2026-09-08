@@ -1837,3 +1837,73 @@ fn main() -> Int {
     assert_eq!(ran.stdout, "15\n42\n100\n0\n", "the trailing 0 is the live-object count");
     assert_eq!(ran.code, Some(0));
 }
+
+/// **Two cases carrying different things share the same register.**
+///
+/// `Held::Number(Int)` and `Held::Text(String)` both put their payload in slot
+/// zero, so that slot is an integer under one tag and a pointer under the
+/// other — which is the whole of what a union layout is, and the thing that
+/// goes wrong if the reader takes the tag's word for it and the writer does
+/// not.
+///
+/// The trailing count is the live-object count: the `Text` case owns a string
+/// and the `Number` case owns nothing, so the walk that releases what a value
+/// holds has to read the tag before it reads the slot. Releasing slot zero
+/// unconditionally would free an integer.
+///
+/// It does *not* catch errata 87, which is the same shape -- a first carrying
+/// case that owns nothing -- and was found in `Validated` instead. Tried here
+/// first and this program stayed green through it, so the guard for that one
+/// lives in `redaction::a_validated_read_twice_keeps_its_errors`, where it was
+/// checked against the bug rather than assumed to catch it.
+#[test]
+fn two_cases_share_one_slot() {
+    let ran = run(
+        "union_slot",
+        "module t;
+fn print(value: String);
+extern fn khora_print_int(value: Int);
+extern fn khora_live_count() -> Int;
+
+impl String {
+  fn byte_length(self) -> Int;
+}
+
+pub type Held = | Number(value: Int) | Text(value: String) | Nothing;
+
+fn made(which: Int) -> Held {
+  if which == 0 { Held::Number(7) }
+  else if which == 1 { Held::Text(\"ab\" + \"c\") }
+  else { Held::Nothing }
+}
+
+fn size(h: Held) -> Int {
+  match h {
+    Held::Number(n) => n,
+    Held::Text(s) => String::byte_length(s),
+    Held::Nothing => -1,
+  }
+}
+
+fn work() -> Int {
+  khora_print_int(size(made(0)));
+  khora_print_int(size(made(1)));
+  khora_print_int(size(made(2)));
+  // Copied four times and read a fifth, so a copy that took no reference
+  // would be four releases against one string and then a read of what they
+  // freed.
+  let kept = made(1);
+  let counted = size(kept) + size(kept) + size(kept) + size(kept);
+  khora_print_int(counted + size(kept));
+  0
+}
+
+fn main() -> Int {
+  let _ = work();
+  khora_live_count()
+}
+",
+    );
+    assert_eq!(ran.stdout, "7\n3\n-1\n15\n");
+    assert_eq!(ran.code, Some(0), "the string the `Text` case held was released");
+}

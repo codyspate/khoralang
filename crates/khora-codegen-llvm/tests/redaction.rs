@@ -212,6 +212,36 @@ fn main() -> () {
     assert_eq!(out, "0\n[no host, no port]\n");
 }
 
+/// **A `Validated` read twice is copied, and the copy has to be counted.**
+///
+/// `Valid(A)` carries nothing counted and `Invalid(List<E>)` carries a list,
+/// and the question "does a value of this type own a reference" was answered
+/// from the first carrying case alone -- so a copy of an `Invalid` took no
+/// reference while the `match` inside `unwrap_or` released one, and the second
+/// read was of a freed list. `docs/errata.md` 87.
+///
+/// Two reads of the same value is the whole of it; the shape is what matters,
+/// not the number. A type whose *first* carrying case is the one that owns
+/// something never showed it.
+#[test]
+fn a_validated_read_twice_keeps_its_errors() {
+    let out = run(
+        "validated_twice",
+        r#"fn nothing(why: String) -> Validated<Int, String> { Validated::error(why) }
+
+fn main() -> () {
+  let failed = nothing("no host");
+  print(Validated::unwrap_or(failed, 0).show());
+  print(match Validated::to_result(failed) {
+    Result::Ok(_v) => "ok",
+    Result::Err(errors) => errors.show(),
+  });
+}"#,
+    );
+
+    assert_eq!(out, "0\n[no host]\n");
+}
+
 /// **`List` gained `Show` and `Eq` because `Validated` needed them**, and the
 /// reason it needed them generalises: a record holding a `List` could not
 /// derive `Show`, so the container people reach for by default was the one
