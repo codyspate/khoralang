@@ -4,8 +4,9 @@
 
 Program        ::= ( Declaration )* ;
 
-Declaration    ::= ModuleDecl | ImportDecl | TypeDecl | EffectDecl
-                 | ContextDecl | FunctionDecl | LetDecl | TestDecl ;
+Declaration    ::= ModuleDecl | ImportDecl | TypeDecl | TraitDecl | ImplDecl
+                 | EffectDecl | ContextDecl | FunctionDecl | LetDecl
+                 | ConstDecl | TestDecl ;
 
 ModuleDecl     ::= "module" Path ";" ;
 ImportDecl     ::= "import" Path "::" ( "{" ImportList "}" | "*" ) ";" ;
@@ -18,14 +19,20 @@ Path           ::= Ident ( "::" Ident )* ;
 
 (* --- types ------------------------------------------------------------- *)
 
-TypeDecl       ::= ( "export" )? "type" Ident ( TypeParams )? ( "=" TypeDef )? ";" ;
+(* `derive` sits *inside* the declaration and *before* `pub`, which is the
+   order the parser takes it in: a reader asking what a type derives should not
+   have to look at what came before it in the file. Structural and refusing
+   rather than guessing — a field whose type lacks the trait is named. *)
+TypeDecl       ::= ( DeriveClause )? ( "pub" )? "type" Ident ( TypeParams )?
+                   ( "=" TypeDef )? ";" ;
+DeriveClause   ::= "derive" "(" Ident ( "," Ident )* ( "," )? ")" ;
 
-TraitDecl      ::= ( "export" )? "trait" Ident ( TypeParams )?
+TraitDecl      ::= ( "pub" )? "trait" Ident ( TypeParams )?
                    ( ":" TypeBounds )? "{" ( TraitItem )* "}" ;
 ImplDecl       ::= "impl" ( TypeParams )? Type ( "for" Type )?
                    "{" ( TraitItem )* "}" ;   (* without "for": the type's
                                                   own methods *)
-(* "export" on a method of an inherent impl means what it means on a top-level
+(* `pub` on a method of an inherent impl means what it means on a top-level
    declaration: without it, only the declaring module may call it. On a *trait*
    impl it is not read — those methods are the trait's, and are reachable
    wherever the trait is. docs/design/std-surface.md, roadmap 13.11. *)
@@ -36,7 +43,7 @@ TypeDef        ::= VariantType | Type ;
 
 (* An effect is a named set of operations, shaped like a record of functions —
    which is what a capability already was. docs/design/effects.md. *)
-EffectDecl     ::= ( "export" )? "effect" Ident ( TypeParams )?
+EffectDecl     ::= ( "pub" )? "effect" Ident ( TypeParams )?
                    "{" ( Field ( "," Field )* ( "," )? )? "}" ;
 
 TypeParams     ::= "<" TypeParam ( "," TypeParam )* ( "," )? ">" ;
@@ -78,16 +85,23 @@ VariantPayload ::= Field ( "," Field )* ( "," )?       (* named payload       *)
    No `=` before a body, and no `;` after it. `{` introduces a definition and
    `;` declares a signature only, which is how std describes intrinsics. *)
 
-FunctionDecl   ::= ( "export" )? "fn" Ident ( TypeParams )? ParamList
+(* `extern` says the body is a C symbol found at link time, so the declaration
+   ends at `;` rather than a block. A foreign function takes and returns scalars
+   and pointers, requires capabilities without receiving them, and cannot raise
+   — docs/design/ffi.md, and the compiler checks it. *)
+FunctionDecl   ::= ( "pub" )? ( "extern" )? "fn" Ident ( TypeParams )? ParamList
                    ( "->" Type )? ( EffectClause )* ( Block | ";" ) ;
+
+(* A module-level constant. Its initialiser is evaluated at compile time. *)
+ConstDecl      ::= ( "pub" )? "const" Ident ( ":" Type )? "=" Expr ";" ;
 ParamList      ::= "(" ( Param ( "," Param )* ( "," )? )? ")" ;
 Param          ::= ( Ident | "_" ) ( ":" Type )? ;
 
-LetDecl        ::= ( "export" )? "let" ( "mut" )? Pattern ( ":" Type )? "=" Expr ";" ;
+LetDecl        ::= ( "pub" )? "let" ( "mut" )? Pattern ( ":" Type )? "=" Expr ";" ;
 
 (* A named bundle of handlers. Bindings are sequential: each may use the ones
    above it, which keeps service composition flat. *)
-ContextDecl    ::= ( "export" )? "context" Ident
+ContextDecl    ::= ( "pub" )? "context" Ident
                    "{" ( RecordExprField ( "," RecordExprField )* ( "," )? )? "}" ;
 
 TestDecl       ::= ( "test" | "bench" ) StringLiteral Block ;
@@ -97,7 +111,8 @@ TestDecl       ::= ( "test" | "bench" ) StringLiteral Block ;
    expression and every statement after it is orphaned. *)
 Block          ::= "{" ( Statement )* ( Expr )? "}" ;
 Statement      ::= LetDecl | Expr ";" | BlockLikeExpr ;
-BlockLikeExpr  ::= IfExpr | MatchExpr | WhileExpr | LoopExpr | WithBlock | Block ;
+BlockLikeExpr  ::= IfExpr | MatchExpr | ForExpr | WhileExpr | LoopExpr
+                 | WithBlock | Block ;
 
 (* --- expressions -------------------------------------------------------
    Binary operators, loosest to tightest:
@@ -112,6 +127,13 @@ BlockLikeExpr  ::= IfExpr | MatchExpr | WhileExpr | LoopExpr | WithBlock | Block
    `.` field access, `!`, `catch`, `with` — binds tightest of all. *)
 
 Expr           ::= BinaryExpr ;
+
+(* `||> a |> b |> c` is sugar for `fn x => x |> a |> b |> c`, desugared during
+   HIR lowering so nothing past that point knows a flow was written. Greedy
+   over the pipes that follow it, at the pipe's own precedence rather than a
+   second one, so `(||> a) |> b` needs its parentheses.
+   docs/design/flow-operator.md. *)
+FlowExpr       ::= "||>" Expr ( "|>" Expr )* ;
 BinaryExpr     ::= UnaryExpr ( BinOp UnaryExpr )* ;
 UnaryExpr      ::= ( "-" | "!" )? PostfixExpr ;
 
@@ -127,11 +149,16 @@ PrimaryExpr    ::= Literal
                  | "_"                                   (* pipe placeholder   *)
                  | RecordExpr | TupleExpr | ListExpr
                  | Block | LambdaExpr
-                 | IfExpr | MatchExpr | WhileExpr | LoopExpr
-                 | RaiseExpr | HandlerExpr | WithBlock
+                 | IfExpr | MatchExpr | ForExpr | WhileExpr | LoopExpr
+                 | FlowExpr | RaiseExpr | HandlerExpr | WithBlock
                  | "break" ( Expr )? | "continue" | "return" ( Expr )? ;
 
-RecordExpr     ::= "{" ( RecordExprField ( "," RecordExprField )* ( "," )? )? "}" ;
+(* `{ ..old, field: value }`: every field the literal does not name is taken
+   from the base. The comma after the base is optional, because `{ ..old }` is
+   legal and is just `old`. *)
+RecordExpr     ::= "{" ( RecordExprBase ( "," )? )?
+                   ( RecordExprField ( "," RecordExprField )* ( "," )? )? "}" ;
+RecordExprBase ::= ".." Expr ;
 RecordExprField::= Ident ":" Expr ;
 TupleExpr      ::= "(" ")" | "(" Expr ")" | "(" Expr ( "," Expr )+ ( "," )? ")" ;
 ListExpr       ::= "[" ( Expr ( "," Expr )* ( "," )? )? "]" ;
@@ -185,26 +212,36 @@ FloatLiteral   ::= IntLiteral "." IntLiteral ( ( "e" | "E" ) ( "+" | "-" )? [0-9
    the "d", and the suffix goes after any exponent. docs/design/numbers.md. *)
 DecimalLiteral ::= ( IntLiteral | FloatLiteral ) "d" ;
 StringLiteral  ::= QuotedString | BacktickString ;
-QuotedString   ::= '"' ( ~["\] | "\" . )* '"' ;
+(* `${ Expr }` interpolates. The hole calls `Show` unless it already holds a
+   `String`, through a compiler-written node rather than a method call, so
+   interpolating something does not require importing the trait that prints it.
+   Both string forms interpolate. *)
+QuotedString   ::= '"' ( ~["\] | "\" . | Interpolation )* '"' ;
+Interpolation  ::= "${" Expr "}" ;
 (* Crosses lines, and its indentation is the source's rather than the
    string's. docs/design/multiline-strings.md. *)
-BacktickString ::= '`' ( ~[`\] | "\" . )* '`' ;
+BacktickString ::= '`' ( ~[`\] | "\" . | Interpolation )* '`' ;
 Comment        ::= "//" ~[\r\n]* | "/*" ( Comment | . )* "*/" ;  (* nesting   *)
 
-(* Hard keywords: never usable as an identifier. *)
-Keyword        ::= "module" | "import" | "type" | "fn" | "match" | "let"
-                 | "mut" | "export" | "as" | "if" | "else" | "for" | "forall" | "const"
-                 | "effect" | "with" | "raises" | "raise" | "catch"
-                 | "while" | "loop" | "break" | "continue" | "return"
-                 | "true" | "false" ;
+(* Hard keywords: never usable as an identifier. This list is the lexer's, and
+   `scripts/check-grammar.sh` fails if the two drift apart -- which they had:
+   this table named `export` as the visibility keyword, a word the lexer does
+   not have and `reference/declarations.md` says outright is not it, and it was
+   missing `trait`, `impl`, `for` and `pub` entirely. Roadmap 16. *)
+Keyword        ::= "module" | "import" | "type" | "trait" | "impl" | "fn"
+                 | "match" | "let" | "mut" | "pub" | "as" | "if" | "else"
+                 | "forall" | "const" | "effect" | "with" | "raises" | "raise"
+                 | "catch" | "while" | "loop" | "break" | "continue" | "for"
+                 | "return" | "true" | "false" ;
 
 (* Contextual keywords: keywords in one position each, ordinary identifiers
-   everywhere else, so `fn post(handler: Request -> Response)` is legal.
-   `for` is reserved only by `handler for E`; the `for` loop in phase 3 will
-   make it hard. *)
+   everywhere else, so `fn post(handler: Request -> Response)` is legal. *)
 ContextualKeyword
                ::= "handler"  (* only before "for"                        *)
-                 | "for"      (* only directly after "handler"            *)
+                 | "in"       (* only in a `for` loop's header            *)
                  | "context"  (* only at the start of a declaration       *)
+                 | "row"      (* only in a type parameter list            *)
                  | "test"     (* only at the start of a declaration       *)
-                 | "bench" ;  (* only at the start of a declaration       *)
+                 | "bench"    (* only at the start of a declaration       *)
+                 | "derive"   (* only at the start of a declaration       *)
+                 | "extern" ; (* only before "fn"                         *)
