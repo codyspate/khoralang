@@ -121,8 +121,83 @@ pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
     all.extend(row_fields_must_be_effects(db, file));
     all.extend(crate::unresolved::unresolved_type_errors(db, file));
     all.extend(crate::exports::export_errors(db, file));
+    all.extend(entry_point_shape_errors(db, file));
     all.extend(check_file(db, file).iter().cloned());
     all
+}
+
+/// What a `main` may not be.
+///
+/// **These were the backend's, and the backend runs after `khora check` has
+/// said the program is fine.** So `fn main(x: Int) -> () {}` -- three lines --
+/// checked clean and then failed to build, and the language server stayed
+/// green on a program that cannot compile. That is a check/build split, which
+/// this repository has closed twice before; it reopened because a `Signature`
+/// carries no span, so the checks lived where the spans had already been
+/// dropped and reported at offset zero of the first file in the program.
+///
+/// Here there is a syntax tree, so the error lands on the parameter list the
+/// author wrote. Every function named `main` is checked rather than only the
+/// one the backend will pick as the entry point: a `main` with parameters is
+/// wrong whichever program it belongs to, and `src/bin` means a package has
+/// several. Whether a package has a `main` *at all* stays with the backend,
+/// because a library correctly has none. Roadmap 16.5.
+pub(crate) fn entry_point_shape_errors(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
+    let mut found = Vec::new();
+    for decl in khora_db::parse(db, file).source_file().decls() {
+        let ast::Decl::Fn(f) = decl else { continue };
+        let Some(name) = f.name().and_then(|n| n.ident()) else { continue };
+        if name != "main" {
+            continue;
+        }
+
+        if let Some(params) = f.params() {
+            if params.params().next().is_some() {
+                found.push(HirError {
+                    message: "`main` cannot take parameters yet; command-line arguments \
+                              arrive with the standard library"
+                        .to_string(),
+                    range: params.syntax().text_range(),
+                });
+            }
+        }
+
+        // An entry point is where capabilities are installed, not asked for:
+        // nothing calls `main`, so a `with` clause on it names something no
+        // caller exists to supply.
+        //
+        // **The message names them**, which is the half worth being careful
+        // about. The backend's version of this refusal has a test asserting it
+        // says `ledger` rather than "a capability", because the error it
+        // replaced was LLVM's "Incorrect number of arguments passed to called
+        // function!" reported as a compiler bug -- a true sentence about the
+        // wrong program. Moving the check earlier must not lose what made the
+        // later one worth having.
+        if let Some(clause) = f.with_clause() {
+            let named: Vec<String> = match clause.row() {
+                Some(ast::Type::Record(row)) => row
+                    .fields()
+                    .filter_map(|field| field.name().and_then(|n| n.ident()))
+                    .map(|name| format!("`{name}`"))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let (wanted, them) = match named.len() {
+                0 => ("capabilities".to_string(), "them"),
+                1 => (named[0].clone(), "it"),
+                n => (format!("{} and {}", named[..n - 1].join(", "), named[n - 1]), "them"),
+            };
+            found.push(HirError {
+                message: format!(
+                    "`main` requires {wanted}, and nothing calls `main` to supply {them}. An \
+                     entry point installs its capabilities rather than asking for them: \
+                     wrap the body in a `with {{ .. }}` block"
+                ),
+                range: clause.syntax().text_range(),
+            });
+        }
+    }
+    found
 }
 
 /// A `row` whose fields are not capabilities.
