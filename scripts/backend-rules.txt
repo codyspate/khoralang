@@ -15,6 +15,15 @@
 # names, and an integer literal wider than an `Int`. Both type-checked cleanly
 # and were refused at build time, which no editor could show.
 #
+# The two inline-layout rules were added by the commit that let variants share
+# their slots and were never classified, so this check has been failing on
+# `main`. Both are the second kind. `{ty}` has no inline layout is reached only
+# where the lowering has already decided a value is held inline and
+# `unboxed_type` then disagrees, which is the layout decision contradicting
+# itself rather than anything a program can express; `{label}` was not given
+# says so in the comment directly above it -- the checker refuses a literal
+# naming neither every field nor a base, so there is nothing to read.
+#
 # Everything below has been read and is the second kind. Most say so in their
 # own words: "is not an operation the backend knows", "which is a compiler
 # bug", "has no machine type". The arity and shape checks are the checker's job
@@ -40,6 +49,7 @@
 `{channel}` is not a channel
 `{fiber}` is not a fiber, so it cannot be joined
 `{label}` has no storage, which is a compiler bug
+`{label}` was not given
 `{name}` has a type the backend cannot represent
 `{name}` has no field `{label}`
 `{name}` has no signature to call through
@@ -56,6 +66,7 @@
 `{text}` is not a number this target can hold
 `{type_name}` has no field `{label}`
 `{type_name}` is not a record
+`{ty}` has no inline layout
 `{ty}` is not a tuple
 `{what}` is about bytes, and `{element}` is not one
 `{wrapped}` is not a `SharedFn`

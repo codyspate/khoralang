@@ -78,6 +78,28 @@ fi
 step 'clippy, all targets'
 cargo clippy --workspace --features llvm --all-targets -- -D warnings
 
+step 'the runtime under an optimizer'
+# **The configuration the scheduler's own evidence needed and never had.**
+# `soak.rs` asserts on `coro::resuming_now`, that counter was
+# `debug_assertions` only, and the call sites were not gated -- so
+# `cargo test -p khora-rt --release` did not compile at all, `khora-rt` was the
+# only crate in the workspace of which that was true, and the two adversarial
+# tests had run nowhere but debug. They are about which worker owns a fiber
+# across a handover, and an optimizer reordering those accesses is the reason
+# to run them; a debug-only proof is the weakest place to have made it.
+#
+# `fiber-audit` is what puts the counter back in a release build. The step
+# above already ran these unoptimized, so this is the second run rather than
+# the only one. Roadmap 16.4.
+cargo test -p khora-rt --release --features fiber-audit
+
+step 'the published grammar matches the lexer'
+# `docs/grammar.ebnf` is served to MCP clients and mirrored into the public
+# reference, and at 1.0 language syntax stops changing without a major version
+# -- so it is the artefact people are held to, and nothing checked it. It had
+# named `export` as the visibility keyword, which the lexer does not have.
+sh "$root/scripts/check-grammar.sh"
+
 step 'and the build with no backend'
 # **The configuration nothing was checking.** Every step above passes
 # `--features llvm`, so the `#[cfg(not(feature = "llvm"))]` stubs are compiled

@@ -644,9 +644,11 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// **A loop back-edge is a cancellation point**, in a function that can
     /// raise. It was only a safepoint, and the difference hung a nursery.
     ///
-    ///     fn ticker() with { clock: Clock } raises Stop {
-    ///       loop { clock.sleep(200); }
-    ///     }
+    /// ```text
+    /// fn ticker() with { clock: Clock } raises Stop {
+    ///   loop { clock.sleep(200); }
+    /// }
+    /// ```
     ///
     /// is how every periodic job in every language is written, and that fiber
     /// could not be stopped: the runtime woke it out of the sleep, correctly,
