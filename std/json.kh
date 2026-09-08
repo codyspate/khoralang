@@ -462,6 +462,13 @@ fn inside_at(text: String, run: Int, at: Int, done: String) -> Result<Scanned, J
         Result::Err(why) => Result::Err(why),
         Result::Ok(found) => inside_at(text, found.at, found.at, so_far + found.text),
       }
+    } else if byte < 32 {
+      // **RFC 8259 forbids an unescaped control character in a string**, and
+      // these were accepted: a raw tab or newline went in and came back out,
+      // so a document Khora had read could be one no other parser would.
+      // `encode` has always written them as `\u00XX` going the other way,
+      // which is what made the asymmetry easy to miss. Roadmap 16.8.
+      Result::Err({ at: at, expected: "an escape: a control character must be written `\\u00XX`" })
     } else {
       inside_at(text, run, at + 1, done)
     }
@@ -636,6 +643,15 @@ fn number_at(text: String, at: Int) -> Result<Value, JsonError> {
   let whole = digits_end(text, start);
   if whole == start {
     Result::Err({ at: start, expected: "a digit" })
+  } else if whole - start > 1 && U8::to_int(String::byte(text, start)) == 48 {
+    // **RFC 8259's `int` is `zero / (digit1-9 *DIGIT)`**, so `0` alone is a
+    // number and `01` is not. This accepted them and, because the scan slices
+    // the document's own digits rather than accumulating a value, re-emitted
+    // them verbatim -- so `encode(parse(x))` could produce output that every
+    // other JSON implementation rejects, and `{"price": 007}` decoded as a
+    // price. The rest of the number grammar was already conformant, which is
+    // what made this an oversight rather than a position. Roadmap 16.8.
+    Result::Err({ at: start, expected: "a digit other than `0`, since only `0` itself may start with one" })
   } else {
     match fraction_end(text, whole) {
       Result::Err(why) => Result::Err(why),

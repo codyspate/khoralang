@@ -392,6 +392,56 @@ fn main() -> Int {{
     );
 }
 
+/// The two places the grammar was looser than RFC 8259, and the values either
+/// side of them.
+///
+/// **Both were accept-too-much bugs, which is the direction that spreads.**
+/// The parser slices the document's own digits rather than accumulating a
+/// value, so `01` came back out of `encode` as `01` -- a document Khora had
+/// read that no other implementation would, and `{"price": 007}` decoding as
+/// a price. Raw control characters were the same shape one token over, and
+/// easy to miss because `encode` has always *written* them as `\u00XX`.
+/// Roadmap 16.8.
+#[test]
+fn the_number_and_string_grammars_refuse_what_the_rfc_refuses() {
+    let out = run(
+        "json_rfc",
+        &format!(
+            "{HEAD}
+fn main() -> Int {{
+  print(shown(\"01\"));
+  print(shown(\"007\"));
+  print(shown(\"-01\"));
+  print(shown(\"0\"));
+  print(shown(\"-0\"));
+  print(shown(\"0.5\"));
+  print(shown(\"0e1\"));
+  print(shown(\"10\"));
+  print(shown(\"\\\"a\\tb\\\"\"));
+  print(shown(\"\\\"a\\\\tb\\\"\"));
+  khora_print_int(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        out,
+        // `0` alone is a number; `0` followed by another digit is not.
+        "at 0: expected a digit other than `0`, since only `0` itself may start with one\n\
+         at 0: expected a digit other than `0`, since only `0` itself may start with one\n\
+         at 1: expected a digit other than `0`, since only `0` itself may start with one\n\
+         0\n\
+         -0\n\
+         0.5\n\
+         0e1\n\
+         10\n\
+         at 2: expected an escape: a control character must be written `\\u00XX`\n\
+         \"a\\tb\"\n\
+         0\n"
+    );
+}
+
 /// The encoder and the parser agree, which is the property that matters more
 /// than either of them alone.
 #[test]
