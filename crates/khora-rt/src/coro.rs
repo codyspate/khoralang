@@ -112,13 +112,21 @@ fn install(yielder: *const Yielder<(), ()>) {
     YIELDER.with(|y| y.set(yielder));
 }
 
-/// Set while a `Task` is inside `resume`, in debug builds only.
+/// Set while a `Task` is inside `resume`.
 ///
 /// **Two workers resuming one coroutine cannot be detected after the fact:**
 /// both switch to the same stack, and what comes out is an unrelated crash
-/// minutes later. So it is checked at the door. Release builds have neither
-/// the flag nor the branch.
-#[cfg(debug_assertions)]
+/// minutes later. So it is checked at the door. An ordinary release build has
+/// neither the flag nor the branch.
+///
+/// **`fiber-audit` is how a release build gets them back**, and it exists
+/// because `soak.rs` asserted on this counter unconditionally while the
+/// counter was `debug_assertions` only -- so `cargo test -p khora-rt
+/// --release` did not compile, and the two adversarial tests, which are the
+/// evidence for the scheduler's ownership invariants, had only ever run
+/// unoptimized. An optimizer reordering the accesses they are about is the
+/// reason to run them. Roadmap 16.4.
+#[cfg(any(debug_assertions, feature = "fiber-audit"))]
 static RESUMING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// A fiber with a stack of its own.
@@ -190,7 +198,7 @@ impl Task {
     /// whichever worker is carrying it. The guard restores the previous one on
     /// the way out, panic included.
     pub(crate) fn resume(&mut self) -> Ran {
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "fiber-audit"))]
         let _once = ResumedOnce::claim(&self.fiber);
         let _entered = enter(self.fiber.clone());
         // Whatever was installed belongs to whoever is resuming us — a worker
@@ -223,10 +231,10 @@ pub(crate) fn on_a_fiber() -> bool {
 /// A guard rather than a pair of calls, so that a panic inside the fiber
 /// releases the claim rather than making every later resume look like a
 /// duplicate.
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "fiber-audit"))]
 struct ResumedOnce<'a>(&'a Fiber);
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "fiber-audit"))]
 impl<'a> ResumedOnce<'a> {
     fn claim(fiber: &'a Arc<Fiber>) -> ResumedOnce<'a> {
         let already = fiber.resuming.swap(true, std::sync::atomic::Ordering::AcqRel);
@@ -240,7 +248,7 @@ impl<'a> ResumedOnce<'a> {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "fiber-audit"))]
 impl Drop for ResumedOnce<'_> {
     fn drop(&mut self) {
         self.0.resuming.store(false, std::sync::atomic::Ordering::Release);
@@ -248,10 +256,23 @@ impl Drop for ResumedOnce<'_> {
     }
 }
 
-/// How many fibers are inside `resume` right now. Debug builds only.
-#[cfg(debug_assertions)]
-pub(crate) fn resuming_now() -> usize {
-    RESUMING.load(std::sync::atomic::Ordering::Relaxed)
+/// How many fibers are inside `resume` right now, or `None` where the counter
+/// is not compiled in.
+///
+/// **`Option` rather than `0`**, because a caller that cannot tell "nothing is
+/// resuming" from "nobody is counting" would assert the first and mean the
+/// second -- a green test proving nothing, which is the failure this whole
+/// entry is about. A release build without `fiber-audit` answers `None` and
+/// `soak.rs` says out loud that it skipped the check.
+pub(crate) fn resuming_now() -> Option<usize> {
+    #[cfg(any(debug_assertions, feature = "fiber-audit"))]
+    {
+        Some(RESUMING.load(std::sync::atomic::Ordering::Relaxed))
+    }
+    #[cfg(not(any(debug_assertions, feature = "fiber-audit")))]
+    {
+        None
+    }
 }
 
 /// Gives the worker back to whoever resumed this fiber.

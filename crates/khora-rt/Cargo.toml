@@ -64,6 +64,19 @@ windows-sys = { version = "0.59", features = [
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[features]
+# The fiber ownership audit -- the `RESUMING` counter and the double-resume
+# check at the door of `Task::resume` -- in a build that would not otherwise
+# have it. On automatically in debug through `debug_assertions`.
+#
+# It exists so the adversarial soak tests can run *optimized*.  They assert on
+# the counter, the counter was `debug_assertions` only, and the call sites were
+# not gated -- so `cargo test -p khora-rt --release` did not compile at all and
+# those tests had never run anywhere but debug, which is not where the
+# reordering they are about happens. `scripts/baseline.sh` runs them both ways.
+# Roadmap 16.4.
+fiber-audit = []
+
 [lib]
 # Linked into generated executables by clang, so it must be a static archive
 # exposing a C ABI.

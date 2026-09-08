@@ -417,7 +417,7 @@ fn adversarial_execution_leaves_nothing_behind() {
   seed={seed} rounds={rounds} workers={workers}
   {:?}
   {:?}
-  resuming={} blocking={:?}",
+  resuming={:?} blocking={:?}",
                 pool.audit(),
                 pool.counts(),
                 crate::coro::resuming_now(),
@@ -516,13 +516,40 @@ fn adversarial_execution_leaves_nothing_behind() {
     // twenty of them of this test alone: rare enough to look like a race in
     // the scheduler and shallow enough to be neither. The audit in the message
     // said so — 668 spawned, 668 completed, everything zero except this.
+    settle_and_assert_nobody_is_resuming(&context);
+}
+
+/// Waits for the last worker to leave `resume`, then asserts that it did.
+///
+/// **One function because it was two copies**, and because the `None` arm has
+/// to exist in exactly one place. `coro::resuming_now` answers `None` in a
+/// release build without `fiber-audit`: the counter is not compiled in, so
+/// there is nothing to wait for and nothing to assert, and the alternative --
+/// reading `None` as zero -- is an assertion that passes by knowing nothing.
+/// It says so on stderr rather than passing quietly, because a test that
+/// silently checks less in one configuration than another is how 16.4 happened.
+///
+/// A fiber may still be on its way out when the counts already balance: the
+/// worker decrements the completion count inside `resume` and leaves the guard
+/// immediately after, so a checker reading between the two sees a settled pool
+/// and a fiber still resuming. Hence the second of grace before the assert
+/// rather than the assert alone.
+fn settle_and_assert_nobody_is_resuming(context: &str) {
+    let Some(_) = crate::coro::resuming_now() else {
+        eprintln!(
+            "  note: the fiber audit is not compiled in, so \"nobody is still \
+             inside a fiber\" was not checked. Build with `--features \
+             fiber-audit` to check it in release."
+        );
+        return;
+    };
     let until = std::time::Instant::now() + std::time::Duration::from_secs(1);
-    while crate::coro::resuming_now() != 0 && std::time::Instant::now() < until {
+    while crate::coro::resuming_now() != Some(0) && std::time::Instant::now() < until {
         std::thread::yield_now();
     }
     assert_eq!(
         crate::coro::resuming_now(),
-        0,
+        Some(0),
         "a worker is still inside a fiber\n{context}"
     );
 }
@@ -823,11 +850,7 @@ fn a_hostile_schedule_leaves_nothing_behind() {
     assert!(audit.settled(), "the pool did not come back to empty\n{context}");
     assert_eq!(audit.in_hand(), 0, "{context}");
 
-    let until = std::time::Instant::now() + std::time::Duration::from_secs(1);
-    while crate::coro::resuming_now() != 0 && std::time::Instant::now() < until {
-        std::thread::yield_now();
-    }
-    assert_eq!(crate::coro::resuming_now(), 0, "a worker is still inside a fiber\n{context}");
+    settle_and_assert_nobody_is_resuming(&context);
 }
 
 /// The same, over and over with a fresh seed, watching for drift.

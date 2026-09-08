@@ -79,8 +79,9 @@ pub(crate) struct Fiber {
     /// and the worker that comes back to it may not be the one that left.
     shielded: AtomicUsize,
     /// Set while a worker is inside this fiber's `resume`. See
-    /// `crate::coro::ResumedOnce`; debug builds only.
-    #[cfg(debug_assertions)]
+    /// `crate::coro::ResumedOnce`; debug builds, and a release build asked for
+    /// `fiber-audit`.
+    #[cfg(any(debug_assertions, feature = "fiber-audit"))]
     pub(crate) resuming: std::sync::atomic::AtomicBool,
     /// Whether this is a spawned fiber rather than the program's own
     /// computation.
@@ -126,7 +127,7 @@ impl Fiber {
             id: next_id(),
             cancelled: AtomicUsize::new(0),
             shielded: AtomicUsize::new(0),
-            #[cfg(debug_assertions)]
+            #[cfg(any(debug_assertions, feature = "fiber-audit"))]
             resuming: std::sync::atomic::AtomicBool::new(false),
             spawned: false,
             wait: crate::wait::Wait::default(),
@@ -154,7 +155,7 @@ impl Fiber {
             id: next_id(),
             cancelled: AtomicUsize::new(0),
             shielded: AtomicUsize::new(0),
-            #[cfg(debug_assertions)]
+            #[cfg(any(debug_assertions, feature = "fiber-audit"))]
             resuming: std::sync::atomic::AtomicBool::new(false),
             spawned: true,
             wait: crate::wait::Wait::default(),
