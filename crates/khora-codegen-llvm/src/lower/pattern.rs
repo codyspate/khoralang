@@ -209,7 +209,10 @@ impl<'ctx> Lower<'_, 'ctx> {
 
         for ((owner, mine), (_, block)) in caught.iter().zip(&cases) {
             self.at(*block);
-            let error_ty = Type::adt(owner);
+            // Named with its home: whether an error is a register or a
+            // pointer is answered from its declaration, and a home-less name
+            // answers "pointer" for every one of them.
+            let error_ty = self.be.named_type(owner, None);
             let error = self.be.word_to_value(word, &error_ty);
 
             // The raising frame moved the error into its return, so this frame
@@ -804,6 +807,11 @@ impl<'ctx> Lower<'_, 'ctx> {
                     return;
                 };
                 let info = self.at_this_instantiation(ty, info);
+                if self.be.unboxed.holds(ty) {
+                    let on = Inline { whole: value.into_struct_value(), ty: ty.clone() };
+                    self.test_inline_named(&on, tag, &info, &fields, success, failure);
+                    return;
+                }
                 let object = value.into_pointer_value();
                 let loaded = runtime::load_tag(self.be.ctx, &self.be.builder, object);
                 let expected = self.be.ctx.i32_type().const_int(tag as u64, false);
@@ -867,7 +875,8 @@ impl<'ctx> Lower<'_, 'ctx> {
         }
 
         let field_ty = info.fields.get(index).cloned().unwrap_or(Type::Unknown);
-        let value = self.load_field(object, index, &field_ty);
+        let at = self.be.field_slot(&info.fields, index);
+        let value = self.load_field(object, at, &field_ty);
         let next = self.block("field.next");
         self.test_pattern(fields[index], value, &field_ty, next, failure);
         self.at(next);
@@ -879,7 +888,7 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// In a header for a boxed value, and beside the fields for an inline one.
     /// Every test of a tag goes through here so that neither shape has to be
     /// remembered at the point of asking.
-    fn case_of(
+    pub(super) fn case_of(
         &mut self,
         value: BasicValueEnum<'ctx>,
         ty: &Type,
@@ -957,6 +966,63 @@ impl<'ctx> Lower<'_, 'ctx> {
         self.test_inline_fields(whole, ty, fields, index + 1, success, failure);
     }
 
+    /// [`Self::test_inline`], for a pattern that names its fields.
+    ///
+    /// Which field a sub-pattern stands in front of comes from its name, as it
+    /// does for a boxed record; where that field *is* comes from the inline
+    /// layout rather than from the object's field area.
+    fn test_inline_named(
+        &mut self,
+        on: &Inline<'ctx>,
+        tag: u32,
+        info: &VariantInfo,
+        fields: &[(String, PatId)],
+        success: BasicBlock<'ctx>,
+        failure: BasicBlock<'ctx>,
+    ) {
+        if self.be.cases_of(&on.ty) > 1 {
+            let held = self.case_of(on.whole.into(), &on.ty);
+            let expected = self.be.ctx.i32_type().const_int(u64::from(tag), false);
+            let block = self.block("inline.case.matched");
+            self.branch_on_equal(held, expected, block, failure);
+            self.at(block);
+        }
+        self.test_inline_named_fields(on, info, fields, 0, success, failure);
+    }
+
+    /// The named fields of an inline value, each tested where it can fail.
+    fn test_inline_named_fields(
+        &mut self,
+        on: &Inline<'ctx>,
+        info: &VariantInfo,
+        fields: &[(String, PatId)],
+        index: usize,
+        success: BasicBlock<'ctx>,
+        failure: BasicBlock<'ctx>,
+    ) {
+        if index >= fields.len() {
+            self.br(success);
+            return;
+        }
+        let (label, pat) = (fields[index].0.clone(), fields[index].1);
+        let found = info.field(&label).map(|(at, t)| (at, t.clone()));
+        // A field the declaration does not have was reported by the checker.
+        let (Some((position, field_ty)), false) = (found, self.is_irrefutable(pat)) else {
+            self.test_inline_named_fields(on, info, fields, index + 1, success, failure);
+            return;
+        };
+        let at = self.be.unboxed_field_at(&on.ty, position);
+        let read = self
+            .be
+            .builder
+            .build_extract_value(on.whole, at, "inline.test")
+            .expect("reading an inline field");
+        let next = self.block("inline.field.next");
+        self.test_pattern(pat, read, &field_ty, next, failure);
+        self.at(next);
+        self.test_inline_named_fields(on, info, fields, index + 1, success, failure);
+    }
+
     /// [`Self::test_fields`], for a pattern that names its fields.
     ///
     /// The index into the object is looked up per field instead of being the
@@ -979,10 +1045,11 @@ impl<'ctx> Lower<'_, 'ctx> {
         let (label, pat) = (fields[index].0.clone(), fields[index].1);
         let found = info.field(&label).map(|(at, t)| (at, t.clone()));
         // A field the declaration does not have was reported by the checker.
-        let (Some((at, field_ty)), false) = (found, self.is_irrefutable(pat)) else {
+        let (Some((position, field_ty)), false) = (found, self.is_irrefutable(pat)) else {
             self.test_named_fields(object, info, fields, index + 1, success, failure);
             return;
         };
+        let at = self.be.field_slot(&info.fields, position);
         let value = self.load_field(object, at, &field_ty);
         let next = self.block("field.next");
         self.test_pattern(pat, value, &field_ty, next, failure);
@@ -1063,7 +1130,8 @@ impl<'ctx> Lower<'_, 'ctx> {
                         Pat::Bind(local) => self.types.local(*local).clone(),
                         _ => info.fields.get(index).cloned().unwrap_or(Type::Unknown),
                     };
-                    let loaded = self.load_field(object, index, &field_ty);
+                    let at = self.be.field_slot(&info.fields, index);
+                    let loaded = self.load_field(object, at, &field_ty);
                     self.bind_pattern(*field, loaded, &field_ty);
                 }
             }
@@ -1074,6 +1142,27 @@ impl<'ctx> Lower<'_, 'ctx> {
             Pat::Record { resolution, fields } => {
                 let Some((_, info)) = self.variant_of(&resolution) else { return };
                 let info = self.at_this_instantiation(ty, info);
+                if self.be.unboxed.holds(ty) {
+                    for (label, field) in fields.iter() {
+                        let Some((index, declared)) =
+                            info.field(label).map(|(i, t)| (i, t.clone()))
+                        else {
+                            continue;
+                        };
+                        let field_ty = match self.body.pat(*field) {
+                            Pat::Bind(local) => self.types.local(*local).clone(),
+                            _ => declared,
+                        };
+                        let at = self.be.unboxed_field_at(ty, index);
+                        let read = self
+                            .be
+                            .builder
+                            .build_extract_value(value.into_struct_value(), at, "inline.bound")
+                            .expect("reading an inline field");
+                        self.bind_pattern(*field, read, &field_ty);
+                    }
+                    return;
+                }
                 let object = value.into_pointer_value();
                 for (label, field) in fields.iter() {
                     let Some((index, declared)) =
@@ -1085,7 +1174,8 @@ impl<'ctx> Lower<'_, 'ctx> {
                         Pat::Bind(local) => self.types.local(*local).clone(),
                         _ => declared,
                     };
-                    let loaded = self.load_field(object, index, &field_ty);
+                    let at = self.be.field_slot(&info.fields, index);
+                    let loaded = self.load_field(object, at, &field_ty);
                     self.bind_pattern(*field, loaded, &field_ty);
                 }
             }
@@ -1099,7 +1189,8 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let object = value.into_pointer_value();
                 for (index, field) in fields.iter().enumerate() {
                     let field_ty = info.fields.get(index).cloned().unwrap_or(Type::Unknown);
-                    let loaded = self.load_field(object, index, &field_ty);
+                    let at = self.be.field_slot(&info.fields, index);
+                    let loaded = self.load_field(object, at, &field_ty);
                     self.bind_pattern(*field, loaded, &field_ty);
                 }
             }
@@ -1115,4 +1206,14 @@ impl<'ctx> Lower<'_, 'ctx> {
             _ => None,
         }
     }
+}
+
+/// An inline value being taken apart.
+///
+/// The registers it is in, and the type that says where its parts are -- the
+/// pair the boxed walk gets for free from a pointer, since a heap object
+/// carries its own tag and a value in registers does not.
+struct Inline<'ctx> {
+    whole: inkwell::values::StructValue<'ctx>,
+    ty: Type,
 }

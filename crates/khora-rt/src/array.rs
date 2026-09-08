@@ -77,8 +77,15 @@ pub unsafe extern "C" fn khora_array_new(
     if len < 0 {
         fatal("an array cannot have a negative length");
     }
-    if !matches!(stride, 1 | 2 | 4 | 8) {
-        fatal("an array element must be 1, 2, 4 or 8 bytes wide");
+    // Narrower than a word, or a whole number of words: an `Array<U8>` is a
+    // byte an element, and an array of a value held inline is that value's
+    // width. Anything between the two would put an element across a word
+    // boundary the header does not promise anything about.
+    if !matches!(stride, 1 | 2 | 4 | 8) && usize::from(stride) % FIELD_WORD != 0 {
+        fatal("an array element must be 1, 2, 4 bytes or a whole number of words wide");
+    }
+    if usize::from(stride) > FIELD_WORD && boxed != 0 {
+        fatal("a counted element is a pointer, so it is one word wide");
     }
     let len = len as usize;
     let stride = stride as usize;
@@ -114,10 +121,18 @@ pub unsafe extern "C" fn khora_array_new(
         // written, which is the same thing on a little-endian target — and both
         // targets Khora has are little-endian. A big-endian port would take the
         // *high* bytes, and this is where it would say so.
+        //
+        // **An element wider than a word arrives by address instead**, because
+        // a word cannot carry one. `fill` is then a pointer to `stride` bytes
+        // the caller keeps alive across this call, which is what the safety
+        // note above means by "must be ... a live Khora object" for the boxed
+        // case and means literally here.
         let elements = base.add(ARRAY_HEADER_FIELDS).cast::<u8>();
-        let source = fill.to_le_bytes();
+        let word = fill.to_le_bytes();
+        let source: *const u8 =
+            if stride > FIELD_WORD { fill as usize as *const u8 } else { word.as_ptr() };
         for index in 0..len {
-            elements.add(index * stride).copy_from_nonoverlapping(source.as_ptr(), stride);
+            elements.add(index * stride).copy_from_nonoverlapping(source, stride);
             if boxed != 0 {
                 khora_dup(fill as *mut u8);
             }

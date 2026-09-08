@@ -40,7 +40,7 @@ use khora_types::{BodyTypes, Type, VariantInfo};
 use text_size::TextRange;
 
 use crate::backend::{
-    can_raise, evidence_of, Backend, CLOSURE_ADAPTER_TAG, CLOSURE_CAPTURE_BASE,
+    can_raise, evidence_of, Backend, CLOSURE_ADAPTER_TAG,
 };
 use crate::runtime::{self, FIELD_WORD, STRING_BYTES_OFFSET, STRING_LEN_FIELD, STRING_TAG};
 
@@ -158,13 +158,11 @@ pub(crate) fn emit_closure<'ctx>(
     // they are stored without a `dup` and released by the closure's own drop
     // glue rather than here.
     let closure = function.get_nth_param(0).expect("a lifted lambda takes its closure");
+    let held: Vec<Type> = site.captures.iter().map(|(_, ty)| ty.clone()).collect();
+    let (at, _) = lower.be.capture_layout(&held);
     for (index, (local, ty)) in site.captures.iter().enumerate() {
         let Some(slot) = lower.slots.get(local).copied() else { continue };
-        let value = lower.load_field(
-            closure.into_pointer_value(),
-            index + CLOSURE_CAPTURE_BASE,
-            ty,
-        );
+        let value = lower.load_field(closure.into_pointer_value(), at[index], ty);
         lower.be.builder.build_store(slot, value).expect("storing a capture");
     }
 

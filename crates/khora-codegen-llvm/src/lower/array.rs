@@ -26,16 +26,17 @@ impl<'ctx> Lower<'_, 'ctx> {
 
     /// How many bytes one element of `ty` occupies inside an array.
     ///
-    /// Read from the *type* rather than from LLVM's data layout, because it is
-    /// also what the runtime is told and the two have to agree exactly. A
-    /// pointer and an `Int` are a word; a fixed-width integer is its own
+    /// A pointer and an `Int` are a word; a fixed-width integer is its own
     /// width; a `Bool` is a byte, which it may as well be now that anything
-    /// narrower than a word is possible at all.
-    pub(super) fn stride(ty: &Type) -> u64 {
+    /// narrower than a word is possible at all. **A value held inline is as
+    /// wide as it is**, which is what makes an array of them contiguous rather
+    /// than an array of pointers to them -- and what the runtime is told, so
+    /// that where an element begins is one answer and not two.
+    pub(super) fn stride(&self, ty: &Type) -> u64 {
         match ty {
             Type::Fixed(kind) => u64::from(kind.bits) / 8,
             Type::Bool => 1,
-            _ => runtime::FIELD_WORD,
+            _ => self.be.field_words(ty) * runtime::FIELD_WORD,
         }
     }
 
@@ -142,7 +143,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 // The fill is written once per slot, and there are no slots.
                 let fill = self.be.ctx.i64_type().const_zero();
                 let flag = self.be.ctx.i8_type().const_int(u64::from(boxed), false);
-                let stride = self.be.ctx.i8_type().const_int(Self::stride(&element), false);
+                let stride = self.be.ctx.i8_type().const_int(self.stride(&element), false);
                 let new = self.be.rt.array_new;
                 let array = self
                     .be
@@ -166,10 +167,23 @@ impl<'ctx> Lower<'_, 'ctx> {
 
                 let boxed = is_boxed(&element, &self.be.unboxed);
                 let glue = if boxed { self.be.drop_glue(&element) } else { self.be.null_pointer() };
-                let word = self.be.to_word(value);
+                let width = self.stride(&element);
+                // **A fill wider than a word is passed by address.** Every
+                // slot gets a copy of the same bytes, and a word cannot carry
+                // three of them. The template is a stack slot of this frame,
+                // which outlives the call that reads it.
+                let word = if width > runtime::FIELD_WORD {
+                    let template = self.entry_slot(value.get_type(), "fill");
+                    self.be.builder.build_store(template, value).expect("writing the fill");
+                    self.be
+                        .builder
+                        .build_ptr_to_int(template, self.be.ctx.i64_type(), "fill.at")
+                        .expect("the fill's address as a word")
+                } else {
+                    self.be.to_word(value)
+                };
                 let flag = self.be.ctx.i8_type().const_int(u64::from(boxed), false);
-                let stride =
-                    self.be.ctx.i8_type().const_int(Self::stride(&element), false);
+                let stride = self.be.ctx.i8_type().const_int(width, false);
                 let new = self.be.rt.array_new;
                 let array = self
                     .be
@@ -209,7 +223,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let element = self.array_element(&array_ty, range)?;
                 let object = self.expr(*array)?.into_pointer_value();
                 let at = self.expr(*index)?.into_int_value();
-                let slot = self.array_slot(object, at, Self::stride(&element));
+                let slot = self.array_slot(object, at, self.stride(&element));
 
                 let Some(llvm_ty) = self.be.llvm_type(&element) else {
                     return self.fail("an array of that element type cannot be read", range);
@@ -233,7 +247,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let object = self.expr(*array)?.into_pointer_value();
                 let at = self.expr(*index)?.into_int_value();
                 let new = self.expr(*value)?;
-                let slot = self.array_slot(object, at, Self::stride(&element));
+                let slot = self.array_slot(object, at, self.stride(&element));
 
                 if is_boxed(&element, &self.be.unboxed) {
                     let llvm_ty = self.be.llvm_type(&element).expect("a boxed type is a pointer");

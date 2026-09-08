@@ -163,7 +163,17 @@ fn a_constructor_in_each_branch_still_reuses() {
     let out = run("reuse_range_walk", RANGE_WALK);
     let lines: Vec<&str> = out.trim().lines().collect();
     assert_eq!(lines[0], "45", "the walk should sum 0..=9");
-    assert_eq!(lines[1], "17", "one allocation an element, not two");
+
+    // **Held inline there is no cell to reuse, and none to count.** `Range`
+    // and `Step` are then registers rather than objects, so the number this
+    // pins is not seventeen: the six that remain are what `print` builds. The
+    // claim above is about heap cells and this walk makes none of them -- the
+    // branch shape it guards is still compiled, and the walks over `List` in
+    // this file are recursive, so they are boxed either way and keep testing
+    // it. Delete the branch when the flag goes.
+    let inline = std::env::var("KHORA_UNBOXED").as_deref() == Ok("1");
+    let expected = if inline { "6" } else { "17" };
+    assert_eq!(lines[1], expected, "one allocation an element, not two");
 }
 
 /// **A branch that builds a constant has to give the cell back.**

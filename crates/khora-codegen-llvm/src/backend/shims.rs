@@ -103,8 +103,13 @@ impl<'ctx> Backend<'ctx> {
     /// one call and nothing holds it afterwards.
     ///
     /// `uint64_t shim(void *code, void *closure, uint64_t value, uint64_t *answer)`.
-    pub fn modify_shim(&mut self, state: &Type, answer: &Type) -> Option<FunctionValue<'ctx>> {
-        let key = format!("{state}=>{answer}");
+    pub fn modify_shim(
+        &mut self,
+        carrier: &Type,
+        state: &Type,
+        answer: &Type,
+    ) -> Option<FunctionValue<'ctx>> {
+        let key = format!("{carrier}:{state}=>{answer}");
         if let Some(f) = self.modify_shims.get(&key) {
             return Some(*f);
         }
@@ -128,25 +133,51 @@ impl<'ctx> Backend<'ctx> {
         let out = f.get_nth_param(3).expect("somewhere for the answer").into_pointer_value();
 
         let state_ty = self.llvm_type(state)?;
+        let carrier_ty = self.llvm_type(carrier)?;
         let given = self.word_to_value(word, state);
-        let callee_type = ptr.fn_type(&[ptr.into(), state_ty.into()], false);
-        let pair = self
+        let callee_type = carrier_ty.fn_type(&[ptr.into(), state_ty.into()], false);
+        let changed = self
             .builder
             .build_indirect_call(callee_type, code, &[closure.into(), given.into()], "changed")
             .expect("calling a change function")
             .try_as_basic_value()
             .basic()
-            .expect("a change function gives back a record")
-            .into_pointer_value();
+            .expect("a change function gives back a record");
 
         // Field order is declaration order, and `Changed` declares `state`
         // first. Both are duplicated out of the record before it goes.
-        let next = self.read_from(pair, 0, state);
-        let result = self.read_from(pair, 1, answer);
-        let glue = self.drop_glue(&Type::adt("Changed"));
-        self.builder
-            .build_call(self.rt.drop, &[pair.into(), glue.into()], "")
-            .expect("releasing the carrier");
+        let (next, result) = if self.unboxed.holds(carrier) {
+            // Held inline, so the halves are already in registers and there is
+            // no carrier to release: it was a value, not a reference to one.
+            let whole = changed.into_struct_value();
+            let at = |i| self.unboxed_field_at(carrier, i);
+            let next = self
+                .builder
+                .build_extract_value(whole, at(0), "changed.state")
+                .expect("reading the new state");
+            let result = self
+                .builder
+                .build_extract_value(whole, at(1), "changed.result")
+                .expect("reading the answer");
+            for (value, ty) in [(next, state), (result, answer)] {
+                if is_boxed(ty, &self.unboxed) {
+                    self.builder
+                        .build_call(self.rt.dup, &[value.into()], "")
+                        .expect("keeping a half past its carrier");
+                }
+            }
+            (next, result)
+        } else {
+            let pair = changed.into_pointer_value();
+            let fields = [state.clone(), answer.clone()];
+            let next = self.read_from(pair, self.field_slot(&fields, 0), state);
+            let result = self.read_from(pair, self.field_slot(&fields, 1), answer);
+            let glue = self.drop_glue(carrier);
+            self.builder
+                .build_call(self.rt.drop, &[pair.into(), glue.into()], "")
+                .expect("releasing the carrier");
+            (next, result)
+        };
 
         let result = self.to_word(result);
         self.builder.build_store(out, result).expect("handing back the answer");

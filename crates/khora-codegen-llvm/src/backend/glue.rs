@@ -221,12 +221,13 @@ impl<'ctx> Backend<'ctx> {
 
         let mut cases = Vec::new();
         for (tag, variant) in self.instantiated_variants(ty).into_iter().enumerate() {
-            let owned: Vec<(usize, Type)> = variant
+            let (at, _) = self.field_layout(&variant.fields);
+            let owned: Vec<(u64, Type)> = variant
                 .fields
                 .iter()
                 .enumerate()
                 .filter(|(_, ty)| is_boxed(ty, &self.unboxed))
-                .map(|(i, ty)| (i, ty.clone()))
+                .map(|(i, ty)| (at[i], ty.clone()))
                 .collect();
             // A variant with nothing to release needs no case at all: the
             // switch's default already falls through to the return.
@@ -239,7 +240,7 @@ impl<'ctx> Backend<'ctx> {
             self.builder.position_at_end(block);
 
             for (index, field_ty) in owned {
-                let slot = runtime::field_pointer(self.ctx, &self.builder, object, index as u64);
+                let slot = runtime::field_pointer(self.ctx, &self.builder, object, index);
                 let value = self
                     .builder
                     .build_load(self.ctx.ptr_type(AddressSpace::default()), slot, "child")

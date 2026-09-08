@@ -630,6 +630,12 @@ fn main() -> Int {
 /// several ways for it to end up that way — an extern that resolved to the
 /// wrong symbol, a `main` that never ran the work. Reading the counter while an
 /// object is deliberately still live has to give a number greater than zero.
+///
+/// **The type held is recursive, so that it is a heap object whatever the
+/// representation decides.** A small record of scalars may be held inline and
+/// allocate nothing at all, which would make this control read zero for the
+/// one reason it is not allowed to: because there was no object, rather than
+/// because the counter is broken.
 #[test]
 fn the_live_count_is_actually_observable() {
     let ran = run(
@@ -637,12 +643,12 @@ fn the_live_count_is_actually_observable() {
         "module t;
 extern fn khora_live_count() -> Int;
 
-pub type Wrapper = | Wrap(value: Int);
+pub type Chain = | Link(value: Int, rest: Chain) | End;
 
 /// The block releases what it declared *after* its tail is evaluated, so the
 /// count is read while `held` is still alive.
 fn while_alive() -> Int {
-  let held = Wrapper::Wrap(1);
+  let held = Chain::Link(1, Chain::End);
   khora_live_count()
 }
 

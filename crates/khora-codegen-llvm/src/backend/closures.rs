@@ -149,14 +149,13 @@ impl<'ctx> Backend<'ctx> {
 
         let mut cases = Vec::new();
         for (tag, site) in self.closure_sites().into_iter().enumerate() {
-            let owned: Vec<(usize, Type)> = site
-                .captures
-                .iter()
+            let held: Vec<Type> = site.captures.iter().map(|(_, ty)| ty.clone()).collect();
+            let (at, _) = self.capture_layout(&held);
+            let owned: Vec<(u64, Type)> = held
+                .into_iter()
                 .enumerate()
-                .filter(|(_, (_, ty))| is_boxed(ty, &self.unboxed))
-                // Field 0 holds the function pointer, so capture `i` is field
-                // `i + 1`.
-                .map(|(i, (_, ty))| (i + CLOSURE_CAPTURE_BASE, ty.clone()))
+                .filter(|(_, ty)| is_boxed(ty, &self.unboxed))
+                .map(|(i, ty)| (at[i], ty))
                 .collect();
             if owned.is_empty() {
                 continue;
@@ -167,7 +166,7 @@ impl<'ctx> Backend<'ctx> {
             self.builder.position_at_end(block);
 
             for (index, field_ty) in owned {
-                let slot = runtime::field_pointer(self.ctx, &self.builder, object, index as u64);
+                let slot = runtime::field_pointer(self.ctx, &self.builder, object, index);
                 let value = self
                     .builder
                     .build_load(self.ctx.ptr_type(AddressSpace::default()), slot, "captured")

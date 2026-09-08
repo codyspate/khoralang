@@ -95,10 +95,11 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let value_ty = self.types.of(*value).clone();
                 let held = self.expr(*value)?;
                 let word = self.be.to_word(held);
-                let boxed = self.be.ctx.bool_type().const_int(
-                    u64::from(is_boxed(&value_ty, &self.be.unboxed)),
-                    false,
-                );
+                let boxed = self
+                    .be
+                    .ctx
+                    .bool_type()
+                    .const_int(u64::from(self.be.counted_across(&value_ty)), false);
                 let glue = self.be.drop_glue(&value_ty);
                 let open = self.be.rt.shared_open;
                 Some(
@@ -177,7 +178,16 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let change_ty = self.types.of(*change).clone();
                 let handle = self.expr(*cell)?;
                 let closure = self.expr(*change)?;
-                let Some(shim) = self.be.modify_shim(&value_ty, &answer_ty) else {
+                // **The carrier's own type, taken from the change function's
+                // signature.** `Changed` is an ordinary record, so at a scalar
+                // instantiation it is held inline and the shim is handed an
+                // aggregate rather than a pointer. Naming it `Changed` with no
+                // arguments answers that question wrong in both directions.
+                let carrier = match &change_ty {
+                    Type::Fn { ret, .. } => (**ret).clone(),
+                    _ => Type::adt("Changed"),
+                };
+                let Some(shim) = self.be.modify_shim(&carrier, &value_ty, &answer_ty) else {
                     return self.fail(
                         format!("`{answer_ty}` has no machine type, so it cannot be handed back"),
                         range,
@@ -242,7 +252,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let room = self.expr(*capacity)?;
                 let when_full = self.be.ctx.i64_type().const_int(strategy, false);
                 let boxed =
-                    self.be.ctx.bool_type().const_int(u64::from(is_boxed(&held, &self.be.unboxed)), false);
+                    self.be.ctx.bool_type().const_int(u64::from(self.be.counted_across(&held)), false);
                 let glue = self.be.drop_glue(&held);
                 let open = self.be.rt.channel_open;
                 Some(
@@ -321,7 +331,8 @@ impl<'ctx> Lower<'_, 'ctx> {
                 if name != "poll" {
                     self.cancelled_empty_handed(arrived, range);
                 }
-                self.option_of_word(arrived, word, &held)
+                let answer_ty = self.types.of(site).clone();
+                self.option_of_word(arrived, word, &held, &answer_ty)
             }
             ("close", [channel]) => {
                 let channel_ty = self.types.of(*channel).clone();
@@ -368,6 +379,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         present: inkwell::values::IntValue<'ctx>,
         word: inkwell::values::IntValue<'ctx>,
         held: &Type,
+        option_ty: &Type,
     ) -> Flow<'ctx> {
         let (some_tag, _) = self.be.variant_in(None, "Option", "Some")?;
         let (none_tag, _) = self.be.variant_in(None, "Option", "None")?;
@@ -395,17 +407,63 @@ impl<'ctx> Lower<'_, 'ctx> {
             .build_conditional_branch(present, some_block, none_block)
             .expect("branching on whether a value arrived");
 
+        // **An `Option` the program holds inline is built here too.** This is
+        // the one place an ADT is made out of a runtime answer rather than out
+        // of an expression, so it is also the one place that would go on
+        // allocating after every other constructor stopped -- and the reader
+        // on the far side of the `phi` reads a tag out of a register.
+        let inline = self.be.unboxed_type(option_ty).filter(|_| self.be.unboxed.holds(option_ty));
+
         self.be.builder.position_at_end(some_block);
         let value = self.be.word_to_value(word, &field_ty);
-        let object = self.allocate(1, some_tag, "Some");
-        self.store_field(object, 0, value, &field_ty);
-        let some_value: BasicValueEnum<'ctx> = object.into();
+        let some_value: BasicValueEnum<'ctx> = match inline {
+            Some(shape) => {
+                let at = self.be.unboxed_field_at(option_ty, 0);
+                let tagged = self
+                    .be
+                    .builder
+                    .build_insert_value(
+                        shape.const_zero(),
+                        self.be.ctx.i32_type().const_int(u64::from(some_tag), false),
+                        0,
+                        "some.case",
+                    )
+                    .expect("writing an inline tag");
+                self.be
+                    .builder
+                    .build_insert_value(tagged, value, at, "some.field")
+                    .expect("writing the received value")
+                    .into_struct_value()
+                    .into()
+            }
+            None => {
+                let (_, words) = self.be.field_layout(std::slice::from_ref(&field_ty));
+                let object = self.allocate(words, some_tag, "Some");
+                self.store_field(object, 0, value, &field_ty);
+                object.into()
+            }
+        };
         self.be.builder.build_unconditional_branch(after).expect("leaving the some arm");
         let some_end = self.be.builder.get_insert_block().expect("the some arm's end");
 
         self.be.builder.position_at_end(none_block);
-        let none_value: BasicValueEnum<'ctx> =
-            self.be.static_variant("Option", "None", none_tag).into();
+        let none_value: BasicValueEnum<'ctx> = match inline {
+            // Nothing carried, so nothing but the tag is written: the fields
+            // beside it are never read on this arm.
+            Some(shape) => self
+                .be
+                .builder
+                .build_insert_value(
+                    shape.const_zero(),
+                    self.be.ctx.i32_type().const_int(u64::from(none_tag), false),
+                    0,
+                    "none.case",
+                )
+                .expect("writing an inline tag")
+                .into_struct_value()
+                .into(),
+            None => self.be.static_variant("Option", "None", none_tag).into(),
+        };
         self.be.builder.build_unconditional_branch(after).expect("leaving the none arm");
         let none_end = self.be.builder.get_insert_block().expect("the none arm's end");
 
@@ -613,7 +671,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 // always a boxed `Adt`, which the runtime knows; only the
                 // successful word needs describing.
                 let boxed =
-                    self.be.ctx.bool_type().const_int(u64::from(is_boxed(&answers, &self.be.unboxed)), false);
+                    self.be.ctx.bool_type().const_int(u64::from(self.be.counted_across(&answers)), false);
                 let value_glue = self.be.drop_glue(&answers);
                 let spawn = self.be.rt.fiber_spawn;
                 let fiber = self
@@ -727,7 +785,9 @@ impl<'ctx> Lower<'_, 'ctx> {
         answer: BasicValueEnum<'ctx>,
         range: TextRange,
     ) -> Flow<'ctx> {
-        let ordering = Type::adt("Ordering");
+        // Named with its home, because whether an `Ordering` is a register
+        // or a pointer is answered from the declaration and not from the name.
+        let ordering = self.be.named_type("Ordering", Some("Less"));
         let (Some((less, _)), Some((greater, _))) = (
             self.be.variant_of("Ordering", "Less"),
             self.be.variant_of("Ordering", "Greater"),
@@ -739,7 +799,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             );
         };
 
-        let tag = runtime::load_tag(self.be.ctx, &self.be.builder, answer.into_pointer_value());
+        let tag = self.case_of(answer, &ordering);
         let against = self.be.ctx.i32_type().const_int(
             u64::from(if matches!(op, BinOp::Lt | BinOp::Ge) { less } else { greater }),
             false,

@@ -41,8 +41,10 @@ impl<'ctx> Lower<'_, 'ctx> {
             // a caller reading one should not have to know whether the body it
             // passed happened to be infallible.
             let value = raw.unwrap_or_else(|| self.be.unit_value());
-            let object = self.allocate(ok_info.fields.len(), ok_tag, &result_name);
-            let field = ok_info.fields.first().cloned().unwrap_or(Type::Unit);
+            let held = self.field_types(&result_ty, "Ok").unwrap_or_else(|| ok_info.fields.clone());
+            let (_, words) = self.be.field_layout(&held);
+            let object = self.allocate(words, ok_tag, &result_name);
+            let field = held.first().cloned().unwrap_or(Type::Unit);
             self.store_field(object, 0, value, &field);
             self.leave_scope();
             return Some(object.into());
@@ -60,9 +62,11 @@ impl<'ctx> Lower<'_, 'ctx> {
             .expect("branching on the tag");
 
         self.at(succeeded);
-        let ok_field = ok_info.fields.first().cloned().unwrap_or(Type::Unit);
+        let ok_held = self.field_types(&result_ty, "Ok").unwrap_or_else(|| ok_info.fields.clone());
+        let ok_field = ok_held.first().cloned().unwrap_or(Type::Unit);
         let value = self.be.word_to_value(word, &ok_field);
-        let object = self.allocate(ok_info.fields.len(), ok_tag, &result_name);
+        let (_, ok_words) = self.be.field_layout(&ok_held);
+        let object = self.allocate(ok_words, ok_tag, &result_name);
         self.store_field(object, 0, value, &ok_field);
         self.store_result(slot, object.into());
         self.br(merge);
@@ -111,9 +115,12 @@ impl<'ctx> Lower<'_, 'ctx> {
         self.leave_with(which, word);
 
         self.at(erred);
-        let err_field = err_info.fields.first().cloned().unwrap_or(Type::Unit);
+        let err_held =
+            self.field_types(&result_ty, "Err").unwrap_or_else(|| err_info.fields.clone());
+        let err_field = err_held.first().cloned().unwrap_or(Type::Unit);
         let error = self.be.word_to_value(word, &err_field);
-        let object = self.allocate(err_info.fields.len(), err_tag, &result_name);
+        let (_, err_words) = self.be.field_layout(&err_held);
+        let object = self.allocate(err_words, err_tag, &result_name);
         self.store_field(object, 0, error, &err_field);
         self.store_result(slot, object.into());
         self.br(merge);

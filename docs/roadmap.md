@@ -5223,9 +5223,12 @@ What it needs, in the order the questions arrive:
    boxed or the criterion excludes them.
 3. **Code generation**: passed as an LLVM aggregate or exploded into fields,
    stored inline, no header, no `dup` or `drop` at all.
-4. **`Array` is already ready.** `khora_array_new(len, fill, stride, boxed,
+4. **`Array` is nearly ready.** `khora_array_new(len, fill, stride, boxed,
    glue)` takes a stride and a boxed flag, so the runtime can already hold
-   elements inline. This is the largest piece and it exists.
+   elements inline. This is the largest piece and it exists — with two
+   one-line assumptions that had to go, which `docs/errata.md` 81 records: the
+   stride was refused unless it was 1, 2, 4 or 8, and the fill arrives as one
+   word, which cannot carry a three-word element.
 5. **The foreign boundary.** `docs/design/ffi.md` says an aggregate must not
    cross. An unboxed record is an aggregate, so either the rule is revisited
    deliberately or unboxed records are boxed again at the boundary.

@@ -554,6 +554,13 @@ import std::net::socket::{{invalid_handle, listen_on, start}};
 pub type Gauge = {{ live: Int, peak: Int }};
 
 /// Enough arithmetic that a handler is still running when the next arrives.
+///
+/// **Raised from twenty thousand when the handler got faster.** Values held
+/// inline take two allocations and a pair of `Shared` updates out of every
+/// request, and the assertion below -- that the load actually overlapped --
+/// is what noticed: every client saw a peak of one, because each request was
+/// finished before the next arrived. The guard did its job; the number it
+/// guards is what needed raising.
 fn spin(rounds: Int) -> Int {{
   let mut i = 0;
   let mut total = 0;
@@ -573,7 +580,7 @@ fn work(gauge: Shared<Gauge>, request: Request) -> Response {{
     live: now.live + 1,
     peak: if now.live + 1 > now.peak {{ now.live + 1 }} else {{ now.peak }},
   }});
-  let _ = spin(20000);
+  let _ = spin(200000);
   let after = Shared::update(gauge, fn now => {{ live: now.live - 1, peak: now.peak }});
   Response::text(200, Int::to_string(after.peak))
 }}

@@ -96,6 +96,57 @@ impl<'ctx> Backend<'ctx> {
         }
     }
 
+    /// How many word-sized slots a field of this type takes in a heap object.
+    ///
+    /// One for anything behind a pointer, and its whole inline width for a
+    /// value held flat. **A slot is not a field.** `Decimal` held inline is
+    /// three words, so an object holding one is sized and indexed in words --
+    /// sizing it by its field *count* allocates two slots for a three-slot
+    /// field and the write runs off the end of the object, which glibc reports
+    /// against whatever allocates next.
+    ///
+    /// The width is LLVM's own, because LLVM is what lays the aggregate out.
+    /// Rounded up to a word so that every slot after it stays aligned, which
+    /// is what lets a narrow field share the uniform spacing it always had.
+    pub fn field_words(&self, ty: &Type) -> u64 {
+        let Some(shape) = self.llvm_type(ty) else { return 1 };
+        self.target_data.get_store_size(&shape).div_ceil(crate::runtime::FIELD_WORD).max(1)
+    }
+
+    /// Where each field begins, in words, and how many words the object needs.
+    ///
+    /// The one place field positions are decided, so that building an object,
+    /// reading it and dropping it cannot disagree about where its fields are.
+    pub fn field_layout(&self, fields: &[Type]) -> (Vec<u64>, u64) {
+        let mut at = Vec::with_capacity(fields.len());
+        let mut total = 0;
+        for field in fields {
+            at.push(total);
+            total += self.field_words(field);
+        }
+        (at, total)
+    }
+
+    /// Where one field of an object begins, in words.
+    pub fn field_slot(&self, fields: &[Type], index: usize) -> u64 {
+        fields.iter().take(index).map(|f| self.field_words(f)).sum()
+    }
+
+    /// Where each of a closure's captures sits, in words, and how many words
+    /// the closure object needs.
+    ///
+    /// Field zero holds the code pointer, so the captures start a word in.
+    /// The same offsets serve building the closure, reading a capture back
+    /// and dropping what a closure held.
+    pub fn capture_layout(&self, captures: &[Type]) -> (Vec<u64>, u64) {
+        let (mut at, payload) = self.field_layout(captures);
+        let base = crate::backend::CLOSURE_CAPTURE_BASE as u64;
+        for slot in &mut at {
+            *slot += base;
+        }
+        (at, payload + base)
+    }
+
     /// Where a field sits in an unboxed value: after the tag, if there is one.
     pub fn unboxed_field_at(&self, ty: &Type, index: usize) -> u32 {
         (index + usize::from(self.cases_of(ty) > 1)) as u32
@@ -187,7 +238,7 @@ impl<'ctx> Backend<'ctx> {
         for (name, id) in &known {
             let block = self.ctx.append_basic_block(function, &format!("release.{name}"));
             self.builder.position_at_end(block);
-            let ty = Type::adt(name);
+            let ty = self.named_type(name, None);
             if is_boxed(&ty, &self.unboxed) {
                 let value = self.word_to_value(word, &ty);
                 let glue = self.drop_glue(&ty);
@@ -195,6 +246,20 @@ impl<'ctx> Backend<'ctx> {
                 self.builder
                     .build_call(drop, &[value.into(), glue.into()], "")
                     .expect("releasing a caught error");
+            } else if self.unboxed.holds(&ty) {
+                // **An inline error crossed in a box and this is where the box
+                // goes.** Nowhere else frees it: an arm that *reads* the error
+                // gets it back through `word_to_value`, which frees the box on
+                // the way, and this is the path where nobody read it.
+                let ptr = self.ctx.ptr_type(AddressSpace::default());
+                let spilled = self
+                    .builder
+                    .build_int_to_ptr(word, ptr, "spilled")
+                    .expect("a word as the box an error crossed in");
+                let drop = self.rt.drop;
+                self.builder
+                    .build_call(drop, &[spilled.into(), ptr.const_null().into()], "")
+                    .expect("freeing the box a caught error crossed in");
             }
             self.builder.build_unconditional_branch(done).expect("leaving a release case");
             cases.push((self.ctx.i32_type().const_int(u64::from(*id), false), block));
@@ -261,31 +326,42 @@ impl<'ctx> Backend<'ctx> {
     }
 
     /// Puts an inline value in a box so it can cross as one word.
-    fn spill_to_word(&self, value: inkwell::values::StructValue<'ctx>) -> inkwell::values::IntValue<'ctx> {
-        let fields = value.get_type().count_fields();
-        let bytes = self.ctx.i64_type().const_int(u64::from(fields) * 8, false);
+    ///
+    /// **Stored whole rather than field by field.** An inline field may itself
+    /// be an aggregate, so a store per field at a word apart writes the wide
+    /// ones over their neighbours; LLVM already knows where the parts of the
+    /// value go, and one store says so.
+    fn spill_to_word(
+        &self,
+        value: inkwell::values::StructValue<'ctx>,
+    ) -> inkwell::values::IntValue<'ctx> {
+        let shape = value.get_type();
+        let bytes = self.ctx.i64_type().const_int(
+            self.target_data.get_store_size(&shape).max(crate::runtime::FIELD_WORD),
+            false,
+        );
         let object = self
             .builder
-            .build_call(self.rt.alloc, &[bytes.into(), self.ctx.i32_type().const_zero().into()], "spill")
+            .build_call(
+                self.rt.alloc,
+                &[bytes.into(), self.ctx.i32_type().const_zero().into()],
+                "spill",
+            )
             .expect("boxing an inline value to cross a word")
             .try_as_basic_value()
             .basic()
             .expect("khora_alloc returns a pointer")
             .into_pointer_value();
-        for index in 0..fields {
-            let field = self
-                .builder
-                .build_extract_value(value, index, "spill.field")
-                .expect("reading an inline field");
-            let slot = crate::runtime::field_pointer(self.ctx, &self.builder, object, u64::from(index));
-            self.builder.build_store(slot, field).expect("spilling an inline field");
-        }
+        let slot = crate::runtime::field_pointer(self.ctx, &self.builder, object, 0);
+        self.builder.build_store(slot, value).expect("spilling an inline value");
         self.builder
             .build_ptr_to_int(object, self.ctx.i64_type(), "spill.word")
             .expect("a spilled value as a word")
     }
 
     /// Reads a spilled inline value back and frees the box it crossed in.
+    ///
+    /// One load, for the reason [`Self::spill_to_word`] does one store.
     fn reload_from_word(
         &self,
         word: inkwell::values::IntValue<'ctx>,
@@ -296,19 +372,11 @@ impl<'ctx> Backend<'ctx> {
             .builder
             .build_int_to_ptr(word, ptr, "spilled")
             .expect("a word as a spilled value");
-        let mut value: inkwell::values::AggregateValueEnum<'ctx> = shape.get_undef().into();
-        for index in 0..shape.count_fields() {
-            let field_ty = shape.get_field_type_at_index(index).expect("a field");
-            let slot = crate::runtime::field_pointer(self.ctx, &self.builder, object, u64::from(index));
-            let read = self
-                .builder
-                .build_load(field_ty, slot, "reload.field")
-                .expect("reading a spilled field");
-            value = self
-                .builder
-                .build_insert_value(value, read, index, "reload")
-                .expect("rebuilding an inline value");
-        }
+        let slot = crate::runtime::field_pointer(self.ctx, &self.builder, object, 0);
+        let value = self
+            .builder
+            .build_load(shape, slot, "reload")
+            .expect("reading a spilled value");
         // The box existed only to cross. Nothing else refers to it, and under
         // `Fields::Scalars` it holds nothing that needs releasing first.
         self.builder
@@ -501,6 +569,38 @@ impl<'ctx> Backend<'ctx> {
             Type::Adt { name, home, .. } => self.variants_in(home.as_ref(), name),
             _ => Vec::new(),
         }
+    }
+
+    /// Whether a value of this type travels as a *counted* pointer.
+    ///
+    /// A boxed one does. **So does an inline one**, and that is the part worth
+    /// stating: a cell, a channel and a fiber's answer each hold their value
+    /// as one machine word, an inline value does not fit in one, so it crosses
+    /// in a box -- and the box is then an ordinary counted object that the
+    /// runtime holds, hands out references to and releases like any other.
+    ///
+    /// Telling the runtime otherwise is not a leak but a double free: the
+    /// reader releases the box on the way out of [`Self::word_to_value`] while
+    /// the structure still holds the same pointer.
+    ///
+    /// Its glue is null, because under `Fields::Scalars` there is nothing
+    /// counted inside it to release first.
+    pub fn counted_across(&self, ty: &Type) -> bool {
+        is_boxed(ty, &self.unboxed) || self.unboxed.holds(ty)
+    }
+
+    /// The compiler's own name for a type, with the home filled in.
+    ///
+    /// `Type::adt("Ordering")` names a type without saying whose, and whether
+    /// a value is held inline is answered out of its *declaration* -- so a
+    /// home-less name answers "boxed" for a type that is not, and the reader
+    /// looks for a header on a value that is three registers. Resolved by the
+    /// rule [`Self::variants_named`] already uses where the home is missing:
+    /// the group holding `case` is the one that was meant, and failing that
+    /// the first group, so the answer names one type either way.
+    pub fn named_type(&self, type_name: &str, case: Option<&str>) -> Type {
+        let home = self.variants_named(None, type_name, case).first().and_then(|v| v.home.clone());
+        Type::Adt { name: type_name.to_string(), home, args: Vec::new() }
     }
 
     /// A constructor's tag and fields, found by its type *and* its own name.

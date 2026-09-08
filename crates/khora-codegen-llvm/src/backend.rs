@@ -268,6 +268,13 @@ pub(crate) struct Backend<'ctx> {
     /// every module has to agree: two files disagreeing about whether a `Step`
     /// is a pointer would pass one to a function expecting the other.
     pub(crate) unboxed: std::rc::Rc<khora_types::unboxed::Unboxed>,
+    /// The target's layout, kept because field offsets are computed from it.
+    ///
+    /// **Asking LLVM how wide a value is, rather than deriving it.** An
+    /// object's field slots are spaced by the width of what they hold, and a
+    /// second answer to "how wide is this" is a second answer that can be
+    /// wrong -- so the one that decides the aggregate decides the spacing too.
+    pub(crate) target_data: inkwell::targets::TargetData,
     pub ctx: &'ctx Context,
     pub module: Module<'ctx>,
     pub builder: Builder<'ctx>,
@@ -422,6 +429,7 @@ impl<'ctx> Backend<'ctx> {
 
         let rt = Runtime::declare(ctx, &module, &target_data);
         Backend {
+            target_data,
             // Set by `build` once the reachable set is known. Assuming threads
             // until told otherwise is the safe direction.
             single_threaded: false,

@@ -37,7 +37,8 @@ impl<'ctx> Lower<'_, 'ctx> {
         // from. Sizing it from the lowering's list instead worked for as long
         // as the two agreed, and wrote past the end of the object the moment
         // one of them grew.
-        let fields = CLOSURE_CAPTURE_BASE + site.captures.len();
+        let held: Vec<Type> = site.captures.iter().map(|(_, ty)| ty.clone()).collect();
+        let (at, words) = self.be.capture_layout(&held);
         let alloc = self.be.rt.alloc;
         let object = self
             .be
@@ -45,7 +46,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             .build_call(
                 alloc,
                 &[
-                    self.be.ctx.i64_type().const_int(FIELD_WORD * fields as u64, false).into(),
+                    self.be.ctx.i64_type().const_int(FIELD_WORD * words, false).into(),
                     self.be.ctx.i32_type().const_int(tag as u64, false).into(),
                 ],
                 "closure.obj",
@@ -74,7 +75,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             if is_boxed(ty, &self.be.unboxed) {
                 self.dup(value);
             }
-            self.store_field(object, index + CLOSURE_CAPTURE_BASE, value, ty);
+            self.store_field(object, at[index], value, ty);
         }
 
         Some(object.into())

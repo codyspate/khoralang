@@ -3303,3 +3303,68 @@ was covered thoroughly and network loss not at all. Writing the missing tests is
 what read the commit arm closely enough to notice that it has to answer two
 different questions.
 
+
+## 81. A value held inline was still given one word in the object holding it
+
+An object's field slots were spaced one machine word apart, which was true of
+every field the language had: an `Int`, a `Bool` widened to a word, or a
+pointer. Holding a value inline made it false. A `Decimal` is `{ hi, lo,
+scale }` and three words wide with no header, so
+
+```khora
+pub type Holder = { name: String, d: Decimal };
+```
+
+allocated two slots — sixteen bytes — and wrote thirty-two, four bytes past the
+end of the next object as well. The symptom was `malloc.c:2601 (sysmalloc):
+assertion failed` from glibc on some later allocation, with nothing on the
+stack from the write that caused it.
+
+**Slots are now a width per field rather than one per field.** `field_layout`
+is the single place the offsets are decided, and building an object, reading a
+field, assigning to one, dropping the fields and walking a closure's captures
+all ask it. The width is LLVM's own `get_store_size` rounded up to a word,
+because LLVM is what lays the aggregate out and a second answer to "how wide is
+this" is a second answer that can disagree.
+
+Two things fell out of it that are worth stating separately.
+
+**A generic record's declared field has no width.** `Pair<A, B>` declares two
+parameters; `Pair<Decimal, Int>` needs four slots. So the layout is taken from
+the fields at *this instantiation* and not from the declaration — the same
+correction `read_field` had already made for a different reason, and for the
+same underlying one.
+
+**`Array` was not as ready as the roadmap said.** `docs/roadmap.md` § Unboxed
+records lists the runtime's stride as a piece that already exists, and it does
+— but `khora_array_new` refused any stride that was not 1, 2, 4 or 8, and its
+fill arrives as one word, which cannot carry a three-word element. Both were
+one-line assumptions rather than designs: a stride may now be a whole number of
+words, and a fill wider than a word arrives by address.
+
+## 82. An inline value crossing as a word is a *counted* object, not a loan
+
+A cell, a channel and a fiber's answer each hold their value as one machine
+word. An inline value does not fit in one, so it is spilled into a box on the
+way in and read back out of it on the way out — the same shape a raise already
+used to cross a frame.
+
+That is sound for a hand-off, where exactly one reader takes the value and
+frees the box. It is wrong for a structure that *holds* the word: the box was
+handed to `khora_shared_open` with `boxed = false`, so the runtime neither
+counted it nor released it, while every `Shared::get` read it back through
+`word_to_value` — which frees the box. The first read freed what the cell was
+still holding, and the second read a freed pointer.
+
+It surfaced as `tcache_thread_shutdown(): unaligned tcache chunk detected` from
+a load test, three layers away from a `Gauge` of two integers.
+
+**The box is an ordinary counted object and the runtime is told so.**
+`counted_across` answers yes for a boxed type and yes for an inline one, with
+null glue, because under `Fields::Scalars` there is nothing inside it to
+release first. Everything then balances against machinery that already existed:
+`khora_shared_get` duplicates under the lock, and the reader's reload releases.
+
+The general shape is worth keeping: **a representation change is not finished
+when values are built and read correctly.** It is finished when everything that
+*holds* one agrees about who owns it.

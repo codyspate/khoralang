@@ -40,11 +40,17 @@ impl<'ctx> Lower<'_, 'ctx> {
         let Some((index, field_ty)) = info.field(label).map(|(i, t)| (i, t.clone())) else {
             return self.fail(format!("`{type_name}` has no field `{label}`"), range);
         };
+        // Where the field *is* comes from the instantiation and not from the
+        // declaration, for the reason `read_field` gives below: a parameter
+        // has no width, so a record whose field turns out to be held inline
+        // is written to at the offset it would have if it were a pointer.
+        let laid_out = self.field_types(&owner_ty, &type_name).unwrap_or_else(|| info.fields.clone());
+        let at = self.be.field_slot(&laid_out, index);
 
         let object = self.expr(base)?.into_pointer_value();
         let new = self.expr(value)?;
 
-        let slot = runtime::field_pointer(self.be.ctx, &self.be.builder, object, index as u64);
+        let slot = runtime::field_pointer(self.be.ctx, &self.be.builder, object, at);
         if is_boxed(&field_ty, &self.be.unboxed) {
             let llvm_ty = self.be.llvm_type(&field_ty).expect("a boxed type is a pointer");
             let old = self
@@ -90,9 +96,10 @@ impl<'ctx> Lower<'_, 'ctx> {
             values.push(self.expr(*item)?);
         }
 
-        let object = self.allocate_at(id, info.fields.len(), 0, "tuple");
+        let (at, words) = self.be.field_layout(&info.fields);
+        let object = self.allocate_at(id, words, 0, "tuple");
         for (index, (value, field_ty)) in values.into_iter().zip(&info.fields).enumerate() {
-            self.store_field(object, index, value, field_ty);
+            self.store_field(object, at[index], value, field_ty);
         }
         Some(object.into())
     }
@@ -134,7 +141,12 @@ impl<'ctx> Lower<'_, 'ctx> {
             values.push((label.clone(), self.expr(*value)?));
         }
 
-        let object = self.allocate_at(id, info.fields.len(), tag, &name);
+        // Sized and indexed from the fields *at this instantiation*: a
+        // generic record's declared field is a parameter, which has no width,
+        // and `Pair<Decimal, Int>` needs four slots rather than two.
+        let laid_out = self.field_types(&built, &name).unwrap_or_else(|| info.fields.clone());
+        let (at, words) = self.be.field_layout(&laid_out);
+        let object = self.allocate_at(id, words, tag, &name);
 
         // **Every field the literal did not name comes from the base**, and
         // comes as an owned reference: the new record holds it too, so a
@@ -150,11 +162,11 @@ impl<'ctx> Lower<'_, 'ctx> {
                 else {
                     continue;
                 };
-                let carried = self.load_field(from, index, &field_ty);
+                let carried = self.load_field(from, at[index], &field_ty);
                 if is_boxed(&field_ty, &self.be.unboxed) {
                     self.dup(carried);
                 }
-                self.store_field(object, index, carried, &field_ty);
+                self.store_field(object, at[index], carried, &field_ty);
             }
             let owner = self.types.of(base).clone();
             self.drop(from.into(), &owner);
@@ -166,7 +178,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             };
             // Moved in, as a constructor's arguments are: the record owns it
             // now and its drop glue is what releases it.
-            self.store_field(object, index, value, &field_ty);
+            self.store_field(object, at[index], value, &field_ty);
         }
         Some(object.into())
     }
@@ -207,7 +219,8 @@ impl<'ctx> Lower<'_, 'ctx> {
         }
 
         let object = self.expr(base)?.into_pointer_value();
-        let value = self.load_field(object, index, &field_ty);
+        let at = self.be.field_slot(&info.fields, index);
+        let value = self.load_field(object, at, &field_ty);
         // The field is borrowed out of the record, and the record was owned by
         // this expression, so reading one keeps the field alive past the
         // release of what held it.
@@ -279,13 +292,15 @@ impl<'ctx> Lower<'_, 'ctx> {
             values.push(self.expr(*arg)?);
         }
 
-        let object = self.allocate_at(site, info.fields.len(), tag, case);
+        let laid_out = self.field_types(&built, case).unwrap_or_else(|| info.fields.clone());
+        let (at, words) = self.be.field_layout(&laid_out);
+        let object = self.allocate_at(site, words, tag, case);
 
         for (index, (value, field_ty)) in values.into_iter().zip(&info.fields).enumerate() {
             // A boxed argument is *moved* into the object: no dup here, and no
             // drop either. The object owns it now, and its `drop_fields` is
             // what eventually releases it.
-            self.store_field(object, index, value, field_ty);
+            self.store_field(object, at[index], value, field_ty);
         }
         Some(object.into())
     }
@@ -293,6 +308,18 @@ impl<'ctx> Lower<'_, 'ctx> {
     // -----------------------------------------------------------------------
     // Fields
     // -----------------------------------------------------------------------
+
+    /// The field types of one case of `ty`, with this use's arguments put in.
+    ///
+    /// `None` where the type declares no such case, which is a caller that
+    /// already reported something and should keep its declared list.
+    pub(super) fn field_types(&mut self, ty: &Type, case: &str) -> Option<Vec<Type>> {
+        self.be
+            .instantiated_variants(ty)
+            .into_iter()
+            .find(|v| v.name == case)
+            .map(|v| v.fields)
+    }
 
     /// An object for the expression `site`, in reused memory where there is
     /// some.
@@ -308,12 +335,12 @@ impl<'ctx> Lower<'_, 'ctx> {
     pub(super) fn allocate_at(
         &mut self,
         site: ExprId,
-        fields: usize,
+        words: u64,
         tag: u32,
         name: &str,
     ) -> PointerValue<'ctx> {
         let Some(token) = self.take_reuse_token(site) else {
-            return self.allocate(fields, tag, name);
+            return self.allocate(words, tag, name);
         };
         let alloc_reuse = self.be.rt.alloc_reuse;
         self.be
@@ -322,7 +349,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 alloc_reuse,
                 &[
                     token.into(),
-                    self.be.ctx.i64_type().const_int(FIELD_WORD * fields as u64, false).into(),
+                    self.be.ctx.i64_type().const_int(FIELD_WORD * words, false).into(),
                     self.be.ctx.i32_type().const_int(tag as u64, false).into(),
                 ],
                 &format!("{name}.reused"),
@@ -471,14 +498,14 @@ impl<'ctx> Lower<'_, 'ctx> {
     }
 
     /// A fresh heap object with room for `fields` words, under `tag`.
-    pub(super) fn allocate(&mut self, fields: usize, tag: u32, name: &str) -> PointerValue<'ctx> {
+    pub(super) fn allocate(&mut self, words: u64, tag: u32, name: &str) -> PointerValue<'ctx> {
         let alloc = self.be.rt.alloc;
         self.be
             .builder
             .build_call(
                 alloc,
                 &[
-                    self.be.ctx.i64_type().const_int(FIELD_WORD * fields as u64, false).into(),
+                    self.be.ctx.i64_type().const_int(FIELD_WORD * words, false).into(),
                     self.be.ctx.i32_type().const_int(tag as u64, false).into(),
                 ],
                 &format!("{name}.obj"),
@@ -492,17 +519,19 @@ impl<'ctx> Lower<'_, 'ctx> {
 
     /// Writes a field, widening a `Bool` to a full word.
     ///
-    /// Every field is a machine word, which is what makes
-    /// `KHORA_FIELD_OFFSET + 8 * i` a valid address for field `i` regardless of
-    /// what the fields before it hold.
+    /// `at` is a *word* offset into the field area and not a field index: a
+    /// value held inline occupies its whole width there, so the two stop
+    /// agreeing the moment anything is unboxed. [`Backend::field_layout`] is
+    /// where the offsets come from, and every reader and writer of an object
+    /// asks it rather than counting fields.
     pub(super) fn store_field(
         &mut self,
         object: PointerValue<'ctx>,
-        index: usize,
+        at: u64,
         value: BasicValueEnum<'ctx>,
         ty: &Type,
     ) {
-        let slot = runtime::field_pointer(self.be.ctx, &self.be.builder, object, index as u64);
+        let slot = runtime::field_pointer(self.be.ctx, &self.be.builder, object, at);
         let stored = match ty {
             Type::Bool => self
                 .be
@@ -515,13 +544,14 @@ impl<'ctx> Lower<'_, 'ctx> {
         self.be.builder.build_store(slot, stored).expect("storing a field");
     }
 
+    /// Reads a field from the word offset [`Self::store_field`] wrote it to.
     pub(super) fn load_field(
         &mut self,
         object: PointerValue<'ctx>,
-        index: usize,
+        at: u64,
         ty: &Type,
     ) -> BasicValueEnum<'ctx> {
-        let slot = runtime::field_pointer(self.be.ctx, &self.be.builder, object, index as u64);
+        let slot = runtime::field_pointer(self.be.ctx, &self.be.builder, object, at);
         match ty {
             // A field slot is a whole word and these are narrower, so the
             // word is read and cut down. Reading them at their own width would
