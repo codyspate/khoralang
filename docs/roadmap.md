@@ -5312,12 +5312,49 @@ Note that `for i in Range::Of(0, n)` went to *nothing* (errata's table in
 at all, and LLVM sees through it. Over a `List` there is one per element, and a
 pointer per element is what a linked list is.
 
-What remains before the flag can go away is a decision rather than a defect:
-the criterion is deliberately narrow — one carrying variant, three fields, four
-words, nothing recursive, nothing `mut` — and every one of those numbers is
-"raise it with a benchmark rather than an argument". `Array<Decimal>` is
-contiguous now; `docs/design/ffi.md`'s boundary boxes an aggregate to cross it,
-which is what the list above anticipated.
+### What is left is two decisions, and neither is a defect
+
+**One: does the flag become the default, and then go?**
+
+Nothing found so far argues against it. The suite is green both ways, twice
+over. Cold-building `examples/ledger_service` costs 14.3 s with values held
+inline against 14.6 s without, and the executable is 10,383,640 bytes against
+10,419,616 — so the change is not paid for in compile time or in size, it is
+36 KB and a third of a second cheaper in both. There is no ABI to break
+between Khora artifacts, because a package resolves to *sources* and the
+criterion is decided once over the whole program's declarations; a library's
+outward surface is the C ABI, where an aggregate is boxed to cross, which the
+32 tests in `foreign` and `exporting` exercise with the flag on.
+
+**What actually stands in the way is that all of this is one machine.** The
+baseline is green on three platforms and this has been run on one, and layout
+is exactly the kind of question that differs between them — `docs/errata.md` 35
+is a Windows x86-64 disagreement about how a sixteen-byte aggregate returns,
+which cost a day. The widths here come from LLVM's own data layout rather than
+from arithmetic, which is the right defence, but it is a defence that has not
+been tested anywhere else. **Run the baseline on macOS and Windows with the
+flag on; that is the whole of what is missing.**
+
+**Two: how wide should the criterion be?** It is deliberately narrow, and every
+part of it except the last is a number to raise with a benchmark:
+
+- **One variant may carry a payload.** This is the expensive one, because it
+  refuses `Result<A, E>` — two carrying cases — and `Result` is everywhere.
+  Widening it needs a union layout and a size taken across the variants, which
+  is real work rather than a constant.
+- **Three fields, four words**, counted transitively. Raising either widens
+  what fits; both were chosen so that `Step` fits and a nest of records does
+  not quietly become a memcpy.
+- **Nothing recursive.** A pointer breaks a cycle, so `Node = { next:
+  Option<Node> }` could in principle be laid out — but deciding that needs a
+  fixed point over "which types are boxed", and the two questions define each
+  other.
+- **Nothing `mut`**, which is not a number and should not move. A record with a
+  mutable field has observable identity, and that is about meaning rather than
+  layout.
+
+`Array<Decimal>` is contiguous now; `docs/design/ffi.md`'s boundary boxes an
+aggregate to cross it, which is what the list above anticipated.
 
 ## Phase 15 — The Torvalds test
 
