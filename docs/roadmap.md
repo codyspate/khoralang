@@ -5289,6 +5289,29 @@ rather than by a header it does not have. `docs/errata.md` 83 is the list of
 places that had to learn the difference between *being* a reference and
 *owning* one, and the shape of each mistake.
 
+### The number the section was waiting on
+
+`bench/iteration`, three million elements, release, the same four-core Linux
+machine every measurement above was taken on:
+
+| | boxed | held inline |
+| --- | --- | --- |
+| `for x in xs { total = total + x }` | 79 ms | **33 ms** |
+| the same loop written out as a `while` | 18 ms | 19 ms |
+| `List::fold(xs, 0, fn (acc, x) => acc + x)` | 19 ms | 20 ms |
+
+**4.2x to 1.8x**, on the construct this section says is the most idiomatic in
+the language. The `Step` is gone: no header, no pair of runtime calls, no store
+and load per element. What is left of the gap is the `List` itself, which is a
+pointer chase per element and stays one -- a recursive type cannot be held
+inline, and nothing here proposes it should be.
+
+Note that `for i in Range::Of(0, n)` went to *nothing* (errata's table in
+`fa2850f`) while this goes to 33 ms, and the difference is the whole reason
+`Fields::Any` had to exist: over a `Range` there is no pointer left in the loop
+at all, and LLVM sees through it. Over a `List` there is one per element, and a
+pointer per element is what a linked list is.
+
 What remains before the flag can go away is a decision rather than a defect:
 the criterion is deliberately narrow — one carrying variant, three fields, four
 words, nothing recursive, nothing `mut` — and every one of those numbers is

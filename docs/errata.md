@@ -3445,3 +3445,22 @@ vacuously, and the moment the test measured anything it found an expectation
 that had never been true. **A number that has never been reached is not an
 assertion, it is a comment** — and the way to tell the difference is to assert
 that the thing under test actually happened.
+
+
+## 85. The build cache could not tell the two representations apart
+
+`khora build` keys its cache on the compiler binary, the linker, the runtime
+archive, the target, the profile, whether debug information is on, what kind of
+thing is being built, and every source file. Not on `KHORA_UNBOXED`, which
+decides whether a small record is a heap object or a machine word -- so it
+changes every object file the compiler emits and nothing the key can see.
+
+Measuring `bench/iteration` with the flag on printed `reused ./build/iteration
+from the cache` and then the boxed timings, three times, while the flag was
+set. It reads as "unboxing bought nothing", which is the most expensive kind of
+wrong answer a benchmark can give.
+
+The key now includes it. The general rule is the one the entry above about
+debug paths already made: **anything that changes the output and is not a
+source file has to be in the key**, and an environment variable is the easiest
+kind to forget because it does not appear in any file the build reads.

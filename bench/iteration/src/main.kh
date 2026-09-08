@@ -35,11 +35,16 @@ import std::clock::{Clock};
 // `for_each(fn x => { total = total + x })` is refused and every loop body
 // that keeps a running total is refused with it.
 //
-// So this is a benchmark waiting on unboxing, and now with a measurement
-// behind it rather than an argument. `docs/roadmap.md`, under "Unboxed
-// records": a two-field variant returned in registers rather than built is
-// what closes the gap, and it closes it for everything shaped this way rather
-// than for `for` alone.
+// So this was a benchmark waiting on unboxing, and it is not waiting any more.
+// With `KHORA_UNBOXED=1` the `for` row goes from 79 ms to 33 ms against 19 ms
+// for the loop written out: 4.2x to 1.8x. The `Step` is gone -- no header, no
+// pair of runtime calls, no store and load an element.
+//
+// **What is left of the gap is the list.** A `List` is a pointer chase per
+// element and stays one; a recursive type cannot be held inline and nothing
+// proposes it should be. `for i in Range::Of(0, n)` goes to nothing at all,
+// because there no pointer is left in the loop and LLVM sees straight through
+// it. `docs/roadmap.md`, under "Unboxed records".
 
 fn build(n: Int) -> List<Int> {
   let mut xs: List<Int> = List::Nil;

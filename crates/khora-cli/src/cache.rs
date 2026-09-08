@@ -268,6 +268,15 @@ impl Cache {
         field(inputs.profile.as_bytes());
         field(&[u8::from(inputs.debug_info)]);
         field(inputs.kind.name().as_bytes());
+        // **The representation, because it is not in the sources.**
+        // `KHORA_UNBOXED` decides whether a small record is a heap object or a
+        // machine word, which changes every object file the compiler emits and
+        // nothing the key would otherwise see. Without it, a build with the
+        // flag on is handed the artifact built with it off -- silently, and
+        // reported as reused, which is a confusing way to measure nothing.
+        //
+        // Any staging switch of this kind belongs here for the same reason.
+        field(std::env::var("KHORA_UNBOXED").unwrap_or_default().as_bytes());
 
         // Sorted by content rather than by path, so the order does not depend
         // on where the checkout is. Paths join the key only when debug
