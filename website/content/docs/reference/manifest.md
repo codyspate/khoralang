@@ -133,19 +133,34 @@ Khora has no ambient authority: a function that touches the network says so in i
 [permissions]
 default = "deny"
 network = ["api.example.com:443", "*.internal:5432"]
-fs = ["data/**", "logs/*.log"]
 env = ["HOME", "DATABASE_URL"]
-extern = ["libsqlite3"]
+extern = ["sqlite_sys"]
+
+[permissions.fs]
+read = ["data/**", "logs/*.log"]
+write = ["logs/**"]
 ```
 
 | Key | Value |
 | --- | --- |
 | `workspace` | `true` to take the root's table whole. |
-| `default` | What an unlisted category grants: `allow` or `deny`. `allow` is the default, so a program that has never heard of permissions compiles. `deny` is the strict posture: one line, set once, and every capability after it is a deliberate edit. |
-| `network` | Hosts, as `name` or `name:port`. `*` matches one name segment. |
-| `fs` | Paths. `*` matches within a path segment, `**` across them. |
-| `env` | Environment variable names. |
-| `extern` | Native libraries this package may link against. |
+| `default` | What a category nobody wrote down grants: `allow` or `deny`. `allow` is the default, so a program that has never heard of permissions compiles. `deny` is the strict posture: one line, set once, and every capability after it is a deliberate edit. |
+| `network` | Hosts, as `name` or `name:port`. `*` spans dots, so `*.internal` covers `db.eu.internal`; a grant with no port covers every port. |
+| `fs` | **A table, not a list**: `[permissions.fs]` with `read` and `write`. `*` stops at a separator and `**` crosses one, and neither covers the directory being described. |
+| `env` | Environment variable names. `*` spans everything, since a name has no segments. |
+| `extern` | **Package names**, not library names: which packages may declare `extern fn`. `std` always may. |
+
+**`fs` is the one key that is a table**, because reading and writing are not the
+same grant and a single list cannot say which one it is. The other three are
+lists. `[workspace.policy]` above takes `fs` as a *list*, because there it names
+which members may grant filesystem access at all rather than which paths they
+may reach.
+
+**`default` applies to a category you did not write down, not to one you wrote
+down empty.** `network = []` grants no host; leaving `network` out entirely
+takes `default`. So `default = "deny"` on its own denies every category, and
+`default = "deny"` beside one `[permissions.fs]` grant allows exactly that grant
+and nothing else.
 
 ## `[dependencies]` — other packages
 
@@ -191,8 +206,25 @@ target = "x86_64-unknown-linux-gnu"
 
 | Key | Value |
 | --- | --- |
-| `target` | The triple to compile for. Defaults to the machine running the compiler. |
-| `plugin` | A build plugin, named and versioned — `protobuf-compiler@2.1`. It names a plugin rather than pointing at a script. |
+| `target` | The triple to compile for. **Not read yet** — see below. |
+| `plugin` | A build plugin, named and versioned — `protobuf-compiler@2.1`. It names a plugin rather than pointing at a script. **Not read yet** — see below. |
+
+**Neither key does anything today, and the toolchain says so.** Both are
+recognized, both are documented here because the decisions behind them are
+made, and setting either gets you a warning rather than silence:
+
+```
+warning: khora.toml: 6:1: nothing reads `build.target`: cross-compilation is
+not supported yet, so the build is for the host either way.
+```
+
+`target` waits on cross-compilation, which needs a linker and sysroot story
+rather than code generation — see [Supported targets](/docs/deployment/supported-targets/).
+`KHORA_TARGET` makes the compiler *emit* for another triple, which checks code
+generation and does not produce a runnable artifact. `plugin` waits on the
+sandboxed WASM plugin mechanism; until it exists, [`[tasks]`](#tasks--project-commands)
+is the thing that runs commands, and it runs only what you wrote in a manifest
+you are standing in.
 
 ## `[tasks]` — project commands
 

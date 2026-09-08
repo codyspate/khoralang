@@ -13,6 +13,17 @@ use std::ops::Range;
 pub enum WarningKind {
     /// A key that no table in this toolchain's schema declares.
     UnknownKey,
+    /// A key this toolchain declares, documents, and does not read yet.
+    ///
+    /// **The third thing a key can be, and the one that had no name.** An
+    /// unknown key may be from a newer toolchain; a removed one is from an
+    /// older one. This is neither: it is in the schema, it is on the manifest
+    /// reference page describing what it does, and nothing consults it -- so a
+    /// manifest that sets it gets the behaviour of not having set it, silently.
+    /// `edition = "1999"` was this and took until `0.1.0` for anybody to
+    /// notice; `[build] target` and `plugin` are this now, and the second is a
+    /// sandbox boundary. Roadmap 16.
+    Inert,
     /// A key this toolchain used to have and deliberately does not any more.
     ///
     /// Separate from [`WarningKind::UnknownKey`] because the two want opposite
@@ -28,6 +39,7 @@ impl fmt::Display for WarningKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             WarningKind::UnknownKey => f.write_str("unrecognized key"),
+            WarningKind::Inert => f.write_str("nothing reads"),
             WarningKind::RemovedKey => f.write_str("removed key"),
         }
     }
@@ -86,6 +98,23 @@ impl Warning {
     ) -> Warning {
         Warning {
             kind: WarningKind::RemovedKey,
+            key,
+            note: Some(note),
+            suggestion: None,
+            location: span.as_ref().map(|span| Location::from_offset(text, span.start)),
+            span,
+        }
+    }
+
+    /// A key the schema declares and nothing reads.
+    pub(crate) fn inert_key(
+        key: String,
+        note: &'static str,
+        span: Option<Range<usize>>,
+        text: &str,
+    ) -> Warning {
+        Warning {
+            kind: WarningKind::Inert,
             key,
             note: Some(note),
             suggestion: None,

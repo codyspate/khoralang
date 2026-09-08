@@ -46,9 +46,10 @@ unused-capability = "deny"
 ai = { path = "../../packages/ai" }
 
 # Sandboxed WASM build plugins replace arbitrary build.rs execution.
-[build]
-target = "x86_64-unknown-linux-musl"
-plugin = "protobuf-compiler@2.1"
+# No `[build]` table. It had one -- a musl target and a protobuf plugin -- and
+# neither key is read by anything, so this example claimed to cross-compile and
+# quietly produced a host binary. A reference application configuring something
+# that does not happen is the worst place for that to be true. Roadmap 16.
 
 [tasks.ci]
 description = "Run the full CI pipeline"
