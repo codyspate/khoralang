@@ -5449,12 +5449,21 @@ impl Fibers {
   /// answer into a `ChildFailed`, which is what a program should be reading
   /// rather than this.
   ///
-  /// **The first failure cancels the siblings.** A nursery is a unit: the block
-  /// asked for these fibers together, so one of them failing means the answer
-  /// the group was computing is not coming and the rest are working on a
-  /// question nobody will ask. They are cancelled rather than killed, so each
-  /// stops at its next `!` and runs its finalizers on the way out, and every
-  /// one of them is still waited for.
+  /// **A failure cancels the siblings, and *when* is not yet a promise.** A
+  /// nursery is a unit: the block asked for these fibers together, so one of
+  /// them failing means the answer the group was computing is not coming and
+  /// the rest are working on a question nobody will ask. They are cancelled
+  /// rather than killed, so each stops at its next `!` and runs its finalizers
+  /// on the way out, and every one of them is still waited for.
+  ///
+  /// **What is measured today is weaker than that reads.** A nursery reaps
+  /// handles oldest-first, so a failure is noticed in adoption order: with
+  /// twelve children and a failure at 10 ms, the siblings were cancelled in
+  /// 2-8 ms when the doomed child was adopted first, in about half of runs at
+  /// all when it was adopted in the middle, and in none of twenty-five runs
+  /// when it was adopted last -- everyone finished and the count came back
+  /// 421 ms later. The group does collapse and every child is waited for.
+  /// Promptness is not something to build on yet. Roadmap 16.7.
   pub fn wait(self) -> Int;
 }
 

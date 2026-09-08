@@ -42,7 +42,24 @@ fn work() -> Int {
 }
 ```
 
-Finalizers execute in **reverse registration order** when the region is released.
+Finalizers execute in **reverse registration order** when the region is
+released, and a region is released **when the block its binding is in ends** --
+on every way out of that block, including a cancellation. So the example above
+runs its finalizers when `work` returns, and putting the `let` inside a smaller
+block ends the region there instead:
+
+```khora
+{
+  let region = Region::open();
+  Region::defer(region, fn () => release());
+  use_it();
+};
+// `release()` has already run here.
+```
+
+That is the difference between a lease that ends with the call and one that
+ends with the caller, and it is worth being deliberate about: a `Region::open()`
+at the top of a function holds everything until the function returns.
 
 `Region::root()` refers to the outer program region. Its finalizers run as the program exits.
 

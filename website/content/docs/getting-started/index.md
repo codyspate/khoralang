@@ -50,13 +50,21 @@ hello_khora/
     └── main.kh
 ```
 
-`khora.toml` names the package:
+`khora.toml` names the package and pins the compiler that builds it:
 
 ```toml
 [package]
 name = "hello_khora"
 version = "0.1.0"
+
+[toolchain]
+version = "0.2.0"
 ```
+
+Both tables are required. `[toolchain]` is what makes "this project builds the
+same way on your machine" true by default rather than by convention, so a
+project without one stops with the two lines to add. `khora new` writes it for
+you with the version you are running.
 
 and `src/main.kh` is a program that compiles:
 
@@ -140,6 +148,9 @@ A package that needs another names it under `[dependencies]`, by path:
 [package]
 name = "hello_khora"
 version = "0.1.0"
+
+[toolchain]
+version = "0.2.0"
 
 [dependencies]
 postgres = { path = "../packages/postgres" }

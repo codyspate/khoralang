@@ -240,7 +240,19 @@ Stating the policy is not meeting it. 1.0 is blocked on at least:
   is a project-management commitment and needs a project, not a design.
 - **Minimum supported compiler version for a package**, and how the resolver
   reads it.
-- **When a `Region` ends.** Its scope, or its last reference? The finalizers it
-  runs make the answer observable, so it is the one place where "freeing is not
-  observable" needs a rule rather than a shrug. Blocks widening the last-use
-  optimization past `String`.
+- ~~**When a `Region` ends.**~~ **Answered, and it has been shipped for some
+  time -- which is the finding rather than the answer.** A region ends with the
+  block its binding is in, on every way out including a cancellation.
+  `std::core`'s own documentation says so and explains why (`Region::open`),
+  the compiler does it, and a three-line program shows the finalizer running at
+  the closing brace and before the next statement.
+
+  So this entry was stale in the direction that matters: it named an open
+  question whose answer was already a promise a reader could act on, and
+  `reference/memory-and-resources.md` said only "when the region is released"
+  without defining it. Three pages, one behaviour, and the one place that
+  called it undecided was the policy that decides what may still change.
+
+  The consequence stands and is now explicit: **block scope is observable and
+  is therefore frozen**, and widening the last-use optimization past `String`
+  has to keep it. Roadmap 16.

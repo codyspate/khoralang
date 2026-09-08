@@ -1029,8 +1029,18 @@ pub fn main() -> Int {
 }
 ```
 
-It does not return. A connection is served on a fiber of its own, and a
-trap inside a handler ends that fiber rather than the server.
+It does not return. A connection is served on a fiber of its own.
+
+**A trap inside a handler ends the server, not the request.** This said
+the opposite, and `reference/traps.md` has always been right: there is no
+per-fiber trap containment, the page says so in bold, and it tells you
+not to design recovery around it. A doc comment promising the mechanism
+that page forbids is the worst place for the two to disagree, because
+this is the one a reader meets while writing the handler.
+
+A trap is for a bug -- an index out of bounds, an overflow, a division by
+zero. Failures a handler is meant to survive belong in its error row,
+where `catch` can reach them.
 
 #### answer_on
 
