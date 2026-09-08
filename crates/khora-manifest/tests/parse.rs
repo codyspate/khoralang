@@ -85,9 +85,15 @@ fn the_reference_manifest_parses_with_no_warnings() {
         "the reference application depends on the package the model vocabulary moved to"
     );
 
-    let build = manifest.build.expect("the reference manifest configures `[build]`");
-    assert_eq!(build.target.as_deref(), Some("x86_64-unknown-linux-musl"));
-    assert_eq!(build.plugin.as_deref(), Some("protobuf-compiler@2.1"));
+    // **The reference manifest no longer configures `[build]`**, and that is
+    // the assertion now. It set `target = "x86_64-unknown-linux-musl"` and a
+    // protobuf plugin, neither of which is read by anything -- so the example
+    // application every reader copies claimed to cross-compile and produced a
+    // host binary. Roadmap 16.
+    assert!(
+        manifest.build.is_none(),
+        "the reference application should not configure keys nothing reads"
+    );
 
     let ci = manifest.tasks.get("ci").expect("`[tasks.ci]` should be present");
     assert_eq!(ci.description.as_deref(), Some("Run the full CI pipeline"));
@@ -132,10 +138,27 @@ fn every_key_the_schema_documents_is_recognized() {
         "#,
     );
 
+    // **`[build]`'s two keys warn on purpose**, so the expectation here is not
+    // "no warnings" but "no warning this test is about". They are recognized,
+    // which is what this test guards -- an unrecognized key would show up as
+    // `UnknownKey` and fail the assertion below -- and they are `Inert`,
+    // because nothing reads them. Roadmap 16.
+    let unrecognized: Vec<String> = parsed
+        .warnings
+        .iter()
+        .filter(|w| w.kind() != khora_manifest::WarningKind::Inert)
+        .map(|w| w.key().to_string())
+        .collect();
+    assert_eq!(
+        unrecognized,
+        Vec::<String>::new(),
+        "every key the schema documents should be recognized"
+    );
     assert_eq!(
         warning_keys(&parsed),
-        Vec::<&str>::new(),
-        "the documented schema should produce no warnings"
+        ["build.target", "build.plugin"],
+        "and the only warnings should be the two keys that are documented as not \
+         being read yet"
     );
 }
 
@@ -585,11 +608,15 @@ description = "everything"
 depends_on = ["test"]
 "#;
     let parsed = Manifest::parse(text).expect("a well-formed manifest");
-    assert!(
-        parsed.warnings.is_empty(),
-        "these are all real keys: {:?}",
-        parsed.warnings.iter().map(ToString::to_string).collect::<Vec<_>>()
-    );
+    // `[build]`'s two keys are real and inert: recognized by the audit, which
+    // is what this test is about, and warned about because nothing reads them.
+    let unrecognized: Vec<String> = parsed
+        .warnings
+        .iter()
+        .filter(|w| w.kind() != khora_manifest::WarningKind::Inert)
+        .map(ToString::to_string)
+        .collect();
+    assert!(unrecognized.is_empty(), "these are all real keys: {unrecognized:?}");
 }
 
 /// The audit still has to catch a genuine typo, or the test above could be
@@ -768,4 +795,159 @@ fn a_package_name_starting_with_a_digit_is_refused() {
 fn an_ordinary_package_name_is_accepted() {
     let parsed = parse("[package]\nname = \"has_an_underscore\"\nversion = \"0.1.0\"\n");
     assert_eq!(parsed.manifest.package().map(|p| p.name.as_str()), Some("has_an_underscore"));
+}
+
+/// `[permissions.fs]` is the one grant that is a table, and its keys were
+/// `Open` -- so anything written under it was accepted and read by nothing.
+///
+/// **TOML makes this easy to do by accident.** A `[permissions.fs]` header
+/// puts every plain key after it inside that table, so a manifest that reads
+/// perfectly well top to bottom files `env` under `fs`. The audit exists to
+/// catch a key nothing reads, and in the one table where that is a security
+/// consequence it stopped a level short. Roadmap 16.1.
+#[test]
+fn a_grant_written_under_permissions_fs_is_an_unknown_key() {
+    let text = "\
+[package]
+name = \"p\"
+version = \"0.1.0\"
+
+[permissions]
+default = \"deny\"
+
+[permissions.fs]
+read = [\"data/**\"]
+write = [\"logs/**\"]
+env = [\"HOME\"]
+extern = [\"sqlite_sys\"]
+";
+    let parsed = parse(text);
+    assert_eq!(
+        warning_keys(&parsed),
+        ["permissions.fs.env", "permissions.fs.extern"],
+        "the two grants that landed in the wrong table should be named"
+    );
+}
+
+/// And the two that belong there are not warned about, because a schema that
+/// flags the correct spelling is worse than no schema.
+#[test]
+fn read_and_write_are_the_keys_permissions_fs_has() {
+    let text = "\
+[package]
+name = \"p\"
+version = \"0.1.0\"
+
+[permissions.fs]
+read = [\"data/**\"]
+write = [\"logs/**\"]
+";
+    let parsed = parse(text);
+    assert!(warning_keys(&parsed).is_empty(), "{:?}", warning_keys(&parsed));
+}
+
+/// Every `toml` block on the manifest reference page parses, and warns about
+/// nothing.
+///
+/// **The page is the manifest's specification and nothing read it.** The
+/// reference printed a `[permissions]` table with `fs = ["data/**", ...]` --
+/// a list, where the compiler wants a `[permissions.fs]` sub-table with `read`
+/// and `write` -- so the flagship example of the security table failed with
+/// `invalid type: string "data/**", expected a sequence` for anybody who
+/// copied it. It also documented `extern` as naming native libraries when it
+/// names packages, and `[build] target` as the triple to compile for when
+/// nothing reads it.
+///
+/// `examples/risk_analyzer/khora.toml` was the only manifest under test, and a
+/// working example elsewhere in the tree cannot notice a broken one on the
+/// page people actually open. Roadmap 16.
+#[test]
+fn every_toml_block_in_the_manifest_reference_parses() {
+    let page = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../website/content/docs/reference/manifest.md");
+    let text = std::fs::read_to_string(&page)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", page.display()));
+
+    let mut blocks = 0;
+    for (n, block) in text.split("```toml").skip(1).enumerate() {
+        let Some(body) = block.split("```").next() else { continue };
+        // **Inheritance cannot be checked one block at a time**, and that is a
+        // property of the feature rather than a gap in the page: `version
+        // .workspace = true` means "take it from the root", and a fragment has
+        // no root above it. `tests/inherit.rs` covers those against a real
+        // workspace, which is the only place they mean anything.
+        if body.contains("workspace = true") || body.contains("workspace.package") {
+            continue;
+        }
+        // **A fragment gets a package wrapped around it.** The page shows one
+        // table at a time -- `[build]`, `[tasks.ci]`, `[permissions]` -- and a
+        // manifest with no `[package]` and no `[workspace]` is refused before
+        // any of its other keys are looked at, which would make this test
+        // about the page's formatting rather than about its content.
+        let whole = if body.contains("[package]") || body.contains("[workspace]") {
+            body.to_string()
+        } else {
+            format!("[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n{body}")
+        };
+        let body = whole.as_str();
+        let parsed = match Manifest::parse(body) {
+            Ok(parsed) => parsed,
+            Err(error) => panic!(
+                "block {} of {} does not parse: {error}\n{body}",
+                n + 1,
+                page.display()
+            ),
+        };
+        // An `Inert` warning is the page being honest: `[build]`'s two keys are
+        // documented there as not read yet, and printing the block is the
+        // point. An *unrecognized* key is the page being wrong.
+        let wrong: Vec<String> = parsed
+            .warnings
+            .iter()
+            .filter(|w| w.kind() != khora_manifest::WarningKind::Inert)
+            .map(|w| w.key().to_string())
+            .collect();
+        assert!(
+            wrong.is_empty(),
+            "block {} of {} uses keys the toolchain does not read: {wrong:?}\n{body}",
+            n + 1,
+            page.display(),
+        );
+        blocks += 1;
+    }
+    assert!(blocks >= 6, "only {blocks} toml blocks found; has the page moved?");
+}
+
+/// `[build]`'s two keys are recognized, documented, and read by nothing --
+/// and the manifest says so rather than accepting them in silence.
+///
+/// **This is the third time the same shape has appeared.** `edition = "1999"`
+/// built without a word until `0.1.0`; `[build] target` claimed to be "the
+/// triple to compile for" and produced a host binary; `[build] plugin` names
+/// the sandboxed-WASM trust boundary from `project.md` §4.1 and is not
+/// implemented. A key that is documented as working and is inert is worse than
+/// one that does not exist, because the author believes they configured
+/// something. Roadmap 16.
+#[test]
+fn the_build_keys_say_that_nothing_reads_them() {
+    let text = "\
+[package]
+name = \"p\"
+version = \"0.1.0\"
+
+[build]
+target = \"x86_64-unknown-linux-gnu\"
+plugin = \"protobuf-compiler@2.1\"
+";
+    let parsed = parse(text);
+    assert_eq!(warning_keys(&parsed), ["build.target", "build.plugin"]);
+    for warning in parsed.warnings.iter() {
+        assert_eq!(
+            warning.kind(),
+            khora_manifest::WarningKind::Inert,
+            "an inert key is neither unknown nor removed: an unknown one may be from a \
+             newer toolchain and a removed one should be deleted, and this should be \
+             left alone until the feature lands"
+        );
+    }
 }

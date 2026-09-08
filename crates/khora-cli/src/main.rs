@@ -1539,8 +1539,27 @@ fn harness(
     name: &str,
     compile: CompileHarness,
 ) -> Result<bool> {
+    // `test` and `bench` both arrive here, and both compile a program from the
+    // same manifest `build` would have read. See the note in `build`.
+    report_manifest_warnings(Some(path));
     let (db, inputs, root) = load(path)?;
-    let entry = &inputs.first().expect("at least one source").0;
+    // The *package's* first source, not the program's: `inputs` carries the
+    // standard library too, and `inputs.first()` is whichever of everything
+    // sorts earliest. Outside a package that put `khora-tests` in the
+    // toolchain's own `std` directory, which is errata 56 one path further
+    // over. Roadmap 16.9.
+    let owned = package_of(path);
+    let real = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let asked = real(path);
+    let entry = inputs
+        .iter()
+        .map(|(file, _, _)| file)
+        .find(|file| match &owned {
+            Some(root) => real(file).starts_with(real(root)),
+            None if asked.is_dir() => real(file).starts_with(&asked),
+            None => real(file) == asked,
+        })
+        .unwrap_or_else(|| &inputs.first().expect("at least one source").0);
     let target = artifact(&output_dir(path, entry), name, std::env::consts::EXE_EXTENSION);
     make_room_for(&target)?;
 
@@ -1588,6 +1607,15 @@ fn build(
     no_cache: bool,
 ) -> Result<bool> {
     one_program(path, "build")?;
+    // **`check` is not the only command that has to say this.** These warnings
+    // were reported from `check_one` and nowhere else, so a key nothing reads
+    // was invisible to every command that produces an artifact -- and the most
+    // important of them says, in as many words, that a misspelled
+    // `[permissions]` table leaves the program running unsandboxed. That is a
+    // sentence with exactly one useful moment to arrive, and `build` was the
+    // one command that never printed it. `run` reaches this through `build`.
+    // Roadmap 16.5.
+    report_manifest_warnings(Some(path));
 
     // **A package with a `src/bin` builds every program in it.**
     //
@@ -1653,9 +1681,24 @@ fn build_one(
     // library's own directory on Linux, and passed on Windows by the alphabet.
     // Errata 56.
     let owned = package_of(path);
+    // **And with no package, "mine" is the file the user actually named.**
+    //
+    // `None => true` let every input qualify, which put the standard library
+    // back in exactly the position errata 56 took it out of: `khora run
+    // scratch.kh` outside a package found no `fn main(` in `scratch.kh`
+    // before it found one in a `std` module that sorted earlier, and built
+    // `/…/std/config_native` -- an executable and an object file written into
+    // the toolchain's own directory, which every later diagnostic then named.
+    // Roadmap 16.9.
+    // Canonical, because `inputs` are: `scratch.kh` and
+    // `/home/me/scratch.kh` are the same file and compare unequal.
+    let asked = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let mine = |file: &Path| match &owned {
         Some(root) => file.starts_with(root),
-        None => true,
+        // A directory argument owns what is under it; a file argument owns
+        // itself and nothing else.
+        None if asked.is_dir() => file.starts_with(&asked),
+        None => file == asked,
     };
     let entry = inputs
         .iter()
@@ -1868,7 +1911,17 @@ fn output_dir(path: &Path, entry: &Path) -> PathBuf {
     package_of(path)
         .or_else(|| path.is_dir().then(|| path.to_path_buf()))
         .map(|root| root.join("build"))
-        .unwrap_or_else(|| entry.parent().unwrap_or(Path::new(".")).to_path_buf())
+        .unwrap_or_else(|| match entry.parent() {
+            // **`.` rather than the empty path.** `khora run scratch.kh`
+            // names a file with no directory component, so the parent is `""`
+            // and the artifact came out as the bare name `scratch` -- which
+            // `Command::new` looks up on `PATH` rather than in the directory
+            // it was just written to, and the run failed with "No such file
+            // or directory" on a file that was right there.
+            Some(dir) if dir.as_os_str().is_empty() => PathBuf::from("."),
+            Some(dir) => dir.to_path_buf(),
+            None => PathBuf::from("."),
+        })
 }
 
 /// `name` in `dir`, with `extension` if the platform has one.
@@ -2064,9 +2117,29 @@ fn which_program(path: &Path) -> Result<()> {
 #[cfg(feature = "llvm")]
 fn executable_for(path: &Path) -> Result<PathBuf> {
     let files = collect_sources(std::slice::from_ref(&path.to_path_buf()))?;
+    // **`collect_sources` appends the standard library**, so "the first file
+    // containing `fn main(`" was a search over `std` as well as over the
+    // program -- and `std/config_native.kh` matches it. Outside a package,
+    // `khora run scratch.kh` therefore built and ran
+    // `/…/std/config_native`, writing an executable and an object file into
+    // the toolchain's own directory and naming them in every later
+    // diagnostic. Errata 56 fixed this shape for `khora build --lib` inside a
+    // package; this is the same mistake one path over. Roadmap 16.9.
+    let owned = package_of(path);
+    // Both sides canonical: `files` holds the paths `gather` walked to, which
+    // are spelled however the caller spelled the root, and `scratch.kh` and
+    // `/home/me/scratch.kh` are one file that compares unequal.
+    let real = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let asked = real(path);
+    let mine = |file: &Path| match &owned {
+        Some(root) => real(file).starts_with(real(root)),
+        None if asked.is_dir() => real(file).starts_with(&asked),
+        None => real(file) == asked,
+    };
     let entry = files
         .iter()
-        .find(|file| read(file).is_ok_and(|text| text.contains("fn main(")))
+        .find(|file| mine(file) && read(file).is_ok_and(|text| text.contains("fn main(")))
+        .or_else(|| files.iter().find(|file| mine(file)))
         .or_else(|| files.first())
         .with_context(|| format!("no `.kh` files under {}", path.display()))?;
     Ok(default_output(path, entry, false))
@@ -2120,10 +2193,20 @@ fn is_grants_module(path: &Path) -> bool {
 /// generating a permissive answer, so there is one place the default lives and
 /// it is a file somebody can read.
 ///
-/// **A category the manifest does not mention keeps its own default**, rather
-/// than being narrowed because a *different* category was. Mentioning `fs`
-/// says nothing about `network`, which is the rule the table already follows
-/// and the one that makes tightening one thing at a time possible.
+/// **A category the manifest does not mention takes `default`**, rather than
+/// being narrowed because a *different* category was. Mentioning `fs` says
+/// nothing about `network` beyond what `default` already said, which is the
+/// rule the table follows and the one that makes tightening one thing at a
+/// time possible.
+///
+/// **`default = "deny"` is the whole reason this reads `default` at all.** It
+/// did not, for as long as the key has existed: this function asked for `fs`,
+/// `env` and `network`, returned `None` when all three were absent, and left
+/// the permissive file in place -- so the one line the manifest reference
+/// calls "the strict posture" granted everything, and a category left out
+/// beside a category written down fell back to `**` rather than to what the
+/// program had asked for. `Permissions::grants` had the rule right the whole
+/// time and nothing outside a test called it. Roadmap 16.1.
 ///
 /// The patterns are written as Khora string literals with the quotes and
 /// backslashes escaped, because a Windows path in a manifest is full of both
@@ -2137,22 +2220,27 @@ fn granted_source(target: &Path) -> Option<String> {
     let fs = permissions.fs.clone();
     let env = permissions.env.clone();
     let network = permissions.network.clone();
-    if fs.is_none() && env.is_none() && network.is_none() {
+    let denies_by_default = !permissions.grants_unmentioned();
+    if fs.is_none() && env.is_none() && network.is_none() && !denies_by_default {
         return None;
     }
     // `**` and `*` are what the checked-in file says, so a category nobody
-    // narrowed comes out of here identical to the default it replaces.
-    let everything_path = vec!["**".to_string()];
-    let everything = vec!["*".to_string()];
+    // narrowed comes out of here identical to the default it replaces --
+    // unless `default = "deny"` says the absent category grants nothing, in
+    // which case the empty list is the whole point.
+    let unmentioned_path: Vec<String> =
+        if denies_by_default { Vec::new() } else { vec!["**".to_string()] };
+    let unmentioned: Vec<String> =
+        if denies_by_default { Vec::new() } else { vec!["*".to_string()] };
     let fs = fs.unwrap_or(khora_manifest::FsGrants {
-        read: everything_path.clone(),
-        write: everything_path,
+        read: unmentioned_path.clone(),
+        write: unmentioned_path,
     });
     Some(render_grants(
         &fs.read,
         &fs.write,
-        &env.unwrap_or_else(|| everything.clone()),
-        &network.unwrap_or(everything),
+        &env.unwrap_or_else(|| unmentioned.clone()),
+        &network.unwrap_or(unmentioned),
     ))
 }
 
@@ -2309,9 +2397,34 @@ fn report_build_errors(
     }
 
     if shown == 0 {
-        let (path, text, _) = &inputs[0];
-        eprintln!("{}", render_hir_errors(path, text, errors));
-        eprintln!();
+        // **An error with no location must not borrow somebody else's.**
+        //
+        // This rendered every backend error against `inputs[0]`, which is
+        // whatever file sorts first -- `std/clock_native.kh`. So the whole
+        // entry-point family, which reports at `TextRange::empty(0)` because
+        // a `Signature` carries no span, arrived as
+        //
+        //     error: `main` cannot take parameters yet ...
+        //      --> /.../std/clock_native.kh:1:1
+        //       |
+        //     1 | module std::clock;
+        //
+        // pointing at a standard-library file the author never opened and
+        // quoting a line with nothing to do with the problem. A message with
+        // no span is not improved by being given a wrong one. Roadmap 16.5.
+        let (located, adrift): (Vec<_>, Vec<_>) = errors
+            .iter()
+            .cloned()
+            .partition(|e| !(e.range.is_empty() && usize::from(e.range.start()) == 0));
+        if !located.is_empty() {
+            let (path, text, _) = &inputs[0];
+            eprintln!("{}", render_hir_errors(path, text, &located));
+            eprintln!();
+        }
+        for error in &adrift {
+            eprintln!("error: {}", error.message);
+            eprintln!();
+        }
         shown = errors.len();
     }
     eprintln!("{shown} error(s)");

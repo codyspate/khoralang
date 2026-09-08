@@ -149,6 +149,11 @@ fn std_may_always_declare_extern() {
 // and it refuses a read outside them, raising `IoError`".
 
 /// A project whose manifest grants only `data/**`.
+///
+/// Every caller builds and runs a program, so all of them are gated on the
+/// backend -- and without it this was a function nothing called, which the
+/// no-backend build has been warning about.
+#[cfg(feature = "llvm")]
 fn granted_project(name: &str) -> PathBuf {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     let _ = std::fs::remove_dir_all(&root);
@@ -436,4 +441,117 @@ fn a_package_with_no_permissions_table_may_still_declare_extern() {
 /// tests have to think about.
 fn pinned(manifest: &str) -> String {
     format!("{manifest}\n[toolchain]\nversion = \"{}\"\n", khora_toolchain::RUNNING)
+}
+
+// ---------------------------------------------------------------------------
+// `default`, which is the key that decides every category nobody wrote down.
+//
+// **These build and run a program rather than inspecting a manifest**, and that
+// is the whole point of them. `Permissions::grants` had this rule right from
+// the day it was written and ten assertions in `khora-manifest` proved it; what
+// nothing checked is that a *build* asks. It did not -- `granted_source` read
+// `fs`, `env` and `network`, never `default`, and returned `None` when all
+// three were absent, leaving the permissive `std/grants.kh` in place. So
+// `default = "deny"`, which the manifest reference calls "the strict posture",
+// granted everything, and the tests were green throughout. Roadmap 16.1.
+//
+// A test that cannot fail when the wiring is cut is not protecting the wiring,
+// so every one below goes through the binary and reads what the program did.
+#[cfg(feature = "llvm")]
+mod default_key {
+    use super::{pinned, write};
+    use std::process::Command;
+
+    /// Reads a file inside the project and one outside it, printing `ok` or
+    /// `refused` for each, then the same question for an environment variable.
+    const PROBE: &str = "module app::main;\n\n\
+         import std::core::{print};\n\
+         import std::fs::{read_text, FsRead};\n\
+         import std::env::{Env, variable_or};\n\n\
+         fn work() -> () with { reads: FsRead, env: Env } {\n  \
+         print(\"inside=\" + (read_text(\"./data/ok.txt\")! catch { e => \"refused\" }));\n  \
+         print(\"outside=\" + (read_text(\"../secret.txt\")! catch { e => \"refused\" }));\n  \
+         print(\"env=\" + (variable_or(\"KHORA_TEST_VALUE\", \"refused\")! catch { e => \"refused\" }));\n\
+         }\n\n\
+         pub fn main() -> Int {\n  \
+         with { reads: FsRead::real(), env: Env::real() } { work() };\n  \
+         0\n\
+         }\n";
+
+    /// Builds and runs `PROBE` under the given `[permissions]`, answering with
+    /// what the program printed.
+    fn probe(permissions: &str) -> String {
+        let tmp = tempfile::tempdir().expect("a temporary directory");
+        let project = tmp.path().join("project");
+        write(&project.join("khora.toml"), &pinned(&format!(
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n{permissions}\n"
+        )));
+        write(&project.join("src").join("main.kh"), PROBE);
+        write(&project.join("data").join("ok.txt"), "inside-the-grant");
+        write(&tmp.path().join("secret.txt"), "outside-the-grant");
+
+        let out = Command::new(env!("CARGO_BIN_EXE_khora"))
+            .args(["run", "."])
+            .current_dir(&project)
+            .env("KHORA_HOME", tmp.path().join("home"))
+            .env("KHORA_TEST_VALUE", "read-it")
+            .output()
+            .expect("running khora");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "the program should have built and run:\n{text}");
+        text
+    }
+
+    /// The bug, exactly: one line, and it used to grant everything.
+    #[test]
+    fn deny_alone_refuses_every_category() {
+        let out = probe("[permissions]\ndefault = \"deny\"\n");
+        assert!(out.contains("inside=refused"), "fs should be denied:\n{out}");
+        assert!(out.contains("outside=refused"), "fs should be denied:\n{out}");
+        assert!(out.contains("env=refused"), "env should be denied:\n{out}");
+    }
+
+    /// And the other direction, which is the rule that makes tightening
+    /// possible: naming one category says nothing about the others.
+    #[test]
+    fn narrowing_one_category_leaves_the_rest_alone() {
+        let out = probe("[permissions.fs]\nread = [\"./data/**\"]\n");
+        assert!(out.contains("inside=inside-the-grant"), "the grant should hold:\n{out}");
+        assert!(out.contains("outside=refused"), "and stop at its edge:\n{out}");
+        assert!(out.contains("env=read-it"), "an unmentioned category is unrestricted:\n{out}");
+    }
+
+    /// `deny` plus one grant is the posture the reference recommends, and the
+    /// combination is where an off-by-one in the fallback would show.
+    #[test]
+    fn deny_plus_a_grant_allows_exactly_the_grant() {
+        let out = probe("[permissions]\ndefault = \"deny\"\n\n[permissions.fs]\nread = [\"./data/**\"]\n");
+        assert!(out.contains("inside=inside-the-grant"), "the named path should be readable:\n{out}");
+        assert!(out.contains("outside=refused"), "and nothing else:\n{out}");
+        assert!(out.contains("env=refused"), "an unmentioned category still takes `deny`:\n{out}");
+    }
+
+    /// The default default. A program that has never heard of permissions is
+    /// not asked to think about them.
+    #[test]
+    fn no_table_at_all_grants_everything() {
+        let out = probe("");
+        assert!(out.contains("inside=inside-the-grant"), "{out}");
+        assert!(out.contains("outside=outside-the-grant"), "{out}");
+        assert!(out.contains("env=read-it"), "{out}");
+    }
+
+    /// Spelled out, because `allow` is the default and writing it should not
+    /// be the same as writing nothing by accident rather than by rule.
+    #[test]
+    fn allow_spelled_out_grants_everything() {
+        let out = probe("[permissions]\ndefault = \"allow\"\n");
+        assert!(out.contains("inside=inside-the-grant"), "{out}");
+        assert!(out.contains("outside=outside-the-grant"), "{out}");
+        assert!(out.contains("env=read-it"), "{out}");
+    }
 }

@@ -27,6 +27,16 @@ enum Schema {
     /// Anything at all. Scalars, arrays, and tables whose keys are defined by
     /// something other than the manifest schema.
     Open,
+    /// A key the schema declares, the reference documents, and nothing reads.
+    ///
+    /// **Kept in the schema and warned about, rather than either removed or
+    /// left silent.** Silence is what `edition = "1999"` had, and it is the
+    /// worst of the three: a manifest sets the key, gets the behaviour of not
+    /// setting it, and nothing anywhere says so. Removing the key is right
+    /// where the question it answered has moved elsewhere, and wrong where the
+    /// feature is still coming -- deleting `[build] plugin` would throw away a
+    /// decision `docs/project.md` §4.1 has already argued.
+    Inert(&'static str),
     /// A key this toolchain used to have. The string says what to do instead.
     ///
     /// Kept in the schema rather than dropped out of it, so that a manifest
@@ -100,10 +110,32 @@ static PERMISSIONS: Schema = Schema::Fields(&[
     ("workspace", &OPEN),
     ("default", &OPEN),
     ("network", &OPEN),
-    ("fs", &OPEN),
+    ("fs", &PERMISSIONS_FS),
     ("env", &OPEN),
     ("extern", &OPEN),
 ]);
+
+/// `[permissions.fs]`, which is the one grant that is a table.
+///
+/// **`Open` here was a hole in the one table where a dropped key is a security
+/// consequence.** Reading and writing are separate grants, so `fs` is a table
+/// where `network`, `env` and `extern` are lists -- and TOML being what it is,
+/// a `[permissions.fs]` header puts every plain key written after it *inside*
+/// that table. So
+///
+/// ```toml
+/// [permissions]
+/// default = "deny"
+/// [permissions.fs]
+/// read = ["data/**"]
+/// env = ["HOME"]
+/// ```
+///
+/// silently files `env` under `fs`, where nothing reads it, and the audit that
+/// exists to catch exactly this said `no errors` because it stopped one level
+/// above. Naming the two real keys is what makes the misplaced one a warning.
+/// Roadmap 16.1.
+static PERMISSIONS_FS: Schema = Schema::Fields(&[("read", &OPEN), ("write", &OPEN)]);
 
 static TOOLCHAIN: Schema = Schema::Fields(&[("version", &OPEN)]);
 
@@ -136,7 +168,37 @@ static DEPENDENCY: Schema = Schema::Fields(&[
     ("subdir", &OPEN),
 ]);
 
-static BUILD: Schema = Schema::Fields(&[("target", &OPEN), ("plugin", &OPEN)]);
+static BUILD: Schema = Schema::Fields(&[("target", &BUILD_TARGET), ("plugin", &BUILD_PLUGIN)]);
+
+/// `[build] target` names a triple and selects nothing.
+///
+/// **The reference documents it as "the triple to compile for" and nothing
+/// reads it**, so `target = "totally-not-a-real-triple"` built a host binary
+/// and said nothing -- which is worse than the key not existing, because
+/// somebody cross-compiling believes they did. Wiring it to `KHORA_TARGET`
+/// would be worse again: that variable changes *code generation* to check it,
+/// and `deployment/supported-targets` is explicit that the linker and sysroot
+/// story is unfinished, so it cannot produce a runnable artifact and is not
+/// meant to. Promising a deployable cross build through a manifest key is the
+/// promise this project is least able to keep. Roadmap 16.
+static BUILD_TARGET: Schema = Schema::Inert(
+    "cross-compilation is not supported yet, so the build is for the host either way. \
+     `KHORA_TARGET` exercises code generation for another triple, which is a check rather \
+     than a deployable artifact -- see the supported-targets page",
+);
+
+/// `[build] plugin` names a sandboxed WASM build plugin, and there are none.
+///
+/// The decision behind it is real and worth keeping -- `docs/project.md` §4.1
+/// replaces arbitrary build-time host code with sandboxed plugins precisely so
+/// that fetching a dependency cannot run its code on your machine -- but the
+/// mechanism does not exist. A key that names a trust boundary and is read by
+/// nothing is the one to be loudest about.
+static BUILD_PLUGIN: Schema = Schema::Inert(
+    "build plugins are not implemented. `[tasks]` runs commands you wrote in a manifest \
+     you are standing in, which is a different trust boundary and is the one that works \
+     today",
+);
 
 static TASKS: Schema = Schema::Map(&TASK);
 static TASK: Schema =
@@ -176,7 +238,7 @@ fn walk(node: &Node, schema: &Schema, path: &mut String, text: &str, out: &mut V
         let below = match schema {
             // Whatever keys sit below belong to something other than the
             // manifest schema, so there is nothing here to check them against.
-            Schema::Open | Schema::Removed(_) => return,
+            Schema::Open | Schema::Removed(_) | Schema::Inert(_) => return,
             Schema::Map(values) => Some(*values),
             Schema::Fields(fields) => {
                 fields.iter().find(|(name, _)| *name == entry.key).map(|(_, values)| *values)
@@ -188,6 +250,9 @@ fn walk(node: &Node, schema: &Schema, path: &mut String, text: &str, out: &mut V
         match below {
             Some(Schema::Removed(note)) => {
                 out.push(Warning::removed_key(path.clone(), note, entry.span.clone(), text))
+            }
+            Some(Schema::Inert(note)) => {
+                out.push(Warning::inert_key(path.clone(), note, entry.span.clone(), text))
             }
             Some(values) => walk(&entry.value, values, path, text, out),
             // Reported at the unknown key itself and not descended into: a

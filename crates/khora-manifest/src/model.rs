@@ -608,6 +608,17 @@ impl Permissions {
             && self.extern_.is_none()
     }
 
+    /// What a category nobody wrote down grants: `true` for everything,
+    /// `false` for nothing.
+    ///
+    /// This is `default` on its own, separated from [`Self::grants`] because
+    /// the build needs it for a category it is *rendering* rather than one it
+    /// is answering about. Roadmap 16.1: `granted_source` used to hard-code
+    /// the `true` answer, so `default = "deny"` was a key nothing read.
+    pub fn grants_unmentioned(&self) -> bool {
+        matches!(self.default, Default_::Allow)
+    }
+
     /// Whether the manifest grants this category at all.
     ///
     /// The compile-time half of the decision, and the only half the compiler
