@@ -151,7 +151,7 @@ There is no `blocking(body)` in `std` to reach for instead, and the reason is a 
 
 Two consequences worth planning for. The cost is a thread and the round trip to start and join one, which is the wrong trade for a call that takes a microsecond: reach for this when the work would hold a thread long enough to matter. And it is **not a cancellation point on the far side** — a cancelled caller stops at the join while the native call runs to its end, because the runtime cannot interrupt foreign code and returning early would mean doing so while a thread still holds the caller's buffer.
 
-When fibers become M:N over a fixed set of workers, blocking on one *will* occupy a worker, and this shape is what the runtime will be able to route to its blocking pool. A direct call to the native function is not.
+Under the M:N coroutine backend — which already ships behind `KHORA_FIBERS=scheduler` — blocking on a fiber occupies a worker, and this shape is what the runtime can route to its blocking pool. A direct call to the native function is not.
 
 An ordinary foreign call also cannot secretly suspend Khora while foreign stack or thread-affine state remains live around the call.
 

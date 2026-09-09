@@ -34,11 +34,6 @@ The current standard library includes APIs for:
   [`std::log`](/docs/stdlib/api/log/);
 - capability permissions, in [`std::permissions`](/docs/stdlib/api/permissions/).
 
-Every entry links, which they did not all do: `civil dates and offsets` and
-`exact Decimal arithmetic` were bare prose beside neighbours that linked, so
-the two modules a financial program reaches for first had to be guessed at by
-URL.
-
 Three of those are new and easy to miss:
 
 `std::clock` holds the `Clock` capability, which used to live in `std::env`. `import std::env::{Clock}` no longer resolves. The split also gave `Clock` a `sleep`, which is an operation on the capability so that a fake clock is one line in a test.
@@ -69,6 +64,14 @@ the type name in a shareable record does not make it safe.
 Khora keeps shared contracts in the standard library and leaves fast-moving implementations in packages. For example, `Db`, transaction semantics, and database cell types belong in `std`; PostgreSQL, SQLite, and Cloudflare D1 drivers do not. Trace vocabulary and propagation belong in `std`; vendor exporters do not.
 
 The same principle keeps the IANA time-zone database out of the compatibility promise while retaining stable date/time/offset types.
+
+**`std::ai` is no longer part of `std`.** Model inference shipped inside the
+standard library in 0.1.0; it is now the `ai` package, published alongside
+`postgres` and `otlp`. What it offers is the effect a caller names when it
+wants a model, so that the provider is the caller's choice. A program that
+wrote `import std::ai::{..}` names the package as a dependency and imports from
+it. The 0.1.0 pages are still served under the `v0.1` documentation for
+programs pinned to that toolchain.
 
 ## Generated API reference
 

@@ -1,7 +1,7 @@
 ---
 title: Take work off a queue safely
 sidebar:
-  order: 10
+  order: 4
 ---
 
 A worker pool is a fiber that reads a job from a channel and does it. The obvious loop loses jobs, silently, and exits 0 while doing it.

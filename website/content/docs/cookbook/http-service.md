@@ -75,24 +75,92 @@ A handler should translate application outcomes into HTTP status codes and respo
 
 For typed request/response bodies, continue with [JSON API](/docs/cookbook/json-api/). For failure translation before the HTTP boundary, see [Typed failure with raises](/docs/reference/failures/#translate-failure-types).
 
+## Two verbs the router answers without being mounted
+
+**A `GET` route is also a `HEAD` route.** The router runs the `GET` handler and
+sends the headers alone — including the `Content-Length` of the body a `GET`
+would have sent, which is the whole point of the method. RFC 9110 requires the
+two answers to agree, and running the same handler is the only arrangement in
+which they cannot drift. Nothing above needs a second mount for `curl -I`, a
+cache, or a health checker that sends one.
+
+**`OPTIONS` is answered with `204` and an `Allow` header** naming what the path
+mounts, plus `OPTIONS` itself and `HEAD` wherever `GET` is mounted — the same
+list a `405` gives, because a client cannot be told two things about one path
+and act on both. A path nothing mounts is `404` rather than a `204` with an
+empty `Allow`: "this path allows nothing" and "there is no such path" are
+different answers.
+
+Mount either explicitly and the default steps aside for that path. There are
+two reasons to:
+
+- `Router::head`, for a resource whose length or validators are cheap and whose
+  body is not, where answering `HEAD` by building the body and throwing it away
+  is the entire cost of the request. Mounting it separately gives up the
+  guarantee that `HEAD` and `GET` agree, so it earns its keep only when that
+  cost is real.
+- `Router::options`, for CORS. The default answer is the correct reply to the
+  question `OPTIONS` asks, but it carries no `Access-Control-Allow-Origin`: the
+  library cannot know which origins a service trusts, and both "none" and "any"
+  are wrong defaults. A browser calling this service from another origin sends
+  a preflight first, and a handler mounted here is what answers it — including
+  the `Allow` header the default would have sent, since the mount replaces the
+  default rather than adding to it. The actual `GET` or `POST` response needs
+  `Access-Control-Allow-Origin` too: the preflight authorises the request, it
+  does not authorise the answer.
+
+```khora
+fn preflight(req: Request) -> Response {
+  Response::text(204, "")
+    |> Response::with_header("Access-Control-Allow-Origin", "https://app.example")
+    |> Response::with_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+    |> Response::with_header("Access-Control-Allow-Headers", "content-type")
+    |> Response::with_header("Allow", "GET, POST, HEAD, OPTIONS")
+}
+```
+
 ## Bound the resource that is actually constrained
 
-**The server has one capacity number, not two.** `Router::listen` accepts at
-most 256 connections at once, and an accepted connection is a fiber that is
-inside your handler for as long as the handler runs. There is no second,
-smaller pool that handlers queue for, so 256 is both the most connections
-served at once and the most handlers running at once.
+**The server has one capacity number, not two.** `Router::listen` runs its
+accept loop inside `bounded_nursery(256, ...)`, and an accepted connection is a
+fiber that is inside your handler for as long as the handler runs. There is no
+second, smaller pool that handlers queue for, so that one number is both the
+most connections served at once and the most handlers running at once — 257
+live, in fact, for the reason
+[Bounded concurrency](/docs/cookbook/bounded-concurrency/) gives. It is not
+configurable in this release.
 
-That bound is not usually what limits throughput. Measured on a 16-core
-desktop, the server saturates by about 16 connections: from there to 128 the
-rate is flat while the median request slows in proportion to the queue behind
-it. Past saturation, raising the bound lengthens the queue and lowers it sheds
-load sooner; neither makes the server faster.
+That bound is not usually what limits throughput: a server saturates its cores
+well before it runs out of connection slots, and past saturation, raising a
+bound lengthens the queue while lowering it sheds load sooner — neither makes
+the server faster. Where the saturation point actually is for your handler on
+your machine is a measurement, and [Performance](/docs/performance/) sets out
+what a number has to carry before it is worth quoting: the ladder, the
+generator, the machine, the profile and the date. This page deliberately
+prints none, because it had one and it carried none of them.
 
 So bound the thing that is actually scarce. If a handler waits on a database
 pool or a rate-limited API, put a smaller bound around *that* work rather than
 lowering the connection limit, which would refuse connections that could have
 been served. See [Bounded concurrency](/docs/cookbook/bounded-concurrency/).
+
+The other number is per request rather than per connection, and it *is*
+configurable. A router holds at most 8 KB of one request — headers and body
+together — and answers `413` past it, before the handler runs.
+`Router::holding(most)` sets another:
+
+```khora
+Router::new()
+  |> Router::holding(1048576)
+  |> Router::post("/documents", SharedFn::of(store))
+  |> Router::listen(8080)!
+```
+
+The default is a policy about how much an unauthenticated client may make a
+server hold, not a limit of the parser. The buffer is allocated once at that
+size per connection, so the number you choose multiplies by the 256 above when
+deciding what a full server costs — raise it to what the largest legitimate
+document needs and not further.
 
 ## A trap in a handler ends the server
 

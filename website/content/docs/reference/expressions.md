@@ -60,13 +60,30 @@ user.display_name()
 }
 ```
 
-An empty record is:
+A braced form beginning with `name:` is a record literal; an ordinary braced
+sequence is a block.
+
+**`{}` in expression position is a record literal, not an empty block.** It is
+the value of a record type declared with no fields — `pub type Nothing = {};` —
+and it only checks where such a type is expected:
 
 ```khora
-{}
+pub type Nothing = {};
+
+let nothing: Nothing = {};
 ```
 
-A braced form beginning with `name:` is a record literal; an ordinary braced sequence is a block.
+Everywhere else it is refused, with a message whose list of fields is empty
+because the literal has none:
+
+```
+error: no record type has exactly the fields
+```
+
+The place this bites is a `match` arm that should do nothing. `=>` is followed
+by an *expression*, so `Option::None => {}` is a record literal and is refused.
+Write `Option::None => ()` for an arm that produces unit. A braced block after
+`=>` is fine as long as it is not empty: `Option::None => { retire(); }`.
 
 ## Record update
 
@@ -336,7 +353,14 @@ load_user(id)! catch {
 }
 ```
 
-`catch` is postfix on the expression whose typed failures it handles.
+`catch` is postfix on the expression whose typed failures it handles, and that
+expression still needs its `!`. The mark is what lets the failure leave the
+call; `catch` only says what to do with it once it has. Omitting it is refused:
+
+```
+error: `load_user` can leave this function, so the call needs `!`:
+       write `load_user(..)!`
+```
 
 ## Postfix capability installation
 

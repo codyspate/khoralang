@@ -47,6 +47,16 @@ the same reason.
 
 The installer checks before downloading anything and says so.
 
+**On Linux the published build needs glibc 2.39 or newer.** It is compiled on
+Ubuntu 24.04, and a glibc program cannot run against a library older than the
+one it was linked against — so Ubuntu 24.04 and Debian 13 run it, and Debian 12
+(2.36), Ubuntu 22.04 (2.35), RHEL 9 (2.34) and anything on musl do not. The
+installer checks `ldd --version` before downloading and refuses rather than
+leaving you a `khora` that fails on every command; if you are below the line,
+use a newer distribution or build from source, which links against the glibc
+you have. `sh scripts/check-install.sh` is what checks that claim, by
+installing the published release inside each of those images.
+
 ### Release candidates
 
 **Before there is a stable release, this is the install.** A candidate is
@@ -148,11 +158,19 @@ synchronous, pooled, or fiber-per-connection as it chooses.
 `crates/khora-codegen-llvm/tests/http_layers.rs` is a second framework of a
 different shape, kept in the suite so the layering stays true.
 
+`Router` mounts seven verbs and answers two of them without being asked to:
+`HEAD` runs the `GET` handler and sends its headers alone, and `OPTIONS`
+answers 204 with an `Allow`. Mounting either replaces that answer, which is
+what a preflight carrying CORS headers needs -- the library cannot invent
+those, because it has no way to know which origins a service trusts.
+
 ### What it does not have yet
 
-- **No chunked transfer, multipart bodies, or request bodies over 8 KB** in
-  `std::net::http`, and a body must be UTF-8 text. TLS is there, both ends,
-  and `Connection::holding` takes a larger cap than the default.
+- **No chunked transfer and no multipart bodies** in `std::net::http`, and a
+  body must be UTF-8 text. A request is capped at 8 KB by default, headers and
+  body together; `Router::holding` and `Connection::holding` each take another,
+  and the cap is a policy about what an unauthenticated client may make a
+  server hold rather than a limit of the parser. TLS is there, both ends.
 - **No HTTP/2 and no WebSockets**, so no upgrade path.
 - **`[permissions]` is still not a sandbox**, though the largest hole in it is
   closed. `[permissions] extern` now decides which packages may declare a
@@ -263,8 +281,8 @@ the `extern` boundary.
 `bench/` and `packages/` — with no lint warnings anywhere in them.
 `khora doc --check` holds the generated standard library reference to the
 source it was generated from.
-`sh scripts/baseline.sh` runs the lot, including twelve HTTP conformance checks
-against a real `curl`.
+`sh scripts/baseline.sh` runs the lot, including eighteen HTTP conformance
+checks against a real `curl`.
 
 It leaves a receipt naming the tree it passed for, and `sh scripts/gate.sh`
 asks whether one exists for the tree as it stands. `sh scripts/install-hooks.sh`
@@ -391,6 +409,8 @@ scripts/
   install-hooks.sh     puts gate.sh in a pre-push hook, opt-in
   http_conformance.sh  what an ordinary client gets, checked with curl
   check-linux.sh       the runtime's tests on Linux, through WSL2
+  check-install.sh     installs the published release in containers and
+                       checks the binary runs; skips without Docker
   tsan.sh              the runtime under ThreadSanitizer; see soundness.md
 .github/workflows/
   ci.yml               the three-platform matrix

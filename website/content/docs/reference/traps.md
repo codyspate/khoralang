@@ -36,6 +36,7 @@ Other operations trap on a violated invariant, and this is the whole list:
 | `String::byte` | the offset is outside the string |
 | `Vector::at` | the index is outside the vector |
 | `Decimal` arithmetic | addition, subtraction, multiplication, division, rescaling or truncation overflows |
+| `Shared::update` / `Shared::modify` | the change function re-enters the same cell, which would otherwise deadlock — see [Sharing](./sharing/) |
 
 An assertion that fails in a test is **not** a trap. `assert` reports the
 failing line and the test continues to the end of the run, because a test

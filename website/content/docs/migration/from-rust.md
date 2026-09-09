@@ -45,8 +45,29 @@ Khora's module path separator is `::` as in Rust, but the declaration is
 file is the module, so there is no `mod` tree to keep in step with the
 directory layout.
 
-## FFI and unsafe boundaries
+## FFI: `extern fn`, and no `unsafe` keyword
 
-Khora still needs explicit rules around foreign code, thread-affine state, and operations the compiler cannot prove safe. The production toolchain documents those boundaries rather than pretending automatic memory management eliminates systems-level invariants.
+There is no stable Khora-to-Khora ABI, for the same reason Rust has none: the
+whole program is monomorphized. The interoperability boundary is the C ABI, and
+it is spelled the way Rust spells it minus the block. An `extern fn` with no
+body is a symbol the linker must find; a `pub extern fn` with a body is a Khora
+function C can call:
 
-Khora is not intended to replace Rust for every low-level kernel/embedded use case. Its target is reliable native application and service software where ownership complexity is often a larger development cost than a benefit.
+```khora
+extern fn monotonic_ticks() -> Int;
+```
+
+What replaces `unsafe` is the manifest. `extern` in `[permissions]` names the
+**packages** that may declare `extern fn` at all — `std` always may — so the
+audit is one table rather than a search for a keyword, and a dependency that
+starts calling into C cannot do it quietly. [FFI](/docs/reference/ffi/) has the
+ABI-safe types, the rules for borrowing a buffer for the duration of one call,
+what a blocking foreign call costs a fiber, and what a trap does at an exported
+boundary. [Capabilities](/docs/reference/capabilities/) has the permission
+table.
+
+Khora is not intended to replace Rust for every low-level kernel or embedded
+use case. Its target is native application and service software where ownership
+complexity costs more than it returns — and the honest version of that trade is
+on [Limitations](/docs/limitations/), which is the page to read before choosing
+between them.

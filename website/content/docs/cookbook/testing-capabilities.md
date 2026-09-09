@@ -1,7 +1,7 @@
 ---
 title: Testing capabilities
 sidebar:
-  order: 8
+  order: 10
 ---
 
 A capability requirement is an explicit seam for tests. Instead of mutating process-global state or adding test-only branches to application code, provide a small handler for the capability the function already requires.

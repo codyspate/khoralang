@@ -173,6 +173,12 @@ tools = { git = "https://example.com/tools.kh", tag = "v1.4.0", subdir = "core" 
 
 Exactly one of `version`, `path` and `git` says where a package comes from. A `path` is resolved relative to this manifest and needs no version, because the source is right there. A `git` dependency takes `rev` or `tag`, and `subdir` when the package is not at the repository root.
 
+**`version` has nothing to resolve against yet.** There is no public registry,
+so the key is accepted and reserved rather than usable; today a dependency comes
+from a `path` or a `git` URL. [Modules and
+packages](/docs/reference/modules-and-packages/#dependencies) is the same point
+from the other side.
+
 ## `[fmt]` — how `khora fmt` writes
 
 ```toml

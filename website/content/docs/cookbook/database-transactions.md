@@ -1,7 +1,7 @@
 ---
 title: Database transactions
 sidebar:
-  order: 2
+  order: 3
 ---
 
 Khora keeps the transaction contract in `std::db` while concrete database engines live in packages. Application code depends on the `Db` **capability**, not on a database value threaded through every function call.

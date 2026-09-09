@@ -36,6 +36,29 @@ import app::prelude::*;
 
 Grouped imports allow a trailing comma.
 
+**The braces are not optional, even for one name.** `import std::core::print;`
+is a parse error — `expected `::{...}` or `::*` after the module path`. Write
+`import std::core::{print};`.
+
+### Names that need no import
+
+There is no prelude of standard-library *items*: `Option`, `Result`, `List`,
+`Dict`, `Show`, `Eq`, `print` and everything else in `std::core` has to be
+named in an `import`, and a type has to be imported wherever it is written —
+including where it is only reached through a trait method or a `${..}` hole.
+
+What resolves without an import is the set of **built-in type names**, which
+belong to the language rather than to a module:
+
+```
+Bool  Char  Float  Int  String  Unit  Never  Ptr
+I8  I16  I32  I64        U8  U16  U32  U64
+```
+
+So `let n: Int = 1;` and `let ok: Bool = true;` compile in a module that
+imports nothing, while `let x: Option<Int> = Option::None;` does not. `F32`,
+`F64`, `I128` and `U128` are not among them and are not types Khora has.
+
 ## Visibility
 
 `pub` makes a declaration visible outside its declaring module:
@@ -68,7 +91,7 @@ default — and for `let` for a value computed while a function runs.
 
 ## Type declarations
 
-Alias or structural definition:
+Named definition over an existing type, and record definition:
 
 ```khora
 pub type UserId = Int;
@@ -86,6 +109,11 @@ pub type Result<A, E> =
   | Ok(value: A)
   | Err(error: E);
 ```
+
+**`pub type UserId = Int;` is a new type, not another spelling of `Int`.**
+Khora has [no transparent alias](./types/#wrappers-and-named-data): an `Int` is not
+accepted where a `UserId` is wanted, and `takes(5)` on `fn takes(u: UserId)`
+reports `expected `UserId`, found `Int``.
 
 Opaque declaration:
 
@@ -316,6 +344,19 @@ General form:
 ```text
 test "name" Block
 ```
+
+`assert` is an ordinary `std::core` function and has to be imported —
+`import std::core::{assert};` — despite reading like a keyword. It is also
+**only legal inside a `test` block**; elsewhere the compiler refuses it:
+
+```
+error: `assert` is only allowed inside a `test` block; elsewhere, `raise` says
+       the same thing and says where it goes
+```
+
+That check runs at `khora build` and `khora run` rather than at `khora check`,
+so a package with an `assert` in application code can look clean and still fail
+to build.
 
 ## Benchmarks
 

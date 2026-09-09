@@ -80,7 +80,7 @@ and each capability's own module provides them:
 import std::clock::{Clock};
 import std::env::{Env};
 import std::fs::{FsRead, FsWrite};
-import std::log::{Level, Log};
+import std::log::{Severity, Log};
 
 pub fn main() -> Int {
   with {
@@ -88,7 +88,7 @@ pub fn main() -> Int {
     reads: FsRead::real(),
     writes: FsWrite::real(),
     clock: Clock::real(),
-    log: Log::json(Level::Info),
+    log: Log::json(Severity::Info),
   } {
     work()
   }
@@ -279,8 +279,8 @@ read = ["./data", "./data/**"]
 write = ["./data/out.txt"]
 ```
 
-Both `read` entries, and the reason is the one surprise in the glob dialect
-below: `./data/**` grants what is *inside* `data` and not `data` itself, so with
+**Both `read` entries above are needed**, and the reason is the one surprise in
+the glob dialect below: `./data/**` grants what is *inside* `data` and not `data` itself, so with
 only that line a program can read every file in the directory and cannot list
 it. `read_dir("data")` and `is_dir("data")` both raise `Denied`. The probes raise rather than answering `false` for the reason given further down: a `false` that could mean "not there", "unreadable" or "not granted" is the one somebody debugs for an hour.
 

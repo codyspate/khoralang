@@ -36,7 +36,7 @@ Every archive is published with a `.sha256` beside it, and the installer checks
 it. If you fetched an archive by hand, check it the same way:
 
 ```bash
-sha256sum -c khora-0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c khora-0.2.0-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 A checksum says the bytes are the ones that were published. It does not say who
@@ -46,7 +46,7 @@ a signed statement, made by GitHub during the release run, of which workflow in
 which repository at which commit produced that exact file.
 
 ```bash
-gh attestation verify khora-0.1.0-x86_64-unknown-linux-gnu.tar.gz   --repo codyspate/khoralang
+gh attestation verify khora-0.2.0-x86_64-unknown-linux-gnu.tar.gz   --repo codyspate/khoralang
 ```
 
 There is no maintainer key to trust and none to leak. The signing identity is
@@ -72,6 +72,47 @@ It is rendered from the resolution rather than from a lockfile read off disk,
 so it describes what a build here would use. Pass `--locked` to refuse a stale
 lockfile instead of absorbing the difference.
 
+## Linux system requirements
+
+The published Linux build is dynamically linked against glibc, and a glibc
+program cannot run against a library older than the one it was compiled
+against. The release is built on Ubuntu 24.04, so:
+
+| | |
+| --- | --- |
+| **glibc 2.39 or newer** | required by the published `x86_64-unknown-linux-gnu` build |
+
+That is a real constraint and not a rounding error. Distributions in wide use
+today are on both sides of it:
+
+| distribution | glibc | the published build |
+| --- | --- | --- |
+| Ubuntu 24.04 LTS | 2.39 | runs |
+| Debian 13 (trixie) | 2.41 | runs |
+| Debian 12 (bookworm) | 2.36 | does not run |
+| Ubuntu 22.04 LTS | 2.35 | does not run |
+| RHEL 9 and rebuilds | 2.34 | does not run |
+| Alpine, and anything on musl | not glibc | does not run |
+
+`install.sh` checks this before it downloads anything, and refuses with the two
+numbers rather than installing a toolchain that cannot start. If you are on a
+distribution below the line, the options are a newer distribution — including
+a container built on one — or [building from
+source](#build-the-compiler-from-source), which links the compiler against the
+glibc you have.
+
+Check yours with:
+
+```bash
+ldd --version | head -1
+```
+
+This is a property of the *toolchain*, not of the programs you compile with it:
+a program built by Khora is linked against the machine that built it, so
+building on Ubuntu 24.04 and deploying to Debian 12 has the same problem for
+the same reason. [Containers](/docs/deployment/containers/) says to use the
+same base image in both stages, which is that advice.
+
 ## System linker requirement
 
 Khora compiles to native object code, so producing an executable requires the platform's linker, C runtime, and system libraries. You do **not** need to install LLVM separately; LLVM is linked into the Khora compiler rather than invoked as an external program.
@@ -94,7 +135,7 @@ Use `khora` itself to install and switch compiler versions:
 ```bash
 khora update                      # install the newest release and use it
 khora toolchain install 0.2.0     # install a particular release
-khora toolchain default 0.1.0     # choose the default release
+khora toolchain default 0.1.0     # select an installed release as the default
 khora toolchain list              # list installed toolchains
 khora toolchain which             # show the version selected here and why
 ```

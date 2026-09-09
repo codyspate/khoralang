@@ -1,7 +1,7 @@
 ---
 title: Logging, and correlating it with traces
 sidebar:
-  order: 13
+  order: 12
 ---
 
 A log line is read by a program before it is read by a person: it goes to a
@@ -11,7 +11,6 @@ there. So `std::log` emits one JSON object per line, on standard error.
 ```khora
 module orders::main;
 
-import std::clock::{Clock};
 import std::log::{Severity, Log, info, warn};
 
 fn charge(amount: Int) -> Int with { log: Log } {

@@ -1,7 +1,7 @@
 ---
 title: Cancellation-safe resources
 sidebar:
-  order: 5
+  order: 6
 ---
 
 A resource should register its cleanup as soon as acquisition succeeds. In Khora, `scoped` creates the lifetime and `acquire` ties a value's release function to that lifetime.

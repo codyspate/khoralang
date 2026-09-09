@@ -578,13 +578,15 @@ be met in.
 
 ### It is §1, and the shape of the evidence is unusually clean
 
-Three walks over the same thousand-element list, counted:
+Three walks over the same thousand-element list, counted. **The middle row is
+0 now** -- see the note below the spike; the table is what it was when the
+section was written:
 
-| walk | allocations |
-| --- | --- |
-| recursive rebuild — `Cons(head + 1, increment(tail))` | 0 |
-| `for n in xs`, which builds a `Step` per element | 1,000 |
-| a hand-written `loop`/`match`, which builds nothing | 0 |
+| walk | allocations, then | now |
+| --- | --- | --- |
+| recursive rebuild — `Cons(head + 1, increment(tail))` | 0 | 0 |
+| `for n in xs`, which builds a `Step` per element | 1,000 | **0** |
+| a hand-written `loop`/`match`, which builds nothing | 0 | 0 |
 
 And, narrower still, the same `Iterator::next` reached two ways — recursively,
 and from a `loop` — is 0 allocations against 1,000. The callee is identical.
@@ -609,6 +611,15 @@ correctly. Four changes: a real backward-liveness fixed point over the body, an
 assignment ending what its binding held, a take clearing the slot even where
 nothing unwinds, and a `break` taking its live set from after the loop rather
 than from the back edge.
+
+**It has since landed, and this section is kept for the diagnosis rather than
+the conclusion.** Measured on the current tree with `khora_alloc_count`, the
+three walks are 0, **0** and 0, and a `List` folded through `Iterator` is
+**1** — exactly what the spike promised, so the numbers in the table above are
+now history. What follows is the account of why it took a second attempt, and
+the method it produced is the part worth keeping.
+
+The original entry:
 
 **It cannot land.** All 2,480 tests pass. The reference application under
 `scripts/http_conformance.sh` then answers `GET /health` and dies on the first

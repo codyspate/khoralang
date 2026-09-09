@@ -30,8 +30,12 @@ A `Schema<A>` splits that in half. It describes an `A`; a [`Raw`] is whatever
 some source produced; `decode` is one function over the pair.
 
 ```khora
-let settings = Schema::decode(schema(), incoming)!;
+let decoded = Schema::decode(schema(), incoming);
 ```
+
+There is no `!` on that call: `decode` answers a `Validated<Settings,
+Rejection>` rather than raising, which is what lets it report every bad field
+at once. [What a failure is](#what-a-failure-is) below is how you read one.
 
 Where `incoming` came from is the caller's business. The same
 `Schema<Settings>` reads the environment, a request body and a test fixture.
@@ -175,8 +179,10 @@ Each line is one [`Rejection`](/docs/stdlib/api/schema/#rejection), and
 say `listen.port` or `items[3].id`; the path is held innermost-first and turned
 round only when a message is built.
 
-`Validated::to_result` is one call for a caller who would rather stop at the
-first problem.
+A caller who would rather stop at the first problem has
+[`decode_or_stop`](/docs/stdlib/api/schema/#decode_or_stop), which answers a
+`Result<A, List<Rejection>>` and does not do the work of collecting the rest.
+`Validated::to_result` converts one that was already decoded.
 
 ### A number keeps its text
 

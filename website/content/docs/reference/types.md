@@ -210,7 +210,7 @@ fn serve() -> Response
 fn hold(r: Result<Int, A + B>) -> Int   // error
 ```
 
-A `Result` holds one error type. Handle a wider row with [`catch`](/docs/reference/failures/#catch), which matches per type and never has to name a combined type.
+A `Result` holds one error type. Handle a wider row with [`catch`](/docs/reference/failures/#handle-failures-with-catch), which matches per type and never has to name a combined type.
 
 There is no union type — no way to write "an `Int` or a `String`" as the type of a value. `+` in a bound (`T: Eq + Show`) is the *other* meaning of the symbol and means the parameter implements both.
 
@@ -269,22 +269,36 @@ are bare:
 { Timeout | Refused }
 ```
 
-That spelling matters in type-argument position, which is the one place a row
-has to be written down rather than inferred. A `Fiber`'s second parameter is a
-row, so:
+The bare spelling above is the one a `raises` clause takes. In
+**type-argument** position — the one place a row has to be written down rather
+than inferred — an error row's entries are *labelled*, and an error row labels
+each type with its own name. A `Fiber`'s second parameter is a row, so the form
+that works everywhere is:
 
 ```khora
-let f: Fiber<(), { Oops }> = Fiber::spawn(work);   // correct
-let g: Fiber<(), Oops> = Fiber::spawn(work);       // refused
+fn stop(f: Fiber<(), { Oops: Oops }>) -> () { Fiber::cancel(f) }
+
+let f: Fiber<(), { Oops: Oops }> = Fiber::spawn(work);
 ```
 
-`Fiber<(), Oops>` is a type where a row belongs. It is a declaration nothing
-can inhabit, and the compiler says so at the assignment:
+`Fiber<(), Oops>` is a type where a row belongs; it is refused, and the
+compiler prints the shape it wanted:
 
 ```
-error: expected `Fiber<(), Oops>`, found `Fiber<(), { Oops: Oops }>`; `Oops` is
-       a type and a row belongs here — write it `{ Oops }`
+error: this argument: expected `() -> () raises { | Oops }`, found
+       `() -> () raises { Oops: Oops }`; `Oops` is a type and a row belongs
+       here. A row's entries are labelled, and an error row labels each type
+       with its own name — write it `{ Oops: Oops }`. The bare name is right in
+       a `raises` clause and only a type argument needs the braces
 ```
+
+**`{ Oops }` is not the same thing as `{ Oops: Oops }`.** In a `let`
+annotation it happens to check, because the annotation is unified against an
+inferred type. In a parameter or return type it is read as `{ | Oops }` — an
+open-tail row *variable* named `Oops` — the declaration is accepted silently,
+and the mismatch surfaces at the call site with the caret on the argument
+rather than on the signature. Write the labelled form and it is right in both
+places.
 
 Most code never writes one, because a signature's `raises` clause takes the
 types directly (`raises Oops`) and everything else infers. `Fiber<A, 'er>` in

@@ -69,6 +69,12 @@ Underscores may be used as visual separators.
 
 A fractional literal without the decimal suffix is an IEEE `Float`.
 
+**An exponent needs a fractional part in front of it.** `6.02e23` and `1.0E-6`
+are literals; `1e19` is not, and is reported as `expected `;`` — the lexer
+stops at the `1` and the `e19` that follows is not part of the number. Write
+`1.0e19`. The same rule applies to a `d` suffix: `1.25e3d` is a `Decimal`
+literal and `1e19d` is a parse error.
+
 ## Decimal literals
 
 Append `d` directly to the number for an exact `Decimal` literal:
@@ -139,7 +145,23 @@ error: `Colour` has no `Show`, so it cannot go in a `${..}` hole. Write
 ```
 
 `Show` does not have to be imported to interpolate. The hole is the use, and
-the trait is never named in the source.
+the trait is never named in the source. The value's *type* does have to be
+imported, though: a hole over a `List<Int>` in a module that never wrote `List`
+reports the same "has no `Show`" error even though `List` implements it.
+
+**A quote inside a hole is written unescaped.** `${...}` is scanned as source,
+not as string content, so the inner literal's quotes stand as they are:
+
+```khora
+"len = ${String::byte_length("abc")}"     // correct
+"len = ${String::byte_length(\"abc\")}"   // refused
+```
+
+The escaped form gives a message that names the wrong thing —
+``error: this `${..}` does not contain an expression`` — and that message is
+what *any* parse error inside a hole produces, with the whole hole underlined.
+Binding the value to a `let` on the line before is the way out of a hole that
+will not parse.
 
 Interpolation is for text a person will read. Where another program consumes
 the output, reach for a structured encoder such as `std::json` instead — a

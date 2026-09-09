@@ -118,6 +118,28 @@ impl<TypeParams>? TraitType for TargetType {
 
 A trait implementation provides the methods and associated types required by the trait.
 
+### Coherence, as it stands today
+
+One impl of a trait for a type is the rule, and within a single **module** the
+compiler enforces it:
+
+```
+error: `Codec` is already implemented for `A`; there can be only one impl of a
+       trait for a type
+```
+
+**Across modules and across packages it is not enforced yet.** A second `impl
+Codec for A` in another module of the same package, or in a package that
+depends on the one declaring both `Codec` and `A`, compiles with no error and
+no warning — and the one that runs is the impl in the module that declares the
+trait, so the other is accepted, checked, and never called.
+
+There is no orphan rule to lean on either. Until that is closed, treat "the
+declaring package owns the impl" as a convention you keep rather than one the
+compiler keeps for you: implement a trait for a type you declare, or a type you
+declare for someone else's trait, and do not implement someone else's trait for
+someone else's type expecting the result to be used.
+
 ## Generic implementations
 
 ```khora

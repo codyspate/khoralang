@@ -55,7 +55,7 @@ fn print_later(value: Int) -> () {
 
 Releasing the final `Fiber` handle also waits for the child. This means a fiber cannot silently outlive the scope that still owns its handle.
 
-`Fiber::detach` is the exception, and the only one: it stops waiting and asks the fiber to stop. The fiber keeps running, its answer is discarded, and a later failure is silent — the program said it was no longer listening. It cancels as well as detaching, because a detached fiber nobody asked to stop is a leak with a nicer name.
+`Fiber::detach` is the exception, and the only one: it stops waiting and asks the fiber to stop. Both halves are asynchronous — `detach` signals and returns at once, so the fiber keeps running until it reaches its next cancellation point rather than stopping where it is. Its answer is discarded when it arrives, and a later failure is silent — the program said it was no longer listening. It cancels as well as detaching, because a detached fiber nobody asked to stop is a leak with a nicer name.
 
 Without it, a bounded wait over a body with an uninterruptible tail could not be honored. That is the failure it exists for: every other way out of a handle waits, letting the binding go included, so one finalizer that never returns holds its nursery, which holds its parent, up to `main`. Reach for it when a bounded wait matters more than a clean one, and not otherwise.
 
@@ -114,7 +114,7 @@ A fiber is an operating-system thread. There is a second implementation — stac
 KHORA_FIBERS=scheduler ./build/myapp
 ```
 
-**A program cannot tell which it has.** `spawn`, `join`, `cancel` and the nursery mean the same thing under both, which is why the choice is a runtime setting and not a language one, and why the default can change in a later release without breaking anything.
+**A program is meant not to be able to tell which it has, and today it can.** `spawn`, `join`, `cancel` and the nursery are intended to mean the same thing under both, which is why the choice is a runtime setting and not a language one. They do not yet: under `KHORA_FIBERS=scheduler` a fiber inside `clock.sleep` is woken by a cancellation and its sleep returns early, and under the default thread backend the sleep runs to completion — about a 350× difference in wall clock on the same source. Until that is closed the default cannot change without notice; [known limitations](/docs/limitations/#the-fiber-scheduler) has the measurements and [compatibility](/docs/reference/compatibility/) carries the policy consequence.
 
 Threads are the default because they are faster at the connection counts a service actually runs at. The coroutine's advantage is *density*: a suspended fiber costs roughly 4 KB against a thread's 33 KB, which matters when tens of thousands are waiting at once rather than working. That measurement exists for Windows and not yet for Linux — see [known limitations](/docs/limitations/#the-fiber-scheduler).
 
@@ -122,13 +122,15 @@ A thread also gets the operating system's stack, two megabytes on Linux and one 
 
 ### A child that failed
 
-A nursery is a unit: the block asked for these fibers together, so one failing means the group's answer is not coming. The first failure cancels the siblings, every child is still waited for, and the nursery raises
+A nursery is a unit: the block asked for these fibers together, so one failing means the group's answer is not coming. The first failure is intended to cancel the siblings; every child is still waited for, and the nursery raises
 
 ```khora
 pub type ChildFailed = { children: Int };
 ```
 
 A count rather than the child's own error, because `adopt` binds the row per adoption — two children may fail with two unrelated types and there is no one value to hand back. A child the nursery *cancelled* is not counted: that is what a nursery does to its children, not something that went wrong.
+
+**The cancelling half does not work yet.** A nursery reaps handles oldest-first, so a child's failure is invisible until every child adopted before it has finished — and by then there is usually nothing left to cancel. Measured with twelve 400 ms children, a failure in the last-adopted one cancelled no siblings in 25 runs out of 25. What still holds is the other half: every child is waited for and the failure is reported, never lost. Do not rely on a sibling's failure to stop work that is expensive, holds a resource, or has an effect outside the process — have that work check a `Shared` flag itself. [Known limitations](/docs/limitations/) has the numbers.
 
 The body may be a named function or a lambda. A lambda resolves its capabilities where it is written, and as the argument to `nursery` that is inside the row `nursery` installs, so `nursery(fan_out)` and `nursery(fn () => fan_out())` mean the same thing.
 
@@ -169,6 +171,11 @@ bounded_nursery(128, serve)
 ```
 
 Adopting past a bounded nursery's limit waits for older work to finish. Use this for work whose arrival rate is controlled externally so overload becomes backpressure instead of unbounded growth.
+
+Two riders on the number, both measured rather than intended:
+
+- **The limit admits `limit + 1` live children.** `Fiber::spawn` *starts* the child and `nursery.adopt` is what blocks, so by the time the bound is applied the extra work is already running. `bounded_nursery(128, serve)` above is 129 live children. Subtract one where the limit stands for a real resource such as a connection pool.
+- **A limit of zero or less means no limit**, because that is how the unbounded `nursery` is built. A limit computed from configuration that comes out zero removes the bound rather than clamping to one; check it before you pass it.
 
 Use unbounded `nursery` when the fan-out is already bounded by data the program holds, such as a known handful of independent tasks.
 
@@ -215,7 +222,7 @@ fn reaper() -> () with { clock: Clock } raises Stop {
 
 There is no `!` in that body. Without the back-edge it could not be cancelled, and a nursery that had to unwind past it would wait for ever.
 
-A blocked or suspended operation is made runnable so that the fiber can unwind its structured scopes. For most calls that is all it is: a *straight-line* blocking call is not itself a cancellation point, so the fiber wakes, finishes the call, and stops at the next `!` or back-edge after it.
+A blocked or suspended operation is meant to be made runnable so that the fiber can unwind its structured scopes. That describes the coroutine backend; under the default thread backend a fiber inside `clock.sleep` sleeps to the end before it sees the cancellation. For most calls that is all it is: a *straight-line* blocking call is not itself a cancellation point, so the fiber wakes, finishes the call, and stops at the next `!` or back-edge after it.
 
 `Channel::send` and `Channel::receive` are the exception, because they are the only two operations in `std::core` with no bound on how long they may wait. A worker parked on an empty queue has no next back-edge to reach, so leaving it to find one meant it never stopped at all. Both therefore carry a `raises 'er` row and are written `Channel::receive(jobs)!`; the row is what gives the cancellation something to travel out on. `poll` never waits and is not a cancellation point.
 

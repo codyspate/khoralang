@@ -109,8 +109,8 @@ impl<A: Share> Channel<A> {
   pub fn bounded(capacity: Int) -> Channel<A>;
   pub fn dropping(capacity: Int) -> Channel<A>;
   pub fn sliding(capacity: Int) -> Channel<A>;
-  pub fn send(self, value: A) -> Bool;
-  pub fn receive(self) -> Option<A>;
+  pub fn send<'er>(self, value: A) -> Bool raises 'er;
+  pub fn receive<'er>(self) -> Option<A> raises 'er;
   pub fn poll(self) -> Option<A>;
   pub fn close(self) -> ();
   pub fn depth(self) -> Int;

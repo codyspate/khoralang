@@ -36,7 +36,6 @@ The server currently provides:
 - go-to-definition and find-references;
 - document and workspace symbols;
 - semantic tokens;
-- inlay hints;
 - code actions and code lenses;
 - highlighting every mention of the name under the cursor;
 - go to the *type* of an expression, and to every `impl` of a type or trait;
@@ -52,7 +51,7 @@ Completion offers every public name in the workspace, not only what the file has
 
 Assists are the other half, and answer a different question: not what is wrong, but what you want done where the cursor is. A `let` with no annotation offers to write its inferred type down as text, which an inlay hint can only draw. A selected expression offers to become a `let` above the statement it was in. That one refuses where lifting it would cross something conditional, an `if` branch, a `match` arm, a lambda body, or the far side of `&&`, because running code the program said to skip is not a refactoring.
 
-A selection also offers to become a **function**, and that one is offered in all the places the `let` refuses: hoisting a expression runs it earlier, and a call left where the expression was runs at exactly the same moment. Blocks count here too, so selecting a run of statements and naming them is one keystroke.
+A selection also offers to become a **function**, and that one is offered in all the places the `let` refuses: hoisting an expression runs it earlier, and a call left where the expression was runs at exactly the same moment. Blocks count here too, so selecting a run of statements and naming them is one keystroke.
 
 What it writes is the interesting part. Parameters are the bindings the selection uses and does not declare, typed from the checker; the return type is the selection's own; and the `with` and `raises` clauses are written from what the calls inside actually demanded. So extracting three lines that reach a database and can fail produces
 
@@ -120,5 +119,4 @@ As with the language server, the client starts the process for you. You normally
 ## Next
 
 - [Your first Khora project](/docs/getting-started/first-project/) shows the command-line workflow the editor complements.
-- The [Language Reference](/docs/reference/) covers the language features the server is checking.
-- [Language Reference](/docs/reference/) is the lookup-oriented companion when you need exact syntax or semantics.
+- The [Language reference](/docs/reference/) covers the language features the server is checking, and is the lookup-oriented companion when you need exact syntax or semantics.

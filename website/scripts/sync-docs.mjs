@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
-import { current, stable, versions } from '../versions.mjs';
+import { current, editUrlFor, stable, versions } from '../versions.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
@@ -142,6 +142,43 @@ function routeForFile(file, source, version) {
   return `/docs/${version}/${routePath ? `${routePath}/` : ''}`;
 }
 
+// **A markdown link label can contain brackets, and the one that broke did.**
+//
+// The label was `` [`[toolchain]`] `` -- a code span naming a TOML table --
+// and the pattern here used to be `\[[^\]]*\]`, which stops at the first `]`
+// and so cannot match it. That was not merely a missed rewrite: `linksIn` and
+// `rewriteDocLinks` share this pattern, so the *same* blindness meant
+// `validateDocLinks` never looked at the link either. The build's own link
+// checker was silent about exactly the class of link the build failed to
+// rewrite, and a `/docs/reference/manifest/` with no page behind it shipped.
+//
+// So the label allows one level of nesting: either a character that is not a
+// bracket, or a whole bracketed run. One level is what CommonMark itself
+// permits inside a link label, and it is what a code span, an emphasis marker
+// or a nested `[...]` needs. The alternation cannot cross an unmatched `]`,
+// so `[a] [b](c)` still matches only `[b](c)`.
+const LINK_LABEL = String.raw`\[(?:[^\[\]]|\[[^\[\]]*\])*\]`;
+
+/// `[label](url "title")`, with the label allowed to contain brackets.
+///
+/// `split: true` returns three groups -- everything before the URL, the URL,
+/// and everything after -- so a replacement can put a rewritten URL back
+/// without reconstructing the label. Without it there is one group, the URL.
+function inlineLinkPattern({ split = false } = {}) {
+  const url = String.raw`[^\s)>]+`;
+  return split
+    ? new RegExp(String.raw`((?<!!)${LINK_LABEL}\(\s*<?)(${url})(>?[^)]*\))`, 'g')
+    : new RegExp(String.raw`(?<!!)${LINK_LABEL}\(\s*<?(${url})>?[^)]*\)`, 'g');
+}
+
+/// `[label]: url`, the reference-style definition, with the same label rule.
+function referenceDefinitionPattern({ split = false } = {}) {
+  const url = String.raw`[^\s>]+`;
+  return split
+    ? new RegExp(String.raw`^(\s*${LINK_LABEL}:\s*<?)(${url})(>?)`, 'gm')
+    : new RegExp(String.raw`^\s*${LINK_LABEL}:\s*<?(${url})>?`, 'gm');
+}
+
 function isExternalUrl(raw) {
   return /^[a-z][a-z0-9+.-]*:/i.test(raw) || raw.startsWith('//');
 }
@@ -198,9 +235,9 @@ function absoluteDocRoute(url, version) {
 function linksIn(text) {
   const found = [];
   const patterns = [
-    /(?<!!)\[[^\]]*\]\(\s*<?([^\s)>]+)>?[^)]*\)/g,
+    inlineLinkPattern(),
     /href\s*=\s*["']([^"']+)["']/gi,
-    /^\s*\[[^\]]+\]:\s*<?([^\s>]+)>?/gm,
+    referenceDefinitionPattern(),
   ];
 
   for (const pattern of patterns) {
@@ -230,24 +267,89 @@ function resolvedDocLink(url, fromFile, source, version) {
   return absoluteDocRoute(raw, version) ?? sourceRelativeRoute(raw, fromFile, source, version);
 }
 
-async function validateDocLinks(files, knownRoutes, source, version) {
+/// Every heading anchor a page offers, as the slugs a link may name.
+///
+/// Headings inside a fenced code block are not headings -- `# comment` in a
+/// shell example is the common one -- so the fences are tracked.
+function anchorsIn(text) {
+  const anchors = new Set();
+  let fenced = false;
+  for (const line of text.split(/\r?\n/)) {
+    if (/^\s*(```|~~~)/.test(line)) {
+      fenced = !fenced;
+      continue;
+    }
+    if (fenced) continue;
+    const heading = line.match(/^#{1,6}\s+(.+?)\s*#*\s*$/)?.[1];
+    if (heading) anchors.add(anchorFor(heading));
+    for (const explicit of line.matchAll(/\bid\s*=\s*["']([^"']+)["']/g)) {
+      anchors.add(explicit[1]);
+    }
+  }
+  return anchors;
+}
+
+async function validateDocLinks(files, knownRoutes, source, version, anchorsAreFatal) {
   const broken = [];
+  // **A link to a heading that does not exist is checked too**, because it is
+  // the same failure as a link to a page that does not exist and it is the one
+  // a reader hits after clicking: the page loads, and the browser sits at the
+  // top of it.
+  //
+  // **Fatal for `next`, reported for a released tree**, which `versions.mjs`
+  // already draws the line for: `next` is the tree this repository gates, and a
+  // tree under `content/versions/` describes a compiler this checkout is not,
+  // is not maintained against it, and must not be edited to make a gate on
+  // `next` go green. So an old tree's dangling anchors are printed, with file
+  // and line, on every build -- visible rather than enforced, which is the
+  // opposite of a checker that says nothing at all.
+  const danglingAnchors = [];
+  const anchorsByRoute = new Map();
+
+  for (const file of files) {
+    anchorsByRoute.set(routeForFile(file, source, version), anchorsIn(await readFile(file, 'utf8')));
+  }
 
   for (const file of files) {
     const text = await readFile(file, 'utf8');
     for (const link of linksIn(text)) {
       const resolved = resolvedDocLink(link.url, file, source, version);
-      if (!resolved) continue;
+      const where = `${path.relative(source, file)}:${link.line}`;
+      if (!resolved) {
+        // A bare `#anchor` names a heading on this page, and is the one link
+        // that never resolves to a route.
+        const own = link.url.trim();
+        if (own.startsWith('#') && own.length > 1) {
+          const anchors = anchorsByRoute.get(routeForFile(file, source, version));
+          if (anchors && !anchors.has(own.slice(1))) {
+            danglingAnchors.push(`${where} -> ${own} (no heading on this page)`);
+          }
+        }
+        continue;
+      }
       if (resolved.error) {
-        broken.push(`${path.relative(source, file)}:${link.line} -> ${link.url} (${resolved.error})`);
+        broken.push(`${where} -> ${link.url} (${resolved.error})`);
         continue;
       }
       if (!knownRoutes.has(resolved.route)) {
-        broken.push(
-          `${path.relative(source, file)}:${link.line} -> ${link.url} (resolves to missing route ${resolved.route})`,
-        );
+        broken.push(`${where} -> ${link.url} (resolves to missing route ${resolved.route})`);
+        continue;
+      }
+      const fragment = resolved.suffix.startsWith('#') ? resolved.suffix.slice(1) : '';
+      if (fragment) {
+        const anchors = anchorsByRoute.get(resolved.route);
+        if (anchors && !anchors.has(fragment)) {
+          danglingAnchors.push(`${where} -> ${link.url} (${resolved.route} has no #${fragment})`);
+        }
       }
     }
+  }
+
+  if (danglingAnchors.length > 0) {
+    const report = `${version}: ${danglingAnchors.length} link(s) to a heading that does not exist:\n`
+      + danglingAnchors.map((link) => `  ${link}`).join('\n');
+    if (anchorsAreFatal) broken.push(...danglingAnchors);
+    else console.warn(report);
   }
 
   if (broken.length > 0) {
@@ -266,7 +368,7 @@ function rewriteDocUrl(url, fromFile, knownRoutes, source, version) {
 function rewriteDocLinks(text, fromFile, knownRoutes, source, version) {
   const rewrite = (url) => rewriteDocUrl(url, fromFile, knownRoutes, source, version);
   text = text.replace(
-    /((?<!!)\[[^\]]*\]\(\s*<?)([^\s)>]+)(>?[^)]*\))/g,
+    inlineLinkPattern({ split: true }),
     (whole, before, url, after) => `${before}${rewrite(url)}${after}`,
   );
   text = text.replace(
@@ -274,9 +376,29 @@ function rewriteDocLinks(text, fromFile, knownRoutes, source, version) {
     (whole, before, url, after) => `${before}${rewrite(url)}${after}`,
   );
   return text.replace(
-    /^(\s*\[[^\]]+\]:\s*<?)([^\s>]+)(>?)/gm,
+    referenceDefinitionPattern({ split: true }),
     (whole, before, url, after) => `${before}${rewrite(url)}${after}`,
   );
+}
+
+/// Point "Edit this page" at the file somebody can actually edit.
+///
+/// Written per page rather than left to `editLink.baseUrl` in the config,
+/// because the two trees have two different source roots and Starlight has one
+/// base URL. `versions.mjs`'s `editUrlFor` has the argument in full.
+///
+/// A page that already carries `editUrl` keeps it: an author who wrote one by
+/// hand meant it, and `false` there is how a page opts out.
+function addEditUrl(text, url) {
+  if (!text.startsWith('---\n') && !text.startsWith('---\r\n')) return text;
+  const frontmatterEnd = text.indexOf('\n---\n', 4);
+  if (frontmatterEnd < 0) return text;
+  const frontmatter = text.slice(0, frontmatterEnd);
+  if (/^editUrl\s*:/m.test(frontmatter)) return text;
+  // The banner block above ends with its own newline, so trim before joining
+  // or the frontmatter gains a blank line on every sync.
+  const head = text.slice(0, frontmatterEnd).replace(/\n+$/, '');
+  return `${head}\neditUrl: "${url}"${text.slice(frontmatterEnd)}`;
 }
 
 function addBanner(text, banner) {
@@ -311,7 +433,15 @@ for (const tree of trees) {
   // old version's pages are not maintained, but they are served, and a reader
   // following a dead link out of one has no way to tell it from a bug in the
   // one they wanted.
-  await validateDocLinks(sourceFiles, knownRoutes, tree.source, tree.version.id);
+  // **Anchors are fatal in every tree, released ones included.** They were
+  // reported-not-failed for a stable tree on the reasoning that its pages are
+  // nobody's to edit -- but `check-released-docs.sh` says the opposite in its
+  // own words: "Drift is allowed and is reported, not failed. Documentation
+  // gets corrected after a release -- that is most of why versioned trees
+  // exist." A dead anchor is a correction, not a rewrite; it does not change
+  // what the release documented. Three of them sat in `v0.1` printing a
+  // warning on every build, which is how a warning stops being read.
+  await validateDocLinks(sourceFiles, knownRoutes, tree.source, tree.version.id, true);
 
   await mkdir(tree.target, { recursive: true });
   // Pages only. `khora doc` keeps a `.khora-doc` record beside the reference it
@@ -388,6 +518,7 @@ async function normalizeMarkdown(dir, tree) {
 
     text = rewriteDocLinks(text, canonicalSource, tree.knownRoutes, tree.source, tree.version.id);
     text = addBanner(text, bannerFor(tree.version));
+    text = addEditUrl(text, editUrlFor(tree.version, relative.split(path.sep).join('/')));
     await writeFile(full, text, 'utf8');
   }
 }
@@ -403,14 +534,31 @@ const apiSections = new Set([
   'Constants',
 ]);
 
+/// The id Astro will give a heading, so a link written to one lands on it.
+///
+/// **This has to agree with `github-slugger`**, which is what Astro's markdown
+/// pipeline uses, and it did not. Two divergences, both of which produced dead
+/// anchors on pages this script writes:
+///
+///   - `_` was stripped along with the other markdown emphasis characters, so
+///     `### bounded_nursery` was indexed as `#boundednursery` while its real id
+///     is `#bounded_nursery`. Every underscored name in an "API at a glance"
+///     row -- which is most of `std` -- was a link to nothing.
+///   - repeated hyphens were collapsed, so a heading whose punctuation leaves
+///     two spaces (`` `[toolchain]` -- which Khora builds this ``, an em dash
+///     between them) was indexed as `#toolchain-which-...` where the real id
+///     keeps both hyphens.
+///
+/// So: lower-case, drop the characters a slugger drops *without* putting
+/// anything in their place, turn each remaining space into a hyphen, and leave
+/// the result alone. Backticks and `*`/`~` fall out of the punctuation class
+/// on their own; `_` and `-` survive because a slug keeps them.
 function anchorFor(heading) {
   return heading
     .trim()
     .toLowerCase()
-    .replace(/[`*_~]/g, '')
-    .replace(/[^\p{L}\p{N}\s-]/gu, '')
-    .replace(/\s+/g, '-')
-    .replace(/-+/g, '-');
+    .replace(/[^\p{L}\p{N}\s\-_]/gu, '')
+    .replace(/\s/g, '-');
 }
 
 function apiIndex(text) {

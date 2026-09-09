@@ -129,11 +129,19 @@ answers five times as many requests.
    tighter than 1.85×.
 4. The machine, the profile and the date printed beside the number.
 
-All four hold for the table above, and `bench/measure.py` checks them on
-every run rather than leaving them to be remembered. A server that fails one
-is reported with what failed instead of with a number, which is the whole
-difference between this rig and the one it replaced: the old one could not
-fail, so it always produced a figure.
+Conditions 3 and 4 hold for every row in the table above. Conditions 1 and 2
+hold for every row **not** marked `>`; the three that are marked — Khora
+`floor`, Khora `render` and Java — are printed as lower bounds precisely
+because they failed one. The generator was still gaining when given more of the
+machine against `floor` and `render`, so the bottleneck was the generator and
+not the server; Java's rate had not flattened at the top of the ladder. A row that
+fails a condition is not a measurement of the server, and the `>` is how the
+table says so.
+
+`bench/measure.py` checks all four on every run rather than leaving them to be
+remembered, and reports what failed alongside the bound instead of a bare
+number. That is the whole difference between this rig and the one it replaced:
+the old one could not fail, so it always produced a figure.
 
 ## Running them yourself
 
@@ -174,3 +182,12 @@ request. It isolates the library from the handler, which is the point, and it
 resembles no real workload: nothing here has a body worth parsing, a database
 behind it, or a response worth rendering. Cold start is not measured, and
 neither is behaviour under more connections than the machine has cores.
+
+**And every row is a Windows number.** One machine is what makes eight
+runtimes comparable to each other, and it is also the limit of what the table
+says: none of it has been reproduced on Linux or macOS, which is where most
+deployments run. [Known limitations](/docs/limitations/) disqualifies this
+project's fiber-density claim for being measured on Windows only, and the same
+standard applies here — the table is evidence about this machine until somebody
+runs `bench/measure.py` on another one, which is the reason the commands above
+are on the page.

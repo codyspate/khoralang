@@ -68,6 +68,18 @@ The pragma applies to the line that follows it. `unknown-allow` is what makes it
 
 Prefer the naming escape where one exists. A binding whose name starts with `_` is deliberately unused, and `_` alone binds nothing — both are quieter than a pragma and neither goes stale.
 
+**The receiver of a trait method is the exception.** `self` is part of the
+signature: it cannot be deleted, and renaming it to `_self` is refused with
+``error: the receiver of `tag` is `?` here, but `Codec` declares `A``. A trait
+method that ignores its receiver — common in a witness trait — takes the pragma:
+
+```khora
+impl Codec for IntCodec {
+  // @klint allow unused-binding
+  fn encode(self, value: Int) -> String { Int::to_string(value) }
+}
+```
+
 ## Where they run
 
 - `khora check` and `khora build`, against the manifest nearest the file.

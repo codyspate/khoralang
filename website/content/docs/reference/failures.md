@@ -115,6 +115,15 @@ let user = load_user(id)! catch {
 };
 ```
 
+**The `!` is still required.** `catch` handles a failure that has already been
+let out of the call, so `load_user(id) catch { .. }` — without the mark — is
+refused before the arms are looked at:
+
+```
+error: `load_user` can leave this function, so the call needs `!`:
+       write `load_user(..)!`
+```
+
 A `catch` arm uses ordinary pattern syntax over the failure value. The success path keeps the value produced by the inner expression; a matching arm produces the replacement value.
 
 A bare name binds the whole failure, the way it does in a `match`:
@@ -244,18 +253,24 @@ match result {
 
 ```text
 error: this argument: `Denied` is not accounted for here. This takes one error
-       type and the body raises `IoError` and `Denied`; there is no type that
+       type and the body raises `Denied` and `IoError`; there is no type that
        means "either of these", so handle them with `catch` instead
 ```
 
 This is a real limit rather than an oversight. `Result<A, E>` needs one `E`, and Khora has no anonymous sum type to name "either of these two" — so there is nothing for a two-type row to collapse into. Naming the union would mean declaring a type for every pair of failures a program happens to combine.
 
-Use [`catch`](#catch) for a wider row. It matches per type and never has to name the union:
+Use [`catch`](#handle-failures-with-catch) for a wider row. It matches per type and never has to name the union:
+
+Here `fetch` raises `std::fs`'s `IoError` and the program's own `Denied`, and
+one `catch` covers both. Every constructor is written with its type in front of
+it, and naming a type commits to all of its variants — `IoError` has three:
 
 ```khora
 let answer = fetch(url)! catch {
   IoError::NotFound(_path) => fallback(),
-  Denied(_path) => refuse(),
+  IoError::Failed(_path) => fallback(),
+  IoError::Denied(_path) => refuse(),
+  Denied::Denied(_path) => refuse(),
 };
 ```
 
@@ -277,11 +292,23 @@ error: `List::map` can leave this function, so the call needs `!`: write `List::
 error: `List::map` needs `Bad`, which this function does not raise
 ```
 
-Every combinator that takes a function is written that way — `fold`, `filter`,
-`find`, `any`, `all`, `partition`, `flat_map`, and their counterparts on
-`Option` and `Result` — so a fallible step never means leaving the chain to
+Every combinator on `List` that takes a function is written that way — `fold`,
+`filter`, `find`, `any`, `all`, `partition`, `flat_map`, and their counterparts
+on `Option` and `Result` — so a fallible step never means leaving the chain to
 write the walk by hand. Mapping a *pure* function needs neither mark: an empty
 row is what a row variable takes when nothing fills it.
+
+**`std::fs::fold_lines` and `fold_chunks` are the exception.** Their `step`
+parameter is `(A, String) -> A` with no `with` row and no `raises` row, so a
+step that fails or that needs a capability cannot be passed:
+
+```text
+error: this argument: `Bad` is not accounted for here
+```
+
+The message does not say why. Until those signatures grow rows, a streaming
+walk whose step can fail has to be written as `read_text` plus
+`String::split`, which holds the whole file.
 
 ## Collect per-item failures
 

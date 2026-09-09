@@ -1,5 +1,5 @@
 ---
-title: Production cookbook
+title: Cookbook
 sidebar:
   order: 0
 ---
@@ -7,6 +7,11 @@ sidebar:
 The Cookbook combines Khora language features and shipped standard-library APIs into complete application patterns. Each recipe includes the imports, types, functions, and boundary wiring needed to understand the example as a whole instead of showing an isolated call with important pieces omitted.
 
 Start with the recipe closest to the problem you are solving:
+
+<!-- Ordered as the sidebar is: each bullet's position here is the `sidebar.order`
+     in that recipe's frontmatter. They drifted apart once -- two recipes shared
+     order 6, two numbers went unused, and `logging.md` was missing from this
+     list entirely -- so if you add a recipe, add it in both places. -->
 
 - [Build an HTTP service](/docs/cookbook/http-service/) — route requests with `Router`, `Request`, `Response`, and `SharedFn`.
 - [Build a typed JSON API](/docs/cookbook/json-api/) — parse JSON, decode typed request bodies, derive encoders/decoders, and return JSON responses.
@@ -19,6 +24,7 @@ Start with the recipe closest to the problem you are solving:
 - [Retry a flaky call](/docs/cookbook/retrying/) — pick a `Schedule`, drive it with `retry_while`, and test the whole thing in under a millisecond.
 - [Test code that uses capabilities](/docs/cookbook/testing-capabilities/) — supply deterministic handlers without global mutation or test-only branches in application code.
 - [Trace an operation](/docs/cookbook/tracing/) — implement a `Tracer`, wrap work with `around`, and keep span lifetime structured.
+- [Log, and correlate it with traces](/docs/cookbook/logging/) — emit one JSON object per line with `std::log`, and carry the trace and span identifiers onto every line inside a span.
 
 ## How to read the examples
 

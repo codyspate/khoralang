@@ -97,8 +97,24 @@ khora: key from compiler af126c475886 linker 8bbe086dfb0f runtime 1ecc48dd160a
        target None profile debug debug true kind exe
 khora:   source .../src/main.kh d0acfb0cb2e2...
 khora: cache key a12bb5ede947...
-khora: cache miss, nothing has been built with this key
+note: cache miss, nothing has been built with this key
 ```
+
+**Why the last line is `note:` and the others are `khora:`.** A miss is a build
+about to succeed, and `khora:` is the prefix on a line reporting the toolchain
+*failing* -- so `khora: cache miss, the key moved` was arriving on stderr on
+every ordinary rebuild, wearing the prefix reserved for a trap. It says `note:`
+on stdout now, beside the `built` line it belongs to. The explain-only lines
+above it keep `khora:` for the moment; that inconsistency is known and is a
+decision nobody has made yet rather than one made this way on purpose.
+
+**And "the key moved" is explain-only now.** It was written for the interesting
+case -- a tree nobody changed whose key moved anyway -- and cannot tell that
+apart from the case it actually meets, which is that you edited a file, so of
+course the key moved. It fired on every rebuild in the edit loop. That is
+errata 66's shape one variant along: a question about whether something was
+*unexpectedly* different, answered by a check that only ever asked whether it
+was different at all.
 
 **A cache that cannot say why it missed is a cache nobody can maintain.** This
 is shipped rather than scaffolding, and errata 51 is why: three plausible

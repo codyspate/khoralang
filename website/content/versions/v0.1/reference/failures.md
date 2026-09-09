@@ -250,7 +250,7 @@ error: this argument: `Denied` is not accounted for here. This takes one error
 
 This is a real limit rather than an oversight. `Result<A, E>` needs one `E`, and Khora has no anonymous sum type to name "either of these two" — so there is nothing for a two-type row to collapse into. Naming the union would mean declaring a type for every pair of failures a program happens to combine.
 
-Use [`catch`](#catch) for a wider row. It matches per type and never has to name the union:
+Use [`catch`](#handle-failures-with-catch) for a wider row. It matches per type and never has to name the union:
 
 ```khora
 let answer = fetch(url)! catch {

@@ -103,8 +103,10 @@ for pattern in iterable {
 }
 ```
 
-The left side is a pattern. Khora has no tuple *literal*, so an iterator over
-pairs yields a `Pair`, and the loop binds it by name:
+The left side is a pattern. Khora has a tuple literal — see
+[Tuple and unit expressions](/docs/reference/expressions/) — but no standard
+iterator yields one: an iterator over pairs yields a `Pair` record, so the loop
+binds it by name and reads its fields.
 
 ```khora
 for entry in Dict::entries(table) {
@@ -112,8 +114,13 @@ for entry in Dict::entries(table) {
 }
 ```
 
+**`Pair<K, V>` has the fields `key` and `value`**, and `String::split_once`
+answers a `Split` with the fields `head` and `rest`. Both are ordinary records:
+they are read with `.`, and written as record literals — `let p: Pair<String,
+Int> = { key: "a", value: 1 };`.
+
 A tuple pattern — `for (key, value) in ...` — is only valid against a value
-whose type really is a tuple, and is refused otherwise:
+whose type really is a tuple, and is refused against a `Pair`:
 
 ```
 error: this pattern takes a value apart into 2 pieces, but `Pair<String, Int>`

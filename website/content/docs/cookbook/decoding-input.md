@@ -1,7 +1,7 @@
 ---
 title: Decode untrusted input
 sidebar:
-  order: 6
+  order: 7
 ---
 
 Write the type once. The compiler writes the schema from it, and the schema
@@ -55,8 +55,11 @@ way somebody would write them, and a rule supplies its own sentence, so
 Text is quoted and a number is bare, so `and is "8080"` says the value arrived
 as text.
 
-`Validated::to_result` is one call for a caller who would rather stop at the
-first.
+A caller who would rather stop at the first has two ways to say so, and they
+are not the same call. [`Schema::decode_or_stop`](/docs/stdlib/api/schema/#decode_or_stop)
+answers `Result<A, List<Rejection>>` and does not do the work of collecting the
+rest; `Validated::to_result` converts a `Validated` you already have. Prefer
+the first when you know at the call site that one problem is enough.
 
 ## The declaration is the schema
 

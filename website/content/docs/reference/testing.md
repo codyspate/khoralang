@@ -27,6 +27,12 @@ test "double returns twice its input" {
 }
 ```
 
+`assert` is a `std::core` function, not a keyword: the `import` line above is
+required. It is also legal **only inside a `test` block** — in application code
+the compiler answers ``error: `assert` is only allowed inside a `test` block;
+elsewhere, `raise` says the same thing and says where it goes``, and it does so
+at `khora build`, not at `khora check`.
+
 Run a package's tests from its root:
 
 ```bash
@@ -50,6 +56,7 @@ test "missing users are reported" {
   match result {
     Result::Ok(_) => assert(false),
     Result::Err(UserError::NotFound(id)) => assert(id == 999),
+    Result::Err(UserError::Unavailable(_)) => assert(false),
   }
 }
 ```
@@ -116,8 +123,8 @@ compared, where the benchmark's design allows it.
 
 ### Benchmarks build unoptimized unless told otherwise
 
-Like everything else the toolchain compiles — a language being brought up
-should give a readable crash by default. There is no `--release` flag here;
+They build unoptimized like everything else the toolchain compiles, because a
+language being brought up should give a readable crash by default. There is no `--release` flag here;
 `khora test` and `khora bench` read `KHORA_PROFILE`, because a flag on every
 subcommand is three ways to say one thing:
 

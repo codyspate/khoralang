@@ -53,7 +53,7 @@ test "double returns twice its input" {
   assert(double(21) == 42);
 }
 
-fn main() -> Int {
+pub fn main() -> Int {
   print("Hello, Khora!");
   0
 }

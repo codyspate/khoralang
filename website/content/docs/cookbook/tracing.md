@@ -1,7 +1,7 @@
 ---
 title: Tracing
 sidebar:
-  order: 4
+  order: 11
 ---
 
 Khora's tracing vocabulary lives in `std::trace`; exporters and vendor protocols can live in packages. Application code can program against `Tracer` and keep span lifetime structured regardless of where completed spans are eventually sent.

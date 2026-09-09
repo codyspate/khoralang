@@ -5833,8 +5833,16 @@ documentation, and every number below is over 20-25 runs on both backends.
 - **A bounded nursery starts children after a sibling has already failed** --
   a median of 6.5 of the 10 remaining, with work continuing 406 ms past the
   failure.
-- **`bounded_nursery(0, ..)` and negative limits are silently unbounded**, 200
-  children at once, where `Channel::bounded(0)` documents its clamp to one.
+- ~~**`bounded_nursery(0, ..)` is silently unbounded.**~~ Reported as a bug and
+  it is not one: `nursery()` *is* `bounded_nursery(0, body)`, so zero meaning
+  "no limit" is the design. What is true is smaller and still worth fixing --
+  nothing says so where a caller computing a limit would look, and
+  `Channel::bounded(0)` documents its clamp to one in the same library, so the
+  two spellings of "0" mean opposite things. A negative limit behaves as zero,
+  which is also undocumented.
+
+  Worth keeping as an entry because it is the one finding in this phase that
+  did not survive being checked, and the check was one `grep` into `std`.
 
 **And one the documentation is wrong about in the safe direction.** The
 channel fan-in serialisation the reference cites as the reason it cannot offer
@@ -5916,6 +5924,60 @@ unequal; the output directory has to be `.` rather than the empty path, or the
 artifact is a bare name that `Command::new` looks up on `PATH` instead of the
 directory it was just written to; and the `fn main(` search is a text match
 that a doc comment satisfies, which is what made `std` a candidate at all.
+
+
+### 16.10 The allocator was the platform's, and the platform was carrying the design
+
+`khora_alloc` is one allocation per Perceus object, so libc's `malloc` *was*
+the hot path -- and Rust's default global allocator is the system one. glibc
+gives each thread an arena; musl's `mallocng` does not. Measured on
+`bench/service`, medians of three, `failed 0` throughout, four cores with the
+load generator competing, so the ratios are the result and the absolutes are
+not:
+
+| threads | glibc | musl |
+| --- | --- | --- |
+| 8 connections, before | 37,886 | 17,126 |
+| 8 connections, after | **41,088** | **33,279** |
+| 64 connections, before | 70,740 | 19,567 |
+| 64 connections, after | **74,005** | **65,144** |
+
+One `#[global_allocator]` in `khora-rt`, which is linked into every generated
+program and -- through `khora-codegen-llvm` -- into the compiler as well. The
+libc gap closes from **3.6x to 1.14x**, glibc *gains* 4.6% rather than paying
+for it, and `examples/core_demo --release --no-cache` compiles in 5,940 ms
+against 8,946. 2,524 tests pass, the leak and allocation-count assertions
+included.
+
+**It is not a musl fix.** musl removed a cushion glibc was providing, and
+underneath was a language allocating once per object through whatever the
+distribution happened to install. A language whose throughput depends on which
+Linux the user chose has two numbers and publishes one.
+
+**And the scheduler is untouched by it**, which is the useful negative result:
+35,678 against threads' 74,005 on glibc, 27,843 against 65,144 on musl, still
+falling from 8 connections to 64 on both. Whatever is wrong there is its own.
+
+### 16.11 Three wrong measurements from one stale file
+
+`cargo build -p khora-cli` compiles `khora-rt` as an *rlib*. `libkhora_rt.a` --
+the archive every generated program links -- is produced only by
+`cargo build -p khora-rt`, and nothing rebuilds it when the toolchain is built.
+
+It was fourteen hours stale, and that one fact produced three separate wrong
+answers in a single session: a program declaring a counter failed to link
+against it; the allocator benchmark above was first run with a glibc runtime
+that did not contain the change, which read as an 11% regression and was
+reported as one; and a fix was written for the diagnosis that followed --
+`lto = true` deleting the symbol -- which was false, as removing the keep-alive
+and rebuilding from scratch shows.
+
+`scripts/check-runtime-symbols.sh` compares the 33 symbols
+`khora-codegen-llvm`'s `runtime.rs` declares against what the release archive
+defines, and rebuilds it when absent. That catches a missing symbol. It does
+**not** catch a present-but-stale archive -- the one that produces a believable
+number rather than an error -- and the real answer there is packaging: the
+staticlib should be built by whatever builds the compiler, so it cannot lag.
 
 
 ### 16.12 `HEAD` and `OPTIONS` were answered with 400 Bad Request

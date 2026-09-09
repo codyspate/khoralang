@@ -36,14 +36,31 @@ Khora spells compile-time names and runtime values differently, and the
 difference is load-bearing when reading unfamiliar code:
 
 ```khora
-let response = http::Response::text(200, "ok");
+import http::{Response};
+
+let response = Response::text(200, "ok");
 print(Int::to_string(response.status));
 ```
 
-- `::` walks modules, types, constructors and associated items;
+- `::` walks types, constructors and associated items;
 - `.` projects a field, or calls behaviour on a runtime value.
 
 So `Response::text` is visibly not `response.status`.
+
+**`::` does not walk modules at a use site.** A module path is only ever
+written in an `import`; it cannot prefix an expression. Both of these are
+refused with `cannot resolve ... in this scope`:
+
+```khora
+http::Response::text(200, "ok")   // refused
+app::helper::greeting()           // refused
+```
+
+A glob import does not change that either: `import app::helper::*;` brings the
+names in unqualified, and `helper::greeting()` still does not resolve. Every
+name a module uses is imported unqualified, so two modules that export the same
+name are separated with `as` — `import app::money::{add as money_add};` —
+rather than by qualifying the call.
 
 ### A field needs its type imported
 
@@ -92,6 +109,21 @@ package's modules and **not** the other programs, which is what stops two
 One file per program. A program needing several modules of its own is a
 package, and that is the shape to reach for rather than a directory inside
 `src/bin`.
+
+**`src/main.kh` is one of "the other programs".** A shared module under `src/`
+may not `import` from it once the package has anything in `src/bin/`, because
+each `src/bin` program is compiled without `src/main.kh` and the import has
+nothing to resolve against:
+
+```
+error: cannot find module `myapp.main`
+error: cannot find `answer` in this scope
+```
+
+Only `khora build` reports this — `check`, `test` and `run` all pass, because
+they compile the package's own program where `src/main.kh` *is* present. Keep
+anything shared in its own module (`src/shared.kh`) and leave `src/main.kh`
+holding only `main`.
 
 `khora run .` runs the package's own program. To run one of the others, name
 it:

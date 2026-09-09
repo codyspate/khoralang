@@ -210,7 +210,7 @@ fn serve() -> Response
 fn hold(r: Result<Int, A + B>) -> Int   // error
 ```
 
-A `Result` holds one error type. Handle a wider row with [`catch`](/docs/reference/failures/#catch), which matches per type and never has to name a combined type.
+A `Result` holds one error type. Handle a wider row with [`catch`](/docs/reference/failures/#handle-failures-with-catch), which matches per type and never has to name a combined type.
 
 There is no union type — no way to write "an `Int` or a `String`" as the type of a value. `+` in a bound (`T: Eq + Show`) is the *other* meaning of the symbol and means the parameter implements both.
 

@@ -82,7 +82,7 @@ Deriving `Show` on a type you are chasing costs one line and survives the sessio
 
 ## When a fiber is involved
 
-A trap inside a fiber names that fiber's stack, not the parent's. If a program hangs rather than traps, the usual cause is a fiber waiting on something that will not arrive — a channel nobody sends to, or a nursery whose child is blocked in a call with no cancellation point in it. [Concurrency](/docs/reference/concurrency/) has the rules for where a fiber can be stopped; a `!` on a fallible call is the only place.
+A trap inside a fiber names that fiber's stack, not the parent's. If a program hangs rather than traps, the usual cause is a fiber waiting on something that will not arrive — a channel nobody sends to, or a nursery whose child is blocked in a call with no cancellation point in it. [Concurrency](/docs/reference/concurrency/) has the rules for where a fiber can be stopped; there are two places — a `!` on a fallible call, and a loop back-edge — and both need the function to carry a `raises` row.
 
 ## Reporting what you find
 

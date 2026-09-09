@@ -1,7 +1,7 @@
 ---
 title: Bounded concurrency
 sidebar:
-  order: 3
+  order: 5
 ---
 
 Structured concurrency tells you who owns concurrent work. `bounded_nursery` adds an admission limit: once the nursery has `limit` live children, adopting another child waits until capacity is available.
@@ -52,7 +52,20 @@ The important line is not the `Fiber::spawn`; it is the adoption:
 nursery.adopt(Fiber::spawn(fn () => handle(job)));
 ```
 
-When 64 children are already live, the next adoption waits. The producer therefore slows down at the same boundary where it creates more work instead of filling an unbounded queue somewhere else.
+When 64 children are already live, the next adoption waits. The producer
+therefore slows down at the same boundary where it creates more work instead of
+filling an unbounded queue somewhere else.
+
+**Subtract one when the limit stands for a real resource.** `bounded_nursery(64, ...)`
+admits **65** live children, because `Fiber::spawn` starts the child before
+`adopt` blocks on the limit — the fiber the producer is currently handing over
+is already running. It does not matter when the limit is a rate you picked; it
+matters a great deal when it is a connection pool of exactly 64, where the
+sixty-fifth child is the one that waits on a connection that will never come
+free. Write `bounded_nursery(63, ...)` for a pool of 64. `std::core`'s
+[`bounded_nursery`](/docs/stdlib/api/core/#bounded_nursery) says the same
+thing, and this recipe — which exists to turn a limit into backpressure — is
+where it is worth the sentence.
 
 `adopt` takes a `Fiber<(), 'er>`. The answer is fixed at `()` — a nursery has nothing to do with a result it cannot hand back — but the failure row is free, so a job that fails needs no `catch` at the adoption site:
 
@@ -76,4 +89,4 @@ The nursery owns its adopted children. On normal return it waits for them. If th
 
 That ownership rule is why bounded concurrency remains structured rather than becoming a semaphore wrapped around detached tasks.
 
-See [Fibers and nurseries](/docs/reference/concurrency/) for the underlying concurrency model and the [Concurrency reference](/docs/reference/concurrency/) for exact signatures.
+See [Concurrency](/docs/reference/concurrency/) for the model underneath this and for the exact signatures, and [`Nursery` in `std::core`](/docs/stdlib/api/core/#nursery) for the declarations.

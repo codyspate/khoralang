@@ -96,3 +96,38 @@ export const stable = versions.find((each) => each.stable) ?? null;
 export function versionOf(id) {
   return versions.find((each) => each.id === id);
 }
+
+/// The repository these pages are written in.
+///
+/// One copy, read by `astro.config.mjs` for the short paths and the social
+/// link and by `scripts/sync-docs.mjs` for every page's "Edit this page" link.
+/// Two copies is how a fork ends up sending editors to somebody else's tree.
+export const repository = 'https://github.com/codyspate/khoralang';
+
+/// The branch an edit is opened against.
+export const editBranch = 'main';
+
+/// Where to edit the page that `relativePath` inside `version`'s tree renders.
+///
+/// **Per page, because no single base URL can be right.** Starlight builds an
+/// edit link by appending the entry's id within the collection, and that id is
+/// `docs/next/reference/traps.md` or `docs/v0.1/reference/traps.md` -- a path
+/// that exists only in the generated tree, which `website/.gitignore` keeps out
+/// of the repository entirely. The real sources are
+/// `website/content/docs/reference/traps.md` and
+/// `website/content/versions/v0.1/reference/traps.md`: two different roots,
+/// neither of them a suffix of the other, so one `editLink.baseUrl` cannot
+/// reach both and the one that was configured reached neither. Every edit link
+/// on the site was a 404.
+///
+/// `from` already records where each tree comes from, so the answer is here
+/// rather than guessed in the config: `sync-docs.mjs` writes the result into
+/// each generated page's `editUrl` frontmatter, which Starlight prefers over
+/// the base URL.
+export function editUrlFor(version, relativePath) {
+  const inRepo = `website/${version.from}/${relativePath}`
+    .split('\\')
+    .join('/')
+    .replace(/\/+/g, '/');
+  return `${repository}/edit/${editBranch}/${inRepo}`;
+}

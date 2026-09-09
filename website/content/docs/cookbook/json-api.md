@@ -1,7 +1,7 @@
 ---
 title: JSON APIs
 sidebar:
-  order: 6
+  order: 2
 ---
 
 Use typed request and response records at the HTTP boundary. `std::json`
@@ -76,6 +76,28 @@ problem, because a `Rejection` encodes as an object with its `path` and its
 [{"message":"name should be text, and is 7","path":"name"}]
 ```
 
+## A body over the limit never reaches the handler
+
+`create_user` distinguishes two client mistakes. There is a third it never
+sees: a request over the router's size limit is answered `413` and the
+connection closed before anything is parsed, so neither `parse` nor `decode`
+runs and none of the above applies. The default is 8 KB for headers and body
+together — the right answer to "how much may an unauthenticated client make a
+server hold", and the wrong one for an API that accepts a document.
+
+Say so in the pipeline:
+
+```khora
+Router::new()
+  |> Router::holding(1048576)
+  |> Router::post("/users", SharedFn::of(create_user))
+  |> Router::listen(8080)!
+```
+
+The buffer is allocated once at that size per connection, so this is also the
+memory one connected client can make the server hold. Raise it to what the
+largest legitimate document needs and not further.
+
 ## Derive when the wire shape matches the type
 
 These declarations:
@@ -100,10 +122,16 @@ has the whole story.
 
 Keep this distinction visible:
 
-```khora
-let document = parse(request.body);                       // Result<Json, JsonError>
-let input = CreateUser::schema().decode(Raw::of_json(document));  // Validated<CreateUser, Rejection>
+```text
+std::json::parse     String -> Result<Json, JsonError>
+Schema::decode       Raw    -> Validated<A, Rejection>
+Raw::of_json         Json   -> Raw
 ```
+
+Two different answers, and `Raw::of_json` sits between them: it takes a `Json`,
+not the `Result` that `parse` hands back, so the `Result` has to be resolved
+first. `create_user` above does it in two `match` expressions for exactly that
+reason.
 
 A malformed document and a well-formed document with the wrong fields are
 different client mistakes. Keeping them separate also gives an API boundary

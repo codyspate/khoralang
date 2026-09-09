@@ -1,7 +1,7 @@
 ---
 title: Configuration
 sidebar:
-  order: 7
+  order: 8
 ---
 
 Read every setting at start-up, report every bad one in a single message, and
@@ -111,8 +111,10 @@ next step needs the last one's value, and wrong for configuration, where the
 keys have nothing to do with each other and you want the whole list.
 
 So `read` answers `Validated<A, Rejection>`, and a record with three bad
-fields reports three. `Validated::to_result` is one call for a caller who
-would rather stop at the first.
+fields reports three. Nothing is lost by that choice: `Validated::to_result`
+turns the whole list back into a `Result` in one call whenever a caller wants
+to stop at the first, and a start-up path that is going to exit anyway usually
+does not.
 
 ## A default, and a rule
 
