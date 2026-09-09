@@ -93,6 +93,11 @@ step 'the runtime under an optimizer'
 # the only one. Roadmap 16.4.
 cargo test -p khora-rt --release --features fiber-audit
 
+step 'the runtime archive defines what the code generator calls'
+# `libkhora_rt.a` is not built by `cargo build -p khora-cli` -- it is a separate
+# artifact, and a stale one is what every generated program links. Roadmap 16.11.
+sh "$root/scripts/check-runtime-symbols.sh"
+
 step 'the published grammar matches the lexer'
 # `docs/grammar.ebnf` is served to MCP clients and mirrored into the public
 # reference, and at 1.0 language syntax stops changing without a major version

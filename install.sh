@@ -63,6 +63,19 @@ END
 }
 
 REPO="codyspate/khoralang"
+
+# **The oldest glibc the published Linux build runs on.** Not a preference: a
+# glibc program carries the symbol versions of the machine that compiled it,
+# the Linux release is compiled on GitHub's `ubuntu-latest` runner
+# (`.github/workflows/release.yml`), and that runner is Ubuntu 24.04, whose
+# glibc is 2.39. The 0.1.0 binary asks for `GLIBC_2.39` and will not start
+# against anything older.
+#
+# So this number is a fact about the release rather than a policy, and it moves
+# only when the image that builds the release moves. Anybody changing the
+# runner there has to change it here, and `scripts/check-install.sh` is what
+# says whether the pair is still telling the truth.
+MIN_GLIBC="2.39"
 HOME_DIR="${KHORA_HOME:-$HOME/.khora}"
 VERSION=""
 PRERELEASE=0
@@ -127,6 +140,73 @@ check_linker() {
     say ""
     say "  Installing anyway; \`khora build\` will say the same until one exists."
     say ""
+}
+
+# **The C library is not a warning, because the binary cannot start without
+# it.** The linker above is missing at *build* time and only for programs;
+# a glibc older than the one the release was compiled against stops `khora`
+# itself, on every command, including `--version`. Checked here for the same
+# reason the linker is -- before eighty megabytes are downloaded -- and refused
+# rather than warned about, because there is nothing an install can leave
+# behind here that would ever run.
+#
+# `ldd --version` prints the version on its first line, last field:
+#
+#     ldd (Debian GLIBC 2.36-9+deb12u14) 2.36
+#     ldd (Ubuntu GLIBC 2.39-0ubuntu8.8) 2.39
+#
+# A C library that is not glibc answers differently or not at all -- musl's
+# `ldd` prints usage to stderr and exits 1 -- and an unreadable answer is
+# treated as no answer. Guessing "too old" from a line this does not recognise
+# would refuse installs that work; the check after unpacking is the backstop
+# for everything this cannot see.
+host_glibc() {
+    command -v ldd > /dev/null 2>&1 || return 0
+    ldd --version 2>/dev/null | head -n 1 | awk '{ print $NF }' \
+        | grep -E '^[0-9]+\.[0-9]+$' || true
+}
+
+# True when $1 is an older glibc than $2. Two numeric fields, compared as
+# numbers: `2.9` is older than `2.36`, which a string comparison gets backwards.
+glibc_older() {
+    awk -v have="$1" -v want="$2" 'BEGIN {
+        split(have, h, ".")
+        split(want, w, ".")
+        if (h[1] + 0 != w[1] + 0) { exit (h[1] + 0 < w[1] + 0) ? 0 : 1 }
+        exit (h[2] + 0 < w[2] + 0) ? 0 : 1
+    }'
+}
+
+check_glibc() {
+    [ "$(uname -s)" = "Linux" ] || return 0
+    HAVE_GLIBC=$(host_glibc)
+    [ -n "$HAVE_GLIBC" ] || return 0
+    glibc_older "$HAVE_GLIBC" "$MIN_GLIBC" || return 0
+
+    say ""
+    say "  This machine's C library is older than the published build needs."
+    say ""
+    say "    this machine   glibc $HAVE_GLIBC"
+    say "    the release    glibc $MIN_GLIBC or newer"
+    say ""
+    say "  Nothing is wrong with your machine, and nothing you can install"
+    say "  fixes it: the Linux release is compiled on a newer distribution, and"
+    say "  a glibc program cannot run against a library older than the one it"
+    say "  was linked against. Downloading it would leave you with a \`khora\`"
+    say "  that fails on every command, so this stops before the download."
+    say ""
+    say "  Distributions with glibc $MIN_GLIBC or newer include Ubuntu 24.04 and"
+    say "  Debian 13. Debian 12 (2.36), Ubuntu 22.04 (2.35) and RHEL 9 (2.34)"
+    say "  are older than the release and are not supported by it."
+    say ""
+    say "  Two ways forward:"
+    say ""
+    say "    - install on a newer distribution, or in a container built on one;"
+    say "    - build the toolchain from source here, which links it against the"
+    say "      glibc you have:"
+    say "      https://khoralang.com/docs/getting-started/installation/"
+    say ""
+    die "glibc $HAVE_GLIBC is older than the $MIN_GLIBC this release needs"
 }
 
 # --- fetch ------------------------------------------------------------------
@@ -221,6 +301,7 @@ The download is not what the release says it is. Do not use it."
 }
 
 TRIPLE=$(triple)
+check_glibc
 check_linker
 
 if [ -n "$VERSION" ]; then
@@ -288,8 +369,65 @@ if [ "$ON_PATH" -eq 0 ] && [ "$MODIFY_PATH" -eq 1 ]; then
     done
 fi
 
-say ""
-say "Installed. $("$BIN/khora" --version 2>/dev/null || echo "khora $NUMBER")"
+# **The one command that proves the install is the one whose failure used to
+# be discarded.** This line was
+#
+#     say "Installed. $("$BIN/khora" --version 2>/dev/null || echo "khora $NUMBER")"
+#
+# which ran the binary, threw its stderr away, and on failure printed a version
+# string it had assembled from the tag -- so a toolchain that could not start
+# reported `Installed. khora 0.1.0` and exited 0, and the difference from a
+# real install was that the line was *shorter*. On Debian 12 and Ubuntu 22.04
+# that is exactly what happened: every later command died with
+# `libc.so.6: version 'GLIBC_2.39' not found`, and the installer had said the
+# install was fine.
+#
+# So the run is the check now. Its output is kept, failure is not swallowed,
+# and there is no synthesised fallback -- if `khora --version` cannot say what
+# it is, this script has nothing true to print.
+if VERSION_LINE=$("$BIN/khora" --version 2>&1); then
+    say ""
+    say "Installed. $VERSION_LINE"
+else
+    say ""
+    say "  Unpacked into $HOME_DIR, and it cannot run here."
+    say ""
+    say "  Running \`$BIN/khora --version\` said:"
+    # Indented by hand rather than through `sed`, which this script has not
+    # asked for anywhere else and does not need to start depending on here.
+    printf '%s\n' "$VERSION_LINE" | while IFS= read -r line; do
+        say "    $line"
+    done
+    say ""
+    if [ "$(uname -s)" = "Linux" ]; then
+        HAVE_GLIBC=$(host_glibc)
+        if [ -n "$HAVE_GLIBC" ]; then
+            say "    this machine   glibc $HAVE_GLIBC"
+            say "    the release    glibc $MIN_GLIBC or newer, as this script"
+            say "                   has it -- and reaching here means either"
+            say "                   that number is wrong or the cause is"
+            say "                   something else entirely"
+            say ""
+        fi
+    fi
+    say "  This is not something you did wrong, and it is not a broken"
+    say "  download -- the archive matched its published checksum. The build"
+    say "  simply cannot start on this system."
+    say ""
+    say "  Two ways forward:"
+    say ""
+    say "    - install on a newer distribution, or in a container built on one;"
+    say "    - build the toolchain from source here, which links it against"
+    say "      this machine's own libraries:"
+    say "      https://khoralang.com/docs/getting-started/installation/"
+    say ""
+    say "  Please report this, with the lines above:"
+    say "    https://github.com/$REPO/issues"
+    say ""
+    say "  What was unpacked is still at $HOME_DIR."
+    say "  Remove it with: rm -rf $HOME_DIR"
+    die "the installed toolchain cannot run on this machine"
+fi
 if [ "$ON_PATH" -eq 0 ]; then
     say ""
     say "  Open a new shell, or for this one:"

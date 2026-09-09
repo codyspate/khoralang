@@ -64,6 +64,29 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # **`ubuntu-latest` is what sets the Linux glibc floor, and it is the
+        # highest one on offer.** A glibc program carries the symbol versions
+        # of the machine that compiled it, so the runner chosen here decides
+        # which machines the released toolchain can start on: `ubuntu-latest`
+        # is Ubuntu 24.04, whose glibc is 2.39, and the 0.1.0 binary asks for
+        # `GLIBC_2.39`. Debian 12 (2.36), Ubuntu 22.04 (2.35) and RHEL 9 (2.34)
+        # cannot run it -- the current Debian stable and a supported LTS among
+        # them.
+        #
+        # That is stated rather than hidden: `MIN_GLIBC` in `install.sh` is the
+        # same number, the installer refuses below it instead of unpacking a
+        # toolchain that cannot start, and `scripts/check-install.sh` installs
+        # the published release inside those images and fails if the two ever
+        # disagree. **Changing this line means changing that one**, and running
+        # that script afterwards.
+        #
+        # Lowering the floor is a real option and deliberately not taken here
+        # without a green run behind it: build the Linux artifact inside an
+        # older container (`container: debian:bookworm-slim` on this job, with
+        # the LLVM setup that image needs) rather than pinning an older runner
+        # label, which GitHub retires. That is its own change, with its own CI
+        # evidence, and it does not belong in a commit that fixes an installer
+        # which was lying about the result.
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       # A draft release has no tag yet — GitHub creates it on publish — so
