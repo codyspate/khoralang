@@ -97,6 +97,52 @@ fn an_ambiguous_literal_asks_which_type_it_is() {
     );
 }
 
+/// `{}` is a record literal with no fields, and a reader who writes it in a
+/// do-nothing `match` arm meant a block. Before, the label search ran on the
+/// empty label set: the exact pass found nothing, and the loose pass — "a
+/// literal short of a field still names its record" — matched *every* record
+/// in reach, because every record has all zero of the fields written. A
+/// `match` arm written `{}` was told ``these fields fit `Entry` and `Pair`
+/// and `Split` and `DateTime` — say which with `handler for ..``, naming
+/// four types the file does not mention and a capability syntax the program
+/// does not use; with one record in reach it was `this `Point` is missing
+/// `x``; with none, `no record type has exactly the fields ` and a trailing
+/// space.
+#[test]
+fn an_empty_literal_is_not_searched_by_its_labels() {
+    for source in [
+        // Nothing in reach: the fields list was empty.
+        "module m;\nfn f() -> Int { let x = {}; 0 }\n",
+        // One record in reach: it was blamed for missing its own fields.
+        &format!("{POINT}fn f() -> Int {{ let x = {{}}; 0 }}\n"),
+        // Several: this is the `handler for ..` message, off a brace with no
+        // fields in a program with no capabilities.
+        "module m;\n\
+         pub type A = { v: Int };\n\
+         pub type B = { w: Int };\n\
+         fn f() -> Int { let x = {}; 0 }\n",
+    ] {
+        assert_reports(source, "`{}` is an empty record literal");
+        assert_reports(source, "Write `()` for a block that does nothing");
+        let found = errors(source);
+        assert!(
+            !found.iter().any(|e| e.contains("handler for") || e.contains("is missing")),
+            "the label search still ran on an empty literal: {found:?}"
+        );
+    }
+}
+
+/// But a record that really is declared with no fields is still found, by the
+/// exact pass and by an annotation — this is not a ban on the literal.
+#[test]
+fn a_declared_fieldless_record_still_takes_an_empty_literal() {
+    assert_clean("module m;\npub type Nothing = {};\nfn f() -> Nothing { {} }\n");
+    assert_clean(
+        "module m;\npub type Nothing = {};\nfn f() -> Int { let x: Nothing = {}; 0 }\n",
+    );
+    assert_clean("module m;\npub type Nothing = {};\nfn f() -> Int { let x = {}; 0 }\n");
+}
+
 /// A record's fields are declared against its own parameters, so a literal
 /// decides them.
 #[test]

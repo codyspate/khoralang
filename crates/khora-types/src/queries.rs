@@ -200,6 +200,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             demanded: Vec::new(),
             projections: Vec::new(),
             coverage: Vec::new(),
+            broken_pats: HashSet::new(),
             enclosing_lambdas: Vec::new(),
             lambda_captures: HashMap::new(),
             call_rows: HashMap::new(),

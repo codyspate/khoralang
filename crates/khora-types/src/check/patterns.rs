@@ -94,28 +94,25 @@ impl<'a> Checker<'a> {
                 match &settled {
                     Type::Tuple(items) if items.len() == fields.len() => {}
                     Type::Tuple(items) => {
-                        self.error(
-                            format!(
-                                "this pattern takes a value apart into {}, but `{settled}` \
-                                 has {}",
-                                pieces(fields.len()),
-                                items.len()
-                            ),
-                            self.body.pat_range(pat),
+                        let message = format!(
+                            "this pattern takes a value apart into {}, but `{settled}` has {}",
+                            pieces(fields.len()),
+                            items.len()
                         );
+                        self.error(message, self.body.pat_range(pat));
+                        self.broken_pats.insert(pat);
                     }
                     // Inference has not settled it, so there is nothing to
                     // disagree with yet.
                     Type::Unknown | Type::Var(_) | Type::Never => {}
                     other => {
-                        self.error(
-                            format!(
-                                "this pattern takes a value apart into {}, but `{other}` is \
-                                 not a tuple",
-                                pieces(fields.len())
-                            ),
-                            self.body.pat_range(pat),
+                        let message = format!(
+                            "this pattern takes a value apart into {}, but `{other}` is \
+                             not a tuple",
+                            pieces(fields.len())
                         );
+                        self.error(message, self.body.pat_range(pat));
+                        self.broken_pats.insert(pat);
                     }
                 }
 
@@ -146,6 +143,75 @@ impl<'a> Checker<'a> {
         self.coverage.push((scrutinee_ty.clone(), arms.to_vec(), range));
     }
 
+    /// Whether this pattern, or one nested inside it, has already been
+    /// reported on by [`Self::bind_pattern`].
+    ///
+    /// Nested, because the pattern a reader wrote is not always the arm's
+    /// own: `for (k, v) in ..` becomes `Step::Yield($rest, (k, v))`, and the
+    /// tuple that does not fit is two levels down.
+    fn pat_is_broken(&self, pat: PatId) -> bool {
+        if self.broken_pats.contains(&pat) {
+            return true;
+        }
+        match self.body.pat(pat) {
+            Pat::TupleStruct { fields, .. } => {
+                fields.iter().any(|f| self.pat_is_broken(*f))
+            }
+            Pat::Tuple(fields) => fields.iter().any(|f| self.pat_is_broken(*f)),
+            Pat::Record { fields, .. } => {
+                fields.iter().any(|(_, f)| self.pat_is_broken(*f))
+            }
+            Pat::Bind(_) | Pat::Wildcard | Pat::Literal(_) | Pat::Path(_) | Pat::Missing => false,
+        }
+    }
+
+    /// A `let` whose pattern can fail.
+    ///
+    /// **The backend refuses this and `khora check` did not**, so
+    /// `let Option::Some(x) = f();` type-checked clean and then failed to
+    /// build -- and `scripts/backend-rules.txt` says in its own words where a
+    /// refusal a passing program can reach belongs. It was never asked,
+    /// because the script that asks read `.fail(` calls one line at a time and
+    /// that message wraps onto its own. Roadmap 16.
+    ///
+    /// Refutability is exhaustiveness over one arm: a `let` is a `match` with
+    /// a single pattern and nowhere to send a value that does not fit, so the
+    /// same witness search answers both questions and there is no second
+    /// notion of coverage to keep in step with the first.
+    pub(super) fn report_let_refutability(&mut self, pat: khora_hir::body::PatId, ty: &Type) {
+        let column = column_type(self.types, ty);
+        if matches!(column, ColumnType::Unknown) {
+            return;
+        }
+        // Same reason as in `report_match_coverage`: a pattern already
+        // reported on describes a shape the value does not have, so coverage
+        // answers about the wrong thing.
+        if self.pat_is_broken(pat) {
+            return;
+        }
+
+        let patterns = vec![self.to_pattern(pat)];
+        let types = self.types;
+        let resolve = move |name: &str| -> ColumnType {
+            let ty = if name == BOOL_TYPE { Type::Bool } else { Type::adt(name) };
+            column_type(types, &ty)
+        };
+
+        let missing = usefulness::missing_patterns(&patterns, &column, &resolve);
+        if missing.is_empty() {
+            return;
+        }
+        let names: Vec<String> = missing.iter().map(|p| p.to_string()).collect();
+        self.error(
+            format!(
+                "this pattern can fail, so it needs a `match` rather than a `let` — a \
+                 `let` has nowhere to send a value that does not match. Not covered: `{}`",
+                names.join("`, `")
+            ),
+            self.body.pat_range(pat),
+        );
+    }
+
     pub(super) fn report_match_coverage(
         &mut self,
         scrutinee_ty: &Type,
@@ -161,6 +227,14 @@ impl<'a> Checker<'a> {
 
         let column = column_type(self.types, scrutinee_ty);
         if matches!(column, ColumnType::Unknown) {
+            return;
+        }
+
+        // **A pattern already reported on says nothing about coverage.** It
+        // bound `Unknown` and kept the shape it was written with, so the
+        // spaces it leaves are spaces in a type it does not belong to; see
+        // [`Checker::broken_pats`] for the `for` loop this showed up in.
+        if unguarded.iter().any(|arm| self.pat_is_broken(arm.pat)) {
             return;
         }
 

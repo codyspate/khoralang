@@ -524,6 +524,31 @@ impl<'a> Checker<'a> {
             }
 
             if let Err(why) = self.unifier.unify(&promise, &row) {
+                // **A name that did not resolve is a phantom, and comparing
+                // it to the type it stands in for is a second error for one
+                // mistake.** `raises EnvError` without `EnvError` imported
+                // reported the missing name and then
+                //
+                // ```text
+                // error: `variable_or` cannot be called here:
+                //        expected `EnvError`, found `std::env::EnvError`
+                // ```
+                //
+                // — the phantom against the real one, printed qualified
+                // because the two spell alike (see `Mismatch`'s `Display`), so
+                // one absent import reads as two types disagreeing. The first
+                // error is the one to fix.
+                //
+                // Narrow on purpose: only where the two sides are the *same
+                // name* and one of them did not resolve. A phantom that meets
+                // some other type is a mismatch a reader still has to hear
+                // about, and a `with` clause naming a type rather than a
+                // capability has its own message below that must keep firing.
+                if let unify::Mismatch::Types { expected, found } = &why {
+                    if self.is_phantom_of(expected, found) {
+                        continue;
+                    }
+                }
                 self.error(
                     match why {
                         // A `with` entry whose label is not an identifier did

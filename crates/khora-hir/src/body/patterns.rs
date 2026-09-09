@@ -114,8 +114,52 @@ impl<'a> Ctx<'a> {
             }
         }
 
-        self.error(format!("cannot find constructor `{}`", segments.join("::")), range);
+        self.error(self.why_no_constructor(&segments), range);
         crate::Resolution::Unsupported("unresolved constructor")
+    }
+
+    /// Why a constructor path found nothing.
+    ///
+    /// **`cannot find constructor `Result::Ok`` was the one "not in scope"
+    /// message in this compiler that did not name the fix.** Its neighbours
+    /// all do — ``derive(Show)` needs `Show` in scope; import it from
+    /// `std::core``, ``for` needs `Step` and `Iterator` in scope; import them
+    /// from `std::core``, ``JsonError` is not in scope here … add it to an
+    /// `import`` — and a reader who has been told the fix four times reads the
+    /// fifth as a different kind of problem.
+    ///
+    /// Two different mistakes hide behind one sentence, and they have
+    /// different fixes: the *type* is not in scope (an import), or the type is
+    /// and the *case* is misspelled (a name). Which one it is, is exactly what
+    /// the two lookups above already established.
+    fn why_no_constructor(&self, segments: &[String]) -> String {
+        let path = segments.join("::");
+        let [type_name, case] = segments else {
+            return format!("cannot find constructor `{path}`");
+        };
+
+        let cases: Vec<&str> = self
+            .map
+            .variants_of(type_name)
+            .chain(self.scope.variants_of(type_name))
+            .map(|v| v.name.as_str())
+            .collect();
+        if cases.is_empty() {
+            return format!(
+                "cannot find constructor `{path}`: `{type_name}` is not in scope here \
+                 — add it to an `import`"
+            );
+        }
+
+        // The type is here and the case is not, so the reader wants the list,
+        // not an import. Named rather than counted: a sum type has few cases,
+        // and seeing them is usually seeing the typo.
+        let known: Vec<String> = cases.iter().map(|c| format!("`{c}`")).collect();
+        format!(
+            "cannot find constructor `{path}`: `{type_name}` has no case `{case}`. \
+             It has {}",
+            known.join(" and ")
+        )
     }
 
     /// The path in `Type { .. }`, which may name a record type directly.

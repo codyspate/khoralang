@@ -1018,3 +1018,112 @@ fn an_ordinary_binding_is_not_blamed_for_being_a_constructor() {
         "`n` is a capture, not a mistyped constructor: {found:?}"
     );
 }
+
+/// Two rules that lived in the backend, so `khora check` passed a program
+/// `khora build` refuses.
+///
+/// **Both were invisible to the check that exists to catch exactly this.**
+/// `scripts/check-backend-rules.sh` asks, of every backend refusal, whether a
+/// program passing `khora check` can reach it — and it read `.fail(` calls one
+/// line at a time, so it never saw a message long enough to wrap onto its own
+/// line. Nine were hidden that way, and these are the two that turned out to
+/// be language rules rather than compiler assertions. Roadmap 16.
+mod moved_out_of_the_backend {
+    use super::{assert_clean, assert_reports};
+
+    #[test]
+    fn a_refutable_let_is_refused_by_the_checker() {
+        assert_reports(
+            "module t;
+pub type Option2 = | Some2(v: Int) | None2;
+
+fn main() -> Int {
+  let Option2::Some2(x) = Option2::Some2(1);
+  x
+}
+",
+            "needs a `match` rather than a `let`",
+        );
+    }
+
+    /// And it names the case that is not covered, which the backend's copy
+    /// could not: the witness search is right here.
+    #[test]
+    fn the_refusal_names_what_is_not_covered() {
+        assert_reports(
+            "module t;
+pub type Option2 = | Some2(v: Int) | None2;
+
+fn main() -> Int {
+  let Option2::Some2(x) = Option2::Some2(1);
+  x
+}
+",
+            "None2",
+        );
+    }
+
+    /// A pattern that cannot fail is still a `let`, which is most of them.
+    #[test]
+    fn an_irrefutable_let_is_quiet() {
+        assert_clean(
+            "module t;
+pub type Point = { x: Int, y: Int };
+
+fn main() -> Int {
+  let (a, b) = (1, 2);
+  let c = 3;
+  a + b + c
+}
+",
+        );
+    }
+
+    /// Through `diagnostics` rather than `check_file`, because this one is a
+    /// walk over the syntax tree rather than part of inference -- `assert` is
+    /// an ordinary call as far as types are concerned, and what makes it wrong
+    /// is where it is written. `diagnostics` is what the CLI and the language
+    /// server both read.
+    #[test]
+    fn assert_outside_a_test_is_refused_by_the_checker() {
+        use khora_db::{Db, KhoraDatabase, SourceFile};
+
+        let db = KhoraDatabase::new();
+        let file = SourceFile::new(
+            &db,
+            "a.kh".into(),
+            "module t;\n\nfn assert(condition: Bool);\n\nfn main() -> Int {\n  \
+             assert(1 == 1);\n  0\n}\n"
+                .to_string(),
+        );
+        let found: Vec<String> = khora_types::diagnostics(&db as &dyn Db, file)
+            .iter()
+            .map(|e| e.message.clone())
+            .collect();
+        assert!(
+            found.iter().any(|e| e.contains("only allowed inside a `test` block")),
+            "got {found:?}"
+        );
+    }
+
+    /// And inside one it is the point of the language, so it must stay quiet.
+    #[test]
+    fn assert_inside_a_test_is_quiet() {
+        use khora_db::{Db, KhoraDatabase, SourceFile};
+
+        let db = KhoraDatabase::new();
+        let file = SourceFile::new(
+            &db,
+            "a.kh".into(),
+            "module t;\n\nfn assert(condition: Bool);\n\ntest \"adds\" {\n  \
+             assert(1 == 1);\n}\n"
+                .to_string(),
+        );
+        let found: Vec<String> = khora_types::diagnostics(&db as &dyn Db, file)
+            .iter()
+            .map(|e| e.message.clone())
+            .filter(|m| m.contains("`test` block"))
+            .collect();
+        assert!(found.is_empty(), "got {found:?}");
+    }
+}

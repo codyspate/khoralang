@@ -43,6 +43,7 @@ pub(crate) fn unresolved_type_errors(db: &dyn Db, file: SourceFile) -> Vec<HirEr
         // scoping machinery this walk does not have.
         let mut in_scope: HashSet<String> = HashSet::new();
         in_scope.insert("Self".to_string());
+        let mut reported_rows: HashSet<String> = HashSet::new();
         for param in node.descendants().filter(|n| n.kind() == SyntaxKind::TYPE_PARAM) {
             let Some(param) = ast::TypeParam::cast(param) else { continue };
             if let Some(name) = param.name().and_then(|n| n.ident()) {
@@ -58,8 +59,48 @@ pub(crate) fn unresolved_type_errors(db: &dyn Db, file: SourceFile) -> Vec<HirEr
                 continue;
             }
             let Some(path_type) = ast::PathType::cast(path.clone()) else { continue };
-            // A bare `'r` is a row variable and has no `Path` under it.
-            if path_type.row_var().is_some() {
+            // **A bare `'r` is a row variable, and it has to be declared too.**
+            // It has no `Path` under it, so it used to be passed over here and
+            // was checked nowhere else. `reference/generics.md` says a row
+            // variable "is introduced directly in the generic parameter list",
+            // so `fn run_it<A>(action: () -> A with 'ef raises 'zz)` is a typo
+            // for `<A, 'ef, 'zz>` — and it was accepted in silence. The
+            // signature it builds cannot be called by anybody: the undeclared
+            // names become rigid parameters the caller is held to, so
+            //
+            //     run_it(pure_action)
+            //
+            // — a pure, effect-free, infallible argument — collected four
+            // errors, all of them in the caller's file, none of them saying
+            // the signature was the problem. For a library that is four
+            // errors in a downstream package that did nothing wrong.
+            if let Some(row) = path_type.row_var() {
+                let row = row.text().to_string();
+                // An effect operation quantifies over its rows implicitly —
+                // `adopt: (Slot<(), 'er>) -> ()` is the `Forall` this walk's
+                // `rows_written_as_types` note already leaves alone — so there
+                // is no parameter list for `'er` to be missing from.
+                //
+                // Once per name per declaration, at the first place it is
+                // written. A row variable is usually written two or three
+                // times in one signature — once in the argument's type and
+                // again in each clause that forwards it — and there is one
+                // fix for all of them: the parameter list. Repeating the
+                // sentence per occurrence would trade four errors in the
+                // caller for four in the declaration.
+                if !in_scope.contains(&row)
+                    && !inside_an_effect(&path)
+                    && reported_rows.insert(row.clone())
+                {
+                    found.push(HirError {
+                        message: format!(
+                            "cannot find the row variable `{row}` in this scope; a row \
+                             variable is introduced in the generic parameter list, as \
+                             `<{row}>`"
+                        ),
+                        range: path.text_range(),
+                    });
+                }
                 continue;
             }
             let Some(name) = path_type.path().map(|p| p.text_path()) else { continue };
@@ -173,6 +214,12 @@ fn resolves(name: &str, in_scope: &HashSet<String>, homes: &crate::TypeHomes) ->
         || IntKind::parse(name).is_some()
         || in_scope.contains(name)
         || homes.of(name).is_some()
+}
+
+/// Whether this sits under an `effect` declaration, whose operations bind
+/// their own row variables without writing a parameter list.
+fn inside_an_effect(node: &SyntaxNode) -> bool {
+    node.ancestors().any(|a| a.kind() == SyntaxKind::EFFECT_DECL)
 }
 
 /// Import paths are spelled with the same node and resolve elsewhere.

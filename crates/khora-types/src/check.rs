@@ -129,6 +129,25 @@ pub(crate) struct Checker<'a> {
     /// a `match` is exhaustive is a question about the scrutinee's *settled*
     /// type and inference has not settled it yet. See [`Self::settle_coverage`].
     pub(crate) coverage: Vec<(Type, Vec<khora_hir::body::MatchArm>, TextRange)>,
+    /// The patterns [`Checker::bind_pattern`] has already reported on.
+    ///
+    /// A pattern that does not fit its scrutinee binds `Unknown` and then
+    /// describes a shape the scrutinee's type does not have, so coverage —
+    /// which asks what shapes are left over — answers about that invented
+    /// shape. `for (k, v) in Dict::entries(d)` was told the truth once and the
+    /// desugaring's own business afterwards:
+    ///
+    /// ```text
+    /// error: this pattern takes a value apart into 2 pieces, but
+    ///        `Pair<String, Int>` is not a tuple
+    /// error: this `match` is not exhaustive: pattern `Yield(_, Pair(_, _))`
+    ///        not covered
+    /// ```
+    ///
+    /// naming a `match` the source does not contain and a `Yield` from
+    /// `lower_for`'s expansion. The second error is the first one seen from
+    /// the other end, so the first one suppresses it.
+    pub(crate) broken_pats: HashSet<PatId>,
     /// The lambdas currently being inferred, innermost last, each with the
     /// bindings it has been found to use implicitly.
     pub(crate) enclosing_lambdas: Vec<(ExprId, Vec<khora_hir::body::LocalId>)>,
@@ -475,17 +494,84 @@ impl<'a> Checker<'a> {
     /// The two halves should agree, and until they do this at least says which
     /// of them went wrong.
     fn why_no_field(&self, owner: &Type, name: &str) -> String {
-        if let Type::Adt { name: type_name, .. } = owner {
-            if !self.types.adts.contains_key(type_name)
-                && !self.types.variants.iter().any(|v| &v.type_name == type_name)
-            {
-                return format!(
-                    "`{type_name}` is not in scope here, so nothing is known about its fields \
-                     — add it to an `import`"
-                );
-            }
+        if let Some(type_name) = self.undeclared_adt(owner) {
+            return format!(
+                "`{type_name}` is not in scope here, so nothing is known about its fields \
+                 — add it to an `import`"
+            );
         }
         format!("`{owner}` has no field `{name}`")
+    }
+
+    /// The first name in `ty` that a signature mentions and this module never
+    /// imported, if there is one.
+    ///
+    /// The same split [`Self::why_no_field`] describes: `type_of_syntax` reads
+    /// a name out of a signature whether or not anything here answers to it,
+    /// while the *declaration* — fields, impls, everything else that is known
+    /// about it — arrives only with the import. Every question asked of such a
+    /// type gets the answer "no", and every one of those answers is a sentence
+    /// about the wrong thing.
+    ///
+    /// The head only, deliberately. An argument that is not in scope is the
+    /// caller's business when the container's impl needs it, and asking about
+    /// one here would name a type the message is not about.
+    pub(crate) fn undeclared_adt<'t>(&self, ty: &'t Type) -> Option<&'t str> {
+        let Type::Adt { name, .. } = ty else { return None };
+        (!self.types.adts.contains_key(name)
+            && !self.types.variants.iter().any(|v| &v.type_name == name))
+        .then_some(name.as_str())
+    }
+
+    /// Whether these two are one name, one of which did not resolve.
+    ///
+    /// [`Type::Adt`]'s `home` is `None` for a name nothing answered to, and
+    /// that failure is reported where it happened. When such a phantom is
+    /// then compared against the real declaration it stands in for, both
+    /// sides print the same word, the mismatch qualifies them to tell them
+    /// apart, and the reader is shown a type disagreeing with itself.
+    pub(crate) fn is_phantom_of(&self, left: &Type, right: &Type) -> bool {
+        let (
+            Type::Adt { name: left_name, home: left_home, .. },
+            Type::Adt { name: right_name, home: right_home, .. },
+        ) = (left, right)
+        else {
+            return false;
+        };
+        left_name == right_name && (left_home.is_none() || right_home.is_none())
+    }
+
+    /// Whether `ty` mentions anywhere a name that did not resolve.
+    ///
+    /// [`Type::Adt`]'s `home` is `None` for exactly that, and its own note
+    /// says the failure is "an error already reported" — so a caller here is
+    /// deciding whether to stay quiet, not whether to look further.
+    ///
+    /// **Every shape, not just the head.** The phantom is usually somewhere
+    /// inside: `raises EnvError` without the import puts it in a row, and the
+    /// row is what the call site compares against.
+    pub(crate) fn unresolved_adt(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Adt { home, args, .. } => {
+                home.is_none() || args.iter().any(|arg| self.unresolved_adt(arg))
+            }
+            Type::Row { fields, tail } => {
+                fields.iter().any(|(_, t)| self.unresolved_adt(t))
+                    || tail.as_deref().is_some_and(|t| self.unresolved_adt(t))
+            }
+            Type::Tuple(items) => items.iter().any(|t| self.unresolved_adt(t)),
+            Type::Applied { head, args } => {
+                self.unresolved_adt(head) || args.iter().any(|t| self.unresolved_adt(t))
+            }
+            Type::Fn { params, ret, requires, raises } => {
+                params.iter().any(|t| self.unresolved_adt(t))
+                    || self.unresolved_adt(ret)
+                    || self.unresolved_adt(requires)
+                    || self.unresolved_adt(raises)
+            }
+            Type::Assoc { owner, .. } => self.unresolved_adt(owner),
+            _ => false,
+        }
     }
 
     /// Whether an assignment's target may be written.

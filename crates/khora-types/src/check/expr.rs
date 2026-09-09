@@ -724,6 +724,7 @@ impl<'a> Checker<'a> {
                     };
                     diverged |= matches!(ty, Type::Never);
                     self.bind_pattern(*pat, &ty);
+                    self.report_let_refutability(*pat, &ty);
                 }
                 Stmt::Expr(e) => {
                     diverged |= matches!(self.infer(*e), Type::Never);
@@ -840,6 +841,18 @@ impl<'a> Checker<'a> {
                 };
                 match record(true) {
                     found if !found.is_empty() => found,
+                    // **`{}` is short of *every* record's fields**, so the
+                    // loose search matches all of them and the literal is
+                    // reported against whichever ones happen to be reachable.
+                    // A do-nothing match arm written `{}` was told `these
+                    // fields fit `Entry` and `Pair` and `Split` and
+                    // `DateTime` — say which with `handler for ..``, about a
+                    // brace with no fields in a program with no capabilities.
+                    // An empty literal has nothing to search by, so it is not
+                    // searched: the exact pass above already found a
+                    // fieldless record if one is declared, and the hint pass
+                    // before it already used an annotation if there was one.
+                    _ if written.is_empty() => Vec::new(),
                     _ => record(false),
                 }
             }
@@ -854,6 +867,17 @@ impl<'a> Checker<'a> {
                 self.error(
                     match &owner {
                         Some(name) => format!("`{name}` is not a record type"),
+                        // `{}` in expression position is a record literal
+                        // with no fields, not an empty block — `reference/
+                        // expressions.md` says so outright. Listing the zero
+                        // fields it does not have (`no record type has
+                        // exactly the fields ` — with a trailing space and
+                        // nothing after it) tells a reader nothing; what they
+                        // almost always meant is `()`.
+                        None if written.is_empty() => "`{}` is an empty record \
+                             literal, and no record type here is declared with no fields. \
+                             Write `()` for a block that does nothing"
+                            .to_string(),
                         None => format!(
                             "no record type has exactly the fields {}",
                             written
@@ -1415,14 +1439,38 @@ impl<'a> Checker<'a> {
             return Type::Str;
         }
 
+        // **A name that did not resolve is not a `Show` problem either.**
+        // `Type::Adt`'s `home` is `None` exactly when the name failed to
+        // resolve, and that failure has already been reported by the pass that
+        // found it. Saying anything more here — that the phantom has no
+        // `Show`, or that it should be imported — is a second error for one
+        // mistake, in the voice of the wrong pass.
+        if self.unresolved_adt(&settled) {
+            return Type::Str;
+        }
+
         if !self.satisfies(SHOW, &settled) {
-            self.error(
-                format!(
+            // **A type this file never imported has no impls here either**,
+            // and "no `Show`" is then a sentence about the wrong thing. A
+            // module returning a `Decimal` and a caller printing it was told
+            // ``Decimal` has no `Show` ... Write `derive(Show)` on it, or
+            // `impl Show for Decimal`` — false, since `std::decimal` writes
+            // that impl, and unfollowable, since the suggested `impl` names a
+            // type that is not in scope either. The fix was
+            // `import std::decimal::{Decimal}`, which the message never
+            // mentioned. `why_no_field` has said the true thing for a field
+            // read for a long time; this says it too.
+            let message = match self.undeclared_adt(&settled) {
+                Some(name) => format!(
+                    "`{name}` is not in scope here, so nothing is known about its `Show` \
+                     — add it to an `import`"
+                ),
+                None => format!(
                     "`{settled}` has no `Show`, so it cannot go in a `${{..}}` hole. \
                      Write `derive(Show)` on it, or `impl Show for {settled}`"
                 ),
-                range,
-            );
+            };
+            self.error(message, range);
             return Type::Str;
         }
 

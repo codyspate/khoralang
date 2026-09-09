@@ -24,6 +24,30 @@
 # says so in the comment directly above it -- the checker refuses a literal
 # naming neither every field nor a base, so there is nothing to read.
 #
+# Nine more became visible when the extractor learned to read a `.fail(` whose
+# message wraps onto its own line -- see `check-backend-rules.sh`. Seven are
+# below. Two are **not**, because they are the first kind and listing them here
+# would assert something false:
+#
+# Both have since moved into `khora-types`, which is where a refusal a passing
+# program can reach belongs, and the backend keeps its copies -- which is why
+# both messages are listed below. The refutable `let` gained something in the
+# move: the checker has the witness search in front of it, so it names the case
+# that is not covered, where the backend only said one existed.
+#
+# `assert` outside a test was the other, and moved with it --
+# `khora-types`'s `assert_outside_a_test_errors` reports it at the call, in the
+# author's own file, where it used to arrive against `std/clock_native.kh:4`.
+# The backend keeps its refusal, which is why the message is listed below.
+# Roadmap 16.
+#
+# Two of the seven are worth a second look even though they are the right kind
+# here. "only a named function or a constructor can be called; there are no
+# function values until closures land" describes a language without closures,
+# and closures landed. "`Ord::cmp` produces an `Ordering`" reads as a rule
+# about a user's impl rather than as a statement about what reached the
+# backend.
+#
 # Everything below has been read and is the second kind. Most say so in their
 # own words: "is not an operation the backend knows", "which is a compiler
 # bug", "has no machine type". The arity and shape checks are the checker's job
@@ -33,9 +57,11 @@
 `Char::{name}` is not a character operation
 `Char::{name}` takes one argument
 `Float::to_int` takes one number
+`Ord::cmp` produces an `Ordering`, which has `Less`, `Equal` and `Greater`
 `Ptr::{name}` takes no arguments but `self`
 `String::from_bytes` takes an `Array<U8>`
 `String::{name}` takes a string
+`assert` is only allowed inside a `test` block; elsewhere, `raise` says the  same thing and says where it goes
 `attempt` produces a `Result`
 `attempt` produces a `Result`, which has `Ok` and `Err`
 `attempt` takes a function to run
@@ -73,14 +99,21 @@
 a `match` needs at least one arm
 a capability has no machine type
 a closure parameter has no machine type
+a closure referred to itself outside a closure, which is a compiler bug
 a closure's result has no machine type
 an array of that element type cannot be read
+only a named function or a constructor can be called; there are no function  values until closures land
 only a record's field can be assigned to
 this binding has no storage, which is a compiler bug
+this call can leave the function, but the function has no `raises` clause
 this closure has no lifted function, which is a compiler bug
 this closure has no tag, which is a compiler bug
 this closure was never declared, which is a compiler bug
 this expression cannot be assigned to
 this expression did not survive the front end
+this function has no `raises` clause, so it cannot raise
+this method call was not resolved to an impl; that is a compiler bug
+this pattern can fail, so it needs a `match` rather than a `let` — a  `let` has nowhere to send a value that does not match
 this pattern does not name a constructor
 this record has no type, which is a compiler bug
+this trait function was not resolved to an impl; that is a compiler bug

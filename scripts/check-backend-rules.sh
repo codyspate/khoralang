@@ -44,9 +44,33 @@ if [ ! -f "$manifest" ]; then
 fi
 
 found="${TMPDIR:-/tmp}/khora-backend-rules-found"
-grep -rhoE '\.fail\(format!\("[^"]+"|\.fail\("[^"]+"' "$lowering"/*.rs \
-    | sed 's/\.fail(format!(//; s/\.fail(//' \
+# **Line by line missed every message long enough to wrap.** `grep -o` works
+# on one line at a time, and the old pattern required the string literal to
+# begin on the same line as `.fail(` -- so a refusal written as
+#
+#     return self.fail(
+#         "`assert` is only allowed inside a `test` block; ...",
+#         range,
+#     );
+#
+# was invisible to the check. Nine were, and they are exactly the long ones,
+# which is to say the ones most likely to be addressed to a user rather than to
+# a compiler engineer. `assert` outside a test was one of them: reachable from
+# a program that passes `khora check`, so a language rule by this file's own
+# test, and never asked the question.
+#
+# So: join each file first, and allow the literal to start anywhere after the
+# paren. The trailing `sed` undoes Rust's line continuations -- a `\` at end of
+# line eats the newline and the indentation after it -- so what lands here is
+# the message as printed.
+for source in "$lowering"/*.rs; do
+    tr '\n' ' ' < "$source"
+    echo
+done \
+    | grep -oE '\.fail\((format!\()? *"([^"\\]|\\.)*"' \
+    | sed 's/^\.fail( *//; s/^format!( *//' \
     | sed 's/^"//; s/"$//' \
+    | sed 's/\\  */ /g' \
     | sort -u > "$found"
 
 # Comments and blank lines are the manifest's own prose.

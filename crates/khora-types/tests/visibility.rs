@@ -357,3 +357,64 @@ fn an_ordinary_mismatch_is_not_qualified() {
         "the short names already differ, so they are what is shown: {found:?}"
     );
 }
+
+/// A `${..}` hole on a type the file never imported says the type is missing,
+/// not that the type has no `Show`.
+///
+/// The old message was ``Decimal` has no `Show`, so it cannot go in a `${..}`
+/// hole. Write `derive(Show)` on it, or `impl Show for Decimal`` — for a
+/// `std::decimal` that writes `impl Show for Decimal` on the page. Both halves
+/// were wrong: the property is false, and the remedy does not compile, because
+/// the `impl` names a type that is not in scope either. The real fix,
+/// `import std::decimal::{Decimal}`, went unmentioned.
+///
+/// This is the same split `why_no_field` has described for a field read since
+/// its own version of the bug: the *name* arrives with `one`'s signature, the
+/// *impls* arrive only with the import, and every question asked in between
+/// gets a "no" that reads as a fact about the type.
+#[test]
+fn a_show_hole_on_an_unimported_type_names_the_import() {
+    const SHOWABLE: &str = "module library;\n\
+                            pub trait Show { fn show(self) -> String; }\n\
+                            pub type Money = { cents: Int };\n\
+                            impl Show for Money { fn show(self) -> String { \"m\" } }\n\
+                            pub fn one() -> Money { { cents: 1 } }\n";
+
+    let found = errors_in_user(
+        SHOWABLE,
+        "module user;\n\
+         import library::{one};\n\
+         pub fn f() -> String { \"${one()}\" }\n",
+    );
+    assert!(
+        found.iter().any(|e| e.contains("`Money` is not in scope here")
+            && e.contains("add it to an `import`")),
+        "expected the import to be named, got {found:?}"
+    );
+    assert!(
+        !found.iter().any(|e| e.contains("has no `Show`")),
+        "still claiming the type has no `Show`: {found:?}"
+    );
+
+    // With the import it compiles, which is what makes the advice good.
+    let imported = errors_in_user(
+        SHOWABLE,
+        "module user;\n\
+         import library::{one, Money};\n\
+         pub fn f() -> String { \"${one()}\" }\n",
+    );
+    assert!(imported.is_empty(), "expected no errors once imported, got {imported:?}");
+
+    // And a type that really is in scope and really has no `Show` still gets
+    // the message about `Show`, since that one is true.
+    let genuine = errors_in_user(
+        "module library;\npub type Money = { cents: Int };\npub fn one() -> Money { { cents: 1 } }\n",
+        "module user;\n\
+         import library::{one, Money};\n\
+         pub fn f() -> String { \"${one()}\" }\n",
+    );
+    assert!(
+        genuine.iter().any(|e| e.contains("`Money` has no `Show`")),
+        "expected the `Show` message where it is true, got {genuine:?}"
+    );
+}

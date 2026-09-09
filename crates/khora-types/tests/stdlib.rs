@@ -67,6 +67,15 @@ fn errors_under(dirs: &[PathBuf]) -> Vec<String> {
 /// because `std::core` declares the effect — so unlike the rest of the
 /// type-checker's tests these cannot be a single file with nothing behind it.
 fn errors_with_std(program: &str) -> Vec<String> {
+    errors_with_std_in(&[], program)
+}
+
+/// The same, with `others` compiled alongside.
+///
+/// A missing import is only visible from a *second* module: the name has to
+/// arrive in a signature the caller reads without arriving in the caller's
+/// scope, and a program that is one file has nowhere for that to happen.
+fn errors_with_std_in(others: &[(&str, &str)], program: &str) -> Vec<String> {
     let mut paths = Vec::new();
     sources(&std_dir(), &mut paths);
     paths.sort();
@@ -79,6 +88,9 @@ fn errors_with_std(program: &str) -> Vec<String> {
             SourceFile::new(&db, p.clone(), text)
         })
         .collect();
+    for (name, text) in others {
+        files.push(SourceFile::new(&db, PathBuf::from(name), text.to_string()));
+    }
     let mine = SourceFile::new(&db, PathBuf::from("program.kh"), program.to_string());
     files.push(mine);
     SourceRoot::new(&db, files);
@@ -515,4 +527,146 @@ fn a_trait_that_arrives_with_a_type_brings_its_other_impls() {
          pub fn main() -> Int { 0 }\n",
     );
     assert!(found.is_empty(), "{found:?}");
+}
+
+/// A `${..}` hole on a `std` type the program never imported names the import.
+///
+/// This is the reproducer as it was reported, against the real `std::decimal`:
+/// a module returns a `Decimal`, a caller prints it, and the caller is told
+/// ``Decimal` has no `Show`, so it cannot go in a `${..}` hole. Write
+/// `derive(Show)` on it, or `impl Show for Decimal``. `std::decimal` writes
+/// `impl Show for Decimal`, so the claim is false; and the offered remedy does
+/// not compile, since the `impl` names a type that is no more in scope than
+/// the value was. `import std::decimal::{Decimal}` is the whole fix, and it
+/// was the one thing the message did not say.
+///
+/// Kept here rather than beside the single-file cases because only a program
+/// compiled with `std` has a type whose impl is real and whose import is not.
+#[test]
+fn a_show_hole_on_an_unimported_std_type_names_the_import() {
+    const OTHER: (&str, &str) = (
+        "other.kh",
+        "module other;\n\
+         import std::decimal::{Decimal};\n\
+         pub fn one() -> Decimal { Decimal::of_int(1) }\n",
+    );
+
+    let found = errors_with_std_in(
+        &[OTHER],
+        "module program;\n\
+         import other::{one};\n\
+         pub fn f() -> String { \"${one()}\" }\n",
+    );
+    assert!(
+        found.iter().any(|e| e.contains("`Decimal` is not in scope here")
+            && e.contains("add it to an `import`")),
+        "expected the import to be named, got {found:?}"
+    );
+    assert!(
+        !found.iter().any(|e| e.contains("has no `Show`")),
+        "`std::decimal` writes `impl Show for Decimal`: {found:?}"
+    );
+
+    // With the import there is nothing to say.
+    let imported = errors_with_std_in(
+        &[OTHER],
+        "module program;\n\
+         import other::{one};\n\
+         import std::decimal::{Decimal};\n\
+         pub fn f() -> String { \"${one()}\" }\n",
+    );
+    assert!(imported.is_empty(), "expected no errors once imported, got {imported:?}");
+}
+
+/// A tuple pattern in a `for` reports once, and does not go on to describe the
+/// desugaring.
+///
+/// `for pat in it` becomes `match it.next() { Step::Yield($rest, pat) => .. }`
+/// (`khora_hir::body::desugar::lower_for`), so a `pat` that does not fit the
+/// item type is reported twice: once as itself, and once as a hole in the
+/// coverage of a `match` the reader did not write. `Dict::entries` yields a
+/// `Pair`, and destructuring it as a tuple used to give
+///
+/// ```text
+/// error: this pattern takes a value apart into 2 pieces, but
+///        `Pair<String, Int>` is not a tuple
+/// error: this `match` is not exhaustive: pattern `Yield(_, Pair(_, _))`
+///        not covered
+/// ```
+///
+/// The second names a `match`, a `Yield` and a shape that appear nowhere in
+/// the source or the documentation. The first error is the whole truth.
+#[test]
+fn a_bad_for_pattern_does_not_leak_the_desugaring() {
+    let found = errors_with_std(
+        "module program;\n\
+         import std::core::{Dict, Step, Iterator, Pair, Show};\n\
+         pub fn f(d: Dict<String, Int>) -> Int {\n\
+           for (k, v) in Dict::entries(d) { let _ = k; let _ = v; };\n\
+           0\n\
+         }\n",
+    );
+    assert!(
+        found.iter().any(|e| e.contains("is not a tuple")),
+        "the real mistake should still be reported, got {found:?}"
+    );
+    assert!(
+        !found.iter().any(|e| e.contains("is not exhaustive")),
+        "the desugaring's own `match` was described to the reader: {found:?}"
+    );
+}
+
+/// A `raises` clause naming a type that is not imported reports the missing
+/// name, and does not go on to compare the phantom to the real one.
+///
+/// `stdlib/api/env.md`'s worked example omits `EnvError` from its import, and
+/// the compiler answered twice:
+///
+/// ```text
+/// error: cannot find type `EnvError` in this scope; nothing declared or
+///        imported here goes by that name
+/// error: `variable_or` cannot be called here: expected `EnvError`, found
+///        `std::env::EnvError`
+/// ```
+///
+/// The second is the phantom the first left behind, printed qualified because
+/// the two spell alike — so a reader is shown one type disagreeing with
+/// itself. Nothing can be done about it except the thing the first line
+/// already says.
+#[test]
+fn an_unresolved_error_type_is_not_compared_to_the_real_one() {
+    let found = errors_with_std(
+        "module program;\n\
+         import std::env::{Env, variable_or};\n\
+         import std::core::{Option, Int};\n\
+         pub fn port() -> Int with { env: Env } raises EnvError {\n\
+           match Int::of_string(variable_or(\"PORT\", \"8080\")!) {\n\
+             Option::Some(n) => n,\n\
+             Option::None => 8080,\n\
+           }\n\
+         }\n",
+    );
+    assert!(
+        found.iter().any(|e| e.contains("cannot find type `EnvError`")),
+        "the missing import should still be reported, got {found:?}"
+    );
+    assert!(
+        !found.iter().any(|e| e.contains("cannot be called here")),
+        "the phantom was compared to the real type: {found:?}"
+    );
+
+    // With the import there is nothing left to say, which is what makes the
+    // one remaining error the whole story.
+    let imported = errors_with_std(
+        "module program;\n\
+         import std::env::{Env, EnvError, variable_or};\n\
+         import std::core::{Option, Int};\n\
+         pub fn port() -> Int with { env: Env } raises EnvError {\n\
+           match Int::of_string(variable_or(\"PORT\", \"8080\")!) {\n\
+             Option::Some(n) => n,\n\
+             Option::None => 8080,\n\
+           }\n\
+         }\n",
+    );
+    assert!(imported.is_empty(), "expected no errors once imported, got {imported:?}");
 }

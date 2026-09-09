@@ -122,8 +122,62 @@ pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
     all.extend(crate::unresolved::unresolved_type_errors(db, file));
     all.extend(crate::exports::export_errors(db, file));
     all.extend(entry_point_shape_errors(db, file));
+    all.extend(assert_outside_a_test_errors(db, file));
     all.extend(check_file(db, file).iter().cloned());
     all
+}
+
+/// `assert` outside a `test` block.
+///
+/// **This was the backend's, and so it was invisible to `khora check` and
+/// reported against the wrong file.** `lower/failure.rs` refuses it, and
+/// deliberately -- the comment there says the rule is "bounded here rather
+/// than in the checker so that the bend is impossible to reach from ordinary
+/// code", which is a good argument about where the rule is *enforced* and not
+/// about where it is *reported*. The backend keeps its refusal as a backstop.
+///
+/// Reporting it there cost two things. `khora check` passed a program that
+/// `khora build` refuses, which is the split this repository has closed twice.
+/// And the error arrived pointing at `std/clock_native.kh:4`, at a `//!`
+/// comment, because a `HirError` carries a range and no file and
+/// `report_build_errors` renders anything without per-file diagnostics against
+/// whichever input sorted first.
+///
+/// `scripts/backend-rules.txt` states the rule this follows: a refusal a
+/// program passing `khora check` can reach belongs in `khora-types`, where the
+/// editor can show it. It had never been asked, because the check that asks
+/// read `.fail(` calls one line at a time and this message wraps. Roadmap 16.
+pub(crate) fn assert_outside_a_test_errors(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
+    use khora_syntax::SyntaxKind;
+
+    let mut found = Vec::new();
+    for decl in khora_db::parse(db, file).source_file().decls() {
+        // A `test` block is where `assert` belongs, and a `bench` block is not
+        // a test: it is timed, it has no runner reading a tag, and an
+        // assertion in one would be measured rather than checked.
+        let ast::Decl::Fn(f) = decl else { continue };
+        let Some(body) = f.body() else { continue };
+
+        for node in body.syntax().descendants() {
+            if node.kind() != SyntaxKind::CALL_EXPR {
+                continue;
+            }
+            let Some(call) = ast::CallExpr::cast(node) else { continue };
+            let Some(ast::Expr::Path(path)) = call.callee() else { continue };
+            // The callee's text, trimmed: `assert` is a bare name, so anything
+            // qualified (`m::assert`) is somebody else's function.
+            if path.syntax().text().to_string().trim() != "assert" {
+                continue;
+            }
+            found.push(HirError {
+                message: "`assert` is only allowed inside a `test` block; elsewhere, \
+                          `raise` says the same thing and says where it goes"
+                    .to_string(),
+                range: call.syntax().text_range(),
+            });
+        }
+    }
+    found
 }
 
 /// What a `main` may not be.

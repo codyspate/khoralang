@@ -375,3 +375,47 @@ fn editing_one_file_does_not_relower_another() {
         "file a was relowered: {executed:?}"
     );
 }
+
+/// An unresolved constructor says which of the two mistakes it is.
+///
+/// This was the one "not in scope" message in the compiler that did not name
+/// the fix. `cannot find constructor `Result::Ok`` — and nothing else, where
+/// its neighbours all say where the name comes from: ``derive(Show)` needs
+/// `Show` in scope; import it from `std::core``, ``JsonError` is not in scope
+/// here … add it to an `import``. Two mistakes shared the sentence, and they
+/// have different fixes: an absent type wants an import, and a misspelled case
+/// wants the list of the ones that exist.
+#[test]
+fn an_unknown_constructor_says_which_mistake_it_is() {
+    let db = KhoraDatabase::new();
+
+    // The type is not in scope at all: an import.
+    let missing = only_body(
+        &db,
+        "module m;\npub type R = | A;\nfn f(r: R) -> Int {\n  match r {\n    Result::Ok(n) => n,\n  }\n}\n",
+    );
+    let found = errors(&missing);
+    assert!(
+        found.iter().any(|e| e.contains("cannot find constructor `Result::Ok`")
+            && e.contains("`Result` is not in scope here")
+            && e.contains("add it to an `import`")),
+        "{found:?}"
+    );
+
+    // The type is in scope and the case is not: the cases it does have.
+    let typo = only_body(
+        &db,
+        "module m;\npub type R = | A | B;\nfn f(r: R) -> Int {\n  match r {\n    R::Nope => 1,\n    _ => 0,\n  }\n}\n",
+    );
+    let found = errors(&typo);
+    assert!(
+        found.iter().any(|e| e.contains("cannot find constructor `R::Nope`")
+            && e.contains("`R` has no case `Nope`")
+            && e.contains("`A` and `B`")),
+        "{found:?}"
+    );
+    assert!(
+        !found.iter().any(|e| e.contains("add it to an `import`")),
+        "the type is in scope, so an import is not the fix: {found:?}"
+    );
+}

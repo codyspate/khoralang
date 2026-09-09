@@ -223,3 +223,75 @@ fn a_variant_in_a_declaration_is_left_alone() {
     );
     assert!(found.is_empty(), "a variant where a variant belongs: {found:?}");
 }
+
+/// A row variable that is in no parameter list is reported where it is
+/// written, and not four times over in whoever tries to call the function.
+///
+/// The same shape as the type case above, arrived at later: a bare `'r` has no
+/// `Path` under it, so the walk passed over it and nothing else looked. The
+/// signature it built is not merely wrong, it is *uncallable* — the undeclared
+/// names become rigid parameters the caller is held to — so
+///
+/// ```khora
+/// fn run_it<A>(action: () -> A with 'ef raises 'zz) -> A with 'ef raises 'zz
+/// ```
+///
+/// accepted in silence, and `run_it(pure_action)` on a pure, infallible
+/// argument collected four errors, every one of them in the caller's file:
+///
+/// ```text
+/// error: this argument: `'ef` is a type the caller chooses, so it cannot be
+///        assumed to be `{}`
+/// error: `run_it` cannot be called here: `'ef` is ... `{}`
+/// error: `run_it` can leave this function, so the call needs `!`
+/// error: `run_it` cannot be called here: `'zz` is ... `{}`
+/// ```
+///
+/// For a library that is four errors in a downstream package that did nothing
+/// wrong, about a signature it cannot edit.
+#[test]
+fn an_undeclared_row_variable_is_reported_at_the_declaration() {
+    let found = errors(
+        "module m;\n\
+         fn run_it<A>(action: () -> A with 'ef raises 'zz) -> A with 'ef raises 'zz \
+         { action()! }\n",
+    );
+    assert!(
+        found.iter().any(|e| e.contains("cannot find the row variable `'ef`")),
+        "expected `'ef` to be named, got {found:?}"
+    );
+    assert!(
+        found.iter().any(|e| e.contains("cannot find the row variable `'zz`")),
+        "expected `'zz` to be named, got {found:?}"
+    );
+    assert!(
+        found.iter().any(|e| e.contains("generic parameter list")),
+        "expected the fix to be named, got {found:?}"
+    );
+    // Once each, though both are written twice: there is one fix per name.
+    assert_eq!(found.len(), 2, "one error per name, not per occurrence: {found:?}");
+}
+
+/// And declaring them properly is quiet, which is what makes the advice good.
+#[test]
+fn a_declared_row_variable_is_quiet() {
+    assert_quiet(
+        "module m;\n\
+         fn run_it<A, 'ef, 'zz>(action: () -> A with 'ef raises 'zz) -> A \
+         with 'ef raises 'zz { action()! }\n",
+    );
+}
+
+/// An effect operation binds its own rows without a parameter list to put
+/// them in, so `'er` there is not missing from anything. `rows_written_as_types`
+/// already leaves this form — a `Forall` — alone for the same reason.
+#[test]
+fn an_effect_operations_row_variable_is_quiet() {
+    assert_quiet(
+        "module m;\n\
+         pub type Slot<A, 'er>;\n\
+         pub effect Crew {\n\
+           adopt: (Slot<(), 'er>) -> (),\n\
+         }\n",
+    );
+}
