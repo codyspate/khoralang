@@ -76,11 +76,8 @@ lockfile instead of absorbing the difference.
 
 The published Linux build is dynamically linked against glibc, and a glibc
 program cannot run against a library older than the one it was compiled
-against. The release is built on Ubuntu 24.04, so:
-
-| | |
-| --- | --- |
-| **glibc 2.39 or newer** | required by the published `x86_64-unknown-linux-gnu` build |
+against. The release is built on Ubuntu 24.04, so the published
+`x86_64-unknown-linux-gnu` build requires **glibc 2.39 or newer**.
 
 That is a real constraint and not a rounding error. Distributions in wide use
 today are on both sides of it:

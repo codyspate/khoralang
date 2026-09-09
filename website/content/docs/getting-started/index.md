@@ -45,6 +45,7 @@ That writes the whole package:
 
 ```text
 hello_khora/
+├── .gitignore
 ├── khora.toml
 └── src/
     └── main.kh

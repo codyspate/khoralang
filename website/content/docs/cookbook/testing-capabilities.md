@@ -110,12 +110,6 @@ Nothing else is involved — no test runtime, no special mode, no rule about whi
 
 The real clock is `Clock::real()`, and it gives a sleeping fiber's worker back for the whole wait — ten thousand sleeping fibers cost ten thousand entries in a heap rather than ten thousand stacks.
 
-## Test only the operations you need
-
-A handler must satisfy the capability's declared operations, but it does not need to reproduce the complexity of the real system. A deterministic clock can return constants. An in-memory repository can store a small test state. A tracer can record finished spans instead of exporting them.
-
-This keeps test doubles focused on the contract the caller observes rather than building a second production implementation.
-
 ## Override one capability in a larger context
 
 When application tests use a named context, replace only the dependency relevant to the test:

@@ -93,11 +93,3 @@ In Effect, a tight loop inside one synchronous step cannot be interrupted. Khora
 ## Pipelines
 
 Khora's `|>` is call-oriented. `value |> f(a)` means `f(value, a)`, and a single `_` placeholder can select another argument position. It is not limited to piping into unary functions.
-
-## Fibers and scopes
-
-Khora fibers and nurseries provide structured concurrency in the language/runtime. Cancellation and finalization remain central concepts, but source code stays ordinary direct-style Khora.
-
-## Memory/runtime
-
-Khora compiles to native code and does not use a tracing GC or JavaScript VM. Automatic memory management is implemented through reference counting plus compiler ownership/reuse analysis rather than through a source-level borrow checker.

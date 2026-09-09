@@ -316,20 +316,17 @@ its logs anywhere wants `json`.
 pub fn trace(message: String) ->() with { log: Log }
 ```
 
-The finest detail.
+The finest detail: what somebody reading a transcript afterwards would want,
+and nobody wants while the program is behaving.
 
 ```khora
 import std::log::{Log, trace};
 
-fn charge(amount: Int) -> Int with { log: Log } {
-  trace("charging");
+fn charge(amount: Int, card: String) -> Int with { log: Log } {
+  trace("authorising ${amount} against ${card}");
   amount
 }
 ```
-
-**The handler decides whether this is written, not the caller.** A
-caller that checked the level itself would have to know the
-configuration, which is what the capability keeps away from it.
 
 ### debug
 
@@ -343,14 +340,10 @@ What a developer wants while working on this code.
 import std::log::{Log, debug};
 
 fn charge(amount: Int) -> Int with { log: Log } {
-  debug("charging");
+  debug("charging ${amount}");
   amount
 }
 ```
-
-**The handler decides whether this is written, not the caller.** A
-caller that checked the level itself would have to know the
-configuration, which is what the capability keeps away from it.
 
 ### info
 
@@ -364,14 +357,10 @@ What an operator wants while the program is behaving.
 import std::log::{Log, info};
 
 fn charge(amount: Int) -> Int with { log: Log } {
-  info("charging");
+  info("charged ${amount}");
   amount
 }
 ```
-
-**The handler decides whether this is written, not the caller.** A
-caller that checked the level itself would have to know the
-configuration, which is what the capability keeps away from it.
 
 ### warn
 
@@ -385,14 +374,10 @@ Something is wrong and the program is carrying on.
 import std::log::{Log, warn};
 
 fn charge(amount: Int) -> Int with { log: Log } {
-  warn("charging");
+  warn("the rate table is stale; charging ${amount} at yesterday's rate");
   amount
 }
 ```
-
-**The handler decides whether this is written, not the caller.** A
-caller that checked the level itself would have to know the
-configuration, which is what the capability keeps away from it.
 
 ### error
 
@@ -406,14 +391,10 @@ Something is wrong and something did not happen.
 import std::log::{Log, error};
 
 fn charge(amount: Int) -> Int with { log: Log } {
-  error("charging");
-  amount
+  error("the acquirer refused ${amount}; nothing was charged");
+  0
 }
 ```
-
-**The handler decides whether this is written, not the caller.** A
-caller that checked the level itself would have to know the
-configuration, which is what the capability keeps away from it.
 
 ### eprint
 

@@ -1249,7 +1249,7 @@ A POST of `body` as `application/json`.
 pub fn of(method: Method, url: String, body: String) -> Call
 ```
 
-Any method, which is what the four above are shorthand for.
+Any method, which is what the three above are shorthand for.
 
 #### with_header
 

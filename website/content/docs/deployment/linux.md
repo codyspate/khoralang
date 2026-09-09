@@ -1,7 +1,7 @@
 ---
 title: Linux
 sidebar:
-  order: 4
+  order: 3
 ---
 
 Linux is a primary native deployment target for Khora services.

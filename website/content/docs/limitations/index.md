@@ -262,9 +262,16 @@ runnable" describes the intent rather than the current thread backend.
 
 ## Cross-compilation and WebAssembly
 
-LLVM object/module emission is further along than the complete runtime/link/sysroot/deployment path for every target. Only targets tested end to end are labeled supported.
+The compiler can emit an object for a triple it cannot link, and
+[Supported targets](/docs/deployment/supported-targets/) lists which triples
+have been carried all the way to a running binary. Only those are called
+supported.
 
-WebAssembly also requires a host-appropriate standard-library/platform surface rather than reusing native filesystem and socket assumptions. Cloudflare Workers remains an experimental/planned deployment path rather than a supported production target.
+WebAssembly needs more than a triple: a Worker or a browser has no filesystem
+and no sockets, so `std` would need a platform surface shaped for the host.
+Cloudflare Workers in particular is **not** an experimental target — none of
+the pieces exist, and [that page](/docs/deployment/cloudflare/) says what they
+would be.
 
 ## Stability
 

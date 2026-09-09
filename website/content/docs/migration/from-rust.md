@@ -6,19 +6,27 @@ sidebar:
 
 Khora shares Rust's goal of native, predictable software without requiring a tracing GC, but it deliberately does not expose Rust's ownership proof system as the ordinary programmer interface.
 
-## Memory
+## There are no lifetimes to write
 
-Khora source is written in a functional style with automatic memory management. The compiler/runtime use reference counting and ownership/reuse analysis to remove unnecessary reference-count operations and reuse uniquely owned storage where safe.
+Memory is reference-counted, and the compiler removes the counts it can prove
+are unnecessary and reuses storage it can prove is uniquely owned. So ordinary
+data flow needs no annotation: no `&`, no `'a`, no `Rc<RefCell<..>>` to get a
+value into two places. What you give up is the proof — Khora will keep a count
+where Rust would have shown you why one was not needed.
 
-The programmer does not annotate borrows or lifetimes merely to express ordinary data flow.
+## `Result` and dependency arguments become rows
 
-## Failure and authority
+What Rust puts in the return type and the parameter list, Khora puts in two
+rows beside them: `raises` for recoverable failure, `with` for external
+authority. Both stay visible in the function's type, and neither has to be
+threaded through every intermediate value — a `?` on every call and a `db:
+&Pool` on every signature are the two things this is trying not to be.
 
-Rust commonly uses `Result<T, E>` and explicit dependency values. Khora lifts recoverable failure into `raises` rows and external authority into `with` capability rows so both remain visible in function types without dominating every value-level composition.
+## There is no `async fn`
 
-## Concurrency
-
-Khora uses structured fibers and direct-style I/O. Application functions do not split into synchronous and `async fn` forms, and suspension is a runtime property rather than a different source-level function kind.
+Fibers are structured and I/O is direct-style, so a function is not written
+twice. Suspension is something the runtime does, not a second colour of
+function that divides the library in half.
 
 ## Visibility
 

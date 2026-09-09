@@ -4,7 +4,8 @@ sidebar:
   order: 9
 ---
 
-Traits describe behavior that types can provide and generic code can require. Trait declarations, implementations, associated types, supertraits, and bounds all use the same statically checked type system.
+A trait is what generic code is allowed to assume, and an impl is a type's
+answer to it. Both are checked where they are written.
 
 ## Declare a trait
 

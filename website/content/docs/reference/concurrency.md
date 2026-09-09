@@ -263,6 +263,5 @@ A fiber may resume on a different operating-system thread after suspension. Fore
 
 ## Sharing boundary
 
-Values captured by or handed to concurrent work must satisfy Khora's sharing rules. Use `Shared<A>` for synchronized shared state, `Channel<A>` for hand-off/backpressure, and `SharedFn` for callbacks stored in shareable data.
-
-See [Sharing](/docs/reference/sharing/) for those exact APIs and constraints.
+A value captured by or handed to concurrent work has to satisfy the sharing
+rules, which are their own page: [Sharing](/docs/reference/sharing/).

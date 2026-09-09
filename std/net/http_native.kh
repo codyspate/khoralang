@@ -2011,7 +2011,7 @@ impl Call {
     Call::with_header(Call::post(url, body), "Content-Type", "application/json")
   }
 
-  /// Any method, which is what the four above are shorthand for.
+  /// Any method, which is what the three above are shorthand for.
   pub fn of(method: Method, url: String, body: String) -> Call {
     { method: method, url: url, headers: List::Nil, body: body }
   }

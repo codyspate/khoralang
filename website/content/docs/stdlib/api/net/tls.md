@@ -41,9 +41,10 @@ pub type TlsError =
 
 Why a TLS server could not start, or a connection could not be secured.
 
-Three cases and no message. A `rustls` diagnostic is written for somebody
-debugging a handshake, and the three things a Khora program can *do* about a
-failure are: fix the certificate, fix the key, or drop the client.
+Four cases, and only the last carries anything. A `rustls` diagnostic is
+written for somebody debugging a handshake; what a Khora program can *do*
+about a failure is fix the certificate, fix the key, drop the client, or
+give up on the host -- and only that last one needs to say which host.
 
 #### BadCertificate
 

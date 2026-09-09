@@ -151,6 +151,8 @@ for entry in Dict::entries(table) {
 
 The pattern binds each yielded item, under the same rules as `let`: valid for the item's type, and irrefutable. `Dict::entries` yields a `Pair`, which is a record — a tuple pattern such as `(key, value)` is only valid where the item's type is a tuple, and is refused otherwise.
 
+`for` needs `Step` and `Iterator` in scope, and `Pair` too if the body reads the item's fields: `import std::core::{Dict, Iterator, Pair, Step, print};`. See [Control flow](./control-flow/#for).
+
 ## Patterns in `catch`
 
 ```khora

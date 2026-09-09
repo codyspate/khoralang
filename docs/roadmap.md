@@ -5732,7 +5732,7 @@ Two things ride along, found while confirming it:
 
 ### The two soundness holes
 
-**16.2 A capability escapes its handler's scope.** Eighteen lines:
+**16.2 A capability escapes its handler's scope.** ~~Eighteen lines:~~
 
 ```khora
 fn leak() -> (() -> String) with { store: Store } {
@@ -5740,22 +5740,67 @@ fn leak() -> (() -> String) with { store: Store } {
 }
 ```
 
-The returned closure is typed with an **empty** capability row. It is called in
-`main`, outside any `with`, and invokes the handler. `capabilities.md` promises
-the opposite in as many words: the operation runs "inside the block, and not
-later through a deferred effect value that outlived its handler". The handler
-in the reproducer is a pure closure so the program merely prints; a handler
-holding a `Region` that has been released is the same program with a
-use-after-free in it.
+The returned closure is typed with an **empty** capability row, is called in
+`main` outside any `with`, and invokes the handler.
 
-`capability-passing.md` decided that a lambda "resolves a capability lexically
-if it can and requires it if it cannot". Both halves are implemented. What is
-missing is the third case: a lambda that resolves lexically and then *outlives
-the resolution*, which is the one the return type has to carry and does not.
+**Investigated and withdrawn: the compiler is right and the documentation
+overclaims.** A closure that reads a capability captures it, because a `with`
+block is a block of `let`s and a capability is an ordinary binding -- which is
+what `effects::a_captured_capability_is_the_one_in_scope_where_the_closure_was_written`
+has always asserted, deliberately, with the reasoning written next to it. The
+captured binding is reference-counted, so the closure keeps its handler alive
+and the empty row is *honest*: a closure that owns what it needs needs nothing
+from its caller. Typing it `with { store: Store }` instead would force every
+combinator that takes a callback to be row-polymorphic, which is the cost
+lexical resolution exists to avoid.
 
-**16.3 Coherence is per-file, not per-program.** Two `impl Label for Int` in one
-file are correctly rejected. In two modules of the *same package* both are
-accepted, `check` says `no errors`, and the program silently takes one.
+The use-after-free the entry projected does not exist either. A `Scope` carried
+out of `scoped` was run against its region:
+
+```khora
+fn leak() -> (() -> ()) with { scope: Scope } {
+  fn () => scope.defer(fn () => print("finalizer"))
+}
+pub fn main() -> () {
+  let escaped = scoped(fn () => leak());
+  print("the scope has ended");
+  escaped();
+}
+```
+
+It printed in the order `the scope has ended`, `finalizer` -- the region was
+still alive, because the closure held a reference to it, and its finalizers ran
+when that last reference went. `khora_region_defer` fatals on a released
+region and did not fire. The control with no capture runs its finalizer at the
+end of the block, as documented.
+
+So what is actually wrong is two sentences that describe a stricter language
+than this one:
+
+- `reference/capabilities.md:164` -- "the operation runs when the call is
+  evaluated, inside the block, and not later through a deferred effect value
+  that outlived its handler". The direct-style argument is right; the second
+  clause promises an escape analysis that does not exist and should not.
+- `reference/memory-and-resources.md:46` -- "a region is released **when the
+  block its binding is in ends** -- on every way out of that block". It is
+  released when the last reference to it goes, which is the end of the block
+  *unless something captured it*. That exception is the whole of this entry and
+  is worth stating, because it is also how a fiber holds a scope that outlives
+  the call that spawned it.
+
+Both are documentation fixes. Nothing in the compiler changes.
+
+**16.3 Coherence is per-file, not per-program.** ✅ Two `impl Label for Int` in
+one file are correctly rejected. In two modules of the *same package* both were
+accepted, `check` said `no errors`, and the program silently took one.
+
+Fixed by `queries::impl_homes`, a query over the `SourceRoot` that maps each
+`(trait, type, home)` to the one file that keeps it -- the file whose path sorts
+first, so which of the two is reported does not depend on the order the files
+were read in -- and `queries::coherence_errors`, which reports the others. It
+runs per file so the error renders against the module it is in, and it is in
+`diagnostics`, so `khora check` and `khora build` both refuse it rather than
+one of them.
 
 D6 says "Rust's coherence rules", and `associated-items.md` rests `Schema::Spec`
 resolution on **one impl per (trait, head)**. That rule holds within a file.
@@ -5811,6 +5856,34 @@ today and is impossible afterwards.
 **16.7 The nursery's promises are order-dependent, and two of them are not
 kept.** Written by an agent building a job runner against the public
 documentation, and every number below is over 20-25 runs on both backends.
+
+> **Investigated 2026-09-09; not started.** The diagnosis, so the next session
+> does not redo it. Cancellation in this runtime is two halves: a flag, and a
+> `!` that reads it and unwinds. `Channel::receive` is the worked example --
+> `khora_channel_receive` returns `false` when `stopping()`, the Khora side
+> answers `None`, and the `!` on its `raises 'er` row does the unwinding. The
+> park itself is `park_until_moved`, which enrols a condition variable with the
+> fiber *and* takes a 250 ms `LOOK_AGAIN` timeout to close the race.
+>
+> `Completion::wait` (`fiber.rs:102`, and `Done::wait` at `:308`) does none of
+> that: it blocks on a `JoinHandle` or a latch with no flag check and no
+> timeout, which is the whole bug. Both `khora_fiber_join` and
+> `khora_fiber_wait` go through it.
+>
+> The two halves are not equally hard. **`Fiber::join` needs no API change** --
+> it is already `raises 'er`, so it already has a `!` to unwind at, and the fix
+> is entirely in `Completion::wait`. What has to be decided is what `join`
+> returns on the cancelled path: `khora_fiber_join` hands back a `which` tag
+> and a word, and a benign word for a boxed `A` is a null the caller holds
+> until the `!` unwinds -- which needs checking against `khora_drop` rather
+> than assuming.
+>
+> **`Fiber::wait` needs the row.** `pub fn wait(self) -> ()` has no `!`, so
+> there is nowhere to observe the flag; it wants `Channel::receive`'s shape,
+> `pub fn wait<'er>(self) -> () raises 'er`. That is a breaking change and
+> costs almost nothing: the only caller in the tree is
+> `packages/postgres/src/pool.kh:178`, and that one is `Fibers::wait`, a
+> different function.
 
 - **A fiber parked in `Fiber::wait` or `Fiber::join` cannot be cancelled, and
   then runs its body to completion anyway.** Cancel at 100 ms against a 2000 ms

@@ -30,9 +30,9 @@ Option::Some(job) => {
   let settled = Shared::of(false);
   let region = Region::open();
   Region::defer(region, fn () => {
-    if !Shared::get(settled) { abandon(board, job.id); };
+    if !Shared::get(settled) { abandon(job); };
   });
-  serve(board, job)!;
+  serve(job)!;
   Shared::set(settled, true);
 }
 ```

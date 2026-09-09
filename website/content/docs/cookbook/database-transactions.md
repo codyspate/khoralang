@@ -162,8 +162,6 @@ with_db(pool, fn () =>
 )
 ```
 
-That is the useful layering: the pool owns connection acquisition and release, while application code simply declares the database authority it needs.
-
 ## Testing becomes substitution, not plumbing
 
 Because the dependency is a capability, the same function can be tested with a different handler without changing its arguments:
@@ -173,7 +171,5 @@ with { db: recording_db() } {
   transfer(10, 20, 2500)
 }
 ```
-
-That is the intended Khora architecture: business functions advertise external authority in `with`, while concrete handlers are assembled at narrow boundaries.
 
 For exact `Db`, `Cell`, `DbError`, and `transaction` declarations, see the [database API reference](/docs/stdlib/api/db/). For the capability model itself, see [Effects and capabilities](/docs/reference/capabilities/). For the cleanup mechanism underneath cancellation-safe transactions, see [Resources and regions](/docs/reference/memory-and-resources/).

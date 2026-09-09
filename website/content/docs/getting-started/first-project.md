@@ -59,13 +59,7 @@ pub fn main() -> Int {
 }
 ```
 
-There are three ordinary language ideas here:
-
-- `fn` declares a function. The parameter and return types are part of its public shape.
-- `test` declares a test that the package test runner can execute.
-- `import std::core::{...}` brings standard-library names into the module.
-
-The [Language Reference](/docs/reference/) goes deeper on each of these once the workflow is running.
+The [Language Reference](/docs/reference/) goes deeper on each construct once the workflow is running.
 
 ## Check before building
 
@@ -159,19 +153,9 @@ For an optimized build, add `--release`:
 khora build . --release
 ```
 
-## The everyday loop
+## In an editor
 
-For most projects, these are the commands you will use repeatedly:
-
-```bash
-khora fmt .
-khora check .
-khora test .
-khora build .
-khora doc
-```
-
-The language server uses the same compiler queries as `khora check`, so editor diagnostics and command-line diagnostics stay aligned. Continue with [Editor setup](/docs/getting-started/editor/) when you want that feedback in your editor.
+The language server uses the same compiler queries as `khora check`, so editor diagnostics and command-line diagnostics stay aligned. Continue with [Editor setup](/docs/getting-started/editor/).
 
 ## What to learn next
 

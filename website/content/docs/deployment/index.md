@@ -4,8 +4,6 @@ sidebar:
   order: 0
 ---
 
-This section covers deploying **Khora applications**.
-
 Start with [Supported targets](/docs/deployment/supported-targets/) to see which platforms are
 actually supported by the current toolchain. The platform pages then cover how
 to build, package, and run Khora programs on those targets.

@@ -39,7 +39,7 @@ needs the platform's C runtime and system libraries, and the driver that knows
 where those live belongs to the platform. `rustc` has the same requirement for
 the same reason.
 
-| | |
+| platform | what to install |
 | --- | --- |
 | Windows | Visual Studio Build Tools, "Desktop development with C++" |
 | macOS | `xcode-select --install` |
@@ -392,12 +392,12 @@ docs/
   vision.md            what Khora is for; breaks ties in the roadmap
   positioning.md       who it is for, and what it is not
   roadmap.md           decisions, open questions, phases
-  design/              nineteen decision records
+  design/              forty-seven decision records
   project.md           the original specification this was built against
   grammar.ebnf         the implemented grammar
   errata.md            where the specification was wrong, and what was done
 std/                   the standard library, written in Khora
-examples/              four reference applications
+examples/              five reference applications
 bench/                 four servers and a load generator; see bench/README.md
 scripts/
   setup-llvm.sh        installs LLVM 22.1.8 and writes .cargo/config.toml
@@ -428,10 +428,13 @@ rule it produced.
   effect system was designed for.
 - **`link_shortener`** — an HTTP service with shared mutable state, JSON,
   persistence and a clock.
+- **`ledger_service`** — a service over a database, with transactions, decoded
+  requests and typed failure across the whole of it.
+- **`khq`** — a query language over JSON, with its own parser and evaluator.
 
 Each is evidence that the pieces compose. **None is a claim of production
 completeness**, and the list above of what the language does not have applies to
-all three.
+all five.
 
 ## Front-end design notes
 
@@ -478,9 +481,12 @@ Phase 10 is largely done: `khora.lock` and a content-addressed store, the
 `extern` allow-list, two lints, and a language server that reports diagnostics
 and answers hover. What is left of it is a registry, cross-compilation targets,
 and the sandboxed WASM build plugins — plus the rest of the editor surface.
-Then phase 11, the scheduler — a fiber is an operating-system thread today, so a server holds
-thousands of connections and not hundreds of thousands, and that is the last
-thing standing between the positioning and the truth.
+Then phase 11, the scheduler. The M:N backend — stackful coroutines on a worker
+pool — is built and opt-in with `KHORA_FIBERS=scheduler`; the default is still
+one operating-system thread per fiber, because threads are faster at the
+connection counts a service actually runs at. What is left is making the
+scheduler the default, which `docs/limitations` gives three reasons against
+today, one of them a gap rather than a preference.
 
 `docs/roadmap.md` has the order, the reasons, and what each one costs.
 

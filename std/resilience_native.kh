@@ -24,8 +24,7 @@ import std::random::{Random};
 //! `(attempt, elapsed) -> Option<delay>`, which is smaller and cannot do any
 //! of that: `sharing.md` refuses a record of closures across a fiber, and a
 //! log line saying `Exponential { base: 100, .. }` is worth more than one
-//! saying nothing. Khora's constraints produce the better design here rather
-//! than a compromise.
+//! saying nothing.
 //!
 //! **The schedule never sleeps; the driver does.** `next_after` answers *when*
 //! the next attempt should start, as an offset from the moment the whole thing

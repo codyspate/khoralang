@@ -17,37 +17,25 @@ The pages are lookup-oriented, but they are ordered so that a straight read
 works. Each opens with what the construct is for before it lists the shapes it
 accepts.
 
-**The syntax of ordinary programs**
+**The syntax of ordinary programs** — [Expressions](./expressions/),
+[Control flow](./control-flow/), [Types](./types/), [Patterns](./patterns/),
+[Generics](./generics/) and [Traits](./traits/).
 
-1. [Expressions](./expressions/) — literals, calls, records, blocks, `let`,
-   lambdas, `|>` and `||>`, postfix `!`.
-2. [Control flow](./control-flow/) — `if`, `match`, `while`, `for`, `loop`,
-   `break`, `return`.
-3. [Types](./types/) — records, variants, tuples, wrappers, function types.
-4. [Patterns](./patterns/) — matching and destructuring, everywhere they appear.
-5. [Generics](./generics/) and [Traits](./traits/) — parameters, bounds,
-   associated types, row variables.
+**What makes Khora different** — [Failures](./failures/): what may go wrong is
+in the type. Then [Effects and rows](./effects/) and
+[Capabilities](./capabilities/): what authority a function needs is in the type
+too, and the two rows are independent.
 
-**What makes Khora different**
-
-6. [Failures](./failures/) — `raises`, `raise`, `!`, `catch`, `attempt`. What
-   may go wrong is in the type.
-7. [Effects and rows](./effects/) and [Capabilities](./capabilities/) —
-   `effect`, `handler`, `with`, `context`. What authority a function needs is in
-   the type too, and the two rows are independent.
-
-**Lifetimes and concurrent work**
-
-8. [Memory and resources](./memory-and-resources/) — regions, `scoped`,
-   `acquire`, cleanup on every exit.
-9. [Concurrency](./concurrency/) — fibers, nurseries, cancellation.
-10. [Sharing](./sharing/) — `Shared`, `Channel`, `SharedFn`, and what may cross
-    a fiber boundary.
+**Lifetimes and concurrent work** — [Memory and
+resources](./memory-and-resources/), [Concurrency](./concurrency/),
+[Sharing](./sharing/).
 
 If you have not built a Khora program yet, start with [Getting
 Started](/docs/getting-started/) and come back once the toolchain workflow
 works. Arriving from TypeScript + Effect, Go or Rust, the [migration
 pages](/docs/migration/) map familiar concepts onto these.
+
+The rest of this page is the full index, by topic.
 
 ## Source and declarations
 
@@ -88,9 +76,6 @@ pages](/docs/migration/) map familiar concepts onto these.
 - [Testing and benchmarks](./testing/) — `khora test` and `khora bench`, supplying capabilities to a test, build profiles, and CI.
 - [Lints](./lints/) — the twelve checks `khora check` runs, their default levels, and how to set them in `[lints]`.
 - [Debugging a program](./debugging/) — backtraces, debug information, what a debugger can and cannot be relied on for.
-
-## The release itself
-
 - [Compatibility and stability](./compatibility/) — what `0.x` promises, what counts as a breaking change, and what 1.0 is waiting for.
 
 ## Where the other sections start

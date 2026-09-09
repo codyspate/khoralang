@@ -5,8 +5,6 @@ sidebar:
   order: 0
 ---
 
-Welcome to the Khora documentation. This is the entry point for everything you need to install the toolchain, learn the language, build applications, understand exact language behavior, and use the standard library.
-
 ## Where Khora actually is
 
 **Khora is `0.x` and pre-1.0, with one maintainer.** The released line is

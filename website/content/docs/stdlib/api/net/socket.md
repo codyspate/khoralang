@@ -61,7 +61,7 @@ A failed call returns -1, and a handle is never negative.
 pub fn start() -> Bool
 ```
 
-Nothing to start. Present so that a caller reads the same on both targets.
+Nothing to start. Present so that a caller reads the same on all three targets.
 
 ### listen_on
 

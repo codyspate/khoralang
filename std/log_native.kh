@@ -326,20 +326,17 @@ fn shown(value: Value) -> String {
 // for the ones that carry structure, and these are written in terms of it so
 // there is one path to a handler rather than six.
 
-/// The finest detail.
+/// The finest detail: what somebody reading a transcript afterwards would want,
+/// and nobody wants while the program is behaving.
 ///
 /// ```khora
 /// import std::log::{Log, trace};
 ///
-/// fn charge(amount: Int) -> Int with { log: Log } {
-///   trace("charging");
+/// fn charge(amount: Int, card: String) -> Int with { log: Log } {
+///   trace("authorising ${amount} against ${card}");
 ///   amount
 /// }
 /// ```
-///
-/// **The handler decides whether this is written, not the caller.** A
-/// caller that checked the level itself would have to know the
-/// configuration, which is what the capability keeps away from it.
 pub fn trace(message: String) -> () with { log: Log } {
   log.record(Severity::Trace, message, List::Nil)
 }
@@ -350,14 +347,10 @@ pub fn trace(message: String) -> () with { log: Log } {
 /// import std::log::{Log, debug};
 ///
 /// fn charge(amount: Int) -> Int with { log: Log } {
-///   debug("charging");
+///   debug("charging ${amount}");
 ///   amount
 /// }
 /// ```
-///
-/// **The handler decides whether this is written, not the caller.** A
-/// caller that checked the level itself would have to know the
-/// configuration, which is what the capability keeps away from it.
 pub fn debug(message: String) -> () with { log: Log } {
   log.record(Severity::Debug, message, List::Nil)
 }
@@ -368,14 +361,10 @@ pub fn debug(message: String) -> () with { log: Log } {
 /// import std::log::{Log, info};
 ///
 /// fn charge(amount: Int) -> Int with { log: Log } {
-///   info("charging");
+///   info("charged ${amount}");
 ///   amount
 /// }
 /// ```
-///
-/// **The handler decides whether this is written, not the caller.** A
-/// caller that checked the level itself would have to know the
-/// configuration, which is what the capability keeps away from it.
 pub fn info(message: String) -> () with { log: Log } {
   log.record(Severity::Info, message, List::Nil)
 }
@@ -386,14 +375,10 @@ pub fn info(message: String) -> () with { log: Log } {
 /// import std::log::{Log, warn};
 ///
 /// fn charge(amount: Int) -> Int with { log: Log } {
-///   warn("charging");
+///   warn("the rate table is stale; charging ${amount} at yesterday's rate");
 ///   amount
 /// }
 /// ```
-///
-/// **The handler decides whether this is written, not the caller.** A
-/// caller that checked the level itself would have to know the
-/// configuration, which is what the capability keeps away from it.
 pub fn warn(message: String) -> () with { log: Log } {
   log.record(Severity::Warn, message, List::Nil)
 }
@@ -404,14 +389,10 @@ pub fn warn(message: String) -> () with { log: Log } {
 /// import std::log::{Log, error};
 ///
 /// fn charge(amount: Int) -> Int with { log: Log } {
-///   error("charging");
-///   amount
+///   error("the acquirer refused ${amount}; nothing was charged");
+///   0
 /// }
 /// ```
-///
-/// **The handler decides whether this is written, not the caller.** A
-/// caller that checked the level itself would have to know the
-/// configuration, which is what the capability keeps away from it.
 pub fn error(message: String) -> () with { log: Log } {
   log.record(Severity::Error, message, List::Nil)
 }

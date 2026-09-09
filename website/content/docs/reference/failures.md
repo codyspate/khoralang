@@ -395,12 +395,16 @@ pub fn main() -> Int {
   with { reads: FsRead::real() } {
     match attempt(fn () => read_text(path)!) {
       Result::Ok(text) => { print(text); 0 },
-      Result::Err(IoError::NotFound(where)) => { print("no such file: ${where}"); 1 },
-      Result::Err(other) => { print("could not read it"); 1 },
+      Result::Err(IoError::NotFound(where)) => { eprint("no such file: ${where}"); 1 },
+      Result::Err(other) => { eprint("could not read it"); 1 },
     }
   }
 }
 ```
+
+`eprint` and not `print`: the diagnostic goes to standard error, so that a
+program whose output somebody redirected still says why it stopped. It comes
+from `std::log`.
 
 A cancellation that reaches the entry point is a different outcome and exits
 **130** — 128 plus `SIGINT`, which is what a shell already means by

@@ -4,7 +4,9 @@ sidebar:
   order: 8
 ---
 
-Khora supports type parameters, trait bounds, const parameters, row variables, higher-kinded use, explicit `forall`, and variance annotations.
+A generic is code written once against a type it does not know, and a bound is
+what it is allowed to assume about that type. Everything below is one of those
+two things.
 
 ## Type parameters on functions
 

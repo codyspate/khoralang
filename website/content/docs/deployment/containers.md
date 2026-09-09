@@ -1,7 +1,7 @@
 ---
 title: Containers
 sidebar:
-  order: 3
+  order: 2
 ---
 
 Khora's native deployment goal is a small, self-contained executable that does
@@ -14,7 +14,7 @@ single file.
 
 ```dockerfile
 # --- build ------------------------------------------------------------------
-FROM debian:bookworm-slim AS build
+FROM debian:trixie-slim AS build
 
 # clang links the executable; the toolchain download cannot bring a linker with
 # it. git is only needed if khora.toml has a git dependency.
@@ -35,7 +35,7 @@ RUN khora install \
     && khora build . --release --out /out/myservice
 
 # --- run --------------------------------------------------------------------
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 # ca-certificates only if the service opens outbound TLS: a TlsClient verifies
 # against the machine's own trust store, and a slim image has none.
@@ -63,8 +63,12 @@ library, and static and musl builds are not produced or tested
 ([Supported targets](/docs/deployment/supported-targets/)). So the runtime image
 has to supply a glibc at least as new as the one the binary was linked against.
 Same distribution and same release in both stages is the way to stop thinking
-about it; `gcr.io/distroless/cc-debian12` works for the same reason and is
-smaller, while Alpine does not, because it is musl.
+about it, and **which** release is not free to choose: the published toolchain
+needs glibc 2.39 or newer, so `bookworm` cannot run it and `trixie` can. That
+is why both stages above are trixie and not the more familiar bookworm; the
+table on [Supported targets](/docs/deployment/supported-targets/) is the list.
+A distroless runtime image works for the same reason and is smaller, as long as
+it is the Debian 13 variant; Alpine does not, because it is musl.
 
 Nothing else from the build stage is copied. There is no `std/`, no compiler,
 and no toolchain in the final image: the executable carries the Khora runtime

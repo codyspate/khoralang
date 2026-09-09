@@ -993,7 +993,7 @@ impl<A: Ord> List<A> {
   ///
   /// `A: Ord` rather than a comparison function, so that `<` on the elements
   /// and `sort` on the list cannot disagree. Sorting by something else is
-  /// `sort_by`, which does not exist yet and wants a closure.
+  /// `sort_by`, which takes the comparison.
   ///
   /// **Its own recursion is the divide, so it goes about `log2(n)` deep** —
   /// twenty frames for a million elements. The `merge` underneath it is
@@ -3676,9 +3676,6 @@ impl String {
   /// not — a view would let one be edited through the other.
   pub fn bytes(self) -> Array<U8>;
 
-  /// Lends the bytes to `body` as a pointer and a length, for the duration of
-  /// the call and no longer.
-  ///
   /// Lends the bytes to `body` as a `const char *`: the same bytes with a
   /// zero after them, which is how every function in the C library finds the
   /// end of a string.

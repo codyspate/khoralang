@@ -94,9 +94,8 @@ Router::new()
   |> Router::listen(8080)!
 ```
 
-The buffer is allocated once at that size per connection, so this is also the
-memory one connected client can make the server hold. Raise it to what the
-largest legitimate document needs and not further.
+What that number costs a full server is worked out in
+[an HTTP service](/docs/cookbook/http-service/#bound-the-resource-that-is-actually-constrained).
 
 ## Derive when the wire shape matches the type
 

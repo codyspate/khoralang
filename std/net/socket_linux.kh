@@ -52,7 +52,7 @@ extern fn khora_net_connect(host: Ptr, host_len: Int, port: Int) -> Int;
 /// A failed call returns -1, and a handle is never negative.
 pub fn invalid_handle() -> Int { 0 - 1 }
 
-/// Nothing to start. Present so that a caller reads the same on both targets.
+/// Nothing to start. Present so that a caller reads the same on all three targets.
 pub fn start() -> Bool { true }
 
 /// A socket listening on `port`, or [`invalid_handle`].
