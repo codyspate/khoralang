@@ -140,7 +140,15 @@ pub fn select_impl(types: &TypeMap, instance: &Instance) -> Option<Instance> {
     def.method(method)?;
 
     let self_ty = instance.args.first()?;
-    let imp = types.traits.find(trait_name, self_ty)?;
+    // `Self` first, then the trait's own arguments: the order the trait's
+    // signature declares them in, which is the order they were instantiated.
+    // These are what choose between `impl Convert<String> for Int` and
+    // `impl Convert<Bool> for Int` -- a search by name alone finds both and
+    // emits whichever was collected first, which is a call to the wrong body
+    // with nothing anywhere reporting it.
+    let trait_args: Vec<Type> =
+        instance.args.iter().skip(1).take(def.type_params.len()).cloned().collect();
+    let imp = types.traits.find_at(trait_name, &trait_args, self_ty)?;
     let head = imp.head()?;
 
     // An impl that leaves a function out is taking the trait's default, and the
@@ -163,7 +171,10 @@ pub fn select_impl(types: &TypeMap, instance: &Instance) -> Option<Instance> {
         .iter()
         .map(|g| solved.get(g).cloned().unwrap_or(Type::Unknown))
         .collect();
-    args.extend(instance.args.iter().skip(1).cloned());
+    // The method's own type arguments, past `Self` and the trait's. The impl
+    // has already answered the trait's, so carrying them on would instantiate
+    // the impl's method at arguments it does not take.
+    args.extend(instance.args.iter().skip(1 + def.type_params.len()).cloned());
 
     // **The module is the type's, when the type has one.** A method key is
     // `Trait#Head::method` and the head is a bare name, so two modules that
@@ -178,7 +189,7 @@ pub fn select_impl(types: &TypeMap, instance: &Instance) -> Option<Instance> {
     let module = traits::home_of(&imp.self_type).unwrap_or_else(|| instance.module.clone());
     Some(Instance {
         module,
-        function: traits::method_key(trait_name, &head, method),
+        function: traits::method_key(&imp.trait_key, &head, method),
         args,
     })
 }

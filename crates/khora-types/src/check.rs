@@ -424,14 +424,47 @@ impl<'a> Checker<'a> {
         // the program's. Errata 33 is the same argument about a different map.
         blamed.sort_by_key(|(range, name)| (range.len(), range.start(), name.clone()));
         let Some((range, name)) = blamed.first().cloned() else { return };
-        self.error(
-            format!(
-                "nothing here decides what type `{name}` is used at, and its bound is \
-                 the only thing that would -- so there is no impl to call. Annotate it: \
-                 `let value: TheType = {name}(..)`, or say it at the call"
-            ),
-            range,
-        );
+        self.error(self.why_undetermined(&name), range);
+    }
+
+    /// Why nothing decided a bounded type argument — which is two situations
+    /// with two different fixes, and one of them cannot be fixed at the call
+    /// at all.
+    ///
+    /// Usually the call is under-annotated, and saying the type fixes it. But
+    /// a *trait method that never mentions `Self`* can never be decided from
+    /// outside: no argument carries it, no result carries it, and an
+    /// annotation has nothing to attach to. That is what a receiver renamed
+    /// from `self` to `_self` produces — the trait still compiles, the impls
+    /// still compile, and every call site in files nobody touched reports
+    /// this. `unused-binding` used to suggest exactly that rename and does not
+    /// any more; a hand-written `_self` still reaches here, and now hears what
+    /// is wrong instead of being told to annotate, which would not have helped.
+    fn why_undetermined(&self, name: &str) -> String {
+        let declared = name.split_once("::").and_then(|(owner, method)| {
+            self.types.traits.traits.get(owner).and_then(|def| def.method(method))
+        });
+        if let Some(method) = declared {
+            let uses_self = method
+                .signature
+                .params
+                .iter()
+                .chain(std::iter::once(&method.signature.ret))
+                .any(|ty| crate::traits::mentions_param(ty, "Self"));
+            if !uses_self {
+                return format!(
+                    "`{name}` never mentions `Self`, so no call can say which impl to use \
+                     and no annotation can either. A method's first parameter has to be \
+                     `self`; anything else — `_self` included — is an ordinary parameter, \
+                     and it takes the method away"
+                );
+            }
+        }
+        format!(
+            "nothing here decides what type `{name}` is used at, and its bound is \
+             the only thing that would -- so there is no impl to call. Annotate it: \
+             `let value: TheType = {name}(..)`, or say it at the call"
+        )
     }
 
     pub(crate) fn check_unknowns(&mut self) {

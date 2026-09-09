@@ -1112,3 +1112,201 @@ fn a_conditional_impl_looks_all_the_way_down() {
         "{CONDITIONAL}fn f(r: Result<Int, Result<Int, Fine>>) -> String {{ Show::show(r) }}\n"
     ));
 }
+
+/// A trait method that never mentions `Self` says so, rather than telling the
+/// caller to annotate something no annotation can reach.
+///
+/// This is what a receiver renamed from `self` to `_self` leaves behind. The
+/// trait compiles, the impls compile, and every call site reports "nothing
+/// here decides what type `Named::label` is used at ... Annotate it" — advice
+/// that cannot work, because there is nowhere for the annotation to bite.
+/// `unused-binding` no longer proposes the rename; a hand-written `_self`
+/// still arrives here.
+#[test]
+fn a_trait_method_without_self_names_the_receiver() {
+    let found = errors(
+        "module m;\n\
+         pub trait Named { fn label(_self) -> String { \"anonymous\" } }\n\
+         pub type Thing = { n: Int };\n\
+         impl Named for Thing {}\n\
+         pub fn go(t: Thing) -> String { Named::label(t) }\n",
+    );
+
+    assert!(
+        found.iter().any(|e| e.contains("`Named::label` never mentions `Self`")
+            && e.contains("first parameter has to be `self`")),
+        "the receiver is the cause and the message should say it: {found:?}"
+    );
+    assert!(
+        !found.iter().any(|e| e.contains("Annotate it")),
+        "no annotation reaches this, so it must not be offered: {found:?}"
+    );
+}
+
+// --- generic traits ---------------------------------------------------------
+
+/// A trait with a type parameter, and the shape `From`/`Into` exists for.
+const CONVERT: &str = "module m;\n\
+                       pub trait Convert<A> { fn convert(self) -> A; }\n";
+
+/// **`impl Convert<String> for Int` was refused.**
+///
+/// `traits.md` documents generic traits and says their parameters take "the
+/// normal generic parameter syntax", but nothing recorded either half of the
+/// substitution: `TraitDef` did not know `A` was a parameter and `ImplDef` did
+/// not keep the `<String>` the impl wrote. So the impl's `-> String` was
+/// compared against the trait's `-> A` with `A` still standing, and every impl
+/// at a concrete argument was told
+///
+///     `convert` returns `String` here, but `Convert` declares `A`
+///
+/// which left only the fully parametric `impl<A> Convert<A> for T` -- the one
+/// shape a `From`/`Into` trait is never written in.
+#[test]
+fn a_trait_argument_may_be_concrete() {
+    assert_clean(&format!(
+        "{CONVERT}impl Convert<String> for Int {{ fn convert(self) -> String {{ \"n\" }} }}\n"
+    ));
+}
+
+/// And the method is callable, which is the half a signature check passing on
+/// its own does not establish.
+#[test]
+fn a_concrete_trait_argument_is_callable() {
+    assert_clean(&format!(
+        "{CONVERT}impl Convert<String> for Int {{ fn convert(self) -> String {{ \"n\" }} }}\n\
+         fn f(n: Int) -> String {{ n.convert() }}\n\
+         fn g(n: Int) -> String {{ Convert::convert(n) }}\n"
+    ));
+}
+
+/// The parametric impl is what worked before any of this, and is what the
+/// substitution must not break: there `A` maps to a parameter of the impl,
+/// which is the parameter it already was.
+#[test]
+fn a_trait_argument_may_still_be_a_parameter() {
+    assert_clean(&format!(
+        "{CONVERT}pub type Wrapper = {{ v: Int }};\n\
+         impl<A> Convert<A> for Wrapper {{ fn convert(self) -> A {{ Convert::convert(self) }} }}\n"
+    ));
+}
+
+/// Two impls at different arguments are two impls, and a program is entitled
+/// to both. Which one a call means is decided by what its result is used as.
+#[test]
+fn one_type_may_convert_to_several() {
+    assert_clean(&format!(
+        "{CONVERT}impl Convert<String> for Int {{ fn convert(self) -> String {{ \"n\" }} }}\n\
+         impl Convert<Bool> for Int {{ fn convert(self) -> Bool {{ true }} }}\n\
+         fn f(n: Int) -> String {{ n.convert() }}\n\
+         fn g(n: Int) -> Bool {{ n.convert() }}\n"
+    ));
+}
+
+/// Two at the *same* argument are the collision the coherence rule is for, and
+/// the message has to name the argument -- without it, it describes the legal
+/// pair above and this one identically.
+#[test]
+fn two_impls_at_one_argument_collide() {
+    assert_reports(
+        &format!(
+            "{CONVERT}impl Convert<String> for Int {{ fn convert(self) -> String {{ \"n\" }} }}\n\
+             impl Convert<String> for Int {{ fn convert(self) -> String {{ \"m\" }} }}\n"
+        ),
+        "`Convert<String>` is already implemented for `Int`",
+    );
+}
+
+/// Naming the type cannot choose between them, so the call says so rather than
+/// resolving to whichever impl was collected first.
+#[test]
+fn a_type_qualified_call_names_the_ambiguity() {
+    assert_reports(
+        &format!(
+            "{CONVERT}impl Convert<String> for Int {{ fn convert(self) -> String {{ \"n\" }} }}\n\
+             impl Convert<Bool> for Int {{ fn convert(self) -> Bool {{ true }} }}\n\
+             fn f(n: Int) -> Bool {{ Int::convert(n) }}\n"
+        ),
+        "`Convert::convert(..)`, where the result decides",
+    );
+}
+
+/// A trait that takes no arguments is untouched by any of it: its key is its
+/// name, its impls collide as they always did, and nothing about a program
+/// that never writes a generic trait changes.
+#[test]
+fn a_trait_without_arguments_is_unaffected() {
+    assert_clean(&format!("{SHOW}fn f(n: Int) -> String {{ n.show() }}\n"));
+    assert_reports(
+        &format!("{SHOW}impl Show for Int {{ fn show(self) -> String {{ \"j\" }} }}\n"),
+        "`Show` is already implemented for `Int`",
+    );
+}
+
+/// Too few arguments, and the message spells the impl that would be right.
+/// This is the first thing somebody writes after reading only the trait's
+/// name, so it has to lead somewhere.
+#[test]
+fn a_missing_trait_argument_names_the_fix() {
+    assert_reports(
+        &format!("{CONVERT}impl Convert for Int {{ fn convert(self) -> String {{ \"n\" }} }}\n"),
+        "`Convert` takes 1 type argument(s), but this impl gives 0; write \
+         `impl Convert<A> for Int`",
+    );
+}
+
+/// And too many.
+#[test]
+fn a_surplus_trait_argument_names_the_fix() {
+    assert_reports(
+        &format!(
+            "{CONVERT}impl Convert<String, Bool> for Int {{ fn convert(self) -> String {{ \"n\" }} }}\n"
+        ),
+        "`Convert` takes 1 type argument(s), but this impl gives 2; write \
+         `impl Convert<A> for Int`",
+    );
+}
+
+/// Coherence across files is per (trait, arguments, type) too.
+///
+/// `impl_homes` keyed on the trait's *name*, which is the same
+/// whole-program check as `traits::check`'s per-file one and had the same
+/// blind spot: it would have called two modules' `Convert<String>` and
+/// `Convert<Bool>` for `Int` a duplicate, and a partial fix that taught only
+/// `traits::check` about arguments would have left this one refusing a legal
+/// program. Both directions, because only checking one of them proves nothing.
+#[test]
+fn coherence_across_files_reads_the_arguments() {
+    let convert = "module m;\npub trait Convert<A> { fn convert(self) -> A; }\n";
+
+    let different = errors_across(
+        convert,
+        "module a;\nimpl Convert<String> for Int { fn convert(self) -> String { \"n\" } }\n",
+        "module b;\nimpl Convert<Bool> for Int { fn convert(self) -> Bool { true } }\n",
+    );
+    assert!(
+        !different.iter().any(|e| e.contains("already implemented")),
+        "two impls at different arguments are two impls: {different:?}"
+    );
+
+    let same = errors_across(
+        convert,
+        "module a;\nimpl Convert<String> for Int { fn convert(self) -> String { \"n\" } }\n",
+        "module b;\nimpl Convert<String> for Int { fn convert(self) -> String { \"m\" } }\n",
+    );
+    assert!(
+        same.iter().any(|e| e.contains("`Convert<String>` is already implemented for `Int`")
+            && e.contains("in `a`")),
+        "the second impl collides, and the message has to say where the first is: {same:?}"
+    );
+}
+
+/// The diagnostics of `second`, with `first` and a shared declaration beside it.
+fn errors_across(declaration: &str, first: &str, second: &str) -> Vec<String> {
+    let db = khora_db::KhoraDatabase::new();
+    let shared = SourceFile::new(&db, "m.kh".into(), declaration.to_string());
+    let first = SourceFile::new(&db, "a.kh".into(), first.to_string());
+    let second = SourceFile::new(&db, "b.kh".into(), second.to_string());
+    khora_db::SourceRoot::new(&db, vec![shared, first, second]);
+    diagnostics(&db, second).iter().map(|e| e.message.clone()).collect()
+}

@@ -753,7 +753,7 @@ pub(crate) fn import_builtin_impls(exported: &TypeMap, map: &mut TypeMap) {
             .traits
             .impls
             .iter()
-            .any(|i| i.trait_name == imp.trait_name && i.head() == imp.head());
+            .any(|i| i.trait_key == imp.trait_key && i.head() == imp.head());
         if known {
             continue;
         }
@@ -783,7 +783,7 @@ pub(crate) fn import_builtin_impls(exported: &TypeMap, map: &mut TypeMap) {
         }
         let Some(head) = imp.head() else { continue };
         let trait_prefix = format!("{}::", imp.trait_name);
-        let impl_prefix = format!("{}#{head}::", imp.trait_name);
+        let impl_prefix = format!("{}#{head}::", imp.trait_key);
         for (key, signature) in &exported.signatures {
             if key.starts_with(&trait_prefix) || key.starts_with(&impl_prefix) {
                 map.signatures.entry(key.clone()).or_insert_with(|| signature.clone());

@@ -74,11 +74,28 @@ impl std::fmt::Display for Mismatch {
                     );
                 }
                 let (left, right) = (expected.to_string(), found.to_string());
-                if left == right {
-                    write!(f, "expected `{}`, found `{}`", expected.qualified(), found.qualified())
-                } else {
-                    write!(f, "expected `{left}`, found `{right}`")
+                if left != right {
+                    return write!(f, "expected `{left}`, found `{right}`");
                 }
+                // **One of the two never resolved, and qualifying it says
+                // nothing.** A file that writes `Dict<String, Int>` without
+                // importing `Dict` gets an `Adt` with no home (see
+                // `Type::Adt`), which prints exactly like the real one -- so
+                // the reader was handed ``expected `Dict<String, Int>`, found
+                // `std::core::Dict<String, Int>``, one type spelled two ways,
+                // and went looking for a second `Dict`. There is not one; the
+                // name simply is not in scope, and the import is the fix. Said
+                // the way ``Split` is not in scope here, so nothing is known
+                // about its fields -- add it to an `import`` says it.
+                if let Some((name, resolved)) = unresolved_against_resolved(expected, found) {
+                    return write!(
+                        f,
+                        "`{name}` is not in scope here, so it is a different type from \
+                         `{}` -- add `{name}` to an `import`",
+                        resolved.qualified()
+                    );
+                }
+                write!(f, "expected `{}`, found `{}`", expected.qualified(), found.qualified())
             }
             Mismatch::Infinite { ty, .. } => {
                 write!(f, "this would make an infinite type, containing `{ty}`")
@@ -107,6 +124,30 @@ impl std::fmt::Display for Mismatch {
                 }
             }
         }
+    }
+}
+
+/// Of two types that print alike, the one whose name never resolved and the
+/// one that did.
+///
+/// Only asked when the plain spellings already match, which is what makes the
+/// two `Adt` names the same name. `home: None` is documented on [`Type::Adt`]
+/// as "a name that did not resolve"; a resolved type always carries the module
+/// that declares it, so the pair is unambiguous.
+///
+/// Both homeless is not this case -- two unresolved names are equal, so they
+/// unify -- and both resolved is the genuine two-modules-one-name mismatch
+/// that [`Type::qualified`] exists for.
+fn unresolved_against_resolved<'t>(
+    expected: &'t Type,
+    found: &'t Type,
+) -> Option<(&'t str, &'t Type)> {
+    match (expected, found) {
+        (Type::Adt { name, home: None, .. }, resolved @ Type::Adt { home: Some(_), .. })
+        | (resolved @ Type::Adt { home: Some(_), .. }, Type::Adt { name, home: None, .. }) => {
+            Some((name.as_str(), resolved))
+        }
+        _ => None,
     }
 }
 

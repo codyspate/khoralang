@@ -483,3 +483,40 @@ fn an_opaque_declaration_is_still_refused() {
         "{found:?}"
     );
 }
+
+/// A `derive` whose trait is not in scope says so once, and the impl it wrote
+/// anyway says nothing at all.
+///
+/// One missing import used to print four errors. The first is the one worth
+/// reading -- it names the trait, the fix and where the fix comes from. The
+/// other three were about the expansion: `cannot resolve `Ordering::Less``
+/// and `cannot resolve `Ordering::Greater`` out of a `match` nobody wrote,
+/// and then a disagreement between the impl's signature and the trait's that
+/// named `Ordering` on both sides, because only one of the two names
+/// resolved. Nothing in there is a line the reader can change.
+#[test]
+fn an_unresolvable_derive_does_not_leak_its_expansion() {
+    let found = errors(
+        "module m;\n\
+         pub trait Eq { fn eq(self, other: Self) -> Bool; }\n\
+         pub trait Show { fn show(self) -> String; }\n\
+         impl Eq for Int { fn eq(self, other: Int) -> Bool { self == other } }\n\
+         impl Show for Int { fn show(self) -> String { \"n\" } }\n\
+         derive(Show, Eq, Ord)\n\
+         pub type Quantity = { n: Int };\n",
+    );
+
+    assert!(
+        found.iter().any(|e| e.contains("`derive(Ord)` needs `Ord` in scope")),
+        "the import is still the message: {found:?}"
+    );
+    assert!(
+        !found.iter().any(|e| e.contains("Ordering")),
+        "nothing about the expansion's `Ordering` should be said: {found:?}"
+    );
+    assert!(
+        !found.iter().any(|e| e.contains("`Ord` is not a trait in scope")),
+        "the `derive` line already said that, in words naming the fix: {found:?}"
+    );
+    assert_eq!(found.len(), 1, "one missing import is one error: {found:?}");
+}

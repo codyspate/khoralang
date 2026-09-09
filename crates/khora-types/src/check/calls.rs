@@ -247,6 +247,51 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Why a trait's method found no impl -- which is two situations, and only
+    /// one of them is a fact about the type.
+    ///
+    /// ``TreeIter<Int>` does not implement `Iterator`` was said about a type
+    /// whose module writes `impl<A> Iterator for TreeIter<A>` on the page. The
+    /// statement is flatly false. What was true is that the file writing
+    /// `for item in numbers.iter()` had imported `Iterator` and `Step` but not
+    /// `TreeIter`, and an impl reaches a file with *its type* -- so nothing
+    /// about `TreeIter` had arrived, including its impls.
+    ///
+    /// That rule is real and worth keeping; the message just never mentioned
+    /// it, and a reader who believes a false sentence goes looking in the
+    /// wrong module. Said the way [`Self::no_such_method`] and `why_no_field`
+    /// say the same thing: name the type, say what is not known about it
+    /// because it is absent, and give the import.
+    ///
+    /// A head this file *does* know is the ordinary case, and the original
+    /// message is right about it: the impl really is not there.
+    fn no_impl_here(&self, self_ty: &Type, method: &str, owners: &[String]) -> String {
+        let head = traits::head_of(self_ty);
+        // `undeclared_adt` rather than `Traits::knows`: `knows` answers "did
+        // any *impl* for this head arrive", which is false for a type that is
+        // imported and simply has no impl -- the ordinary case this must not
+        // steal. The declaration is the right question, and it is the same one
+        // `why_no_field` asks before saying a type's fields are unknown.
+        let unimported = self.undeclared_adt(self_ty).is_some()
+            && !head.as_deref().is_some_and(|h| self.types.effects.contains(h));
+        let wanted = owners.join("` or `");
+        match (unimported, head, traits::home_of(self_ty)) {
+            (true, Some(name), Some(home)) => format!(
+                "`{name}` is not in scope here, so nothing is known about its impls, \
+                 including whether it implements `{wanted}` — an impl reaches a file with \
+                 its type. Write `import {}::{{{name}}};`",
+                home.segments().join("::")
+            ),
+            // No home means nothing to import: `Bool` and the other builtins
+            // are never "in scope" in the sense above, and telling somebody to
+            // import one would be a worse sentence than the false one this
+            // replaced. For those the original message is the true one.
+            _ => format!(
+                "`{self_ty}` does not implement `{wanted}`, which is where `{method}` comes from"
+            ),
+        }
+    }
+
     /// Resolves `receiver.method(args)` through the traits in scope.
     ///
     /// Returns `None` when the receiver has a *field* of that name, so a record
@@ -321,13 +366,7 @@ impl<'a> Checker<'a> {
                 return Some(Type::Unknown);
             }
             Err(traits::MethodError::NotImplemented(owners)) => {
-                self.error(
-                    format!(
-                        "`{self_ty}` does not implement `{}`, which is where `{method}` comes from",
-                        owners.join("` or `")
-                    ),
-                    range,
-                );
+                self.error(self.no_impl_here(&self_ty, method, &owners), range);
                 return Some(Type::Unknown);
             }
             Err(traits::MethodError::Ambiguous(names)) => {
@@ -522,12 +561,49 @@ impl<'a> Checker<'a> {
         // falls through to the trait lookup below, which is what `Show::show`
         // and a bounded type parameter both need.
         {
-            let found = self.types.traits.impls.iter().find(|i| {
-                traits::head_of(&i.self_type).as_deref() == Some(owner)
-                    && i.methods.iter().any(|m| m == name)
-            });
-            if let Some(chosen) = found {
-                let key = traits::method_key(&chosen.trait_name, owner, name);
+            let found: Vec<&traits::ImplDef> = self
+                .types
+                .traits
+                .impls
+                .iter()
+                .filter(|i| {
+                    traits::head_of(&i.self_type).as_deref() == Some(owner)
+                        && i.methods.iter().any(|m| m == name)
+                })
+                .collect();
+
+            // **A type may implement one generic trait several times.** This
+            // search is by the type and the method name only, so
+            // `impl Convert<String> for Int` and `impl Convert<Bool> for Int`
+            // both answer for `Int::convert` -- and taking the first meant the
+            // call resolved to whichever impl was collected first, then
+            // disagreed with the caller about its own return type. The trait
+            // form has somewhere for the answer to come from, since the
+            // arguments are inferred there, so that is what to point at.
+            let mut spellings: Vec<&str> = Vec::new();
+            for imp in &found {
+                if !spellings.contains(&imp.trait_key.as_str()) {
+                    spellings.push(&imp.trait_key);
+                }
+            }
+            if spellings.len() > 1 {
+                let names: Vec<String> = spellings.iter().map(|s| format!("`{s}`")).collect();
+                let through = found[0].trait_name.clone();
+                let range = self.body.range(at);
+                self.error(
+                    format!(
+                        "`{owner}` implements `{name}` at more than one argument ({}), so naming the type does not say which; call it through the trait, as `{through}::{name}(..)`, where the result decides",
+                        names.join(" and ")
+                    ),
+                    range,
+                );
+                return Type::Unknown;
+            }
+
+            if let Some(chosen) = found.first() {
+                // The trait *as the impl wrote it*: `Convert<String>#Int::convert`
+                // is the key its body and signature are recorded under.
+                let key = traits::method_key(&chosen.trait_key, owner, name);
                 let Some(signature) = self.types.signatures.get(key.as_str()).cloned() else {
                     return Type::Unknown;
                 };

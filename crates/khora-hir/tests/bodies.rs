@@ -419,3 +419,53 @@ fn an_unknown_constructor_says_which_mistake_it_is() {
         "the type is in scope, so an import is not the fix: {found:?}"
     );
 }
+
+/// A `${..}` hole is scanned as source, so a quote in it is written
+/// unescaped — and the message says so, rather than claiming there is no
+/// expression under text that visibly is one.
+///
+/// The escaped form is what somebody arriving from Rust writes by habit, and
+/// the general message sent one developer looking at the call twelve times
+/// over. Naming the backslash is the whole fix.
+#[test]
+fn an_escaped_quote_in_a_hole_names_the_backslash() {
+    let db = KhoraDatabase::new();
+    let body = only_body(
+        &db,
+        "module m;\nfn f() -> String { \"${String::byte_length(\\\"abc\\\")}\" }\n",
+    );
+
+    let found = errors(&body);
+    assert!(
+        found.iter().any(|e| e.contains("scanned as source, not as string text")
+            && e.contains("write `\"` here, not `\\\"`")),
+        "the backslash should be named: {found:?}"
+    );
+    assert!(
+        !found.iter().any(|e| e.contains("does not contain an expression")),
+        "the hole does contain an expression, so that must not be said: {found:?}"
+    );
+}
+
+/// A hole that is broken some other way keeps the general message, even when
+/// it holds an escape — the backslash is named only when it is the reason.
+#[test]
+fn a_hole_broken_otherwise_still_says_no_expression() {
+    let db = KhoraDatabase::new();
+
+    let empty = only_body(&db, "module m;\nfn f() -> String { \"a${}b\" }\n");
+    assert!(
+        errors(&empty).iter().any(|e| e.contains("does not contain an expression")),
+        "{:?}",
+        errors(&empty)
+    );
+
+    // An escape is present and removing it does not help: still the general
+    // message, because the backslash is not what broke this.
+    let other = only_body(&db, "module m;\nfn f() -> String { \"${let \\\"x\\\" =}\" }\n");
+    assert!(
+        errors(&other).iter().any(|e| e.contains("does not contain an expression")),
+        "{:?}",
+        errors(&other)
+    );
+}

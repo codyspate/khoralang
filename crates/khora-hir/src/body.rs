@@ -710,11 +710,30 @@ fn fields_of(row: Option<&ast::RecordExpr>) -> Vec<ast::RecordExprField> {
 /// occur in a Khora identifier, so this can never collide with a name a program
 /// chose.
 pub fn impl_key(decl: &ast::ImplDecl) -> String {
-    let trait_name = decl.trait_().as_ref().and_then(type_head).unwrap_or_default();
+    let trait_name = decl.trait_().as_ref().and_then(trait_key).unwrap_or_default();
     let self_name = decl.self_type().as_ref().and_then(type_head).unwrap_or_default();
     // An inherent impl has an empty trait half, so its methods key as `#User`.
     // Still unambiguous, and still impossible to collide with a Khora name.
     format!("{trait_name}#{self_name}")
+}
+
+/// The half of an impl's key that names the trait, arguments included.
+///
+/// `Convert<String>`, not `Convert`: `impl Convert<String> for Int` and
+/// `impl Convert<Bool> for Int` are two impls, and keying both as `Convert#Int`
+/// recorded two bodies under one name and ran whichever was lowered first.
+///
+/// A trait with no arguments keys as its bare name, so every existing key is
+/// what it always was. The arguments are taken from the source text with
+/// whitespace removed rather than from a type, because `khora-types` builds the
+/// same key from the same syntax and the two halves have to agree exactly.
+pub fn trait_key(ty: &ast::Type) -> Option<String> {
+    let ast::Type::Path(path) = ty else { return None };
+    let head = path.path()?.text_path();
+    let Some(args) = path.type_args() else { return Some(head) };
+    let written: String =
+        args.syntax().text().to_string().chars().filter(|c| !c.is_whitespace()).collect();
+    Some(format!("{head}{written}"))
 }
 
 /// The head constructor of a written type: `Option` for `Option<Int>`.
@@ -1256,6 +1275,15 @@ fn split_interpolation(body: &str) -> Vec<Part> {
             while j < bytes.len() {
                 match bytes[j] {
                     b'\\' if quoted => j += 1,
+                    // A backslash before a quote *outside* a nested string is
+                    // a `\"` written out of habit: nothing in Khora puts a
+                    // backslash where an expression may start. Letting it open
+                    // a string leaves `quoted` stuck on, so the hole ran to
+                    // the end of the literal and its span covered the closing
+                    // brace and everything after it. Stepping over both bytes
+                    // ends the hole at its own `}`, where the reader put it,
+                    // and leaves `lower_fragment` a fragment it can diagnose.
+                    b'\\' if bytes.get(j + 1) == Some(&b'"') => j += 1,
                     b'"' => quoted = !quoted,
                     b'{' if !quoted => depth += 1,
                     b'}' if !quoted => {

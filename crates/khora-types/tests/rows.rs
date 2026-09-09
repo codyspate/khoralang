@@ -1217,3 +1217,26 @@ fn a_missing_capability_does_not_mention_catch() {
         "a capability is not a failure: {found:?}"
     );
 }
+
+/// One mistake is one error, however many passes noticed it.
+///
+/// A missing `!` on a fallible call whose result is method-chained reached the
+/// report down two routes — the call, and the receiver of the chain — and
+/// printed the identical sentence at the identical span twice, under
+/// `2 error(s)`. A record literal did the same. The second copy tells the
+/// reader nothing, and a count that is not the number of things wrong is a
+/// count people stop reading.
+#[test]
+fn one_missing_mark_is_reported_once() {
+    let found = errors(
+        "module m;\n\
+         pub type Oops = | Bad;\n\
+         pub trait Show { fn show(self) -> String; }\n\
+         impl Show for Int { fn show(self) -> String { \"n\" } }\n\
+         fn risky() -> Int raises Oops;\n\
+         pub fn go() -> String raises Oops { risky().show() }\n",
+    );
+
+    let marks: Vec<&String> = found.iter().filter(|e| e.contains("needs `!`")).collect();
+    assert_eq!(marks.len(), 1, "the mark is missing once: {found:?}");
+}

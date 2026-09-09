@@ -418,3 +418,88 @@ fn a_show_hole_on_an_unimported_type_names_the_import() {
         "expected the `Show` message where it is true, got {genuine:?}"
     );
 }
+
+/// An impl reaches a file with its *type*, and the message says so instead of
+/// denying the impl exists.
+///
+/// With `Iterator` and `Step` imported but the iterator type itself not,
+/// `for item in numbers.iter()` reported ``TreeIter<Int>` does not implement
+/// `Iterator`` about a type whose own module writes `impl Iterator for
+/// TreeIter` on the page. The rule is real -- a type must be imported where
+/// its impls are reached, exactly as it must be where its fields are -- and
+/// the reader can act on it; the flat denial only sends them into the wrong
+/// module.
+///
+/// Three modules, because two are not enough to reach it: an impl travels
+/// with its trait as well as with its type, so the trait has to live
+/// somewhere other than the impl -- which is the shape of the real case,
+/// where `Iterator` is `std::core`'s and the impl is the package's.
+#[test]
+fn an_impl_on_an_unimported_type_names_the_import() {
+    let db = KhoraDatabase::new();
+    let traits = SourceFile::new(
+        &db,
+        "traits.kh".into(),
+        "module traits;
+pub trait Tick { fn tick(self) -> Int; }
+".to_string(),
+    );
+    let library = SourceFile::new(
+        &db,
+        "library.kh".into(),
+        "module library;
+         import traits::{Tick};
+         pub type Counter = { n: Int };
+         impl Tick for Counter { fn tick(self) -> Int { self.n } }
+         pub fn one() -> Counter { { n: 1 } }
+"
+            .to_string(),
+    );
+    let user = SourceFile::new(
+        &db,
+        "user.kh".into(),
+        "module user;
+         import traits::{Tick};
+         import library::{one};
+         pub fn go() -> Int { one().tick() }
+"
+            .to_string(),
+    );
+    SourceRoot::new(&db, vec![traits, library, user]);
+    let found: Vec<String> =
+        khora_types::diagnostics(&db, user).iter().map(|e| e.message.clone()).collect();
+
+    assert_eq!(found.len(), 1, "one thing is wrong here: {found:?}");
+    assert!(
+        found[0].contains("`Counter` is not in scope here")
+            && found[0].contains("nothing is known about its impls")
+            && found[0].contains("import library::{Counter};"),
+        "the import is the fix and the message should carry it: {found:?}"
+    );
+    assert!(
+        !found[0].contains("does not implement `Tick`"),
+        "it does implement it, and saying otherwise is false: {found:?}"
+    );
+}
+
+/// A type that *is* in scope and genuinely lacks the impl keeps the plain
+/// message -- that one is true, and it is the common case.
+#[test]
+fn a_type_in_scope_without_the_impl_is_still_told_so() {
+    let found = errors_in_user(
+        "module library;
+         pub trait Tick { fn tick(self) -> Int; }
+         pub type Counter = { n: Int };
+         pub fn one() -> Counter { { n: 1 } }
+",
+        "module user;
+         import library::{Tick, Counter, one};
+         pub fn go() -> Int { one().tick() }
+",
+    );
+
+    assert!(
+        found.iter().any(|e| e.contains("`Counter` does not implement `Tick`")),
+        "{found:?}"
+    );
+}

@@ -300,13 +300,19 @@ pub fn impl_homes(
     db: &dyn Db,
     root: khora_db::SourceRoot,
 ) -> HashMap<(String, String, Option<khora_hir::ModulePath>), SourceFile> {
+    // Keyed by the trait *as written* -- `Convert<String>`, not `Convert`.
+    // `impl Convert<String> for Int` and `impl Convert<Bool> for Int` are two
+    // impls a program is entitled to both of, and keying by the trait's name
+    // alone reported the second as a duplicate of the first. Two impls at the
+    // same arguments share a key and still collide, which is the case this
+    // check exists for.
     let mut files: Vec<SourceFile> = root.files(db).to_vec();
     files.sort_by_key(|file| file.path(db).clone());
     let mut homes = HashMap::new();
     for file in files {
         for imp in type_map(db, file).traits.impls.iter().filter(|imp| imp.local) {
             let Some((head, home)) = imp.target() else { continue };
-            homes.entry((imp.trait_name.clone(), head, home)).or_insert(file);
+            homes.entry((imp.trait_key.clone(), head, home)).or_insert(file);
         }
     }
     homes
@@ -325,7 +331,7 @@ pub fn coherence_errors(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
     let mut errors = Vec::new();
     for imp in type_map(db, file).traits.impls.iter().filter(|imp| imp.local) {
         let Some((head, home)) = imp.target() else { continue };
-        let key = (imp.trait_name.clone(), head.clone(), home);
+        let key = (imp.trait_key.clone(), head.clone(), home);
         let Some(kept) = homes.get(&key) else { continue };
         if *kept == file {
             continue;
@@ -339,7 +345,7 @@ pub fn coherence_errors(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
             message: format!(
                 "`{}` is already implemented for `{head}` in `{there}`; there can be only \
                  one impl of a trait for a type in a program",
-                imp.trait_name
+                imp.trait_key
             ),
             range: imp.range,
         });

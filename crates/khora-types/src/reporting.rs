@@ -111,11 +111,29 @@ pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
     // `derive` that cannot be honoured makes everything after it about the
     // impl the compiler wrote rather than the line the reader wrote.
     all.extend(khora_hir::derive::derived(db, file).errors.iter().cloned());
-    all.extend(derive::derive_report(db, file).errors.iter().cloned());
-    for (_, body) in khora_hir::body::bodies(db, file) {
+    let derives = derive::derive_report(db, file);
+    all.extend(derives.errors.iter().cloned());
+    for (name, body) in khora_hir::body::bodies(db, file) {
+        // A refused `derive`'s body says the same thing in the expander's
+        // words. `checked` has always dropped what the *checker* found in one;
+        // what got out was what *lowering* found, which for a trait that is
+        // not in scope is a run of `cannot resolve `Ordering::Less`` about a
+        // `match` nobody wrote. See `DeriveReport::unresolved`.
+        if derives.refused.contains(name) {
+            continue;
+        }
         all.extend(body.errors.iter().cloned());
     }
-    all.extend(trait_errors(db, file).iter().cloned());
+    // The same cascade, one pass further on: `traits::check` compares the
+    // expansion's signature against the trait's and finds `Ordering` on one
+    // side and `Ordering` on the other, because only one of the two names
+    // resolved. The `derive` clause has already been told to import the trait.
+    all.extend(
+        trait_errors(db, file)
+            .iter()
+            .filter(|e| !derives.unresolved.contains(&e.range))
+            .cloned(),
+    );
     all.extend(crate::queries::coherence_errors(db, file).iter().cloned());
     all.extend(shadowed_name_errors(db, file));
     all.extend(malformed_with_clause_errors(db, file));
@@ -125,6 +143,24 @@ pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
     all.extend(entry_point_shape_errors(db, file));
     all.extend(assert_outside_a_test_errors(db, file));
     all.extend(check_file(db, file).iter().cloned());
+
+    // **The same sentence at the same span, twice, is one mistake.** A missing
+    // `!` on a fallible call whose result is method-chained reached the
+    // reporting path down two routes -- the call itself and the receiver of
+    // the chain -- and printed identically twice, under `2 error(s)`. A record
+    // literal did the same. Nobody can act on the second copy, and a count
+    // that is not the number of things wrong is a count people stop reading.
+    //
+    // Here rather than in the renderer because the count is taken from this
+    // list: de-duplicating at the last moment would print once and still say
+    // two. Message *and* span both, so two genuinely different places that
+    // deserve the same words each keep theirs.
+    //
+    // Order is preserved -- the passes above run in the order a reader wants
+    // to read them, and the first copy is the one in the right place.
+    let mut seen: std::collections::HashSet<(String, TextRange)> =
+        std::collections::HashSet::new();
+    all.retain(|e| seen.insert((e.message.clone(), e.range)));
     all
 }
 

@@ -39,6 +39,24 @@ pub struct DeriveReport {
     /// the expander, and that has to stay visible — but their diagnostics are
     /// dropped, because this pass has already said the same thing better.
     pub refused: Vec<String>,
+    /// The `derive(..)` clauses whose trait could not be resolved at all.
+    ///
+    /// **A trait that is not in scope makes the whole expansion unreadable,
+    /// not just its body.** `derive(Ord)` without `Ord` imported expands to an
+    /// `impl Ord` whose `cmp` mentions `Ordering`, which is not in scope
+    /// either -- so one missing import produced ``derive(Ord)` needs `Ord` in
+    /// scope`, then `cannot resolve `Ordering::Less``, then the same for
+    /// `Greater`, and then ``cmp` returns `Ordering` here, but `Ord` declares
+    /// `Ordering`` -- a sentence naming one type on both sides of a
+    /// disagreement, because only one of the two resolved. Three of the four
+    /// are about an impl nobody wrote.
+    ///
+    /// Everything a derived impl can be blamed for is blamed at its `derive`
+    /// clause (see `khora_hir::derive::DerivedImpl::at`), so the clause's span
+    /// is enough to recognise the expansion's diagnostics and drop them.
+    /// `refused` covers the bodies; this covers what `traits::check` says
+    /// about the impl's shape.
+    pub unresolved: Vec<text_size::TextRange>,
 }
 
 /// Checks a file's `derive` clauses against what its traits actually are.
@@ -120,6 +138,9 @@ pub fn derive_report(db: &dyn Db, file: SourceFile) -> DeriveReport {
             // Suppresses the per-field errors below, which without the trait
             // would all fail and bury this one.
             out.refused.push(derived.body_key());
+            // And everything the expansion goes on to say elsewhere: see
+            // `DeriveReport::unresolved`.
+            out.unresolved.push(derived.at);
             continue;
         }
         let def = known.expect("checked just above");

@@ -27,6 +27,12 @@ use super::*;
 const STEP_IS_MISSING: &str = "`for` needs `Step` and `Iterator` in scope; import them from \
                                `std::core`";
 
+/// What a `${..}` fragment is wrapped in to be parsed as a source file, and
+/// what its ranges are shifted back by afterwards. Named once because two
+/// places need it now: the lowering, and the check that tells an escaped quote
+/// apart from every other reason a hole will not parse.
+const FRAGMENT_PREFIX: &str = "module i;\nconst i = ";
+
 impl<'a> Ctx<'a> {
     /// `for pat in iter { body }`, desugared here rather than carried further.
     ///
@@ -227,8 +233,7 @@ impl<'a> Ctx<'a> {
     /// digging a tail expression out of a function body would be more code for
     /// the same result.
     pub(super) fn lower_fragment(&mut self, source: &str, at: u32) -> ExprId {
-        const PREFIX: &str = "module i;\nconst i = ";
-        let wrapped = format!("{PREFIX}{source};\n");
+        let wrapped = format!("{FRAGMENT_PREFIX}{source};\n");
         let parsed = khora_syntax::parse(&wrapped);
 
         let found = parsed
@@ -243,15 +248,33 @@ impl<'a> Ctx<'a> {
         let Some(expr) = found else {
             let width = source.len().max(1) as u32;
             let span = TextRange::at(TextSize::from(at), TextSize::from(width));
-            self.error("this `${..}` does not contain an expression", span);
+            // A hole is scanned as source, not as string content, so a `\"` in
+            // one is a backslash followed by a quote and nothing after it
+            // parses. Saying "does not contain an expression" under text that
+            // visibly is an expression sends the reader searching the
+            // expression instead of looking at the one character that broke
+            // it -- and the escaped form is what somebody arriving from Rust
+            // writes out of habit. The backslash is named only when taking it
+            // off makes the fragment parse, so a hole broken some other way
+            // that happens to contain an escape still gets the general
+            // message.
+            let unescaped = source.replace("\\\"", "\"");
+            let message = if unescaped != source && parses_as_expression(&unescaped) {
+                "a `${..}` hole is scanned as source, not as string text, so its quotes stand \
+                 as they are: write `\"` here, not `\\\"`"
+            } else {
+                "this `${..}` does not contain an expression"
+            };
+            self.error(message, span);
             return self.add_expr(Expr::Missing, span);
         };
 
         // The fragment's ranges are measured from the start of `wrapped`, and
         // the expression begins right after the prefix — so moving them by
-        // `at - PREFIX.len()` puts them exactly where the source text is.
+        // `at - FRAGMENT_PREFIX.len()` puts them exactly where the source text
+        // is.
         let outer = self.range_shift;
-        self.range_shift = at.wrapping_sub(PREFIX.len() as u32);
+        self.range_shift = at.wrapping_sub(FRAGMENT_PREFIX.len() as u32);
         let lowered = self.lower_expr(&expr);
         self.range_shift = outer;
         lowered
@@ -459,6 +482,23 @@ impl<'a> Ctx<'a> {
             None => crate::Resolution::Unsupported(STEP_IS_MISSING),
         }
     }
+}
+
+/// Whether this text is a whole expression, by the same wrapping
+/// `lower_fragment` parses one with.
+///
+/// Only asked once a hole has already failed to parse: it is how an escaped
+/// quote is told apart from every other way a hole can be malformed, so the
+/// message that names the backslash is given only when the backslash is the
+/// reason.
+fn parses_as_expression(source: &str) -> bool {
+    let wrapped = format!("{FRAGMENT_PREFIX}{source};\n");
+    let parsed = khora_syntax::parse(&wrapped);
+    parsed.errors().is_empty()
+        && parsed.source_file().decls().any(|item| match item {
+            ast::Decl::Const(c) => c.initializer().is_some(),
+            _ => false,
+        })
 }
 
 /// The significand and the scale a decimal literal denotes.

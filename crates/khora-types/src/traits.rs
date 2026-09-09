@@ -83,6 +83,15 @@ pub struct MethodDef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraitDef {
     pub name: String,
+    /// The trait's own type parameters: `A` for `trait Convert<A>`.
+    ///
+    /// **Nothing recorded these, so `A` existed only in the source text.** An
+    /// impl at a concrete argument was then checked against a signature still
+    /// mentioning `A` and told ``convert` returns `String` here, but `Convert`
+    /// declares `A`` — a trait parameter cannot be substituted by a checker
+    /// that does not know it is one. These are the left-hand side of that
+    /// substitution; [`ImplDef::trait_args`] is the right.
+    pub type_params: Vec<String>,
     /// Traits an implementing type must also implement: `trait Ord: Eq`.
     pub supertraits: Vec<String>,
     pub assoc_types: Vec<String>,
@@ -102,6 +111,23 @@ impl TraitDef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImplDef {
     pub trait_name: String,
+    /// The arguments the impl gives the trait's own parameters: `[String]` for
+    /// `impl Convert<String> for Int`, `[Param("A")]` for
+    /// `impl<A> Convert<A> for Wrapper`.
+    ///
+    /// Empty for a trait that takes none, which is every trait `Traits::find`
+    /// was written for and why an argument-blind lookup stayed correct for so
+    /// long.
+    pub trait_args: Vec<Type>,
+    /// The trait half of this impl's method keys, arguments included:
+    /// `Convert<String>`.
+    ///
+    /// Equal to `trait_name` whenever the trait takes no arguments, so every
+    /// key a program had before is unchanged. Built by
+    /// [`khora_hir::body::trait_key`], which is also what lowering keys the
+    /// bodies under — the two must agree character for character or a method
+    /// resolves to a signature with no body.
+    pub trait_key: String,
     /// The implementing type, with the impl's own parameters rigid: `Option<A>`
     /// for `impl<A> Eq for Option<A>`.
     pub self_type: Type,
@@ -135,6 +161,31 @@ impl ImplDef {
     /// Resolution is nominal, so this is a name and never a shape.
     pub fn head(&self) -> Option<String> {
         head_of(&self.self_type)
+    }
+
+    /// Whether this impl is the one for a trait used at `args`.
+    ///
+    /// `impl Convert<String> for Int` answers at `[String]` and not at
+    /// `[Bool]`. `impl<A> Convert<A> for Wrapper` answers at both, because `A`
+    /// is the impl's own parameter and stands for whatever was asked for.
+    ///
+    /// An empty `args` is a caller with nothing to say about the arguments, and
+    /// every impl answers it -- see [`Traits::find_at`]. So is an argument the
+    /// caller has not solved: a `Var` or an `Unknown` is the absence of an
+    /// answer rather than a wrong one, and rejecting on it would report "no
+    /// impl" for a program whose only problem is that inference is not finished.
+    pub fn answers_at(&self, args: &[Type]) -> bool {
+        if args.is_empty() {
+            return true;
+        }
+        self.trait_args.len() == args.len()
+            && self.trait_args.iter().zip(args).all(|(mine, wanted)| match wanted {
+                Type::Unknown | Type::Var(_) | Type::Never => true,
+                wanted => match mine {
+                    Type::Param(p) if self.generics.iter().any(|g| g == p) => true,
+                    mine => mine == wanted,
+                },
+            })
     }
 
     /// The type this impl is *for*: its name, and the module that declared it.
@@ -256,12 +307,36 @@ impl Traits {
     /// Matching is on the head constructor: `impl<A> Eq for Option<A>` answers
     /// for every `Option<..>`, and no impl answers for a type variable, because
     /// which impl applies is not yet known.
+    ///
+    /// The trait's own arguments are not asked about, which is the right
+    /// question for every caller that has none to ask -- "does `Int` implement
+    /// `Convert` at all" -- and the wrong one for choosing between
+    /// `Convert<String>` and `Convert<Bool>`. [`Traits::find_at`] is that
+    /// question.
     pub fn find(&self, trait_name: &str, ty: &Type) -> Option<&ImplDef> {
+        self.find_at(trait_name, &[], ty)
+    }
+
+    /// The impl of `trait_name` at `args` covering `ty`.
+    ///
+    /// **An empty `args` means "at any arguments", not "at none".** Almost
+    /// every caller asks about a trait that takes none, where the two readings
+    /// coincide and the filter is inert. A caller that has solved the trait's
+    /// arguments -- monomorphization, once inference has settled what the
+    /// result of `convert` is used as -- passes them, and gets the one impl
+    /// that promised them rather than whichever was collected first.
+    ///
+    /// An argument still open on the caller's side is not a reason to reject an
+    /// impl: it carries no information, and refusing here would turn "not
+    /// decided yet" into "no impl", which is a different diagnostic pointing at
+    /// a different line.
+    pub fn find_at(&self, trait_name: &str, args: &[Type], ty: &Type) -> Option<&ImplDef> {
         let head = head_of(ty)?;
         let named = self
             .impls
             .iter()
-            .filter(|i| i.trait_name == trait_name && i.head().as_deref() == Some(head.as_str()));
+            .filter(|i| i.trait_name == trait_name && i.head().as_deref() == Some(head.as_str()))
+            .filter(|i| i.answers_at(args));
 
         // **The first impl whose type is the receiver's, not the first whose
         // name is.** Two modules may each declare an `Entry`, and this used to
@@ -311,7 +386,17 @@ impl Traits {
     /// the far end with `Show::show has no body` -- a message about the trait
     /// rather than about the type, pointing at no line in particular.
     pub fn satisfies(&self, trait_name: &str, ty: &Type) -> bool {
-        self.satisfied_within(trait_name, ty, 0)
+        self.satisfied_within(trait_name, &[], ty, 0)
+    }
+
+    /// The same question about a trait used at particular arguments.
+    ///
+    /// `Int` satisfies `Convert` -- it implements it once -- without satisfying
+    /// `Convert<Bool>`, and a caller holding the arguments is entitled to the
+    /// narrower answer. [`Traits::satisfies`] is the wider one, which is what a
+    /// bound written as a bare name asks for.
+    pub fn satisfies_at(&self, trait_name: &str, args: &[Type], ty: &Type) -> bool {
+        self.satisfied_within(trait_name, args, ty, 0)
     }
 
     /// The same question, with a depth to stop a cycle.
@@ -320,9 +405,9 @@ impl Traits {
     /// since a bound is on a parameter of the head just matched -- but a
     /// malformed one should get an error rather than a stack overflow, and this
     /// runs on every hole in every file.
-    fn satisfied_within(&self, trait_name: &str, ty: &Type, depth: usize) -> bool {
+    fn satisfied_within(&self, trait_name: &str, args: &[Type], ty: &Type, depth: usize) -> bool {
         const DEEPEST: usize = 32;
-        let Some(found) = self.find(trait_name, ty) else { return false };
+        let Some(found) = self.find_at(trait_name, args, ty) else { return false };
         if depth >= DEEPEST || found.bounds.is_empty() {
             return true;
         }
@@ -334,7 +419,9 @@ impl Traits {
                 // reported: the caller's own `satisfies` answers for these, and
                 // guessing here would blame the wrong expression.
                 Type::Unknown | Type::Var(_) | Type::Never | Type::Param(_) => true,
-                settled => self.satisfied_within(w, settled, depth + 1),
+                // A bound on an impl's parameter is written as a bare trait
+                // name, so there are no arguments to carry into the recursion.
+                settled => self.satisfied_within(w, &[], settled, depth + 1),
             })
         })
     }
@@ -416,6 +503,7 @@ pub fn collect(source: &ast::SourceFile, homes: &crate::TypeHomes) -> Traits {
                     name.clone(),
                     TraitDef {
                         name,
+                        type_params: own.clone(),
                         supertraits: bound_names(t.supertraits().as_ref()),
                         assoc_types,
                         methods,
@@ -447,7 +535,14 @@ pub fn collect(source: &ast::SourceFile, homes: &crate::TypeHomes) -> Traits {
             }
             ast::Decl::Impl(i) => {
                 let generics = crate::generic_names(i.type_params().as_ref());
-                let Some(trait_name) = i.trait_().as_ref().and_then(written_head) else { continue };
+                let Some(written) = i.trait_() else { continue };
+                let Some(trait_name) = written_head(&written) else { continue };
+                // `Convert<String>` keeps its `<String>` in syntax; it was
+                // dropped here, and everything downstream then had only the
+                // head name to work from.
+                let trait_args = written_args(&written, &generics, homes);
+                let trait_key =
+                    khora_hir::body::trait_key(&written).unwrap_or_else(|| trait_name.clone());
                 let self_type = type_of_syntax(i.self_type().as_ref(), &generics, homes);
                 let methods: Vec<String> =
                     i.functions().filter_map(|f| f.name().and_then(|n| n.ident())).collect();
@@ -470,6 +565,8 @@ pub fn collect(source: &ast::SourceFile, homes: &crate::TypeHomes) -> Traits {
                     .collect();
                 out.impls.push(ImplDef {
                     trait_name,
+                    trait_args,
+                    trait_key,
                     self_type,
                     generics,
                     bounds,
@@ -580,6 +677,36 @@ fn applied_arity(ty: &Type, param: &str) -> usize {
     }
 }
 
+/// Whether `param` appears anywhere in `ty`.
+///
+/// Asked of `Self` in a trait method's signature, to tell "nothing at this
+/// call decides which impl" from "nothing *anywhere* could": a method that
+/// never mentions `Self` has no impl to be chosen for it at all, and telling
+/// its caller to annotate the result is advice that cannot work.
+pub fn mentions_param(ty: &Type, param: &str) -> bool {
+    match ty {
+        Type::Param(p) => p == param,
+        Type::Adt { args, .. } | Type::Tuple(args) => {
+            args.iter().any(|a| mentions_param(a, param))
+        }
+        Type::Applied { head, args } => {
+            mentions_param(head, param) || args.iter().any(|a| mentions_param(a, param))
+        }
+        Type::Fn { params, ret, requires, raises } => {
+            params.iter().any(|a| mentions_param(a, param))
+                || mentions_param(ret, param)
+                || mentions_param(requires, param)
+                || mentions_param(raises, param)
+        }
+        Type::Row { fields, tail } => {
+            fields.iter().any(|(_, t)| mentions_param(t, param))
+                || tail.as_deref().is_some_and(|t| mentions_param(t, param))
+        }
+        Type::Assoc { owner, .. } => mentions_param(owner, param),
+        _ => false,
+    }
+}
+
 /// The trait names in a bound list, ignoring anything that is not a plain name.
 pub fn bound_names(bounds: Option<&ast::TypeBounds>) -> Vec<String> {
     bounds
@@ -609,6 +736,18 @@ fn bind_parameters<'a>(
         }
     }
     out
+}
+
+/// The type arguments of a written type: `[Int]` for `Option<Int>`.
+///
+/// Read straight off the path rather than by converting the whole type, because
+/// a trait is not a type: `Convert` has no declaration for `named_type` to
+/// resolve, and only the arguments are wanted here.
+fn written_args(ty: &ast::Type, generics: &[String], homes: &crate::TypeHomes) -> Vec<Type> {
+    let ast::Type::Path(path) = ty else { return Vec::new() };
+    path.type_args()
+        .map(|a| a.args().map(|t| type_of_syntax(Some(&t), generics, homes)).collect())
+        .unwrap_or_default()
 }
 
 /// The head name of a written type: `Option` for `Option<Int>`.
@@ -673,13 +812,22 @@ pub fn impl_signatures(
         scope.extend(own.iter().cloned());
         for f in t.functions() {
             let Some(def) = method_def(&f, &scope, homes) else { continue };
+            // `Self` first, then the trait's own parameters, then the
+            // method's. The trait's belong here because they are chosen per
+            // *call*, exactly as `Self` is: `Convert::convert(n)` has to solve
+            // `A` from what the result is used as, and a parameter left out of
+            // this list stays rigid and can only ever disagree with the answer.
             let mut generics = vec!["Self".to_string()];
+            generics.extend(own.iter().cloned());
             generics.extend(def.signature.generics.iter().cloned());
             // `Self: ThisTrait` is what a default body relies on when it calls
             // another of the trait's functions on `self`. Stating it here means
             // the ordinary bound machinery discharges it, with no special case
             // anywhere else.
             let mut bounds = vec![vec![name.clone()]];
+            let mut trait_bounds = crate::bound_lists(t.type_params().as_ref());
+            trait_bounds.resize(own.len(), Vec::new());
+            bounds.extend(trait_bounds);
             bounds.extend(def.signature.bounds.iter().cloned());
             out.insert(
                 format!("{name}::{}", def.name),
@@ -737,7 +885,9 @@ pub fn impl_signatures(
         if i.is_inherent() {
             continue;
         }
-        let Some(trait_name) = i.trait_().as_ref().and_then(written_head) else { continue };
+        let Some(written) = i.trait_() else { continue };
+        let Some(trait_name) = written_head(&written) else { continue };
+        let trait_key = khora_hir::body::trait_key(&written).unwrap_or_else(|| trait_name.clone());
         let generics = crate::generic_names(i.type_params().as_ref());
         let self_type = type_of_syntax(i.self_type().as_ref(), &generics, homes);
         let Some(head) = head_of(&self_type) else { continue };
@@ -778,7 +928,7 @@ pub fn impl_signatures(
                     .collect(),
                 ret: crate::unify::substitute(&def.signature.ret, &mapping),
             };
-            out.insert(method_key(&trait_name, &head, &def.name), signature);
+            out.insert(method_key(&trait_key, &head, &def.name), signature);
         }
     }
     out
@@ -898,22 +1048,48 @@ pub fn check(
             continue;
         };
 
-        // One impl per trait per type. The second one is the error, and the
-        // message has to say where the first is or it is not actionable.
-        if let Some(first) = traits.impls[..i]
+        // A generic trait has to be given its arguments, and exactly as many
+        // as it declares. Checked before anything else reads `trait_args`,
+        // because every later check pairs a parameter with an argument
+        // positionally, and a short list leaves a parameter standing -- which
+        // surfaces as a signature mismatch about a name the reader never wrote.
+        if imp.trait_args.len() != def.type_params.len() {
+            let what = imp.head().unwrap_or_else(|| "this type".to_string());
+            let spelled = if def.type_params.is_empty() {
+                format!("impl {} for {what}", def.name)
+            } else {
+                format!("impl {}<{}> for {what}", def.name, def.type_params.join(", "))
+            };
+            errors.push(HirError {
+                message: format!(
+                    "`{}` takes {} type argument(s), but this impl gives {}; write `{spelled}`",
+                    def.name,
+                    def.type_params.len(),
+                    imp.trait_args.len()
+                ),
+                range: imp.range,
+            });
+            continue;
+        }
+
+        // One impl per trait per type -- per *arguments* too, since
+        // `Convert<String>` and `Convert<Bool>` are two different promises
+        // about `Int` and a program is entitled to both. The second impl at the
+        // same arguments is the error, and the message names them, because
+        // otherwise it describes a legal pair and an illegal one identically.
+        if traits.impls[..i]
             .iter()
-            .find(|o| o.trait_name == imp.trait_name && o.target() == imp.target())
+            .any(|o| o.trait_key == imp.trait_key && o.target() == imp.target())
         {
             let what = imp.head().unwrap_or_else(|| "this type".to_string());
             errors.push(HirError {
                 message: format!(
                     "`{}` is already implemented for `{what}`; there can be only one impl \
                      of a trait for a type",
-                    imp.trait_name
+                    imp.trait_key
                 ),
                 range: imp.range,
             });
-            let _ = first;
             continue;
         }
 
@@ -1066,6 +1242,14 @@ fn check_methods(imp: &ImplDef, def: &TraitDef, errors: &mut Vec<HirError>) {
     }
 }
 
+/// A trait's own type parameters, or none for a name that is not a trait here.
+///
+/// An unknown trait is reported by [`check`] before anything reaches this, so
+/// the empty answer only ever feeds a check that is already going to be quiet.
+fn trait_params<'a>(traits: &'a Traits, name: &str) -> &'a [String] {
+    traits.traits.get(name).map(|d| d.type_params.as_slice()).unwrap_or(&[])
+}
+
 /// Every method an impl declares must have the signature the trait promised.
 ///
 /// `impl_signatures` deliberately reads what the impl *wrote* rather than what
@@ -1085,16 +1269,30 @@ fn check_signatures(
         let Some(declared) = signatures.get(&format!("{}::{}", imp.trait_name, method)) else {
             continue;
         };
-        let Some(written) = signatures.get(&method_key(&imp.trait_name, &head, method)) else {
+        let Some(written) = signatures.get(&method_key(&imp.trait_key, &head, method)) else {
             continue;
         };
 
         // Put both sides in the same names: `Self` becomes the implementing
-        // type, and the trait's method parameters take the impl's spelling of
+        // type, the trait's own parameters become the arguments this impl gave
+        // them, and the trait's method parameters take the impl's spelling of
         // them, so `fn map<A, B>` and `fn map<X, Y>` compare equal.
+        //
+        // The middle one is what makes `impl Convert<String> for Int` check at
+        // all: `A` is answered by `String` here, and comparing the trait's
+        // `-> A` against the impl's `-> String` without that substitution can
+        // only ever report a difference. `impl<A> Convert<A> for Wrapper` goes
+        // through the same line and maps `A` to the impl's own `A`, which is
+        // the parameter it already was.
         let mut mapping: HashMap<&str, Type> = HashMap::new();
         mapping.insert("Self", imp.self_type.clone());
-        let trait_own = declared.generics.get(1..).unwrap_or(&[]);
+        let params = trait_params(traits, &imp.trait_name);
+        for (param, arg) in params.iter().zip(&imp.trait_args) {
+            mapping.insert(param.as_str(), arg.clone());
+        }
+        // `Self`, then the trait's own parameters, then the method's: the
+        // order `impl_signatures` writes them in.
+        let trait_own = declared.generics.get(1 + params.len()..).unwrap_or(&[]);
         let impl_own = written.generics.get(imp.generics.len()..).unwrap_or(&[]);
         for (from, to) in trait_own.iter().zip(impl_own) {
             mapping.insert(from.as_str(), Type::Param(to.clone()));
