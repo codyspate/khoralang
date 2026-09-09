@@ -253,8 +253,23 @@ impl Unboxed {
             // boxed: one word, and `qualifies` is false *because* it is a
             // pointer. So the pointer-ness has to be asked about directly.
             // Roadmap 16.6.
-            let counted = self.counted(first);
-            if here.iter().any(|t| self.counted(t) != counted) {
+            // **Agreeing that the word is counted is not enough: it has to be
+            // the same counted thing.** The check below used to compare
+            // `counted` across the variants and admit the slot when they
+            // agreed. That is still wrong wherever they agree on `true`,
+            // because releasing a counted word is type-specific -- a `Str` and
+            // a boxed ADT are both one counted pointer and are not released by
+            // the same code. `Result<String, Bad>`, where `Bad` mixes a boxed
+            // and an unboxed payload and is therefore itself boxed, is exactly
+            // that shape: slot zero is a `Str` under `Ok` and a boxed `Bad`
+            // under `Err`, both counted, both admitted -- and the program dies
+            // with SIGILL on a `match` over what `attempt` answered.
+            //
+            // A slot the variants disagree about may therefore hold only words
+            // nothing counts. Where they agree about the type, the equality
+            // branch above has already taken it and this never runs, so the
+            // layouts that pay are untouched. Roadmap 16.6, second half.
+            if here.iter().any(|t| self.counted(t)) {
                 return None;
             }
             total += 1;

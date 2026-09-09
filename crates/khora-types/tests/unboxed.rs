@@ -171,3 +171,55 @@ fn a_shared_slot_may_not_mix_a_pointer_with_a_scalar() {
         "and two counted pointers share one plan"
     );
 }
+
+/// **Agreeing that a slot is counted does not make it one plan.**
+///
+/// The first half of 16.6 refused a slot holding a pointer under one variant
+/// and a scalar under the other. This is the half that was left: two variants
+/// that both put a *counted pointer* in the slot, of different types. A `Str`
+/// and a boxed ADT are one counted word each and are not released by the same
+/// code, so the plan a slot gets from its static type is wrong for one of them.
+///
+/// `CallError` is the shape from `cookbook/retrying.md`: six `String` cases and
+/// a `TooLarge(limit: Int)`, so it mixes payload kinds and is itself boxed.
+/// `Result<String, CallError>` -- what `attempt` answers for the cookbook's own
+/// example -- then had a `Str` under `Ok` and a boxed `CallError` under `Err`,
+/// both counted, both admitted. `khora check` and `khora build` were clean and
+/// matching the result died with SIGILL on the success path.
+#[test]
+fn a_shared_slot_may_not_mix_two_kinds_of_counted_pointer() {
+    let (_db, map) = merged();
+    let u = khora_types::unboxed::decide(&map, khora_types::unboxed::Fields::Any);
+
+    let call_error = Type::Adt {
+        name: "CallError".to_string(),
+        home: Some(khora_hir::ModulePath::new(vec![
+            "std".into(),
+            "net".into(),
+            "http".into(),
+        ])),
+        args: Vec::new(),
+    };
+
+    assert!(
+        !u.holds(&call_error),
+        "the premise: `CallError` mixes a `String` payload with an `Int` one,          so it is behind a pointer itself"
+    );
+
+    assert!(
+        !u.holds(&core("Result", vec![Type::Str, call_error.clone()])),
+        "`Ok` carries a `Str` and `Err` a boxed ADT; both are counted and          neither is released the way the other is"
+    );
+    assert!(
+        !u.holds(&core("Result", vec![call_error, Type::Str])),
+        "and the same the other way round"
+    );
+
+    // Still admitted, because the equality branch takes them before any of
+    // this runs: a slot every variant agrees about is that type, counted or not.
+    let list_int = core("List", vec![Type::Int]);
+    assert!(
+        u.holds(&core("Result", vec![list_int.clone(), list_int])),
+        "one type in the slot is still one plan"
+    );
+}
