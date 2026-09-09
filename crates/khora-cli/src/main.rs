@@ -1433,6 +1433,45 @@ fn fmt_one(paths: &[PathBuf], check: bool) -> Result<bool> {
     for root in &roots {
         gather(root, &mut files)?;
     }
+
+    // **And the programs in `src/bin`, which the walk leaves out.**
+    //
+    // The same addition `check_one` makes, for the same reason and one step
+    // further along. `walk` skips that directory so a *build* gets one entry
+    // point; `fmt` inherited the skip and so `khora fmt .` reported "formatted
+    // 0 of 5 file(s)" in a package with twenty programs under `src/bin`, and
+    // `khora fmt . --check` said "all formatted" about files it had never
+    // opened. That last one is the damage: `--check` is what the documented CI
+    // recipe runs, so the skip was a green result over code `khora check` and
+    // `khora build` do compile -- a check/build split of exactly the shape
+    // `check_one`'s comment says this repository has fixed twice and reopened
+    // once. It was reopened here.
+    //
+    // Formatting is per file rather than per compilation, so there is nothing
+    // to reason about beyond adding them: each program is formatted by itself
+    // under the package's `[fmt]`, which is the style its own package asked
+    // for. `same_file` rather than `==` because a program named on the command
+    // line and the same program found through its package arrive spelled
+    // differently, and reformatting it twice is harmless only until one of the
+    // two spellings is what `--check` prints.
+    //
+    // **Under the root, and not merely in its package.** This is the one place
+    // it parts company with `check_one`, and the reason is the paragraph above:
+    // a check needs the whole package because a compilation does, while `khora
+    // fmt src/models` was asked about `src/models`. `package_of` answers with
+    // the enclosing package for any directory inside one, so taking its
+    // programs unconditionally would have reformatted `src/bin` from a command
+    // that named a sibling directory -- the same overreach as formatting `std`,
+    // arrived at from the other side.
+    for root in &roots {
+        let Some(package) = root.is_dir().then(|| package_of(root)).flatten() else { continue };
+        for program in binaries(&package) {
+            if under(root, &program) && !files.iter().any(|f| same_file(f, &program)) {
+                files.push(program);
+            }
+        }
+    }
+
     files.sort();
     files.dedup();
     if files.is_empty() {
@@ -1794,9 +1833,39 @@ fn build_one(
                     // changes the timing of the thing being measured, and under
                     // which it passed. A diagnosis you cannot switch on without
                     // destroying the evidence is not a diagnosis.
+                    //
+                    // **And an edit is an ordinary miss too.** `KeyMoved` was
+                    // written for the tree nobody changed whose key moved
+                    // anyway, and it cannot tell that case from the one that
+                    // reaches it constantly: edit a file, build, and the key
+                    // has moved because you moved it. So the alarming branch
+                    // fired on every rebuild in the edit loop -- errata 66's
+                    // shape exactly, one variant along: a question about
+                    // whether anything was *unexpectedly* different, answered
+                    // by a check that only ever asked whether anything was
+                    // different. The cache does not know what you meant to
+                    // change, so it stops guessing and leaves the loud version
+                    // to `KHORA_CACHE_EXPLAIN`, which is what somebody
+                    // investigating a key that should not have moved sets --
+                    // and where the previous key, which is the whole value of
+                    // the variant, is printed alongside the ingredients that
+                    // explain it.
                     let explaining = cache::Cache::explaining();
-                    if explaining || !matches!(miss, cache::Miss::NoEntry) {
-                        eprintln!("khora: cache miss, {miss}");
+                    let ordinary =
+                        matches!(miss, cache::Miss::NoEntry | cache::Miss::KeyMoved { .. });
+                    if explaining || !ordinary {
+                        // **`note:` on stdout, not `khora:` on stderr.** A miss
+                        // is information about a build that is about to succeed
+                        // normally; `khora:` is the prefix on the lines that
+                        // report the toolchain failing -- an unrunnable
+                        // binary, a manifest that cannot be read, the trap that
+                        // ends the process -- and wearing it made a routine
+                        // event read as a fault report. Every other non-failure
+                        // aside here says `note:` and says it on stdout, beside
+                        // the `built` or `reused` line it belongs to, so that a
+                        // CI log that redirects stderr for errors is not
+                        // sprayed with cache trivia.
+                        println!("note: cache miss, {miss}");
                     }
                     if explaining {
                         let held = store.keys();
@@ -3318,6 +3387,20 @@ fn same_file(a: &Path, b: &Path) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(x), Ok(y)) => x == y,
         _ => a == b,
+    }
+}
+
+/// Whether `file` is inside `directory`.
+///
+/// The containment counterpart of [`same_file`], and canonical for the same
+/// reason: `.` and `./src/bin/backfill.kh` are one inside the other and share
+/// no prefix as written, while `../pkg` and `pkg` share one and mean different
+/// things. Falls back to the paths themselves where either does not exist,
+/// which is the case a caller comparing two paths it just built cannot hit.
+fn under(directory: &Path, file: &Path) -> bool {
+    match (std::fs::canonicalize(directory), std::fs::canonicalize(file)) {
+        (Ok(dir), Ok(file)) => file.starts_with(dir),
+        _ => file.starts_with(directory),
     }
 }
 

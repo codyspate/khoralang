@@ -198,6 +198,56 @@ fn a_key_that_moves_on_one_target_still_reports_it() {
     );
 }
 
+/// **And an ordinary rebuild says nothing at all.**
+///
+/// The test above runs under `KHORA_CACHE_EXPLAIN`, so for a while it was the
+/// only thing looking at this message -- and it could not see that the message
+/// was also being printed, unasked, on every build in the edit loop, with the
+/// `khora:` prefix the toolchain uses for the lines that report it failing.
+/// `KeyMoved` was written for the tree nobody changed whose key moved anyway,
+/// and it cannot tell that from the case that reaches it constantly: you edited
+/// a file, so of course the key moved. Errata 66's shape, one variant along.
+///
+/// Deliberately without `KHORA_CACHE_EXPLAIN`: the whole claim is about what an
+/// ordinary build prints, and the helper that sets it cannot make it.
+#[test]
+fn an_ordinary_rebuild_is_quiet_about_the_cache() {
+    let w = world(&source(1));
+    let (ok, output) = khora_in(&w, &w.project, &["build", "."]);
+    assert!(ok, "{output}");
+
+    std::fs::write(w.project.join("src").join("main.kh"), source(2)).expect("an edit");
+    let (ok, output) = khora_in(&w, &w.project, &["build", "."]);
+    assert!(ok, "{output}");
+    assert!(output.contains("built"), "it still has to build: {output}");
+    assert!(
+        !output.contains("cache miss"),
+        "editing a file and rebuilding is the edit loop, not an anomaly:\n{output}"
+    );
+}
+
+/// And when it does speak, it speaks as information rather than as a fault.
+///
+/// `khora:` is the prefix on the lines that report the toolchain failing -- a
+/// binary that will not run, a manifest that cannot be read, the trap that ends
+/// the process. A miss is a build that is about to succeed normally, so it
+/// takes the `note:` every other aside here takes, on stdout beside the `built`
+/// line it belongs to.
+#[test]
+fn a_miss_is_a_note_and_not_a_khora_prefixed_fault() {
+    let w = world(&source(1));
+    build(&w, &[]);
+
+    std::fs::write(w.project.join("src").join("main.kh"), source(2)).expect("an edit");
+    let (ok, output) = build(&w, &[]);
+    assert!(ok, "{output}");
+    assert!(output.contains("note: cache miss"), "a miss is a note:\n{output}");
+    assert!(
+        !output.contains("khora: cache miss"),
+        "and not a line that reads as the toolchain failing:\n{output}"
+    );
+}
+
 /// A cleared cache is its own case, and not an anomaly.
 ///
 /// It reads as one otherwise: the key is right, the target has built under it,

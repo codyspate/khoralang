@@ -162,6 +162,86 @@ fn check_sees_a_program_in_src_bin() {
     assert!(out.contains("backfill.kh"), "and be named:\n{out}");
 }
 
+/// **`khora fmt` sees them too, and for one step longer it did not.**
+///
+/// The same walk, the same skip, the same split -- one command further along.
+/// `khora fmt .` in a package with programs under `src/bin` reported
+/// "formatted 0 of 2 file(s)" and `khora fmt . --check` said "all formatted",
+/// about files it had never opened. `--check` is what the documented CI recipe
+/// runs, so the skip was not a missing feature but a green result over code
+/// that `khora check` and `khora build` both compile.
+#[test]
+fn fmt_check_sees_a_program_in_src_bin() {
+    let w = world(&["backfill"]);
+    std::fs::write(
+        w.project.join("src").join("bin").join("backfill.kh"),
+        "module app::backfill;\n\npub fn main() -> Int {   0 }\n",
+    )
+    .expect("a badly formatted program");
+
+    let (ok, out) = khora(&w, &["fmt", ".", "--check"]);
+    assert!(!ok, "an unformatted program must fail `fmt --check`:\n{out}");
+    assert!(out.contains("backfill.kh"), "and be named:\n{out}");
+    assert!(
+        !out.contains("all formatted"),
+        "a file that was never opened must not be reported as formatted:\n{out}"
+    );
+}
+
+/// And the writing half: `khora fmt` rewrites what `--check` complains about.
+///
+/// Separately, because a `--check` that sees the file and a `fmt` that does not
+/// write it is the same false green from the other direction -- CI red, and
+/// nothing the developer runs makes it go away.
+#[test]
+fn fmt_formats_a_program_in_src_bin() {
+    let w = world(&["backfill"]);
+    let program = w.project.join("src").join("bin").join("backfill.kh");
+    std::fs::write(&program, "module app::backfill;\n\npub fn main() -> Int {   0 }\n")
+        .expect("a badly formatted program");
+
+    let (ok, out) = khora(&w, &["fmt", "."]);
+    assert!(ok, "{out}");
+    assert_eq!(
+        std::fs::read_to_string(&program).expect("the program"),
+        "module app::backfill;\n\npub fn main() -> Int { 0 }\n",
+        "the program under `src/bin` should have been rewritten:\n{out}"
+    );
+
+    let (ok, out) = khora(&w, &["fmt", ".", "--check"]);
+    assert!(ok, "and `--check` should now be quiet about it:\n{out}");
+}
+
+/// **A directory that is not `src/bin` does not drag `src/bin` in.**
+///
+/// `fmt` reaches the programs through the enclosing *package*, which is what a
+/// check needs because a compilation needs the package. Formatting was asked
+/// about a path. Taking the package's programs unconditionally would have
+/// rewritten `src/bin` from `khora fmt src/models` -- the same overreach as the
+/// one that reformatted `std`, reached from the other side.
+#[test]
+fn fmt_of_a_subdirectory_leaves_src_bin_alone() {
+    let w = world(&["backfill"]);
+    std::fs::write(
+        w.project.join("src").join("bin").join("backfill.kh"),
+        "module app::backfill;\n\npub fn main() -> Int {   0 }\n",
+    )
+    .expect("a badly formatted program");
+    std::fs::create_dir_all(w.project.join("src").join("models")).expect("a subdirectory");
+    std::fs::write(
+        w.project.join("src").join("models").join("row.kh"),
+        "module app::models;\n\npub fn one() -> Int { 1 }\n",
+    )
+    .expect("a formatted module");
+
+    let (ok, out) = khora(&w, &["fmt", "src/models", "--check"]);
+    assert!(ok, "nothing under `src/models` is unformatted:\n{out}");
+    assert!(
+        !out.contains("backfill"),
+        "a command that named `src/models` must not reach `src/bin`:\n{out}"
+    );
+}
+
 /// A package whose programs are all in `src/bin` has no default one, and says
 /// which it has rather than reporting that it has none.
 #[test]
