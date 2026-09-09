@@ -574,3 +574,43 @@ fn main() -> Int { print(work()); print(khora_live_count()); 0 }
     assert_eq!(ran.stdout, "42\n0\n0\n", "the record is ordinary, and nothing is left over");
     assert_eq!(ran.code, Some(0));
 }
+
+/// **A captured region outlives the block that opened it.** This is the
+/// exception `reference/memory-and-resources.md` states, and it is what makes
+/// the general rule "the last reference" rather than "the end of the block":
+/// a closure that captured the region is such a reference, so its finalizers
+/// run when the closure goes.
+///
+/// Roadmap 16.2 was filed as a use-after-free on the stricter reading -- a
+/// capability carried out of its `with` and called afterwards. It is not one.
+/// The region is reference-counted, the closure holds it, and
+/// `khora_region_defer`'s `fatal` on a released region never fires. What
+/// needed changing was the documentation.
+#[test]
+fn a_captured_region_outlives_its_block() {
+    let ran = run(
+        "region_captured",
+        &format!(
+            "{REGIONS}
+fn make() -> (() -> ()) {{
+  let region = Region::open();
+  Region::defer(region, fn () => print(1));
+  fn () => Region::defer(region, fn () => print(2))
+}}
+
+fn main() -> Int {{
+  let escaped = make();
+  print(0);
+  escaped();
+  print(3);
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout, "0\n2\n1\n3\n",
+        "the region stayed open past `make`, and released after its last reference"
+    );
+    assert_eq!(ran.code, Some(0));
+}

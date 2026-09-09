@@ -160,8 +160,15 @@ with ContextRow Block
 
 Handlers lexically enclose the operations they serve. That is a real
 consequence of direct style rather than a syntactic detail: the operation runs
-when the call is evaluated, inside the block, and not later through a deferred
-effect value that outlived its handler.
+when the call is evaluated, inside the block, rather than being collected into
+a description that something runs later.
+
+A closure written inside the block is the one case worth being exact about. It
+*captures* the capability, because a context row is a block of bindings and a
+capability is an ordinary binding, so the closure keeps the handler it was
+written with even when it is called somewhere else -- including after the block
+has ended. That is what makes a callback that logs cost nothing in the type of
+whatever takes it. The handler stays alive as long as the closure does.
 
 ## Sequential bindings
 

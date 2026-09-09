@@ -12,7 +12,6 @@ There is no source-level borrow or lifetime syntax for ordinary Khora values. Th
 
 The programmer-visible rules are:
 
-- a value remains valid according to ordinary lexical and type semantics;
 - optimization cannot make behavior depend on whether storage was reused;
 - writable state does not silently become cross-fiber shared state;
 - external resources require their own cleanup policy.
@@ -43,8 +42,13 @@ fn work() -> Int {
 ```
 
 Finalizers execute in **reverse registration order** when the region is
-released, and a region is released **when the block its binding is in ends** --
-on every way out of that block, including a cancellation. So the example above
+released, and a region is released **when the last reference to it goes** --
+which for the ordinary case is the end of the block its binding is in, on every
+way out of that block, including a cancellation. The exception is a reference
+that outlives the block: a closure that captured the region, or a `Scope`
+handed to a fiber, keeps it open until that reference goes too. That is what
+lets a fiber hold a scope belonging to the call that spawned it, and it means a
+captured region's finalizers run later than the block, not at it. So the example above
 runs its finalizers when `work` returns, and putting the `let` inside a smaller
 block ends the region there instead:
 
@@ -101,11 +105,6 @@ fn outside() -> Int {
 A named function is the normal argument to `scoped` when that function requires the `scope` capability.
 
 ## Acquire and release
-
-Pass a *named* function to `scoped` where that function is the one receiving
-the `scope` capability. It keeps the capability passing explicit, and it is
-what lets row subtraction take `scope` back out of the caller's row.
-
 
 `acquire` registers a release operation and returns the acquired value:
 
