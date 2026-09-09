@@ -132,3 +132,39 @@ fn a_generic_function_over_a_generic_type_checks() {
          }}\n"
     ));
 }
+
+/// **An ambiguous type parameter is a type error, and used to be a link-time
+/// riddle.**
+///
+/// `pick()` names `pick<A: Bound>` and nothing says which `A`. Every use of it
+/// is behind the bound, so unification has nothing to work from -- and the
+/// leftover is a free variable rather than an `Unknown`, which is why every
+/// check here missed it. `khora check` said `no errors` and `khora build`
+/// answered ``Bound::how` has no body`, pointing at the blank line after the
+/// end of the program, because monomorphization had picked the trait's own
+/// declaration for want of an impl.
+///
+/// Found by an agent building a program from the public documentation.
+#[test]
+fn an_undetermined_type_parameter_is_refused_where_it_is_written() {
+    assert_reports(
+        "module m;\n\
+         pub trait Bound { fn how(self) -> Int; }\n\
+         pub fn pick<A: Bound>(n: Int) -> A;\n\
+         pub fn main() -> Int { let value = pick(1); 0 }\n",
+        "nothing here decides what type `pick` is used at",
+    );
+}
+
+/// **A parameter with no bound is not the same question.** An unconstrained
+/// row is the empty row and nothing dispatches on it, which is why
+/// `Router::bound<'ef>` -- a row declared and never mentioned again -- is
+/// legitimate and every module in `std` that has one still checks.
+#[test]
+fn an_unmentioned_row_parameter_is_not_an_ambiguity() {
+    assert_clean(
+        "module m;\n\
+         pub fn listen<'ef>(port: Int) -> Int;\n\
+         pub fn main() -> Int { listen(80) }\n",
+    );
+}

@@ -385,7 +385,57 @@ impl<'a> Checker<'a> {
     /// is doing its job. "Clean" means more than this pass being quiet — an
     /// unresolved name or an unparsed fragment leaves one behind too, and those
     /// were reported by a different pass whose errors are not in this list.
+    /// Refuses a mention of a generic whose type arguments nothing decided.
+    ///
+    /// `decode(Raw::Absent)` names `decode<A: Decode>` and nothing in the
+    /// program says which `A`. Every use of `A` is behind the bound, so
+    /// unification has nothing to work from and leaves the variable free --
+    /// which is not an `Unknown` and so was invisible to every check here.
+    ///
+    /// Monomorphization then has to pick an impl for a type it does not have,
+    /// and picked the trait's own method, whose body is the declaration.
+    ///
+    /// **A `Param` is not undetermined.** Inside a generic function an
+    /// instantiation at that function's own parameter is exactly right: `A` is
+    /// decided by whoever calls it. Only a unification variable that survived
+    /// the body is a question nobody answered.
+    fn refuse_undetermined_instantiations(&mut self) {
+        let mut blamed: Vec<(TextRange, String)> = Vec::new();
+        for (id, (name, args)) in &self.instantiations {
+            // **Only a *bounded* parameter, because only a bound dispatches.**
+            // `Router::bound<'ef>` declares a row nothing in its signature
+            // mentions, so its argument is undetermined for ever and harmless:
+            // an unconstrained row is the empty one, and no code is chosen by
+            // it. A parameter with a bound is the opposite -- the bound is how
+            // the body reaches an impl, and not knowing the type means not
+            // having one.
+            let Some(signature) = self.types.signatures.get(name.as_str()) else { continue };
+            let bounded = args.iter().enumerate().any(|(at, arg)| {
+                signature.bounds.get(at).is_some_and(|traits| !traits.is_empty())
+                    && undetermined(&self.unifier.zonk(arg))
+            });
+            if !bounded {
+                continue;
+            }
+            blamed.push((self.body.range(*id), name.clone()));
+        }
+        // Narrowest first, and then by position, so one program reports the
+        // same way twice: `instantiations` is a hash map and its order is not
+        // the program's. Errata 33 is the same argument about a different map.
+        blamed.sort_by_key(|(range, name)| (range.len(), range.start(), name.clone()));
+        let Some((range, name)) = blamed.first().cloned() else { return };
+        self.error(
+            format!(
+                "nothing here decides what type `{name}` is used at, and its bound is \
+                 the only thing that would -- so there is no impl to call. Annotate it: \
+                 `let value: TheType = {name}(..)`, or say it at the call"
+            ),
+            range,
+        );
+    }
+
     pub(crate) fn check_unknowns(&mut self) {
+
         if !self.errors.is_empty() || !self.body.errors.is_empty() {
             return;
         }
@@ -394,6 +444,22 @@ impl<'a> Checker<'a> {
             .iter()
             .any(|id| matches!(self.body.expr(*id), Expr::Missing | Expr::Unresolved(_)))
         {
+            return;
+        }
+
+        // **A generic call whose type argument nothing decided.** This is not
+        // an `Unknown` -- inference made a variable for it and simply never
+        // solved it -- so the walk below cannot see it, and it used to reach
+        // the backend, which picked the trait's own bodyless method and said
+        // ``Decode::schema` has no body` against the blank line after the end
+        // of the program.
+        //
+        // That is the check/build split this repository has closed twice: an
+        // ambiguity is a type error, and a type error belongs to `khora check`.
+        // Reported before the walk because it is the cause; an undetermined
+        // argument usually leaves nothing else to see.
+        self.refuse_undetermined_instantiations();
+        if !self.errors.is_empty() {
             return;
         }
 
@@ -645,5 +711,20 @@ impl<'a> Checker<'a> {
             let settled = self.unifier.zonk(&scrutinee);
             self.report_match_coverage(&settled, &arms, range);
         }
+    }
+}
+
+/// Whether a type still holds a unification variable nothing solved.
+///
+/// Distinct from `settled`: a `Param` is settled from this angle -- it is a
+/// type somebody else chooses, which is an answer -- while a `Var` that
+/// survived the body is a question that was never put to anybody.
+fn undetermined(ty: &Type) -> bool {
+    match ty {
+        Type::Var(_) | Type::Unknown => true,
+        Type::Adt { args, .. } | Type::Applied { args, .. } => args.iter().any(undetermined),
+        Type::Tuple(items) => items.iter().any(undetermined),
+        Type::Fn { params, ret, .. } => params.iter().any(undetermined) || undetermined(ret),
+        _ => false,
     }
 }
