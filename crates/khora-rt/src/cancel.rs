@@ -85,9 +85,17 @@ impl Drop for Shielded {
 ///
 /// On a spawned fiber it is a *hole*, and this says so rather than taking the
 /// whole program down quietly. A fiber's root should absorb a cancellation and
-/// stop that fiber — which needs the spawned thunk to return a tagged value,
-/// so the runtime can see how it ended. `docs/design/fibers.md` calls this out
-/// as the piece 5.3 has not built yet.
+/// stop that fiber.
+///
+/// **The comment here used to say that piece was unbuilt, and it is.** A
+/// spawned thunk that can fail does return the tagged pair, and `design/fibers.md`
+/// §2 is right that a cancellation stops that fiber: a fiber in a `loop`, a
+/// fiber running a nursery with two live children, and a fiber that catches
+/// every case in its row are all detached cleanly while running. What still
+/// reaches here is a listener inside `Router::listen` with connections in
+/// flight -- five rounds out of five -- so the remaining gap is somewhere in
+/// the serving path rather than in fiber roots at large. Roadmap 16.8 has the
+/// measurement and the three experiments that bound it.
 ///
 /// # Safety
 ///
@@ -96,8 +104,15 @@ impl Drop for Shielded {
 pub unsafe extern "C" fn khora_cancel_stop() -> ! {
     if current(|fiber| fiber.is_spawned()) {
         fatal(
-            "a cancellation reached a fiber's root, which cannot absorb one yet; \
-             see docs/design/fibers.md",
+            "a cancellation reached a fiber's root, which cannot absorb one yet.\n\
+             \n\
+             The shape this is usually reached from is a server: cancelling or \
+             detaching the fiber inside `Router::listen` while it is still \
+             serving connections. Drain first and detach last -- stop accepting \
+             work, wait for what is in flight, and let go of the listener after \
+             that. An idle listener detaches cleanly.\n\
+             \n\
+             This is a gap rather than a rule: roadmap 16.8.",
         );
     }
     // SAFETY: nothing returns past this, so no other frame observes the

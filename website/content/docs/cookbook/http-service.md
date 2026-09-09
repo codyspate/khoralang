@@ -162,6 +162,53 @@ size per connection, so the number you choose multiplies by the 256 above when
 deciding what a full server costs — raise it to what the largest legitimate
 document needs and not further.
 
+## Stopping a service
+
+`Router::listen` serves until the process stops, and `std` has no signal API in
+this release — so a service that stops *itself* runs `listen` on a fiber and
+lets go of that fiber when a route says to.
+
+**The order matters, and getting it wrong ends the process rather than the
+server.** Cancelling or detaching the listener while connections are still
+being served aborts on `a cancellation reached a fiber's root`; roadmap 16.8
+has the measurement. Drain first and detach last:
+
+```khora
+let stop = Shared::of(false);
+let server = Fiber::spawn(fn () =>
+  Router::new()
+    |> Router::post("/shutdown", SharedFn::of(fn _r => {
+        Shared::set(stop, true);
+        Response::text(200, "stopping")
+      }))
+    |> Router::listen(port)!);
+
+loop {
+  clock.sleep(50);
+  if Shared::get(stop) { break };
+};
+
+// Whatever the handlers feed: close it, and wait for the work already taken.
+Channel::close(jobs);
+Fiber::wait(worker);
+// Only now.
+Fiber::detach(server);
+```
+
+Two things are worth being deliberate about. A request that arrives during the
+drain finds a closed channel, so `Channel::send` answers `false` — count it
+where it is refused, or the job is accepted and never seen again; the same
+reconciliation [taking work off a
+queue](/docs/cookbook/taking-work-off-a-queue/) is about, one layer up. And a
+`Fiber::spawn` that fails says nothing to anybody: a listener that could not
+bind raises inside its own fiber, and a `main` that is polling a flag waits for
+ever with an empty terminal. Write the port into the log line before you listen.
+
+For a container, this is the in-program half only. Draining at the layer above
+— out of the load balancer, wait, then stop — is what
+[Containers](/docs/deployment/containers/) covers, and is what a `SIGTERM`
+does today.
+
 ## A trap in a handler ends the server
 
 The router turns a typed failure into a 500 rather than a dropped connection.

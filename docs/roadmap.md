@@ -5853,6 +5853,44 @@ today and is impossible afterwards.
 
 ### What structured concurrency actually does, measured
 
+**16.8 Cancelling the fiber inside `Router::listen` aborts the process, and
+that is the only shutdown the documentation leaves you.** Found by an agent
+building a job service against the public pages, and reproduced here.
+
+There is no `std::process::exit` and no signal API -- `deployment/linux.md`
+says so -- so a service that stops itself has to run `listen` on a fiber and
+detach or cancel that fiber when a route sets a flag. With connections in
+flight that aborts: 200 jobs at 32-way concurrency, `/shutdown` at 400 ms, one
+process and a fresh port per round, **5 rounds out of 5, exit 134**, on
+
+```
+khora runtime: a cancellation reached a fiber's root, which cannot absorb one
+yet; see docs/design/fibers.md
+```
+
+The agent measured 10 of 11 and also got one hang out of three from
+`cancel` then `wait`. Moving the detach *after* the drain -- close the channel,
+wait the workers, then detach -- is clean 3 of 3 here and 10 of 10 there.
+
+**The hole is narrower than the message reads.** A plain fiber in a `loop`, a
+fiber running a `bounded_nursery` with two live children, and a fiber whose
+body catches every case in its row are all detached cleanly while running. It
+takes the serving path to reproduce, which is where the bisect has to start.
+
+**Two documents disagree about whether this is built.** `design/fibers.md` §2
+says "a fiber root that absorbs a cancellation -- *built*", and "a cancellation
+stops *that fiber* rather than the program". `khora-rt/src/cancel.rs:86` says
+the opposite in its own comment: "On a spawned fiber it is a *hole* ... which
+needs the spawned thunk to return a tagged value ... `docs/design/fibers.md`
+calls this out as the piece 5.3 has not built yet." The three experiments above
+say the design doc is right in general, so `cancel.rs`'s comment is describing
+a case that no longer covers what it says it covers -- and one of the two has
+to be rewritten with the boundary in it.
+
+Reported in `reference/concurrency.md` and `cookbook/http-service.md` in the
+meantime, because a reader following those pages today writes the aborting
+shape.
+
 **16.7 The nursery's promises are order-dependent, and two of them are not
 kept.** Written by an agent building a job runner against the public
 documentation, and every number below is over 20-25 runs on both backends.

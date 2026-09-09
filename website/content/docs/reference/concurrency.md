@@ -57,6 +57,21 @@ Releasing the final `Fiber` handle also waits for the child. This means a fiber 
 
 `Fiber::detach` is the exception, and the only one: it stops waiting and asks the fiber to stop. Both halves are asynchronous — `detach` signals and returns at once, so the fiber keeps running until it reaches its next cancellation point rather than stopping where it is. Its answer is discarded when it arrives, and a later failure is silent — the program said it was no longer listening. It cancels as well as detaching, because a detached fiber nobody asked to stop is a leak with a nicer name.
 
+**One shape is not safe yet: cancelling the fiber that is inside
+`Router::listen` while it is serving connections.** It ends the *process*, on
+
+```text
+khora runtime: a cancellation reached a fiber's root, which cannot absorb one yet
+```
+
+measured at five rounds out of five with two hundred requests in flight. An
+idle listener detaches cleanly, and so does every other shape tried — a fiber
+in a `loop`, a fiber running a nursery with live children, a fiber that catches
+every case in its row. So the rule to write today is **drain first, detach
+last**: stop accepting work, wait for what is in flight, and only then let go
+of the listener. [Serve HTTP](/docs/cookbook/http-service/#stopping-a-service)
+has the shape. This is roadmap 16.8 and it is a gap rather than a decision.
+
 Without it, a bounded wait over a body with an uninterruptible tail could not be honored. That is the failure it exists for: every other way out of a handle waits, letting the binding go included, so one finalizer that never returns holds its nursery, which holds its parent, up to `main`. Reach for it when a bounded wait matters more than a clean one, and not otherwise.
 
 ## Nurseries
