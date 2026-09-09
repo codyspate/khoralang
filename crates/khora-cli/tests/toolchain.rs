@@ -418,3 +418,58 @@ fn a_pin_still_captures_a_build_of_the_compiler() {
     assert!(output.contains("this project pins it"), "{output}");
     assert!(output.contains("would hand over"), "{output}");
 }
+
+/// **A member inherits the workspace's pin, and is told where it came from.**
+///
+/// The walk up from a member ran on a relative path -- `.`, then `""`, which
+/// joins to the same manifest again -- and ran out of parents one directory
+/// below the pin. So a member with no `[toolchain]` of its own, which is every
+/// member `khora new` scaffolds, fell through to the machine's default: two
+/// developers with different defaults got different compilers for the same
+/// member, and nothing said so.
+///
+/// The version alone is not the assertion. "0.99.0 because it is your default"
+/// and "0.99.0 because the workspace pins it" are the same number from
+/// different places, and only the second sends somebody to the file that
+/// actually holds it.
+#[test]
+fn a_member_inherits_the_workspace_pin() {
+    let w = world(None);
+    std::fs::write(
+        w.project.join("khora.toml"),
+        "[workspace]\nmembers = [\"packages/*\"]\n\n[toolchain]\nversion = \"0.99.0\"\n",
+    )
+    .expect("a workspace root");
+    let member = w.project.join("packages").join("alpha");
+    std::fs::create_dir_all(member.join("src")).expect("a member directory");
+    std::fs::write(
+        member.join("khora.toml"),
+        "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("a member manifest");
+    link(&w, "0.99.0");
+
+    let (ok, output) = khora(&w, &member, &["toolchain", "which"]);
+    assert!(ok, "{output}");
+    assert!(output.contains("0.99.0"), "{output}");
+    assert!(
+        output.contains("the workspace pins it"),
+        "a member has to be told the pin is the workspace's:\n{output}"
+    );
+    assert!(
+        !output.contains("it is your default"),
+        "the root's pin was ignored and the machine default answered:\n{output}"
+    );
+}
+
+/// And a root still says the pin is its own, which is a different sentence.
+#[test]
+fn a_root_says_the_pin_is_its_own() {
+    let w = world(Some("0.99.0"));
+    link(&w, "0.99.0");
+
+    let (ok, output) = khora(&w, &w.project, &["toolchain", "which"]);
+    assert!(ok, "{output}");
+    assert!(output.contains("this project pins it"), "{output}");
+    assert!(!output.contains("the workspace pins it"), "{output}");
+}

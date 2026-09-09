@@ -588,6 +588,10 @@ fn unused_imports(
 /// Capability bindings from a `with` row. Those are [`UNUSED_CAPABILITY`]'s,
 /// and reporting one thing twice under two names is worse than reporting it
 /// once under the right one.
+///
+/// A method's `self`. It is not a binding but a declaration that this function
+/// is a method, and both of the remedies above break the program — see the
+/// comment on `receiver` below.
 fn unused_bindings(body: &Body, out: &mut Vec<Finding>) {
     let mut read: Vec<LocalId> = Vec::new();
     for (_, expr) in body.exprs() {
@@ -618,11 +622,30 @@ fn unused_bindings(body: &Body, out: &mut Vec<Finding>) {
     let installed: Vec<&str> =
         body.installs.values().flatten().map(String::as_str).collect();
 
+    // **The receiver, which is not a binding anybody may rename.** `self` in
+    // the first parameter position is what makes a function a method. Rename
+    // it to `_self` and the trait still compiles, the impls still compile, and
+    // every call site fails with "nothing here decides what type
+    // `Named::label` is used at, and its bound is the only thing that would --
+    // so there is no impl to call": an error in files the reader never
+    // touched, with a cause this lint's own advice created. Neither remedy it
+    // offers is available here -- `_` is not writable in a receiver position
+    // either -- so it has nothing to say and says nothing.
+    //
+    // A default trait-method body that ignores its receiver is ordinary,
+    // `fn label(self) -> String { "anonymous" }` being the shape the feature
+    // exists for, so this is not a rare corner.
+    let receiver = body.params.first().and_then(|p| match body.pat(*p) {
+        Pat::Bind(local) if body.local(*local).name == "self" => Some(*local),
+        _ => None,
+    });
+
     for (id, local) in body.locals() {
         if local.name.starts_with('_')
             || read.contains(&id)
             || capabilities.contains(&id)
             || installed.contains(&local.name.as_str())
+            || receiver == Some(id)
         {
             continue;
         }

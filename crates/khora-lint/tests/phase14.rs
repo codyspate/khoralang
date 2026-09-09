@@ -123,6 +123,53 @@ fn a_wildcard_binds_nothing_and_is_never_reported() {
     assert!(of(source, UNUSED_BINDING).is_empty());
 }
 
+/// A method's `self` is never reported, read or not.
+///
+/// The lint's two remedies are "delete it" and "rename it to `_self`", and
+/// both take the method away: `self` in the first parameter position is what
+/// makes a function a method. Somebody took the advice on a default trait
+/// method and got, from every call site in files they had not touched,
+/// "nothing here decides what type `Named::label` is used at, and its bound is
+/// the only thing that would -- so there is no impl to call". One warning
+/// produced two errors in the wrong place.
+#[test]
+fn a_receiver_is_never_reported() {
+    let source = "module t;
+
+                  pub trait Named { fn label(self) -> String { \"anonymous\" } }
+                  pub type Thing = { n: Int };
+                  impl Named for Thing {}
+                  
+pub fn main() -> Int {
+  let t: Thing = { n: 1 };
+                    if Named::label(t) == \"anonymous\" { 1 } else { 0 }
+}
+";
+    assert!(
+        of(source, UNUSED_BINDING).is_empty(),
+        "{:?}",
+        of(source, UNUSED_BINDING)
+    );
+}
+
+/// And an ordinary unused parameter beside a used receiver still is.
+#[test]
+fn a_parameter_beside_a_receiver_is_still_reported() {
+    let source = "module t;
+
+                  pub type Thing = { n: Int };
+                  impl Thing { fn plus(self, spare: Int) -> Int { self.n } }
+                  
+pub fn main() -> Int {
+  let t: Thing = { n: 1 };
+                    Thing::plus(t, 2)
+}
+";
+    let found = of(source, UNUSED_BINDING);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].message.contains("spare"), "{:?}", found[0]);
+}
+
 #[test]
 fn assigning_to_a_binding_counts_as_using_it() {
     // A miss rather than a false report, and deliberate: "assigned and never

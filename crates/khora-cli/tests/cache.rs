@@ -329,7 +329,11 @@ fn debug_information_is_in_the_key() {
         .env("KHORA_DEBUG", "0")
         .output()
         .expect("could not run `khora`");
-    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    // Both streams: a build's progress is on stderr, so that `khora run` can
+    // hand the program an untouched stdout. What is under test here is the
+    // key, not which stream said so.
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
     assert!(text.contains("built"), "debug information off is a different build: {text}");
 }
 

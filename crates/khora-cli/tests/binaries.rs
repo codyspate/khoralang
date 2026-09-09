@@ -277,3 +277,30 @@ fn two_mains_in_one_program_are_still_refused() {
     assert!(out.contains("more than one module"), "{out}");
     assert!(out.contains("src/bin"), "and it should say where the other one goes:\n{out}");
 }
+
+/// **`--out` says which programs it is not building.**
+///
+/// `khora build .` builds the package's program and every one in `src/bin`;
+/// `khora build . --out somewhere` can only mean one file, and said nothing
+/// about the rest. So the flag looked like a nicer output path and was
+/// silently a smaller build.
+#[test]
+fn out_says_what_it_leaves_out() {
+    let w = world(&["report"]);
+    let target = w.project.join("dist").join("cli.exe");
+
+    let (ok, out) = khora(&w, &["build", ".", "--out", target.to_str().expect("utf-8")]);
+    assert!(ok, "{out}");
+    assert!(out.contains("--out names one file"), "it should say why:\n{out}");
+    assert!(out.contains("report"), "and name what was left out:\n{out}");
+}
+
+/// And without `--out` there is nothing left out, so nothing to say.
+#[test]
+fn a_plain_build_says_nothing_about_leaving_programs_out() {
+    let w = world(&["report"]);
+
+    let (ok, out) = khora(&w, &["build", "."]);
+    assert!(ok, "{out}");
+    assert!(!out.contains("--out names one file"), "a note about a flag nobody typed:\n{out}");
+}

@@ -119,3 +119,46 @@ fn a_directory_that_is_not_a_package_is_refused() {
     assert!(!ok, "it should fail: {out}");
     assert!(out.contains("khora.toml"), "and say what is missing: {out}");
 }
+
+/// **`--locked` is a flag this command takes.**
+///
+/// `getting-started/installation.md` documents it, `locked_requested` reads
+/// it, and the parser rejected it -- so the documented command did not run at
+/// all. The refusal it buys is `khora-pkg`'s; what is tested here is that the
+/// flag reaches it.
+#[test]
+fn locked_is_accepted() {
+    let dir = scratch("sbom_locked");
+    package(&dir, "audited", "1.0.0", "");
+
+    let (ok, out) = sbom(&dir, &["--locked"]);
+    assert!(ok, "`--locked` should be a flag rather than an error:\n{out}");
+    assert!(!out.contains("unexpected argument"), "{out}");
+    assert!(out.contains("CycloneDX"), "and it should still write the document:\n{out}");
+}
+
+/// And it refuses a lockfile that no longer matches the manifest, rather than
+/// absorbing the difference into a document somebody may hand to an auditor.
+#[test]
+fn locked_refuses_a_stale_lockfile() {
+    let dir = scratch("sbom_locked_stale");
+    package(&dir.join("router"), "router", "0.2.0", "");
+    package(
+        &dir,
+        "service",
+        "1.0.0",
+        "\n[dependencies]\nrouter = { path = \"router\" }\n",
+    );
+
+    // One clean run writes the lockfile the second is asked to trust.
+    let (ok, out) = sbom(&dir, &[]);
+    assert!(ok, "{out}");
+    let lock = dir.join("khora.lock");
+    let recorded = std::fs::read_to_string(&lock).expect("a lockfile");
+    std::fs::write(&lock, recorded.replace("\"router\"", "\"router_gone\""))
+        .expect("staling it");
+
+    let (ok, out) = sbom(&dir, &["--locked"]);
+    assert!(!ok, "a stale lockfile should be refused:\n{out}");
+    assert!(out.contains("--locked"), "and the message should name the flag:\n{out}");
+}

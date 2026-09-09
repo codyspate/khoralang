@@ -119,7 +119,29 @@ pub fn list(path: &Path) -> Result<()> {
             }
         }
     }
-    println!("\nalways available: {}", khora_pkg::tasks::BUILT_IN.join(", "));
+    // **Task names, not commands, and `lint` is the one that is not both.**
+    // This printed `always available: build, check, fmt, lint, test`, which
+    // reads as a list of verbs `khora` takes -- while `docs/index.md` and
+    // `reference/lints.md` both say in as many words that there is no `khora
+    // lint`. One of the two was going to be believed and the other found out
+    // by typing it. So the names are still listed, because a manifest may
+    // depend on any of them, and the one that runs something else says so
+    // here rather than only at the moment it runs. See `verb_for`.
+    let (verbs, substituted): (Vec<&str>, Vec<&str>) = khora_pkg::tasks::BUILT_IN
+        .iter()
+        .copied()
+        .partition(|name| verb_for(name) == Some(*name));
+    println!("\nalways available as task names: {}", verbs.join(", "));
+    for name in substituted {
+        match verb_for(name) {
+            Some(verb) => println!(
+                "  and `{name}`, which runs `khora {verb}` — there is no `khora {name}`"
+            ),
+            // A built-in with no verb behind it is a grouping, which `one`
+            // already reports as running nothing of its own.
+            None => println!("  and `{name}`, which runs nothing of its own"),
+        }
+    }
     Ok(())
 }
 

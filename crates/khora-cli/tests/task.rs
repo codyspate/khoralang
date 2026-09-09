@@ -13,8 +13,18 @@ fn workspace(name: &str) -> PathBuf {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("run").join(name);
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).expect("a scratch directory");
-    std::fs::write(root.join("khora.toml"), "[workspace]\nmembers = [\"packages/*\"]\n")
-        .expect("the root manifest");
+    // The pin, because a project without one is refused and this fixture lives
+    // under `CARGO_TARGET_TMPDIR` -- which has no manifest above it once the
+    // target directory is somewhere other than this repository. See
+    // `tests/workspace.rs`, which pins for the same reason.
+    std::fs::write(
+        root.join("khora.toml"),
+        format!(
+            "[workspace]\nmembers = [\"packages/*\"]\n\n[toolchain]\nversion = \"{}\"\n",
+            khora_toolchain::RUNNING,
+        ),
+    )
+    .expect("the root manifest");
     root
 }
 
@@ -248,11 +258,14 @@ fn a_task_the_root_declares_runs_once_at_the_root() {
     std::fs::write(
         root.join("khora.toml"),
         format!(
-            "[workspace]{n}members = [{q}packages/*{q}]{n}{n}[tasks.ci]{n}run = {q}{cmd}{q}{n}",
+            "[workspace]{n}members = [{q}packages/*{q}]{n}{n}[tasks.ci]{n}run = {q}{cmd}{q}{n}\
+             {n}[toolchain]{n}version = {q}{pin}{q}{n}",
             n = "
 ",
             q = '"',
-            cmd = echo("marker-root")
+            cmd = echo("marker-root"),
+            // Rewriting the root manifest drops the pin `workspace` wrote.
+            pin = khora_toolchain::RUNNING,
         ),
     )
     .expect("the root manifest");
@@ -267,4 +280,27 @@ fn a_task_the_root_declares_runs_once_at_the_root() {
     assert!(ok, "{output}");
     assert!(output.contains("marker-root"), "{output}");
     assert!(!output.contains("marker-member"), "the root task should not fan out: {output}");
+}
+
+/// **The listing does not advertise a command that does not exist.**
+///
+/// It printed `always available: build, check, fmt, lint, test`, which reads
+/// as a list of verbs `khora` takes -- while `docs/index.md` and
+/// `reference/lints.md` both say in as many words that there is no `khora
+/// lint`. The name is still listed, because a manifest may depend on any of
+/// them; it is listed as what it is.
+#[test]
+fn the_listing_does_not_promise_a_khora_lint() {
+    let root = workspace("listing_lint");
+    let member = root.join("packages").join("alpha");
+    package(&member, "alpha", "");
+
+    let (ok, output) = run(&member, &["task"]);
+    assert!(ok, "{output}");
+    assert!(output.contains("as task names"), "{output}");
+    assert!(output.contains("lint"), "the name is still usable and still listed:\n{output}");
+    assert!(
+        output.contains("there is no `khora lint`"),
+        "the docs deny it and the CLI has to agree:\n{output}"
+    );
 }

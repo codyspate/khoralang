@@ -10,13 +10,33 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+// Only the compiling tests below need it, and it is dead weight without
+// the backend that compiles.
+#[cfg(feature = "llvm")]
+mod pinned;
+
 /// A workspace root with `packages/*` as its members.
 fn workspace(name: &str) -> PathBuf {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).expect("a scratch directory");
-    std::fs::write(root.join("khora.toml"), "[workspace]\nmembers = [\"packages/*\"]\n")
-        .expect("writing the root manifest");
+    // **The pin, because a project without one is refused.** These fixtures
+    // live under `CARGO_TARGET_TMPDIR`, so once the target directory is
+    // somewhere other than this repository -- `CARGO_TARGET_DIR` pointing
+    // elsewhere is enough -- there is no manifest above them to inherit one
+    // from, and every one of these tests failed on the pin rather than on its
+    // subject. A fixture that depends on where the target directory happens to
+    // be is one that passes on one machine. `tests/binaries.rs` pins for the
+    // same reason. Only the root pins: the members inherit it, which is what a
+    // workspace pin is for.
+    std::fs::write(
+        root.join("khora.toml"),
+        format!(
+            "[workspace]\nmembers = [\"packages/*\"]\n\n[toolchain]\nversion = \"{}\"\n",
+            khora_toolchain::RUNNING,
+        ),
+    )
+    .expect("writing the root manifest");
     root
 }
 
@@ -220,4 +240,100 @@ fn a_member_and_the_root_agree_about_the_lockfile() {
         !root.join("packages").join("alpha").join("khora.lock").is_file(),
         "a member must not grow a lockfile of its own"
     );
+}
+
+/// A member holding one test, so `khora test` there has something to report.
+#[cfg(feature = "llvm")]
+fn member_with_a_test(root: &Path, name: &str, answer: i64) {
+    let directory = root.join("packages").join(name);
+    std::fs::create_dir_all(directory.join("src")).expect("a member directory");
+    std::fs::write(
+        directory.join("khora.toml"),
+        format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n"),
+    )
+    .expect("writing a member manifest");
+    std::fs::write(
+        directory.join("src").join("lib.kh"),
+        format!(
+            "module {name}::lib;\n\n\
+             import std::core::{{assert}};\n\n\
+             pub fn go() -> Int {{\n    {answer}\n}}\n\n\
+             test \"{name} goes\" {{\n    assert(go() == 1);\n}}\n\n\
+             bench \"{name} going\" {{\n    go();\n}}\n"
+        ),
+    )
+    .expect("writing a member source file");
+}
+
+/// Runs `khora` with the pinned runtime archive, which every compiling command
+/// needs. See `tests/pinned`.
+#[cfg(feature = "llvm")]
+fn compile(root: &Path, args: &[&str]) -> (bool, String) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_khora"));
+    if let Some(archive) = pinned::runtime() {
+        command.env("KHORA_RT_LIB", archive);
+    }
+    let out = command
+        .args(args)
+        .current_dir(root)
+        .output()
+        .expect("could not run `khora`");
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    (out.status.success(), text)
+}
+
+/// **A root runs every member's tests**, the way it checks and formats them.
+///
+/// It did not, and the failure was silent: a root has no `.kh` of its own, so
+/// the harness compiled nothing, printed `no tests` and exited 0. The CI
+/// baseline in `reference/testing.md` is `khora fmt . --check; khora check .;
+/// khora test .`, so a workspace following the documented steps was green
+/// having never run a test.
+#[test]
+#[cfg(feature = "llvm")]
+fn a_root_tests_every_member() {
+    let root = workspace("ws_test_all");
+    member_with_a_test(&root, "alpha", 1);
+    member_with_a_test(&root, "beta", 1);
+
+    let (ok, output) = compile(&root, &["test", "."]);
+    assert!(ok, "expected a clean workspace, got:\n{output}");
+    assert!(output.contains("alpha goes"), "alpha's test never ran:\n{output}");
+    assert!(output.contains("beta goes"), "beta's test never ran:\n{output}");
+    assert!(output.contains("2 member(s) clean"), "{output}");
+    assert!(
+        !output.contains("no tests"),
+        "a root with two tested members must not report having none:\n{output}"
+    );
+}
+
+/// And a failing test in one member fails the run, rather than the root
+/// reporting nothing at all.
+#[test]
+#[cfg(feature = "llvm")]
+fn a_failing_member_test_fails_the_root() {
+    let root = workspace("ws_test_failing");
+    member_with_a_test(&root, "alpha", 1);
+    member_with_a_test(&root, "beta", 2);
+
+    let (ok, output) = compile(&root, &["test", "."]);
+    assert!(!ok, "a failing test should fail the run:\n{output}");
+    assert!(output.contains("alpha goes"), "alpha was skipped:\n{output}");
+    assert!(output.contains("member(s) failed"), "{output}");
+}
+
+/// `khora bench .` fans out for the same reason and in the same way.
+#[test]
+#[cfg(feature = "llvm")]
+fn a_root_benches_every_member() {
+    let root = workspace("ws_bench_all");
+    member_with_a_test(&root, "alpha", 1);
+    member_with_a_test(&root, "beta", 1);
+
+    let (ok, output) = compile(&root, &["bench", "."]);
+    assert!(ok, "{output}");
+    assert!(output.contains("alpha going"), "alpha was never benched:\n{output}");
+    assert!(output.contains("beta going"), "beta was never benched:\n{output}");
+    assert!(output.contains("2 member(s) clean"), "{output}");
 }

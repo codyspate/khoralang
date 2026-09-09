@@ -611,3 +611,55 @@ fn a_failing_assertion_says_which_one_it_was() {
     // reads the same in a release build as in a debug one.
     assert!(output.contains("at line"), "and where it was written:\n{output}");
 }
+
+/// **A bare relative path finds the workspace root that `./` finds.**
+///
+/// `khora check src/lib.kh` walked to the empty path and read the manifest as
+/// the bare name `khora.toml`, which has no parent to look above -- so a
+/// member inheriting anything from its root was told there was no root, with
+/// the root sitting one directory up. `khora check ./src/lib.kh` worked, and
+/// the difference was two characters. `reference/manifest.md` writes the bare
+/// spelling.
+#[test]
+fn a_bare_relative_path_still_finds_the_workspace_root() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("bare_relative_path");
+    let _ = std::fs::remove_dir_all(&root);
+    let member = root.join("packages").join("alpha");
+    std::fs::create_dir_all(member.join("src")).expect("a member directory");
+    std::fs::write(
+        root.join("khora.toml"),
+        format!(
+            "[workspace]\nmembers = [\"packages/*\"]\n\n\
+             [workspace.lints]\nunused-import = \"warn\"\n\n\
+             [toolchain]\nversion = \"{}\"\n",
+            khora_toolchain::RUNNING,
+        ),
+    )
+    .expect("a workspace root");
+    std::fs::write(
+        member.join("khora.toml"),
+        "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\n\n[lints]\nworkspace = true\n",
+    )
+    .expect("a member manifest");
+    std::fs::write(
+        member.join("src").join("lib.kh"),
+        "module alpha::lib;\n\npub fn go() -> Int {\n    1\n}\n",
+    )
+    .expect("a member source file");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_khora"))
+        .args(["check", "src/lib.kh"])
+        .current_dir(&member)
+        .output()
+        .expect("could not run `khora`");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !text.contains("no workspace root above"),
+        "the root is one directory up:\n{text}"
+    );
+    assert!(out.status.success(), "{text}");
+}

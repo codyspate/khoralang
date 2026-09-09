@@ -475,3 +475,50 @@ fn a_subprocess_cannot_read_what_the_manifest_denies() {
     let (_, denied) = khora(&w, &w.project, &["run", ".", "--no-cache"]);
     assert!(denied.contains("denied echo"), "`default = \"deny\"` covers it too:\n{denied}");
 }
+
+/// **Nothing of the toolchain's own reaches the program's stdout.**
+///
+/// `khora run --help` claims the command is usable in a script the way running
+/// the executable is. It was not: `reused ... from the cache` and `running
+/// ...` went to stdout, so `khora run . | head -1` read the toolchain's
+/// progress rather than the program's first line, and `2>/dev/null` did not
+/// help because none of it was on stderr.
+#[test]
+fn build_chatter_stays_off_the_programs_stdout() {
+    let w = world(
+        "module app::main;\n\nimport std::core::{print};\n\n\
+         pub fn main() -> Int {\n  print(\"first line\");\n  0\n}\n",
+    );
+
+    // Twice, because the two runs print different things -- a real build the
+    // first time and a cache hit the second -- and both were on stdout.
+    for attempt in 1..=2 {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_khora"));
+        if let Some(archive) = pinned::runtime() {
+            command.env("KHORA_RT_LIB", archive);
+        }
+        let out = command
+            .args(["run", "."])
+            .current_dir(&w.project)
+            .env("KHORA_HOME", &w.home)
+            .output()
+            .expect("could not run `khora`");
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert_eq!(out.status.code(), Some(0), "run {attempt}:\n{stdout}{stderr}");
+        assert_eq!(
+            stdout.lines().next(),
+            Some("first line"),
+            "run {attempt}: the program's first line has to be the first line of stdout.\n\
+             stdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            !stdout.contains("running "),
+            "run {attempt}: toolchain progress on stdout:\n{stdout}"
+        );
+        assert!(
+            !stdout.contains("from the cache"),
+            "run {attempt}: cache progress on stdout:\n{stdout}"
+        );
+    }
+}

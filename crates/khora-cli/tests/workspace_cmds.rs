@@ -18,7 +18,14 @@ fn workspace(name: &str, shared: &str) -> PathBuf {
     let root = scratch(name);
     std::fs::write(
         root.join("khora.toml"),
-        format!("[workspace]\nmembers = [\"packages/*\"]\n{shared}"),
+        // The pin, because a project without one is refused and this fixture
+        // lives under `CARGO_TARGET_TMPDIR` -- which has no manifest above it
+        // once the target directory is somewhere other than this repository.
+        // See `tests/workspace.rs`, which pins for the same reason.
+        format!(
+            "[workspace]\nmembers = [\"packages/*\"]\n\n[toolchain]\nversion = \"{}\"\n{shared}",
+            khora_toolchain::RUNNING,
+        ),
     )
     .expect("the root manifest");
     root

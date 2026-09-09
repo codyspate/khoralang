@@ -229,8 +229,17 @@ fn a_package_that_is_not_a_workspace_is_refused() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("release").join("solo");
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).expect("a directory");
-    std::fs::write(root.join("khora.toml"), "[package]\nname = \"solo\"\nversion = \"0.1.0\"\n")
-        .expect("a manifest");
+    // Pinned like the workspace fixture above, because a project without a pin
+    // is refused before it can be refused for not being a workspace -- and the
+    // second refusal is what this is about.
+    std::fs::write(
+        root.join("khora.toml"),
+        format!(
+            "[package]\nname = \"solo\"\nversion = \"0.1.0\"\n\n[toolchain]\nversion = \"{}\"\n",
+            khora_toolchain::RUNNING,
+        ),
+    )
+    .expect("a manifest");
 
     let (ok, output) = run(&root, &["release", "--since", "HEAD"]);
     assert!(!ok, "{output}");

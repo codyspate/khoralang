@@ -162,6 +162,16 @@ enum Command {
         /// Where to write it. Standard output by default.
         #[arg(short, long)]
         out: Option<PathBuf>,
+        /// Refuse a resolution that differs from `khora.lock`.
+        ///
+        /// The document is rendered from the resolution rather than from the
+        /// lockfile, so a stale lockfile is absorbed rather than reported --
+        /// which is the one case an audit most wants not to be misled about.
+        /// `getting-started/installation.md` documents this flag; it was read
+        /// by `locked_requested` and rejected by the parser, so the documented
+        /// command did not run at all.
+        #[arg(long)]
+        locked: bool,
     },
     /// Generate API documentation from `///` and `//!` comments.
     ///
@@ -478,6 +488,9 @@ fn dispatch() -> Result<ExitCode> {
         Command::Lex { path } => lex(&path).map(|()| true),
         Command::Parse { path, no_trivia } => parse_cmd(&path, no_trivia),
         Command::Build { path, out, lib, release, no_cache } => {
+            if out.is_some() {
+                report_programs_out_leaves_out(&path, lib);
+            }
             build(&path, out.as_deref(), lib, release, no_cache)
         }
         Command::Release { since, path, major, minor, patch, notes } => {
@@ -496,7 +509,10 @@ fn dispatch() -> Result<ExitCode> {
             release::release(&path, &since, step, notes.as_deref(), &members)
         }
         Command::Cache { clear } => cache_command(clear).map(|()| true),
-        Command::Sbom { path, out } => sbom(&path, out.as_deref()).map(|()| true),
+        // `locked` is declared so the parser accepts it and rejected nowhere;
+        // `locked_requested` reads the argument list, because being locked is
+        // a property of the run rather than of the subcommand.
+        Command::Sbom { path, out, locked: _ } => sbom(&path, out.as_deref()).map(|()| true),
         Command::Doc { paths, out, check } => {
             let (paths, out) = doc_targets(paths, out)?;
             doc(&paths, &out, check)
@@ -1084,12 +1100,23 @@ fn toolchain(command: ToolchainCommand) -> Result<bool> {
             Ok(true)
         }
         ToolchainCommand::Which { path } => {
-            // Both halves, and which one answered: "0.2.0 because this project
-            // says so" and "0.2.0 because you chose it once" are different
-            // facts, and saying which is the whole point of this command.
-            let pinned = khora_toolchain::pinned_version(&path);
-            let because =
-                if pinned.is_some() { "this project pins it" } else { "it is your default" };
+            // Every half, and which one answered: "0.2.0 because this project
+            // says so", "because the workspace above says so" and "because you
+            // chose it once" are three different facts, and saying which is
+            // the whole point of this command.
+            //
+            // **The third reason is here because the answer used to be
+            // wrong.** A member inheriting the root's pin reported "it is your
+            // default" -- the right version by luck, from the wrong place --
+            // and somebody who wants to change it needs to be told which
+            // manifest actually holds it. See `khora_toolchain::pinned_at`.
+            let found = khora_toolchain::pinned_at(&path);
+            let pinned = found.as_ref().map(|(version, _)| version.clone());
+            let because = match &found {
+                Some((_, manifest)) if pins_here(&path, manifest) => "this project pins it",
+                Some(_) => "the workspace pins it",
+                None => "it is your default",
+            };
             // **The same rule `hand_over_if_pinned` uses**, or this reports a
             // handover that will not happen. A command whose whole job is to
             // say what would run has to agree with what runs.
@@ -1139,6 +1166,21 @@ fn toolchain(command: ToolchainCommand) -> Result<bool> {
             Ok(true)
         }
     }
+}
+
+/// Whether the pin `khora toolchain which` found belongs to `path` itself.
+///
+/// The manifest beside `path` -- or the one `path` *is* -- rather than one
+/// further up. Canonical on both sides, because `.` and the directory it
+/// names are the same place spelled two ways and this comparison is the
+/// difference between "this project pins it" and "the workspace pins it".
+fn pins_here(path: &Path, manifest: &Path) -> bool {
+    let real = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    // Directories, not files: `khora toolchain which src/main.kh` asks about
+    // the package holding that file, and comparing the file against a
+    // `khora.toml` answers no every time.
+    let here = if path.is_dir() { path.to_path_buf() } else { path.parent().unwrap_or(Path::new(".")).to_path_buf() };
+    manifest.parent().is_some_and(|directory| real(&here) == real(directory))
 }
 
 /// `khora update`.
@@ -1527,19 +1569,62 @@ fn fmt_one(paths: &[PathBuf], check: bool) -> Result<bool> {
     Ok(failed == 0)
 }
 
-/// Builds the program's tests and runs them.
+/// Runs the tests of everything `path` names.
+///
+/// **A workspace root fans out over its members**, the way `check` and `fmt`
+/// do. It did not, and what it did instead was worse than an error: a root has
+/// no `.kh` of its own, so the harness compiled nothing, printed `no tests`
+/// and exited 0. `website/content/docs/reference/testing.md` gives the CI
+/// baseline as `khora fmt . --check; khora check .; khora test .`, so a
+/// workspace following the documented recipe was green having never run a
+/// test.
+///
+/// **Fanned out rather than refused.** `build` refuses a root, because
+/// building all of a workspace's programs into one executable is not a reading
+/// of anything; "test the workspace" has an obvious reading and it is the one
+/// the CI recipe means. And each member's tests are their own compilation for
+/// the same reason `check`'s are -- a member's dependencies come from *its*
+/// manifest.
+fn test(path: &Path, filter: Option<&str>) -> Result<bool> {
+    over_workspace(path, "test", |directory| test_one(directory, filter))
+}
+
+/// Runs the benchmarks of everything `path` names, fanning out for the reason
+/// [`test`] does.
+fn bench(path: &Path, filter: Option<&str>) -> Result<bool> {
+    over_workspace(path, "bench", |directory| bench_one(directory, filter))
+}
+
+/// `each` over the members when `path` is a workspace root, and over `path`
+/// itself otherwise.
+///
+/// The membership question is [`workspace_members`], so only a root named
+/// *directly* fans out and `khora test .` inside a member is a request about
+/// that member -- the rule `check` and `fmt` already follow.
+fn over_workspace(
+    path: &Path,
+    verb: &str,
+    mut each: impl FnMut(&Path) -> Result<bool>,
+) -> Result<bool> {
+    match workspace_members(std::slice::from_ref(&path.to_path_buf())) {
+        Some(members) => over_members(&members, verb, |member| each(member)),
+        None => each(path),
+    }
+}
+
+/// Builds one package's tests and runs them.
 ///
 /// The executable is written beside the sources rather than into a temporary,
 /// so that a failing test can be run again under a debugger without rebuilding
 /// — which is the first thing anyone wants and would otherwise need a flag.
 #[cfg(feature = "llvm")]
-fn test(path: &Path, filter: Option<&str>) -> Result<bool> {
+fn test_one(path: &Path, filter: Option<&str>) -> Result<bool> {
     harness(path, filter, "khora-tests", khora_codegen_llvm::compile_tests)
 }
 
-/// Compiles the `bench` blocks and times them.
+/// Compiles one package's `bench` blocks and times them.
 #[cfg(feature = "llvm")]
-fn bench(path: &Path, filter: Option<&str>) -> Result<bool> {
+fn bench_one(path: &Path, filter: Option<&str>) -> Result<bool> {
     // **Which profile these numbers came from, before any of them.** There is
     // no `--release` here on purpose -- `khora test` and `khora bench` read
     // `KHORA_PROFILE`, and `docs/design/profiles.md` argues that a flag on
@@ -1618,7 +1703,7 @@ fn harness(
 }
 
 #[cfg(not(feature = "llvm"))]
-fn test(_path: &Path, _filter: Option<&str>) -> Result<bool> {
+fn test_one(_path: &Path, _filter: Option<&str>) -> Result<bool> {
     anyhow::bail!(
         "this `khora` was built without the LLVM backend. \
          Rebuild with `--features llvm`; see docs/llvm-setup.md."
@@ -1626,7 +1711,7 @@ fn test(_path: &Path, _filter: Option<&str>) -> Result<bool> {
 }
 
 #[cfg(not(feature = "llvm"))]
-fn bench(_path: &Path, _filter: Option<&str>) -> Result<bool> {
+fn bench_one(_path: &Path, _filter: Option<&str>) -> Result<bool> {
     anyhow::bail!(
         "this `khora` was built without the LLVM backend. \
          Rebuild with `--features llvm`; see docs/llvm-setup.md."
@@ -1683,6 +1768,45 @@ fn build(
     }
     build_one(path, out, lib, release, no_cache)
 }
+
+/// Says what `--out` left out.
+///
+/// **`--out` names one file, so it can only mean the package's own program**
+/// -- but the silence made `khora build apps/cli --out dist/cli` look like
+/// `khora build apps/cli` with a nicer path, when it had quietly stopped
+/// building `report`. Somebody who wants both has to know there is a second
+/// command to run, and this is the only moment they can learn it.
+///
+/// Called from the `build` arm of `dispatch` rather than from [`build`]
+/// itself, because `run` passes an `--out` of its own to put the executable
+/// where it is about to start it, and a note about a flag nobody typed is
+/// noise.
+#[cfg(feature = "llvm")]
+fn report_programs_out_leaves_out(path: &Path, lib: bool) {
+    if lib || !path.is_dir() {
+        return;
+    }
+    let Some(root) = package_of(path) else { return };
+    let others = binaries(&root);
+    if others.is_empty() {
+        return;
+    }
+    let named: Vec<String> = others.iter().map(|p| p.display().to_string()).collect();
+    eprintln!(
+        "khora: --out names one file, so this builds only {}'s own program. Its `src/bin` \
+         {} not built: {}. Name {} with `khora build <path> --out <file>`, or drop --out \
+         to build all of them.",
+        root.display(),
+        if others.len() == 1 { "program is" } else { "programs are" },
+        named.join(", "),
+        if others.len() == 1 { "it" } else { "them" },
+    );
+}
+
+/// [`report_programs_out_leaves_out`] in a build with no backend. The `--out`
+/// arm reaches it either way.
+#[cfg(not(feature = "llvm"))]
+fn report_programs_out_leaves_out(_path: &Path, _lib: bool) {}
 
 /// One program, which is what `build` was before `src/bin`.
 #[cfg(feature = "llvm")]
@@ -1795,14 +1919,23 @@ fn build_one(
             match store.lookup(key, &target) {
                 Ok(hit) => match cache::Cache::place(&hit, &target) {
                     Ok(()) => {
-                        println!(
+                        // **Stderr, like every other line this command
+                        // prints.** `khora run` claims to be usable in a
+                        // script the way the executable is, and it was
+                        // prepending two lines of build chatter to the
+                        // program's own stdout -- so `khora run . | head -1`
+                        // read the toolchain's progress rather than the
+                        // program's first line, and `2>/dev/null` did not
+                        // help because none of it was on stderr. Progress is
+                        // not output; the program's output is.
+                        eprintln!(
                             "reused {} from the cache [{}, {}]",
                             target.display(),
                             &hit.key[..12],
                             profile.name()
                         );
                         if lib {
-                            println!("header {}", target.with_extension("h").display());
+                            eprintln!("header {}", target.with_extension("h").display());
                         }
                         return Ok(true);
                     }
@@ -1865,7 +1998,7 @@ fn build_one(
                         // the `built` or `reused` line it belongs to, so that a
                         // CI log that redirects stderr for errors is not
                         // sprayed with cache trivia.
-                        println!("note: cache miss, {miss}");
+                        eprintln!("note: cache miss, {miss}");
                     }
                     if explaining {
                         let held = store.keys();
@@ -1888,14 +2021,15 @@ fn build_one(
     match outcome {
         Ok(()) => {
             let what = if lib { "library" } else { "built" };
-            println!(
+            // Stderr, for the reason on the cache-hit line above.
+            eprintln!(
                 "{what} {} from {} module(s) [{}]",
                 target.display(),
                 inputs.len(),
                 profile.name()
             );
             if lib {
-                println!("header {}", target.with_extension("h").display());
+                eprintln!("header {}", target.with_extension("h").display());
             }
             if let (Some(store), Some(key)) = (&store, &key) {
                 let header = lib.then(|| target.with_extension("h"));
@@ -2090,14 +2224,18 @@ fn run_program(
         return Ok(ExitCode::FAILURE);
     }
 
-    // Separated from the program's own output, because the next thing on the
-    // terminal belongs to the program and not to the toolchain.
-    println!("running {}\n", target.display());
-    // Flushed before handing the terminal over: the child writes to the same
-    // stdout, and a buffered line of ours arriving after its first line is
-    // the kind of interleaving nobody can debug.
+    // Separated from the program's own output, and on stderr, because the
+    // whole of this command's stdout belongs to the program: `khora run` is
+    // meant to behave in a script the way running the executable would, and a
+    // toolchain line on stdout makes `khora run . | head -1` read the wrong
+    // thing.
+    eprintln!("running {}\n", target.display());
+    // Both flushed before handing the terminal over: the child writes to the
+    // same two streams, and a buffered line of ours arriving after its first
+    // line is the kind of interleaving nobody can debug.
     use std::io::Write;
     let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
 
     let mut command = std::process::Command::new(&target);
     command.args(args);
@@ -3367,6 +3505,17 @@ fn enclosing_package(start: &Path) -> Option<PathBuf> {
 
 /// The `khora.toml` governing `start`: in it if it is a directory, beside it if
 /// it is a file, or in the nearest ancestor of either.
+///
+/// **The directory component is never dropped.** `khora check src/lib.kh`
+/// walked to the empty path and returned the bare name `khora.toml`, and a
+/// manifest spelled with no directory has no parent to look above: reading it
+/// found no workspace root, so a member inheriting `lints.workspace = true`
+/// was told "there is no workspace root above this manifest to take it from"
+/// with the root sitting two directories up. `khora check ./src/lib.kh`
+/// worked, and the difference was two characters somebody did or did not
+/// type. The empty path means the working directory, which is `.` rather than
+/// nowhere -- the same substitution [`enclosing_package`] makes, for the same
+/// reason.
 fn nearest_manifest(start: &Path) -> Option<PathBuf> {
     let mut here: Option<&Path> = Some(if start.is_dir() {
         start
@@ -3374,7 +3523,8 @@ fn nearest_manifest(start: &Path) -> Option<PathBuf> {
         start.parent().unwrap_or(Path::new("."))
     });
     while let Some(dir) = here {
-        let candidate = dir.join("khora.toml");
+        let directory = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
+        let candidate = directory.join("khora.toml");
         if candidate.is_file() {
             return Some(candidate);
         }

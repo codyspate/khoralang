@@ -183,26 +183,74 @@ pub enum Pin {
 /// found the member's, saw no `[toolchain]`, and reported that the project pins
 /// nothing. The pin belongs to the workspace, and the workspace is further up.
 pub fn pin_status(start: &Path) -> Pin {
-    let mut here: Option<&Path> =
-        Some(if start.is_dir() { start } else { start.parent().unwrap_or(Path::new(".")) });
+    match found_pin(start) {
+        Ok(Some((version, _))) => Pin::Found(version),
+        Ok(None) => Pin::NoProject,
+        Err(pin) => pin,
+    }
+}
+
+/// The pin governing `start`, and the manifest that supplied it.
+///
+/// **Which manifest answered is a fact somebody asks for.** `khora toolchain
+/// which` has to say *why* a version is the answer, and "this project pins it"
+/// and "the workspace pins it" are different sentences: the second one tells a
+/// member's owner that the file to edit is not the one they are standing in.
+pub fn pinned_at(start: &Path) -> Option<(String, PathBuf)> {
+    found_pin(start).ok().flatten()
+}
+
+/// The walk both of the above are.
+///
+/// `Err` carries the two answers that are not a pin and not "nothing above" --
+/// a manifest that would not parse, and a tree of manifests none of which pins
+/// anything -- because they are [`Pin`]'s business and not [`pinned_at`]'s.
+fn found_pin(start: &Path) -> Result<Option<(String, PathBuf)>, Pin> {
+    // **Absolute first, because the walk cannot climb out of a relative
+    // path.** `pin_status(Path::new("."))` in a workspace member walked `.`,
+    // then `""` -- which joins to the same `khora.toml` all over again -- and
+    // then ran out of parents one directory below where the pin was. So a
+    // member with no `[toolchain]` of its own, which is every member `khora
+    // new` scaffolds, reported no pin and fell through to the machine's
+    // default: two developers with different defaults got different compilers
+    // for the same member, and nothing said so. `khora_manifest::workspace`
+    // makes the same walk absolute for the same reason.
+    let from = absolute(if start.is_dir() { start } else { start.parent().unwrap_or(Path::new(".")) });
+    let mut here: Option<&Path> = Some(from.as_path());
     let mut nearest = None;
     while let Some(dir) = here {
         let candidate = dir.join("khora.toml");
         if candidate.is_file() {
             let parsed = match khora_manifest::Manifest::load(&candidate) {
                 Ok(parsed) => parsed,
-                Err(why) => return Pin::Unreadable(why.to_string()),
+                Err(why) => return Err(Pin::Unreadable(why.to_string())),
             };
             if let Some(toolchain) = parsed.manifest.toolchain {
-                return Pin::Found(toolchain.version);
+                return Ok(Some((toolchain.version, candidate)));
             }
             nearest.get_or_insert(candidate);
         }
         here = dir.parent();
     }
     match nearest {
-        Some(path) => Pin::Missing(path),
-        None => Pin::NoProject,
+        Some(path) => Err(Pin::Missing(path)),
+        None => Ok(None),
+    }
+}
+
+/// `path` as an absolute path, so a walk upwards can leave the working
+/// directory.
+///
+/// Canonicalizing an empty path fails, and an empty path is what
+/// `Path::new("member").parent()` gives -- meaning the working directory,
+/// not nowhere.
+fn absolute(path: &Path) -> PathBuf {
+    if let Ok(found) = path.canonicalize() {
+        return khora_manifest::readable(found);
+    }
+    match std::env::current_dir() {
+        Ok(here) => here.join(path),
+        Err(_) => path.to_path_buf(),
     }
 }
 

@@ -26,8 +26,18 @@ fn fixture(name: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).expect("a scratch directory");
 
-    std::fs::write(root.join("khora.toml"), "[workspace]\nmembers = [\"packages/*\"]\n")
-        .expect("the root manifest");
+    // The pin, because a project without one is refused and this fixture lives
+    // under `CARGO_TARGET_TMPDIR` -- which has no manifest above it once the
+    // target directory is somewhere other than this repository. See
+    // `tests/workspace.rs`, which pins for the same reason.
+    std::fs::write(
+        root.join("khora.toml"),
+        format!(
+            "[workspace]\nmembers = [\"packages/*\"]\n\n[toolchain]\nversion = \"{}\"\n",
+            khora_toolchain::RUNNING,
+        ),
+    )
+    .expect("the root manifest");
     package(&root.join("vendor").join("shared"), "shared", "");
     package(
         &root.join("packages").join("alpha"),
