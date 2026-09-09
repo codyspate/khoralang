@@ -278,3 +278,44 @@ fn a_path_grant_keeps_its_segment_rule() {
         );
     }
 }
+
+/// **A `..` segment is refused unless the grants are the whole filesystem.**
+///
+/// `**` crosses separators, so the `./logs/**` the capabilities guide teaches
+/// matched `logs/../secret.txt` as text and a grant naming one directory
+/// covered the disk. Resolving the `..` away instead would be unsound from the
+/// string alone -- where `logs` is a symlink, `logs/..` is the parent of its
+/// target -- so the path is not compared at all.
+///
+/// Bare `**` is the exception, because it is not a restriction there is an
+/// outside to: `default = "allow"` and a manifest with no `[permissions]`
+/// table both compile to exactly that list.
+///
+/// The same table as `std::permissions`'s own test, which lives in
+/// `crates/khora-codegen-llvm/tests/fs.rs`.
+#[test]
+fn a_parent_segment_is_refused_however_wide_the_grant() {
+    for (grant, value, want) in [
+        // The escape, against the grant the docs teach.
+        ("./logs/**", "logs/../secret.txt", false),
+        // The same grant still covers what is really under the tree.
+        ("./logs/**", "logs/a/b.txt", true),
+        // Leading, and doubled, against a grant that names everything.
+        ("**", "../secret.txt", true),
+        ("**", "a/../../b", true),
+        // Buried, so this is not just a test of the first segment.
+        ("./logs/**", "logs/deep/../../secret.txt", false),
+        // Separators are levelled first, so this is the same path again.
+        ("./logs/**", "logs\\..\\secret.txt", false),
+        // A segment and not a substring: `..config` is a filename.
+        ("./logs/**", "logs/..config", true),
+        // The literal grant refused this before the fix, and still does.
+        ("./logs", "logs/../secret.txt", false),
+    ] {
+        assert_eq!(
+            granted_path(&[grant.to_string()], value),
+            want,
+            "granted_path({grant:?}, {value:?})"
+        );
+    }
+}

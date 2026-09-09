@@ -849,11 +849,9 @@ fn main() -> Int {{
 ///
 /// A `.` segment is dropped now, on both sides, so all four spellings agree.
 ///
-/// **`..` is still not resolved**, and that is deliberate: dropping `a/../b`
-/// to `b` is only correct if `a` exists and is a directory rather than a link,
-/// which is a question about the filesystem — and a normalizer that guessed
-/// would *widen* a grant, which is the one direction a permission check must
-/// never be wrong in.
+/// **A `..` segment is refused outright now**, which is the next test. The
+/// case below is the one that was already right, and it is still right: the
+/// `..` is not compared, so no grant covers it.
 #[test]
 fn a_dot_segment_does_not_change_what_a_grant_covers() {
     let ran = run(
@@ -893,6 +891,76 @@ pub fn main() -> Int {{
         ran.stdout,
         "granted\ngranted\ngranted\ngranted\ngranted\nrefused\nrefused\n\
          [a/b]\n[.]\n[/abs/path]\n"
+    );
+}
+
+/// **`read = ["./logs/**"]` granted `logs/../secret.txt`.**
+///
+/// `**` crosses separators, so the grant the capabilities guide teaches for a
+/// directory tree matched the escape as text: the `**` swallowed
+/// `../secret.txt`, and a manifest naming one directory could read the whole
+/// disk. Every program that joins a path it was handed -- an argument, a
+/// config entry, a request path -- under a granted prefix was passing that
+/// reach on to whoever handed it the path.
+///
+/// `granted` refuses a `..` segment before it consults the grants, unless the
+/// grants are the whole filesystem.
+///
+/// **Bare `**` is the exception, and it has to be.** It is not a wide grant,
+/// it is the absence of one: `default = "allow"`, and a manifest with no
+/// `[permissions]` table at all, both compile to exactly that list. A `..`
+/// escapes a grant by reaching outside what it names, and this one names
+/// everything, so there is nothing outside to reach. The spellings that have to go with it are here:
+/// leading, doubled, buried under a directory, and written with Windows
+/// separators, which are levelled before the segments are looked at.
+///
+/// Refused rather than resolved, because resolving is not sound from the
+/// string alone: if `a` is a symlink then `a/..` is the parent of its target,
+/// so approving `a/../b` as `b` approves a file the open does not reach. The
+/// two lines that must still say `granted` are here because refusing too much
+/// is its own bug -- an ordinary path under the tree, and a file honestly
+/// named `..config`, which is a name and not a segment.
+#[test]
+fn a_parent_segment_is_refused_however_wide_the_grant() {
+    let ran = run(
+        "fs_grant_parent",
+        &format!(
+            "{HEAD}
+import std::permissions::{{granted}};
+
+fn say(grant: String, path: String) -> () {{
+  let ok = granted(List::Cons(grant, List::Nil), path);
+  print(if ok {{ \"granted\" }} else {{ \"refused\" }})
+}}
+
+pub fn main() -> Int {{
+  // The escape the probe package reproduced, against the grant the docs teach.
+  say(\"./logs/**\", \"logs/../secret.txt\");
+  // The same grant still covers what is really under the tree.
+  say(\"./logs/**\", \"logs/a/b.txt\");
+  // Leading, and doubled, against a grant that names everything: allowed,
+  // because bare `**` is what a manifest with no table compiles to.
+  say(\"**\", \"../secret.txt\");
+  say(\"**\", \"a/../../b\");
+  // Buried, so this is not just a test of the first segment.
+  say(\"./logs/**\", \"logs/deep/../../secret.txt\");
+  // Separators are levelled first, so this is the same path again.
+  say(\"./logs/**\", \"logs\\\\..\\\\secret.txt\");
+  // A segment and not a substring: `..config` is a filename.
+  say(\"./logs/**\", \"logs/..config\");
+  // The literal grant refused this before the fix, and still does.
+  say(\"./logs\", \"logs/../secret.txt\");
+  0
+}}
+"
+        ),
+    );
+
+    assert_eq!(
+        ran.stdout,
+        "refused\ngranted\ngranted\ngranted\nrefused\nrefused\ngranted\nrefused\n",
+        "a grant narrower than everything covers no path that climbs, and bare \
+         `**` is not a restriction there is an outside to"
     );
 }
 

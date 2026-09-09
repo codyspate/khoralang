@@ -740,9 +740,69 @@ pub fn granted_name(grants: &[String], name: &str) -> bool {
 /// `*` matches within one path segment and `**` across them, which is the glob
 /// dialect everyone already has in their fingers from `.gitignore`. Separators
 /// are normalized, so a grant written with `/` covers a Windows path.
+///
+/// **A path with a `..` segment is refused, unless the grants are the whole
+/// filesystem.** `granted` in `std/permissions.kh` answers this question for a
+/// running program and the two have to agree; that one was changed first,
+/// because `**` spans separators and so the `./logs/**` the capabilities guide
+/// teaches matched `logs/../secret.txt` as text -- the `**` swallowed
+/// `../secret.txt`, and a grant that reads like one directory covered the disk.
+/// This matcher reads patterns out of a manifest rather than a path a program
+/// built, so it was not the way in; it is the other half of an answer that has
+/// to be one answer.
 pub fn granted_path(grants: &[String], path: &str) -> bool {
-    let path = path.replace('\\', "/");
-    grants.iter().any(|g| glob(&g.replace('\\', "/"), &path, Some('/')))
+    let wanted = normalized(path);
+    if climbs(&wanted) && !unrestricted(grants) {
+        return false;
+    }
+    grants.iter().any(|g| glob(&normalized(g), &wanted, Some('/')))
+}
+
+/// One spelling of a path, so a grant and a request can be compared.
+///
+/// `\\` becomes `/`, so a grant written with forward slashes covers a path
+/// Windows spelled with back ones, and a `.` segment is dropped, so `./data/**`
+/// grants `data/foo.txt` and `data/**` grants `./data/foo.txt`.
+///
+/// **`..` is neither resolved nor levelled here**; `granted_path` refuses the
+/// path outright. Resolving `a/../b` to `b` is only correct where `a` is a real
+/// directory: if it is a symlink then `a/..` is the parent of what `a` points
+/// *at*, so the open lands beside the target while the check approved the `b`
+/// beside `a`. Telling those apart needs the filesystem, and this function has
+/// only the string.
+///
+/// A path that is nothing but `.` stays `.`: it names the current directory,
+/// and the empty string would match nothing rather than what it says.
+fn normalized(path: &str) -> String {
+    let swapped = path.replace('\\', "/");
+    let kept: Vec<&str> = swapped.split('/').filter(|piece| *piece != ".").collect();
+    if kept.is_empty() {
+        swapped
+    } else {
+        kept.join("/")
+    }
+}
+
+/// Whether any segment of `path` is `..`.
+///
+/// By segment rather than by substring, so a file honestly named `..config` is
+/// left alone. `path` has been through `normalized`, so `\\` is `/` and there
+/// is one spelling of a boundary to split on.
+fn climbs(path: &str) -> bool {
+    path.split('/').any(|piece| piece == "..")
+}
+
+/// Whether the grants are the whole filesystem rather than a part of it.
+///
+/// **`..` is only dangerous against a grant narrower than everything.** A grant
+/// of bare `**` covers the disk on purpose: there is no outside for a `..` to
+/// reach, and refusing one would deny a read the manifest plainly allowed.
+///
+/// That case is the default rather than a corner: `default = "allow"`, and a
+/// manifest with no `[permissions]` table at all, both compile to exactly this
+/// list.
+fn unrestricted(grants: &[String]) -> bool {
+    grants.iter().any(|g| normalized(g) == "**")
 }
 
 /// Whether any of `grants` covers `host`, which is `name` or `name:port`.
