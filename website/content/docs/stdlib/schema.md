@@ -138,6 +138,13 @@ and the build says so. `Rejection` implements `Encode`, so a list of problems
 is a response body a client can read: one object per problem, with its `path`
 and its `message`.
 
+**The object it prints is sorted by key, not in declaration order.** A
+`Json::Object` holds a `Map`, and every route out -- `Raw::to_json`, `encode`,
+a handwritten encoder -- goes through one. So a `{ zebra, apple, mango }`
+record encodes as `{"apple":..,"mango":..,"zebra":..}`. Nothing in JSON
+promises field order and nothing here keeps it; worth knowing before it is a
+surprise in a program's output.
+
 ## Where a `Raw` comes from
 
 `Raw::of_json` turns a parsed document into one, and `Raw::to_json` turns one
@@ -272,9 +279,11 @@ map from one to the other; a call to it is rewritten before it is typed into
 takes a record literal and nothing else, there is no arity, and a record with
 a hand-written schema is picked up by every schema that contains it.
 
-**The assemblers stop at five fields.** `Schema::record` over `Fields` has no
-such limit — `Fields::zip` nests a tuple, however many fields there are — but
-nesting a record is usually what the shape of the data was telling you anyway.
+**There is no field limit.** `struct` is rewritten into `Schema::record` over
+`Fields`, and `Fields::zip` nests a tuple however many fields there are — a
+seven-field record checks, and so does a twelve-field one. This page used to
+say the assemblers stop at five, which sent at least one reader to design a
+record around a limit that does not exist.
 
 **`std::json` parses and prints, and does not decode.** `parse` turns text
 into a `Json` and `Raw::of_json` turns that into what a schema reads;

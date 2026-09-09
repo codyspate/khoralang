@@ -670,3 +670,39 @@ fn an_unresolved_error_type_is_not_compared_to_the_real_one() {
     );
     assert!(imported.is_empty(), "expected no errors once imported, got {imported:?}");
 }
+
+/// **An operation is reached through the binding, and the message says so.**
+///
+/// `Env::arguments()` is the shape the generated API pages invite: they list
+/// the operations under `pub effect Env` and the binding's name appears
+/// nowhere on the page. The answer used to be "`Env` has no constructor or
+/// function named `arguments`", which is true and leaves the reader with
+/// nothing to type. Found by an agent building a program from the public
+/// documentation.
+#[test]
+fn an_operation_called_on_its_effect_says_how_to_call_it() {
+    let found = errors_with_std(
+        "module program;\n\
+         import std::env::{Env};\n\
+         pub fn main() -> Int { with { env: Env::real() } { Env::arguments(); }; 0 }\n",
+    );
+    assert!(
+        found.iter().any(|e| e.contains("write `env.arguments(..)`")),
+        "the message has to say what to type: {found:?}"
+    );
+}
+
+/// And a *constructor* on the same effect is still an ordinary call, or the
+/// message above would land on `Env::real()` and be wrong about it.
+#[test]
+fn a_constructor_on_an_effect_is_not_that_mistake() {
+    let found = errors_with_std(
+        "module program;\n\
+         import std::env::{Env, EnvError, variable_or};\n\
+         pub fn main() -> Int raises EnvError {\n\
+           with { env: Env::real() } { let _ = variable_or(\"HOME\", \"\")!; };\n\
+           0\n\
+         }\n",
+    );
+    assert!(found.is_empty(), "a constructor on an effect is an ordinary call: {found:?}");
+}

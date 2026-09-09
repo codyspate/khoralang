@@ -55,6 +55,13 @@ promising something. What a caller can act on is "it was not there" against
 "it did not work", and both carry the path so the message can say which
 file.
 
+**Coarse is not the same as arbitrary, and it was arbitrary.** `fopen`
+returns null whether the file is absent, unreadable or a directory, and
+every one of those was reported as `NotFound` -- so the one distinction
+this type does draw was not drawn. `open_or_say_why` reads the reason in
+the runtime, on the thread that set `errno`, and only a genuine ENOENT is
+`NotFound` now.
+
 #### Denied
 
 ```khora

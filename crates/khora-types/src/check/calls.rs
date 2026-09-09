@@ -552,7 +552,25 @@ impl<'a> Checker<'a> {
         let Some(trait_name) = found else {
             let range = self.body.range(at);
             self.error(
-                if self.types.adts.contains_key(owner) {
+                if self.types.effects.contains(owner) {
+                    // **An operation is called on the binding, not on the
+                    // effect.** `Env::arguments()` is the shape every generated
+                    // API page invites -- it lists `arguments` under
+                    // `pub effect Env` and the binding's name appears nowhere
+                    // on it -- and the message here used to be
+                    // "`Env` has no constructor or function named `arguments`",
+                    // which is true and tells nobody what to write instead.
+                    // Every other "you wrote it wrong" message in this compiler
+                    // names the fix.
+                    let label = lowercase_start(owner);
+                    format!(
+                        "`{owner}` is an effect, and `{name}` is reached through the \
+                         binding that supplies it rather than through the type: write \
+                         `{label}.{name}(..)` inside a \
+                         `with {{ {label}: {owner}::real() }}`, or take \
+                         `with {{ {label}: {owner} }}` in this function's signature"
+                    )
+                } else if self.types.adts.contains_key(owner) {
                     // `Fruit::Red` where `Red` is `Color`'s is the common way
                     // to get here, and naming the type that does have it is
                     // the whole of the fix.
@@ -631,5 +649,19 @@ impl<'a> Checker<'a> {
             }
             khora_hir::Resolution::Unsupported(_) => Type::Unknown,
         }
+    }
+}
+
+/// A capability's conventional binding label: the effect's name, lowercased.
+///
+/// Only for a suggestion, so being wrong about an unusual spelling costs a
+/// slightly-off example rather than a wrong compile. `Env` gives `env`,
+/// `HttpClient` gives `httpClient` -- which nobody writes, so the first letter
+/// is all that is touched and the rest is left as the author wrote it.
+fn lowercase_start(name: &str) -> String {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) => first.to_lowercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
     }
 }

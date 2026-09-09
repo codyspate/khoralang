@@ -273,11 +273,18 @@ making an otherwise context-free record literal guess that it is a `Field`.
 pub fn object(fields: List<Field>) -> Json
 ```
 
-Builds an object from fields in declaration order.
+Builds an object out of the fields it is given.
 
-The map intentionally forgets that order, as every other object built by
-this module does. `Raw::to_json` in `std::schema` is built on it, and so
-is a handwritten encoder.
+**The order is not kept, and the printed object is sorted by key.** A
+`Json::Object` holds a `Map`, and a `Map` is ordered by its keys -- so the
+list here says which fields, not which order. Everything that builds an
+object goes through this: `Raw::to_json` in `std::schema`, so `encode`
+over a derived `Encode` prints alphabetically rather than in the order the
+record declares, and so does a handwritten encoder.
+
+Worth knowing before it is a surprise in a program's output. A reader
+depending on field order is depending on something JSON does not promise,
+and this makes that concrete rather than accidental.
 
 ### encode
 

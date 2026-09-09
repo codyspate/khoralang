@@ -126,6 +126,25 @@ with `Decimal::of_string` and `0.0725` stays `0.0725`. A price read through a
 double is the wrong price. `decimal()` reads text too, because money travels as
 a string on most wires, and `Decimal` encodes as one.
 
+## A schema reads more than JSON
+
+`Raw::of_json` is one way in and not the only one. `Raw::of_map` takes a
+`Map<String, String>` — a query string, a set of headers, the cells of a CSV
+row against its header — and hands it to the same schema:
+
+```khora
+let cells: Map<String, String> = Map::new();
+for pair in List::zip(header, row) {
+  Map::insert(cells, pair.key, String::trim(pair.value));
+};
+let sale: Validated<Sale, Rejection> = decode(Raw::of_map(cells));
+```
+
+The rejections come out naming the column, because a `Raw`'s field name is
+what the schema asked for either way. This is what "the same `Schema<Settings>`
+reads the environment, a request body and a test fixture" means in practice:
+the source changes and the declaration does not.
+
 ## Ask what a configuration needs, without running it
 
 A schema carries an untyped `Shape` beside its decoder, so its structure can be
