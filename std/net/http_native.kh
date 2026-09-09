@@ -46,7 +46,14 @@ pub type Method =
   | Post
   | Put
   | Patch
-  | Delete;
+  | Delete
+  /// The same as `Get`, and the response carries no body. RFC 9110 requires a
+  /// server to support it, and a router that answers 400 to it is refusing a
+  /// method every cache and health checker sends.
+  | Head
+  /// What a path allows. This is the CORS preflight, so a router without it
+  /// cannot be called from a browser on another origin at all.
+  | Options;
 
 impl Method {
   /// The method this text names, or `None`.
@@ -65,6 +72,10 @@ impl Method {
       Option::Some(Method::Patch)
     } else if text == "DELETE" {
       Option::Some(Method::Delete)
+    } else if text == "HEAD" {
+      Option::Some(Method::Head)
+    } else if text == "OPTIONS" {
+      Option::Some(Method::Options)
     } else {
       Option::None
     }
@@ -89,6 +100,8 @@ impl Method {
       Method::Put => 2,
       Method::Patch => 3,
       Method::Delete => 4,
+      Method::Head => 5,
+      Method::Options => 6,
     }
   }
 }
@@ -252,13 +265,23 @@ impl Response {
   /// safe: a client knows where the body ends and where the next answer
   /// begins without the connection closing to tell it.
   pub fn rendered_keeping(self, keep: Bool) -> String {
+    Response::head_keeping(self, keep) + self.body
+  }
+
+  /// Everything up to the blank line, and nothing after it.
+  ///
+  /// **This is what a `HEAD` answer is**, and why it is a separate function
+  /// rather than `rendered_keeping` with the body cleared: `Content-Length`
+  /// here is the length of the body a `GET` *would* have sent, and clearing
+  /// the body first would compute it as zero. RFC 9110 is explicit that the
+  /// two answers carry the same headers and differ only in the body.
+  pub fn head_keeping(self, keep: Bool) -> String {
     "HTTP/1.1 " + Int::to_string(self.status) + " " + Response::reason(self.status) + "\r\n"
     + "Content-Type: " + self.content_type + "\r\n"
     + "Content-Length: " + Int::to_string(String::byte_length(self.body)) + "\r\n"
     + Response::extra(self.headers)
     + (if keep { "Connection: keep-alive\r\n" } else { "Connection: close\r\n" })
     + "\r\n"
-    + self.body
   }
 
   /// The caller's own headers. `with_header` prepends, so the most recently
@@ -1050,6 +1073,16 @@ impl Connection {
     self.transport.transmit(Response::rendered_keeping(response, keep))
   }
 
+  /// The same, for a request whose answer carries no body.
+  ///
+  /// `HEAD` only. The headers are the ones `GET` would have sent, including
+  /// the `Content-Length` of the body that is not being sent -- which is the
+  /// whole point of the method, and the reason this is decided here rather
+  /// than by clearing a field somewhere upstream.
+  pub fn reply_headless(self, response: Response, keep: Bool) -> Int {
+    self.transport.transmit(Response::head_keeping(response, keep))
+  }
+
   /// Ends the conversation and releases the transport.
   pub fn shut(self) -> () {
     self.transport.shut()
@@ -1137,6 +1170,13 @@ pub type Route<'er> = {
 /// against the database widens the router's own error row.
 pub type Router<'er> = {
   routes: List<Route<'er>>,
+  /// The most bytes one request may occupy, headers and body together.
+  ///
+  /// On the router because that is the only thing a caller holds: the limit
+  /// belongs to `Connection`, and every path from `listen` to it goes through
+  /// five functions that had no reason to carry a number. `Router::holding`
+  /// is how it is set.
+  limit: Int,
 };
 
 /// Mounting is written `router |> Router::post(..)`, so the router is the
@@ -1151,7 +1191,27 @@ pub type Router<'er> = {
 /// made a REST service unwritable.
 impl Router {
   /// A router with no routes. The start of the pipeline.
-  pub fn new<'er>() -> Router<'er> { { routes: List::Nil } }
+  pub fn new<'er>() -> Router<'er> { { routes: List::Nil, limit: default_limit() } }
+
+  /// The same router, holding at most `most` bytes per request.
+  ///
+  /// **8 KB is the default and was, until now, the only value.** It is the
+  /// right answer to "how much may an unauthenticated client make a server
+  /// hold" and the wrong one for a service that accepts a document -- and
+  /// `Connection::holding` has taken a size since it was written, with no way
+  /// to reach it from a router. A form post or a JSON body above 8 KB meant
+  /// abandoning `Router` for a hand-written accept loop, and nothing said so.
+  ///
+  /// Written in the pipeline like everything else:
+  ///
+  /// ```khora
+  /// Router::new()
+  ///   |> Router::holding(1048576)
+  ///   |> Router::post("/documents", SharedFn::of(store))
+  /// ```
+  pub fn holding<'er>(router: Router<'er>, most: Int) -> Router<'er> {
+    { routes: router.routes, limit: most }
+  }
 
   /// Mounts `handler` at `route` for `method`.
   ///
@@ -1172,7 +1232,10 @@ impl Router {
     route: String,
     handler: SharedFn<Request, Response, 'er>
   ) -> Router<'er> {
-    { routes: List::Cons({ method: method, pattern: route, handler: handler }, router.routes) }
+    {
+      routes: List::Cons({ method: method, pattern: route, handler: handler }, router.routes),
+      limit: router.limit,
+    }
   }
 
   /// Mounts `handler` at `route` for GET.
@@ -1223,6 +1286,46 @@ impl Router {
     Router::on(router, Method::Delete, route, handler)
   }
 
+  /// Mounts `handler` at `route` for HEAD.
+  ///
+  /// **Rarely what you want.** A router without this answers `HEAD` by running
+  /// the `GET` handler and sending the headers alone, which is what RFC 9110
+  /// requires the two to agree on and the only arrangement that cannot drift.
+  /// Mounting `HEAD` separately takes that guarantee away, and is here for the
+  /// one case that needs it: a resource whose length or validators are cheap
+  /// to compute and whose body is not, where answering `HEAD` by building the
+  /// body and discarding it is the whole cost of the request.
+  ///
+  /// Whatever this returns is sent without its body, exactly as the `GET`
+  /// fallback would be.
+  pub fn head<'er>(
+    router: Router<'er>,
+    route: String,
+    handler: SharedFn<Request, Response, 'er>
+  ) -> Router<'er> {
+    Router::on(router, Method::Head, route, handler)
+  }
+
+  /// Mounts `handler` at `route` for OPTIONS.
+  ///
+  /// **Also rarely what you want**, and for the opposite reason: a router
+  /// without this answers `OPTIONS` with 204 and an `Allow` naming what the
+  /// path mounts, which is the correct answer to the question the method asks.
+  /// What it does *not* carry is `Access-Control-Allow-Origin` and the rest of
+  /// the CORS reply, because the library has no way to know which origins a
+  /// service trusts -- and a default of "none" and a default of "any" are both
+  /// wrong. A service that answers preflights mounts this and sets them.
+  ///
+  /// A handler mounted here replaces the default outright, so it is also
+  /// responsible for the `Allow` header the default would have sent.
+  pub fn options<'er>(
+    router: Router<'er>,
+    route: String,
+    handler: SharedFn<Request, Response, 'er>
+  ) -> Router<'er> {
+    Router::on(router, Method::Options, route, handler)
+  }
+
   /// **405 when the path exists under another method, 404 when it does not.**
   ///
   /// A router with one verb per path can answer 404 to everything and nobody
@@ -1248,10 +1351,10 @@ impl Router {
 
   /// Every method mounted at a path that matches, comma-separated.
   ///
-  /// Deduplicated by substring, which is safe for exactly these five names:
-  /// none of `GET`, `POST`, `PUT`, `PATCH` and `DELETE` contains another. A
-  /// sixth verb would have to check that again, so the check is written here
-  /// rather than assumed anywhere else.
+  /// Deduplicated by substring, which is safe for exactly these seven names:
+  /// no one of `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD` and `OPTIONS`
+  /// contains another. That was checked again when the last two were added,
+  /// which is what the note here asked of whoever added a sixth.
   fn allowing<'er>(routes: List<Route<'er>>, path: String, so_far: String) -> String {
     match routes {
       List::Nil => so_far,
@@ -1572,7 +1675,7 @@ impl Router {
     // fiber gets parked forever by a client that stops talking. Ten seconds is
     // long enough that no real client notices and short enough that a
     // half-open connection is not a leak.
-    Router::answer_on(router, transport) catch {
+    Router::answer_on_holding(router, transport, router.limit) catch {
       _ => {
         transport.transmit(Response::rendered(Response::text(500, "handler failed")));
       },
@@ -1587,7 +1690,23 @@ impl Router {
   pub fn answer_on<'er>(router: Router<'er>, transport: Transport) -> ()
     raises 'er
   {
-    let connection = Connection::over(transport);
+    Router::answer_on_holding(router, transport, default_limit())!
+  }
+
+  /// The same, holding at most `most` bytes of request.
+  ///
+  /// **The limit was unreachable through the router**, which is the half of it
+  /// that was a bug: `Connection::holding` has taken a size since it was
+  /// written, and every path from `Router::listen` went through
+  /// `Connection::over` and its 8 KB. A service accepting a JSON document or a
+  /// form had to abandon the router and write its own accept loop, and nothing
+  /// said so. The default is unchanged -- 8 KB is the right answer to "how much
+  /// may an unauthenticated client make a server hold" -- and it is now an
+  /// answer a caller can disagree with.
+  pub fn answer_on_holding<'er>(router: Router<'er>, transport: Transport, most: Int) -> ()
+    raises 'er
+  {
+    let connection = Connection::holding(transport, most);
     let mut going = true;
     while going {
       match Connection::next(connection) {
@@ -1597,8 +1716,13 @@ impl Router {
           going = false
         },
         Incoming::Arrived(request, keep) => {
+          let headless = Method::same(request.method, Method::Head);
           let response = Router::dispatch(router.routes, request)!;
-          Connection::reply(connection, response, keep);
+          if headless {
+            Connection::reply_headless(connection, response, keep);
+          } else {
+            Connection::reply(connection, response, keep);
+          };
           going = keep
         },
       }
@@ -1609,7 +1733,81 @@ impl Router {
   fn dispatch<'er>(routes: List<Route<'er>>, request: Request) -> Response
     raises 'er
   {
-    Router::taking(routes, routes, request)!
+    match request.method {
+      // **`HEAD` is `GET` without the body**, and a router should not make
+      // anybody mount it twice. A route mounted `HEAD` explicitly still wins;
+      // otherwise the `GET` handler answers and `answer_on` sends the headers
+      // alone. RFC 9110 requires the two to agree, and the only way to be sure
+      // they do is to run the same handler.
+      Method::Head =>
+        if Router::mounts(routes, Method::Head, request.path) {
+          Router::taking(routes, routes, request)!
+        } else {
+          Router::taking(routes, routes, {
+              method: Method::Get,
+              path: request.path,
+              params: request.params,
+              queries: request.queries,
+              headers: request.headers,
+              body: request.body,
+            })!
+        },
+      // **`OPTIONS` is the preflight**, so a router that cannot answer it
+      // cannot be called from a browser on another origin. A mounted handler
+      // wins -- an API that sets its own CORS headers needs to -- and the
+      // default says what the path allows and nothing else.
+      Method::Options =>
+        if Router::mounts(routes, Method::Options, request.path) {
+          Router::taking(routes, routes, request)!
+        } else {
+          Router::allowed_answer(routes, request.path)
+        },
+      _ => Router::taking(routes, routes, request)!,
+    }
+  }
+
+  /// Whether any route mounts `method` at a path matching `path`.
+  fn mounts<'er>(routes: List<Route<'er>>, method: Method, path: String) -> Bool {
+    match routes {
+      List::Nil => false,
+      List::Cons(route, rest) =>
+        if Method::same(route.method, method) {
+          match matches(route.pattern, path) {
+            Option::Some(_params) => true,
+            Option::None => Router::mounts(rest, method, path),
+          }
+        } else {
+          Router::mounts(rest, method, path)
+        },
+    }
+  }
+
+  /// The default answer to `OPTIONS`: what this path allows.
+  ///
+  /// 204, because there is no body to send and 200 with an empty one invites a
+  /// client to look for content that was never there. `Allow` carries the
+  /// mounted methods plus the two this router answers without being asked --
+  /// `OPTIONS` itself, and `HEAD` wherever `GET` is mounted.
+  ///
+  /// A path nothing mounts is 404 rather than an empty `Allow`: "this path
+  /// allows nothing" and "there is no such path" are different answers and a
+  /// client can act on the difference.
+  fn allowed_answer<'er>(routes: List<Route<'er>>, path: String) -> Response {
+    let mounted = Router::allowing(routes, path, "");
+    if String::byte_length(mounted) == 0 {
+      Response::text(404, "no route for " + path)
+    } else {
+      let with_head =
+        match String::index_of(mounted, "GET") {
+          Option::Some(_at) => mounted + ", HEAD",
+          Option::None => mounted,
+        };
+      Response::with_header(
+        { status: 204, body: "", content_type: "text/plain", headers: List::Nil },
+        "Allow",
+        with_head + ", OPTIONS",
+      )
+    }
   }
 
   /// `left` is what is still to try; `all` is the whole table.
@@ -1982,6 +2180,8 @@ fn method_name(method: Method) -> String {
     Method::Put => "PUT",
     Method::Patch => "PATCH",
     Method::Delete => "DELETE",
+    Method::Head => "HEAD",
+    Method::Options => "OPTIONS",
   }
 }
 

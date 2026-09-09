@@ -42,7 +42,9 @@ pub type Method =
   | Post
   | Put
   | Patch
-  | Delete;
+  | Delete
+  | Head
+  | Options;
 ```
 
 The five verbs this server routes on.
@@ -51,6 +53,25 @@ Not every verb HTTP defines: `HEAD`, `OPTIONS` and `TRACE` are answered by
 the server rather than routed to a handler, and a method nobody can mount a
 route for is not worth a case here. `of` returns `None` for the rest, which
 becomes a 400 rather than a panic.
+
+#### Head
+
+```khora
+| Head
+```
+
+The same as `Get`, and the response carries no body. RFC 9110 requires a
+server to support it, and a router that answers 400 to it is refusing a
+method every cache and health checker sends.
+
+#### Options
+
+```khora
+| Options
+```
+
+What a path allows. This is the CORS preflight, so a router without it
+cannot be called from a browser on another origin at all.
 
 ### Params
 
@@ -354,11 +375,25 @@ to carry — `Router<'er>` says only how its handlers can fail.
 ```khora
 pub type Router<'er> = {
   routes: List<Route<'er>>,
+  limit: Int,
 };
 ```
 
 A router carries its handlers' failures, so mounting a route that can fail
 against the database widens the router's own error row.
+
+#### limit
+
+```khora
+limit: Int
+```
+
+The most bytes one request may occupy, headers and body together.
+
+On the router because that is the only thing a caller holds: the limit
+belongs to `Connection`, and every path from `listen` to it goes through
+five functions that had no reason to carry a number. `Router::holding`
+is how it is set.
 
 ### Url
 
@@ -713,6 +748,20 @@ server benchmarked with keep-alive was comparing two different questions.
 safe: a client knows where the body ends and where the next answer
 begins without the connection closing to tell it.
 
+#### head_keeping
+
+```khora
+pub fn head_keeping(self, keep: Bool) -> String
+```
+
+Everything up to the blank line, and nothing after it.
+
+**This is what a `HEAD` answer is**, and why it is a separate function
+rather than `rendered_keeping` with the body cleared: `Content-Length`
+here is the length of the body a `GET` *would* have sent, and clearing
+the body first would compute it as zero. RFC 9110 is explicit that the
+two answers carry the same headers and differ only in the body.
+
 #### reason
 
 ```khora
@@ -809,6 +858,19 @@ status and the request's `Connection` header are both known once, at the
 point the request has been parsed, and working either out again afterwards
 means reading the request a second time.
 
+#### reply_headless
+
+```khora
+pub fn reply_headless(self, response: Response, keep: Bool) -> Int
+```
+
+The same, for a request whose answer carries no body.
+
+`HEAD` only. The headers are the ones `GET` would have sent, including
+the `Content-Length` of the body that is not being sent -- which is the
+whole point of the method, and the reason this is decided here rather
+than by clearing a field somewhere upstream.
+
 #### shut
 
 ```khora
@@ -841,6 +903,29 @@ pub fn new<'er>() -> Router<'er>
 ```
 
 A router with no routes. The start of the pipeline.
+
+#### holding
+
+```khora
+pub fn holding<'er>(router: Router<'er>, most: Int) -> Router<'er>
+```
+
+The same router, holding at most `most` bytes per request.
+
+**8 KB is the default and was, until now, the only value.** It is the
+right answer to "how much may an unauthenticated client make a server
+hold" and the wrong one for a service that accepts a document -- and
+`Connection::holding` has taken a size since it was written, with no way
+to reach it from a router. A form post or a JSON body above 8 KB meant
+abandoning `Router` for a hand-written accept loop, and nothing said so.
+
+Written in the pipeline like everything else:
+
+```khora
+Router::new()
+  |> Router::holding(1048576)
+  |> Router::post("/documents", SharedFn::of(store))
+```
 
 #### on
 
@@ -904,6 +989,44 @@ Mounts `handler` at `route` for DELETE.
 
 `delete` rather than `remove`, because the method is spelled `DELETE` and
 a router's job is to say what the wire says.
+
+#### head
+
+```khora
+pub fn head<'er>(router: Router<'er>, route: String, handler: SharedFn<Request, Response, 'er>) -> Router<'er>
+```
+
+Mounts `handler` at `route` for HEAD.
+
+**Rarely what you want.** A router without this answers `HEAD` by running
+the `GET` handler and sending the headers alone, which is what RFC 9110
+requires the two to agree on and the only arrangement that cannot drift.
+Mounting `HEAD` separately takes that guarantee away, and is here for the
+one case that needs it: a resource whose length or validators are cheap
+to compute and whose body is not, where answering `HEAD` by building the
+body and discarding it is the whole cost of the request.
+
+Whatever this returns is sent without its body, exactly as the `GET`
+fallback would be.
+
+#### options
+
+```khora
+pub fn options<'er>(router: Router<'er>, route: String, handler: SharedFn<Request, Response, 'er>) -> Router<'er>
+```
+
+Mounts `handler` at `route` for OPTIONS.
+
+**Also rarely what you want**, and for the opposite reason: a router
+without this answers `OPTIONS` with 204 and an `Allow` naming what the
+path mounts, which is the correct answer to the question the method asks.
+What it does *not* carry is `Access-Control-Allow-Origin` and the rest of
+the CORS reply, because the library has no way to know which origins a
+service trusts -- and a default of "none" and a default of "any" are both
+wrong. A service that answers preflights mounts this and sets them.
+
+A handler mounted here replaces the default outright, so it is also
+responsible for the `Allow` header the default would have sent.
 
 #### listen
 
@@ -1053,6 +1176,23 @@ Answers every request on one connection, until the client stops.
 **Written against the public [`Connection`], with nothing reserved.** A
 framework of a different shape writes this loop itself and is not missing
 anything: the reading, the framing and the refusals are all above.
+
+#### answer_on_holding
+
+```khora
+pub fn answer_on_holding<'er>(router: Router<'er>, transport: Transport, most: Int) ->() raises 'er
+```
+
+The same, holding at most `most` bytes of request.
+
+**The limit was unreachable through the router**, which is the half of it
+that was a bug: `Connection::holding` has taken a size since it was
+written, and every path from `Router::listen` went through
+`Connection::over` and its 8 KB. A service accepting a JSON document or a
+form had to abandon the router and write its own accept loop, and nothing
+said so. The default is unchanged -- 8 KB is the right answer to "how much
+may an unauthenticated client make a server hold" -- and it is now an
+answer a caller can disagree with.
 
 ### Call
 

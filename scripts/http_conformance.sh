@@ -133,6 +133,37 @@ huge=$(printf 'x%.0s' $(seq 1 9000))
 check "a 9 KB header is refused, not fatal" "413" \
     "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Filler: $huge" "$base/health")"
 
+# `curl -I` is a `HEAD`, and this was a 400 until the router learned the verb:
+# the request every cache, health checker and uptime monitor sends was answered
+# by calling the client malformed.
+check "HEAD /health is 200" "200" \
+    "$(curl -s -o /dev/null -w '%{http_code}' -I "$base/health")"
+
+# The headers a GET would have sent, including the length of the body that is
+# deliberately not coming. A HEAD reporting zero tells a client the resource is
+# empty, which is a different and wrong answer.
+head_length=$(curl -s -I "$base/health" \
+    | tr -d '\r' | grep -i '^content-length:' | cut -d' ' -f2)
+get_length=$(curl -s "$base/health" | wc -c | tr -d ' ')
+check "HEAD reports the length GET sends" "$get_length" "$head_length"
+
+# And the connection is still framed after one. A HEAD that sent a body makes
+# the *next* answer on the connection unparseable rather than that one, which
+# is why it has to be asked on a reused connection to be asked at all.
+check "a HEAD leaves the connection usable" "200200" \
+    "$(curl -s -I -o /dev/null -w '%{http_code}' "$base/health" \
+        --next -o /dev/null -w '%{http_code}' "$base/health")"
+
+# The CORS preflight. A 400 here is a service no browser on another origin can
+# call at all, whatever else it serves correctly.
+check "OPTIONS /health is 204" "204" \
+    "$(curl -s -o /dev/null -w '%{http_code}' -X OPTIONS "$base/health")"
+allow=$(curl -s -D - -o /dev/null -X OPTIONS "$base/health" \
+    | tr -d '\r' | grep -i '^allow:')
+check "the preflight says GET is allowed" "1" "$(printf '%s' "$allow" | grep -c 'GET')"
+check "and names the verbs the router answers unmounted" "1" \
+    "$(printf '%s' "$allow" | grep -c 'HEAD.*OPTIONS\|OPTIONS.*HEAD')"
+
 # The server is still answering after all of that.
 check "the server survived" "200" \
     "$(curl -s -o /dev/null -w '%{http_code}' "$base/health")"

@@ -5918,6 +5918,57 @@ directory it was just written to; and the `fn main(` search is a text match
 that a doc comment satisfies, which is what made `std` a candidate at all.
 
 
+### 16.12 `HEAD` and `OPTIONS` were answered with 400 Bad Request
+
+`Method::of` knew five verbs; `parse_request_line` returns `None` for a verb it
+does not know; `Connection::understood` answers `None` with
+`400 malformed request` and closes. So every `std::net::http` server ever
+started answered `HEAD` -- what a cache, a health checker and `curl -I` send --
+by calling the client malformed. `OPTIONS` got the same, which means no Khora
+service could be called from a browser on another origin *at all*: the CORS
+preflight is an `OPTIONS`, and a 400 to the preflight fails the request before
+the real one is sent. Nothing in the library or the docs said either.
+
+Both are now answered without being mounted, because a router that requires
+every path to be mounted twice is a router that is wrong for everyone who
+forgets.
+
+- **`HEAD` runs the `GET` handler and sends the headers alone.**
+  `Response::head_keeping` is a separate function rather than
+  `rendered_keeping` with the body cleared, because `Content-Length` here is
+  the length of the body a `GET` *would* have sent -- clearing the body first
+  computes it as zero, and a client believes it. A route mounted `HEAD`
+  explicitly still wins.
+- **`OPTIONS` answers 204 with `Allow`**: the mounted methods, plus `OPTIONS`
+  and -- wherever `GET` is mounted -- `HEAD`, since the router answers those
+  whether or not anybody mounted them, and an `Allow` that omits them is a lie
+  a client acts on. A path nothing mounts is 404 rather than a 204 with an
+  empty `Allow`: "this path allows nothing" and "there is no such path" are
+  different answers.
+
+`Router::head` and `Router::options` mount each one explicitly, for the two
+cases the defaults cannot serve: a resource whose validators are cheap and
+whose body is not, where the fallback's cost *is* the request; and a preflight
+that has to carry `Access-Control-Allow-Origin`, which the default cannot send
+because the library has no way to know which origins a service trusts, and
+"none" and "any" are both wrong. An explicit mount replaces the default rather
+than adding to it -- so a mounted `OPTIONS` also owns the `Allow` header.
+
+Asserted end to end against a real socket in
+`crates/khora-codegen-llvm/tests/http.rs`. `HEAD` matches the `GET` answer
+header for header, and a second request down the same connection is what shows
+the body was never written rather than merely unread -- the failure mode a
+`HEAD` with a body produces is the *next* answer being garbage.
+
+**And the request limit was unreachable through the router.**
+`Connection::holding` has taken a size since it was written, but every path
+from `Router::listen` went through `Connection::over` and its 8 KB, so a
+service accepting a JSON document or a form larger than that had to abandon the
+router and write its own accept loop -- and nothing said so. `Router::holding`
+and `Router::answer_on_holding` make 8 KB a default a caller can disagree with
+rather than a limit of the router.
+
+
 ### The order this gets worked in
 
 16.6 first, because it is the only wrong answer on this page and a systems

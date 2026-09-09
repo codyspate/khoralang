@@ -78,6 +78,20 @@ fn thing(req: Request) -> Response {
   Response::text(200, method_of(req) + \" \" + Params::get(req.params, \"id\").unwrap_or(\"?\"))
 }
 
+/// Mounted for `HEAD` alone, which is the case `Router::head` exists for: the
+/// body is what is expensive here, so it is never built.
+fn cheap(req: Request) -> Response {
+  Response::text(200, \"cheap\") |> Response::with_header(\"X-Cheap\", \"yes\")
+}
+
+/// Mounted for `OPTIONS`, because the default answer cannot know which origins
+/// a service trusts and so does not send the CORS headers at all.
+fn cors(req: Request) -> Response {
+  Response::text(204, \"\")
+    |> Response::with_header(\"Access-Control-Allow-Origin\", \"https://app.test\")
+    |> Response::with_header(\"Allow\", \"GET, HEAD, OPTIONS\")
+}
+
 fn method_of(req: Request) -> String {
   if Method::same(req.method, Method::Put) { \"put\" }
   else { if Method::same(req.method, Method::Patch) { \"patch\" }
@@ -98,6 +112,11 @@ pub fn main() raises HttpError + ChildFailed {
     |> Router::patch(\"/thing/:id\", SharedFn::of(thing))
     // The general one, so that the five named verbs are not the only way in.
     |> Router::on(Method::Delete, \"/thing/:id\", SharedFn::of(thing))
+    // The two the router already answers unmounted, mounted anyway — which is
+    // the only way to find out that an explicit mount wins.
+    |> Router::head(\"/cheap\", SharedFn::of(cheap))
+    |> Router::get(\"/cors\", SharedFn::of(tagged))
+    |> Router::options(\"/cors\", SharedFn::of(cors))
     |> Router::listen(@PORT@)!
 }
 ";
@@ -217,6 +236,34 @@ fn read_message(socket: &mut std::net::TcpStream) -> String {
         }
     }
     String::from_utf8_lossy(&got).into_owned()
+}
+
+/// Reads the headers of one answer and stops at the blank line.
+///
+/// `read_message` goes on to read the `Content-Length` bytes the head
+/// promises, which is right for every answer except the one method whose whole
+/// point is that those bytes are not coming. Waiting for them after a `HEAD`
+/// means waiting out the ten-second deadline, every time.
+fn read_head(socket: &mut std::net::TcpStream) -> String {
+    let mut got: Vec<u8> = Vec::new();
+    loop {
+        if got.windows(4).any(|w| w == b"\r\n\r\n") {
+            return String::from_utf8_lossy(&got).into_owned();
+        }
+        let mut chunk = [0u8; 4096];
+        match socket.read(&mut chunk) {
+            Ok(0) | Err(_) => return String::from_utf8_lossy(&got).into_owned(),
+            Ok(n) => got.extend_from_slice(&chunk[..n]),
+        }
+    }
+}
+
+/// The `Allow:` header of an answer, whole.
+fn allow_of(answer: &str) -> &str {
+    answer
+        .lines()
+        .find(|line| line.starts_with("Allow: "))
+        .unwrap_or_else(|| panic!("an Allow header: {answer}"))
 }
 
 /// Sends one raw request on a connection of its own and reads the answer.
@@ -523,4 +570,127 @@ fn the_server_reads_what_a_client_actually_sends() {
     // --- and a path nothing mounted is still 404
     let answer = ask(b"GET /nothing-here HTTP/1.1\r\nHost: x\r\n\r\n");
     assert!(answer.starts_with("HTTP/1.1 404 "), "{answer}");
+
+    // --- `HEAD` is `GET` without the body
+    //
+    // Mounted nowhere, on purpose. A router that made every service mount each
+    // path twice is a router that gets `HEAD` wrong for everyone who forgets,
+    // and RFC 9110 requires the two answers to carry the same headers — which
+    // is only guaranteed if the same handler produced them. So the `GET`
+    // handler runs and the body is dropped on the way out.
+    let getted = ask(b"GET /tagged HTTP/1.1\r\nHost: x\r\n\r\n");
+    let mut headed = connect().expect("could not reach the server");
+    headed.write_all(b"HEAD /tagged HTTP/1.1\r\nHost: x\r\n\r\n").expect("a request");
+    headed.flush().expect("flush");
+    let head = read_head(&mut headed);
+    assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "{head}");
+    assert!(
+        head.contains("Content-Length: 6\r\n"),
+        "the length of the body a GET would have sent, not the zero bytes sent: {head}"
+    );
+    assert_eq!(
+        head,
+        format!("{}\r\n\r\n", getted.split_once("\r\n\r\n").expect("a blank line").0),
+        "header for header, the answer GET gave — including the handler's own X-Trace"
+    );
+
+    // The body is not merely unread: it was never sent. A second request down
+    // the same connection comes back as an answer rather than as six stray
+    // bytes followed by one, which is what a `HEAD` with a body does to every
+    // client that keeps the connection.
+    headed.write_all(b"GET /tagged HTTP/1.1\r\nHost: x\r\n\r\n").expect("a second request");
+    headed.flush().expect("flush");
+    let next = read_message(&mut headed);
+    assert!(next.starts_with("HTTP/1.1 200 OK\r\n"), "nothing was left on the wire: {next}");
+    assert_eq!(body_of(&next), "tagged", "{next}");
+
+    // A `HEAD` is answered from the routing table, not around it: the path
+    // still has to be there, and the method still has to be one the path
+    // takes.
+    let mut missing = connect().expect("could not reach the server");
+    missing.write_all(b"HEAD /nowhere HTTP/1.1\r\nHost: x\r\n\r\n").expect("a request");
+    missing.flush().expect("flush");
+    let head = read_head(&mut missing);
+    assert!(head.starts_with("HTTP/1.1 404 Not Found\r\n"), "{head}");
+
+    let mut wrong = connect().expect("could not reach the server");
+    wrong.write_all(b"HEAD /thing/7 HTTP/1.1\r\nHost: x\r\n\r\n").expect("a request");
+    wrong.flush().expect("flush");
+    let head = read_head(&mut wrong);
+    assert!(
+        head.starts_with("HTTP/1.1 405 "),
+        "nothing mounts GET at /thing/:id, so nothing answers HEAD there: {head}"
+    );
+
+    // --- `OPTIONS` says what the path allows
+    //
+    // This is the CORS preflight. A router that cannot answer it cannot be
+    // called from a browser on another origin at all, whatever else it serves.
+    let answer = ask(b"OPTIONS /thing/7 HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert!(answer.starts_with("HTTP/1.1 204 No Content\r\n"), "{answer}");
+    assert_eq!(body_of(&answer), "", "204 means there is nothing to look for: {answer}");
+    let allow = allow_of(&answer);
+    for verb in ["PUT", "PATCH", "DELETE", "OPTIONS"] {
+        assert!(allow.contains(verb), "{allow}");
+    }
+    assert!(
+        !allow.contains("HEAD"),
+        "no GET is mounted here, so HEAD is not among the answers either: {allow}"
+    );
+
+    // Where `GET` is mounted, `HEAD` is offered with it — the router answers
+    // it whether or not anybody mounted it, so saying otherwise would be a
+    // lie a client acts on.
+    let answer = ask(b"OPTIONS /tagged HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert!(answer.starts_with("HTTP/1.1 204 "), "{answer}");
+    let allow = allow_of(&answer);
+    for verb in ["GET", "HEAD", "OPTIONS"] {
+        assert!(allow.contains(verb), "{allow}");
+    }
+
+    // --- a `HEAD` mounted on purpose wins over the `GET` fallback
+    //
+    // `/cheap` has no `GET`, so reaching a handler at all is the proof: the
+    // fallback would have found nothing to run and answered 405. This is what
+    // `Router::head` is for — a resource whose length is cheap and whose body
+    // is not, where answering `HEAD` by building the body and throwing it away
+    // is the entire cost of the request.
+    let mut cheap = connect().expect("could not reach the server");
+    cheap.write_all(b"HEAD /cheap HTTP/1.1\r\nHost: x\r\n\r\n").expect("a request");
+    cheap.flush().expect("flush");
+    let head = read_head(&mut cheap);
+    assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "the mounted handler ran: {head}");
+    assert!(head.contains("X-Cheap: yes\r\n"), "and it was that handler: {head}");
+    assert!(
+        head.contains("Content-Length: 5\r\n"),
+        "still the length of the body it built, still not sent: {head}"
+    );
+    assert_eq!(head.split_once("\r\n\r\n").expect("a blank line").1, "", "{head}");
+
+    // Mounting it for `HEAD` did not mount it for `GET`.
+    let answer = ask(b"GET /cheap HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert!(answer.starts_with("HTTP/1.1 405 "), "{answer}");
+    assert!(allow_of(&answer).contains("HEAD"), "{answer}");
+
+    // --- and an `OPTIONS` mounted on purpose replaces the default outright
+    //
+    // Which is the reason `Router::options` exists: the default says what the
+    // path allows, and cannot say `Access-Control-Allow-Origin`, because the
+    // library has no way to know which origins a service trusts.
+    let answer = ask(b"OPTIONS /cors HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert!(answer.starts_with("HTTP/1.1 204 No Content\r\n"), "{answer}");
+    assert!(
+        answer.contains("Access-Control-Allow-Origin: https://app.test\r\n"),
+        "the mounted handler answered, not the default: {answer}"
+    );
+    // The GET at the same path is untouched by the OPTIONS mount.
+    assert_eq!(body_of(&ask(b"GET /cors HTTP/1.1\r\nHost: x\r\n\r\n")), "tagged");
+
+    // --- and `OPTIONS` on a path nothing mounts is 404
+    //
+    // Rather than a 204 with an empty `Allow`: "this path allows nothing" and
+    // "there is no such path" are different answers, and a client that is
+    // discovering an API can act on the difference.
+    let answer = ask(b"OPTIONS /nowhere HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert!(answer.starts_with("HTTP/1.1 404 Not Found\r\n"), "{answer}");
 }
