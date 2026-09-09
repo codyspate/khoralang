@@ -5969,6 +5969,75 @@ and `Router::answer_on_holding` make 8 KB a default a caller can disagree with
 rather than a limit of the router.
 
 
+**And three more, found by auditing the documentation rather than the code.**
+The `Method` comment still read "the five verbs this server routes on", and
+went on to say that `HEAD` and `OPTIONS` "are answered by the server rather
+than routed to a handler, and a method nobody can mount a route for is not
+worth a case here" -- sitting directly above the two variants it denies, in the
+commit that added `Router::head` and `Router::options`. Four more counts of
+five, one of them in `Router::on`'s own doc.
+
+Two of the three were code:
+
+- **`Router::answer_on` passed `default_limit()` rather than `router.limit`.**
+  It is the public entry point for embedding the router in somebody else's
+  accept loop -- which is to say it is the entry point `Router::holding` was
+  written for -- and it was the one path on which `holding` did nothing.
+  `Router::listen` and the TLS forms were always correct, so nothing failed;
+  the caller simply got 8 KB back and no indication of it.
+- **The 405's `Allow` and the `OPTIONS` answer's `Allow` disagreed.** One was
+  built from the mounted methods, the other from the mounted methods plus the
+  two the router answers unmounted, so `/tagged` replied `Allow: GET` to a
+  `POST` and `Allow: GET, HEAD, OPTIONS` to an `OPTIONS`. One router, one path,
+  two answers, and the argument for adding them to the second -- an `Allow`
+  that omits a method the router answers is a lie a client acts on -- is
+  verbatim the argument for the first. `Router::answerable` is the one list
+  both read now, and the test asserts the two headers are the same string
+  rather than that each contains what it should.
+
+Neither is the kind of defect a test written alongside the fix catches: the fix
+and its test agree about what to check, and what disagreed here was a sentence.
+Both were found by reading prose against code, which is the argument for doing
+that as a pass of its own rather than trusting a commit to have been internally
+consistent.
+
+### 16.13 A server cannot restart on its own port for a minute
+
+`listen_on` calls `socket`, `bind` and `listen`, and never `setsockopt`. There
+is no `SO_REUSEADDR`, so the kernel refuses to bind a port that still has a
+connection in `TIME_WAIT` -- and `TIME_WAIT` lands on whichever side closed
+first, which for this server is every `Connection: close`, every 413, and every
+client that stopped talking and hit the ten-second deadline.
+
+Measured on `examples/link_shortener`, which is the difference between the two
+cases rather than an assertion about one:
+
+| the last connection was closed by | restart on the same port |
+| --- | --- |
+| the client (an ordinary keep-alive `GET`) | binds |
+| **the server** (`Connection: close`) | **fails to bind for ~60s** |
+
+So an ordinary deployment -- stop the process, start the new one -- fails
+whenever the old one served a client that asked to close, which is any browser
+navigating away and anything sending `Connection: close` at all. It is the one
+defect on this page that every user hits and none of the tests did, because a
+test suite starts a server on a fresh port and a deployment does not.
+
+What comes back is not a diagnosis either:
+
+```
+khora: `HttpError` reached the entry point and nothing handled it
+```
+
+`SO_REUSEADDR` before `bind` is the fix on Linux and macOS. **Windows is not
+the same call**: `SO_REUSEADDR` there lets an unrelated process bind a port
+this one is already listening on, which is a hijack rather than a convenience,
+and the option that means what Unix means is `SO_EXCLUSIVEADDRUSE` plus not
+setting `SO_REUSEADDR` at all. Three files, two behaviours, and a note in
+`socket_windows.kh` saying why it differs -- which is the shape of decision
+this page exists to record rather than to have taken quietly.
+
+
 ### The order this gets worked in
 
 16.6 first, because it is the only wrong answer on this page and a systems

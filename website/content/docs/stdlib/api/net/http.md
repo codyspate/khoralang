@@ -13,7 +13,8 @@ below it is Khora over `String::slice`, `String::index_of` and `Map`.
 
 **Answering**: a request line with its query string, headers, a body read
 to the length the headers promised, routing on method and path with `:name`
-segments, and a response that can carry headers of its own. On a fiber per
+segments, `HEAD` and `OPTIONS` answered whether or not they are mounted,
+and a response that can carry headers of its own. On a fiber per
 connection, which took a language feature to reach rather than a line here
 — see `Router::serve_once`.
 
@@ -47,12 +48,15 @@ pub type Method =
   | Options;
 ```
 
-The five verbs this server routes on.
+The seven verbs this server routes on.
 
-Not every verb HTTP defines: `HEAD`, `OPTIONS` and `TRACE` are answered by
-the server rather than routed to a handler, and a method nobody can mount a
-route for is not worth a case here. `of` returns `None` for the rest, which
-becomes a 400 rather than a panic.
+Not every verb HTTP defines: `TRACE` and `CONNECT` are neither routed nor
+answered, and a method nobody can mount a route for is not worth a case
+here. `HEAD` and `OPTIONS` earned theirs the moment the router began
+answering them unmounted -- the answer has to be reachable from a `Route`
+for a caller to be able to replace it, and this comment said the opposite
+for as long as answering them meant a 400. `of` returns `None` for the
+rest, which becomes a 400 rather than a panic.
 
 #### Head
 
@@ -891,7 +895,7 @@ ones so that the pipeline reads as a chain against `Router` and cannot
 collide with another module's `get`.
 
 One per method, over a general `on` that takes the method as a value. Both
-are worth having: the named five are what a pipeline reads best with, and
+are worth having: the named seven are what a pipeline reads best with, and
 `on` is what stops the set being closed — a router with only the verbs
 somebody thought to write helpers for is the shape this had before, and it
 made a REST service unwritable.
@@ -935,13 +939,17 @@ pub fn on<'er>(router: Router<'er>, method: Method, route: String, handler: Shar
 
 Mounts `handler` at `route` for `method`.
 
-**The general one, and the five below are it with a name.** A router that
+**The general one, and the seven below are it with a name.** A router that
 could only mount the methods somebody had written a helper for is a
 router that stops at whatever its first caller needed — which is what
 this one did, for months, with `get` and `post` and no way to say `PUT`
-at all. The named five exist because `Router::get(..)` reads better in a
+at all. The named seven exist because `Router::get(..)` reads better in a
 pipeline than `Router::on(Method::Get, ..)`, not because they are the
 only ones allowed.
+
+The last two are unlike the other five: the router answers `HEAD` and
+`OPTIONS` whether or not anything is mounted for them, so mounting one
+*replaces* an answer rather than supplying the only one there is.
 
 Later mounts are tried first, because each prepends. Mounting the same
 route twice is allowed and the second one wins, which is worth knowing
@@ -1177,6 +1185,12 @@ Answers every request on one connection, until the client stops.
 framework of a different shape writes this loop itself and is not missing
 anything: the reading, the framing and the refusals are all above.
 
+The limit is the router's, which is what `Router::holding` set. This read
+`default_limit()` when `holding` was written, so a caller who raised the
+limit and then drove its own transport through here silently got 8 KB
+back -- the one path on which `holding` did nothing, and the path a
+framework of a different shape is on by definition.
+
 #### answer_on_holding
 
 ```khora
@@ -1332,8 +1346,9 @@ says otherwise.
 
 Eight kilobytes is what a buffer costs per connection, and a connection is
 what a fiber costs — so this is the number that decides how many callers a
-server can hold, not a guess about how big a request is. `Connection::holding`
-takes another.
+server can hold, not a guess about how big a request is.
+`Connection::holding` takes another, and `Router::holding` is how a router
+says so.
 
 The buffer is allocated once at this size and never grows, which is what
 makes a lying `Content-Length` harmless: the header is a promise about what

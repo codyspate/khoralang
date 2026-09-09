@@ -365,10 +365,16 @@ fn the_server_reads_what_a_client_actually_sends() {
     // --- a body larger than one `recv`, which is 4096 bytes
     //
     // The whole point of reading to `Content-Length` rather than once. Six
-    // thousand rather than something rounder because `limit()` is 8192, and
-    // `limit()` is 8192 because `std::core`'s text helpers recurse once per
-    // byte and the stack gives out around nine thousand — see the comment
-    // there.
+    // thousand rather than something rounder because `limit()` is 8192 and this
+    // has to fit under it.
+    //
+    // It said `limit()` was 8192 *because* `std::core`'s text helpers recursed
+    // once per byte and the stack gave out around nine thousand. That stopped
+    // being true when those helpers were rewritten as loops, and
+    // `default_limit`'s own comment now says the opposite and shows its work: a
+    // 39,808-byte request with 2,001 headers parses when the limit admits it.
+    // Eight kilobytes is a policy about what an unauthenticated client may make
+    // a server hold, and `Router::holding` is how a caller disagrees with it.
     let big = "x".repeat(6000);
     let request = format!(
         "POST /size HTTP/1.1\r\nHost: t\r\nContent-Length: {}\r\n\r\n{}",
@@ -544,28 +550,45 @@ fn the_server_reads_what_a_client_actually_sends() {
 
     // --- a path that exists under a different verb is 405, not 404
     //
-    // With one verb per path nobody notices; with five it is the difference
+    // With one verb per path nobody notices; with seven it is the difference
     // between "your URL is wrong" and "your method is wrong", and sending a
     // client to check the first when it is the second is an afternoon.
-    let answer = ask(b"POST /tagged HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n");
-    assert!(answer.starts_with("HTTP/1.1 405 "), "{answer}");
-    assert!(
-        answer.contains("Allow: GET"),
-        "a 405 has to say what would have worked: {answer}"
+    let refusal = ask(b"POST /tagged HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n");
+    assert!(refusal.starts_with("HTTP/1.1 405 "), "{refusal}");
+    assert_eq!(
+        allow_of(&refusal),
+        "Allow: GET, HEAD, OPTIONS",
+        "a 405 has to say what would have worked, and that includes the two the \
+         router answers unmounted: {refusal}"
     );
 
+    // --- and the 405 and the `OPTIONS` answer agree about the same path
+    //
+    // They did not. `unmatched` built its `Allow` from the mounted methods and
+    // the `OPTIONS` default built its own from the mounted methods *plus* the
+    // two answered unmounted, so one router gave two answers to one question:
+    // `Allow: GET` to a 405 and `Allow: GET, HEAD, OPTIONS` to an `OPTIONS`,
+    // for `/tagged`. A client cannot act on both. One list, built once.
+    let preflight = ask(b"OPTIONS /tagged HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert_eq!(allow_of(&refusal), allow_of(&preflight), "one path, one answer");
+
     // Every verb mounted at the path, and each named once however many routes
-    // matched.
+    // matched. No `GET` here, so no `HEAD` either — the router would not
+    // answer one, and an `Allow` that offered it would be a lie a client acts
+    // on.
     let answer = ask(b"GET /thing/7 HTTP/1.1\r\nHost: x\r\n\r\n");
     assert!(answer.starts_with("HTTP/1.1 405 "), "{answer}");
-    let allow = answer
-        .lines()
-        .find(|line| line.starts_with("Allow: "))
-        .expect("an Allow header");
-    for verb in ["PUT", "PATCH", "DELETE"] {
+    let allow = allow_of(&answer);
+    for verb in ["PUT", "PATCH", "DELETE", "OPTIONS"] {
         assert!(allow.contains(verb), "{allow}");
     }
+    assert!(!allow.contains("HEAD"), "nothing mounts GET at /thing/:id: {allow}");
     assert_eq!(allow.matches("PUT").count(), 1, "named once: {allow}");
+    assert_eq!(
+        allow,
+        allow_of(&ask(b"OPTIONS /thing/7 HTTP/1.1\r\nHost: x\r\n\r\n")),
+        "one path, one answer"
+    );
 
     // --- and a path nothing mounted is still 404
     let answer = ask(b"GET /nothing-here HTTP/1.1\r\nHost: x\r\n\r\n");
@@ -670,7 +693,11 @@ fn the_server_reads_what_a_client_actually_sends() {
     // Mounting it for `HEAD` did not mount it for `GET`.
     let answer = ask(b"GET /cheap HTTP/1.1\r\nHost: x\r\n\r\n");
     assert!(answer.starts_with("HTTP/1.1 405 "), "{answer}");
-    assert!(allow_of(&answer).contains("HEAD"), "{answer}");
+    assert_eq!(
+        allow_of(&answer),
+        "Allow: HEAD, OPTIONS",
+        "the mounted HEAD is named once, not appended to itself: {answer}"
+    );
 
     // --- and an `OPTIONS` mounted on purpose replaces the default outright
     //
@@ -685,6 +712,16 @@ fn the_server_reads_what_a_client_actually_sends() {
     );
     // The GET at the same path is untouched by the OPTIONS mount.
     assert_eq!(body_of(&ask(b"GET /cors HTTP/1.1\r\nHost: x\r\n\r\n")), "tagged");
+
+    // And an explicit mount is not appended to itself. `/cors` mounts GET and
+    // OPTIONS, so the 405's list has `OPTIONS` in it already and `HEAD` added
+    // for the GET; naming either twice is an `Allow` a client may well parse
+    // into a duplicate.
+    let answer = ask(b"DELETE /cors HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n");
+    assert!(answer.starts_with("HTTP/1.1 405 "), "{answer}");
+    let allow = allow_of(&answer);
+    assert_eq!(allow.matches("OPTIONS").count(), 1, "named once: {allow}");
+    assert_eq!(allow.matches("HEAD").count(), 1, "and so is the one added: {allow}");
 
     // --- and `OPTIONS` on a path nothing mounts is 404
     //

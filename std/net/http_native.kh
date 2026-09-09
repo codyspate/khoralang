@@ -16,7 +16,8 @@ import std::schema::{Encode, Raw};
 //!
 //! **Answering**: a request line with its query string, headers, a body read
 //! to the length the headers promised, routing on method and path with `:name`
-//! segments, and a response that can carry headers of its own. On a fiber per
+//! segments, `HEAD` and `OPTIONS` answered whether or not they are mounted,
+//! and a response that can carry headers of its own. On a fiber per
 //! connection, which took a language feature to reach rather than a line here
 //! — see `Router::serve_once`.
 //!
@@ -35,12 +36,15 @@ import std::schema::{Encode, Raw};
 //! `Router::listen_tls` differ only in what they hand it, and the client
 //! reuses both without knowing which it has.
 
-/// The five verbs this server routes on.
+/// The seven verbs this server routes on.
 ///
-/// Not every verb HTTP defines: `HEAD`, `OPTIONS` and `TRACE` are answered by
-/// the server rather than routed to a handler, and a method nobody can mount a
-/// route for is not worth a case here. `of` returns `None` for the rest, which
-/// becomes a 400 rather than a panic.
+/// Not every verb HTTP defines: `TRACE` and `CONNECT` are neither routed nor
+/// answered, and a method nobody can mount a route for is not worth a case
+/// here. `HEAD` and `OPTIONS` earned theirs the moment the router began
+/// answering them unmounted -- the answer has to be reachable from a `Route`
+/// for a caller to be able to replace it, and this comment said the opposite
+/// for as long as answering them meant a 400. `of` returns `None` for the
+/// rest, which becomes a 400 rather than a panic.
 pub type Method =
   | Get
   | Post
@@ -701,8 +705,9 @@ fn body_of(rest: String) -> String {
 ///
 /// Eight kilobytes is what a buffer costs per connection, and a connection is
 /// what a fiber costs — so this is the number that decides how many callers a
-/// server can hold, not a guess about how big a request is. `Connection::holding`
-/// takes another.
+/// server can hold, not a guess about how big a request is.
+/// `Connection::holding` takes another, and `Router::holding` is how a router
+/// says so.
 ///
 /// The buffer is allocated once at this size and never grows, which is what
 /// makes a lying `Content-Length` harmless: the header is a promise about what
@@ -1185,7 +1190,7 @@ pub type Router<'er> = {
 /// collide with another module's `get`.
 ///
 /// One per method, over a general `on` that takes the method as a value. Both
-/// are worth having: the named five are what a pipeline reads best with, and
+/// are worth having: the named seven are what a pipeline reads best with, and
 /// `on` is what stops the set being closed — a router with only the verbs
 /// somebody thought to write helpers for is the shape this had before, and it
 /// made a REST service unwritable.
@@ -1215,13 +1220,17 @@ impl Router {
 
   /// Mounts `handler` at `route` for `method`.
   ///
-  /// **The general one, and the five below are it with a name.** A router that
+  /// **The general one, and the seven below are it with a name.** A router that
   /// could only mount the methods somebody had written a helper for is a
   /// router that stops at whatever its first caller needed — which is what
   /// this one did, for months, with `get` and `post` and no way to say `PUT`
-  /// at all. The named five exist because `Router::get(..)` reads better in a
+  /// at all. The named seven exist because `Router::get(..)` reads better in a
   /// pipeline than `Router::on(Method::Get, ..)`, not because they are the
   /// only ones allowed.
+  ///
+  /// The last two are unlike the other five: the router answers `HEAD` and
+  /// `OPTIONS` whether or not anything is mounted for them, so mounting one
+  /// *replaces* an answer rather than supplying the only one there is.
   ///
   /// Later mounts are tried first, because each prepends. Mounting the same
   /// route twice is allowed and the second one wins, which is worth knowing
@@ -1329,15 +1338,20 @@ impl Router {
   /// **405 when the path exists under another method, 404 when it does not.**
   ///
   /// A router with one verb per path can answer 404 to everything and nobody
-  /// notices. With five it becomes a real distinction: a client that sends
+  /// notices. With seven it becomes a real distinction: a client that sends
   /// `POST` to a path mounted `GET` has found the route and used it wrongly,
   /// and telling it "no such path" sends whoever is debugging to look at their
   /// URL rather than at their verb.
   ///
   /// The `Allow` header is required by HTTP for a 405 — a bare 405 is a
-  /// refusal that does not say what would have worked.
+  /// refusal that does not say what would have worked. It is
+  /// `Router::answerable`'s list rather than the mounted one, so that it names
+  /// `HEAD` and `OPTIONS` where the router answers them. It did not, and a
+  /// 405 said `Allow: GET` for a path whose own `OPTIONS` answer said
+  /// `Allow: GET, HEAD, OPTIONS` -- two answers to one question, from one
+  /// router, about one path.
   fn unmatched<'er>(all: List<Route<'er>>, request: Request) -> Response {
-    let allowed = Router::allowing(all, request.path, "");
+    let allowed = Router::answerable(all, request.path);
     if String::byte_length(allowed) == 0 {
       Response::text(404, "no route for " + request.path)
     } else {
@@ -1346,6 +1360,44 @@ impl Router {
         "Allow",
         allowed,
       )
+    }
+  }
+
+  /// Every method that would be answered at `path`, comma-separated, or `""`
+  /// when nothing mounts it.
+  ///
+  /// `allowing`'s mounted list, plus the two the router answers whether or not
+  /// anybody mounted them: `OPTIONS` always, and `HEAD` wherever `GET` is.
+  /// **Both the 405 and the `OPTIONS` answer are built from this**, because a
+  /// client cannot be told two different things about one path and act on
+  /// both -- and it was being told two, which is what putting the rule in one
+  /// place fixes rather than remembering it in two.
+  ///
+  /// Added only if absent: a route mounted `HEAD` or `OPTIONS` explicitly is
+  /// already in the mounted list, and an `Allow` naming a method twice is one
+  /// a client may parse into a duplicate.
+  fn answerable<'er>(routes: List<Route<'er>>, path: String) -> String {
+    let mounted = Router::allowing(routes, path, "");
+    if String::byte_length(mounted) == 0 {
+      ""
+    } else {
+      let with_head =
+        match String::index_of(mounted, "GET") {
+          Option::Some(_at) => Router::naming(mounted, "HEAD"),
+          Option::None => mounted,
+        };
+      Router::naming(with_head, "OPTIONS")
+    }
+  }
+
+  /// `so_far` with `name` on the end, unless it is already there.
+  ///
+  /// Substring containment, for the reason `allowing` gives: no one of the
+  /// seven method names contains another.
+  fn naming(so_far: String, name: String) -> String {
+    match String::index_of(so_far, name) {
+      Option::Some(_at) => so_far,
+      Option::None => so_far + ", " + name,
     }
   }
 
@@ -1687,10 +1739,16 @@ impl Router {
   /// **Written against the public [`Connection`], with nothing reserved.** A
   /// framework of a different shape writes this loop itself and is not missing
   /// anything: the reading, the framing and the refusals are all above.
+  ///
+  /// The limit is the router's, which is what `Router::holding` set. This read
+  /// `default_limit()` when `holding` was written, so a caller who raised the
+  /// limit and then drove its own transport through here silently got 8 KB
+  /// back -- the one path on which `holding` did nothing, and the path a
+  /// framework of a different shape is on by definition.
   pub fn answer_on<'er>(router: Router<'er>, transport: Transport) -> ()
     raises 'er
   {
-    Router::answer_on_holding(router, transport, default_limit())!
+    Router::answer_on_holding(router, transport, router.limit)!
   }
 
   /// The same, holding at most `most` bytes of request.
@@ -1793,19 +1851,14 @@ impl Router {
   /// allows nothing" and "there is no such path" are different answers and a
   /// client can act on the difference.
   fn allowed_answer<'er>(routes: List<Route<'er>>, path: String) -> Response {
-    let mounted = Router::allowing(routes, path, "");
-    if String::byte_length(mounted) == 0 {
+    let allowed = Router::answerable(routes, path);
+    if String::byte_length(allowed) == 0 {
       Response::text(404, "no route for " + path)
     } else {
-      let with_head =
-        match String::index_of(mounted, "GET") {
-          Option::Some(_at) => mounted + ", HEAD",
-          Option::None => mounted,
-        };
       Response::with_header(
         { status: 204, body: "", content_type: "text/plain", headers: List::Nil },
         "Allow",
-        with_head + ", OPTIONS",
+        allowed,
       )
     }
   }
