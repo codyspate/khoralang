@@ -45,6 +45,13 @@ import std::permissions::grants::{fs_read, fs_write};
 /// promising something. What a caller can act on is "it was not there" against
 /// "it did not work", and both carry the path so the message can say which
 /// file.
+///
+/// **Coarse is not the same as arbitrary, and it was arbitrary.** `fopen`
+/// returns null whether the file is absent, unreadable or a directory, and
+/// every one of those was reported as `NotFound` -- so the one distinction
+/// this type does draw was not drawn. `open_or_say_why` reads the reason in
+/// the runtime, on the thread that set `errno`, and only a genuine ENOENT is
+/// `NotFound` now.
 derive(Show, Eq)
 pub type IoError =
   | NotFound(path: String)
@@ -571,6 +578,7 @@ fn ends_with_separator(text: String) -> Bool {
 // notices there is no worker to protect and calls straight through.
 // `crates/khora-rt/src/fs.rs`, and `docs/design/scheduler.md` §9.
 extern fn khora_fs_open(path: Ptr, mode: Ptr) -> Ptr;
+extern fn khora_fs_open_why(path: Ptr, mode: Ptr, why: Ptr) -> Ptr;
 extern fn khora_fs_read(into: Ptr, size: Int, count: Int, file: Ptr) -> Int;
 extern fn khora_fs_write(from: Ptr, size: Int, count: Int, file: Ptr) -> Int;
 extern fn khora_fs_close(file: Ptr) -> I32;
@@ -627,6 +635,46 @@ fn open(path: String, mode: String) -> Ptr {
   String::with_c_string(path, fn p => String::with_c_string(mode, fn m => khora_fs_open(p, m)))
 }
 
+/// What the runtime says about an open that did not produce a handle. The
+/// numbers are `khora-rt`'s `fs.rs`, and the two have to agree.
+fn why_not_found() -> Int { 1 }
+
+/// An open, and a failure that says which of the three it was.
+///
+/// **Every failed open used to be `NotFound`**, so a file whose permission bit
+/// was cleared was reported as absent -- a message that sends the reader
+/// looking for a name that is right there. [`IoError`] promises "it was not
+/// there" against "it did not work", and the promise could not be kept while
+/// `fopen` returning null was the only thing anybody looked at.
+///
+/// `errno` is read by the runtime, on the thread that set it, because a fiber
+/// is not a thread and reading it back here would be reading somebody else's.
+///
+/// A directory comes back null too, with its own reason: `fopen` on one
+/// succeeds on Linux and every read from it fails, so asking for a directory's
+/// contents used to answer "empty file".
+fn open_or_say_why(path: String, mode: String) -> Ptr raises IoError {
+  let reasons: Array<Int> = Array::new(1, 0);
+  let file = Array::with_data(reasons, fn (why, _n) =>
+    String::with_c_string(path, fn p =>
+      String::with_c_string(mode, fn m => khora_fs_open_why(p, m, why))));
+  if Ptr::is_null(file) {
+    let why = Array::get(reasons, 0);
+    if why == why_not_found() {
+      raise IoError::NotFound(path)
+    } else {
+      // Everything else, including a permission bit and a directory.
+      // [`IoError`] reserves `Denied` for the manifest on purpose -- the fix
+      // there is a line the reader owns -- and puts "a permission bit" under
+      // `Failed` in as many words. The runtime tells the two apart and this
+      // does not, so that the case split stays the one already argued for.
+      raise IoError::Failed(path)
+    }
+  } else {
+    file
+  }
+}
+
 /// `fclose` on a null pointer is undefined, and an open that failed hands back
 /// exactly that.
 fn close(file: Ptr) -> () {
@@ -654,18 +702,14 @@ fn size_of(file: Ptr) -> Int {
 fn read_whole(path: String) -> Array<U8> raises IoError {
   let region = Region::open();
   with { scope: handler for Scope { defer: fn f => Region::defer(region, f) } } {
-    let file = acquire(open(path, "rb"), fn f => close(f));
-    if Ptr::is_null(file) {
-      raise IoError::NotFound(path)
+    let file = acquire(open_or_say_why(path, "rb")!, fn f => close(f));
+    let size = size_of(file);
+    if size < 0 {
+      raise IoError::Failed(path)
     } else {
-      let size = size_of(file);
-      if size < 0 {
-        raise IoError::Failed(path)
-      } else {
-        let bytes: Array<U8> = Array::new(size, 0);
-        let read = Array::with_data(bytes, fn (into, n) => khora_fs_read(into, 1, n, file));
-        if read == size { bytes } else { raise IoError::Failed(path) }
-      }
+      let bytes: Array<U8> = Array::new(size, 0);
+      let read = Array::with_data(bytes, fn (into, n) => khora_fs_read(into, 1, n, file));
+      if read == size { bytes } else { raise IoError::Failed(path) }
     }
   }
 }
@@ -689,13 +733,9 @@ fn can_open(path: String) -> Bool {
 fn size_of_path(path: String) -> Int raises IoError {
   let region = Region::open();
   with { scope: handler for Scope { defer: fn f => Region::defer(region, f) } } {
-    let file = acquire(open(path, "rb"), fn f => close(f));
-    if Ptr::is_null(file) {
-      raise IoError::NotFound(path)
-    } else {
-      let size = size_of(file);
-      if size < 0 { raise IoError::Failed(path) } else { size }
-    }
+    let file = acquire(open_or_say_why(path, "rb")!, fn f => close(f));
+    let size = size_of(file);
+    if size < 0 { raise IoError::Failed(path) } else { size }
   }
 }
 
@@ -723,14 +763,10 @@ fn rename_file(from: String, to: String) -> () raises IoError {
 fn append_whole(path: String, bytes: Array<U8>) -> () raises IoError {
   let region = Region::open();
   with { scope: handler for Scope { defer: fn f => Region::defer(region, f) } } {
-    let file = acquire(open(path, "ab"), fn f => close(f));
-    if Ptr::is_null(file) {
-      raise IoError::Failed(path)
-    } else {
-      let count = Array::length(bytes);
-      let written = Array::with_data(bytes, fn (from, n) => khora_fs_write(from, 1, n, file));
-      if written == count {} else { raise IoError::Failed(path) }
-    }
+    let file = acquire(open_or_say_why(path, "ab")!, fn f => close(f));
+    let count = Array::length(bytes);
+    let written = Array::with_data(bytes, fn (from, n) => khora_fs_write(from, 1, n, file));
+    if written == count {} else { raise IoError::Failed(path) }
   }
 }
 
@@ -820,13 +856,9 @@ fn collect_names(dir: Ptr, path: String) -> List<String> raises IoError {
 fn write_whole(path: String, bytes: Array<U8>) -> () raises IoError {
   let region = Region::open();
   with { scope: handler for Scope { defer: fn f => Region::defer(region, f) } } {
-    let file = acquire(open(path, "wb"), fn f => close(f));
-    if Ptr::is_null(file) {
-      raise IoError::Failed(path)
-    } else {
-      let count = Array::length(bytes);
-      let written = Array::with_data(bytes, fn (from, n) => khora_fs_write(from, 1, n, file));
-      if written == count {} else { raise IoError::Failed(path) }
-    }
+    let file = acquire(open_or_say_why(path, "wb")!, fn f => close(f));
+    let count = Array::length(bytes);
+    let written = Array::with_data(bytes, fn (from, n) => khora_fs_write(from, 1, n, file));
+    if written == count {} else { raise IoError::Failed(path) }
   }
 }

@@ -61,12 +61,128 @@ unsafe extern "C" {
 /// whole call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn khora_fs_open(path: *const u8, mode: *const u8) -> *mut c_void {
+    // SAFETY: the caller's obligation, unchanged, and a null `why` is allowed.
+    unsafe { khora_fs_open_why(path, mode, std::ptr::null_mut()) }
+}
+
+/// Nothing went wrong.
+pub const OPEN_OK: i64 = 0;
+/// There is no such file.
+pub const OPEN_NOT_FOUND: i64 = 1;
+/// It is there and this process may not read it.
+pub const OPEN_DENIED: i64 = 2;
+/// It is a directory, which `fopen` on Linux is happy to open and no read of
+/// which can succeed.
+pub const OPEN_IS_A_DIRECTORY: i64 = 3;
+/// Something else. A disk, a name that was there a moment ago.
+pub const OPEN_FAILED: i64 = 4;
+
+/// [`khora_fs_open`], and *why* it failed.
+///
+/// **`errno` has to be read on the thread that set it**, which is the whole
+/// reason this exists rather than a `khora_fs_last_error` a caller reads
+/// afterwards. `fopen` runs on a pool thread; a fiber that asked for it is
+/// suspended somewhere else entirely and its `errno` says nothing about this
+/// call. `net.rs` states the rule and this is the same rule: a shim that
+/// reports through `errno` across a suspension is unsound. So the
+/// classification happens in the closure, next to the call that decided it.
+///
+/// Without this, `std::fs` had one answer for every failed open --
+/// `IoError::NotFound` -- and so a file whose permission bit was cleared was
+/// reported as absent. `stdlib/api/fs.md` sells the three-way split as
+/// "'it was not there' against 'it did not work'", and it could not deliver it.
+///
+/// **A directory is refused here rather than at the read.** On Linux `fopen`
+/// on a directory succeeds and every `fread` from it fails with `EISDIR`, so a
+/// program asking for a directory's lines got zero lines and no error --
+/// worse than a failure, because it looks like an empty file. The handle is
+/// closed and a null returned, so every caller's existing null check covers it.
+///
+/// # Safety
+///
+/// As [`khora_fs_open`]. `why`, if not null, must be a writable `i64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_fs_open_why(
+    path: *const u8,
+    mode: *const u8,
+    why: *mut i64,
+) -> *mut c_void {
     let (path, mode) = (path as usize, mode as usize);
-    blocking(move || {
+    let (file, reason) = blocking(move || {
         // SAFETY: both strings belong to a fiber that is suspended until this
         // returns, so neither can move or be freed while it runs.
-        unsafe { fopen(path as *const u8, mode as *const u8) as usize }
-    }) as *mut c_void
+        let file = unsafe { fopen(path as *const u8, mode as *const u8) };
+        if file.is_null() {
+            // Read here, before anything else on this thread can overwrite it.
+            return (0usize, classify(std::io::Error::last_os_error().raw_os_error()));
+        }
+        // SAFETY: `file` is the handle `fopen` just returned.
+        if unsafe { is_a_directory(file) } {
+            // SAFETY: as above, and nothing else holds it.
+            unsafe { fclose(file) };
+            return (0usize, OPEN_IS_A_DIRECTORY);
+        }
+        (file as usize, OPEN_OK)
+    });
+    if !why.is_null() {
+        // SAFETY: the caller promised a writable word.
+        unsafe { why.write(reason) };
+    }
+    file as *mut c_void
+}
+
+/// Which of the four an `errno` is.
+fn classify(errno: Option<i32>) -> i64 {
+    #[cfg(unix)]
+    match errno {
+        Some(libc::ENOENT) | Some(libc::ENOTDIR) => OPEN_NOT_FOUND,
+        Some(libc::EACCES) | Some(libc::EPERM) | Some(libc::EROFS) => OPEN_DENIED,
+        Some(libc::EISDIR) => OPEN_IS_A_DIRECTORY,
+        _ => OPEN_FAILED,
+    }
+    // On Windows the CRT sets the same three `errno` values, and they are the
+    // ones `_doserrno` is mapped onto, so the numbers are worth reading even
+    // though `libc`'s constants are not here to name them.
+    #[cfg(not(unix))]
+    match errno {
+        Some(2) | Some(3) => OPEN_NOT_FOUND,
+        Some(13) => OPEN_DENIED,
+        Some(21) => OPEN_IS_A_DIRECTORY,
+        _ => OPEN_FAILED,
+    }
+}
+
+/// Whether an open handle is a directory.
+///
+/// Unix only, because it is only a question there: `fopen` on a directory
+/// fails on Windows, with an `errno` [`classify`] already reads.
+///
+/// # Safety
+///
+/// `file` must be a live handle from `fopen`.
+#[cfg(unix)]
+unsafe fn is_a_directory(file: *mut c_void) -> bool {
+    // SAFETY: the caller guarantees a live handle.
+    let fd = unsafe { libc::fileno(file.cast()) };
+    if fd < 0 {
+        return false;
+    }
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: a valid descriptor and a writable `stat`.
+    if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
+        return false;
+    }
+    // SAFETY: `fstat` returned 0, so it filled the struct in.
+    let mode = unsafe { stat.assume_init() }.st_mode;
+    mode & libc::S_IFMT == libc::S_IFDIR
+}
+
+/// # Safety
+///
+/// `file` must be a live handle from `fopen`.
+#[cfg(not(unix))]
+unsafe fn is_a_directory(_file: *mut c_void) -> bool {
+    false
 }
 
 /// `fread`, off the worker.

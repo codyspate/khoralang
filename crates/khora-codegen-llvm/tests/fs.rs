@@ -895,3 +895,92 @@ pub fn main() -> Int {{
          [a/b]\n[.]\n[/abs/path]\n"
     );
 }
+
+/// **A file this process may not read is `Failed`, and used to be `NotFound`.**
+///
+/// `fopen` returns null for both, and null was all `std::fs` looked at -- so
+/// the split `IoError` promises ("it was not there" against "it did not work")
+/// had one answer, and it sent the reader looking for a name that is right
+/// there. The reason is classified in the runtime, on the thread that set
+/// `errno`, because a fiber is not a thread.
+///
+/// `Failed` and not `Denied`: `IoError::Denied` is reserved for the manifest,
+/// where the fix is a line the reader owns, and its own doc comment puts "a
+/// permission bit" under `Failed`.
+///
+/// Unix only: the test needs a file the owner cannot read, and `chmod 000`
+/// does not mean that on Windows.
+#[cfg(unix)]
+#[test]
+fn a_file_that_may_not_be_read_is_not_reported_as_missing() {
+    // Beside the scratch directory, not in it: `run` clears its own directory
+    // on the way in, which would delete the file this test is about and turn
+    // it into the `NotFound` case.
+    let beside = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fs_denied_file");
+    let _ = std::fs::remove_dir_all(&beside);
+    std::fs::create_dir_all(&beside).expect("a workspace");
+    let secret = beside.join("secret.txt");
+    std::fs::write(&secret, "shh\n").expect("writing the file");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o000))
+            .expect("clearing the permission bits");
+    }
+
+    let where_it_is = secret.to_string_lossy().replace('\\', "/");
+    let ran = run(
+        "fs_denied",
+        &format!(
+            "{HEAD}
+pub fn work() -> Int with {{ reads: FsRead, writes: FsWrite }} {{
+  String::byte_length(read_text(\"@SECRET@\")! catch {{
+    IoError::Failed(p) => \"1\",
+    IoError::NotFound(p) => \"22\",
+    IoError::Denied(p) => \"333\",
+  }})
+}}
+
+fn main() -> Int {{
+  with {{ reads: FsRead::real(), writes: FsWrite::real() }} {{ khora_print_int(work()); }}
+  khora_print_int(khora_live_count());
+  0
+}}
+"
+        )
+        .replace("@SECRET@", &where_it_is),
+    );
+    assert_eq!(ran.stdout, "1\n0\n", "not `NotFound`, and the failed open leaked nothing");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// **A directory is a failure, and used to be an empty file.**
+///
+/// On Linux `fopen` on a directory succeeds and every read from it fails with
+/// `EISDIR`, so a program asking for a directory's lines got zero lines and
+/// exit 0 -- worse than an error, because nothing distinguishes it from a file
+/// that is genuinely empty. The runtime closes the handle and reports it.
+#[test]
+fn a_directory_is_not_an_empty_file() {
+    let ran = run(
+        "fs_directory",
+        &format!(
+            "{HEAD}
+pub fn work() -> Int with {{ reads: FsRead, writes: FsWrite }} {{
+  String::byte_length(read_text(\"@DIR@\")! catch {{
+    IoError::Failed(p) => \"1\",
+    IoError::NotFound(p) => \"22\",
+    IoError::Denied(p) => \"333\",
+  }})
+}}
+
+fn main() -> Int {{
+  with {{ reads: FsRead::real(), writes: FsWrite::real() }} {{ khora_print_int(work()); }}
+  khora_print_int(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "1\n0\n", "a directory is not read as nothing");
+    assert_eq!(ran.code, Some(0));
+}
