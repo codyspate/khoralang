@@ -308,10 +308,11 @@ impl Response {
   /// deliberately chose reads as a bug to whoever is holding the packet
   /// capture, and it was.
   ///
-  /// **The whole of 5xx is here now**, because that is the family a server
+  /// **500 through 504 are all here now**, because those are the ones a server
   /// sends about *itself*: 503 under backpressure, 502 and 504 from anything
   /// with a proxy in front of it, 501 for a method it does not implement.
-  /// Those are the lines somebody reads at three in the morning.
+  /// Those are the lines somebody reads at three in the morning. The rest of
+  /// 5xx still answers `Unknown`, as anything not in the table does.
   ///
   /// A `match` rather than a chain of `else if`s. Twenty-seven of them in a
   /// row is a table pretending to be control flow, and a table should look
@@ -1173,6 +1174,15 @@ pub type Route<'er> = {
 
 /// A router carries its handlers' failures, so mounting a route that can fail
 /// against the database widens the router's own error row.
+///
+/// **The three answers the router writes itself are `text/plain`**: 404 for a
+/// path nothing mounts, 405 for a path mounted under another method, and 413
+/// for a request over `limit`. None of them reaches a handler, so a service
+/// whose handlers all return a JSON error body still emits three plain-text
+/// ones, and a client that parses every response as JSON fails on exactly the
+/// responses it was not expecting. Nothing here configures them: a path that
+/// has to answer JSON for a method it does not want must mount that method and
+/// refuse inside the handler.
 pub type Router<'er> = {
   routes: List<Route<'er>>,
   /// The most bytes one request may occupy, headers and body together.
@@ -1539,13 +1549,14 @@ impl Router {
   /// server is usually the program's.
   ///
   /// ```khora
+  /// import std::core::{SharedFn};
   /// import std::fs::{FsRead, read_text};
-  /// import std::net::http::{Router, listen_tls};
+  /// import std::net::http::{Response, Router};
   ///
   /// pub fn main() -> Int {
   ///   with { reads: FsRead::real() } {
   ///     Router::new()
-  ///       |> Router::get("/health", SharedFn::of(fn _ => Response::ok("ok")))
+  ///       |> Router::get("/health", SharedFn::of(fn _ => Response::text(200, "ok")))
   ///       |> Router::listen_tls(8443, read_text("cert.pem")!, read_text("key.pem")!)
   ///   };
   ///   0
@@ -1625,12 +1636,13 @@ impl Router {
   /// a test on port zero, a socket inherited from a supervisor.
   ///
   /// ```khora
-  /// import std::net::http::{Router};
+  /// import std::core::{SharedFn};
+  /// import std::net::http::{Response, Router};
   /// import std::net::socket::{listen_on};
   ///
   /// pub fn main() -> Int {
   ///   Router::new()
-  ///     |> Router::get("/health", SharedFn::of(fn _ => Response::ok("ok")))
+  ///     |> Router::get("/health", SharedFn::of(fn _ => Response::text(200, "ok")))
   ///     |> Router::serve_forever(listen_on(8080));
   ///   0
   /// }
@@ -1987,6 +1999,17 @@ pub type CallError =
 /// One operation. `Call` carries everything a request is, so a second would
 /// only be a shorter way to build one, and `Call::get` is already that.
 pub effect HttpClient {
+  /// Sends one `Call` and waits for the answer.
+  ///
+  /// **A `Result` rather than a raise**, because reaching somebody else fails
+  /// often enough that the caller usually has a second thing to try — another
+  /// host, a cached copy, a retry — and a failure that is a value is one a
+  /// `match` reaches without unwinding first.
+  ///
+  /// **A status is not a failure.** A 404 or a 503 arrives as `Result::Ok`
+  /// carrying that status on the `Answer`; only a call that never became an
+  /// answer is a `CallError`. `Answer::ok` is the question about the status,
+  /// and it is a separate question on purpose.
   send: (Call) -> Result<Answer, CallError>,
 }
 

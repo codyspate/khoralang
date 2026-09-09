@@ -378,6 +378,35 @@ pub type Problem =
   | Denied;
 
 /// A problem, and where it was.
+///
+/// The decoders build these, and a caller almost always only reads them --
+/// through [`Rejection::at`] and [`Rejection::describe`]. **One is written by
+/// hand for a rule no combinator can hold**, a cross-field check being the
+/// usual case: `end` is a valid timestamp and `start` is a valid timestamp and
+/// the pair of them is backwards, which nothing attached to either field can
+/// say. The record is public and has no constructor because there are three
+/// fields and nothing to check.
+///
+/// `problem` is what was wrong -- `Problem::Refused(Rule::Custom("after
+/// `start`"))` for a rule of your own, where the text is the rest of the
+/// sentence after `must be`, as [`refine`] takes it. `secret` is whether the
+/// value came from somewhere that must not be quoted back, and only
+/// `Problem::Wrong` carries a value for it to suppress.
+///
+/// **`path` is held innermost-first**, which is the trap: `Rejection::at`
+/// reverses it on the way out, so a rejection about `listen.port` holds
+/// `port` first and a path written the way it reads comes out backwards.
+/// `List::push` puts a segment on the front, which is the order the
+/// decoders extend it in and the order to build one in.
+///
+/// ```khora
+/// // `window.end`, and note which push comes first.
+/// let backwards: Rejection = {
+///   path: List::push(List::push(List::Nil, Segment::Field("window")), Segment::Field("end")),
+///   secret: false,
+///   problem: Problem::Refused(Rule::Custom("after `start`")),
+/// };
+/// ```
 derive(Show)
 pub type Rejection = { path: List<Segment>, secret: Bool, problem: Problem };
 
@@ -624,9 +653,19 @@ impl<A> Schema<A> {
     (self.read)(List::Nil, from)
   }
 
-  /// The same, stopping at the first problem.
+  /// The same as a `Result`, for a caller that stops at the first problem.
   ///
   /// For one field, or for a caller with nothing to do with a list.
+  ///
+  /// **It is the caller that stops, not the decode.** A `Validated` invites
+  /// the code around it to carry on and report everything; a `Result` is the
+  /// shape `!` carries straight out of the function. The `Err` still holds
+  /// every rejection the decode found, because the combinators have no way to
+  /// short-circuit: `read` is one function ending in a `Validated`, and
+  /// `Fields::zip` reads both sides to collect both sides. Reading only as far
+  /// as the first failure would mean a second reader on `Schema`, `Fields` and
+  /// `Case` -- which `struct` and `derive(Decode)` build from inside the
+  /// compiler -- so it is not a change this one function can make.
   pub fn decode_or_stop(self, from: Raw) -> Result<A, List<Rejection>> {
     Validated::to_result(Schema::decode(self, from))
   }
@@ -996,8 +1035,9 @@ pub fn bool() -> Schema<Bool> {
 
 /// Whatever arrived, as it arrived.
 ///
-/// For a field whose shape is somebody else's business; the only thing it
-/// refuses is a value that is not there.
+/// For a field whose shape is somebody else's business. It refuses two
+/// things: `Raw::Absent`, a value that is not there, and `Raw::Denied`, one
+/// the manifest would not let anybody read.
 pub fn any() -> Schema<Raw> {
   {
     shape: Shape::Any,

@@ -23,6 +23,15 @@ import std::permissions::grants::{fs_read, fs_write};
 //! test cannot tell, which is the thing a file system mock is usually a poor
 //! imitation of.
 //!
+//! **A free function here is one that does more than an operation.**
+//! `read_text`, `write_text` and `append_text` are text where the operation is
+//! bytes, and `copy` needs both effects and a buffer; each of the four earns a
+//! name because there is a decision inside it. Everything else is called on
+//! the capability -- `writes.create_dir(path)!`, `reads.read_dir(path)!` --
+//! and has no wrapper on purpose, because a wrapper would be the operation's
+//! own argument list typed out a second time. The asymmetry is the rule rather
+//! than a gap in the list.
+//!
 //! **Two effects rather than one**, `FsRead` and `FsWrite`, because
 //! `[permissions.fs]` already grants reading and writing separately and a
 //! single capability made the finer half unexpressible: a function allowed

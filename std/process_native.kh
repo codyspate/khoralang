@@ -57,9 +57,12 @@ import std::process::shell::{close_pipe, open_pipe, run};
 /// failure as one number with no story attached, and inventing detail that the
 /// C library never supplied would be inventing it.
 ///
-/// `NotStarted` is the shell itself refusing to run — *not* "the command was
-/// not found", which is a shell that started perfectly well and then exited
-/// 127. `NotText` is a command that ran and printed bytes that are not UTF-8,
+/// `NotStarted` is the child never becoming a process at all — *not* "the
+/// command was not found", which under [`Process::shell`] is a shell that
+/// started perfectly well and then exited 127. There is no shell in the way of
+/// [`Process::run`] and [`Process::output`]: they reach `posix_spawn` or
+/// `CreateProcess`, and for those two this is the spawn itself failing.
+/// `NotText` is a command that ran and printed bytes that are not UTF-8,
 /// so there is no `String` to hand back; only the two operations that keep the
 /// output -- [`Process::output`] and [`Process::shell`] -- can raise it, and
 /// [`Process::run`], which keeps none, cannot. `Failed` is raised by
@@ -102,7 +105,7 @@ pub type Completed = {
 
 /// Permission to start another program.
 ///
-/// The reason this is an effect and not two free functions is the reason every
+/// The reason this is an effect and not three free functions is the reason every
 /// other capability in `std` is one, and it is sharper here than most: "this
 /// library may run arbitrary commands on your machine" is close to the largest
 /// thing a dependency can ask for, and a `with { process: Process }` in a

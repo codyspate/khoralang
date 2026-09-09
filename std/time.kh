@@ -83,14 +83,24 @@ pub type Offset = {
   minutes: Int,
 };
 
-/// Days in `month` of `year`, which is only interesting for February.
-pub fn days_in_month(year: Int, month: Int) -> Int {
-  if month == 2 {
-    if is_leap(year) { 29 } else { 28 }
+/// Days in `month` of `year`, or `None` if `month` is not 1 to 12.
+///
+/// Only interesting for February, and only an `Option` because of the range
+/// check. **31 is the worst possible answer for a month that does not exist**,
+/// which is what falling through to the last branch used to give for 0, 13 and
+/// -1: the main use of this function is clamping a day to the end of a month,
+/// and a clamp that answers 31 does not clamp. `Date::of` refuses a month
+/// outside 1 to 12, and this now refuses the same numbers rather than the two
+/// disagreeing about whether a month index is checked at all.
+pub fn days_in_month(year: Int, month: Int) -> Option<Int> {
+  if month < 1 || month > 12 {
+    Option::None
+  } else if month == 2 {
+    Option::Some(if is_leap(year) { 29 } else { 28 })
   } else if month == 4 || month == 6 || month == 9 || month == 11 {
-    30
+    Option::Some(30)
   } else {
-    31
+    Option::Some(31)
   }
 }
 
@@ -113,18 +123,27 @@ impl Date {
   /// and a library that picked silently would be picking for a caller who
   /// nearly always has bad input rather than an interesting question.
   pub fn of(year: Int, month: Int, day: Int) -> Option<Date> {
-    if month < 1 || month > 12 || day < 1 || day > days_in_month(year, month) {
-      Option::None
-    } else {
-      Option::Some({ year: year, month: month, day: day })
+    match days_in_month(year, month) {
+      Option::None => Option::None,
+      Option::Some(last) =>
+        if day < 1 || day > last {
+          Option::None
+        } else {
+          Option::Some({ year: year, month: month, day: day })
+        },
     }
   }
 
   /// A date written `2026-08-25`, or `None`.
   ///
   /// Exactly four digits, two, two, hyphen-separated, and the day has to exist
-  /// -- `2026-02-30` is `None` for the same reason `Date::of` refuses it. What
-  /// `Show` prints, read back.
+  /// -- `2026-02-30` is `None` for the same reason `Date::of` refuses it.
+  ///
+  /// **What `Show` prints for the years 0000 to 9999, read back**, and only
+  /// those. `Date` holds an `Int` year, so `Show` will print `-0044-03-15` or
+  /// a five-digit year quite happily; ten bytes of digits and hyphens cannot
+  /// say either, and this answers `None` for both. The round trip holds over
+  /// the range a date is normally written in and stops at its edges.
   pub fn of_string(text: String) -> Option<Date> {
     if String::byte_length(text) != 10 || !separated(text, 4, 45) || !separated(text, 7, 45) {
       Option::None
@@ -199,6 +218,20 @@ impl Date {
   }
 }
 
+/// `millis` after midnight, with the range already known good.
+///
+/// Split out so `DateTime::of_unix_millis`, which has floored the whole days
+/// off itself and so cannot be holding a remainder outside one day, does not
+/// have to unwrap an `Option` it can already see is `Some`.
+fn time_after_midnight(millis: Int) -> Time {
+  {
+    hour: millis / 3600000,
+    minute: (millis / 60000) % 60,
+    second: (millis / 1000) % 60,
+    milli: millis % 1000,
+  }
+}
+
 impl Time {
   /// A time of day, or `None` if there is no such moment.
   pub fn of(hour: Int, minute: Int, second: Int, milli: Int) -> Option<Time> {
@@ -254,13 +287,22 @@ impl Time {
     ((self.hour * 60 + self.minute) * 60 + self.second) * 1000 + self.milli
   }
 
-  /// The time `millis` after midnight, which must be inside one day.
-  pub fn of_millis(millis: Int) -> Time {
-    {
-      hour: millis / 3600000,
-      minute: (millis / 60000) % 60,
-      second: (millis / 1000) % 60,
-      milli: millis % 1000,
+  /// The time `millis` after midnight, or `None` if that is not inside one
+  /// day.
+  ///
+  /// **The arithmetic cannot refuse on its own.** `/` and `%` truncate toward
+  /// zero, so this used to build a `Time` out of whatever it was handed:
+  /// `of_millis(-1)` held `milli: -1` and printed `00:00:00.-001`, which is
+  /// not ISO 8601 and which `Time::of_string` will not read back, and
+  /// `of_millis(86400000)` printed `24:00:00.000`. A `Time` like that then
+  /// travelled into a `DateTime` with nothing there to notice it. `Time::of`
+  /// refuses the same numbers, and the sentence here already said the argument
+  /// had to be inside one day; the check is what was missing.
+  pub fn of_millis(millis: Int) -> Option<Time> {
+    if millis < 0 || millis > 86399999 {
+      Option::None
+    } else {
+      Option::Some(time_after_midnight(millis))
     }
   }
 }
@@ -269,8 +311,22 @@ impl Offset {
   /// No offset at all.
   pub fn utc() -> Offset { { minutes: 0 } }
 
-  /// `minutes` east of UTC. Positive is ahead, negative is behind.
-  pub fn of_minutes(minutes: Int) -> Offset { { minutes: minutes } }
+  /// `minutes` east of UTC, or `None` if that is not less than a day.
+  /// Positive is ahead, negative is behind.
+  ///
+  /// The bound is the one `Offset::of_string` already enforces -- two digits
+  /// of hours and two of minutes, so -1439 to 1439 -- rather than the fourteen
+  /// hours governments have actually reached for, because a wire format may
+  /// carry a historical offset this module has no list of. What it will not
+  /// carry is 100000, which `Show` writes as `+1666:40` and `of_string` then
+  /// refuses to read back, so the record and its own printed form disagreed.
+  pub fn of_minutes(minutes: Int) -> Option<Offset> {
+    if minutes < 0 - 1439 || minutes > 1439 {
+      Option::None
+    } else {
+      Option::Some({ minutes: minutes })
+    }
+  }
 
   /// An offset written `+05:30`, `-05:00` or `Z`, or `None`.
   ///
@@ -296,7 +352,7 @@ impl Offset {
               if hours > 23 || minutes > 59 {
                 Option::None
               } else {
-                Option::Some(Offset::of_minutes(sign * (hours * 60 + minutes)))
+                Offset::of_minutes(sign * (hours * 60 + minutes))
               },
           },
         }
@@ -316,7 +372,7 @@ impl DateTime {
     let day = 86400000;
     let days = if millis >= 0 { millis / day } else { (millis - (day - 1)) / day };
     let rest = millis - days * day;
-    { date: Date::of_days(days), time: Time::of_millis(rest) }
+    { date: Date::of_days(days), time: time_after_midnight(rest) }
   }
 
   /// Milliseconds since 1970, reading `self` as UTC.

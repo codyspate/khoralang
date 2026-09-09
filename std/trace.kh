@@ -308,7 +308,7 @@ fn reported<A, E: Show, 'ef, 'er>(
 /// and cannot require a capability of its own. The enclosing span therefore has
 /// to be somewhere ambient, and the only thing that survives what a span has to
 /// survive — a spawn, a steal, a wake and a cancellation — is the fiber. This
-/// reads a slot the runtime keeps per fiber, which `spanned` sets for the
+/// reads a slot the runtime keeps per fiber, which [`around`] sets for the
 /// duration of a body and puts back on every path out.
 ///
 /// # What it does across a spawn

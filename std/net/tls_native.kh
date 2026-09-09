@@ -158,8 +158,9 @@ pub fn receive(connection: TlsConnection, into: Array<U8>) -> Int {
 
 /// Sends `text`, all of it, or -1.
 ///
-/// All or nothing, unlike `send`: a partial write of an encrypted record is not
-/// something a caller can resume, so the runtime finishes it or fails.
+/// All or nothing, unlike `socket::transmit`, which answers how many bytes
+/// went: a partial write of an encrypted record is not something a caller can
+/// resume, so the runtime finishes it or fails.
 pub fn transmit(connection: TlsConnection, text: String) -> Int {
   String::with_data(text, fn (bytes, length) =>
     khora_tls_write(connection.session, bytes, length))

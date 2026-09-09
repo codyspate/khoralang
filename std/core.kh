@@ -1385,8 +1385,14 @@ impl<A> List<A> {
   ///
   /// The same merge sort and the same guarantees: stable, so equal elements
   /// keep the order they were given -- which is what makes sorting twice, by
-  /// one key and then another, do what everybody expects -- and about
-  /// `log2(n)` frames deep rather than one per element.
+  /// one key and then another, do what everybody expects.
+  ///
+  /// **Deeper than `sort`, though, and the two are not interchangeable on a
+  /// long list.** `sort` gets its `log2(n)` frames because `take_first` under
+  /// its `split` is a `while` loop; `split_evenly` here reaches `take_evenly`,
+  /// which calls itself once per element it takes, so the first split alone is
+  /// about `n / 2` frames. `Array::sort_by` is iterative throughout and is the
+  /// one to move to when the list is long enough for that to matter.
   ///
   /// `order` must be consistent: if it says `a` is less than `b` it must not
   /// also say `b` is less than `a`. One that is not produces some order and no
@@ -1732,6 +1738,35 @@ impl<A: Eq> List<A> {
 }
 
 impl<A> List<A> {
+  /// Each element through `f`, in order, answering a `List`.
+  ///
+  /// **`List` is the one type in `std` that implements both `Functor` and
+  /// `Iterator`, and both of them declare a `map`.** They are not the same
+  /// operation: `Functor::map` answers a `List<B>`, and `Iterator::map`
+  /// answers a lazy `Mapped` that computes nothing until something walks it.
+  /// With only those two, `xs.map(f)` was a hard error naming both traits, and
+  /// no answer a reader could guess -- the most ordinary line in the language,
+  /// made ambiguous by an abstraction most programs never mention.
+  ///
+  /// So `List` has its own. A type's own method outranks a trait's, so this is
+  /// what `xs.map(f)` means, and it means the eager one: a list in, a list
+  /// out, which is what a reader arriving from Go, TypeScript or Rust's `Vec`
+  /// expects. The lazy pipeline is still there and is now asked for by name --
+  /// `Iterator::map(xs, f)`, or `.iter()` on something that has one -- which
+  /// is the right way round: the abstraction pays for itself, not the boring
+  /// call.
+  ///
+  /// The body is `Functor`'s, because two implementations of one operation is
+  /// the shape half of this repository's errata is about. `f`'s effect and
+  /// failure rows pass straight through, so a `map` over a list of requests
+  /// that can fail is still one call and still fails where it is written.
+  pub fn map<B, 'ef, 'er>(self, f: (A) -> B with 'ef raises 'er) -> List<B>
+    with 'ef
+    raises 'er
+  {
+    Functor::map(self, f)!
+  }
+
   /// Each element's list, laid end to end.
   ///
   /// `map` and then a flatten, written as one pass because the intermediate
@@ -2240,7 +2275,8 @@ impl<A: Share, 'er> Fiber<A, 'er> {
   /// //                                                  no `!`, it cannot fail
   ///
   /// let row = Fiber::join(worker)! catch {
-  ///   DbError::Timeout => Row::empty(),      // by name, because the row is here
+  ///   // by name, because the row is here
+  ///   DbError::Disconnected(_why) => { columns: List::Nil, cells: List::Nil },
   /// };
   /// ```
   ///
@@ -2322,9 +2358,9 @@ impl<A> Array<A> {
   /// ```khora
   /// type Agg = { mut count: Int };
   /// let slots: Array<Agg> = Array::new(3, { count: 0 });
-  /// Array::get(slots, 0).count = 1;
-  /// Array::get(slots, 1).count = 1;
-  /// // every slot now reads 2
+  /// Array::get(slots, 0).count = Array::get(slots, 0).count + 1;
+  /// Array::get(slots, 1).count = Array::get(slots, 1).count + 1;
+  /// // every slot now reads 2, including the one nothing touched
   /// ```
   ///
   /// An array of mutable accumulators is the natural way to group by a small
@@ -2890,7 +2926,9 @@ impl String {
   /// direction.
   ///
   /// The ends move inwards over the original bytes and only what survives is
-  /// copied, so trimming nothing costs one slice and no allocation.
+  /// copied: one allocation, and no second walk of the bytes. The copy is
+  /// `String::slice`, which always makes one — trimming nothing still hands
+  /// back a new string of the same length rather than the one it was given.
   pub fn trim(self) -> String {
     let length = String::byte_length(self);
     let mut start = 0;
@@ -3699,42 +3737,49 @@ impl String {
 
 // --- The fixed-width integers ----------------------------------------------
 //
-// A table, and it reads like one. Seven types, each with the same ten
+// A table, and it reads like one. Seven types, each with the same eleven
 // operations, because `Int` alone cannot describe a byte and a byte is what
 // every file, socket and string is made of. `docs/design/numbers.md`.
+//
+// `U64` has a twelfth: it is the only one holding numbers `Int` cannot, so it
+// is the only one that needs a `wrapping_to_int` beside the `to_int` that
+// stops the program.
 //
 // `I64` is not here: it is a second spelling of `Int`, so `impl Int` above is
 // its impl too. Two different 64-bit signed integers would mean a conversion
 // between them that can never fail and never does anything.
 //
-// Every conversion goes through `Int` — `U8::of` and `U8::to_int` rather than
-// a method for each of the forty-two ordered pairs. `U8` to `U32` is two
-// steps, which is more to type and never wrong.
-//
-// **The seven bitwise and wrapping operations mean the same thing in every
-// block below**, so the reason for them is here rather than repeated eight
-// times. `+`, `-` and `*` trap on overflow — `numbers.md` §"Overflow traps, in
-// every build" argues that at length — and `wrapping_add`, `wrapping_sub` and
-// `wrapping_mul` are how a program asks for the other behaviour *by name*.
-// That is what a hash, a checksum and a wire format want, and naming it is
-// what keeps a wrap that was intended apart from one that was a bug.
-//
-// `xor`, `and`, `or` and `shl` are the bit operations under names rather than
-// symbols, because Khora spends its operator budget on arithmetic and
-// comparison. `shr` is the one that differs by type, so it keeps a line of its
-// own in each block: logical where the type is unsigned, arithmetic where it
-// is signed.
+// The conversion rule and the seven shared operations are written on `impl U8`
+// below, as `///` rather than here as `//`, so that they reach the generated
+// page — which is where the reader who is about to hit the repetition is.
 
 /// An unsigned byte: 0 to 255.
 ///
 /// The one every other type here is in service of — a wire format, a file and
 /// a string are all made of these.
+///
+/// **The seven bitwise and wrapping operations mean the same thing in every
+/// one of these blocks**, so they are argued for here and only named in the
+/// other six. `+`, `-` and `*` trap on overflow — [The numbers design note](https://github.com/codyspate/khoralang/blob/main/docs/design/numbers.md)
+/// §"Overflow traps, in every build" argues that at length — and
+/// `wrapping_add`, `wrapping_sub` and `wrapping_mul` are how a program asks
+/// for the other behaviour *by name*. That is what a hash, a checksum and a
+/// wire format want, and naming it is what keeps a wrap that was intended
+/// apart from one that was a bug.
+///
+/// `xor`, `and`, `or` and `shl` are the bit operations under names rather than
+/// symbols, because Khora spends its operator budget on arithmetic and
+/// comparison. `shr` is the one that differs by type, so it keeps a line of
+/// its own in each block: logical where the type is unsigned, arithmetic where
+/// it is signed.
+///
+/// **Every conversion goes through `Int`** — `U8::of` and `U8::to_int` rather
+/// than a method for each of the forty-two ordered pairs. `U8` to `U32` is two
+/// steps, which is more to type and never wrong. And every narrowing is
+/// explicit, because a number that silently becomes a different number is
+/// found in production rather than in a test.
 impl U8 {
   /// The same number as a `U8`, or a stopped program if it does not fit.
-  ///
-  /// Explicit, like every conversion in Khora: there is no implicit narrowing
-  /// anywhere, because a number that silently becomes a different number is
-  /// found in production rather than in a test.
   pub fn of(value: Int) -> U8;
 
   /// The low bits of `value`, whatever they are. The way to ask for
@@ -3768,21 +3813,15 @@ impl U8 {
 /// An unsigned 16-bit integer: 0 to 65,535.
 impl U16 {
   /// The same number as a `U16`, or a stopped program if it does not fit.
-  ///
-  /// Explicit, like every conversion in Khora: there is no implicit narrowing
-  /// anywhere, because a number that silently becomes a different number is
-  /// found in production rather than in a test.
   pub fn of(value: Int) -> U16;
 
-  /// The low bits of `value`, whatever they are. The way to ask for
-  /// truncation by name, for the wire formats that mean it.
+  /// The low bits of `value`, whatever they are.
   pub fn wrapping(value: Int) -> U16;
 
-  /// Every `U16` is an `Int`, so this cannot fail and costs one
-  /// instruction.
+  /// Every `U16` is an `Int`, so this cannot fail.
   pub fn to_int(self) -> Int;
 
-  /// The sum, wrapping at the type's own range instead of trapping.
+  /// The sum, wrapping.
   pub fn wrapping_add(self, other: U16) -> U16;
   /// The difference, wrapping.
   pub fn wrapping_sub(self, other: U16) -> U16;
@@ -3794,32 +3833,24 @@ impl U16 {
   pub fn and(self, other: U16) -> U16;
   /// Bit by bit: one wherever either is one.
   pub fn or(self, other: U16) -> U16;
-  /// Towards the high bits, with zeros coming in at the bottom and
-  /// whatever leaves the top gone.
+  /// Towards the high bits, with zeros coming in at the bottom.
   pub fn shl(self, other: U16) -> U16;
-  /// Logical, because the type is unsigned: the vacated bits are zeros
-  /// and a large value stays large.
+  /// Logical, because the type is unsigned.
   pub fn shr(self, other: U16) -> U16;
 }
 
 /// An unsigned 32-bit integer: 0 to 4,294,967,295.
 impl U32 {
   /// The same number as a `U32`, or a stopped program if it does not fit.
-  ///
-  /// Explicit, like every conversion in Khora: there is no implicit narrowing
-  /// anywhere, because a number that silently becomes a different number is
-  /// found in production rather than in a test.
   pub fn of(value: Int) -> U32;
 
-  /// The low bits of `value`, whatever they are. The way to ask for
-  /// truncation by name, for the wire formats that mean it.
+  /// The low bits of `value`, whatever they are.
   pub fn wrapping(value: Int) -> U32;
 
-  /// Every `U32` is an `Int`, so this cannot fail and costs one
-  /// instruction.
+  /// Every `U32` is an `Int`, so this cannot fail.
   pub fn to_int(self) -> Int;
 
-  /// The sum, wrapping at the type's own range instead of trapping.
+  /// The sum, wrapping.
   pub fn wrapping_add(self, other: U32) -> U32;
   /// The difference, wrapping.
   pub fn wrapping_sub(self, other: U32) -> U32;
@@ -3831,11 +3862,9 @@ impl U32 {
   pub fn and(self, other: U32) -> U32;
   /// Bit by bit: one wherever either is one.
   pub fn or(self, other: U32) -> U32;
-  /// Towards the high bits, with zeros coming in at the bottom and
-  /// whatever leaves the top gone.
+  /// Towards the high bits, with zeros coming in at the bottom.
   pub fn shl(self, other: U32) -> U32;
-  /// Logical, because the type is unsigned: the vacated bits are zeros
-  /// and a large value stays large.
+  /// Logical, because the type is unsigned.
   pub fn shr(self, other: U32) -> U32;
 }
 
@@ -3845,14 +3874,9 @@ impl U32 {
 /// only one whose `to_int` can stop the program.
 impl U64 {
   /// The same number as a `U64`, or a stopped program if it does not fit.
-  ///
-  /// Explicit, like every conversion in Khora: there is no implicit narrowing
-  /// anywhere, because a number that silently becomes a different number is
-  /// found in production rather than in a test.
   pub fn of(value: Int) -> U64;
 
-  /// The low bits of `value`, whatever they are. The way to ask for
-  /// truncation by name, for the wire formats that mean it.
+  /// The low bits of `value`, whatever they are.
   pub fn wrapping(value: Int) -> U64;
 
   /// `Int` cannot hold every `U64`, so this stops the program above
@@ -3864,7 +3888,7 @@ impl U64 {
   /// comes back negative rather than stopping.
   pub fn wrapping_to_int(self) -> Int;
 
-  /// The sum, wrapping at the type's own range instead of trapping.
+  /// The sum, wrapping.
   pub fn wrapping_add(self, other: U64) -> U64;
   /// The difference, wrapping.
   pub fn wrapping_sub(self, other: U64) -> U64;
@@ -3876,32 +3900,24 @@ impl U64 {
   pub fn and(self, other: U64) -> U64;
   /// Bit by bit: one wherever either is one.
   pub fn or(self, other: U64) -> U64;
-  /// Towards the high bits, with zeros coming in at the bottom and
-  /// whatever leaves the top gone.
+  /// Towards the high bits, with zeros coming in at the bottom.
   pub fn shl(self, other: U64) -> U64;
-  /// Logical, because the type is unsigned: the vacated bits are zeros
-  /// and a large value stays large.
+  /// Logical, because the type is unsigned.
   pub fn shr(self, other: U64) -> U64;
 }
 
 /// A signed 8-bit integer: -128 to 127.
 impl I8 {
   /// The same number as a `I8`, or a stopped program if it does not fit.
-  ///
-  /// Explicit, like every conversion in Khora: there is no implicit narrowing
-  /// anywhere, because a number that silently becomes a different number is
-  /// found in production rather than in a test.
   pub fn of(value: Int) -> I8;
 
-  /// The low bits of `value`, whatever they are. The way to ask for
-  /// truncation by name, for the wire formats that mean it.
+  /// The low bits of `value`, whatever they are.
   pub fn wrapping(value: Int) -> I8;
 
-  /// Every `I8` is an `Int`, so this cannot fail and costs one
-  /// instruction.
+  /// Every `I8` is an `Int`, so this cannot fail.
   pub fn to_int(self) -> Int;
 
-  /// The sum, wrapping at the type's own range instead of trapping.
+  /// The sum, wrapping.
   pub fn wrapping_add(self, other: I8) -> I8;
   /// The difference, wrapping.
   pub fn wrapping_sub(self, other: I8) -> I8;
@@ -3913,32 +3929,24 @@ impl I8 {
   pub fn and(self, other: I8) -> I8;
   /// Bit by bit: one wherever either is one.
   pub fn or(self, other: I8) -> I8;
-  /// Towards the high bits, with zeros coming in at the bottom and
-  /// whatever leaves the top gone.
+  /// Towards the high bits, with zeros coming in at the bottom.
   pub fn shl(self, other: I8) -> I8;
-  /// Arithmetic, because the type is signed: a negative number stays
-  /// negative.
+  /// Arithmetic, because the type is signed.
   pub fn shr(self, other: I8) -> I8;
 }
 
 /// A signed 16-bit integer: -32,768 to 32,767.
 impl I16 {
   /// The same number as a `I16`, or a stopped program if it does not fit.
-  ///
-  /// Explicit, like every conversion in Khora: there is no implicit narrowing
-  /// anywhere, because a number that silently becomes a different number is
-  /// found in production rather than in a test.
   pub fn of(value: Int) -> I16;
 
-  /// The low bits of `value`, whatever they are. The way to ask for
-  /// truncation by name, for the wire formats that mean it.
+  /// The low bits of `value`, whatever they are.
   pub fn wrapping(value: Int) -> I16;
 
-  /// Every `I16` is an `Int`, so this cannot fail and costs one
-  /// instruction.
+  /// Every `I16` is an `Int`, so this cannot fail.
   pub fn to_int(self) -> Int;
 
-  /// The sum, wrapping at the type's own range instead of trapping.
+  /// The sum, wrapping.
   pub fn wrapping_add(self, other: I16) -> I16;
   /// The difference, wrapping.
   pub fn wrapping_sub(self, other: I16) -> I16;
@@ -3950,11 +3958,9 @@ impl I16 {
   pub fn and(self, other: I16) -> I16;
   /// Bit by bit: one wherever either is one.
   pub fn or(self, other: I16) -> I16;
-  /// Towards the high bits, with zeros coming in at the bottom and
-  /// whatever leaves the top gone.
+  /// Towards the high bits, with zeros coming in at the bottom.
   pub fn shl(self, other: I16) -> I16;
-  /// Arithmetic, because the type is signed: a negative number stays
-  /// negative.
+  /// Arithmetic, because the type is signed.
   pub fn shr(self, other: I16) -> I16;
 }
 
@@ -3963,21 +3969,15 @@ impl I16 {
 /// A C `int`, which is why it is the one a foreign function usually wants.
 impl I32 {
   /// The same number as a `I32`, or a stopped program if it does not fit.
-  ///
-  /// Explicit, like every conversion in Khora: there is no implicit narrowing
-  /// anywhere, because a number that silently becomes a different number is
-  /// found in production rather than in a test.
   pub fn of(value: Int) -> I32;
 
-  /// The low bits of `value`, whatever they are. The way to ask for
-  /// truncation by name, for the wire formats that mean it.
+  /// The low bits of `value`, whatever they are.
   pub fn wrapping(value: Int) -> I32;
 
-  /// Every `I32` is an `Int`, so this cannot fail and costs one
-  /// instruction.
+  /// Every `I32` is an `Int`, so this cannot fail.
   pub fn to_int(self) -> Int;
 
-  /// The sum, wrapping at the type's own range instead of trapping.
+  /// The sum, wrapping.
   pub fn wrapping_add(self, other: I32) -> I32;
   /// The difference, wrapping.
   pub fn wrapping_sub(self, other: I32) -> I32;
@@ -3989,11 +3989,9 @@ impl I32 {
   pub fn and(self, other: I32) -> I32;
   /// Bit by bit: one wherever either is one.
   pub fn or(self, other: I32) -> I32;
-  /// Towards the high bits, with zeros coming in at the bottom and
-  /// whatever leaves the top gone.
+  /// Towards the high bits, with zeros coming in at the bottom.
   pub fn shl(self, other: I32) -> I32;
-  /// Arithmetic, because the type is signed: a negative number stays
-  /// negative.
+  /// Arithmetic, because the type is signed.
   pub fn shr(self, other: I32) -> I32;
 }
 
@@ -4682,8 +4680,10 @@ impl<K: Hash, V> Map<K, V> {
   /// where the traversal is written; a map big enough for that to matter wants
   /// `entries` itself, which allocates the pairs the caller was going to keep.
   ///
-  /// Not `List::map`, which recurses once per element and would put a ceiling
-  /// on the size of map this can be called on.
+  /// Not `List::map`, which is a loop too but reverses at the end to hand back
+  /// the input's order. Nothing here promises an order, so that reversal would
+  /// be a second walk of the list for nothing — and skipping it is exactly why
+  /// this reports the reverse of what `entries` did.
   ///
   /// `keys` and `values` walk the same list the same way, so the two line up
   /// position for position. That is the only thing worth promising about the
@@ -5190,8 +5190,9 @@ impl<A, B, 'er> SharedFn<A, B, 'er> {
 /// A new state, and something to hand back that is not the state.
 ///
 /// What `Shared::modify` asks its change function for. A record rather than a
-/// tuple because a tuple literal has no expression form yet, and named halves
-/// read better than positional ones at the call anyway.
+/// tuple -- `Validated::zip` shows a tuple literal is perfectly writable --
+/// because named halves read better than positional ones at the call, and the
+/// two halves here are the two things a caller is most likely to swap.
 pub type Changed<A, B> = {
   state: A,
   result: B,
@@ -5507,6 +5508,19 @@ pub type ChildFailed = { children: Int };
 /// one branch fails is a raise, not a leak, and not a fiber still running
 /// after the caller has moved on.
 ///
+/// **A cancellation does not come out here the way a failure does.** This
+/// joins, and `Fiber::wait` records what a join does to a fiber that was
+/// cancelled: a cancelled fiber has no answer, so the join has nothing to hand
+/// back and unwinds the joiner along with it. Where the joiner is `main` there
+/// is nowhere left to unwind to, and the program ends at status 130 naming the
+/// call that got there. Being ordered is what leaves no other answer: a list
+/// in handle order has no entry to put where an answer was never computed.
+///
+/// So a deadline over a fan-out is not spelled as a cancel and then a
+/// `join_all`. A caller who only needed the ordering wants `Fiber::wait`,
+/// which does not ask for an answer and so has nothing to lose when there is
+/// none; one who wants to stop waiting at all wants `Fiber::detach`.
+///
 /// In handle order rather than completion order. A caller who wanted the
 /// fastest first wanted a channel, and one who wanted the answers lined up
 /// against the requests -- which is nearly everybody -- wanted this.
@@ -5704,11 +5718,11 @@ pub fn scoped<A, 'ef, 'er>(body: () -> A with { 'ef | scope: Scope } raises 'er)
 ///
 /// ```khora
 /// import std::core::{Scope, acquire};
-/// import std::fs::{FsRead, open, close};
+/// import std::net::socket::{connect_to, shut, transmit};
 ///
-/// fn reading(path: String) -> Int with { scope: Scope, reads: FsRead } {
-///   let file = acquire(open(path), fn f => close(f));
-///   count(file)
+/// fn ask(host: String) -> Int with { scope: Scope } {
+///   let connection = acquire(connect_to(host, 80), fn c => shut(c));
+///   transmit(connection, "GET / HTTP/1.0\r\n\r\n")
 /// }
 /// ```
 ///
