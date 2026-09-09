@@ -64,3 +64,15 @@ bench/*.pdb
 # release workflow; never committed.
 /dist/
 __pycache__/
+
+# `cargo fuzz` builds into its own workspace, and keeps its corpus and its
+# crashing inputs beside it. The corpus is a build product too: it is grown by
+# running the fuzzer, not written by hand.
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+
+# `proptest` writes the seed of a failure here so the next run replays it.
+# Useful locally, and not a thing to commit: a checked-in regression file makes
+# every later run start by re-running somebody else's failure.
+**/*.proptest-regressions

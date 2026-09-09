@@ -1,0 +1,14 @@
+[package]
+name = "khora-testgen"
+description = "Generates Khora source text from a byte seed, for property tests and fuzzing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# No dependencies, deliberately. This crate turns bytes into strings; it does
+# not parse, format or compile anything. Depending on `khora-syntax` would make
+# the generator a dev-dependency cycle for the crate that most needs it, and
+# there is nothing here that wants a parser.
+[dependencies]

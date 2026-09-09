@@ -8,3 +8,7 @@ license.workspace = true
 
 [dependencies]
 khora-syntax.workspace = true
+
+[dev-dependencies]
+khora-testgen.workspace = true
+proptest.workspace = true

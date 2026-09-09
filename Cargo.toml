@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/khora-syntax",
+    "crates/khora-testgen",
     "crates/khora-db",
     "crates/khora-fmt",
     "crates/khora-diagnostics",
@@ -30,6 +31,7 @@ repository = "https://github.com/khora-lang/khora"
 
 [workspace.dependencies]
 khora-syntax = { path = "crates/khora-syntax" }
+khora-testgen = { path = "crates/khora-testgen" }
 khora-db = { path = "crates/khora-db" }
 khora-fmt = { path = "crates/khora-fmt" }
 khora-diagnostics = { path = "crates/khora-diagnostics" }
@@ -56,6 +58,10 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 toml = "1"
+
+# Pinned exactly: a property test that changes which cases it runs when a
+# dependency is bumped is a test whose green is not evidence of anything.
+proptest = "=1.11.0"
 
 [profile.release]
 opt-level = 3

@@ -1,0 +1,47 @@
+# A workspace of its own, which is what keeps `cargo test` at the repository
+# root from trying to build a crate that needs a nightly compiler and
+# libFuzzer. `cargo fuzz` is run from here; nothing else refers to it.
+[package]
+name = "khora-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+# Pinned exactly, like everything else this repository depends on.
+libfuzzer-sys = "=0.4.11"
+khora-syntax = { path = "../crates/khora-syntax" }
+khora-fmt = { path = "../crates/khora-fmt" }
+khora-testgen = { path = "../crates/khora-testgen" }
+
+[[bin]]
+name = "parse"
+path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "token_soup"
+path = "fuzz_targets/token_soup.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "format_roundtrip"
+path = "fuzz_targets/format_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
+
+# The fuzzer's own build is release with debug info: coverage feedback on an
+# unoptimized parser spends its time in `rowan` rather than in the grammar.
+[profile.release]
+debug = 1
