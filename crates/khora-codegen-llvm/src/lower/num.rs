@@ -285,12 +285,20 @@ impl<'ctx> Lower<'_, 'ctx> {
             return self.fail("`Float::to_int` takes one number", range);
         };
         let value = self.expr(*only)?.into_float_value();
+        // `build_float_to_signed_int` is plain `fptosi`, which is poison out of
+        // range -- the comment above has claimed this used the saturating form
+        // since it was written, and it did not. `llvm.fptosi.sat` is the one
+        // that keeps the promise.
+        let saturating = self.be.saturating_fptosi();
         let converted = self
             .be
             .builder
-            .build_float_to_signed_int(value, self.be.ctx.i64_type(), "to.int")
-            .expect("converting a float to an integer");
-        Some(converted.into())
+            .build_call(saturating, &[value.into()], "to.int")
+            .expect("converting a float to an integer")
+            .try_as_basic_value()
+            .basic()
+            .expect("the intrinsic returns an integer");
+        Some(converted)
     }
 
     /// The two things a `Ptr` can do, which is deliberately all of them.

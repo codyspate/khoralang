@@ -410,3 +410,57 @@ fn main() -> Int {{
     assert_eq!(ran.stdout, "6\n8\n14\n48\n3\n13\n11\n36\n6\n");
     assert_eq!(ran.code, Some(0));
 }
+
+/// `Float::to_int` is defined at both ends and for `NaN`.
+///
+/// **Plain `fptosi` is poison out of range, and poison here was not merely
+/// unspecified — it was sign-flipped.** `1e30` and `9.3e18` are positive and
+/// both came back as `-9223372036854775808`, the most negative `Int`, which is
+/// the worst available answer for anything that then indexes or bills with it.
+///
+/// Both the standard library's `///` and the lowering's own comment promised
+/// otherwise. `core.kh` said "clamps to the nearest end, and a `NaN` is zero.
+/// Undefined behaviour is the alternative and is not one"; `num.rs` said the
+/// saturating form "is what this uses". It used `build_float_to_signed_int`.
+/// Two comments agreeing with each other and neither agreeing with the
+/// machine, because nothing had asked the machine. Roadmap 16.
+#[test]
+fn converting_a_float_out_of_range_clamps_rather_than_wrapping() {
+    let ran = run(
+        "float_to_int_saturates",
+        &format!(
+            "{FLOAT}
+impl Float {{
+  fn to_int(self) -> Int;
+}}
+
+fn main() -> Int {{
+  khora_print_int(Float::to_int(1.0e30));
+  khora_print_int(Float::to_int(9.3e18));
+  khora_print_int(Float::to_int(0.0 - 1.0e30));
+  let zero = 0.0;
+  khora_print_int(Float::to_int(zero / zero));
+  khora_print_int(Float::to_int(1.0 / zero));
+  khora_print_int(Float::to_int(0.0 - (1.0 / zero)));
+  khora_print_int(Float::to_int(2.9));
+  khora_print_int(Float::to_int(0.0 - 2.9));
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout,
+        // max, max, min, zero for NaN, max, min, then truncation toward zero
+        // in both directions -- which is the half that already worked.
+        "9223372036854775807\n\
+         9223372036854775807\n\
+         -9223372036854775808\n\
+         0\n\
+         9223372036854775807\n\
+         -9223372036854775808\n\
+         2\n\
+         -2\n"
+    );
+    assert_eq!(ran.code, Some(0));
+}

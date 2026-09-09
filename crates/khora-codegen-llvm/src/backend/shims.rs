@@ -40,6 +40,29 @@ impl<'ctx> Backend<'ctx> {
         )
     }
 
+    /// `llvm.fptosi.sat.i64.f64`, the conversion that is defined everywhere.
+    ///
+    /// **Plain `fptosi` is poison out of range**, and what that produced was
+    /// not merely unspecified but *sign-flipped*: `1e30` and `9.3e18` both came
+    /// back as `-9223372036854775808`, the most negative `Int`, from positive
+    /// inputs. `Float::to_int`'s own documentation promised the opposite in as
+    /// many words -- "clamps to the nearest end, and a `NaN` is zero.
+    /// Undefined behaviour is the alternative and is not one" -- and the
+    /// lowering's comment claimed the saturating form "is what this uses".
+    /// Neither was true; nothing had asked the machine. Roadmap 16.
+    pub fn saturating_fptosi(&mut self) -> FunctionValue<'ctx> {
+        let name = "llvm.fptosi.sat.i64.f64";
+        if let Some(f) = self.module.get_function(name) {
+            return f;
+        }
+        let i64 = self.ctx.i64_type();
+        self.module.add_function(
+            name,
+            i64.fn_type(&[self.ctx.f64_type().into()], false),
+            Some(Linkage::External),
+        )
+    }
+
     /// The shim `khora_shared_update` calls the change function through.
     ///
     /// The runtime cannot know `A`. It has the value as the one word every
