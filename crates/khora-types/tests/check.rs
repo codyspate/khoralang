@@ -1127,3 +1127,69 @@ fn main() -> Int {
         assert!(found.is_empty(), "got {found:?}");
     }
 }
+
+/// **Coherence is a property of the program.** Two `impl Label for Int` in one
+/// file are refused; the same two in two modules of one package were both
+/// accepted, `khora check` said `no errors`, and the program silently took
+/// whichever was merged first. Roadmap 16.3.
+#[test]
+fn one_trait_may_be_implemented_for_a_type_once_in_a_program() {
+    let db = KhoraDatabase::new();
+    let one = SourceFile::new(
+        &db,
+        "one.kh".into(),
+        "module one;\n\npub trait Label { fn label(self) -> Int; }\n\
+         impl Label for Int { fn label(self) -> Int { 1 } }\n"
+            .to_string(),
+    );
+    let two = SourceFile::new(
+        &db,
+        "two.kh".into(),
+        "module two;\n\nimport one::{Label};\n\
+         impl Label for Int { fn label(self) -> Int { 2 } }\n"
+            .to_string(),
+    );
+    SourceRoot::new(&db, vec![one, two]);
+
+    let found: Vec<String> =
+        khora_types::diagnostics(&db, two).iter().map(|e| e.message.clone()).collect();
+    assert!(
+        found.iter().any(|e| e.contains("already implemented for `Int`")),
+        "the second impl is the error: {found:?}"
+    );
+    assert!(
+        found.iter().any(|e| e.contains("`one`")),
+        "and the message has to say where the first one is: {found:?}"
+    );
+    // The file that keeps it says nothing, or the error is reported twice.
+    let first: Vec<String> =
+        khora_types::diagnostics(&db, one).iter().map(|e| e.message.clone()).collect();
+    assert!(
+        !first.iter().any(|e| e.contains("already implemented")),
+        "only the loser is told: {first:?}"
+    );
+}
+
+/// The same impl in one module is still one impl -- a file that imports a
+/// trait and implements it for its own type is the ordinary case and must
+/// stay clean.
+#[test]
+fn implementing_an_imported_trait_once_is_fine() {
+    let db = KhoraDatabase::new();
+    let one = SourceFile::new(
+        &db,
+        "one.kh".into(),
+        "module one;\n\npub trait Label { fn label(self) -> Int; }\n".to_string(),
+    );
+    let two = SourceFile::new(
+        &db,
+        "two.kh".into(),
+        "module two;\n\nimport one::{Label};\n\
+         impl Label for Int { fn label(self) -> Int { 2 } }\n"
+            .to_string(),
+    );
+    SourceRoot::new(&db, vec![one, two]);
+    let found: Vec<String> =
+        khora_types::diagnostics(&db, two).iter().map(|e| e.message.clone()).collect();
+    assert!(found.is_empty(), "nothing is wrong with this: {found:?}");
+}

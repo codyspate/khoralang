@@ -277,3 +277,72 @@ pub fn trait_errors(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
         &|ty| types.declares(ty),
     )
 }
+
+/// Which file keeps each `impl Trait for Type` in the program.
+///
+/// **Coherence is a property of the program and was being checked per file.**
+/// `traits::check` refuses two `impl Label for Int` in one file, correctly.
+/// `type_map` is per-file by design -- that is what keeps a body edit in one
+/// module from invalidating another -- so two modules of the *same package*
+/// each saw only their own, `khora check` said `no errors`, and the program
+/// silently took whichever impl was merged first. D6 says "Rust's coherence
+/// rules" and `associated-items.md` rests `Schema::Spec` resolution on one
+/// impl per (trait, head); neither holds across a file boundary. Roadmap 16.3.
+///
+/// **Package identity (10.2) does not fix it.** The two impls are in one
+/// package, so nothing about a package boundary is what is missing; what is
+/// missing is a check over the program's own modules, which is this.
+///
+/// The winner is the file whose path sorts first, so which of the two is
+/// reported does not depend on the order the files were read in.
+#[salsa::tracked(returns(ref))]
+pub fn impl_homes(
+    db: &dyn Db,
+    root: khora_db::SourceRoot,
+) -> HashMap<(String, String, Option<khora_hir::ModulePath>), SourceFile> {
+    let mut files: Vec<SourceFile> = root.files(db).to_vec();
+    files.sort_by_key(|file| file.path(db).clone());
+    let mut homes = HashMap::new();
+    for file in files {
+        for imp in type_map(db, file).traits.impls.iter().filter(|imp| imp.local) {
+            let Some((head, home)) = imp.target() else { continue };
+            homes.entry((imp.trait_name.clone(), head, home)).or_insert(file);
+        }
+    }
+    homes
+}
+
+/// The impls this file writes that another module already wrote.
+///
+/// Reported here, per file, so the error renders against the module it is in.
+/// See [`impl_homes`] for why the check cannot live in `traits::check`.
+#[salsa::tracked(returns(ref))]
+pub fn coherence_errors(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
+    // A single file checked in isolation -- which is most of the type tests --
+    // never builds a root, and has nothing to disagree with.
+    let Some(root) = khora_db::source_root(db) else { return Vec::new() };
+    let homes = impl_homes(db, root);
+    let mut errors = Vec::new();
+    for imp in type_map(db, file).traits.impls.iter().filter(|imp| imp.local) {
+        let Some((head, home)) = imp.target() else { continue };
+        let key = (imp.trait_name.clone(), head.clone(), home);
+        let Some(kept) = homes.get(&key) else { continue };
+        if *kept == file {
+            continue;
+        }
+        let there = khora_hir::item_map(db, *kept)
+            .module
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| kept.path(db).display().to_string());
+        errors.push(HirError {
+            message: format!(
+                "`{}` is already implemented for `{head}` in `{there}`; there can be only \
+                 one impl of a trait for a type in a program",
+                imp.trait_name
+            ),
+            range: imp.range,
+        });
+    }
+    errors
+}

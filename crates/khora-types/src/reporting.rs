@@ -116,6 +116,7 @@ pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
         all.extend(body.errors.iter().cloned());
     }
     all.extend(trait_errors(db, file).iter().cloned());
+    all.extend(crate::queries::coherence_errors(db, file).iter().cloned());
     all.extend(shadowed_name_errors(db, file));
     all.extend(malformed_with_clause_errors(db, file));
     all.extend(row_fields_must_be_effects(db, file));
