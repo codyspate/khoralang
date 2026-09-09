@@ -56,6 +56,16 @@ Windows path spelled with `\\`. `granted_path` in `khora-manifest` answers
 the same question for the compiler and the two have to agree; the tests
 name the cases where agreement is not obvious.
 
+**A path with a `..` segment is refused, whatever the grants say**, and it
+is refused here rather than left to the matcher, because the matcher gets
+it wrong. `**` spans separators, so the `./logs/**` the capabilities guide
+teaches for granting a tree matches `logs/../secret.txt` literally: the
+`**` swallows `../secret.txt`, and a grant that reads like one directory
+covers the disk. A program that joins a path it was handed -- an argument,
+a config entry, a request path -- under a granted prefix was passing that
+reach on to whoever handed it the path. `normalized` says why the `..` is
+refused rather than resolved away.
+
 ### granted_name
 
 ```khora
@@ -107,12 +117,24 @@ hit them:
   `read = ["./data/**"]` into a manifest, opened `data/foo.txt`, and were
   refused by a grant that looks like it says yes.
 
-**`..` is deliberately not resolved.** Dropping `a/../b` to `b` is only
-correct if `a` exists and is a directory rather than a link, which is a
-question about the filesystem — and a normalizer that guessed would widen
-a grant, which is the one direction a permission check must never be wrong
-in. A path containing `..` is compared as written and will usually be
-refused, which is the safe answer.
+**`..` is neither resolved nor levelled here; `granted` refuses the path
+outright.** Both of the other answers widen a grant, which is the one
+direction a permission check must never be wrong in.
+
+Resolving `a/../b` to `b` is only correct if `a` is a real directory. Where
+`a` is a symlink, `a/..` is the parent of what `a` points *at*, so the open
+lands on the target's neighbour `b` while the check approved the `b` beside
+`a` -- it would be answering about a file the filesystem does not open.
+Telling those apart needs the filesystem, and this function has only the
+string.
+
+Comparing the `..` as written is not the safe half it looks like either,
+which is what this comment used to claim. `**` crosses separators, so
+`./logs/**` matches `logs/../secret.txt` as text and grants it. No spelling
+of the comparison is right for both `logs/a.txt` and `logs/../secret.txt`,
+so a path with a `..` segment is not compared at all. A caller that means
+`a/../b` can pass `b`; one that cannot is asking a question only the
+filesystem can answer.
 
 **Nor is anything resolved against a working directory or a package root.**
 A grant is matched against the path the program passes, so a program that

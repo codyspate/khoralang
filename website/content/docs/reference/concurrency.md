@@ -151,9 +151,7 @@ The body may be a named function or a lambda. A lambda resolves its capabilities
 
 ### An operation can be generic in a row, but not in a type
 
-`adopt` binds `'er` and cannot bind an answer type. The asymmetry follows from how each one is represented.
-
-A capability crosses as evidence and an error as a tag, so a handler's closure is the same code for every row: nothing in it depends on which failures a child can raise. A type parameter decides a layout and must be monomorphized, and a handler's fields are closures, which have nowhere to put a per-layout instantiation.
+`adopt` binds `'er` and cannot bind an answer type, which is why `Fiber<(), 'er>` fixes the answer and leaves the failure row free. That asymmetry is a rule about every effect operation rather than about nurseries: [Effects and rows](/docs/reference/effects/#an-operation-may-be-generic-in-a-row-but-not-in-a-type) has the reason, with `adopt` as its example.
 
 ### Why `adopt` takes a fiber and not a thunk
 

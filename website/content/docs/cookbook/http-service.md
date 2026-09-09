@@ -119,6 +119,75 @@ fn preflight(req: Request) -> Response {
 }
 ```
 
+## State a handler shares between requests
+
+A handler is called on a different fiber per connection, so anything they hold
+in common has to be shareable. **`Shared<Dict<K, V>>` is the shape**, and it is
+worth saying because the maps a handler already has in hand are not:
+`request.params`, `request.queries` and `request.headers` are `Map`, `Map` is a
+record with `mut` fields, and a mutable record cannot cross into a fiber:
+
+```text
+error: `Map<String, Int>` does not implement `Share`, which `Shared::of` requires
+```
+
+`Dict` is the persistent one — an insert gives back a new dictionary and leaves
+the old one alone — so it holds nothing writable and goes into a cell. Build the
+state before the router, and let each handler close over it:
+
+```khora
+module main;
+
+import std::core::{ChildFailed, Dict, Option, Shared, SharedFn};
+import std::net::http::{HttpError, Request, Response, Router};
+
+/// One counter per name, in a cell every request fiber shares.
+fn greet(visits: Shared<Dict<String, Int>>, request: Request) -> Response {
+  let name = match request.query("name") {
+    Option::Some(value) => value,
+    Option::None => "world",
+  };
+
+  let seen = Shared::update(visits, fn table =>
+    Dict::insert(table, name, match Dict::get(table, name) {
+      Option::Some(n) => n + 1,
+      Option::None => 1,
+    }));
+
+  match Dict::get(seen, name) {
+    Option::Some(n) => Response::text(200, "hello ${name} (${n})"),
+    Option::None => Response::text(500, "lost the count"),
+  }
+}
+
+pub fn main()
+  raises HttpError + ChildFailed
+{
+  let visits = Shared::of(Dict::new());
+
+  Router::new()
+    |> Router::get("/hello", SharedFn::of(fn request => greet(visits, request)))
+    |> Router::listen(8080)!
+}
+```
+
+`SharedFn::of` takes a closure literal, and the closure captures `visits` — so
+the state reaches the handler as an ordinary parameter. A capability reaches one
+the same way, which is the [parameter form](/docs/reference/capabilities/#a-capability-as-an-ordinary-parameter):
+`SharedFn` has no capability row, so a handler that needs a database or an HTTP
+client takes it as an argument and the closure closes over it.
+
+`Shared::update` reads, changes and writes under one lock, which is what makes
+the read-modify-write above correct when two requests for the same name arrive
+at once; two separate `get` and `set` calls would not be. Use `Shared::modify`
+when the change has something to report beyond the new state — the key it
+generated, say.
+
+**A cell is process-local.** It does not survive a restart and a second instance
+does not see it, and [a trap in a handler ends the process](#a-trap-in-a-handler-ends-the-server).
+So this is for what a restart can rebuild — a cache, a counter, a connection
+registry — and anything else belongs in a database.
+
 ## Bound the resource that is actually constrained
 
 **The server has one capacity number, not two.** `Router::listen` runs its

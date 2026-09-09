@@ -32,6 +32,7 @@
 
 #![deny(missing_docs)]
 
+mod links;
 mod markdown;
 mod signature;
 
@@ -409,7 +410,7 @@ fn is_primitive(name: &str) -> bool {
 }
 
 /// `List` out of `List<A>`, which is what the declaration is called.
-fn base_name(text: &str) -> &str {
+pub(crate) fn base_name(text: &str) -> &str {
     text.split(['<', ' ']).next().unwrap_or(text)
 }
 

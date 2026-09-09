@@ -9,14 +9,14 @@ One description of a value's shape, used to decode untrusted input.
 
 **A schema describes a value. It does not know where the bytes came from.**
 That separation is the whole of the library. A `Schema<A>` describes an
-`A`; a [`Raw`] is whatever a source produced -- a JSON document, the
+`A`; a [`Raw`](#raw) is whatever a source produced -- a JSON document, the
 environment, a query string, a database row; and `decode` is one function
 over the pair. The same `Schema<Settings>` reads a request body, a test
 fixture and the deployment's variables, and does not know which.
 
 ## Both halves, in one record
 
-A schema carries a `read` closure *and* a [`Shape`] beside it, and both are
+A schema carries a `read` closure *and* a [`Shape`](#shape) beside it, and both are
 load-bearing. The closure is what makes `schema.decode(value)` an ordinary
 call and what lets schemas be combined. The shape is untyped -- no type
 parameter -- which is what lets a record's fields sit in a `List` and be
@@ -35,7 +35,7 @@ a time. `Validated::to_result` is one call for a caller who wants to stop.
 `int()` reads a `Raw::Number`, and refuses a `Raw::Text` holding `"8080"`:
 a JSON body that sends a number as a string is wrong, and serde and
 `encoding/json` refuse it too. The environment cannot label anything, so
-it hands over [`Raw::Untyped`], which every primitive reads. Leniency is a
+it hands over [`Raw::Untyped`](#raw), which every primitive reads. Leniency is a
 fact about the source, recorded by the source, and no primitive has to
 guess.
 
@@ -59,7 +59,7 @@ pub type Raw =
 
 A value as a source handed it over, before anything has been asked of it.
 
-A record's fields are [`Pair`]s from `std::core` rather than a type of this
+A record's fields are `Pair`s from `std::core` rather than a type of this
 module's own, so anything that already walks a `Pair` walks these.
 
 **A number is its text, and that is not an oversight.** A `Float` holds
@@ -67,10 +67,10 @@ about fifteen significant digits, so `9007199254740993` comes back one
 short of itself and `10.10` is never exactly recoverable -- and a schema
 that decoded a `Decimal` through one would rebuild, inside the library
 meant to prevent that class of thing, the exact bug it exists to prevent.
-Keeping the token lets [`int`] and [`decimal`] parse it exactly.
+Keeping the token lets [`int`](#int) and [`decimal`](#decimal) parse it exactly.
 
 **`Null` is not `Absent`.** A key that was not there and a key that was
-there holding nothing are different facts to a client: [`optional`] treats
+there holding nothing are different facts to a client: [`optional`](#optional) treats
 both as nothing, and a required field given `null` says so rather than
 saying it was not set, which is the difference between a client bug and a
 deployment bug.
@@ -84,7 +84,7 @@ how one `Schema<Int>` refuses `"port": "8080"` in a JSON body and accepts
 
 **`Denied` is a value the source was not allowed to look at.** The
 environment puts it where a variable the manifest does not grant would
-go, and it decodes as [`Problem::Denied`] rather than as missing, because
+go, and it decodes as [`Problem::Denied`](#problem) rather than as missing, because
 the fix is a line in `khora.toml` and not in the deployment.
 
 ### Segment
@@ -116,8 +116,8 @@ What a refinement asked of a value, kept as structure rather than as a
 sentence.
 
 A sentence is what a person reads and a keyword is what a JSON Schema
-carries, and only structure can become both. [`refine`] takes a sentence
-and keeps it as `Custom`; the named rules -- [`between`], [`min_length`]
+carries, and only structure can become both. [`refine`](#refine) takes a sentence
+and keeps it as `Custom`; the named rules -- [`between`](#between), [`min_length`](#min_length)
 and their neighbours -- carry their bounds.
 
 ### Problem
@@ -137,11 +137,11 @@ What was wrong at one place.
 **`found` is a `Redacted<String>`**, always, rather than only inside a
 secret. A decode error quotes what it saw, which is most of its value, and
 that is the easiest imaginable way to put a password in a log. Making the
-wrapper unconditional means [`Rejection::describe`] decides once whether
+wrapper unconditional means [`Rejection::describe`](#describe-2) decides once whether
 to expose it and no future variant can forget.
 
 `Unexpected` is a key a closed record did not declare, and only
-[`Schema::closed`] produces it: unknown keys are ignored by default, as
+[`Schema::closed`](#closed) produces it: unknown keys are ignored by default, as
 every library this audience has used ignores them. `Denied` is a value the
 source was not allowed to read, kept apart from `Missing` because the fix
 is in `khora.toml` and not in the deployment.
@@ -154,6 +154,35 @@ pub type Rejection = { path: List<Segment>, secret: Bool, problem: Problem };
 ```
 
 A problem, and where it was.
+
+The decoders build these, and a caller almost always only reads them --
+through [`Rejection::at`](#at) and [`Rejection::describe`](#describe-2). **One is written by
+hand for a rule no combinator can hold**, a cross-field check being the
+usual case: `end` is a valid timestamp and `start` is a valid timestamp and
+the pair of them is backwards, which nothing attached to either field can
+say. The record is public and has no constructor because there are three
+fields and nothing to check.
+
+`problem` is what was wrong -- `Problem::Refused(Rule::Custom("after
+`start`"))` for a rule of your own, where the text is the rest of the
+sentence after `must be`, as [`refine`](#refine) takes it. `secret` is whether the
+value came from somewhere that must not be quoted back, and only
+`Problem::Wrong` carries a value for it to suppress.
+
+**`path` is held innermost-first**, which is the trap: `Rejection::at`
+reverses it on the way out, so a rejection about `listen.port` holds
+`port` first and a path written the way it reads comes out backwards.
+`List::push` puts a segment on the front, which is the order the
+decoders extend it in and the order to build one in.
+
+```khora
+// `window.end`, and note which push comes first.
+let backwards: Rejection = {
+  path: List::push(List::push(List::Nil, Segment::Field("window")), Segment::Field("end")),
+  secret: false,
+  problem: Problem::Refused(Rule::Custom("after `start`")),
+};
+```
 
 ### Shape
 
@@ -189,9 +218,9 @@ the keys a configuration needs, to print a request body in generated
 documentation, to render a JSON Schema. A closure answers none of those.
 
 **Every arm is named after the constructor that builds it**, one for one:
-[`string`] builds `String`, [`list`] builds `List`, [`Schema::cases`]
-builds `Cases`, [`Schema::lazy`] builds `Lazy`. `Struct` is what
-[`Schema::record`] builds, and is named for the literal that will build it.
+[`string`](#string) builds `String`, [`list`](#list) builds `List`, [`Schema::cases`](#cases)
+builds `Cases`, [`Schema::lazy`](#lazy) builds `Lazy`. `Struct` is what
+[`Schema::record`](#record) builds, and is named for the literal that will build it.
 
 `Lazy` holds a thunk rather than a shape, so that a type which mentions
 itself has a shape at all; a walker forces it, and a walker that can meet
@@ -219,11 +248,11 @@ derive(Show)
 pub type Named = { name: String, shape: Shape };
 ```
 
-One named field of a [`Shape::Struct`].
+One named field of a [`Shape::Struct`](#shape).
 
 `name` is the field's name in the type. The key it is read under on the
-wire is the same unless the shape inside is [`Shape::Keyed`], which
-[`Shape::keys`] looks through.
+wire is the same unless the shape inside is [`Shape::Keyed`](#shape), which
+[`Shape::keys`](#keys) looks through.
 
 ### Alternative
 
@@ -232,7 +261,7 @@ derive(Show)
 pub type Alternative = { name: String, fields: List<Named> };
 ```
 
-One case of a [`Shape::Cases`]: its tag, and the fields of its payload.
+One case of a [`Shape::Cases`](#shape): its tag, and the fields of its payload.
 
 ### Schema
 
@@ -247,7 +276,7 @@ A description of an `A`, and how to read one.
 
 Built with the constructors below rather than by hand: the record is public
 so that a package may add a primitive of its own, and everything `std`
-offers goes through [`string`], [`int`] and their neighbours.
+offers goes through [`string`](#string), [`int`](#int) and their neighbours.
 
 ### Fields
 
@@ -260,8 +289,8 @@ pub type Fields<A> = {
 
 The fields of a record, decoding to an `A`.
 
-What [`Schema::record`] turns into a schema. Two fields are joined with
-[`Fields::zip`], which nests a tuple, and [`Fields::map`] turns the tuple
+What [`Schema::record`](#record) turns into a schema. Two fields are joined with
+[`Fields::zip`](#zip), which nests a tuple, and [`Fields::map`](#map-1) turns the tuple
 into the record; there is no arity anywhere in it. Public because a
 package may want to build a record schema from something that is not
 source -- a database catalog, say.
@@ -277,7 +306,7 @@ pub type Case<A> = {
 ```
 
 One case of a variant: its tag on the wire, the fields of its payload, and
-how the payload becomes the value. Built by [`Schema::case`].
+how the payload becomes the value. Built by [`Schema::case`](#case-1).
 
 ## Traits
 
@@ -311,9 +340,9 @@ pub trait Encode
 
 A type with one representation on the wire.
 
-Kept apart from [`Decode`] rather than folded into the schema, because a
+Kept apart from [`Decode`](#decode) rather than folded into the schema, because a
 secret has no representation on the wire: `Redacted` implements `Decode`,
-through [`secret`], and not this, so a record holding one reads and does
+through [`secret`](#secret), and not this, so a record holding one reads and does
 not write, and the build says so rather than a round trip somewhere far
 away.
 
@@ -323,7 +352,7 @@ away.
 fn encode(self) -> Raw
 ```
 
-The value as a source would have produced it; [`Raw::to_json`] is the
+The value as a source would have produced it; [`Raw::to_json`](#to_json) is the
 bridge out.
 
 ## Methods
@@ -348,11 +377,11 @@ One entry of a record: what a generated encoder writes a field as.
 pub fn field(self, name: String) -> Raw
 ```
 
-The field of a record, or [`Raw::Absent`].
+The field of a record, or [`Raw::Absent`](#raw).
 
 Absent rather than an `Option`, so that a missing field and a field
 holding nothing are the same thing to everything downstream and only
-[`optional`] has to know the difference.
+[`optional`](#optional) has to know the difference.
 
 #### describe
 
@@ -408,7 +437,7 @@ so `--log-level` reaches a field called `log_level`; and anything that
 is not a flag is collected, in order, under `arguments`.
 
 Shape-blind, so a flag followed by a word takes it as its value:
-`-c .name` reads `c` as `.name`. [`Raw::of_arguments_for`] knows which
+`-c .name` reads `c` as `.name`. [`Raw::of_arguments_for`](#of_arguments_for) knows which
 flags are switches, and is the one a program with a schema wants.
 
 #### of_arguments_for
@@ -419,7 +448,7 @@ pub fn of_arguments_for(shape: Shape, arguments: List<String>) -> Raw
 
 Command-line arguments as a record, read the way a shape says.
 
-The grammar of [`Raw::of_arguments`], except that a flag whose field is
+The grammar of [`Raw::of_arguments`](#of_arguments), except that a flag whose field is
 a `Bool` is a switch and never takes the word after it, so
 `khq -c .name file.json` reads `c` as `true` and `.name` as the first
 argument. The shape decides, because only the shape knows.
@@ -485,7 +514,7 @@ One line a person can act on.
 
 **What was found is quoted, unless this is inside a secret.** A message
 naming the bad value is what makes a decode error worth reading, and a
-message naming a password is a leak. The flag is set by [`secret`] and
+message naming a password is a leak. The flag is set by [`secret`](#secret) and
 nothing else looks at it.
 
 Text is written in double quotes and a number bare, so `port should be
@@ -534,7 +563,7 @@ started to answer.** Empty for anything that is not a record.
 pub fn wire_key(self) -> Option<String>
 ```
 
-The wire key a field shape was given by [`key`], looking through the
+The wire key a field shape was given by [`key`](#key), looking through the
 wrappers that may sit outside it.
 
 ### Schema<A>
@@ -559,9 +588,19 @@ The method a caller wants: `Settings::schema().decode(input)`.
 pub fn decode_or_stop(self, from: Raw) -> Result<A, List<Rejection>>
 ```
 
-The same, stopping at the first problem.
+The same as a `Result`, for a caller that stops at the first problem.
 
 For one field, or for a caller with nothing to do with a list.
+
+**It is the caller that stops, not the decode.** A `Validated` invites
+the code around it to carry on and report everything; a `Result` is the
+shape `!` carries straight out of the function. The `Err` still holds
+every rejection the decode found, because the combinators have no way to
+short-circuit: `read` is one function ending in a `Validated`, and
+`Fields::zip` reads both sides to collect both sides. Reading only as far
+as the first failure would mean a second reader on `Schema`, `Fields` and
+`Case` -- which `struct` and `derive(Decode)` build from inside the
+compiler -- so it is not a change this one function can make.
 
 #### map
 
@@ -602,10 +641,10 @@ the field, and something that is not a record at all is reported once.
 pub fn case<F>(name: String, fields: Fields<F>, make: (F) -> A) -> Case<A>
 ```
 
-One case of a variant, for [`Schema::cases`].
+One case of a variant, for [`Schema::cases`](#cases).
 
 `make` turns the decoded payload into the value; a case with no payload
-takes [`Fields::none`] and ignores its argument.
+takes [`Fields::none`](#none) and ignores its argument.
 
 #### cases
 
@@ -682,7 +721,7 @@ pub fn of(name: String, inner: Schema<A>) -> Fields<A>
 ```
 
 One field, read under its own name -- or under the wire key its schema
-was given by [`key`].
+was given by [`key`](#key).
 
 #### none
 
@@ -727,7 +766,7 @@ A `Lazy` shape is rendered once, under `$defs` by its name, and every
 mention after that is a `$ref`, which is what terminates a type that
 mentions itself. A rule renders as its keyword and its sentence. A
 `Decimal` renders as a string, which is what `Encode` writes and
-[`decimal`] reads. `required` leaves out an optional or defaulted field,
+[`decimal`](#decimal) reads. `required` leaves out an optional or defaulted field,
 and a secret is `writeOnly`.
 
 ## Trait implementations
@@ -992,7 +1031,7 @@ impl Encode for Decimal
 
 Written as text, because that is how money travels on most wires: every
 decimal library this audience has used writes it so, for the sake of
-JavaScript clients whose only number is a double, and [`decimal`] reads
+JavaScript clients whose only number is a double, and [`decimal`](#decimal) reads
 it back.
 
 #### encode
@@ -1133,8 +1172,8 @@ impl Encode for Rejection
 A problem as a client reads it: where, and what.
 
 The one hand-written encoder over a type that holds a secret, and the
-reason it is safe is the reason [`Rejection::describe`] exists: the
-message never quotes a value that was under [`secret`], and nothing else
+reason it is safe is the reason [`Rejection::describe`](#describe-2) exists: the
+message never quotes a value that was under [`secret`](#secret), and nothing else
 of the rejection is written.
 
 #### encode
@@ -1155,7 +1194,7 @@ Text, as it arrived.
 
 A number is not text: `{ "name": 42 }` is refused, as serde refuses it.
 
-A source that could not tell hands over [`Raw::Untyped`], which is read.
+A source that could not tell hands over [`Raw::Untyped`](#raw), which is read.
 
 ### int
 
@@ -1186,7 +1225,7 @@ pub fn decimal() -> Schema<Decimal>
 
 An exact decimal, parsed from the token.
 
-The reason [`Raw::Number`] keeps its text: this is the one a price goes
+The reason [`Raw::Number`](#raw) keeps its text: this is the one a price goes
 through, and a `Float` on the way would make it the wrong price.
 
 **Read from text as well as from a number.** Money travels as a string on
@@ -1213,8 +1252,9 @@ pub fn any() -> Schema<Raw>
 
 Whatever arrived, as it arrived.
 
-For a field whose shape is somebody else's business; the only thing it
-refuses is a value that is not there.
+For a field whose shape is somebody else's business. It refuses two
+things: `Raw::Absent`, a value that is not there, and `Raw::Denied`, one
+the manifest would not let anybody read.
 
 ### optional
 
@@ -1310,7 +1350,7 @@ attached here. A `None` reads exactly like a primitive that did not match --
 arrives in the wrong form should not report differently depending on whether
 the conversion was built in.
 
-**One direction only, and deliberately.** [`Encode`] is a separate trait for
+**One direction only, and deliberately.** [`Encode`](#encode) is a separate trait for
 the reason its own documentation gives -- a `Redacted` decodes and has no
 wire form at all -- so a type built with this implements `Encode` itself if
 it has one. Folding a `back` in here would promise a round trip that
@@ -1401,7 +1441,7 @@ A value nothing may print.
 instead of sitting beside it. No bound on `A`: a `Schema<A>` is a value, and
 holding one already is the evidence that an `A` can be decoded.
 
-A failure inside one is marked, and [`Rejection::describe`] then says what
+A failure inside one is marked, and [`Rejection::describe`](#describe-2) then says what
 was wanted without quoting what it saw.
 
 ### key
@@ -1448,7 +1488,7 @@ does not, is reported at the call.
 **Not a function that runs.** Its argument is a record of *schemas* and
 its result a schema of the record they decode, and there is no type-level
 map from one to the other. A call to it is rewritten before it is typed,
-into [`Schema::record`] over [`Fields`] -- which is what a hand-written
+into [`Schema::record`](#record) over [`Fields`](#fields) -- which is what a hand-written
 record schema is, and what a derived one is too. The declaration is here
 so the name can be imported and read about; a call with anything but a
 record literal, or a use of the name as a value, is refused.

@@ -13,19 +13,34 @@ This module implements a small console tracer and uses `around` to guarantee the
 ```khora
 module main;
 
-import std::core::{print};
-import std::trace::{Context, Span, Status, Tracer, around};
+import std::core::{Option, print};
+import std::random::{Random};
+import std::trace::{Context, Span, Status, Tracer, around, current};
 
-fn console_tracer() -> Tracer {
+fn console_tracer(random: Random) -> Tracer {
   handler for Tracer {
     start: fn (name, _attributes) => {
-      print("start span: ${name}");
+      let id = random.int();
 
-      {
-        context: Context::none(),
-        parent: 0,
-        name: name,
-      }
+      let span = match current() {
+        // Inside a span already: keep its trace and record it as the parent.
+        Option::Some(inside) => {
+          context: { trace_high: inside.trace_high, trace_low: inside.trace_low,
+                     span: id, sampled: inside.sampled },
+          parent: inside.span,
+          name: name,
+        },
+        // At the top: begin a new trace.
+        Option::None => {
+          context: { trace_high: random.int(), trace_low: random.int(),
+                     span: id, sampled: true },
+          parent: 0,
+          name: name,
+        },
+      };
+
+      print("start ${name}: trace=${span.context.trace_id()} span=${span.context.span_id()}");
+      span
     },
 
     finish: fn (span, status) => {
@@ -43,26 +58,61 @@ fn console_tracer() -> Tracer {
   }
 }
 
-fn calculate() -> Int {
+fn calculate(tracer: Tracer) -> Int {
   print("doing work");
-  42
+  around(tracer, "inner", fn () => 42)
 }
 
 pub fn main() {
-  let tracer = console_tracer();
-  let result = around(tracer, "calculate", calculate);
+  let tracer = console_tracer(Random::real());
+  let result = around(tracer, "calculate", fn () => calculate(tracer));
 
   print("result = ${result}");
 }
 ```
 
+```text
+start calculate: trace=bf0d815f869cef498398871c54234801 span=6fdab51de189b88d
+doing work
+start inner: trace=bf0d815f869cef498398871c54234801 span=d52ddfe412d2d513
+finish span: inner
+finish span: calculate
+result = 42
+```
+
 The application decides which tracer implementation to construct. `around` owns the span lifetime:
 
 ```khora
-let result = around(tracer, "calculate", calculate);
+let result = around(tracer, "calculate", fn () => calculate(tracer));
 ```
 
 It starts the span before running `calculate` and registers cleanup so the span is finished when the operation returns, raises, or is cancelled. A caller should not rely on a later `tracer.finish(...)` line running after arbitrary fallible work.
+
+## `start` has to ask what it is inside
+
+The one thing a handler must do is call [`current`](/docs/stdlib/api/trace/) in
+`start`, and it is why `console_tracer` takes a `Random`: a span needs an id
+nobody else has, and a handler may be handed to another fiber, so it cannot
+count with a `mut` field. Capturing a capability is what a handler is allowed
+to do.
+
+A `start` that instead writes
+
+```khora
+{ context: Context::none(), parent: 0, name: name }
+```
+
+compiles and produces no trace. `Context::none()` is an all-zero context, so
+`current()` inside the body still answers `None`, every span is an unparented
+root, the two spans above land in different traces, and — because
+[`Log`](/docs/cookbook/logging/#correlating-with-a-trace) reads `current()` to
+decide whether to write `trace_id` and `span_id` — no log line carries any ids
+either. `Context::none()` is for a *context*, such as an absent or malformed
+incoming header; it is not a starting point for a span.
+
+The parent shows the same thing. Zero is how `Span::parent` says "root", so a
+nested `around` that writes `parent: 0` starts a second trace rather than a
+child span.
 
 ## Report `Result` failures on the span
 

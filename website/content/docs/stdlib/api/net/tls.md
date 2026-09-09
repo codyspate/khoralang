@@ -197,8 +197,9 @@ pub fn transmit(connection: TlsConnection, text: String) -> Int
 
 Sends `text`, all of it, or -1.
 
-All or nothing, unlike `send`: a partial write of an encrypted record is not
-something a caller can resume, so the runtime finishes it or fails.
+All or nothing, unlike `socket::transmit`, which answers how many bytes
+went: a partial write of an encrypted record is not something a caller can
+resume, so the runtime finishes it or fails.
 
 ### set_receive_timeout
 

@@ -24,6 +24,15 @@ it. And it is a **seam**: a test installs its own handler and the code under
 test cannot tell, which is the thing a file system mock is usually a poor
 imitation of.
 
+**A free function here is one that does more than an operation.**
+`read_text`, `write_text` and `append_text` are text where the operation is
+bytes, and `copy` needs both effects and a buffer; each of the four earns a
+name because there is a decision inside it. Everything else is called on
+the capability -- `writes.create_dir(path)!`, `reads.read_dir(path)!` --
+and has no wrapper on purpose, because a wrapper would be the operation's
+own argument list typed out a second time. The asymmetry is the rule rather
+than a gap in the list.
+
 **Two effects rather than one**, `FsRead` and `FsWrite`, because
 `[permissions.fs]` already grants reading and writing separately and a
 single capability made the finer half unexpressible: a function allowed
@@ -137,7 +146,7 @@ this one.
 word: a file that is not there, a file that is there and unreadable, and
 a file that is there, readable, and simply not granted. The third is the
 one somebody debugs for an hour, because nothing in a `false` points at
-the manifest -- and it is exactly the confusion [`IoError::Denied`]
+the manifest -- and it is exactly the confusion [`IoError::Denied`](#denied)
 exists to prevent everywhere else.
 
 The cost is a `!` on a probe, which is the same cost `read` has always
@@ -210,7 +219,7 @@ is_dir: (String) -> Bool raises IoError
 Whether the path is a directory.
 
 Raises `Denied` for a path the manifest does not grant, the same as
-[`FsRead::exists`] and for the same reason -- and this is where it mattered
+[`FsRead::exists`](#exists) and for the same reason -- and this is where it mattered
 most. `./data/**` does not grant `data` itself, so before this an ordinary
 two-line mistake in a manifest made `is_dir("data")` answer `false` about
 a directory whose every file the program could read, with nothing
@@ -232,7 +241,7 @@ pub effect FsWrite {
 Changing the file system.
 
 The other half of `[permissions.fs]`. A function that takes this can alter
-what is on disk; one that takes only [`FsRead`] cannot, and its signature
+what is on disk; one that takes only [`FsRead`](#fsread) cannot, and its signature
 is the proof.
 
 #### write

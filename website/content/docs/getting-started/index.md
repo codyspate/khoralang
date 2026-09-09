@@ -110,6 +110,53 @@ Hello, Khora!
 its own — so it behaves in a script the way running the executable would. The
 build is cached, so the second run starts immediately.
 
+### Arguments
+
+Anything after `--` goes to the program rather than to `khora`:
+
+```bash
+khora run . -- --quiet report.txt
+```
+
+Without the `--`, `khora` reads `--quiet` as one of its own options and stops
+with `error: unexpected argument '--quiet' found`.
+
+The program reads them through `Env`, which is a capability like any other:
+
+```khora
+module hello_khora::main;
+
+import std::core::{Iterator, List, Step, print};
+import std::env::{Env};
+
+pub fn main() {
+  let env = Env::real();
+
+  match env.arguments() {
+    List::Nil => print("no arguments"),
+    List::Cons(program, rest) => {
+      print("program: ${program}");
+      for arg in rest {
+        print("arg: ${arg}");
+      }
+    },
+  }
+}
+```
+
+```text
+program: ./build/hello_khora
+arg: --quiet
+arg: report.txt
+```
+
+`arguments` is an operation on `Env`, so it is called through the capability —
+`env.arguments()`, not an imported free function. The program's own name comes
+first, the same convention C, Rust and Go follow, which is why the example
+splits it off before walking the rest. Reading an environment *variable* needs
+a grant in `khora.toml`; the argument list does not, because the person typing
+the command is already the one who chose it.
+
 To get an executable you can hand to somebody:
 
 ```bash

@@ -26,7 +26,7 @@ where every other ecosystem's tracing leaks.
 
 ## The current span
 
-[`current`] is the span this fiber is inside, and it is the propagation the
+[`current`](#current) is the span this fiber is inside, and it is the propagation the
 paragraph above promises. `around` installs a span for the duration of a
 body and puts back the enclosing one on every path out, including a raise
 and a cancellation; a handler's `start` reads it and takes the trace id, the
@@ -431,7 +431,7 @@ handler was installed, so it cannot see the `around` above it on the stack
 and cannot require a capability of its own. The enclosing span therefore has
 to be somewhere ambient, and the only thing that survives what a span has to
 survive — a spawn, a steal, a wake and a cancellation — is the fiber. This
-reads a slot the runtime keeps per fiber, which `spanned` sets for the
+reads a slot the runtime keeps per fiber, which [`around`](#around) sets for the
 duration of a body and puts back on every path out.
 
 #### What it does across a spawn

@@ -386,6 +386,15 @@ pub type Router<'er> = {
 A router carries its handlers' failures, so mounting a route that can fail
 against the database widens the router's own error row.
 
+**The three answers the router writes itself are `text/plain`**: 404 for a
+path nothing mounts, 405 for a path mounted under another method, and 413
+for a request over `limit`. None of them reaches a handler, so a service
+whose handlers all return a JSON error body still emits three plain-text
+ones, and a client that parses every response as JSON fails on exactly the
+responses it was not expecting. Nothing here configures them: a path that
+has to answer JSON for a method it does not want must mount that method and
+refuse inside the handler.
+
 #### limit
 
 ```khora
@@ -576,6 +585,18 @@ only be a shorter way to build one, and `Call::get` is already that.
 ```khora
 send: (Call) -> Result<Answer, CallError>
 ```
+
+Sends one `Call` and waits for the answer.
+
+**A `Result` rather than a raise**, because reaching somebody else fails
+often enough that the caller usually has a second thing to try — another
+host, a cached copy, a retry — and a failure that is a value is one a
+`match` reaches without unwinding first.
+
+**A status is not a failure.** A 404 or a 503 arrives as `Result::Ok`
+carrying that status on the `Answer`; only a call that never became an
+answer is a `CallError`. `Answer::ok` is the question about the status,
+and it is a separate question on purpose.
 
 ## Methods
 
@@ -782,10 +803,11 @@ number — but one that says `Unknown` about a status the server
 deliberately chose reads as a bug to whoever is holding the packet
 capture, and it was.
 
-**The whole of 5xx is here now**, because that is the family a server
+**500 through 504 are all here now**, because those are the ones a server
 sends about *itself*: 503 under backpressure, 502 and 504 from anything
 with a proxy in front of it, 501 for a method it does not implement.
-Those are the lines somebody reads at three in the morning.
+Those are the lines somebody reads at three in the morning. The rest of
+5xx still answers `Unknown`, as anything not in the table does.
 
 A `match` rather than a chain of `else if`s. Twenty-seven of them in a
 row is a table pretending to be control flow, and a table should look
@@ -809,7 +831,7 @@ impl Connection
 pub fn over(transport: Transport) -> Connection
 ```
 
-Over a transport, holding at most [`default_limit`] bytes per request.
+Over a transport, holding at most [`default_limit`](#default_limit) bytes per request.
 
 #### holding
 
@@ -832,7 +854,7 @@ pub fn next(self) -> Incoming
 Reads until one request is whole, and says what arrived.
 
 Blocks. Whether that blocks a thread, a fiber or the only thread there is
-belongs to the caller — see the note on [`Connection`].
+belongs to the caller — see the note on [`Connection`](#connection).
 
 #### understood
 
@@ -854,7 +876,7 @@ pub fn reply(self, response: Response, keep: Bool) -> Int
 
 Renders `response` and sends it.
 
-`keep` decides the `Connection` header, and is what [`Incoming::Arrived`]
+`keep` decides the `Connection` header, and is what [`Incoming::Arrived`](#arrived)
 reported unless the caller has its own reason to close.
 
 The two travel together because they are decided together: the answer's
@@ -1086,13 +1108,14 @@ The configuration is released when the caller's scope ends, which for a
 server is usually the program's.
 
 ```khora
+import std::core::{SharedFn};
 import std::fs::{FsRead, read_text};
-import std::net::http::{Router, listen_tls};
+import std::net::http::{Response, Router};
 
 pub fn main() -> Int {
   with { reads: FsRead::real() } {
     Router::new()
-      |> Router::get("/health", SharedFn::of(fn _ => Response::ok("ok")))
+      |> Router::get("/health", SharedFn::of(fn _ => Response::text(200, "ok")))
       |> Router::listen_tls(8443, read_text("cert.pem")!, read_text("key.pem")!)
   };
   0
@@ -1149,12 +1172,13 @@ already-bound socket is for a caller that wants to bind it themselves —
 a test on port zero, a socket inherited from a supervisor.
 
 ```khora
-import std::net::http::{Router};
+import std::core::{SharedFn};
+import std::net::http::{Response, Router};
 import std::net::socket::{listen_on};
 
 pub fn main() -> Int {
   Router::new()
-    |> Router::get("/health", SharedFn::of(fn _ => Response::ok("ok")))
+    |> Router::get("/health", SharedFn::of(fn _ => Response::text(200, "ok")))
     |> Router::serve_forever(listen_on(8080));
   0
 }
@@ -1181,7 +1205,7 @@ pub fn answer_on<'er>(router: Router<'er>, transport: Transport) ->() raises 'er
 
 Answers every request on one connection, until the client stops.
 
-**Written against the public [`Connection`], with nothing reserved.** A
+**Written against the public [`Connection`](#connection), with nothing reserved.** A
 framework of a different shape writes this loop itself and is not missing
 anything: the reading, the framing and the refusals are all above.
 
@@ -1401,7 +1425,7 @@ shows up in testing — it is a request truncated at a packet boundary, or two
 requests read as one — which is why this is exported rather than left for
 each framework to derive again.
 
-[`Connection`] is this with a buffer around it, and is what most callers
+[`Connection`](#connection) is this with a buffer around it, and is what most callers
 want.
 
 ### matches

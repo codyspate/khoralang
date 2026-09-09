@@ -12,7 +12,7 @@ A platform is in one of three states here, and the words mean this:
 
 The website must never describe emission-only support as deployable platform support.
 
-## What 0.1.0 supports
+## What is supported
 
 Three triples, and they are exactly the ones the release workflow builds, packages, and then uses to compile a program before publishing:
 
@@ -36,7 +36,7 @@ A release is not published unless each of them has produced an artifact, unpacke
 **`x86_64-unknown-linux-gnu` means a recent one.** The published Linux
 toolchain is compiled on GitHub's `ubuntu-latest` runner, which is Ubuntu
 24.04, and a glibc program carries the symbol versions of the machine that
-built it. The 0.1.0 binary asks for `GLIBC_2.39` and will not start against
+built it. The published binary asks for `GLIBC_2.39` and will not start against
 anything older — not with a degraded feature, but with
 `libc.so.6: version 'GLIBC_2.39' not found` on every command.
 
@@ -111,7 +111,7 @@ materials for the toolchain itself, with its own checksum.
 
 WebAssembly is a distinct runtime environment, not Linux with a different object format. A wasm target must use a std/platform surface appropriate to its host and must not expose filesystem or socket APIs the host does not provide.
 
-**No wasm target is advertised in 0.1.0**, so none of that has been built. `std` has no Worker-shaped platform surface, there is no no-fibers execution model to test, and no host-provided networking or storage capabilities are modelled. LLVM can emit wasm — the compiler's own tests check that the runtime's symbols resolve there — and that is emission, not a deployment path.
+**No wasm target is advertised**, so none of that has been built. `std` has no Worker-shaped platform surface, there is no no-fibers execution model to test, and no host-provided networking or storage capabilities are modelled. LLVM can emit wasm — the compiler's own tests check that the runtime's symbols resolve there — and that is emission, not a deployment path.
 
 Cloudflare Workers is the motivating first wasm deployment target, and its host-provided networking model and single-threaded isolate mean its runtime contract will differ intentionally from native server targets. [Cloudflare Workers](/docs/deployment/cloudflare/) says what would have to exist, and tells you not to choose it in the meantime.
 

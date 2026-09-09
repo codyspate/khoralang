@@ -93,7 +93,7 @@ The names are what let a row be read through a schema -- `Entry::schema()`
 reads `id`, `account`, `amount` and `memo` by name -- and a driver that
 has them has no reason to drop them. A driver that genuinely does not
 (a bare `SELECT` with no description) leaves them empty, and
-[`Row::to_raw`] then hands over a sequence rather than a record.
+[`Row::to_raw`](#to_raw) then hands over a sequence rather than a record.
 
 ### DbError
 
@@ -205,11 +205,19 @@ broken: () ->()
 
 Says this connection's state is no longer known.
 
-**Called when a rollback fails**, and only then. A `ROLLBACK` that does
-not arrive leaves a connection that may still be holding a transaction
-open and rows locked, and there is no second thing to try: another
-rollback would fail the same way, and asking the server what state it is
-in needs a working connection to ask over.
+**Called when a rollback fails**, and when a `BEGIN` or a `COMMIT` comes
+back `Disconnected`. A `ROLLBACK` that does not arrive leaves a
+connection that may still be holding a transaction open and rows locked,
+and there is no second thing to try: another rollback would fail the same
+way, and asking the server what state it is in needs a working connection
+to ask over.
+
+The other two are the same shape from a different direction. A
+`Disconnected` from `begin` or `commit` says the exchange never
+completed, so nobody knows whether the statement reached the server; a
+`Rejected` says the engine answered and refused, which ends the
+transaction and leaves the connection perfectly usable, so that one does
+**not** call this.
 
 So the handler is told, because the handler *is* the connection and is
 the only thing that can act. A pool stops lending it out. A single
@@ -438,7 +446,7 @@ finalizer, and no path that could ever reach it.
 
 With the row, a body that does fallible work has cancellation points, and
 one that fires unwinds through here — releasing the region, running the
-rollback. A body that does no fallible work instantiates `'r` empty, needs
+rollback. A body that does no fallible work instantiates `'er` empty, needs
 no `!` at the call, and has nothing to interrupt: §6's promise is that an
 interruption is delayed to the next mark that can carry it, never lost, and
 a transaction with no marks in it runs to its commit.

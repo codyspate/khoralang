@@ -36,7 +36,7 @@ source among several, and the same `Settings` reads all of them.
 
 ## Every problem, not the first
 
-A record with four bad fields reports four. A person fixing a deployment wants
+A record with six bad fields reports six. A person fixing a deployment wants
 the list, not one line per restart:
 
 ```text
@@ -55,11 +55,18 @@ way somebody would write them, and a rule supplies its own sentence, so
 Text is quoted and a number is bare, so `and is "8080"` says the value arrived
 as text.
 
-A caller who would rather stop at the first has two ways to say so, and they
-are not the same call. [`Schema::decode_or_stop`](/docs/stdlib/api/schema/#decode_or_stop)
-answers `Result<A, List<Rejection>>` and does not do the work of collecting the
-rest; `Validated::to_result` converts a `Validated` you already have. Prefer
-the first when you know at the call site that one problem is enough.
+A caller who has nothing to do with a list wants a `Result` instead, and
+[`Schema::decode_or_stop`](/docs/stdlib/api/schema/#decode_or_stop) is that
+shape: `Result<A, List<Rejection>>`, which `!` carries straight out of the
+function. `Validated::to_result` converts a `Validated` you already have, and
+the two are the same call — `decode_or_stop` is `decode` followed by that
+conversion.
+
+**It is the caller that stops, not the decode.** The `Err` holds every
+rejection the decode found, because the combinators have no way to
+short-circuit: a schema's `read` is one function ending in a `Validated`, and
+the reader for two fields reads both to collect both. So this is a choice about
+the shape you want in hand, not about work saved.
 
 ## The declaration is the schema
 

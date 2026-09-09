@@ -69,29 +69,34 @@ An implementation of the child trait must satisfy the supertrait requirements.
 
 ## Associated types
 
-Declare an associated type:
+Declare an associated type. `Iterator` in `std::core` declares two, and they
+answer different questions — what the iteration yields, and what pulling from
+it requires:
 
 ```khora
 pub trait Iterator {
   type Item;
-  fn next(self) -> Step<Self, Self::Item>;
+  type Effects;
+  fn next(self) -> Step<Self, Self::Item> with Self::Effects;
 }
 ```
 
 With a bound:
 
 ```khora
-pub trait Iterator {
-  type Item: Show;
-  fn next(self) -> Step<Self, Self::Item>;
+pub trait Indexed {
+  type Key: Eq + Show;
+  fn key(self) -> Self::Key;
 }
 ```
 
-Supply it in an implementation:
+Supply them in an implementation. `Effects = {}` is an iterator over something
+already in memory, so `next` asks its caller for nothing:
 
 ```khora
 impl Iterator for Users {
   type Item = User;
+  type Effects = {};
 
   fn next(self) -> Step<Users, User> {
     // ...
@@ -119,27 +124,40 @@ impl<TypeParams>? TraitType for TargetType {
 
 A trait implementation provides the methods and associated types required by the trait.
 
-### Coherence, as it stands today
+### Coherence, and the orphan rule that is not there yet
 
-One impl of a trait for a type is the rule, and within a single **module** the
-compiler enforces it:
+One impl of a trait for a type is the rule, and the compiler enforces it across
+the whole compilation — the package's own modules, the sources of the packages
+it depends on, and `std`. Two impls in one file are refused where they are
+written:
 
 ```
 error: `Codec` is already implemented for `A`; there can be only one impl of a
        trait for a type
 ```
 
-**Across modules and across packages it is not enforced yet.** A second `impl
-Codec for A` in another module of the same package, or in a package that
-depends on the one declaring both `Codec` and `A`, compiles with no error and
-no warning — and the one that runs is the impl in the module that declares the
-trait, so the other is accepted, checked, and never called.
+and a second `impl Codec for A` in another module names the module that already
+has one:
 
-There is no orphan rule to lean on either. Until that is closed, treat "the
-declaring package owns the impl" as a convention you keep rather than one the
-compiler keeps for you: implement a trait for a type you declare, or a type you
-declare for someone else's trait, and do not implement someone else's trait for
-someone else's type expecting the result to be used.
+```
+error: `Codec` is already implemented for `A` in `store`; there can be only one
+       impl of a trait for a type in a program
+```
+
+The file whose path sorts first keeps the impl and the other is what gets
+reported, so which of two modules is refused does not depend on the order the
+files were read in. A type's identity is its name *and* the module that
+declared it, so two types both named `Entry` are two types and each may have
+its own `impl Codec`.
+
+**There is still no orphan rule**, with one exception: `Share`, which only the
+module declaring a type may implement for it. Nothing else stops you writing
+someone else's trait for someone else's type. What has changed is that a second
+impl is now an error you are shown rather than a silent choice of whichever one
+was merged first. The only impl the compiler still cannot see is one in a
+package this build does not include, so keep "the declaring package owns the
+impl" as a convention: implement a trait for a type you declare, or a type you
+declare for someone else's trait.
 
 ## Generic implementations
 
@@ -210,15 +228,72 @@ pub trait Combine {
 
 ## Trait scope and resolution
 
-Traits participate in method and operator resolution only where the relevant trait is in scope:
+**A trait's methods resolve on every type that implements it, imported or not.**
+An implementation is a property of the type, and `value.method(..)` asks the
+type — so this compiles in a module that imports neither `Show` nor `Eq`:
 
 ```khora
-import std::core::{Eq};
+module app::main;
+import std::core::{print};
 
-let same = left == right;
+pub fn main() -> Int {
+  let same = 1 == 1;
+  let text = 42.show();
+  if same { print(text); }
+  0
+}
 ```
 
-This keeps the meaning of trait-provided behavior tied to explicit module imports rather than a process-wide registry.
+Operators follow the same rule: `==` is `Eq::eq`, and it works on any type that
+implements `Eq` without the name being brought in.
+
+What an import buys is the **name**. `Show` has to be imported wherever the word
+`Show` is written — as a bound in `<A: Show>`, in a `derive(Show)` clause, or as
+the prefix of a trait-qualified call. `for` needs `Iterator` and `Step` in scope
+for exactly that reason: it desugars to `Iterator::next`, and a path is a name
+being looked up. One consequence worth knowing before it surprises you: a file
+that imports `Eq` and then only ever writes `==` never writes `Eq`, so
+`unused-import` reports the import, correctly.
+
+## Two traits declaring the same method
+
+A type may implement more than one trait that declares a given method name.
+`List` implements both `Functor` and `Iterator`, and both declare `map`, so
+method syntax has nothing left to choose with:
+
+```khora
+let ys = xs.map(fn (n) => n + 1);
+```
+
+```text
+error: `map` is declared by `Functor` and `Iterator`, and `List<Int>` implements more than one
+```
+
+The answer is to name the trait. A trait-qualified call passes the receiver as
+the first argument and settles which `map` is meant:
+
+```khora
+module app::main;
+import std::core::{Functor, List, print};
+
+pub fn main() -> Int {
+  let xs = List::Cons(1, List::Cons(2, List::Nil));
+  let ys = Functor::map(xs, fn (n) => n + 1);
+  print(ys.show());
+  0
+}
+```
+
+`Iterator::map(xs, fn (n) => n + 1)` picks the other one, and gives a lazy
+`Mapped` rather than a `List`. The trait has to be imported for this form, since
+this is the case where the name is written. Without the import the call is
+refused with ``cannot resolve `Functor::map` in this scope``.
+
+`Functor::map` is a *trait* path, not a module path. [Modules and
+packages](./modules-and-packages/#paths-versus-fields) says a module path cannot
+prefix an expression, and that still holds — `std::core::map(..)` does not
+resolve. `::` after a trait or type name reaches an associated item, which is
+what this is.
 
 ## Deriving structural traits
 

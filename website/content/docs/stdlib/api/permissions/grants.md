@@ -7,9 +7,10 @@ description: "What khora.toml granted, as Khora"
 
 What `khora.toml` granted, as Khora.
 
-**This file is replaced at build time.** `khora build` reads
-`[permissions.fs]` and writes this module out with the manifest's own
-patterns in it; what is on disk is the default, which grants everything.
+**This file is replaced at build time.** `khora build` reads the whole
+`[permissions]` table -- `fs`, `env`, `network` and `process` alike -- and
+writes this module out with the manifest's own patterns in all five
+functions below; what is on disk is the default, which grants everything.
 
 It is a file of its own so that the replacement is a *whole file* rather
 than surgery on one: the matcher in `std::permissions` is real code that
@@ -18,8 +19,10 @@ function body inside a file it does not otherwise understand is a compiler
 that breaks the next time somebody reformats it.
 
 **A missing `[permissions]` table grants everything.** That is opt-in
-tightening rather than a tax on starting, and it is why the default here is
-`**` rather than nothing.
+tightening rather than a tax on starting, and it is why the defaults here
+are wildcards rather than nothing: `**` for the two path grants, which
+spans separators, and `*` for `env`, `network` and `process`, whose
+subjects are single names.
 
 ## Functions
 

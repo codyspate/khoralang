@@ -1,9 +1,20 @@
 # Khora
 
-A statically-typed, pure-functional systems language that compiles to native
-static executables — no VM, no tracing GC. Memory is managed by Perceus
-reference counting; effects, capabilities and typed failure channels are
-tracked in the type system by row polymorphism.
+A statically-typed application language that compiles to native static
+executables — no VM, no tracing GC. You can look at a function and know what it
+can do, what it can fail with, and what it depends on, and the code inside
+still looks ordinary: `let`, `if`, `while`, `for`, assignment.
+
+The compiler tracks the three things a signature usually leaves out —
+capabilities, failures and effects — as rows in the type system. Memory is
+managed by Perceus reference counting rather than by a garbage collector or by
+lifetimes you write down.
+
+**It is aimed at servers, CLIs, workers and data processing**, not at kernels,
+drivers or firmware. Mutation, loops and early `return` are all here on purpose:
+local mutation is ordinary, and what the type system cares about is the effects
+that can be observed from outside. Khora is not an ownership language and does
+not try to replace Rust where Rust is unarguable.
 
 This repository is the compiler, written in Rust.
 
@@ -41,9 +52,14 @@ the same reason.
 
 | platform | what to install |
 | --- | --- |
-| Windows | Visual Studio Build Tools, "Desktop development with C++" |
+| Windows | [LLVM](https://releases.llvm.org), or the "C++ Clang tools for Windows" component of the Visual Studio Build Tools |
 | macOS | `xcode-select --install` |
 | Linux | `clang` or `gcc` from your package manager |
+
+Windows needs `clang` by name: it is what the compiler probes for, the "Desktop
+development with C++" workload does not install one, and `cl.exe` is not a
+substitute because the driver is what locates the C runtime. Installing LLVM is
+the shorter route.
 
 The installer checks before downloading anything and says so.
 
@@ -398,7 +414,7 @@ docs/
   errata.md            where the specification was wrong, and what was done
 std/                   the standard library, written in Khora
 examples/              five reference applications
-bench/                 four servers and a load generator; see bench/README.md
+bench/                 five servers and a load generator; see bench/README.md
 scripts/
   setup-llvm.sh        installs LLVM 22.1.8 and writes .cargo/config.toml
   check.sh             the fast loop: front end in ~30s, `native` for the rest
@@ -485,7 +501,7 @@ Then phase 11, the scheduler. The M:N backend — stackful coroutines on a worke
 pool — is built and opt-in with `KHORA_FIBERS=scheduler`; the default is still
 one operating-system thread per fiber, because threads are faster at the
 connection counts a service actually runs at. What is left is making the
-scheduler the default, which `docs/limitations` gives three reasons against
+scheduler the default, which `/docs/limitations/` gives three reasons against
 today, one of them a gap rather than a preference.
 
 `docs/roadmap.md` has the order, the reasons, and what each one costs.

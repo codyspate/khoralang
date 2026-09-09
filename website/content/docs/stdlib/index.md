@@ -22,7 +22,7 @@ The current standard library includes APIs for:
 - typed configuration, in [`std::config`](/docs/stdlib/api/config/);
 - retries and backoff schedules, in [`std::resilience`](/docs/stdlib/api/resilience/);
 - civil dates and offsets, in [`std::time`](/docs/stdlib/api/time/);
-- exact `Decimal` arithmetic, in [`std::decimal`](/docs/stdlib/api/decimal/);
+- exact `Decimal` arithmetic, in [`std::decimal`](/docs/stdlib/decimal/);
 - HTTP client/server building blocks, in [`std::net::http`](/docs/stdlib/api/net/http/),
   over [`std::net::socket`](/docs/stdlib/api/net/socket/);
 - TLS, in [`std::net::tls`](/docs/stdlib/api/net/tls/);
@@ -32,9 +32,12 @@ The current standard library includes APIs for:
   [`std::trace`](/docs/stdlib/api/trace/);
 - structured logging and writing to standard error, in
   [`std::log`](/docs/stdlib/api/log/);
-- capability permissions, in [`std::permissions`](/docs/stdlib/api/permissions/).
+- capability permissions, in [`std::permissions`](/docs/stdlib/api/permissions/),
+  over the grants in
+  [`std::permissions::grants`](/docs/stdlib/api/permissions/grants/) that
+  `khora build` writes out of the manifest.
 
-Three of those are new and easy to miss:
+Four of those are new and easy to miss:
 
 `std::clock` holds the `Clock` capability, which used to live in `std::env`. `import std::env::{Clock}` no longer resolves. The split also gave `Clock` a `sleep`, which is an operation on the capability so that a fake clock is one line in a test.
 

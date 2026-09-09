@@ -520,11 +520,15 @@ fn merged_types(db: &dyn Db, files: &[SourceFile]) -> TypeMap {
             // the other -- so the call that needed the dropped one resolved to
             // the trait's bodyless method. Errata 62, and the same shape as
             // the variant rule above it.
+            //
+            // And by the trait's arguments, for the same reason on the other
+            // side: `Convert<String>` and `Convert<Bool>` for one type are two
+            // impls, and merging them by the trait's name kept one.
             if !out
                 .traits
                 .impls
                 .iter()
-                .any(|o| o.trait_name == imp.trait_name && o.target() == imp.target())
+                .any(|o| o.trait_key == imp.trait_key && o.target() == imp.target())
             {
                 out.traits.impls.push(imp.clone());
             }

@@ -42,7 +42,7 @@ let response = Response::text(200, "ok");
 print(Int::to_string(response.status));
 ```
 
-- `::` walks types, constructors and associated items;
+- `::` walks types, traits, constructors and associated items;
 - `.` projects a field, or calls behaviour on a runtime value.
 
 So `Response::text` is visibly not `response.status`.
@@ -55,6 +55,12 @@ refused with `cannot resolve ... in this scope`:
 http::Response::text(200, "ok")   // refused
 app::helper::greeting()           // refused
 ```
+
+**A trait name is not a module name**, so this rule says nothing about
+`Functor::map(xs, f)`. That is an imported trait followed by one of its
+methods — the first bullet above, the same shape as `Response::text` — and it is
+how a call is disambiguated when a type implements two traits that declare the
+same method. See [Traits](./traits/#two-traits-declaring-the-same-method).
 
 A glob import does not change that either: `import app::helper::*;` brings the
 names in unqualified, and `helper::greeting()` still does not resolve. Every

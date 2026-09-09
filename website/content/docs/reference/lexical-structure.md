@@ -157,11 +157,17 @@ not as string content, so the inner literal's quotes stand as they are:
 "len = ${String::byte_length(\"abc\")}"   // refused
 ```
 
-The escaped form gives a message that names the wrong thing —
-``error: this `${..}` does not contain an expression`` — and that message is
-what *any* parse error inside a hole produces, with the whole hole underlined.
-Binding the value to a `let` on the line before is the way out of a hole that
-will not parse.
+The escaped form is refused by name:
+
+```
+error: a `${..}` hole is scanned as source, not as string text, so its quotes
+       stand as they are: write `"` here, not `\"`
+```
+
+A hole that fails to parse for some other reason gets the general message,
+``error: this `${..}` does not contain an expression``, with the hole
+underlined. Binding the value to a `let` on the line before is the way out of
+one that will not parse.
 
 Interpolation is for text a person will read. Where another program consumes
 the output, reach for a structured encoder such as `std::json` instead — a

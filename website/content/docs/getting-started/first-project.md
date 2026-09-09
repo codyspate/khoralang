@@ -4,7 +4,7 @@ sidebar:
   order: 2
 ---
 
-A Khora package has a `khora.toml` manifest and source files under `src/`. This walkthrough adds a small function and a test, then formats, checks, tests, builds, and runs the package with the installed `khora` toolchain.
+A Khora package has a `khora.toml` manifest and source files, conventionally under `src/`. This walkthrough adds a small function and a test, then formats, checks, tests, builds, and runs the package with the installed `khora` toolchain.
 
 If `khora --version` does not work yet, start with [Installation](/docs/getting-started/installation/).
 
@@ -18,6 +18,21 @@ hello_khora/
 └── src/
     └── main.kh
 ```
+
+`src/` is the convention and `khora new` writes it, but **the package is the
+manifest's directory**, not `src/` alone: every `.kh` file beside `khora.toml`
+or under any directory below it is compiled. A scratch file dropped at the
+package root is part of the package and its errors are reported against it.
+
+Three directories are left out of that walk: `target/`, `.git/`, and any
+directory with a `khora.toml` of its own — so a nested package or a vendored
+copy stays its own package rather than being absorbed into its parent. `src/bin/`
+is left out too, but only of the package's own compilation: each file there is
+built as a program of its own against the package's modules, and is still
+checked.
+
+Delete a scratch file or move it under a directory with its own `khora.toml`;
+there is no ignore list.
 
 The manifest names the package and says which Khora builds it:
 

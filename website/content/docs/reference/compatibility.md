@@ -8,11 +8,11 @@ Khora is `0.x`. It may break. This page says when, how you find out, and what 1.
 
 ## What `0.x` promises
 
-**Within one release, everything.** A program that compiles with `khora 0.1.0` compiles with every `0.1.0` build, and the lockfile resolves the same way. Pin the toolchain and a build is reproducible.
+**Within one release, everything.** A program that compiles with one `khora 0.2.0` build compiles with every `0.2.0` build, and the lockfile resolves the same way. Pin the toolchain and a build is reproducible.
 
 ```toml
 [toolchain]
-version = "0.1.0"
+version = "0.2.0"
 ```
 
 A pin that cannot be satisfied fails loudly. It never silently runs a different compiler — the toolchain shim hands over before argument parsing, and `khora toolchain which` tells you which build answered and why.
@@ -68,7 +68,7 @@ There was an `edition` key in `khora.toml`, and it has been removed. It named a 
 
 1. **A bug-discovery rate that has flattened.** The honest signal is not a feature list; it is how often a session aimed at known issues turns up something new. Recent sessions have still produced silent-wrongness bugs in trait dispatch and structured concurrency. Until that stops, a stability promise would be a promise to keep bugs.
 2. **The formal soundness review finished.** All 282 `unsafe` blocks now name the invariant that makes them sound, and a gate step keeps it that way. What is missing is the other half: which *test* protects each invariant. The load-bearing ones say so; most do not. [The soundness design note](https://github.com/codyspate/khoralang/blob/main/docs/design/soundness.md) is where that lives.
-3. **The scheduler measured on Linux.** Fibers are OS threads by default and the M:N scheduler is opt-in; that choice is settled for 0.1.0 and written up in [the fibers design note](https://github.com/codyspate/khoralang/blob/main/docs/design/fibers.md). What is not settled is whether it should stay that way, and the missing evidence is the density claim on Linux — the reason the scheduler exists. The I/O backends underneath it are the other half of that question, and Linux now has `epoll` -- a backend rather than a rewrite, with a `poll` fallback where the kernel will not open one. macOS wants `kqueue`, which is the same shape; Windows wants IOCP, which is not a backend swap because it is completion-based.
+3. **The scheduler measured on Linux.** Fibers are OS threads by default and the M:N scheduler is opt-in; that choice is settled for 0.2.0 and written up in [the fibers design note](https://github.com/codyspate/khoralang/blob/main/docs/design/fibers.md). What is not settled is whether it should stay that way, and the missing evidence is the density claim on Linux — the reason the scheduler exists. The I/O backends underneath it are the other half of that question, and Linux now has `epoll` -- a backend rather than a rewrite, with a `poll` fallback where the kernel will not open one. macOS wants `kqueue`, which is the same shape; Windows wants IOCP, which is not a backend swap because it is completion-based.
 4. **Use by people who did not write it.** Nothing else substitutes for it, and it has not happened yet.
 
 The [known limitations](/docs/limitations/) page tracks the shorter-term version of the same list.

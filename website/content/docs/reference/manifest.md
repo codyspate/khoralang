@@ -117,13 +117,70 @@ workspace = true
 
 ### `[workspace.policy]` — a cap on grants
 
+**The values are member names.** A policy says which members may ask for a
+category at all, not which hosts or paths they may reach:
+
 ```toml
 [workspace.policy]
-network = ["*.internal:5432"]
-fs = ["data/**"]
+network = ["gateway"]
+fs = ["reports"]
+env = ["gateway", "reports"]
+extern = ["sqlite"]
 ```
 
-A member may grant what it likes within the policy and nothing outside it. This is the one place a workspace overrules a member rather than offering it something.
+Only `gateway` may write a `[permissions] network` entry; only `reports` may
+write `[permissions.fs]`. Neither is told anything about *which* host or path —
+`network = ["*.internal:5432"]` here is not a narrower cap, it is a member name
+that does not exist, and the root is refused with `` `*.internal:5432` is not a
+member of the workspace ``. A typo in a cap is a cap that does not apply, so it
+fails loudly at the root rather than quietly wherever it should have bitten.
+
+A member that asks for a capped category without being named is refused, and
+the message says where the cap is and what to do about it:
+
+```text
+`cli` is not allowed to grant `fs`. The workspace at .../khora.toml caps it to
+reports. Add `cli` to `[workspace.policy] fs` if it should be, or drop the grant
+```
+
+A category the policy does not mention is uncapped. This is the one place a
+workspace overrules a member rather than offering it something.
+
+**`process` is not one of the categories a policy caps.** The key parses, and a
+name in it that is not a member is refused like any other, so it reads as though
+it works. It does not: the check that refuses a member for granting a capped
+category runs over `network`, `fs`, `env` and `extern`, and never over
+`process`. A root that writes
+`process = ["gateway"]` does not stop any other member writing
+`[permissions] process`. Leave it out rather than relying on it, and cap the
+grant in the member's own manifest.
+
+Capping the *values* — "no member may reach anything outside `*.internal`" — is
+a different feature and is not here: it needs a rule for when one glob is
+narrower than another, and a version of that rule that is subtly wrong is a cap
+that looks enforced and is not.
+
+### `--since` — building only what changed
+
+`khora check`, `khora fmt` and `khora task` take `--since <REV>` at a workspace
+root, and `khora release` requires it:
+
+```bash
+khora check --since main
+khora task test --since origin/main
+khora release --since v0.3.0
+```
+
+`<REV>` is anything `git diff` takes — a branch, a tag or a commit. The
+selection is exact rather than heuristic: the resolver already knows which
+packages each member compiles, so it takes the changed files, finds the members
+they belong to, and adds every member that depends on one of those. A workspace
+of thirty packages where two changed checks two.
+
+A changed file that belongs to no member, and to nothing a member depends on —
+the root `khora.toml`, a CI script — selects *everything*, and the output says
+which file did it. That is the safe direction: a build tool that guesses a file
+does not matter is a build tool that skips the check that would have caught it.
 
 ## `[permissions]` — what the code may reach
 
@@ -146,7 +203,7 @@ write = ["logs/**"]
 | --- | --- |
 | `workspace` | `true` to take the root's table whole. |
 | `default` | What a category nobody wrote down grants: `allow` or `deny`. `allow` is the default, so a program that has never heard of permissions compiles. `deny` is the strict posture: one line, set once, and every capability after it is a deliberate edit. |
-| `network` | Hosts, as `name` or `name:port`. `*` spans dots, so `*.internal` covers `db.eu.internal`; a grant with no port covers every port. |
+| `network` | Hosts the program may **connect out to**, as `name` or `name:port`. `*` spans dots, so `*.internal` covers `db.eu.internal`; a grant with no port covers every port. **Outbound only**: a port the program *binds* is not a host it reaches, so `Router::listen` and the rest of the server side are not covered by this key, or by any other — see [known limitations](/docs/limitations/#inbound-connections-are-not-permissioned). |
 | `fs` | **A table, not a list**: `[permissions.fs]` with `read` and `write`. `*` stops at a separator and `**` crosses one, and neither covers the directory being described. |
 | `env` | Environment variable names. `*` spans everything, since a name has no segments. |
 | `process` | Program names, as written at the call: `run("git", ..)` names `git`. `*` spans everything, so `git*` covers `git` and `gitk`. |
@@ -254,7 +311,7 @@ you are standing in.
 ```toml
 [tasks.migrate]
 description = "Bring the development database up to date"
-run = "khora run --bin migrate"
+run = "khora run src/bin/migrate.kh"
 
 [tasks.ci]
 description = "What the pipeline runs"

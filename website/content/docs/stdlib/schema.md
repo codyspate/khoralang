@@ -84,7 +84,7 @@ Every constructor is named after the type it answers.
 | [`default(s, value)`](/docs/stdlib/api/schema/#default) | an `A`, with `value` when the field is absent; `null` is still an error |
 | [`list(s)`](/docs/stdlib/api/schema/#list) | a `List<A>`, indexing each element into the error path |
 | [`dict(s)`](/docs/stdlib/api/schema/#dict) | a `Dict<String, A>`, for a record whose keys are data |
-| [`refine(s, must, holds)`](/docs/stdlib/api/schema/#refine) | the same `A`, rejected unless `holds`; `must` is the sentence the message uses |
+| [`refine(s, must, holds)`](/docs/stdlib/api/schema/#refine) | the same `A`, rejected unless `holds`; `must` is the rest of the sentence after `must be` — `"between 1 and 65535"` reads as *port must be between 1 and 65535* |
 | [`between`](/docs/stdlib/api/schema/#between), [`at_least`](/docs/stdlib/api/schema/#at_least), [`at_most`](/docs/stdlib/api/schema/#at_most), [`min_length`](/docs/stdlib/api/schema/#min_length), [`max_length`](/docs/stdlib/api/schema/#max_length), [`min_items`](/docs/stdlib/api/schema/#min_items), [`max_items`](/docs/stdlib/api/schema/#max_items), [`non_empty`](/docs/stdlib/api/schema/#non_empty), [`one_of`](/docs/stdlib/api/schema/#one_of) | the same, with a rule that carries its bounds, so a rendered document can carry them too |
 | [`secret(s)`](/docs/stdlib/api/schema/#secret) | a `Redacted<A>`, and a failure inside it does not quote what it saw |
 | [`key(wire, s)`](/docs/stdlib/api/schema/#key) | the same `A`, read under a key that is not the field's name |
@@ -186,10 +186,14 @@ Each line is one [`Rejection`](/docs/stdlib/api/schema/#rejection), and
 say `listen.port` or `items[3].id`; the path is held innermost-first and turned
 round only when a message is built.
 
-A caller who would rather stop at the first problem has
-[`decode_or_stop`](/docs/stdlib/api/schema/#decode_or_stop), which answers a
-`Result<A, List<Rejection>>` and does not do the work of collecting the rest.
-`Validated::to_result` converts one that was already decoded.
+A caller with nothing to do with a list wants a `Result` instead:
+[`decode_or_stop`](/docs/stdlib/api/schema/#decode_or_stop) answers
+`Result<A, List<Rejection>>`, which `!` carries straight out of the function.
+`Validated::to_result` converts one that was already decoded, and that is
+exactly what `decode_or_stop` does — it is the shape that differs, not the work.
+**It is the caller that stops, not the decode**: the `Err` still holds every
+rejection, because a schema's `read` ends in a `Validated` and has no way to
+short-circuit.
 
 ### A number keeps its text
 

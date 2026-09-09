@@ -1,6 +1,6 @@
 # Benchmarks
 
-Four servers answering the same request, so that the difference between them is
+Five servers answering the same request, so that the difference between them is
 one thing at a time.
 
 | | what it does |

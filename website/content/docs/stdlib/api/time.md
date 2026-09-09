@@ -138,8 +138,13 @@ pub fn of_string(text: String) -> Option<Date>
 A date written `2026-08-25`, or `None`.
 
 Exactly four digits, two, two, hyphen-separated, and the day has to exist
--- `2026-02-30` is `None` for the same reason `Date::of` refuses it. What
-`Show` prints, read back.
+-- `2026-02-30` is `None` for the same reason `Date::of` refuses it.
+
+**What `Show` prints for the years 0000 to 9999, read back**, and only
+those. `Date` holds an `Int` year, so `Show` will print `-0044-03-15` or
+a five-digit year quite happily; ten bytes of digits and hyphens cannot
+say either, and this answers `None` for both. The round trip holds over
+the range a date is normally written in and stops at its edges.
 
 #### to_days
 
@@ -245,10 +250,20 @@ Milliseconds since midnight.
 #### of_millis
 
 ```khora
-pub fn of_millis(millis: Int) -> Time
+pub fn of_millis(millis: Int) -> Option<Time>
 ```
 
-The time `millis` after midnight, which must be inside one day.
+The time `millis` after midnight, or `None` if that is not inside one
+day.
+
+**The arithmetic cannot refuse on its own.** `/` and `%` truncate toward
+zero, so this used to build a `Time` out of whatever it was handed:
+`of_millis(-1)` held `milli: -1` and printed `00:00:00.-001`, which is
+not ISO 8601 and which `Time::of_string` will not read back, and
+`of_millis(86400000)` printed `24:00:00.000`. A `Time` like that then
+travelled into a `DateTime` with nothing there to notice it. `Time::of`
+refuses the same numbers, and the sentence here already said the argument
+had to be inside one day; the check is what was missing.
 
 ### Offset
 
@@ -267,10 +282,18 @@ No offset at all.
 #### of_minutes
 
 ```khora
-pub fn of_minutes(minutes: Int) -> Offset
+pub fn of_minutes(minutes: Int) -> Option<Offset>
 ```
 
-`minutes` east of UTC. Positive is ahead, negative is behind.
+`minutes` east of UTC, or `None` if that is not less than a day.
+Positive is ahead, negative is behind.
+
+The bound is the one `Offset::of_string` already enforces -- two digits
+of hours and two of minutes, so -1439 to 1439 -- rather than the fourteen
+hours governments have actually reached for, because a wire format may
+carry a historical offset this module has no list of. What it will not
+carry is 100000, which `Show` writes as `+1666:40` and `of_string` then
+refuses to read back, so the record and its own printed form disagreed.
 
 #### of_string
 
@@ -504,10 +527,18 @@ fn show(self) -> String
 ### days_in_month
 
 ```khora
-pub fn days_in_month(year: Int, month: Int) -> Int
+pub fn days_in_month(year: Int, month: Int) -> Option<Int>
 ```
 
-Days in `month` of `year`, which is only interesting for February.
+Days in `month` of `year`, or `None` if `month` is not 1 to 12.
+
+Only interesting for February, and only an `Option` because of the range
+check. **31 is the worst possible answer for a month that does not exist**,
+which is what falling through to the last branch used to give for 0, 13 and
+-1: the main use of this function is clamping a day to the end of a month,
+and a clamp that answers 31 does not clamp. `Date::of` refuses a month
+outside 1 to 12, and this now refuses the same numbers rather than the two
+disagreeing about whether a month index is checked at all.
 
 ### is_leap
 

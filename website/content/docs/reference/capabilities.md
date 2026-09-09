@@ -246,6 +246,69 @@ for that installation. This is what makes a named production context usable
 from a test: install `Production` and override the one capability the test
 wants to control.
 
+## A capability as an ordinary parameter
+
+A `with` row is not the only way in. An effect value is a value, so a function
+can take one as a plain parameter and call its operations with the same method
+syntax:
+
+```khora
+import std::clock::{Clock};
+import std::core::{print};
+
+/// The capability arrives as an argument.
+fn stamp(clock: Clock, message: String) -> String {
+  "${clock.unix_millis()}: ${message}"
+}
+
+/// The same thing said with a row.
+fn stamped(message: String) -> String with { clock: Clock } {
+  "${clock.unix_millis()}: ${message}"
+}
+
+pub fn main() {
+  let clock = Clock::real();
+
+  print(stamp(clock, "started"));
+  print(stamped("started") with { clock: clock });
+}
+```
+
+The two forms differ in who chooses. A row is *requested*: the caller decides
+what to install, and every intermediate frame passes it along without naming
+it. A parameter is *given*: the caller has a particular handler in hand and
+hands that one over. Prefer the row — it is what makes an intermediate function
+say nothing about a capability it only passes through.
+
+**Reach for the parameter where a row cannot go.** The clearest case is a type
+that has no capability row to put one in. `SharedFn<A, B, 'er>`, which
+`Router::get` takes, is `(A) -> B raises 'er` and nothing else — there is no
+`with` in it, so a handler needing a database or an HTTP client looks
+impossible to write. It is not: the handler takes the capability as a
+parameter, and the closure that is certified closes over it.
+
+```khora
+import std::core::{Result, SharedFn};
+import std::net::http::{Answer, Call, HttpClient, Request, Response, Router};
+
+/// The capability arrives as a parameter, because `SharedFn` has no row.
+fn items(client: HttpClient, _request: Request) -> Response {
+  match client.send(Call::get("http://inventory/items")) {
+    Result::Ok(answer) => Response::text(answer.status, answer.body),
+    Result::Err(_why) => Response::text(502, "inventory unreachable"),
+  }
+}
+
+let client = HttpClient::real();
+
+Router::new()
+  |> Router::get("/items", SharedFn::of(fn request => items(client, request)))
+```
+
+A handler is written the same way whether the capability came from a row or an
+argument, so a function can be moved from one to the other without its body
+changing.
+
 ## Capability rows on function values
 
 ```khora
@@ -289,11 +352,23 @@ write = ["./data/out.txt"]
 **Both `read` entries above are needed**, and the reason is the one surprise in
 the glob dialect below: `./data/**` grants what is *inside* `data` and not `data` itself, so with
 only that line a program can read every file in the directory and cannot list
-it. `read_dir("data")` and `is_dir("data")` both raise `Denied`. The probes raise rather than answering `false` for the reason given further down: a `false` that could mean "not there", "unreadable" or "not granted" is the one somebody debugs for an hour.
+it. `read_dir("data")` and `is_dir("data")` both raise `Denied` rather than
+answering `false`, for the reason given under the probes below.
 
 The grants are compiled into the binary rather than read at run time. A file the program consults for its own permissions is a file an attacker edits.
 
 **A missing table grants everything, and each category is independent.** Naming `network` says nothing about `env`. Tightening is opt-in.
+
+**`network` is a list of hosts the program may connect *out* to, and nothing
+else.** It is read in one place — `HttpClient::send`, once the URL is parsed and
+before anything is dialled — and it decides whether that host may be reached.
+Binding a port is the other direction and is not covered: `Router::listen`,
+`Router::listen_quietly` and `Router::listen_tls` never consult it, so a program
+with `default = "deny"` and no hosts granted still serves on any port it asks
+for. Write `network = ["127.0.0.1:8787"]` expecting it to authorise a listener
+and it will do nothing, in either direction. [Known
+limitations](/docs/limitations/#inbound-connections-are-not-permissioned) has
+the reasoning.
 
 A denial is its own error case, separate from the ordinary failure, because the two send a reader to different files:
 
@@ -311,17 +386,12 @@ readable and simply not granted — and the third is the one somebody debugs for
 an hour, because nothing in a `false` points at a manifest. The remaining
 `false` means one thing: the operating system would not open it.
 
-That combines with the glob rule above, which is where it matters most.
-`./data/**` does not grant `data`, so `is_dir("data")` raises `Denied` for a
-directory whose every file the program can read — the manifest is what has to
-change, and the message says so.
-
 `Unreachable` is DNS or a firewall; `Denied` is a line you can copy out of the message into the manifest. `Env::variable` and `std::env::variable_or` therefore `raise EnvError`, so both need a `!` at the call site:
 
 ```khora
 let port = variable_or("PORT", "8080")!;
 ```
 
-Globbing differs by category, and each one is the reading that costs the least surprise. For a path, `*` stops at a separator and `**` crosses one — and, as in `.gitignore`, **neither covers the directory being described**: `data/**` is a grant over the contents of `data`, so listing `data` needs `data` named as well. For a name — a variable, a command — there are no segments, so `*` spans everything. For a host, `*` spans dots, so `*.internal` covers `db.eu.internal`, and a grant with no port covers every port.
+Globbing differs by category, and each one is the reading that costs the least surprise. For a path, `*` stops at a separator and `**` crosses one — and, as in `.gitignore`, **neither covers the directory being described**, which is why the `[permissions.fs]` example above names `./data` as well as `./data/**`. For a name — a variable, a command — there are no segments, so `*` spans everything. For a host, `*` spans dots, so `*.internal` covers `db.eu.internal`, and a grant with no port covers every port.
 
 See [Effects and rows](./effects/) for effect declarations and [Failures](./failures/) for typed failure.

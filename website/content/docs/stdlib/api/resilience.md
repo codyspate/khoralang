@@ -36,12 +36,12 @@ delays is not the sooner of two instants once the sides have been running
 for different lengths of time.
 
 It also lets the two honest readings of "again later" coexist without
-either being a special case. `Spaced` is a **grid** -- the third attempt
-begins at `3 * millis` whatever the body cost, so a run that falls behind
-does not pile up delays. `Exponential` and `Fibonacci` are **backoffs**,
-measured from the failure that just happened, because "wait twice as long
-as last time" is a statement about the other end rather than about the
-calendar. Both are instants by the time the driver sees them.
+either being a special case. `Spaced` is a **grid** -- attempts begin at
+0, `millis`, `2 * millis` and so on whatever the body cost, so a run that
+falls behind does not pile up delays. `Exponential` and `Fibonacci` are
+**backoffs**, measured from the failure that just happened, because "wait
+twice as long as last time" is a statement about the other end rather than
+about the calendar. Both are instants by the time the driver sees them.
 
 ## Types
 
@@ -91,9 +91,10 @@ retry", and is what you get from `once`.
 
 Every `millis`, without end.
 
-**Anchored to the start, so it does not drift.** The third attempt begins
-at `3 * millis` from the beginning whether or not the second one ran
-long, which is what a caller who wrote "every thirty seconds" meant.
+**Anchored to the start, so it does not drift.** Attempts begin at 0,
+`millis`, `2 * millis` and so on from the beginning, whether or not the
+one before ran long, which is what a caller who wrote "every thirty
+seconds" meant.
 
 #### Exponential
 
@@ -277,15 +278,27 @@ only stays drift-free because it answers `attempt * millis` rather than
 `millis`.
 
 ```khora
+import std::clock::{Clock};
+import std::random::{Random};
 import std::resilience::{Schedule};
 
-let plan = Schedule::Exponential(100, 200, 30000);
-// How long to wait before the third attempt, 250ms in.
-match Schedule::next_after(plan, 2, 250) {
-  Option::Some(millis) => sleep(millis),
-  Option::None => give_up(),
+// Two attempts made; wait for the third, or say the plan is done.
+fn hold(plan: Schedule, began: Int) -> Bool
+  with { clock: Clock, random: Random }
+{
+  match Schedule::next_after(plan, 2, clock.monotonic_millis() - began) {
+    Option::None => false,
+    Option::Some(at) => {
+      let now = clock.monotonic_millis() - began;
+      if at > now { clock.sleep(at - now) } else { () };
+      true
+    }
+  }
 }
 ```
+
+`at` is an instant, so only the part of it still ahead is waited for.
+Passing it to `sleep` unchanged waits from the beginning a second time.
 
 `None` means the schedule is finished, which is how `retry` knows to
 stop. Exposed because a caller driving its own loop -- a queue consumer
@@ -394,9 +407,9 @@ is the one that stopped the retrying, and an earlier error is something
 that was already recovered from.
 
 ```khora
-import std::resilience::{Attempts, Schedule, retry_counting};
+import std::resilience::{Schedule, Tried, retry_counting};
 
-fn fetch_reporting() -> Attempts<String, HttpError>
+fn fetch_reporting() -> Tried<String, HttpError>
   with { client: HttpClient, clock: Clock, random: Random }
 {
   retry_counting(Schedule::times(5), fn _e => true, fn () => fetch()!)

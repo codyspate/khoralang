@@ -84,7 +84,8 @@ pub type Field = {
 };
 ```
 
-One field of an object, in the order `entries` happened to find it.
+One field of an object. `entries` reports them sorted by name, which is
+the same order every time and is not the order the document wrote them in.
 
 ## Methods
 
@@ -276,7 +277,9 @@ pub fn object(fields: List<Field>) -> Json
 Builds an object out of the fields it is given.
 
 **The order is not kept, and the printed object is sorted by key.** A
-`Json::Object` holds a `Map`, and a `Map` is ordered by its keys -- so the
+`Json::Object` holds a `Map`, which is a hash table and forgets the order
+its keys arrived in; the sorting is `sorted_fields`, which `encode` and
+`Json::entries` both go through, and not anything the `Map` does. So the
 list here says which fields, not which order. Everything that builds an
 object goes through this: `Raw::to_json` in `std::schema`, so `encode`
 over a derived `Encode` prints alphabetically rather than in the order the

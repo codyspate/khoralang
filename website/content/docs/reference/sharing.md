@@ -218,7 +218,7 @@ pub fn main() -> () {
 
 **This is what a supervisor is made of**, and what a deadline would be made of: there is no `timeout` or `race` in `std` (see [Concurrency](/docs/reference/concurrency/)), so anything of that shape is written from a handle one fiber holds and another cancels.
 
-What constrains it is the answer rather than the handle: `Fiber::join` requires `A: Share`, because the value was computed on another fiber and has to be safe to hold from this one. `Fiber::wait` has no such bound, because it does not hand the answer back.
+What constrains it is the answer rather than the handle. `A: Share` is on the whole `impl<A: Share, 'er> Fiber<A, 'er>`, because a value computed on one fiber and read on another has to be safe to hold twice — so it is a condition on having a `Fiber<A, 'er>` at all, and `wait` needs it as much as `join` does even though `wait` never hands the answer back.
 
 ## Choosing the boundary
 

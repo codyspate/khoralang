@@ -31,7 +31,8 @@ test "double returns twice its input" {
 required. It is also legal **only inside a `test` block** — in application code
 the compiler answers ``error: `assert` is only allowed inside a `test` block;
 elsewhere, `raise` says the same thing and says where it goes``, and it does so
-at `khora build`, not at `khora check`.
+at `khora check`, so the editor shows it as you type rather than the build
+finding what the check passed.
 
 Run a package's tests from its root:
 
@@ -50,6 +51,10 @@ khora test . --filter double
 Use the same `catch` or `attempt` that application code uses:
 
 ```khora
+module users_test;
+
+import std::core::{Result, assert, attempt};
+
 test "missing users are reported" {
   let result = attempt(fn () => load_user(999)!);
 
@@ -60,6 +65,9 @@ test "missing users are reported" {
   }
 }
 ```
+
+`attempt` and `Result` are `std::core` names like `assert`, so all three are on
+the `import` line; `UserError` comes from wherever `load_user` is declared.
 
 [Failures](./failures/) is the model behind it.
 

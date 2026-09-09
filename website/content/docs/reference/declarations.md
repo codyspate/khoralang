@@ -44,8 +44,17 @@ is a parse error — `expected `::{...}` or `::*` after the module path`. Write
 
 There is no prelude of standard-library *items*: `Option`, `Result`, `List`,
 `Dict`, `Show`, `Eq`, `print` and everything else in `std::core` has to be
-named in an `import`, and a type has to be imported wherever it is written —
-including where it is only reached through a trait method or a `${..}` hole.
+named in an `import` wherever it is written. `let x: Option<Int> = Option::None;`
+needs `Option`; a module that imports nothing gets ``cannot find type `Option`
+in this scope``.
+
+**Written is the whole of the rule.** A trait's methods resolve on any type that
+implements it whether or not the trait is imported, because the implementation
+belongs to the type and `value.method(..)` asks the type. `42.show()` compiles
+with no `import` of `Show`, `left == right` with no `import` of `Eq`, and
+`"${n}"` needs neither. `Show` is imported when the word `Show` appears — a
+bound, a `derive(Show)` clause, a trait-qualified call — and not otherwise. See
+[Traits](./traits/#trait-scope-and-resolution).
 
 What resolves without an import is the set of **built-in type names**, which
 belong to the language rather than to a module:
@@ -276,9 +285,9 @@ pub trait Named {
 With supertraits and an associated type:
 
 ```khora
-pub trait Iterator: Show {
-  type Item;
-  fn next(self) -> Step<Self, Self::Item>;
+pub trait Stored: Eq + Show {
+  type Id;
+  fn id(self) -> Self::Id;
 }
 ```
 
@@ -354,9 +363,8 @@ error: `assert` is only allowed inside a `test` block; elsewhere, `raise` says
        the same thing and says where it goes
 ```
 
-That check runs at `khora build` and `khora run` rather than at `khora check`,
-so a package with an `assert` in application code can look clean and still fail
-to build.
+That check runs at `khora check`, so the editor underlines it as you type.
+`khora build` keeps the same refusal as a backstop, and the two agree.
 
 ## Benchmarks
 

@@ -26,7 +26,7 @@ naming the file for one of them would have meant writing it twice.
 
 The number that comes back from `pclose` and `system` is a *wait status*
 rather than an exit code -- a packed word that has to be taken apart, which is
-what [`exit_status`] is for and what Windows has no need of.
+what `exit_status` is for and what Windows has no need of.
 
 ## On Windows
 

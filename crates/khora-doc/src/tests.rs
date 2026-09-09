@@ -541,3 +541,87 @@ fn an_impl_on_a_foreign_name_is_still_dropped() {
     ));
     assert!(!page.contains("Not ours."), "{page}");
 }
+
+// --- intra-doc references ---------------------------------------------------
+//
+// `std` is written with rustdoc's shortcut references. CommonMark resolves one
+// only against a link reference definition, a generated page has none, and for
+// a long time ninety-one of them reached the site as literal brackets. Two
+// outcomes now and no third: a link, or the code span it already looked like.
+
+#[test]
+fn a_reference_becomes_a_link_to_what_it_names() {
+    let page = markdown(&module(
+        "module m;\n\n/// See [`Thing::twice`], and [`Thing`].\npub fn f() -> Int { 1 }\n\n\
+         /// A thing.\npub type Thing = { n: Int };\n\n\
+         impl Thing {\n  /// Twice.\n  pub fn twice(self) -> Int { 2 }\n}\n",
+    ));
+    assert!(page.contains("See [`Thing::twice`](#twice), and [`Thing`](#thing)."), "{page}");
+}
+
+/// The reason the page is written twice. `std::core` heads four `impl` blocks
+/// `List<A>`, and Astro numbers a repeated heading `-1`, `-2` -- so which
+/// `get` a reference means is decided by where it sits on the finished page,
+/// which is not known until the page is finished.
+#[test]
+fn a_reference_to_a_repeated_heading_carries_its_number() {
+    let page = markdown(&module(
+        "module m;\n\n/// A.\npub type A = { n: Int };\n\n\
+         /// B.\npub type B = { n: Int };\n\n\
+         impl A {\n  /// First.\n  pub fn get(self) -> Int { 1 }\n}\n\n\
+         impl B {\n  /// Second, and see [`A::get`].\n  pub fn get(self) -> Int { 2 }\n}\n",
+    ));
+    assert!(page.contains("[`A::get`](#get)"), "{page}");
+    assert!(page.find("#### get").unwrap() < page.find("Second").unwrap(), "{page}");
+}
+
+/// `exit_status` in `std::process::shell` is `fn` and not `pub fn`: there is
+/// no heading, no anchor and nowhere honest to send the reader. It reads as
+/// code, which is what the sentence around it meant anyway.
+#[test]
+fn a_reference_to_something_the_page_has_not_got_loses_its_brackets() {
+    let page = markdown(&module(
+        "module m;\n\n/// Behind this is [`helper`], and [`Elsewhere::thing`].\n\
+         pub fn f() -> Int { 1 }\n\nfn helper() -> Int { 1 }\n",
+    ));
+    assert!(page.contains("Behind this is `helper`, and `Elsewhere::thing`."), "{page}");
+    assert!(!page.contains("[`"), "nothing dangling should reach the page: {page}");
+}
+
+/// A bare name means the one nearest to hand: `[`slice`]` written inside
+/// `impl String` is `String::slice`, not a free function somewhere else.
+#[test]
+fn a_bare_name_is_looked_for_in_its_own_impl_first() {
+    let page = markdown(&module(
+        "module m;\n\n/// A thing.\npub type Thing = { n: Int };\n\n\
+         /// A free one.\npub fn size() -> Int { 0 }\n\n\
+         impl Thing {\n  /// Its own, see [`size`].\n  pub fn size(self) -> Int { 1 }\n\
+         }\n",
+    ));
+    // `## Methods` comes before `## Functions`, so the method's heading takes
+    // `#size` and the free function's takes `#size-1`. Either way the
+    // reference is inside the method's own block and means the method.
+    assert!(page.contains("[`size`](#size)"), "{page}");
+    assert!(page.find("#### size").unwrap() < page.find("### size").unwrap(), "{page}");
+}
+
+/// A case with nothing said about it gets no heading -- but it is printed in
+/// the declaration under the type's own, which is somewhere true to point.
+#[test]
+fn a_reference_to_an_undocumented_case_goes_to_the_declaration() {
+    let page = markdown(&module(
+        "module m;\n\n/// A thing.\npub type Thing = | Here | Gone;\n\n\
+         /// Answers [`Thing::Gone`].\npub fn f() -> Int { 1 }\n",
+    ));
+    assert!(page.contains("[`Thing::Gone`](#thing)"), "{page}");
+}
+
+/// A `[` in a code sample is code. The same rule the heading shift uses.
+#[test]
+fn a_reference_inside_a_fenced_block_is_left_alone() {
+    let page = markdown(&module(
+        "module m;\n\n/// Text.\n///\n/// ```\n/// let x = m[`k`];\n/// ```\n\
+         pub fn f() -> Int { 1 }\n",
+    ));
+    assert!(page.contains("let x = m[`k`];"), "{page}");
+}

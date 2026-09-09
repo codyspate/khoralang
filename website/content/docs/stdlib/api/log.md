@@ -13,7 +13,7 @@ command-line tool whose output you redirected lost its own error messages
 into the file. Two independent evaluators building ordinary tools reported
 it, and one of them stopped trying to keep the two apart.
 
-[`eprint`] is the primitive that fixes it. Everything else here is the
+[`eprint`](#eprint) is the primitive that fixes it. Everything else here is the
 capability built on top.
 
 ## Why logging is an effect
@@ -39,15 +39,16 @@ that predates the argument rather than the one that refutes it.
 
 ## Levels
 
-Five, in the order everybody already knows: [`Severity::Trace`],
-[`Severity::Debug`], [`Severity::Info`], [`Severity::Warn`], [`Severity::Error`]. Not
+Five, in the order everybody already knows: [`Severity::Trace`](#trace),
+[`Severity::Debug`](#debug), [`Severity::Info`](#info), [`Severity::Warn`](#warn), [`Severity::Error`](#error). Not
 four and not seven, because these are the ones every operator has a filter
 for, and a level nobody filters on is a level nobody sets.
 
-**The handler decides what to drop, not the caller.** `Logger::to_stderr`
-takes a minimum and discards anything below it. A caller that checked the
-level itself would be a caller that has to know the configuration, which is
-the thing the capability exists to keep away from it.
+**The handler decides what to drop, not the caller.** `Log::json`,
+`Log::json_using` and `Log::plain` each take a minimum and discard
+anything below it. A caller that checked the level itself would be a
+caller that has to know the configuration, which is the thing the
+capability exists to keep away from it.
 
 ## The format is JSON
 
@@ -81,13 +82,6 @@ duplicate key that a collector will show them.
 
 ## Correlating with traces
 
-A record carries [`Attribute`]s, the same ones `std::trace` puts on a span,
-so a caller can attach the trace and span it belongs to:
-
-```khora
-log.record(Severity::Warn, "retrying", [text("trace_id", trace_id(span.context))])
-```
-
 **`trace_id` and `span_id` are added by the handler, not by the caller.**
 A line logged inside an `around` carries the ids of the span it was logged
 in, because `std::trace::current` is ambient and per fiber; a line logged
@@ -100,9 +94,19 @@ trace, which was the whole point of the exercise.
  "trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","span_id":"00f067aa0ba902b7"}
 ```
 
+A record carries `Attribute`s, the same ones `std::trace` puts on a span,
+so whatever else is worth correlating on goes on the line beside them:
+
+```khora
+log.record(Severity::Warn, "retrying", [text("account", account.id)])
+```
+
 Attributes named `trace_id` or `span_id` are still written, after these and
 by the same rule as `level` and `message`: silently dropping somebody's
-field is worse than a duplicate key a collector will show them.
+field is worse than a duplicate key a collector will show them. Writing one
+by hand — `text("trace_id", Context::trace_id(span.context))`, and it is a
+method on `Context` rather than a free function — is how a line ends up
+carrying the key twice.
 
 ## Types
 
@@ -242,11 +246,13 @@ pub fn of_name(name: String) -> Option<Severity>
 
 The level `name` spells, or `None`.
 
-**Both cases spelled out, because `std` has no `String::to_lower`.** It
-has `Char::to_lower` and nothing that folds a whole string, so the
-alternative was to write one here and get Unicode case folding wrong in a
-corner of a logging module. A level name is a closed set of six words, and
-listing them is honest about what is actually accepted.
+**Both cases spelled out rather than lower-cased first.**
+`String::lower` exists and is ASCII-only, which is right for these six
+words; what it would also do is accept `wArN` and `Info`, and a level
+name arrives from a manifest or an environment variable where everything
+that writes one writes it in one of two ways. A level name is a closed
+set of six words, and listing the spellings is honest about what is
+actually accepted rather than folding a case nobody sends.
 
 `WARNING` is taken as well as `WARN` because half the world writes it.
 

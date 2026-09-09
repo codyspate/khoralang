@@ -116,6 +116,52 @@ When debug information is available, the trace includes Khora source frames and 
 
 A process-fatal trap is **not** normal structured failure unwinding. Do not depend on regions, `catch`, or application finalizers to recover from it. Resource correctness must come from normal return, typed failure, and cancellation paths; a fatal trap means the process is ending.
 
+## Exit statuses
+
+A trap is one of several ways a program ends without returning from `main`, and
+they are told apart from outside by the status:
+
+| status | what happened |
+| --- | --- |
+| the value | `main` returned an `Int`, truncated to what the platform's status holds. `()` is 0. |
+| 1 | An error reached the entry point and nothing handled it. `main` has nowhere to hand one, so it ends here. |
+| 130 | A **cancellation** reached the entry point. 128 + `SIGINT`, which is what a shell already means by "interrupted". |
+| 134 | A trap, everything above — and the runtime's own fatal errors, such as a cancellation reaching a spawned fiber's root. 128 + `SIGABRT`, and 134 on Windows too rather than a native abort code. |
+| the platform's | The stack ran out: `SIGSEGV` on Unix, which a shell reports as 139; `STATUS_STACK_OVERFLOW` on Windows, which a POSIX shell reports as 127. |
+
+**130 is the one that surprises people**, because a cancellation is not a
+failure and there is no `catch` for it. The common way to reach it is a `join`
+on a fiber that was cancelled: a cancelled fiber has no answer, so the join
+unwinds the joiner along with it, and if the joiner is `main` the program ends
+there. `join_all` joins, so it ends the same way. `Fiber::wait` waits without
+asking for an answer and does not do this — reach for it when what you needed
+was "not before that finishes" rather than the value, and `Fiber::detach` when
+you are no longer waiting at all. The program says all of this on the way out;
+it used to end at 130 having printed nothing, which is what made it a surprise
+rather than a message.
+
+**The runtime's fatal errors exit 134 rather than aborting.** `abort()` leaves
+the status to the platform, and on Windows a POSIX shell reports that as 127 --
+which is also what it reports for a stack overflow. Two unrelated deaths
+arriving as one number is what this table exists to prevent, so the runtime
+picks 134 the way a trap does. Stack exhaustion is the one death that cannot
+pick anything: its handler runs with the stack already gone, so it may not
+allocate, lock, or call `exit`. It reports and lets the platform end the
+process, which is why its row says "the platform's".
+
+A supervisor should treat 130 as a deliberate stop and 134 as a crash. They are
+different outcomes and this is where the difference is visible.
+
+**Read them with `waitpid`, not `$?`, where the difference matters.** 128 + *N*
+is a shell's way of reporting a child *killed by signal N*; a Khora program that
+exits 130 was not signalled, it chose that number. POSIX keeps the two apart --
+`WIFSIGNALED` is true of a real `SIGINT`, and `WIFEXITED` with status 130 is
+true of this -- but a shell collapses both into one `$?`. So a script cannot
+tell "somebody pressed Ctrl-C" from "a cancellation reached the entry point",
+and a supervisor that cares should read the wait status rather than the shell.
+On Windows there are no signals in this sense at all: the numbers above are
+Khora's own, chosen to match what a Unix shell would have said.
+
 ## Containment for exported C calls
 
 A host embedding a Khora shared library may explicitly opt into trap containment at the **export boundary**:

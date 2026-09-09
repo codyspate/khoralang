@@ -247,6 +247,8 @@ the nearest one is a different number, and handing back a different number
 is the failure this whole type exists to prevent. `rounded` goes through
 here, so it stops too.
 
+A negative `scale` is clamped to zero, as it is in every constructor.
+
 #### rounded
 
 ```khora
@@ -257,6 +259,13 @@ The same number at `scale` places, rounded as asked.
 
 The way back from `mul`'s widening scales, and the way a total becomes a
 figure somebody can be invoiced for.
+
+**A negative `scale` is clamped to zero**, the way `of_parts` clamps it,
+because a `Decimal` has no scale below nought to be written at. This is
+the one call where that is likely to catch somebody out: `rounded(-2)`
+reads as *to the nearest hundred* and answers the nearest unit, with no
+`Option` in the signature to say it did something else. Round to the
+nearest hundred by dividing by `100d` at scale zero and multiplying back.
 
 #### negate
 

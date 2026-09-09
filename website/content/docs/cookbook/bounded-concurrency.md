@@ -44,7 +44,7 @@ pub fn main() raises ChildFailed {
 
 `launch_jobs` requires a `Nursery` capability because it adopts children. `bounded_nursery(64, launch_jobs)!` supplies that capability and does not return until all adopted children have finished.
 
-The `!` is there because a nursery raises [`ChildFailed`](/docs/reference/concurrency/#a-child-that-failed) when a child fails: the first failure cancels the siblings and the block's answer does not arrive.
+The `!` is there because a nursery raises [`ChildFailed`](/docs/reference/concurrency/#a-child-that-failed) when a child fails: every child is waited for, the failure is reported, and the block's answer does not arrive. It does not stop the siblings — see [Failure and cancellation](#failure-and-cancellation) below before you rely on it.
 
 The important line is not the `Fiber::spawn`; it is the adoption:
 
@@ -86,6 +86,8 @@ For a known, already-bounded handful of tasks, use an ordinary `nursery` instead
 ## Failure and cancellation
 
 The nursery owns its adopted children. On normal return it waits for them. If the nursery body leaves through failure or cancellation, children that are still running are cancelled and joined before the nursery is released.
+
+**A child's own failure does not stop its siblings today.** A nursery reaps handles oldest-first, so a failure is invisible until every child adopted before it has finished, and by then there is usually nothing left to cancel: measured with twelve 400 ms children, a failure in the last-adopted one cancelled no siblings in 25 runs out of 25. A bounded nursery also goes on admitting and starting brand-new children after a failure has been recorded, so a limit of 64 over 1,000 jobs does not mean the run stops near the failure. What does hold is the other half — every child is waited for and `ChildFailed` is reported, never lost. Where a job is expensive, holds a connection, or has an effect outside the process, have the job check a `Shared` flag itself rather than expecting the group to collapse. [Known limitations](/docs/limitations/#what-a-nursery-actually-does) has the measurements.
 
 That ownership rule is why bounded concurrency remains structured rather than becoming a semaphore wrapped around detached tasks.
 

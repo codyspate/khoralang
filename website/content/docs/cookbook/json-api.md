@@ -155,3 +155,6 @@ explicitly.
 
 For the complete JSON surface, see the [JSON API reference](/docs/stdlib/api/json/).
 For HTTP routing and request data, see [HTTP service](/docs/cookbook/http-service/).
+For state a handler keeps between requests — and why the answer is
+`Shared<Dict<..>>` rather than the `Map` a `Request` hands you — see
+[State a handler shares between requests](/docs/cookbook/http-service/#state-a-handler-shares-between-requests).

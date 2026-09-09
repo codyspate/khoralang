@@ -40,7 +40,7 @@ by `key("http_host", ..)` replaces the field's name in that scheme and
 nothing else. An optional nested record is present when any of its
 variables is.
 
-Every variable a shape needs is [`variables`], which is the question a
+Every variable a shape needs is [`variables`](#variables), which is the question a
 deployment asks and a program should not have to be started to answer.
 
 ## Why every value arrives `Untyped`
@@ -54,7 +54,7 @@ Strictness is a fact about the source, and this source has none to offer.
 A variable the manifest does not grant is a different thing from one
 nobody set, and the fix is a line in `khora.toml` rather than a line in a
 deployment script. `Env::variable` raises for it; this catches the raise
-into `Raw::Denied`, which decodes as `Problem::Denied`, and [`report`]
+into `Raw::Denied`, which decodes as `Problem::Denied`, and [`report`](#report)
 names the file.
 
 ## Functions

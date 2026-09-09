@@ -73,11 +73,15 @@ pub type Nothing = {};
 let nothing: Nothing = {};
 ```
 
-Everywhere else it is refused, with a message whose list of fields is empty
-because the literal has none:
+Everywhere else it is refused, and the message says so and says what to write
+instead:
 
-```
-error: no record type has exactly the fields
+```text
+error: `{}` is an empty record literal, and no record type here is declared with no fields. Write `()` for a block that does nothing
+ --> src/main.kh:9:21
+  |
+9 |     Option::None => {},
+  |                     ^^
 ```
 
 The place this bites is a `match` arm that should do nothing. `=>` is followed

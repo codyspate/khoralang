@@ -117,8 +117,8 @@ fn the_century_rule_is_the_one_people_get_wrong() {
   print(is_leap(2000).show());
   print(is_leap(2024).show());
   print(is_leap(2026).show());
-  print(Int::to_string(days_in_month(1900, 2)));
-  print(Int::to_string(days_in_month(2000, 2)));"#,
+  print(Int::to_string(days_in_month(1900, 2).unwrap_or(0)));
+  print(Int::to_string(days_in_month(2000, 2).unwrap_or(0)));"#,
     );
     assert_eq!(out, "false\ntrue\ntrue\nfalse\n28\n29\n");
 }
@@ -198,7 +198,7 @@ fn adding_days_crosses_every_boundary() {
 fn an_offset_is_a_number_somebody_else_worked_out() {
     let out = run(
         "time_offset",
-        r#"  let india = Offset::of_minutes(330);
+        r#"  let india = Offset::of_minutes(330).unwrap_or(Offset::utc());
   let millis = 1_600_000_000_000;
   print(DateTime::of_unix_millis(millis).show());
   print(DateTime::at_offset(millis, india).show());

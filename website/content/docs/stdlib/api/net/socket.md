@@ -61,7 +61,11 @@ A failed call returns -1, and a handle is never negative.
 pub fn start() -> Bool
 ```
 
-Nothing to start. Present so that a caller reads the same on all three targets.
+Nothing to start *on Linux and macOS*, where this is `true` and no more.
+
+It is here because the Windows file's `start` is not a no-op: Winsock has
+to be told which version of itself to be, once per process, and a caller
+that skipped this would work everywhere except there. Call it anyway.
 
 ### listen_on
 
@@ -69,7 +73,7 @@ Nothing to start. Present so that a caller reads the same on all three targets.
 pub fn listen_on(port: Int) -> Int
 ```
 
-A socket listening on `port`, or [`invalid_handle`].
+A socket listening on `port`, or [`invalid_handle`](#invalid_handle).
 
 ### accept_on
 
@@ -77,7 +81,7 @@ A socket listening on `port`, or [`invalid_handle`].
 pub fn accept_on(server: Int) -> Int
 ```
 
-Waits for a connection. [`invalid_handle`] if the wait failed.
+Waits for a connection. [`invalid_handle`](#invalid_handle) if the wait failed.
 
 ### set_receive_timeout
 
@@ -121,7 +125,7 @@ Writes `text`, and says how many bytes went. Negative if the write failed.
 pub fn connect_to(host: String, port: Int) -> Int
 ```
 
-Opens a connection to `host` on `port`, or [`invalid_handle`].
+Opens a connection to `host` on `port`, or [`invalid_handle`](#invalid_handle).
 
 **The first thing here that starts a conversation.** Everything else in this
 module grew from serving: `listen_on`, `accept_on`, and nothing that dials.
@@ -146,7 +150,7 @@ pub fn transmit_bytes(connection: Int, bytes: Array<U8>) -> Int
 
 Writes bytes, and says how many went. Negative if the write failed.
 
-[`transmit`] takes a `String`, which is right for a protocol made of text
+[`transmit`](#transmit) takes a `String`, which is right for a protocol made of text
 and wrong for one made of bytes: a wire protocol frames its messages with a
 length nobody wrote as characters. Postgres is the first caller, and a
 `String` would have meant deciding what its bytes mean on the way through.

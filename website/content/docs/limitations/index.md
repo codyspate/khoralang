@@ -91,6 +91,36 @@ server rather than of the `Router` type, so it does not appear in the generated
 requests](/docs/cookbook/http-service/) is where it is discussed. Because of
 the off-by-one below, the peak actually observed is 257.
 
+## Inbound connections are not permissioned
+
+**`[permissions] network` governs outbound connections only.** The grant list is
+consulted in exactly one place in the standard library — inside
+`HttpClient::send`, after the URL is parsed and before anything is dialled — and
+what it decides is whether that host may be reached. Nothing on the server side
+consults it: `Router::listen`, `Router::listen_quietly`, `Router::listen_tls`
+and the `listen_on` under them bind and serve without asking. A program with
+`default = "deny"` and `network = []` opens whatever port it is given and
+answers requests on it.
+
+So do not read a `network` grant as an authorisation to listen, and do not read
+its absence as a refusal to. `network = ["127.0.0.1:8787"]` written to allow a
+server to bind 8787 does nothing at all — it neither permits the bind, which
+needed no permission, nor restricts it. The mistake is easy to make and leaves
+no trace: the program works, and the line that was supposed to be holding it
+back is not.
+
+The reason it is this way rather than fixed is that the two directions do not
+share a vocabulary. `network` is a list of hosts a program may *reach*. A port
+it may *bind* is not a host it reaches, so extending the same list to cover
+listening would produce a control whose meaning could not be written down —
+`api.example.com:443` would have to mean one thing as a destination and another
+as a local port, and a permission that cannot be stated is a permission nobody
+can audit. Naming inbound authority properly needs a grant of its own, and what
+that grant ranges over — ports, interfaces, both — is an open design question
+rather than a fix waiting to be typed. Until there is one, a program's ability
+to listen is bounded by the operating system and by whatever runs it, not by its
+manifest.
+
 ## The fiber scheduler
 
 A fiber is an operating-system thread. The M:N scheduler — stackful coroutines on a worker pool — is built and is opt-in with `KHORA_FIBERS=scheduler`.

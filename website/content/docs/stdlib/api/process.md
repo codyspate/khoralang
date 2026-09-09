@@ -65,17 +65,20 @@ Coarse, for the reason `std::fs`'s `IoError` is: `system` and `popen` report
 failure as one number with no story attached, and inventing detail that the
 C library never supplied would be inventing it.
 
-`NotStarted` is the shell itself refusing to run — *not* "the command was
-not found", which is a shell that started perfectly well and then exited
-127. `NotText` is a command that ran and printed bytes that are not UTF-8,
+`NotStarted` is the child never becoming a process at all — *not* "the
+command was not found", which under [`Process::shell`](#shell) is a shell that
+started perfectly well and then exited 127. There is no shell in the way of
+[`Process::run`](#run) and [`Process::output`](#output): they reach `posix_spawn` or
+`CreateProcess`, and for those two this is the spawn itself failing.
+`NotText` is a command that ran and printed bytes that are not UTF-8,
 so there is no `String` to hand back; only the two operations that keep the
-output -- [`Process::output`] and [`Process::shell`] -- can raise it, and
-[`Process::run`], which keeps none, cannot. `Failed` is raised by
-[`checked_output`] alone.
+output -- [`Process::output`](#output) and [`Process::shell`](#shell) -- can raise it, and
+[`Process::run`](#run), which keeps none, cannot. `Failed` is raised by
+[`checked_output`](#checked_output) alone.
 
 Note what is *not* here: a command that ran and exited non-zero. It ran.
 Its status is the answer, and a caller who wanted that to be a failure says
-so by calling [`checked_output`].
+so by calling [`checked_output`](#checked_output).
 
 #### Denied
 
@@ -86,7 +89,7 @@ so by calling [`checked_output`].
 The manifest does not grant this program.
 
 **A fourth case rather than `NotStarted`**, for the reason
-[`IoError::Denied`] is a case rather than a `Failed`: they want different
+`IoError::Denied` is a case rather than a `Failed`: they want different
 things from whoever reads the message. `NotStarted` is a name the machine
 could not find, and the reader goes looking at their `PATH`; `Denied` is
 `khora.toml`, and the fix is a line in a file they own.
@@ -143,7 +146,7 @@ pub effect Process {
 
 Permission to start another program.
 
-The reason this is an effect and not two free functions is the reason every
+The reason this is an effect and not three free functions is the reason every
 other capability in `std` is one, and it is sharper here than most: "this
 library may run arbitrary commands on your machine" is close to the largest
 thing a dependency can ask for, and a `with { process: Process }` in a
