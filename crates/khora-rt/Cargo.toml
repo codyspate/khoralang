@@ -24,6 +24,19 @@ cc = "1"
 # choice: `ring` cannot build for wasm at all, and `corosensei` has assembly
 # for three architectures of which wasm is not one.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
+# **The allocator, bundled rather than borrowed from the platform.**
+#
+# Every Perceus object is one allocation, so `khora_alloc` is the hottest path
+# in the runtime and it went to whatever `malloc` the platform had. That is a
+# 3.6x throughput difference between glibc and musl on `bench/service` at 64
+# connections, measured -- glibc gives each thread its own arena and musl's
+# `mallocng` does not, so the gap widens with the fiber count. A language whose
+# performance depends on which Linux the user chose is not one number, it is
+# two, and only one of them ever gets published.
+#
+# `default-features = false` leaves out the secure/debug modes; what is wanted
+# here is the allocator itself. Roadmap 16.
+mimalloc = { version = "0.1", default-features = false }
 # TLS is bound rather than written — `docs/design/ecosystem.md`. `ring` rather
 # than the default provider because it needs no cmake and no assembler, so a
 # Khora checkout builds with a Rust toolchain and clang and nothing else.

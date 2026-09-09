@@ -124,6 +124,21 @@
 // runtime module with nothing to call it is dead weight in an artifact with a
 // size limit. What is left is what the eight `std` files a wasm build selects
 // reach — the heap, strings, arrays, decimals, randomness and the traps.
+/// The allocator every generated program uses.
+///
+/// **Bundled, so that the language performs the same on every Linux.** Rust's
+/// default is the system allocator, which is libc's -- and `khora_alloc` is
+/// called once per object by a runtime whose whole memory discipline is
+/// reference counting, so libc's `malloc` *is* the hot path. glibc hands each
+/// thread its own arena; musl's `mallocng` does not, and the difference is
+/// 3.6x on `bench/service` at 64 connections, widening with the fiber count.
+///
+/// `wasm` keeps the default: there are no threads there to contend, and the
+/// split follows the one every other OS-dependent piece of this crate uses.
+#[cfg(not(target_family = "wasm"))]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[cfg(not(target_family = "wasm"))]
 mod args;
 mod array;
