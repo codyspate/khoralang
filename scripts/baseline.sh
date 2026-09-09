@@ -49,6 +49,22 @@ step() {
     printf '\n=== %s\n' "$1"
 }
 
+step 'the runtime archive the suite links against'
+# **The gate could not run on a clean clone, and said the opposite.** The note
+# below promises that somebody who has just cloned this can run it without
+# installing anything. They could not: dozens of `khora-cli` tests shell out to
+# `khora build`, which needs `khora_rt.lib` on disk, and nothing had put one
+# there. `cargo nextest run --workspace` builds *test targets and what they
+# depend on*, and no test binary depends on the staticlib -- `khora-rt` is
+# built as an rlib and its `staticlib` half is never emitted. On a machine that
+# had built before, the file was already sitting in `target/` and the step
+# passed, which is why this survived: the gate only worked once you no longer
+# needed it to.
+#
+# 39 failures in one run, every one of them `the Khora runtime archive
+# (khora_rt.lib) was not found for this target`.
+cargo build -p khora-rt
+
 step 'the native suite'
 # `cargo nextest` when it is installed, and `cargo test` when it is not.
 #
@@ -104,6 +120,20 @@ step 'the published grammar matches the lexer'
 # -- so it is the artefact people are held to, and nothing checked it. It had
 # named `export` as the visibility keyword, which the lexer does not have.
 sh "$root/scripts/check-grammar.sh"
+
+step 'two implementations of one contract still agree'
+# **The class of defect this repository actually produces.** Seven were found
+# in one day and every one was the same shape: two components, each correct on
+# its own, that had stopped saying the same thing. `std::permissions::granted`
+# against `khora_manifest::granted_path` diverged twice -- over a `..` segment
+# and over a `.` one -- and both were found by somebody reading the two files
+# side by side, which is not a thing that happens on a schedule.
+#
+# The tests run inside the workspace suite too; they are named here because a
+# failure among fifteen hundred others does not say "two implementations of one
+# contract have parted company", and that sentence is the point of them.
+# `scripts/check-agreement.sh` lists the pairs and says how to add one.
+sh "$root/scripts/check-agreement.sh"
 
 step 'and the build with no backend'
 # **The configuration nothing was checking.** Every step above passes

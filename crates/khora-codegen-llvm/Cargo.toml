@@ -46,6 +46,10 @@ inkwell = { version = "0.10", default-features = false, features = [
 
 [dev-dependencies]
 khora-pkg.workspace = true
+# `tests/agreement.rs` drives `khora_manifest`'s permission matchers against
+# the same cases it drives `std/permissions.kh` with. The comparison is the
+# test, so the compiler's matcher has to be linked into it.
+khora-manifest.workspace = true
 tempfile = "3"
 
 [[test]]

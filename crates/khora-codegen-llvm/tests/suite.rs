@@ -25,6 +25,7 @@
 
 mod harness;
 
+mod agreement;
 mod arithmetic;
 mod arrays;
 mod backtick;
