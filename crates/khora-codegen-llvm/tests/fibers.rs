@@ -17,6 +17,9 @@ use khora_db::{KhoraDatabase, SourceFile, SourceRoot};
 
 struct Ran {
     stdout: String,
+    /// What the runtime said on its way out, for the tests that are about a
+    /// message rather than only about a status.
+    stderr: String,
     code: Option<i32>,
 }
 
@@ -39,6 +42,7 @@ fn run(name: &str, source: &str) -> Ran {
     let output = Command::new(&exe).output().expect("the program should run");
     Ran {
         stdout: String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+        stderr: String::from_utf8_lossy(&output.stderr).replace("\r\n", "\n"),
         code: output.status.code(),
     }
 }
@@ -396,6 +400,175 @@ fn main() -> Int {{
     );
     assert_eq!(ran.stdout, "1\n2\n");
     assert_eq!(ran.code, Some(0));
+}
+
+// --- a total `catch` in a frame with no channel ----------------------------
+//
+// These four are the shape the runtime's `khora_cancel_stop` comment used to
+// blame on `Router::listen`. It is not a serving bug and has no socket in it:
+// it is a *total* `catch` -- one naming every case in the row, or a `_` arm --
+// inside a function whose own `raises` row is empty. That function receives a
+// cancellation it cannot handle, because no arm can name one, and cannot pass
+// on, because it has no tagged return to pass it on with.
+//
+// `std::net`'s `Router::serve_connection` is written exactly that way, which is
+// the only reason a server was where this showed up.
+
+/// The frame absorbs it, and the fiber stops. Nothing after the `catch` runs,
+/// every finalizer between the mark and here does, and the process lives.
+///
+/// **This aborted with status 134 before**, printing a paragraph about
+/// draining a listener at a program with no listener in it.
+#[test]
+fn a_fiber_that_catches_every_case_is_not_a_hole() {
+    let ran = run(
+        "fiber_total_catch",
+        &format!(
+            "{CANCELLABLE}
+// The cancellation point is the `!` *inside* here: `worker` cannot raise, so
+// nothing at its own call sites checks the flag. This is the rule working --
+// a cancellation point is a `!` in a function that can raise.
+fn step() -> Int raises Oops {{ ok(1)! }}
+
+fn worker() -> () {{
+  let region = Region::open();
+  Region::defer(region, fn () => print(99));
+  khora_cancel();
+  step()! catch {{
+    Oops::Bad => 0,
+  }};
+  print(2);
+}}
+
+fn main() -> Int {{
+  let f = Fiber::spawn(fn () => worker());
+  Fiber::wait(f);
+  print(3);
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout, "99\n3\n",
+        "the finalizer ran, the tail after the `catch` did not, and `main` did"
+    );
+    assert_eq!(ran.code, Some(0), "and the process was not taken down");
+}
+
+/// The same frame, reached by joining a child that was cancelled rather than by
+/// this fiber's own flag. `Fiber::join` on a cancelled fiber unwinds its
+/// joiner -- there is no answer to hand back -- and here the joiner is a fiber
+/// whose thunk cannot fail.
+///
+/// **This is the reported reproducer**, and it aborted with 134.
+#[test]
+fn a_fiber_that_joins_a_child_it_cancelled_stops_only_itself() {
+    let ran = run(
+        "fiber_join_cancelled_nested",
+        &format!(
+            "{CANCELLABLE}
+fn child() -> Int raises Oops {{
+  khora_cancel();
+  ok(1)!;
+  2
+}}
+
+fn parent() -> Int {{
+  let c = Fiber::spawn(fn () => child()!);
+  let n = Fiber::join(c)! catch {{
+    Oops::Bad => 0 - 1,
+  }};
+  print(9);
+  n
+}}
+
+fn main() -> Int {{
+  let f = Fiber::spawn(fn () => parent());
+  Fiber::wait(f);
+  print(3);
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "3\n", "the joiner stopped where the join was");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// And the entry point's outcome is unchanged: 130, which is what a shell
+/// means by interrupted and what `reference/traps.md` tabulates. The fiber
+/// case above is the only thing that moved.
+#[test]
+fn a_total_catch_at_the_entry_point_still_ends_the_program() {
+    let ran = run(
+        "cancel_total_catch_main",
+        &format!(
+            "{CANCELLABLE}
+fn step() -> Int raises Oops {{ ok(1)! }}
+
+fn main() -> Int {{
+  khora_cancel();
+  step()! catch {{
+    Oops::Bad => 0,
+  }};
+  print(2);
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "", "nothing after the `catch` ran");
+    assert_eq!(ran.code, Some(130));
+}
+
+/// The one shape left that cannot absorb one, and it says which.
+///
+/// The absorbing frame returns a zero of its own return type, and a Khora
+/// pointer has no zero that is a value: a null is not a live object and an
+/// infallible caller is entitled to read through what it is handed. So a
+/// boxed answer still stops the process -- and the message names *that*,
+/// rather than talking about servers.
+#[test]
+fn a_boxed_answer_cannot_absorb_a_cancellation_and_says_so() {
+    let ran = run(
+        "fiber_total_catch_boxed",
+        &format!(
+            "{CANCELLABLE}
+pub type Answer = {{ n: Int }};
+
+fn boxed() -> Answer raises Oops {{
+  khora_cancel();
+  ok(1)!;
+  {{ n: 1 }}
+}}
+
+fn worker() -> Answer {{
+  boxed()! catch {{
+    Oops::Bad => {{ n: 2 }},
+  }}
+}}
+
+fn main() -> Int {{
+  let f = Fiber::spawn(fn () => worker());
+  Fiber::wait(f);
+  print(3);
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.code, Some(134));
+    assert!(
+        ran.stderr.contains("cannot hand back a value"),
+        "the message names the frame it is about: {:?}",
+        ran.stderr
+    );
+    assert!(
+        !ran.stderr.contains("Router::listen"),
+        "and not a shape it is not: {:?}",
+        ran.stderr
+    );
 }
 
 // --- nurseries -------------------------------------------------------------

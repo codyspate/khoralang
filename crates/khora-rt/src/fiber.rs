@@ -400,6 +400,9 @@ pub unsafe extern "C" fn khora_fiber_spawn(
     let done = Arc::new(Done::default());
     let closes = done.clone();
     let child = fiber.clone();
+    // A second reference, because `enter` takes the first and the answer is
+    // decided after the thunk has returned. See `absorbed` below.
+    let stopping = fiber.clone();
     let legacy = Arc::new(Legacy {
         outcome: Mutex::new(None),
         boxed,
@@ -438,6 +441,47 @@ pub unsafe extern "C" fn khora_fiber_spawn(
                 // guessing at the callee's return type is how the wrong
                 // register gets read.
                 (None, None) => fatal("a fiber was spawned with no way to call its thunk"),
+            };
+            // **A cancellation the thunk absorbed is the fiber's answer**, and
+            // the word it handed back is not.
+            //
+            // An infallible thunk has no channel to say it was stopped on, so
+            // a total `catch` inside one releases its frame, calls
+            // `khora_cancel_absorb` and returns a zero -- see that function
+            // for why a zero and not something else. The zero arrives here as
+            // an ordinary `which == 0`, which would make the handle report a
+            // *value*: `join` would hand back nought, and a fiber that gave up
+            // half way would be indistinguishable from one that finished. So
+            // the record is read here, where the thunk has returned and
+            // nothing else has looked at the answer yet.
+            //
+            // The word is released first where it is a pointer. A thunk whose
+            // inner frame absorbed and whose outer frames carried on may hand
+            // back a perfectly real object; replacing it without letting go of
+            // it would leak one per cancelled fiber, which on a server is the
+            // shape of leak with no allocation site to blame.
+            //
+            // **Except for an infallible thunk with a boxed answer**, which is
+            // the one shape where this would do harm. `Fiber<A, {}>::join`
+            // emits no branch on `which` -- there is no row for it to unwind
+            // on, and the code generator says so in `fiber_intrinsic` -- so it
+            // reads the word whatever the tag is. Storing a cancellation there
+            // would hand a joiner a null typed as `A`. So that fiber keeps the
+            // answer it produced: the handle cannot report a cancellation
+            // because the *type* has nowhere to report one, which is the same
+            // rule as everywhere else here rather than a new exception to it.
+            let announce = !(plain.is_some() && boxed);
+            let outcome = if stopping.has_absorbed() && announce {
+                if boxed && outcome.which == 0 && outcome.payload != 0 {
+                    // SAFETY (the enclosing block's): the caller promised
+                    // `boxed` says truthfully whether a successful answer is a
+                    // Khora pointer, and this fiber owns the reference the
+                    // thunk just returned.
+                    khora_drop(outcome.payload as *mut u8, value_glue);
+                }
+                Tagged { which: CANCELLED_WHICH, payload: 0 }
+            } else {
+                outcome
             };
             // **Stored before the closure is released**, because releasing it
             // may run arbitrary drop routines and a joiner woken in the middle

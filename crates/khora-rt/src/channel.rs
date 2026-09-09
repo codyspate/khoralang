@@ -212,8 +212,13 @@ fn park_until_moved(moved: &Arc<Condvar>, state: std::sync::MutexGuard<'_, Queue
 }
 
 /// Whether this fiber has been asked to stop and may act on it.
+///
+/// The same predicate `khora_cancelled` answers with, and deliberately the
+/// same *call* rather than the same expression written twice: a blocking
+/// primitive that gives up on a cancellation a cancellation point would ignore
+/// hands back "the channel is closed" for a channel that is open.
 fn stopping() -> bool {
-    crate::current::current(|fiber| fiber.is_cancelled() && !fiber.is_shielded())
+    crate::current::current(|fiber| fiber.stops_here())
 }
 
 /// Sends a value, waiting while the channel is full.

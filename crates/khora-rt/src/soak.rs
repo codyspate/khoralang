@@ -615,6 +615,14 @@ impl Drop for OneCpu {
         }
         #[cfg(not(any(windows, target_os = "linux")))]
         {
+            // `Restore` is `()` on this platform -- there is no affinity to put
+            // back, and `pin()` answers `Some(())` only so that `pinned()` has
+            // something to report. This binding is what keeps `previous` used
+            // here, and it is a unit value on this platform alone, so `-D
+            // warnings` fails on macOS and passes on the other two. Named at
+            // the statement rather than the crate, because a unit `let _`
+            // anywhere else in the runtime is still worth hearing about.
+            #[allow(clippy::let_unit_value)]
             let _ = previous;
         }
     }

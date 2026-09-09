@@ -86,11 +86,28 @@ pub(crate) struct Fiber {
     /// Whether this is a spawned fiber rather than the program's own
     /// computation.
     ///
-    /// Only [`crate::cancel::khora_cancel_stop`] asks, and only to tell a
-    /// program that has nowhere left to unwind to from a *fiber* that has
-    /// nowhere left to unwind to. The first is an outcome; the second is a
-    /// hole.
+    /// Asked by [`crate::cancel::khora_cancel_absorb`] and
+    /// [`crate::cancel::khora_cancel_stop`], to tell a program that has
+    /// nowhere left to unwind to from a *fiber* that has nowhere left to
+    /// unwind to. The first is an outcome — the entry point ends at 130 — and
+    /// the second stops one fiber and leaves the process running.
     spawned: bool,
+    /// Whether a frame on this fiber gave up on a cancellation it could not
+    /// carry.
+    ///
+    /// Set by [`crate::cancel::khora_cancel_absorb`] and read once, by the
+    /// body in [`crate::fiber::khora_fiber_spawn`], to decide what the fiber
+    /// *answered*. A fiber whose root absorbed a cancellation did not produce
+    /// a value, whatever word its infallible signature made it hand back, so
+    /// the handle reports a cancellation rather than that word.
+    ///
+    /// Separate from `cancelled`, and the difference is the whole point.
+    /// `cancelled` is what somebody *asked* for; this is what a frame did
+    /// about it. A fiber can be cancelled and still finish normally — that is
+    /// the whole of "a cancellation point is a `!`" — and a fiber can absorb a
+    /// cancellation `Fiber::join` handed it without ever having been cancelled
+    /// itself.
+    absorbed: AtomicUsize,
     /// Where this fiber is in the sleep/wake protocol. [`crate::wait`].
     wait: crate::wait::Wait,
     /// What this fiber is parked on, while it is parked off the scheduler.
@@ -130,6 +147,7 @@ impl Fiber {
             #[cfg(any(debug_assertions, feature = "fiber-audit"))]
             resuming: std::sync::atomic::AtomicBool::new(false),
             spawned: false,
+            absorbed: AtomicUsize::new(0),
             wait: crate::wait::Wait::default(),
             parked_on: Mutex::new(None),
             span: Mutex::new(SpanContext::default()),
@@ -158,6 +176,7 @@ impl Fiber {
             #[cfg(any(debug_assertions, feature = "fiber-audit"))]
             resuming: std::sync::atomic::AtomicBool::new(false),
             spawned: true,
+            absorbed: AtomicUsize::new(0),
             wait: crate::wait::Wait::default(),
             parked_on: Mutex::new(None),
             span: Mutex::new(inherited),
@@ -227,6 +246,31 @@ impl Fiber {
 
     pub(crate) fn uncancel(&self) {
         self.cancelled.store(0, COUNTER_ORDER);
+    }
+
+    /// Records that a frame gave up on a cancellation it could not carry.
+    ///
+    /// Idempotent, and deliberately not cleared: the fiber is on its way out
+    /// and the only reader is the one that decides what it answered.
+    pub(crate) fn absorb(&self) {
+        self.absorbed.store(1, COUNTER_ORDER);
+    }
+
+    /// Whether [`Fiber::absorb`] has been called on this fiber.
+    pub(crate) fn has_absorbed(&self) -> bool {
+        self.absorbed.load(COUNTER_ORDER) != 0
+    }
+
+    /// Whether a cancellation is pending *and may be acted on here*.
+    ///
+    /// The one predicate behind [`crate::cancel::khora_cancelled`] and behind
+    /// the check `crate::channel` makes before it gives up on a parked
+    /// receive. Two readers of one rule rather than two copies of it: they
+    /// disagreed once already, and a blocking primitive that stops on a
+    /// cancellation a cancellation point would ignore hands back "the channel
+    /// is closed" for a channel that is open.
+    pub(crate) fn stops_here(&self) -> bool {
+        self.is_cancelled() && !self.is_shielded()
     }
 
     /// Whether this fiber is running cleanup that must not be interrupted.

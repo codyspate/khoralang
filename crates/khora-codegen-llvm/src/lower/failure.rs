@@ -380,9 +380,27 @@ impl<'ctx> Lower<'_, 'ctx> {
             // total `catch` still emits its fall-through, and that is the only
             // way to get here. For a *cancellation* it is reachable, because a
             // cancellation is not in any row and so nothing the checker looked
-            // at ruled it out. There is no frame between here and the entry
-            // point that could carry it, so the entry point's outcome is
-            // produced here instead. `docs/design/effect-runtime.md` §6.
+            // at ruled it out.
+            //
+            // **This frame absorbs it, where it can.** It is the only frame
+            // that can: nothing between here and the fiber's root has a
+            // channel either, or this one would have found it. So the frame is
+            // released — the regions among it, so their finalizers run, which
+            // is what a cancellation is *for* — and then it returns, the way
+            // the `raises` arm below returns a tag.
+            //
+            // What it returns is a zero, and that is the whole of the rule and
+            // its limit. A `()` promises nothing and a scalar zero is a value;
+            // a *pointer* zero is a null, and an infallible caller is entitled
+            // to read through what it is handed. So a pointer return goes to
+            // `khora_cancel_stop`, which says so and stops, and everything
+            // else goes to `khora_cancel_absorb`, which records that this
+            // fiber gave up and lets the `ret` below happen.
+            //
+            // On the program's own computation neither returns: both end it at
+            // 130, which is the outcome `docs/design/effect-runtime.md` §6
+            // describes and `reference/traps.md` tabulates. The `ret` after
+            // the call is dead there and load-bearing on a fiber.
             None if !self.raises => {
                 let cancelled = self.be.ctx.i32_type().const_int(runtime::CANCELLED_WHICH, false);
                 let is_cancel = self
@@ -398,9 +416,32 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .expect("branching on the tag");
 
                 self.at(stop);
-                let cancel_stop = self.be.rt.cancel_stop;
-                self.be.builder.build_call(cancel_stop, &[], "").expect("stopping");
-                self.be.builder.build_unreachable().expect("sealing after a stop");
+                match self.zero_answer() {
+                    Some(zero) => {
+                        self.unwind_to(0);
+                        let absorb = self.be.rt.cancel_absorb;
+                        self.be.builder.build_call(absorb, &[], "").expect("absorbing");
+                        match zero {
+                            Some(value) => {
+                                self.be
+                                    .builder
+                                    .build_return(Some(&value))
+                                    .expect("returning a zero for a cancelled frame");
+                            }
+                            None => {
+                                self.be
+                                    .builder
+                                    .build_return(None)
+                                    .expect("returning unit for a cancelled frame");
+                            }
+                        }
+                    }
+                    None => {
+                        let cancel_stop = self.be.rt.cancel_stop;
+                        self.be.builder.build_call(cancel_stop, &[], "").expect("stopping");
+                        self.be.builder.build_unreachable().expect("sealing after a stop");
+                    }
+                }
 
                 self.at(sealed);
                 self.be.builder.build_unreachable().expect("sealing an unhandled error");
@@ -410,6 +451,32 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let error = self.be.word_to_value(word, &Type::Str);
                 self.return_tagged(which, error);
             }
+        }
+    }
+
+    /// The zero this function could return in place of an answer it will never
+    /// compute, if there is one.
+    ///
+    /// `None` means there is not, which is the pointer case: every Khora
+    /// pointer is a live reference-counted object and a null is not one, so a
+    /// frame with a pointer return type has no value to hand back and the
+    /// cancellation it is holding cannot be absorbed here. `Some(None)` is a
+    /// `void` return — `()`, which promises nothing and so is never a
+    /// fabrication. `Some(Some(zero))` is a scalar, where the zero is a value
+    /// of the type even though it is not the one the caller was owed.
+    ///
+    /// Read off the emitted function rather than off [`Self::ret`], because
+    /// the calling convention is what this has to agree with: `()` is a word
+    /// everywhere in the type system and `void` at the ABI, and a lifted
+    /// lambda's return type is its own rather than its enclosing function's.
+    fn zero_answer(&self) -> Option<Option<BasicValueEnum<'ctx>>> {
+        match self.function.get_type().get_return_type() {
+            None => Some(None),
+            Some(BasicTypeEnum::IntType(int)) => Some(Some(int.const_zero().into())),
+            Some(BasicTypeEnum::FloatType(float)) => Some(Some(float.const_zero().into())),
+            // A pointer, or an aggregate nothing here builds: no zero that is
+            // a value.
+            Some(_) => None,
         }
     }
 

@@ -301,7 +301,20 @@ fn object_layout(field_bytes: u32) -> Layout {
 /// ABI boundary, which has no frames to unwind through.
 fn fatal(message: &str) -> ! {
     let _ = writeln!(std::io::stderr(), "khora runtime: {message}");
-    std::process::abort()
+    let _ = std::io::stderr().flush();
+    // **134, and not `abort()`.** `abort()` leaves the status to the platform,
+    // and on Windows what a POSIX shell then reports is 127 -- which is also
+    // what it reports for a stack overflow, the one failure that genuinely
+    // cannot pick its own status because the handler runs with no stack to
+    // call `exit` from. Two unrelated deaths arriving as one number defeats
+    // the table in `docs/reference/traps.md`, whose whole purpose is telling
+    // them apart from outside.
+    //
+    // So this normalizes the way `trap` already does, for the reason that
+    // module gives: 134 on Windows too rather than a native abort code. A
+    // supervisor reading 134 learns "it crashed and said why", which is true
+    // of a trap and of every message that reaches here.
+    std::process::exit(134)
 }
 
 /// A tagged return: which channel, and the payload.

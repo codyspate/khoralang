@@ -14,11 +14,17 @@
 //! and they check it where the outside world can see it.
 //!
 //! What they cannot do is cancel `Router::listen`'s own fiber, because nothing
-//! in Khora can: `khora_cancel` sets the flag on the *running* fiber and there
-//! is no `Fiber::cancel`. Nor can a handler usefully cancel itself — the
-//! cancellation reaches the connection fiber's root, which the runtime still
-//! declines, and the process stops. So the call sites are covered by review and
-//! the mechanism they rest on is covered here.
+//! in *this* file can: `khora_cancel` sets the flag on the running fiber and
+//! these two programs hold no handle to the listener.
+//!
+//! **A handler cancelling itself is a third test, and it used to be a hole.**
+//! The comment here said the cancellation reached the connection fiber's root,
+//! "which the runtime still declines, and the process stops" — which was true,
+//! and was the whole of the release blocker: one cancelled request took the
+//! server down with status 134. `Router::serve_connection` catches `_` and has
+//! no `raises` row, so it is the frame with nowhere to send one. It absorbs
+//! now, and `a_handler_that_cancels_itself_stops_its_connection_and_not_the_server`
+//! is the proof.
 //!
 //! Both would have failed before the fix, for the reason the fix exists:
 //! `std::net::socket` registered no release at all, so a socket was closed only
@@ -42,6 +48,8 @@ use khora_db::{KhoraDatabase, SourceFile, SourceRoot};
 /// Not 18732 — `http.rs` binds that, and the two run at once.
 const LISTENER_PORT: u16 = 18961;
 const CONNECTION_PORT: u16 = 18962;
+/// And a third, for the server that keeps running after a cancelled request.
+const HANDLER_PORT: u16 = 18963;
 
 /// A test that hangs is worse than one that fails: the failure at least says
 /// what happened.
@@ -267,4 +275,127 @@ pub fn main() -> Int {{
         took < std::time::Duration::from_secs(20),
         "closing a connection whose peer is open and silent took {took:?}, which is          `docs/errata.md` 78 coming back"
     );
+}
+
+/// **A cancellation reaching a connection fiber's root stops that connection,
+/// not the server.**
+///
+/// This is the shape `khora_cancel_stop`'s comment used to name, and it named
+/// it because `Router::served` is a function with no `raises` row that catches
+/// `_` -- "what a fiber runs, and it does not fail". A cancellation is in no
+/// row, so the `_` arm cannot name it, and the frame has no tagged return to
+/// pass it on with. Before, one cancelled request took the whole server down
+/// with status 134.
+///
+/// A handler cancelling itself is the only way a *program* can reach that
+/// frame from inside, and it stands in for every other way of getting there:
+/// the nursery cancelling a sibling, or the listener being asked to stop with
+/// connections in flight.
+///
+/// **The handler has to be able to raise**, and that is not a detail of the
+/// test -- it is the rule. A router whose handlers raise nothing has no tagged
+/// return anywhere between `Router::dispatch` and here, so there is no channel
+/// for a cancellation to travel and the flag is simply never read. `Oops` is
+/// never raised; declaring it is what puts the `!` in `dispatch`'s caller.
+///
+/// Three requests, and the shape of the answers is the assertion. `/health`
+/// answers before and after; `/stop` does not answer at all, because its fiber
+/// stopped where the cancellation reached it and the region shut the socket on
+/// the way out. The second `/health` is the whole point: it proves the process
+/// that served the cancelled request is still there.
+#[test]
+fn a_handler_that_cancels_itself_stops_its_connection_and_not_the_server() {
+    let exe = build(
+        "net_cancel_handler",
+        &format!(
+            "module demo::main;
+import std::core::{{SharedFn, print}};
+import std::net::http::{{Request, Response, Router}};
+
+extern fn khora_cancel();
+
+pub type Oops = | Bad;
+
+/// A fallible call, so that `!` is a cancellation point. It never fails.
+fn mark() -> Int raises Oops {{ 1 }}
+
+/// Runs on the connection's own fiber, under `Router::served`.
+fn stopping(_request: Request) -> Response raises Oops {{
+  khora_cancel();
+  let _ = mark()!;
+  Response::text(200, \"the cancellation was not seen\")
+}}
+
+fn healthy(_request: Request) -> Response raises Oops {{
+  Response::text(200, \"ok\")
+}}
+
+pub fn main() -> Int {{
+  Router::listen(
+    Router::get(
+      Router::get(Router::new(), \"/health\", SharedFn::of(fn r => healthy(r)!)),
+      \"/stop\",
+      SharedFn::of(fn r => stopping(r)!),
+    ),
+    {HANDLER_PORT},
+  )! catch {{
+    _ => print(\"the listener stopped\"),
+  }};
+  0
+}}
+"
+        ),
+    );
+
+    let mut child = std::process::Command::new(&exe)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the program should start");
+    let mut stdout = child.stdout.take().expect("piped");
+    let mut said = String::new();
+    if !wait_for(&mut stdout, &mut said, &format!("listening on {HANDLER_PORT}")) {
+        let _ = child.kill();
+        panic!("it never bound: {said}");
+    }
+
+    let before = ask(HANDLER_PORT, "/health");
+    let cancelled = ask(HANDLER_PORT, "/stop");
+    let after = ask(HANDLER_PORT, "/health");
+    let alive = child.try_wait().expect("asking after the child").is_none();
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(before.contains("200"), "the server was not answering to begin with: {before:?}");
+    assert!(
+        !cancelled.contains("the cancellation was not seen"),
+        "the handler ran past its own cancellation point: {cancelled:?}"
+    );
+    assert!(
+        after.contains("200"),
+        "the server did not survive a cancelled request: {after:?} {said}"
+    );
+    assert!(alive, "the server was gone after the cancelled request: {said}");
+}
+
+/// One HTTP/1.1 GET, spoken by hand.
+///
+/// A raw socket rather than `std::net::http`'s own client, so that what is
+/// under test is the server and not a second thing that could also be wrong.
+/// An empty answer is a connection that was accepted and closed without a
+/// reply, which is what a stopped connection fiber leaves behind.
+fn ask(port: u16, path: &str) -> String {
+    use std::io::Write;
+
+    let Ok(mut socket) = std::net::TcpStream::connect(("127.0.0.1", port)) else {
+        return String::new();
+    };
+    socket.set_read_timeout(Some(DEADLINE)).expect("a read deadline");
+    let request = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    if socket.write_all(request.as_bytes()).is_err() {
+        return String::new();
+    }
+    let mut answer = Vec::new();
+    let _ = socket.read_to_end(&mut answer);
+    String::from_utf8_lossy(&answer).into_owned()
 }
