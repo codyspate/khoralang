@@ -55,7 +55,8 @@ text has `run`.
 pub type ProcessError =
   | NotStarted(command: String)
   | NotText(command: String)
-  | Failed(command: String, status: Int);
+  | Failed(command: String, status: Int)
+  | Denied(command: String);
 ```
 
 Why running something did not work.
@@ -75,6 +76,25 @@ output -- [`Process::output`] and [`Process::shell`] -- can raise it, and
 Note what is *not* here: a command that ran and exited non-zero. It ran.
 Its status is the answer, and a caller who wanted that to be a failure says
 so by calling [`checked_output`].
+
+#### Denied
+
+```khora
+| Denied(command: String)
+```
+
+The manifest does not grant this program.
+
+**A fourth case rather than `NotStarted`**, for the reason
+[`IoError::Denied`] is a case rather than a `Failed`: they want different
+things from whoever reads the message. `NotStarted` is a name the machine
+could not find, and the reader goes looking at their `PATH`; `Denied` is
+`khora.toml`, and the fix is a line in a file they own.
+
+**Without this, `[permissions.fs]` was advisory.** In one program with
+`read = ["./data/**"]`, `read_text("/etc/hostname")` was refused and
+`checked_output("cat", ["/etc/hostname"])` returned the file. A grant
+that any subprocess can walk around is not a grant.
 
 ### Completed
 

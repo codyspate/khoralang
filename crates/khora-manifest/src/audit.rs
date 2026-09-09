@@ -86,6 +86,7 @@ static POLICY: Schema = Schema::Fields(&[
     ("network", &OPEN),
     ("fs", &OPEN),
     ("env", &OPEN),
+    ("process", &OPEN),
     ("extern", &OPEN),
 ]);
 
@@ -112,6 +113,7 @@ static PERMISSIONS: Schema = Schema::Fields(&[
     ("network", &OPEN),
     ("fs", &PERMISSIONS_FS),
     ("env", &OPEN),
+    ("process", &OPEN),
     ("extern", &OPEN),
 ]);
 

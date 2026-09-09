@@ -2289,8 +2289,10 @@ fn granted_source(target: &Path) -> Option<String> {
     let fs = permissions.fs.clone();
     let env = permissions.env.clone();
     let network = permissions.network.clone();
+    let process = permissions.process.clone();
     let denies_by_default = !permissions.grants_unmentioned();
-    if fs.is_none() && env.is_none() && network.is_none() && !denies_by_default {
+    if fs.is_none() && env.is_none() && network.is_none() && process.is_none() && !denies_by_default
+    {
         return None;
     }
     // `**` and `*` are what the checked-in file says, so a category nobody
@@ -2309,7 +2311,8 @@ fn granted_source(target: &Path) -> Option<String> {
         &fs.read,
         &fs.write,
         &env.unwrap_or_else(|| unmentioned.clone()),
-        &network.unwrap_or(unmentioned),
+        &network.unwrap_or_else(|| unmentioned.clone()),
+        &process.unwrap_or(unmentioned),
     ))
 }
 
@@ -2327,6 +2330,7 @@ fn render_grants(
     write: &[String],
     env: &[String],
     network: &[String],
+    process: &[String],
 ) -> String {
     let mut out = vec![
         "module std::permissions::grants;".to_string(),
@@ -2342,6 +2346,7 @@ fn render_grants(
         ("Paths this program may write.", "fs_write", write),
         ("Environment variables this program may read.", "env", env),
         ("Hosts this program may reach, as `name` or `name:port`.", "network", network),
+        ("Programs this program may run, by name.", "process", process),
     ] {
         out.push(String::new());
         out.push(format!("/// {doc}"));

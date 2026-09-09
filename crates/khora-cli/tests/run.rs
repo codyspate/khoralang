@@ -407,3 +407,71 @@ fn what_a_build_makes_goes_in_the_build_directory() {
 fn pinned(manifest: &str) -> String {
     format!("{manifest}\n[toolchain]\nversion = \"{}\"\n", khora_toolchain::RUNNING)
 }
+
+/// **`[permissions.fs]` was advisory for any program holding `Process`.**
+///
+/// With `read = ["./data/**"]`, `read_text("/etc/hostname")` was refused and
+/// `checked_output("cat", ["/etc/hostname"])` returned the file — so every
+/// path grant in the table was one subprocess away from meaning nothing. A
+/// grant that another program can be asked to walk around is not a grant.
+///
+/// End to end rather than against the matcher, because the thing that was
+/// missing was the *category*: the manifest key, the rendered
+/// `std::permissions::grants::process`, and the handler that consults it.
+/// Roadmap 16, "the `process` permission category".
+#[test]
+fn a_subprocess_cannot_read_what_the_manifest_denies() {
+    let w = world(
+        "module app::main;\n\
+         import std::core::{List, print};\n\
+         import std::process::{Process, ProcessError, checked_output};\n\n\
+         pub fn main() -> Int {\n  \
+           with { process: Process::real() } {\n    \
+             print(checked_output(\"echo\", [\"reached\"])! catch {\n      \
+               ProcessError::Denied(c) => \"denied ${c}\",\n      \
+               ProcessError::NotStarted(c) => \"not started ${c}\",\n      \
+               ProcessError::NotText(c) => \"not text ${c}\",\n      \
+               ProcessError::Failed(c, _s) => \"failed ${c}\",\n    \
+             });\n    \
+             0\n  \
+           }\n\
+         }\n",
+    );
+
+    // Granted by name: the program runs and its output comes back.
+    std::fs::write(
+        w.project.join("khora.toml"),
+        pinned(
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+             [permissions]\nprocess = [\"echo\"]\n",
+        ),
+    )
+    .expect("a manifest");
+    let (_, allowed) = khora(&w, &w.project, &["run", ".", "--no-cache"]);
+    assert!(allowed.contains("reached"), "a granted program should run:\n{allowed}");
+
+    // A table that grants something else does not grant this.
+    std::fs::write(
+        w.project.join("khora.toml"),
+        pinned(
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+             [permissions]\nprocess = [\"git\"]\n",
+        ),
+    )
+    .expect("a manifest");
+    let (_, refused) = khora(&w, &w.project, &["run", ".", "--no-cache"]);
+    assert!(refused.contains("denied echo"), "and one it does not name should not:\n{refused}");
+
+    // And `default = "deny"` denies it without the key being written at all,
+    // which is the case 16.1 exists for.
+    std::fs::write(
+        w.project.join("khora.toml"),
+        pinned(
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+             [permissions]\ndefault = \"deny\"\n",
+        ),
+    )
+    .expect("a manifest");
+    let (_, denied) = khora(&w, &w.project, &["run", ".", "--no-cache"]);
+    assert!(denied.contains("denied echo"), "`default = \"deny\"` covers it too:\n{denied}");
+}

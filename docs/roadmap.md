@@ -5717,11 +5717,18 @@ this is what that gap looks like when it lands somewhere that matters.
 
 Two things ride along, found while confirming it:
 
-- **`std::process` bypasses every `fs` grant.** In one program, with
-  `read = ["./data/**"]`: `read_text("/etc/hostname")` is refused and
-  `checked_output("cat", ["/etc/hostname"])` returns the file. There is no
-  `process` permission category, so holding `Process` is unbounded authority —
-  and with 16.1 there is currently no way to deny it at all.
+- **`std::process` bypasses every `fs` grant.** ✅ In one program, with
+  `read = ["./data/**"]`: `read_text("/etc/hostname")` was refused and
+  `checked_output("cat", ["/etc/hostname"])` returned the file. There was no
+  `process` permission category, so holding `Process` was unbounded authority.
+
+  Fixed by adding one: `[permissions] process = ["git"]`, a list like `env` and
+  `network` because there is one kind of access and nothing to split, matched
+  by name with `granted_name` because a name is what the caller writes.
+  `Process::real()` consults it and raises `ProcessError::Denied`, a fourth case
+  for the reason `IoError::Denied` is a third one -- `NotStarted` sends the
+  reader to their `PATH` and `Denied` to a line in a file they own. A refused
+  `cat` is now refused; `default = "deny"` covers it with no key written.
 - **The audit does not descend into a permission category.**
   `audit.rs:99-106` maps `fs`, `network`, `env` and `extern` to `Schema::Open`.
   `[permissions.fs]` with `read`, then `env` and `extern` written under it,
@@ -6300,8 +6307,6 @@ thing that separates a regression test from a test.
   deadline pattern is built on it. `std`'s own comment now says what is
   actually true about sibling cancellation, which is a smaller fix than making
   it true.
-- The `process` permission category, without which `[permissions.fs]` is
-  advisory for any program holding `Process`.
 - The stability tier, the reserved keywords, and the audit of 6,343 lines of
   `///` prose for truth rather than coverage -- which is what found three of
   the four documentation defects on this page, by accident, while looking for

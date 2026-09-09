@@ -55,3 +55,11 @@ pub fn network() -> List<String>
 
 Hosts this program may reach, as `name` or `name:port`.
 
+### process
+
+```khora
+pub fn process() -> List<String>
+```
+
+Programs this program may run, by name.
+

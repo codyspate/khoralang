@@ -445,6 +445,9 @@ pub struct Policy {
     /// Members that may grant `env`.
     #[serde(default)]
     pub env: Option<Vec<String>>,
+    /// Members that may grant `process`.
+    #[serde(default)]
+    pub process: Option<Vec<String>>,
     /// Members that may declare `extern fn`, or allow a dependency to.
     #[serde(default, rename = "extern")]
     pub extern_: Option<Vec<String>>,
@@ -457,12 +460,13 @@ impl Policy {
             Category::Network => self.network.as_deref(),
             Category::Fs => self.fs.as_deref(),
             Category::Env => self.env.as_deref(),
+            Category::Process => self.process.as_deref(),
         }
     }
 
     /// Every name the policy mentions, for checking them against the members.
     pub fn names(&self) -> impl Iterator<Item = &String> {
-        [&self.network, &self.fs, &self.env, &self.extern_]
+        [&self.network, &self.fs, &self.env, &self.process, &self.extern_]
             .into_iter()
             .flatten()
             .flatten()
@@ -566,6 +570,21 @@ pub struct Permissions {
     /// Environment variables that may be read.
     #[serde(default)]
     pub env: Option<Vec<String>>,
+    /// Programs that may be run, by name. `["*"]` is any.
+    ///
+    /// **Without this, `[permissions.fs]` was advisory.** In one program with
+    /// `read = ["./data/**"]`, `read_text("/etc/hostname")` was refused and
+    /// `checked_output("cat", ["/etc/hostname"])` returned the file -- so
+    /// every path grant in the table was one `Process` away from meaning
+    /// nothing. A subprocess is not a smaller hole than a file read; it is a
+    /// bigger one.
+    ///
+    /// Names rather than paths, matched by `granted_name`, because that is
+    /// what a caller writes: `run("git", ..)` names `git` and lets the
+    /// operating system find it. `*` spans everything, so `git*` covers
+    /// `git` and `gitk` both.
+    #[serde(default)]
+    pub process: Option<Vec<String>>,
     /// Packages that may declare `extern fn`. `std` is always among them.
     ///
     /// **This is the key the rest of the table rests on.** Every other grant
@@ -605,6 +624,7 @@ impl Permissions {
             && self.network.is_none()
             && self.fs.is_none()
             && self.env.is_none()
+            && self.process.is_none()
             && self.extern_.is_none()
     }
 
@@ -628,6 +648,7 @@ impl Permissions {
         let listed = match category {
             Category::Network => self.network.as_ref().map(|g| !g.is_empty()),
             Category::Env => self.env.as_ref().map(|g| !g.is_empty()),
+            Category::Process => self.process.as_ref().map(|g| !g.is_empty()),
             Category::Fs => {
                 self.fs.as_ref().map(|g| !g.read.is_empty() || !g.write.is_empty())
             }
@@ -670,6 +691,8 @@ pub enum Category {
     Network,
     /// The process environment.
     Env,
+    /// Running another program.
+    Process,
 }
 
 impl Category {
@@ -679,6 +702,7 @@ impl Category {
             Category::Fs => "Fs",
             Category::Network => "Net",
             Category::Env => "Env",
+            Category::Process => "Process",
         }
     }
 
@@ -688,6 +712,7 @@ impl Category {
             Category::Fs => "fs",
             Category::Network => "network",
             Category::Env => "env",
+            Category::Process => "process",
         }
     }
 

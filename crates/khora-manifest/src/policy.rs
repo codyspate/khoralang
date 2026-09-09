@@ -89,6 +89,9 @@ fn asks_for(manifest: &Manifest, category: Category) -> bool {
     match category {
         Category::Network => manifest.permissions.network.as_ref().is_some_and(|g| !g.is_empty()),
         Category::Env => manifest.permissions.env.as_ref().is_some_and(|g| !g.is_empty()),
+        Category::Process => {
+            manifest.permissions.process.as_ref().is_some_and(|g| !g.is_empty())
+        }
         Category::Fs => manifest
             .permissions
             .fs

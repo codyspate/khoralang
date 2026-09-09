@@ -134,6 +134,7 @@ Khora has no ambient authority: a function that touches the network says so in i
 default = "deny"
 network = ["api.example.com:443", "*.internal:5432"]
 env = ["HOME", "DATABASE_URL"]
+process = ["git", "docker"]
 extern = ["sqlite_sys"]
 
 [permissions.fs]
@@ -148,13 +149,29 @@ write = ["logs/**"]
 | `network` | Hosts, as `name` or `name:port`. `*` spans dots, so `*.internal` covers `db.eu.internal`; a grant with no port covers every port. |
 | `fs` | **A table, not a list**: `[permissions.fs]` with `read` and `write`. `*` stops at a separator and `**` crosses one, and neither covers the directory being described. |
 | `env` | Environment variable names. `*` spans everything, since a name has no segments. |
+| `process` | Program names, as written at the call: `run("git", ..)` names `git`. `*` spans everything, so `git*` covers `git` and `gitk`. |
 | `extern` | **Package names**, not library names: which packages may declare `extern fn`. `std` always may. |
 
 **`fs` is the one key that is a table**, because reading and writing are not the
-same grant and a single list cannot say which one it is. The other three are
-lists. `[workspace.policy]` above takes `fs` as a *list*, because there it names
+same grant and a single list cannot say which one it is. The rest are lists. `[workspace.policy]` above takes `fs` as a *list*, because there it names
 which members may grant filesystem access at all rather than which paths they
 may reach.
+
+**`process` is what stops the rest of the table being advisory.** A program
+that may run another program can ask it to do anything the program itself may
+not: with `read = ["data/**"]` and no `process` grant,
+`read_text("/etc/hostname")` is refused and
+`checked_output("cat", ["/etc/hostname"])` used to return the file. A refused
+program raises `ProcessError::Denied`, which is a separate case from
+`NotStarted` for the reason `IoError::Denied` is separate from `Failed`: one
+sends the reader to their `PATH` and the other to a line in a file they own.
+
+**A shell line is checked on its first word, which is a weaker promise** and is
+said here rather than left to be found. `Process`'s `shell` runs a string
+nobody has parsed, so `sh -c 'a; b'` runs two programs and the grant sees one.
+That is the bound; `run` is the operation for a command built out of anything
+that came from outside the program, and it takes its arguments as a list so
+nothing re-parses them.
 
 **`default` applies to a category you did not write down, not to one you wrote
 down empty.** `network = []` grants no host; leaving `network` out entirely

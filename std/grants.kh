@@ -37,3 +37,8 @@ pub fn env() -> List<String> {
 pub fn network() -> List<String> {
   List::Cons("*", List::Nil)
 }
+
+/// Programs this program may run, by name.
+pub fn process() -> List<String> {
+  List::Cons("*", List::Nil)
+}

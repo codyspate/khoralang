@@ -1,6 +1,8 @@
 module std::process;
 
-import std::core::{Array, List, Ptr};
+import std::core::{Array, List, Option, Ptr, Split, String};
+import std::permissions::{granted_name};
+import std::permissions::grants::{process as process_grants};
 import std::process::shell::{close_pipe, open_pipe, run};
 
 //! Running another program.
@@ -69,7 +71,20 @@ import std::process::shell::{close_pipe, open_pipe, run};
 pub type ProcessError =
   | NotStarted(command: String)
   | NotText(command: String)
-  | Failed(command: String, status: Int);
+  | Failed(command: String, status: Int)
+  /// The manifest does not grant this program.
+  ///
+  /// **A fourth case rather than `NotStarted`**, for the reason
+  /// [`IoError::Denied`] is a case rather than a `Failed`: they want different
+  /// things from whoever reads the message. `NotStarted` is a name the machine
+  /// could not find, and the reader goes looking at their `PATH`; `Denied` is
+  /// `khora.toml`, and the fix is a line in a file they own.
+  ///
+  /// **Without this, `[permissions.fs]` was advisory.** In one program with
+  /// `read = ["./data/**"]`, `read_text("/etc/hostname")` was refused and
+  /// `checked_output("cat", ["/etc/hostname"])` returned the file. A grant
+  /// that any subprocess can walk around is not a grant.
+  | Denied(command: String);
 
 /// A finished command.
 ///
@@ -139,10 +154,44 @@ impl Process {
   /// The real machine.
   pub fn real() -> Process {
     handler for Process {
-      run: fn (program, arguments) => spawn_status(program, arguments)!,
-      output: fn (program, arguments) => spawn_output(program, arguments)!,
-      shell: fn command => capture_output(command)!,
+      run: fn (program, arguments) => {
+        allow_run(program)!;
+        spawn_status(program, arguments)!
+      },
+      output: fn (program, arguments) => {
+        allow_run(program)!;
+        spawn_output(program, arguments)!
+      },
+      shell: fn command => {
+        allow_run(first_word(command))!;
+        capture_output(command)!
+      },
     }
+  }
+}
+
+/// Refuses a program the manifest does not grant.
+///
+/// By *name*, matched the way `[permissions.env]` is, because a name is what
+/// the caller wrote: `run("git", ..)` names `git` and lets the operating
+/// system find it. Resolving the name to a path first would be a different
+/// promise -- and a worse one, since the path a name resolves to depends on
+/// the `PATH` this process happens to have.
+fn allow_run(program: String) -> () raises ProcessError {
+  if granted_name(process_grants(), program) {} else { raise ProcessError::Denied(program) }
+}
+
+/// The first word of a shell line, which is the program it starts with.
+///
+/// **A shell line is checked on its head and that is a weaker promise**, said
+/// here rather than left to be discovered: `sh -c 'a; b'` runs two programs
+/// and this sees one. It is the honest bound of checking a string nobody has
+/// parsed, and it is why `run` exists and why `shell` is named for what it
+/// does. A manifest that grants no `process` still refuses the whole line.
+fn first_word(command: String) -> String {
+  match String::split_once(String::trim(command), " ") {
+    Option::None => String::trim(command),
+    Option::Some(split) => split.head,
   }
 }
 

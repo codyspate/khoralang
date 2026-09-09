@@ -89,6 +89,7 @@ fn reason(error: ProcessError) -> String {
     ProcessError::NotStarted(command) => \"not started: \" + command,
     ProcessError::NotText(command) => \"not text: \" + command,
     ProcessError::Failed(command, code) => \"failed \" + Int::to_string(code),
+    ProcessError::Denied(command) => \"denied: \" + command,
   }
 }
 ";
