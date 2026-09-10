@@ -202,7 +202,6 @@ proptest! {
 /// `cargo test -p khora-syntax --test parser_properties --
 ///  --ignored --exact deep_nesting_overflows_the_stack`.
 #[test]
-#[ignore = "aborts the process rather than failing; see the doc comment"]
 fn deep_nesting_overflows_the_stack() {
     let src = format!("module m;\nfn f() {{ {}1{} }}\n", "(".repeat(1600), ")".repeat(1600));
     parses_soundly(&src);
@@ -220,9 +219,10 @@ fn deep_nesting_overflows_the_stack() {
 // rather than green because nothing was being looked at. When the fixes
 // landed, the attributes came off and nothing else changed.
 //
-// The fifth, `deep_nesting_overflows_the_stack`, is still ignored. It is not
-// unfixed prose: it *aborts* rather than failing, so no harness can catch it,
-// and it stays out of an ordinary run for that reason alone.
+// The fifth, `deep_nesting_overflows_the_stack`, is fixed too and runs with
+// the rest. It could not be run at all while it was live: a stack overflow
+// *aborts* rather than unwinding, so no harness could report it. The parser
+// refuses past `DEPTH_LIMIT` now instead of descending.
 
 /// **`pub` at the end of a file loses the rest of the file.**
 ///

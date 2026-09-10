@@ -37,6 +37,20 @@ use crate::lexer::LexedStr;
 /// grammar bug. Keeps a malformed file from hanging the LSP.
 const STEP_LIMIT: u32 = 10_000;
 
+/// How deeply the descent may nest before it refuses rather than recurses.
+///
+/// **The other unbounded quantity, and the one with no survivable failure.**
+/// `STEP_LIMIT` above stops a malformed file hanging the LSP; this stops one
+/// *killing* it. Around fifteen hundred nested delimiters overflowed the stack
+/// -- measured at 1554 for `(`, 1572 for `{`, 1697 for `[` -- and a stack
+/// overflow aborts the process rather than unwinding, so no caller can catch
+/// it and no test harness can report it. An editor parsing on every keystroke
+/// is the thing that dies.
+///
+/// 256 because no program a person wrote nests that far and every one that
+/// does is generated or malformed. Found by the generated-input suite.
+const DEPTH_LIMIT: u32 = 256;
+
 pub(crate) struct Parser<'a> {
     /// The whole source, read only through [`Parser::nth_text`].
     text: &'a str,
@@ -44,6 +58,8 @@ pub(crate) struct Parser<'a> {
     ranges: Vec<TextRange>,
     pos: usize,
     steps: u32,
+    /// How deep the recursive descent currently is. See [`DEPTH_LIMIT`].
+    depth: u32,
     events: Vec<Event>,
     errors: Vec<ParseError>,
     /// Cleared while parsing a `match` scrutinee, where a following `{` opens
@@ -106,6 +122,7 @@ impl<'a> Parser<'a> {
             ranges,
             pos: 0,
             steps: 0,
+            depth: 0,
             events: Vec::new(),
             errors,
             record_literals_allowed: true,
@@ -413,6 +430,27 @@ impl<'a> Parser<'a> {
     pub(crate) fn tick(&mut self) -> bool {
         self.steps += 1;
         self.steps <= STEP_LIMIT
+    }
+
+    /// Enters one level of the descent, or reports that it will not.
+    ///
+    /// Paired with [`Parser::leave`]. A caller that gets `false` must not
+    /// recurse: it should consume something and return, so the outer loops
+    /// still make progress and the file still parses to a tree.
+    pub(crate) fn descend(&mut self) -> bool {
+        if self.depth >= DEPTH_LIMIT {
+            self.error(format!("nested more than {DEPTH_LIMIT} deep here"));
+            return false;
+        }
+        self.depth += 1;
+        true
+    }
+
+    /// Leaves one level. Saturating, because an unbalanced pair is a grammar
+    /// bug and wrapping to a huge depth would turn it into a refusal to parse
+    /// anything at all.
+    pub(crate) fn leave(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
     }
 
     // --- markers ----------------------------------------------------------

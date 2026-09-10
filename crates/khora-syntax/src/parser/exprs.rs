@@ -39,6 +39,17 @@ pub(super) fn expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
 }
 
 fn expr_bp(p: &mut Parser, min_bp: u8) -> Option<CompletedMarker> {
+    // The descent's one recursive spine. Guarded here rather than at each
+    // nesting construct, because every one of them reaches an expression.
+    if !p.descend() {
+        return None;
+    }
+    let answer = expr_bp_inner(p, min_bp);
+    p.leave();
+    answer
+}
+
+fn expr_bp_inner(p: &mut Parser, min_bp: u8) -> Option<CompletedMarker> {
     let mut lhs = unary_expr(p)?;
     loop {
         let op = p.current();
