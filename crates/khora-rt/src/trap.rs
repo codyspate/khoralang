@@ -258,9 +258,23 @@ fn where_from(err: &mut impl Write) {
 /// naming this module, and if that frame is ever not found the whole capture is
 /// returned unchanged — so the failure mode is the noisy output this replaced,
 /// never a backtrace with something real missing from it.
+///
+/// **The entry points are `#[no_mangle]`, so they have no module path.**
+/// Looking only for `khora_rt::trap::` matched the *inner* frame
+/// (`where_from`, which is an ordinary Rust function and is mangled) and cut
+/// there — leaving `khora_overflow` itself on top, carrying the absolute path
+/// of the machine the compiler was built on into a user's crash output. The
+/// unit test passed throughout, because its fixture had only one runtime frame
+/// and spelled it mangled.
+///
+/// So the cut is at the **last** frame matching *any* runtime spelling, not at
+/// the first pattern that matches anywhere. `a_no_mangle_trap_frame_is_trimmed_too`
+/// and `both_runtime_frames_come_off` pin each half.
 fn from_khora_down(captured: &str) -> &str {
-    const MINE: &str = "khora_rt::trap::";
-    let Some(last) = captured.rfind(MINE) else { return captured };
+    const MINE: [&str; 2] = ["khora_rt::trap::", "khora_"];
+    let Some(last) = MINE.iter().filter_map(|m| captured.rfind(m)).max() else {
+        return captured;
+    };
     // The frame *after* the trap handler: the next line that **opens** a
     // frame. A frame's own `at <file>:<line>` line is indented too, so
     // "newline then spaces" finds the wrong one and cuts a frame in half —
@@ -320,5 +334,71 @@ mod tests {
     fn a_trap_with_no_frames_below_it_is_left_alone() {
         let only = "   5: khora_rt::trap::khora_overflow\n             at trap.rs:33\n";
         assert_eq!(from_khora_down(only), only);
+    }
+
+    /// **The shipped entry points are `#[no_mangle]`, so a real capture spells
+    /// them without a module path**, and `CAPTURE` above does not.
+    ///
+    /// That gap hid a live bug: the filter looked only for
+    /// `khora_rt::trap::`, found nothing in a real trap, fell back to
+    /// "return it unchanged", and every user's crash output carried a runtime
+    /// frame naming an absolute path on the machine the compiler was built on.
+    /// Every test here passed the whole time, because every fixture used the
+    /// mangled spelling.
+    ///
+    /// So this asserts on the *bare* spelling. It is the shape the linker
+    /// produces, and the one a user sees.
+    #[test]
+    fn a_no_mangle_trap_frame_is_trimmed_too() {
+        let real = concat!(
+            "   0: std::backtrace::Backtrace::force_capture\n",
+            "             at library/std/src/backtrace.rs:332\n",
+            "   1: khora_overflow\n",
+            "             at /home/somebody/khoralang/crates/khora-rt/src/trap.rs:93\n",
+            "   2: bt$main$deep\n",
+            "             at ./src/main.kh:6\n",
+        );
+
+        let trimmed = from_khora_down(real);
+        assert!(trimmed.starts_with("   2: bt$main$deep"), "got {trimmed:?}");
+        assert!(
+            !trimmed.contains("khora_overflow"),
+            "the runtime frame is gone: {trimmed:?}"
+        );
+        assert!(
+            !trimmed.contains("/home/somebody/"),
+            "and with it the build machine's path: {trimmed:?}"
+        );
+    }
+
+    /// Both runtime frames come off, not just the first one matched.
+    ///
+    /// A real capture has two: `khora_rt::trap::where_from` is an ordinary Rust
+    /// function and is mangled, and `khora_overflow` below it is `#[no_mangle]`
+    /// and is not. Searching the patterns in order and taking the first hit cut
+    /// at `where_from` and left `khora_overflow` — and its absolute build path
+    /// — on top. The cut belongs at the *last* runtime frame however it is
+    /// spelled.
+    #[test]
+    fn both_runtime_frames_come_off() {
+        let real = concat!(
+            "   0: khora_rt::trap::where_from\n",
+            "             at /home/somebody/khoralang/crates/khora-rt/src/trap.rs:243\n",
+            "   1: khora_overflow\n",
+            "             at /home/somebody/khoralang/crates/khora-rt/src/trap.rs:93\n",
+            "   2: bt$main$deep\n",
+            "             at ./src/main.kh:6\n",
+        );
+
+        let trimmed = from_khora_down(real);
+        assert!(trimmed.starts_with("   2: bt$main$deep"), "got {trimmed:?}");
+        assert!(
+            !trimmed.contains("khora_overflow") && !trimmed.contains("where_from"),
+            "no runtime frame survives: {trimmed:?}"
+        );
+        assert!(
+            !trimmed.contains("/home/somebody/"),
+            "and with them the build machine's path: {trimmed:?}"
+        );
     }
 }
