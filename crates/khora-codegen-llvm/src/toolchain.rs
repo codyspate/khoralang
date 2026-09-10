@@ -522,6 +522,28 @@ fn drive_clang(
     if cfg!(windows) {
         cmd.arg("-Wl,-Brepro");
     }
+
+    // **The same question on macOS, and a different field.** A Mach-O image
+    // carries an `LC_UUID` load command, and `ld64` fills it with a hash over
+    // the linked content *and the output path* -- so linking one unchanged set
+    // of objects to `reused.exe` and to `fresh.exe` gives two files that differ
+    // in sixteen bytes and nowhere else.
+    //
+    // That is what `a_release_hit_is_byte_for_byte_what_a_build_would_have_
+    // produced` was failing on, and only on macOS: an ELF has no such field, so
+    // Linux passed the same assertion the whole time, and Windows' equivalent
+    // was already handled above. The claim `--release` makes is bit-for-bit
+    // reproducibility, and a UUID that changes with the file's name is exactly
+    // the kind of non-determinism that claim is about.
+    //
+    // `-no_uuid` drops the load command. Nothing in the toolchain reads it:
+    // `khora`'s own backtraces come from DWARF, which `--release` does not emit
+    // at all. A debugger matching a `.dSYM` to its binary does use it -- so
+    // this belongs to `release` alone, where debug information is already gone
+    // and there is nothing for a `.dSYM` to be.
+    if cfg!(target_os = "macos") && !profile.debug_info() {
+        cmd.arg("-Wl,-no_uuid");
+    }
     cmd.arg("-o").arg(out);
 
     let output = cmd.output().map_err(|e| format!("running {}: {e}", clang.display()))?;

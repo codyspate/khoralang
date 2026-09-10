@@ -117,6 +117,14 @@ fn release_is_the_smaller_object_for_this_program() {
 /// see the failure this one can. The **executable** is compared as well as the
 /// object, because the artifact somebody ships is the executable, and on
 /// Windows it is exactly debug information that made relinking unrepeatable.
+///
+/// **The two runs write to different names on purpose.** `run0.exe` and
+/// `run1.exe` are not incidental: a Mach-O `LC_UUID` is a hash over the linked
+/// content *and the output path*, so linking one unchanged set of objects to
+/// two names produced two files differing in sixteen bytes and nowhere else.
+/// An ELF carries no such field, which is why Linux passed this assertion
+/// throughout while macOS failed it. Keep the names different — matching them
+/// would make this test pass on a platform where the claim is false.
 #[test]
 fn a_release_build_is_reproducible() {
     let Some(khora) = std::env::var_os("CARGO_BIN_EXE_khora") else {
