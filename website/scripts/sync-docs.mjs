@@ -68,6 +68,9 @@ function revisionOf() {
 /// From `khora.toml`, not from `package.json`: the site's own version is about
 /// the site, and what a reader wants is which *language* release they are
 /// reading about.
+///
+/// **This is `next`'s answer only.** A released tree describes the compiler its
+/// tag published, which is not the one in this checkout — see `releaseFor`.
 async function releaseOf() {
   try {
     const manifest = await readFile(path.join(root, '..', 'khora.toml'), 'utf8');
@@ -76,6 +79,28 @@ async function releaseOf() {
   } catch {
     return null;
   }
+}
+
+/// The release each documentation tree describes, keyed by its id.
+///
+/// **A footer that names one version for the whole site is wrong on every page
+/// but one.** `/docs/v0.1/` pages carried "Khora 0.2.0" because the version came
+/// from `khora.toml` in this checkout — so a reader on the tree that documents
+/// the compiler they can install was told they were reading about a compiler
+/// that is not released. Three separate readers reported it as the reason they
+/// could not tell which tree matched their toolchain.
+///
+/// A stable tree's version is its `cutFrom` tag with the leading `v` dropped:
+/// the tag is what published the compiler the tree describes, and
+/// `check-released-docs.sh` already holds that claim honest. `next` is the
+/// working tree and takes `khora.toml`.
+function releasesByTree(nextRelease) {
+  return Object.fromEntries(
+    versions.map((each) => [
+      each.id,
+      each.cutFrom ? each.cutFrom.replace(/^v/, '') : nextRelease,
+    ]),
+  );
 }
 
 /// Writes what this build was made from, for the footer to read.
@@ -89,6 +114,9 @@ async function writeProvenance() {
     revision,
     short: revision ? revision.slice(0, 12) : null,
     release,
+    /// The release each tree describes, so the footer can name the right one
+    /// for the page it is on rather than one for the whole site.
+    releases: releasesByTree(release),
     // To the minute. A second is precision this does not have -- two builds of
     // one commit are the same site -- and a date alone would not tell two
     // builds of one day apart.

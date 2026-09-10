@@ -14,14 +14,32 @@
  */
 import Default from '@astrojs/starlight/components/Footer.astro';
 import { build } from '../generated/build.js';
+import { current } from '../../versions.mjs';
 
 const source = 'https://github.com/codyspate/khoralang';
+
+/**
+ * The release *this page's tree* describes, not the site's.
+ *
+ * A page under `/docs/v0.1/` documents what `v0.1.0` published; a page under
+ * `/docs/next/` documents this checkout. Naming one version for both told a
+ * reader on the released tree that they were reading about a compiler that is
+ * not released — the single most-reported confusion from readers who did not
+ * already know how the site is laid out.
+ *
+ * The tree comes from the URL rather than from frontmatter, because the URL is
+ * what the reader is looking at. A path with no version segment is a short path
+ * into `current`, which is where it redirects.
+ */
+const segment = Astro.url.pathname.split('/').filter(Boolean)[1];
+const tree = build.releases?.[segment] ? segment : current;
+const release = build.releases?.[tree] ?? build.release;
 ---
 
 <Default><slot /></Default>
 
 <p class="build-provenance">
-  {build.release && <span>Khora {build.release}</span>}
+  {release && <span>Khora {release}</span>}
   {build.short && (
     <span>
       built from
