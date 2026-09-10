@@ -271,8 +271,21 @@ function resolvedDocLink(url, fromFile, source, version) {
 ///
 /// Headings inside a fenced code block are not headings -- `# comment` in a
 /// shell example is the common one -- so the fences are tracked.
+/// Every anchor a page offers, numbered the way the renderer numbers them.
+///
+/// **Repeated headings get a suffix, because Starlight gives them one.** It
+/// takes each heading's id from `github-slugger`, which answers `get`,
+/// `get-1`, `get-2`, `get-3` for four headings called `get` -- and
+/// `stdlib/api/core.md` has exactly four, because it documents a method of
+/// that name on four types.
+///
+/// This collapsed them all to `get`, so a link to the fourth was reported as
+/// pointing at a heading that does not exist while the built page had that id.
+/// Three implementations of one rule -- `khora doc`'s, this one, and the
+/// renderer's -- and this was the one that disagreed.
 function anchorsIn(text) {
   const anchors = new Set();
+  const seen = new Map();
   let fenced = false;
   for (const line of text.split(/\r?\n/)) {
     if (/^\s*(```|~~~)/.test(line)) {
@@ -281,7 +294,12 @@ function anchorsIn(text) {
     }
     if (fenced) continue;
     const heading = line.match(/^#{1,6}\s+(.+?)\s*#*\s*$/)?.[1];
-    if (heading) anchors.add(anchorFor(heading));
+    if (heading) {
+      const base = anchorFor(heading);
+      const before = seen.get(base) ?? 0;
+      seen.set(base, before + 1);
+      anchors.add(before === 0 ? base : base + '-' + before);
+    }
     for (const explicit of line.matchAll(/\bid\s*=\s*["']([^"']+)["']/g)) {
       anchors.add(explicit[1]);
     }
