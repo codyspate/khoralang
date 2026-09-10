@@ -51,7 +51,31 @@ name: ci
 on:
   push:
     branches: [main]
+    # **The website has its own workflow, and this one is six runners.**
+    # A change under `website/` used to start the full three-platform matrix --
+    # 35-47 minutes a job -- *and* cancel whichever run was already going, so a
+    # typo fix could throw away 40 minutes of answers about real code.
+    #
+    # What `baseline.sh` checks about the site moved to `docs.yml` rather than
+    # being dropped: the Khora examples in the prose (`check-docs.sh`) and the
+    # generated standard-library pages against their source (`khora doc
+    # --check`). Both need only `khora parse` and `khora check`, so that job
+    # builds the CLI without LLVM and stays a few minutes.
+    #
+    # `paths-ignore` rather than `paths`, deliberately. An allow-list silently
+    # skips CI for a new top-level directory nobody remembered to add, and the
+    # failure is invisible; a deny-list's failure is a slow run, which somebody
+    # notices. Markdown stays in scope for the same reason -- `check-claims.sh`
+    # reads the README, and a stale count there is a real red tick.
+    paths-ignore:
+      - 'website/**'
+      - 'editors/**'
+      - 'LICENSE-*'
   pull_request:
+    paths-ignore:
+      - 'website/**'
+      - 'editors/**'
+      - 'LICENSE-*'
   workflow_dispatch:
 
 # One run per branch. A push landing while an earlier run is still going
