@@ -111,7 +111,10 @@ fn main() -> Int {{
   print(encode(Json::Null));
   print(encode(Json::Bool(true)));
   print(encode(Json::Bool(false)));
-  print(encode(Json::of_float(1.5)));
+  print(encode(match Json::of_float(1.5) {{
+    Option::Some(rendered) => rendered,
+    Option::None => Json::Null,
+  }}));
   print(encode(Json::Text(\"khora\")));
   print(shown(\"null\"));
   print(shown(\"true\"));

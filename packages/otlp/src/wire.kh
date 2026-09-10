@@ -35,7 +35,7 @@ module otlp::wire;
 //! string for exactly this reason, and a collector given a number rounds the
 //! timestamp to the nearest few hundred nanoseconds.
 
-import std::core::{List};
+import std::core::{List, Option};
 import std::json::{Field, Json, encode, member, object};
 import std::trace::{Attribute, Context, Span, Status, Value};
 
@@ -110,7 +110,17 @@ fn attribute(each: Attribute) -> Json {
   keyed(each.name, match each.value {
       Value::Text(text) => object([member("stringValue", Json::Text(text))]),
       Value::Number(number) => object([member("intValue", Json::Text(Int::to_string(number)))]),
-      Value::Decimal(number) => object([member("doubleValue", Json::of_float(number))]),
+      // `Json::of_float` answers `None` for a value JSON cannot spell -- an
+      // infinity or a `NaN` -- because emitting one produces a document no
+      // parser will read back, this exporter's collector included. A
+      // measurement that is not a number is reported as an absent value
+      // rather than as a broken one.
+      Value::Decimal(number) => object([
+        member("doubleValue", match Json::of_float(number) {
+          Option::Some(rendered) => rendered,
+          Option::None => Json::Null,
+        }),
+      ]),
       Value::Flag(flag) => object([member("boolValue", Json::Bool(flag))]),
     })
 }

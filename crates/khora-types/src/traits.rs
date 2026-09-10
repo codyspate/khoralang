@@ -26,7 +26,7 @@ use khora_hir::HirError;
 use khora_syntax::ast::{self, AstNode};
 use text_size::TextRange;
 
-use crate::{type_of_syntax, Signature, Type};
+use crate::{type_of_syntax, Bound, Signature, Type};
 
 /// What a type is, before you ask what values it has.
 ///
@@ -79,6 +79,22 @@ pub struct MethodDef {
     pub range: TextRange,
 }
 
+/// An associated type a trait declares: `type Key: Eq + Show;`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssocTypeDef {
+    pub name: String,
+    /// What the impl's choice must implement -- and, the half that makes this
+    /// worth recording at all, what may be *called* on the projection before
+    /// any impl has chosen it.
+    ///
+    /// **These were dropped, and the bound was a parse with no meaning.** A
+    /// default body writing `self.key().show()` was told ``Self::Key` does not
+    /// implement `Show``, which the line above it had just said it did, and
+    /// there was nothing else to write: `fn f<A: Indexed, A::Key: Show>` is not
+    /// a bound this grammar has and there are no `where` clauses.
+    pub bounds: Vec<Bound>,
+}
+
 /// A declared trait.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraitDef {
@@ -94,7 +110,7 @@ pub struct TraitDef {
     pub type_params: Vec<String>,
     /// Traits an implementing type must also implement: `trait Ord: Eq`.
     pub supertraits: Vec<String>,
-    pub assoc_types: Vec<String>,
+    pub assoc_types: Vec<AssocTypeDef>,
     pub methods: Vec<MethodDef>,
     /// Inferred from how the trait's own signatures use `Self`.
     pub self_kind: Kind,
@@ -490,8 +506,17 @@ pub fn collect(source: &ast::SourceFile, homes: &crate::TypeHomes) -> Traits {
                 let mut scope = vec!["Self".to_string()];
                 scope.extend(own.iter().cloned());
 
-                let assoc_types: Vec<String> =
-                    t.assoc_types().filter_map(|a| a.name().and_then(|n| n.ident())).collect();
+                let assoc_types: Vec<AssocTypeDef> = t
+                    .assoc_types()
+                    .filter_map(|a| {
+                        Some(AssocTypeDef {
+                            name: a.name()?.ident()?,
+                            // Read in the trait's scope, so `type Key: Convert<A>`
+                            // means the trait's own `A`.
+                            bounds: bound_list(a.bounds().as_ref(), &scope, homes),
+                        })
+                    })
+                    .collect();
 
                 let methods: Vec<MethodDef> = t
                     .functions()
@@ -589,9 +614,11 @@ fn method_def(
 ) -> Option<MethodDef> {
     let name = f.name()?.ident()?;
     let own = crate::generic_names(f.type_params().as_ref());
-    let own_bounds = crate::bound_lists(f.type_params().as_ref());
     let mut generics = scope.to_vec();
     generics.extend(own.iter().cloned());
+    // After `generics`, because a bound's arguments are read in the same scope
+    // the signature is: `fn f<T: Convert<U>, U>` means `U` the parameter.
+    let own_bounds = crate::bound_lists(f.type_params().as_ref(), &generics, homes);
 
     let params = f
         .params()
@@ -708,9 +735,33 @@ pub fn mentions_param(ty: &Type, param: &str) -> bool {
 }
 
 /// The trait names in a bound list, ignoring anything that is not a plain name.
+///
+/// The head only. For a supertrait list that is all there is to read — a
+/// supertrait is written as a bare name — and for the places that still want a
+/// name to look a `TraitDef` up by. [`bound_list`] is what keeps the arguments.
 pub fn bound_names(bounds: Option<&ast::TypeBounds>) -> Vec<String> {
     bounds
         .map(|b| b.types().filter_map(|t| written_head(&t)).collect())
+        .unwrap_or_default()
+}
+
+/// The same list, with each bound's type arguments kept.
+///
+/// `scope` names the parameters a bound's arguments may mention: `T: Convert<U>`
+/// means `U` the rigid parameter, not a type called `U`.
+pub fn bound_list(
+    bounds: Option<&ast::TypeBounds>,
+    scope: &[String],
+    homes: &crate::TypeHomes,
+) -> Vec<Bound> {
+    bounds
+        .map(|b| {
+            b.types()
+                .filter_map(|t| {
+                    Some(Bound { name: written_head(&t)?, args: written_args(&t, scope, homes) })
+                })
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -824,8 +875,8 @@ pub fn impl_signatures(
             // another of the trait's functions on `self`. Stating it here means
             // the ordinary bound machinery discharges it, with no special case
             // anywhere else.
-            let mut bounds = vec![vec![name.clone()]];
-            let mut trait_bounds = crate::bound_lists(t.type_params().as_ref());
+            let mut bounds = vec![vec![Bound::bare(name.clone())]];
+            let mut trait_bounds = crate::bound_lists(t.type_params().as_ref(), &scope, homes);
             trait_bounds.resize(own.len(), Vec::new());
             bounds.extend(trait_bounds);
             bounds.extend(def.signature.bounds.iter().cloned());
@@ -857,7 +908,7 @@ pub fn impl_signatures(
             // says every method here may use `K`'s `Hash`, exactly as a bound
             // written on the method would — and dropping them made a bound on
             // an impl block parse, mean nothing, and say nothing about it.
-            let mut bounds = crate::bound_lists(i.type_params().as_ref());
+            let mut bounds = crate::bound_lists(i.type_params().as_ref(), &scope, homes);
             bounds.resize(generics.len(), Vec::new());
             bounds.extend(def.signature.bounds.iter().cloned());
             out.insert(
@@ -911,7 +962,7 @@ pub fn impl_signatures(
             // says every method here may use `K`'s `Hash`, exactly as a bound
             // written on the method would — and dropping them made a bound on
             // an impl block parse, mean nothing, and say nothing about it.
-            let mut bounds = crate::bound_lists(i.type_params().as_ref());
+            let mut bounds = crate::bound_lists(i.type_params().as_ref(), &scope, homes);
             bounds.resize(generics.len(), Vec::new());
             bounds.extend(def.signature.bounds.iter().cloned());
             let signature = Signature {
@@ -1141,7 +1192,7 @@ pub fn check(
 
         check_kind(imp, def, kinds, &mut errors);
         check_methods(imp, def, &mut errors);
-        check_assoc_types(imp, def, &mut errors);
+        check_assoc_types(imp, def, traits, &mut errors);
         check_signatures(imp, traits, signatures, &mut errors);
     }
 
@@ -1344,12 +1395,17 @@ fn check_signatures(
     }
 }
 
-fn check_assoc_types(imp: &ImplDef, def: &TraitDef, errors: &mut Vec<HirError>) {
+fn check_assoc_types(
+    imp: &ImplDef,
+    def: &TraitDef,
+    traits: &Traits,
+    errors: &mut Vec<HirError>,
+) {
     let missing: Vec<&str> = def
         .assoc_types
         .iter()
-        .filter(|n| !imp.assoc_types.iter().any(|(m, _)| m == *n))
-        .map(String::as_str)
+        .filter(|a| !imp.assoc_types.iter().any(|(m, _)| m == &a.name))
+        .map(|a| a.name.as_str())
         .collect();
     if !missing.is_empty() {
         errors.push(HirError {
@@ -1362,12 +1418,57 @@ fn check_assoc_types(imp: &ImplDef, def: &TraitDef, errors: &mut Vec<HirError>) 
         });
     }
 
-    for (name, _) in &imp.assoc_types {
-        if !def.assoc_types.contains(name) {
+    for (name, chosen) in &imp.assoc_types {
+        let Some(declared) = def.assoc_types.iter().find(|a| &a.name == name) else {
             errors.push(HirError {
                 message: format!("`{}` has no associated type named `{name}`", def.name),
                 range: imp.range,
             });
+            continue;
+        };
+        // The bound is a promise the *trait* made to everything written against
+        // it, and this impl is where it is kept or broken. Checking it here
+        // rather than at the default body's call means one error naming the
+        // impl, instead of one per method that relied on the bound.
+        //
+        // A bound may name the trait's own parameters -- `type Key: Convert<A>`
+        // in a `trait Indexed<A>` -- so it is read at the arguments this impl
+        // gave them, the same substitution `check_signatures` does.
+        let mapping: HashMap<&str, Type> = def
+            .type_params
+            .iter()
+            .map(|p| p.as_str())
+            .zip(imp.trait_args.iter().cloned())
+            .collect();
+        for wanted in &declared.bounds {
+            let wanted = Bound {
+                name: wanted.name.clone(),
+                args: wanted.args.iter().map(|a| crate::unify::substitute(a, &mapping)).collect(),
+            };
+            // The impl's own parameters are rigid here -- `type Item = A` in
+            // `impl<A: Show> Iterable for List<A>` -- and what they satisfy is
+            // what this impl required of them.
+            let satisfied = match chosen {
+                Type::Unknown | Type::Var(_) | Type::Never => true,
+                Type::Param(p) => imp
+                    .bounds
+                    .iter()
+                    .find(|(g, _)| g == p)
+                    .is_some_and(|(_, names)| {
+                        with_supertraits(traits, names).iter().any(|t| t == &wanted.name)
+                    }),
+                chosen => traits.satisfies_at(&wanted.name, &wanted.args, chosen),
+            };
+            if !satisfied {
+                errors.push(HirError {
+                    message: format!(
+                        "`{chosen}` does not implement `{wanted}`, which `{}` requires of its \
+                         `{name}`",
+                        def.name
+                    ),
+                    range: imp.range,
+                });
+            }
         }
     }
 }

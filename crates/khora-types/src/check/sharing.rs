@@ -133,7 +133,7 @@ impl<'a> Checker<'a> {
             .iter()
             .enumerate()
             .filter(|(i, _)| {
-                self.signature.bounds.get(*i).is_some_and(|b| b.iter().any(|t| t == SHARE))
+                self.signature.bounds.get(*i).is_some_and(|b| b.iter().any(|t| t.name == SHARE))
             })
             .map(|(_, g)| g.clone())
             .collect()

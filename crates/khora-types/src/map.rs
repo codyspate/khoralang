@@ -502,7 +502,7 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
             ast::Decl::Fn(f) => {
                 let Some(name) = f.name().and_then(|n| n.ident()) else { continue };
                 let generics = generic_names(f.type_params().as_ref());
-                let bounds = bound_lists(f.type_params().as_ref());
+                let bounds = bound_lists(f.type_params().as_ref(), &generics, homes);
                 let params = f
                     .params()
                     .map(|list| {
@@ -1138,12 +1138,20 @@ pub(crate) fn disagreement(outer: (&Type, &Type), inner: (&Type, &Type)) -> Stri
 /// The traits each parameter requires, positionally matched to
 /// [`generic_names`]. A parameter with no bounds contributes an empty list, so
 /// the two are always the same length.
-pub(crate) fn bound_lists(params: Option<&ast::TypeParams>) -> Vec<Vec<String>> {
+///
+/// `scope` is what a bound's own arguments are read against: in
+/// `fn f<T: Convert<U>, U>` the `U` is a rigid parameter of this signature, and
+/// without the scope it would be resolved as the name of some type.
+pub(crate) fn bound_lists(
+    params: Option<&ast::TypeParams>,
+    scope: &[String],
+    homes: &TypeHomes,
+) -> Vec<Vec<Bound>> {
     params
         .map(|p| {
             p.params()
                 .filter(|g| g.name().and_then(|n| n.ident()).is_some())
-                .map(|g| traits::bound_names(g.bounds().as_ref()))
+                .map(|g| traits::bound_list(g.bounds().as_ref(), scope, homes))
                 .collect()
         })
         .unwrap_or_default()

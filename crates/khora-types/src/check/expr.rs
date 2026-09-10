@@ -618,7 +618,7 @@ impl<'a> Checker<'a> {
         // decided when the function is specialized, exactly as it is for a
         // written `a.cmp(b)` on a bounded parameter.
         let available = match ty {
-            Type::Param(param) => self.bounds_on(param).iter().any(|b| b == trait_name),
+            Type::Param(param) => self.bounds_on(param).iter().any(|b| b.name == trait_name),
             other => self.types.traits.find(trait_name, other).is_some(),
         };
         if !available {

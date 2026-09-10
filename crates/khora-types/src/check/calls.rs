@@ -348,9 +348,18 @@ impl<'a> Checker<'a> {
             _ => None,
         };
         if let Some(param) = rigid {
-            return Some(
-                self.infer_bounded_method(callee, &param, &self_ty, method, args, range),
-            );
+            let bounds = self.bounds_on(&param);
+            return Some(self.infer_via_bounds(callee, &bounds, &self_ty, method, args, range));
+        }
+
+        // A projection is rigid too: `Self::Key` is whichever type the impl
+        // will choose, and the only methods it has are the ones the associated
+        // type's own bounds promise. Without this it fell through to impl
+        // search, which found no impl — for a type nobody has chosen yet —
+        // and said so about the bound the line above had just declared.
+        if let Type::Assoc { owner, name } = &self_ty {
+            let bounds = self.assoc_bounds(owner, name);
+            return Some(self.infer_via_bounds(callee, &bounds, &self_ty, method, args, range));
         }
 
         let (def, imp) = match traits::method_source(&self.types.traits, &self_ty, method) {
@@ -391,16 +400,23 @@ impl<'a> Checker<'a> {
     /// `fn f<T: Eq>(a: T, b: T) { a.eq(b) }` has no impl to select — `T` is
     /// whatever the caller passes — so the *trait's* signature is used, and
     /// which impl runs is settled by monomorphization.
-    pub(super) fn infer_bounded_method(
+    pub(super) fn infer_via_bounds(
         &mut self,
         callee: ExprId,
-        param: &str,
+        bounds: &[Bound],
         receiver: &Type,
         method: &str,
         args: &[ExprId],
         range: TextRange,
     ) -> Type {
-        let declared = self.bounds_on(param);
+        // What the message calls the receiver. The *head* of an application,
+        // because the bounds are `F`'s and the advice is to write one on `F`:
+        // `F<B>` names nothing anybody can add a bound to.
+        let subject = match receiver {
+            Type::Applied { head, .. } => head.to_string(),
+            other => other.to_string(),
+        };
+        let declared: Vec<String> = bounds.iter().map(|b| b.name.clone()).collect();
         let available = traits::with_supertraits(&self.types.traits, &declared);
         let found = available.iter().find_map(|name| {
             let def = self.types.traits.traits.get(name)?;
@@ -413,14 +429,29 @@ impl<'a> Checker<'a> {
             }
             self.error(
                 if declared.is_empty() {
-                    format!(
-                        "`{param}` is a type the caller chooses and has no bounds, so it has no \
-                         method `{method}`; add one, as `{param}: Trait`"
-                    )
+                    match receiver {
+                        // The fix is in the *declaration*. `A::Key: Show` is
+                        // not a bound this grammar has and there are no
+                        // `where` clauses, so the trait's own `type Key` is
+                        // the one place it can be written — telling the caller
+                        // to add a bound here is advice that cannot be taken.
+                        Type::Assoc { name, .. } => format!(
+                            "`{subject}` is an associated type with no bounds, so it has no \
+                             method `{method}`; bound it where it is declared, as \
+                             `type {name}: Trait`"
+                        ),
+                        _ => format!(
+                            "`{subject}` is a type the caller chooses and has no bounds, so it \
+                             has no method `{method}`; add one, as `{subject}: Trait`"
+                        ),
+                    }
                 } else {
+                    // The bounds as written, arguments included: `Convert` and
+                    // `Convert<String>` send a reader to different lines.
+                    let spelled: Vec<String> = bounds.iter().map(Bound::to_string).collect();
                     format!(
-                        "no method `{method}` on `{param}`, whose bounds are `{}`",
-                        declared.join("` + `")
+                        "no method `{method}` on `{subject}`, whose bounds are `{}`",
+                        spelled.join("` + `")
                     )
                 },
                 range,
@@ -614,7 +645,7 @@ impl<'a> Checker<'a> {
             }
         }
 
-        let bounds = self.bounds_on(owner);
+        let bounds = self.bound_names_on(owner);
         let candidates: Vec<String> = if bounds.is_empty() {
             vec![owner.to_string()]
         } else {

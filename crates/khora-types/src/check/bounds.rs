@@ -72,7 +72,7 @@ impl<'a> Checker<'a> {
     }
 
     /// The traits the enclosing function requires of `param`.
-    pub(super) fn bounds_on(&self, param: &str) -> Vec<String> {
+    pub(super) fn bounds_on(&self, param: &str) -> Vec<Bound> {
         self.signature
             .generics
             .iter()
@@ -80,6 +80,31 @@ impl<'a> Checker<'a> {
             .and_then(|i| self.signature.bounds.get(i))
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Those bounds as bare names, for the questions that are about which
+    /// trait rather than which of its instances — looking a `TraitDef` up to
+    /// see whether it declares a method, and following supertraits.
+    pub(super) fn bound_names_on(&self, param: &str) -> Vec<String> {
+        self.bounds_on(param).into_iter().map(|b| b.name).collect()
+    }
+
+    /// The bounds a projection carries.
+    ///
+    /// `Self::Key` has no impl to look at — which type it is, is exactly what
+    /// the impl has not been chosen yet to say — so what it promises is what
+    /// the trait declared for it: `type Key: Show` and nothing else. The owner
+    /// is a rigid parameter, and its own bounds name the traits that could
+    /// have declared this associated type.
+    pub(super) fn assoc_bounds(&self, owner: &Type, name: &str) -> Vec<Bound> {
+        let Type::Param(param) = owner else { return Vec::new() };
+        let declared = self.bound_names_on(param);
+        traits::with_supertraits(&self.types.traits, &declared)
+            .iter()
+            .filter_map(|t| self.types.traits.traits.get(t))
+            .filter_map(|def| def.assoc_types.iter().find(|a| a.name == name))
+            .flat_map(|a| a.bounds.iter().cloned())
+            .collect()
     }
 
     /// Reports every trait bound this body left unsatisfied.
@@ -97,6 +122,15 @@ impl<'a> Checker<'a> {
         for (id, name, args) in mentions {
             let Some(signature) = self.types.signatures.get(name.as_str()) else { continue };
             let bounds = signature.bounds.clone();
+            // A bound's arguments are written in terms of the signature's own
+            // parameters — `fn f<T: Convert<U>, U>` — so they mean nothing
+            // until this instantiation says what those parameters became.
+            let mapping: HashMap<&str, Type> = signature
+                .generics
+                .iter()
+                .map(|g| g.as_str())
+                .zip(args.iter().cloned())
+                .collect();
             let range = self.body.range(id);
 
             for (arg, required) in args.iter().zip(&bounds) {
@@ -104,11 +138,21 @@ impl<'a> Checker<'a> {
                 for wanted in required {
                     // A trait that does not exist is reported where it is
                     // written, not once per use of the function.
-                    if !self.types.traits.traits.contains_key(wanted) {
+                    if !self.types.traits.traits.contains_key(&wanted.name) {
                         continue;
                     }
-                    if !self.satisfies(wanted, &arg) {
+                    let at: Vec<Type> = wanted
+                        .args
+                        .iter()
+                        .map(|a| self.unifier.zonk(&crate::unify::substitute(a, &mapping)))
+                        .collect();
+                    if !self.satisfies_at(&wanted.name, &at, &arg) {
                         let called = traits::readable_key(&name);
+                        // The bound *as the instantiation makes it*, not as it
+                        // was written: `Convert<U>` names no type the reader
+                        // can go and look at, and `Convert<Bool>` is the whole
+                        // of what is wrong here.
+                        let wanted = Bound { name: wanted.name.clone(), args: at };
                         self.error(
                             format!(
                                 "`{arg}` does not implement `{wanted}`, which `{called}` \
@@ -128,6 +172,15 @@ impl<'a> Checker<'a> {
     /// enclosing signature promised about it, which is why this is a method on
     /// the checker rather than on `Traits`.
     pub(super) fn satisfies(&self, wanted: &str, ty: &Type) -> bool {
+        self.satisfies_at(wanted, &[], ty)
+    }
+
+    /// The same question about a trait used at particular arguments.
+    ///
+    /// An empty `args` is the wide question — "does this implement `Convert` at
+    /// all" — which is what a bound written as a bare name asks and what every
+    /// caller here asked before bounds carried their arguments.
+    pub(super) fn satisfies_at(&self, wanted: &str, args: &[Type], ty: &Type) -> bool {
         // `Share` is answered by looking, not by finding an impl. A record of
         // immutable fields is safe for two fibers whether or not anybody wrote
         // it down, and requiring the impl would mean writing one for every
@@ -140,13 +193,47 @@ impl<'a> Checker<'a> {
         match ty {
             // Not solved, or downstream of an error already reported.
             Type::Unknown | Type::Var(_) | Type::Never => true,
-            Type::Param(p) => {
-                let declared = self.bounds_on(p);
-                traits::with_supertraits(&self.types.traits, &declared)
-                    .iter()
-                    .any(|t| t == wanted)
+            Type::Param(p) => self.bounds_answer(&self.bounds_on(p), wanted, args),
+            // A projection is rigid in the same way, and its bounds come from
+            // the associated type's declaration rather than from a signature.
+            Type::Assoc { owner, name } => {
+                let declared = self.assoc_bounds(owner, name);
+                self.bounds_answer(&declared, wanted, args)
             }
-            other => self.types.traits.satisfies(wanted, other),
+            other => self.types.traits.satisfies_at(wanted, args, other),
         }
     }
+
+    /// Whether a list of declared bounds discharges `wanted` at `args`.
+    fn bounds_answer(&self, declared: &[Bound], wanted: &str, args: &[Type]) -> bool {
+        // A bound of the same name is the direct answer, and it answers at its
+        // own arguments: `T: Convert<Bool>` does not discharge a
+        // `Convert<String>` it is passed to.
+        if declared.iter().any(|b| b.name == wanted && arguments_match(&b.args, args)) {
+            return true;
+        }
+        // Otherwise the trait can only be reached through a supertrait, and a
+        // supertrait list is bare names — `trait Sub: Convert<A>` records
+        // `Convert` and nothing else. There is no argument information to be
+        // strict with, so this stays the wide answer rather than refusing a
+        // program on a fact nobody recorded.
+        let names: Vec<String> = declared.iter().map(|b| b.name.clone()).collect();
+        traits::with_supertraits(&self.types.traits, &names).iter().any(|t| t == wanted)
+    }
+}
+
+/// Whether a bound's own arguments answer the ones being asked for.
+///
+/// The rule [`crate::traits::ImplDef::answers_at`] uses, for the same reason:
+/// nothing asked is nothing to disagree with, and an argument inference has not
+/// solved is the absence of an answer rather than a wrong one.
+fn arguments_match(mine: &[Type], wanted: &[Type]) -> bool {
+    if wanted.is_empty() {
+        return true;
+    }
+    mine.len() == wanted.len()
+        && mine.iter().zip(wanted).all(|(mine, wanted)| match wanted {
+            Type::Unknown | Type::Var(_) | Type::Never => true,
+            wanted => mine == wanted,
+        })
 }

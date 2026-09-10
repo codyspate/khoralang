@@ -1301,6 +1301,165 @@ fn coherence_across_files_reads_the_arguments() {
     );
 }
 
+// --- bounds at trait arguments ----------------------------------------------
+
+/// **A bound dropped its arguments**, so `T: Convert<String>` recorded bare
+/// `Convert` and meant the trait at *any* arguments. The matching impl is the
+/// easy half; the next test is the one that proves anything.
+#[test]
+fn a_bound_may_name_a_concrete_trait_argument() {
+    assert_clean(&format!(
+        "{CONVERT}impl Convert<String> for Int {{ fn convert(self) -> String {{ \"n\" }} }}\n\
+         fn to_text<T: Convert<String>>(v: T) -> String {{ v.convert() }}\n\
+         fn f(n: Int) -> String {{ to_text(n) }}\n"
+    ));
+}
+
+/// And a type that converts to something *else* does not satisfy it.
+///
+/// `Int` implements `Convert` once, at `Bool`, and the bound asks for `String`.
+/// Answering it from the head alone accepted this, and the mismatch surfaced
+/// as `convert` returning the wrong type somewhere downstream -- or not at all,
+/// where the caller only stored the result.
+#[test]
+fn a_bound_at_one_argument_is_not_satisfied_by_another() {
+    assert_reports(
+        &format!(
+            "{CONVERT}impl Convert<Bool> for Int {{ fn convert(self) -> Bool {{ true }} }}\n\
+             fn to_text<T: Convert<String>>(v: T) -> String {{ v.convert() }}\n\
+             fn f(n: Int) -> String {{ to_text(n) }}\n"
+        ),
+        "`Int` does not implement `Convert<String>`",
+    );
+}
+
+/// A bound's argument may be another of the function's own parameters, which
+/// is what makes `fn via<T: Convert<U>, U>` say "converts to whatever this
+/// returns". It is only answerable once the instantiation solves `U`, so the
+/// bound's arguments are substituted before the question is asked.
+#[test]
+fn a_bound_argument_may_be_another_parameter() {
+    assert_clean(&format!(
+        "{CONVERT}impl Convert<String> for Int {{ fn convert(self) -> String {{ \"n\" }} }}\n\
+         fn via<T: Convert<U>, U>(v: T) -> U {{ v.convert() }}\n\
+         fn f(n: Int) -> String {{ via(n) }}\n"
+    ));
+}
+
+/// And is refused at the instantiation that makes it false -- same function,
+/// same impl, different `U`.
+#[test]
+fn a_bound_argument_from_a_parameter_is_checked_at_the_instantiation() {
+    assert_reports(
+        &format!(
+            "{CONVERT}impl Convert<String> for Int {{ fn convert(self) -> String {{ \"n\" }} }}\n\
+             fn via<T: Convert<U>, U>(v: T) -> U {{ v.convert() }}\n\
+             fn g(n: Int) -> Bool {{ via(n) }}\n"
+        ),
+        "`Int` does not implement `Convert<Bool>`",
+    );
+}
+
+/// A bound on a trait that takes no parameters is spelled and checked exactly
+/// as it was: bare `Show`, no arguments to read, and the message that names it
+/// says `Show` and not `Show<>`.
+#[test]
+fn a_bare_bound_is_unaffected() {
+    assert_clean(&format!(
+        "{SHOW}fn shown<T: Show>(v: T) -> String {{ v.show() }}\n\
+         fn f(n: Int) -> String {{ shown(1) }}\n"
+    ));
+    assert_reports(
+        &format!(
+            "{SHOW}pub type Money = {{ units: Int }};\n\
+             fn shown<T: Show>(v: T) -> String {{ v.show() }}\n\
+             fn f(m: Money) -> String {{ shown(m) }}\n"
+        ),
+        "`Money` does not implement `Show`",
+    );
+}
+
+// --- bounds on associated types ---------------------------------------------
+
+/// The trait `reference/traits.md` and `reference/declarations.md` both show.
+const INDEXED: &str = "pub trait Indexed {\n\
+                       \x20 type Key: Show;\n\
+                       \x20 fn key(self) -> Self::Key;\n\
+                       \x20 fn label(self) -> String { self.key().show() }\n\
+                       }\n";
+
+/// **The default body was refused by the trait that declared the bound.**
+///
+/// `type Key: Show` parsed and was thrown away -- `assoc_types` was a list of
+/// names -- so `self.key().show()` reached impl search with a receiver no impl
+/// has been chosen for, and was told ``Self::Key` does not implement `Show`,
+/// which is where `show` comes from` two lines under the line saying it does.
+/// There was no way to write it differently: `A::Key: Show` is not a bound this
+/// grammar has, and there are no `where` clauses.
+#[test]
+fn an_associated_type_bound_reaches_a_default_body() {
+    assert_clean(&format!("{SHOW}{INDEXED}"));
+}
+
+/// And a use site, where the owner is an ordinary parameter rather than `Self`:
+/// `A::Key` promises what `Indexed` declared for `Key`, the same as inside.
+#[test]
+fn an_associated_type_bound_reaches_a_use_site() {
+    assert_clean(&format!(
+        "{SHOW}{INDEXED}fn label_of<A: Indexed>(a: A) -> String {{ a.key().show() }}\n"
+    ));
+}
+
+/// The bound is a promise, so an impl that breaks it is refused -- and the
+/// message names the bound and the associated type, because the fix is in the
+/// impl and the reason for it is in the trait.
+#[test]
+fn an_impl_must_keep_the_associated_type_bound() {
+    assert_reports(
+        &format!(
+            "{SHOW}{INDEXED}pub type Money = {{ units: Int }};\n\
+             pub type Row = {{ id: Int }};\n\
+             impl Indexed for Row {{\n\
+             \x20 type Key = Money;\n\
+             \x20 fn key(self) -> Money {{ Money {{ units: 1 }} }}\n\
+             }}\n"
+        ),
+        "`Money` does not implement `Show`, which `Indexed` requires of its `Key`",
+    );
+}
+
+/// An impl that keeps it is accepted, which is the half that proves the check
+/// above is reading the impl rather than refusing every one of them.
+#[test]
+fn an_impl_that_keeps_the_bound_is_accepted() {
+    assert_clean(&format!(
+        "{SHOW}{INDEXED}pub type Row = {{ id: Int }};\n\
+         impl Indexed for Row {{\n\
+         \x20 type Key = Int;\n\
+         \x20 fn key(self) -> Int {{ self.id }}\n\
+         }}\n"
+    ));
+}
+
+/// An associated type with no bound promises nothing, and calling a method on
+/// it still says so -- naming the projection, and naming the *declaration* as
+/// the place to fix it. "Add one, as `Self::Key: Trait`" is advice nobody can
+/// take: that is not a bound this grammar has.
+#[test]
+fn an_unbounded_associated_type_still_has_no_methods() {
+    assert_reports(
+        &format!(
+            "{SHOW}pub trait Keyed {{\n\
+             \x20 type Key;\n\
+             \x20 fn key(self) -> Self::Key;\n\
+             \x20 fn label(self) -> String {{ self.key().show() }}\n\
+             }}\n"
+        ),
+        "`Self::Key` is an associated type with no bounds, so it has no method `show`; \
+         bound it where it is declared, as `type Key: Trait`",
+    );
+}
+
 /// The diagnostics of `second`, with `first` and a shared declaration beside it.
 fn errors_across(declaration: &str, first: &str, second: &str) -> Vec<String> {
     let db = khora_db::KhoraDatabase::new();

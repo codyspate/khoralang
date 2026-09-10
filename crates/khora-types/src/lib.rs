@@ -355,6 +355,45 @@ impl Type {
     }
 }
 
+/// One trait bound written on a type parameter, with the arguments it names.
+///
+/// **The arguments used to be dropped**, so `T: Convert<String>` was recorded
+/// as bare `Convert` and asked only "does this implement `Convert` at all" — a
+/// type implementing nothing but `Convert<Bool>` satisfied it, and the
+/// disagreement surfaced later as a return type nobody wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bound {
+    pub name: String,
+    /// Empty for a trait that takes none, which is most of them: a bound with
+    /// no arguments asks the wide question and every impl of the trait answers.
+    ///
+    /// May mention the enclosing signature's *own* parameters, as the `U` in
+    /// `fn f<T: Convert<U>, U>` does, so these are substituted against the
+    /// instantiation before the question is asked.
+    pub args: Vec<Type>,
+}
+
+impl Bound {
+    /// A bound written as a bare trait name.
+    pub fn bare(name: impl Into<String>) -> Bound {
+        Bound { name: name.into(), args: Vec::new() }
+    }
+}
+
+impl std::fmt::Display for Bound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name)?;
+        if let Some((first, rest)) = self.args.split_first() {
+            write!(f, "<{first}")?;
+            for arg in rest {
+                write!(f, ", {arg}")?;
+            }
+            write!(f, ">")?;
+        }
+        Ok(())
+    }
+}
+
 /// A function's declared signature.
 ///
 /// `generics` names the rigid parameters. Inside the body they stay rigid; at
@@ -380,7 +419,7 @@ pub struct Signature {
     /// Parallel to `generics` rather than a map, so the parameter a bound
     /// belongs to is positional — which is how instantiation already matches
     /// arguments to parameters.
-    pub bounds: Vec<Vec<String>>,
+    pub bounds: Vec<Vec<Bound>>,
     pub params: Vec<Type>,
     pub ret: Type,
 }
