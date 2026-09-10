@@ -387,3 +387,66 @@ fn an_unsolved_operand_learns_from_the_other_side() {
         "expected `String`, found `Int`",
     );
 }
+
+/// A statement does not leave its hint for the statement after it.
+///
+/// `self.hint` is one field, taken by whichever `infer` runs next. A lambda
+/// sets it to its own fresh result variable before inferring its body, so a
+/// call taking a `()`-returning closure left an unsolved variable behind — and
+/// the *next* statement's generic call unified its type parameter against it
+/// and succeeded, solving `A` to `()`:
+///
+///     run(fn () => { note(); });
+///     let _ = update(cell, fn n => n + 1);
+///     //             ^ expected `Cell<()>`, found `Cell<Int>`
+///
+/// Three errors came out of that, all against the second line, none naming the
+/// first — and the declared type they contradicted was never mentioned. The
+/// same shape as errata 53: unifying against an unsolved variable *succeeds*,
+/// so nothing is reported until an innocent line disagrees with the answer.
+///
+/// Order was the tell. Moving the closure call below the generic one checked
+/// clean, which no type error should depend on.
+#[test]
+fn a_statement_does_not_leave_its_hint_behind() {
+    const SETUP: &str = "module m;\n\
+                         pub type Cell<A>;\n\
+                         impl<A> Cell<A> {\n\
+                           pub fn update(self, step: (A) -> A) -> A;\n\
+                         }\n\
+                         fn note() -> ();\n\
+                         fn run(f: () -> ()) -> ();\n";
+
+    // The order that used to fail.
+    assert_clean(&format!(
+        "{SETUP}pub fn f(cell: Cell<Int>) -> () {{ \
+           run(fn () => {{ note(); }}); \
+           Cell::update(cell, fn n => n + 1); \
+         }}\n"
+    ));
+
+    // And the order that always worked, so the fix did not simply move the
+    // failure.
+    assert_clean(&format!(
+        "{SETUP}pub fn f(cell: Cell<Int>) -> () {{ \
+           Cell::update(cell, fn n => n + 1); \
+           run(fn () => {{ note(); }}) \
+         }}\n"
+    ));
+}
+
+/// Clearing the statement hint does not cost the tail its own.
+///
+/// `infer_block` holds the block's hint across the statements and restores it
+/// for the tail, which is what lets a record literal in tail position know
+/// which record it is. Clearing per-statement must not disturb that.
+#[test]
+fn the_tail_still_gets_the_blocks_hint() {
+    assert_clean(
+        "module m;\n\
+         pub type Changed = { state: Int, result: Int };\n\
+         fn note() -> ();\n\
+         fn modify(step: (Int) -> Changed) -> ();\n\
+         pub fn f() -> () { modify(fn n => { note(); { state: n, result: n } }) }\n",
+    );
+}

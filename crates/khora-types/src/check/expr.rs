@@ -705,6 +705,11 @@ impl<'a> Checker<'a> {
         for stmt in stmts {
             match stmt {
                 Stmt::Let { pat, ty: declared, init } => {
+                    // A `let` clears it for the same reason (see `Stmt::Expr`):
+                    // an initializer is described by its annotation or by
+                    // nothing, never by a hint left over from the statement
+                    // above.
+                    self.hint = None;
                     // An annotation is checked against the initializer and
                     // then *is* the binding's type. Until errata 36 it was
                     // parsed and dropped, so `let x: Bool = 5` compiled clean
@@ -727,6 +732,31 @@ impl<'a> Checker<'a> {
                     self.report_let_refutability(*pat, &ty);
                 }
                 Stmt::Expr(e) => {
+                    // **A statement's hint is nobody's hint.** `self.hint` is a
+                    // single field that whichever `infer` runs next will take,
+                    // and a statement that sets one without consuming it leaves
+                    // it for the statement after — which is not what it
+                    // describes.
+                    //
+                    // A lambda sets `self.hint` to its own fresh result
+                    // variable before inferring its body (see `Expr::Lambda`),
+                    // so a call taking a `()`-returning closure left an
+                    // unsolved variable behind. The next statement's generic
+                    // call then unified its own type parameter against it and
+                    // *succeeded*, solving `A` to `()`:
+                    //
+                    //     run(fn () => { print("x"); });
+                    //     let _ = Shared::update(total, fn n => n + 1);
+                    //     //                     ^ expected `Shared<()>`,
+                    //     //                       found `Shared<Int>`
+                    //
+                    // The same shape as errata 53 and the same reason it is
+                    // not caught: unifying against an unsolved variable
+                    // succeeds, so nothing is reported until a later,
+                    // innocent line contradicts the answer. Both `Stmt` arms
+                    // clear it, because a statement's value is discarded and
+                    // there is nothing for a hint to describe.
+                    self.hint = None;
                     diverged |= matches!(self.infer(*e), Type::Never);
                 }
             }
