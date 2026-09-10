@@ -304,10 +304,29 @@ pub unsafe extern "C" fn khora_fibers_wait(fibers: *mut u8) -> i64 {
         if waiting.is_empty() {
             return list.lock().unwrap_or_else(|e| e.into_inner()).failed;
         }
-        // A round adopted after a failure was already seen is a round nobody
-        // is waiting on the answers of, so it is stopped before it is waited
-        // for rather than after.
-        if list.lock().unwrap_or_else(|e| e.into_inner()).failed > 0 {
+        // **And a round nobody is waiting on because *this* fiber was told to
+        // stop.** `docs/design/fibers.md` promises that cancelling a nursery
+        // cancels its children, transitively, and nothing else looks.
+        //
+        // **This covers only the cancellation that arrives between rounds, and
+        // that is not the common one.** A parent blocked in `wait_for` below is
+        // inside `JoinHandle::join` on the thread backend, which cannot be
+        // given a deadline, so a cancellation arriving then is not seen until
+        // the round it is waiting on completes -- and if the children are in
+        // `loop`s, it never does. The hang is still reachable: cancel a fiber
+        // that is already inside this call and it waits for ever.
+        //
+        // Closing it properly means cancelling at the point the cancellation is
+        // *delivered* rather than where it is noticed -- a fiber would have to
+        // know its open nurseries so `khora_fiber_cancel` could walk them --
+        // and that is a change to what a `Fiber` owns, with a lock order to get
+        // right between the fiber and the crew. It is not a repair.
+        //
+        // The children are still *waited* for after being cancelled. A nursery
+        // that returned while one was winding up would not be structured, and
+        // that is as true of a cancellation as it is of a failure.
+        let stopping = crate::current::current(|fiber| fiber.stops_here());
+        if stopping || list.lock().unwrap_or_else(|e| e.into_inner()).failed > 0 {
             for Handed(fiber) in waiting.iter() {
                 // SAFETY: as below.
                 unsafe { khora_fiber_cancel(*fiber) };

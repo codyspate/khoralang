@@ -6327,6 +6327,126 @@ without reading the compiler.
 
 ---
 
+## Phase 17 — One cancellation rule, and the three places there is not one
+
+Phase 16 closed the shape where a cancellation reached a frame with nowhere to
+send it: a *total* `catch` inside a function whose `raises` row is empty has no
+tagged return to travel on, so it called `khora_cancel_stop` and, on a spawned
+fiber, aborted the process. That frame now absorbs it, releases what it owns
+and returns a zero of its own type.
+
+What that closed was a *frame* problem. What is left is the same question asked
+of a *fiber*, and of a *nursery*, and the answers do not agree with each other
+or with `docs/design/fibers.md`. An outside audit called this the highest-risk
+technical area in the project and a release blocker, and the reason is not the
+individual bugs below — it is that `Fiber::cancel`, a nursery, and a fiber's
+root are three mechanisms with three different ideas of what cancelling means.
+
+**The test for this phase is one sentence: a user cannot turn ordinary
+structured cancellation into a hang or an abort by composing two supported
+calls.** Three things stand between here and that.
+
+### 17.1 Cancelling a fiber does not reach the children it is waiting on
+
+`khora_fibers_wait` joins its children with `wait_for`, and the only thing that
+cancels them is a sibling's failure. Nothing asks whether the *waiting* fiber
+was told to stop. So:
+
+```khora
+let parent = Fiber::spawn(fn () => {
+  let kids = Fibers::open();
+  kids.adopt(Fiber::spawn(fn () => forever()!));
+  kids.adopt(Fiber::spawn(fn () => forever()!));
+  kids.wait();
+  ()
+});
+clock.sleep(200);
+Fiber::cancel(parent);
+Fiber::wait(parent);      // never returns
+```
+
+Two supported calls, and the program waits for ever. `docs/design/fibers.md`
+promises that cancelling a nursery cancels its children transitively;
+`nursery.rs` does not implement it. `khora_fibers_release` — the *drop* path —
+already does exactly the right thing, cancelling every child and then waiting
+in rounds, so the shape of the answer is written down twice and reached once.
+
+A check was added at the top of each round and **it is not enough, which is the
+finding worth keeping.** On the thread backend `Completion::Thread` is a
+`JoinHandle::join()` and takes no deadline, so a parent already inside the join
+does not notice a cancellation until the round completes — and if the children
+are in `loop`s it never does. Checking where the cancellation is *noticed*
+cannot work; it has to happen where it is *delivered*.
+
+That means `khora_fiber_cancel` walking the target's open nurseries, which
+means a `Fiber` knowing what nurseries it has open, which means a lock order
+between the fiber and the crew that is right in both directions. It is a change
+to what a `Fiber` owns. A deadlock here would be worse than the hang it
+replaced, which is why this is a phase and not a patch.
+
+### 17.2 `Fiber<A, {}>::join` cannot report that its fiber was cancelled
+
+The runtime records the cancellation. The code generator emits no branch on
+`which` for an empty row, so the joiner reads the word regardless: a non-boxed
+answer gets a zero, and a boxed one keeps the real answer rather than a null.
+
+This is a type-level limit rather than a runtime one — `join`'s row *is* the
+channel, and an empty row has nowhere to put "stopped". It is listed here
+rather than separately because it is the same question as 17.1 asked at the
+other end: 17.1 is a cancellation that cannot get *in*, this is one that cannot
+get *out*, and any coherent rule has to answer both. Whether the answer is a
+row on `join`, a distinguished `Fiber::outcome`, or a refusal to spawn an
+infallible thunk that something may cancel, is what this phase decides.
+
+### 17.3 A frame whose answer is a pointer still stops the process
+
+Phase 16's rule needs a zero that is a value. `()` and the scalars have one; a
+pointer does not, because a null is not a live object and an infallible caller
+may read through it. So a total `catch` in a function returning a boxed value
+still calls `khora_cancel_stop`. The message names that shape and says to give
+the function a `raises` row or move the `catch` outward, which is honest and is
+not a rule — it is the absence of one.
+
+### What this is measured against
+
+`crates/khora-codegen-llvm/tests/tls_cancel.rs`'s
+`a_cancelled_fiber_releases_the_tls_session` fails on Windows and passes on
+Linux, and it is 17.1 wearing a different coat: it drives cancellation *through
+a nursery*, relying on a first child's failure to cancel its siblings. The
+Python client's handshake times out because the server never completes it.
+Five of the six TLS tests pass on the same machine, so this is not TLS.
+
+That test is the phase's acceptance test on Windows, and the nursery probe
+above is its acceptance test everywhere. Neither is a new thing to build.
+
+Two measurements already exist and should not be re-taken: sibling cancellation
+cuts 0 of 11 siblings at the last adoption position, 25 runs out of 25, and the
+documented cooperative workaround — the work polling a `Shared<Bool>` — cuts 11
+of 11 at every position in about a twentieth of the time. `limitations/`
+carries both, measured on two operating systems.
+
+### The order this gets worked in
+
+17.2 first, because it decides the vocabulary. Until there is an answer to
+"how does a fiber say it was stopped", 17.1 has nowhere to report what it did
+and 17.3 has no alternative to offer a boxed frame. It is also the cheapest of
+the three to be wrong about, because it is a type-level decision that a test
+can pin before any runtime changes.
+
+Then 17.1, which is the hang and the release blocker, and where the deadlock
+risk lives. Then 17.3, which by then is either a special case of 17.2's answer
+or a documented refusal, and which is the only one of the three that can
+honestly stay open.
+
+**Done when** the nursery probe stops, `tls_cancel` passes on Windows, a
+cancelled fiber's `join` says so whatever its row, and the comment above
+`khora_cancel_stop` describes every shape that reaches it. That comment has
+been wrong twice — it claimed the gap was confined to the serving path, and it
+claimed three shapes detached cleanly that did not — so the last of those is
+not a formality.
+
+---
+
 ## Where Khora can pass Effect, and what of it is tracked
 
 `docs/design/beyond-effect.md` argues six places the language can go past the
