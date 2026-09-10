@@ -116,11 +116,11 @@ fn attribute(each: Attribute) -> Json {
       // measurement that is not a number is reported as an absent value
       // rather than as a broken one.
       Value::Decimal(number) => object([
-        member("doubleValue", match Json::of_float(number) {
-          Option::Some(rendered) => rendered,
-          Option::None => Json::Null,
-        }),
-      ]),
+          member("doubleValue", match Json::of_float(number) {
+              Option::Some(rendered) => rendered,
+              Option::None => Json::Null,
+            }),
+        ]),
       Value::Flag(flag) => object([member("boolValue", Json::Bool(flag))]),
     })
 }

@@ -52,8 +52,38 @@ built() {
     [ -x "$1.exe" ] && printf '%s\n' "$1.exe" || printf '%s\n' "$1"
 }
 
+# **Each step announces itself and times the one before it.** A gate taking
+# twenty minutes on three runners is worth knowing the shape of, and every
+# proposal to make it faster is a guess until there is a table. The previous
+# step's seconds print with the next step's name, so a reader scanning the
+# log sees where the time went without adding anything up.
+#
+# `date +%s` rather than `SECONDS`, which is a bashism and this runs under
+# `sh`. A shell that cannot answer prints no timing rather than failing the
+# gate over one.
+baseline_started=$(date +%s 2>/dev/null || echo "")
+step_started=""
+step_name=""
 step() {
+    now=$(date +%s 2>/dev/null || echo "")
+    if [ -n "$step_started" ] && [ -n "$now" ]; then
+        printf '    (%s took %ss)\n' "$step_name" "$((now - step_started))"
+    fi
+    step_started="$now"
+    step_name="$1"
     printf '\n=== %s\n' "$1"
+}
+
+# The last step has nobody to announce it, so the tail and the total are
+# printed by hand once everything has passed.
+finished() {
+    now=$(date +%s 2>/dev/null || echo "")
+    if [ -n "$step_started" ] && [ -n "$now" ]; then
+        printf '    (%s took %ss)\n' "$step_name" "$((now - step_started))"
+    fi
+    if [ -n "$baseline_started" ] && [ -n "$now" ]; then
+        printf '\n=== the whole baseline took %ss\n' "$((now - baseline_started))"
+    fi
 }
 
 step 'the runtime archive the suite links against'
@@ -394,4 +424,5 @@ sh "$root/scripts/check-tree-id.sh"
 # invalidates it without anybody having to remember that it should.
 sh "$root/scripts/tree-id.sh" > "$receipt"
 
+finished
 printf '\n=== baseline clean\n'

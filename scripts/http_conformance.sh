@@ -34,14 +34,30 @@ command -v curl > /dev/null || { echo "curl is needed for this check"; exit 1; }
 # asks the same questions of an optimized server. Worth doing after a change to
 # code generation: an optimizer is what turns a latent assumption into a wrong
 # answer, and a server is the program here with the most of them.
-"$khora" build examples/link_shortener > /dev/null
+# **Skipped when the executable is already there and newer than its source.**
+# `baseline.sh` builds all five reference applications a few steps above this
+# one, `link_shortener` among them, and then this rebuilt it -- a second full
+# native build of the same program by the same compiler, proving nothing the
+# first had not. Run on its own the check still builds what it needs, so the
+# script stays usable by hand.
+#
+# `KHORA_CONFORMANCE_REBUILD=1` forces it, which is what to reach for if the
+# tree changed under a long run.
+server_bin=$(built ./examples/link_shortener/build/link_shortener)
+newest_source=$(find examples/link_shortener/src examples/link_shortener/khora.toml -type f -newer "$server_bin" 2>/dev/null | head -1)
+if [ -n "${KHORA_CONFORMANCE_REBUILD:-}" ] || [ ! -x "$server_bin" ] || [ -n "$newest_source" ]; then
+    "$khora" build examples/link_shortener > /dev/null
+    server_bin=$(built ./examples/link_shortener/build/link_shortener)
+else
+    printf '  reusing %s, which is newer than its source\n' "$server_bin"
+fi
 
 # The shortener persists to `$LINKS_FILE`, defaulting to `./links.txt` in the
 # working directory rather than beside its source. Pointed somewhere disposable
 # so a conformance run neither reads a previous one's links nor leaves any.
 store=$(mktemp -d)/links.txt
 
-PORT=$port LINKS_FILE=$store "$(built ./examples/link_shortener/build/link_shortener)" > /dev/null 2>&1 &
+PORT=$port LINKS_FILE=$store "$server_bin" > /dev/null 2>&1 &
 server=$!
 # shellcheck disable=SC2064
 trap "kill $server 2>/dev/null || true; rm -f '$store'" EXIT
