@@ -398,12 +398,20 @@ impl Lines {
 
 /// A path split the way `DIFile` wants it: file name, containing directory.
 ///
-/// **The directory is absolute.** DWARF resolves a relative `DW_AT_directory`
-/// against the compile unit's own directory, and the compile unit is built from
-/// `files.first()` — which is a `std` module, not the user's entry. So a user
-/// file recorded as `./src` with a compile unit in `<toolchain>/std` came back
-/// out of a backtrace as `<toolchain>/std/./src/main.kh`: a path that names no
-/// file on the machine, in the one place a reader most needs a real one.
+/// **The directory is absolute where the caller gave a real one.** DWARF
+/// resolves a relative `DW_AT_directory` against the compile unit's directory,
+/// and the compile unit is built from `files.first()` — which is a `std`
+/// module, not the user's entry. So a user file recorded as `./src` with a
+/// compile unit in `<toolchain>/std` came back out of a backtrace as
+/// `<toolchain>/std/./src/main.kh`: a path that names no file on the machine,
+/// in the one place a reader most needs a real one.
+///
+/// **A path with no directory at all keeps `.`.** Anchoring that one to the
+/// working directory would answer a question nobody asked: `a.kh` names no
+/// directory because there is none to name, and `.` is what DWARF wants when
+/// there is nothing better. Anchoring it made `a_path_splits_into_name_and_
+/// directory` fail against the build machine's cwd, which is exactly the
+/// leak this function exists to stop.
 ///
 /// Absolute paths appear only in debug builds. `--release` drops debug
 /// information entirely and is the profile that promises bit-for-bit
@@ -413,11 +421,13 @@ fn split(path: &Path) -> (String, String) {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.to_string_lossy().into_owned());
-    let directory = path
+    let Some(directory) = path
         .parent()
         .map(|p| p.to_string_lossy().into_owned())
         .filter(|p| !p.is_empty())
-        .unwrap_or_else(|| ".".to_string());
+    else {
+        return (name, ".".to_string());
+    };
     let directory = match Path::new(&directory) {
         // Already anchored: leave it exactly as the caller wrote it.
         p if p.is_absolute() => directory,
