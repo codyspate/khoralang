@@ -53,7 +53,7 @@ sh scripts/baseline.sh
 **This is what a change has to pass, and it is not optional.** It runs the test
 suite (a little over two thousand tests), the doctests, clippy, the formatter
 over `std` and every corpus member, the generated standard-library reference
-against its source, the packages' own tests, all four reference applications,
+against its source, the packages' own tests, all five reference applications,
 the build cache's byte-for-byte claim, HTTP conformance, and — on Windows —
 the runtime again under Linux through WSL2.
 

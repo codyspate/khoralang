@@ -1,7 +1,7 @@
 # The workspace this repository is.
 #
-# **No `[package]`, because the root is not one.** `std`, four examples, four
-# benchmarks and a library live under it, and none of them is here. A root
+# **No `[package]`, because the root is not one.** `std`, five examples, six
+# benchmarks and three libraries live under it, and none of them is here. A root
 # forced to declare a package would be inventing a name for a thing that does
 # not exist, and that name would then turn up in error messages. Roadmap 14.13.
 #
@@ -94,7 +94,7 @@ extern = []
 # does not fail `khora check`, and a rule the gate does not enforce is a
 # preference rather than a standard.
 #
-# It costs nothing today. `std`, four examples, two packages and four
+# It costs nothing today. `std`, five examples, three packages and six
 # benchmarks were all clean when this was switched on, which is why it could be
 # switched on at a stroke rather than as a project.
 #

@@ -292,7 +292,10 @@ the `extern` boundary.
 | `khora-mcp` | A Model Context Protocol server, so an agent can ask the compiler. |
 | `khora-cli` | `check`, `fmt`, `doc`, `install`, `lex`, `parse`, `lsp`, `mcp`, `toolchain`, `test`, `bench`, and `build` with `--features llvm`. |
 
-1,376 Rust tests and 18 Khora ones pass, `clippy -D warnings` is clean, and
+`cargo nextest run --workspace` is the count that matters and prints it; at the
+time of writing it is a little over 2,600 Rust tests, alongside 72 `test` blocks
+written in Khora across `std/`, `examples/`, `packages/` and `bench/`.
+`clippy -D warnings` is clean, and
 `khora check` and `khora fmt --check` pass over all of `std/`, `examples/`,
 `bench/` and `packages/` — with no lint warnings anywhere in them.
 `khora doc --check` holds the generated standard library reference to the
