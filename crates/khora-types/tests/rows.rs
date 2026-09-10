@@ -1240,3 +1240,58 @@ fn one_missing_mark_is_reported_once() {
     let marks: Vec<&String> = found.iter().filter(|e| e.contains("needs `!`")).collect();
     assert_eq!(marks.len(), 1, "the mark is missing once: {found:?}");
 }
+
+/// The suggested binding label is the one the callee declares.
+///
+/// The label was derived from the effect's *type name*, lowercased, so `FsRead`
+/// suggested `fsRead` while `std::fs` spells that binding `reads`. A newcomer
+/// who followed the message wrote `with { fsRead: FsRead::real() }` and then
+/// found `read_text` would not accept it — the message sent them to write a
+/// clause that could not work.
+///
+/// `reference/capabilities.md` calls the labels "effectively part of `std`'s
+/// public API", chosen by the function being called. So the fix is to read one
+/// off a signature rather than to guess, and the contract is that a label the
+/// message suggests is a label some callee actually requires.
+#[test]
+fn the_suggested_label_is_one_a_callee_declares() {
+    let found = errors(
+        "module m;\n\
+         pub effect FsRead { read_text: (String) -> String, }\n\
+         fn load(path: String) -> String with { reads: FsRead };\n\
+         pub fn go() -> String { FsRead::read_text(\"a\") }\n",
+    );
+
+    let effect: Vec<&String> = found.iter().filter(|e| e.contains("is an effect")).collect();
+    assert_eq!(effect.len(), 1, "the effect mistake is reported once: {found:?}");
+    assert!(
+        effect[0].contains("`reads`") || effect[0].contains("{ reads:"),
+        "the label is the declared one, not the type's name: {:?}",
+        effect[0]
+    );
+    assert!(
+        !effect[0].contains("fsRead"),
+        "the lowercased type name is not a label anything requires: {:?}",
+        effect[0]
+    );
+}
+
+/// An effect nothing requires still gets a usable suggestion.
+///
+/// `label_for` reads the label off a signature, and there is no signature to
+/// read when nothing in scope takes the effect. Lowercasing the name is the
+/// fallback, and it has to stay — the message is still better than naming no
+/// binding at all.
+#[test]
+fn an_unrequired_effect_falls_back_to_the_lowercased_name() {
+    let found = errors(
+        "module m;\n\
+         pub effect Clock { now: () -> Int, }\n\
+         pub fn go() -> Int { Clock::now() }\n",
+    );
+
+    assert!(
+        found.iter().any(|e| e.contains("{ clock:")),
+        "expected the lowercased fallback: {found:?}"
+    );
+}

@@ -191,6 +191,33 @@ impl<'a> Checker<'a> {
         *ret
     }
 
+    /// The binding label `std` (or any callee) actually declares for an effect.
+    ///
+    /// **The label belongs to the function being called, not to the effect's
+    /// type.** `std::fs` requires `FsRead` under the label `reads`, so
+    /// lowercasing the type name and suggesting `fsRead` sends the reader to
+    /// write a `with { .. }` clause that `read_text` will then reject.
+    /// `reference/capabilities.md` puts it plainly: the label "is chosen by the
+    /// function you are calling, not by you", and the labels "are effectively
+    /// part of `std`'s public API".
+    ///
+    /// Every signature in scope is searched for a requires-row field carrying
+    /// this effect, and the first label found wins. Signatures are a `HashMap`,
+    /// so "first" is not deterministic where two callees disagree -- but a
+    /// suggestion that names one real label beats one that names no real label,
+    /// and `std` is consistent within an effect.
+    ///
+    /// Falls back to [`lowercase_start`] when nothing in scope requires the
+    /// effect at all, which is the only case where there is no declared label
+    /// to read.
+    fn label_for(&self, effect: &str) -> String {
+        self.types
+            .signatures
+            .values()
+            .find_map(|signature| label_in_row(&signature.requires, effect))
+            .unwrap_or_else(|| lowercase_start(effect))
+    }
+
     /// What to call the callee in a diagnostic.
     ///
     /// A name when there is one, and otherwise a description: `(f(x))(y)` has
@@ -669,7 +696,20 @@ impl<'a> Checker<'a> {
                     // which is true and tells nobody what to write instead.
                     // Every other "you wrote it wrong" message in this compiler
                     // names the fix.
-                    let label = lowercase_start(owner);
+                    //
+                    // **The label has to be the one `std` declares, not one
+                    // derived from the type.** Lowercasing the effect's name
+                    // gives `fsRead` for `FsRead`, and `std::fs` spells that
+                    // binding `reads` -- so a newcomer who followed this
+                    // message wrote `with { fsRead: FsRead::real() }` and then
+                    // found `read_text` would not accept it. The label is
+                    // chosen by the callee and `reference/capabilities.md`
+                    // calls it "effectively part of `std`'s public API", so
+                    // guessing it is guessing at somebody else's API.
+                    // `label_for` reads it off a real signature and only falls
+                    // back to the lowercased name when nothing in scope
+                    // requires this effect.
+                    let label = self.label_for(owner);
                     format!(
                         "`{owner}` is an effect, and `{name}` is reached through the \
                          binding that supplies it rather than through the type: write \
@@ -759,12 +799,31 @@ impl<'a> Checker<'a> {
     }
 }
 
+/// The label a requires-row gives to a field of this effect's type.
+///
+/// A capability row is `{ reads: FsRead | 'e }` -- the label on the left is the
+/// binding name the callee chose, and the head of the type on the right is the
+/// effect. Matching on the head rather than on equality means a parameterised
+/// effect still answers.
+fn label_in_row(row: &Type, effect: &str) -> Option<String> {
+    let Type::Row { fields, .. } = row else {
+        return None;
+    };
+    fields.iter().find_map(|(label, ty)| {
+        (traits::head_of(ty).as_deref() == Some(effect)).then(|| label.clone())
+    })
+}
+
 /// A capability's conventional binding label: the effect's name, lowercased.
 ///
 /// Only for a suggestion, so being wrong about an unusual spelling costs a
 /// slightly-off example rather than a wrong compile. `Env` gives `env`,
 /// `HttpClient` gives `httpClient` -- which nobody writes, so the first letter
 /// is all that is touched and the rest is left as the author wrote it.
+///
+/// **Prefer [`Check::label_for`], which asks the signatures first.** This is
+/// the fallback for an effect nothing in scope requires, where there is no
+/// declared label to read.
 fn lowercase_start(name: &str) -> String {
     let mut chars = name.chars();
     match chars.next() {
