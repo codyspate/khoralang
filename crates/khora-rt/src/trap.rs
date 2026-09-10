@@ -268,10 +268,22 @@ fn where_from(err: &mut impl Write) {
 /// and spelled it mangled.
 ///
 /// So the cut is at the **last** frame matching *any* runtime spelling, not at
-/// the first pattern that matches anywhere. `a_no_mangle_trap_frame_is_trimmed_too`
-/// and `both_runtime_frames_come_off` pin each half.
+/// the first pattern that matches anywhere.
+///
+/// **The unmangled names are listed, not matched by prefix.** A bare `khora_`
+/// also matches `khora_fiber_spawn`, which sits *below* the user's frames on a
+/// fiber — so the cut ate the very frames it exists to expose, and
+/// `a_trap_on_a_fiber_says_which_fiber` said so. These four are this module's
+/// whole `#[unsafe(no_mangle)]` surface; a fifth belongs here the day it is
+/// added, which is why they sit next to each other rather than being derived.
 fn from_khora_down(captured: &str) -> &str {
-    const MINE: [&str; 2] = ["khora_rt::trap::", "khora_"];
+    const MINE: [&str; 5] = [
+        "khora_rt::trap::",
+        "khora_overflow",
+        "khora_unhandled",
+        "khora_bounds_fail",
+        "khora_todo",
+    ];
     let Some(last) = MINE.iter().filter_map(|m| captured.rfind(m)).max() else {
         return captured;
     };
@@ -399,6 +411,35 @@ mod tests {
         assert!(
             !trimmed.contains("/home/somebody/"),
             "and with them the build machine's path: {trimmed:?}"
+        );
+    }
+
+    /// A frame below the user's is not the runtime's to trim.
+    ///
+    /// Matching `khora_` by prefix also matched `khora_fiber_spawn`, which sits
+    /// *under* the Khora frames on a fiber — so the cut took the user's code
+    /// with it and a trap on a fiber showed nothing but the runtime beneath it.
+    /// `a_trap_on_a_fiber_says_which_fiber` caught this in the full suite; this
+    /// is the same contract in one function, where a reader can see it.
+    #[test]
+    fn a_runtime_frame_below_the_user_is_left_alone() {
+        let on_a_fiber = concat!(
+            "   1: khora_overflow\n",
+            "             at /home/somebody/crates/khora-rt/src/trap.rs:93\n",
+            "   2: t$main$work\n",
+            "             at ./src/main.kh:12\n",
+            "   3: khora_fiber_spawn\n",
+            "             at /home/somebody/crates/khora-rt/src/fiber.rs:377\n",
+        );
+
+        let trimmed = from_khora_down(on_a_fiber);
+        assert!(
+            trimmed.starts_with("   2: t$main$work"),
+            "the user's frame survives: {trimmed:?}"
+        );
+        assert!(
+            trimmed.contains("main.kh:12"),
+            "and so does its line: {trimmed:?}"
         );
     }
 }
