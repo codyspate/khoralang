@@ -463,7 +463,26 @@ fn drive_clang(
             } else {
                 // `-u` forces the member to be linked; a shared object's
                 // symbols are visible by default once it is.
-                cmd.arg(format!("-Wl,-u,{symbol}"));
+                //
+                // **Spelled the way the object file spells it, which is not
+                // the same on both.** Mach-O prefixes every C symbol with an
+                // underscore, and `-u` takes the name as it appears in the
+                // object -- so `-u khora_alloc_count` asks a macOS linker for
+                // a symbol nothing defines, and all six of these came back as
+                // `Undefined symbols for architecture arm64 ... referenced
+                // from: <initial-undefines>`. That phrasing is the tell: an
+                // initial undefine is one *this flag* asked for, not one the
+                // program referenced.
+                //
+                // ELF carries no such prefix, so Linux was always right and
+                // only macOS was ever wrong -- which is why nothing found it
+                // until the three-platform matrix ran again.
+                let named = if cfg!(target_os = "macos") {
+                    format!("_{symbol}")
+                } else {
+                    symbol.to_string()
+                };
+                cmd.arg(format!("-Wl,-u,{named}"));
             }
         }
     }
