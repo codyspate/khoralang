@@ -530,48 +530,31 @@ fn drive_clang(
         cmd.arg("-Wl,-Brepro");
     }
 
-    // **The same question on macOS, and a different field.** A Mach-O image
-    // carries an `LC_UUID` load command, and `ld64` fills it with a hash over
-    // the linked content *and the output path* -- so linking one unchanged set
-    // of objects to `reused.exe` and to `fresh.exe` gives two files that differ
-    // in sixteen bytes and nowhere else.
+    // **A Mach-O image's reproducibility is decided by the output file's
+    // name, and by nothing else here.** Two fields vary with it: `LC_UUID`,
+    // which `ld64` hashes over the content *and the path*, and the ad-hoc code
+    // signature an `arm64` image carries by default, whose identifier is the
+    // file name embedded in the image. Linking one unchanged set of objects to
+    // `reused.exe` and to `fresh.exe` differed in both.
     //
-    // That is what `a_release_hit_is_byte_for_byte_what_a_build_would_have_
-    // produced` was failing on, and only on macOS: an ELF has no such field, so
-    // Linux passed the same assertion the whole time, and Windows' equivalent
-    // was already handled above. The claim `--release` makes is bit-for-bit
-    // reproducibility, and a UUID that changes with the file's name is exactly
-    // the kind of non-determinism that claim is about.
+    // So the link writes `khora-release-image` in a `.khora-link` directory
+    // beside the output and the result is renamed into place. One name for
+    // every build makes both fields constant, the caller still gets the path
+    // it asked for, and the bytes that were signed are the bytes that ship.
     //
-    // `-no_uuid` drops the load command. Nothing in the toolchain reads it:
-    // `khora`'s own backtraces come from DWARF, which `--release` does not emit
-    // at all. A debugger matching a `.dSYM` to its binary does use it -- so
-    // this belongs to `release` alone, where debug information is already gone
-    // and there is nothing for a `.dSYM` to be.
-    if cfg!(target_os = "macos") && !profile.debug_info() {
-        cmd.arg("-Wl,-no_uuid");
-    }
-
-    // **And the ad-hoc code signature, which is the arm64 half of the same
-    // problem.** An `arm64` Mach-O is ad-hoc signed by default -- it will not
-    // execute on Apple Silicon otherwise -- and `ld64` takes the signature's
-    // identifier from the output file's *name*, embedding it in the image. So
-    // `-no_uuid` alone still gave two different files for two different names,
-    // and `macos-latest` has been Apple Silicon for some time: the half that
-    // was actually failing CI is this one.
+    // **`-no_uuid` is not the fix, and was actively wrong.** It removes the
+    // load command, and `dyld` on Apple Silicon then refuses to start the
+    // program:
     //
-    // There is no flag to set the identifier (`-adhoc_codesign` and
-    // `-no_adhoc_codesign` are the only knobs, and turning it off produces a
-    // binary the platform refuses to run). So the link writes to a fixed name
-    // in a directory of its own and the result is moved into place: the
-    // identifier sees `RELEASE_IMAGE` every time, and the caller still gets
-    // the path it asked for.
+    //     dyld[23193]: missing LC_UUID load command
     //
-    // Release only, for the reason above -- and measured on both
-    // architectures rather than assumed, by cross-linking Mach-O images and
-    // comparing hashes.
-    let signed_name = cfg!(target_os = "macos") && !profile.debug_info();
-    let staging = signed_name
+    // A reproducible binary that will not run is not a trade worth making, and
+    // the flag is unnecessary once the name is stable -- measured both ways by
+    // cross-linking `arm64` images on Linux and comparing hashes.
+    //
+    // Release only. Every other platform's link is the command it was before.
+    let staged_name = cfg!(target_os = "macos") && !profile.debug_info();
+    let staging = staged_name
         .then(|| out.parent().map(|dir| dir.join(".khora-link")))
         .flatten();
     let linked = match &staging {
