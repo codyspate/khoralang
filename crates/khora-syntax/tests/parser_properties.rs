@@ -210,10 +210,19 @@ fn deep_nesting_overflows_the_stack() {
 
 // --- what the generators found ----------------------------------------------
 //
-// Three shapes, all reachable by typing at the end of a file, which is the
-// case an LSP hits on every keystroke. Each is `#[ignore]`d and each says what
-// it does when it is not ignored, so that a run of the suite is green when
-// there is nothing *new* rather than green because nothing is looked at.
+// Four shapes, all reachable by typing at the end of a file, which is the case
+// an LSP hits on every keystroke. Two of them panicked the parser, in a
+// function documented never to panic on malformed input.
+//
+// All four are fixed and these tests are the guard. They were written first,
+// while the bugs were live, and were `#[ignore]`d with a note saying what each
+// did -- so that a run of the suite was green when there was nothing *new*,
+// rather than green because nothing was being looked at. When the fixes
+// landed, the attributes came off and nothing else changed.
+//
+// The fifth, `deep_nesting_overflows_the_stack`, is still ignored. It is not
+// unfixed prose: it *aborts* rather than failing, so no harness can catch it,
+// and it stays out of an ordinary run for that reason alone.
 
 /// **`pub` at the end of a file loses the rest of the file.**
 ///
@@ -241,7 +250,6 @@ fn deep_nesting_overflows_the_stack() {
 /// missing from the `PUB_KW` arm's match. `pub 1`, `pub ;` and `pub }` are the
 /// same path.
 #[test]
-#[ignore = "known bug: `pub` with nothing after it drops the rest of the file"]
 fn pub_at_the_end_of_a_file_is_lost() {
     for src in ["pub", "pub impl X {}", "module m;
 pub
@@ -261,7 +269,6 @@ pub
 /// malformed input*, and `extern` alone on a line is what a file looks like
 /// halfway through typing `extern fn`.
 #[test]
-#[ignore = "known bug: `extern` with no `fn` panics rather than diagnosing"]
 fn extern_without_a_function_panics() {
     parses_soundly("extern");
 }
@@ -277,7 +284,6 @@ fn extern_without_a_function_panics() {
 /// here because it is the same one-line assumption in a second place and a fix
 /// to one should be checked against the other.
 #[test]
-#[ignore = "known bug: `pub type` in a trait body panics rather than diagnosing"]
 fn pub_before_a_non_function_in_a_trait_body_panics() {
     parses_soundly("trait T { pub type X; }");
 }
@@ -311,7 +317,6 @@ fn pub_before_a_non_function_in_a_trait_body_panics() {
 /// and only in this position, so it keeps generating the no-semicolon rule
 /// everywhere else.
 #[test]
-#[ignore = "known bug: postfix `!` has no `is_block_like` guard; postfix `with` does"]
 fn a_try_after_a_block_like_statement_swallows_it() {
     let src = "module m;
 fn f() { if 0 { 0 } else { 1 }

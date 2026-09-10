@@ -140,7 +140,20 @@ fn postfix_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
             }
             // `expr!` — this call can abort the enclosing function. Marking it
             // is a deliberate divergence from Koka; see docs/design/effects.md.
-            BANG => {
+            //
+            // **Not after a block-like expression**, for the reason postfix
+            // `with` above gives: `if c { .. }` is a statement, and what
+            // follows it on the next line starts a new one. `!` is the only
+            // postfix operator that is *also* a prefix operator, so without
+            // this guard `if c { 0 } else { 1 }` followed by `!x` read as one
+            // expression and reported the function's own opening brace as
+            // never closed -- an error four lines from the text that caused
+            // it. Every other postfix token (`-`, `(`, `.`, `[`, `*`, `|>`)
+            // already starts a new statement there.
+            //
+            // Found by the generated-input suite,
+            // `khora-syntax/tests/parser_properties.rs`.
+            BANG if !is_block_like(lhs.kind()) => {
                 let m = lhs.precede(p);
                 p.bump(BANG);
                 m.complete(p, TRY_EXPR)

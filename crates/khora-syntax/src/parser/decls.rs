@@ -61,11 +61,31 @@ fn declaration(p: &mut Parser<'_>) {
             IDENT if p.nth_at_contextual(1, CONTEXT_KW) => context_decl(p),
             IDENT if p.nth_at_contextual(1, ROW_KW) => row_decl(p),
             IDENT if p.nth_at_contextual(1, EXTERN_KW) => fn_decl(p),
-            _ => p.err_recover(
-                "expected `type`, `trait`, `effect`, `context`, `fn`, `extern` or `const` \
-                 after `pub`",
-                Parser::at_decl_start,
-            ),
+            // **The `pub` is consumed before recovering, and that is the
+            // whole fix.** `err_recover` skips to the next declaration
+            // start, and `PUB_KW` *is* one -- so it stopped where it stood,
+            // consumed nothing, and the file loop came round on the same
+            // token until `STEP_LIMIT` broke it. Every remaining token was
+            // then left unconsumed, so a trailing `pub`, or a `pub impl`,
+            // truncated the tree from that point on.
+            //
+            // Bumping first guarantees progress; recovery then lands on the
+            // declaration after this one rather than on this one.
+            //
+            // Found by the generated-input suite,
+            // `khora-syntax/tests/parser_properties.rs`.
+            _ => {
+                let m = p.start();
+                p.error(
+                    "expected `type`, `trait`, `effect`, `context`, `fn`, `extern` or \
+                     `const` after `pub`",
+                );
+                p.bump(PUB_KW);
+                while !p.at(EOF) && !p.at_decl_start() {
+                    p.bump_any();
+                }
+                m.complete(p, ERROR);
+            }
         },
         SEMICOLON => p.err_and_bump("stray `;`"),
         // The word this keyword used to be. It is an ordinary identifier now,
@@ -472,7 +492,19 @@ fn fn_decl(p: &mut Parser<'_>) {
     if p.at_contextual(EXTERN_KW) {
         p.bump_contextual(EXTERN_KW);
     }
-    p.bump(FN_KW);
+    // **`expect` and not `bump`.** `bump` asserts, and this is reached with
+    // whatever follows `extern` or `pub` -- including nothing at all. A file
+    // holding just the word `extern` is not a strange input, it is what a
+    // buffer looks like halfway through typing one, and it panicked the
+    // parser: `assertion `left == right` failed: expected to bump FN_KW`, in a
+    // function documented never to panic on malformed input. The same
+    // assertion fired for `pub type X;` inside a trait body.
+    //
+    // Found by the generated-input suite, `khora-syntax/tests/parser_properties.rs`.
+    if !p.expect(FN_KW) {
+        m.abandon(p);
+        return;
+    }
     name(p);
     if p.at(LT) {
         type_params(p);
