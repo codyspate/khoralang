@@ -6447,6 +6447,122 @@ not a formality.
 
 ---
 
+## Phase 18 — The two an outside audit called architecture rather than repair
+
+An audit read this repository asking what it should distrust in a compiler
+written mostly by AI. Its answer was not a list of bugs — it found few, and
+said the code does not look like generated code at the function level. What it
+found was at the *boundaries*: "AI has been quite good at implementing each
+local abstraction, and considerably worse at proving that two abstractions
+agree on their shared contract."
+
+That diagnosis is correct and this repository is the evidence. Seven such
+divergences turned up in a single day, each two components individually right
+and mutually inconsistent: the value layout against the reference-counting plan
+(a SIGILL on the success path), `std`'s permission matcher against the
+compiler's, a `std` signature against callers inside Rust test strings, a
+security fix against the default it changed, documentation against
+implementation, the reference against the compiler against the linter, and a
+trait's definition against its own impls. None was found by a test.
+
+`scripts/check-agreement.sh` now holds two such pairs together and is the
+mechanism for the rest. What follows is the two the audit named that a gate
+cannot reach, because they are not disagreements between components — they are
+places where a single component's own invariant is unstated.
+
+### 18.1 `Type::Unknown` is one word doing two jobs
+
+The unifier treats either side being `Unknown` as success, which is the right
+instinct: one error should not cascade into twenty. But `Unknown` is also what
+a fallback path produces when the compiler has no answer, and those are
+different things wearing one name.
+
+**The history is the argument.** `docs/errata.md` records this mechanism
+turning missing implementation into accepted programs more than once — tuple
+shapes becoming `Unknown` and admitting invalid operations, unsupported union
+syntax becoming `Unknown`, and a period where `khora check` passed programs it
+was not type-checking. The compiler's own diagnostic says the quiet part:
+
+    error: the type of this expression was never worked out, and nothing else
+    was reported — so either it needs an annotation, or this is a gap in the
+    compiler worth reporting
+
+Two independent readers hit that message in one day, on a cross-module wrapper
+constructor and on an imported `context` override. A message that cannot tell
+the user's mistake from the compiler's gap is the type system saying it has
+lost track of which it is.
+
+The shape of the answer, from the audit: split the concept. `Type::Error`,
+carrying the diagnostic that produced it, unifies with anything — that is what
+stops cascades. An unresolved inference variable does not; it is a question,
+not an answer. Then state the invariant that does not exist today: **a checked
+program cannot contain an unresolved variable, an unsatisfied bound, or an
+unresolved trait**, and give code generation a type that can only be built by
+satisfying it. Codegen currently accepts the same representation the checker
+manipulates while it is still working, which is why a gap in the checker can
+reach the backend at all.
+
+This is the largest item on this page and it is not a repair. It is also the
+one with the best return: every defect in the errata that this mechanism
+produced was invisible until a program did the wrong thing at run time.
+
+### 18.2 The M:N runtime has an unenforced soundness invariant
+
+`unsafe impl Send for Task` (`crates/khora-rt/src/coro.rs:162`) is what lets a
+suspended fiber's stack move between worker threads. What is checked is the
+*captured* state: `Task::new` requires a `Send` closure. What is not checked,
+and what the source says plainly, is a local created inside the fiber body and
+held across a suspension — that would be unsound if it were not `Send`, and
+nothing stops it. `crates/khora-rt/src/blocking.rs:273` calls it "the residual
+obligation `unsafe impl Send for Task` leaves on Rust".
+
+**No reachable bug is claimed here and none should be**, which is exactly why
+it is on this page rather than in the errata. The problem is that the property
+is currently maintained by whoever remembers it, in the one subsystem where
+being wrong is undefined behaviour rather than a wrong answer — and where the
+next change is as likely to be written by an agent as by a person.
+
+The audit's remedy is cheap and right: make every raw suspension point an
+`unsafe fn` whose safety contract states that no `!Send` state may survive it.
+The soundness audit already inventories the Rust-side suspension sites and
+there are only a handful, so the review burden is small and one-time. Then gate
+it — this repository already counts 282 `unsafe` blocks and requires a safety
+argument on each, so counting suspension sites is the same apparatus pointed at
+a second thing.
+
+**The related gap, and the reason this is hard to test into:** ThreadSanitizer
+covers the ordinary runtime and cannot cover the scheduler, fibers, reactor or
+blocking pool, because `corosensei`'s stack switch crashes TSan itself. So the
+most concurrency-sensitive code in the project is validated by reasoning and
+stress tests alone. Two ways out, either acceptable: annotate the switch
+through TSan's fiber API with a small C shim, or build a model test of the
+park/wake/cancel/ownership protocol that runs without the real stack switch.
+The second is worth doing even if the first works, because it can run
+everywhere and in every configuration.
+
+### The order this gets worked in
+
+18.2 first, and not because it is more urgent — it is not, since nothing here
+is known to be reachable. It is first because it is *bounded*: a handful of
+functions gain an `unsafe` and a contract, a gate counts them, and it is done.
+18.1 is open-ended enough that starting it first means 18.2 waits behind
+something with no natural end.
+
+Take the model test with 18.2 rather than after it. The protocol it would
+describe is the same one the contract is about, and writing the contract is
+when it is clearest what the model has to say.
+
+**Done when** a suspension point cannot be added without writing down what may
+not survive it; a gate fails when one is; the park/wake/cancel protocol has a
+test that does not need a real stack switch; `Type::Error` and an unresolved
+variable are different things; and code generation takes a type that cannot be
+built from an unchecked program.
+
+None of that is a release blocker for `0.2`. All of it is what has to be true
+before the answer to "can I trust this for production services" is yes.
+
+---
+
 ## Where Khora can pass Effect, and what of it is tracked
 
 `docs/design/beyond-effect.md` argues six places the language can go past the
