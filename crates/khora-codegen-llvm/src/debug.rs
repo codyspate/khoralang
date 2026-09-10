@@ -397,6 +397,17 @@ impl Lines {
 }
 
 /// A path split the way `DIFile` wants it: file name, containing directory.
+///
+/// **The directory is absolute.** DWARF resolves a relative `DW_AT_directory`
+/// against the compile unit's own directory, and the compile unit is built from
+/// `files.first()` — which is a `std` module, not the user's entry. So a user
+/// file recorded as `./src` with a compile unit in `<toolchain>/std` came back
+/// out of a backtrace as `<toolchain>/std/./src/main.kh`: a path that names no
+/// file on the machine, in the one place a reader most needs a real one.
+///
+/// Absolute paths appear only in debug builds. `--release` drops debug
+/// information entirely and is the profile that promises bit-for-bit
+/// reproducibility, so nothing here reaches a reproducible artefact.
 fn split(path: &Path) -> (String, String) {
     let name = path
         .file_name()
@@ -407,6 +418,16 @@ fn split(path: &Path) -> (String, String) {
         .map(|p| p.to_string_lossy().into_owned())
         .filter(|p| !p.is_empty())
         .unwrap_or_else(|| ".".to_string());
+    let directory = match Path::new(&directory) {
+        // Already anchored: leave it exactly as the caller wrote it.
+        p if p.is_absolute() => directory,
+        p => std::env::current_dir()
+            .map(|cwd| cwd.join(p))
+            // `./src` and `src` name one directory, and `.` in the middle of a
+            // printed path is noise a reader has to step over.
+            .map(|joined| joined.to_string_lossy().replace("/./", "/"))
+            .unwrap_or(directory),
+    };
     (name, directory)
 }
 
