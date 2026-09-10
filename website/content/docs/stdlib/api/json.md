@@ -203,7 +203,6 @@ from the bug this replaced. These two are the way to make one.
 pub fn of_float(value: Float) -> Option<Json>
 ```
 
-A number from a `Float`, in its shortest round-tripping form.
 A JSON number holding `value`, or `None` where JSON has no way to say it.
 
 **JSON has no infinity and no `NaN`, and this used to emit them anyway.**

@@ -36,6 +36,7 @@ use proptest::prelude::*;
 /// The same function as `format.rs`'s, deliberately: if the definition of
 /// "the same tokens" drifts between the two files, one of them stops meaning
 /// what its name says.
+///
 /// One token: its kind and its spelling. Both, because the kind alone loses
 /// which identifier it was and the text alone loses `1` the integer from `1`
 /// the something-else.

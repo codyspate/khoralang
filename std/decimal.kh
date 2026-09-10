@@ -423,7 +423,6 @@ impl Show for Decimal {
   }
 }
 
-/// `text` with leading zeros until it is `width` long.
 /// `text` with leading zeros until it is `width` bytes wide.
 ///
 /// **A loop and not a recursion**, which is the rule every walk in `std`
