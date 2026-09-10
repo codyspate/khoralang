@@ -39,6 +39,12 @@ mod debug;
 mod lower;
 #[cfg(feature = "llvm")]
 mod runtime;
+// Gated with its only consumer. `backend` is the whole of what reads a phase
+// timer and is `llvm`-only, so without the feature this module compiled with
+// nothing reaching it -- five dead-code warnings, which `-D warnings` turns
+// into a failed build. Nobody saw it locally because every local build passes
+// `--features llvm`; the no-backend configuration is a thing only CI builds.
+#[cfg(feature = "llvm")]
 mod timings;
 
 /// Whether small values are laid out flat rather than behind a header.

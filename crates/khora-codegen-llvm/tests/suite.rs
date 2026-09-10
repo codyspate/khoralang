@@ -23,6 +23,12 @@
 //! tests that never mention a target. They stay separate binaries, declared in
 //! `Cargo.toml`.
 
+// Gated like every module that calls it. Each test file below carries
+// `#![cfg(feature = "llvm")]`, so without the feature this binary is empty and
+// the harness has no callers -- four dead-code warnings, and `-D warnings`
+// makes that a failed build. Only CI builds the no-backend configuration,
+// which is why it stayed broken.
+#[cfg(feature = "llvm")]
 mod harness;
 
 mod agreement;
