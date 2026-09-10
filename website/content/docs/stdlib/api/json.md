@@ -200,10 +200,30 @@ from the bug this replaced. These two are the way to make one.
 #### of_float
 
 ```khora
-pub fn of_float(value: Float) -> Json
+pub fn of_float(value: Float) -> Option<Json>
 ```
 
 A number from a `Float`, in its shortest round-tripping form.
+A JSON number holding `value`, or `None` where JSON has no way to say it.
+
+**JSON has no infinity and no `NaN`, and this used to emit them anyway.**
+`Float::to_string` writes `inf` for one, so `encode(Json::of_float(x))`
+produced the four characters `inf` -- which is not a JSON document, and
+which `std::json::parse` refuses. The module emitted something it could
+not read back, and a service handing that to any other parser gets the
+same answer for the same reason.
+
+The test is a round trip through `Float::of_string`, whose documented
+grammar is JSON's and already excludes both names, rather than a
+finiteness predicate `Float` does not have. That keeps one definition of
+"a number this module will emit" instead of two that can drift.
+
+`Option` rather than a silent `null`, because a caller reaching for this
+has a number in hand and should decide what an unrepresentable one means:
+dropping the field, `Json::Null`, or refusing the whole document are all
+reasonable and this is not the place to pick. `derive(Encode)` has no such
+choice -- see `impl Encode for Float` in `std::schema`, which writes
+`null` and says why.
 
 #### is_null
 

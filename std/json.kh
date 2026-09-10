@@ -196,7 +196,33 @@ impl Json {
   pub fn of_int(value: Int) -> Json { Json::Number(Int::to_string(value)) }
 
   /// A number from a `Float`, in its shortest round-tripping form.
-  pub fn of_float(value: Float) -> Json { Json::Number(Float::to_string(value)) }
+  /// A JSON number holding `value`, or `None` where JSON has no way to say it.
+  ///
+  /// **JSON has no infinity and no `NaN`, and this used to emit them anyway.**
+  /// `Float::to_string` writes `inf` for one, so `encode(Json::of_float(x))`
+  /// produced the four characters `inf` -- which is not a JSON document, and
+  /// which `std::json::parse` refuses. The module emitted something it could
+  /// not read back, and a service handing that to any other parser gets the
+  /// same answer for the same reason.
+  ///
+  /// The test is a round trip through `Float::of_string`, whose documented
+  /// grammar is JSON's and already excludes both names, rather than a
+  /// finiteness predicate `Float` does not have. That keeps one definition of
+  /// "a number this module will emit" instead of two that can drift.
+  ///
+  /// `Option` rather than a silent `null`, because a caller reaching for this
+  /// has a number in hand and should decide what an unrepresentable one means:
+  /// dropping the field, `Json::Null`, or refusing the whole document are all
+  /// reasonable and this is not the place to pick. `derive(Encode)` has no such
+  /// choice -- see `impl Encode for Float` in `std::schema`, which writes
+  /// `null` and says why.
+  pub fn of_float(value: Float) -> Option<Json> {
+    let text = Float::to_string(value);
+    match Float::of_string(text) {
+      Option::Some(_readable) => Option::Some(Json::Number(text)),
+      Option::None => Option::None,
+    }
+  }
 
   /// Whether this is `null`, which is a question rather than a value.
   ///

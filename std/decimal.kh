@@ -70,6 +70,16 @@ import std::core::{Array, Eq, List, Option, Ord, Ordering, Ptr, Show};
 /// the constructors clamp it, because a negative scale is a large number
 /// spelled confusingly and every caller who wants one means a larger
 /// significand.
+///
+/// **It is not bounded above, and nothing here pretends otherwise.**
+/// `Decimal::scaled(1, 20000)` is a legitimate value: the significand is one
+/// and the point is twenty thousand places to its left. Nothing in `std` or in
+/// the runtime caps it, so no operation refuses one -- but `Show` writes a
+/// character per place, and the arithmetic aligns operands to the larger of
+/// two scales before it works, so a wide scale is paid for in both. A scale
+/// arriving from input rather than from a literal is worth a bound of the
+/// caller's own choosing; there is no obvious one to impose here, and imposing
+/// a wrong one would silently change values that are correct today.
 pub type Decimal = {
   hi: Int,
   lo: Int,

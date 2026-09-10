@@ -1011,6 +1011,21 @@ impl Encode for Float
 fn encode(self) -> Raw
 ```
 
+**A non-finite float writes `null`, because there is nowhere else to put
+it.** JSON has no infinity and no `NaN`, and this wrote `inf` regardless
+-- so `derive(Encode)` on a record with a `Float` field could produce a
+document `schema::float()` would not decode and no other parser would
+read either.
+
+`Json::of_float` answers `Option` and lets the caller decide. A trait
+method has no such channel: `encode` owes a `Raw` and cannot refuse, so
+the choice is between a wrong number, a trap, and the one value JSON has
+for "not a number here". `null` is that value, and it is what a decoder
+meeting the field will report as missing rather than as nonsense.
+
+The test is a round trip through `Float::of_string`, whose grammar is
+JSON's, so this and `Json::of_float` agree by construction.
+
 ### Encode for Bool
 
 ```khora
