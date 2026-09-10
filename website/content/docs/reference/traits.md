@@ -258,19 +258,23 @@ that imports `Eq` and then only ever writes `==` never writes `Eq`, so
 ## Two traits declaring the same method
 
 A type may implement more than one trait that declares a given method name.
-`List` implements both `Functor` and `Iterator`, and both declare `map`, so
-method syntax has nothing left to choose with:
-
-```khora
-let ys = xs.map(fn (n) => n + 1);
-```
+When it does, method syntax has nothing left to choose with:
 
 ```text
 error: `map` is declared by `Functor` and `Iterator`, and `List<Int>` implements more than one
 ```
 
-The answer is to name the trait. A trait-qualified call passes the receiver as
-the first argument and settles which `map` is meant:
+**A type's own method outranks a trait's, so this only arises where the type
+has none.** `List` implements both `Functor` and `Iterator` and both declare
+`map`, which is exactly the collision above — and `xs.map(f)` is not ambiguous,
+because `List` has a `map` of its own. It is the eager one: a list in, a list
+out. Adding a trait to a program must not silently change what an existing call
+does, and the same rule is what keeps an abstraction most programs never
+mention from making the most ordinary line in the language an error.
+
+Where a type genuinely has no method of its own, name the trait. A
+trait-qualified call passes the receiver as the first argument and settles
+which one is meant:
 
 ```khora
 module app::main;
@@ -285,8 +289,9 @@ pub fn main() -> Int {
 ```
 
 `Iterator::map(xs, fn (n) => n + 1)` picks the other one, and gives a lazy
-`Mapped` rather than a `List`. The trait has to be imported for this form, since
-this is the case where the name is written. Without the import the call is
+`Mapped` rather than a `List` — which is why the two cannot simply be merged,
+and why `List::map` had to choose. The trait has to be imported for this form,
+since this is the case where the name is written. Without the import the call is
 refused with ``cannot resolve `Functor::map` in this scope``.
 
 `Functor::map` is a *trait* path, not a module path. [Modules and

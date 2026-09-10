@@ -414,12 +414,21 @@ impl Show for Decimal {
 }
 
 /// `text` with leading zeros until it is `width` long.
+/// `text` with leading zeros until it is `width` bytes wide.
+///
+/// **A loop and not a recursion**, which is the rule every walk in `std`
+/// follows: Khora does not promise tail calls, so a frame per unit of width
+/// dies on a wide one. This recursed once per zero, and `Decimal::scaled(1,
+/// 20000)` -- an ordinary call, with a scale nothing refuses -- overflowed the
+/// stack inside `std` while `Show` was printing it. The runtime's note then
+/// said the cause was "most likely a function of your own", which was wrong
+/// and is the reason a crash here is worse than the wide number is.
 fn padded(text: String, width: Int) -> String {
-  if String::byte_length(text) >= width {
-    text
-  } else {
-    padded("0" + text, width)
-  }
+  let mut out = text;
+  while String::byte_length(out) < width {
+    out = "0" + out;
+  };
+  out
 }
 
 // --- The significand, which lives in the runtime ----------------------------
