@@ -107,6 +107,13 @@ pub fn link_executable(objects: &[&Path], out: &Path) -> Result<(), String> {
 /// File name of the runtime's static archive, as cargo writes it.
 const RUNTIME_ARCHIVE: &str = if cfg!(windows) { "khora_rt.lib" } else { "libkhora_rt.a" };
 
+/// The name every reproducible macOS link writes to before being moved.
+///
+/// `ld64` puts the output file's name inside the ad-hoc code signature, so the
+/// name has to be the same for two links to produce the same bytes. Any fixed
+/// string does; this one says why it exists to whoever finds it in a signature.
+const RELEASE_IMAGE: &str = "khora-release-image";
+
 /// System libraries `khora-rt` needs, because it carries Rust's `std` with it.
 ///
 /// Not guessed: it is what
@@ -544,7 +551,38 @@ fn drive_clang(
     if cfg!(target_os = "macos") && !profile.debug_info() {
         cmd.arg("-Wl,-no_uuid");
     }
-    cmd.arg("-o").arg(out);
+
+    // **And the ad-hoc code signature, which is the arm64 half of the same
+    // problem.** An `arm64` Mach-O is ad-hoc signed by default -- it will not
+    // execute on Apple Silicon otherwise -- and `ld64` takes the signature's
+    // identifier from the output file's *name*, embedding it in the image. So
+    // `-no_uuid` alone still gave two different files for two different names,
+    // and `macos-latest` has been Apple Silicon for some time: the half that
+    // was actually failing CI is this one.
+    //
+    // There is no flag to set the identifier (`-adhoc_codesign` and
+    // `-no_adhoc_codesign` are the only knobs, and turning it off produces a
+    // binary the platform refuses to run). So the link writes to a fixed name
+    // in a directory of its own and the result is moved into place: the
+    // identifier sees `RELEASE_IMAGE` every time, and the caller still gets
+    // the path it asked for.
+    //
+    // Release only, for the reason above -- and measured on both
+    // architectures rather than assumed, by cross-linking Mach-O images and
+    // comparing hashes.
+    let signed_name = cfg!(target_os = "macos") && !profile.debug_info();
+    let staging = signed_name
+        .then(|| out.parent().map(|dir| dir.join(".khora-link")))
+        .flatten();
+    let linked = match &staging {
+        Some(dir) => {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| format!("creating {}: {e}", dir.display()))?;
+            dir.join(RELEASE_IMAGE)
+        }
+        None => out.to_path_buf(),
+    };
+    cmd.arg("-o").arg(&linked);
 
     let output = cmd.output().map_err(|e| format!("running {}: {e}", clang.display()))?;
     if !output.status.success() {
@@ -570,6 +608,15 @@ fn drive_clang(
             output.status,
             String::from_utf8_lossy(&output.stderr)
         ));
+    }
+
+    // The staged image into place, and the staging directory away with it. A
+    // rename rather than a copy, so the bytes the linker signed are the bytes
+    // that ship and nothing can be observed half-written.
+    if let Some(dir) = staging {
+        std::fs::rename(&linked, out)
+            .map_err(|e| format!("moving {} to {}: {e}", linked.display(), out.display()))?;
+        let _ = std::fs::remove_dir(&dir);
     }
     Ok(())
 }
