@@ -479,14 +479,39 @@ mod tests {
         assert_eq!(Lines::of("").locate(at(0)), (1, 1));
     }
 
+    /// **The absolute case uses a path that is absolute *here*.** `/home/x/std`
+    /// is absolute on POSIX and relative on Windows, where a path with no drive
+    /// letter is -- so the fixture asked for one answer and the platform gave
+    /// the other, and `split` anchored it to `D:` exactly as it should have.
+    /// `std::env::current_dir()` is absolute on every host by construction.
     #[test]
     fn a_path_splits_into_name_and_directory() {
-        let (name, dir) = split(Path::new("/home/x/std/list.kh"));
+        let here = std::env::current_dir().expect("a working directory");
+        let (name, dir) = split(&here.join("std").join("list.kh"));
         assert_eq!(name, "list.kh");
-        assert_eq!(dir, "/home/x/std");
-        // A bare file name still gets a directory, because DWARF wants one.
+        assert_eq!(
+            dir,
+            here.join("std").to_string_lossy(),
+            "an absolute directory is passed through unchanged"
+        );
+        // A bare file name still gets a directory, because DWARF wants one --
+        // and `.` rather than the working directory, which would put the build
+        // machine's path in a user's backtrace.
         let (name, dir) = split(Path::new("a.kh"));
         assert_eq!(name, "a.kh");
         assert_eq!(dir, ".");
+    }
+
+    /// A relative directory is anchored, which is the case the leak was about.
+    ///
+    /// `./src/main.kh` recorded as `./src` was resolved by DWARF against the
+    /// compile unit's directory -- a `std` module's -- and came out of a
+    /// backtrace naming a file that does not exist.
+    #[test]
+    fn a_relative_directory_is_anchored_to_the_working_directory() {
+        let here = std::env::current_dir().expect("a working directory");
+        let (name, dir) = split(Path::new("src/main.kh"));
+        assert_eq!(name, "main.kh");
+        assert_eq!(dir, here.join("src").to_string_lossy());
     }
 }
