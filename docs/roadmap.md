@@ -6530,6 +6530,30 @@ it — this repository already counts 282 `unsafe` blocks and requires a safety
 argument on each, so counting suspension sites is the same apparatus pointed at
 a second thing.
 
+**And the test that would catch a violation does not run on Windows.**
+`migration::tests::a_thread_affine_handle_held_across_a_suspension_is_used_from_the_wrong_thread`
+passes on Linux and fails on Windows -- not by observing a violation, but by
+refusing to claim it observed anything:
+
+    no fiber changed worker in 25 runs, so this proves nothing about a handle
+    used from the wrong thread
+
+Deterministic, three runs out of three, and identical at `main`, so it is not
+new. Its own comment expects a migration on the first attempt -- "park-and-wake
+makes migration the normal case" -- and the backstop was written for a
+saturated machine, not an idle one. On an idle sixteen-core Windows box no
+fiber moves at all.
+
+That is the sharpest form of the problem above. The `unsafe impl Send` exists
+so that a suspended stack may change worker; on one of the three supported
+platforms, the only test that exercises that is inert, and it is inert in the
+direction that reports success. Whether migration is genuinely absent on
+Windows or merely unobservable by this test is the first thing 18.2 has to
+find out, because the answer changes what the contract is for.
+
+Found by running the gate to completion, which nothing had done: every earlier
+run died at an earlier step.
+
 **The related gap, and the reason this is hard to test into:** ThreadSanitizer
 covers the ordinary runtime and cannot cover the scheduler, fibers, reactor or
 blocking pool, because `corosensei`'s stack switch crashes TSan itself. So the
