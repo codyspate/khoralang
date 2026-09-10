@@ -55,6 +55,14 @@ module users_test;
 
 import std::core::{Result, assert, attempt};
 
+pub type UserError =
+  | NotFound(id: Int)
+  | Unavailable(why: String);
+
+fn load_user(id: Int) -> String raises UserError {
+  if id == 999 { raise UserError::NotFound(999) } else { "ada" }
+}
+
 test "missing users are reported" {
   let result = attempt(fn () => load_user(999)!);
 
@@ -67,7 +75,8 @@ test "missing users are reported" {
 ```
 
 `attempt` and `Result` are `std::core` names like `assert`, so all three are on
-the `import` line; `UserError` comes from wherever `load_user` is declared.
+the `import` line. `UserError` and `load_user` are declared here to keep the
+block runnable; in a real test they come from the module under test.
 
 [Failures](./failures/) is the model behind it.
 

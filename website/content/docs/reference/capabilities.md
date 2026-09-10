@@ -299,10 +299,10 @@ fn items(client: HttpClient, _request: Request) -> Response {
   }
 }
 
-let client = HttpClient::real();
-
-Router::new()
-  |> Router::get("/items", SharedFn::of(fn request => items(client, request)))
+fn routes<'er>(client: HttpClient) -> Router<'er> {
+  Router::new()
+    |> Router::get("/items", SharedFn::of(fn request => items(client, request)))
+}
 ```
 
 A handler is written the same way whether the capability came from a row or an

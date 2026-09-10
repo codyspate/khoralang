@@ -35,8 +35,15 @@ receipt="$root/.khora-gate-full"
 # `fast` sitting beside a failed `full` would be a receipt for a tree whose
 # baseline is not known to pass.
 rm -f "$receipt" "$root/.khora-gate-fast"
-khora="./target/debug/khora.exe"
-[ -x "$khora" ] || khora="./target/debug/khora"
+# **`target/` is not always the target directory.** `CARGO_TARGET_DIR`
+# moves it, which a machine building two platforms out of one checkout has
+# to do -- and this then looked for a compiler that was never going to be
+# there and reported every documentation block unparseable, including on
+# pages nobody had touched. A gate that fails everywhere it is run somewhere
+# new teaches people to ignore it.
+target="${CARGO_TARGET_DIR:-target}"
+khora="$target/debug/khora.exe"
+[ -x "$khora" ] || khora="$target/debug/khora"
 
 # `khora build` puts a package's program in the package's own `build/`, named
 # after the package and given the host's executable extension -- so `core_demo`

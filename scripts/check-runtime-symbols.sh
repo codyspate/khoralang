@@ -28,10 +28,25 @@ set -eu
 
 cd "$(dirname "$0")/.."
 
-archive=target/release/libkhora_rt.a
+# **Where the archive is, and what it is called, are both variables.** This
+# read `target/release/libkhora_rt.a` outright, so it reported every symbol
+# missing on Windows -- where the file is `khora_rt.lib` -- and on any machine
+# with `CARGO_TARGET_DIR` set, where `target/` is not the target directory.
+# A check that answers "all of them are gone" whenever it is run somewhere it
+# was not written is worse than one that does not run: it is a failing gate
+# nobody believes, and this one exists precisely to be believed.
+target="${CARGO_TARGET_DIR:-target}"
+case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*) archive="$target/release/khora_rt.lib" ;;
+    *) archive="$target/release/libkhora_rt.a" ;;
+esac
 if [ ! -f "$archive" ]; then
     echo "  building the release runtime archive first" >&2
     cargo build --release -p khora-rt >&2
+fi
+if [ ! -f "$archive" ]; then
+    echo "  FAILED  no runtime archive at $archive after building it" >&2
+    exit 1
 fi
 
 work=$(mktemp -d)
@@ -43,8 +58,27 @@ grep -oE 'declare\("khora_[a-z_0-9]+"' crates/khora-codegen-llvm/src/runtime.rs 
 
 # What the archive exports. `T` is a defined text symbol; anything else cannot
 # satisfy a call from outside.
-nm --defined-only "$archive" 2>/dev/null \
+# **`nm` has to be one that reads the archive in front of it.** GNU `nm`
+# knows ELF; the Windows archive is a COFF one, and it answered with nothing
+# at all rather than with an error -- so every symbol read as missing and the
+# gate failed with a list of thirty names that were all present. `llvm-nm`
+# reads both, and LLVM is already a build requirement.
+reader=nm
+if command -v llvm-nm > /dev/null 2>&1; then
+    reader=llvm-nm
+elif [ -n "${LLVM_SYS_221_PREFIX:-}" ] && [ -x "$LLVM_SYS_221_PREFIX/bin/llvm-nm.exe" ]; then
+    reader="$LLVM_SYS_221_PREFIX/bin/llvm-nm.exe"
+elif [ -n "${LLVM_SYS_221_PREFIX:-}" ] && [ -x "$LLVM_SYS_221_PREFIX/bin/llvm-nm" ]; then
+    reader="$LLVM_SYS_221_PREFIX/bin/llvm-nm"
+fi
+"$reader" --defined-only "$archive" 2>/dev/null \
     | awk '$2 == "T" { print $3 }' | sort -u > "$work/have"
+if [ ! -s "$work/have" ]; then
+    printf '  FAILED  %s read no defined symbols from %s.'"\n" "$reader" "$archive" >&2
+    printf '          An empty read is the wrong reader for the format, not an'"\n" >&2
+    printf '          empty archive -- it would report every symbol missing.'"\n" >&2
+    exit 1
+fi
 
 missing=$(comm -23 "$work/wanted" "$work/have")
 if [ -n "$missing" ]; then
