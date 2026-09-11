@@ -63,8 +63,16 @@ found="${TMPDIR:-/tmp}/khora-backend-rules-found"
 # paren. The trailing `sed` undoes Rust's line continuations -- a `\` at end of
 # line eats the newline and the indentation after it -- so what lands here is
 # the message as printed.
+#
+# **The carriage returns come off before the join, not after.** `tr '\n' ' '`
+# turns the newline into a space and leaves the `\r` sitting in the middle of
+# the text, so on a Windows checkout every extracted message carries one and
+# matches nothing in the list. The symptom is the giveaway and is worth knowing
+# again: the check reported the same eleven messages as *both* unlisted and
+# no-longer-present, which is one comparison failing from both directions
+# rather than two disagreements about content.
 for source in "$lowering"/*.rs; do
-    tr '\n' ' ' < "$source"
+    tr -d '\r' < "$source" | tr '\n' ' '
     echo
 done \
     | grep -oE '\.fail\((format!\()? *"([^"\\]|\\.)*"' \
