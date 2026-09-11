@@ -13,6 +13,20 @@
 *.yml text eol=lf
 *.yaml text eol=lf
 
+# **`scripts/*.txt` is data a shell script compares line by line.**
+# `backend-rules.txt` is read by `check-backend-rules.sh` and diffed against
+# what it extracts from the lowering. On a Windows checkout every line arrived
+# with a carriage return on the end, so nothing matched anything: the gate said
+# the list named eleven messages the lowering no longer has *and* that the
+# lowering had eleven it did not list -- the same eleven, twice, once from each
+# side of the comparison.
+#
+# It read as a repository-wide inconsistency and was a line ending. The check
+# passed on Ubuntu and macOS in the same run, which is the signature of this
+# whole class: a gate that disagrees with itself on one platform is reading a
+# file the platform rewrote.
+scripts/*.txt text eol=lf
+
 # Khora source is LF everywhere too, and this one is not cosmetic either.
 #
 # The formatter emits LF, and `the_corpus_is_already_formatted` compares its

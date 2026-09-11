@@ -74,8 +74,15 @@ done \
     | sort -u > "$found"
 
 # Comments and blank lines are the manifest's own prose.
+#
+# **The carriage return comes off.** `.gitattributes` asks for LF here, and a
+# checkout made before that line existed still has CRLF -- so a gate that
+# trusted it would keep failing on Windows for a file the developer cannot see
+# is wrong. Every line then ends in `\r`, nothing matches anything, and the
+# check reports the same eleven messages as both missing *and* unlisted: once
+# from each side of the comparison. A gate reading data belongs to the gate.
 known="${TMPDIR:-/tmp}/khora-backend-rules-known"
-grep -vE '^\s*(#|$)' "$manifest" | sort -u > "$known"
+grep -vE '^\s*(#|$)' "$manifest" | tr -d '\r' | sort -u > "$known"
 
 added=$(comm -23 "$found" "$known")
 gone=$(comm -13 "$found" "$known")
