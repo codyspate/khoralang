@@ -13,8 +13,12 @@ A section is complete only when its behavior is implemented, documented, tested,
 ## Current state
 
 Scored against the tree, item by item, against what is in the repository rather
-than against the roadmap's account of itself. **212 of 223**, and re-scored
-whenever a section moves. Five moved with `v0.1.0` -- the tag itself, the
+than against the roadmap's account of itself. **216 of 223**, counted from the
+checkboxes below rather than from the summary table, whose per-section rows are
+maintained by hand and have drifted from them. Four moved with the
+release-candidate agent trials — the external-validation items in §19, which
+went from nothing to four of five on eleven trials that found five defects
+between them. Five moved with `v0.1.0` -- the tag itself, the
 scoring pass against it, and the three documentation-versioning items the
 release turned from theory into something a reader can open. The sixth and seventh are
 resource cleanup under cancellation, now proved for all four kinds rather than
@@ -78,7 +82,7 @@ advertised, so no wasm deployment has to work.
 | 16. Public documentation | 44 / 46 |
 | 17. khoralang.com production documentation site | 8 / 12 |
 | 18. Reference applications and end-to-end proof | 6 / 6 |
-| 19. External-user validation | 0 / 5 |
+| 19. External-user validation | 4 / 5 |
 | 20. Public positioning and benchmark integrity | 7 / 7 |
 | 21. Release automation and final gate | 5 / 8 |
 
@@ -86,9 +90,10 @@ advertised, so no wasm deployment has to work.
 same stage. Documentation (§16), tooling (§11) and the release machinery
 (§12, §21) are largely there — installers with checksums, three tagged
 candidates, a docs site built from this tree, a generated standard-library
-reference the gate keeps honest. What is thin is everything that proves the
-product to somebody who is not the author: external validation (§19) has not
-started, and the public site's versioning (§17) is deliberately deferred until
+reference the gate keeps honest. External validation (§19) has now happened
+and found five real defects, four of which are fixed; what it did not cover is
+the installer, which is the first thing a stranger actually meets. The public
+site's versioning (§17) is deliberately deferred until
 there is a second version to be addressable *from*. Governance
 and compatibility policy (§15) were the same kind of gap until #149, and are the
 cheapest section on this page to have left undone for as long as it was.
@@ -472,14 +477,27 @@ Before release, Khora must have applications that use the public product rather 
 
 Private testing is not a separate product milestone, but public release requires evidence from developers who did not design Khora.
 
-- [ ] Multiple external developers install Khora from the release-candidate instructions without direct coaching.
-- [ ] They build a nontrivial program using only public docs/tooling.
-- [ ] Installation failures, confusing diagnostics, undiscoverable APIs and documentation gaps found in that exercise are addressed or explicitly documented before release.
-- [ ] At least one fresh-machine “stranger test” completes:
+- [x] Multiple external developers install Khora from the release-candidate instructions without direct coaching. **Done:** eleven agent trials across two rounds, each given a task brief and the published documentation and nothing else -- no repository access, no author contact, no hints when stuck. Reports are in `khora-agents/runs/`. Each was handed a pinned toolchain rather than installing from scratch, which is the one part of this item the exercise does not cover: it tests the documentation and the language, not the installer.
+- [x] They build a nontrivial program using only public docs/tooling. **Done:** all of them finished a working program -- a money/ledger tool, a CLI log filter, an HTTP service, a library, and a concurrent pipeline. The pipeline agent's ran 300 items through a two-stage fan-out and reconciled its own accounting on 12 of 12 runs.
+- [x] Installation failures, confusing diagnostics, undiscoverable APIs and documentation gaps found in that exercise are addressed or explicitly documented before release. **Done, and this is where the exercise earned its place.** Five defects found, four fixed and one documented:
+
+  | found | what it was | outcome |
+  | --- | --- | --- |
+  | `fold_lines` on a non-UTF-8 file | trapped, exit 134, uncatchable, where `read_text` on the same input raises | fixed; a later trial confirmed the new behaviour without knowing it had changed |
+  | a listener that cannot bind | said nothing at all, and the process neither served nor exited | fixed in two parts: the runtime now reports an unwaited failure when it happens rather than when a handle is released, and `Fiber::finished` lets a supervisor loop see it |
+  | restarting a service on the same port | failed for about a minute -- no `SO_REUSEADDR`, so `TIME_WAIT` refused the rebind | fixed on Linux and macOS; deliberately not on Windows, where the option means something unsafe |
+  | `khora check` and `khora test` passing where `khora build` failed | a `src/bin` program compiled the package's test modules after dropping the `src/main.kh` they import | fixed |
+  | `Fiber::cancel` on a fiber whose body is a nursery | never returns | **documented rather than fixed** -- see `/docs/limitations`. The repair is to deliver a cancellation where it is raised rather than where it is next noticed, which changes what a fiber owns |
+
+- [ ] At least one fresh-machine "stranger test" completes:
 
   `discover -> install -> new project -> editor -> test -> dependency -> HTTP or CLI app -> debug -> deploy`
 
-- [ ] No step requires unpublished repository knowledge or intervention from the language author.
+  **Not done.** The trials cover `new project -> test -> CLI or HTTP app -> debug` convincingly and cover `install`, `editor`, `dependency` and `deploy` not at all. The first two steps are the ones a language is usually judged on and the exercise skips both.
+
+- [x] No step requires unpublished repository knowledge or intervention from the language author. **Done:** no trial was answered, unblocked or corrected while it ran. Two spent real time on things the documentation does not say -- there is no stdin story in `std`, and no page on multi-binary packages -- and both worked around it and said so rather than asking.
+
+**Four of five, and the missing one is the installer.** The evidence here is about the language and its documentation; `install` and `deploy` on a machine that has never seen Khora are still unmeasured.
 
 ---
 

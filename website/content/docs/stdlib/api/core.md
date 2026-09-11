@@ -2100,6 +2100,40 @@ Letting the binding go waits too — that is where structured concurrency
 comes from — so this is for the case where the waiting has to happen at a
 particular line rather than at the end of a scope.
 
+#### finished
+
+```khora
+pub fn finished(self) -> Bool
+```
+
+Whether the fiber has finished, without waiting for it to.
+
+**For the loop that supervises rather than waits.** `join` and `wait`
+both block, and letting the handle go blocks, so a program that spawns a
+server and then watches a stop flag has no way to ask the one question it
+needs: is the thing I spawned still running?
+
+Without it, a listener whose port would not bind leaves its supervisor
+turning over a fiber that died before the first pass — no error, no exit,
+and a process that looks healthy to anything watching it.
+
+```khora
+let server = Fiber::spawn(fn () => Router::listen_quietly(router, port)!);
+loop {
+  clock.sleep(50);
+  if Fiber::finished(server) {
+    // It stopped on its own, which for a listener is never good news.
+    Fiber::join(server)!;
+    break
+  };
+  if Shared::get(stop) { break }
+}
+```
+
+A `true` here means `join` has an answer ready and will not block. False
+is a fact about the instant it was asked, so this belongs in a loop that
+sleeps between looks rather than one that spins.
+
 #### cancel
 
 ```khora
@@ -2107,6 +2141,18 @@ pub fn cancel(self) ->()
 ```
 
 Asks the fiber to stop at its next cancellation point. Returns at once.
+
+**It does not reach the work inside the fiber.** A cancellation is
+delivered to a fiber and observed at its next `!`, loop back-edge or
+wait. Work that does none of those is not interrupted, and a fiber whose
+body is a `nursery` is the case where that matters most: the nursery
+notices between rounds of waiting for its children, so one already
+blocked on a round of children that never finish never notices at all,
+and a following `wait` does not return. See [Known
+limitations](/docs/limitations/#cancelling-a-fiber-that-is-inside-a-nursery-does-not-return).
+
+For work that has to be stoppable, pass a `Shared<Bool>` the work itself
+reads. `Fiber::detach` is the way out that does not wait.
 
 #### detach
 

@@ -652,6 +652,38 @@ pub(crate) unsafe fn failed_and_reported(fiber: *mut u8) -> bool {
     failed
 }
 
+/// Whether the fiber has finished, without waiting for it to.
+///
+/// **The question a supervisor loop has to be able to ask.** Every other way
+/// of looking at a fiber blocks: `join` waits, `wait` waits, and letting the
+/// handle go waits. A program that spawns a listener and then polls its own
+/// stop flag has no way to notice that the listener is already gone -- so a
+/// port that would not bind leaves the loop turning over a fiber that died
+/// before the first pass. Answering this lets the loop end.
+///
+/// True the instant the outcome is stored, which is before the completion
+/// latch is signalled, so a fiber this reports as finished is one whose answer
+/// `join` can take without blocking.
+///
+/// # Safety
+///
+/// `fiber` must be a live object from [`khora_fiber_spawn`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_fiber_finished(fiber: *mut u8) -> bool {
+    // SAFETY: the caller guarantees a live handle.
+    let Some(state) = (unsafe { fiber_state(fiber) }) else {
+        // A handle already released has nothing left to wait for, which is
+        // "finished" as far as a caller can tell.
+        return true;
+    };
+    state
+        .legacy
+        .outcome
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some()
+}
+
 /// The same, for a program that wants the ordering and not the answer.
 ///
 /// # Safety

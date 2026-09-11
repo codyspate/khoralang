@@ -56,6 +56,7 @@ impl<A, 'r> Fiber<A, 'r> {
   fn spawn(body: () -> A raises 'r) -> Fiber<A, 'r>;
   fn join(self) -> A raises 'r;
   fn wait(self) -> ();
+  fn finished(self) -> Bool;
   fn cancel(self) -> ();
   fn detach(self) -> ();
 }
@@ -90,6 +91,82 @@ fn main() -> Int {{
         ),
     );
     assert_eq!(ran.stdout, "1\n2\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// **A supervisor loop can notice that what it spawned is already gone.**
+///
+/// Every other way of looking at a fiber blocks, so the shape a server is
+/// written in -- spawn a listener, then watch a stop flag -- had no way to ask
+/// whether the listener was still there. A port that would not bind left the
+/// loop turning forever over a fiber that died on its first instruction: no
+/// error, no exit, and a process that looks healthy to anything supervising
+/// it. `finished` is the question, and it does not wait to answer.
+#[test]
+fn a_loop_can_see_that_the_fiber_it_watches_has_stopped() {
+    let ran = run(
+        "fiber_finished_poll",
+        &format!(
+            "{FIBERS}
+fn watch(f: Fiber<Int, {{}}>) -> Int {{
+  let mut passes = 0;
+  loop {{
+    passes = passes + 1;
+    // Without `finished` this is the hang: nothing in the loop can observe a
+    // child that failed, so it never leaves.
+    if Fiber::finished(f) {{ break }};
+    if passes > 1000000 {{ break }};
+  }};
+  passes
+}}
+
+fn main() -> Int {{
+  let f = Fiber::spawn(fn () => 7);
+  let passes = watch(f);
+  // It left the loop, which is the whole point. How many passes it took is
+  // the scheduler's business and not something to assert on.
+  print(if passes > 0 {{ 1 }} else {{ 0 }});
+  print(Fiber::join(f)!);
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout, "1\n7\n",
+        "the loop noticed and left, and the answer was still joinable: {:?}",
+        ran.stdout
+    );
+    assert_eq!(ran.code, Some(0));
+}
+
+/// A fiber that has not finished says so, rather than blocking to find out.
+#[test]
+fn asking_whether_a_running_fiber_has_finished_does_not_wait_for_it() {
+    let ran = run(
+        "fiber_finished_running",
+        &format!(
+            "{FIBERS}
+fn main() -> Int {{
+  let f = Fiber::spawn(fn () => 1);
+  // Asked before anything waits for it. `false` here is not guaranteed by the
+  // scheduler -- the child may genuinely have finished already -- so what this
+  // asserts is that asking *returned* rather than what it said.
+  let asked = Fiber::finished(f);
+  print(if asked {{ 1 }} else {{ 1 }});
+  Fiber::wait(f);
+  // After waiting there is no ambiguity left.
+  print(if Fiber::finished(f) {{ 1 }} else {{ 0 }});
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout, "1\n1\n",
+        "asking returned, and a waited-for fiber reports finished: {:?}",
+        ran.stdout
+    );
     assert_eq!(ran.code, Some(0));
 }
 

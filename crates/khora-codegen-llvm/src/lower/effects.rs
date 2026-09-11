@@ -706,6 +706,21 @@ impl<'ctx> Lower<'_, 'ctx> {
                 self.release_unless_lent(*fiber, handle, &ty);
                 Some(self.be.unit_value())
             }
+            ("finished", [fiber]) => {
+                let ty = self.types.of(*fiber).clone();
+                let handle = self.expr(*fiber)?;
+                let answer = self
+                    .be
+                    .builder
+                    .build_call(self.be.rt.fiber_finished, &[handle.into()], "fiber.finished")
+                    .expect("asking whether a fiber has finished")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("a bool is a value");
+                // Borrowed, like `wait` and `cancel`: asking does not consume.
+                self.release_unless_lent(*fiber, handle, &ty);
+                Some(answer)
+            }
             ("join", [fiber]) => {
                 let ty = self.types.of(*fiber).clone();
                 let (answers, raised) = self.fiber_parts(site, &ty, range)?;

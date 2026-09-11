@@ -276,22 +276,43 @@ where it is refused, or the job is accepted and never seen again; the same
 reconciliation [taking work off a
 queue](/docs/cookbook/taking-work-off-a-queue/) is about, one layer up.
 
-**A listener that cannot bind fails silently, and the process does not exit.**
-`Router::listen` raises inside the fiber that `Fiber::spawn` started, and
-nothing is waiting on that fiber, so there is no message on either stream and
-no non-zero status — a `main` polling a stop flag waits for ever. A second copy
-started on a busy port is a process that serves nothing and never dies, which
-under a supervisor that restarts on exit never restarts either.
+**A listener that cannot bind does not stop the process on its own.**
+`Router::listen` raises inside the fiber that `Fiber::spawn` started. The
+runtime prints `khora: a fiber ended with an error nobody was waiting for` when
+that happens, so the failure is no longer silent — but a `main` polling a stop
+flag has still been told nothing it can act on, and keeps polling. A second
+copy started on a busy port serves nothing and, under a supervisor that
+restarts on exit, never restarts.
 
 Logging the port before you listen does **not** mitigate this: the line is
 emitted whether or not the bind succeeded, so it reports a healthy start for a
-process listening on nothing. Prove the bind instead — after spawning, connect
-to your own port once and fail loudly if you cannot:
+process listening on nothing.
+
+Ask the fiber instead. `Fiber::finished` answers without waiting, which is the
+one question a supervisor loop needs:
 
 ```khora
 let server = Fiber::spawn(fn () => Router::listen(router, port)!);
 
-// The bind either took or it did not; find out here rather than never.
+loop {
+  clock.sleep(50);
+  if Fiber::finished(server) {
+    // A listener that stopped without being asked never started. `join` has
+    // the error; nothing below this is worth doing.
+    error("the listener stopped on its own");
+    Fiber::join(server)!;
+    break
+  };
+  if Shared::get(stop) { break };
+};
+```
+
+That turns a process that hung for ever into one that exits non-zero with the
+`HttpError` on stderr, which is what a supervisor can see. Probing your own
+port once after spawning works too and proves a little more — that the socket
+answers, not just that the fiber is alive:
+
+```khora
 match HttpClient::send(client, Request::get("http://127.0.0.1:${port}/health")) {
   Result::Err(_) => {
     eprint("could not bind ${port}");
@@ -301,6 +322,10 @@ match HttpClient::send(client, Request::get("http://127.0.0.1:${port}/health")) 
   Result::Ok(_) => info("listening on ${port}"),
 };
 ```
+
+Restarting on the same port inside a minute is fine: the listener sets
+`SO_REUSEADDR`, so a port left in `TIME_WAIT` by the previous run binds
+straight away. A port held by a *live* process still fails, as it should.
 
 For a container, this is the in-program half only. Draining at the layer above
 — out of the load balancer, wait, then stop — is what

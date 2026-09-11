@@ -19,6 +19,7 @@ import std::core::{Array, Ptr};
 extern fn socket(family: I32, kind: I32, protocol: I32) -> I32;
 extern fn bind(handle: I32, address: Ptr, length: I32) -> I32;
 extern fn listen(handle: I32, backlog: I32) -> I32;
+extern fn setsockopt(handle: I32, level: I32, name: I32, value: Ptr, length: I32) -> I32;
 extern fn close(handle: I32) -> I32;
 extern fn shutdown(handle: I32, how: I32) -> I32;
 
@@ -63,6 +64,24 @@ pub fn listen_on(port: Int) -> Int {
     invalid_handle()
   } else {
     let address = sockaddr_in(port);
+    // **`SO_REUSEADDR` before the bind, or a restart within a minute fails.**
+    //
+    // See the note in `socket_linux.kh`: a closed listener leaves the port in
+    // `TIME_WAIT` for about a minute, and rebinding it without this is
+    // `EADDRINUSE`, so a service started fine once and never again until the
+    // window passed.
+    //
+    // **The constants are not Linux's.** On the BSDs, and so on macOS,
+    // `SOL_SOCKET` is `0xffff` rather than `1` and `SO_REUSEADDR` is `4`
+    // rather than `2`. Passing Linux's numbers here sets a different option on
+    // a different level, which fails quietly and leaves the bug in place.
+    //
+    // Not `SO_REUSEPORT`, which on the BSDs really does let two live listeners
+    // share a port.
+    let on: Array<U8> = Array::new(4, 0);
+    Array::set(on, 0, 1);
+    Array::with_data(on, fn (bytes, _n) =>
+      setsockopt(handle, I32::of(65535), I32::of(4), bytes, I32::of(4)));
     let bound = Array::with_data(address, fn (bytes, n) => bind(handle, bytes, I32::of(16)));
     // **511, not 16.** The backlog is the queue of connections the kernel has
     // accepted and this program has not yet taken, which is to say it *is* the

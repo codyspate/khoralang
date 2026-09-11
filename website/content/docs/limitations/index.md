@@ -9,6 +9,10 @@ language rule, a supported feature, and unfinished work.
 
 **The ones most likely to affect you:**
 
+- [Cancelling a fiber whose body is a nursery never
+  returns](#cancelling-a-fiber-that-is-inside-a-nursery-does-not-return) — a
+  hang, not a delay, and the reason `Ctrl-C` handling needs a flag rather than
+  `Fiber::cancel`.
 - [A bounded nursery runs `limit + 1` children](#what-a-nursery-actually-does),
   and a limit of zero means no limit at all.
 - [A child's failure usually does not cancel its siblings](#a-childs-failure-usually-cancels-no-siblings).
@@ -237,12 +241,54 @@ measuring, and a program built on the prose will meet them as flakiness.
 | `bounded_nursery(0)` | **no limit at all** | check a computed limit before passing it |
 | a child fails | siblings usually keep running | have long work check a `Shared` flag itself |
 | a child fails in a bounded nursery | new children still start | as above |
+| `Fiber::cancel` on a fiber whose body is a nursery | **never returns** if a child does not stop on its own | cancel through a `Shared` flag the children read |
 
 A nursery does still guarantee the other half: every child is waited for, and a
 failure is reported rather than lost.
 
 The measurements below are `khora 0.2.0 (b16417c)` on x86_64 Linux, 20–25 runs
 per backend, under both the default thread backend and `KHORA_FIBERS=scheduler`.
+
+### Cancelling a fiber that is inside a nursery does not return
+
+This is the one to plan around, because it is a hang rather than a surprise.
+
+```khora
+let hand = Fiber::spawn(fn () => nursery(fn () => fan_out(jobs))!);
+clock.sleep(100);
+Fiber::cancel(hand);   // returns straight away
+Fiber::wait(hand);     // never returns
+```
+
+The same worker cancelled *without* the nursery in between stops immediately.
+Put it under `nursery(..)` and `wait` blocks for ever, on both backends.
+
+A nursery checks whether it has been cancelled **between** rounds of waiting
+for its children. A parent already blocked waiting on a round does not look
+again until that round finishes — and a child in a `loop` never finishes it. So
+the cancellation is delivered, acknowledged, and then not acted on until an
+event that cannot happen.
+
+Cancel through a flag the children themselves read:
+
+```khora
+let stop = Shared::of(false);
+// each worker checks it
+loop {
+  if Shared::get(stop) { break };
+  // ..
+}
+// and the supervisor sets it instead of cancelling
+Shared::set(stop, true);
+```
+
+That is the same advice as *a child's failure usually cancels no siblings*
+below, and for the same underlying reason: **a cancellation reaches a fiber, not
+the work inside it.** Long-running work has to check something.
+
+`Ctrl-C` handling built on `Fiber::cancel` over a nursery deadlocks. Fixing it
+properly means delivering a cancellation where it is *raised* rather than where
+it is next noticed, which is a change to what a fiber owns.
 
 ### The bound is on children held, not work in flight
 

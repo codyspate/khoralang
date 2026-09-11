@@ -63,6 +63,19 @@ pub fn listen_on(port: Int) -> Int {
     handle
   } else {
     let address = sockaddr_in(port);
+    // **No `SO_REUSEADDR` here, deliberately, unlike Linux and macOS.**
+    //
+    // The other two set it so that restarting a service inside the `TIME_WAIT`
+    // window works. On Windows the same option means something else: it lets a
+    // *live* socket be bound over, which Microsoft's own documentation calls
+    // hijacking and says makes a server "not secure". Windows does not refuse
+    // the rebind this would be working around, so setting it would buy a
+    // vulnerability and fix nothing.
+    //
+    // `SO_EXCLUSIVEADDRUSE` is the option a Windows server is supposed to set,
+    // and it is a separate decision from this one: it would make two Khora
+    // services on one port fail earlier and more clearly rather than changing
+    // what works today.
     let bound = Array::with_data(address, fn (bytes, _n) => bind(handle, bytes, I32::of(16)));
     // **511, not 16.** The backlog is the queue of connections the kernel has
     // accepted and this program has not yet taken, which is to say it *is* the

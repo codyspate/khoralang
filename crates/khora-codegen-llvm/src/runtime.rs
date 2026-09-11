@@ -238,6 +238,12 @@ pub struct Runtime<'ctx> {
     /// ordering. It is also the only way to wait for a fiber that may have been
     /// *cancelled* without the cancellation unwinding the waiter.
     pub fiber_wait: FunctionValue<'ctx>,
+    /// `bool khora_fiber_finished(void *fiber)`
+    ///
+    /// Asks whether a fiber has finished without waiting for it to, which is
+    /// the one question a supervisor loop needs and the only one every other
+    /// entry point answers by blocking.
+    pub fiber_finished: FunctionValue<'ctx>,
     /// `void khora_fiber_cancel(void *fiber)`
     pub fiber_cancel: FunctionValue<'ctx>,
     /// `void khora_fiber_release(void *fiber)` — a `drop_fields` callback.
@@ -459,6 +465,10 @@ impl<'ctx> Runtime<'ctx> {
             ),
             fiber_detach: declare("khora_fiber_detach", void.fn_type(&[ptr.into()], false)),
             fiber_wait: declare("khora_fiber_wait", void.fn_type(&[ptr.into()], false)),
+            fiber_finished: declare(
+                "khora_fiber_finished",
+                ctx.bool_type().fn_type(&[ptr.into()], false),
+            ),
             fiber_cancel: declare("khora_fiber_cancel", void.fn_type(&[ptr.into()], false)),
             fiber_release: declare("khora_fiber_release", void.fn_type(&[ptr.into()], false)),
             fibers_open: declare("khora_fibers_open", ptr.fn_type(&[], false)),

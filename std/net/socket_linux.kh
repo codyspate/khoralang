@@ -24,6 +24,7 @@ import std::core::{Array, Ptr};
 extern fn socket(family: I32, kind: I32, protocol: I32) -> I32;
 extern fn bind(handle: I32, address: Ptr, length: I32) -> I32;
 extern fn listen(handle: I32, backlog: I32) -> I32;
+extern fn setsockopt(handle: I32, level: I32, name: I32, value: Ptr, length: I32) -> I32;
 extern fn close(handle: I32) -> I32;
 extern fn shutdown(handle: I32, how: I32) -> I32;
 
@@ -72,6 +73,26 @@ pub fn listen_on(port: Int) -> Int {
     invalid_handle()
   } else {
     let address = sockaddr_in(port);
+    // **`SO_REUSEADDR` before the bind, or a restart within a minute fails.**
+    //
+    // A listener that has been closed leaves the port in `TIME_WAIT` for
+    // roughly sixty seconds, and binding it again without this is `EADDRINUSE`
+    // -- so the first start of a service worked and every restart after it did
+    // not. That is the edit-stop-start loop, which is what somebody writing a
+    // service does more often than anything else, and the failure looked like
+    // the port being genuinely taken.
+    //
+    // It does *not* let two live listeners share a port: that is
+    // `SO_REUSEPORT`, which this deliberately does not set. The only thing
+    // being reused here is an address no live socket holds.
+    //
+    // `SOL_SOCKET` is 1 and `SO_REUSEADDR` is 2 on Linux. Failure is not worth
+    // refusing over -- a listener without it binds fine on a free port, which
+    // is every first start -- so the result is deliberately not checked.
+    let on: Array<U8> = Array::new(4, 0);
+    Array::set(on, 0, 1);
+    Array::with_data(on, fn (bytes, _n) =>
+      setsockopt(handle, I32::of(1), I32::of(2), bytes, I32::of(4)));
     let bound = Array::with_data(address, fn (bytes, n) => bind(handle, bytes, I32::of(16)));
     // **511, not 16.** The backlog is the queue of connections the kernel has
     // accepted and this program has not yet taken, which is to say it *is* the

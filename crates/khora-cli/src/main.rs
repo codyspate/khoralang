@@ -2813,15 +2813,43 @@ fn collect_sources(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     // which is the error this directory exists to avoid and which the backend
     // duly reported against the file the user had just named.
     //
+    // **And the tests that go with it**, which is the other half and was
+    // missing. A test module imports the thing it tests, so dropping
+    // `src/main.kh` and keeping `src/main_test.kh` left a module importing a
+    // module that was no longer in the compilation -- `cannot find module`,
+    // reported against a test file, in a build the user never asked to include
+    // tests in. `check` and `test` compile the package as a whole and so both
+    // passed, which made a `src/bin` directory the difference between three
+    // commands agreeing and one of them failing alone.
+    //
+    // A test module is never part of a program: `build` does not run tests,
+    // and a `src/bin` program has no business compiling the package's test
+    // files even where they would resolve.
+    //
+    // Recognised by holding a `test` block rather than by its filename.
+    // `_test.kh` is a convention four files in this repository happen to
+    // follow and nothing enforces, so reading the declaration is the rule that
+    // does not quietly mean something else for somebody who named the file
+    // differently.
+    //
     // Only for a `src/bin` entry: the package's own build excludes the bin
     // directory in `walk`, so the exclusion runs one way each.
-    if roots.iter().any(|r| r.is_file() && r.parent().is_some_and(is_bin_dir)) {
-        let mains: Vec<PathBuf> = roots
+    if roots
+        .iter()
+        .any(|r| r.is_file() && r.parent().is_some_and(is_bin_dir))
+    {
+        let packages: Vec<PathBuf> = roots
             .iter()
             .filter(|r| r.is_file())
-            .filter_map(|r| r.parent()?.parent()?.parent().map(|root| root.join("src").join("main.kh")))
+            .filter_map(|r| r.parent()?.parent()?.parent().map(Path::to_path_buf))
             .collect();
-        out.retain(|file| !mains.iter().any(|m| same_file(file, m)));
+        out.retain(|file| {
+            !packages.iter().any(|root| {
+                let src = root.join("src");
+                same_file(file, &src.join("main.kh"))
+                    || (file.starts_with(&src) && holds_a_test(file))
+            })
+        });
     }
 
     // Sorted *and* deduplicated by canonical path, because the same file
@@ -3568,6 +3596,27 @@ fn is_bin_dir(dir: &Path) -> bool {
     dir.file_name().is_some_and(|n| n == "bin")
         && dir.parent().is_some_and(|src| src.file_name().is_some_and(|n| n == "src"))
         && dir.parent().and_then(Path::parent).is_some_and(|root| root.join("khora.toml").is_file())
+}
+
+/// Whether a source file declares a `test` block.
+///
+/// **Read from the file rather than guessed from its name.** `_test.kh` is a
+/// convention, not a rule -- nothing rejects a test in `checks.kh` -- so a
+/// filename test would silently mean something different for anybody who
+/// named theirs otherwise. Parsing is what `khora test` effectively does to
+/// find them, and this asks the same question of the same tree.
+///
+/// A file that cannot be read or does not parse is not a test file: it is
+/// somebody else's error to report, and answering `false` leaves it in the
+/// compilation where the real diagnostic will find it.
+fn holds_a_test(path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    khora_syntax::parse(&text)
+        .source_file()
+        .decls()
+        .any(|declaration| matches!(declaration, khora_syntax::ast::Decl::Test(_)))
 }
 
 /// The programs in a package's `src/bin`, sorted, or nothing if it has none.
