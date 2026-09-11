@@ -1,0 +1,98 @@
+module std_suite::chars;
+
+//! `Char`, and the string API that has to know where a character begins.
+//!
+//! A `String` is bytes, and a character is one to four of them. Every operation
+//! that takes an index therefore has a boundary question behind it, and the
+//! answers are the point: a count that terminates on a range ending mid
+//! character, a slice that refuses to cut one in half, an index that reads as
+//! absent past the end rather than as whatever byte is there.
+
+import std::core::{List, Option, Show, String, assert_that};
+
+/// Counting characters between two byte offsets, including the awkward ranges.
+///
+/// `"café au lait"` is the fixture because `é` is two bytes: every question
+/// about boundaries has a concrete wrong answer available in it.
+test "chars between counts characters and terminates" {
+  let s = "café au lait";
+  // "café" is five bytes and four characters.
+  let four = String::chars_between(s, 0, 5);
+  assert_that(four == 4, "the first five bytes hold ${four} characters, not four");
+
+  let whole = String::chars_between(s, 0, String::byte_length(s));
+  assert_that(whole == 12, "the whole string counted ${whole}");
+  let length = String::char_length(s);
+  assert_that(length == 12, "char_length said ${length}");
+
+  // An empty range, and one that starts past the end.
+  assert_that(String::chars_between(s, 3, 3) == 0, "an empty range counted something");
+  assert_that(String::chars_between(s, 0, 0) == 0, "a zero range counted something");
+
+  // Ends that are not boundaries: `é` is bytes 3..5, so a range ending inside
+  // it counts it rather than trapping or looping.
+  let split = String::chars_between(s, 0, 4);
+  assert_that(split == 4, "a range ending inside `é` counted ${split}");
+
+  // Past the end is clamped.
+  let clamped = String::chars_between(s, 0, 9999);
+  assert_that(clamped == 12, "a range past the end counted ${clamped}");
+}
+
+/// A character literal is written between apostrophes, and shows as itself.
+test "a character is written between apostrophes" {
+  assert_that(Show::show('a') == "a", "'a' showed as ${Show::show('a')}");
+  assert_that(Show::show('é') == "é", "'é' showed as ${Show::show('é')}");
+  assert_that(Show::show('\u{1F600}') == "😀", "an astral character showed as ${Show::show('\u{1F600}')}");
+  assert_that(Show::show('\n') == "\n", "an escape showed as ${Show::show('\n')}");
+  let code = Char::code('A');
+  assert_that(code == 65, "'A' has code ${code}");
+}
+
+/// And can be matched, which is what makes a lexer writable.
+test "a character can be matched" {
+  let describe = fn (c) => match c {
+    'a' => "letter a",
+    '0' => "zero",
+    '😀' => "a face",
+    _other => "other",
+  };
+  assert_that(describe('a') == "letter a", "'a' described as ${describe('a')}");
+  assert_that(describe('0') == "zero", "'0' described as ${describe('0')}");
+  assert_that(describe('😀') == "a face", "a face described as ${describe('😀')}");
+  assert_that(describe('z') == "other", "'z' described as ${describe('z')}");
+}
+
+/// **A cut can be moved to a boundary rather than refused.**
+///
+/// Byte 2 of `"héllo"` is inside `é`, and slicing there would stop the program.
+/// `next_boundary` and `previous_boundary` are what a caller reaches for
+/// instead, and are the reason `slice` can afford to be strict.
+test "a cut can be moved to a boundary" {
+  let text = "héllo";
+  let bytes = String::byte_length(text);
+  let chars = String::char_length(text);
+  assert_that(bytes == 6, "it is ${bytes} bytes");
+  assert_that(chars == 5, "it is ${chars} characters");
+
+  assert_that(String::is_char_boundary(text, 1), "byte 1 should be a boundary");
+  assert_that(!String::is_char_boundary(text, 2), "byte 2 is inside `é`");
+
+  let forward = String::slice(text, 0, String::next_boundary(text, 2));
+  assert_that(forward == "hé", "moving forward gave [${forward}]");
+  let back = String::slice(text, 0, String::previous_boundary(text, 2));
+  assert_that(back == "h", "moving back gave [${back}]");
+}
+
+/// Indexing by character, which answers `None` past the end rather than a byte.
+test "a string hands over its characters" {
+  let text = "aé😀";
+  assert_that(Show::show(String::char_at(text, 0)) == "Some(a)", "index 0 gave ${Show::show(String::char_at(text, 0))}");
+  assert_that(Show::show(String::char_at(text, 1)) == "Some(é)", "index 1 gave ${Show::show(String::char_at(text, 1))}");
+  assert_that(Show::show(String::char_at(text, 2)) == "None", "index 2 is inside a character and gave ${Show::show(String::char_at(text, 2))}");
+  assert_that(Show::show(String::char_at(text, 3)) == "Some(😀)", "index 3 gave ${Show::show(String::char_at(text, 3))}");
+  assert_that(Show::show(String::char_at(text, 99)) == "None", "past the end gave ${Show::show(String::char_at(text, 99))}");
+
+  let all = Show::show(String::chars(text));
+  assert_that(all == "[a, é, 😀]", "the characters are ${all}");
+}
