@@ -1,0 +1,140 @@
+module std_suite::combinators;
+
+//! The collection combinators, and the failure system, composing.
+//!
+//! A function type in Khora carries its own capability and failure rows, and
+//! `guide/collections-and-strings.md` has always said so. The combinators that
+//! *take* a function declared theirs without, so a fallible step was refused:
+//!
+//! ```text
+//! ids |> List::map(fn id => load_user(id)!)
+//! error: this argument: `UserError` is not accounted for here
+//! ```
+//!
+//! `fold` and `filter` said the same, which left a hand-written `while` over
+//! `Nil`/`Cons` as the only way to walk a list with a step that can fail. For a
+//! language whose headline is typed failure that is the collection library and
+//! the failure system declining to compose, and it is the largest gap an agent
+//! writing a real program hit. Roadmap #136.
+
+import std::core::{Iterator, List, Option, Range, Result, assert_that, attempt};
+
+pub type UserError = | NotFound(id: Int);
+
+fn load_user(id: Int) -> Int raises UserError {
+  if id < 0 { raise UserError::NotFound(id) } else { id * 2 }
+}
+
+fn show(xs: List<Int>) -> String { List::fold(xs, "", fn (acc, n) => acc + " ${n}") }
+
+fn load_all(ids: List<Int>) -> List<Int> raises UserError {
+  ids |> List::map(fn id => load_user(id)!)!
+}
+
+/// The Guide's own example, which used to be refused.
+///
+/// Two marks, and they do different jobs: the inner one is `load_user` failing,
+/// the outer one is `List::map` passing that on -- which it can only do because
+/// its signature now says `raises 'er`.
+test "a fallible step maps over a list" {
+  match attempt(fn () => load_all([1, 2, 3])!) {
+    Result::Ok(xs) => {
+      let shown = show(xs);
+      assert_that(shown == " 2 4 6", "mapped to${shown}")
+    },
+    Result::Err(_e) => assert_that(false, "a list of good ids was refused"),
+  }
+}
+
+/// And stops at the first failure, which is the thing `attempt` inside the
+/// closure could never do.
+///
+/// That workaround answers a `List<Result<..>>`: every element is visited and
+/// the failures come back as data. Useful, and a different operation -- the
+/// Guide documents both, and only one of them existed.
+test "a failing step stops the walk" {
+  match attempt(fn () => load_all([1, 0 - 5, 3])!) {
+    Result::Ok(_xs) => assert_that(false, "a bad id was accepted"),
+    Result::Err(UserError::NotFound(id)) =>
+      assert_that(id == 0 - 5, "stopped at ${id} rather than at -5"),
+  }
+}
+
+/// The rest of the walks, which refused the same way and are fixed the same
+/// way. `fold` and `filter` are the two the report named beside `map`.
+test "every walk takes a fallible step" {
+  let everything = fn () => {
+    let kept = show(List::filter([1, 2, 3, 4], fn n => load_user(n)! > 4)!);
+    let total = List::fold([1, 2, 3], 0, fn (a, n) => a + load_user(n)!)!;
+    let any = List::any([1, 2, 3], fn n => load_user(n)! == 4)!;
+    let all = List::all([1, 2, 3], fn n => load_user(n)! > 0)!;
+    let flat = show(List::flat_map([1, 2], fn n => [load_user(n)!])!);
+    "kept${kept} total ${total} any ${any} all ${all} flat${flat}"
+  };
+  match attempt(fn () => everything()!) {
+    Result::Ok(text) =>
+      assert_that(
+        text == "kept 3 4 total 12 any true all true flat 2 4",
+        "the walks answered: ${text}",
+      ),
+    Result::Err(_e) => assert_that(false, "a walk over good ids was refused"),
+  }
+}
+
+/// `Option` and `Result` too, because a surface where `List::map` takes a
+/// fallible step and `Option::and_then` does not is worse than one where
+/// neither did: the reader has to remember which is which.
+test "option and result take one too" {
+  let chained = fn () => {
+    let mapped = Option::and_then(Option::Some(3), fn n => Option::Some(load_user(n)!))!;
+    let kept = Option::filter(Option::Some(3), fn n => load_user(n)! > 4)!;
+    let fell = Option::unwrap_or_else(Option::None, fn () => load_user(7)!)!;
+    let ok: Result<Int, UserError> = Result::Ok(5);
+    let doubled = Result::map(ok, fn n => load_user(n)!)!;
+    let m = Option::unwrap_or(mapped, 0 - 1);
+    let k = Option::unwrap_or(kept, 0 - 1);
+    let d = Result::unwrap_or(doubled, 0 - 1);
+    "mapped ${m} kept ${k} fell ${fell} doubled ${d}"
+  };
+  match attempt(fn () => chained()!) {
+    Result::Ok(text) =>
+      assert_that(
+        text == "mapped 6 kept 3 fell 14 doubled 10",
+        "each combinator carried the row and answered: ${text}",
+      ),
+    Result::Err(_e) => assert_that(false, "a chain over good values was refused"),
+  }
+}
+
+/// **And a pure step still needs no mark at all.**
+///
+/// The rows are variables, so nothing that maps an ordinary function has to
+/// change. This is the half that made the change safe to make: the whole
+/// corpus -- `std`, the examples, the packages, the reference applications --
+/// compiled unaltered.
+test "a pure step is unchanged" {
+  let mapped = show(List::map([1, 2], fn n => n + 10));
+  assert_that(mapped == " 11 12", "mapped to${mapped}");
+  let kept = show(List::filter([1, 2, 3], fn n => n > 1));
+  assert_that(kept == " 2 3", "kept${kept}");
+  let total = List::fold([1, 2, 3], 0, fn (a, n) => a + n);
+  assert_that(total == 6, "the total was ${total}");
+}
+
+/// The adapters compose over a `Range`, which is the `impl Iterator` that
+/// yields without allocating anything.
+test "combinators compose over a range" {
+  let total = Iterator::fold(
+    Iterator::map(Iterator::filter(Range::Of(0, 10), fn i => i % 2 == 0), fn i => i * 2),
+    0,
+    fn (acc, i) => acc + i,
+  );
+  // 0+2+4+6+8 doubled.
+  assert_that(total == 40, "the pipeline answered ${total}");
+}
+
+/// `take` and `count` over a `List`, which is a different `impl Iterator`.
+test "take and count walk a list" {
+  let counted = Iterator::count(Iterator::take([1, 2, 3, 4, 5], 2));
+  assert_that(counted == 2, "take(2) counted ${counted}");
+}
