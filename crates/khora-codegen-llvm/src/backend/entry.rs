@@ -153,6 +153,24 @@ impl<'ctx> Backend<'ctx> {
         self.begin();
         self.remember_arguments(main);
 
+        // **The counters, on the same terms the program entry point gives
+        // them.** A module declaring `extern fn khora_live_count() -> Int;`
+        // gets counting switched on; one that does not pays nothing. That was
+        // written for `main` and not for this, so a `test` block asking what is
+        // live got `NOT_COUNTING` -- `-1` -- and any assertion about it failed
+        // with a number that looks like a corrupted count rather than like a
+        // switch nobody threw.
+        //
+        // It surfaced converting `vector`'s tests, where several are about
+        // exactly this: that a vector of a thousand integers is two objects,
+        // and that a popped element dies at the pop. Those cannot move out of
+        // Rust while the harness cannot count.
+        if COUNTERS.iter().any(|name| self.module.get_function(name).is_some()) {
+            self.builder
+                .build_call(self.rt.enable_counters, &[], "")
+                .expect("switching the counters on");
+        }
+
         for (symbol, name) in blocks {
             let Some(function) = self.functions.get(symbol).copied() else { continue };
             let text = self

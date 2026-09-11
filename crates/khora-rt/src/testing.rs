@@ -17,6 +17,25 @@ struct PendingTest {
     call: Trampoline0,
 }
 
+/// A test that has been started, or one that has already finished.
+///
+/// The two are the same to the reporting loop below and different to the run:
+/// a parallel run holds a join handle per test and joins them all afterwards; a
+/// serial one has joined each before starting the next, and carries the result.
+enum Finished {
+    Running(std::thread::JoinHandle<Tagged>),
+    Already(std::thread::Result<Tagged>),
+}
+
+impl Finished {
+    fn outcome(self) -> std::thread::Result<Tagged> {
+        match self {
+            Finished::Running(handle) => handle.join(),
+            Finished::Already(result) => result,
+        }
+    }
+}
+
 /// The tests a program declared, in the order they were written.
 static PENDING: Mutex<Vec<PendingTest>> = Mutex::new(Vec::new());
 
@@ -193,22 +212,58 @@ pub extern "C" fn khora_test_run() -> i32 {
     }
     let filtered_out = declared - tests.len();
 
-    let running: Vec<_> = tests
-        .into_iter()
-        .map(|test| {
-            let name = test.name.clone();
-            let code = test.code;
-            let call = test.call;
-            let handle = std::thread::spawn(move || {
-                let code = code;
-                let _entered = enter(Fiber::spawned());
-                let mut payload: u64 = 0;
-                let which = (call)(code.0, &raw mut payload);
-                Tagged { which, payload }
-            });
-            (name, handle)
+    // **A program that counts objects runs its tests one at a time.**
+    //
+    // `khora_live_count` reports the whole process's heap, and the blocks below
+    // run at once -- so a test asking what is live sees every other test's
+    // allocations too, and subtracting two of its own readings can answer a
+    // *negative* number when another block freed something in between. That is
+    // not a flaky test; it is a test measuring something that is not its own.
+    //
+    // Whether the program counts is already known: the compiler switches the
+    // counters on for a module that declares `extern fn khora_live_count`, and
+    // nothing else turns them on. So the harness needs no flag and no
+    // annotation -- a file with a counting test gets a serial run, and a file
+    // without keeps the parallelism, which is most files.
+    //
+    // The parallel run is still the point for everything else, and the reason
+    // is in the doc comment above: a test that only passes when it runs alone
+    // is a test that is lying. A test that reads a process-wide counter is the
+    // one honest exception, because "alone" is part of what it is measuring.
+    let alone = crate::counters::counting();
+
+    let start = |test: PendingTest| {
+        let code = test.code;
+        let call = test.call;
+        std::thread::spawn(move || {
+            let code = code;
+            let _entered = enter(Fiber::spawned());
+            let mut payload: u64 = 0;
+            let which = (call)(code.0, &raw mut payload);
+            Tagged { which, payload }
         })
-        .collect();
+    };
+
+    // Each test still gets a thread and a fiber of its own either way: what
+    // changes is whether the next one starts before this one has finished.
+    let running: Vec<_> = if alone {
+        tests
+            .into_iter()
+            .map(|test| {
+                let name = test.name.clone();
+                let finished = start(test).join();
+                (name, Finished::Already(finished))
+            })
+            .collect()
+    } else {
+        tests
+            .into_iter()
+            .map(|test| {
+                let name = test.name.clone();
+                (name, Finished::Running(start(test)))
+            })
+            .collect()
+    };
 
     // **The lock is taken per line rather than held across the loop**, and
     // that is a deadlock rather than a style. A fiber that traps writes its
@@ -220,9 +275,9 @@ pub extern "C" fn khora_test_run() -> i32 {
     // because nothing there holds the lock.
     let mut failed = 0usize;
     let mut total = 0usize;
-    for (name, handle) in running {
+    for (name, finished) in running {
         total += 1;
-        let verdict = match handle.join() {
+        let verdict = match finished.outcome() {
             // A test that ends any way other than "returned" did not pass.
             // Which way it was matters to the reader and not to the count.
             Ok(outcome) if outcome.which == 0 => "ok",
