@@ -40,6 +40,7 @@ mod channels;
 mod chars;
 mod combinators;
 mod compile;
+mod conformance;
 mod config;
 mod db;
 mod decimal;
