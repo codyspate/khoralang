@@ -107,13 +107,13 @@ To share state deliberately, use `Shared<A>`, which takes a lock and is safe to
 capture. Where another language needs `Arc<Mutex<HashMap<K, V>>>`, Khora has
 `Shared<Map<K, V>>`: the counting is implicit and there is no lifetime to name.
 
-[Sharing](/docs/next/reference/sharing/) has the rules as they apply to code
+[Sharing](/docs/reference/sharing/) has the rules as they apply to code
 you are writing.
 
 ## Resources are not memory
 
 Memory is reclaimed when the last reference goes. A file handle, a socket or a
 transaction has an *observable* end — the other side notices — so those are
-closed by [regions](/docs/next/reference/memory-and-resources/#region-syntax)
+closed by [regions](/docs/reference/memory-and-resources/#region-syntax)
 rather than by the reference count, at a point the program states rather than
 one the optimiser chooses.

@@ -274,10 +274,33 @@ Two things are worth being deliberate about. A request that arrives during the
 drain finds a closed channel, so `Channel::send` answers `false` — count it
 where it is refused, or the job is accepted and never seen again; the same
 reconciliation [taking work off a
-queue](/docs/cookbook/taking-work-off-a-queue/) is about, one layer up. And a
-`Fiber::spawn` that fails says nothing to anybody: a listener that could not
-bind raises inside its own fiber, and a `main` that is polling a flag waits for
-ever with an empty terminal. Write the port into the log line before you listen.
+queue](/docs/cookbook/taking-work-off-a-queue/) is about, one layer up.
+
+**A listener that cannot bind fails silently, and the process does not exit.**
+`Router::listen` raises inside the fiber that `Fiber::spawn` started, and
+nothing is waiting on that fiber, so there is no message on either stream and
+no non-zero status — a `main` polling a stop flag waits for ever. A second copy
+started on a busy port is a process that serves nothing and never dies, which
+under a supervisor that restarts on exit never restarts either.
+
+Logging the port before you listen does **not** mitigate this: the line is
+emitted whether or not the bind succeeded, so it reports a healthy start for a
+process listening on nothing. Prove the bind instead — after spawning, connect
+to your own port once and fail loudly if you cannot:
+
+```khora
+let server = Fiber::spawn(fn () => Router::listen(router, port)!);
+
+// The bind either took or it did not; find out here rather than never.
+match HttpClient::send(client, Request::get("http://127.0.0.1:${port}/health")) {
+  Result::Err(_) => {
+    eprint("could not bind ${port}");
+    Fiber::cancel(server);
+    return 1
+  },
+  Result::Ok(_) => info("listening on ${port}"),
+};
+```
 
 For a container, this is the in-program half only. Draining at the layer above
 — out of the load balancer, wait, then stop — is what

@@ -5885,8 +5885,8 @@ pub fn print(value: String)
 Writes a line to standard output. Accepts a `String`, an `Int` or a
 `Float`.
 
-Not an effect, unlike [`std::log`](/docs/stdlib/api/log/) — so it needs no
-`with` clause and can be called before any capability is installed.
+Not an effect, unlike `std::log` — so it needs no `with` clause and can be
+called before any capability is installed.
 
 ### todo
 

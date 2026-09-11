@@ -458,6 +458,12 @@ The file is read a line at a time rather than into one string, so a log
 bigger than memory is still foldable. `start` is the answer for an empty
 file, which is why it is a value rather than an `Option`.
 
+**Bytes that are not UTF-8 raise `IoError::Failed`**, the same as
+[`read_text`](#read_text) and for the same reason: a file handed to something that
+folds over *lines* was supposed to hold text, and a tool pointed at a
+binary by accident should be able to say so and exit rather than abort.
+Converting without asking would trap, which no caller can catch.
+
 ### copy
 
 ```khora

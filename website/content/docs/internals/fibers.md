@@ -24,13 +24,13 @@ stack switch in user space, and a fiber can move between workers.
 They behave identically except under cancellation: a fiber inside
 `clock.sleep` is woken by a cancellation under the scheduler, but runs the
 sleep to completion under threads. [Known
-limitations](/docs/next/limitations/#the-two-fiber-backends-are-distinguishable)
+limitations](/docs/limitations/#the-two-fiber-backends-are-distinguishable)
 has the measurements.
 
 Threads are the default because they are faster at the connection counts a
 service actually runs at; the scheduler exists for programs that need far more
 concurrent fibers than a machine has threads. [Known
-limitations](/docs/next/limitations/#the-fiber-scheduler) has the measurements.
+limitations](/docs/limitations/#the-fiber-scheduler) has the measurements.
 
 The remaining difference is cost and density:
 
@@ -51,13 +51,13 @@ reactor, or by another thread — is not left waiting behind a worker's own work
 A fiber woken this way can resume on a different worker than it started on.
 Nothing a fiber owns is tied to a thread: its identity, its cancellation state
 and its current span travel with it. The one exception is foreign code that is
-itself thread-affine, which [FFI](/docs/next/reference/ffi/) covers.
+itself thread-affine, which [FFI](/docs/reference/ffi/) covers.
 
 ## A nursery is a region
 
 What makes Khora's concurrency *structured* is that a fiber cannot outlive the
 block that started it. That is not a separate mechanism — it is
-[regions](/docs/next/reference/memory-and-resources/#region-syntax), which
+[regions](/docs/reference/memory-and-resources/#region-syntax), which
 already run their finalisers on every way out of a block.
 
 A nursery opens a region and installs a `Nursery` capability whose `spawn`
@@ -119,7 +119,7 @@ travel on, so it runs to its end.
 A handler runs and returns; it cannot capture the rest of the computation. All
 suspension belongs to fibers, which is what lets handlers be a function call
 rather than a stack switch — see
-[Effects and handlers](/docs/next/internals/effects/).
+[Effects and handlers](/docs/internals/effects/).
 
 The practical consequence is that `with` blocks and nurseries compose without
 either knowing about the other, and a capability handed to a fiber is just a

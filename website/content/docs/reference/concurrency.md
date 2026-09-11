@@ -153,7 +153,7 @@ Windows — and a coroutine gets one megabyte with a guard page, so deep
 recursion near the old limit may be over the new one. The failure is a clean
 fault rather than corruption.
 
-[Fibers](/docs/next/internals/fibers/) describes how each is scheduled.
+[Fibers](/docs/internals/fibers/) describes how each is scheduled.
 
 ### A child that failed
 

@@ -303,3 +303,59 @@ jobs:
           echo
           echo "Every archive is attested. A downloader checks one with:"
           echo "  gh attestation verify <file> --repo $GH_REPO"
+
+  # **The documentation tree is part of the release, and was not.**
+  #
+  # Cutting `v0.1.0` left `/docs/` pointing at it while `khora --version` said
+  # `0.2.0` and `/docs/v0.2/` was a 404, because the step that copies the pages
+  # existed only as a comment in `versions.mjs` telling a maintainer to run two
+  # `git` commands. A newcomer reads that skew as "my compiler is ahead of its
+  # documentation" and starts discounting pages that are correct.
+  #
+  # This job does not push to `main`. It opens a pull request, because the cut
+  # is a real change to the site -- a tree and a `versions.mjs` entry -- and
+  # deserves the same review as any other. What it removes is the chance of
+  # forgetting.
+  docs:
+    name: cut the documentation tree
+    needs: attach
+    permissions:
+      contents: write
+      pull-requests: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # `cut-docs.sh` reads the tag with `git archive`, so the tag has to be
+          # here: a shallow default checkout has the commit and not the refs.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+
+      - name: Cut it from the tag
+        run: sh scripts/cut-docs.sh "$TAG"
+
+      - name: The site still builds with the new tree
+        working-directory: website
+        run: |
+          npm ci
+          npm run build
+
+      - name: Open a pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          branch="docs/cut-$TAG"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add website/content/versions website/versions.mjs
+          git commit -m "Documentation for $TAG, cut from the tag"
+          git push origin "$branch"
+          gh pr create \
+            --title "Documentation for $TAG" \
+            --body "Cut from \`$TAG\` by the release workflow. Merging it makes \`/docs/\` resolve here, and returns \`next\` to being the tree that is being written." \
+            --base main --head "$branch"

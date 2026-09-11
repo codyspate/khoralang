@@ -152,6 +152,14 @@ struct Legacy {
     /// How to release a successful answer. Null for a value with no fields to
     /// let go of.
     glue: Option<extern "C" fn(*mut u8)>,
+    /// Whether the "nobody was waiting for this" line has been written.
+    ///
+    /// Two places can write it: the fiber itself, the moment it finishes with
+    /// an error, and `khora_fiber_release`, for a handle let go of later. Both
+    /// are needed -- a held handle never reaches the second, and a fiber that
+    /// has not finished never reaches the first -- and one failure is one
+    /// message, so whichever arrives first claims it here.
+    announced: std::sync::atomic::AtomicBool,
 }
 
 impl Legacy {
@@ -213,7 +221,11 @@ impl Legacy {
     fn discard(&self, reported: bool) {
         let taken = self.outcome.lock().unwrap_or_else(|e| e.into_inner()).take();
         let Some(outcome) = taken else { return };
-        if reported && outcome.which != 0 && outcome.which != CANCELLED_WHICH {
+        if reported
+            && outcome.which != 0
+            && outcome.which != CANCELLED_WHICH
+            && !self.announced.swap(true, Ordering::Relaxed)
+        {
             let mut err = std::io::stderr().lock();
             let _ = err.write_all(b"khora: a fiber ended with an error nobody was waiting for\n");
         }
@@ -407,6 +419,7 @@ pub unsafe extern "C" fn khora_fiber_spawn(
         outcome: Mutex::new(None),
         boxed,
         glue: value_glue,
+        announced: std::sync::atomic::AtomicBool::new(false),
     });
     let answers = legacy.clone();
 
@@ -488,6 +501,33 @@ pub unsafe extern "C" fn khora_fiber_spawn(
             // of that must find the answer already there.
             *answers.outcome.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
             khora_drop(body, glue);
+        }
+        // **A failure nobody is waiting for is said here, not at release.**
+        //
+        // `khora_fiber_release` already reports one, which covers a handle that
+        // is let go of. It does not cover the shape a server is written in:
+        // spawn the listener, keep the handle, and poll a stop flag. If the
+        // bind fails, the fiber raises, the handle is still held, and the
+        // release that would have printed never runs -- so the process sits
+        // there having said nothing, serving nothing, and never exiting. That
+        // is worse than a crash, because a supervisor that restarts on exit
+        // sees a healthy process.
+        //
+        // Reported at most once: `announced` is the flag, and a later join or
+        // release finds it already set and stays quiet rather than saying it
+        // twice.
+        {
+            let held = answers.outcome.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(outcome) = held.as_ref() {
+                if outcome.which != 0
+                    && outcome.which != CANCELLED_WHICH
+                    && !answers.announced.swap(true, Ordering::Relaxed)
+                {
+                    let mut err = std::io::stderr().lock();
+                    let _ = err
+                        .write_all(b"khora: a fiber ended with an error nobody was waiting for\n");
+                }
+            }
         }
         // Last, and after the closure has been released, so a joiner that
         // wakes immediately finds the fiber finished in every sense.

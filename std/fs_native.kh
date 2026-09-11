@@ -364,9 +364,14 @@ fn fold_from<A>(path: String, offset: Int, acc: A, step: (A, Array<U8>) -> A) ->
 ///
 /// A line does not respect a chunk boundary, so the tail of one chunk is the
 /// head of the next line and has to survive until the rest of it arrives.
+///
+/// `text` is false once a chunk has turned out not to be UTF-8. The fold
+/// cannot raise from inside its own step, so the refusal rides along here and
+/// [`fold_lines`] raises it once the fold is over.
 type Lines<A> = {
   done: A,
   partial: String,
+  text: Bool,
 };
 
 /// Folds over a file's lines, without holding it in memory.
@@ -389,16 +394,33 @@ type Lines<A> = {
 /// The file is read a line at a time rather than into one string, so a log
 /// bigger than memory is still foldable. `start` is the answer for an empty
 /// file, which is why it is a value rather than an `Option`.
+///
+/// **Bytes that are not UTF-8 raise `IoError::Failed`**, the same as
+/// [`read_text`] and for the same reason: a file handed to something that
+/// folds over *lines* was supposed to hold text, and a tool pointed at a
+/// binary by accident should be able to say so and exit rather than abort.
+/// Converting without asking would trap, which no caller can catch.
 pub fn fold_lines<A>(path: String, start: A, step: (A, String) -> A) -> A
   with { reads: FsRead }
   raises IoError
 {
+  // `fold_chunks` takes a step that cannot raise, so the refusal is carried
+  // out in the accumulator and raised below rather than thrown from inside it.
   let carried = fold_chunks(
     path,
-    { done: start, partial: "" },
-    fn (state, chunk) => absorb(state, String::from_bytes(chunk), step),
+    { done: start, partial: "", text: true },
+    fn (state, chunk) =>
+    if !state.text {
+      state
+    } else if Array::is_utf8(chunk) {
+      absorb(state, String::from_bytes(chunk), step)
+    } else {
+      { done: state.done, partial: state.partial, text: false }
+    },
   )!;
-  if String::byte_length(carried.partial) == 0 {
+  if !carried.text {
+    raise IoError::Failed(path)
+  } else if String::byte_length(carried.partial) == 0 {
     carried.done
   } else {
     step(carried.done, carried.partial)
@@ -408,7 +430,7 @@ pub fn fold_lines<A>(path: String, start: A, step: (A, String) -> A) -> A
 /// Takes whole lines out of `text`, keeping the remainder.
 fn absorb<A>(state: Lines<A>, text: String, step: (A, String) -> A) -> Lines<A> {
   let joined = "${state.partial}${text}";
-  split_lines({ done: state.done, partial: joined }, step)
+  split_lines({ done: state.done, partial: joined, text: state.text }, step)
 }
 
 /// Peels complete lines off the front of `partial`.
@@ -417,7 +439,9 @@ fn split_lines<A>(state: Lines<A>, step: (A, String) -> A) -> Lines<A> {
     Option::None => state,
     Option::Some(split) =>
       split_lines(
-        { done: step(state.done, without_return(split.head)), partial: split.rest },
+        { done: step(state.done, without_return(split.head)),
+          partial: split.rest,
+          text: state.text },
         step,
       ),
   }

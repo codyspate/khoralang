@@ -56,7 +56,7 @@ This has consequences worth knowing:
 **There is no unwinder.** No DWARF tables, no landing pads, no personality
 routine, no `longjmp`. A raise is a return with a tag, and each frame it passes
 through runs the releases it was going to run anyway. That is what keeps
-foreign frames out of the story — see [FFI](/docs/next/reference/ffi/).
+foreign frames out of the story — see [FFI](/docs/reference/ffi/).
 
 **`!` is where the branch is.** The mark a reader is taught to read as "control
 can leave here" is exactly the point where the compiler emits the test.
@@ -82,7 +82,7 @@ would allow.
 Handlers are therefore single-shot, and the generator-shaped uses of algebraic
 effects are unavailable: an operation cannot yield more than once, and a
 handler cannot restart a computation. Stopping and continuing a computation is
-what a *fiber* does — see [Fibers](/docs/next/internals/fibers/).
+what a *fiber* does — see [Fibers](/docs/internals/fibers/).
 
 Because a handler never suspends, performing an operation costs a call rather
 than a stack switch, and a handler can be passed to foreign code without the
