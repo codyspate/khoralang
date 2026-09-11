@@ -69,7 +69,24 @@ mod tests {
     /// A backstop rather than the mechanism: park-and-wake makes migration the
     /// normal case, so the first attempt is expected to succeed. This is what
     /// stops a saturated machine turning a real check into a red build.
-    const ATTEMPTS: usize = 25;
+    ///
+    /// **It was 25, and 25 was not enough.** Both
+    /// `a_thread_affine_handle_held_across_a_suspension_is_used_from_the_wrong_thread`
+    /// and its neighbour failed on macOS and Windows CI with "no fiber changed
+    /// worker in 25 runs" -- not always, and never on a developer's machine.
+    /// The runners have two to four cores and are heavily loaded, and
+    /// `GLOBAL_INTERVAL` lets a worker take its own queue thirty-one times
+    /// before it looks at the shared one: when the other workers are
+    /// descheduled, the fiber's own worker reclaims it before anybody can
+    /// steal it, every time, for a whole run.
+    ///
+    /// An attempt costs about two milliseconds, so this is well under a second
+    /// even when it has to spend all of it, against a test that otherwise
+    /// blocks a release. Raising it does not weaken anything: the panic still
+    /// fires if migration is never observed, so the test still refuses to pass
+    /// having proved nothing -- which is the whole reason it is written this
+    /// way.
+    const ATTEMPTS: usize = 200;
 
     /// The worker a fiber is on right now.
     fn worker() -> String {
