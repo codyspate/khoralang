@@ -38,19 +38,50 @@ use std::process::Command;
 
 use khora_db::{KhoraDatabase, SourceFile, SourceRoot};
 
+/// Every `.kh` file of `std`, plus the conformance program.
+///
+/// **Compiled against the real `std`, not alone.** The program interpolates
+/// values into its assertion messages, and `${n}` goes through `Show` -- which
+/// lives in `std::core`. A module compiled by itself has no `Show for Int`, so
+/// every message in the file is a type error, and the failure says so
+/// seventeen times over.
+///
+/// It was written standalone and tested inside a package, where `std` comes in
+/// implicitly. That is a different compile from the one this test does, which
+/// is the whole reason CI caught it and the local run did not.
+fn sources(db: &KhoraDatabase, dir: &std::path::Path, main: &str) -> Vec<SourceFile> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("std");
+    let mut out = Vec::new();
+    let mut stack = vec![root];
+    while let Some(here) = stack.pop() {
+        for entry in std::fs::read_dir(&here).expect("a readable std") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "kh")
+                && khora_db::selected_for_target(&path, khora_db::host_target())
+            {
+                let text = std::fs::read_to_string(&path).expect("readable");
+                out.push(SourceFile::new(db, path, text));
+            }
+        }
+    }
+    out.push(SourceFile::new(db, dir.join("conformance.kh"), main.to_string()));
+    out
+}
+
 /// The language, in one module.
 ///
-/// Deliberately not using `std` beyond `print`: this is about what the
-/// *compiler* does with each construct, and a program that reaches into `std`
-/// for each one is testing the library at the same time and taking longer to do
-/// it. `std`'s own tests are where the library is checked.
+/// Deliberately not using `std` beyond `print` and `assert_that`: this is about
+/// what the *compiler* does with each construct, and a program that reaches
+/// into `std` for each one is testing the library at the same time and taking
+/// longer to do it. `std`'s own tests are where the library is checked.
+///
+/// It is nevertheless compiled *with* `std`, because `${..}` goes through
+/// `Show` and `Show` lives there. See `sources`.
 const CONFORMANCE: &str = r#"module conformance;
 
-fn print(value: Int);
-
-// `assert_that` the same way: a declaration the backend implements, so this
-// program needs nothing from `std` and pays for nothing it does not use.
-fn assert_that(condition: Bool, message: String);
+import std::core::{assert_that, print};
 
 // --- algebraic data types, and matching over them ------------------------
 
@@ -204,8 +235,7 @@ fn the_language_still_compiles_and_runs() {
     let _ = std::fs::remove_file(&exe);
 
     let db = KhoraDatabase::new();
-    let file = SourceFile::new(&db, dir.join("conformance.kh"), CONFORMANCE.to_string());
-    let root = SourceRoot::new(&db, vec![file]);
+    let root = SourceRoot::new(&db, sources(&db, &dir, CONFORMANCE));
     if let Err(errors) = khora_codegen_llvm::compile_tests(&db, root, &exe) {
         let messages: Vec<String> = errors.into_iter().map(|e| e.message).collect();
         panic!("the conformance program did not compile:\n  {}", messages.join("\n  "));
