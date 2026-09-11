@@ -201,15 +201,18 @@ pub(crate) fn assert_outside_a_test_errors(db: &dyn Db, file: SourceFile) -> Vec
             }
             let Some(call) = ast::CallExpr::cast(node) else { continue };
             let Some(ast::Expr::Path(path)) = call.callee() else { continue };
-            // The callee's text, trimmed: `assert` is a bare name, so anything
+            // The callee's text, trimmed: both are bare names, so anything
             // qualified (`m::assert`) is somebody else's function.
-            if path.syntax().text().to_string().trim() != "assert" {
+            let name = path.syntax().text().to_string();
+            let name = name.trim();
+            if name != "assert" && name != "assert_that" {
                 continue;
             }
             found.push(HirError {
-                message: "`assert` is only allowed inside a `test` block; elsewhere, \
-                          `raise` says the same thing and says where it goes"
-                    .to_string(),
+                message: format!(
+                    "`{name}` is only allowed inside a `test` block; elsewhere, \
+                     `raise` says the same thing and says where it goes"
+                ),
                 range: call.syntax().text_range(),
             });
         }

@@ -38,6 +38,8 @@
 # `assert` outside a test was the other, and moved with it --
 # `khora-types`'s `assert_outside_a_test_errors` reports it at the call, in the
 # author's own file, where it used to arrive against `std/clock_native.kh:4`.
+# `assert_that` joined it the day it was added: the same check reports both, so
+# a message that only the backend could give is a message no editor could show.
 # The backend keeps its refusal, which is why the message is listed below.
 # Roadmap 16.
 #
@@ -62,6 +64,7 @@
 `String::from_bytes` takes an `Array<U8>`
 `String::{name}` takes a string
 `assert` is only allowed inside a `test` block; elsewhere, `raise` says the  same thing and says where it goes
+`assert_that` is only allowed inside a `test` block; elsewhere, `raise` says  the same thing and says where it goes
 `attempt` produces a `Result`
 `attempt` produces a `Result`, which has `Ok` and `Err`
 `attempt` takes a function to run
