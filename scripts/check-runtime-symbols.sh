@@ -71,8 +71,18 @@ elif [ -n "${LLVM_SYS_221_PREFIX:-}" ] && [ -x "$LLVM_SYS_221_PREFIX/bin/llvm-nm
 elif [ -n "${LLVM_SYS_221_PREFIX:-}" ] && [ -x "$LLVM_SYS_221_PREFIX/bin/llvm-nm" ]; then
     reader="$LLVM_SYS_221_PREFIX/bin/llvm-nm"
 fi
+# **A Mach-O symbol carries a leading underscore and an ELF one does not.**
+# `_khora_alloc` never matches `khora_alloc`, so on macOS this compared a list
+# of bare names against a list of underscored ones, found nothing in common,
+# and reported every symbol as missing -- including ones that had been in the
+# archive since the first commit. The same shape as the `nm` bug above: the
+# reader was right and the comparison was reading a different dialect.
+#
+# Stripping one leading underscore is enough and is not ambiguous. Nothing the
+# backend declares starts with one; the names are all `khora_*`, so an
+# underscore at the front is the platform's and never the symbol's.
 "$reader" --defined-only "$archive" 2>/dev/null \
-    | awk '$2 == "T" { print $3 }' | sort -u > "$work/have"
+    | awk '$2 == "T" { sub(/^_/, "", $3); print $3 }' | sort -u > "$work/have"
 if [ ! -s "$work/have" ]; then
     printf '  FAILED  %s read no defined symbols from %s.'"\n" "$reader" "$archive" >&2
     printf '          An empty read is the wrong reader for the format, not an'"\n" >&2
