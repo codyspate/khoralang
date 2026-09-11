@@ -186,6 +186,99 @@ impl<'ctx> Lower<'_, 'ctx> {
         Some(self.be.unit_value())
     }
 
+    /// `assert_that(condition, message)` — an assertion that says what it saw.
+    ///
+    /// **The same branch, plus a sentence.** `assert` reports an ordinal and a
+    /// line, which says *which* assertion failed and not *why*; recovering the
+    /// value meant adding a `print` and building again, and on a program that
+    /// links `std` that is the better part of a minute for a fact the test
+    /// already had in its hand.
+    ///
+    /// The message is only evaluated on the failing path. It is built by string
+    /// interpolation at the call site -- `assert_that(ok, "port ${l.port}")` --
+    /// so it costs nothing at all in a passing test, which is every test almost
+    /// every time.
+    ///
+    /// **A message rather than `assert_eq`'s two rendered values.** An
+    /// `assert_eq<A: Show>` was the other candidate and is the worse trade: the
+    /// `Show` bound excludes types a test may legitimately compare, and
+    /// "left/right" is the wrong sentence whenever the useful thing to say is
+    /// neither operand -- which key was missing, which input produced this.
+    /// Interpolation already exists, already composes, and needs no bound.
+    pub(super) fn assert_that(
+        &mut self,
+        condition: ExprId,
+        message: ExprId,
+        range: TextRange,
+    ) -> Flow<'ctx> {
+        if !khora_hir::is_test(&self.owner) {
+            return self.fail(
+                "`assert_that` is only allowed inside a `test` block; elsewhere, `raise` says \
+                 the same thing and says where it goes"
+                    .to_string(),
+                range,
+            );
+        }
+
+        // Counted with `assert`'s, and before the condition is lowered, so the
+        // ordinals a reader sees are the order the assertions are written in
+        // whichever form they take.
+        self.asserts += 1;
+        let ordinal = self.asserts;
+
+        let held = self.expr(condition)?.into_int_value();
+        let failed = self.block("assert.failed");
+        let held_ok = self.block("assert.ok");
+        self.be
+            .builder
+            .build_conditional_branch(held, held_ok, failed)
+            .expect("branching on an assertion");
+
+        self.at(failed);
+        // **Built on this side of the branch**, which is the whole reason the
+        // message is an expression rather than a string the caller formats
+        // first: a passing assertion never allocates it.
+        let text = self.expr(message)?.into_pointer_value();
+        let length_slot =
+            runtime::field_pointer(self.be.ctx, &self.be.builder, text, STRING_LEN_FIELD);
+        let length = self
+            .be
+            .builder
+            .build_load(self.be.ctx.i64_type(), length_slot, "assert.len")
+            .expect("reading the message length");
+        let bytes = runtime::byte_offset(
+            self.be.ctx,
+            &self.be.builder,
+            text,
+            STRING_BYTES_OFFSET,
+            "assert.bytes",
+        );
+
+        let say = self.be.rt.assert_that_failed;
+        let ordinal = self.be.ctx.i32_type().const_int(u64::from(ordinal), false);
+        let line = self
+            .be
+            .ctx
+            .i32_type()
+            .const_int(u64::from(line_of(&self.be.source, range)), false);
+        self.be
+            .builder
+            .build_call(
+                say,
+                &[ordinal.into(), line.into(), bytes.into(), length.into()],
+                "",
+            )
+            .expect("reporting which assertion failed");
+        // The message is this frame's to release, and the frame is leaving.
+        self.drop(text.into(), &Type::Str);
+        let which = self.be.ctx.i32_type().const_int(runtime::FAILED_WHICH, false);
+        let none = self.be.ctx.i64_type().const_zero();
+        self.leave_with(which, none);
+
+        self.at(held_ok);
+        Some(self.be.unit_value())
+    }
+
     /// `raise e` — leave the function carrying the error.
     ///
     /// Everything the frame owns is released first, exactly as an early

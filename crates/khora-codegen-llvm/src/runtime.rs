@@ -273,6 +273,14 @@ pub struct Runtime<'ctx> {
     /// `void khora_assert_failed(uint32_t ordinal, uint32_t line)` — says which
     /// `assert` in the running test did not hold, and where it was written.
     pub assert_failed: FunctionValue<'ctx>,
+
+    /// `void khora_assert_that_failed(uint32_t ordinal, uint32_t line,
+    /// const char *message, uint64_t len)` — the same, carrying a sentence.
+    ///
+    /// `assert` can only say that a `Bool` was false. `assert_that` takes a
+    /// message with it, so a failure says what the test saw rather than
+    /// sending the reader back to add a `print` and rebuild.
+    pub assert_that_failed: FunctionValue<'ctx>,
     /// `void khora_begin(void)` — the first call every entry point makes.
     /// Installs the stack guard, which has to be in place before anything can
     /// exhaust the stack.
@@ -494,6 +502,10 @@ impl<'ctx> Runtime<'ctx> {
             assert_failed: declare(
                 "khora_assert_failed",
                 void.fn_type(&[i32t.into(), i32t.into()], false),
+            ),
+            assert_that_failed: declare(
+                "khora_assert_that_failed",
+                void.fn_type(&[i32t.into(), i32t.into(), ptr.into(), i64t.into()], false),
             ),
             begin: declare("khora_begin", void.fn_type(&[], false)),
             test_register: declare(

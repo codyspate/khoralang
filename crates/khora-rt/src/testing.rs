@@ -99,6 +99,53 @@ pub extern "C" fn khora_assert_failed(ordinal: u32, line: u32) {
     }
 }
 
+/// The same, for an assertion that was given something to say.
+///
+/// **A `Bool` is all `assert` has, and a `Bool` cannot say what it saw.**
+/// `assert(l.port == 8080)` fails with an ordinal and a line, and the reader's
+/// next move is to add a `print` and build again -- which on a program linking
+/// `std` is the better part of a minute, to recover a value the assertion was
+/// holding and dropped.
+///
+/// `assert_that` takes the sentence with it:
+///
+/// ```text
+/// khora: assertion 3 failed, at line 47
+///   port was 8081
+/// ```
+///
+/// **A message rather than the two values.** An `assert_eq` rendering each side
+/// through `Show` was the other candidate, and it is the worse trade here: it
+/// needs a `Show` bound, so it does not work for every type a test compares,
+/// and it fixes the sentence at "left/right" when the useful thing to say is
+/// often neither operand -- the key that was missing, the input that produced
+/// this. String interpolation already exists and composes:
+/// `assert_that(ok, "port ${l.port} from ${source}")`.
+///
+/// # Safety
+///
+/// `message` must point at `len` bytes of UTF-8 live for the duration of the
+/// call. Generated code passes a Khora string, which is exactly that.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_assert_that_failed(
+    ordinal: u32,
+    line: u32,
+    message: *const u8,
+    len: usize,
+) {
+    let mut err = std::io::stderr().lock();
+    if line == 0 {
+        let _ = writeln!(err, "khora: assertion {ordinal} failed");
+    } else {
+        let _ = writeln!(err, "khora: assertion {ordinal} failed, at line {line}");
+    }
+    if len > 0 && !message.is_null() {
+        // SAFETY: the caller guarantees `len` bytes at `message` for this call.
+        let bytes = unsafe { std::slice::from_raw_parts(message, len) };
+        let _ = writeln!(err, "  {}", String::from_utf8_lossy(bytes));
+    }
+}
+
 /// Runs every registered test, one fiber each, and reports.
 ///
 /// Returns the process's exit status: 0 when every test passed.

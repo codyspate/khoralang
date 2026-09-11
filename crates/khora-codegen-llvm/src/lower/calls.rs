@@ -63,10 +63,13 @@ impl<'ctx> Lower<'_, 'ctx> {
                 // `attempt` — the tests in this repository have one — gets its
                 // own, and the name means what it was written to mean.
                 let is_intrinsic = !self.be.is_defined(&symbol) && args.len() == 1;
+                let is_intrinsic2 = !self.be.is_defined(&symbol) && args.len() == 2;
                 if is_intrinsic && name == "print" {
                     self.print(args[0], range)
                 } else if is_intrinsic && name == "assert" {
                     self.assert(args[0], range)
+                } else if is_intrinsic2 && name == "assert_that" {
+                    self.assert_that(args[0], args[1], range)
                 } else if is_intrinsic && name == "attempt" {
                     self.attempt(site, args[0], range)
                 } else {
