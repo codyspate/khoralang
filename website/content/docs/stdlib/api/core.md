@@ -5850,6 +5850,32 @@ halves of that are deliberate: an assertion is the one place a reader of a
 test already expects control to leave, it is written at every one of them,
 and a test is not ordinary code.
 
+### assert_that
+
+```khora
+pub fn assert_that(condition: Bool, message: String)
+```
+
+The same, with something to say when it does not hold.
+
+`assert` reports which assertion failed and on what line. What it cannot
+report is *why*, because a `Bool` arrives having forgotten both operands —
+so the next step was always to add a `print` and build again, which on a
+program linking `std` costs the better part of a minute to recover a value
+the test had already computed.
+
+```khora
+test "a record decodes" {
+  let parsed = decode(input);
+  assert_that(parsed.port == 8080, "port was ${parsed.port}");
+}
+```
+
+The message is built only when the assertion fails, so a passing test —
+which is nearly all of them, nearly all the time — does not allocate it.
+
+Only allowed inside a `test` block, like `assert`, and for the same reason.
+
 ### print
 
 ```khora

@@ -39,9 +39,14 @@ if [ "$verdict" -ne 0 ]; then
     | while read -r job; do
         name=$(gh run view --job="$job" --json name -q '.name' 2>/dev/null || echo "job $job")
         printf '\n--- %s ---\n' "$name"
+        # **The tail, not a grep.** A filter over the whole log matches the
+        # *names* of passing tests -- `a_failing_assertion_says_which_one_it_was`
+        # contains "fail" -- and `baseline.sh` reports its failure as ordinary
+        # prose that no keyword catches: "1 page(s) out of date", "would
+        # reformat", "a way to refuse a program that nothing has classified".
+        # The last lines before the step died are where the reason always is.
         gh run view --job="$job" --log-failed 2>/dev/null \
-            | grep -aiE 'panicked at|FAIL \[|test result: FAILED|^error|error:|would reformat|member\(s\) failed|##\[error\]|assertion' \
-            | head -25 \
+            | tail -30 \
             | cut -c1-200 || true
     done
 fi
