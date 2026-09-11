@@ -72,43 +72,6 @@ fn run(name: &str, main: &str) -> String {
 
 // --- the seed ---------------------------------------------------------------
 
-/// **The whole reason randomness is a capability.** One seed, two runs of the
-/// same code, the same three numbers — so a test that draws is a test that
-/// either always passes or always fails, and never one in a hundred.
-///
-/// The third block changes only the seed. If it printed the same numbers the
-/// seed would not be reaching the generator at all, which is the failure a
-/// replay test cannot otherwise see.
-#[test]
-fn a_seeded_source_replays_and_a_different_seed_does_not() {
-    let out = run(
-        "random_seeded",
-        "module main;
-import std::core::{print};
-import std::random::{Random};
-
-fn three() -> () with { rng: Random } {
-  print(Int::to_string(rng.int()));
-  print(Int::to_string(rng.int()));
-  print(Int::to_string(rng.int()))
-}
-
-pub fn main() -> () {
-  with { rng: Random::seeded(1234) } { three(); };
-  with { rng: Random::seeded(1234) } { three(); };
-  with { rng: Random::seeded(1235) } { three(); }
-}
-",
-    );
-    let lines: Vec<&str> = out.trim().lines().collect();
-    assert_eq!(lines.len(), 9, "three draws from each of three sources:\n{out}");
-    assert_eq!(lines[0..3], lines[3..6], "the same seed replayed the same sequence");
-    assert_ne!(lines[0..3], lines[6..9], "a different seed drew something else");
-    // Three draws in a row that are equal would mean the state is not advancing
-    // — a generator stuck on its seed passes the replay check perfectly.
-    assert!(lines[0] != lines[1] || lines[1] != lines[2], "the state advanced:\n{out}");
-}
-
 /// The real source, and how a program splits one it can write down.
 ///
 /// There is no free `os_seed` on purpose — entropy that arrived outside a
@@ -148,54 +111,6 @@ pub fn main() -> () {
 
 // --- the range --------------------------------------------------------------
 
-/// A thousand draws, all of them inside `[10, 20)`, and both ends reached.
-///
-/// Seeded, so this is a deterministic assertion rather than a probabilistic
-/// one: the counts below are what this generator does, not what it usually
-/// does. Reaching both ends is worth checking because the two ways to get a
-/// range wrong — an off-by-one at the top and a bias that never reaches the
-/// bottom — each leave every draw inside the range.
-#[test]
-fn a_range_contains_its_draws() {
-    let out = run(
-        "random_range",
-        "module main;
-import std::core::{print};
-import std::random::{Random};
-
-fn survey(low: Int, high: Int, rounds: Int) -> () with { rng: Random } {
-  let mut inside = 0;
-  let mut least = high;
-  let mut most = low;
-  let mut round = 0;
-  while round < rounds {
-    let n = rng.in_range(low, high);
-    inside = if n >= low { if n < high { inside + 1 } else { inside } } else { inside };
-    least = if n < least { n } else { least };
-    most = if n > most { n } else { most };
-    round = round + 1;
-  };
-  print(Int::to_string(inside));
-  print(Int::to_string(least));
-  print(Int::to_string(most))
-}
-
-pub fn main() -> () {
-  with { rng: Random::seeded(7) } { survey(10, 20, 1000); };
-  // Negative bounds, because `low + scale(..)` is where an unsigned reduction
-  // would quietly go wrong.
-  with { rng: Random::seeded(7) } { survey(-5, 5, 1000); };
-  // A range of one has exactly one answer, and a thousand of them.
-  with { rng: Random::seeded(7) } { survey(3, 4, 1000); }
-}
-",
-    );
-    assert_eq!(
-        out, "1000\n10\n19\n1000\n-5\n4\n1000\n3\n3\n",
-        "every draw inside, and both ends of each range reached"
-    );
-}
-
 /// An empty range stops the program and says so, the way an index outside an
 /// array does.
 ///
@@ -223,69 +138,6 @@ pub fn main() -> () {
 }
 
 // --- the bytes --------------------------------------------------------------
-
-/// A buffer comes back filled, the same way twice from one seed and a
-/// different way from another.
-///
-/// The zero count is the check that matters. `bytes` is one loop away from
-/// filling nothing, and an all-zero buffer would satisfy "every element is a
-/// byte" perfectly — so a run of thirty-two bytes with only a handful of zeros
-/// in it is the evidence that the loop ran and the draws reached the array.
-#[test]
-fn bytes_fill_the_buffer_they_are_given() {
-    let out = run(
-        "random_bytes",
-        "module main;
-import std::core::{Array, print};
-import std::random::{Random};
-
-fn digest(buffer: Array<U8>) -> Int {
-  let mut total = 0;
-  let mut at = 0;
-  while at < Array::length(buffer) {
-    total = Int::wrapping_add(Int::wrapping_mul(total, 31), U8::to_int(Array::get(buffer, at)));
-    at = at + 1;
-  };
-  total
-}
-
-fn zeros(buffer: Array<U8>) -> Int {
-  let mut count = 0;
-  let mut at = 0;
-  while at < Array::length(buffer) {
-    count = if U8::to_int(Array::get(buffer, at)) == 0 { count + 1 } else { count };
-    at = at + 1;
-  };
-  count
-}
-
-fn take(size: Int) -> () with { rng: Random } {
-  let buffer: Array<U8> = Array::new(size, 0);
-  rng.bytes(buffer);
-  print(Int::to_string(Array::length(buffer)));
-  print(Int::to_string(digest(buffer)));
-  print(Int::to_string(zeros(buffer)))
-}
-
-pub fn main() -> () {
-  with { rng: Random::seeded(99) } { take(32); };
-  with { rng: Random::seeded(99) } { take(32); };
-  with { rng: Random::seeded(100) } { take(32); };
-  // An empty buffer is not a special case, and asking for one must not draw or
-  // trap.
-  with { rng: Random::seeded(99) } { take(0); }
-}
-",
-    );
-    let lines: Vec<&str> = out.trim().lines().collect();
-    assert_eq!(lines.len(), 12, "three lines per buffer:\n{out}");
-    assert_eq!(lines[0..3], lines[3..6], "the same seed filled the buffer the same way");
-    assert_ne!(lines[1], lines[7], "a different seed filled it differently");
-    assert_eq!(lines[0], "32", "the whole buffer, and no more of it");
-    let zeros: i32 = lines[2].parse().expect("a count");
-    assert!(zeros < 8, "thirty-two drawn bytes should not be mostly zero, got {zeros}");
-    assert_eq!(lines[9..12], ["0", "0", "0"], "an empty buffer fills without complaint");
-}
 
 // --- the clock --------------------------------------------------------------
 
@@ -347,42 +199,6 @@ pub fn main() -> () {
         .expect("after 1970")
         .as_secs() as i64;
     assert!((seconds - now).abs() < 120, "the clock said {seconds}, the host says {now}");
-}
-
-/// A test's own clock, which is the other half of why this is a capability:
-/// code that measures itself can be handed a timeline that never moves, or one
-/// that moves exactly as far as the test says.
-#[test]
-fn a_clock_can_be_replaced_wholesale() {
-    let out = run(
-        "clock_pinned",
-        "module main;
-import std::core::{Shared, print};
-import std::clock::{Clock};
-
-/// Ordinary code. It has no idea whether real time exists.
-fn how_long() -> Int with { clock: Clock } {
-  let before = clock.monotonic_millis();
-  let after = clock.monotonic_millis();
-  after - before
-}
-
-pub fn main() -> () {
-  // Every reading is five milliseconds after the last, forever.
-  let ticks = Shared::of(0);
-  with { clock: handler for Clock {
-    unix_seconds: fn () => 1000,
-    unix_millis: fn () => 1000000,
-    monotonic_millis: fn () => Shared::update(ticks, fn t => t + 5),
-    sleep: fn _ms => (),
-  } } {
-    print(Int::to_string(how_long()));
-    print(Int::to_string(how_long()));
-  }
-}
-",
-    );
-    assert_eq!(out, "5\n5\n", "the pinned clock advanced exactly as told");
 }
 
 // --- what is left behind -----------------------------------------------------

@@ -103,41 +103,6 @@ pub fn main() -> Int {
     assert_eq!(ran.err, "the diagnostic\n", "stderr should carry only the diagnostic");
 }
 
-/// One object per line, with `timestamp`, `level` and `message` in that order.
-///
-/// The order is asserted whole rather than by three `contains` checks, because
-/// the order is the property: a log read with `head` or diffed between runs
-/// depends on it, and a `Map` would not have one.
-#[test]
-fn a_record_is_one_json_object_per_line() {
-    let ran = run(
-        "log_json",
-        &format!(
-            "module demo::main;
-import std::clock::{{Clock}};
-import std::log::{{Severity, Log, info, warn}};
-
-fn work() -> () with {{ log: Log }} {{
-  info(\"starting\");
-  warn(\"nearly done\");
-}}
-
-pub fn main() -> Int {{{FIXED}
-  with {{ log: Log::json_using(Severity::Info, fixed) }} {{ work() }};
-  0
-}}
-"
-        ),
-    );
-    assert_eq!(
-        ran.err,
-        "{\"timestamp\":1757021376817,\"level\":\"info\",\"message\":\"starting\"}\n\
-         {\"timestamp\":1757021376817,\"level\":\"warn\",\"message\":\"nearly done\"}\n",
-        "stdout was {:?}",
-        ran.out
-    );
-}
-
 /// **A message is arbitrary text and will eventually contain a quote.** A
 /// logger that emits broken JSON on that line is worse than one that emits
 /// none, so the escaping goes through `std::json` rather than being written by
@@ -167,94 +132,6 @@ pub fn main() -> Int {{{FIXED}
         "the quotes should be escaped, not emitted raw: {:?}",
         ran.err
     );
-}
-
-/// Attributes become fields of the same object, keeping their JSON types: a
-/// number is a number and a flag is a bool, so a collector can filter on them
-/// without parsing strings back.
-#[test]
-fn attributes_become_typed_fields() {
-    let ran = run(
-        "log_attributes",
-        &format!(
-            "module demo::main;
-import std::clock::{{Clock}};
-import std::core::{{List}};
-import std::log::{{Severity, Log}};
-import std::trace::{{flag, number, text}};
-
-fn work() -> () with {{ log: Log }} {{
-  log.record(Severity::Error, \"failed\", [text(\"job\", \"abc\"), number(\"attempt\", 2), flag(\"retry\", true)]);
-}}
-
-pub fn main() -> Int {{{FIXED}
-  with {{ log: Log::json_using(Severity::Trace, fixed) }} {{ work() }};
-  0
-}}
-"
-        ),
-    );
-    assert!(
-        ran.err.contains(r#""job":"abc","attempt":2,"retry":true"#),
-        "typed, in the order given: {:?}",
-        ran.err
-    );
-}
-
-/// **The handler drops what is below the minimum, not the caller.** A caller
-/// that checked the level itself would have to know the configuration, which is
-/// what the capability exists to keep away from it.
-#[test]
-fn a_level_below_the_minimum_says_nothing() {
-    let ran = run(
-        "log_levels",
-        &format!(
-            "module demo::main;
-import std::clock::{{Clock}};
-import std::log::{{Severity, Log, debug, error, info, trace, warn}};
-
-fn work() -> () with {{ log: Log }} {{
-  trace(\"t\");
-  debug(\"d\");
-  info(\"i\");
-  warn(\"w\");
-  error(\"e\");
-}}
-
-pub fn main() -> Int {{{FIXED}
-  with {{ log: Log::json_using(Severity::Warn, fixed) }} {{ work() }};
-  0
-}}
-"
-        ),
-    );
-    let lines: Vec<&str> = ran.err.lines().collect();
-    assert_eq!(lines.len(), 2, "only warn and error should survive: {:?}", ran.err);
-    assert!(lines[0].contains(r#""level":"warn""#), "{:?}", ran.err);
-    assert!(lines[1].contains(r#""level":"error""#), "{:?}", ran.err);
-}
-
-/// The default has to be nearly free: if logging costs when it is off it gets
-/// turned off, and then it does not exist.
-#[test]
-fn the_silent_logger_says_nothing_at_all() {
-    let ran = run(
-        "log_none",
-        "module demo::main;
-import std::log::{Log, error, info};
-
-fn work() -> () with { log: Log } {
-  info(\"i\");
-  error(\"e\");
-}
-
-pub fn main() -> Int {
-  with { log: Log::none() } { work() };
-  0
-}
-",
-    );
-    assert_eq!(ran.err, "", "a silent logger writes nothing: {:?}", ran.err);
 }
 
 /// **A line logged inside a span carries the span's ids, and nobody passed

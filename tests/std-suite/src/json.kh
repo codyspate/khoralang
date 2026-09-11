@@ -1,0 +1,139 @@
+module std_suite::json;
+
+//! `std::json`, round-tripping and refusing.
+//!
+//! Twelve of these were Rust tests compiling twelve programs against the whole
+//! standard library. The claims are all about values -- what a document encodes
+//! to, what a text parses as, where a malformed one is refused -- so they are
+//! `test` blocks sharing one compile.
+//!
+//! The live-object count each of them printed is gone from here on purpose:
+//! `tests/std-suite/src/vector.kh` asserts that property directly, against a
+//! container built for it, rather than as an afterthought on a test about
+//! encoding.
+
+import std::core::{List, Option, Pair, Result, String, assert_that};
+import std::json::{Json, JsonError, encode, parse};
+
+/// The text of a value, or the error's offset and what it wanted there -- so a
+/// failure reads as plainly as a success.
+fn shown(text: String) -> String {
+  match parse(text) {
+    Result::Ok(value) => encode(value),
+    Result::Err(why) => "at " + Int::to_string(why.at) + ": expected " + why.expected,
+  }
+}
+
+/// The value, or `Json::Null` when it will not parse.
+fn parsed(text: String) -> Json {
+  match parse(text) { Result::Ok(value) => value, Result::Err(_e) => Json::Null }
+}
+
+fn a_float(f: Float) -> Json {
+  match Json::of_float(f) { Option::Some(rendered) => rendered, Option::None => Json::Null }
+}
+
+test "the simple values round trip" {
+  assert_that(encode(Json::Null) == "null", "null encoded as ${encode(Json::Null)}");
+  assert_that(encode(Json::Bool(true)) == "true", "true encoded as ${encode(Json::Bool(true))}");
+  assert_that(encode(Json::Bool(false)) == "false", "false encoded as ${encode(Json::Bool(false))}");
+  assert_that(encode(a_float(1.5)) == "1.5", "1.5 encoded as ${encode(a_float(1.5))}");
+  let got1 = encode(Json::Text("khora"));
+  assert_that(got1 == "\"khora\"", "text encoded as ${got1}");
+
+  // And back the other way, through the parser.
+  let got2 = shown("null");
+  assert_that(got2 == "null", "null parsed as ${got2}");
+  let got3 = shown("true");
+  assert_that(got3 == "true", "true parsed as ${got3}");
+  let got4 = shown("false");
+  assert_that(got4 == "false", "false parsed as ${got4}");
+  let got5 = shown("1.5");
+  assert_that(got5 == "1.5", "1.5 parsed as ${got5}");
+  let got6 = shown("\"khora\"");
+  assert_that(got6 == "\"khora\"", "text parsed as ${got6}");
+}
+
+/// Every shape the grammar allows, including the exponents.
+test "numbers parse in every shape" {
+  let cases = [
+    { key: "0", value: "0" },
+    { key: "42", value: "42" },
+    { key: "-42", value: "-42" },
+    { key: "3.25", value: "3.25" },
+    { key: "-0.5", value: "-0.5" },
+    { key: "1e3", value: "1e3" },
+    { key: "1.5e2", value: "1.5e2" },
+    { key: "1E+2", value: "1E+2" },
+    { key: "1500e-3", value: "1500e-3" },
+  ];
+  // `fold` rather than an `each`, which `List` does not have: the accumulator
+  // is the report, so a failure names every shape that came back wrong rather
+  // than only the first.
+  let wrong = List::fold(cases, "", fn (sofar, c) => {
+      let got = shown(c.key);
+      if got == c.value { sofar } else { sofar + c.key + " -> " + got + "; " }
+    });
+  assert_that(wrong == "", "these shapes did not round trip: ${wrong}");
+}
+
+/// **A number keeps its text**, which is what makes a sixty-four bit integer
+/// survive a round trip that a double would round away.
+test "a sixty four bit integer survives the round trip" {
+  assert_that(
+    shown("9007199254740993") == "9007199254740993",
+    "the integer came back as ${shown("9007199254740993")}",
+  );
+  assert_that(
+    shown("-9007199254740993") == "-9007199254740993",
+    "the negative came back as ${shown("-9007199254740993")}",
+  );
+  // And a trailing zero is part of the text rather than of the value.
+  let got7 = shown("0.1");
+  assert_that(got7 == "0.1", "0.1 came back as ${got7}");
+  let got8 = shown("10.10");
+  assert_that(got8 == "10.10", "10.10 came back as ${got8}");
+}
+
+test "strings escape and unescape" {
+  // **Bound before asserted**, rather than interpolating the call: a `${..}`
+  // hole is scanned as source, so a string literal inside one carries its own
+  // quotes and the nesting gets away from a reader fast.
+  let quote = encode(Json::Text("a\"b"));
+  assert_that(quote == "\"a\\\"b\"", "a quote encoded as ${quote}");
+
+  let backslash = encode(Json::Text("a\\b"));
+  assert_that(backslash == "\"a\\\\b\"", "a backslash encoded as ${backslash}");
+
+  let newline = encode(Json::Text("a\nb"));
+  assert_that(newline == "\"a\\nb\"", "a newline encoded as ${newline}");
+
+  let tab = encode(Json::Text("a\tb"));
+  assert_that(tab == "\"a\\tb\"", "a tab encoded as ${tab}");
+
+  // A solidus needs no escape, and emitting one would be noise.
+  let url = encode(Json::Text("http://x/y"));
+  assert_that(url == "\"http://x/y\"", "a URL encoded as ${url}");
+}
+
+test "arrays and objects nest" {
+  let got9 = shown("[]");
+  assert_that(got9 == "[]", "an empty array came back as ${got9}");
+  let got10 = shown("{}");
+  assert_that(got10 == "{}", "an empty object came back as ${got10}");
+  let got11 = shown("[1,2,3]");
+  assert_that(got11 == "[1,2,3]", "a flat array came back as ${got11}");
+  let got12 = shown("[1,[2,[3]]]");
+  assert_that(got12 == "[1,[2,[3]]]", "a nested array came back as ${got12}");
+  let got13 = shown("{\"a\":1}");
+  assert_that(got13 == "{\"a\":1}", "an object came back as ${got13}");
+}
+
+/// **Malformed input is refused at the byte it went wrong**, which is most of
+/// what makes a parse error worth reading.
+test "malformed input is reported at its offset" {
+  let at_zero = shown("");
+  assert_that(at_zero == "at 0: expected a value", "empty input said: ${at_zero}");
+  let after_open = shown("[1,");
+  assert_that(after_open == "at 3: expected a value", "a trailing comma said: ${after_open}");
+}

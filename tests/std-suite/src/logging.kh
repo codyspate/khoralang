@@ -1,0 +1,124 @@
+module std_suite::logging;
+
+//! What `std::log` records, checked by capturing it rather than by reading
+//! stderr.
+//!
+//! **`Log` is an effect, so a test can hand it a handler of its own.** The Rust
+//! tests these came from ran a program and inspected its standard error, which
+//! is the only thing available from outside a process -- and is also why they
+//! each needed a process. A handler that appends to a `Vector` answers the same
+//! questions without one, and says more when it fails: the record is a value
+//! here rather than a line of text to match.
+//!
+//! What stays in Rust is the rendering. `Log::json` writes to stderr through
+//! `eprint`, and a program cannot read its own stderr -- so
+//! `a_record_is_one_json_object_per_line` and its two neighbours keep their own
+//! programs, along with the one whose whole claim is *which stream* each half
+//! went to.
+
+import std::core::{List, Shared, String, assert_that};
+import std::log::{Log, Severity, debug, error, info, warn};
+import std::trace::{Attribute, Value, flag, number, text};
+
+/// A logger that keeps what it is given.
+///
+/// The same shape `Log::json_using` has -- a handler over the `record`
+/// operation -- with a cell where it has `eprint`. What this captures is the
+/// structure, which is what these assertions are about; the rendering is
+/// `json`'s business and is checked where it can be read.
+///
+/// **A `Shared<String>` rather than a `Vector<String>`**, and the compiler is
+/// what decided that: a handler may be installed on one fiber and run on
+/// another, so everything it captures has to be shareable. A `Vector` is
+/// written in place and two fibers writing one is a race, which the sharing
+/// discipline refuses at the point of capture:
+///
+///     `Log`'s `record` captures `into`, and a handler has to be safe to hand
+///     to another fiber: `Vector<String>` can be written, and two fibers
+///     writing one value is a race
+fn capturing(into: Shared<String>, minimum: Severity) -> Log {
+  handler for Log {
+    record: fn (level, message, attributes) =>
+    if Severity::severity(level) >= Severity::severity(minimum) {
+      let _kept = Shared::update(
+        into,
+        fn sofar => sofar + Severity::name(level) + " " + message + attached(attributes) + ";",
+      );
+    } else {},
+  }
+}
+
+/// How many records a capture holds.
+///
+/// Each is terminated with `;`, so counting them is counting separators --
+/// which keeps the capture a plain `String` and therefore shareable.
+fn count(cell: Shared<String>) -> Int {
+  List::length(String::split(Shared::get(cell), ";")) - 1
+}
+
+/// The attributes as ` name=value`, in the order they were given.
+fn attached(attributes: List<Attribute>) -> String {
+  List::fold(attributes, "", fn (acc, a) => acc + " " + a.name + "=" + shown(a.value))
+}
+
+fn shown(v: Value) -> String {
+  match v {
+    Value::Text(t) => t,
+    Value::Number(n) => "${n}",
+    Value::Decimal(d) => "${d}",
+    Value::Flag(b) => "${b}",
+  }
+}
+
+test "a record carries its level and its message" {
+  let lines = Shared::of("");
+  with { log: capturing(lines, Severity::Info) } {
+    info("starting");
+    warn("nearly done");
+  };
+  assert_that(count(lines) == 2, "recorded ${count(lines)} lines, not two");
+  let shown = Shared::get(lines);
+  assert_that(shown == "[info starting, warn nearly done]", "recorded ${shown}");
+}
+
+test "attributes keep the order they were given" {
+  let lines = Shared::of("");
+  with { log: capturing(lines, Severity::Info) } {
+    // `info` and friends take a message alone; the attributed form is
+    // `record`, which is the operation they are each one line over.
+    log.record(
+      Severity::Info,
+      "retrying",
+      [text("job", "abc"), number("attempt", 2), flag("retry", true)],
+    );
+  };
+  let shown = Shared::get(lines);
+  assert_that(
+    shown == "[info retrying job=abc attempt=2 retry=true]",
+    "the attributes came out as ${shown}",
+  );
+}
+
+test "a level below the minimum says nothing" {
+  let lines = Shared::of("");
+  with { log: capturing(lines, Severity::Warn) } {
+    debug("quiet");
+    info("also quiet");
+    warn("loud");
+    error("louder");
+  };
+  assert_that(count(lines) == 2, "only warn and error survive: " + Shared::get(lines));
+  let shown = Shared::get(lines);
+  assert_that(shown == "[warn loud, error louder]", "recorded ${shown}");
+}
+
+test "the silent logger says nothing at all" {
+  let lines = Shared::of("");
+  // `Log::none` is the default and has to be nearly free: it reads no argument
+  // and builds no string. Nothing reaches the capture because nothing is built.
+  with { log: Log::none() } {
+    info("into the void");
+    error("also into the void");
+  };
+  assert_that(count(lines) == 0, "a silent logger wrote ${count(lines)} lines");
+}

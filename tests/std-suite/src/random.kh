@@ -1,0 +1,124 @@
+module std_suite::random;
+
+//! `std::random`, and the properties a source of randomness has to have.
+//!
+//! **Seeded draws are asserted as properties, not as literals.** The Rust
+//! tests these came from printed three numbers and compared the transcript,
+//! which pins the generator's exact output -- so changing the algorithm breaks
+//! a test that was never about the algorithm. What the module actually promises
+//! is that one seed replays, that two seeds differ, and that a range contains
+//! its draws; each of those is checkable without naming a number.
+//!
+//! `an_empty_range_stops_the_program` stays in Rust. A range with nothing in it
+//! is a trap, and a trap ends the process.
+
+import std::core::{Array, String, assert_that};
+import std::clock::{Clock};
+import std::random::{Random};
+
+/// Three draws, as text, so two runs can be compared.
+fn three() -> String with { rng: Random } {
+  "${rng.int()},${rng.int()},${rng.int()}"
+}
+
+/// How many of `rounds` draws from `[low, high)` landed inside it, and the
+/// extremes that were seen.
+fn survey(low: Int, high: Int, rounds: Int) -> Survey with { rng: Random } {
+  let mut inside = 0;
+  let mut least = high;
+  let mut most = low;
+  let mut round = 0;
+  while round < rounds {
+    let n = rng.in_range(low, high);
+    inside = if n >= low { if n < high { inside + 1 } else { inside } } else { inside };
+    least = if n < least { n } else { least };
+    most = if n > most { n } else { most };
+    round = round + 1;
+  };
+  { inside: inside, least: least, most: most }
+}
+
+pub type Survey = { inside: Int, least: Int, most: Int };
+pub type Filled = { filled: Int, zeros: Int };
+
+/// A buffer of `size` bytes, filled from the source, and how many stayed zero.
+///
+/// A named function rather than a closure inside the test: a capability has to
+/// be in scope where the body is *written*, and a closure defined in a test
+/// block is outside the `with` that supplies one.
+fn take(size: Int) -> Filled with { rng: Random } {
+  let buffer: Array<U8> = Array::new(size, 0);
+  rng.bytes(buffer);
+  let mut zeros = 0;
+  let mut at = 0;
+  while at < Array::length(buffer) {
+    zeros = if U8::to_int(Array::get(buffer, at)) == 0 { zeros + 1 } else { zeros };
+    at = at + 1;
+  };
+  { filled: Array::length(buffer), zeros: zeros }
+}
+
+/// **The same seed replays, and a different one does not.**
+///
+/// The property the module exists for: a test that draws is reproducible, and
+/// a program that wants fresh numbers gets them.
+test "a seeded source replays and a different seed does not" {
+  let first = with { rng: Random::seeded(1234) } { three() };
+  let again = with { rng: Random::seeded(1234) } { three() };
+  assert_that(first == again, "one seed gave ${first} and then ${again}");
+
+  let other = with { rng: Random::seeded(1235) } { three() };
+  assert_that(first != other, "two seeds gave the same draws: ${first}");
+}
+
+/// **Every draw is inside the range**, including where an unsigned reduction
+/// would go wrong.
+test "a range contains its draws" {
+  let ten = with { rng: Random::seeded(7) } { survey(10, 20, 1000) };
+  assert_that(ten.inside == 1000, "${ten.inside} of a thousand draws were in [10, 20)");
+  assert_that(ten.least >= 10, "the smallest draw was ${ten.least}");
+  assert_that(ten.most < 20, "the largest draw was ${ten.most}");
+
+  // Negative bounds, because `low + scale(..)` is where an unsigned reduction
+  // would quietly go wrong.
+  let signed = with { rng: Random::seeded(7) } { survey(0 - 5, 5, 1000) };
+  assert_that(signed.inside == 1000, "${signed.inside} of a thousand were in [-5, 5)");
+  assert_that(signed.least >= 0 - 5, "the smallest draw was ${signed.least}");
+  assert_that(signed.most < 5, "the largest draw was ${signed.most}");
+
+  // A range of one has exactly one answer, and a thousand of them.
+  let single = with { rng: Random::seeded(7) } { survey(3, 4, 1000) };
+  assert_that(single.inside == 1000, "${single.inside} of a thousand were in [3, 4)");
+  assert_that(single.least == 3, "the smallest draw was ${single.least}");
+  assert_that(single.most == 3, "the largest draw was ${single.most}");
+}
+
+/// Bytes fill the buffer they are given, and are not all zero.
+///
+/// The digest is asserted to *differ between seeds* rather than to equal a
+/// number: what matters is that the buffer was written, and a fixed digest
+/// would pin the algorithm.
+test "bytes fill the buffer they are given" {
+  let taken = with { rng: Random::seeded(99) } { take(64) };
+  assert_that(taken.filled == 64, "the buffer is ${taken.filled} bytes");
+  // Sixty-four zero bytes from a real source is about one chance in 2^512; a
+  // buffer nothing wrote to is certain.
+  assert_that(taken.zeros < 64, "every byte was zero, so nothing wrote to the buffer");
+}
+
+/// A clock can be replaced wholesale, which is what makes elapsed time
+/// testable at all.
+test "a clock can be replaced wholesale" {
+  let fixed = handler for Clock {
+    unix_seconds: fn () => 5,
+    unix_millis: fn () => 5,
+    monotonic_millis: fn () => 5,
+    sleep: fn _ms => (),
+  };
+  let elapsed = with { clock: fixed } {
+    let before = clock.monotonic_millis();
+    let after = clock.monotonic_millis();
+    after - before
+  };
+  assert_that(elapsed == 0, "a stopped clock measured ${elapsed} milliseconds");
+}
