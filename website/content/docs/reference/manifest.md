@@ -216,12 +216,12 @@ may reach.
 
 **`process` is what stops the rest of the table being advisory.** A program
 that may run another program can ask it to do anything the program itself may
-not: with `read = ["data/**"]` and no `process` grant,
-`read_text("/etc/hostname")` is refused and
-`checked_output("cat", ["/etc/hostname"])` used to return the file. A refused
-program raises `ProcessError::Denied`, which is a separate case from
-`NotStarted` for the reason `IoError::Denied` is separate from `Failed`: one
-sends the reader to their `PATH` and the other to a line in a file they own.
+not: with `read = ["data/**"]` and no `process` grant, both
+`read_text("/etc/hostname")` and `checked_output("cat", ["/etc/hostname"])` are
+refused. A refused program raises `ProcessError::Denied`, which is a separate
+case from `NotStarted` for the reason `IoError::Denied` is separate from
+`Failed`: one sends the reader to their `PATH` and the other to a line in a
+file they own.
 
 **A shell line is checked on its first word, which is a weaker promise** and is
 said here rather than left to be found. `Process`'s `shell` runs a string

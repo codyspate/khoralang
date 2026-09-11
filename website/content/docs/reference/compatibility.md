@@ -41,26 +41,23 @@ A pin that cannot be satisfied fails loudly. It never silently runs a different 
 
 A new lint can make `khora check` report something it did not report before. That is deliberate and is not treated as breaking: a lint tells you about code that was already wrong. Set its level in `[lints]` if you disagree.
 
-### The fiber backend is not yet unobservable
+### The fiber backend is observable
 
-That row used to say "No — a program cannot observe it", and the
-[known limitations](/docs/limitations/) page has said the opposite, with
-measurements, for as long as it has existed: under `KHORA_FIBERS=scheduler` a
-fiber inside `clock.sleep` is woken by a cancellation and its sleep returns
-early, and under the default thread backend the sleep runs to completion. That
-is a 350x difference in wall clock on the same source.
+The two backends do not agree about cancellation. Under
+`KHORA_FIBERS=scheduler` a fiber inside `clock.sleep` is woken by a
+cancellation and its sleep returns early; under the default thread backend the
+sleep runs to completion. On the same source that is a 350x difference in wall
+clock.
 
-A policy table is a promise, and this one was resting on a claim the
-documentation elsewhere refuted. Until the two backends agree about
-cancellation, **the default cannot change without a breaking-change note**, and
-this row says so rather than describing the intended end state as though it had
-arrived.
+So the backend is not an implementation detail, and **the default cannot change
+without a breaking-change note.** [Known limitations](/docs/limitations/) has
+the measurements.
 
 ## Editions
 
 There is no editions mechanism, and there will not be one until something needs it. An edition is a promise to maintain two languages at once, and a `0.x` with three release candidates has no evidence that it is the right shape of promise.
 
-There was an `edition` key in `khora.toml`, and it has been removed. It named a year rather than a compiler, nothing read it, and the question people were actually asking it — *which Khora builds this?* — is answered by [the `toolchain` table](/docs/reference/manifest/#toolchain--which-khora-builds-this), which names a version that exists and selects the binary that runs. When editions arrive they will need a key of their own; keeping an inert one against that day cost more than it saved, because two fields for one question meant the one nothing enforced was going to be wrong.
+`khora.toml` has no `edition` key. The question it looks like it would answer — *which Khora builds this?* — is answered by [the `toolchain` table](/docs/reference/manifest/#toolchain--which-khora-builds-this), which names a version that exists and selects the binary that runs.
 
 ## What 1.0 is waiting for
 

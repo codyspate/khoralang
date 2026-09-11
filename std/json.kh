@@ -197,12 +197,11 @@ impl Json {
 
   /// A JSON number holding `value`, or `None` where JSON has no way to say it.
   ///
-  /// **JSON has no infinity and no `NaN`, and this used to emit them anyway.**
-  /// `Float::to_string` writes `inf` for one, so `encode(Json::of_float(x))`
-  /// produced the four characters `inf` -- which is not a JSON document, and
-  /// which `std::json::parse` refuses. The module emitted something it could
-  /// not read back, and a service handing that to any other parser gets the
-  /// same answer for the same reason.
+  /// **JSON has no infinity and no `NaN`, so this answers `None` for them.**
+  /// `Float::to_string` writes `inf`, which is not a JSON document and which
+  /// `std::json::parse` refuses -- a module that emitted it would be producing
+  /// something it could not read back, and any other parser would refuse it
+  /// too.
   ///
   /// The test is a round trip through `Float::of_string`, whose documented
   /// grammar is JSON's and already excludes both names, rather than a
@@ -261,16 +260,11 @@ impl Json {
 
 /// Every field of an object, by name.
 ///
-/// **Through `Map::entries` rather than the map's buckets.** This module used
-/// to walk `fields.buckets` itself, with a note saying the fix was a
-/// `Map::entries` in `std::core` and that this was the caller justifying one.
-/// It exists now, so the coupling is gone.
+/// **Through `Map::entries` rather than the map's buckets**, so this module
+/// does not depend on `Map`'s representation.
 ///
-/// `fold` rather than `map` to build the list. The reason used to be that
-/// `List::map` recursed once per element and a document is whatever size it
-/// arrived as; `map` is a loop now, and says so, so that reason is gone. The
-/// fold stays because the sort below decides the order anyway, which leaves
-/// the fold's reversed answer costing nothing.
+/// `fold` rather than `map` to build the list: the sort below decides the
+/// order anyway, which leaves the fold's reversed answer costing nothing.
 fn sorted_fields(fields: Map<String, Json>) -> List<Field> {
   let named = List::fold(Map::entries(fields), List::Nil, fn (out, pair) =>
     List::Cons({ name: pair.key, value: pair.value }, out));
@@ -665,12 +659,11 @@ fn four_bytes(first: Int, second: Int, third: Int, fourth: Int) -> String {
 /// A number: an optional sign, digits, an optional fraction, an optional
 /// exponent.
 ///
-/// **Scanned rather than accumulated.** This used to build a `Float` as it
-/// walked, which made the parser the place where `9007199254740993` became
-/// `9007199254740992` and `10.10` became a number nothing could recover. Now
-/// it finds where the token ends and slices it, so the document's own digits
-/// are what `Json::Number` holds and each accessor decides what to make of
-/// them.
+/// **Scanned rather than accumulated.** The parser finds where the token ends
+/// and slices it, so the document's own digits are what `Json::Number` holds
+/// and each accessor decides what to make of them. Building a `Float` while
+/// walking would be the place where `9007199254740993` became
+/// `9007199254740992` and `10.10` became a number nothing could recover.
 ///
 /// The grammar is unchanged and so is what it refuses: a leading `+`, a bare
 /// `.5`, a trailing `1.`, an `e` with no digits after it.
@@ -767,11 +760,6 @@ fn sign_end(text: String, at: Int) -> Int {
 /// **The lossy reading, kept in one place.** The literal is known-good — it got
 /// here by being scanned — so the `None` below cannot fire and answers zero
 /// rather than inventing an error nobody could act on.
-///
-/// This used to be a number parser of its own, with a comment saying it was
-/// `Float::of_string` in all but name and belonged in `std::core` as soon as
-/// something other than this module needed one. `examples/khq` needed one, so
-/// it is there now and this is the one line that is left.
 fn float_of(literal: String) -> Float {
   match Float::of_string(literal) {
     Option::Some(value) => value,

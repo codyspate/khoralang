@@ -154,9 +154,9 @@ signature is that sentence written where a reviewer will see it. A
 dependency that does not carry the row cannot start anything, and nothing
 it imports can either.
 
-And it is a seam. A test that wanted to exercise a build driver used to
-have the choice of really invoking a compiler or not testing the thing;
-here it installs its own handler and the code under test cannot tell:
+And it is a seam. A test that wants to exercise a build driver installs its
+own handler, and the code under test cannot tell — no compiler is really
+invoked:
 
 ```khora
 with { process: handler for Process {

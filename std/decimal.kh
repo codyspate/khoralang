@@ -44,10 +44,9 @@ module std::decimal;
 //! Division is not an exception to it. It takes a scale and a rounding because
 //! a quotient usually has no exact decimal form, and answers `None` when the
 //! divisor is zero because that is a thing data does — but an answer too large
-//! for the significand stops the program, the same as anywhere else. It used to
-//! saturate, which meant `Decimal::divide(10d, 1d, 18, HalfEven)` answered
-//! `9.223372036854775807`: in range, printed to the right number of places, and
-//! wrong. Somebody writing a reconciler found it in the first ten minutes.
+//! for the significand stops the program, the same as anywhere else. It does
+//! not saturate: a saturated quotient is in range, printed to the right number
+//! of places, and wrong.
 //!
 //! **The three that cannot stop the program are comparing, reading and
 //! printing**, and each was made not to. Comparing is a question about order

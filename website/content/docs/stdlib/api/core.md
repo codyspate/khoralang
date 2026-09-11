@@ -20,8 +20,7 @@ type, so there is no `Effect<A, R, E>` here. A computation's requirements
 live in its `with` clause and its failures in its `raises` clause; both are
 inferred on private functions and written out on exported ones.
 
-The module is `std::core` rather than `std::effect` for two reasons: there
-is no longer an `Effect` type to name it after, and `effect` is now a
+The module is `std::core` rather than `std::effect` because `effect` is a
 reserved word, so `std::effect` will not lex as a path.
 
 

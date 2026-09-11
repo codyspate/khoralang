@@ -203,9 +203,9 @@ significant digits, so `9007199254740993` comes back one short of itself and
 through one would rebuild, inside the library meant to prevent that class of
 thing, the exact bug it exists to prevent.
 
-`std::json` keeps its numbers the same way, so the two trees no longer disagree
-about what a number is. They remain separate types: a `Raw` is what *any*
-source produced, and JSON is one source.
+`std::json` keeps its numbers the same way, so the two trees agree about what a
+number is. They remain separate types: a `Raw` is what *any* source produced,
+and JSON is one source.
 
 ### A secret does not appear in its own error
 
@@ -285,9 +285,7 @@ a hand-written schema is picked up by every schema that contains it.
 
 **There is no field limit.** `struct` is rewritten into `Schema::record` over
 `Fields`, and `Fields::zip` nests a tuple however many fields there are — a
-seven-field record checks, and so does a twelve-field one. This page used to
-say the assemblers stop at five, which sent at least one reader to design a
-record around a limit that does not exist.
+seven-field record checks, and so does a twelve-field one.
 
 **`std::json` parses and prints, and does not decode.** `parse` turns text
 into a `Json` and `Raw::of_json` turns that into what a schema reads;

@@ -11,11 +11,10 @@ The smallest thing that separates a program from a demo. Until this
 existed, nothing a Khora program did could depend on anything outside its
 own source — every path, every port, every setting was compiled in.
 
-**`Clock` used to live here and now does not.** The two were together
-because both answer "what did the outside world hand this process", and
-that grouping cost something: this file is native-only for `getenv` and
-`argv`, so the clock was native-only too, for a reason that had nothing to
-do with clocks. `std::clock` has it, and says why.
+**The `Clock` capability is in `std::clock`, not here.** This file is
+native-only for `getenv` and `argv`; a clock has no such constraint, and
+grouping the two would have imposed one for a reason that has nothing to do
+with clocks.
 
 The C side is almost all ISO C: `getenv`, `strlen`, `memcpy`. The one
 exception is the argument vector, which no C function returns — it arrives

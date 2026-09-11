@@ -37,13 +37,13 @@ The current standard library includes APIs for:
   [`std::permissions::grants`](/docs/stdlib/api/permissions/grants/) that
   `khora build` writes out of the manifest.
 
-Four of those are new and easy to miss:
+Four of those are easy to miss:
 
-`std::clock` holds the `Clock` capability, which used to live in `std::env`. `import std::env::{Clock}` no longer resolves. The split also gave `Clock` a `sleep`, which is an operation on the capability so that a fake clock is one line in a test.
+`std::clock` holds the `Clock` capability, and `Clock` has a `sleep` — an operation on the capability, so a fake clock is one line in a test.
 
 `std::config` reads settings out of the environment, types them, and reports *every* bad key in one pass rather than one restart per key. See [the cookbook recipe](/docs/cookbook/configuration/).
 
-`std::resilience` holds `Schedule`, `retry`, `retry_while` and `repeat`, which used to be a bare attempt counter in `std::core`. See [Retrying a flaky call](/docs/cookbook/retrying/).
+`std::resilience` holds `Schedule`, `retry`, `retry_while` and `repeat`. See [Retrying a flaky call](/docs/cookbook/retrying/).
 
 `std::schema` describes the shape of a value once and decodes it from anywhere. It is the newest, and the one that changes how the others are meant to be used: a `Schema<Settings>` reads the same settings from the environment, from a request body or from a test fixture, because the description does not know where the bytes came from. [Schemas](/docs/stdlib/schema/) is the model; [Decode untrusted input](/docs/cookbook/decoding-input/) is a program that runs.
 
@@ -68,13 +68,10 @@ Khora keeps shared contracts in the standard library and leaves fast-moving impl
 
 The same principle keeps the IANA time-zone database out of the compatibility promise while retaining stable date/time/offset types.
 
-**`std::ai` is no longer part of `std`.** Model inference shipped inside the
-standard library in 0.1.0; it is now the `ai` package, published alongside
-`postgres` and `otlp`. What it offers is the effect a caller names when it
-wants a model, so that the provider is the caller's choice. A program that
-wrote `import std::ai::{..}` names the package as a dependency and imports from
-it. The 0.1.0 pages are still served under the `v0.1` documentation for
-programs pinned to that toolchain.
+**`std::ai` is not part of `std`.** Model inference is the `ai` package,
+published alongside `postgres` and `otlp`. What it offers is the effect a
+caller names when it wants a model, so that the provider is the caller's
+choice. Name the package as a dependency and import from it.
 
 ## Generated API reference
 
@@ -82,9 +79,11 @@ This page is the curated entry point; the **API reference** pages beneath it are
 
 They are checked rather than trusted. `khora doc --check` runs in the project baseline and fails if the checked-in pages no longer match the source, so a page cannot quietly drift from the declaration it describes.
 
-Two things the reference does not yet do, both tracked as roadmap 13.15:
+Two things the reference does not do:
 
-- **Examples are not compiled.** Code in a doc comment is prose today. Making ` ```khora ` blocks run as tests is the next slice, and until it lands an example can be wrong without anything noticing.
-- **There are no cross-links.** A signature mentioning `Decimal` names it but does not link to it.
+- **Examples are not compiled.** Code in a doc comment is prose, so an example
+  can be wrong without anything noticing.
+- **There are no cross-links.** A signature mentioning `Decimal` names it but
+  does not link to it.
 
 Use the [Language Reference](/docs/reference/) for the language, this section for the library, and the generated pages beneath it for exact declarations.

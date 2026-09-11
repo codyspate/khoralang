@@ -205,12 +205,11 @@ pub fn of_float(value: Float) -> Option<Json>
 
 A JSON number holding `value`, or `None` where JSON has no way to say it.
 
-**JSON has no infinity and no `NaN`, and this used to emit them anyway.**
-`Float::to_string` writes `inf` for one, so `encode(Json::of_float(x))`
-produced the four characters `inf` -- which is not a JSON document, and
-which `std::json::parse` refuses. The module emitted something it could
-not read back, and a service handing that to any other parser gets the
-same answer for the same reason.
+**JSON has no infinity and no `NaN`, so this answers `None` for them.**
+`Float::to_string` writes `inf`, which is not a JSON document and which
+`std::json::parse` refuses -- a module that emitted it would be producing
+something it could not read back, and any other parser would refuse it
+too.
 
 The test is a round trip through `Float::of_string`, whose documented
 grammar is JSON's and already excludes both names, rather than a

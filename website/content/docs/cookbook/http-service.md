@@ -239,8 +239,8 @@ lets go of that fiber when a route says to.
 
 **The order matters, and getting it wrong ends the process rather than the
 server.** Cancelling or detaching the listener while connections are still
-being served aborts on `a cancellation reached a fiber's root`; roadmap 16.8
-has the measurement. Drain first and detach last:
+being served aborts on `a cancellation reached a fiber's root`. Drain first and
+detach last:
 
 ```khora
 let stop = Shared::of(false);

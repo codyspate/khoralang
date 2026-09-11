@@ -650,11 +650,11 @@ fn why_not_found() -> Int { 1 }
 
 /// An open, and a failure that says which of the three it was.
 ///
-/// **Every failed open used to be `NotFound`**, so a file whose permission bit
-/// was cleared was reported as absent -- a message that sends the reader
-/// looking for a name that is right there. [`IoError`] promises "it was not
-/// there" against "it did not work", and the promise could not be kept while
-/// `fopen` returning null was the only thing anybody looked at.
+/// **A failed open distinguishes "it was not there" from "it did not work".**
+/// A file whose permission bit is cleared reports as denied, not as absent --
+/// reporting it as absent sends the reader looking for a name that is right
+/// there. That distinction is what [`IoError`] promises, and keeping it means
+/// looking at more than `fopen` returning null.
 ///
 /// `errno` is read by the runtime, on the thread that set it, because a fiber
 /// is not a thread and reading it back here would be reading somebody else's.

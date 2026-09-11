@@ -4,9 +4,16 @@ sidebar:
   order: 15
 ---
 
-Khora concurrency is structured around fibers and nurseries. A fiber may suspend without blocking the scheduler worker, and child work remains owned by a lexical lifetime rather than becoming detached by default.
+Start concurrent work with `Fiber::spawn`. A fiber cannot outlive the block
+that started it, so nothing leaks when you leave.
 
-Source functions are not colored `async`; suspension-capable operations remain ordinary direct-style calls.
+**There is no `async` keyword and no `await`.** A function that suspends looks
+like one that does not, so any function can call any function.
+
+```khora
+let child = Fiber::spawn(fn () => load(id)!);
+let row = Fiber::join(child)!;
+```
 
 ## Fibers
 
@@ -70,7 +77,7 @@ in a `loop`, a fiber running a nursery with live children, a fiber that catches
 every case in its row. So the rule to write today is **drain first, detach
 last**: stop accepting work, wait for what is in flight, and only then let go
 of the listener. [Serve HTTP](/docs/cookbook/http-service/#stopping-a-service)
-has the shape. This is roadmap 16.8 and it is a gap rather than a decision.
+has the shape. This is a known gap rather than a deliberate design.
 
 Without it, a bounded wait over a body with an uninterruptible tail could not be honored. That is the failure it exists for: every other way out of a handle waits, letting the binding go included, so one finalizer that never returns holds its nursery, which holds its parent, up to `main`. Reach for it when a bounded wait matters more than a clean one, and not otherwise.
 
@@ -123,17 +130,30 @@ When the body completes normally, `nursery` waits until every adopted child is f
 
 ### What a fiber is made of
 
-A fiber is an operating-system thread. There is a second implementation — stackful coroutines multiplexed onto a pool of workers — behind an environment variable:
+A fiber is an operating-system thread. There is a second implementation —
+stackful coroutines on a pool of workers — behind an environment variable:
 
 ```bash
 KHORA_FIBERS=scheduler ./build/myapp
 ```
 
-**A program is meant not to be able to tell which it has, and today it can.** `spawn`, `join`, `cancel` and the nursery are intended to mean the same thing under both, which is why the choice is a runtime setting and not a language one. They do not yet: under `KHORA_FIBERS=scheduler` a fiber inside `clock.sleep` is woken by a cancellation and its sleep returns early, and under the default thread backend the sleep runs to completion — about a 350× difference in wall clock on the same source. Until that is closed the default cannot change without notice; [known limitations](/docs/limitations/#the-fiber-scheduler) has the measurements and [compatibility](/docs/reference/compatibility/) carries the policy consequence.
+Threads are the default because they are faster at the connection counts a
+service actually runs at. The coroutine's advantage is *density*: a suspended
+fiber costs roughly 4 KB against a thread's 33 KB, which matters when tens of
+thousands are waiting rather than working.
 
-Threads are the default because they are faster at the connection counts a service actually runs at. The coroutine's advantage is *density*: a suspended fiber costs roughly 4 KB against a thread's 33 KB, which matters when tens of thousands are waiting at once rather than working. That measurement exists for Windows and not yet for Linux — see [known limitations](/docs/limitations/#the-fiber-scheduler).
+**The two are distinguishable under cancellation**, so the choice is not yet an
+implementation detail: a fiber inside `clock.sleep` is woken by a cancellation
+under the scheduler and runs to completion under threads. [Known
+limitations](/docs/limitations/#the-two-fiber-backends-are-distinguishable) has
+the measurements.
 
-A thread also gets the operating system's stack, two megabytes on Linux and one on Windows; a coroutine gets one megabyte with a guard page. Deep recursion that was near the old limit may be over the new one, and the failure is a clean fault rather than corruption.
+A thread gets the operating system's stack — two megabytes on Linux, one on
+Windows — and a coroutine gets one megabyte with a guard page, so deep
+recursion near the old limit may be over the new one. The failure is a clean
+fault rather than corruption.
+
+[Fibers](/docs/next/internals/fibers/) describes how each is scheduled.
 
 ### A child that failed
 

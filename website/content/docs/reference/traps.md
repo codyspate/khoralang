@@ -136,9 +136,7 @@ unwinds the joiner along with it, and if the joiner is `main` the program ends
 there. `join_all` joins, so it ends the same way. `Fiber::wait` waits without
 asking for an answer and does not do this — reach for it when what you needed
 was "not before that finishes" rather than the value, and `Fiber::detach` when
-you are no longer waiting at all. The program says all of this on the way out;
-it used to end at 130 having printed nothing, which is what made it a surprise
-rather than a message.
+you are no longer waiting at all. The program says all of this on the way out.
 
 **The runtime's fatal errors exit 134 rather than aborting.** `abort()` leaves
 the status to the platform, and on Windows a POSIX shell reports that as 127 --

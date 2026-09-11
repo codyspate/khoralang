@@ -157,13 +157,12 @@ fn split_port(text: String) -> Split {
 /// Telling those apart needs the filesystem, and this function has only the
 /// string.
 ///
-/// Comparing the `..` as written is not the safe half it looks like either,
-/// which is what this comment used to claim. `**` crosses separators, so
-/// `./logs/**` matches `logs/../secret.txt` as text and grants it. No spelling
-/// of the comparison is right for both `logs/a.txt` and `logs/../secret.txt`,
-/// so a path with a `..` segment is not compared at all. A caller that means
-/// `a/../b` can pass `b`; one that cannot is asking a question only the
-/// filesystem can answer.
+/// Comparing the `..` as written is not the safe half it looks like. `**`
+/// crosses separators, so `./logs/**` matches `logs/../secret.txt` as text and
+/// grants it. No spelling of the comparison is right for both `logs/a.txt` and
+/// `logs/../secret.txt`, so a path with a `..` segment is not compared at all.
+/// A caller that means `a/../b` can pass `b`; one that cannot is asking a
+/// question only the filesystem can answer.
 ///
 /// **Nor is anything resolved against a working directory or a package root.**
 /// A grant is matched against the path the program passes, so a program that

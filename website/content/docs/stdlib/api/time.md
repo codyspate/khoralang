@@ -256,14 +256,12 @@ pub fn of_millis(millis: Int) -> Option<Time>
 The time `millis` after midnight, or `None` if that is not inside one
 day.
 
-**The arithmetic cannot refuse on its own.** `/` and `%` truncate toward
-zero, so this used to build a `Time` out of whatever it was handed:
-`of_millis(-1)` held `milli: -1` and printed `00:00:00.-001`, which is
-not ISO 8601 and which `Time::of_string` will not read back, and
-`of_millis(86400000)` printed `24:00:00.000`. A `Time` like that then
-travelled into a `DateTime` with nothing there to notice it. `Time::of`
-refuses the same numbers, and the sentence here already said the argument
-had to be inside one day; the check is what was missing.
+**The range is checked here, because the arithmetic cannot refuse on its
+own.** `/` and `%` truncate toward zero, so without the check
+`of_millis(-1)` would hold `milli: -1` and print `00:00:00.-001` — not
+ISO 8601, and not something `Time::of_string` reads back — while
+`of_millis(86400000)` would print `24:00:00.000`. Either would then
+travel into a `DateTime` with nothing there to notice it.
 
 ### Offset
 
@@ -533,12 +531,11 @@ pub fn days_in_month(year: Int, month: Int) -> Option<Int>
 Days in `month` of `year`, or `None` if `month` is not 1 to 12.
 
 Only interesting for February, and only an `Option` because of the range
-check. **31 is the worst possible answer for a month that does not exist**,
-which is what falling through to the last branch used to give for 0, 13 and
--1: the main use of this function is clamping a day to the end of a month,
-and a clamp that answers 31 does not clamp. `Date::of` refuses a month
-outside 1 to 12, and this now refuses the same numbers rather than the two
-disagreeing about whether a month index is checked at all.
+check. **31 is the worst possible answer for a month that does not exist**:
+the main use of this function is clamping a day to the end of a month, and
+a clamp that answers 31 does not clamp. `Date::of` refuses a month outside
+1 to 12, and so does this, so the two agree about whether a month index is
+checked.
 
 ### is_leap
 

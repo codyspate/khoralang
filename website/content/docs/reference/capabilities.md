@@ -4,7 +4,16 @@ sidebar:
   order: 11
 ---
 
-Capabilities represent authority required by a computation. A function declares requirements with a `with` row; handlers satisfy those requirements for an expression or lexical block.
+A function that needs to touch the outside world says so in its signature, and
+the caller has to hand it the means:
+
+```khora
+fn load_user(id: Id) -> User with { store: Store } raises StoreError
+```
+
+`with { store: Store }` is the requirement. Callers supply it with a `with`
+block. Nothing reaches a database, a clock or the network without a caller
+passing it in.
 
 ## Capability row on a declaration
 
