@@ -62,10 +62,11 @@ admits **65** live children, because `Fiber::spawn` starts the child before
 is already running. It does not matter when the limit is a rate you picked; it
 matters a great deal when it is a connection pool of exactly 64, where the
 sixty-fifth child is the one that waits on a connection that will never come
-free. Write `bounded_nursery(63, ...)` for a pool of 64. `std::core`'s
-[`bounded_nursery`](/docs/stdlib/api/core/#bounded_nursery) says the same
-thing, and this recipe — which exists to turn a limit into backpressure — is
-where it is worth the sentence.
+free. Write `bounded_nursery(63, ...)` for a pool of 64.
+
+**A limit of zero or less is not a bound at all** — it is how the unbounded
+[`nursery`](/docs/stdlib/api/core/#bounded_nursery) is built — so check a limit
+that was computed from configuration before you pass it.
 
 `adopt` takes a `Fiber<(), 'er>`. The answer is fixed at `()` — a nursery has nothing to do with a result it cannot hand back — but the failure row is free, so a job that fails needs no `catch` at the adoption site:
 

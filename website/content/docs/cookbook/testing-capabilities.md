@@ -53,9 +53,7 @@ initializer — and the type map that carries a module's exports is built from
 syntax, before anything is inferred. So nothing records what an exported `const`
 is, and a file that imports one gets a name with no type behind it.
 
-That is a real limitation rather than a rule with a reason, and it is worth
-knowing before you factor a set of doubles into a `fakes` module. A function has
-a signature, and a signature is what travels:
+A function has a signature, and a signature is what travels:
 
 ```khora
 // In another module, and usable from anywhere.

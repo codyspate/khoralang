@@ -144,6 +144,15 @@ slows at the boundary where it makes work instead of filling a queue. See
 [Bound concurrent work](/docs/cookbook/bounded-concurrency/), including the
 off-by-one to subtract when the limit is a real resource.
 
+**Two of those three questions are answered today.** Every child is waited for
+and a failure is always reported as `ChildFailed`. The first failure is
+*intended* to cancel its siblings and currently does not — so work that is
+expensive, holds a resource, or has an effect outside the process should check
+a `Shared` flag itself rather than expect the group to collapse. [Known
+limitations](/docs/limitations/#a-childs-failure-usually-cancels-no-siblings)
+has the measurements. A Go reader coming off `errgroup`, where the first error
+does cancel the group's context, should not assume the same here.
+
 Cancellation arrives without a `ctx.Done()` channel to select on, because a
 cancellation travels out on the same tagged return a failure does. It is
 observed at a `!` and at a **loop back-edge**, which is what makes an ordinary

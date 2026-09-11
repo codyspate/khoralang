@@ -4,11 +4,18 @@ sidebar:
   order: 3
 ---
 
+Wrap the body: `transaction(fn () => body())`. It commits when the body answers
+`Result::Ok`, rolls back on `Result::Err`, and rolls back during unwinding if
+the body is cancelled. It takes `db` from the capability row, so there is
+nothing to thread through.
+
 Khora keeps the transaction contract in `std::db` while concrete database engines live in packages. Application code depends on the `Db` **capability**, not on a database value threaded through every function call.
 
 That distinction is the point of the API. A function that talks to the database says so in its type:
 
 ```khora
+import std::db::{Cell, Db, DbError, Row, transaction};
+
 fn load_account(id: Int) -> Result<List<Row>, DbError>
   with { db: Db }
 {
@@ -31,7 +38,7 @@ This complete module transfers money between two accounts. Both application func
 module main;
 
 import std::core::{List, Result, Show, print};
-import std::db::{Cell, Db, DbError, transaction};
+import std::db::{Cell, Db, DbError, Row, transaction};
 
 fn demo_db() -> Db {
   handler for Db {

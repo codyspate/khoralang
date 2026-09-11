@@ -70,7 +70,7 @@ checks code generation and does not produce a runnable artifact.
 ## Running it under systemd
 
 Khora contributes nothing special here — the unit is the ordinary one for a
-static native binary, which is the point:
+native binary, which is the point:
 
 ```ini
 [Unit]

@@ -26,7 +26,4 @@ abstraction, and which habits should not be carried over unchanged.
   without lifetimes or a borrow checker, because Perceus reference counting
   answers the same question at run time.
 
-Three, and not more. A comparison page is only worth reading if its code is
-real, and every hand-written Khora block on these pages goes through the same
-gate as the Reference's — `scripts/check-docs.sh` parses all of them against
-this compiler, and checks the ones that declare their own `module`.
+Khora examples on these pages are compiled as part of the docs build.

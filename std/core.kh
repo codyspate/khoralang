@@ -561,8 +561,7 @@ impl<A> Option<A> {
   ///
   /// **What its absence costs is a shape, not a keystroke.** Reading a record
   /// out of positional fields is one lookup that may fail per field, and
-  /// without this each is a `match` inside the previous one --
-  /// `examples/link_shortener` nested six deep before this existed.
+  /// without this each is a `match` inside the previous one.
   pub fn and_then<B, 'ef, 'er>(self, f: (A) -> Option<B> with 'ef raises 'er) -> Option<B>
     with 'ef
     raises 'er
@@ -621,8 +620,8 @@ impl<A, E> Result<A, E> {
 
   /// Rewrites the value and leaves the error alone.
   ///
-  /// The other half of `map_err`, and having only that half was the odd part:
-  /// a reader who has met one goes looking for this and finds a `match`.
+  /// The other half of `map_err`: a reader who has met one goes looking for
+  /// this and finds a `match`.
   ///
   /// **Not `Functor`**, which takes one type parameter and `Result` has two.
   /// An `impl Functor for Result<_, E>` needs partial application of a type
@@ -2038,9 +2037,7 @@ impl Functor for List {
   /// **A loop and not a recursion**, which is the rule every other walk in
   /// this file already followed: `fold`, `filter`, `any`, `contains`, `zip`
   /// and `partition` are all `while` with an accumulator, because Khora does
-  /// not promise tail calls and a frame per element dies on a long list. This
-  /// one was `Cons(f(h), t.map(f))` and went over at about forty thousand --
-  /// `map` being, of the lot, the one people reach for first.
+  /// not promise tail calls and a frame per element dies on a long list.
   ///
   /// Built back to front and reversed, so the answer is in the order the input
   /// was and `f` is called in that order too. That matters when `f` has
@@ -2152,12 +2149,11 @@ pub fn assert(condition: Bool);
 /// Only allowed inside a `test` block, like `assert`, and for the same reason.
 pub fn assert_that(condition: Bool, message: String);
 
-/// Writes a line to standard output.
+/// Writes a line to standard output. Accepts a `String`, an `Int` or a
+/// `Float`.
 ///
-/// Declared without a body, so it is an extern: the backend dispatches it on
-/// the argument's type, because there is no prelude yet to declare three
-/// differently-typed printers. It is not an effect, which it eventually should
-/// be — writing to a console is exactly the sort of thing a capability is for.
+/// Not an effect, unlike [`std::log`](/docs/stdlib/api/log/) — so it needs no
+/// `with` clause and can be called before any capability is installed.
 pub fn print(value: String);
 
 /// The empty type. A function whose return type is `Never` does not return
@@ -2170,9 +2166,8 @@ pub fn print(value: String);
 ///
 /// The name is the compiler's, the way `Int` and `String` are, so it needs no
 /// import. This declaration is where it is documented and what an `import`
-/// naming it resolves against; nothing resolves *to* it. It read as an
-/// ordinary opaque type until recently, which left the solver's bottom — the
-/// type a `raise` already has — sitting next to a name that could not reach it.
+/// naming it resolves against; nothing resolves *to* it. It is the solver's
+/// bottom — the type a `raise` already has.
 pub type Never;
 
 /// Resource lifetimes.
@@ -4823,22 +4818,19 @@ impl<K: Hash + Show, V: Show> Show for Map<K, V> {
 /// second fiber. A sequence several fibers write is a `Shared<List<A>>`, which
 /// is slower and says so.
 ///
-/// **The obstacle, and what it cost to get around it wrongly.** `Array::new`
-/// needs a value to fill with, and there is no value of an arbitrary `A` to be
-/// had: `Vector::new()` has nothing in its hands, and neither has
-/// `with_capacity`, whose whole purpose is to allocate *before* there is
-/// anything to put in it. The first version of this type answered that by
-/// holding `Array<Option<A>>` — every cell could then be `Option::None` — and
-/// that answer was wrong in a way worth recording, because it type checked,
-/// passed its tests and read perfectly well. It allocates a `Some` for every
-/// element. A hundred integers pushed into a vector were a hundred and three
-/// live objects, where they are two now, at that length and at every other:
-/// the vector and its array. Allocating per element is precisely the property
-/// a vector exists to *not* have, and it is the reason to reach for one over a
-/// `List`. The other way out is a `new` that takes a seed element, which is
-/// C++'s value-initialisation: it turns "give me somewhere to collect results"
-/// into "produce a result first", and a type with no cheap value has to
-/// fabricate one.
+/// **Why `new` takes no seed element.** `Array::new` needs a value to fill
+/// with, and there is no value of an arbitrary `A` to be had: `Vector::new()`
+/// has nothing in its hands, and neither has `with_capacity`, whose whole
+/// purpose is to allocate *before* there is anything to put in it.
+///
+/// A vector of a hundred integers is two live objects — the vector and its
+/// array — at that length and at every other. Allocating per element is
+/// precisely the property a vector exists to *not* have, and it is the reason
+/// to reach for one over a `List`. Holding `Array<Option<A>>` would cost a
+/// `Some` per element and give that property away. The other way out is a
+/// `new` that takes a seed element, which is C++'s value-initialisation: it
+/// turns "give me somewhere to collect results" into "produce a result first",
+/// and a type with no cheap value has to fabricate one.
 ///
 /// The answer is `Array::empty`, which is a zero-length array and needs no
 /// fill because it has no cells. The storage starts there and costs nothing;
@@ -5236,8 +5228,7 @@ pub type Changed<A, B> = {
 /// serial — two fibers writing one socket interleave their frames. So one
 /// fiber owns the connection and the others send it requests. The handler
 /// captures the channel, which is `Share`, and never the connection, which is
-/// not. This is why the type exists: `packages/postgres` could not be finished
-/// without it.
+/// not. A database driver is the shape this is for.
 ///
 /// **Backpressure.** A full channel stops the sender until a taker catches up.
 /// That is not a limitation to be worked around; it is how a service under
@@ -5372,8 +5363,17 @@ impl<A: Share> Shared<A> {
   /// A cell holding `value`.
   pub fn of(value: A) -> Shared<A>;
   /// What is in it now, as a value of the caller's own.
+  ///
+  /// Takes the lock for the read, so it never observes a half-written value.
+  /// The answer is a retain rather than a deep copy, and it is a snapshot: a
+  /// concurrent `set` or `update` may land the moment after it returns.
   pub fn get(self) -> A;
   /// Replaces what is in it.
+  ///
+  /// Takes the lock, so it does not interleave with an `update` in progress.
+  /// **It does not read first**, so `set(get(cell) + 1)` is two steps and two
+  /// fibers running it can lose one of the increments — that is what `update`
+  /// is for.
   pub fn set(self, value: A) -> ();
   /// Reads, transforms and writes as one step, and gives back the new value.
   ///
@@ -5614,7 +5614,7 @@ pub effect Nursery {
 /// rule in [the capability-passing design note](https://github.com/codyspate/khoralang/blob/main/docs/design/capability-passing.md), and the reason for it is that
 /// eta-expansion must not alter what a program means.
 ///
-/// **And the body may name the nursery**, which for a while it could not:
+/// **And the body may name the nursery**:
 ///
 /// ```khora
 /// nursery(fn () => {

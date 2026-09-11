@@ -4,7 +4,12 @@ sidebar:
   order: 11
 ---
 
-Khora's tracing vocabulary lives in `std::trace`; exporters and vendor protocols can live in packages. Application code can program against `Tracer` and keep span lifetime structured regardless of where completed spans are eventually sent.
+Wrap an operation in `around(tracer, name, fn () => ...)` and the span is
+started before it and finished when it returns, raises, or is cancelled.
+
+The vocabulary is in `std::trace`; exporters and vendor protocols live in
+packages, so application code programs against `Tracer` regardless of where
+completed spans are sent.
 
 ## Complete example
 
@@ -157,7 +162,5 @@ Use the shipped no-op tracer when tracing is intentionally disabled:
 ```khora
 let tracer = Tracer::none();
 ```
-
-Application code can keep the same tracing structure without conditional instrumentation branches throughout the program.
 
 For exact `Tracer`, `Span`, `Context`, `Attribute`, `Status`, `around`, and `around_result` declarations, see the [tracing API reference](/docs/stdlib/api/trace/). For cancellation-safe cleanup generally, see [Cancellation-safe resources](/docs/cookbook/cancellation-safe-resources/).

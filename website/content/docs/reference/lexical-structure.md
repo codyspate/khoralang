@@ -70,7 +70,7 @@ Underscores may be used as visual separators.
 A fractional literal without the decimal suffix is an IEEE `Float`.
 
 **An exponent needs a fractional part in front of it.** `6.02e23` and `1.0E-6`
-are literals; `1e19` is not, and is reported as `expected `;`` — the lexer
+are literals; `1e19` is not, and is reported as ``expected `;` `` — the lexer
 stops at the `1` and the `e19` that follows is not part of the number. Write
 `1.0e19`. The same rule applies to a `d` suffix: `1.25e3d` is a `Decimal`
 literal and `1e19d` is a parse error.

@@ -290,8 +290,8 @@ The bound is the one `Offset::of_string` already enforces -- two digits
 of hours and two of minutes, so -1439 to 1439 -- rather than the fourteen
 hours governments have actually reached for, because a wire format may
 carry a historical offset this module has no list of. What it will not
-carry is 100000, which `Show` writes as `+1666:40` and `of_string` then
-refuses to read back, so the record and its own printed form disagreed.
+carry is 100000, which `Show` would write as `+1666:40` and `of_string`
+refuses to read back.
 
 #### of_string
 

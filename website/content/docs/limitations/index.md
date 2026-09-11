@@ -12,17 +12,24 @@ language rule, a supported feature, and unfinished work.
 - [A bounded nursery runs `limit + 1` children](#what-a-nursery-actually-does),
   and a limit of zero means no limit at all.
 - [A child's failure usually does not cancel its siblings](#a-childs-failure-usually-cancels-no-siblings).
+- [A cancelled fiber waiting on a child finishes waiting, then runs the rest of
+  its body](#a-cancelled-fiber-parked-in-fiberwait-keeps-going).
 - [The two fiber backends behave differently](#the-two-fiber-backends-are-distinguishable)
   under cancellation.
 - [There is no `timeout` or `race`](#concurrency-combinators).
 - [Inbound connections are not permissioned](#inbound-connections-are-not-permissioned) —
   the manifest governs outbound only.
 
-## Toolchain distribution
+## Target coverage
 
-Khora has versioned toolchain artifacts and installers for the platforms released by the project. The normal application-developer path is the installer documented in [Installation](/docs/getting-started/installation/), not compiling the compiler from source.
+Khora has versioned toolchain artifacts and installers for the platforms the
+project releases. The normal path is the installer documented in
+[Installation](/docs/getting-started/installation/), not compiling the compiler
+from source.
 
-The remaining limitation is **target coverage**, not the absence of distribution. A target is only labeled supported when the compiler, runtime, linker/sysroot, packaging, CI, and deployment/conformance path work end to end. See [Supported targets](/docs/deployment/supported-targets/) for that distinction.
+A target is only called supported when the compiler, runtime, linker/sysroot,
+packaging, CI and deployment path work end to end. [Supported
+targets](/docs/deployment/supported-targets/) lists the ones that do.
 
 ## Recursion depth and very large lists
 
@@ -44,7 +51,7 @@ Releasing a value costs no stack either: reference counting frees a value's chil
 
 What is left is ordinary recursion that somebody writes. A function that calls itself once per element of its input will use a frame per element, and no analysis in the compiler turns that into a loop.
 
-`Array<A>` and `Vector<A>` remain the better shape for a large indexed collection — a list is for building front-to-back and walking once — but the choice is now about cost rather than about a cliff.
+`Array<A>` and `Vector<A>` are the better shape for a large indexed collection; a list is for building front-to-back and walking once.
 
 ## Package ecosystem
 
@@ -54,7 +61,7 @@ Dependencies can be pinned reproducibly to git revisions, but there is not yet a
 
 `khora lsp` already provides compiler-backed diagnostics, hover, formatting, completion, signature help, go-to-definition, references, document/workspace symbols, semantic tokens, code actions, code lenses, and inlay hints.
 
-Rename now covers a declaration and every file that names it, including the import that brings the name into each file, and it renames the original rather than a file's own alias. It is still narrower than the rest of the navigation surface in two places, and refuses each with a sentence saying why rather than applying a partial rename: a **trait member**, whose name belongs to the trait and to every impl of it, and a **constructor**, which has no recorded range to edit. Further refactoring operations remain editor-tooling work.
+Rename covers a declaration and every file that names it, including the import that brings the name into each file, and it renames the original rather than a file's own alias. It refuses two cases rather than applying a partial rename, each with a sentence saying why: a **trait member**, whose name belongs to the trait and to every impl of it, and a **constructor**, which has no recorded range to edit. Further refactoring operations are editor-tooling work.
 
 See [Editor setup](/docs/getting-started/editor/) for the language-server command and client setup.
 
@@ -71,16 +78,16 @@ See the [Standard library](/docs/stdlib/) entry point for the generated referenc
 
 ## HTTP surface
 
-The reference HTTP implementation is intentionally not presented as every protocol feature a mature web framework might provide. The shipping documentation should be treated as the supported surface; unlisted body encodings, upgrades, protocol versions, or framework conveniences should not be assumed merely because the core server/client path exists.
+Assume nothing beyond what this section lists.
 
 **The verbs are `GET`, `POST`, `PUT`, `PATCH` and `DELETE`, routed to
 handlers, plus `HEAD` and `OPTIONS`, which the router answers from what is
 mounted unless you mount a handler for them.** Anything else — `TRACE`,
 `CONNECT`, an extension method — is answered `400` and the connection closed,
 because `Method::of` does not name it and an unparsed request line is a
-malformed one as far as the reader is concerned. This page is where that
-belongs because the failure is silent from the client's side: a `400` to a
-verb the server does not know reads as the client's mistake.
+malformed one as far as the reader is concerned. The failure is silent from the
+client's side: a `400` to a verb the server does not know reads as the client's
+mistake.
 
 **A request is capped at 8 KB by default, headers and body together, and the
 cap is configurable.** Past it the server answers `413` before parsing
@@ -145,14 +152,9 @@ It is not the default for 0.1.0 for three reasons, and one of them is a gap rath
 - The scheduler exists for fiber **density**, and that claim is measured on Windows only. Linux caps `vm.max_map_count` at 65530 and guard pages split mappings, so the "100,000 waiting fibers" figure has not been reproduced on the platform most deployments use.
 - It is the less-exercised path, and therefore the likelier home of the next runtime bug.
 
-The two are *meant* to be indistinguishable, and the [concurrency
-reference](/docs/reference/concurrency/) still says a program cannot tell which
-it has. It can, today: see [The two fiber backends are
-distinguishable](#what-a-nursery-actually-does) below. Until that is closed the
-default cannot change without notice, whatever the compatibility policy says
-about it.
-
-**Throughput figures published before September 2026 were two to twelve times too high.** The load generator reported one connection's rate multiplied by the number of connections, which is why no ceiling was ever found. It has been replaced, the numbers have been retaken, and [Performance](/docs/performance/) carries them with the conditions they satisfy. Any requests-per-second number for Khora from an older document or post is wrong.
+The two backends are distinguishable under cancellation — see [The two fiber
+backends are distinguishable](#the-two-fiber-backends-are-distinguishable)
+below — so the default cannot change without a breaking-change note.
 
 ## Characters and strings
 
@@ -174,9 +176,31 @@ The practical consequence is that `attempt` handles a body raising exactly one t
 
 [The unions design note](https://github.com/codyspate/khoralang/blob/main/docs/design/unions.md) records what a union would mean, what it would cost, and why existentials are not part of the same question.
 
+## A cancelled fiber parked in `Fiber::wait` keeps going
+
+`Fiber::wait` and `Fiber::join` are not cancellation points and carry no
+failure row, so a fiber parked in one cannot be stopped until the child it is
+waiting on ends by itself.
+
+Cancelling a parent inside `Fiber::wait` on a 2000 ms child landed after
+1939-1984 ms, 20 runs out of 20 on both backends, against 0-5 ms for the same
+parent with no child to wait on.
+
+**Worse, the parent then ran the rest of its body** — the statement after the
+wait executed in 20 of 20 runs — so a fiber that was cancelled can still
+publish a result. A supervisor that cancels a worker and assumes it stopped is
+wrong on both counts: it did not stop promptly, and it did not stop.
+
+Until `wait` and `join` carry a `raises` row of the kind `Channel::receive`
+already has, a parent that must stop promptly cannot be waiting on a child when
+the cancellation arrives.
+
 ## Concurrency combinators
 
-A fiber carries its answer and its failure row — `Fiber<A, 'er>`, with `join` re-raising what the child raised — and `Clock` can `sleep`. The combinators built on top of those do not exist yet: there is no `timeout`, no `race`, and no bounded parallel map.
+A fiber carries its answer and its failure row — `Fiber<A, 'er>`, with `join`
+re-raising what the child raised — and `Clock` can `sleep`. The combinators
+built on top of those do not exist: there is no `timeout`, no `race`, and no
+bounded parallel map.
 
 **Channel fan-in is concurrent.** Two 2000 ms fibers take about 2.1 seconds
 whether the parent reads their results off a `Channel::bounded(4)`, joins both
@@ -184,19 +208,10 @@ handles, or uses `join_all` — measured three runs per backend on x86_64 Linux,
 and indistinguishable under `KHORA_FIBERS=scheduler`. At 500 ms per fiber over
 25 runs the three are 518, 514 and 516 ms.
 
-**What blocks a hand-written `race` or `timeout` is something else.**
-`Fiber::wait` and `Fiber::join` are not cancellation points and carry no
-failure row, so a fiber parked in one cannot be stopped until the child it is
-waiting on ends by itself: cancelling a parent that is inside `Fiber::wait` on
-a 2000 ms child landed after 1939-1984 ms, 20 runs out of 20 on both backends,
-against 0-5 ms for the same parent with no child to wait on. Worse, the parent
-then ran the rest of its body — the statement after the wait executed in 20 of
-20 runs — so a fiber that was cancelled can still publish a result. A `race`
-built out of `spawn` plus a wait is therefore bounded by its *slowest* branch
-rather than its fastest, and a deadline built that way reports a cancellation
-the run then ignores. A cancellable wait — `Fiber::wait` with a bound, or a
-`raises` row on `wait`/`join` of the kind `Channel::receive` already has — is
-what these combinators are actually waiting on.
+**What blocks a hand-written `race` or `timeout` is the wait above.** A `race`
+built out of `spawn` plus a wait is bounded by its *slowest* branch rather than
+its fastest, and a deadline built that way reports a cancellation the run then
+ignores.
 
 Two smaller things a supervisor meets on the way. `Fiber::wait` tells you
 nothing about how the fiber ended — there is no status and no
@@ -251,6 +266,9 @@ out zero removes the bound rather than failing.
 
 ### A child's failure usually cancels no siblings
 
+**Do not rely on a sibling's failure to stop work that is expensive, holds a
+resource, or has an effect outside the process.**
+
 A nursery reaps handles oldest-first, so a failure is invisible until every
 child adopted before it has finished — and by then there may be nothing left to
 cancel. Twelve children of 400 ms, one raising after 10 ms, 25 runs a side:
@@ -265,9 +283,6 @@ cancel. Twelve children of 400 ms, one raising after 10 ms, 25 runs a side:
 not collapse in any useful sense: every sibling runs to completion and the
 nursery returns `ChildFailed` about 420 ms after a failure that happened at
 11 ms.
-
-So do not rely on a sibling's failure to stop work that is expensive, holds a
-resource, or has an effect outside the process.
 
 ### New children start after a sibling has failed
 

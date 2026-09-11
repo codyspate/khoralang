@@ -41,6 +41,11 @@ Option::Some(job) => {
 
 What `abandon` should do is the application's decision — put the job back, mark it for redelivery, write it to a dead-letter queue, or simply record that it was dropped. The point is that something happens, and that the decision is made where the job is taken rather than left to nobody.
 
+**A `Region` is the right tool here because the cleanup depends on what
+happened.** For a resource that always releases the same way, `scoped` and
+`acquire` are shorter — see [Cancellation-safe
+resources](/docs/cookbook/cancellation-safe-resources/).
+
 ## Complete example
 
 ```khora
@@ -103,7 +108,14 @@ pub fn main() -> Int {
 }
 ```
 
-Every job that came off the queue is in exactly one of the last two counts. That reconciliation — *taken equals served plus abandoned* — is the invariant worth asserting in a real pool, because it is the one that catches this class of bug. Over two hundred rounds cut at a jittered moment it held every time; the same two hundred rounds without the region took 198 jobs and accounted for none of them. Without the reconciliation the loss is invisible: the program exits 0 either way.
+Every job that came off the queue is in exactly one of the last two counts. That reconciliation — *taken equals served plus abandoned* — is the invariant worth asserting in a real pool, because it is the one that catches this class of bug. Over two hundred rounds cut at a jittered moment it held every time. Without the reconciliation the loss is invisible: the program exits 0 either way.
+
+**This program also prints `khora: a fiber ended with an error nobody was
+waiting for` on standard error as it exits.** That is the cancelled worker: a
+fiber that raised and was waited on rather than joined says so at exit. It does
+not change the exit status and cannot be suppressed — see [known
+limitations](/docs/limitations/#concurrency-combinators). Since `wait` is the
+right thing to use after `cancel`, any supervisor built this way prints it.
 
 ## Why the check is before the call and not after
 

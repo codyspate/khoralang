@@ -59,10 +59,12 @@ Anything worth searching for later goes in a field rather than in the sentence:
 ```khora
 import std::trace::{number, text};
 
-log.record(Severity::Error, "charge failed", [
-  text("account", account.id),
-  number("amount_minor", amount),
-]);
+fn charge(account: Account, amount: Int) -> () with { log: Log } {
+  log.record(Severity::Error, "charge failed", [
+    text("account", account.id),
+    number("amount_minor", amount),
+  ]);
+}
 ```
 
 ```text
@@ -82,10 +84,13 @@ two you send it to.
 Nothing to do. A line logged inside a span carries that span's ids:
 
 ```khora
+import std::trace::{Tracer, around};
+
 fn work() -> () with { log: Log } {
   info("processing");
 }
 
+// `tracer` is any `Tracer` — see [Tracing](/docs/cookbook/tracing/).
 around(tracer, "request", fn () => work())
 ```
 

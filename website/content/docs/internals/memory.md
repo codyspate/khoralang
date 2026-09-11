@@ -49,11 +49,8 @@ closure it was handed — so the counts have to be safe to change from two
 threads at once. They are.
 
 This costs an atomic instruction on each retain and release that survives to
-run time. Khora pays it everywhere rather than offering a cheaper
-single-threaded variant, because a type that says "this one is not safe to
-share" spreads through every signature that touches it. That colouring is
-exactly what Khora's effect rows exist to avoid, and it would be a strange
-thing to reintroduce for an increment.
+run time. There is no cheaper single-threaded variant; the cost is the same in
+every program.
 
 ## Cycles leak
 
@@ -75,8 +72,7 @@ Those four objects are never freed.
 
 **This is a leak, not unsoundness.** Nothing is freed early, nothing is read
 after being freed, and the program stays correct — the memory is simply never
-returned. A program that leaks is wrong in a way you can measure; a program
-that frees early is wrong in a way you cannot.
+returned.
 
 It is also hard to do by accident. Three properties of the language make the
 reference graph acyclic unless you deliberately write a cycle:

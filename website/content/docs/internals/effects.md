@@ -58,10 +58,8 @@ routine, no `longjmp`. A raise is a return with a tag, and each frame it passes
 through runs the releases it was going to run anyway. That is what keeps
 foreign frames out of the story — see [FFI](/docs/next/reference/ffi/).
 
-**`!` is where the branch is.** The mark is usually explained as readability,
-and it is: a reader taught by `?` and `try` expects a mark where control can
-leave. It is also exactly the point where the compiler emits the test. The
-notation and the machine agree.
+**`!` is where the branch is.** The mark a reader is taught to read as "control
+can leave here" is exactly the point where the compiler emits the test.
 
 **The tag names the error's type, not just "something failed".** `catch`
 handles part of a row, so a function raising `DbError + ModelError` whose
@@ -81,17 +79,14 @@ A handler runs, returns, and control continues. It cannot capture the rest of
 the computation and resume it later, which is what a first-class continuation
 would allow.
 
-That is deliberate, and it is why handlers need no stack machinery at all.
-Stopping and continuing a computation is what a *fiber* does, and fibers are a
-separate mechanism — see [Fibers](/docs/next/internals/fibers/). Effect
-(TypeScript) draws the same line between dependency injection and the runtime
-that suspends it.
+Handlers are therefore single-shot, and the generator-shaped uses of algebraic
+effects are unavailable: an operation cannot yield more than once, and a
+handler cannot restart a computation. Stopping and continuing a computation is
+what a *fiber* does — see [Fibers](/docs/next/internals/fibers/).
 
-What you give up is the generator-shaped uses of algebraic effects: an operation
-that yields several times, or a handler that restarts a computation. What you
-get is that performing an operation costs a call rather than a stack switch,
-and that a handler can be passed to foreign code without the foreign frames
-becoming part of anybody's control flow.
+Because a handler never suspends, performing an operation costs a call rather
+than a stack switch, and a handler can be passed to foreign code without the
+foreign frames becoming part of anybody's control flow.
 
 ## `with` and `raises` are one mechanism
 

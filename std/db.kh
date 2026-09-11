@@ -182,7 +182,7 @@ pub effect Db {
 /// at greater length: a transaction that borrowed its caller's scope would end
 /// when the caller did, which is not what a transaction is.
 ///
-/// # Why the body carries a row it does not seem to need
+/// # Cancellation inside a transaction
 ///
 /// `raises 'er` is the other half, and without it the paragraph above is
 /// theatre. [The effect-runtime design note](https://github.com/codyspate/khoralang/blob/main/docs/design/effect-runtime.md) §6: **a cancellation point is a
@@ -190,8 +190,7 @@ pub effect Db {
 /// an error uses. A body typed `() -> Result<A, DbError>` with no row has no
 /// `!` anywhere inside it, so nothing in the transaction can observe a
 /// cancellation, and the frames above have no channel to receive one on
-/// either. The first version of this function was in that state: a region, a
-/// finalizer, and no path that could ever reach it.
+/// either -- a region and a finalizer with no path that could ever reach it.
 ///
 /// With the row, a body that does fallible work has cancellation points, and
 /// one that fires unwinds through here — releasing the region, running the

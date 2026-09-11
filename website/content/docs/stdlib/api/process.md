@@ -33,10 +33,11 @@ The rule: **if any part of the command came from outside the program, it is
 `run` or `output`.** If the whole line is a literal and wants a pipeline, it
 is `shell`.
 
-This is what the earlier version of this module said was missing and could
-not have: `system` and `popen` are all ISO C offers, and `CreateProcess`
-takes a `STARTUPINFO` while `posix_spawn` wants a `posix_spawn_file_actions_t`
-— neither reachable from Khora, because no struct crosses the C ABI. They are reachable from the *runtime*, where Rust's
+**A process cannot be started from Khora alone**: `system` and `popen` are
+all ISO C offers, and `CreateProcess` takes a `STARTUPINFO` while
+`posix_spawn` wants a `posix_spawn_file_actions_t` — neither reachable from
+Khora, because no struct crosses the C ABI. They are reachable from the
+*runtime*, where Rust's
 `std::process::Command` is one interface over both, so `khora_spawn_status`
 and `khora_spawn_capture` are what the two safe operations call.
 

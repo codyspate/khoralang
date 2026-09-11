@@ -114,11 +114,14 @@ lines.
 pub fn text(self) -> Option<String>
 ```
 
-The rest are one per shape, so that a caller can ask "is it what I
-expected" without a `match` whose other arms it does not care about.
-`Option` rather than a failure, because a document being the wrong shape
-is the caller's business to name — this module does not know what the
-field was for.
+The string here, or `None` if this is something else. No coercion: the
+number `3` is not text.
+
+This and the accessors below it are one per shape, so that a caller can
+ask "is it what I expected" without a `match` whose other arms it does
+not care about. `Option` rather than a failure, because a document being
+the wrong shape is the caller's business to name — this module does not
+know what the field was for.
 
 #### number
 
@@ -152,8 +155,7 @@ digits never went near a `Float`.
 `None` for a number no `Int` can hold, and for one that is not whole.
 
 A whole number *written* as `1.0` or `1e3` is still whole, and those go
-through a `Float` to be read — which is how they were read before, so
-nothing that decoded yesterday stops decoding today.
+through a `Float` to be read.
 
 #### literal
 
@@ -195,7 +197,7 @@ A number from an `Int`, with every digit kept.
 
 `Json::Number` takes text, and text is easy to get wrong — a caller
 writing `Json::Number(Int::to_string(n))` is one `Float::to_string` away
-from the bug this replaced. These two are the way to make one.
+from a silently lossy number. These two are the way to make one.
 
 #### of_float
 
@@ -249,12 +251,12 @@ the same trade every language whose JSON object is a hash makes — Go's
 `map[string]any`, Python before 3.7 — and it buys `field` in constant
 time, which is what consumers actually do with a document.
 
-What it *can* promise, and now does, is that the order is the **same
-every time**. Bucket order is not: it depends on how many keys there are
-and changes when the map grows, so two runs over the same document could
-print its fields differently. That makes a golden test over an encoded
+What it *can* promise is that the order is the **same every time**.
+Bucket order is not: it depends on how many keys there are and changes
+when the map grows, so two runs over the same document would print its
+fields differently. That would make a golden test over an encoded
 document impossible to write and a diff between two API responses
-unreadable, which is what this was reported for.
+unreadable.
 
 Sorted rather than insertion order, because insertion order is the one
 thing a hash map genuinely cannot recover — keeping it would mean

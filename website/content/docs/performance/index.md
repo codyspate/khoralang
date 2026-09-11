@@ -43,9 +43,9 @@ shaped this way.
 
 ## The numbers
 
-16-core Windows desktop, release builds, 32 connections, generator on the same
-machine, six-second runs, mean of five, 2 September 2026. **These numbers
-travel with that sentence or they do not travel.**
+16-core Windows desktop, release builds, `bench/loadgen.rs` on the same
+machine, 32 connections, six-second runs, mean of five, 2 September 2026.
+**These numbers travel with that sentence or they do not travel.**
 
 | | req/s | p50 | p99 | peak RSS |
 | --- | --- | --- | --- | --- |
@@ -125,8 +125,7 @@ answers five times as many requests.
    generator that can saturate the server on this one.
 2. A ladder of concurrencies where the rate flattens, so that the top of the
    ladder is the server's answer and not the client's.
-3. The same configuration repeating across sittings, to within something much
-   tighter than 1.85×.
+3. The same configuration repeating across sittings, to within a few per cent.
 4. The machine, the profile and the date printed beside the number.
 
 Conditions 3 and 4 hold for every row in the table above. Conditions 1 and 2
@@ -140,8 +139,7 @@ table says so.
 
 `bench/measure.py` checks all four on every run rather than leaving them to be
 remembered, and reports what failed alongside the bound instead of a bare
-number. That is the whole difference between this rig and the one it replaced:
-the old one could not fail, so it always produced a figure.
+number.
 
 ## Running them yourself
 

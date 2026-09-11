@@ -239,8 +239,9 @@ lets go of that fiber when a route says to.
 
 **The order matters, and getting it wrong ends the process rather than the
 server.** Cancelling or detaching the listener while connections are still
-being served aborts on `a cancellation reached a fiber's root`. Drain first and
-detach last:
+being served aborts the process with `khora: a cancellation reached a fiber's
+root`. Drain first and detach last. Inside a `main` that has already created
+the `jobs` channel, spawned `worker`, bound `port`, and installed a `Clock`:
 
 ```khora
 let stop = Shared::of(false);
@@ -263,6 +264,11 @@ Fiber::wait(worker);
 // Only now.
 Fiber::detach(server);
 ```
+
+`Fiber::wait` on a cancelled or failed worker prints `khora: a fiber ended with
+an error nobody was waiting for` at exit. It is harmless and cannot be
+suppressed — see [known
+limitations](/docs/limitations/#concurrency-combinators).
 
 Two things are worth being deliberate about. A request that arrives during the
 drain finds a closed channel, so `Channel::send` answers `false` — count it

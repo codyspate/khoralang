@@ -68,8 +68,10 @@ publish = true
 
 A manifest with no `[package]` is a workspace root, which is a normal thing to be — see below.
 
-:::note[`edition` is gone]
-It named a year rather than a compiler, nothing read it, and `[toolchain]` answers the question it was pretending to. A manifest that still has the line gets a warning saying so, and builds.
+:::note[There is no `edition` key]
+[`[toolchain]`](#toolchain--which-khora-builds-this) says which compiler builds
+the project. A manifest that still has an `edition` line gets a warning and
+builds.
 :::
 
 ## `[workspace]` — several packages, built together

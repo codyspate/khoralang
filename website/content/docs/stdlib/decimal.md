@@ -76,10 +76,10 @@ let rate = 0.000000000001d;     // scale 12
 let together = notional.add(rate);  // needs the notional at scale 12
 ```
 
-At 64 bits that stopped the program, on two numbers a rates desk writes down
-every day. Going past 38 digits still stops it — the answer would be a
-different number, and a different total is the failure this type exists to
-prevent.
+Aligned, the notional needs 20 significant digits — well inside 38, and the
+sort of pair a rates desk writes down every day. Going past 38 digits stops the
+program: the answer would be a different number, and a different total is the
+failure this type exists to prevent.
 
 ## A column of them
 

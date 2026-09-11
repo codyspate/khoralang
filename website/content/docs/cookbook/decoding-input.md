@@ -21,8 +21,8 @@ pub type Settings = {
 let settings = Settings::schema().decode(Raw::of_json(document));
 ```
 
-The alternative is a reader per source, and the signature of the one this
-library replaced shows why that does not generalise:
+The alternative is a reader per source, and the signature of one that both
+names a field and fetches it shows why that does not generalise:
 
 ```khora
 pub fn string(name: String) -> Validated<String, ConfigError> with { env: Env }

@@ -7,14 +7,14 @@ description: "Saying what happened, on the stream meant for it"
 
 Saying what happened, on the stream meant for it.
 
-**Khora had no way to write to standard error at all.** Everything went to
-stdout, so a program's diagnostics and its answer were the same stream: a
-command-line tool whose output you redirected lost its own error messages
-into the file. Two independent evaluators building ordinary tools reported
-it, and one of them stopped trying to keep the two apart.
+**[`Log`](#log) is the capability for structured diagnostics**: one JSON object
+per line on standard error, with the level and the destination chosen by
+the caller. [`eprint`](#eprint) is the unstructured primitive underneath it.
 
-[`eprint`](#eprint) is the primitive that fixes it. Everything else here is the
-capability built on top.
+Standard error rather than standard output, because a program's
+diagnostics and its answer are different things: a command-line tool whose
+output is redirected would otherwise lose its own error messages into the
+file.
 
 ## Why logging is an effect
 
@@ -127,13 +127,9 @@ How much something matters, in the order everybody already filters on.
 `Ord` so a handler can compare against a minimum: `Trace` is the least and
 `Error` the most, which is the direction "at least Info" reads in.
 
-**Named `Severity` rather than `Level`, and not for taste.** `Level` is what
-this is called everywhere, and it is still the name of the JSON field. It is
-also a name a program is likely to have already — and today two modules
-declaring one type name is a compiler bug rather than a resolution: the
-program compiles and then stops on an illegal instruction at run time. This
-name avoids the collision until that is fixed, and should go back to `Level`
-when it is.
+**Named `Severity`; the JSON field it writes is still `level`.** `Level` is
+a name a program is likely to have already, and two modules declaring one
+type name does not resolve cleanly today.
 
 #### Trace
 

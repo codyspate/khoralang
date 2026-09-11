@@ -8,6 +8,11 @@ A resource should register its cleanup as soon as acquisition succeeds. In Khora
 
 That means the same cleanup path runs when the body returns normally, raises a typed failure, or is unwound by cancellation.
 
+**`acquire` is for a value with a release function.** When cleanup depends on
+*what happened* — whether the work finished, or what to do with a value already
+taken — open a `Region` and `defer` a closure instead: see [Take work off a
+queue safely](/docs/cookbook/taking-work-off-a-queue/).
+
 ## Complete example
 
 This example intentionally raises after acquiring a resource. The registered release still runs before the failure leaves the scope:

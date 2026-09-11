@@ -39,7 +39,7 @@ requirement for the same reason.
 | debug information | yes | no |
 | reproducible | no | **bit for bit** |
 
-`release` drops debug information deliberately, and that is what makes it
+`release` drops debug information, which is one of the things that makes it
 reproducible: a debug build embeds each source file's absolute path, so two
 checkouts of identical content produce different bytes.
 
@@ -71,9 +71,9 @@ A build is cached under a key covering everything that can change the output:
 | the compiler binary, hashed | not its version string — a version is constant across every development build |
 | the linker binary | Khora emits an object and a C driver links it, so the driver's bytes are in the output's |
 | the runtime archive | every executable links it statically |
-| the target triple | |
+| the target triple | a different target produces different code |
 | the profile, and whether debug information is on | the environment can override the profile in both directions |
-| executable or library | |
+| executable or library | the two emit different artifacts |
 | the source *paths*, when debug information is on | because a debug build embeds them |
 
 Fields are length-prefixed before hashing, so two adjacent ones cannot be run

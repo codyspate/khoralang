@@ -13,8 +13,8 @@ Everything else in this section is reached through the generated
 
 ## The separation it is built on
 
-A reader per source reads well, and none of it is reusable. The signature of
-the configuration reader this library replaced says why:
+A reader per source reads well, and none of it is reusable. A reader that both
+names a field and fetches it says why:
 
 ```khora
 pub fn string(name: String) -> Validated<String, ConfigError> with { env: Env }

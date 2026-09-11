@@ -21,19 +21,24 @@ blocks only the fiber that made it.
 coroutine on a pool of worker threads, with work stealing. Suspending is a
 stack switch in user space, and a fiber can move between workers.
 
-They behave identically. The difference is cost and density:
+They behave identically except under cancellation: a fiber inside
+`clock.sleep` is woken by a cancellation under the scheduler, but runs the
+sleep to completion under threads. [Known
+limitations](/docs/next/limitations/#the-two-fiber-backends-are-distinguishable)
+has the measurements.
+
+Threads are the default because they are faster at the connection counts a
+service actually runs at; the scheduler exists for programs that need far more
+concurrent fibers than a machine has threads. [Known
+limitations](/docs/next/limitations/#the-fiber-scheduler) has the measurements.
+
+The remaining difference is cost and density:
 
 | | thread | coroutine |
 | --- | --- | --- |
 | stack | 1–2 MB, the operating system's | 1 MB with a guard page |
 | suspend | a kernel transition | a stack switch |
 | how many | thousands | hundreds of thousands |
-
-Measured on a sixteen-core machine serving HTTP, **threads are around 20 per
-cent ahead on throughput** at the concurrencies a service actually sees, and
-the scheduler wins on median latency once connections are dense. Threads are
-the default because the common case is faster; the scheduler exists for
-programs that need far more concurrent fibers than a machine has threads.
 
 ### What the scheduler does
 
@@ -56,9 +61,9 @@ block that started it. That is not a separate mechanism — it is
 already run their finalisers on every way out of a block.
 
 A nursery opens a region and installs a `Nursery` capability whose `spawn`
-registers each fiber with it. Every path out of the block — running off the
-end, an early `return`, a raise passing through, a cancellation — runs the
-finalisers, and those wait for the children.
+registers each fiber with it. Every path out of the block runs the finalisers,
+and those wait for the children: running off the end, an early `return`, a
+raise passing through, a cancellation.
 
 There is nothing extra to enforce, and no way to write a fiber that escapes:
 the `Nursery` capability is in scope only inside the block, and the block
@@ -78,19 +83,36 @@ is leaving because something failed. The distinction is not something the
 program asks about: cancellation is idempotent, so "cancel then wait" is
 correct on both paths and the normal one simply has nothing to cancel.
 
-## Cancellation is cooperative, at the `!` marks
+## Cancellation is cooperative, at cancellation points
 
 Cancelling a fiber does not stop it where it stands. It sets a flag, and the
 fiber notices at its next cancellation point.
 
-A cancellation point is a `!` in a function that can raise — which is to say,
-exactly the places the language already marks as *control may leave here*. A
-cancelled fiber unwinds from one of those the same way a raise does, running
-each frame's releases and each region's finalisers as it goes.
+There are two:
 
-This is why a cancelled program closes its files. It is also why a computation
-with no `!` in it — a long arithmetic loop — cannot be interrupted: there is no
-point at which it has agreed to be.
+- a `!` site, which is also where propagation and suspension are marked; and
+- a loop back-edge — the point where `loop` or `while` goes round again.
+
+Both exist only in a function that can raise, because the `raises` row is what
+a cancellation travels out on. A cancelled fiber unwinds from one of them the
+same way a raise does, running each frame's releases and each region's
+finalisers as it goes.
+
+This is why a cancelled program closes its files. The back-edge is why the
+ordinary shape of a periodic job can be stopped at all:
+
+```khora
+fn ticker() with { clock: Clock } raises Stop {
+  loop { clock.sleep(200); }
+}
+```
+
+There is no `!` in that body. Without the back-edge, a nursery that had to
+unwind past it would wait for ever.
+
+What neither kind widens is *which* functions have a cancellation point. A
+function declared without `raises` has no tagged return for a cancellation to
+travel on, so it runs to its end.
 
 ## Suspending is not a handler's job
 

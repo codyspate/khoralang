@@ -20,7 +20,7 @@ module main;
 import std::core::{ChildFailed, Result, SharedFn, Validated};
 import std::json::{parse};
 import std::net::http::{HttpError, Request, Response, Router};
-import std::schema::{Decode, Encode, Raw, Rejection};
+import std::schema::{Decode, Encode, Raw};
 
 derive(Decode)
 pub type CreateUser = {

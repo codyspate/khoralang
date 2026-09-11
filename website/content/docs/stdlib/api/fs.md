@@ -137,9 +137,8 @@ Whether the path can be opened for reading.
 **Not "whether it exists".** ISO C has no `stat`, so the only portable
 question is whether `fopen` succeeds, and a file that is there but
 unreadable answers `false`. The name says `exists` because that is what
-callers mean; this comment is where the difference is kept honest, and a
-caller that needs the distinction wants a permissions API rather than
-this one.
+callers mean; a caller that needs the distinction wants a permissions API
+rather than this one.
 
 **A path the manifest denies raises `Denied` rather than answering
 `false`.** Answering `false` would make three different situations one
@@ -219,11 +218,10 @@ is_dir: (String) -> Bool raises IoError
 Whether the path is a directory.
 
 Raises `Denied` for a path the manifest does not grant, the same as
-[`FsRead::exists`](#exists) and for the same reason -- and this is where it mattered
-most. `./data/**` does not grant `data` itself, so before this an ordinary
-two-line mistake in a manifest made `is_dir("data")` answer `false` about
-a directory whose every file the program could read, with nothing
-anywhere pointing at the cause.
+[`FsRead::exists`](#exists) and for the same reason -- and this is where it matters
+most. `./data/**` does not grant `data` itself, so a manifest granting
+only the glob makes `is_dir("data")` raise `Denied` rather than answer
+`false` about a directory whose every file the program can read.
 
 ### FsWrite
 
