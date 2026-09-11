@@ -457,7 +457,21 @@ fn verify(bundle: &Path, sums: &Path) -> Result<()> {
 /// Unpacks a `.tar.gz` or a `.zip` into `into`.
 fn unpack(bundle: &Path, into: &Path) -> Result<()> {
     if have("tar") {
-        return run(Command::new("tar").arg("-xf").arg(bundle).arg("-C").arg(into), "tar");
+        // **`--no-same-owner`, for the reason `install.sh` carries at its own
+        // `tar` call.** The archives are built by CI and store that machine's
+        // uid, and GNU tar tries to restore it when it believes it is root --
+        // failing on every entry, because that uid is nobody here. An ordinary
+        // user never saw it; `khora update` under `sudo`, or in a container
+        // build, did.
+        return run(
+            Command::new("tar")
+                .arg("--no-same-owner")
+                .arg("-xf")
+                .arg(bundle)
+                .arg("-C")
+                .arg(into),
+            "tar",
+        );
     }
     if cfg!(windows) {
         return run(

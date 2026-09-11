@@ -14,6 +14,12 @@ On macOS or Linux:
 curl -fsSL https://raw.githubusercontent.com/codyspate/khoralang/main/install.sh | sh
 ```
 
+The script needs `curl` or `wget`, `tar`, and CA certificates. A desktop or a
+CI runner has them; a slim container image often does not — on
+`debian:*-slim`, `apt-get install -y curl ca-certificates` first.
+
+Running it as `root`, in a `Dockerfile` or a CI step, is supported.
+
 On Windows, in PowerShell:
 
 ```powershell

@@ -27,6 +27,17 @@
 #   - never, on any image, does the installer report success over a binary that
 #     cannot start.
 #
+# **And it runs as `root`**, which is a second thing this catches and is not
+# incidental to how containers work -- it *is* how they work. A `Dockerfile`
+# `RUN` line is root, a CI step usually is, and `docker run` is by default.
+# `tar` restores the archive's stored ownership when it believes it is root,
+# the archives are built by CI and carry uid 1001, and so every entry failed
+# with `Cannot change ownership to uid 1001` and the installer exited 2. On a
+# developer's laptop, uid 1000, tar ignores stored ownership and the same
+# archive unpacked silently -- which is why this survived until somebody ran
+# the documented command in a container. `--no-same-owner` is the fix, in
+# `install.sh` and in `khora-toolchain`'s own unpack.
+#
 # Which images are which is not written down twice. Each container reports its
 # own glibc, this compares it against the `MIN_GLIBC` in `install.sh`, and the
 # expectation follows -- so raising the floor by rebuilding the release on an

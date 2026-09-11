@@ -345,7 +345,24 @@ say "  verifying"
 verify "$WORK/$BUNDLE" "$WORK/$BUNDLE.sha256"
 
 say "  unpacking into $HOME_DIR"
-tar xzf "$WORK/$BUNDLE" -C "$WORK"
+# **`--no-same-owner`, or this fails when run as root.**
+#
+# The archives are built by CI and carry that machine's uid -- `runner/runner`,
+# 1001. GNU tar restores ownership from the archive when it believes it is
+# root, and then fails on every entry because 1001 is not a user here:
+#
+#   tar: khora-0.1.0-.../bin/khora: Cannot change ownership to uid 1001 ..
+#   tar: Exiting with failure status due to previous errors
+#
+# An ordinary user never saw it, because tar ignores stored ownership for
+# anybody who cannot honour it -- which is why a laptop install worked and a
+# `RUN` line in a Dockerfile, a CI step, or any rootless container build did
+# not. That is most of the ways somebody scripts an install.
+#
+# Being explicit is also the right answer rather than merely a working one: a
+# toolchain unpacked into `$HOME` should belong to whoever is installing it,
+# and the build machine's uids mean nothing on this side.
+tar --no-same-owner -xzf "$WORK/$BUNDLE" -C "$WORK"
 # Replaced rather than merged: a file left over from an older release is a file
 # the new compiler was never tested against.
 rm -rf "$HOME_DIR"
