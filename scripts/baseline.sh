@@ -389,12 +389,17 @@ sh "$root/scripts/http_conformance.sh"
 # it answers the question for Linux at no cost. Skipped rather than failed when
 # there is no WSL: this is a Windows developer's extra check, not a requirement.
 #
-# **`wsl -l -q`, not `command -v wsl`.** A GitHub `windows-latest` runner has
-# `wsl.exe` on PATH and no distribution behind it, so the command exists and
-# every use of it fails -- which turned "an extra check a laptop can do" into a
-# CI failure on the one platform that cannot fix it. Asking for the list asks
-# the question that matters, which is whether there is a Linux here.
-if wsl -l -q >/dev/null 2>&1; then
+# **`wsl -e true`, not `command -v wsl` and not `wsl -l -q`.** A GitHub
+# `windows-latest` runner has `wsl.exe` on PATH and no distribution behind it.
+# `command -v wsl` finds the executable, and `wsl -l -q` succeeds too: with
+# nothing installed it reports that in its output and still exits zero. Both
+# answer "is there a wsl.exe", and the question is "is there a Linux".
+#
+# Running something is the only answer that cannot be wrong, because it is the
+# thing the check goes on to do. `wsl -e true` needs a distribution that starts
+# and executes a command; anything less than that and the step below could not
+# have run anyway.
+if wsl -e true >/dev/null 2>&1; then
     step 'the runtime on Linux, through WSL'
     # **Kept, not discarded.** This was `> /dev/null`, and when the Linux check
     # exited 101 the baseline log ended mid-sentence with no error anywhere in
