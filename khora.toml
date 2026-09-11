@@ -33,7 +33,7 @@
 version = "0.2.0"
 
 [workspace]
-members = ["examples/*", "packages/*", "bench/*"]
+members = ["examples/*", "packages/*", "bench/*", "tests/*"]
 
 # What every member takes with `field.workspace = true`. Roadmap 14.14.
 #

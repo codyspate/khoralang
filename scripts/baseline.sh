@@ -335,6 +335,24 @@ step 'the packages pass their own tests'
 "$khora" test packages/postgres
 "$khora" test packages/otlp
 
+step "the standard library's own tests"
+# **`tests/std-suite` is how `std` is checked, and it is one compile.**
+#
+# The suite's price is per program rather than per assertion: one check against
+# the real `std` costs about sixteen seconds and two hundred cost eighteen. So
+# a test per program is the expensive shape, and `khora-codegen-llvm` had
+# hundreds of them -- thirteen for `Vector` alone were 193 seconds here and 231
+# on macOS. The same assertions are `test` blocks in one package now, and
+# adding an area costs a file rather than a build.
+#
+# It is a *consumer* of `std` rather than a part of it, which is the other half
+# of why it is here. `struct({ .. })` in `std::schema` is rewritten before it is
+# typed and the rewrite is skipped when the name resolves locally, so a test
+# inside that module cannot call the API the module exists to provide -- and
+# anything in `std/*.kh` is parsed and checked by every build in the repository,
+# including a user's.
+"$khora" test tests/std-suite
+
 step 'every reference application builds'
 # `ledger_service` is here for the same reason the packages are: it depends on
 # `packages/postgres`, so building it is what catches a package change that

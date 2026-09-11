@@ -1,0 +1,324 @@
+module std_suite::vector;
+
+import std::core::{Array, List, Map, Option, Ordering, Pair, Vector, assert_that};
+
+extern fn khora_live_count() -> Int;
+
+fn at(v: Vector<String>, index: Int) -> String {
+  match Vector::get(v, index) { Option::None => "-", Option::Some(s) => s }
+}
+
+/// How many objects are live while a vector of `n` numbers is.
+fn live_with(n: Int) -> Int {
+  let v: Vector<Int> = Vector::new();
+  let mut i = 0;
+  while i < n {
+    Vector::push(v, i);
+    i = i + 1;
+  };
+  khora_live_count()
+}
+
+/// The same, where the elements are themselves objects.
+fn live_with_strings(n: Int) -> Int {
+  let v: Vector<String> = Vector::new();
+  let mut i = 0;
+  while i < n {
+    Vector::push(v, Int::to_string(i));
+    i = i + 1;
+  };
+  khora_live_count()
+}
+
+fn live_after_popping(n: Int, dropped: Int) -> Int {
+  let v: Vector<String> = Vector::new();
+  let mut i = 0;
+  while i < n {
+    Vector::push(v, Int::to_string(i));
+    i = i + 1;
+  };
+  let mut j = 0;
+  while j < dropped {
+    match Vector::pop(v) { Option::None => (), Option::Some(_item) => () };
+    j = j + 1;
+  };
+  khora_live_count()
+}
+
+/// `Array::empty`, on its own: a zero-length array of a number and of a boxed
+/// element, both released without incident.
+///
+/// The boxed one is the case worth having a test for. Nothing is stored in it,
+/// but its header still carries the element's stride and drop glue, and a
+/// header that lied about either would be a wild free the first time an element
+/// was written -- or, for a length of zero, a release that walked past the end
+/// of the allocation.
+test "an array can be empty without a fill" {
+  let numbers: Array<Int> = Array::empty();
+  let texts: Array<String> = Array::empty();
+  let total = Array::length(numbers) + Array::length(texts);
+  assert_that(total == 0, "two empty arrays held ${total} elements");
+}
+
+/// The whole surface of a small one: push, index, replace, remove.
+///
+/// `get` and `set` disagree on purpose -- one answers with an `Option` and the
+/// other with a `Bool` -- and both of those answers are checked here at an index
+/// that is off the end, because that is the pair of decisions a reader is most
+/// likely to trip over.
+test "a vector pushes, pops and indexes" {
+  let v: Vector<String> = Vector::new();
+  assert_that(Vector::is_empty(v), "a new vector was not empty");
+
+  Vector::push(v, "a");
+  Vector::push(v, "b");
+  Vector::push(v, "c");
+  assert_that(Vector::length(v) == 3, "three pushes gave length ${Vector::length(v)}");
+
+  // The fourth is off the end, and reads as absent rather than as whatever the
+  // cell beyond the length happens to still hold.
+  let read = at(v, 0) + at(v, 1) + at(v, 2) + at(v, 3);
+  assert_that(read == "abc-", "reading four gave ${read}");
+
+  assert_that(Vector::set(v, 1, "B"), "an in-range set refused");
+  assert_that(!Vector::set(v, 3, "d"), "an out-of-range set was accepted");
+  assert_that(at(v, 1) == "B", "the replaced element is ${at(v, 1)}");
+
+  match Vector::pop(v) { Option::None => assert_that(false, "pop found nothing"),
+    Option::Some(s) => assert_that(s == "c", "popped ${s}") };
+  match Vector::pop(v) { Option::None => assert_that(false, "pop found nothing"),
+    Option::Some(s) => assert_that(s == "B", "popped ${s}") };
+  match Vector::pop(v) { Option::None => assert_that(false, "pop found nothing"),
+    Option::Some(s) => assert_that(s == "a", "popped ${s}") };
+  // Popping an empty one is the loop condition, not a trap.
+  match Vector::pop(v) { Option::None => assert_that(true, ""),
+    Option::Some(s) => assert_that(false, "an empty vector gave ${s}") };
+  assert_that(Vector::length(v) == 0, "a drained vector has length ${Vector::length(v)}");
+
+  // Draining it gave the array back, so this push has to allocate again -- and
+  // it comes back to the size the vector had reached, not to nothing.
+  Vector::push(v, "z");
+  assert_that(at(v, 0) == "z", "after draining, the first element is ${at(v, 0)}");
+  assert_that(Vector::capacity(v) == 8, "it came back at capacity ${Vector::capacity(v)}");
+}
+
+/// Growth, which is the only thing about a vector that is not obvious from the
+/// outside: three hundred pushes into a vector that started with no storage at
+/// all, and every element still there afterwards.
+///
+/// The capacities are asserted rather than just the contents. Doubling is what
+/// makes `push` amortised constant, and a growth policy that quietly became a
+/// fixed increment would still pass a test that only looked at the elements --
+/// it would just be quadratic.
+test "a vector grows past its first allocation" {
+  let v: Vector<Int> = Vector::new();
+  assert_that(Vector::capacity(v) == 0, "a new vector starts at ${Vector::capacity(v)}");
+
+  let mut i = 0;
+  while i < 300 {
+    Vector::push(v, i * 2);
+    i = i + 1;
+  };
+  assert_that(Vector::length(v) == 300, "after 300 pushes, length ${Vector::length(v)}");
+  assert_that(Vector::capacity(v) == 512, "doubling reached ${Vector::capacity(v)}, not 512");
+
+  // Every element survived seven reallocations, in the order it was pushed.
+  let mut sum = 0;
+  let mut wrong = 0;
+  let mut j = 0;
+  while j < 300 {
+    match Vector::get(v, j) {
+      Option::None => { wrong = wrong + 1; },
+      Option::Some(value) => {
+        sum = sum + value;
+        if value != j * 2 { wrong = wrong + 1; } else {}
+      },
+    };
+    j = j + 1;
+  };
+  assert_that(sum == 89700, "the elements summed to ${sum}");
+  assert_that(wrong == 0, "${wrong} elements were misplaced or missing");
+
+  // `with_capacity` is a promise, not storage: nothing is allocated until there
+  // is an element to fill an array with, so the capacity reads as zero until
+  // the first push and as the whole hundred from then on.
+  let w: Vector<Int> = Vector::with_capacity(100);
+  assert_that(Vector::capacity(w) == 0, "a promise allocated ${Vector::capacity(w)}");
+  let mut k = 0;
+  while k < 100 {
+    Vector::push(w, k);
+    k = k + 1;
+  };
+  assert_that(Vector::capacity(w) == 100, "the promise gave ${Vector::capacity(w)}");
+  Vector::push(w, 100);
+  assert_that(Vector::capacity(w) == 200, "past the promise it doubled to ${Vector::capacity(w)}");
+}
+
+/// The property the `Option<A>` cells cost and `Array::empty` bought back: a
+/// vector of `Int` is *two* heap objects -- itself and its array -- whatever its
+/// length, and two before anything has been pushed at all, because
+/// `Array::empty` allocates a header with no cells under it.
+///
+/// This is pinned rather than described because it regressed silently once
+/// already. Every element being a `Some` type checked, passed every other test
+/// in this file, and made a hundred integers into a hundred and three live
+/// objects.
+test "a vector of numbers allocates a constant number of objects" {
+  // **Differences rather than totals.** Each `test` block runs on a fiber of
+  // its own with the harness's own objects live around it, so the absolute
+  // count is the harness's business and not this test's. What the vector
+  // promises is that the count does not move with the length, and a difference
+  // says exactly that while staying true wherever the baseline sits.
+  let none = live_with(0);
+  let one = live_with(1);
+  let hundred = live_with(100);
+  let thousand = live_with(1000);
+  assert_that(one == none, "one element added ${one - none} objects");
+  assert_that(hundred == none, "a hundred elements added ${hundred - none} objects");
+  assert_that(thousand == none, "a thousand elements added ${thousand - none} objects");
+
+  // Boxed elements are objects themselves, so a hundred of them cost a hundred
+  // -- minus the one `Int::to_string(0)` gives back as a literal, which is a
+  // static rather than an allocation.
+  let strings = live_with_strings(100);
+  assert_that(
+    strings - none == 99,
+    "a hundred strings added ${strings - none} objects, not ninety-nine",
+  );
+}
+
+/// A popped element dies at the `pop`, not whenever the cell it vacated is next
+/// written. Without the backfill the array would still be holding every one.
+///
+/// Fifty left of a hundred is fifty-one strings, not fifty. The cells past the
+/// length still hold the fill the last `grow` used -- the element that was being
+/// pushed at the time -- and that one string stays alive until the array grows
+/// again or goes. It is one object however long the vector is, because every
+/// one of those cells holds the same one.
+test "a popped element is released at the pop" {
+  let empty = live_with(0);
+  let half = live_after_popping(100, 50);
+  let drained = live_after_popping(100, 100);
+  // Fifty left of a hundred is fifty *and one*: the cells past the length still
+  // hold the fill the last `grow` used, and that one string stays alive until
+  // the array grows again or goes. One object however long the vector is,
+  // because every one of those cells holds the same one.
+  assert_that(half - empty == 50, "fifty left of a hundred held ${half - empty} strings");
+  assert_that(drained - empty == 0, "a drained vector held ${drained - empty} strings");
+}
+
+/// Both conversions, and that neither loses an element or its order.
+test "a vector and a list convert both ways" {
+  let v: Vector<Int> = Vector::new();
+  Vector::push(v, 1);
+  Vector::push(v, 2);
+  Vector::push(v, 3);
+
+  let as_list = Vector::to_list(v);
+  assert_that(List::length(as_list) == 3, "to_list gave ${List::length(as_list)} elements");
+  let summed = List::fold(as_list, 0, fn (acc, n) => acc + n);
+  assert_that(summed == 6, "the list summed to ${summed}");
+
+  let back = Vector::from_list(as_list);
+  assert_that(Vector::length(back) == 3, "from_list gave ${Vector::length(back)} elements");
+  match Vector::get(back, 0) {
+    Option::None => assert_that(false, "the first element was lost"),
+    Option::Some(first) => assert_that(first == 1, "the order changed: first is ${first}"),
+  }
+}
+
+/// A map can be walked at all, which is the whole reason `entries` exists.
+test "a map reports every entry" {
+  let m: Map<String, Int> = Map::new();
+  Map::insert(m, "a", 1);
+  Map::insert(m, "b", 2);
+  Map::insert(m, "c", 3);
+
+  let entries = Map::entries(m);
+  assert_that(List::length(entries) == 3, "three inserts gave ${List::length(entries)} entries");
+  let total = List::fold(entries, 0, fn (acc, e) => acc + e.value);
+  assert_that(total == 6, "the values summed to ${total}");
+}
+
+/// `keys` and `values` are the same walk, split -- so they have to agree with
+/// each other and with `entries`.
+test "a map's keys and values line up" {
+  let m: Map<String, Int> = Map::new();
+  Map::insert(m, "x", 10);
+  Map::insert(m, "y", 20);
+
+  let keys = Map::keys(m);
+  let values = Map::values(m);
+  assert_that(List::length(keys) == 2, "two keys became ${List::length(keys)}");
+  assert_that(List::length(values) == 2, "two values became ${List::length(values)}");
+  let sum = List::fold(values, 0, fn (acc, n) => acc + n);
+  assert_that(sum == 30, "the values summed to ${sum}");
+}
+
+/// Filled, walked and dropped: nothing outlives the scope that made it.
+test "a vector and a walked map leave nothing behind" {
+  let before = khora_live_count();
+  let after = {
+    let v: Vector<Int> = Vector::new();
+    let mut i = 0;
+    while i < 50 {
+      Vector::push(v, i);
+      i = i + 1;
+    };
+    let m: Map<String, Int> = Map::new();
+    Map::insert(m, "k", 1);
+    let _walked = Map::entries(m);
+    0
+  };
+  let now = khora_live_count();
+  assert_that(now == before, "${now} objects live where ${before} were, after ${after}");
+}
+
+/// Indexing answers the element, not an `Option` wrapping one, when the caller
+/// has already established the index is in range.
+///
+/// **Counted in a function of its own**, because the count has to be read with
+/// nothing else in flight. Taken inline, the `before` snapshot includes the
+/// temporaries of whatever assertion ran last -- an interpolated message is
+/// itself a live object -- and the difference then measures the harness rather
+/// than the index.
+fn cost_of_indexing() -> Int {
+  let v: Vector<Int> = Vector::new();
+  Vector::push(v, 7);
+  let before = khora_live_count();
+  let read = Vector::at(v, 0);
+  let after = khora_live_count();
+  // **`v` is kept alive past the second reading**, or the index is its last
+  // use and Perceus releases the vector and its array between the two counts:
+  // the difference then comes out at minus two, which is the collector working
+  // exactly as promised and this test measuring the wrong thing.
+  let still = Vector::length(v);
+  if read == 7 && still == 1 { after - before } else { 0 - 1 }
+}
+
+test "a vector indexes without building an option" {
+  let cost = cost_of_indexing();
+  assert_that(cost == 0, "indexing allocated ${cost} objects");
+}
+
+/// A sort that keeps equal elements in the order they arrived, which is what
+/// makes sorting by one key and then another compose.
+test "a stable sort keeps equal elements in the order they were given" {
+  let items = [
+    { key: 2, value: "first" },
+    { key: 1, value: "only" },
+    { key: 2, value: "second" },
+  ];
+  let sorted = List::sort_by(items, fn (a, b) => Int::cmp(a.key, b.key));
+  let shown = List::fold(sorted, "", fn (acc, p) => acc + p.value + " ");
+  assert_that(shown == "only first second ", "the sort gave: ${shown}");
+}
+
+/// A vector shows its elements, not the array underneath it.
+test "a vector prints its elements and not its array" {
+  let v: Vector<Int> = Vector::new();
+  Vector::push(v, 1);
+  Vector::push(v, 2);
+  let shown = "${v}";
+  assert_that(shown == "[1, 2]", "a vector showed as ${shown}");
+}

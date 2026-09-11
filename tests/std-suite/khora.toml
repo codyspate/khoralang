@@ -1,0 +1,9 @@
+[package]
+name = "std_suite"
+version.workspace = true
+
+# Not published: this is how `std` is tested, not something to depend on.
+publish = false
+
+[toolchain]
+version = "0.2.0"

@@ -1,0 +1,55 @@
+//! Why `std`'s tests live here rather than in `std`.
+//!
+//! **A consumer, not an insider.** This package imports `std` the way anybody
+//! else does, so what it checks is the surface a user reaches. Tests written
+//! inside `std/*.kh` check something slightly different, and the difference is
+//! not academic: `struct({ .. })` in `std::schema` is a compiler-rewritten
+//! intrinsic, and the rewrite is skipped when the name resolves to a local item
+//! -- so a test inside that module cannot call the API the module exists to
+//! provide. The same hazard is waiting wherever a feature knows its own name.
+//!
+//! **One compile for all of it.** The suite's price is per program rather than
+//! per assertion: one check costs about sixteen seconds against the real `std`
+//! and two hundred cost eighteen. Thirteen Rust tests for `Vector` were 193
+//! seconds of CI on Ubuntu and 231 on macOS; the same assertions here are one
+//! `khora test` and about seventeen. Adding an area costs a file, not a build.
+//!
+//! **`std` stays out of it.** Everything in `std/*.kh` is parsed and checked
+//! every time anything compiles anything, so a test block there is a cost paid
+//! by every build in the repository, including a user's.
+//!
+//! # What does not belong here
+//!
+//! A test that needs something a running Khora program cannot observe:
+//!
+//!   - a program that must **fail to compile** -- the error is the assertion,
+//!     and a file that does not compile cannot hold a passing test;
+//!   - a **trap**, which ends the process and would take every other block in
+//!     this binary with it;
+//!   - the **shape of an artifact** -- reproducibility, profiles, the cache;
+//!   - anything setting an **environment variable**, which belongs to the
+//!     process rather than to the test.
+//!
+//! Those stay in `crates/khora-codegen-llvm/tests/`, which is also where the
+//! language itself is checked, by one program, in `conformance.rs`.
+//!
+//! # Adding an area
+//!
+//! A file per area, named `module std_suite::<area>;` at the top -- the package
+//! finds its own files, nothing has to be declared here -- and
+//! `scripts/baseline.sh` picks it up with everything else, because it runs
+//! `khora test` over this package once.
+
+module std_suite::main;
+
+import std::core::{print};
+
+/// A package needs an entry point; the tests are the point of this one.
+///
+/// `khora test` compiles the `test` blocks and runs those; `khora run` builds
+/// this and prints one line, which is what makes the package buildable by
+/// itself and therefore checkable by `khora check` like any other member.
+pub fn main() -> Int {
+  print("std_suite: run `khora test tests/std-suite`");
+  0
+}
