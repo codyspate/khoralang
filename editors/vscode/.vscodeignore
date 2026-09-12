@@ -16,6 +16,7 @@
 .gitignore
 install.ps1
 RELEASE.md
+PUBLISHING.md
 scripts/**
 node_modules/sharp/**
 node_modules/@img/**

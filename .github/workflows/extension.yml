@@ -24,7 +24,10 @@ name: extension
 # eventually and each will want a series of its own.
 #
 # Until 14.12 puts this on the marketplace and OpenVSX, a release asset is the
-# whole installation story.
+# whole installation story. The publish steps at the end are written and
+# skipped: each runs when its token exists as a repository secret --
+# `VSCE_PAT` for the Visual Studio Marketplace, `OVSX_PAT` for Open VSX -- and
+# the release asset goes out either way.
 
 on:
   push:
@@ -46,6 +49,14 @@ jobs:
   package:
     name: package and publish
     runs-on: ubuntu-latest
+    # **Job level, so the publish steps can ask whether they have a token.**
+    # GitHub refuses `secrets` inside an `if`, and a step's own `env` is not in
+    # scope for its own condition -- a job-level `env` is the one shape that
+    # works. An absent secret is the empty string here, which is what makes
+    # "publish where we can, always publish the release asset" expressible.
+    env:
+      VSCE_PAT: ${{ secrets.VSCE_PAT }}
+      OVSX_PAT: ${{ secrets.OVSX_PAT }}
     steps:
       # The tag, not the default branch. On a tag push those are the same
       # thing and the `ref` is redundant; on `workflow_dispatch` they are not,
@@ -165,3 +176,32 @@ jobs:
               --prerelease \
               --notes-file "$notes"
           fi
+
+      # **The two registries, each skipped when its token is absent.**
+      #
+      # A `.vsix` on a release is an installation story for somebody who
+      # already knows the extension exists; it is not one for somebody typing
+      # "khora" into the extensions pane, which is where every editor plugin is
+      # actually found. Both steps are conditional rather than required so that
+      # a release still succeeds before the credentials exist -- the GitHub
+      # asset above is the floor, and these raise it when they can.
+      #
+      # `--packagePath` on the archive that was already built and checked,
+      # rather than letting either tool package again: a registry copy built by
+      # a different command is a different artifact, and then the thing people
+      # install is not the thing the checks above passed.
+      #
+      # The condition reads a *job-level* `env`, which is the documented way:
+      # GitHub refuses `secrets` inside an `if` outright, and a step's own
+      # `env` is not in scope for its own condition. Both wrong shapes fail the
+      # same silent way -- a skip indistinguishable from a missing token, which
+      # would keep skipping after the credentials arrived.
+      - name: Publish to the Visual Studio Marketplace
+        if: ${{ env.VSCE_PAT != '' }}
+        run: npx --yes @vscode/vsce publish --packagePath "$(ls dist/*.vsix)"
+
+      # Open VSX is what VSCodium, Cursor, Gitpod and Eclipse Theia search.
+      # Same artifact, different registry, and no Microsoft account involved.
+      - name: Publish to Open VSX
+        if: ${{ env.OVSX_PAT != '' }}
+        run: npx --yes ovsx publish --packagePath "$(ls dist/*.vsix)"
