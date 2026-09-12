@@ -87,6 +87,110 @@ pub(crate) fn name_filter() -> Option<String> {
     None
 }
 
+/// What the harness is in the middle of, for a trap to name.
+///
+/// **A trap ends the process, and that cannot change here.** `contain.rs` gives
+/// the argument: containing one needs an unwinder, because Perceus leaves live
+/// reference counts between the trap and any landing point, and a fiber
+/// abandoned without running them leaks everything it touched. An exported call
+/// escapes that by construction; a `test` block does not.
+///
+/// What *can* change is what the reader is told on the way out. A trapping test
+/// printed `Int division by zero on fiber 5` -- a fiber number, in a run where
+/// the tests are named -- and then took the process down mid-loop, so the
+/// remaining tests neither ran nor were reported, and no summary line was ever
+/// printed. Somebody reading `test a ... ok` and a stray message can reasonably
+/// conclude the rest passed.
+///
+/// So the harness records what it started and what it has finished, and the
+/// trap path reads it. Nothing is contained; the death is explained.
+pub(crate) mod progress {
+    use std::sync::Mutex;
+
+    /// The name of every test, and how far the report has got.
+    pub(crate) struct Progress {
+        /// Every test this run intends to execute, in order.
+        pub(crate) names: Vec<String>,
+        /// How many have been reported. A trap happens in the one after.
+        pub(crate) reported: usize,
+        /// Whether a trap should say anything at all. False under `khora run`,
+        /// where there is no harness and the plain message is right.
+        pub(crate) active: bool,
+    }
+
+    pub(crate) static PROGRESS: Mutex<Option<Progress>> = Mutex::new(None);
+
+    /// Records the run this harness is about to perform.
+    pub(crate) fn begin(names: Vec<String>) {
+        if let Ok(mut held) = PROGRESS.lock() {
+            *held = Some(Progress { names, reported: 0, active: true });
+        }
+    }
+
+    /// Notes that one more test has been reported.
+    pub(crate) fn reported() {
+        if let Ok(mut held) = PROGRESS.lock() {
+            if let Some(progress) = held.as_mut() {
+                progress.reported += 1;
+            }
+        }
+    }
+
+    /// The harness is done, so a later trap is not a test's.
+    pub(crate) fn done() {
+        if let Ok(mut held) = PROGRESS.lock() {
+            if let Some(progress) = held.as_mut() {
+                progress.active = false;
+            }
+        }
+    }
+}
+
+/// What a trap should add, when one happens inside `khora test`.
+///
+/// Empty under `khora run` and `khora bench`, where the plain message is the
+/// whole story and a harness sentence would be a lie.
+///
+/// **Deliberately not naming one test as the culprit** when the run is
+/// parallel. Several are in flight at once and the harness cannot know which
+/// one divided by zero without asking each fiber, which is exactly the
+/// bookkeeping a trap has no stack to do. It names the ones that were still
+/// running, which is true, and says what did not run, which is the part a
+/// reader is otherwise never told.
+pub(crate) fn trap_context() -> String {
+    let Ok(held) = progress::PROGRESS.lock() else {
+        return String::new();
+    };
+    let Some(progress) = held.as_ref() else {
+        return String::new();
+    };
+    if !progress.active {
+        return String::new();
+    }
+
+    let remaining: Vec<&str> =
+        progress.names[progress.reported.min(progress.names.len())..].iter().map(String::as_str).collect();
+    if remaining.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::from("\nkhora: this ended the test run. ");
+    if remaining.len() == 1 {
+        out.push_str(&format!("`{}` was running.\n", remaining[0]));
+    } else {
+        out.push_str(&format!(
+            "{} test(s) had not been reported: {}.\n",
+            remaining.len(),
+            remaining.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ")
+        ));
+    }
+    out.push_str(
+        "khora: a trap ends the process, so the rest of the run did not happen. \
+         `khora test --filter <name>` runs one at a time.\n",
+    );
+    out
+}
+
 /// Says which assertion in the current test failed.
 ///
 /// **A failing test said only that it had failed.** `test a well formed line
@@ -212,6 +316,11 @@ pub extern "C" fn khora_test_run() -> i32 {
     }
     let filtered_out = declared - tests.len();
 
+    // What a trap should say if one happens during the run below. Recorded
+    // before anything starts, because a trap does not wait for a convenient
+    // moment.
+    progress::begin(tests.iter().map(|t| t.name.clone()).collect());
+
     // **A program that counts objects runs its tests one at a time.**
     //
     // `khora_live_count` reports the whole process's heap, and the blocks below
@@ -295,8 +404,27 @@ pub extern "C" fn khora_test_run() -> i32 {
         if verdict != "ok" {
             failed += 1;
         }
-        let _ = writeln!(std::io::stdout().lock(), "test {name} ... {verdict}");
+        // **Counted before the line is written, not after.** A trap in another
+        // thread reads this the instant it happens, and a test whose verdict
+        // has been decided is not one the reader should be told "had not been
+        // reported" -- which is what the other order produced, listing a test
+        // whose `... ok` was already on the screen.
+        progress::reported();
+        // **Flushed per line, because another thread may end the process.** A
+        // trap writes to stderr, which is unbuffered, while this is stdout,
+        // which is not when it is a pipe. An unflushed `test a ... ok` sitting
+        // in the buffer was emitted *after* the trap's message, or worse,
+        // in the middle of it -- the reported output included the literal line
+        // `khora: test a ... ok`, which attaches the word `khora:` to a passing
+        // test. One flush per test is nothing next to running the test.
+        {
+            let mut out = std::io::stdout().lock();
+            let _ = writeln!(out, "test {name} ... {verdict}");
+            let _ = out.flush();
+        }
     }
+
+    progress::done();
 
     let passed = total - failed;
     let mut out = std::io::stdout().lock();

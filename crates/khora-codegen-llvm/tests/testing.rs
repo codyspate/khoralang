@@ -106,6 +106,70 @@ test \"divides by zero\" {{ assert(7 / zero(3) == 0); }}
     assert_ne!(status.code(), Some(0), "a trapped run is not a pass");
 }
 
+/// A trap says which tests it took down with it.
+///
+/// **The gap this fills:** the test above proves a trapping run ends rather
+/// than hanging, with one test in the suite, so it could not see the part that
+/// mattered. With four tests, one trapping, the run reported `test a ... ok`
+/// and a bare `Int division by zero on fiber 5`, then stopped -- no summary
+/// line, no mention that two further tests never ran, and the trap's message
+/// interleaved into stdout badly enough to produce the literal line
+/// `khora: test a ... ok`. A reader is entitled to conclude the rest passed,
+/// and would be wrong.
+///
+/// A trap still ends the process; `contain.rs` explains why it must. What is
+/// asserted here is that the reader is told what the run did not get to.
+#[test]
+fn a_trap_names_the_tests_that_never_ran() {
+    let exe = build_suite(
+        "suite_trap_report",
+        &format!(
+            "{PRELUDE}
+fn zero(n: Int) -> Int {{ n - n }}
+
+test \"aaa passes\" {{ assert(1 == 1); }}
+
+test \"bbb divides by zero\" {{ assert(7 / zero(3) == 0); }}
+
+test \"ccc never runs\" {{ assert(2 == 2); }}
+
+test \"ddd never runs\" {{ assert(3 == 3); }}
+"
+        ),
+    );
+    let out = Command::new(&exe).output().expect("the suite should run");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert_ne!(out.status.code(), Some(0), "a trapped run is not a pass:\n{text}");
+    assert!(
+        text.contains("this ended the test run"),
+        "the run should say it was cut short:\n{text}"
+    );
+    assert!(
+        text.contains("had not been reported") || text.contains("was running"),
+        "the run should name what it did not reach:\n{text}"
+    );
+
+    // The tests after the trap are the ones a reader is never otherwise told
+    // about. Naming them is the whole point.
+    assert!(
+        text.contains("ccc never runs") && text.contains("ddd never runs"),
+        "both abandoned tests should be named:\n{text}"
+    );
+
+    // **A passing test's line is its own.** The interleaving produced
+    // `khora: test aaa passes ... ok`, which reads as though the harness
+    // prefix belonged to the verdict.
+    assert!(
+        !text.contains("khora: test "),
+        "the trap's prefix should not land inside a verdict line:\n{text}"
+    );
+}
+
 /// A suite that passes says so, and exits 0.
 #[test]
 fn a_passing_suite_reports_every_test() {
