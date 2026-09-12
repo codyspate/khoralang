@@ -72,6 +72,14 @@ pub type Answer = { n: Int };
 fn make(n: Int) -> Answer { { n: n } }
 fn first(a: Answer) -> Int { a.n }
 fn quiet() -> () { }
+
+// **Genuinely behind a pointer**: five fields is past the limit for holding a
+// value inline, so this is a counted object wherever it appears -- which is
+// what a record holding one needs in order to hold a *reference* rather than
+// a copy of the fields.
+pub type Counted = { a: Int, b: Int, c: Int, d: Int, e: Int };
+fn counted(n: Int) -> Counted { { a: n, b: 0, c: 0, d: 0, e: 0 } }
+fn head(c: Counted) -> Int { c.a }
 ";
 
 /// A fiber runs the closure it was handed, and `join` waits for it.
@@ -1183,6 +1191,54 @@ fn main() -> Int {{
     );
     assert_eq!(ran.stdout, "1\n1\n1\n0\n");
     assert_eq!(ran.code, Some(0));
+}
+
+/// **An inline answer holding a counted field survives the join.**
+///
+/// The regression for a double free found by somebody building a process
+/// runner: a record small enough to be held inline crosses a `join` as a word
+/// pointing at the box it was spilled into, and reading it back out copies the
+/// fields into the joining frame. The runtime hands out a reference to the
+/// *box* per joiner and keeps its own, so that joining twice works — but a
+/// reference to the box is not a reference to what the box holds, and without
+/// one this frame and the fiber's stored answer both released the same
+/// pointer. The process aborted with `refcount is already zero` after printing
+/// the right answer, which is the worst shape a memory bug takes: correct
+/// output, then a crash naming nothing that appears in the program.
+///
+/// The trailing `0` is the live-object count, so this fails in both directions
+/// — a missing retain aborts, an eager one leaves the count above zero.
+#[test]
+fn an_inline_answer_holding_a_reference_is_counted_across_a_join() {
+    let ran = run(
+        "fiber_inline_answer",
+        &format!(
+            "{FIBERS}
+pub type Holder = {{ n: Int, held: Counted }};
+
+fn hold() -> Holder {{ {{ n: 7, held: counted(1) }} }}
+
+fn use_it() -> () {{
+  let f = Fiber::spawn(fn () => hold());
+  let h = Fiber::join(f);
+  print(h.n);
+  print(head(h.held));
+}}
+
+fn main() -> Int {{
+  use_it();
+  print(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout, "7\n1\n0\n",
+        "the answer crossed intact and nothing was left over: {:?}",
+        ran.stdout
+    );
+    assert_eq!(ran.code, Some(0), "and the process was not aborted");
 }
 
 /// **A child's failure becomes the joiner's, with the error's own type.**

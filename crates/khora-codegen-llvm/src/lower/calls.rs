@@ -230,6 +230,40 @@ impl<'ctx> Lower<'_, 'ctx> {
         self.drop(value, ty);
     }
 
+    /// Counts what an inline value holds, given the box it crossed in.
+    ///
+    /// **For a reader that copies rather than takes.** A value held inline
+    /// travels as one word pointing at a box, and reading it back out copies
+    /// the fields into the reading frame -- pointers and all. Where the
+    /// structure it came from *gave up* its reference, as a channel's queue
+    /// does, that copy is the only owner and nothing is owed. Where the
+    /// structure keeps one, as a fiber's stored answer does so that joining
+    /// twice works, the copy is a second owner of a pointer counted once, and
+    /// the second release of it aborts the process.
+    ///
+    /// Walks the fields rather than the box: the box's own count is already
+    /// right, and it is what the value is *in* rather than what it is.
+    pub(super) fn retain_spilled(&mut self, word: inkwell::values::IntValue<'ctx>, ty: &Type) {
+        let Some(walk) = self.be.inline_retain(ty) else { return };
+        let ptr = self.be.ctx.ptr_type(inkwell::AddressSpace::default());
+        let object = self
+            .be
+            .builder
+            .build_int_to_ptr(word, ptr, "spilled.retain")
+            .expect("a word as a spilled value");
+        let slot = crate::runtime::field_pointer(self.be.ctx, &self.be.builder, object, 0);
+        let Some(shape) = self.be.unboxed_type(ty) else { return };
+        let value = self
+            .be
+            .builder
+            .build_load(shape, slot, "spilled.fields")
+            .expect("reading a spilled value to count it");
+        self.be
+            .builder
+            .build_call(walk, &[value.into()], "")
+            .expect("counting what a spilled value holds");
+    }
+
     /// The capabilities a call needs, read out of the caller's own bindings.
     ///
     /// A label is in scope because the caller declared it in its own `with`

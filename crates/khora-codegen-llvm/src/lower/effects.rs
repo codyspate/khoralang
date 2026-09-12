@@ -747,6 +747,31 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .build_load(self.be.ctx.i64_type(), slot, "word")
                     .expect("reading the joined word")
                     .into_int_value();
+
+                // **A joined inline value has to be retained on the way out.**
+                //
+                // The answer to a `join` is one word, and for a type held
+                // inline that word is a box the value crossed in. The runtime
+                // hands out a reference to the *box* per joiner and keeps its
+                // own, which is what makes joining twice joining once. But a
+                // reference to the box is not a reference to what the box
+                // holds: reading the value back out copies a `String` pointer
+                // into this frame without counting it, and then two owners --
+                // this frame and the fiber's stored answer -- release the same
+                // pointer. The abort lands on whichever gets there second, as
+                // a double free somewhere with no evidence of a fiber in it.
+                //
+                // A `Channel` has no matching bug because `receive` *moves*
+                // the value out of the queue, so the count is right by there
+                // being one owner throughout.
+                //
+                // Both exits below read the word, so this is not on either of
+                // their branches: a fiber whose row is empty returns straight
+                // out of `word_to_value` and would otherwise take the same
+                // uncounted copy.
+                if self.be.unboxed.holds(&answers) {
+                    self.retain_spilled(word, &answers);
+                }
                 self.release_unless_lent(*fiber, handle, &ty);
 
                 // **The child's failure becomes this frame's**, which is
