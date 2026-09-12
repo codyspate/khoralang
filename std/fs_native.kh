@@ -236,7 +236,10 @@ impl FsWrite {
 /// named for it.
 ///
 /// ```khora
-/// import std::fs::{FsRead, read_text};
+/// module settings::main;
+///
+/// import std::core::{Result, attempt, print};
+/// import std::fs::{FsRead, IoError, read_text};
 ///
 /// fn settings() -> String with { reads: FsRead } raises IoError {
 ///   read_text("config.toml")!
@@ -653,6 +656,7 @@ extern fn khora_fs_create_dir(path: Ptr) -> I32;
 extern fn khora_fs_remove_dir(path: Ptr) -> I32;
 extern fn khora_fs_is_dir(path: Ptr) -> I32;
 extern fn khora_fs_dir_open(path: Ptr) -> Ptr;
+extern fn khora_fs_dir_open_why(path: Ptr, why: Ptr) -> Ptr;
 extern fn khora_fs_dir_next(dir: Ptr, into: Ptr, cap: Int) -> Int;
 extern fn khora_fs_dir_close(dir: Ptr) -> ();
 
@@ -871,12 +875,25 @@ fn name_capacity() -> Int { 4096 }
 fn list_dir(path: String) -> List<String> raises IoError {
   let region = Region::open();
   with { scope: handler for Scope { defer: fn f => Region::defer(region, f) } } {
+    // **The reason, not just the failure.** A directory that is present and
+    // unreadable and one that is not there are both a null handle, and
+    // reporting both as `NotFound` sends somebody looking for a path that is
+    // right where they left it rather than for the permission bit that is
+    // actually stopping them. `open_or_say_why` draws this distinction for
+    // files and the `IoError` documentation describes it as drawn; this is the
+    // same split for directories, reading the same classification.
+    let reasons: Array<Int> = Array::new(1, 0);
     let dir = acquire(
-      String::with_c_string(path, fn p => khora_fs_dir_open(p)),
+      Array::with_data(reasons, fn (why, _n) =>
+        String::with_c_string(path, fn p => khora_fs_dir_open_why(p, why))),
       fn d => khora_fs_dir_close(d),
     );
     if Ptr::is_null(dir) {
-      raise IoError::NotFound(path)
+      if Array::get(reasons, 0) == why_not_found() {
+        raise IoError::NotFound(path)
+      } else {
+        raise IoError::Failed(path)
+      }
     } else {
       collect_names(dir, path)!
     }

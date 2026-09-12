@@ -435,6 +435,41 @@ pub unsafe extern "C" fn khora_fs_dir_open(path: *const u8) -> *mut c_void {
     }) as *mut c_void
 }
 
+/// The same, reporting why it failed.
+///
+/// **The distinction `khora_fs_open_why` draws, for directories.** A directory
+/// that is present and unreadable and one that is not there were both a null
+/// handle, so `std` called both `NotFound` -- and the page documenting
+/// `IoError` makes a point of that having been fixed, because it was, for
+/// files. A caller listing a tree was told a locked directory did not exist,
+/// which is the one answer that stops somebody looking for the permission bit.
+///
+/// # Safety
+///
+/// As [`khora_fs_dir_open`]. `why`, if not null, must be a writable `i64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_fs_dir_open_why(path: *const u8, why: *mut i64) -> *mut c_void {
+    let path = path as usize;
+    let (dir, reason) = blocking(move || {
+        // SAFETY: as above.
+        let Some(path) = (unsafe { path_of(path as *const u8) }) else {
+            return (0usize, OPEN_FAILED);
+        };
+        match std::fs::read_dir(path) {
+            Ok(entries) => (Box::into_raw(Box::new(entries)) as usize, OPEN_OK),
+            // Read from the error itself rather than from `errno`: this is
+            // already the failure `std::fs` observed, and `errno` on this
+            // thread may have moved on.
+            Err(e) => (0usize, classify(e.raw_os_error())),
+        }
+    });
+    if !why.is_null() {
+        // SAFETY: the caller promised a writable word.
+        unsafe { why.write(reason) };
+    }
+    dir as *mut c_void
+}
+
 /// The next entry's name, written into `into`.
 ///
 /// Returns the number of bytes written, `0` when the directory is exhausted,
