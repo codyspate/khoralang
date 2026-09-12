@@ -110,7 +110,15 @@ pub fn new(directory: &Path, library: bool) -> Result<()> {
     let (file, source) = if library {
         (
             "lib.kh",
-            format!("module {name}::lib;\n\n/// What this package offers.\npub fn hello() -> String {{\n  \"hello from {name}\"\n}}\n"),
+            // **The package's own name, not `name::lib`.** The module path is
+            // what a consumer writes, and `module semver::lib` makes them
+            // write `import semver::lib::{..}` -- naming a file that is an
+            // artefact of this scaffold rather than anything about the
+            // library. `module semver` gives them `import semver::{..}`,
+            // which is the import every doc page and every README writes.
+            // Both forms check clean, so nothing enforced this and the
+            // generated one was simply the worse default.
+            format!("module {name};\n\n/// What this package offers.\npub fn hello() -> String {{\n  \"hello from {name}\"\n}}\n"),
         )
     } else {
         (

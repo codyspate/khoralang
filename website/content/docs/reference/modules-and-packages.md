@@ -220,6 +220,54 @@ already fetchable — so the marker records an intention rather than granting a
 permission. What it prevents is depending on somebody's application, or their
 unfinished experiment, because it happened to sit in a repository you fetched.
 
+`publish = true` is checked for a `git` dependency and not for a `path` one.
+A path dependency is a directory you already chose to point at, usually inside
+your own workspace, and refusing it would only mean editing a manifest you
+control to say what you have already said by writing the path.
+
+### Writing a library
+
+```
+khora new semver --lib
+```
+
+writes `src/lib.kh` instead of `src/main.kh`, sets `publish = true`, and
+declares the module as the package's own name:
+
+```khora
+module semver;
+
+/// A version, as its three numbers.
+pub type Version = { major: Int, minor: Int, patch: Int };
+
+/// The version `major.minor.patch`.
+pub fn of(major: Int, minor: Int, patch: Int) -> Version {
+  { major: major, minor: minor, patch: patch }
+}
+```
+
+**That module path is what a consumer types.** `module semver` gives them:
+
+```khora
+import semver::{Version, parse};
+```
+
+A library whose `lib.kh` says `module semver::lib` is accepted and works, but
+everybody depending on it has to write `import semver::lib::{..}` — naming a
+file layout that is the library's business rather than theirs. The scaffold
+writes the bare form for that reason.
+
+`khora build` has nothing to build for a library: a library is compiled as part
+of whatever depends on it, so there is no executable to produce and the command
+says so. `khora check` and `khora test` are the two that apply.
+
+Consuming it from a sibling directory needs a path and nothing else:
+
+```toml
+[dependencies]
+semver = { path = "../semver" }
+```
+
 ## Toolchain pinning
 
 Every project says which compiler builds it, and the field is required:
