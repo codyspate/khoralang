@@ -9,6 +9,10 @@ language rule, a supported feature, and unfinished work.
 
 **The ones most likely to affect you:**
 
+- [A wrapper constructor needs its
+  type](#a-wrapper-constructor-needs-its-type-outside-its-module) outside the
+  module that declares it — `Money::Money(1)`, not the `Money(1)` the reference
+  teaches, and the diagnostic names no cause.
 - [There is no signal API](#a-program-cannot-handle-a-signal) — `SIGTERM` from
   `systemctl stop`, a container runtime or a Kubernetes eviction kills the
   process outright, with no cleanup and no chance to finish in-flight work.
@@ -186,6 +190,40 @@ say the same thing in the setting where it bites.
 `Ctrl-C` handling is sometimes discussed as though it were blocked on
 [cancellation over a nursery](#cancelling-a-fiber-that-is-inside-a-nursery-does-not-return).
 That hang is real and would matter next; the signal API's absence comes first.
+
+## A wrapper constructor needs its type outside its module
+
+A wrapper type built the way [Types](/docs/reference/types/) teaches:
+
+```khora
+derive(Eq, Ord, Show)
+pub type Money = Int;
+```
+
+is constructed `Money(499)` **in the module that declares it**, and that is the
+spelling the reference shows. From any other module the same expression fails:
+
+```
+error: the type of this expression was never worked out, and nothing else was
+reported — so either it needs an annotation, or this is a gap in the compiler
+worth reporting
+  --> ./src/main.kh:7:18
+```
+
+Write `Money::Money(499)` instead. Adding the annotation the message suggests
+does **not** help, and the qualified form is the one the reference singles out
+as *not* the spelling — so the message, the fix and the documentation disagree
+with each other.
+
+Only construction is affected. These all cross a module boundary correctly:
+
+- `match m { Money(value) => value }` — matching, bare, from another module
+- `Colour::Blue(3)` and `Colour::Red` — variant constructors
+- `{ x: 1, y: 2 }` — record literals
+
+So a wrapper used only inside its own module behaves as documented, and one
+passed around a package needs the qualified constructor at every construction
+site.
 
 ## The fiber scheduler
 

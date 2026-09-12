@@ -391,6 +391,15 @@ pub type UserId = Int;
 
 `Show` prints `UserId(1)`, not `UserId::UserId(1)` — the one case is the type.
 
+**Outside the module that declares it, the constructor needs its type:**
+`UserId::UserId(1)`. The bare `UserId(1)` only resolves in the declaring
+module; from anywhere else it fails with *"the type of this expression was
+never worked out"* — which names no cause and suggests an annotation that does
+not help. Matching is unaffected: `match id { UserId(value) => value }` works
+across modules either way, and so do variant constructors and record literals.
+This is a compiler limitation rather than the intended spelling; it is filed in
+[Limitations](/docs/limitations/#a-wrapper-constructor-needs-its-type-outside-its-module).
+
 The underlying type may be anything, a generic one included, which is how a
 long type gets a short name:
 
