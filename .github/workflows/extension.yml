@@ -41,6 +41,10 @@ on:
 
 permissions:
   contents: write
+  # Trusted publishing: the workflow proves its own identity to the marketplace
+  # and receives a short-lived credential, so no token is stored anywhere. Inert
+  # unless the publish step below asks for a token.
+  id-token: write
 
 env:
   TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
@@ -196,8 +200,38 @@ jobs:
       # `env` is not in scope for its own condition. Both wrong shapes fail the
       # same silent way -- a skip indistinguishable from a missing token, which
       # would keep skipping after the credentials arrived.
-      - name: Publish to the Visual Studio Marketplace
-        if: ${{ env.VSCE_PAT != '' }}
+      # **Trusted publishing, which is the one that survives December 2026.**
+      #
+      # GitHub Actions proves this workflow's identity straight to the
+      # marketplace and gets a short-lived credential back, so there is no
+      # token here to store, rotate or leak. Switched on by a repository
+      # *variable* rather than a secret, because there is no secret involved --
+      # which is the whole point, and a secret-shaped switch would imply
+      # otherwise.
+      #
+      # `@next` is pinned deliberately: `--oidc` is implemented and works, but
+      # it is `hideHelp` and ships only in the prerelease line, so the stable
+      # release does not list it. Microsoft's own README documents the flag
+      # their CLI hides. Drop the pin when it reaches stable.
+      #
+      # The alternative Microsoft recommends is Entra ID with workload identity
+      # federation -- an Azure subscription, a managed identity, a service
+      # connection, a federated credential, and an undocumented `az rest` call
+      # to discover the identity's Azure DevOps profile, which the marketplace
+      # keeps separate from both its ARM resource ID and its Entra object ID.
+      # That is built for Azure Pipelines. This repository already has an
+      # identity the marketplace will trust.
+      - name: Publish to the Visual Studio Marketplace (trusted publishing)
+        if: ${{ vars.VSCE_TRUSTED_PUBLISHING == 'true' }}
+        run: npx --yes @vscode/vsce@next publish --oidc --packagePath "$(ls dist/*.vsix)"
+
+      # The PAT path, for a publisher that does not have trusted publishing
+      # yet. Global PATs -- which is what "All accessible organizations" means,
+      # and the marketplace requires it -- are retired on 1 December 2026, so
+      # this is a bridge rather than a destination. Skipped when trusted
+      # publishing is on, so turning that on is the whole migration.
+      - name: Publish to the Visual Studio Marketplace (token)
+        if: ${{ vars.VSCE_TRUSTED_PUBLISHING != 'true' && env.VSCE_PAT != '' }}
         run: npx --yes @vscode/vsce publish --packagePath "$(ls dist/*.vsix)"
 
       # Open VSX is what VSCodium, Cursor, Gitpod and Eclipse Theia search.
