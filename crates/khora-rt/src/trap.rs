@@ -83,6 +83,14 @@ pub unsafe extern "C" fn khora_overflow(what: *const u8, len: u64) -> ! {
     // dying anyway. So everything with a `Drop` is confined to a block that
     // ends before `stop` is reached.
     let contained = {
+        // **stdout first, or the two streams corrupt each other.** The harness
+        // writes `test a ... ok` to stdout, which is block-buffered when it is
+        // a pipe; this writes to stderr, which is not. A trap during a run
+        // produced the literal line `khora: test a ... ok` -- the trap's own
+        // prefix with a *passing* test's line inside it -- and output whose
+        // length differed run to run. Flushing first costs nothing on the way
+        // out of a process that is about to die.
+        let _ = std::io::stdout().flush();
         let mut err = std::io::stderr().lock();
         let _ = writeln!(
             err,
@@ -108,6 +116,14 @@ pub unsafe extern "C" fn khora_overflow(what: *const u8, len: u64) -> ! {
 pub extern "C" fn khora_todo() -> ! {
     // The same block, for the same reason as `khora_overflow`.
     let contained = {
+        // **stdout first, or the two streams corrupt each other.** The harness
+        // writes `test a ... ok` to stdout, which is block-buffered when it is
+        // a pipe; this writes to stderr, which is not. A trap during a run
+        // produced the literal line `khora: test a ... ok` -- the trap's own
+        // prefix with a *passing* test's line inside it -- and output whose
+        // length differed run to run. Flushing first costs nothing on the way
+        // out of a process that is about to die.
+        let _ = std::io::stdout().flush();
         let mut err = std::io::stderr().lock();
         let _ = writeln!(err, "khora: this is not written yet{}", on_which_fiber());
         where_from(&mut err);
@@ -125,6 +141,14 @@ pub extern "C" fn khora_todo() -> ! {
 pub extern "C" fn khora_bounds_fail(index: i64, len: i64) -> ! {
     // The same block, for the same reason as `khora_overflow`.
     let contained = {
+        // **stdout first, or the two streams corrupt each other.** The harness
+        // writes `test a ... ok` to stdout, which is block-buffered when it is
+        // a pipe; this writes to stderr, which is not. A trap during a run
+        // produced the literal line `khora: test a ... ok` -- the trap's own
+        // prefix with a *passing* test's line inside it -- and output whose
+        // length differed run to run. Flushing first costs nothing on the way
+        // out of a process that is about to die.
+        let _ = std::io::stdout().flush();
         let mut err = std::io::stderr().lock();
         let _ = writeln!(
             err,
@@ -153,6 +177,12 @@ pub extern "C" fn khora_bounds_fail(index: i64, len: i64) -> ! {
 /// library that swallowed one in silence would be worse than one that died.
 fn say_what_happens_next(err: &mut impl Write) -> bool {
     if !crate::contain::can_contain() {
+        // **Nothing is contained here, and the reader is told what that cost.**
+        // Under `khora test` this is the difference between a run that reports
+        // itself and one that stops mid-sentence: the harness knows which tests
+        // it had not reached, and a trap is the only moment anybody wants that
+        // list. Empty outside a test run, where there is no list to give.
+        let _ = err.write_all(crate::testing::trap_context().as_bytes());
         return false;
     }
     let freed = crate::contain::discard();
@@ -296,8 +326,55 @@ fn from_khora_down(captured: &str) -> &str {
         opens_a_frame(&captured[after..]).then_some(after)
     });
     match start {
-        Some(start) => &captured[start..],
+        Some(start) => trim_below_khora(&captured[start..]),
         None => captured,
+    }
+}
+
+/// Drops the host's frames from the *bottom* of a trimmed backtrace.
+///
+/// **The top was trimmed; the bottom was not, and under `khora test` the bottom
+/// is most of it.** A trap in a test printed three Khora frames and then
+/// thirteen of `khora_rt::testing`, `std::sys::backtrace`,
+/// `std::thread::lifecycle` and `core::panicking` — carrying
+/// `/rustc/<hash>/library/std/...` and the absolute path of the machine the
+/// compiler was built on into a user's crash output. Under `khora run` the
+/// tail is four short frames (`main`, `__libc_start_main`, `_start`) that cost
+/// nothing, which is why nobody had looked.
+///
+/// Cuts after the last frame that names a Khora module, identified by the `$`
+/// the mangler puts in every symbol it emits (`btrace$main$deep`). A frame that
+/// opens with no `$` and no source line below it is the host's.
+///
+/// **Returns the input unchanged when no Khora frame is found**, matching the
+/// rule above it: the failure mode is the noisy output this replaced, never a
+/// backtrace with something real missing.
+fn trim_below_khora(trimmed: &str) -> &str {
+    // Where each frame starts, so a cut lands on a boundary rather than inside
+    // a frame's `at <file>:<line>` continuation.
+    let openers: Vec<usize> = std::iter::once(0)
+        .filter(|_| opens_a_frame(trimmed))
+        .chain(trimmed.match_indices('\n').filter_map(|(i, _)| {
+            let after = i + 1;
+            opens_a_frame(&trimmed[after..]).then_some(after)
+        }))
+        .collect();
+
+    // The last frame whose name carries a module path. `kh$tagged_call0` is the
+    // runtime's own trampoline and has no `$`-separated module, so it does not
+    // count as Khora's.
+    let last_khora = openers.iter().rposition(|&start| {
+        let line = trimmed[start..].lines().next().unwrap_or("");
+        let name = line.split_once(':').map(|(_, rest)| rest.trim()).unwrap_or("");
+        name.contains('$') && !name.starts_with("kh$")
+    });
+
+    match last_khora {
+        Some(index) => match openers.get(index + 1) {
+            Some(&next) => trimmed[..next].trim_end(),
+            None => trimmed,
+        },
+        None => trimmed,
     }
 }
 
@@ -346,6 +423,85 @@ mod tests {
     fn a_trap_with_no_frames_below_it_is_left_alone() {
         let only = "   5: khora_rt::trap::khora_overflow\n             at trap.rs:33\n";
         assert_eq!(from_khora_down(only), only);
+    }
+
+    /// A capture taken under the test harness, where the host's frames sit
+    /// *below* the program's rather than above them.
+    ///
+    /// Abridged from a real one: the full version carried thirteen host frames
+    /// and the absolute path of the machine the compiler was built on.
+    const UNDER_HARNESS: &str = concat!(
+        "   1: khora_rt::trap::where_from\n",
+        "   2: khora_overflow\n",
+        "   3: traptest$main$#test$1\n",
+        "             at ./src/main.kh:9:14\n",
+        "   4: kh$tagged_call0\n",
+        "   5: khora_rt::testing::khora_test_run::{closure#2}\n",
+        "             at /general/khoralang/crates/khora-rt/src/testing.rs:242:25\n",
+        "   6: std::sys::backtrace::__rust_begin_short_backtrace\n",
+        "             at /rustc/48a229ceaefd/library/std/src/sys/backtrace.rs:166:18\n",
+    );
+
+    /// The host's frames come off the bottom as well as the top.
+    #[test]
+    fn the_hosts_frames_come_off_the_bottom_too() {
+        let trimmed = from_khora_down(UNDER_HARNESS);
+
+        assert!(
+            trimmed.starts_with("   3: traptest$main$#test$1"),
+            "the trapping test's frame is first: {trimmed:?}"
+        );
+        assert!(
+            trimmed.contains("./src/main.kh:9:14"),
+            "its source line is kept: {trimmed:?}"
+        );
+
+        // The point of the cut: a user's crash output is not a tour of the
+        // compiler's build directory.
+        assert!(
+            !trimmed.contains("/general/khoralang"),
+            "the build machine's paths are gone: {trimmed:?}"
+        );
+        assert!(
+            !trimmed.contains("/rustc/"),
+            "the Rust toolchain's paths are gone: {trimmed:?}"
+        );
+        assert!(
+            !trimmed.contains("khora_rt::testing"),
+            "the harness's own frames are gone: {trimmed:?}"
+        );
+        assert!(
+            !trimmed.contains("kh$tagged_call0"),
+            "the runtime trampoline is not a Khora frame: {trimmed:?}"
+        );
+    }
+
+    /// The `run` shape still keeps every Khora frame.
+    ///
+    /// **The risk in cutting from the bottom is cutting too early.** A program
+    /// with three of its own frames must keep all three; only the C runtime
+    /// below them goes.
+    #[test]
+    fn every_khora_frame_survives_the_bottom_cut() {
+        let capture = concat!(
+            "   1: khora_overflow\n",
+            "   2: btrace$main$deep\n",
+            "             at ./src/main.kh:5:45\n",
+            "   3: btrace$main$middle\n",
+            "             at ./src/main.kh:6:33\n",
+            "   4: btrace$main$main\n",
+            "             at ./src/main.kh:10:18\n",
+            "   5: main\n",
+            "   6: __libc_start_main\n",
+            "   7: _start\n",
+        );
+        let trimmed = from_khora_down(capture);
+
+        for frame in ["btrace$main$deep", "btrace$main$middle", "btrace$main$main"] {
+            assert!(trimmed.contains(frame), "{frame} should survive: {trimmed:?}");
+        }
+        assert!(!trimmed.contains("__libc_start_main"), "the C runtime goes: {trimmed:?}");
+        assert!(!trimmed.contains("_start"), "the C runtime goes: {trimmed:?}");
     }
 
     /// **The shipped entry points are `#[no_mangle]`, so a real capture spells
