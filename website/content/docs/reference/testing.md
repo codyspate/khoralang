@@ -120,6 +120,35 @@ cover successful completion, typed failure, cancellation where it applies, and
 the cleanup or rollback each of those paths owes. [Cancellation-safe
 resources](/docs/cookbook/cancellation-safe-resources/) is that written out.
 
+### A trap ends the whole run
+
+An `assert` that fails, or a `raise` that escapes, is a *failing test*: it is
+reported, the other tests still run, and the process exits 1. A **trap** is
+different — dividing by zero, indexing past the end, arithmetic overflow — and
+ends the process immediately, including the tests that had not run yet:
+
+```
+test a ... ok
+khora: Int division by zero on fiber 8
+note: re-run with KHORA_BACKTRACE=1 to see where
+
+khora: this ended the test run. 3 test(s) had not been reported: `b traps`, `c`, `d`.
+khora: a trap ends the process, so the rest of the run did not happen. `khora test --filter <name>` runs one at a time.
+```
+
+Tests run concurrently, so how many verdicts appear before the trap varies
+between runs — a test whose result had not been printed yet is listed as not
+reported, even if it would have passed. What does not vary is that the run says
+it ended early and names what it did not reach.
+
+Trapping cannot be contained into a failing test:
+recovering would need an unwinder to run the reference-count operations between
+the trap and a landing point, and a fiber abandoned without them leaks
+everything it was holding.
+
+So a trap in a test is a bug to fix rather than a result to read, and
+`khora test --filter <name>` is how to work on one test while another traps.
+
 ## Write a benchmark
 
 `bench` takes the same named-block shape:

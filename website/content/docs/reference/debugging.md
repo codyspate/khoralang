@@ -64,7 +64,17 @@ lldb ./build/myapp
 (lldb) run
 ```
 
-Linker symbols carry the module that defines them and a `kh$` prefix — `kh$myapp$main$handle` for `handle` in `myapp::main`. The debug information records the source name as well, which is why a backtrace prints `handle` rather than the mangled form, but breaking by file and line avoids having to find out which one your debugger wants.
+Linker symbols carry the module that defines them and a `kh$` prefix — `kh$myapp$main$handle` for `handle` in `myapp::main`. The debug information records the source name as well, so a debugger can show `handle`, but breaking by file and line avoids having to find out which one your debugger wants. **A backtrace prints the qualified form**, `myapp$main$handle`, because the frame is resolved from the symbol table rather than from the debug information:
+
+```
+khora: Int division by zero
+   2: btrace$main$deep
+             at ./src/main.kh:5:45
+   3: btrace$main$middle
+             at ./src/main.kh:6:33
+```
+
+The numbering starts partway in, commonly at 2. The runtime's own frames are cut from the top of the capture — `Backtrace::force_capture` and the trap entry point sit above the line that trapped, and they are the same frames in every backtrace. The numbers are the ones the capture assigned, so the first one you see is whatever the trimmed frames left; nothing is missing below it.
 
 **What is not verified.** Nothing in CI drives a debugger, so stepping, frame inspection and variable display are not covered by any test. Line tables are emitted and the linker is told about them; whether every Khora construct produces a frame a debugger renders usefully is unmeasured. Treat this section as a starting point rather than a supported workflow, and prefer a backtrace or a `print` when you need an answer you can rely on.
 

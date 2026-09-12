@@ -15,6 +15,8 @@ let count: Int = 42;
 let names: List<String> = [];
 ```
 
+**`List` has to be imported.** There is no prelude: `List`, `Dict`, `Option`, `Result`, `print` and everything else in `std::core` must be named in an `import` in every file that writes them, including the types that look built in. The snippets on this page show the annotation under discussion and not the `import std::core::{List};` above it; [Declarations](/docs/reference/declarations/#names-that-need-no-import) has the rule. Only `Int`, `Float`, `Bool`, `Char`, `String` and the fixed-width numerics are keywords of the language rather than library names.
+
 Parameters and returns:
 
 ```khora
@@ -82,6 +84,23 @@ A `mut` field can be assigned through a value of that record type; an ordinary f
 ```khora
 let seen: Tally = { name: "hits", count: 0 };
 seen.count = seen.count + 1;
+```
+
+**The annotation is load-bearing, and there are no anonymous records.** A
+record literal is checked *against* a declared type, so `{ name: "hits", count: 0 }`
+is a `Tally` because something said so — the annotation here, a parameter's
+type at a call, or a function's return type. A literal with nowhere to get a
+type from is refused:
+
+```
+error: no record type has exactly the fields `hit`, `value`
+```
+
+which most often means a `let` with no annotation, or an accumulator handed to
+`List::fold` whose shape was never declared. Declaring the type is the fix:
+
+```khora
+pub type Pick = { take: Bool, value: String };
 ```
 
 This is what in-place aggregation is written out of, and the fast shape for

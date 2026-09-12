@@ -13,6 +13,8 @@ The syntax of `module`, `import`, `pub` and `const` is in
 the programs a package builds, dependency resolution, and where the boundary of
 a package falls.
 
+**There is no prelude.** Every `std::core` name a file writes — `List`, `Dict`, `Option`, `Result`, `print`, `Show` — needs an `import`, including the ones that look built in; only `Int`, `Float`, `Bool`, `Char`, `String` and the fixed-width numerics are the language's own. [Names that need no import](./declarations/#names-that-need-no-import) states the rule. Worth knowing before the first build, because the error arrives as a surprise about `[a, b, c]` rather than about imports.
+
 ## Package manifest
 
 A minimal package:

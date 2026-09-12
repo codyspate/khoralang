@@ -10,6 +10,86 @@ answer that is now right, then the rest. A bug that produced a *silently wrong*
 answer is listed under Breaking as well as Fixed, because code written around
 it will behave differently now.
 
+## Unreleased
+
+Another round of strangers building real programs against the published
+documentation, and this time the tools that tell you whether your program works
+were the ones lying.
+
+The one to read first is the test and benchmark misattribution: with `test` or
+`bench` blocks in more than one file, verdicts and timings were reported under
+the wrong names. A test whose body was `assert(2 == 2)` could be reported
+`FAILED`, and a benchmark ladder could appear to get faster as its input grew.
+
+### Breaking
+
+- **A dependency's `test` blocks are no longer part of your build.** They were,
+  with three consequences: a consumer could `import` a library's test module
+  and use types written for tests, `khora test` in a consumer ran every
+  dependency's suite — so somebody else's failing test failed your run — and
+  `khora doc` published a page for each test module in a library's public API.
+
+  Listed as breaking because a program that imported a dependency's test module
+  no longer compiles. That import was never intended to work; nothing in a
+  library's published surface should depend on how its author organised tests.
+
+### Fixed
+
+- **`khora test` and `khora bench` reported results under the wrong names when
+  blocks were spread across files.** Test keys are numbered per file, so the
+  nth block of one file and the nth of another shared one, and the lookup that
+  paired a compiled body with its name ignored which module it came from.
+
+  The visible effects: a test that cannot fail reported as failing, another
+  missing from the report entirely, totals that described a suite that did not
+  exist, and a `Dict` insertion benchmark that appeared to run six times faster
+  with four times the keys. The measurements themselves were correct; only the
+  names on them were wrong, so there was nothing in the output to suggest a
+  mix-up.
+
+  Listed under Fixed rather than Breaking because no program's behaviour
+  changes — but a suite whose verdicts you have been reading may not say what
+  you thought it said.
+
+- **A trapping test no longer reports the run as passing.** A suite of four
+  tests, one dividing by zero, printed one `... ok` line and a bare
+  `Int division by zero on fiber 5`, then stopped: no summary, no failure
+  count, and no indication that two further tests never ran. The trap's output
+  interleaved with the harness's badly enough to produce the line
+  `khora: test a ... ok`.
+
+  A trap still ends the process — containing one needs an unwinder, and
+  `contain.rs` has the argument — but the run now names the tests it did not
+  reach and says why they did not run.
+
+- **Backtraces no longer print the build machine's paths.** Under `khora test`,
+  thirteen of sixteen frames were the runtime's own, carrying
+  `/rustc/<hash>/...` and absolute paths from the machine the compiler was
+  built on. The frames above the trapping line were trimmed; the ones below
+  were not, and under `khora run` the tail is short enough that nobody had
+  looked.
+
+- **`khora new --lib` generates the module declaration consumers expect.**
+  (Was `module <name>::lib`, which forced `import <name>::lib::{...}`.)
+
+### Documentation
+
+- **The absence of a prelude is stated where a reader will meet it.** Every
+  `std::core` name needs an `import`, including `List`, `Dict` and `Option`,
+  which look built in. The rule was on Declarations; the snippets that omit the
+  import line are on Types and Modules and packages, and two separate readers
+  lost time to the same surprise.
+
+- **A record literal needs a declared type, and the four ways it can get one.**
+  `{ hit: false, value: "none" }` as a `fold` seed fails with `no record type
+  has exactly the fields ...`; Types showed an annotated example without saying
+  the annotation was what made it work.
+
+- **A backtrace prints the qualified symbol**, `btrace$main$deep`, not the
+  bare source name the Debugging page promised.
+
+- **`extern fn` cannot link against a native library** — documented, not fixed.
+
 ## 0.2.0 — 2026-09-11
 
 Editor work, a manifest change, and -- from five rounds of strangers building
