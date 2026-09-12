@@ -78,7 +78,7 @@ test "a record carries its level and its message" {
   };
   assert_that(count(lines) == 2, "recorded ${count(lines)} lines, not two");
   let shown = Shared::get(lines);
-  assert_that(shown == "[info starting, warn nearly done]", "recorded ${shown}");
+  assert_that(shown == "info starting;warn nearly done;", "recorded ${shown}");
 }
 
 test "attributes keep the order they were given" {
@@ -94,7 +94,7 @@ test "attributes keep the order they were given" {
   };
   let shown = Shared::get(lines);
   assert_that(
-    shown == "[info retrying job=abc attempt=2 retry=true]",
+    shown == "info retrying job=abc attempt=2 retry=true;",
     "the attributes came out as ${shown}",
   );
 }
@@ -109,7 +109,7 @@ test "a level below the minimum says nothing" {
   };
   assert_that(count(lines) == 2, "only warn and error survive: " + Shared::get(lines));
   let shown = Shared::get(lines);
-  assert_that(shown == "[warn loud, error louder]", "recorded ${shown}");
+  assert_that(shown == "warn loud;error louder;", "recorded ${shown}");
 }
 
 test "the silent logger says nothing at all" {
