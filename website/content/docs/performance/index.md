@@ -12,6 +12,11 @@ runtimes it is measured against. This page says what that measures, what it
 does not, how to run it yourself, and why every figure published here before
 September 2026 was between two and twelve times too high.
 
+**This page is about Khora's performance, not yours.** The commands below run
+from the compiler's repository, so an installed toolchain does not have them.
+If your own program is slower than you want, [Making your program
+faster](./your-program/) is the page you want.
+
 A benchmark number without the ladder that produced it is unfalsifiable, and an
 unfalsifiable number in a language's marketing makes every other claim in the
 documentation worth less. So the conditions a figure has to meet are written
