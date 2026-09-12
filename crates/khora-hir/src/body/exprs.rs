@@ -465,16 +465,37 @@ impl<'a> Ctx<'a> {
             // is not a value — a bare `UserId` in expression position can only
             // be the constructor. Only a newtype has one of these: a record
             // declares no case, and a variant's cases have names of their own.
-            if let Some(variant) =
-                self.map.variants_of(only).find(|v| v.name == *only).cloned()
+            // Its own declarations first, then what it imported: a local
+            // `Money` shadows an imported one, which is what shadowing means.
+            // **The imported half was missing entirely**, which is why
+            // `Money(499)` failed in every file except the one declaring
+            // `Money` -- the guard never fired, the name fell through to the
+            // item table as a *type*, and a type is not callable.
+            if let Some(variant) = self
+                .map
+                .variants_of(only)
+                .find(|v| v.name == *only)
+                .or_else(|| {
+                    self.scope
+                        .variants
+                        .iter()
+                        .find(|v| v.name == *only && v.type_name == *only)
+                })
+                .cloned()
             {
                 return self.add_expr(
                     Expr::Path(crate::Resolution::Variant {
-                        module: self
-                            .map
-                            .module
-                            .clone()
-                            .unwrap_or_else(|| crate::ModulePath::new(vec![])),
+                        // **The module that declares the type, not this one.**
+                        // Stamping the current module here is what made
+                        // `Money(499)` fail everywhere except the file that
+                        // declared `Money`: the resolution claimed a `Money`
+                        // declared *here*, no such type existed, and the
+                        // inference variable was left for the "never worked
+                        // out" audit to report. `Money::Money(499)` worked
+                        // because the two-segment path carries the module it
+                        // found. Same reasoning as errata 46, which fixed the
+                        // pattern side and left this one.
+                        module: self.home_of_type(&variant.type_name),
                         type_name: variant.type_name,
                         name: variant.name,
                     }),

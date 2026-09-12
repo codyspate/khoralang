@@ -1193,3 +1193,35 @@ fn implementing_an_imported_trait_once_is_fine() {
         khora_types::diagnostics(&db, two).iter().map(|e| e.message.clone()).collect();
     assert!(found.is_empty(), "nothing is wrong with this: {found:?}");
 }
+
+/// **A wrapper type is constructed by name from anywhere it is imported.**
+///
+/// `type Money = Int;` declares one constructor, `Money`, and
+/// `reference/types` teaches `Money(499)` as the way to build one -- singling
+/// out `Money::Money(499)` as *not* the form. Outside the declaring module the
+/// taught spelling was the one that did not work: the bare name resolved
+/// against this file's own declarations only, so an imported wrapper never
+/// matched, fell through to the item table as a *type*, and left an inference
+/// variable for the "never worked out" audit to report. The advice that error
+/// gives -- add an annotation -- did not help either, because the constructor
+/// still did not resolve.
+#[test]
+fn an_imported_wrapper_is_constructed_by_its_bare_name() {
+    let db = KhoraDatabase::new();
+    let declaring = SourceFile::new(
+        &db,
+        "money.kh".into(),
+        "module money;\n\npub type Money = Int;\n".to_string(),
+    );
+    let using = SourceFile::new(
+        &db,
+        "app.kh".into(),
+        "module app;\n\nimport money::{Money};\n\
+         pub fn charge() -> Money { Money(499) }\n"
+            .to_string(),
+    );
+    SourceRoot::new(&db, vec![declaring, using]);
+    let found: Vec<String> =
+        khora_types::diagnostics(&db, using).iter().map(|e| e.message.clone()).collect();
+    assert!(found.is_empty(), "`Money(499)` is how the reference builds one: {found:?}");
+}
