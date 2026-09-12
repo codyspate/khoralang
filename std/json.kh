@@ -481,19 +481,45 @@ fn string_at(text: String, at: Int) -> Result<Scanned, JsonError> {
   }
 }
 
-/// The same run-copying as `escaped`, in the other direction.
+/// Scans the inside of a string literal, from `at`, with `done` holding what
+/// earlier escapes have already contributed and `run` the start of the plain
+/// stretch being accumulated.
+///
+/// **A loop, because this used to recurse once per character.** Every ordinary
+/// byte was a tail call, so the depth of the recursion was the length of the
+/// string: a 50 KB document killed the process on the main thread and an 11 KB
+/// one inside a request fiber, where the stack is smaller. That is a remote
+/// denial of service for any service parsing a request body -- which is what
+/// `cookbook/json-api` tells the reader to build -- and it needed no malformed
+/// input, only a long one. Escapes are still recursive *per escape*, which is
+/// bounded by how many escapes the document has rather than by its length.
 fn inside_at(text: String, run: Int, at: Int, done: String) -> Result<Scanned, JsonError> {
-  if at >= String::byte_length(text) {
-    Result::Err({ at: at, expected: "a closing quote" })
-  } else {
+  let length = String::byte_length(text);
+  let mut run = run;
+  let mut at = at;
+  let mut done = done;
+  let mut answer: Option<Result<Scanned, JsonError>> = Option::None;
+  loop {
+    if at >= length {
+      answer = Option::Some(Result::Err({ at: at, expected: "a closing quote" }));
+      break
+    };
     let byte = U8::to_int(String::byte(text, at));
     if byte == 34 {
-      Result::Ok({ text: done + String::slice(text, run, at), at: at + 1 })
+      answer = Option::Some(Result::Ok({ text: done + String::slice(text, run, at), at: at + 1 }));
+      break
     } else if byte == 92 {
       let so_far = done + String::slice(text, run, at);
       match escape_at(text, at + 1) {
-        Result::Err(why) => Result::Err(why),
-        Result::Ok(found) => inside_at(text, found.at, found.at, so_far + found.text),
+        Result::Err(why) => {
+          answer = Option::Some(Result::Err(why));
+          break
+        },
+        Result::Ok(found) => {
+          done = so_far + found.text;
+          run = found.at;
+          at = found.at;
+        },
       }
     } else if byte < 32 {
       // **RFC 8259 forbids an unescaped control character in a string**, and
@@ -501,10 +527,20 @@ fn inside_at(text: String, run: Int, at: Int, done: String) -> Result<Scanned, J
       // so a document Khora had read could be one no other parser would.
       // `encode` has always written them as `\u00XX` going the other way,
       // which is what made the asymmetry easy to miss. Roadmap 16.8.
-      Result::Err({ at: at, expected: "an escape: a control character must be written `\\u00XX`" })
+      answer = Option::Some(Result::Err({
+            at: at,
+            expected: "an escape: a control character must be written `\\u00XX`",
+          }));
+      break
     } else {
-      inside_at(text, run, at + 1, done)
+      at = at + 1;
     }
+  };
+  match answer {
+    Option::Some(found) => found,
+    // Unreachable: every path out of the loop sets it. A `match` rather than
+    // an `unwrap` that does not exist here.
+    Option::None => Result::Err({ at: at, expected: "a closing quote" }),
   }
 }
 

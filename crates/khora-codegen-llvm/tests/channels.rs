@@ -224,6 +224,15 @@ fn main() -> Int {{ go(); print(khora_live_count()); 0 }}
 /// The first value goes in, the second parks, and the cancellation gets it
 /// out. The value it was holding is released rather than leaked, which is
 /// what the live count at the end is for.
+///
+/// **It waits for the channel to be full rather than for 50 ms.** Sleeping and
+/// hoping assumes the worker has been scheduled, which on a loaded runner it
+/// has not: this failed on Windows CI with `"9\n"` where `"1\n9\n"` was
+/// expected -- not the second send completing, but the *first* one never
+/// having happened, because the fiber had not started inside the sleep. A
+/// depth of 1 on a channel bounded to 1 is proof that the first send landed,
+/// which is the precondition this test actually needs. `print` is not a
+/// cancellation point, so the `1` still arrives once the send has returned.
 #[test]
 fn cancelling_a_parked_send_unwinds_it() {
     let ran = run_bounded(
@@ -240,7 +249,15 @@ fn worker(pipe: Channel<Int>) -> () raises Oops {{
 fn main() -> Int {{
   let pipe: Channel<Int> = Channel::bounded(1);
   let hand = Fiber::spawn(fn () => worker(pipe)!);
-  khora_sleep(50);
+  // Bounded, so a runtime that never runs the worker fails the assertion
+  // below rather than hanging here.
+  let mut waited = 0;
+  loop {{
+    if Channel::depth(pipe) >= 1 {{ break }};
+    if waited > 600 {{ break }};
+    khora_sleep(5);
+    waited = waited + 1;
+  }};
   Fiber::cancel(hand);
   Fiber::wait(hand);
   print(9);

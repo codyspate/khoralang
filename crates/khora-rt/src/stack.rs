@@ -38,10 +38,19 @@
 /// named `List::sort`, `fold` and `length` as the shape to look at, which was
 /// true when every walk in `std` was a recursion. They are loops now, and so
 /// are `String::split`, `join` and `repeat`, so a note pointing at them sends
-/// somebody to read code that cannot be the cause. What is left is a function
-/// somebody wrote, or a `derive` walking a value that is nested rather than
-/// long -- and those are worth naming instead.
-const MESSAGE: &[u8] = b"khora: the stack ran out\nnote: a function that recurses as deep as its input will do this. `std` walks\n      lists and strings with loops, so it is most likely a function of your\n      own -- or a derived `Eq`, `Ord` or `Show` on a value nested tens of\n      thousands deep.\n";
+/// somebody to read code that cannot be the cause.
+///
+/// **And then it claimed too much in the other direction.** "`std` walks lists
+/// and strings with loops, so it is most likely a function of your own" is
+/// false for `std::json::parse`, which recurses once per character of a string
+/// literal: a 50 KB document kills the process on the main thread and an 11 KB
+/// one inside a request fiber, with no user code in the frame at all. A reader
+/// told to look at their own handlers spends an afternoon there.
+///
+/// So the note names both possibilities and neither as "most likely". It
+/// cannot say which without a backtrace, and the thing it must not do is rule
+/// one out.
+const MESSAGE: &[u8] = b"khora: the stack ran out\nnote: a function that recurses as deep as its input will do this -- one you\n      wrote, a derived `Eq`, `Ord` or `Show` on a deeply nested value, or\n      `std::json::parse` on a document with a very long string in it, which\n      recurses per character. Most of `std` walks with loops and is not the\n      cause; `json` is the exception.\n";
 
 /// Installs the stack guard, once, before anything else runs.
 ///

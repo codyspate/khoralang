@@ -400,6 +400,23 @@ type Lines<A> = {
 /// folds over *lines* was supposed to hold text, and a tool pointed at a
 /// binary by accident should be able to say so and exit rather than abort.
 /// Converting without asking would trap, which no caller can catch.
+///
+/// **`step` cannot fail, and that is a real limitation rather than a
+/// choice.** Every `List` combinator takes `(..) -> A with 'ef raises 'er`;
+/// this does not. So a fold that wants to raise -- a malformed line reported
+/// with its number, which is the usual reason to fold over lines at all --
+/// does not compile, and the error names the lambda rather than the missing
+/// row on the parameter it is checked against.
+///
+/// Carry the failure in the accumulator and raise after the fold, which is
+/// what this function does internally for bytes that are not text. The
+/// alternative people find first is `read_text` with `List::fold`, and it
+/// gives up the only reason to use this: the file no longer has to fit in
+/// memory.
+///
+/// Widening the row is the fix and is not small -- both rows have to thread
+/// through `fold_chunks` and `fold_from`, and `with { reads: FsRead } + 'ef`
+/// does not keep `reads` in scope today.
 pub fn fold_lines<A>(path: String, start: A, step: (A, String) -> A) -> A
   with { reads: FsRead }
   raises IoError

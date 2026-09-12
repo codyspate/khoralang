@@ -134,6 +134,72 @@ means.
 
 ## Unreleased
 
+### Breaking
+
+- **`std::fs::fold_lines` raises `IoError` on bytes that are not UTF-8, where
+  it used to trap.** The old behaviour was `SIGABRT` and exit 134, which no
+  program could catch; `read_text` on the same file already raised. A tool that
+  means "this file is not text" can now say so and choose its own exit status.
+
+  Listed as breaking because a program written around the trap — a wrapper
+  script watching for 134, or anything relying on the process dying — sees a
+  catchable failure and exit 1 instead.
+
+### Fixed
+
+- **`std::json::parse` could be killed by one long string, which made it a
+  remote denial of service.** The scanner inside a string literal recursed once
+  per ordinary character, so the depth of the recursion was the length of the
+  string: 50 KB was fatal on the main thread and about 11 KB inside a request
+  fiber, where the stack is smaller. No malformed input was needed, only a long
+  one — and `cookbook/json-api` tells the reader to set
+  `Router::holding(1048576)`, so any service accepting a name, a description or
+  a base64 field could be stopped by a single unauthenticated request. Inside a
+  fiber there was no message at all, just a dead process.
+
+  It is a loop now, and 2 MB parses. Escapes still recurse, once per escape,
+  which is bounded by how many the document has rather than by its length.
+
+- **The stack-exhaustion note said the cause was most likely your own code.**
+  It named `std` as walking "lists and strings with loops", which was true of
+  everything except `json::parse` — the one function in `std` that could
+  actually do this. A reader whose service died parsing a request body was sent
+  to audit their handlers. The note now names both possibilities and neither as
+  the likely one, because without a backtrace it cannot know which.
+
+- **A listener that could not bind said nothing and the process did not stop.**
+  Two halves. The runtime's `a fiber ended with an error nobody was waiting
+  for` now prints when the fiber *finishes*, not when its handle is released —
+  a server holds its handle and polls a stop flag, so the one shape every
+  service is written in was the one the message could not reach. And
+  `Fiber::finished` is new, because nothing could ask whether a spawned fiber
+  was still running: `join`, `wait` and letting the handle go all block. A
+  supervisor loop can now notice its listener died and exit instead of turning
+  for ever.
+
+- **A service could not be restarted on the same port for about a minute.**
+  `listen_on` set no `SO_REUSEADDR`, so a port left in `TIME_WAIT` by the
+  program's own previous run was refused. First start worked, every restart
+  inside the window did not, which is the edit-stop-start loop. Fixed on Linux
+  and macOS — with the BSD constants there, which are not Linux's — and
+  deliberately not on Windows, where the same option permits binding over a
+  *live* socket and the rebind being worked around is not refused anyway.
+
+- **`khora check` and `khora test` passed where `khora build` failed on the
+  same source.** A package with anything under `src/bin` built each program
+  with the package's own `src/main.kh` correctly excluded, and its test modules
+  left in — so a `src/main_test.kh` imported a module that was no longer in the
+  compilation. A test module is now excluded too, recognised by containing a
+  `test` block rather than by its file name.
+
+- **`install.sh` and `khora toolchain install` failed when run as root**, which
+  is how a container, a `Dockerfile` `RUN` line and most CI steps install
+  anything. `tar` restores an archive's stored ownership when it believes it is
+  root, the release archives carry the build machine's uid, and every entry
+  failed with `Cannot change ownership to uid 1001`. At uid 1000 tar ignores
+  stored ownership, which is why installing by hand always worked. Both now
+  pass `--no-same-owner`.
+
 ### Changed
 
 - **A span knows what it is inside, and `std::log` correlates by itself.**
@@ -157,11 +223,28 @@ means.
 
 ### Added
 
+- **`Fiber::finished`**, which answers whether a fiber has finished without
+  waiting for it to. The question a supervisor loop needs and the only one
+  every other entry point answered by blocking.
+
 - **`std::trace::current`**, `Context::trace_id` and `Context::span_id`. The
   last two render the ids as OpenTelemetry writes them, thirty-two and sixteen
   lower-case hex digits, which is the form a collector's search box takes.
 
 ### Documentation
+
+- **Cancelling a fiber whose body is a nursery never returns**, and that is now
+  on the limitations page with a reproduction and the workaround. The runtime
+  has described it in a comment since before 0.1.0 — a nursery checks for its
+  own cancellation between rounds of waiting, so one already blocked on
+  children that never finish never checks again — but the page listing nursery
+  surprises did not mention the only one that hangs. `Ctrl-C` handling built on
+  `Fiber::cancel` deadlocks; cancel through a flag the work itself reads.
+
+- **The installation page names what the install script needs.** `curl` or
+  `wget`, `tar`, and CA certificates: a slim container image has none of them,
+  so the first command on the page could not run there and the page said
+  nothing about it.
 
 - **`khoralang.com/docs/` serves `v0.1`, the documentation for the released
   compiler**, with `next` beside it for the one being written. `/docs/` used to
@@ -169,6 +252,12 @@ means.
   every reader to pages marked as describing a compiler they could not install.
   A released tree is cut from its tag and records which one; a section is per
   release allowed to break, so the major from 1.0 and the minor before it.
+
+- **Cutting a release now cuts its documentation tree.** `release.yml`
+  mentioned the documentation nowhere, so the versioned tree was two `git`
+  commands a maintainer was trusted to remember, described in a comment.
+  `scripts/cut-docs.sh` does it from the tag and the workflow opens a pull
+  request rather than pushing.
 
 ## 0.1.0 — 2026-09-03
 
