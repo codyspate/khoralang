@@ -1,0 +1,186 @@
+---
+title: Your first Khora project
+sidebar:
+  order: 2
+---
+
+A Khora package has a `khora.toml` manifest and source files, conventionally under `src/`. This walkthrough adds a small function and a test, then formats, checks, tests, builds, and runs the package with the installed `khora` toolchain.
+
+If `khora --version` does not work yet, start with [Installation](/docs/getting-started/installation/).
+
+## Package structure
+
+Create a directory like this:
+
+```text
+hello_khora/
+├── khora.toml
+└── src/
+    └── main.kh
+```
+
+`src/` is the convention and `khora new` writes it, but **the package is the
+manifest's directory**, not `src/` alone: every `.kh` file beside `khora.toml`
+or under any directory below it is compiled. A scratch file dropped at the
+package root is part of the package and its errors are reported against it.
+
+Three directories are left out of that walk: `target/`, `.git/`, and any
+directory with a `khora.toml` of its own — so a nested package or a vendored
+copy stays its own package rather than being absorbed into its parent. `src/bin/`
+is left out too, but only of the package's own compilation: each file there is
+built as a program of its own against the package's modules, and is still
+checked.
+
+Delete a scratch file or move it under a directory with its own `khora.toml`;
+there is no ignore list.
+
+The manifest names the package and says which Khora builds it:
+
+```toml
+[package]
+name = "hello_khora"
+version = "0.1.0"
+
+# Which Khora builds this project. Required.
+[toolchain]
+version = "0.2.0"
+```
+
+The `[toolchain]` version is required, and it is what makes a project build the
+same way on the next machine: run any command here with a different Khora on
+your path and it hands the command over to the one this project asks for. Every
+key is in [the manifest reference](/docs/reference/manifest/).
+
+## Write some Khora
+
+Put this in `src/main.kh`:
+
+```khora
+module hello_khora::main;
+
+import std::core::{assert, print};
+
+fn double(value: Int) -> Int {
+  value * 2
+}
+
+test "double returns twice its input" {
+  assert(double(21) == 42);
+}
+
+pub fn main() -> Int {
+  print("Hello, Khora!");
+  0
+}
+```
+
+The [Language Reference](/docs/reference/) goes deeper on each construct once the workflow is running.
+
+## Check before building
+
+From the package root:
+
+```bash
+khora check .
+```
+
+Use `check` constantly while you work. It validates the package without paying the cost of native code generation and linking.
+
+## Format
+
+Khora has one canonical formatter:
+
+```bash
+khora fmt .
+```
+
+In CI, check formatting without changing files:
+
+```bash
+khora fmt . --check
+```
+
+See [Values and functions](/docs/reference/expressions/) for the core expression and function model.
+
+## Run the tests
+
+```bash
+khora test .
+```
+
+The test runner discovers `test` blocks in the package and reports failures through the CLI. For testing patterns around capabilities, typed failure, and cancellation, see [Testing](/docs/reference/testing/).
+
+## Document what you wrote
+
+```bash
+khora doc
+```
+
+Run inside a package, this reads the `///` and `//!` comments from its `src`
+and writes a page per module into `docs/api` beside the `khora.toml`. Name
+sources or a destination when you want different ones, as in
+`khora doc src --out reference`.
+
+It keeps a `.khora-doc` record beside the pages listing the ones it generated.
+That is what lets a later run delete the page of a module you removed without
+touching anything it did not write, so a hand-written file in the same
+directory is safe and is reported rather than removed. `khora doc --check`
+writes nothing and fails when a checked-in page no longer matches its source,
+which is how a project keeps generated documentation honest in CI.
+
+## Build a native executable
+
+```bash
+khora build .
+```
+
+The program goes in `build/`, named after the package, so nothing a build makes
+lands among your sources. `khora new` writes a `.gitignore` with `build/` in it
+for exactly that reason.
+
+Run it on macOS or Linux:
+
+```bash
+./build/hello_khora
+```
+
+Or on Windows:
+
+```powershell
+.\build\hello_khora.exe
+```
+
+`--out` puts it somewhere else, under whatever name you give it:
+
+```bash
+khora build . --out dist/hello
+```
+
+You should see:
+
+```text
+Hello, Khora!
+```
+
+For an optimized build, add `--release`:
+
+```bash
+khora build . --release
+```
+
+## In an editor
+
+The language server uses the same compiler queries as `khora check`, so editor diagnostics and command-line diagnostics stay aligned. Continue with [Editor setup](/docs/getting-started/editor/).
+
+## What to learn next
+
+A useful path from here is:
+
+1. [Expressions](/docs/reference/expressions/) — values, functions, lambdas, pipelines
+2. [Types](/docs/reference/types/) — records, variants, wrappers, generics
+3. [Patterns](/docs/reference/patterns/) — matching and destructuring
+4. [Failures](/docs/reference/failures/) — `raises`, `!`, `catch`, `attempt`
+5. [Capabilities](/docs/reference/capabilities/) — `effect`, `handler`, `with`, `context`
+6. [Concurrency](/docs/reference/concurrency/) — fibers, nurseries, cancellation
+
+For exact declarations while you work, browse the [Standard Library](/docs/stdlib/) reference.
