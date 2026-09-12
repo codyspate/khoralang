@@ -170,7 +170,7 @@ fn split_port(text: String) -> Split {
 /// what its users will type. [The permissions design note](https://github.com/codyspate/khoralang/blob/main/docs/design/permissions.md) records why that is
 /// the boundary and what it costs a CLI.
 pub fn normalized(path: String) -> String {
-  without_dots(swap_byte(path, 0, ""))
+  without_dots(String::replace(path, "\\", "/"))
 }
 
 /// `./a` and `a/./b` are `a` and `a/b`.
@@ -194,17 +194,6 @@ fn without_dots(path: String) -> String {
 /// `/` and there is one spelling of a boundary to split on.
 fn climbs(path: String) -> Bool {
   List::any(String::split(path, "/"), fn piece => piece.eq(".."))
-}
-
-/// Rebuilds `text` with every `\\` written as `/`.
-fn swap_byte(text: String, at: Int, acc: String) -> String {
-  if at >= String::byte_length(text) {
-    acc
-  } else {
-    let here = String::slice(text, at, at + 1);
-    let next = if String::byte(text, at) == 92 { "/" } else { here };
-    swap_byte(text, at + 1, "${acc}${next}")
-  }
 }
 
 /// The index of the last byte `wanted` accepts, walking back from `at`.

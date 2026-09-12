@@ -202,6 +202,90 @@ fn granted_project(name: &str) -> PathBuf {
     root
 }
 
+/// **A path with a character outside ASCII goes through the checker intact.**
+///
+/// The normalizer walked the path a byte at a time and sliced it a character
+/// at a time, so the first byte of any multi-byte character cut one in half
+/// and trapped: `this slice cuts a character in half, so it is not a String`,
+/// exit 134, from inside `std` with no path named and nothing of the caller's
+/// in the backtrace. Every filesystem call passes through here, so one
+/// accented filename in a directory took the program down -- and `attempt`
+/// could not catch it, a trap not being a failure.
+///
+/// Both halves are asserted. That the program survives is the bug; that the
+/// grant still refuses what it should is the fix not having been an
+/// amputation.
+#[cfg(feature = "llvm")]
+#[test]
+fn a_path_outside_ascii_is_checked_rather_than_halved() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("perm_utf8");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).expect("a src directory");
+    std::fs::create_dir_all(root.join("data")).expect("a data directory");
+    std::fs::write(
+        root.join("khora.toml"),
+        pinned(
+            "[package]\nname = \"utf8paths\"\nversion = \"0.1.0\"\n\n\
+             [permissions.fs]\nread = [\"data/**\"]\nwrite = [\"data/**\"]\n",
+        ),
+    )
+    .expect("a manifest");
+    std::fs::write(
+        root.join("src").join("main.kh"),
+        "module main;\n\n\
+         import std::core::{print};\n\
+         import std::fs::{FsRead, FsWrite, IoError, read_text, write_text};\n\n\
+         fn look(label: String, path: String) -> () with { reads: FsRead } {\n\
+         \x20 let text = read_text(path)! catch {\n\
+         \x20   IoError::Denied(p) => \"DENIED ${p}\",\n\
+         \x20   IoError::NotFound(p) => \"missing ${p}\",\n\
+         \x20   IoError::Failed(p) => \"failed ${p}\",\n\
+         \x20 };\n\
+         \x20 print(\"${label}: ${text}\");\n\
+         }\n\n\
+         fn main() -> Int {\n\
+         \x20 with { reads: FsRead::real(), writes: FsWrite::real() } {\n\
+         \x20   write_text(\"data/café.txt\", \"accented\")! catch {\n\
+         \x20     IoError::Denied(p) => print(\"DENIED ${p}\"),\n\
+         \x20     IoError::NotFound(p) => print(\"missing ${p}\"),\n\
+         \x20     IoError::Failed(p) => print(\"failed ${p}\"),\n\
+         \x20   };\n\
+         \x20   look(\"granted\", \"data/café.txt\");\n\
+         \x20   look(\"refused\", \"secrets/café.txt\");\n\
+         \x20   print(\"survived\");\n\
+         \x20 }\n\
+         \x20 0\n\
+         }\n",
+    )
+    .expect("a source file");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_khora"))
+        .args(["run", "."])
+        .current_dir(&root)
+        .output()
+        .expect("could not run `khora`");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(
+        !text.contains("cuts a character in half"),
+        "an accented path must not trap in the permission checker: {text}"
+    );
+    assert!(
+        text.contains("granted: accented"),
+        "the granted accented path has to read back: {text}"
+    );
+    assert!(
+        text.contains("DENIED secrets/café.txt"),
+        "and one outside the grant is still refused: {text}"
+    );
+    assert!(text.contains("survived"), "the program has to reach its end: {text}");
+    assert_eq!(out.status.code(), Some(0), "and exit normally: {text}");
+}
+
 /// **The grant reaches the running program.** A path inside it is written and
 /// read back; a path outside it is refused, by the program itself, with the
 /// case that names the manifest rather than the disk.
