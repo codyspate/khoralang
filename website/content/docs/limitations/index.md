@@ -9,12 +9,16 @@ language rule, a supported feature, and unfinished work.
 
 **The ones most likely to affect you:**
 
+- [There is no signal API](#a-program-cannot-handle-a-signal) — `SIGTERM` from
+  `systemctl stop`, a container runtime or a Kubernetes eviction kills the
+  process outright, with no cleanup and no chance to finish in-flight work.
 - [Cancelling a fiber whose body is a nursery never
   returns](#cancelling-a-fiber-that-is-inside-a-nursery-does-not-return) — a
-  hang, not a delay, and the reason `Ctrl-C` handling needs a flag rather than
-  `Fiber::cancel`.
+  hang, not a delay, and the reason a `Ctrl-C` handler could not be built on
+  `Fiber::cancel` even if there were a way to catch the signal.
 - [A bounded nursery runs `limit + 1` children](#what-a-nursery-actually-does),
-  and a limit of zero means no limit at all.
+  and a limit of zero means no limit at all — so **a bound of exactly one
+  cannot be written**, which is the value a "one at a time" flag wants most.
 - [A child's failure usually does not cancel its siblings](#a-childs-failure-usually-cancels-no-siblings).
 - [A cancelled fiber waiting on a child finishes waiting, then runs the rest of
   its body](#a-cancelled-fiber-parked-in-fiberwait-keeps-going).
@@ -150,6 +154,39 @@ rather than a fix waiting to be typed. Until there is one, a program's ability
 to listen is bounded by the operating system and by whatever runs it, not by its
 manifest.
 
+## A program cannot handle a signal
+
+`std` has no signal API. Nothing catches `SIGTERM`, `SIGINT` or `Ctrl-C`, and
+there is no way to ask for one.
+
+A signal therefore takes the process the way the kernel takes any process that
+has not asked otherwise: **immediately, without unwinding.** Nursery
+cancellation does not run, scoped finalizers do not run, buffered output is not
+flushed, and in-flight work is dropped. `systemctl stop`, a container runtime's
+graceful shutdown, and a Kubernetes eviction all begin with `SIGTERM`, so all
+three kill a Khora program outright.
+
+Measured, on a program that prints, sleeps, then prints again:
+
+```
+kill -TERM -> wait-status 143; output: started|
+kill -KILL -> wait-status 137; output: started|
+```
+
+The second line never prints in either case. **`SIGTERM` and `SIGKILL` are
+indistinguishable from inside the program**, which is the practical shape of
+the limitation: there is no "graceful" case to write code for.
+
+So a program that must not lose work has to be crash-only: durable state
+advances by one atomic append or rename, and a program killed between any two
+instructions is correct at the next start. [Running on
+Linux](/docs/deployment/linux/) and [Containers](/docs/deployment/containers/)
+say the same thing in the setting where it bites.
+
+`Ctrl-C` handling is sometimes discussed as though it were blocked on
+[cancellation over a nursery](#cancelling-a-fiber-that-is-inside-a-nursery-does-not-return).
+That hang is real and would matter next; the signal API's absence comes first.
+
 ## The fiber scheduler
 
 A fiber is an operating-system thread. The M:N scheduler — stackful coroutines on a worker pool — is built and is opt-in with `KHORA_FIBERS=scheduler`.
@@ -243,6 +280,7 @@ measuring, and a program built on the prose will meet them as flakiness.
 | --- | --- | --- |
 | `bounded_nursery(4)` | 5 children run at once | subtract one when the limit is a real resource |
 | `bounded_nursery(0)` | **no limit at all** | check a computed limit before passing it |
+| a bound of exactly 1 | **not expressible** — `bounded_nursery(0)` is unbounded, `bounded_nursery(1)` admits 2 | accept 2, or guard the work with a `Shared` flag of your own |
 | a child fails | siblings usually keep running | have long work check a `Shared` flag itself |
 | a child fails in a bounded nursery | new children still start | as above |
 | `Fiber::cancel` on a fiber whose body is a nursery | **never returns** if a child does not stop on its own | cancel through a `Shared` flag the children read |
@@ -290,9 +328,11 @@ That is the same advice as *a child's failure usually cancels no siblings*
 below, and for the same underlying reason: **a cancellation reaches a fiber, not
 the work inside it.** Long-running work has to check something.
 
-`Ctrl-C` handling built on `Fiber::cancel` over a nursery deadlocks. Fixing it
-properly means delivering a cancellation where it is *raised* rather than where
-it is next noticed, which is a change to what a fiber owns.
+`Ctrl-C` handling built on `Fiber::cancel` over a nursery deadlocks — but that
+is the second obstacle, not the first: there is [no way to catch the signal at
+all](#a-program-cannot-handle-a-signal). Fixing the hang properly means
+delivering a cancellation where it is *raised* rather than where it is next
+noticed, which is a change to what a fiber owns.
 
 ### The bound is on children held, not work in flight
 
