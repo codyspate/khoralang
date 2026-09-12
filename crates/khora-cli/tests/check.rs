@@ -352,6 +352,71 @@ pub fn main() -> Int { 0 }
     );
 }
 
+/// **A library keeps its tests in the file it publishes, and stays importable.**
+///
+/// `khora new --lib` writes the API and a `test` block into one `src/lib.kh`,
+/// and `reference/testing` teaches exactly that. An earlier attempt at the
+/// test-module rule excluded dependency *files* holding a test, which dropped
+/// that file -- so every scaffolded library became unimportable, and the error
+/// pointed at the consumer's call site rather than at anything the author did.
+///
+/// The rule is about module paths, not files: `lib.kh` declares the package's
+/// own module, so it belongs no matter what else it declares.
+#[test]
+fn a_library_with_a_test_beside_its_api_is_still_importable() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lib_with_test");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("app")).expect("a workspace");
+    std::fs::create_dir_all(root.join("csv")).expect("a workspace");
+
+    // The scaffold's shape: one file, API and test together.
+    std::fs::write(
+        root.join("csv/lib.kh"),
+        "module csv;
+import std::core::{assert};
+
+pub fn parse() -> Int { 7 }
+
+test \"parse returns seven\" {
+  assert(parse() == 7);
+}
+",
+    )
+    .expect("a fixture");
+    std::fs::write(
+        root.join("app/khora.toml"),
+        "[package]
+name = \"app\"
+version = \"0.1.0\"
+
+[dependencies]
+csv = { path = \"../csv\" }
+",
+    )
+    .expect("a manifest");
+    std::fs::write(
+        root.join("app/main.kh"),
+        "module app::main;
+import csv::{parse};
+pub fn main() -> Int { parse() }
+",
+    )
+    .expect("a fixture");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_khora"))
+        .arg("check")
+        .arg(root.join("app"))
+        .output()
+        .expect("could not run `khora`");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned()
+        + &String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        out.status.success(),
+        "a library whose tests sit beside its API must still be importable:\n{text}"
+    );
+}
+
 /// The standard library is there without being declared, the way `rustc` finds
 /// its sysroot. A program that has never written a manifest still has one.
 #[test]

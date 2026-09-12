@@ -89,6 +89,19 @@ impl Resolution {
     pub fn directories(&self) -> Vec<PathBuf> {
         self.packages.iter().map(|p| p.directory.clone()).collect()
     }
+
+    /// The same, each paired with the name of the package it is.
+    ///
+    /// **A package owns the module tree rooted at its name**, and deciding
+    /// which of a dependency's files a consumer compiles needs both halves:
+    /// the directory to walk, and the name a module has to sit under to be
+    /// part of what that package published.
+    pub fn named_directories(&self) -> Vec<(String, PathBuf)> {
+        self.packages
+            .iter()
+            .map(|p| (p.name.clone(), p.directory.clone()))
+            .collect()
+    }
 }
 
 /// Resolves the dependencies of the manifest at `manifest_path`.

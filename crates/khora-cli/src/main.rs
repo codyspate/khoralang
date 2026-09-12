@@ -2796,26 +2796,30 @@ fn collect_sources(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     }
 
     for root in &roots {
-        for dependency in dependencies_of(root)? {
-            // **A dependency's tests are not part of this build.** They were,
-            // and the consequences went further than a slower compile: a
-            // library's `test` modules became modules of the consuming
-            // program, so `import lib_test::{..}` resolved and reached types
-            // the library wrote for its own tests, and `khora test` in the
-            // consumer ran every dependency's suite -- which means somebody
-            // else's failing test failing your run, and your test count being
-            // a number about code you did not write.
+        for (package, dependency) in dependencies_of(root)? {
+            // **A dependency contributes the module tree it published, and
+            // nothing else.** A package named `csv` owns `csv` and every
+            // `csv::*`; a `module csv_test` beside it is the author's own
+            // scaffolding. Compiling that in made `import csv_test::{..}`
+            // resolve, ran the dependency's tests as part of the consumer's
+            // suite -- so somebody else's failing test failed your run -- and
+            // gave a test module a page in the library's published API.
             //
-            // Recognised by holding a `test` declaration, not by a `_test.kh`
-            // name, for the reason the `src/bin` exclusion below gives: the
-            // filename is a convention nothing enforces.
+            // Keyed on the module rather than on what a file declares, which
+            // is what two earlier attempts got wrong in opposite directions.
+            // Excluding every file holding a `test` dropped `src/lib.kh`,
+            // where `khora new --lib` puts your code *and* your tests, so a
+            // scaffolded library became unimportable and the error pointed at
+            // the consumer's call site. Excluding only files with nothing a
+            // caller could reach let a test module declaring a `pub` fixture
+            // type back in. The module path is the thing a consumer can
+            // actually write, so it is the thing that decides.
             //
-            // The package's *own* tests are untouched -- `roots` is gathered
-            // above this loop -- because running those is what `khora test`
-            // is for.
+            // The package's *own* files are untouched -- `roots` is gathered
+            // above this loop -- so `khora test` still runs your tests.
             let mut theirs = Vec::new();
             gather(&dependency, &mut theirs)?;
-            theirs.retain(|file| !holds_a_test(file));
+            theirs.retain(|file| module_belongs_to(module_of(file).as_deref(), &package));
             out.append(&mut theirs);
         }
     }
@@ -2905,7 +2909,7 @@ fn gather(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 /// and two commands reporting the same error differently is worse than one
 /// reporting it. A manifest that parses and then *cannot be resolved* is
 /// different: nothing else will say so, so that error is returned.
-fn dependencies_of(root: &Path) -> Result<Vec<PathBuf>> {
+fn dependencies_of(root: &Path) -> Result<Vec<(String, PathBuf)>> {
     let Some(manifest_path) = nearest_manifest(root) else { return Ok(Vec::new()) };
     let parsed = match khora_manifest::Manifest::load(&manifest_path) {
         Ok(parsed) => parsed,
@@ -2943,7 +2947,56 @@ fn dependencies_of(root: &Path) -> Result<Vec<PathBuf>> {
         );
     }
 
-    Ok(resolution.directories())
+    Ok(resolution.named_directories())
+}
+
+/// Whether `module` is part of what the package named `package` published.
+///
+/// **A package owns the module tree rooted at its name.** `csv` owns `csv` and
+/// every `csv::*` beneath it; a module called anything else in the same
+/// directory is the author's private business, and a consumer has no way to
+/// name it on purpose.
+///
+/// That rule is what distinguishes the two shapes a dependency's `test` blocks
+/// come in. `khora new --lib` writes code *and* tests into `src/lib.kh` under
+/// `module csv`, which is the library and has to be compiled. A separate
+/// `src/csv_test.kh` under `module csv_test` is a test module, and compiling it
+/// into a consumer made `import csv_test::{..}` resolve, ran its tests as part
+/// of the consumer's suite, and gave it a page in the library's published API.
+///
+/// **Decided by module, not by declarations.** An earlier attempt excluded
+/// files holding a test and nothing a caller could reach; a test module that
+/// declares a `pub` type for its own fixtures slipped through it, and the
+/// scaffold's single file was excluded by the attempt before that. The module
+/// path is the thing a consumer can actually write, so it is the thing that
+/// decides.
+///
+/// A file with no `module` at all is kept: it declares nothing importable, so
+/// excluding it could only lose something the build needs.
+fn module_belongs_to(module: Option<&str>, package: &str) -> bool {
+    let Some(module) = module else { return true };
+    // **Three spellings of one path, normalised to one.** A TOML key cannot
+    // hold `::`, so a manifest writes `"acme.greet"`; source writes
+    // `module acme::greet;`; and `item_map` renders that back with dots.
+    // Comparing any two of those raw says no, and said no here: the whole
+    // library was dropped and its consumer could not import it.
+    let normalise = |path: &str| path.replace("::", ".");
+    let owner = normalise(package);
+    let module = normalise(module);
+    module == owner || module.starts_with(&format!("{owner}."))
+}
+
+/// The module a source file declares, if it declares one.
+///
+/// **Asked of `item_map`, not of the syntax tree directly.** A module path is
+/// several tokens and `ItemMap` already holds the assembled answer, so reading
+/// it here keeps one spelling of "what module is this file" in the build. A
+/// first attempt matched on a `Decl::Module` variant that does not exist.
+fn module_of(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let db = KhoraDatabase::new();
+    let file = SourceFile::new(&db, path.to_path_buf(), text);
+    khora_hir::item_map(&db, file).module.as_ref().map(ToString::to_string)
 }
 
 /// Refuses a dependency that declares `extern fn` without being allowed to.
