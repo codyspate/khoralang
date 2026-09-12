@@ -12,9 +12,12 @@
   "dependencies": {
     "@astrojs/starlight": "latest",
     "astro": "latest",
-    "sharp": "latest"
+    "sharp": "^0.35.4"
   },
   "devDependencies": {
     "wrangler": "latest"
+  },
+  "overrides": {
+    "sharp": "$sharp"
   }
 }
