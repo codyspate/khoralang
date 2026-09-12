@@ -2797,7 +2797,26 @@ fn collect_sources(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
 
     for root in &roots {
         for dependency in dependencies_of(root)? {
-            gather(&dependency, &mut out)?;
+            // **A dependency's tests are not part of this build.** They were,
+            // and the consequences went further than a slower compile: a
+            // library's `test` modules became modules of the consuming
+            // program, so `import lib_test::{..}` resolved and reached types
+            // the library wrote for its own tests, and `khora test` in the
+            // consumer ran every dependency's suite -- which means somebody
+            // else's failing test failing your run, and your test count being
+            // a number about code you did not write.
+            //
+            // Recognised by holding a `test` declaration, not by a `_test.kh`
+            // name, for the reason the `src/bin` exclusion below gives: the
+            // filename is a convention nothing enforces.
+            //
+            // The package's *own* tests are untouched -- `roots` is gathered
+            // above this loop -- because running those is what `khora test`
+            // is for.
+            let mut theirs = Vec::new();
+            gather(&dependency, &mut theirs)?;
+            theirs.retain(|file| !holds_a_test(file));
+            out.append(&mut theirs);
         }
     }
 

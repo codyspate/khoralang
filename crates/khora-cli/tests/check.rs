@@ -259,6 +259,99 @@ pub fn main() -> Int { greeting() }
     assert_eq!(count_of(&text), 2 + std_files(), "the app and its dependency:\n{text}");
 }
 
+/// **A dependency's tests are not modules of the program that depends on it.**
+///
+/// They were, and it went further than a slower build: a library's `test`
+/// module was a module of the consuming program, so `import greet_test::{..}`
+/// resolved and reached types the library wrote for its own tests, and
+/// `khora test` in the consumer ran every dependency's suite — somebody
+/// else's failing test failing your run.
+///
+/// Both halves are asserted. The dependency's ordinary code still arrives,
+/// because a library with tests in it is still a library.
+#[test]
+fn a_dependencys_tests_are_not_part_of_this_build() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("deps_tests");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("app")).expect("a workspace");
+    std::fs::create_dir_all(root.join("greet")).expect("a workspace");
+
+    std::fs::write(
+        root.join("greet/greet.kh"),
+        "module acme::greet;\npub fn greeting() -> Int { 7 }\n",
+    )
+    .expect("a fixture");
+    // The library's own test module, carrying a `pub` type a consumer must
+    // not be able to reach.
+    std::fs::write(
+        root.join("greet/greet_test.kh"),
+        "module acme::greet_test;\n\
+         import std::core::{assert};\n\
+         import acme::greet::{greeting};\n\
+         pub type TestOnly = { secret: Int };\n\
+         test \"it greets\" {\n\
+         \x20 assert(greeting() == 7);\n\
+         }\n",
+    )
+    .expect("a fixture");
+    std::fs::write(
+        root.join("app/khora.toml"),
+        "[package]
+name = \"app\"
+version = \"0.1.0\"
+
+[dependencies]
+\"acme.greet\" = { path = \"../greet\" }
+",
+    )
+    .expect("a manifest");
+    std::fs::write(
+        root.join("app/main.kh"),
+        "module app::main;
+import acme::greet::{greeting};
+pub fn main() -> Int { greeting() }
+",
+    )
+    .expect("a fixture");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_khora"))
+        .arg("check")
+        .arg(root.join("app"))
+        .output()
+        .expect("could not run `khora`");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned()
+        + &String::from_utf8_lossy(&out.stderr);
+
+    assert!(out.status.success(), "the dependency should still work:\n{text}");
+    assert_eq!(
+        count_of(&text),
+        2 + std_files(),
+        "the app and its dependency, and not the dependency's test module:\n{text}"
+    );
+
+    // And the test module is unreachable by name, which is the half a file
+    // count cannot show.
+    std::fs::write(
+        root.join("app/main.kh"),
+        "module app::main;
+import acme::greet_test::{TestOnly};
+pub fn main() -> Int { 0 }
+",
+    )
+    .expect("a fixture");
+    let reaching = Command::new(env!("CARGO_BIN_EXE_khora"))
+        .arg("check")
+        .arg(root.join("app"))
+        .output()
+        .expect("could not run `khora`");
+    let reaching_text = String::from_utf8_lossy(&reaching.stdout).into_owned()
+        + &String::from_utf8_lossy(&reaching.stderr);
+    assert!(
+        !reaching.status.success(),
+        "a consumer must not reach into a dependency's tests:\n{reaching_text}"
+    );
+}
+
 /// The standard library is there without being declared, the way `rustc` finds
 /// its sysroot. A program that has never written a manifest still has one.
 #[test]
