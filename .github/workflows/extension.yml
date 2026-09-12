@@ -103,6 +103,27 @@ jobs:
             || { echo "no extension.js in $file"; exit 1; }
           unzip -l "$file" | grep -q "vscode-languageclient" \
             || { echo "no language client in $file"; exit 1; }
+          unzip -l "$file" | grep -q "extension/icon.png" \
+            || { echo "no icon in $file: the gallery tile would be blank"; exit 1; }
+          # **A build tool in the package is a shipped defect, not waste.**
+          # `sharp` renders the icon and carries a platform-specific native
+          # binary; installed on demand rather than declared, so `vsce` has no
+          # dev-dependency entry to prune it by. It went from 487 KB to 8.7 MB
+          # once, and a package built on one runner would carry another
+          # platform's binary.
+          if unzip -l "$file" | grep -qE "sharp|@img"; then
+            echo "a build tool reached $file"; exit 1
+          fi
+          size=$(unzip -l "$file" | tail -1 | awk '{print $1}')
+          # The package unpacks to about 1.8 MB, nearly all of it the language
+          # client. Four is loose enough that a dependency growing does not
+          # fail a release, and tight enough to catch the 8.7 MB the native
+          # renderer made of it.
+          if [ "$size" -gt 4000000 ]; then
+            echo "$file unpacks to $size bytes, which is far more than an"
+            echo "editor client needs; something is riding along"
+            exit 1
+          fi
           echo "$file looks like an extension"
 
       # **`--prerelease`, on a release that is not provisional.** The flag is

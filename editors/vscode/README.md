@@ -186,3 +186,21 @@ There are two lists, and they live in separate repository rules:
   `context` at the start of a declaration, `test`/`bench` before a name string.
   These approximations are exactly the kind of thing semantic tokens will
   replace.
+
+## The icon
+
+`icon.png` is generated from the site's own `website/public/favicon.svg`:
+
+```
+npm install --no-save sharp && node scripts/make-icon.mjs
+```
+
+It is committed, because packaging should not need a native image library.
+Regenerate it when the site's mark changes; the script is the only place the
+two are connected, and the alternative is an extension quietly wearing an old
+logo.
+
+The bar in the mark is lifted from `#172033` to `#334867` on the way. The
+favicon is read against the site's dark page, where a near-black upright is a
+quiet counterweight to the chevron; on a 128px gallery tile at that colour it
+disappears and the mark reads as a lone `>`.

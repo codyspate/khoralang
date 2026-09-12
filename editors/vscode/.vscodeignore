@@ -6,8 +6,17 @@
 # `RELEASE.md` is the release *page*, written for somebody deciding whether to
 # download this; the packaged `readme.md` is for somebody who already has it.
 # Shipping both would put two overlapping introductions inside the extension.
+#
+# `scripts/` builds the icon and is not needed to run it. `sharp` is what does
+# the rendering: it is a build tool with a large native binary per platform,
+# installed on demand rather than declared, so `vsce` has no dev-dependency
+# entry to prune it by and would ship every byte. Excluded by name because the
+# only thing standing between it and the package is this line.
 .vscode/**
 .gitignore
 install.ps1
 RELEASE.md
+scripts/**
+node_modules/sharp/**
+node_modules/@img/**
 *.vsix

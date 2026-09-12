@@ -5,9 +5,29 @@
   "version": "0.3.0",
   "publisher": "khora-lang",
   "license": "MIT OR Apache-2.0",
+  "icon": "icon.png",
+  "keywords": [
+    "khora",
+    "kh",
+    "language server",
+    "lsp",
+    "effects",
+    "capabilities",
+    "systems programming"
+  ],
+  "galleryBanner": {
+    "color": "#0b1120",
+    "theme": "dark"
+  },
+  "homepage": "https://khoralang.com",
+  "bugs": {
+    "url": "https://github.com/codyspate/khoralang/issues"
+  },
+  "qna": "https://github.com/codyspate/khoralang/issues",
   "repository": {
     "type": "git",
-    "url": "https://github.com/codyspate/khoralang"
+    "url": "https://github.com/codyspate/khoralang",
+    "directory": "editors/vscode"
   },
   "engines": {
     "vscode": "^1.82.0"
