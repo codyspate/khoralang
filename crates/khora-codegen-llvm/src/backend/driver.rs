@@ -369,13 +369,24 @@ pub(super) fn build(
             };
             let mut blocks: Vec<(String, String)> = Vec::new();
             for file in files {
-                for test in &khora_hir::item_map(db, *file).tests {
+                let items = khora_hir::item_map(db, *file);
+                for test in &items.tests {
                     if test.kind != wanted {
                         continue;
                     }
-                    let Some((instance, _)) =
-                        mono.instances.iter().find(|(i, _)| i.function == test.key)
-                    else {
+                    // **Matched on the module as well as the key.** Keys are
+                    // numbered per file (`#test$0`, `#test$1`), so the nth
+                    // block of one file and the nth of another share one, and
+                    // a search by key alone returned whichever was
+                    // monomorphized first. Two files of `bench` blocks then
+                    // reported real measurements under the wrong names --
+                    // a `Dict` ladder that appeared to get *faster* as it grew,
+                    // with nothing in the output to suggest a mix-up.
+                    // `Instance::module` is documented as part of a function's
+                    // identity; this is what it is for.
+                    let Some((instance, _)) = mono.instances.iter().find(|(i, _)| {
+                        i.function == test.key && Some(&i.module) == items.module.as_ref()
+                    }) else {
                         continue;
                     };
                     blocks.push((instance.symbol(), test.name.clone()));

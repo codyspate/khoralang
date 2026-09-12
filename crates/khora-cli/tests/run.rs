@@ -522,3 +522,69 @@ fn build_chatter_stays_off_the_programs_stdout() {
         );
     }
 }
+
+/// A verdict belongs to the test that earned it, across files.
+///
+/// **Keys are numbered per file, and the lookup ignored the module.** The nth
+/// `test` block of one file and the nth of another both have key `#test$n`, so
+/// a search by key alone returned whichever instance was found first, and every
+/// verdict after the collision landed on the wrong name: a test whose body is
+/// `assert(2 == 2)` was reported `FAILED`, another vanished from the report,
+/// and the totals described a suite that did not exist.
+///
+/// **Driven through the CLI on a real package, not through `compile_tests`
+/// directly.** An in-process fixture with two hand-built `SourceFile`s does
+/// *not* reproduce this: the collision depends on the order instances are
+/// found in, and a real build has `std` in the root ahead of the program. A
+/// unit test that passes either way would have been worse than none.
+///
+/// The same lookup serves `khora bench`, where it reported a `Dict` insertion
+/// ladder getting six times *faster* as it grew.
+#[test]
+fn a_verdict_belongs_to_the_test_that_earned_it() {
+    let w = world(
+        "module app::main;\n\
+         \n\
+         import std::core::{assert};\n\
+         \n\
+         test \"A in main passes\" { assert(1 == 1); }\n\
+         \n\
+         test \"B in main fails\" { assert(1 == 2); }\n\
+         \n\
+         pub fn main() -> Int { 0 }\n",
+    );
+    std::fs::write(
+        w.project.join("src").join("other.kh"),
+        "module app::other;\n\
+         \n\
+         import std::core::{assert};\n\
+         \n\
+         test \"C in other passes\" { assert(1 == 1); }\n\
+         \n\
+         test \"D in other cannot fail\" { assert(2 == 2); }\n",
+    )
+    .expect("a second source file");
+
+    let (_code, text) = khora(&w, &w.project, &["test", "."]);
+
+    assert!(
+        text.contains("test A in main passes ... ok"),
+        "a passing test should be reported, and as passing:\n{text}"
+    );
+    assert!(
+        text.contains("test B in main fails ... FAILED"),
+        "the one failing body is the one that fails:\n{text}"
+    );
+    assert!(
+        text.contains("test C in other passes ... ok"),
+        "the second file's tests keep their own verdicts:\n{text}"
+    );
+    assert!(
+        text.contains("test D in other cannot fail ... ok"),
+        "`assert(2 == 2)` cannot fail, whatever file it is in:\n{text}"
+    );
+    assert!(
+        text.contains("3 passed, 1 failed"),
+        "the totals should match the bodies:\n{text}"
+    );
+}
