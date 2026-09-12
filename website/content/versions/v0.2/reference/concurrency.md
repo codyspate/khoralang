@@ -1,0 +1,303 @@
+---
+title: Concurrency
+sidebar:
+  order: 15
+---
+
+Start concurrent work with `Fiber::spawn`. A fiber cannot outlive the block
+that started it, so nothing leaks when you leave.
+
+**There is no `async` keyword and no `await`.** A function that suspends looks
+like one that does not, so any function can call any function.
+
+```khora
+let child = Fiber::spawn(fn () => load(id)!);
+let row = Fiber::join(child)!;
+```
+
+## Fibers
+
+A fiber handle carries both the answer type and the failure row:
+
+```khora
+pub type Fiber<A, 'er>;
+
+impl<A: Share, 'er> Fiber<A, 'er> {
+  pub fn spawn(body: () -> A raises 'er) -> Fiber<A, 'er>;
+  pub fn join(self) -> A raises 'er;
+  pub fn cancel(self) -> ();
+  pub fn detach(self) -> ();
+  pub fn wait(self) -> ();
+}
+```
+
+`A` must be `Share`: the value is computed on one fiber and read on another.
+
+`wait` waits without taking the answer, which is what you need after `cancel`: a
+cancelled fiber has no answer, so `join` on one unwinds the joiner along with it.
+
+`join` waits and answers what the body answered. If the body raised, `join` re-raises with the same type, so the caller catches by name:
+
+```khora
+fn run(id: Int) -> () {
+  let child = Fiber::spawn(fn () => load(id)!);
+  let row = Fiber::join(child)! catch {
+    DbError::Timeout => Row::empty(),
+    DbError::Missing(_id) => Row::empty(),
+  };
+  print(Int::to_string(row.total))
+}
+```
+
+A body with an empty failure row needs no `!` on the join. Joining twice is joining once, from either side, and answers twice.
+
+A spawned closure may capture values that satisfy the sharing rules:
+
+```khora
+fn print_later(value: Int) -> () {
+  let child = Fiber::spawn(fn () => print(Int::to_string(value)));
+  Fiber::join(child)
+}
+```
+
+Releasing the final `Fiber` handle also waits for the child. This means a fiber cannot silently outlive the scope that still owns its handle.
+
+`Fiber::detach` is the exception, and the only one: it stops waiting and asks the fiber to stop. Both halves are asynchronous — `detach` signals and returns at once, so the fiber keeps running until it reaches its next cancellation point rather than stopping where it is. Its answer is discarded when it arrives, and a later failure is silent — the program said it was no longer listening. It cancels as well as detaching, because a detached fiber nobody asked to stop is a leak with a nicer name.
+
+**One shape is not safe yet: cancelling the fiber that is inside
+`Router::listen` while it is serving connections.** It ends the *process*, on
+
+```text
+khora runtime: a cancellation reached a fiber's root, which cannot absorb one yet
+```
+
+measured at five rounds out of five with two hundred requests in flight. An
+idle listener detaches cleanly, and so does every other shape tried — a fiber
+in a `loop`, a fiber running a nursery with live children, a fiber that catches
+every case in its row. So the rule to write today is **drain first, detach
+last**: stop accepting work, wait for what is in flight, and only then let go
+of the listener. [Serve HTTP](/docs/cookbook/http-service/#stopping-a-service)
+has the shape. This is a known gap rather than a deliberate design.
+
+Without it, a bounded wait over a body with an uninterruptible tail could not be honored. That is the failure it exists for: every other way out of a handle waits, letting the binding go included, so one finalizer that never returns holds its nursery, which holds its parent, up to `main`. Reach for it when a bounded wait matters more than a clean one, and not otherwise.
+
+## Nurseries
+
+A nursery owns a set of fibers. The capability installed in a nursery body is:
+
+```khora
+pub effect Nursery {
+  adopt: (Fiber<(), 'er>) -> (),
+}
+```
+
+The answer is fixed at `()` and the row is not, and each half has its own reason.
+
+The answer is fixed because a nursery has nothing to do with a result it cannot hand back: it holds children as bare handles and waits for them. A fiber whose result matters is one whose handle you keep and `join`.
+
+The row stays because a cancellation travels out on the same tagged return an error does. A child whose row is empty has no channel to be stopped on, and a nursery whose children cannot be stopped is not a nursery.
+
+`'er` is quantified per call rather than per handler, so children raising unrelated failures are adopted by one nursery. A body that starts children declares the requirement and adopts each handle; the child's body may raise, and no `catch` is needed at the adoption site:
+
+```khora
+fn fan_out() -> ()
+  with { nursery: Nursery }
+{
+  nursery.adopt(Fiber::spawn(fn () => first()));
+  nursery.adopt(Fiber::spawn(fn () => second()!));
+}
+```
+
+`nursery` installs that capability and waits for the children on the normal path:
+
+```khora
+pub fn nursery<A, 'ef, 'er>(
+  body: () -> A with { 'ef | nursery: Nursery } raises 'er
+) -> A
+  with 'ef
+  raises 'er + ChildFailed
+```
+
+Example:
+
+```khora
+fn run() -> () raises ChildFailed {
+  nursery(fan_out)!
+}
+```
+
+When the body completes normally, `nursery` waits until every adopted child is finished. If the body leaves by failure or cancellation, releasing the nursery cancels children that are still running and waits for them before the scope is gone.
+
+### What a fiber is made of
+
+A fiber is an operating-system thread. There is a second implementation —
+stackful coroutines on a pool of workers — behind an environment variable:
+
+```bash
+KHORA_FIBERS=scheduler ./build/myapp
+```
+
+Threads are the default because they are faster at the connection counts a
+service actually runs at. The coroutine's advantage is *density*: a suspended
+fiber costs roughly 4 KB against a thread's 33 KB, which matters when tens of
+thousands are waiting rather than working.
+
+**The two are distinguishable under cancellation**, so the choice is not yet an
+implementation detail: a fiber inside `clock.sleep` is woken by a cancellation
+under the scheduler and runs to completion under threads. [Known
+limitations](/docs/limitations/#the-two-fiber-backends-are-distinguishable) has
+the measurements.
+
+A thread gets the operating system's stack — two megabytes on Linux, one on
+Windows — and a coroutine gets one megabyte with a guard page, so deep
+recursion near the old limit may be over the new one. The failure is a clean
+fault rather than corruption.
+
+[Fibers](/docs/internals/fibers/) describes how each is scheduled.
+
+### A child that failed
+
+A nursery is a unit: the block asked for these fibers together, so one failing means the group's answer is not coming. The first failure is intended to cancel the siblings; every child is still waited for, and the nursery raises
+
+```khora
+pub type ChildFailed = { children: Int };
+```
+
+A count rather than the child's own error, because `adopt` binds the row per adoption — two children may fail with two unrelated types and there is no one value to hand back. A child the nursery *cancelled* is not counted: that is what a nursery does to its children, not something that went wrong.
+
+**The cancelling half does not work yet.** A nursery reaps handles oldest-first, so a child's failure is invisible until every child adopted before it has finished — and by then there is usually nothing left to cancel. Measured with twelve 400 ms children, a failure in the last-adopted one cancelled no siblings in 25 runs out of 25. What still holds is the other half: every child is waited for and the failure is reported, never lost. Do not rely on a sibling's failure to stop work that is expensive, holds a resource, or has an effect outside the process — have that work check a `Shared` flag itself. [Known limitations](/docs/limitations/) has the numbers.
+
+The body may be a named function or a lambda. A lambda resolves its capabilities where it is written, and as the argument to `nursery` that is inside the row `nursery` installs, so `nursery(fan_out)` and `nursery(fn () => fan_out())` mean the same thing.
+
+### An operation can be generic in a row, but not in a type
+
+`adopt` binds `'er` and cannot bind an answer type, which is why `Fiber<(), 'er>` fixes the answer and leaves the failure row free. That asymmetry is a rule about every effect operation rather than about nurseries: [Effects and rows](/docs/reference/effects/#an-operation-may-be-generic-in-a-row-but-not-in-a-type) has the reason, with `adopt` as its example.
+
+### Why `adopt` takes a fiber and not a thunk
+
+A fiber's body must be written where it starts, so that what it closes over can be checked against the sharing rules. A thunk built somewhere else and forwarded to `spawn` inside the handler would move that check away from the code it is about.
+
+## Bounded nurseries
+
+The bounded form has the same row behavior plus a concurrency limit:
+
+```khora
+pub fn bounded_nursery<A, 'ef, 'er>(
+  limit: Int,
+  body: () -> A with { 'ef | nursery: Nursery } raises 'er
+) -> A
+  with 'ef
+  raises 'er + ChildFailed
+```
+
+```khora
+fn serve() -> ()
+  with { nursery: Nursery }
+{
+  loop {
+    let request = next_request();
+    nursery.adopt(Fiber::spawn(fn () => handle(request)!));
+  }
+}
+
+bounded_nursery(128, serve)
+```
+
+Adopting past a bounded nursery's limit waits for older work to finish. Use this for work whose arrival rate is controlled externally so overload becomes backpressure instead of unbounded growth.
+
+Two riders on the number, both measured rather than intended:
+
+- **The limit admits `limit + 1` live children.** `Fiber::spawn` *starts* the child and `nursery.adopt` is what blocks, so by the time the bound is applied the extra work is already running. `bounded_nursery(128, serve)` above is 129 live children. Subtract one where the limit stands for a real resource such as a connection pool.
+- **A limit of zero or less means no limit**, because that is how the unbounded `nursery` is built. A limit computed from configuration that comes out zero removes the bound rather than clamping to one; check it before you pass it.
+
+Use unbounded `nursery` when the fan-out is already bounded by data the program holds, such as a known handful of independent tasks.
+
+## Cancellation
+
+Cancellation belongs to the target fiber:
+
+```khora
+let child = Fiber::spawn(fn () => work());
+Fiber::cancel(child);
+Fiber::wait(child);
+continue_parent();
+```
+
+`wait` rather than `join`, because a cancelled fiber has no answer: `join` on
+one unwinds the joiner along with it, and `continue_parent()` would never run.
+
+Cancelling a child does not cancel its parent.
+
+**There is no `timeout`, no `race` and no `select`.** Channel fan-in itself is concurrent, but `Fiber::wait` and `Fiber::join` are not cancellation points and carry no failure row, so a parent parked in one cannot be stopped before the child it is waiting on ends by itself. A hand-written race is therefore bounded by its slowest branch rather than its fastest. [Known limitations](/docs/limitations/#concurrency-combinators) has the measurements.
+
+What does work is waiting on handles: [Take work off a queue safely](/docs/cookbook/taking-work-off-a-queue/) and [Bound concurrent work](/docs/cookbook/bounded-concurrency/) are the nearest recipes, and [known limitations](/docs/limitations/) is the page to check before assuming an operation exists.
+
+Cancellation is observed at cancellation points rather than between arbitrary source instructions. There are two:
+
+- a `!` site, which is also where propagation and suspension are marked; and
+- a **loop back-edge** — the point where `loop` or `while` goes round again.
+
+Both only exist in a function that can raise, because a `raises` row is the channel a cancellation travels on.
+
+A `!` observes a pending cancellation *before* the call it marks, so a computation already asked to stop does not do work it is about to throw away, and the arguments are not evaluated. `Channel::send` and `Channel::receive` are the exception, and carry a row for exactly this reason — see below.
+
+**A value the fiber is already holding is discarded with it.** Between the point a value becomes the fiber's responsibility and the first `!` after that point, nobody else knows the fiber has it — so a cancellation there drops it, cleanly and silently. The shape that meets this is a worker taking a job off a channel and then calling something fallible with it. Register the value with a region before that `!` and the region's finalizer runs on the unwind; [Take work off a queue safely](/docs/cookbook/taking-work-off-a-queue/) is the recipe.
+
+Reading the flag after the call instead would move the problem rather than remove it: the fiber would be holding the call's result at the same point. Work in flight across a cancellation boundary is at risk whichever side the boundary is read on.
+
+The back-edge is why an ordinary background worker can be stopped:
+
+```khora
+fn reaper() -> () with { clock: Clock } raises Stop {
+  loop {
+    clock.sleep(1000);
+    sweep();
+  }
+}
+```
+
+There is no `!` in that body. Without the back-edge it could not be cancelled, and a nursery that had to unwind past it would wait for ever.
+
+A blocked or suspended operation is meant to be made runnable so that the fiber can unwind its structured scopes. That describes the coroutine backend; under the default thread backend a fiber inside `clock.sleep` sleeps to the end before it sees the cancellation. For most calls that is all it is: a *straight-line* blocking call is not itself a cancellation point, so the fiber wakes, finishes the call, and stops at the next `!` or back-edge after it.
+
+`Channel::send` and `Channel::receive` are the exception, because they are the only two operations in `std::core` with no bound on how long they may wait. A worker parked on an empty queue has no next back-edge to reach, so leaving it to find one meant it never stopped at all. Both therefore carry a `raises 'er` row and are written `Channel::receive(jobs)!`; the row is what gives the cancellation something to travel out on. `poll` never waits and is not a cancellation point.
+
+The check on these two comes *after* the call rather than before it, and only when the call comes back **empty-handed**. The runtime looks at the cancellation flag only once it has established there is nothing to take and no room to send, so a value arriving at the same moment as the cancellation is delivered rather than discarded — a cancelled receive is never holding a value nobody will see again. A send that gives up releases its value, the same as a send to a closed channel.
+
+### A fiber with no error row runs to its end
+
+A cancellation leaves a function the same way an error does, on the same tagged return. A function declared without `raises` has no such return, so it has nothing to travel on — it has no cancellation points, and neither `!` nor a loop back-edge puts one there.
+
+That is a language rule rather than a gap. It also means a background worker that genuinely cannot fail still needs an error row to be stoppable:
+
+```khora
+// Cannot be cancelled: nothing to carry the cancellation out.
+fn reporter() -> () with { clock: Clock } {
+  loop { clock.sleep(5000); report(); }
+}
+```
+
+Give it a `raises` row — even one whose error it never raises — and the loop becomes cancellable.
+
+Cancellation is **not** a member of a `raises` row. A `catch` that handles every declared failure does not consume cancellation.
+
+During cancellation, intervening regions are released and their finalizers run before the fiber terminates. See [Memory and resources](/docs/reference/memory-and-resources/).
+
+## Suspension and workers
+
+Waiting for nonblocking I/O, a timer, a channel, a join, or scheduler capacity suspends the fiber so the worker can execute other runnable work. Application code continues to look like ordinary calls:
+
+```khora
+let bytes = receive(socket)!;
+let message = decode(bytes)!;
+handle(message)
+```
+
+Suspension is distinct from scheduler safepoints used for fairness. Fairness may move execution between workers without being a cancellation event.
+
+A fiber may resume on a different operating-system thread after suspension. Foreign code must therefore not carry a thread-local address, borrowed errno-like state, native-thread identity, or another thread-affine value across a Khora suspension unless the foreign API explicitly permits that migration.
+
+## Sharing boundary
+
+A value captured by or handed to concurrent work has to satisfy the sharing
+rules, which are their own page: [Sharing](/docs/reference/sharing/).
