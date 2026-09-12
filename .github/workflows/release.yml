@@ -142,11 +142,31 @@ jobs:
           name=${name%/}
 
           mkdir -p "$RUNNER_TEMP/first/src"
-          cat > "$RUNNER_TEMP/first/khora.toml" <<'EOF'
+          # **The manifest a 0.2.0 toolchain requires, not a 0.1.0 one.**
+          #
+          # `[toolchain] version` became required in 0.2.0 and `edition` was
+          # removed, and this step still wrote the old shape -- so the first
+          # release to enforce its own rule failed its own smoke test on all
+          # three platforms, with the compiler correctly refusing a manifest
+          # the workflow had just written. The check was testing a language
+          # that no longer existed.
+          #
+          # The pin is the version being released, taken from the tag rather
+          # than written here: a literal would be one more place to forget at
+          # the next bump. `TAG` is what the package step was given, so the
+          # pin and the archive cannot disagree.
+          #
+          # `${TAG#v}` and not a parse of the directory name: a candidate's
+          # version contains a hyphen of its own -- `0.2.0-rc.1` -- so
+          # trimming `khora-<version>-<triple>` at a hyphen gets it wrong in
+          # exactly the case a candidate exists to test.
+          cat > "$RUNNER_TEMP/first/khora.toml" <<EOF
           [package]
           name = "first"
           version = "0.1.0"
-          edition = "2026"
+
+          [toolchain]
+          version = "${TAG#v}"
           EOF
           cat > "$RUNNER_TEMP/first/src/main.kh" <<'EOF'
           module main;
