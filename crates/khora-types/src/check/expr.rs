@@ -1495,10 +1495,28 @@ impl<'a> Checker<'a> {
                     "`{name}` is not in scope here, so nothing is known about its `Show` \
                      — add it to an `import`"
                 ),
-                None => format!(
-                    "`{settled}` has no `Show`, so it cannot go in a `${{..}}` hole. \
-                     Write `derive(Show)` on it, or `impl Show for {settled}`"
-                ),
+                // **A generic whose impl is conditional fails at its
+                // argument.** `Show for Option<A>` exists and is written
+                // `impl<A: Show>`, so `Option<Count>` has no `Show` exactly
+                // when `Count` has none -- and naming the outer type sends the
+                // reader to fix a type they do not own. Both suggestions were
+                // then impossible: `derive(Show)` needs a declaration site
+                // `Option` does not have here, and `impl Show for
+                // Option<Count>` is refused twice over, once for a receiver
+                // that is `Option<A>` and once because `std` already wrote the
+                // only impl a program may have. `derive(Show)` on `Count` is
+                // the whole fix.
+                None => match self.unshowable_argument(&settled) {
+                    Some(argument) => format!(
+                        "`{settled}` has no `Show` because `{argument}` has none, so it \
+                         cannot go in a `${{..}}` hole. Write `derive(Show)` on \
+                         `{argument}`, or `impl Show for {argument}`"
+                    ),
+                    None => format!(
+                        "`{settled}` has no `Show`, so it cannot go in a `${{..}}` hole. \
+                         Write `derive(Show)` on it, or `impl Show for {settled}`"
+                    ),
+                },
             };
             self.error(message, range);
             return Type::Str;

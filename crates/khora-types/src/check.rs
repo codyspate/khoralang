@@ -622,6 +622,36 @@ impl<'a> Checker<'a> {
         .then_some(name.as_str())
     }
 
+    /// The type argument that cost a generic its `Show`, if that is the story.
+    ///
+    /// **Which type the reader has to change.** `Show for Option<A>` is
+    /// written `impl<A: Show>`, so `Option<Count>` has no `Show` exactly when
+    /// `Count` has none — and a message naming `Option<Count>` sends somebody
+    /// to fix a type they did not declare and may not touch. Both of the
+    /// suggestions it then makes are refused: `derive(Show)` wants a
+    /// declaration site, and a second `impl Show for Option<..>` collides with
+    /// the one `std` already wrote.
+    ///
+    /// Answers only when the head itself is fine and exactly one argument is
+    /// not, which is the case worth a different sentence. Two bad arguments
+    /// would make "because `X` has none" a half-truth, and there the general
+    /// message is the honest one.
+    pub(crate) fn unshowable_argument(&mut self, ty: &Type) -> Option<String> {
+        let Type::Adt { args, .. } = ty else { return None };
+        let mut culprits = args.iter().filter(|a| !self.satisfies(SHOW, a));
+        let first = culprits.next()?;
+        if culprits.next().is_some() {
+            return None;
+        }
+        // A variable has no `Show` because nothing is known about it yet, not
+        // because it lacks an impl, and telling somebody to `derive(Show)` on
+        // `A` is not a thing they can write.
+        if matches!(first, Type::Var(_) | Type::Unknown) {
+            return None;
+        }
+        Some(first.to_string())
+    }
+
     /// Whether these two are one name, one of which did not resolve.
     ///
     /// [`Type::Adt`]'s `home` is `None` for a name nothing answered to, and
