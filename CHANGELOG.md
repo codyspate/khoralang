@@ -10,13 +10,26 @@ answer that is now right, then the rest. A bug that produced a *silently wrong*
 answer is listed under Breaking as well as Fixed, because code written around
 it will behave differently now.
 
-## 0.2.0 — 2026-09-04
+## 0.2.0 — 2026-09-11
 
-An editor release, and one manifest change. Everything else here is about what
-Khora tells you while you are writing it, and nothing changes what a program
-means.
+Editor work, a manifest change, and -- from five rounds of strangers building
+real programs against the published documentation -- four runtime failures and
+an installer that could not be run as root.
+
+The one to read first is the denial of service in `std::json::parse`: a service
+built the way `cookbook/json-api` describes could be stopped by a single
+request carrying a long string.
 
 ### Breaking
+
+- **`std::fs::fold_lines` raises `IoError` on bytes that are not UTF-8, where
+  it used to trap.** The old behaviour was `SIGABRT` and exit 134, which no
+  program could catch; `read_text` on the same file already raised. A tool that
+  means "this file is not text" can now say so and choose its own exit status.
+
+  Listed as breaking because a program written around the trap — a wrapper
+  script watching for 134, or anything relying on the process dying — sees a
+  catchable failure and exit 1 instead.
 
 - **`[toolchain] version` is now required, and `edition` is gone.** Both halves
   of one change: two fields were answering the question *which Khora builds
@@ -91,62 +104,6 @@ means.
 
 ### Fixed
 
-- **An unreadable token is reported where it is.** `0xFF`, `0b1010` and `1 @ 2`
-  all used to come back as ``this `{` is never closed``, naming a brace on the
-  line above — an underline your editor drew on code that was correct. Numeric
-  bases Khora does not have are now named as such, and say what it does have:
-  decimal digits, with `_` free to separate them.
-- **An unreachable `match` arm names its cause.** `Red => 1` where
-  `Colour::Red` was meant reported the *next* arm — the one written correctly —
-  as unreachable. A bare name in a pattern is a binding, so it had matched
-  every colour. The message now says so and gives the line to write.
-- **A declaration keyword from another language is redirected.** `struct`,
-  `class`, `enum`, `interface`, `func`, `var`, `namespace` and `async` name the
-  Khora spelling instead of *expected a declaration*. `enum` shows the variant
-  syntax, because being told only "write `type`" leaves you looking for a
-  separate word for cases; `async` is told the distinction does not exist here
-  rather than that it is a rename.
-
-### Editor
-
-- **Sixty-two new assists**, bringing the total offered under the cursor from
-  two to sixty-four. They are in ten groups: control flow, bindings,
-  capabilities and failures, matching, patterns, imports, declarations, types,
-  calls and pipelines, statements, literals and documentation.
-
-  The ones worth finding first:
-
-  - **Extract into a function**, on an expression or a block. The `with` and
-    `raises` clauses are written from what the calls inside actually demanded —
-    the checker records that at every call site, so the signature is correct by
-    construction rather than inferred a second time by an editor.
-  - **Write out the cases a `_` arm covers.** A wildcard is how a `match` stops
-    being exhaustive without stopping compiling: add a variant, and every
-    `match` that names its cases fails loudly while every `match` ending in `_`
-    sends the new one down the default path in silence.
-  - **Lift a lambda into a function**, with the parameter and answer types the
-    checker gave it.
-  - `catch` and `attempt` in both directions, a `with` in both spellings, and a
-    handler written from an effect declaration.
-
-  Every editor gets all of them. There is one implementation and it is
-  `khora lsp`; `editors/` is configuration.
-
-## Unreleased
-
-### Breaking
-
-- **`std::fs::fold_lines` raises `IoError` on bytes that are not UTF-8, where
-  it used to trap.** The old behaviour was `SIGABRT` and exit 134, which no
-  program could catch; `read_text` on the same file already raised. A tool that
-  means "this file is not text" can now say so and choose its own exit status.
-
-  Listed as breaking because a program written around the trap — a wrapper
-  script watching for 134, or anything relying on the process dying — sees a
-  catchable failure and exit 1 instead.
-
-### Fixed
-
 - **`std::json::parse` could be killed by one long string, which made it a
   remote denial of service.** The scanner inside a string literal recursed once
   per ordinary character, so the depth of the recursion was the length of the
@@ -199,6 +156,22 @@ means.
   failed with `Cannot change ownership to uid 1001`. At uid 1000 tar ignores
   stored ownership, which is why installing by hand always worked. Both now
   pass `--no-same-owner`.
+
+- **An unreadable token is reported where it is.** `0xFF`, `0b1010` and `1 @ 2`
+  all used to come back as ``this `{` is never closed``, naming a brace on the
+  line above — an underline your editor drew on code that was correct. Numeric
+  bases Khora does not have are now named as such, and say what it does have:
+  decimal digits, with `_` free to separate them.
+- **An unreachable `match` arm names its cause.** `Red => 1` where
+  `Colour::Red` was meant reported the *next* arm — the one written correctly —
+  as unreachable. A bare name in a pattern is a binding, so it had matched
+  every colour. The message now says so and gives the line to write.
+- **A declaration keyword from another language is redirected.** `struct`,
+  `class`, `enum`, `interface`, `func`, `var`, `namespace` and `async` name the
+  Khora spelling instead of *expected a declaration*. `enum` shows the variant
+  syntax, because being told only "write `type`" leaves you looking for a
+  separate word for cases; `async` is told the distinction does not exist here
+  rather than that it is a rename.
 
 ### Changed
 
@@ -258,6 +231,31 @@ means.
   commands a maintainer was trusted to remember, described in a comment.
   `scripts/cut-docs.sh` does it from the tag and the workflow opens a pull
   request rather than pushing.
+
+### Editor
+
+- **Sixty-two new assists**, bringing the total offered under the cursor from
+  two to sixty-four. They are in ten groups: control flow, bindings,
+  capabilities and failures, matching, patterns, imports, declarations, types,
+  calls and pipelines, statements, literals and documentation.
+
+  The ones worth finding first:
+
+  - **Extract into a function**, on an expression or a block. The `with` and
+    `raises` clauses are written from what the calls inside actually demanded —
+    the checker records that at every call site, so the signature is correct by
+    construction rather than inferred a second time by an editor.
+  - **Write out the cases a `_` arm covers.** A wildcard is how a `match` stops
+    being exhaustive without stopping compiling: add a variant, and every
+    `match` that names its cases fails loudly while every `match` ending in `_`
+    sends the new one down the default path in silence.
+  - **Lift a lambda into a function**, with the parameter and answer types the
+    checker gave it.
+  - `catch` and `attempt` in both directions, a `with` in both spellings, and a
+    handler written from an effect declaration.
+
+  Every editor gets all of them. There is one implementation and it is
+  `khora lsp`; `editors/` is configuration.
 
 ## 0.1.0 — 2026-09-03
 
