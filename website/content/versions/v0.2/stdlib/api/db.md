@@ -11,8 +11,15 @@ Talking to a database, as a capability rather than a library.
 and it is not an engine. SQLite has no middle layer at all — no framing, no
 handshake, nothing that fails at a packet boundary — so putting it in `std`
 would be the mistake `std::net::http` avoided, all top layer plus a quarter
-of a million lines of C. It is a first-party package. Postgres is a package
-for the ordinary reason: its wire protocol is versioned by somebody else.
+of a million lines of C. It belongs in a package rather than here. Postgres
+belongs in one for the ordinary reason: its wire protocol is versioned by
+somebody else.
+
+**No driver is published yet, and this interface is the whole of what
+exists.** `Db` is a record of closures, so writing a handler over an existing
+client is a day's work and a test double is a few lines — but there is no
+`khora install` away from a working SQLite connection today, and a program that
+needs one has to bring its own.
 
 ## What the middle layer actually is
 

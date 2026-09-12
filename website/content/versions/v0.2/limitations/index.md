@@ -61,6 +61,8 @@ What is left is ordinary recursion that somebody writes. A function that calls i
 
 Dependencies can be pinned reproducibly to git revisions, but there is not yet a public package registry or broad third-party ecosystem.
 
+**No database driver is published.** `std::db` defines `Db`, transaction semantics and cancellation behaviour, and several pages describe a PostgreSQL, SQLite or D1 package satisfying that interface — none of them exists yet. `Db` is a record of closures, so a handler over an existing client is a day's work and a test double is a few lines, but there is nothing to install today that talks to a real database. A program that needs one writes its own handler.
+
 ## Editor tooling
 
 `khora lsp` already provides compiler-backed diagnostics, hover, formatting, completion, signature help, go-to-definition, references, document/workspace symbols, semantic tokens, code actions, code lenses, and inlay hints.

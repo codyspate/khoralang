@@ -23,6 +23,19 @@ let now = monotonic_ticks();
 
 Foreign declarations are subject to the package's extern permissions. That permission controls whether the package may declare the boundary; it is not process sandboxing.
 
+### Where the symbol comes from
+
+**A Khora build links the runtime and nothing else, so there is no way to link against a system library yet.** `khora check` accepts a declaration of any C symbol; `khora build` then fails at the linker with `undefined reference`, and no manifest key, build flag or environment variable changes that. `[build]` has `target` and `plugin`, and neither is read.
+
+So `extern fn` today reaches symbols that are *already in the program*: the Khora runtime's own exports, and code linked in by the toolchain. Declaring `sqlite3_open` compiles and does not link.
+
+What this leaves for somebody who needs a C library:
+
+- **Wrap it in a separate process** and talk to it over a pipe or a socket. `std::process` and `std::net` are both available, and the boundary is a serialisation rather than an ABI.
+- **Wait.** Naming native libraries from the manifest is a known gap rather than a decision, and it is what `[build]` will grow.
+
+`pub extern fn` — exporting *out* of Khora — is unaffected, because there the symbol is one this program defines. A shared library built with `khora build --lib` and called from C works today.
+
 ## Export a Khora function to C
 
 A public extern function **with a body** publishes a C-callable symbol:

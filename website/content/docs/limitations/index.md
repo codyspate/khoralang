@@ -63,6 +63,8 @@ Dependencies can be pinned reproducibly to git revisions, but there is not yet a
 
 **No database driver is published.** `std::db` defines `Db`, transaction semantics and cancellation behaviour, and several pages describe a PostgreSQL, SQLite or D1 package satisfying that interface — none of them exists yet. `Db` is a record of closures, so a handler over an existing client is a day's work and a test double is a few lines, but there is nothing to install today that talks to a real database. A program that needs one writes its own handler.
 
+**A build cannot link against a native library.** `extern fn` declares a C symbol and `khora check` accepts it, but the link step takes the Khora runtime and the program's own objects and nothing else — no manifest key, build flag or environment variable adds one. So importing from an installed C library fails at the linker with `undefined reference`, and the two directions of the FFI are not symmetric: `pub extern fn` and `khora build --lib` export to C and work today. Reaching an existing C library means running it in a separate process for now.
+
 ## Editor tooling
 
 `khora lsp` already provides compiler-backed diagnostics, hover, formatting, completion, signature help, go-to-definition, references, document/workspace symbols, semantic tokens, code actions, code lenses, and inlay hints.
