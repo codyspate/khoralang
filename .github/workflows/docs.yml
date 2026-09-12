@@ -48,6 +48,13 @@ jobs:
         run: bash scripts/check-docs.sh
       - name: The generated reference matches the standard library
         run: ./target/debug/khora doc std --out website/content/docs/stdlib/api --check
+      # **`--check` above compares the page to its source; this compiles what
+      # the page says.** The two agree perfectly about an example that does not
+      # build, which is how `std::fs`'s `read_text` example was published using
+      # `IoError` without importing it -- and copied verbatim, by somebody
+      # reading the page to learn the library.
+      - name: The programs on the generated pages still compile
+        run: KHORA=./target/debug/khora bash scripts/check-api-programs.sh
 
   build:
     runs-on: ubuntu-latest

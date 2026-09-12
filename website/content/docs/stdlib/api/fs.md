@@ -343,7 +343,10 @@ question with a wrong answer. This one takes the optimistic view and is
 named for it.
 
 ```khora
-import std::fs::{FsRead, read_text};
+module settings::main;
+
+import std::core::{Result, attempt, print};
+import std::fs::{FsRead, IoError, read_text};
 
 fn settings() -> String with { reads: FsRead } raises IoError {
   read_text("config.toml")!
