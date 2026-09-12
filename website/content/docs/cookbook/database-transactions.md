@@ -161,6 +161,8 @@ with { db: postgres_db } {
 }
 ```
 
+**No driver package is published yet.** `postgres_db` above stands for a handler somebody has written; there is nothing to `khora install` today that produces one. `Db` is a record of closures, so a handler over an existing client is a day's work and the in-memory double below is the whole of what a test needs — but a program that has to reach a real database in 0.2 brings its own handler.
+
 The PostgreSQL pool helper does the same installation for a leased connection. Its callback requires `db: Db`; `with_db` supplies it and removes that requirement from the caller:
 
 ```khora
