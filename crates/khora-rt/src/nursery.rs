@@ -62,21 +62,29 @@ struct Children {
 /// bookkeeping than the handles it reclaims.
 const SWEEP_FLOOR: usize = 64;
 
-type Crew = Mutex<Children>;
-
-/// One registered nursery.
+/// One nursery's children, behind their lock.
 ///
-/// **The `Send` claim covers the crew, not the handles.** `Children` holds
-/// `*mut u8` fiber handles, which is what makes it non-`Send` by default. Those
-/// are only ever read under the crew's own mutex, and the one thing done to a
-/// handle from here — `khora_fiber_cancel`, which sets an atomic flag and wakes
-/// — is already safe from any thread. What genuinely crosses threads is the
-/// `Arc`: the fiber cancelling a nursery is by definition not the fiber that
-/// opened it.
-struct Registered(Arc<Crew>);
+/// **A newtype so the thread-safety claim can be made about the crew itself.**
+/// `Children` holds `*mut u8` fiber handles, which makes it neither `Send` nor
+/// `Sync` by default, and an `Arc<Mutex<Children>>` is therefore an `Arc` of
+/// something that cannot cross a thread -- which is both a clippy error and a
+/// fair description of the problem. The claim belongs here, where the handles
+/// are, rather than on a wrapper around the `Arc`.
+struct Crew(Mutex<Children>);
 
-// SAFETY: as above.
-unsafe impl Send for Registered {}
+// SAFETY: the handles are only ever read under this mutex, and the one thing
+// done to one from another thread -- `khora_fiber_cancel`, which sets an atomic
+// flag and wakes -- is safe from any thread. Crossing threads is the point: the
+// fiber cancelling a nursery is by definition not the fiber that opened it.
+unsafe impl Send for Crew {}
+unsafe impl Sync for Crew {}
+
+impl std::ops::Deref for Crew {
+    type Target = Mutex<Children>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 /// Every nursery currently open, and the fiber that opened it.
 ///
@@ -89,14 +97,14 @@ unsafe impl Send for Registered {}
 ///
 /// So the parent-to-child edge has to exist at the moment the cancellation
 /// arrives, and this is it.
-static OPEN: Mutex<Vec<(usize, Registered)>> = Mutex::new(Vec::new());
+static OPEN: Mutex<Vec<(usize, Arc<Crew>)>> = Mutex::new(Vec::new());
 
 /// Notes that the running fiber has opened `crew`.
 fn opened(crew: &Arc<Crew>) {
     let id = crate::current::current(|fiber| fiber.id());
     OPEN.lock()
         .unwrap_or_else(|e| e.into_inner())
-        .push((id, Registered(crew.clone())));
+        .push((id, crew.clone()));
 }
 
 /// Forgets one nursery, identified by the crew itself.
@@ -107,7 +115,7 @@ fn closed(crew: &Arc<Crew>) {
     let mut open = OPEN.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(at) = open
         .iter()
-        .position(|(_, Registered(held))| Arc::ptr_eq(held, crew))
+        .position(|(_, held)| Arc::ptr_eq(held, crew))
     {
         open.swap_remove(at);
     }
@@ -129,7 +137,7 @@ pub(crate) fn cancel_open_crews(fiber: usize) {
         let open = OPEN.lock().unwrap_or_else(|e| e.into_inner());
         open.iter()
             .filter(|(owner, _)| *owner == fiber)
-            .map(|(_, Registered(crew))| crew.clone())
+            .map(|(_, crew)| crew.clone())
             .collect()
     };
 
@@ -199,13 +207,13 @@ pub extern "C" fn khora_fibers_open_bounded(limit: i64) -> *mut u8 {
     // **`Arc`, so `OPEN` can hold one too.** A cancellation reaches this crew
     // through the registry while the fiber that opened it is blocked in a join,
     // so the two references have to be able to outlive each other either way.
-    let list: Arc<Crew> = Arc::new(Mutex::new(Children {
+    let list: Arc<Crew> = Arc::new(Crew(Mutex::new(Children {
         limit,
         sweep_at: SWEEP_FLOOR,
         held: Vec::new(),
         joining: Vec::new(),
         failed: 0,
-    }));
+    })));
     opened(&list);
     // SAFETY: `khora_alloc` returned an object with one field's worth of
     // space, zeroed and aligned, and nothing else holds this pointer yet.
