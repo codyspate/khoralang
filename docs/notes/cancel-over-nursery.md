@@ -1,94 +1,98 @@
-# Cancelling a fiber whose body is a nursery never returns
+# Cancelling a fiber whose body is a nursery never returned
 
-Status: **diagnosed, not fixed.** The fix is a design change and wants your
-decision first.
+Status: **fixed.** Kept because the diagnosis took four attempts and three of
+them failed for reasons worth writing down.
 
-## What happens
+## What happened
 
 ```khora
 let hand = Fiber::spawn(fn () => body(seen)!);   // body opens a nursery
 clock.sleep(100);
-Fiber::cancel(hand);      // returns immediately
-Fiber::wait(hand);        // never returns
+Fiber::cancel(hand);      // returned immediately
+Fiber::wait(hand);        // never returned
 ```
 
-```
-cancelling...
-cancel returned; waiting...
-                            <- forever; killed by `timeout 20`
-```
-
-Swap the body for the same worker spawned directly and `wait` returns in
-about a millisecond. The nursery is the whole difference. Reproduces on the
-default thread backend and under `KHORA_FIBERS=scheduler`; repro kept at
-`/general/khora-agents/runs/rc2-pipeline/probe`, verified again on
-`a99fbe7`.
+No exit code, no message, no backtrace. The same worker spawned directly and
+cancelled the same way stopped in about 100 ms. The nursery was the whole
+difference.
 
 ## Why
 
-Four steps, each correct on its own:
+`khora_fiber_cancel` flagged the one fiber it was handed. That fiber was inside
+`khora_fibers_wait`, blocked in `JoinHandle::join` on a child nobody had told to
+stop — so it could not reach the point where it would have read its own flag.
+The child looped forever. The parent waited forever.
 
-1. `khora_fiber_cancel` calls `scheduler::cancel_fiber(id)`, which flags
-   **that one fiber** — `state.cancel()`, forget its timers, forget its
-   reactor registration, wake it. Nothing walks anywhere.
-2. The cancelled fiber's body is `nursery(...)`. A nursery's exit waits for
-   every child, oldest first. That is the promise of structured concurrency
-   and is exactly what `std/core.kh:5501` documents.
-3. The adopted worker was never flagged, so it never reaches a cancellation
-   point that fires. It keeps looping.
-4. The nursery therefore never returns, so the outer fiber's completion latch
-   is never signalled, so `wait_for` blocks forever.
+`khora_fibers_wait` does check for its own cancellation between rounds, and that
+check is correct. It simply cannot fire: the cancellation arrives *during* a
+join, and the next round comes after the join it is waiting on ends.
 
-**The runtime tracks no parentage.** `grep -n parent crates/khora-rt/src/fiber.rs`
-finds three comments and no field. Cancellation cannot walk a tree that is not
-recorded.
+The trace, with the instrumentation that settled it:
 
-`khora_fiber_detach`'s own doc comment names this tension already:
+```
+[wait] round took 1 child(ren); held now 0     <- the crew is emptied
+[wait] between-rounds check: stopping=false    <- runs before the cancel
+[wait] joining child 0...
+[wait]   child 0 is fiber 3
+cancelling...
+[cancel] flagging fiber 2                      <- the parent, and only the parent
+cancel returned; waiting...                    <- forever
+```
 
-> That is right, and it is also how a program hangs -- one finalizer that
-> never returns holds its nursery, which holds its parent, up to `main`.
-> `docs/design/scheduler.md` promises both bounded cancellation latency and
-> that a nursery exit leaves every child stopped or joined, and those two are
-> in tension exactly here.
+Fiber 3 is never mentioned again.
 
-So this is a known-shaped problem that nobody had connected to the hang.
+## The fix
 
-## The three options
+Three parts, and all three are needed.
 
-### A. Cancellation walks the fiber tree
+1. **`OPEN`**, in `nursery.rs`: every open nursery and the fiber that opened it.
+   Cancellation is *delivered* to the children rather than waited for, because
+   waiting for the parent to notice is what deadlocked.
+2. **`Children::joining`**: the round a wait is currently joining stays visible.
+   `std::mem::take(&mut crew.held)` moved those children into a local variable,
+   which made exactly the fibers a cancellation needs to reach findable by
+   nobody. This was invisible until `cancel_open_crews` reported `crew with 0
+   child(ren)` on a nursery that plainly had one.
+3. **Nothing locked while a child is cancelled.** The handles are copied out
+   from under both locks first. A child's exit path takes the crew's lock to
+   deregister itself, so cancelling while holding it deadlocks — and a deadlock
+   here is indistinguishable from the original hang, which is why the second
+   attempt looked like no progress at all.
 
-Record a parent on each fiber at spawn; `cancel_fiber` walks descendants and
-flags each.
+Measured after: **106 ms**, against 107 ms for the same child with no nursery.
 
-- Makes `Fiber::cancel` mean what the docs say for every body, not just the
-  ones without a nursery.
-- Costs a field per fiber and a lock discipline for the tree. The walk has to
-  tolerate children finishing mid-walk, which is the fiddly part.
-- **This is the one I would choose**, because it makes the documented
-  behaviour true rather than narrowing the documentation.
+## What the first three attempts got wrong
 
-### B. A nursery observes its own cancellation
+**The stale archive.** `cargo build --bin khora` does not rebuild
+`libkhora_rt.a`, and every compiled Khora program links that archive. Three
+rounds of "still hangs" were testing a runtime from hours earlier. Any runtime
+change needs `cargo build -p khora-rt` *before* `--bin khora`. The in-tree test
+harness gets this right — `harness::ensure_runtime` rebuilds it — which is worth
+knowing, because it also means disabling a fix and rebuilding by hand does not
+reach a `cargo test` run.
 
-Leave the runtime alone; have the nursery's wait loop notice that the fiber it
-is running on has been cancelled and cancel its children before waiting.
+**The wrong subsystem, twice.** An earlier note recommended recording a parent
+on each `Fiber` so cancellation could walk the tree. That is a real thing to
+want and it does not fix this: the walk needs a fiber's *nurseries*, not its
+children, and on the thread backend there is no registry of live fibers to walk
+in the first place. A second attempt moved the check into `std/core.kh`, where
+it duplicated a check `khora_fibers_wait` already performs — and misses for the
+same reason.
 
-- Much smaller, and local to `std/core.kh` plus whatever intrinsic exposes
-  "am I cancelled".
-- Fixes the nursery case and nothing else. A fiber blocked on any other
-  uninterruptible wait still hangs, so the same report comes back in a
-  different shape.
+**The control experiment is what unstuck it.** Running the identical child body
+under a direct `Fiber::spawn` — 107 ms — exonerated codegen and the scheduler by
+measurement rather than by argument, and turned a three-subsystem guess into a
+one-file target. It should have been the first thing tried, not the fourth.
 
-### C. Document the limitation and move on
+## The regression test
 
-`Fiber::cancel` is honest about single fibers; say plainly that a body holding
-a nursery is not cancellable today, and point at `Fiber::detach`.
+`cancelling_a_fiber_inside_a_nursery_returns`, in
+`crates/khora-codegen-llvm/tests/fibers.rs`.
 
-- Cheap and true, and consistent with how the FFI linking gap was handled.
-- Leaves a documented feature that hangs the process, which is the worst
-  failure mode there is. I would not ship 0.3.0 this way.
-
-## What I did not do
-
-No code changed. `Fiber::cancel` is a documented feature and the fix touches
-the scheduler's model of what a fiber is, which is past the line where I
-should be asking rather than deciding.
+It sleeps 100 ms before cancelling, and **that pause is the test**. A
+cancellation arriving before the parent enters the join is caught by the
+between-rounds check and succeeds even against the unfixed runtime; without the
+pause the test passes on the very defect it exists to catch. It also runs the
+program under a deadline of its own, because a regression here is a hang, and a
+hang under `Command::output` takes the whole suite with it instead of failing
+one test.

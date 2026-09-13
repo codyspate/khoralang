@@ -1513,3 +1513,104 @@ fn main() -> Int {{ run_it(); print(3); 0 }}
     );
     assert_eq!(ran.code, Some(0));
 }
+
+/// **Cancelling a fiber whose body is a nursery returns.**
+///
+/// It used to hang, with no exit code and no message: `Fiber::cancel` returned
+/// and `Fiber::wait` never did. `khora_fiber_cancel` flagged the one fiber it
+/// was given, and that fiber was inside `khora_fibers_wait`, blocked joining a
+/// child nobody had told to stop — so it could not reach the point where it
+/// would have read its own flag. The between-rounds check in `khora_fibers_wait`
+/// runs before the cancellation arrives and cannot help.
+///
+/// The child is cancellable on its own: the same `loop` under a direct
+/// `Fiber::spawn` stops in about 100 ms. The nursery was the whole difference,
+/// which is why the fix is `cancel_open_crews` reaching the children as the
+/// cancellation is *delivered*.
+///
+/// **Run with a deadline of its own.** A regression here is a hang, and a hang
+/// under `Command::output` would take the whole suite down with it rather than
+/// failing this one test.
+#[test]
+fn cancelling_a_fiber_inside_a_nursery_returns() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("nursery_cancel");
+    harness::ensure_runtime();
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
+    let _ = std::fs::remove_file(&exe);
+
+    // The child loops forever, so nothing but a cancellation ends it. The
+    // parent's body is a nursery holding that child, which is the shape that
+    // hung.
+    let source = format!(
+        "{NURSERY}
+extern fn khora_sleep(millis: Int) -> ();
+
+fn forever() -> () raises Oops {{ loop {{ let _ = ok(1)!; }} }}
+
+fn fan() -> () with {{ nursery: Nursery }} {{
+  nursery.adopt(Fiber::spawn(fn () => forever()!))
+}}
+
+fn body() -> () {{
+  let crew = Fibers::open();
+  let _ = with {{ nursery: handler for Nursery {{ adopt: fn f => Fibers::adopt(crew, f) }} }} {{
+    fan()
+  }};
+  let _ = Fibers::wait(crew);
+}}
+
+fn main() -> Int {{
+  let hand = Fiber::spawn(fn () => body());
+  // **Cancelled after the parent is already inside the wait.** That is the
+  // whole of the bug: a cancellation arriving before the join begins is seen
+  // by the between-rounds check and works even unfixed. Without this pause the
+  // test passes against the defect it exists to catch.
+  khora_sleep(100);
+  Fiber::cancel(hand);
+  Fiber::wait(hand);
+  print(7);
+  0
+}}
+"
+    );
+
+    let db = KhoraDatabase::new();
+    let file = SourceFile::new(&db, dir.join("main.kh"), source.clone());
+    let root = SourceRoot::new(&db, vec![file]);
+    if let Err(errors) = khora_codegen_llvm::compile(&db, root, &exe) {
+        let messages: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
+        panic!("compiling failed:\n  {}\n\n{source}", messages.join("\n  "));
+    }
+
+    let mut child = Command::new(&exe)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("the program should run");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        match child.try_wait().expect("waiting on the program") {
+            Some(status) => {
+                let mut out = String::new();
+                use std::io::Read;
+                if let Some(mut pipe) = child.stdout.take() {
+                    let _ = pipe.read_to_string(&mut out);
+                }
+                assert_eq!(status.code(), Some(0), "it should exit cleanly:\n{out}");
+                assert!(
+                    out.contains('7'),
+                    "the program should reach the line after the wait:\n{out}"
+                );
+                return;
+            }
+            None if std::time::Instant::now() > deadline => {
+                let _ = child.kill();
+                panic!(
+                    "`Fiber::wait` never returned: cancelling a fiber whose body \
+                     is a nursery hangs again"
+                );
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
+}

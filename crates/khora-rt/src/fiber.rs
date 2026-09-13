@@ -756,6 +756,14 @@ pub unsafe extern "C" fn khora_fiber_detach(fiber: *mut u8) {
 pub unsafe extern "C" fn khora_fiber_cancel(fiber: *mut u8) {
     // SAFETY: the caller guarantees a live handle.
     let Some(state) = (unsafe { fiber_state(fiber) }) else { return };
+    // **Its nurseries' children go with it, here.** A fiber whose body is a
+    // nursery does not finish until its children do, so flagging it alone asks
+    // it to stop and makes stopping impossible: it is blocked joining a child
+    // nobody has told to stop, and will not read its own flag again until that
+    // join returns. Delivered at the cancellation rather than waited for --
+    // `khora_fibers_wait`'s between-rounds check cannot see a cancellation that
+    // arrives mid-round, which is every cancellation that matters.
+    crate::nursery::cancel_open_crews(state.fiber.id());
     if on_the_scheduler() {
         // Through the pool rather than the flag alone. Setting the flag is
         // what the child observes at its next `!`; waking it is what gets it

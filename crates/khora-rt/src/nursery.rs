@@ -10,7 +10,7 @@ use crate::fiber::{
     failed_and_reported, fiber_state, khora_fiber_cancel, khora_fiber_release, wait_for, Handed,
 };
 use crate::heap::{khora_alloc, khora_drop};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// [`khora_fiber_release`] as a `drop_fields` callback. See [`release_shim`].
 extern "C" fn fiber_release_shim(fiber: *mut u8) {
@@ -38,6 +38,15 @@ struct Children {
     /// there are.
     sweep_at: usize,
     held: Vec<Handed>,
+    /// The children a `khora_fibers_wait` round is currently joining.
+    ///
+    /// **A child being waited on is still a child.** A round moves its fibers
+    /// out of `held` so the next round sees only new adoptions; for a while it
+    /// moved them nowhere else, which left the fibers a cancellation most needs
+    /// to reach findable by nobody. Raw pointers rather than `Handed` because
+    /// this is a view, not a second owner: the round still releases each handle
+    /// exactly once, and removes it from here first.
+    joining: Vec<*mut u8>,
     /// How many children have ended with an error.
     ///
     /// **Kept on the nursery rather than answered at the wait**, because the
@@ -54,6 +63,90 @@ struct Children {
 const SWEEP_FLOOR: usize = 64;
 
 type Crew = Mutex<Children>;
+
+/// One registered nursery.
+///
+/// **The `Send` claim covers the crew, not the handles.** `Children` holds
+/// `*mut u8` fiber handles, which is what makes it non-`Send` by default. Those
+/// are only ever read under the crew's own mutex, and the one thing done to a
+/// handle from here — `khora_fiber_cancel`, which sets an atomic flag and wakes
+/// — is already safe from any thread. What genuinely crosses threads is the
+/// `Arc`: the fiber cancelling a nursery is by definition not the fiber that
+/// opened it.
+struct Registered(Arc<Crew>);
+
+// SAFETY: as above.
+unsafe impl Send for Registered {}
+
+/// Every nursery currently open, and the fiber that opened it.
+///
+/// **A cancellation has to be delivered, not waited for.** Cancelling a fiber
+/// whose body is a nursery flags that fiber and nothing else; the fiber is
+/// inside `khora_fibers_wait`, blocked in `JoinHandle::join` on a child that
+/// nobody has told to stop. It will not look at its own flag again until that
+/// join returns, and if the child is in a `loop` it never does. Measured: the
+/// same child cancelled directly stops in 107 ms, and under a nursery never.
+///
+/// So the parent-to-child edge has to exist at the moment the cancellation
+/// arrives, and this is it.
+static OPEN: Mutex<Vec<(usize, Registered)>> = Mutex::new(Vec::new());
+
+/// Notes that the running fiber has opened `crew`.
+fn opened(crew: &Arc<Crew>) {
+    let id = crate::current::current(|fiber| fiber.id());
+    OPEN.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((id, Registered(crew.clone())));
+}
+
+/// Forgets one nursery, identified by the crew itself.
+///
+/// By identity rather than by fiber: the binding holding a nursery can be moved,
+/// so the fiber releasing it need not be the one that opened it.
+fn closed(crew: &Arc<Crew>) {
+    let mut open = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(at) = open
+        .iter()
+        .position(|(_, Registered(held))| Arc::ptr_eq(held, crew))
+    {
+        open.swap_remove(at);
+    }
+}
+
+/// Cancels every child of every nursery `fiber` has open.
+///
+/// Called by [`crate::fiber::khora_fiber_cancel`] as the cancellation is
+/// delivered. Transitive without recursing here: cancelling a child that is
+/// itself inside a nursery comes back through this function for that child.
+///
+/// **Nothing is locked while a child is cancelled.** The handles are copied out
+/// from under both locks first. Cancelling reaches the scheduler, the timers and
+/// the reactor, and a child's own exit path takes the crew's lock to deregister
+/// itself — so cancelling while holding it is a deadlock that looks exactly like
+/// the hang this exists to fix.
+pub(crate) fn cancel_open_crews(fiber: usize) {
+    let crews: Vec<Arc<Crew>> = {
+        let open = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+        open.iter()
+            .filter(|(owner, _)| *owner == fiber)
+            .map(|(_, Registered(crew))| crew.clone())
+            .collect()
+    };
+
+    let mut children: Vec<*mut u8> = Vec::new();
+    for crew in &crews {
+        let held = crew.lock().unwrap_or_else(|e| e.into_inner());
+        children.extend(held.held.iter().map(|Handed(f)| *f));
+        children.extend(held.joining.iter().copied());
+    }
+
+    for child in children {
+        // SAFETY: a handle in `held` or `joining` is one the crew holds a
+        // reference to; `joining` entries are removed before their round
+        // releases them, so neither list can name a freed fiber.
+        unsafe { crate::fiber::khora_fiber_cancel(child) };
+    }
+}
 
 /// The tag every nursery object carries.
 const FIBERS_TAG: u32 = 0;
@@ -103,16 +196,24 @@ pub extern "C" fn khora_fibers_open() -> *mut u8 {
 pub extern "C" fn khora_fibers_open_bounded(limit: i64) -> *mut u8 {
     let limit = if limit > 0 { limit as usize } else { 0 };
     let object = khora_alloc(std::mem::size_of::<*mut Crew>() as u64, FIBERS_TAG);
-    let list: Box<Crew> = Box::new(Mutex::new(Children {
+    // **`Arc`, so `OPEN` can hold one too.** A cancellation reaches this crew
+    // through the registry while the fiber that opened it is blocked in a join,
+    // so the two references have to be able to outlive each other either way.
+    let list: Arc<Crew> = Arc::new(Mutex::new(Children {
         limit,
         sweep_at: SWEEP_FLOOR,
         held: Vec::new(),
+        joining: Vec::new(),
         failed: 0,
     }));
+    opened(&list);
     // SAFETY: `khora_alloc` returned an object with one field's worth of
     // space, zeroed and aligned, and nothing else holds this pointer yet.
     unsafe {
-        object.add(KHORA_FIELD_OFFSET).cast::<*mut Crew>().write(Box::into_raw(list));
+        object
+            .add(KHORA_FIELD_OFFSET)
+            .cast::<*mut Crew>()
+            .write(Arc::into_raw(list) as *mut Crew);
     }
     object
 }
@@ -299,7 +400,10 @@ pub unsafe extern "C" fn khora_fibers_wait(fibers: *mut u8) -> i64 {
     loop {
         let waiting = {
             let mut crew = list.lock().unwrap_or_else(|e| e.into_inner());
-            std::mem::take(&mut crew.held)
+            let round = std::mem::take(&mut crew.held);
+            // Visible to `cancel_open_crews` for as long as it is being joined.
+            crew.joining = round.iter().map(|Handed(f)| *f).collect();
+            round
         };
         if waiting.is_empty() {
             return list.lock().unwrap_or_else(|e| e.into_inner()).failed;
@@ -350,6 +454,14 @@ pub unsafe extern "C" fn khora_fibers_wait(fibers: *mut u8) -> i64 {
             }
         }
         for Handed(fiber) in waiting {
+            // Out of `joining` before the handle goes, so a cancellation
+            // arriving now cannot name a fiber this round has finished with.
+            {
+                let mut crew = list.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(at) = crew.joining.iter().position(|f| *f == fiber) {
+                    crew.joining.swap_remove(at);
+                }
+            }
             // SAFETY: as above; this is the last reference to each.
             unsafe { khora_drop(fiber, Some(fiber_release_shim)) };
         }
@@ -388,7 +500,10 @@ pub unsafe extern "C" fn khora_fibers_release(fibers: *mut u8) {
         // may still be adopting. The list is this function's alone now — the
         // slot was nulled above — so each round takes what the last one did not
         // know about.
-        let list = Box::from_raw(list);
+        let list = Arc::from_raw(list as *const Crew);
+        // Out of the registry first: a child cancelled below may come back
+        // through `cancel_open_crews`, and must not find a crew going away.
+        closed(&list);
         let mut round = std::mem::take(&mut list.lock().unwrap_or_else(|e| e.into_inner()).held);
         while !round.is_empty() {
             for Handed(fiber) in round.iter() {

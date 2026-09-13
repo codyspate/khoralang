@@ -2144,15 +2144,16 @@ Asks the fiber to stop at its next cancellation point. Returns at once.
 
 **It does not reach the work inside the fiber.** A cancellation is
 delivered to a fiber and observed at its next `!`, loop back-edge or
-wait. Work that does none of those is not interrupted, and a fiber whose
-body is a `nursery` is the case where that matters most: the nursery
-notices between rounds of waiting for its children, so one already
-blocked on a round of children that never finish never notices at all,
-and a following `wait` does not return. See [Known
-limitations](/docs/limitations/#cancelling-a-fiber-that-is-inside-a-nursery-does-not-return).
+wait. Work that does none of those — a tight arithmetic loop calling only
+infallible functions — is not interrupted, because there is nowhere in it
+to look.
 
-For work that has to be stoppable, pass a `Shared<Bool>` the work itself
-reads. `Fiber::detach` is the way out that does not wait.
+A fiber whose body is a `nursery` cancels its children with it, so a
+cancelled fan-out stops rather than waiting on workers nobody told.
+
+For work that has to be stoppable at a point of its own choosing, pass a
+`Shared<Bool>` the work itself reads. `Fiber::detach` is the way out that
+does not wait.
 
 #### detach
 
