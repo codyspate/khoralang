@@ -237,10 +237,16 @@ document needs and not further.
 this release — so a service that stops *itself* runs `listen` on a fiber and
 lets go of that fiber when a route says to.
 
-**The order matters, and getting it wrong ends the process rather than the
-server.** Cancelling or detaching the listener while connections are still
-being served aborts the process with `khora: a cancellation reached a fiber's
-root`. Drain first and detach last. Inside a `main` that has already created
+**Detach the listener; never cancel it.** `Fiber::detach` on a listener is
+clean and immediate. `Fiber::cancel` on one hangs the process forever — `main`
+runs to its last line, evaluates its result, and never exits, with no message on
+any stream. No connection is needed to trigger it: an idle listener that has
+never served a request hangs just the same. A supervisor watching that process
+sees something healthy which is serving nothing, which is the worst shape a
+failure can take.
+
+Drain first and detach last: stop accepting work, wait for what is in flight,
+then let go of the listener. Inside a `main` that has already created
 the `jobs` channel, spawned `worker`, bound `port`, and installed a `Clock`:
 
 ```khora
