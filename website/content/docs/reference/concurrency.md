@@ -228,7 +228,15 @@ one unwinds the joiner along with it, and `continue_parent()` would never run.
 
 Cancelling a child does not cancel its parent.
 
-**There is no `timeout`, no `race` and no `select`.** Channel fan-in itself is concurrent, but `Fiber::wait` and `Fiber::join` are not cancellation points and carry no failure row, so a parent parked in one cannot be stopped before the child it is waiting on ends by itself. A hand-written race is therefore bounded by its slowest branch rather than its fastest. [Known limitations](/docs/limitations/#concurrency-combinators) has the measurements.
+**There is no `timeout`, no `race` and no `select`.** A deadline can be built by
+hand — [Timeouts and cancellation](/docs/cookbook/timeouts-and-cancellation/)
+has the shape, and it works because cancelling a fiber cancels the children of
+any nursery it holds. A race cannot: `Fiber::wait` and `Fiber::join` are not
+cancellation points and carry no failure row, so a parent parked directly in one
+cannot be stopped before the child it is waiting on ends by itself, and a
+hand-written race is bounded by its slowest branch rather than its fastest.
+[Known limitations](/docs/limitations/#concurrency-combinators) has the
+measurements.
 
 What does work is waiting on handles: [Take work off a queue safely](/docs/cookbook/taking-work-off-a-queue/) and [Bound concurrent work](/docs/cookbook/bounded-concurrency/) are the nearest recipes, and [known limitations](/docs/limitations/) is the page to check before assuming an operation exists.
 
