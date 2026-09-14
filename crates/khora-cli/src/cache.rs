@@ -280,12 +280,11 @@ impl Cache {
         // no way to tell. Rebuilding the C library and getting the old answer
         // is the exact failure this prevents.
         for archive in inputs.natives.iter() {
-            match self.identity(archive) {
-                Some(digest) => field(digest.as_bytes()),
-                // Named but not found: the link is about to fail. Miss, and
-                // let the linker explain rather than caching a broken key.
-                None => return None,
-            }
+            // `?` rather than a match: an archive that is named and not found
+            // means the link is about to fail, so miss and let the linker
+            // explain rather than caching a key built from a hole.
+            let digest = self.identity(archive)?;
+            field(digest.as_bytes());
         }
         // **The representation, because it is not in the sources.**
         // `KHORA_UNBOXED` decides whether a small record is a heap object or a

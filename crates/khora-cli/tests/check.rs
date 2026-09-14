@@ -854,16 +854,32 @@ fn only_the_root_package_may_link_a_native_library() {
         .output()
         .expect("running the C compiler");
     assert!(compiled.status.success(), "compiling the fixture library");
+    // **Named the way this platform's linker looks for it.** `-lanswer` finds
+    // `libanswer.a` where the linker is ELF or Mach-O and `answer.lib` on
+    // Windows, and `llvm-ar` writes either -- so a fixture that always wrote
+    // the Unix spelling built fine and then failed at the link with
+    // `could not open 'answer.lib'`, which reads like a defect in the feature
+    // rather than in the test.
+    let archive = vendor.join(if cfg!(windows) {
+        "answer.lib"
+    } else {
+        "libanswer.a"
+    });
     let ar = khora_codegen_llvm::toolchain::tool("llvm-ar")
         .or_else(|| khora_codegen_llvm::toolchain::tool("ar"))
         .unwrap_or_else(|| PathBuf::from("ar"));
     let archived = Command::new(&ar)
         .arg("rcs")
-        .arg(vendor.join("libanswer.a"))
+        .arg(&archive)
         .arg(&object)
         .output()
         .expect("running ar");
-    assert!(archived.status.success(), "archiving the fixture library");
+    assert!(
+        archived.status.success(),
+        "archiving the fixture library: {}",
+        String::from_utf8_lossy(&archived.stderr)
+    );
+    assert!(archive.is_file(), "the archive should exist at {archive:?}");
 
     let app = root.join("app");
     std::fs::create_dir_all(app.join("src")).expect("the package");
