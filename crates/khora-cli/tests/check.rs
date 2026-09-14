@@ -834,6 +834,13 @@ fn a_bare_relative_path_still_finds_the_workspace_root() {
 /// Asserted in both directions: the consumer's build fails while the line is
 /// absent, and succeeds once it is there. Without the first half this test
 /// would pass against a build that linked everything it found.
+///
+/// **Gated on `llvm`, like every test here that drives a real build.** The
+/// default `cargo nextest run --workspace` builds `khora` without a backend,
+/// and such a binary refuses every `khora build` with "this `khora` was built
+/// without the LLVM backend" -- which arrives as this test's own assertion
+/// failing on all three platforms, reading like a defect in the feature.
+#[cfg(feature = "llvm")]
 #[test]
 fn only_the_root_package_may_link_a_native_library() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("native_link");
