@@ -356,11 +356,6 @@ pub fn debug_info_wanted() -> bool {
     Profile::from_env().debug_info()
 }
 
-/// Links objects with the Khora runtime into an executable.
-///
-/// What [`crate::compile`] finishes with. The runtime archive goes *after* the
-/// objects and the system libraries after that: a static link resolves left to
-/// right, so an archive listed before its user contributes nothing.
 /// Native libraries the root package asked to link against.
 ///
 /// **Only the root package's request is honoured.** A dependency may ship an
@@ -407,8 +402,11 @@ fn natives() -> Natives {
     NATIVES.get().cloned().unwrap_or_default()
 }
 
-/// Links objects with the Khora runtime archive into an executable or a shared
-/// library.
+/// Links objects with the Khora runtime into an executable.
+///
+/// What [`crate::compile`] finishes with. The runtime archive goes *after* the
+/// objects and the system libraries after that: a static link resolves left to
+/// right, so an archive listed before its user contributes nothing.
 pub fn link_with_runtime(
     objects: &[&Path],
     out: &Path,

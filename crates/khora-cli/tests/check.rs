@@ -950,3 +950,70 @@ fn only_the_root_package_may_link_a_native_library() {
         "the manifest audit should know both keys:\n{said}"
     );
 }
+
+/// **A row in a `let` annotation was not checked at all.**
+///
+/// Khora reads a written type through two converters. A signature goes through
+/// `type_of_syntax`, which has carried rows since errata 59. A body annotation
+/// goes through the HIR echo `TypeRef::of_syntax`, which had no row variant --
+/// so `ast::Type::Record` fell into the catch-all beside `Fn | Union | Variant
+/// | Forall`, became `TypeRef::Opaque`, and `type_of_ref` read that as
+/// `Type::Unknown`.
+///
+/// `Unknown` unifies with anything, so the row was not merely lost, it was
+/// *permissive*: the program below passes a `{ Bad: Bad }` list to a parameter
+/// declared `{ Oops: Oops }` and compiled clean. The loud half of the same
+/// defect refused valid programs -- `for` over a list of row-carrying values
+/// was rejected, blaming `Iterator::next`, a function the source never names.
+///
+/// **This is the case that goes green-to-red**, which is why it is the test. A
+/// test that only asserted the valid program compiles would pass against a
+/// build that still dropped the row, because dropping it is what made the
+/// invalid program pass too. It is the fourth site of the shape errata 30, 59
+/// and 60 describe, and the first outside `khora-types/src/syntax.rs`.
+#[test]
+fn a_row_written_in_a_let_annotation_is_checked() {
+    let (ok, output) = check(
+        "row_annotation_mismatch",
+        "module m;\n\
+         import std::core::{List};\n\
+         type Oops = { why: String };\n\
+         type Bad = { nope: String };\n\
+         type Job<A, 'er> = { done: A };\n\
+         fn take(js: List<Job<Int, { Oops: Oops }>>) -> Int { 0 }\n\
+         pub fn main() -> Int {\n\
+         \x20 let js: List<Job<Int, { Bad: Bad }>> = List::Cons({ done: 1 }, List::Nil);\n\
+         \x20 take(js)\n\
+         }\n",
+    );
+    assert!(
+        !ok,
+        "a row mismatch between the annotation and the parameter has to be \
+         refused; the annotation's row was being dropped:\n{output}"
+    );
+    assert!(
+        output.contains("Bad"),
+        "the error should name the row entry that is not accounted for:\n{output}"
+    );
+}
+
+/// The other half: carrying the row must not refuse a program that agrees.
+///
+/// `for` over a list of row-carrying values is the shape a worker pool takes,
+/// and it was rejected outright while the row was `Unknown`.
+#[test]
+fn a_for_loop_over_a_row_carrying_list_compiles() {
+    let (ok, output) = check(
+        "row_annotation_for",
+        "module m;\n\
+         import std::core::{List, Iterator, Step};\n\
+         type Oops = { why: String };\n\
+         type Job<A, 'er> = { done: A };\n\
+         pub fn main() -> Int {\n\
+         \x20 let js: List<Job<Int, { Oops: Oops }>> = List::Cons({ done: 1 }, List::Nil);\n\
+         \x20 for j in js { let _ = j.done; };\n\
+         \x20 0\n\
+         }\n",
+    );
+    assert!(ok, "expected success, got:\n{output}");
+}

@@ -366,6 +366,15 @@ pub fn type_of_ref(
             let args = args.iter().map(|t| type_of_ref(t, generics, homes)).collect();
             named_type(name, args, generics, homes)
         }
+        // A row written as a type argument. `Opaque` here made the row slot
+        // `Type::Unknown`, and `undetermined` refuses an ADT holding one.
+        TypeRef::Row { fields, tail } => Type::row(
+            fields
+                .iter()
+                .map(|(label, t)| (label.clone(), type_of_ref(t, generics, homes)))
+                .collect(),
+            tail.as_ref().map(|t| Type::Param(t.clone())),
+        ),
     }
 }
 

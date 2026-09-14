@@ -3541,3 +3541,41 @@ exactly the same shape — a first carrying case owning nothing — and stayed
 green through the bug. A test that would have caught it is the only kind worth
 calling a regression test, so this one was checked against the defect before
 being believed.
+
+## 88. The second converter had no row, so an annotation stopped checking one
+
+`let js: List<Job<Int, { Bad: Bad }>> = ..` passed to a parameter declared
+`List<Job<Int, { Oops: Oops }>>` compiled clean. The rows disagree, and nothing
+said so.
+
+Khora reads a written type through two converters. A signature goes through
+`type_of_syntax`, which has carried rows since errata 59. A *body* annotation
+goes through the HIR echo `TypeRef::of_syntax`, which had no row variant — so
+`ast::Type::Record` fell into the catch-all beside `Fn | Union | Variant |
+Forall`, became `TypeRef::Opaque`, and `type_of_ref` read that as
+`Type::Unknown`.
+
+`Unknown` unifies with anything. So the row was not merely lost, it was
+*permissive*: every row written on an annotated local went unchecked.
+
+**The loud half was reported first and is the less serious one.** `for` over a
+list of row-carrying values was refused outright, blaming `Iterator::next` — a
+function the program never mentions — because the recorded instantiation held
+an `Unknown` and `refuse_undetermined_instantiations` is looking for exactly
+that. Six theories about inference were formed and disproved by probes before
+anybody looked at the converter, all of them downstream of a deletion that had
+already happened. Inference was behaving correctly on a corrupted input the
+whole time.
+
+**Errata 30, 59 and 60 are the same shape, and all three fixes landed in
+`khora-types/src/syntax.rs`.** This is a different converter, and none of them
+reached it. A permissive default is not a small bug and it hides in the arm
+nobody wrote — the third time that sentence has been written here, and the
+first time about this file.
+
+The guard is `check::a_row_written_in_a_let_annotation_is_checked`, and it is
+the *mismatch* rather than the `for` loop because only the mismatch goes
+green-to-red: a test that asserted the valid program compiles would have passed
+against a build that still dropped the row, since dropping it is what let the
+invalid program through. Both tests were run with the fix disabled and both
+failed before either was believed.

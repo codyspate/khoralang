@@ -339,6 +339,10 @@ pub enum TypeRef {
     /// checked clean: an annotation that is only a comment is worse than no
     /// annotation, because it is believed.
     Fn { params: Vec<TypeRef>, ret: Box<TypeRef> },
+    /// A row written in type-argument position: the `{ Oops: Oops }` in
+    /// `Job<Int, { Oops: Oops }>`. Echoed because collapsing it to `Opaque`
+    /// made the row slot `Type::Unknown`, which `undetermined` refuses.
+    Row { fields: Vec<(String, TypeRef)>, tail: Option<String> },
     /// A shape this echo does not carry — a function type with effect
     /// clauses, so far. Checked as `Unknown`, which is to say not checked,
     /// which is what every annotation used to get.
@@ -389,8 +393,27 @@ impl TypeRef {
                 let ret = f.return_type().as_ref().map_or(TypeRef::Opaque, TypeRef::of_syntax);
                 TypeRef::Fn { params, ret: Box::new(ret) }
             }
+            ast::Type::Record(r) => {
+                let after_tail: Vec<ast::Field> =
+                    r.row_tail().map(|t| t.fields().collect()).unwrap_or_default();
+                let fields = r
+                    .fields()
+                    .chain(after_tail)
+                    .filter_map(|f| {
+                        let label = f.name()?.ident()?;
+                        Some((label, f.ty().as_ref().map_or(TypeRef::Opaque, TypeRef::of_syntax)))
+                    })
+                    .collect();
+                let tail = r
+                    .row_tail()
+                    .and_then(|t| t.types().next())
+                    .and_then(|t| match t {
+                        ast::Type::Path(p) => p.row_var().map(|v| v.text().to_string()),
+                        _ => None,
+                    });
+                TypeRef::Row { fields, tail }
+            }
             ast::Type::Fn(_)
-            | ast::Type::Record(_)
             | ast::Type::Union(_)
             | ast::Type::Variant(_)
             | ast::Type::Forall(_) => TypeRef::Opaque,

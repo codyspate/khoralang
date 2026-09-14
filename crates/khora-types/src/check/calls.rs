@@ -520,8 +520,24 @@ impl<'a> Checker<'a> {
         // parameter is `Self` and the two are the same thing; for `Functor` it
         // is `Self<A>`, and only unifying through it decides `Self := Option`
         // and `A := Int` rather than the nonsense `Self := Option<Int>`.
+        //
+        // **Reported here, where the two types are still in hand.** Discarding
+        // this failure left `Self` unsolved and no error said so, and the
+        // program was refused two hundred lines later by the generic
+        // undetermined-instantiation check -- which names `Iterator::next`, a
+        // function the author never wrote, and advises an annotation that
+        // cannot be written. The receiver and the parameter it would not match
+        // are exactly what a reader needs, and this is the only place that has
+        // both.
         if let Some(receiver) = params.first() {
-            let _ = self.unifier.unify(receiver, self_ty);
+            if let Err(mismatch) = self.unifier.unify(receiver, self_ty) {
+                let shown = self.unifier.zonk(self_ty);
+                self.error(
+                    format!("`{shown}` cannot be the receiver of `{key}`: {mismatch}"),
+                    range,
+                );
+                return Type::Unknown;
+            }
         }
 
         // The receiver is the first parameter, and it is already checked: it is
