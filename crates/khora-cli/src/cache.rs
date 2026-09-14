@@ -121,6 +121,11 @@ pub struct Inputs<'a> {
     pub debug_info: bool,
     /// Executable or library.
     pub kind: Kind,
+    /// Native library archives this build links, resolved to real paths.
+    ///
+    /// Hashed by content: they are part of the artifact, so a changed archive
+    /// is a changed program even when every source is identical.
+    pub natives: Vec<PathBuf>,
 }
 
 /// The cache directory, and the questions asked of it.
@@ -268,6 +273,20 @@ impl Cache {
         field(inputs.profile.as_bytes());
         field(&[u8::from(inputs.debug_info)]);
         field(inputs.kind.name().as_bytes());
+        // **Native libraries by content, for the same reason as the runtime.**
+        // A `-l` archive is linked into the artifact, so an archive that
+        // changed produces a different program from identical sources -- and a
+        // key that ignored it would serve the previous build's behaviour with
+        // no way to tell. Rebuilding the C library and getting the old answer
+        // is the exact failure this prevents.
+        for archive in inputs.natives.iter() {
+            match self.identity(archive) {
+                Some(digest) => field(digest.as_bytes()),
+                // Named but not found: the link is about to fail. Miss, and
+                // let the linker explain rather than caching a broken key.
+                None => return None,
+            }
+        }
         // **The representation, because it is not in the sources.**
         // `KHORA_UNBOXED` decides whether a small record is a heap object or a
         // machine word, which changes every object file the compiler emits and
@@ -438,6 +457,10 @@ impl Cache {
                 anyhow::bail!("could not move the entry into {}", destination.display());
             }
         }
+        // **Trimmed on the way out of a write, not on the way into a read.** A
+        // hit should cost nothing beyond the copy, and this is the only moment
+        // the cache is known to have grown.
+        self.evict();
         Ok(())
     }
 
@@ -454,6 +477,88 @@ impl Cache {
             copy(header, &target.with_extension("h"))?;
         }
         Ok(())
+    }
+
+    /// How large the build cache may get before entries are evicted.
+    ///
+    /// **Two gigabytes, chosen against the machine rather than the workload.**
+    /// A cache exists to make the second build fast, and the entries that do
+    /// that are the recent ones; the rest is a record of every key that has
+    /// ever been built. Small enough that a modest disk cannot be filled by
+    /// leaving a build loop running, large enough to hold many builds of a
+    /// large project. `KHORA_CACHE_BUDGET`, in bytes, for a machine where that
+    /// is the wrong trade.
+    pub const BUDGET: u64 = 2 * 1024 * 1024 * 1024;
+
+    /// The budget in force, which `KHORA_CACHE_BUDGET` may override.
+    fn budget() -> u64 {
+        std::env::var("KHORA_CACHE_BUDGET")
+            .ok()
+            .and_then(|set| set.parse().ok())
+            .unwrap_or(Self::BUDGET)
+    }
+
+    /// Removes the least recently used entries until the cache is under
+    /// [`Cache::BUDGET`].
+    ///
+    /// **A build cache with no ceiling is a disk-filling bug on a timer.** Every
+    /// distinct key writes a new directory and nothing ever removed one, so a
+    /// cache grows without bound by design: a day of ordinary work changes the
+    /// compiler, the profile and the sources many times over, and each
+    /// combination is kept forever. Measured on a development machine, it
+    /// reached 12 GB and filled a 20 GB filesystem.
+    ///
+    /// Least-recently-used by the marker each entry's directory carries, which
+    /// [`Cache::store`] touches on write and [`Cache::reuse`] touches on a hit
+    /// -- so an entry stays exactly as long as it is still being asked for.
+    /// Eviction is best-effort: a cache that cannot be trimmed is a slow build,
+    /// never a failed one.
+    pub fn evict(&self) {
+        let (_, bytes) = self.size();
+        let budget = Self::budget();
+        if bytes <= budget {
+            return;
+        }
+
+        let build = self.root.join("build");
+        let Ok(read) = std::fs::read_dir(&build) else {
+            return;
+        };
+        // (last used, size, path), oldest first.
+        let mut entries: Vec<(std::time::SystemTime, u64, PathBuf)> = read
+            .flatten()
+            .filter(|entry| entry.path().is_dir())
+            .map(|entry| {
+                let path = entry.path();
+                let mut size = 0;
+                let mut used = std::time::SystemTime::UNIX_EPOCH;
+                if let Ok(inner) = std::fs::read_dir(&path) {
+                    for file in inner.flatten() {
+                        if let Ok(meta) = file.metadata() {
+                            size += meta.len();
+                            if let Ok(at) = meta.accessed().or_else(|_| meta.modified()) {
+                                used = used.max(at);
+                            }
+                        }
+                    }
+                }
+                (used, size, path)
+            })
+            .collect();
+        entries.sort_by_key(|(used, _, _)| *used);
+
+        // Down to half the budget rather than to the line, so that the next
+        // build does not evict again immediately -- trimming one entry per
+        // build would spend the time and keep none of the benefit.
+        let mut held = bytes;
+        for (_, size, path) in entries {
+            if held <= budget / 2 {
+                break;
+            }
+            if std::fs::remove_dir_all(&path).is_ok() {
+                held = held.saturating_sub(size);
+            }
+        }
     }
 
     /// How many entries there are and what they occupy.
@@ -721,5 +826,71 @@ mod tests {
     fn a_file_that_is_not_there_has_no_identity() {
         let cache = scratch("missing");
         assert!(cache.identity(&cache.root.join("nothing")).is_none());
+    }
+
+    /// **The cache has a ceiling, and the oldest entries go first.**
+    ///
+    /// It had none: every distinct key wrote a directory holding a linked
+    /// executable and nothing ever removed one, so the cache grew for as long
+    /// as the machine was used. Because the key includes the compiler binary,
+    /// a day of compiler work mints a fresh generation of entries per rebuild
+    /// — measured at 32 MB each, reaching 12 GB and filling a 20 GB disk.
+    ///
+    /// Asserted on both halves: that it stops growing, and that what survives
+    /// is what was used most recently.
+    #[test]
+    fn the_cache_evicts_its_oldest_entries_when_it_is_too_large() {
+        let cache = scratch("evicts");
+        let budget = Cache::budget();
+
+        // Four entries of a third of the budget each: over the line, and
+        // enough that trimming to half leaves a clear survivor.
+        let each = (budget / 3) as usize;
+        let mut written = Vec::new();
+        for name in ["oldest", "older", "newer", "newest"] {
+            let entry = cache.root.join("build").join(name);
+            std::fs::create_dir_all(&entry).expect("an entry");
+            std::fs::write(entry.join("program"), vec![0u8; each]).expect("an artifact");
+            // Distinct, increasing mtimes: the filesystem's resolution is not
+            // fine enough to separate four writes in a loop.
+            written.push(entry);
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+        }
+
+        let (count, before) = cache.size();
+        assert_eq!(count, 4, "four entries were written");
+        assert!(before > budget, "the fixture must exceed the budget");
+
+        cache.evict();
+
+        let (_, after) = cache.size();
+        assert!(
+            after <= budget,
+            "eviction should bring the cache under {budget}, left {after}"
+        );
+        assert!(
+            !written[0].exists(),
+            "the least recently used entry should be the first to go"
+        );
+        assert!(
+            written[3].exists(),
+            "the most recently used entry should survive"
+        );
+    }
+
+    /// A cache inside its budget is left alone.
+    ///
+    /// Without this, an `evict` that removed something every time would pass
+    /// the test above and quietly make every build a cold one.
+    #[test]
+    fn a_cache_within_its_budget_is_not_touched() {
+        let cache = scratch("keeps");
+        let entry = cache.root.join("build").join("small");
+        std::fs::create_dir_all(&entry).expect("an entry");
+        std::fs::write(entry.join("program"), b"tiny").expect("an artifact");
+
+        cache.evict();
+
+        assert!(entry.exists(), "an entry under budget must be kept");
     }
 }
