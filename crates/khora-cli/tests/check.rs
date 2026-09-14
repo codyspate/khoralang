@@ -821,3 +821,109 @@ fn a_bare_relative_path_still_finds_the_workspace_root() {
     );
     assert!(out.status.success(), "{text}");
 }
+
+/// **A dependency ships the archive; only the root package may link it.**
+///
+/// The shape a driver package has to have. A native library cannot be reached
+/// from Khora at all unless something puts `-l` on the link line, and the
+/// question is who. A dependency doing it would be a supply-chain change with
+/// no signal at the place that would have to consent, so the dependency ships
+/// the bytes and declares `extern fn`, and the program that depends on it
+/// writes one line saying yes.
+///
+/// Asserted in both directions: the consumer's build fails while the line is
+/// absent, and succeeds once it is there. Without the first half this test
+/// would pass against a build that linked everything it found.
+#[test]
+fn only_the_root_package_may_link_a_native_library() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("native_link");
+    let _ = std::fs::remove_dir_all(&root);
+    let vendor = root.join("vendor");
+    std::fs::create_dir_all(&vendor).expect("a workspace");
+
+    // A C archive, built with the linker the toolchain already requires.
+    let c = vendor.join("answer.c");
+    std::fs::write(&c, "long doubled(long n) { return n * 2; }\n").expect("the C source");
+    let object = vendor.join("answer.o");
+    let clang = khora_codegen_llvm::toolchain::linker().expect("a C compiler");
+    let compiled = Command::new(&clang)
+        .arg("-c")
+        .arg(&c)
+        .arg("-o")
+        .arg(&object)
+        .output()
+        .expect("running the C compiler");
+    assert!(compiled.status.success(), "compiling the fixture library");
+    let ar = khora_codegen_llvm::toolchain::tool("llvm-ar")
+        .or_else(|| khora_codegen_llvm::toolchain::tool("ar"))
+        .unwrap_or_else(|| PathBuf::from("ar"));
+    let archived = Command::new(&ar)
+        .arg("rcs")
+        .arg(vendor.join("libanswer.a"))
+        .arg(&object)
+        .output()
+        .expect("running ar");
+    assert!(archived.status.success(), "archiving the fixture library");
+
+    let app = root.join("app");
+    std::fs::create_dir_all(app.join("src")).expect("the package");
+    std::fs::write(
+        app.join("src").join("main.kh"),
+        "module app::main;\n\
+         \n\
+         import std::core::{print};\n\
+         \n\
+         extern fn doubled(n: Int) -> Int;\n\
+         \n\
+         pub fn main() -> Int {\n\
+         \x20 print(\"${doubled(21)}\");\n\
+         \x20 0\n\
+         }\n",
+    )
+    .expect("the program");
+
+    // Permitted to declare the extern, but naming no library to satisfy it.
+    let manifest = app.join("khora.toml");
+    let base = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+                [toolchain]\nversion = \"0.2.0\"\n\n\
+                [permissions]\nextern = [\"app\"]\n";
+    std::fs::write(&manifest, base).expect("the manifest");
+
+    let without = Command::new(env!("CARGO_BIN_EXE_khora"))
+        .arg("build")
+        .arg(&app)
+        .output()
+        .expect("could not run `khora`");
+    assert!(
+        !without.status.success(),
+        "a build that names no library must not resolve the symbol"
+    );
+
+    // The one line that says yes.
+    std::fs::write(
+        &manifest,
+        format!(
+            "{base}\n[build]\nlink = [\"answer\"]\nlink-search = [\"../vendor\"]\n"
+        ),
+    )
+    .expect("the manifest");
+
+    let with = Command::new(env!("CARGO_BIN_EXE_khora"))
+        .arg("build")
+        .arg(&app)
+        .output()
+        .expect("could not run `khora`");
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&with.stdout),
+        String::from_utf8_lossy(&with.stderr)
+    );
+    assert!(
+        with.status.success(),
+        "`build.link` should satisfy the extern:\n{said}"
+    );
+    assert!(
+        !said.contains("unrecognized key"),
+        "the manifest audit should know both keys:\n{said}"
+    );
+}

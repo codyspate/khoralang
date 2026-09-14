@@ -170,7 +170,12 @@ static DEPENDENCY: Schema = Schema::Fields(&[
     ("subdir", &OPEN),
 ]);
 
-static BUILD: Schema = Schema::Fields(&[("target", &BUILD_TARGET), ("plugin", &BUILD_PLUGIN)]);
+static BUILD: Schema = Schema::Fields(&[
+    ("target", &BUILD_TARGET),
+    ("plugin", &BUILD_PLUGIN),
+    ("link", &OPEN),
+    ("link-search", &OPEN),
+]);
 
 /// `[build] target` names a triple and selects nothing.
 ///

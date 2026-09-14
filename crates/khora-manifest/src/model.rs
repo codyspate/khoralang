@@ -1245,6 +1245,21 @@ pub struct Build {
     pub target: Option<String>,
     /// Build plugin, such as `protobuf-compiler@2.1`.
     pub plugin: Option<String>,
+    /// Native libraries to link, named as the linker names them: `link =
+    /// ["pq"]` becomes `-lpq`.
+    ///
+    /// **Only the root package's list is read.** A dependency may ship an
+    /// archive and declare `extern fn` against it, but it cannot put a flag on
+    /// your link line -- a transitive package quietly linking a native library
+    /// into your program is a supply-chain hole with no signal. The package
+    /// does the work and documents one line for you to add, so every native
+    /// library a program links can be read off its own manifest.
+    #[serde(default)]
+    pub link: Vec<String>,
+    /// Directories to search for the libraries named in `link`, relative to the
+    /// manifest.
+    #[serde(default, rename = "link-search")]
+    pub link_search: Vec<String>,
 }
 
 /// One entry of the `[tasks]` table.

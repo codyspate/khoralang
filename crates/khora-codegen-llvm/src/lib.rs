@@ -67,3 +67,4 @@ pub use backend::{
     verify_for_target,
 };
 pub use toolchain::Profile;
+pub use toolchain::{set_natives, Natives};

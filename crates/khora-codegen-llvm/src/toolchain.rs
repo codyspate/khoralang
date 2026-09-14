@@ -101,7 +101,7 @@ fn no_linker() -> String {
 /// already knows how to find the platform's CRT and system libraries, and it
 /// is the same driver that will handle the cross-targets in Phase 6.
 pub fn link_executable(objects: &[&Path], out: &Path) -> Result<(), String> {
-    drive_clang(objects, &[], out, false, Profile::from_env())
+    drive_clang(objects, &[], out, false, Profile::from_env(), &natives())
 }
 
 /// File name of the runtime's static archive, as cargo writes it.
@@ -361,6 +361,54 @@ pub fn debug_info_wanted() -> bool {
 /// What [`crate::compile`] finishes with. The runtime archive goes *after* the
 /// objects and the system libraries after that: a static link resolves left to
 /// right, so an archive listed before its user contributes nothing.
+/// Native libraries the root package asked to link against.
+///
+/// **Only the root package's request is honoured.** A dependency may ship an
+/// archive and declare `extern fn` against it, but it cannot add a flag to the
+/// link line: a transitive package quietly linking a native library into a
+/// program is a supply-chain hole with no signal at the place that would have
+/// to consent. The package does the work and documents one line for the program
+/// to add, so every native library a build links is readable from its own
+/// manifest.
+#[derive(Debug, Default, Clone)]
+pub struct Natives {
+    /// Library names as the linker spells them: `pq` becomes `-lpq`.
+    pub link: Vec<String>,
+    /// Absolute directories to search, already resolved against the manifest.
+    pub search: Vec<PathBuf>,
+}
+
+impl Natives {
+    /// Whether anything was asked for.
+    pub fn is_empty(&self) -> bool {
+        self.link.is_empty() && self.search.is_empty()
+    }
+}
+
+/// The native libraries this build may link, set once by whoever read the
+/// manifest.
+///
+/// **A global rather than a parameter, for the same reason [`Profile`] reads
+/// the environment.** The link happens at the bottom of several public entry
+/// points -- `compile`, `compile_with`, `compile_library`, and the library form
+/// -- and threading one more argument through all of them to reach a single
+/// call site would widen four signatures for one consumer. What matters is that
+/// the value is decided *once*, by the CLI, which is the only layer that has a
+/// manifest and an error channel to complain on.
+static NATIVES: std::sync::OnceLock<Natives> = std::sync::OnceLock::new();
+
+/// Records what the root manifest asked to link. Later calls are ignored.
+pub fn set_natives(natives: Natives) {
+    let _ = NATIVES.set(natives);
+}
+
+/// What was recorded, or nothing.
+fn natives() -> Natives {
+    NATIVES.get().cloned().unwrap_or_default()
+}
+
+/// Links objects with the Khora runtime archive into an executable or a shared
+/// library.
 pub fn link_with_runtime(
     objects: &[&Path],
     out: &Path,
@@ -368,6 +416,7 @@ pub fn link_with_runtime(
     exports: &[String],
     profile: Profile,
 ) -> Result<(), String> {
+    let natives = natives();
     let wasm = khora_db::target_triple().is_some_and(|t| t.contains("wasm"));
     let runtime = runtime_archive().ok_or_else(|| {
         let (archive, how) = match khora_db::target_triple() {
@@ -383,9 +432,15 @@ pub fn link_with_runtime(
         )
     })?;
     if wasm {
+        if !natives.is_empty() {
+            return Err("linking a native library is not supported for wasm: the module's \
+                        imports are resolved by the host, so a `-l` flag has nothing to \
+                        resolve against. Remove `build.link` for this target."
+                .to_string());
+        }
         return drive_wasm_ld(objects, runtime.as_path(), out, exports);
     }
-    drive_clang(objects, &[runtime.as_path()], out, library, profile)
+    drive_clang(objects, &[runtime.as_path()], out, library, profile, &natives)
 }
 
 /// Links a WebAssembly module with `wasm-ld`.
@@ -454,6 +509,7 @@ fn drive_clang(
     out: &Path,
     library: bool,
     profile: Profile,
+    natives: &Natives,
 ) -> Result<(), String> {
     let clang = linker().ok_or_else(no_linker)?;
 
@@ -494,6 +550,16 @@ fn drive_clang(
         }
     }
     cmd.args(objects).args(archives);
+    // **After the program's own objects, before the system libraries.** A
+    // static archive only contributes the members something already undefined
+    // asks for, so an archive named ahead of the object that needs it
+    // contributes nothing and the symbol is still missing at the end.
+    for dir in &natives.search {
+        cmd.arg(format!("-L{}", dir.display()));
+    }
+    for name in &natives.link {
+        cmd.arg(format!("-l{name}"));
+    }
     if !archives.is_empty() {
         cmd.args(SYSTEM_LIBS);
     }

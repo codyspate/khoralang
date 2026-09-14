@@ -23,18 +23,63 @@ let now = monotonic_ticks();
 
 Foreign declarations are subject to the package's extern permissions. That permission controls whether the package may declare the boundary; it is not process sandboxing.
 
-### Where the symbol comes from
+### Link against a native library
 
-**A Khora build links the runtime and nothing else, so there is no way to link against a system library yet.** `khora check` accepts a declaration of any C symbol; `khora build` then fails at the linker with `undefined reference`, and no manifest key, build flag or environment variable changes that. `[build]` has `target` and `plugin`, and neither is read.
+An `extern fn` with no body needs its symbol to arrive from somewhere. The root
+package names the libraries:
 
-So `extern fn` today reaches symbols that are *already in the program*: the Khora runtime's own exports, and code linked in by the toolchain. Declaring `sqlite3_open` compiles and does not link.
+```toml
+[permissions]
+extern = ["myapp"]
 
-What this leaves for somebody who needs a C library:
+[build]
+link = ["answer"]
+link-search = ["./vendor"]
+```
 
-- **Wrap it in a separate process** and talk to it over a pipe or a socket. `std::process` and `std::net` are both available, and the boundary is a serialisation rather than an ABI.
-- **Wait.** Naming native libraries from the manifest is a known gap rather than a decision, and it is what `[build]` will grow.
+`link` names libraries the way the linker does — `"answer"` becomes `-lanswer`,
+matching `libanswer.a` or `answer.lib`. `link-search` adds directories to search,
+relative to the manifest. A name with no directory listed is looked for where the
+system keeps its libraries.
 
-`pub extern fn` — exporting *out* of Khora — is unaffected, because there the symbol is one this program defines. A shared library built with `khora build --lib` and called from C works today.
+Linking is governed by the same `extern` permission as declaring an `extern fn`:
+it is how those declarations are satisfied, so a package not trusted to declare
+them is not trusted to link them either.
+
+### A dependency ships the library; the root package links it
+
+**`build.link` is read from the root manifest and nowhere else.** A dependency
+may ship an archive and declare `extern fn` against it — that is how a driver
+package works — but it cannot put a flag on the link line of a program that
+merely depends on it.
+
+A transitive package adding a native library to your build would be a
+supply-chain change with no signal at the place that would have to consent. So
+the package does the work, and the program that uses it writes one line saying
+yes:
+
+```toml
+[permissions]
+extern = ["myapp", "postgres"]
+
+[build]
+link = ["pq"]
+link-search = ["../postgres/vendor"]
+```
+
+Until that line is there the build fails at the linker, naming the symbol it
+could not find. The consequence worth the trade: every native library a program
+links can be read off its own manifest.
+
+### What this does not cover
+
+- **wasm.** A WebAssembly module's imports are resolved by its host, so there is
+  nothing for `-l` to resolve against; `build.link` is refused for that target.
+- **Cross-compilation.** Linking for another triple needs a sysroot story that
+  does not exist yet — see [Supported targets](/docs/deployment/supported-targets/).
+
+`pub extern fn` — exporting *out* of Khora — is unaffected either way, because
+there the symbol is one this program defines.
 
 ## Export a Khora function to C
 

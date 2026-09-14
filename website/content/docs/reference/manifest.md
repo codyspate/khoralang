@@ -290,8 +290,16 @@ target = "x86_64-unknown-linux-gnu"
 | --- | --- |
 | `target` | The triple to compile for. **Not read yet** — see below. |
 | `plugin` | A build plugin, named and versioned — `protobuf-compiler@2.1`. It names a plugin rather than pointing at a script. **Not read yet** — see below. |
+| `link` | Native libraries to link, named as the linker names them: `link = ["pq"]` becomes `-lpq`. |
+| `link-search` | Directories to search for those libraries, relative to this manifest. |
 
-**Neither key does anything today, and the toolchain says so.** Both are
+**`link` is read from the root package only.** A dependency may ship an archive
+and declare `extern fn` against it, but it cannot add a flag to your link line —
+see [Foreign function interface](/docs/reference/ffi/#a-dependency-ships-the-library-the-root-package-links-it).
+Both keys need the package to hold the `extern` permission, because linking a
+native library is how an `extern fn` is satisfied.
+
+**Neither `target` nor `plugin` does anything today, and the toolchain says so.** Both are
 recognized, both are documented here because the decisions behind them are
 made, and setting either gets you a warning rather than silence:
 

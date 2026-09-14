@@ -1666,7 +1666,11 @@ fn harness(
     // `test` and `bench` both arrive here, and both compile a program from the
     // same manifest `build` would have read. See the note in `build`.
     report_manifest_warnings(Some(path));
-    let (db, inputs, root) = load(path)?;
+    // `natives` is deliberately unused here: the harness does not consult the
+    // build cache, so there is no key for an archive to be part of. The linked
+    // library still reaches the test binary, because `record_natives` told the
+    // backend on the way through `load`.
+    let (db, inputs, root, _natives) = load(path)?;
     // The *package's* first source, not the program's: `inputs` carries the
     // standard library too, and `inputs.first()` is whichever of everything
     // sorts earliest. Outside a package that put `khora-tests` in the
@@ -1817,7 +1821,7 @@ fn build_one(
     release: bool,
     no_cache: bool,
 ) -> Result<bool> {
-    let (db, inputs, root) = load(path)?;
+    let (db, inputs, root, natives) = load(path)?;
 
     // `--release` wins over the variable, and the variable is how everything
     // without a flag says it. Passed rather than set, because the linker asks
@@ -1885,6 +1889,7 @@ fn build_one(
         profile: profile.name(),
         debug_info: profile.debug_info(),
         kind: if lib { cache::Kind::Library } else { cache::Kind::Executable },
+        natives,
     };
     // A cache that cannot be opened is a cache that is not used. Never fatal:
     // see the module comment.
@@ -2384,7 +2389,80 @@ fn run_program(
 /// that does not parse has nothing worth compiling, and the errors are already
 /// on stderr by then.
 #[cfg(feature = "llvm")]
-type Loaded = (KhoraDatabase, Vec<(PathBuf, String, SourceFile)>, SourceRoot);
+type Loaded = (
+    KhoraDatabase,
+    Vec<(PathBuf, String, SourceFile)>,
+    SourceRoot,
+    // The native archives `build.link` resolved to, for the cache key.
+    Vec<PathBuf>,
+);
+
+/// Tells the backend which native libraries the root package asked to link.
+///
+/// **Only the root manifest is read, and that is the security boundary.** A
+/// dependency may ship an archive and declare `extern fn` against it -- that is
+/// how a driver package is meant to work -- but it cannot put `-l` on the link
+/// line of a program that merely depends on it. A transitive package adding a
+/// native library to your build is a supply-chain change with no signal at the
+/// place that would have to consent, so the consent is one line in the manifest
+/// you own, and every native library a build links can be read off that file.
+///
+/// Returns the archives it resolved, which the build cache hashes: a `-l`
+/// archive is linked into the artifact, so a changed one is a changed program
+/// even when every source file is identical.
+#[cfg(feature = "llvm")]
+fn record_natives(target: &Path) -> Result<Vec<PathBuf>> {
+    let Some(manifest_path) = nearest_manifest(target) else {
+        return Ok(Vec::new());
+    };
+    let Ok(parsed) = khora_manifest::Manifest::load(&manifest_path) else {
+        // Not ours to report: `load` is called again with a real error channel.
+        return Ok(Vec::new());
+    };
+    let Some(build) = parsed.manifest.build.as_ref() else {
+        return Ok(Vec::new());
+    };
+    if build.link.is_empty() && build.link_search.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let root = manifest_path.parent().unwrap_or(Path::new("."));
+    let mut search = Vec::new();
+    for dir in &build.link_search {
+        let resolved = root.join(dir);
+        if !resolved.is_dir() {
+            anyhow::bail!(
+                "{}: `build.link-search` names {}, which is not a directory",
+                manifest_path.display(),
+                resolved.display()
+            );
+        }
+        search.push(std::fs::canonicalize(&resolved).unwrap_or(resolved));
+    }
+
+    // Resolved here rather than in the backend, because the cache key needs the
+    // file the linker will pick before the linker runs. A name that matches
+    // nothing here is not an error: it may be satisfied from a system directory
+    // nobody listed, and the linker reports that failure in better words than a
+    // guess at this point could.
+    let mut archives = Vec::new();
+    for name in &build.link {
+        for dir in &search {
+            for shape in [format!("lib{name}.a"), format!("{name}.lib")] {
+                let candidate = dir.join(shape);
+                if candidate.is_file() {
+                    archives.push(candidate);
+                }
+            }
+        }
+    }
+
+    khora_codegen_llvm::set_natives(khora_codegen_llvm::Natives {
+        link: build.link.clone(),
+        search,
+    });
+    Ok(archives)
+}
 
 /// Whether this is the file holding the compiled-in permission grants.
 #[cfg(feature = "llvm")]
@@ -2539,6 +2617,7 @@ fn load(path: &Path) -> Result<Loaded> {
 
     let db = KhoraDatabase::new();
     let granted = granted_source(path);
+    let natives = record_natives(path)?;
     let mut inputs = Vec::with_capacity(files.len());
     for path in &files {
         // `std::permissions::grants` is the one file whose *contents* come
@@ -2564,7 +2643,7 @@ fn load(path: &Path) -> Result<Loaded> {
     if !clean {
         anyhow::bail!("{} did not parse", path.display());
     }
-    Ok((db, inputs, root))
+    Ok((db, inputs, root, natives))
 }
 
 /// Reports what the backend refused.

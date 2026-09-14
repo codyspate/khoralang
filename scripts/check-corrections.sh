@@ -33,9 +33,14 @@ set -eu
 
 # One phrase per line: a distinctive sentence from a correction that applies to
 # every tree, not only `next`. Keep the reason with it.
+#
+# **A phrase leaves this list when the defect is fixed, not when it is reworded.**
+# "A build cannot link against a native library" was here until `build.link`
+# landed; it is still true of v0.2 and still on that page, but requiring it in
+# `next` would demand the documentation describe a limitation the compiler no
+# longer has.
 corrections=$(cat <<'PHRASES'
 No database driver is published|std::db names packages that do not exist
-A build cannot link against a native library|extern fn cannot reach a system library in any release
 PHRASES
 )
 
