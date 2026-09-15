@@ -3579,3 +3579,51 @@ green-to-red: a test that asserted the valid program compiles would have passed
 against a build that still dropped the row, since dropping it is what let the
 invalid program through. Both tests were run with the fix disabled and both
 failed before either was believed.
+
+## 89. A cancelled listener was told, and had nowhere to hear it
+
+`Fiber::cancel` on a fiber parked in `accept` hung the process for ever. `main`
+ran to its last line and never exited, with no message on any stream, and an
+idle listener was enough — no connection was needed to trigger it. A supervisor
+watching that process saw something healthy which was serving nothing.
+
+**Delivery was never the defect, which is what made it hard to find.** A probe
+inside the poll loop showed the flag going from 0 to 1 on the right fiber and
+staying readable for a hundred further rounds while the loop ignored it. What
+was missing was anywhere to observe it: `accept` retries, and a retry has no
+`!` and no loop back-edge, so the fiber reached no cancellation point of its
+own.
+
+**Two blockages, one per backend, and both had to go.**
+
+On the default thread backend the fiber sits in `reactor::block_until_ready`,
+whose only exit was socket readiness. It never returned at all — so a fix
+written against the retry loop above it, which is where the symptom appears,
+changed nothing and appeared to disprove a correct diagnosis. On the scheduler
+backend the wake from `cancel_fiber` does land, but arrived as `Waited::Ready`,
+indistinguishable from a spurious wake, so the loop retried and parked again.
+
+Measuring the two separately is what separated them: the same program under
+`KHORA_FIBERS=scheduler` got strictly further than under the default. A repro
+that only ever runs one backend cannot see that, and an afternoon went into the
+half that was not broken.
+
+`block_until_ready` now asks `stops_here()` at the top of its loop — the same
+call `crate::channel` makes before giving up on a parked receive, deliberately
+the same predicate rather than the same expression written twice. `net::wait`
+no longer reports a cancellation wake as readiness, and `accept` and `send` act
+on the answer instead of discarding it.
+
+`Fiber::detach` was never the workaround it appeared to be. It cancels
+identically and leaves the listener just as stuck, then nulls the state so
+releasing the handle finds nothing to join: the process exits while the fiber
+stays wedged. The cookbook's advice to detach was right about what to write and
+wrong about why.
+
+**No regression test yet**, and that is a gap rather than an omission by
+design. The natural home is a CLI-driven test on a real package with its own
+deadline, since a regression here is a hang and would take the suite down
+rather than failing by name. An in-process attempt in `fibers.rs` was abandoned:
+that file's bare prelude has no `std`, so `I32::of` and `Ptr::null` are not
+available in it. The fix is verified by hand instead — disabled, the repro exits
+124; restored, it exits 0 on both backends.

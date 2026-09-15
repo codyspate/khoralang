@@ -468,6 +468,9 @@ fn ready<T>(fds: &[T], watching: &[Watch], is_ready: impl Fn(&T) -> bool) -> Vec
 /// For a program with no scheduler to park a fiber on. A socket in
 /// non-blocking mode would otherwise spin, and spinning is worse than the
 /// blocking read this replaced.
+///
+/// Answers false when the wait ended without readiness — the deadline passed,
+/// or this fiber was cancelled.
 pub(crate) fn block_until_ready(
     socket: Socket,
     interest: Interest,
@@ -477,6 +480,19 @@ pub(crate) fn block_until_ready(
     // reactor that is not running: this is the no-scheduler path.
     let watch = [Watch { socket, interest, fiber: 0, deadline: None }];
     loop {
+        // **A cancellation ends this wait, and only a check here can see it.**
+        // The fiber running this loop executes nothing else: `accept` on an
+        // idle listener has no `!` and no back-edge above it, so there is no
+        // cancellation point for the flag to be observed at. Without this,
+        // cancelling a listener hung the process for ever with no message on
+        // any stream — the flag was set on the right fiber and readable from
+        // inside this loop, and nothing looked at it.
+        //
+        // The same call `crate::channel` makes for a parked receive, for the
+        // same reason and deliberately the same predicate.
+        if crate::current::current(|fiber| fiber.stops_here()) {
+            return false;
+        }
         // A long wait rather than an indefinite one, so a socket closed from
         // another thread does not leave this here for ever. `poll` reports a
         // hangup, but only if it is looking.

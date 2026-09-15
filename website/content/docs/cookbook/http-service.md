@@ -245,6 +245,12 @@ never served a request hangs just the same. A supervisor watching that process
 sees something healthy which is serving nothing, which is the worst shape a
 failure can take.
 
+The reason is that the fiber is parked inside `accept` on a socket that never
+becomes readable, and the wake a cancellation sends does not reach it there —
+so it is not that the fiber declines to stop, it is that it never runs again to
+find out it was asked. `detach` is the operation that means "stop waiting on
+this": it does not require the fiber to observe anything.
+
 Drain first and detach last: stop accepting work, wait for what is in flight,
 then let go of the listener. Inside a `main` that has already created
 the `jobs` channel, spawned `worker`, bound `port`, and installed a `Clock`:
@@ -322,7 +328,7 @@ answers, not just that the fiber is alive:
 match HttpClient::send(client, Request::get("http://127.0.0.1:${port}/health")) {
   Result::Err(_) => {
     eprint("could not bind ${port}");
-    Fiber::cancel(server);
+    Fiber::detach(server);
     return 1
   },
   Result::Ok(_) => info("listening on ${port}"),
