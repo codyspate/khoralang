@@ -256,7 +256,16 @@ pub(crate) fn type_of_syntax(ty: Option<&ast::Type>, generics: &[String], homes:
         // and inventing a nominal type here would produce a second, worse
         // message. `crate::unresolved` walks the syntax and reports them at
         // the range they were written, which is the only place that can.
-        _ => Type::Unknown,
+        //
+        // **Named rather than a `_`, so the next variant is a compile error.**
+        // Errata 30, 59, 60 and 88 are all one story: a shape this converter
+        // did not recognise became the type that agrees with everything, and
+        // the signature passed by saying nothing. A catch-all is why each of
+        // those was found by a user rather than by the compiler -- adding a
+        // variant to `ast::Type` compiled clean and silently switched off the
+        // checking of whatever was written in it. Listing them means the
+        // author of the eleventh variant is asked what it means here.
+        ast::Type::Union(_) | ast::Type::Variant(_) | ast::Type::Forall(_) => Type::Unknown,
     }
 }
 
