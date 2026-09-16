@@ -44,9 +44,21 @@ An effect name is the type of handlers implementing that effect.
 The `Clock` above is a stand-in cut down to one operation. The real one is
 [`std::clock::Clock`](/docs/stdlib/api/clock/): it lives in its own module
 rather than in `std::env`, and it has four operations, `sleep` among them.
-Waiting is an operation on the capability on purpose — a fake clock is
-`handler for Clock { sleep: fn _ms => (), .. }` and nothing else, so a test that
-exercises a retry loop finishes instantly.
+Waiting is an operation on the capability on purpose — a fake clock is an
+ordinary handler, so a test that exercises a retry loop finishes instantly:
+
+```khora
+handler for Clock {
+  sleep: fn _ms => (),
+  unix_seconds: fn () => 0,
+  unix_millis: fn () => 0,
+  monotonic_millis: fn () => 0,
+}
+```
+
+A handler gives every operation of its effect. There is no `..` for the rest,
+and leaving one out is an error naming the operation that is missing, so the
+fake above writes all four even though only `sleep` is what the test is for.
 
 ### An operation may be generic in a row, but not in a type
 

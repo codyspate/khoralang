@@ -105,8 +105,12 @@ request be" — nothing in the parser recurses per byte or per line, and a
 39,808-byte request carrying 2,001 headers parses when the limit admits it.
 `Router::holding` sets another; the buffer is allocated once at that size per
 connection, so it multiplies by the connection bound below when deciding what
-a full server costs. There is no chunked transfer and no multipart decoding,
-and a body must be UTF-8 text.
+a full server costs. There is no multipart decoding, and a body must be UTF-8
+text. **Chunked transfer is read but not written:** `HttpClient` accepts a
+response framed by `Transfer-Encoding: chunked` and hands the handler the
+de-chunked body, so a service that answers that way can be called; the server
+never writes a chunked response. That is the split real traffic has — a
+response of unknown length is ordinary and a request of unknown length is not.
 
 **The server serves at most 256 connections at once, and the number is not
 configurable.** `Router::listen` and the TLS form wrap their accept loops in
@@ -228,8 +232,12 @@ writes before it fails, which is the sort of thing the failure row was supposed
 to make unnecessary. And a fiber that raised and was `wait`ed on rather than
 `join`ed prints `khora: a fiber ended with an error nobody was waiting for` to
 standard error at process exit, once per such fiber, with no way to suppress it
-and no effect on the exit status. Since `wait` is the documented thing to use
-after `cancel`, a supervisor that cancels children prints that line routinely.
+and no effect on the exit status. **A cancellation is excluded from it.** The
+runtime emits that line only for a fiber that ended in a *failure* nobody
+observed; a cancelled fiber is silent, so a supervisor that cancels children
+does not print it — it prints it only when a child fails on its own. Which
+makes the line worth reading rather than expecting: seeing it means a genuine
+unobserved failure, not the ordinary noise of a shutdown.
 
 `Channel` also has no `select` (waiting on the first of several) and no zero-capacity rendezvous. `Channel::bounded(0)` gets a capacity of one rather than a rendezvous, deliberately.
 

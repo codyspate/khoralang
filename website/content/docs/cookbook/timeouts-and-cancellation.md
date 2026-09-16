@@ -37,7 +37,7 @@ fn with_deadline(millis: Int) -> () with { clock: Clock } raises Timeout {
   clock.sleep(millis)!;
   print("  deadline reached; cancelling");
   Fiber::cancel(hand);
-  Fiber::wait(hand);
+  Fiber::wait(hand)! catch { ChildFailed => () };
   print("  cancelled, and the wait returned");
   raise Timeout::TookTooLong
 }
@@ -64,6 +64,47 @@ The whole program takes 308 ms for a 300 ms deadline.
 The shape is: put the work in a fiber, sleep for the deadline, cancel the
 handle, `wait` for it, then raise. `wait` rather than `join`, because a
 cancelled fiber has no answer to take.
+
+### When the work finishing early has to be fast
+
+**That recipe always takes the whole deadline.** The timing fiber sleeps the
+full interval whether the work finished in 2 ms or not at all, which is right
+when the deadline is a budget you intend to spend, and wrong for a call that
+usually returns immediately — a five-second guard on a health check would make
+every healthy check take five seconds.
+
+Poll instead, when the common case is early completion:
+
+```khora
+let hand = Fiber::spawn(fn () => work());
+let started = clock.monotonic_millis();
+let mut done = false;
+let mut expired = false;
+while !done && !expired {
+  if Fiber::finished(hand) {
+    done = true;
+  } else if clock.monotonic_millis() - started > millis {
+    expired = true;
+  } else {
+    clock.sleep(25)!;
+  }
+};
+if expired {
+  Fiber::cancel(hand);
+  // **Detach as well as cancel.** A fiber blocked in a call with no
+  // cancellation point -- a connect to an unroutable host, say -- is not
+  // freed by the cancel, and releasing its handle waits for it. `detach`
+  // says the program is no longer interested, so its own exit is not held
+  // up by work it has already given up on.
+  Fiber::detach(hand);
+  raise Timeout
+} else {
+  Fiber::join(hand)!
+}
+```
+
+The poll interval is the cost: 25 ms means up to 25 ms of latency added to a
+fast answer, against a deadline that would otherwise cost its whole length.
 
 ## The work must have somewhere to be interrupted
 

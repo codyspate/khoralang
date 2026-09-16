@@ -55,7 +55,7 @@ pub type Fiber<A, 'r>;
 impl<A, 'r> Fiber<A, 'r> {
   fn spawn(body: () -> A raises 'r) -> Fiber<A, 'r>;
   fn join(self) -> A raises 'r;
-  fn wait(self) -> ();
+  fn wait(self) -> () raises 'r;
   fn finished(self) -> Bool;
   fn cancel(self) -> ();
   fn detach(self) -> ();
@@ -162,7 +162,7 @@ fn main() -> Int {{
   // asserts is that asking *returned* rather than what it said.
   let asked = Fiber::finished(f);
   print(if asked {{ 1 }} else {{ 1 }});
-  Fiber::wait(f);
+  Fiber::wait(f)! catch {{ }};
   // After waiting there is no ambiguity left.
   print(if Fiber::finished(f) {{ 1 }} else {{ 0 }});
   0
@@ -352,7 +352,7 @@ pub type Fiber<A, 'r>;
 impl<A, 'r> Fiber<A, 'r> {
   fn spawn(body: () -> A raises 'r) -> Fiber<A, 'r>;
   fn join(self) -> A raises 'r;
-  fn wait(self) -> ();
+  fn wait(self) -> () raises 'r;
   fn cancel(self) -> ();
   fn detach(self) -> ();
 }
@@ -388,16 +388,16 @@ fn worker() -> () raises Oops {{
   print(2);
 }}
 
-fn run_it() -> () {{
+fn run_it() -> () raises Oops {{
   let f = Fiber::spawn(fn () => worker()!);
   // `wait`, not `join`: this needs the ordering and not the answer, and a
   // cancelled fiber has no answer to give -- a join would have nothing to
   // hand back and would unwind this frame along with it.
-  Fiber::wait(f);
+  Fiber::wait(f)!;
 }}
 
 fn main() -> Int {{
-  run_it();
+  run_it()! catch {{ Oops::Bad => () }};
   print(3);
   print(khora_live_count());
   0
@@ -449,7 +449,7 @@ fn main() -> Int {{
   // `wait`, not `join`: this needs the ordering and not the answer, and a
   // cancelled fiber has no answer to give -- a join would have nothing to
   // hand back and would unwind this frame along with it.
-  Fiber::wait(f);
+  Fiber::wait(f)! catch {{ Oops::Bad => () }};
   print(3);
   0
 }}
@@ -527,7 +527,7 @@ fn worker() -> () {{
 
 fn main() -> Int {{
   let f = Fiber::spawn(fn () => worker());
-  Fiber::wait(f);
+  Fiber::wait(f)! catch {{ }};
   print(3);
   0
 }}
@@ -570,7 +570,7 @@ fn parent() -> Int {{
 
 fn main() -> Int {{
   let f = Fiber::spawn(fn () => parent());
-  Fiber::wait(f);
+  Fiber::wait(f)! catch {{ }};
   print(3);
   0
 }}
@@ -636,7 +636,7 @@ fn worker() -> Answer {{
 
 fn main() -> Int {{
   let f = Fiber::spawn(fn () => worker());
-  Fiber::wait(f);
+  Fiber::wait(f)! catch {{ }};
   print(3);
   0
 }}
@@ -671,7 +671,7 @@ pub type Fiber<A, 'r>;
 impl<A, 'r> Fiber<A, 'r> {
   fn spawn(body: () -> A raises 'r) -> Fiber<A, 'r>;
   fn join(self) -> A raises 'r;
-  fn wait(self) -> ();
+  fn wait(self) -> () raises 'r;
   fn cancel(self) -> ();
   fn detach(self) -> ();
 }
@@ -975,16 +975,16 @@ fn worker() -> () raises Oops {{
   print(2);
 }}
 
-fn run_it() -> () {{
+fn run_it() -> () raises Oops {{
   let f = Fiber::spawn(fn () => worker()!);
   // `wait`, not `join`: this needs the ordering and not the answer, and a
   // cancelled fiber has no answer to give -- a join would have nothing to
   // hand back and would unwind this frame along with it.
-  Fiber::wait(f);
+  Fiber::wait(f)!;
 }}
 
 fn main() -> Int {{
-  run_it();
+  run_it()! catch {{ Oops::Bad => () }};
   print(3);
   print(khora_live_count());
   0
@@ -1093,16 +1093,16 @@ fn worker() -> () raises Oops {{
   print(2);
 }}
 
-fn run_it() -> () {{
+fn run_it() -> () raises Oops {{
   let f = Fiber::spawn(fn () => worker()!);
   // `wait`, not `join`: this needs the ordering and not the answer, and a
   // cancelled fiber has no answer to give -- a join would have nothing to
   // hand back and would unwind this frame along with it.
-  Fiber::wait(f);
+  Fiber::wait(f)!;
 }}
 
 fn main() -> Int {{
-  run_it();
+  run_it()! catch {{ Oops::Bad => () }};
   print(3);
   0
 }}
@@ -1412,13 +1412,13 @@ fn spinner() -> () raises Oops {{
   }}
 }}
 
-fn run_it() -> () {{
+fn run_it() -> () raises Oops {{
   let f = Fiber::spawn(fn () => spinner()!);
-  Fiber::wait(f);
+  Fiber::wait(f)!;
 }}
 
 fn main() -> Int {{
-  run_it();
+  run_it()! catch {{ Oops::Bad => () }};
   print(3);
   print(khora_live_count());
   0
@@ -1452,12 +1452,12 @@ fn counter() -> () raises Oops {{
   }}
 }}
 
-fn run_it() -> () {{
+fn run_it() -> () raises Oops {{
   let f = Fiber::spawn(fn () => counter()!);
-  Fiber::wait(f);
+  Fiber::wait(f)!;
 }}
 
-fn main() -> Int {{ run_it(); print(3); 0 }}
+fn main() -> Int {{ run_it()! catch {{ Oops::Bad => () }}; print(3); 0 }}
 "
         ),
     );
@@ -1493,12 +1493,12 @@ fn worker() -> () raises Oops {{
   print(50);
 }}
 
-fn run_it() -> () {{
+fn run_it() -> () raises Oops {{
   let f = Fiber::spawn(fn () => worker()!);
-  Fiber::wait(f);
+  Fiber::wait(f)!;
 }}
 
-fn main() -> Int {{ run_it(); print(3); 0 }}
+fn main() -> Int {{ run_it()! catch {{ Oops::Bad => () }}; print(3); 0 }}
 "
         ),
     );
@@ -1552,7 +1552,11 @@ fn fan() -> () with {{ nursery: Nursery }} {{
   nursery.adopt(Fiber::spawn(fn () => forever()!))
 }}
 
-fn body() -> () {{
+// `body` carries `raises Oops` so the `Fiber::wait` below has a channel to be
+// cancelled on. The row is empty in practice -- nothing here raises -- but
+// `wait` is a cancellation point now, and a cancellation point in a function
+// with no failure channel has nowhere to go. See `limitations/index.md`.
+fn body() -> () raises Oops {{
   let crew = Fibers::open();
   let _ = with {{ nursery: handler for Nursery {{ adopt: fn f => Fibers::adopt(crew, f) }} }} {{
     fan()
@@ -1561,14 +1565,14 @@ fn body() -> () {{
 }}
 
 fn main() -> Int {{
-  let hand = Fiber::spawn(fn () => body());
+  let hand = Fiber::spawn(fn () => body()!);
   // **Cancelled after the parent is already inside the wait.** That is the
   // whole of the bug: a cancellation arriving before the join begins is seen
   // by the between-rounds check and works even unfixed. Without this pause the
   // test passes against the defect it exists to catch.
   khora_sleep(100);
   Fiber::cancel(hand);
-  Fiber::wait(hand);
+  Fiber::wait(hand)! catch {{ Oops::Bad => () }};
   print(7);
   0
 }}

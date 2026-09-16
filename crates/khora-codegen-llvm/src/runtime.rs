@@ -141,6 +141,14 @@ pub struct Runtime<'ctx> {
     pub single_threaded: FunctionValue<'ctx>,
     /// `void khora_enable_counters(void)`
     pub enable_counters: FunctionValue<'ctx>,
+    /// `void khora_root_can_raise(void)` — told to the runtime by the entry
+    /// point when `main`'s signature has a `raises` row.
+    ///
+    /// **Without it the signal watcher cancels into a program that cannot
+    /// observe a cancellation**, and a `SIGTERM` that used to end the process
+    /// is swallowed. The runtime cannot work this out for itself: a `raises`
+    /// row is a fact about the source that only the compiler holds.
+    pub root_can_raise: FunctionValue<'ctx>,
     /// `void khora_drop_last(void *object, void (*drop_fields)(void *), size_t previous)`
     ///
     /// The slow half of a drop generated code decremented itself.
@@ -358,6 +366,7 @@ impl<'ctx> Runtime<'ctx> {
             ),
             single_threaded: declare("khora_single_threaded", void.fn_type(&[], false)),
             enable_counters: declare("khora_enable_counters", void.fn_type(&[], false)),
+            root_can_raise: declare("khora_root_can_raise", void.fn_type(&[], false)),
             drop_last: declare(
                 "khora_drop_last",
                 void.fn_type(&[ptr.into(), ptr.into(), i64t.into()], false),
@@ -464,7 +473,7 @@ impl<'ctx> Runtime<'ctx> {
                 ctx.i32_type().fn_type(&[ptr.into(), ptr.into()], false),
             ),
             fiber_detach: declare("khora_fiber_detach", void.fn_type(&[ptr.into()], false)),
-            fiber_wait: declare("khora_fiber_wait", void.fn_type(&[ptr.into()], false)),
+            fiber_wait: declare("khora_fiber_wait", ctx.i32_type().fn_type(&[ptr.into()], false)),
             fiber_finished: declare(
                 "khora_fiber_finished",
                 ctx.bool_type().fn_type(&[ptr.into()], false),

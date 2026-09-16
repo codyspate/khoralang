@@ -157,6 +157,10 @@ exits 130 was not signalled, it chose that number. POSIX keeps the two apart --
 true of this -- but a shell collapses both into one `$?`. So a script cannot
 tell "somebody pressed Ctrl-C" from "a cancellation reached the entry point",
 and a supervisor that cares should read the wait status rather than the shell.
+**A signalled Khora program produces both, in order**: the first `SIGTERM` or
+`SIGINT` becomes a cancellation and the program *exits* 130, and a second one
+restores the default disposition and re-raises, so what a supervisor then sees
+is a genuine `WIFSIGNALED` — not an `exit` imitating one.
 On Windows there are no signals in this sense at all: the numbers above are
 Khora's own, chosen to match what a Unix shell would have said.
 

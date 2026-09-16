@@ -193,6 +193,18 @@ fn error_text(m: Message) -> String {
 // --- connecting ------------------------------------------------------------
 
 /// Opens a connection and completes the handshake.
+///
+/// **There is no connect timeout, and a fiber blocked here cannot be
+/// cancelled.** The runtime's connect is a blocking call on the worker — it
+/// resolves the name and waits for the kernel — so a host that is unroutable
+/// rather than refusing takes the operating system's own connect timeout,
+/// which is minutes on Linux. `Fiber::cancel` does not shorten it: the fiber
+/// is inside `connect(2)` and reaches no cancellation point until it returns.
+///
+/// A deadline around this call reports on time but does not free the fiber, so
+/// a program that has given up must `Fiber::detach` the handle as well as
+/// cancelling it, or its own exit will wait for the connect to finish. Guard a
+/// user-supplied address before reaching here if a prompt answer matters.
 pub fn open(
   host: String,
   port: Int,

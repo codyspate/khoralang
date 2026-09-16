@@ -119,7 +119,12 @@ pub fn main() -> Int {{
   let f = Fiber::spawn(fn () => {{
     with {{ reads: FsRead::real(), writes: FsWrite::real() }} {{ hold()! }}
   }});
-  Fiber::wait(f);
+  Fiber::wait(f)! catch {{
+    IoError::NotFound(_) => (),
+    IoError::Failed(_) => (),
+    IoError::Denied(_) => (),
+    Oops::Bad => (),
+  }};
   print(\"the fiber settled\");
   0
 }}

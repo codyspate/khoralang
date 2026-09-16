@@ -281,6 +281,18 @@ impl<'ctx> Backend<'ctx> {
         let main = self.entry_point();
         let entry = self.ctx.append_basic_block(main, "entry");
         self.builder.position_at_end(entry);
+        // **Before `khora_begin`, which is what spawns the signal watcher.**
+        // A `main` with no `raises` row has no cancellation point anywhere
+        // below it, so a signal-borne cancellation would reach nothing and the
+        // program would run until `SIGKILL` -- where before the watcher it
+        // died at once. The watcher falls back to the default disposition when
+        // this has not been called, and the ordering is what makes the flag
+        // true before there is a thread to read it.
+        if raises {
+            self.builder
+                .build_call(self.rt.root_can_raise, &[], "")
+                .expect("telling the runtime the root can carry a cancellation");
+        }
         self.begin();
         self.remember_arguments(main);
 

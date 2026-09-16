@@ -30,7 +30,7 @@ use crate::scheduler::{park_current, Scheduler};
 use crate::heap::SINGLE_THREADED;
 use crate::heap::{khora_alloc, khora_drop};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 /// A Khora pointer being moved to another fiber.
 ///
@@ -93,15 +93,57 @@ pub(crate) enum Completion {
     /// Behind a lock because `Fiber` is `Share`: two fibers may hold one handle
     /// and both call `join`, and "take the handle if it is there" is the
     /// read-modify-write that has to happen once.
-    Thread(Mutex<Option<std::thread::JoinHandle<()>>>),
+    Thread(Mutex<Option<std::thread::JoinHandle<()>>>, Arc<Done>),
     /// A latch the child closes.
     Fiber(Arc<Done>),
 }
 
 impl Completion {
+    /// Waits for the fiber to finish, whatever happens to the waiter.
+    ///
+    /// **Does not return early on a cancellation**, and callers that must
+    /// want [`Completion::wait_or_cancelled`]. Kept for the one waiter that
+    /// has to finish waiting: a handle's release, which is where structured
+    /// concurrency comes from and must not leave a child running.
     fn wait(&self) {
+        self.wait_until(&|| false);
+    }
+
+    /// The same, but gives up when this fiber is asked to stop.
+    ///
+    /// **Without this a parked joiner cannot be cancelled.** `join` and `wait`
+    /// used to block on a `JoinHandle` or a latch with no flag check and no
+    /// timeout, so a fiber parked in either observed a cancellation only once
+    /// the child had finished on its own -- measured at 2000 ms against a
+    /// 2000 ms child, on both backends, where the control stops in 0-2 ms
+    /// (roadmap §16.7). A `main` that ends in a join would therefore not
+    /// observe a signal at all.
+    ///
+    /// Answers true when it gave up rather than waited. The child is *not*
+    /// stopped by this and is not waited for: the caller is unwinding and its
+    /// own handle release is what still waits.
+    fn wait_or_cancelled(&self) -> bool {
+        self.wait_until(&|| crate::current::current(|fiber| fiber.stops_here()))
+    }
+
+    /// Waits until the fiber finishes or `give_up` says to stop asking.
+    ///
+    /// The two mechanisms `crate::channel::park_until_moved` uses, for the
+    /// same reason: the condition variable registered with the fiber is what
+    /// makes a cancellation immediate, and [`crate::channel::LOOK_AGAIN`] is
+    /// what bounds the one that arrives between the check and the wait.
+    fn wait_until(&self, give_up: &dyn Fn() -> bool) -> bool {
         match self {
-            Completion::Thread(handle) => {
+            Completion::Thread(handle, done) => {
+                // **The latch first, and the handle only once it is closed.**
+                // A `JoinHandle` cannot be joined with a deadline, so a joiner
+                // that blocked on it directly could not look at its flag
+                // again. The child closes this latch as its last act on both
+                // backends, so waiting on it is waiting for the thread -- and
+                // it is a condition variable, which a cancellation can reach.
+                if done.wait_until(give_up) {
+                    return true;
+                }
                 let taken = handle.lock().unwrap_or_else(|e| e.into_inner()).take();
                 if let Some(thread) = taken {
                     // A child that panicked has already reported it; there is
@@ -110,14 +152,15 @@ impl Completion {
                     // behind a second one.
                     let _ = thread.join();
                 }
+                false
             }
-            Completion::Fiber(done) => done.wait(),
+            Completion::Fiber(done) => done.wait_until(give_up),
         }
     }
 
     pub(crate) fn finished(&self) -> bool {
         match self {
-            Completion::Thread(handle) => {
+            Completion::Thread(handle, _) => {
                 match handle.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
                     Some(thread) => thread.is_finished(),
                     // Already joined by somebody, so nothing is left to wait for.
@@ -284,7 +327,11 @@ pub(crate) struct FiberState {
 pub(crate) struct Done {
     state: Mutex<Latch>,
     /// For joiners that are threads rather than fibers.
-    closed: std::sync::Condvar,
+    ///
+    /// Behind an `Arc` so a waiting fiber can register it with itself: that
+    /// registration is what lets `Fiber::cancel` notify the joiner rather than
+    /// only set a flag it will not read again while it is parked here.
+    closed: Arc<Condvar>,
 }
 
 #[derive(Default)]
@@ -316,8 +363,15 @@ impl Done {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).finished
     }
 
-    /// Waits for the latch, whatever the caller is.
-    fn wait(&self) {
+    /// Waits for the latch, whatever the caller is, until `give_up` says stop.
+    ///
+    /// Answers true when it gave up. Both waiters are bounded by
+    /// [`crate::channel::LOOK_AGAIN`] rather than blocking outright, for the
+    /// reason `park_until_moved` states: a cancellation that lands between the
+    /// check and the wait notifies a waiter that is not waiting yet, and that
+    /// wake is lost. The registration is the fast path; the timeout is the
+    /// bound.
+    fn wait_until(&self, give_up: &dyn Fn() -> bool) -> bool {
         loop {
             // **The waker is enrolled under the same lock that reads the
             // flag.** A child that finishes between the two would otherwise
@@ -326,7 +380,10 @@ impl Done {
             {
                 let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
                 if state.finished {
-                    return;
+                    return false;
+                }
+                if give_up() {
+                    return true;
                 }
                 match crate::scheduler::waker_for_current() {
                     Some(waker) => state.waiting.push(waker),
@@ -334,10 +391,22 @@ impl Done {
                     // thread does the waiting, which is what the program's own
                     // computation has always done at a `join`.
                     None => {
+                        crate::current::current(|fiber| fiber.park_on(&self.closed));
                         while !state.finished {
-                            state = self.closed.wait(state).unwrap_or_else(|e| e.into_inner());
+                            let (held, _timed_out) = self
+                                .closed
+                                .wait_timeout(state, crate::channel::LOOK_AGAIN)
+                                .unwrap_or_else(|e| e.into_inner());
+                            state = held;
+                            if !state.finished && give_up() {
+                                drop(state);
+                                crate::current::current(|fiber| fiber.unpark_from());
+                                return true;
+                            }
                         }
-                        return;
+                        drop(state);
+                        crate::current::current(|fiber| fiber.unpark_from());
+                        return false;
                     }
                 }
             }
@@ -546,7 +615,7 @@ pub unsafe extern "C" fn khora_fiber_spawn(
         }
         Completion::Fiber(done)
     } else {
-        Completion::Thread(Mutex::new(Some(std::thread::spawn(run))))
+        Completion::Thread(Mutex::new(Some(std::thread::spawn(run))), done)
     };
 
     let object = khora_alloc(std::mem::size_of::<*mut FiberState>() as u64, FIBER_TAG);
@@ -602,7 +671,20 @@ pub unsafe extern "C" fn khora_fiber_join(fiber: *mut u8, out: *mut u64) -> u32 
         unsafe { out.write(0) };
         return 0;
     };
-    state.completion.wait();
+    // **A joiner that is cancelled while parked unwinds rather than waits.**
+    // The child is left running and is not cancelled here: what the joiner is
+    // giving up is the *waiting*, and the handle's release still waits, which
+    // is what keeps the child from outliving the binding.
+    //
+    // A zero word rather than the child's answer, because there is not one
+    // yet. `CANCELLED_WHICH` is outside the range of error-type ids, so the
+    // caller's `!` unwinds without any `catch` being able to name it, and the
+    // word is never read on that path.
+    if state.completion.wait_or_cancelled() {
+        // SAFETY: the caller promised a writable word.
+        unsafe { out.write(0) };
+        return CANCELLED_WHICH;
+    }
     state.observed.store(true, Ordering::Relaxed);
     let outcome = state.legacy.observe();
     // SAFETY: the caller promised a writable word.
@@ -619,6 +701,26 @@ pub unsafe extern "C" fn khora_fiber_join(fiber: *mut u8, out: *mut u64) -> u32 
 /// as bare handles. So it waits, and the answer stays where it is until the
 /// release lets go of it. That is also what keeps "a fiber that failed and
 /// nobody joined says so on stderr" true of a child inside a nursery.
+///
+/// Answers whether it gave up on a cancellation rather than waited, which is
+/// the one thing a caller with a `raises` row can act on.
+///
+/// # Safety
+///
+/// `fiber` must be a live object from [`khora_fiber_spawn`].
+pub(crate) unsafe fn wait_or_cancel_for(fiber: *mut u8) -> bool {
+    // SAFETY: the caller guarantees a live handle.
+    let Some(state) = (unsafe { fiber_state(fiber) }) else { return false };
+    state.completion.wait_or_cancelled()
+}
+
+/// The same, for a waiter that must not give up.
+///
+/// **A nursery's own waits are here rather than above.** A nursery release
+/// cancels its children and then waits for them, and a release that gave up on
+/// its own cancellation would let a child outlive the binding — which is the
+/// whole of what structured concurrency promises. So the cancellation this
+/// fiber is already carrying does not shorten this wait.
 ///
 /// # Safety
 ///
@@ -686,13 +788,18 @@ pub unsafe extern "C" fn khora_fiber_finished(fiber: *mut u8) -> bool {
 
 /// The same, for a program that wants the ordering and not the answer.
 ///
+/// Answers [`CANCELLED_WHICH`] when the *waiter* was asked to stop and 0 when
+/// the fiber finished, which is the shape every fallible call across this
+/// boundary uses. There is no other tag: this never takes the fiber's answer,
+/// so a child that failed is still the child's business.
+///
 /// # Safety
 ///
 /// `fiber` must be a live object from [`khora_fiber_spawn`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn khora_fiber_wait(fiber: *mut u8) {
+pub unsafe extern "C" fn khora_fiber_wait(fiber: *mut u8) -> u32 {
     // SAFETY: the caller guarantees a live handle.
-    unsafe { wait_for(fiber) };
+    if unsafe { wait_or_cancel_for(fiber) } { CANCELLED_WHICH } else { 0 }
 }
 
 /// Lets go of a fiber without waiting for it.
@@ -744,6 +851,23 @@ pub unsafe extern "C" fn khora_fiber_detach(fiber: *mut u8) {
     }
 }
 
+/// Wakes a fiber known only by id, on the scheduler.
+///
+/// **The thread backend has nothing to do here** and says so by doing nothing:
+/// `Fiber::cancel` already notified whatever condition variable the fiber
+/// parked on, because a thread-backed fiber registers that condvar with
+/// itself. On the scheduler the flag alone reaches a fiber that is running and
+/// not one asleep on a deadline or a socket, so the wake has to go through the
+/// pool.
+///
+/// For a caller that holds an id rather than a handle — the signal watcher,
+/// which has the root fiber and no `Fiber<A, 'er>` object anywhere.
+pub(crate) fn cancel_by_id(id: usize) {
+    if on_the_scheduler() {
+        fibers().cancel_fiber(id);
+    }
+}
+
 /// Asks a fiber to stop at its next cancellation point.
 ///
 /// Returns immediately. The child stops where the source says it can — at a
@@ -784,6 +908,19 @@ pub unsafe extern "C" fn khora_fiber_cancel(fiber: *mut u8) {
 /// cannot outlive the binding that holds it. Put the handle in a region and the
 /// region waits; put it in a block and the block does.
 ///
+/// **A cancelled releaser asks the child to stop first**, which is what a
+/// nursery release already does. Without it, a fiber cancelled while holding a
+/// child's handle stops at its next `!` and then blocks here for the child's
+/// full remaining run: the cancellation is observed promptly and the program
+/// still waits out the work it asked to abandon. Measured at 2000 ms against a
+/// 2000 ms child on both backends, which is the same number roadmap §16.7
+/// recorded for the wait itself.
+///
+/// The flag rather than `stops_here`: this runs inside a region release, which
+/// is [`crate::cancel::Shielded`], so the masked reading would say no every
+/// time. What is being asked is "was this fiber cancelled", and the shield
+/// exists to protect the cleanup rather than to hide that.
+///
 /// # Safety
 ///
 /// `fiber` must be a live object from [`khora_fiber_spawn`] whose refcount has
@@ -792,6 +929,11 @@ pub unsafe extern "C" fn khora_fiber_cancel(fiber: *mut u8) {
 pub unsafe extern "C" fn khora_fiber_release(fiber: *mut u8) {
     if fiber.is_null() {
         return;
+    }
+    if crate::current::current(|holder| holder.is_cancelled()) {
+        // SAFETY: the caller guarantees a live handle, and cancelling reads
+        // the state without taking it.
+        unsafe { khora_fiber_cancel(fiber) };
     }
     // SAFETY: the caller guarantees a live handle; the field holds what
     // `khora_fiber_spawn` wrote, and nothing else reads it after this.

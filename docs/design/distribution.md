@@ -13,7 +13,7 @@ anywhere, and no name resolves to anything without a URL beside it.
 
 ```toml
 [dependencies]
-postgres = { git = "https://github.com/khora-lang/khora", rev = "main", subdir = "packages/postgres" }
+postgres = { git = "https://github.com/codyspate/khoralang", rev = "main", subdir = "packages/postgres" }
 ```
 
 **A package says whether it is offered, with `publish = true`.** Absent means

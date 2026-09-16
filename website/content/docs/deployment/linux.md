@@ -25,7 +25,7 @@ For a build machine, pin the version and leave the shell profiles alone:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/codyspate/khoralang/main/install.sh \
-  | sh -s -- --version 0.1.0 --to /opt/khora --no-modify-path
+  | sh -s -- --version 0.2.0 --to /opt/khora --no-modify-path
 export PATH="/opt/khora/bin:$PATH"
 ```
 
@@ -106,18 +106,25 @@ started from its own directory disagree about which files exist.
 `journalctl` and every container log collector already look; there is no log
 file to rotate unless you make one.
 
-## Shutdown, and what it currently is not
+## Shutdown
 
-**`std` has no signal API in this release.** A `SIGTERM` from `systemctl stop`,
-a container runtime, or a Kubernetes eviction takes the process the way the
-kernel takes any process that has not asked otherwise: immediately, without
-unwinding. Nursery cancellation does not run, `scoped` finalizers do not run,
-and in-flight requests are dropped.
+**A `SIGTERM` from `systemctl stop` becomes a cancellation at the root of the
+program.** Nursery cancellation runs, `scoped` finalizers run, in-flight
+requests unwind, and the process exits 130. `systemd` already reports that as a
+clean stop, and `TimeoutStopSec` stays the deadline: the runtime has no grace
+period of its own, so the number in your unit file is the only one. A second
+`SIGTERM` — or `TimeoutStopSec` expiring into `SIGKILL` — ends it at once.
 
-So a graceful shutdown has to be arranged outside the program for now — drain
-the load balancer, then stop the process — and a service should be written so
-that being killed at an arbitrary instant is survivable: commit before
-acknowledging, and let the next start recover. [Cancellation-safe
-resources](/docs/cookbook/cancellation-safe-resources/) is the pattern for the
-cancellations Khora *can* deliver, which are the ones a nursery raises inside
-the program.
+Two shapes still take the process the old way, and a service that must survive
+either should be written so that being killed at an arbitrary instant is
+survivable — commit before acknowledging, and let the next start recover:
+
+- a `main` with **no `raises` row**, which has no channel for a cancellation to
+  travel; the runtime falls back to the default disposition, so the process
+  dies at wait-status 143 with no finalizers rather than hanging;
+- a fiber inside a blocking `connect_to`, which reaches no cancellation point
+  until `connect(2)` gives up.
+
+[Cancellation-safe
+resources](/docs/cookbook/cancellation-safe-resources/) is the pattern, and it
+is now the pattern for a deploy as well as for a nursery.

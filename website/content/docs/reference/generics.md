@@ -180,6 +180,35 @@ not need explicit `forall`. It earns its place in an API that stores or accepts
 a polymorphic function *value*, where there is no declaration to hang the
 parameter on.
 
+### A `forall` value cannot be called yet
+
+**This is a gap in the compiler, and it is the whole of what `forall` is for**,
+so read the paragraph above as describing the intent rather than what today's
+compiler does. Writing the type is accepted:
+
+```khora
+fn takes(f: forall<A>. A -> A) -> Int { 0 }
+```
+
+and so is passing a polymorphic function to it — `takes(fn x => x)` compiles.
+**Calling `f` inside the body does not:**
+
+```text
+fn apply(f: forall<A>. A -> A) -> Int { let r: Int = f(1); r }
+
+error: the type of this expression was never worked out, and nothing else was
+reported — so either it needs an annotation, or this is a gap in the compiler
+worth reporting
+```
+
+The annotation the message suggests does not help: `let r: Int` is already
+there, and instantiating by hand — `let g: Int -> Int = f;` — fails the same
+way at the assignment. Nothing in `std` uses `forall`, which is why this has
+not bitten anybody here.
+
+Until it is fixed, a polymorphic operation that has to be *used* is a named
+generic function or a trait method rather than a stored function value.
+
 ## Variance annotations
 
 Covariant parameter:

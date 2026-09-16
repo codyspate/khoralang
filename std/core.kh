@@ -2316,7 +2316,17 @@ impl<A: Share, 'er> Fiber<A, 'er> {
   /// Letting the binding go waits too — that is where structured concurrency
   /// comes from — so this is for the case where the waiting has to happen at a
   /// particular line rather than at the end of a scope.
-  pub fn wait(self) -> ();
+  ///
+  /// **`raises 'er` because waiting can be interrupted.** A fiber parked here
+  /// is asked to stop like any other, and the `!` is where it stops — without
+  /// the row there would be no channel to say so on, and a parent waiting on a
+  /// slow child would not observe its own cancellation until the child ended.
+  /// The row is the waiter's, not the child's: this never takes the child's
+  /// answer, so a child that *failed* still says so where it always did.
+  ///
+  /// The child is not cancelled by the waiter giving up. Letting the handle go
+  /// still waits, which is what keeps it from outliving the binding.
+  pub fn wait(self) -> () raises 'er;
 
   /// Whether the fiber has finished, without waiting for it to.
   ///

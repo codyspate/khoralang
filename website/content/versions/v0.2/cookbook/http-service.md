@@ -265,9 +265,11 @@ Fiber::wait(worker);
 Fiber::detach(server);
 ```
 
-`Fiber::wait` on a cancelled or failed worker prints `khora: a fiber ended with
-an error nobody was waiting for` at exit. It is harmless and cannot be
-suppressed — see [known
+`Fiber::wait` on a *failed* worker prints `khora: a fiber ended with
+an error nobody was waiting for` at exit. Cancellation is excluded from that
+message, so the shutdown above is silent — the line appears only when a worker
+failed on its own. It cannot be suppressed and does not change the exit status
+— see [known
 limitations](/docs/limitations/#concurrency-combinators).
 
 Two things are worth being deliberate about. A request that arrives during the

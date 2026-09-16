@@ -110,12 +110,15 @@ pub fn main() -> Int {
 
 Every job that came off the queue is in exactly one of the last two counts. That reconciliation — *taken equals served plus abandoned* — is the invariant worth asserting in a real pool, because it is the one that catches this class of bug. Over two hundred rounds cut at a jittered moment it held every time. Without the reconciliation the loss is invisible: the program exits 0 either way.
 
-**This program also prints `khora: a fiber ended with an error nobody was
-waiting for` on standard error as it exits.** That is the cancelled worker: a
-fiber that raised and was waited on rather than joined says so at exit. It does
-not change the exit status and cannot be suppressed — see [known
-limitations](/docs/limitations/#concurrency-combinators). Since `wait` is the
-right thing to use after `cancel`, any supervisor built this way prints it.
+**This program prints nothing on standard error**, and that is worth saying
+because a nearby sentence in the [known
+limitations](/docs/limitations/#concurrency-combinators) is easy to misread.
+The runtime does print `khora: a fiber ended with an error nobody was waiting
+for` for a fiber that *failed* and was waited on rather than joined — but a
+cancellation is excluded from that message, so the cancelled worker above is
+silent. If you ever do see the line from a supervisor like this one, a child
+failed on its own and the failure is unobserved: investigate it rather than
+filtering it out.
 
 ## Why the check is before the call and not after
 

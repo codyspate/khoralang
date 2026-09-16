@@ -179,6 +179,7 @@ mod region;
 #[cfg(not(target_family = "wasm"))]
 mod scheduler;
 mod shared;
+mod signals;
 #[cfg(not(target_family = "wasm"))]
 mod soak;
 mod span;

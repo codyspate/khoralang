@@ -274,7 +274,7 @@ fn a_cancelled_body_still_finishes_its_span() {
   // `wait`, not `join`: this needs the ordering and not the answer, and a
   // cancelled fiber has no answer to give -- a join would have nothing to
   // hand back and would unwind this frame along with it.
-  Fiber::wait(f);
+  Fiber::wait(f)! catch { Oops::Bad => () };
   print("the parent carried on");"#,
     );
     // Nothing after the span's close runs *in the fiber* — the cancellation

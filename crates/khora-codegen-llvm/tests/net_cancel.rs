@@ -173,7 +173,7 @@ fn serve(server: Int) -> () with {{ scope: Scope }} raises Oops {{
 /// Cancelled holding a listening socket, then the port asked for again.
 fn the_port() -> () {{
   let f = Fiber::spawn(fn () => scoped(fn () => hold()!)!);
-  Fiber::wait(f);
+  Fiber::wait(f)! catch {{ Oops::Bad => () }};
   let again = listen_on({LISTENER_PORT});
   if again == invalid_handle() {{
     print(\"the port is still held\")
@@ -191,7 +191,7 @@ fn the_connection() -> () {{
   }} else {{
     print(\"listening\");
     let f = Fiber::spawn(fn () => scoped(fn () => serve(server)!)!);
-    Fiber::wait(f);
+    Fiber::wait(f)! catch {{ Oops::Bad => () }};
     print(\"the connection was let go\");
     shut(server)
   }}

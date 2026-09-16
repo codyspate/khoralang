@@ -103,10 +103,10 @@ Waits this many milliseconds before going on.
 
 **An operation on the clock, and that is the whole design.** Waiting is
 the one thing a program does that a test cannot afford to actually do, and
-putting it here means a fake clock is `handler for Clock { sleep: fn ms
-=> .. }` and nothing else -- no test runtime, no special mode, no rule
-about which fiber may advance time. The alternative is what every
-language with an ambient sleep ends up building: a parallel clock the
+putting it here means a fake clock is an ordinary handler -- no test
+runtime, no special mode, no rule about which fiber may advance time. The
+alternative is what every language with an ambient sleep ends up
+building: a parallel clock the
 runtime knows about, and documentation that has to open by warning you to
 fork the sleeping code or deadlock.
 
@@ -116,7 +116,15 @@ already makes about the other unrepeatable input.
 Zero or less returns at once. A caller who meant "let somebody else run"
 wants a safepoint, and every loop back-edge already has one — and a
 back-edge in a function that can raise is a cancellation point too, so a
-`loop { sleep }` worker stops when it is asked to.
+`loop { sleep(short) }` worker stops when it is asked to.
+
+**One long sleep is not a cancellation point.** Under the default thread
+backend a fiber inside `sleep` is not woken by a cancellation and
+shutdown waits the sleep out; under the scheduler backend it is woken,
+but the wake returns from `sleep` normally rather than raising, so the
+statement after it runs before the fiber stops. Chunk a long wait into a
+loop of short ones when shutdown latency matters — that is what puts a
+cancellation point inside it.
 
 ## Methods
 

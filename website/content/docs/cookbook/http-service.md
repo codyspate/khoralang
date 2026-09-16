@@ -233,8 +233,15 @@ document needs and not further.
 
 ## Stopping a service
 
-`Router::listen` serves until the process stops, and `std` has no signal API in
-this release — so a service that stops *itself* runs `listen` on a fiber and
+`Router::listen` serves until the process stops. **A `SIGTERM` or `SIGINT` now
+stops it** — the signal becomes a cancellation at the root, a parked `accept`
+observes it in about ten milliseconds, and `scoped` finalizers run on the way
+out. For an ordinary deploy that is the whole answer and this section is
+optional reading.
+
+A `/shutdown` route exists for the case the signal does not cover: a service
+that stops *itself* on a request, or one whose `main` has no `raises` row and
+so has no channel for a cancellation to travel. It runs `listen` on a fiber and
 lets go of that fiber when a route says to.
 
 **Cancel the listener, or detach it — both work now.** `Fiber::cancel` on a
@@ -274,9 +281,11 @@ Fiber::wait(worker);
 Fiber::detach(server);
 ```
 
-`Fiber::wait` on a cancelled or failed worker prints `khora: a fiber ended with
-an error nobody was waiting for` at exit. It is harmless and cannot be
-suppressed — see [known
+`Fiber::wait` on a *failed* worker prints `khora: a fiber ended with
+an error nobody was waiting for` at exit. Cancellation is excluded from that
+message, so the shutdown above is silent — the line appears only when a worker
+failed on its own. It cannot be suppressed and does not change the exit status
+— see [known
 limitations](/docs/limitations/#concurrency-combinators).
 
 Two things are worth being deliberate about. A request that arrives during the
@@ -284,6 +293,23 @@ drain finds a closed channel, so `Channel::send` answers `false` — count it
 where it is refused, or the job is accepted and never seen again; the same
 reconciliation [taking work off a
 queue](/docs/cookbook/taking-work-off-a-queue/) is about, one layer up.
+
+**A program does not exit while a listener fiber is still running.** Releasing
+a `Fiber` handle waits for the child — that is the guarantee that stops a fiber
+outliving the scope that owns it — and a listener never ends on its own. So a
+`main` that spawns a listener and then finishes its other work *hangs at the
+end*, after its last line, with nothing printed to say why.
+
+Cancel the listener before `main` returns, or detach it if the program is
+exiting anyway:
+
+```khora
+Fiber::cancel(server);
+Fiber::wait(server);
+```
+
+This is the same fact as "drain first, stop last" seen from the other side: the
+listener is a child like any other, and somebody has to end it.
 
 **A listener that cannot bind does not stop the process on its own.**
 `Router::listen` raises inside the fiber that `Fiber::spawn` started. The
@@ -336,10 +362,11 @@ Restarting on the same port inside a minute is fine: the listener sets
 `SO_REUSEADDR`, so a port left in `TIME_WAIT` by the previous run binds
 straight away. A port held by a *live* process still fails, as it should.
 
-For a container, this is the in-program half only. Draining at the layer above
-— out of the load balancer, wait, then stop — is what
-[Containers](/docs/deployment/containers/) covers, and is what a `SIGTERM`
-does today.
+For a container, a `SIGTERM` unwinds the program and runs its finalizers, so
+the in-program half is covered. Draining at the layer above — out of the load
+balancer, wait, then stop — is still what
+[Containers](/docs/deployment/containers/) recommends, because it is what stops
+*new* requests arriving.
 
 ## A trap in a handler ends the server
 

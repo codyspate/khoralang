@@ -145,7 +145,7 @@ fn held() -> () with {{ process: Process }} raises Oops {{
 pub fn main() -> Int {{
   let f = Fiber::spawn(fn () =>
     with {{ process: Process::real() }} {{ scoped(fn () => held()!)! }});
-  Fiber::wait(f);
+  Fiber::wait(f)! catch {{ Oops::Bad => () }};
   print(\"the fiber was joined\");
   0
 }}

@@ -528,6 +528,57 @@ fn a_contexts_methods_are_documented() {
     assert!(page.contains("pub fn real() -> Int"), "{page}");
 }
 
+// --- type parameters in headings --------------------------------------------
+
+/// **A one-parameter type used to lose its parameter on the built page.**
+/// `### Option<A>` reaches the markdown renderer, which reads `<A>` as a raw
+/// HTML tag and drops it, so the heading rendered as the bare word `Option`
+/// and `std::core` told a reader that `List`, `Vector`, `Option`, `Array`,
+/// `Shared`, `Channel` and `Redacted` were not generic. Escaping the `<` is
+/// what makes the rendered heading equal the heading as written.
+#[test]
+fn a_type_parameter_in_a_heading_survives_the_renderer() {
+    let page = markdown(&module(
+        "module std::thing;\n\n//! What it is.\n\n\
+         /// A box.\npub type Box<A> = { item: A };\n\n\
+         impl Box<A> {\n  /// Out.\n  pub fn get() -> Int { 1 }\n}\n",
+    ));
+    assert!(page.contains("### Box\\<A>"), "{page}");
+    assert!(!page.contains("### Box<A>"), "the raw `<A>` would be eaten: {page}");
+}
+
+/// The escape is punctuation, which a slugger drops, so it cannot move an
+/// anchor: the reference that a doc comment writes and the heading it names
+/// have to still agree after escaping. This is the half of the bug that made
+/// twenty-eight links dead rather than merely twenty-eight headings wrong.
+#[test]
+fn escaping_a_type_parameter_does_not_move_its_anchor() {
+    let page = markdown(&module(
+        "module std::thing;\n\n//! What it is.\n\n\
+         /// A box.\npub type Box<A> = { item: A };\n\n\
+         impl Box<A> {\n  /// Out. See [`put`].\n  pub fn get() -> Int { 1 }\n  \
+         /// In.\n  pub fn put() -> Int { 1 }\n}\n",
+    ));
+    // The reference resolves against the anchor the `impl Box<A>` heading
+    // took, and that anchor is computed from the text as written -- exactly as
+    // `github-slugger` will compute it from the rendered `Box<A>`, since both
+    // drop the backslash as punctuation.
+    assert!(page.contains("[`put`](#put)"), "{page}");
+    assert!(page.contains("### Box\\<A>"), "{page}");
+}
+
+/// A two-parameter type was never broken -- `<A, E>` does not parse as a tag,
+/// so it survived by accident -- and escaping must not change where it lands.
+#[test]
+fn a_multi_parameter_type_keeps_the_anchor_it_had() {
+    let page = markdown(&module(
+        "module std::thing;\n\n//! What it is.\n\n\
+         /// A pair.\npub type Both<A, E> = { left: A, right: E };\n\n\
+         impl Both<A, E> {\n  /// Left.\n  pub fn left() -> Int { 1 }\n}\n",
+    ));
+    assert!(page.contains("### Both\\<A, E>"), "{page}");
+}
+
 /// And an `impl` on something this module does not export is still dropped.
 ///
 /// The gate is what keeps a page from documenting somebody else's type because

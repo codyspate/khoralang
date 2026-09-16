@@ -219,12 +219,21 @@ fn a_spawned_fiber_stays_in_its_spawners_trace() {
     let out = run(
         "trace_spawn",
         &program(
-            "pub fn main() -> Int {
+            "type Stop = { why: String };
+
+// `worker` carries a row so the `Fiber::wait` below has a channel to be
+// cancelled on -- `wait` is a cancellation point, and one in a function with
+// no failure channel has nowhere to go. Nothing here actually raises.
+fn worker(tracer: Tracer) -> () raises Stop {
+  around(tracer, \"worker\", fn () => ())
+}
+
+pub fn main() -> Int {
   let counter = Shared::of(0);
   let tracer = recording(counter);
   around(tracer, \"request\", fn () => {
-    let child = Fiber::spawn(fn () => around(tracer, \"worker\", fn () => ()));
-    Fiber::wait(child);
+    let child = Fiber::spawn(fn () => worker(tracer)!);
+    Fiber::wait(child)! catch { Stop => () };
   });
   0
 }",

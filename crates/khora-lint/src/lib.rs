@@ -65,6 +65,7 @@ pub const LINTS: &[&str] = &[
     DISCARDED_RESULT,
     INCONSISTENT_CONSTRUCTOR,
     MISPLACED_MAIN,
+    NESTED_VERDICT,
     REFERENCE_CYCLE,
     UNDOCUMENTED_EXPORT,
     UNKNOWN_ALLOW,
@@ -171,6 +172,8 @@ pub const DISCARDED_RESULT: &str = "discarded-result";
 /// breaks every manifest that mentions it. `reference-cycle` is true either
 /// way. `docs/roadmap.md` Phase 13.
 pub const REFERENCE_CYCLE: &str = "reference-cycle";
+/// A `Result` handed to something that decides on the outer tag alone.
+pub const NESTED_VERDICT: &str = "nested-verdict";
 
 /// What the lints find in one file.
 ///
@@ -192,6 +195,7 @@ pub fn findings(db: &dyn Db, file: SourceFile) -> Vec<Finding> {
             unused_capabilities(body, types, &mut out);
             reference_cycles(body, types, &mut out);
             discarded_results(body, types, &mut out);
+            nested_verdicts(body, types, &mut out);
         }
     }
 
@@ -909,6 +913,77 @@ fn discarded_results(body: &Body, types: &BodyTypes, out: &mut Vec<Finding>) {
             });
         }
     }
+}
+
+// --- a verdict nobody will read --------------------------------------------
+
+/// A `Result` passed to a function that decides on the outer tag alone.
+///
+/// **`std::db::transaction`'s `A` is unconstrained**, so a body typed
+/// `Result<Result<(), Refusal>, DbError>` type-checks and *commits* when the
+/// business refuses: `transaction` sees `Result::Ok` and has no way to look
+/// inside it. That has already cost a ledger a permanently un-retryable
+/// transfer — the idempotency key committed, the work did not.
+///
+/// A lint rather than a type error, because the nesting is legal and
+/// occasionally deliberate: a body that genuinely wants to commit a
+/// `Result`-shaped *value* — a stored parse outcome, a cached fallible answer —
+/// is writing the same type and means it. `Ok` means commit, whatever is
+/// inside it, and that rule stays; this says the rule is about to be applied to
+/// a program that probably did not want it.
+///
+/// # What it sees
+///
+/// A call to a function on the settling list whose return type is
+/// `Result<Result<_, _>, _>`. Matched on the callee's resolved item rather than
+/// on the argument's syntax, so a body written as a named function, a closure,
+/// or a call through a `let` is caught the same way — the type is the evidence,
+/// not the spelling.
+///
+/// **No false positives on shape alone**: nothing fires unless the callee is
+/// one whose contract is documented as reading only the outer tag. A general
+/// "you nested a `Result`" lint would be wrong about half of `std`.
+fn nested_verdicts(body: &Body, types: &BodyTypes, out: &mut Vec<Finding>) {
+    for (id, expr) in body.exprs() {
+        let Expr::Call { callee, .. } = expr else { continue };
+        let Expr::Path(khora_hir::Resolution::Item { module, name, .. }) = body.expr(*callee)
+        else {
+            continue;
+        };
+        if !settles_on_the_outer_tag(&module.to_string(), name) {
+            continue;
+        }
+        let Type::Adt { name: outer, args, .. } = types.of(id) else { continue };
+        if outer != "Result" {
+            continue;
+        }
+        let Some(Type::Adt { name: inner, .. }) = args.first() else { continue };
+        if inner != "Result" {
+            continue;
+        }
+        out.push(Finding {
+            lint: NESTED_VERDICT,
+            message: format!(
+                "`{name}` decides on the outer `Result` only, and this body's success \
+                 type is itself a `Result` — so an inner `Result::Err` commits. If that \
+                 inner failure has to undo the work, give it to the body's own `raises` \
+                 row and `attempt` the whole call; if it is a value being stored, write \
+                 `// @klint allow nested-verdict` to say so"
+            ),
+            range: body.range(id),
+        });
+    }
+}
+
+/// The functions whose contract is "the outer tag is the whole decision".
+///
+/// A list rather than a property of the signature, because the property is not
+/// in the type: `transaction`'s `A` is a plain parameter and nothing about
+/// `Result<A, DbError>` says the caller's commit hangs off it. Adding one here
+/// is the cost of adding another such function, and that cost is the point —
+/// it is a small enough list that a maintainer notices growing it.
+fn settles_on_the_outer_tag(module: &str, name: &str) -> bool {
+    matches!((module, name), ("std.db", "transaction"))
 }
 
 // --- reference cycles ------------------------------------------------------

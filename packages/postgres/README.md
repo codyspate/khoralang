@@ -6,7 +6,7 @@ wire protocol, spoken directly over `std::net::socket`.
 ## Installing
 
 ```
-khora install https://github.com/khora-lang/khora --subdir packages/postgres
+khora install https://github.com/codyspate/khoralang --subdir packages/postgres
 ```
 
 `--subdir` because a git URL names a *repository*, and this package lives
@@ -15,7 +15,7 @@ inside one that is mostly a compiler. The command writes the entry, so
 
 ```toml
 [dependencies]
-postgres = { git = "https://github.com/khora-lang/khora", rev = "main", subdir = "packages/postgres" }
+postgres = { git = "https://github.com/codyspate/khoralang", rev = "main", subdir = "packages/postgres" }
 ```
 
 ## Using it as a `Db` capability

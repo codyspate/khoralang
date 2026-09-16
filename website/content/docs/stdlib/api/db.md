@@ -463,6 +463,11 @@ The row is the *caller's*, deliberately. A transaction over a body that can
 fail its own way keeps that failure's type — folding it into `DbError`
 would be the loss `Result<A, DbError>` already declines to take.
 
+**Placeholder syntax belongs to the driver, not to `Db`.** This example
+uses PostgreSQL's `$1`, `$2`, which is what the `postgres` package takes;
+another engine's handler would take that engine's spelling. `Db` passes the
+string through untouched.
+
 ```khora
 import std::db::{Cell, Db, DbError, transaction};
 
@@ -470,10 +475,10 @@ fn transfer(from: Int, to: Int, amount: Int) -> Result<(), DbError>
   with { db: Db }
 {
   transaction(fn () =>
-    match db.execute("update accounts set balance = balance - ? where id = ?",
+    match db.execute("update accounts set balance = balance - $1 where id = $2",
                      [Cell::Number(amount), Cell::Number(from)]) {
       Result::Err(problem) => Result::Err(problem),
-      Result::Ok(_) => db.execute("update accounts set balance = balance + ? where id = ?",
+      Result::Ok(_) => db.execute("update accounts set balance = balance + $1 where id = $2",
                                   [Cell::Number(amount), Cell::Number(to)]),
     })
 }
@@ -483,4 +488,37 @@ There is no connection parameter. `with { db: Db }` is the function's
 authority to run statements, and the caller supplies it at a boundary --
 which is what keeps a transaction from turning the capability back into
 plumbing threaded through every signature.
+
+#### A refusal nested inside `Ok` commits
+
+**`A` is unconstrained, so `Result<Result<(), Refusal>, DbError>` is a legal
+body type and `transaction` commits it.** A body has three outcomes more
+often than two: it worked, the database broke, or *the business said no* --
+an overdraft, a closed account, a mismatched currency. A refusal is not a
+`DbError`, so the obvious typing puts it in the `Ok` channel, where this
+function cannot see it. The rollback that the body's author expected does
+not happen, and whatever the body wrote before the refusal is committed.
+
+The failure is quiet and it is not the database's: an idempotency key
+inserted at the top of the body outlives a refusal, so retrying the same
+request after the refusal's cause is gone answers "already done" forever.
+
+Roll back on a refusal by raising it, not by returning it. `transaction`
+carries a `raises 'er` row for exactly this: a raise leaves the body
+without an `Ok`, so the transaction rolls back, and the row carries the
+refusal out to a caller that can answer it.
+
+```khora
+fn transfer() -> Result<(), DbError> with { db: Db } raises Refusal {
+  // ... a refusal is `raise Refusal(why)`, not `Result::Err(..)`
+}
+
+// At the boundary, where the refusal becomes the caller's answer:
+let outcome = attempt(fn () => transaction(fn () => transfer()!)!);
+```
+
+**The body's `Err` channel is `DbError` and nothing else**, so a refusal
+cannot travel that way — it does not typecheck. The rule is that anything
+which must undo the transaction leaves the body as a raise or as
+`Result::Err(DbError)`; `Ok` means commit, whatever is inside it.
 

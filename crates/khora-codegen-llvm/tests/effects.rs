@@ -2032,7 +2032,7 @@ pub type Fiber<A, 'r>;
 impl<A, 'r> Fiber<A, 'r> {
   fn spawn(body: () -> A raises 'r) -> Fiber<A, 'r>;
   fn join(self) -> A raises 'r;
-  fn wait(self) -> ();
+  fn wait(self) -> () raises 'r;
   fn cancel(self) -> ();
 }
 

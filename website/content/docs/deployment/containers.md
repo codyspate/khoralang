@@ -24,7 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Pinned. A plain `curl | sh` takes the newest stable release, which makes the
 # image depend on the day it was built.
-ARG KHORA_VERSION=0.1.0
+ARG KHORA_VERSION=0.2.0
 RUN curl -fsSL https://raw.githubusercontent.com/codyspate/khoralang/main/install.sh \
       | sh -s -- --version "${KHORA_VERSION}" --to /opt/khora --no-modify-path
 ENV PATH="/opt/khora/bin:${PATH}"
@@ -52,7 +52,7 @@ ENTRYPOINT ["/usr/local/bin/myservice"]
 ```
 
 ```bash
-docker build --build-arg KHORA_VERSION=0.1.0 -t myservice:1 .
+docker build --build-arg KHORA_VERSION=0.2.0 -t myservice:1 .
 docker run --rm -p 8080:8080 myservice:1
 ```
 
@@ -96,13 +96,20 @@ group configured that way — is answered by the `GET` route without a second
 mount, with the headers `GET` would have sent and none of the body. So a
 health route is one route however the orchestrator asks for it.
 
-Shutdown is the part where a container's assumptions and Khora's current
-capabilities disagree, and it is worth stating plainly. **`std` has no signal
-API in this release**, so the `SIGTERM` a runtime sends before its grace period
-terminates the process immediately: no nursery cancellation, no `scoped`
-finalizer, and every in-flight request dropped. Structured cancellation is
-delivered inside the program by a nursery, not by the kernel.
+Shutdown works, with edges worth stating plainly. **The `SIGTERM` a runtime
+sends before its grace period becomes a cancellation at the root of the
+program**: nursery cancellation runs, `scoped` finalizers run, in-flight
+requests unwind, and the process exits 130. The grace period stays the
+orchestrator's — `--stop-timeout`, or Kubernetes'
+`terminationGracePeriodSeconds` — because a second deadline inside the runtime
+would be the one number nobody configured. A second `SIGTERM` restores the
+default disposition and re-raises, so an operator who means it is not waiting
+on a slow finalizer.
 
-Until there is a signal surface, drain at the layer above — remove the container
-from the load balancer or endpoint list, wait, then stop it — and write handlers
-so that being killed between two instructions is recoverable at the next start.
+Two shapes are **not** covered and a drain at the layer above is still the
+answer for them: a `main` with no `raises` row has no channel for a
+cancellation to travel, so the runtime falls back to killing the process
+outright as it did before; and a fiber inside a blocking `connect_to` reaches
+no cancellation point until the kernel gives up. Writing handlers so that being
+killed between two instructions is recoverable at the next start remains worth
+doing — `SIGKILL` at the end of the grace period has not gone anywhere.

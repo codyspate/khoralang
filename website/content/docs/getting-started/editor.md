@@ -12,8 +12,8 @@ Your editor should launch the server for `.kh` files; you normally do not need t
 
 The extension is not on the Marketplace yet. Install it from a release:
 
-1. Download `khora-lang.khora.vsix` from the newest `vscode-v*` release on GitHub.
-2. Run `code --install-extension khora-lang.khora.vsix`, or use **Extensions: Install from VSIX** in the command palette.
+1. Download `khora-vscode-<version>.vsix` from the newest `vscode-v*` release on GitHub — the `vscode-v0.3.0` release publishes `khora-vscode-0.3.0.vsix`. The extension is versioned separately from the compiler, so that number is not a Khora toolchain version.
+2. Run `code --install-extension khora-vscode-<version>.vsix`, or use **Extensions: Install from VSIX** in the command palette.
 
 It needs `khora` on your `PATH`, which both installers arrange. If it cannot find one it says so and offers to open the `khora.server.path` setting rather than failing quietly. Format-on-save is turned on for `.kh` files only.
 

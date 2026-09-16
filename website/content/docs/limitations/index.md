@@ -9,9 +9,9 @@ language rule, a supported feature, and unfinished work.
 
 **The ones most likely to affect you:**
 
-- [There is no signal API](#a-program-cannot-handle-a-signal) — `SIGTERM` from
-  `systemctl stop`, a container runtime or a Kubernetes eviction kills the
-  process outright, with no cleanup and no chance to finish in-flight work.
+- [What a signal does](#what-a-signal-does-and-the-three-shapes-it-does-not-reach)
+  — `SIGTERM` and `SIGINT` unwind the program and run its finalizers, but an
+  infallible `main`, a blocking `connect_to` and Windows are not covered.
 - [A bounded nursery runs `limit + 1` children](#what-a-nursery-actually-does),
   and a limit of zero means no limit at all — so **a bound of exactly one
   cannot be written**, which is the value a "one at a time" flag wants most.
@@ -61,6 +61,8 @@ What is left is ordinary recursion that somebody writes. A function that calls i
 
 Dependencies can be pinned reproducibly to git revisions, but there is not yet a public package registry or broad third-party ecosystem.
 
+**Three packages are maintained in the Khora repository**, and they are what "the ecosystem" means today: [`postgres`](/docs/packages/postgres/), `ai` — the effect a caller names when it wants model inference — and `otlp`, an exporter for `std::trace` over OTLP/HTTP JSON. [Packages](/docs/packages/) lists all three and gives the manifest line each is depended on with. Beyond those there is nothing to install: no registry to search and no third-party publishing.
+
 **One database driver is published: `postgres`.** `std::db` defines `Db`, transaction semantics and cancellation behaviour, and [`packages/postgres`](/docs/packages/postgres/) satisfies that interface — it speaks the wire protocol directly, authenticates with `scram-sha-256`, and supplies the `Db` handler. Depend on it with a git revision and a `subdir`; there is no registry yet. **SQLite and D1 have no driver**, and a program that needs one writes its own handler — `Db` is a record of closures, so that is a day's work and a test double is a few lines — over a native client it links with [`build.link`](/docs/reference/manifest/#build--what-to-produce).
 
 **A dependency cannot link a native library on your behalf.** `build.link` is read from the root package's manifest and nowhere else, so a package that ships an archive and declares `extern fn` against it cannot put a flag on your link line — a transitive package adding a native library to your build would be a supply-chain change with no signal at the place that would have to consent. The package does the work and documents one line for you to add, which means every native library a program links can be read off its own manifest. [Foreign function interface](/docs/reference/ffi/#link-against-a-native-library) has the shape.
@@ -79,7 +81,7 @@ See [Editor setup](/docs/getting-started/editor/) for the language-server comman
 
 Two important documentation-tooling gaps remain:
 
-- Khora code blocks in API documentation are not yet compiled as documentation tests.
+- An API code block is only type-checked if it declares its own `module`. One of the 1,023 blocks on the generated pages does, and `scripts/check-api-programs.sh` checks it on every CI run; the rest are parsed as fragments and none are executed.
 - Generated signatures name referenced types but do not yet cross-link those type names to their API pages.
 
 See the [Standard library](/docs/stdlib/) entry point for the generated reference.
@@ -105,8 +107,12 @@ request be" — nothing in the parser recurses per byte or per line, and a
 39,808-byte request carrying 2,001 headers parses when the limit admits it.
 `Router::holding` sets another; the buffer is allocated once at that size per
 connection, so it multiplies by the connection bound below when deciding what
-a full server costs. There is no chunked transfer and no multipart decoding,
-and a body must be UTF-8 text.
+a full server costs. There is no multipart decoding, and a body must be UTF-8
+text. **Chunked transfer is read but not written:** `HttpClient` accepts a
+response framed by `Transfer-Encoding: chunked` and hands the handler the
+de-chunked body, so a service that answers that way can be called; the server
+never writes a chunked response. That is the split real traffic has — a
+response of unknown length is ordinary and a request of unknown length is not.
 
 **The server serves at most 256 connections at once, and the number is not
 configurable.** `Router::listen` and the TLS form wrap their accept loops in
@@ -150,44 +156,127 @@ rather than a fix waiting to be typed. Until there is one, a program's ability
 to listen is bounded by the operating system and by whatever runs it, not by its
 manifest.
 
-## A program cannot handle a signal
+## What a signal does, and the three shapes it does not reach
 
-`std` has no signal API. Nothing catches `SIGTERM`, `SIGINT` or `Ctrl-C`, and
-there is no way to ask for one.
+`SIGTERM` and `SIGINT` become a **cancellation at the root of the program**.
+There is no new API and nothing to spell: a program observes a signal as the
+cancellation it already knows how to observe, so nursery cancellation runs,
+scoped finalizers run, a `std::db` transaction sends its `ROLLBACK`, and the
+process exits **130**. `Ctrl-C` is `SIGINT` and behaves the same way.
 
-A signal therefore takes the process the way the kernel takes any process that
-has not asked otherwise: **immediately, without unwinding.** Nursery
-cancellation does not run, scoped finalizers do not run, buffered output is not
-flushed, and in-flight work is dropped. `systemctl stop`, a container runtime's
-graceful shutdown, and a Kubernetes eviction all begin with `SIGTERM`, so all
-three kill a Khora program outright.
+**The second signal is forceful.** The runtime restores the default
+disposition and re-raises, so the process dies the way the platform says —
+a real `WIFSIGNALED`, not an `exit(143)` that prints the same number. The
+operator holds the deadline: there is no grace period in the language, because
+a runtime timer that disagreed with `TimeoutStopSec` or
+`terminationGracePeriodSeconds` would be the one number nobody configured.
 
-Measured, on a program that prints, sleeps, then prints again:
+Measured, on a program with a scoped finalizer in a fallible loop:
 
 ```
-kill -TERM -> wait-status 143; output: started|
-kill -KILL -> wait-status 137; output: started|
+kill -TERM -> exit 130; the finalizer ran
+kill -TERM twice -> killed by signal 15 mid-finalizer
 ```
 
-The second line never prints in either case. **`SIGTERM` and `SIGKILL` are
-indistinguishable from inside the program**, which is the practical shape of
-the limitation: there is no "graceful" case to write code for.
+### What this does not cover
 
-So a program that must not lose work has to be crash-only: durable state
-advances by one atomic append or rename, and a program killed between any two
-instructions is correct at the next start. [Running on
-Linux](/docs/deployment/linux/) and [Containers](/docs/deployment/containers/)
-say the same thing in the setting where it bites.
+**An infallible `main` dies rather than unwinding.** A cancellation travels the
+error channel, so a `main` with no `raises` row has nowhere for one to go. The
+runtime notices this and falls back to the old behaviour — default disposition,
+re-raised at once — so such a program still answers `kill`, at wait-status 143
+with no finalizers. It loses nothing it previously had; it gains nothing
+either. Give `main` a `raises` row to get the graceful path.
 
-`Ctrl-C` handling is sometimes discussed as though it were blocked on
-cancellation over a nursery. That hang is fixed; the signal API's absence is
-what remains.
+A compiler warning for this shape — a `main` with no `raises` row and a `loop`
+or a `listen` in it — is decidable from the signature and is **not built**. The
+runtime fallback was chosen over it because it helps the program already
+running rather than the author who reads warnings; the warning is still worth
+having and is not yet written.
+
+**`Fiber::wait` cannot be called from a function with no failure channel.**
+This is the same rule met at compile time rather than at `kill` time, and it is
+sharper: `wait` is a cancellation point, a cancellation point needs a channel
+to travel, and a function with no `raises` row has none. So
+
+```khora
+fn main() -> Int {
+  let hand = Fiber::spawn(fn () => body());
+  Fiber::wait(hand)   // refused: this call can leave the function
+}
+```
+
+is rejected even when `body` raises nothing at all — the empty row is still a
+row, and the diagnostics say so from three directions at once (`!` reports the
+missing clause, a `catch` reports that nothing raises, an annotation reports
+`expected Oops, found {}`). Give the waited-on function a `raises` row and
+catch it at the top.
+
+`Fiber::join` has always behaved this way, so this is `wait` joining a rule
+that already existed rather than a new one. It is still a real cost: `wait` on
+a provably-infallible child needs no channel in principle, and requiring one
+is the implementation showing through. Making the empty row callable without
+`!` is the fix, and it is a type-system change rather than a runtime one.
+
+**Inside a closure there is no spelling that works.** A closure carries no
+`raises` row, so a `wait` in one has nowhere to put the cancellation and no
+annotation can give it somewhere:
+
+```khora
+around(tracer, "request", fn () => {
+  let child = Fiber::spawn(fn () => work(tracer));
+  Fiber::wait(child)          // refused, and `!` does not help
+});
+```
+
+The fix is a restructure rather than a spelling: lift the body into a named
+function that carries a row, spawn that, and catch at the `wait`. Worth
+knowing before reaching for `wait` inside a callback.
+
+**A long `clock.sleep` delays or survives the shutdown, and the two backends
+differ.** Measured against an eight-second sleep in a child fiber, one
+`SIGTERM`:
+
+```
+thread backend     stopped after 6034 ms; the sleep completed normally
+scheduler backend  stopped after 3 ms; the sleep still returned normally
+```
+
+Under the default thread backend the sleep is simply not interrupted, so
+shutdown waits it out. Under the scheduler the fiber *is* woken — but the wake
+returns from `sleep` **normally rather than raising**, so the statement after
+the sleep runs before the fiber stops at its next cancellation point. A
+cancelled fiber runs one more step of the work it was told to abandon.
+
+This is the most reachable of the three gaps on this page: `clock.sleep` is in
+every poll loop and every retry backoff. Chunk a long sleep into a loop of
+short ones if shutdown latency matters, which makes the loop back-edge the
+cancellation point.
+
+**A blocking `connect_to` is not a cancellation point.** `khora_net_connect` is
+a blocking `connect(2)` on the worker, so a fiber inside one reaches no
+cancellation point until the kernel gives up — minutes, on an unroutable host.
+`accept` and `recv` are fine: they are reactor-driven, and an idle
+`Router::listen` server stops in about ten milliseconds. The fix is a
+non-blocking connect driven by the reactor, which the roadmap schedules for
+Phase 13.
+
+**Windows has none of this.** Windows has no `SIGTERM`, and no way for an
+arbitrary process to ask another to stop: `TerminateProcess` is `SIGKILL` with
+no notice and nothing to observe. The console events (`CTRL_C_EVENT` and its
+two siblings) are not wired up in this release.
+
+So a program that must not lose work should still be crash-only — durable state
+advancing by one atomic append or rename — because `SIGKILL`, a power cut and
+the three cases above all remain. What has changed is that the ordinary deploy
+is no longer one of them. [Running on Linux](/docs/deployment/linux/) and
+[Containers](/docs/deployment/containers/) say this in the setting where it
+bites.
 
 ## The fiber scheduler
 
 A fiber is an operating-system thread. The M:N scheduler — stackful coroutines on a worker pool — is built and is opt-in with `KHORA_FIBERS=scheduler`.
 
-It is not the default for 0.1.0 for three reasons, and one of them is a gap rather than a preference:
+It is not the default in 0.2.0, and is still not the default in the compiler this page describes, for three reasons, and one of them is a gap rather than a preference:
 
 - Threads are faster at the connection counts a service runs at.
 - The scheduler exists for fiber **density**, and that claim is measured on Windows only. Linux caps `vm.max_map_count` at 65530 and guard pages split mappings, so the "100,000 waiting fibers" figure has not been reproduced on the platform most deployments use.
@@ -273,8 +362,12 @@ writes before it fails, which is the sort of thing the failure row was supposed
 to make unnecessary. And a fiber that raised and was `wait`ed on rather than
 `join`ed prints `khora: a fiber ended with an error nobody was waiting for` to
 standard error at process exit, once per such fiber, with no way to suppress it
-and no effect on the exit status. Since `wait` is the documented thing to use
-after `cancel`, a supervisor that cancels children prints that line routinely.
+and no effect on the exit status. **A cancellation is excluded from it.** The
+runtime emits that line only for a fiber that ended in a *failure* nobody
+observed; a cancelled fiber is silent, so a supervisor that cancels children
+does not print it — it prints it only when a child fails on its own. Which
+makes the line worth reading rather than expecting: seeing it means a genuine
+unobserved failure, not the ordinary noise of a shutdown.
 
 `Channel` also has no `select` (waiting on the first of several) and no zero-capacity rendezvous. `Channel::bounded(0)` gets a capacity of one rather than a rendezvous, deliberately.
 
@@ -394,4 +487,4 @@ Khora has not reached 1.0. Source compatibility across arbitrary development rev
 
 If the documentation says something should work and the compiler disagrees, treat that as a bug in either the implementation or the docs.
 
-Every hand-written example on this site is compiled as a step of the project's build gate, and the generated API pages are checked against their declarations by `khora doc --check`. Two gaps remain. A hand-written fragment is *parsed* rather than type-checked unless it declares its own `module`, so an example can be syntactically valid and still mean the wrong thing — `List<String` with the bracket missing is a valid comparison. And the examples inside `///` doc comments, which become the generated pages, are not run at all. Where an example and the compiler disagree, reconcile them against the implementation rather than assuming either side is right.
+Every hand-written example on this site is compiled as a step of the project's build gate, and the generated API pages are checked against their declarations by `khora doc --check`. Two gaps remain. A hand-written fragment is *parsed* rather than type-checked unless it declares its own `module`, so an example can be syntactically valid and still mean the wrong thing — `List<String` with the bracket missing is a valid comparison. And the examples inside `///` doc comments, which become the generated API pages, follow the same rule: one of them declares a `module` and is type-checked by `scripts/check-api-programs.sh` in CI, and the rest are parsed. None are executed, so an example that compiles can still print something other than what it says it prints. Where an example and the compiler disagree, reconcile them against the implementation rather than assuming either side is right.

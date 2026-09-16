@@ -566,7 +566,7 @@ pub fn wire_key(self) -> Option<String>
 The wire key a field shape was given by [`key`](#key), looking through the
 wrappers that may sit outside it.
 
-### Schema<A>
+### Schema\<A>
 
 ```khora
 impl<A> Schema<A>
@@ -708,7 +708,7 @@ pub fn described(self, text: String) -> Schema<A>
 
 The same schema, with a sentence for a document to carry.
 
-### Fields<A>
+### Fields\<A>
 
 ```khora
 impl<A> Fields<A>
@@ -903,7 +903,7 @@ impl Decode for DateTime
 fn schema() -> Schema<DateTime>
 ```
 
-### Decode for Option<A>
+### Decode for Option\<A>
 
 ```khora
 impl<A: Decode> Decode for Option<A>
@@ -915,7 +915,7 @@ impl<A: Decode> Decode for Option<A>
 fn schema() -> Schema<Option<A>>
 ```
 
-### Decode for List<A>
+### Decode for List\<A>
 
 ```khora
 impl<A: Decode> Decode for List<A>
@@ -927,7 +927,7 @@ impl<A: Decode> Decode for List<A>
 fn schema() -> Schema<List<A>>
 ```
 
-### Decode for Vector<A>
+### Decode for Vector\<A>
 
 ```khora
 impl<A: Decode> Decode for Vector<A>
@@ -939,7 +939,7 @@ impl<A: Decode> Decode for Vector<A>
 fn schema() -> Schema<Vector<A>>
 ```
 
-### Decode for Redacted<A>
+### Decode for Redacted\<A>
 
 ```khora
 impl<A: Decode> Decode for Redacted<A>
@@ -951,7 +951,7 @@ impl<A: Decode> Decode for Redacted<A>
 fn schema() -> Schema<Redacted<A>>
 ```
 
-### Decode for Dict<String, V>
+### Decode for Dict\<String, V>
 
 ```khora
 impl<V: Decode> Decode for Dict<String, V>
@@ -963,7 +963,7 @@ impl<V: Decode> Decode for Dict<String, V>
 fn schema() -> Schema<Dict<String, V>>
 ```
 
-### Decode for Map<String, V>
+### Decode for Map\<String, V>
 
 ```khora
 impl<V: Decode> Decode for Map<String, V>
@@ -1115,7 +1115,7 @@ impl Encode for DateTime
 fn encode(self) -> Raw
 ```
 
-### Encode for Option<A>
+### Encode for Option\<A>
 
 ```khora
 impl<A: Encode> Encode for Option<A>
@@ -1130,7 +1130,7 @@ impl<A: Encode> Encode for Option<A>
 fn encode(self) -> Raw
 ```
 
-### Encode for List<A>
+### Encode for List\<A>
 
 ```khora
 impl<A: Encode> Encode for List<A>
@@ -1142,7 +1142,7 @@ impl<A: Encode> Encode for List<A>
 fn encode(self) -> Raw
 ```
 
-### Encode for Vector<A>
+### Encode for Vector\<A>
 
 ```khora
 impl<A: Encode> Encode for Vector<A>
@@ -1154,7 +1154,7 @@ impl<A: Encode> Encode for Vector<A>
 fn encode(self) -> Raw
 ```
 
-### Encode for Dict<String, V>
+### Encode for Dict\<String, V>
 
 ```khora
 impl<V: Encode> Encode for Dict<String, V>
@@ -1166,7 +1166,7 @@ impl<V: Encode> Encode for Dict<String, V>
 fn encode(self) -> Raw
 ```
 
-### Encode for Map<String, V>
+### Encode for Map\<String, V>
 
 ```khora
 impl<V: Encode> Encode for Map<String, V>

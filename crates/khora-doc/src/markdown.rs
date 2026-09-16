@@ -98,10 +98,16 @@ impl Page<'_> {
     /// included: an anchor depends on how many headings with the same text
     /// came before it, so one that skipped the count would move every anchor
     /// under it.
+    ///
+    /// The anchor is taken from the text as written and the line is emitted
+    /// [`escaped`], which is the only order that works: the slug has to agree
+    /// with what the renderer will compute from the *rendered* heading, and
+    /// escaping is exactly the operation that makes the rendered heading equal
+    /// the text as written.
     fn heading(&mut self, depth: usize, text: &str) -> String {
-        let line = format!("{} {}", "#".repeat(depth.min(6)), text);
-        let anchor = self.slugger.slug(&line);
-        self.out.push_str(&line);
+        let hashes = "#".repeat(depth.min(6));
+        let anchor = self.slugger.slug(&format!("{hashes} {text}"));
+        self.out.push_str(&format!("{hashes} {}", escaped(text)));
         self.out.push_str("\n\n");
         anchor
     }
@@ -211,6 +217,31 @@ impl Page<'_> {
         self.signature(item);
         self.prose(&item.doc, depth, scope);
     }
+}
+
+/// A heading's text with `<` escaped, so the renderer prints it.
+///
+/// **`### Option<A>` used to lose its type parameter.** Markdown passes a
+/// `<A>` through to the HTML as a raw tag, the browser finds no such element,
+/// and the heading renders as the bare word `Option` — so the reference page
+/// for the type system said `Vector`, `List`, `Option` and `Shared` were not
+/// generic, and the anchor the heading took (`#option-1`, deduplicated against
+/// the type's own `### Option`) could never match the `#optiona` that the
+/// index line linked to. Twenty-eight dead links on `std::core` and
+/// `std::schema`, all of them this.
+///
+/// Only the single-parameter types broke: `<A, E>` is not parseable as a tag,
+/// so `Result<A, E>` survived by accident. Escaping every `<` makes the two
+/// cases one case, and does not move an anchor — a backslash escape is
+/// punctuation, which every slugger drops, so `Result\<A, E>` still lands on
+/// `#resulta-e`.
+///
+/// **Not `&lt;`**, which renders identically but is three letters to the
+/// checker in `website/scripts/sync-docs.mjs` that recomputes these anchors
+/// from the markdown source: `Option&lt;A>` would index as `#optionlta` and
+/// put the dead link back from the other end.
+fn escaped(text: &str) -> String {
+    text.replace('<', "\\<")
 }
 
 /// Doc text with its own headings pushed below the heading it sits under.

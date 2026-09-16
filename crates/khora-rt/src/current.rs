@@ -350,6 +350,21 @@ fn root_fiber() -> Arc<Fiber> {
     ROOT.with(Arc::clone)
 }
 
+/// This thread's root fiber, as something that can be held.
+///
+/// **Not [`current`], which is a borrow.** The signal watcher needs a handle on
+/// the program's own computation that outlives the call, and a closure-scoped
+/// reference cannot give it one. Installing it as the running fiber matches
+/// what `current` would have done, so the two never disagree about which fiber
+/// this thread is carrying.
+pub(crate) fn this_root() -> Arc<Fiber> {
+    let root = root_fiber();
+    if running().is_null() {
+        set_running(Arc::as_ptr(&root));
+    }
+    root
+}
+
 /// The running fiber.
 ///
 /// Never fails: a thread that has not entered one is carrying its own root.

@@ -239,7 +239,7 @@ fn worker() -> () raises Oops {{
   // `wait`, not `join`: this needs the ordering and not the answer, and a
   // cancelled fiber has no answer to give -- a join would have nothing to
   // hand back and would unwind this frame along with it.
-  Fiber::wait(f);
+  Fiber::wait(f)! catch { Oops::Bad => () };
   print("the parent carried on");"#,
     );
     assert_eq!(
@@ -279,7 +279,7 @@ fn worker() -> () raises Oops {{
   // `wait`, not `join`: this needs the ordering and not the answer, and a
   // cancelled fiber has no answer to give -- a join would have nothing to
   // hand back and would unwind this frame along with it.
-  Fiber::wait(f);"#,
+  Fiber::wait(f)! catch { Oops::Bad => () };"#,
     );
     assert_eq!(out, "begin\ncommit\n7\n", "no rollback after a commit");
 }
@@ -344,7 +344,7 @@ fn worker() -> () raises Oops {{
 "#
         ),
         r#"  let f = Fiber::spawn(fn () => worker()!);
-  Fiber::wait(f);"#,
+  Fiber::wait(f)! catch { Oops::Bad => () };"#,
     );
     assert!(
         out.contains("the body failed"),
@@ -390,7 +390,7 @@ fn worker() -> () raises Oops {{
 "#
         ),
         r#"  let f = Fiber::spawn(fn () => worker()!);
-  Fiber::wait(f);
+  Fiber::wait(f)! catch { Oops::Bad => () };
   print("the parent carried on");"#,
     );
     assert_eq!(
@@ -439,7 +439,7 @@ fn worker() -> () raises Oops {{
 "#
         ),
         r#"  let f = Fiber::spawn(fn () => worker()!);
-  Fiber::wait(f);
+  Fiber::wait(f)! catch { Oops::Bad => () };
   print("the parent carried on");"#,
     );
     assert_eq!(
@@ -475,7 +475,7 @@ fn worker() -> () raises Oops {{
   // `wait`, not `join`: this needs the ordering and not the answer, and a
   // cancelled fiber has no answer to give -- a join would have nothing to
   // hand back and would unwind this frame along with it.
-  Fiber::wait(f);"#,
+  Fiber::wait(f)! catch { Oops::Bad => () };"#,
     );
     assert_eq!(out, "begin\nrollback\nrolled back: rejected: no\n");
 }
@@ -533,7 +533,7 @@ fn worker() -> () raises Oops {{
   // `wait`, not `join`: this needs the ordering and not the answer, and a
   // cancelled fiber has no answer to give -- a join would have nothing to
   // hand back and would unwind this frame along with it.
-  Fiber::wait(f);
+  Fiber::wait(f)! catch { Oops::Bad => () };
   print("the parent carried on");"#,
     );
     assert_eq!(

@@ -122,7 +122,7 @@ impl<A: Share> Channel<A> {
 pub type Fiber<A, 'r>;
 impl<A, 'r> Fiber<A, 'r> {
   fn spawn(body: () -> A raises 'r) -> Fiber<A, 'r>;
-  fn wait(self) -> ();
+  fn wait(self) -> () raises 'r;
   fn cancel(self) -> ();
 }
 impl<A, 'r> Share for Fiber<A, 'r> {}
@@ -202,16 +202,16 @@ fn worker(inbox: Channel<Int>) -> () raises Oops {{
   print(3);
 }}
 
-fn go() -> () {{
+fn go() -> () raises Oops {{
   let inbox: Channel<Int> = Channel::bounded(1);
   let hand = Fiber::spawn(fn () => worker(inbox)!);
   khora_sleep(50);
   Fiber::cancel(hand);
-  Fiber::wait(hand);
+  Fiber::wait(hand)!;
   print(9);
 }}
 
-fn main() -> Int {{ go(); print(khora_live_count()); 0 }}
+fn main() -> Int {{ go()! catch {{ Oops::Bad => () }}; print(khora_live_count()); 0 }}
 "
         ),
     );
@@ -259,7 +259,7 @@ fn main() -> Int {{
     waited = waited + 1;
   }};
   Fiber::cancel(hand);
-  Fiber::wait(hand);
+  Fiber::wait(hand)! catch {{ Oops::Bad => () }};
   print(9);
   0
 }}
@@ -300,7 +300,7 @@ pub type Fiber<A, 'r>;
 impl<A, 'r> Fiber<A, 'r> {
   fn spawn(body: () -> A raises 'r) -> Fiber<A, 'r>;
   fn join(self) -> A raises 'r;
-  fn wait(self) -> ();
+  fn wait(self) -> () raises 'r;
   fn cancel(self) -> ();
 }
 impl<A, 'r> Share for Fiber<A, 'r> {}

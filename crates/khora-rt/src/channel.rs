@@ -188,7 +188,10 @@ pub unsafe extern "C" fn khora_channel_open(
 /// Only a backstop; see [`park_until_moved`]. Long, because the window it
 /// covers is a few instructions wide and a shorter one would cost every parked
 /// fiber wakeups to catch a case that almost never happens.
-const LOOK_AGAIN: std::time::Duration = std::time::Duration::from_millis(250);
+///
+/// Shared with [`crate::fiber`], whose completion latch closes the same race
+/// against the same flag. One number rather than two that drift.
+pub(crate) const LOOK_AGAIN: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Waits for the channel to move, off the scheduler.
 ///

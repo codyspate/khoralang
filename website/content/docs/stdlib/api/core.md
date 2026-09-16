@@ -1235,7 +1235,7 @@ pub fn reverse(self) -> Ordering
 
 `a.cmp(b).reverse()` sorts descending without a second comparison.
 
-### Option<A>
+### Option\<A>
 
 ```khora
 impl<A> Option<A>
@@ -1320,7 +1320,7 @@ The bridge from a predicate back into the chain: `find` gives an
 `Option`, and asking a second question about what it found should not
 mean leaving the chain to ask it.
 
-### Result<A, E>
+### Result\<A, E>
 
 ```khora
 impl<A, E> Result<A, E>
@@ -1402,7 +1402,7 @@ The error type is shared, which is what makes this a chain rather than a
 pair of unrelated failures: a step that fails differently says so with
 `map_err` first, and the conversion is visible at the place it happens.
 
-### Redacted<A>
+### Redacted\<A>
 
 ```khora
 impl<A> Redacted<A>
@@ -1428,7 +1428,7 @@ The value back.
 site is a word a reviewer can search for; the leak this type exists to
 stop is the one nobody wrote on purpose.
 
-### Validated<A, E>
+### Validated\<A, E>
 
 ```khora
 impl<A, E> Validated<A, E>
@@ -1569,7 +1569,7 @@ pub fn unwrap_or(self, fallback: A) -> A
 
 The value, or `fallback` if anything was wrong.
 
-### List<A>
+### List\<A>
 
 ```khora
 impl<A: Ord> List<A>
@@ -1640,7 +1640,7 @@ The largest element, or nothing if there are none.
 
 Ties go to the first as well, for the same reason.
 
-### List<A>
+### List\<A>
 
 ```khora
 impl<A> List<A>
@@ -1853,7 +1853,7 @@ walks twice and calls the question twice per element -- which is wrong
 when the question is expensive and wrong in a different way when it is
 not pure. Both sides keep the order they were given.
 
-### List<A>
+### List\<A>
 
 ```khora
 impl<A: Eq> List<A>
@@ -1871,7 +1871,7 @@ Whether `wanted` is in the list.
 somebody asks about a value they are holding -- `List::any` is already
 there for the predicate.
 
-### List<A>
+### List\<A>
 
 ```khora
 impl<A> List<A>
@@ -1930,7 +1930,7 @@ Pairs, one from each, stopping at the shorter.
 `List<A>` with: `A` is any type and this library has no notion of a
 default. A caller who wants the tail of the longer one still has it.
 
-### List<Int>
+### List\<Int>
 
 ```khora
 impl List<Int>
@@ -2026,7 +2026,7 @@ above it to ask. Everything else should take one rather than reach for
 this — a library that roots its own scope has decided its caller's
 lifetimes for it.
 
-### Fiber<A, 'er>
+### Fiber\<A, 'er>
 
 ```khora
 impl<A: Share, 'er> Fiber<A, 'er>
@@ -2084,7 +2084,7 @@ the row is on the type instead.
 #### wait
 
 ```khora
-pub fn wait(self) ->()
+pub fn wait(self) ->() raises 'er
 ```
 
 Waits for the fiber, and does not take its answer.
@@ -2099,6 +2099,16 @@ a fiber is spawned for what it does rather than for what it computes.
 Letting the binding go waits too — that is where structured concurrency
 comes from — so this is for the case where the waiting has to happen at a
 particular line rather than at the end of a scope.
+
+**`raises 'er` because waiting can be interrupted.** A fiber parked here
+is asked to stop like any other, and the `!` is where it stops — without
+the row there would be no channel to say so on, and a parent waiting on a
+slow child would not observe its own cancellation until the child ended.
+The row is the waiter's, not the child's: this never takes the child's
+answer, so a child that *failed* still says so where it always did.
+
+The child is not cancelled by the waiter giving up. Letting the handle go
+still waits, which is what keeps it from outliving the binding.
 
 #### finished
 
@@ -2180,7 +2190,7 @@ a second and then block on the tail.
 **It cancels as well as detaching**, because a detached fiber nobody asked
 to stop is a leak with a nicer name.
 
-### Array<A>
+### Array\<A>
 
 ```khora
 impl<A> Array<A>
@@ -3899,7 +3909,7 @@ pub fn shr(self, other: I32) -> I32
 
 Arithmetic, because the type is signed.
 
-### Dict<K, V>
+### Dict\<K, V>
 
 ```khora
 impl<K, V> Dict<K, V>
@@ -3976,7 +3986,7 @@ pub fn values(self) -> List<V>
 
 Every value, in key order.
 
-### Dict<K, V>
+### Dict\<K, V>
 
 ```khora
 impl<K: Ord, V> Dict<K, V>
@@ -4062,7 +4072,7 @@ Builds a map from entries, later ones winning.
 A loop rather than a fold, because the recursion would be as deep as the
 list is long — the cliff `String::slice` fell off.
 
-### Map<K, V>
+### Map\<K, V>
 
 ```khora
 impl<K: Hash, V> Map<K, V>
@@ -4224,7 +4234,7 @@ The values, one per entry — duplicates included, because two keys may
 well hold the same value and dropping one would make `values` disagree
 with `len`.
 
-### Vector<A>
+### Vector\<A>
 
 ```khora
 impl<A> Vector<A>
@@ -4465,7 +4475,7 @@ Pushed one at a time into an empty vector rather than sized up front with
 of the list to save a handful of reallocations that double — and a walk
 of the whole input is the more expensive half of that trade.
 
-### SharedFn<A, B, 'er>
+### SharedFn\<A, B, 'er>
 
 ```khora
 impl<A, B, 'er> SharedFn<A, B, 'er>
@@ -4491,7 +4501,7 @@ pub fn call(self, argument: A) -> B raises 'er
 
 Calls it. A plain closure call; the wrapper costs nothing at runtime.
 
-### Channel<A>
+### Channel\<A>
 
 ```khora
 impl<A: Share> Channel<A>
@@ -4610,7 +4620,7 @@ How many values are waiting to be taken.
 **Stale the moment it is given**, which is true of every such count. For
 a pool reporting its depth and for tests; nothing should branch on it.
 
-### Shared<A>
+### Shared\<A>
 
 ```khora
 impl<A: Share> Shared<A>
@@ -5038,7 +5048,7 @@ fn show(self) -> String
 
 The variant's own name, which is what a comparison in a log wants to say.
 
-### Show for Option<A>
+### Show for Option\<A>
 
 ```khora
 impl<A: Show> Show for Option<A>
@@ -5062,7 +5072,7 @@ somebody is looking.
 fn show(self) -> String
 ```
 
-### Eq for Option<A>
+### Eq for Option\<A>
 
 ```khora
 impl<A: Eq> Eq for Option<A>
@@ -5081,7 +5091,7 @@ nothing at all about `Some`.
 fn eq(self, other: Option<A>) -> Bool
 ```
 
-### Ord for Option<A>
+### Ord for Option\<A>
 
 ```khora
 impl<A: Ord> Ord for Option<A>
@@ -5099,7 +5109,7 @@ that do not.
 fn cmp(self, other: Option<A>) -> Ordering
 ```
 
-### Show for Result<A, E>
+### Show for Result\<A, E>
 
 ```khora
 impl<A: Show, E: Show> Show for Result<A, E>
@@ -5117,7 +5127,7 @@ line somebody is actually writing.
 fn show(self) -> String
 ```
 
-### Eq for Result<A, E>
+### Eq for Result\<A, E>
 
 ```khora
 impl<A: Eq, E: Eq> Eq for Result<A, E>
@@ -5131,7 +5141,7 @@ Same side, and equal contents.
 fn eq(self, other: Result<A, E>) -> Bool
 ```
 
-### Show for Redacted<A>
+### Show for Redacted\<A>
 
 ```khora
 impl<A> Show for Redacted<A>
@@ -5177,7 +5187,7 @@ type Effects = {};
 fn next(self) -> Step<Range, Int>
 ```
 
-### Show for List<A>
+### Show for List\<A>
 
 ```khora
 impl<A: Show> Show for List<A>
@@ -5196,7 +5206,7 @@ of something unshowable is still unshowable, which is the honest answer.
 fn show(self) -> String
 ```
 
-### Eq for List<A>
+### Eq for List\<A>
 
 ```khora
 impl<A: Eq> Eq for List<A>
@@ -5210,7 +5220,7 @@ Element by element, and length first where they differ in length.
 fn eq(self, other: List<A>) -> Bool
 ```
 
-### Ord for List<A>
+### Ord for List\<A>
 
 ```khora
 impl<A: Ord> Ord for List<A>
@@ -5233,7 +5243,7 @@ Consistent with the derived `Eq` above -- two lists compare `Equal`
 exactly when `eq` says they are equal -- which is the property that lets
 `sort` on a `List<List<A>>` mean anything.
 
-### Iterator for List<A>
+### Iterator for List\<A>
 
 ```khora
 impl<A> Iterator for List<A>
@@ -5261,7 +5271,7 @@ type Effects = {};
 fn next(self) -> Step<List<A>, A>
 ```
 
-### Iterator for Mapped<I, B>
+### Iterator for Mapped\<I, B>
 
 ```khora
 impl<I: Iterator, B> Iterator for Mapped<I, B>
@@ -5294,7 +5304,7 @@ out of the adapter, so it reaches the inner `next` shared and the cell it
 matched cannot be built in. Destructuring hands it over instead, which is
 what a record pattern is for here.
 
-### Iterator for Filtered<I>
+### Iterator for Filtered\<I>
 
 ```khora
 impl<I: Iterator> Iterator for Filtered<I>
@@ -5326,7 +5336,7 @@ fn next(self) -> Step<Filtered<I>, I::Item> with Self::Effects
 is: it walks until something is kept or the source runs out, so a caller
 never sees a step that yielded nothing.
 
-### Iterator for Taken<I>
+### Iterator for Taken\<I>
 
 ```khora
 impl<I: Iterator> Iterator for Taken<I>
@@ -5793,7 +5803,7 @@ impl Hash for I32
 fn hash(self) -> Int
 ```
 
-### Show for Pair<K, V>
+### Show for Pair\<K, V>
 
 ```khora
 impl<K: Show, V: Show> Show for Pair<K, V>
@@ -5811,7 +5821,7 @@ No brackets around it. A `Pair` is nearly always inside something that
 has its own -- `Dict` and `Map` both print a list of these -- and a pair
 that brought its own would double them.
 
-### Show for Dict<K, V>
+### Show for Dict\<K, V>
 
 ```khora
 impl<K: Ord + Show, V: Show> Show for Dict<K, V>
@@ -5836,7 +5846,7 @@ The key needs both bounds and for different reasons: `Ord` is what a
 map whose keys order but cannot print does not print, which is the right
 answer -- there is nothing to write in place of the key.
 
-### Show for Map<K, V>
+### Show for Map\<K, V>
 
 ```khora
 impl<K: Hash + Show, V: Show> Show for Map<K, V>
@@ -5861,7 +5871,7 @@ keys hash but do not order could not print at all -- and the reason this
 exists is that a record holding a `Map` could not derive `Show`. Trading
 that back for a tidier order is the wrong way round.
 
-### Show for Vector<A>
+### Show for Vector\<A>
 
 ```khora
 impl<A: Show> Show for Vector<A>

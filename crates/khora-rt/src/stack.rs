@@ -52,11 +52,17 @@
 /// one out.
 const MESSAGE: &[u8] = b"khora: the stack ran out\nnote: a function that recurses as deep as its input will do this -- one you\n      wrote, a derived `Eq`, `Ord` or `Show` on a deeply nested value, or\n      `std::json::parse` on a document with a very long string in it, which\n      recurses per character. Most of `std` walks with loops and is not the\n      cause; `json` is the exception.\n";
 
-/// Installs the stack guard, once, before anything else runs.
+/// Installs the stack guard and the signal watcher, once, before anything else
+/// runs.
 ///
 /// Called by generated code at the top of every entry point — the ordinary
 /// one, the test harness and the bench harness — because a program that
 /// exhausts its stack should say so however it was started.
+///
+/// **The signal watcher is here for the same reason the stack guard is**, and
+/// for one more: it blocks `SIGTERM` and `SIGINT` in the process mask, which
+/// only works before any thread exists to inherit a different one. `khora_rt`
+/// spawns nothing until a fiber is spawned, and this runs first.
 ///
 /// Idempotent and cheap: a second call on a platform that has already
 /// installed does nothing, which matters because a test binary and the program
@@ -65,6 +71,8 @@ const MESSAGE: &[u8] = b"khora: the stack ran out\nnote: a function that recurse
 pub extern "C" fn khora_begin() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(install);
+    static SIGNALS: std::sync::Once = std::sync::Once::new();
+    SIGNALS.call_once(crate::signals::install);
 }
 
 /// Writes `MESSAGE` to standard error with the smallest call that will do it.

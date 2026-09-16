@@ -231,19 +231,24 @@ pub unsafe extern "C" fn khora_cancel_stop() -> ! {
             "a cancellation reached a frame that cannot carry one and cannot \
              hand back a value either.\n\
              \n\
-             The shape is a function with no `raises` row that catches every \
-             case in the row of something it calls -- `f()! catch { .. }` with \
-             an arm for each case, or a `_` arm -- and whose own return type is \
-             a boxed value. A cancellation is in no row, so no arm names it and \
-             there is no channel left to send it on; and unlike a `()` or an \
-             `Int`, a boxed answer has no zero that is a value rather than a \
+             The shape is a function that catches every case in the row of \
+             something it calls -- `f()! catch { .. }` with an arm for each \
+             case, or a `_` arm -- and whose own return type is a boxed value. \
+             A cancellation is in no row, so no arm names it and there is no \
+             channel left to send it on; and unlike a `()`, an `Int` or a \
+             `Float`, a boxed answer has no zero that is a value rather than a \
              null.\n\
              \n\
+             **The return type is what decides, not the shape of the arms.** \
+             The same total `catch` in a function returning `Int` absorbs the \
+             cancellation and returns zero; in one returning a `String` or a \
+             record it arrives here.\n\
+             \n\
              Give that function a `raises` row, so the cancellation has a way \
-             out of it -- or move the total `catch` into a caller that has one. \
-             A fiber whose thunk can fail is a fiber whose root can carry a \
-             cancellation, which is what `docs/design/fibers.md` §2 means by a \
-             fiber that can be stopped.",
+             out of it -- or move the total `catch` into a caller that has \
+             one. Inside a `Fiber::spawn` thunk, the thunk itself carries a \
+             row: `Fiber::spawn(fn () => risky()!)` and a `Fiber::join(h)!` at \
+             the other end is the shape that works.",
         );
     }
     end_the_program()

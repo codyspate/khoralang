@@ -689,12 +689,11 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .expect("a fiber handle is a value");
                 Some(fiber)
             }
-            ("cancel", [fiber]) | ("detach", [fiber]) | ("wait", [fiber]) => {
+            ("cancel", [fiber]) | ("detach", [fiber]) => {
                 let ty = self.types.of(*fiber).clone();
                 let handle = self.expr(*fiber)?;
                 let call = match name {
                     "detach" => self.be.rt.fiber_detach,
-                    "wait" => self.be.rt.fiber_wait,
                     _ => self.be.rt.fiber_cancel,
                 };
                 self.be
@@ -705,6 +704,33 @@ impl<'ctx> Lower<'_, 'ctx> {
                 // and the plan handed this frame an owned reference.
                 self.release_unless_lent(*fiber, handle, &ty);
                 Some(self.be.unit_value())
+            }
+            ("wait", [fiber]) => {
+                // **A cancellation point, unlike `cancel` and `detach`.** A
+                // waiter parked here observed nothing until the child finished
+                // on its own, so a `main` ending in a wait could not be
+                // stopped at all (roadmap §16.7). The runtime answers
+                // `CANCELLED_WHICH` when the *waiter* was asked to stop, and
+                // the branch below is the `!` that unwinds on it -- which is
+                // why `Fiber::wait` carries a `raises 'er` row.
+                let ty = self.types.of(*fiber).clone();
+                let handle = self.expr(*fiber)?;
+                let which = self
+                    .be
+                    .builder
+                    .build_call(self.be.rt.fiber_wait, &[handle.into()], "wait.which")
+                    .expect("waiting for a fiber")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("a wait answers")
+                    .into_int_value();
+                // Borrowed, like `cancel`: waiting does not consume the handle.
+                self.release_unless_lent(*fiber, handle, &ty);
+                // No answer travels with it, so the word is the unit every
+                // other `()`-returning fallible call carries.
+                let word = self.be.ctx.i64_type().const_zero();
+                let tagged = self.be.tagged_of(which, word);
+                self.split_tagged(tagged, &Type::Unit, range)
             }
             ("finished", [fiber]) => {
                 let ty = self.types.of(*fiber).clone();

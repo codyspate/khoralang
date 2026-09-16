@@ -83,9 +83,11 @@ elsewhere, and you can tolerate a pre-1.0 implementation while it is proved.
 ## Build real applications
 
 - **[Cookbook](/docs/cookbook/)** — worked patterns for HTTP services, database access, tracing, cancellation, bounded concurrency, and testing.
+- **[Packages](/docs/packages/)** — what ships alongside the language rather than inside it, and the manifest line each is depended on with.
 - **[Deployment](/docs/deployment/)** — supported targets and how Khora applications are built and deployed.
 - **[Migration guides](/docs/migration/)** — mental-model bridges for developers coming from Effect TypeScript, Go, and Rust.
 - **[Performance](/docs/performance/)** — what the HTTP server answers, measured against a load generator that is not the bottleneck, with the conditions each figure had to satisfy and an account of why every number published before September 2026 was too high.
+- **[Internals](/docs/internals/)** — how Khora works underneath: what a reference count costs, what `with` compiles to, what a fiber is made of, and what makes a release build reproducible. Nothing here is needed to write Khora; it is for debugging something strange or judging whether Khora suits a problem.
 - **[Limitations](/docs/limitations/)** — functionality that is intentionally incomplete, unsupported, or still evolving, with the measurements behind each entry.
 
 ## Tooling

@@ -35,10 +35,20 @@ whole mechanism, and a monorepo of packages works because `subdir` exists.
 ## What is here
 
 - **[`postgres`](/docs/packages/postgres/)** — a PostgreSQL client that speaks
-  the wire protocol directly, with no `libpq` to install.
+  the wire protocol directly, with no `libpq` to install. Documented here.
 - **`ai`** — the effect a caller names when it wants model inference, so the
-  provider stays the caller's choice.
-- **`otlp`** — an exporter for the trace vocabulary in `std::trace`.
+  provider stays the caller's choice. It declares `LLMService` and `extract`
+  and implements no provider: there is no HTTP and no tokenizer in it, and a
+  handler supplies those. **No page here yet** — read
+  [`packages/ai/src/llm.kh`](https://github.com/codyspate/khoralang/blob/main/packages/ai/src/llm.kh),
+  whose module comment is the documentation.
+- **`otlp`** — an exporter for the trace vocabulary in `std::trace`, over
+  OTLP/HTTP JSON. **No page here yet** — read
+  [`packages/otlp/README.md`](https://github.com/codyspate/khoralang/blob/main/packages/otlp/README.md).
+
+Each of the three is depended on the same way, with `git` and `subdir`; not
+having a page here is a gap in this section rather than a difference in how the
+package is used.
 
 ## These are not covered by the language's compatibility promise
 
@@ -48,5 +58,5 @@ compiler for convenience, not as a promise: it can break between releases when
 the protocol underneath it changes, and the reason to keep it out of `std` is
 exactly that it might need to.
 
-Read each package's own page for what it does and does not do yet. The
-honest list of gaps is at the bottom of each one.
+`postgres` has a page here, and the honest list of gaps is at the bottom of it.
+For `ai` and `otlp` that list is in the source linked above.

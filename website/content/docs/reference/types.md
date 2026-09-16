@@ -343,6 +343,8 @@ forall<A, const N: Int>. Vector<A>
 
 Most named generic functions do not need explicit `forall`; the declaration's own type parameter list introduces their parameters.
 
+**A `forall` value cannot be called yet.** The type is accepted as a parameter or an annotation, and a polymorphic function can be passed as one, but applying it inside the body is a gap in the compiler — [Generics](/docs/reference/generics/#a-forall-value-cannot-be-called-yet) has the error and what to write instead.
+
 ## Opaque types
 
 A type declaration may omit its definition:
