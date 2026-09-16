@@ -251,4 +251,4 @@ with Production {
 }
 ```
 
-See [Capabilities](./capabilities/) for context rows and overrides.
+See [Capabilities](./capabilities/) for capability rows and overrides.

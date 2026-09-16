@@ -269,7 +269,7 @@ while loop break continue for return true false
 These words are keywords only in their grammatical position and remain usable as ordinary identifiers elsewhere:
 
 ```text
-handler in context row test bench derive extern
+handler in capability row test bench derive extern
 ```
 
 Examples of their keyword positions:

@@ -1,5 +1,5 @@
 ---
-title: Retrying a flaky call
+title: Retry a flaky call
 sidebar:
   order: 9
 ---

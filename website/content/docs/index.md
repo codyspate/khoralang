@@ -8,7 +8,7 @@ sidebar:
 ## Where Khora actually is
 
 **Khora is `0.x` and pre-1.0, with one maintainer.** The released line is
-`0.1`; these pages document the `0.2` development series. What that means in
+`0.2`; these pages document the `0.3` development series. What that means in
 practice, stated here so nobody has to discover it:
 
 - The language and `std` can break between releases. Every breaking change is

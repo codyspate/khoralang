@@ -39,8 +39,15 @@ set -eu
 # landed; it is still true of v0.2 and still on that page, but requiring it in
 # `next` would demand the documentation describe a limitation the compiler no
 # longer has.
+# "No database driver is published" and "std::db names packages that do not
+# exist" both left for the same reason: `packages/postgres` authenticates to a
+# stock PostgreSQL and supplies `Db`, so `next` saying the driver exists is the
+# correction, not a regression of one.
+#
+# **The list being empty is a normal state**, not a sign the check is
+# disabled. It fills when a correction lands in `next` that readers of the
+# released tree are being misled without.
 corrections=$(cat <<'PHRASES'
-No database driver is published|std::db names packages that do not exist
 PHRASES
 )
 

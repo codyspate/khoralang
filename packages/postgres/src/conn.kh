@@ -32,11 +32,13 @@ extern fn khora_random_seed() -> Int;
 ///
 /// # What it does not speak
 ///
-/// **MD5 and SCRAM-SHA-256.** Both need a hash the runtime does not expose to
-/// Khora — `ring` is linked for TLS and reaches no further. A server set to
-/// either is refused by name rather than hung: `Unsupported` says which method
-/// was asked for, because "connection failed" against a default PostgreSQL 14
-/// install would send somebody looking at their network.
+/// **MD5.** `ring` does not carry it, deliberately, because nothing new should
+/// be using it. A server set to `md5` is refused by name rather than hung:
+/// `Unsupported` says which method was asked for, because "connection failed"
+/// would send somebody looking at their network.
+///
+/// `scram-sha-256` — the default on PostgreSQL 14 and later — **is** spoken,
+/// and the server is made to prove itself too. See `src/scram.kh`.
 ///
 /// **TLS.** `SSLRequest` is one message and `std::net::tls` exists, so this is
 /// closer than it sounds; it is not here yet.
@@ -309,8 +311,10 @@ fn authenticate(c: Connection, m: Message, secret: String) -> Result<Bool, PgErr
     }
   } else if method == 5 {
     Result::Err(PgError::Unsupported(
-        "the server asked for MD5 authentication, which needs a hash this driver \
-       has no way to compute yet. Set the server to `trust` or `password` for now"
+        "the server asked for MD5 authentication, which this driver does not \
+       compute: `ring` does not carry MD5, deliberately. Set this role's \
+       password_encryption to `scram-sha-256` and reset its password — that is \
+       the default from PostgreSQL 14 and this driver speaks it"
       ))
   } else if method == 10 {
     // AuthenticationSASL. The payload lists the mechanisms the server will

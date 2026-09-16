@@ -1,5 +1,5 @@
 ---
-title: Tracing
+title: Trace an operation
 sidebar:
   order: 11
 ---

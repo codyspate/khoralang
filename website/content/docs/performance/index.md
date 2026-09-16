@@ -7,8 +7,10 @@ sidebar:
 
 **Khora's HTTP server answers about 174,000 requests a second on a 16-core
 desktop, in 8.4 MB of memory.** That is a little under Go's standard library
-on rate and between three and eighty times less memory than any of the
-runtimes it is measured against. This page says what that measures, what it
+on rate, and between two and eighty times less memory than the *managed*
+runtimes it is measured against. The Rust control uses less — 5.5 MB — which
+is the honest comparison: Khora is second on memory in the table below, not
+first. This page says what that measures, what it
 does not, how to run it yourself, and why every figure published here before
 September 2026 was between two and twelve times too high.
 
@@ -68,11 +70,14 @@ was still gaining when given more of the machine. Java's is one too, because
 its rate was still climbing at the top of the ladder, which is a JIT that had
 not finished with the handler.
 
-**Khora's HTTP server is mid-table on throughput and first on memory, and both
-halves of that are the headline.** It is about six per cent under Go's standard
+**Khora's HTTP server is mid-table on throughput and uses less memory than any
+managed runtime here, and both halves of that are the headline.** It is about
+six per cent under Go's standard
 library and a third under Kestrel on requests a second. It does it in 8.4 MB,
 against Go's 21.8, Node's 86.8, Kestrel's 240 and the JDK's 699 -- between
-three and eighty times less than the runtimes it is answering as fast as. That
+two and eighty times less than the runtimes it is answering as fast as. The
+Rust control, with no runtime at all, uses 5.5 MB: that is the floor this is
+measured against rather than a competitor it beats. That
 is what "no VM and no tracing GC" is worth, in the one column where the claim
 can be checked.
 

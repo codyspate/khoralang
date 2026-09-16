@@ -61,7 +61,7 @@ What is left is ordinary recursion that somebody writes. A function that calls i
 
 Dependencies can be pinned reproducibly to git revisions, but there is not yet a public package registry or broad third-party ecosystem.
 
-**No database driver is published.** `std::db` defines `Db`, transaction semantics and cancellation behaviour, and several pages describe a PostgreSQL, SQLite or D1 package satisfying that interface — none of them exists yet. `Db` is a record of closures, so a handler over an existing client is a day's work and a test double is a few lines, but there is nothing to install today that talks to a real database. A program that needs one writes its own handler, over a native client it links with [`build.link`](/docs/reference/manifest/#build--what-to-produce).
+**One database driver is published: `postgres`.** `std::db` defines `Db`, transaction semantics and cancellation behaviour, and [`packages/postgres`](/docs/packages/postgres/) satisfies that interface — it speaks the wire protocol directly, authenticates with `scram-sha-256`, and supplies the `Db` handler. Depend on it with a git revision and a `subdir`; there is no registry yet. **SQLite and D1 have no driver**, and a program that needs one writes its own handler — `Db` is a record of closures, so that is a day's work and a test double is a few lines — over a native client it links with [`build.link`](/docs/reference/manifest/#build--what-to-produce).
 
 **A dependency cannot link a native library on your behalf.** `build.link` is read from the root package's manifest and nowhere else, so a package that ships an archive and declares `extern fn` against it cannot put a flag on your link line — a transitive package adding a native library to your build would be a supply-chain change with no signal at the place that would have to consent. The package does the work and documents one line for you to add, which means every native library a program links can be read off its own manifest. [Foreign function interface](/docs/reference/ffi/#link-against-a-native-library) has the shape.
 
@@ -209,13 +209,25 @@ let safe = String::slice(text, 0, String::next_boundary(text, 20));
 
 The character predicates — `Char::is_digit`, `is_alpha`, `is_whitespace`, `to_upper`, `to_lower` — are **ASCII only** and say so in their own documentation. Unicode case mapping and the full `Nd` category are not in `std`, deliberately: they need tables that would double its size, and a library is the right place for them.
 
-## Union types
+## Anonymous union types
 
-There is no way to write "an `Int` or a `String`" as the type of a value. `+` joins the failure types of a `raises` row and means nothing outside one; `T: Eq + Show` is the other meaning of the symbol, a trait bound, and works as it does in Rust.
+There is no way to write "an `Int` or a `String`" **inline**, as the type of a value, without declaring anything.
+
+A named [variant type](/docs/reference/types/#variant-types) — a discriminated union, in other languages' words — is how "one of several" is expressed, and it is exhaustively checked:
+
+```khora
+pub type Answer =
+  | Number(Int)
+  | Text(String);
+```
+
+What is missing is the anonymous form. Declaring `Answer` is the cost, and the compiler's exhaustiveness checking is what it buys.
+
+`+` joins the failure types of a `raises` row and means nothing outside one; `T: Eq + Show` is the other meaning of the symbol, a trait bound, and works as it does in Rust. Writing `Int + String` in a value's type is refused by name rather than by a parse error.
 
 The practical consequence is that `attempt` handles a body raising exactly one type. Use [`catch`](/docs/reference/failures/#handle-failures-with-catch) for a wider row — it matches per type and never has to name a combined type.
 
-[The unions design note](https://github.com/codyspate/khoralang/blob/main/docs/design/unions.md) records what a union would mean, what it would cost, and why existentials are not part of the same question.
+[The unions design note](https://github.com/codyspate/khoralang/blob/main/docs/design/unions.md) records what an anonymous union would mean, what it would cost, and why existentials are not part of the same question.
 
 ## A cancelled fiber parked in `Fiber::wait` keeps going
 
@@ -279,7 +291,7 @@ measuring, and a program built on the prose will meet them as flakiness.
 | a bound of exactly 1 | **not expressible** — `bounded_nursery(0)` is unbounded, `bounded_nursery(1)` admits 2 | accept 2, or guard the work with a `Shared` flag of your own |
 | a child fails | siblings usually keep running | have long work check a `Shared` flag itself |
 | a child fails in a bounded nursery | new children still start | as above |
-| `Fiber::cancel` on a fiber whose body is a nursery | **never returns** if a child does not stop on its own | cancel through a `Shared` flag the children read |
+| `Fiber::cancel` on a fiber whose body is a nursery | **returns** — it is the following `Fiber::wait` that never does, if a child has no cancellation point | cancel through a `Shared` flag the children read |
 
 A nursery does still guarantee the other half: every child is waited for, and a
 failure is reported rather than lost.
@@ -349,9 +361,15 @@ than the thread backend ever did.
 **The default cannot change without a breaking-change note while that is true.**
 
 **Cancellation only lands where the fiber checks for it** — at a `!` in a
-function that can raise, or a loop back-edge. A long `sleep` is not a
-cancellation point, so work that must stop promptly has to be chunked into a
-loop.
+function that can raise, or a loop back-edge. **Under the default thread
+backend a long `sleep` is not one of those points**, so work that must stop
+promptly has to be chunked into a loop; under the scheduler backend the sleep
+is woken and returns early, as above. Write for the thread backend: it is the
+default and the pessimistic case.
+
+Either way, the statements between the wake and the *next* cancellation point
+still run. Cancellation unwinds at a point, not between arbitrary instructions
+— [Concurrency](/docs/reference/concurrency/) has the model.
 
 ## Cross-compilation and WebAssembly
 

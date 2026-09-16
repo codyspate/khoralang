@@ -15,13 +15,13 @@ of a million lines of C. It belongs in a package rather than here. Postgres
 belongs in one for the ordinary reason: its wire protocol is versioned by
 somebody else.
 
-**No driver is published yet, and this interface is the whole of what
-exists.** `Db` is a record of closures, so writing a handler over an
-existing client is a day's work and a test double is a few lines — but
-there is no `khora install` away from a working SQLite connection today,
-and a program that needs one has to bring its own. Said plainly here
+**No driver ships in `std`, and this interface is the whole of what is
+here.** `Db` is a record of closures, so writing a handler over an existing
+client is a day's work and a test double is a few lines. Said plainly
 because the shape of this module invites the opposite assumption: an
-interface this settled usually means implementations exist.
+interface this settled usually means implementations exist. For the drivers
+maintained alongside the compiler, see the Packages section of the
+documentation.
 
 ## What the middle layer actually is
 

@@ -1,5 +1,5 @@
 ---
-title: Configuration
+title: Load application configuration
 sidebar:
   order: 8
 ---

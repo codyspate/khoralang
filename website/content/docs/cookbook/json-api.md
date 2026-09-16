@@ -1,5 +1,5 @@
 ---
-title: JSON APIs
+title: Build a typed JSON API
 sidebar:
   order: 2
 ---

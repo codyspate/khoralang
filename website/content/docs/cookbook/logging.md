@@ -1,5 +1,5 @@
 ---
-title: Logging, and correlating it with traces
+title: Log, and correlate it with traces
 sidebar:
   order: 12
 ---

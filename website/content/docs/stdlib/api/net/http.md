@@ -384,7 +384,7 @@ pub type Router<'er> = {
 ```
 
 A router carries its handlers' failures, so mounting a route that can fail
-against the database widens the router's own error row.
+against the database widens the router's own failure row.
 
 **The three answers the router writes itself are `text/plain`**: 404 for a
 path nothing mounts, 405 for a path mounted under another method, and 413
@@ -727,6 +727,12 @@ Encodes `body` as JSON and sends it with the given status.
 client reads a refused request from. A record holding a secret has no
 `Encode`, so it cannot be sent by accident.
 
+**A `String` argument is encoded, not passed through.** `String` has an
+`Encode` impl — it encodes to a JSON string — so passing JSON you
+assembled yourself sends it quoted and escaped inside another string.
+`Response::of(status, "application/json", body)` is the one that sends
+bytes as they are.
+
 #### text
 
 ```khora
@@ -734,6 +740,26 @@ pub fn text(status: Int, body: String) -> Response
 ```
 
 `body` as `text/plain`, with the given status.
+
+#### of
+
+```khora
+pub fn of(status: Int, content_type: String, body: String) -> Response
+```
+
+A body that is already serialised, with the content type you name.
+
+**For JSON you built yourself, this and not `json`.** `Response::json`
+encodes its argument, and a `String` encodes to a *JSON string* — so
+`json(200, "{\"a\":1}")` sends `"{\"a\":1}"`, quoted and escaped, which
+is a correct encoding of the wrong thing. It type-checks, no diagnostic
+fires, and a client reading the body gets text where it expected an
+object.
+
+Prefer `derive(Encode)` on a record and `json` when you can: it removes
+the hand-written escaping that is the usual reason a body is a `String`
+in the first place. Use this when the bytes come from somewhere that
+already serialised them.
 
 #### with_header
 
@@ -1194,7 +1220,7 @@ that page forbids is the worst place for the two to disagree, because
 this is the one a reader meets while writing the handler.
 
 A trap is for a bug -- an index out of bounds, an overflow, a division by
-zero. Failures a handler is meant to survive belong in its error row,
+zero. Failures a handler is meant to survive belong in its failure row,
 where `catch` can reach them.
 
 #### answer_on

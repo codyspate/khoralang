@@ -79,11 +79,16 @@ This page is the curated entry point; the **API reference** pages beneath it are
 
 They are checked rather than trusted. `khora doc --check` runs in the project baseline and fails if the checked-in pages no longer match the source, so a page cannot quietly drift from the declaration it describes.
 
-Two things the reference does not do:
+Two limits worth knowing:
 
-- **Examples are not compiled.** Code in a doc comment is prose, so an example
-  can be wrong without anything noticing.
-- **There are no cross-links.** A signature mentioning `Decimal` names it but
-  does not link to it.
+- **Almost no example is compiled.** A CI job compiles the fenced blocks that
+  declare their own `module` line, and across the whole of `stdlib/api` there
+  is exactly one of those out of about 1,100 code blocks. The rest — signatures
+  and fragments — are prose, and can be wrong without anything noticing.
+- **Type names inside a rendered signature are not links.** A signature
+  mentioning `Decimal` names it but does not link to it. Prose *around* a
+  signature does link: `khora doc` renders the `` [`Name`] `` form as a working
+  anchor, and there are about a hundred of those, plus an "API at a glance"
+  index at the top of every page.
 
 Use the [Language Reference](/docs/reference/) for the language, this section for the library, and the generated pages beneath it for exact declarations.

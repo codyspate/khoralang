@@ -1,5 +1,5 @@
 ---
-title: Foreign function interface
+title: Foreign function interface (FFI)
 sidebar:
   order: 17
 ---

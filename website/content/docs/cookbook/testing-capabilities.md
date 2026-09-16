@@ -1,5 +1,5 @@
 ---
-title: Testing capabilities
+title: Test code that uses capabilities
 sidebar:
   order: 10
 ---

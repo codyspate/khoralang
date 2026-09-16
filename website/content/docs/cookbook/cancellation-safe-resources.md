@@ -1,5 +1,5 @@
 ---
-title: Cancellation-safe resources
+title: Make resource cleanup cancellation-safe
 sidebar:
   order: 6
 ---

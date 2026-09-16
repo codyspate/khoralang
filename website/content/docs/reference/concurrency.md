@@ -64,14 +64,15 @@ Releasing the final `Fiber` handle also waits for the child. This means a fiber 
 
 `Fiber::detach` is the exception, and the only one: it stops waiting and asks the fiber to stop. Both halves are asynchronous — `detach` signals and returns at once, so the fiber keeps running until it reaches its next cancellation point rather than stopping where it is. Its answer is discarded when it arrives, and a later failure is silent — the program said it was no longer listening. It cancels as well as detaching, because a detached fiber nobody asked to stop is a leak with a nicer name.
 
-**One shape is not safe: cancelling a fiber running `Router::listen`.** It does
-not abort and it does not stop the server — it hangs the process forever, with
-no message on any stream, and `main` returning does not end it. An idle listener
-hangs exactly as readily as a busy one; no connection is needed. `Fiber::detach`
-on the same fiber is clean and immediate, so the rule is **drain first, detach
-last**: stop accepting work, wait for what is in flight, and only then let go of
-the listener. [Serve HTTP](/docs/cookbook/http-service/#stopping-a-service) has
-the shape. This is a known gap rather than a deliberate design.
+**Cancelling a fiber running `Router::listen` works.** It was a known gap until
+the runtime learned to check for cancellation in the poll loop a parked
+`accept` sits in: a cancelled listener now unwinds and the process exits.
+Cancel it, wait for it, and the port is released.
+
+The shape still worth keeping is **drain first, stop last**: stop accepting
+work, wait for what is in flight, and only then cancel the listener — otherwise
+connections mid-request are dropped rather than finished.
+[Serve HTTP](/docs/cookbook/http-service/#stopping-a-service) has the code.
 
 Without it, a bounded wait over a body with an uninterruptible tail could not be honored. That is the failure it exists for: every other way out of a handle waits, letting the binding go included, so one finalizer that never returns holds its nursery, which holds its parent, up to `main`. Reach for it when a bounded wait matters more than a clean one, and not otherwise.
 
@@ -266,11 +267,11 @@ A blocked or suspended operation is meant to be made runnable so that the fiber 
 
 The check on these two comes *after* the call rather than before it, and only when the call comes back **empty-handed**. The runtime looks at the cancellation flag only once it has established there is nothing to take and no room to send, so a value arriving at the same moment as the cancellation is delivered rather than discarded — a cancelled receive is never holding a value nobody will see again. A send that gives up releases its value, the same as a send to a closed channel.
 
-### A fiber with no error row runs to its end
+### A fiber with no failure row runs to its end
 
 A cancellation leaves a function the same way an error does, on the same tagged return. A function declared without `raises` has no such return, so it has nothing to travel on — it has no cancellation points, and neither `!` nor a loop back-edge puts one there.
 
-That is a language rule rather than a gap. It also means a background worker that genuinely cannot fail still needs an error row to be stoppable:
+That is a language rule rather than a gap. It also means a background worker that genuinely cannot fail still needs an failure row to be stoppable:
 
 ```khora
 // Cannot be cancelled: nothing to carry the cancellation out.

@@ -146,9 +146,12 @@ off-by-one to subtract when the limit is a real resource.
 
 **Two of those three questions are answered today.** Every child is waited for
 and a failure is always reported as `ChildFailed`. The first failure is
-*intended* to cancel its siblings and currently does not — so work that is
+*intended* to cancel its siblings and does so unreliably — reliably when the
+failing child was adopted first, and usually not otherwise — so work that is
 expensive, holds a resource, or has an effect outside the process should check
-a `Shared` flag itself rather than expect the group to collapse. [Known
+a `Shared` flag itself rather than expect the group to collapse promptly. The
+group does collapse and every child is waited for; it is the *promptness* that
+is not yet something to build on. [Known
 limitations](/docs/limitations/#a-childs-failure-usually-cancels-no-siblings)
 has the measurements. A Go reader coming off `errgroup`, where the first error
 does cancel the group's context, should not assume the same here.

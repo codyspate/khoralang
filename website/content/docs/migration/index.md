@@ -1,5 +1,5 @@
 ---
-title: Coming to Khora
+title: Coming to Khora (migration guides)
 sidebar:
   order: 0
 ---

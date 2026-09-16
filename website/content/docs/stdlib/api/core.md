@@ -2042,7 +2042,7 @@ Runs `body` on a fiber of its own.
 
 The thunk may fail, and a thunk that can is also one that can be
 *stopped*: a cancellation travels out on the same tagged return an error
-does, so a fiber with no error row has no channel to be interrupted on
+does, so a fiber with no failure row has no channel to be interrupted on
 and runs to its end.
 
 `A` must be `Share` for the reason every value crossing a fiber must be:
@@ -4658,7 +4658,7 @@ pub fn update(self, change: (A) -> A) -> A
 Reads, transforms and writes as one step, and gives back the new value.
 
 `change` runs once, under the lock. It cannot fail, and that is
-deliberate: a function with no error row has no channel to be cancelled
+deliberate: a function with no failure row has no channel to be cancelled
 on, so nothing can leave the critical section except by returning and
 there is no path on which the lock is still held. Work that can fail
 belongs outside — compute it, then `set` the answer.
@@ -5929,8 +5929,11 @@ Only allowed inside a `test` block, like `assert`, and for the same reason.
 pub fn print(value: String)
 ```
 
-Writes a line to standard output. Accepts a `String`, an `Int` or a
-`Float`.
+Writes a line to standard output.
+
+**A `String` and nothing else.** A number needs converting first —
+`Int::to_string(n)`, `Float::to_string(x)` — or interpolating, which calls
+`Show` for you: `print("saw ${n}")`.
 
 Not an effect, unlike `std::log` — so it needs no `with` clause and can be
 called before any capability is installed.

@@ -24,7 +24,9 @@ into.
 value
 ```
 
-A bare identifier normally binds the matched value. A bare identifier that resolves to a nullary constructor is treated as that constructor rather than as a new binding.
+**A bare identifier always binds the matched value, even when a nullary constructor has the same name.** `Ready => 1` binds every value to a new variable called `Ready`; it does not match the `Ready` case. **Qualify a constructor pattern** — `Status::Ready => 1` — and it matches the case.
+
+The compiler catches the common shape of this mistake: a bare name before other arms makes those arms unreachable, and that is an error naming the fix. It cannot catch every shape. A bare name as the *only* arm, or as the last one, leaves nothing unreachable, so the match compiles and silently binds everything — with a `` `Ready` is bound and never read `` warning as the one signal. **Treat that warning as an error in a `match` over a variant type.**
 
 ## Literal patterns
 

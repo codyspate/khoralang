@@ -1,5 +1,5 @@
 ---
-title: Bounded concurrency
+title: Bound concurrent work
 sidebar:
   order: 5
 ---

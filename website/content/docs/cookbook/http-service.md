@@ -1,5 +1,5 @@
 ---
-title: HTTP service
+title: Build an HTTP service
 sidebar:
   order: 1
 ---
@@ -237,21 +237,18 @@ document needs and not further.
 this release — so a service that stops *itself* runs `listen` on a fiber and
 lets go of that fiber when a route says to.
 
-**Detach the listener; never cancel it.** `Fiber::detach` on a listener is
-clean and immediate. `Fiber::cancel` on one hangs the process forever — `main`
-runs to its last line, evaluates its result, and never exits, with no message on
-any stream. No connection is needed to trigger it: an idle listener that has
-never served a request hangs just the same. A supervisor watching that process
-sees something healthy which is serving nothing, which is the worst shape a
-failure can take.
+**Cancel the listener, or detach it — both work now.** `Fiber::cancel` on a
+listener used to hang the process forever, which is why older text here said to
+detach and never cancel. The runtime now checks for cancellation in the poll
+loop a parked `accept` sits in, so a cancelled listener unwinds and the process
+exits.
 
-The reason is that the fiber is parked inside `accept` on a socket that never
-becomes readable, and the wake a cancellation sends does not reach it there —
-so it is not that the fiber declines to stop, it is that it never runs again to
-find out it was asked. `detach` is the operation that means "stop waiting on
-this": it does not require the fiber to observe anything.
+`cancel` is the better of the two when you want the port released before the
+next line runs: it stops the listener and `Fiber::wait` tells you when that has
+happened. `detach` says "stop waiting on this" and returns at once, which is
+what you want when nothing afterwards depends on the socket being closed.
 
-Drain first and detach last: stop accepting work, wait for what is in flight,
+Drain first and stop last: stop accepting work, wait for what is in flight,
 then let go of the listener. Inside a `main` that has already created
 the `jobs` channel, spawned `worker`, bound `port`, and installed a `Clock`:
 

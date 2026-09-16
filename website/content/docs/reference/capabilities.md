@@ -173,7 +173,7 @@ when the call is evaluated, inside the block, rather than being collected into
 a description that something runs later.
 
 A closure written inside the block is the one case worth being exact about. It
-*captures* the capability, because a context row is a block of bindings and a
+*captures* the capability, because a capability row is a block of bindings and a
 capability is an ordinary binding, so the closure keeps the handler it was
 written with even when it is called somewhere else -- including after the block
 has ended. That is what makes a callback that logs cost nothing in the type of
@@ -181,7 +181,7 @@ whatever takes it. The handler stays alive as long as the closure does.
 
 ## Sequential bindings
 
-Bindings inside a context row are sequential. A later expression may use handlers introduced above it:
+Bindings inside a capability row are sequential. A later expression may use handlers introduced above it:
 
 ```khora
 with {
@@ -250,7 +250,7 @@ with Production {
 }
 ```
 
-Entries written at the use site replace or extend the corresponding context row
+Entries written at the use site replace or extend the corresponding capability row
 for that installation. This is what makes a named production context usable
 from a test: install `Production` and override the one capability the test
 wants to control.

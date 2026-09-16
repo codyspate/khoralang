@@ -3491,7 +3491,7 @@ fn every_source(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
         let path = entry?.path();
         if path.is_dir() {
-            if path.file_name().is_some_and(|n| n == "target" || n == ".git") {
+            if path.file_name().is_some_and(|n| n == "build" || n == "target" || n == ".git") {
                 continue;
             }
             every_source(&path, out)?;
@@ -3792,7 +3792,7 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
         let path = entry?.path();
         if path.is_dir() {
-            if path.file_name().is_some_and(|n| n == "target" || n == ".git") {
+            if path.file_name().is_some_and(|n| n == "build" || n == "target" || n == ".git") {
                 continue;
             }
             // **A manifest is a package boundary, and a walk stops at one.**

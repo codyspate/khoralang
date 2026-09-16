@@ -1,5 +1,5 @@
 ---
-title: Timeouts and cancellation
+title: Give work a deadline (timeouts and cancellation)
 sidebar:
   order: 13
 ---
@@ -128,5 +128,6 @@ joiner along with it, which is why every example here uses `wait`.
 - **A cancelled fiber is not stopped at an arbitrary instruction.** It stops at
   its next cancellation point, which is why a worker that spends 200 ms inside
   one infallible call takes up to 200 ms to notice.
-- **`Router::listen` cannot be cancelled while serving.** See
-  [Concurrency](/docs/reference/concurrency/) — drain first, detach last.
+- **`Router::listen` can be cancelled**, and the process exits when it is. This
+  was a known gap and is fixed; see
+  [Concurrency](/docs/reference/concurrency/) — drain first, stop last.
