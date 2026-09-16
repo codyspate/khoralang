@@ -4,7 +4,10 @@ import std::core::{Array, List, Option, Result, Vector};
 import std::db::{Cell, DbError, Row};
 import std::decimal::{Decimal};
 import std::net::socket::{connect_to, invalid_handle, receive, shut, start, transmit_bytes};
-import postgres::wire::{Message, Reader, extended, message_at, message_width, password, query, startup, terminate};
+import postgres::wire::{Message, Reader, extended, message_at, message_width, password, query, sasl_initial, sasl_response, startup, terminate};
+import postgres::scram::{Opening, ScramError, Session, begin, encode64, finish, verify};
+
+extern fn khora_random_seed() -> Int;
 
 /// A connection to a PostgreSQL server, and the conversation it has.
 ///
@@ -78,6 +81,14 @@ pub type Connection = {
   /// so the socket's boundaries and the protocol's have nothing to do with
   /// each other. This is where that is absorbed.
   mut pending: Array<U8>,
+  /// The SCRAM exchange in progress, if one is.
+  ///
+  /// **Authentication is the one part of this protocol with state that spans
+  /// messages.** The server asks, the client answers, the server challenges,
+  /// the client proves — and the proof is signed over the client's own first
+  /// message, so that message has to survive until the challenge arrives.
+  /// Every other exchange here is a request and its replies.
+  mut scram: Option<Session>,
 };
 
 /// What a column is called and what type the server says it is.
@@ -197,7 +208,7 @@ pub fn open(
         ))
     } else {
       let empty: Array<U8> = Array::new(0, 0);
-      let c: Connection = { handle: handle, pending: empty };
+      let c: Connection = { handle: handle, pending: empty, scram: Option::None };
       let hello = startup(user, database);
       if transmit_bytes(handle, hello) < 0 {
         shut(handle);
@@ -254,6 +265,32 @@ fn handshake(c: Connection, secret: String) -> Result<Bool, PgError> {
   outcome
 }
 
+/// Bytes for a client nonce.
+///
+/// **A nonce must not repeat across connections**, because the proof is signed
+/// over it and a repeated one makes a recorded exchange replayable. The
+/// runtime's seed is drawn from the operating system, and each call draws
+/// again, so two connections opened in the same millisecond do not share one.
+///
+/// This reaches for the runtime directly rather than taking a `Random`
+/// capability, because `open` has no capability row and adding one to it would
+/// change every caller for a value no caller should be choosing. A nonce the
+/// application could pin is a nonce an application will eventually pin.
+fn nonce_bytes() -> Array<U8> {
+  let out: Array<U8> = Array::new(18, 0);
+  let mut at = 0;
+  while at < 18 {
+    // One draw per three bytes: the seed is 64 bits and taking all eight from
+    // one would be eight bytes of one number, not eight independent ones.
+    let draw = khora_random_seed();
+    Array::set(out, at, U8::of(Int::and(draw, 255)));
+    if at + 1 < 18 { Array::set(out, at + 1, U8::of(Int::and(Int::shr(draw, 8), 255))) };
+    if at + 2 < 18 { Array::set(out, at + 2, U8::of(Int::and(Int::shr(draw, 16), 255))) };
+    at = at + 3;
+  };
+  out
+}
+
 /// Answers whichever authentication the server asked for, if it can.
 fn authenticate(c: Connection, m: Message, secret: String) -> Result<Bool, PgError> {
   let read = Reader::of(m.payload);
@@ -276,12 +313,62 @@ fn authenticate(c: Connection, m: Message, secret: String) -> Result<Bool, PgErr
        has no way to compute yet. Set the server to `trust` or `password` for now"
       ))
   } else if method == 10 {
-    Result::Err(PgError::Unsupported(
-        "the server asked for SCRAM-SHA-256, which needs HMAC and PBKDF2 that the \
-       runtime does not expose to Khora yet. This is the default on PostgreSQL 14 \
-       and later, so a stock install will land here: set `password_encryption` to \
-       `md5` and the method to `password`, or wait for the hash surface"
-      ))
+    // AuthenticationSASL. The payload lists the mechanisms the server will
+    // accept; this client speaks one, and says so.
+    //
+    // **`SCRAM-SHA-256-PLUS` is deliberately not offered.** It binds the
+    // exchange to the TLS channel, and claiming it without doing that binding
+    // is worse than not offering it: the whole point of the `-PLUS` variant is
+    // that a client refuses to authenticate through a proxy it cannot see.
+    let nonce = encode64(nonce_bytes());
+    let opening = begin(nonce);
+    c.scram = Option::Some(opening.session);
+    if transmit_bytes(c.handle, sasl_initial("SCRAM-SHA-256", opening.message)) < 0 {
+      Result::Err(PgError::Closed("the SASL handshake could not be started"))
+    } else {
+      Result::Ok(true)
+    }
+  } else if method == 11 {
+    // AuthenticationSASLContinue: the server's nonce, salt and iteration
+    // count. Answer it with the proof.
+    match c.scram {
+      Option::None => Result::Err(PgError::Refused(
+          "the server sent a SASL challenge before this client began one")),
+      Option::Some(session) => {
+        let challenge = String::from_bytes(Reader::rest(read));
+        match finish(session, challenge, secret) {
+          Result::Err(why) => Result::Err(PgError::Refused(match why {
+                ScramError::Malformed(m) => "the server's SASL challenge is malformed: " + m,
+                ScramError::Rejected(m) => m,
+              })),
+          Result::Ok(final) =>
+            if transmit_bytes(c.handle, sasl_response(final)) < 0 {
+              Result::Err(PgError::Closed("the SASL proof could not be sent"))
+            } else {
+              Result::Ok(true)
+            },
+        }
+      },
+    }
+  } else if method == 12 {
+    // AuthenticationSASLFinal: the server's own proof that it holds the
+    // password. Checked rather than accepted — a client that skips this has
+    // proved itself to a peer it never made prove anything back.
+    match c.scram {
+      Option::None => Result::Err(PgError::Refused(
+          "the server sent a SASL conclusion before this client began one")),
+      Option::Some(session) => {
+        let shown = String::from_bytes(Reader::rest(read));
+        c.scram = Option::None;
+        match verify(session, shown) {
+          Result::Ok(_) => Result::Ok(true),
+          Result::Err(why) => Result::Err(PgError::Refused(match why {
+                ScramError::Malformed(m) => "the server's SASL conclusion is malformed: " + m,
+                ScramError::Rejected(m) => m,
+              })),
+        }
+      },
+    }
   } else {
     Result::Err(PgError::Unsupported(
         "the server asked for authentication method " + Int::to_string(method)

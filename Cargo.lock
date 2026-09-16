@@ -769,6 +769,7 @@ dependencies = [
  "corosensei",
  "libc",
  "mimalloc",
+ "ring",
  "rustls",
  "rustls-native-certs",
  "rustls-pemfile",

@@ -159,6 +159,8 @@ mod decimal;
 mod fiber;
 #[cfg(not(target_family = "wasm"))]
 mod fs;
+#[cfg(not(target_family = "wasm"))]
+mod hash;
 mod heap;
 #[cfg(not(target_family = "wasm"))]
 mod migration;

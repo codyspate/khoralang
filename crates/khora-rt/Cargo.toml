@@ -40,6 +40,12 @@ mimalloc = { version = "0.1", default-features = false }
 # TLS is bound rather than written — `docs/design/ecosystem.md`. `ring` rather
 # than the default provider because it needs no cmake and no assembler, so a
 # Khora checkout builds with a Rust toolchain and clang and nothing else.
+# **Hashes for the drivers, from the library TLS already pulls in.** SCRAM and
+# MD5 authentication need SHA-256, HMAC and PBKDF2, and a driver that cannot
+# hash a password cannot connect to a default PostgreSQL install. `ring` is
+# already here for rustls, so this is a direct name for something already
+# linked rather than a new dependency — `crates/khora-rt/src/hash.rs`.
+ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "2"
 # The machine's own trust store, rather than a root list compiled in here. A

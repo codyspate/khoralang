@@ -347,19 +347,25 @@ fn a_password_is_sent_when_the_server_asks_for_one() {
     assert!(out.contains("number:7"), "{out}");
 }
 
-/// **A method the driver has not got is refused by name.**
+/// **An authentication method the driver has not got is refused by name.**
 ///
-/// SCRAM-SHA-256 is the default on PostgreSQL 14 and later, so a stock install
-/// lands here — and "connection failed" would send somebody looking at their
-/// network. The message says which method, why it cannot be answered, and what
-/// to change.
+/// MD5 is what lands here now: `ring` does not carry it, deliberately, because
+/// nothing new should be using it. The message says which method, why it
+/// cannot be answered, and what to change — "connection failed" would send
+/// somebody looking at their network.
+///
+/// **SCRAM used to be tested here and deliberately is not any more.** The fake
+/// server would have to implement the whole exchange to answer method 10, and
+/// a fake written from the same reading of the RFC as the driver proves only
+/// that the two agree with each other. What settles SCRAM is
+/// `against_a_real_server`, where PostgreSQL implements the document
+/// independently and rejects a wrong proof on its own authority.
 #[test]
-fn scram_is_refused_with_something_useful_to_read() {
-    let (out, _, code) = run_against("pg_scram", 10, vec![], "select 1", "hunter2");
+fn an_unknown_method_is_refused_with_something_useful_to_read() {
+    let (out, _, code) = run_against("pg_md5", 5, vec![], "select 1", "hunter2");
     assert_eq!(code, Some(1), "{out}");
     assert!(out.starts_with("unsupported: "), "{out}");
-    assert!(out.contains("SCRAM-SHA-256"), "it names the method: {out}");
-    assert!(out.contains("PostgreSQL 14"), "and why it is what you hit: {out}");
+    assert!(out.contains("MD5"), "it names the method: {out}");
 }
 
 // --- and against PostgreSQL itself ----------------------------------------

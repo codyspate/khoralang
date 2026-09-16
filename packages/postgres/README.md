@@ -84,7 +84,7 @@ infrastructure or when the portable `Db` contract is not enough:
 ```khora
 import std::core::{List, Result, print};
 import std::db::{Cell, Row};
-import postgres::conn::{PgError, ask, close, open};
+import postgres::conn::{Answer, PgError, ask, close, open};
 
 fn main() -> Int {
   match open("127.0.0.1", 5432, "user", "database", "secret") {
@@ -145,16 +145,35 @@ Going the other way, `ask` accepts all five `Cell` kinds including `Money`.
 
 ## What it does not do yet
 
-- **MD5 and SCRAM-SHA-256 authentication.** Both need a hash the runtime does
-  not expose to Khora. A server set to either is refused *by name* rather than
-  hung, because "connection failed" against a default PostgreSQL install would
-  send somebody looking at their network. Cleartext and trust work.
+- **MD5 authentication.** The runtime exposes SHA-256, HMAC and PBKDF2 — what
+  SCRAM needs — and deliberately not MD5, which `ring` does not carry because
+  nothing new should be using it. A server set to `md5` is refused *by name*
+  rather than hung. SCRAM-SHA-256 is the default on PostgreSQL 14 and later and
+  works.
 - **TLS.** `SSLRequest` is one message and `std::net::tls` exists, so this is
-  closer than it sounds.
+  closer than it sounds. **Until then a password does not cross the network in
+  the clear under SCRAM** — the exchange proves knowledge without sending it —
+  but everything else, including every row you read, does.
+- **`SCRAM-SHA-256-PLUS`.** The channel-binding variant, deliberately not
+  offered rather than claimed and faked: its whole purpose is that a client
+  refuses to authenticate through a proxy it cannot see, and a client that
+  advertises it without binding to the channel has thrown that away.
 - **Named prepared statements.** Every `ask` uses the unnamed statement, so the
   parse is not reused across calls. Round trips are unchanged — one write, one
   read — but a hot query pays a parse each time.
 - **Binary result format**, **`COPY`**, **notifications**, **cursors**.
+
+## Authentication
+
+`scram-sha-256` is what a stock PostgreSQL asks for and what this speaks. The
+password is never transmitted: the client proves it knows one by signing a
+challenge built from both sides' nonces, so a recording of one exchange cannot
+be replayed into another.
+
+**The server is made to prove itself too.** Its `ServerSignature` is checked
+rather than accepted, so a peer that never held the password cannot conclude
+the handshake — a client that skips that check has authenticated itself to a
+stranger. A mismatch closes the connection with a message saying so.
 
 ## Testing
 

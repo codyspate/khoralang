@@ -284,6 +284,27 @@ pub fn password(secret: String) -> Array<U8> {
   framed(112, Writer::finish(body))
 }
 
+/// `SASLInitialResponse`: the mechanism this client chose and its first
+/// message.
+///
+/// Same type byte as `PasswordMessage` — the server knows which it asked for.
+/// The length is sent explicitly and is *not* a C string, because a SASL
+/// message may legitimately contain a zero byte.
+pub fn sasl_initial(mechanism: String, first: String) -> Array<U8> {
+  let body = Writer::new();
+  Writer::cstring(body, mechanism);
+  Writer::i32(body, String::byte_length(first));
+  Writer::text(body, first);
+  framed(112, Writer::finish(body))
+}
+
+/// `SASLResponse`: the client's proof, with no framing of its own.
+pub fn sasl_response(final: String) -> Array<U8> {
+  let body = Writer::new();
+  Writer::text(body, final);
+  framed(112, Writer::finish(body))
+}
+
 /// `Terminate`. Politer than closing the socket: the server logs a
 /// disconnection rather than a broken connection.
 pub fn terminate() -> Array<U8> {
@@ -303,6 +324,22 @@ impl Reader {
   pub fn of(bytes: Array<U8>) -> Reader { { bytes: bytes, at: 0 } }
 
   pub fn remaining(self) -> Int { Array::length(self.bytes) - self.at }
+
+  /// Every byte not yet read.
+  ///
+  /// A SASL challenge is "the rest of this message" rather than a counted or
+  /// terminated field, so reading it needs this rather than a width.
+  pub fn rest(self) -> Array<U8> {
+    let left = Reader::remaining(self);
+    let out: Array<U8> = Array::new(left, 0);
+    let mut at = 0;
+    while at < left {
+      Array::set(out, at, Array::get(self.bytes, self.at + at));
+      at = at + 1;
+    };
+    self.at = self.at + left;
+    out
+  }
 
   /// One byte, or zero past the end.
   ///

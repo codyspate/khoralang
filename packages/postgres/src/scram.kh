@@ -1,0 +1,304 @@
+module postgres::scram;
+
+//! SCRAM-SHA-256, the authentication a stock PostgreSQL asks for.
+//!
+//! **RFC 5802 and RFC 7677**, the subset a client needs. PostgreSQL 14 and
+//! later default `password_encryption` to `scram-sha-256`, so this is what an
+//! ordinary install demands and a driver without it can only connect to a
+//! server somebody has deliberately weakened.
+//!
+//! The exchange is three messages after the server's `AuthenticationSASL`:
+//!
+//! 1. the client sends its first message — the mechanism, a GS2 header and a
+//!    nonce it invented,
+//! 2. the server answers with its own nonce, a salt and an iteration count,
+//! 3. the client proves it knows the password without ever sending it.
+//!
+//! **The password is never transmitted, and neither is anything reusable.**
+//! The proof is bound to both nonces, so a recording of one exchange cannot
+//! authenticate a second. That is the whole point of the mechanism and the
+//! reason cleartext is not an acceptable substitute over a network.
+//!
+//! The hashes come from the runtime — `khora_hash_*` — because they are in
+//! every binary already for TLS. What is written here is the protocol: the
+//! message formats, the base64, and the exact byte strings the RFC says to
+//! sign.
+
+import std::core::{Array, Int, List, Option, Result, String, U8, Vector};
+
+// --- the runtime's hashes ---------------------------------------------------
+
+extern fn khora_hash_sha256_length() -> Int;
+extern fn khora_hash_sha256(input: Ptr, length: Int, out: Ptr) -> ();
+extern fn khora_hash_hmac_sha256(
+  key: Ptr, key_length: Int, message: Ptr, message_length: Int, out: Ptr
+) -> ();
+extern fn khora_hash_pbkdf2_sha256(
+  password: Ptr, password_length: Int,
+  salt: Ptr, salt_length: Int,
+  iterations: Int,
+  out: Ptr, out_length: Int
+) -> U8;
+
+/// How wide every digest in this exchange is.
+pub fn digest_length() -> Int { khora_hash_sha256_length() }
+
+/// SHA-256 of some bytes.
+pub fn sha256(input: Array<U8>) -> Array<U8> {
+  let out: Array<U8> = Array::new(digest_length(), 0);
+  Array::with_data(input, fn (bytes, n) =>
+    Array::with_data(out, fn (into, _) => khora_hash_sha256(bytes, n, into)));
+  out
+}
+
+/// HMAC-SHA-256 of `message` under `key`.
+pub fn hmac(key: Array<U8>, message: Array<U8>) -> Array<U8> {
+  let out: Array<U8> = Array::new(digest_length(), 0);
+  Array::with_data(key, fn (k, kn) =>
+    Array::with_data(message, fn (m, mn) =>
+      Array::with_data(out, fn (into, _) => khora_hash_hmac_sha256(k, kn, m, mn, into))));
+  out
+}
+
+/// PBKDF2-HMAC-SHA-256. `Option::None` when the server sent an iteration
+/// count this cannot honour — zero, or one that does not fit.
+pub fn pbkdf2(password: Array<U8>, salt: Array<U8>, iterations: Int) -> Option<Array<U8>> {
+  let out: Array<U8> = Array::new(digest_length(), 0);
+  let ok = Array::with_data(password, fn (p, pn) =>
+    Array::with_data(salt, fn (s, sn) =>
+      Array::with_data(out, fn (into, on) =>
+        khora_hash_pbkdf2_sha256(p, pn, s, sn, iterations, into, on))));
+  // **A runtime extern returning a boolean returns `U8`.** Compared against
+  // zero rather than to `true`, which is not a value this type has.
+  if U8::to_int(ok) != 0 { Option::Some(out) } else { Option::None }
+}
+
+// --- base64 -----------------------------------------------------------------
+//
+// Written here rather than in `std` because this is the only thing in the
+// package that needs it, and a base64 in the standard library is a decision
+// about what Khora promises rather than something a driver should settle.
+
+fn alphabet() -> String {
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+}
+
+/// Bytes to base64, padded.
+pub fn encode64(input: Array<U8>) -> String {
+  let table = String::bytes(alphabet());
+  let out: Array<U8> = Array::new(((Array::length(input) + 2) / 3) * 4, 0);
+  let total = Array::length(input);
+  let mut at = 0;
+  let mut put = 0;
+  while at < total {
+    let b0 = U8::to_int(Array::get(input, at));
+    let b1 = if at + 1 < total { U8::to_int(Array::get(input, at + 1)) } else { 0 };
+    let b2 = if at + 2 < total { U8::to_int(Array::get(input, at + 2)) } else { 0 };
+    let triple = Int::shl(b0, 16) + Int::shl(b1, 8) + b2;
+    Array::set(out, put, Array::get(table, Int::and(Int::shr(triple, 18), 63)));
+    Array::set(out, put + 1, Array::get(table, Int::and(Int::shr(triple, 12), 63)));
+    Array::set(out, put + 2, if at + 1 < total {
+        Array::get(table, Int::and(Int::shr(triple, 6), 63))
+      } else { U8::of(61) });
+    Array::set(out, put + 3, if at + 2 < total {
+        Array::get(table, Int::and(triple, 63))
+      } else { U8::of(61) });
+    at = at + 3;
+    put = put + 4;
+  };
+  String::from_bytes(out)
+}
+
+/// The index of `c` in the base64 alphabet, or -1.
+fn unbase(c: Int) -> Int {
+  if c >= 65 && c <= 90 { c - 65 }
+  else if c >= 97 && c <= 122 { c - 97 + 26 }
+  else if c >= 48 && c <= 57 { c - 48 + 52 }
+  else if c == 43 { 62 }
+  else if c == 47 { 63 }
+  else { 0 - 1 }
+}
+
+/// Base64 to bytes. Characters outside the alphabet — including padding and
+/// any whitespace a server wraps a long salt with — are skipped.
+pub fn decode64(input: String) -> Array<U8> {
+  let out = Vector::new();
+  let total = String::byte_length(input);
+  let mut accumulator = 0;
+  let mut bits = 0;
+  let mut at = 0;
+  while at < total {
+    let value = unbase(U8::to_int(String::byte(input, at)));
+    if value >= 0 {
+      accumulator = Int::shl(accumulator, 6) + value;
+      bits = bits + 6;
+      if bits >= 8 {
+        bits = bits - 8;
+        Vector::push(out, U8::of(Int::and(Int::shr(accumulator, bits), 255)));
+      }
+    };
+    at = at + 1;
+  };
+  let list = Vector::to_list(out);
+  let bytes: Array<U8> = Array::new(List::length(list), 0);
+  // **A fold rather than a loop with a captured counter.** A closure captures
+  // by value, so `index = index + 1` inside one is a write nobody sees — the
+  // compiler says so rather than letting the array fill with zeros.
+  List::fold(list, 0, fn (index, b) => { Array::set(bytes, index, b); index + 1 });
+  bytes
+}
+
+// --- the exchange -----------------------------------------------------------
+
+/// What the client has to remember between the two halves of the exchange.
+pub type Session = {
+  /// The nonce this client invented, base64 of random bytes.
+  nonce: String,
+  /// `n=,r=<nonce>` — signed later, so it is kept rather than rebuilt.
+  first_bare: String,
+  /// The `ServerSignature` this client expects to be shown at the end.
+  ///
+  /// **Mutual authentication is the half a client is tempted to skip.** The
+  /// proof the client sends convinces the server; this is what convinces the
+  /// client, and without checking it a peer that never knew the password can
+  /// answer `AuthenticationSASLFinal` with anything and be believed. Computed
+  /// while the salted password is in hand and kept, because by the time the
+  /// server's final message arrives that value is gone.
+  mut expected_signature: String,
+};
+
+/// The client's opening message, paired with the state needed to finish.
+pub type Opening = {
+  message: String,
+  session: Session,
+};
+
+/// The client's opening message, and the state needed to finish.
+///
+/// `n,,` is the GS2 header: no channel binding, no authorization identity.
+/// The username is empty because PostgreSQL takes it from the startup packet
+/// and RFC 5802 says to send `n=` when it is carried elsewhere — sending it
+/// twice is how a driver gets a puzzling mismatch from the server.
+pub fn begin(nonce: String) -> Opening {
+  let bare = "n=,r=" + nonce;
+  {
+    message: "n,," + bare,
+    session: { nonce: nonce, first_bare: bare, expected_signature: "" },
+  }
+}
+
+/// One `key=value` field of a SCRAM message.
+fn field(message: String, key: String) -> Option<String> {
+  let parts = String::split(message, ",");
+  List::fold(parts, Option::None, fn (found, part) =>
+    match found {
+      Option::Some(v) => Option::Some(v),
+      Option::None =>
+        if String::starts_with(part, key + "=") {
+          Option::Some(String::slice(part, String::byte_length(key) + 1, String::byte_length(part)))
+        } else {
+          Option::None
+        },
+    })
+}
+
+/// Why a SCRAM exchange could not be completed.
+pub type ScramError = | Malformed(String) | Rejected(String);
+
+/// The client's final message, proving knowledge of the password.
+///
+/// The proof is `ClientKey XOR HMAC(StoredKey, AuthMessage)`, where the
+/// `AuthMessage` is the three message bodies joined by commas — RFC 5802 §3.
+/// Every byte of it is fixed by the RFC, so a driver that gets one separator
+/// wrong is told only that the password is bad.
+pub fn finish(
+  session: Session,
+  server_first: String,
+  password: String
+) -> Result<String, ScramError> {
+  match field(server_first, "r") {
+    Option::None => Result::Err(ScramError::Malformed("the server sent no nonce")),
+    Option::Some(combined) =>
+      if !String::starts_with(combined, session.nonce) {
+        // **The server's nonce must extend the client's.** A server that
+        // returns a different one is not answering this exchange, and
+        // continuing would sign somebody else's challenge.
+        Result::Err(ScramError::Rejected(
+            "the server's nonce does not begin with the one this client sent"))
+      } else {
+        match field(server_first, "s") {
+          Option::None => Result::Err(ScramError::Malformed("the server sent no salt")),
+          Option::Some(salt64) => match field(server_first, "i") {
+            Option::None => Result::Err(ScramError::Malformed("the server sent no iteration count")),
+            Option::Some(count) => match Int::of_string(count) {
+              Option::None => Result::Err(ScramError::Malformed(
+                  "the server's iteration count is not a number: " + count)),
+              Option::Some(iterations) => {
+                let salted = pbkdf2(String::bytes(password), decode64(salt64), iterations);
+                match salted {
+                  Option::None => Result::Err(ScramError::Rejected(
+                      "the server asked for an iteration count this client will not use: " + count)),
+                  Option::Some(salted_password) => {
+                    let client_key = hmac(salted_password, String::bytes("Client Key"));
+                    let stored_key = sha256(client_key);
+                    let without_proof = "c=biws,r=" + combined;
+                    let auth_message =
+                      session.first_bare + "," + server_first + "," + without_proof;
+                    let signature = hmac(stored_key, String::bytes(auth_message));
+                    let proof = xor(client_key, signature);
+                    // Kept now, checked when the server's final message arrives:
+                    // the salted password does not survive this scope, and the
+                    // server signature cannot be computed without it.
+                    let server_key = hmac(salted_password, String::bytes("Server Key"));
+                    session.expected_signature =
+                    encode64(hmac(server_key, String::bytes(auth_message)));
+                    Result::Ok(without_proof + ",p=" + encode64(proof))
+                  },
+                }
+              },
+            },
+          },
+        }
+      },
+  }
+}
+
+/// Whether the server proved it also knew the password.
+///
+/// **The other half of mutual authentication.** RFC 5802 §3: the server signs
+/// the same `AuthMessage` with a key derived differently, so only a peer that
+/// held the salted password can produce it. A client that skips this check has
+/// authenticated itself to a stranger.
+///
+/// `e=` instead of `v=` is the server saying the exchange failed, and its text
+/// is worth more to a reader than "no signature" would be.
+pub fn verify(session: Session, server_final: String) -> Result<Bool, ScramError> {
+  match field(server_final, "e") {
+    Option::Some(reason) => Result::Err(ScramError::Rejected(
+        "the server refused the SASL exchange: " + reason)),
+    Option::None => match field(server_final, "v") {
+      Option::None =>
+        Result::Err(ScramError::Malformed("the server's final message has no signature")),
+      Option::Some(shown) =>
+        if shown == session.expected_signature {
+          Result::Ok(true)
+        } else {
+          Result::Err(ScramError::Rejected(
+              "the server's signature does not match: it does not hold the password \
+             for this account, so this connection is not the server it claims"))
+        },
+    },
+  }
+}
+
+/// Byte-wise XOR of two equal-length buffers.
+fn xor(left: Array<U8>, right: Array<U8>) -> Array<U8> {
+  let width = Array::length(left);
+  let out: Array<U8> = Array::new(width, 0);
+  let mut at = 0;
+  while at < width {
+    Array::set(out, at, U8::xor(Array::get(left, at), Array::get(right, at)));
+    at = at + 1;
+  };
+  out
+}

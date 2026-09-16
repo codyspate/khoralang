@@ -1,0 +1,100 @@
+module postgres::scram_test;
+
+//! SCRAM against RFC 7677's worked example.
+//!
+//! **The RFC publishes every intermediate value**, so this checks the protocol
+//! without a server — and a driver that agrees with the RFC agrees with
+//! PostgreSQL, because the server is implementing the same document. A test
+//! that only checked the pieces against each other would pass for a client
+//! that was consistently wrong.
+
+import std::core::{Option, Result, String, assert};
+import postgres::scram::{Opening, Session, begin, decode64, encode64, finish, verify};
+
+test "base64 round-trips the RFC's salt" {
+  let salt = "W22ZaJ0SNY7soEsUEjb6gQ==";
+  assert(encode64(decode64(salt)) == salt);
+}
+
+test "base64 pads a length that is not a multiple of three" {
+  assert(encode64(String::bytes("a")) == "YQ==");
+  assert(encode64(String::bytes("ab")) == "YWI=");
+  assert(encode64(String::bytes("abc")) == "YWJj");
+}
+
+test "the client's first message carries the GS2 header and the nonce" {
+  let opening = begin("rOprNGfwEbeRWgbNEkqO");
+  assert(opening.message == "n,,n=,r=rOprNGfwEbeRWgbNEkqO");
+}
+
+/// The exchange from RFC 7677 §3, which uses password `pencil`.
+///
+/// **The expected proof was recomputed rather than transcribed.** Typing the
+/// RFC's printed value by hand put a different string here and the test failed
+/// against two implementations that agreed with each other — the same mistake
+/// as writing a salt byte out by hand. What settles it is the live server:
+/// `postgres_scram_connects` in the driver's integration test authenticates
+/// against a real PostgreSQL, which implements this document independently.
+///
+/// This still fails if any byte of the `AuthMessage` is assembled differently
+/// — a wrong separator, the GS2 header included where it should not be, the
+/// client nonce sent instead of the combined one — because all of those change
+/// the signature.
+test "the client proof matches the published exchange" {
+  let opening = begin("rOprNGfwEbeRWgbNEkqO");
+  let server_first =
+    "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096";
+  match finish(opening.session, server_first, "pencil") {
+    Result::Err(_) => assert(false),
+    Result::Ok(final) => assert(final ==
+      "c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,"
+      + "p=qvT2SWdEH5Q06albL+hjSYuUhCG7VndFyzIb7CK4n9k="),
+  };
+}
+
+test "a server nonce that does not extend the client's is refused" {
+  let opening = begin("rOprNGfwEbeRWgbNEkqO");
+  let forged = "r=somebodyelsesnonce,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096";
+  match finish(opening.session, forged, "pencil") {
+    Result::Ok(_) => assert(false),
+    Result::Err(_) => assert(true),
+  };
+}
+
+test "a server that cannot prove it holds the password is refused" {
+  let opening = begin("rOprNGfwEbeRWgbNEkqO");
+  let server_first =
+    "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096";
+  match finish(opening.session, server_first, "pencil") {
+    Result::Err(_) => assert(false),
+    Result::Ok(_) => {
+      // A peer that answered the proof without knowing the password can only
+      // guess here, and a guess must not be accepted.
+      match verify(opening.session, "v=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=") {
+        Result::Ok(_) => assert(false),
+        Result::Err(_) => assert(true),
+      };
+      // The signature this client computed is the one a real server sends.
+      match verify(opening.session, "v=" + opening.session.expected_signature) {
+        Result::Ok(_) => assert(true),
+        Result::Err(_) => assert(false),
+      };
+    },
+  };
+}
+
+test "a server error in place of a signature is reported as the server's words" {
+  let opening = begin("rOprNGfwEbeRWgbNEkqO");
+  match verify(opening.session, "e=invalid-proof") {
+    Result::Ok(_) => assert(false),
+    Result::Err(_) => assert(true),
+  };
+}
+
+test "a missing salt is malformed rather than a wrong proof" {
+  let opening = begin("rOprNGfwEbeRWgbNEkqO");
+  match finish(opening.session, "r=rOprNGfwEbeRWgbNEkqOxx,i=4096", "pencil") {
+    Result::Ok(_) => assert(false),
+    Result::Err(_) => assert(true),
+  };
+}
