@@ -357,6 +357,11 @@ fn root_fiber() -> Arc<Fiber> {
 /// reference cannot give it one. Installing it as the running fiber matches
 /// what `current` would have done, so the two never disagree about which fiber
 /// this thread is carrying.
+///
+/// `cfg(unix)` because the signal watcher is the only caller and does not
+/// exist on Windows, where an unconditional definition is dead code and the
+/// workspace denies warnings.
+#[cfg(unix)]
 pub(crate) fn this_root() -> Arc<Fiber> {
     let root = root_fiber();
     if running().is_null() {

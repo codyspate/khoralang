@@ -862,6 +862,11 @@ pub unsafe extern "C" fn khora_fiber_detach(fiber: *mut u8) {
 ///
 /// For a caller that holds an id rather than a handle — the signal watcher,
 /// which has the root fiber and no `Fiber<A, 'er>` object anywhere.
+///
+/// `cfg(unix)` because that watcher is the only caller and Windows has no
+/// `sigwait` to run it: an unconditional definition is dead code there, and
+/// the workspace denies warnings.
+#[cfg(unix)]
 pub(crate) fn cancel_by_id(id: usize) {
     if on_the_scheduler() {
         fibers().cancel_fiber(id);

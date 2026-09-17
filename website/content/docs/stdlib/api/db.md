@@ -87,6 +87,19 @@ read through a float is a number that has already lost, and
 [The numbers design note](https://github.com/codyspate/khoralang/blob/main/docs/design/numbers.md) is the long version. Floats can be added when
 something that is genuinely a measurement needs one.
 
+**A `numeric` column arrives as [`Text`](#cell), not as [`Money`](#cell), and the
+PostgreSQL driver is not alone in that.** `numeric` is arbitrary-precision,
+so a driver that produced a `Money` would have to decide what to do with
+digits that will not parse — become a wrong number, or lose the value —
+and neither is a decision a driver may take on a caller's behalf. The
+server's own digits are kept instead, and turning them into a `Decimal` is
+the caller's step: `Decimal::of_string`, whose `Option::None` arm means
+*this is not a number I can represent* and must not be answered with a
+zero.
+
+What it costs is that [`Cell::money`](#money) answers `None` for every money column
+a PostgreSQL server returns. Read those through [`Cell::text`](#text).
+
 ### Row
 
 ```khora
@@ -273,6 +286,11 @@ pub fn money(self) -> Option<Decimal>
 ```
 
 The decimal in this cell, or `None`.
+
+**`None` for a PostgreSQL `numeric`**, which arrives as [`Cell::Text`](#cell) —
+see the note on [`Cell`](#cell) for why, and read it with [`Cell::text`](#text) and
+`Decimal::of_string`. A money column that reads as `None` here is the
+normal case, not a null.
 
 #### flag
 

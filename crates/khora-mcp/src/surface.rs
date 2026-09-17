@@ -55,6 +55,30 @@ pub fn public_items(db: &dyn Db, file: SourceFile) -> Vec<Entry> {
             doc: doc_above(text, start),
         });
     }
+
+    // **A method is what somebody searches for.** `map.items` deliberately
+    // excludes the members of an `impl` block, because an impl has no name of
+    // its own to index -- but `Int::of_string` is exactly what a reader types
+    // when they want to parse a number, and indexing only the outer items left
+    // every method in the standard library unfindable. They are listed
+    // separately, so they are walked separately.
+    //
+    // Named `Type::method`, which is how the compiler spells it and how a
+    // caller writes it, so a search for either half finds it.
+    for method in map.methods.iter() {
+        let start = usize::from(method.range.start()).min(text.len());
+        let end = usize::from(method.range.end()).min(text.len());
+        out.push(Entry {
+            module: spell(module),
+            name: format!("{}::{}", method.type_name, method.name),
+            kind: match method.trait_name.as_deref() {
+                Some(trait_name) => format!("method, from {trait_name}"),
+                None => "method".to_string(),
+            },
+            signature: signature_of(&text[start..end], ItemKind::Function),
+            doc: doc_above(text, start),
+        });
+    }
     out
 }
 

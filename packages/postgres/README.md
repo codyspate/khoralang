@@ -84,7 +84,7 @@ infrastructure or when the portable `Db` contract is not enough:
 ```khora
 import std::core::{List, Result, print};
 import std::db::{Cell, Row};
-import postgres::conn::{Answer, PgError, ask, close, open};
+import postgres::conn::{Answer, Connection, PgError, ask, close, open};
 
 fn main() -> Int {
   match open("127.0.0.1", 5432, "user", "database", "secret") {
@@ -106,6 +106,23 @@ fn main() -> Int {
   }
 }
 ```
+
+The type `open` returns is **`Connection`**, and it is the name a parameter
+has to be written with — a signature guessed from the module name
+(`postgres::conn::Conn`) does not resolve, and the diagnostic for it names the
+import rather than the type. Anything taking a connection is written:
+
+```khora
+fn one_row(c: Connection, sql: String) -> Result<Answer, PgError> {
+  ask(c, sql, List::Nil)
+}
+```
+
+`ask` and `run` answer with an **`Answer`**, which carries three fields:
+`columns` (a `List<Column>`, each a `name` and an `oid`), `rows` (a
+`List<Row>` — this is where the data is), and `tag`, the server's completion
+line, `SELECT 3` or `INSERT 0 1`. The example above prints `tag` because it is
+the shortest thing to print, not because it is where the answer is.
 
 ## `ask` or `run`
 

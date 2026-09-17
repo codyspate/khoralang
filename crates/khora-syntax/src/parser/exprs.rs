@@ -383,18 +383,44 @@ fn lambda_expr(p: &mut Parser<'_>) -> CompletedMarker {
         param_list(p);
     } else {
         let list = p.start();
-        let param = p.start();
-        match p.current() {
-            IDENT => name(p),
-            UNDERSCORE => p.bump(UNDERSCORE),
-            _ => p.error("expected a lambda parameter"),
+        bare_lambda_param(p);
+        // **`fn acc, row =>` is one mistake, and without this it is a dozen
+        // diagnostics.** The comma ends the one-parameter form, so the `=>`
+        // that follows is never found, the enclosing call is never closed, and
+        // everything after the comma is read as a fresh declaration -- twelve
+        // errors for the observed case, the first of them `expected =>` and
+        // none of them naming the brackets. Absorbing the rest of the list
+        // here costs a diagnostic that cannot fire for legal source (a lambda
+        // body is a single expression, so a comma can never follow the one
+        // parameter) and puts the parser back at the `=>` it expected.
+        if p.at(COMMA) {
+            p.error(
+                "a lambda with more than one parameter needs parentheses around them: \
+                 `fn (a, b) => ...`",
+            );
+            while p.eat(COMMA) {
+                if !p.tick() {
+                    break;
+                }
+                bare_lambda_param(p);
+            }
         }
-        param.complete(p, PARAM);
         list.complete(p, PARAM_LIST);
     }
     p.expect(FAT_ARROW);
     lambda_or_arm_body(p);
     m.complete(p, LAMBDA_EXPR)
+}
+
+/// One parameter of a lambda written without parentheses.
+fn bare_lambda_param(p: &mut Parser<'_>) {
+    let param = p.start();
+    match p.current() {
+        IDENT => name(p),
+        UNDERSCORE => p.bump(UNDERSCORE),
+        _ => p.error("expected a lambda parameter"),
+    }
+    param.complete(p, PARAM);
 }
 
 /// After `=>` a `{` means a block unless it looks like a record literal.

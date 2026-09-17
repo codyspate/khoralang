@@ -170,10 +170,26 @@ fn watch(set: libc::sigset_t, id: usize) {
         // thread spends its life here and costs nothing until one arrives.
         let failed = unsafe { libc::sigwait(&raw const set, &raw mut signo) };
         if failed != 0 {
-            // Nothing this thread can do about it and nothing to report that
-            // would be true: it does not know which signal it failed to wait
-            // for. Leaving is better than spinning on a `sigwait` that keeps
-            // failing.
+            // **Leaving quietly would make the process ignore `kill`.** The
+            // signals are still blocked -- this thread filled that mask -- so
+            // returning with nobody in `sigwait` is exactly the state the
+            // spawn-failure path above refuses to leave the process in. Undo
+            // the block so the default disposition applies again, and say so:
+            // a program that stops honouring SIGTERM has changed its contract
+            // with whatever supervises it, and silence there is the worst of
+            // the available outcomes.
+            //
+            // SAFETY: unblocking the same set this frame filled, on the thread
+            // that filled it.
+            unsafe {
+                libc::pthread_sigmask(libc::SIG_UNBLOCK, &raw const set, std::ptr::null_mut());
+            }
+            let _ = std::io::Write::write_all(
+                &mut std::io::stderr(),
+                b"khora: the signal watcher stopped waiting, so SIGTERM and SIGINT \
+                  end this program the way they did before -- at once, with no \
+                  finalizers and no rollback.\n",
+            );
             return;
         }
         seen += 1;

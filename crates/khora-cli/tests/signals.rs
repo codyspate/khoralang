@@ -368,8 +368,8 @@ fn sigint_behaves_as_sigterm() {
 /// normally, and `main` runs on to its `0`. Measured on both backends. That is
 /// a defect — a supervisor reading the status of a signalled shutdown is told
 /// it succeeded — but it is a defect about *status* rather than about
-/// unwinding, and pinning the wrong number here would freeze it. `REPORT.md`
-/// has the measurement.
+/// unwinding, and pinning the wrong number here would freeze it. The
+/// limitations page records it.
 #[test]
 fn a_two_child_nursery_stops_both_children_and_runs_both_finalizers() {
     let built = build(TWO_CHILDREN);

@@ -217,6 +217,23 @@ a provably-infallible child needs no channel in principle, and requiring one
 is the implementation showing through. Making the empty row callable without
 `!` is the fix, and it is a type-system change rather than a runtime one.
 
+**A nursery shutdown exits 0, so a supervisor is told it succeeded.** When the
+root's body is a nursery, the children are cancelled and their finalizers run —
+that part works — but the nursery absorbs its children's cancellations, returns
+normally, and `main` runs on to its own `0`. Measured on both backends:
+
+```
+two-child nursery + SIGTERM -> both finalizers ran, exit 0
+scoped finalizer  + SIGTERM -> finalizer ran,     exit 130
+```
+
+The unwinding is right and the status is wrong, which is the more dangerous
+half: a supervisor reading the exit status of a shutdown it signalled cannot
+tell it from a clean finish, and a `restart: on-failure` policy will not fire.
+The fix is for a nursery to distinguish a cancellation it absorbed from a child
+that merely finished; until then, do not read the exit status of a nursery-
+rooted program as a shutdown outcome.
+
 **Inside a closure there is no spelling that works.** A closure carries no
 `raises` row, so a `wait` in one has nowhere to put the cancellation and no
 annotation can give it somewhere:

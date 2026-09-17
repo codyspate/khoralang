@@ -70,6 +70,39 @@ fn a_broad_query_is_capped_and_says_how_many_more() {
     assert!(said.contains("more"), "{said}");
 }
 
+/// **A method is what somebody searches for, and it was not in the index.**
+/// `Int::of_string` is the function a reader wants when they type `parse`, and
+/// every member of an `impl` block was absent — `khora std search of_string`
+/// answered with three types whose prose happens to mention it, and nothing
+/// that is actually named that. The index was built from `ItemMap::items`,
+/// which deliberately excludes `impl` members because an impl has no name of
+/// its own; `ItemMap::methods` is where they are.
+#[test]
+fn a_method_is_findable_by_its_own_name() {
+    let (ok, said) = search(&["of_string", "--limit", "20"]);
+    assert!(ok, "{said}");
+    assert!(said.contains("Int::of_string"), "{said}");
+}
+
+/// The word a newcomer types is `parse`, not `of_string`. The doc comment is
+/// what has to carry it, so this is a search over documentation as much as
+/// over names — and it fails if either the method is absent from the index or
+/// its prose never uses the word.
+#[test]
+fn the_word_a_newcomer_searches_for_reaches_the_integer_reader() {
+    let (ok, said) = search(&["parse", "--limit", "25"]);
+    assert!(ok, "{said}");
+    assert!(said.contains("Int::of_string"), "{said}");
+}
+
+/// A method's own `///` travels with it, not the `impl` block's or the type's.
+#[test]
+fn a_method_carries_its_own_documentation() {
+    let (ok, said) = search(&["of_string", "--limit", "20"]);
+    assert!(ok, "{said}");
+    assert!(said.contains("The number a string spells"), "{said}");
+}
+
 /// Private items are left out on purpose: an agent or a person who learns about
 /// one writes code that does not compile, and `not exported` is a worse teacher
 /// than never having seen it.
