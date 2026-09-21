@@ -48,6 +48,7 @@ set -eu
 # disabled. It fills when a correction lands in `next` that readers of the
 # released tree are being misled without.
 corrections=$(cat <<'PHRASES'
+written by that fiber the moment it ends|The runtime announces an unobserved failure when the fiber ends, not at process exit, and joining it does not suppress the line. Both trees said otherwise, in three pages each. A developer running a feed aggregator read the line's position between two startup prints as proof the runtime was emitting it spuriously, filed it as a false alarm, and never found out what it reported -- the documentation's account of when it arrives made the question look answered. v0.2 readers need the corrected rule as much as `next` readers do.
 PHRASES
 )
 

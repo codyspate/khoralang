@@ -660,12 +660,16 @@ fn main() -> Int {{
 ///
 /// **A message whose position in the output lies is a message that sends a
 /// reader to the wrong place.** `limitations/index.md` and
-/// `cookbook/http-service.md` both said this line arrived "at process exit",
-/// and a developer reading a log where it sat between two startup prints
-/// concluded the runtime was emitting it spuriously — the failure it was
-/// reporting was a listener that could not bind, three lines earlier, and it
-/// was dismissed. The interleaving is the only evidence a reader has about
-/// *when* the failure happened, so it is worth pinning.
+/// `cookbook/http-service.md` both said this line arrived "at process exit".
+/// A developer running a feed aggregator saw it sit between `schema ready`
+/// and the server's own startup print, concluded from its position that the
+/// runtime was emitting it spuriously, and filed it as a false alarm. The
+/// server had in fact bound and served for the rest of that run; what the
+/// line reported is not recorded anywhere, because the documentation's
+/// account of *when* it arrives made the question look answered.
+///
+/// The interleaving is the only evidence a reader has about when a failure
+/// happened, so it is worth pinning.
 ///
 /// **What this pins is that the line exists, exactly once, on a clean run —
 /// not when it is written.** Ordering is not observable here: stdout and
@@ -771,7 +775,57 @@ fn main() -> Int {{
     );
 }
 
-// --- nurseries -------------------------------------------------------------
+/// A cancelled fiber says nothing on standard error.
+///
+/// **This is the exclusion four documentation pages rest on** and nothing
+/// tested it. `limitations/index.md` bolds it, `taking-work-off-a-queue.md`
+/// opens with "this program prints nothing on standard error" because of it,
+/// and the whole argument for reading the line rather than filtering it out
+/// is that a shutdown does not produce it.
+///
+/// The only things keeping that true are the two `which != CANCELLED_WHICH`
+/// guards in `fiber.rs`, and they sit in the blocks anybody touching this
+/// message will edit. Without this test a regression there turns every
+/// graceful shutdown into a false alarm and the suite stays green — which is
+/// precisely the failure the prose says trains readers to ignore the line.
+#[test]
+fn a_cancelled_fiber_is_not_reported_as_an_unobserved_failure() {
+    let ran = run(
+        "fiber_cancel_is_silent",
+        &format!(
+            "{CANCELLABLE}
+extern fn khora_sleep(millis: Int) -> ();
+
+fn worker() -> () raises Oops {{
+  // Capable of failing, so the only reason for silence is the cancellation
+  // itself rather than the fiber having nothing to report.
+  loop {{ let _ = ok(1)!; }}
+}}
+
+fn run_it() -> () raises Oops {{
+  let f = Fiber::spawn(fn () => worker()!);
+  khora_sleep(30);
+  Fiber::cancel(f);
+  Fiber::wait(f)!;
+}}
+
+fn main() -> Int {{
+  run_it()! catch {{ Oops::Bad => () }};
+  print(1);
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "1\n", "the program ran to its end");
+    assert_eq!(ran.code, Some(0));
+    assert!(
+        !ran.stderr.contains("a fiber ended with an error nobody was waiting for"),
+        "a cancellation is not a failure nobody observed, and reporting it as \
+         one is what teaches a reader to filter the line out: {:?}",
+        ran.stderr
+    );
+}
 
 /// `std::core` spells these the same way; they are here so the file stays one
 /// module. Note the idiom: `nursery.adopt(Fiber::spawn(fn () => ..))`, one call

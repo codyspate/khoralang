@@ -113,12 +113,13 @@ Every job that came off the queue is in exactly one of the last two counts. That
 **This program prints nothing on standard error**, and that is worth saying
 because a nearby sentence in the [known
 limitations](/docs/limitations/#concurrency-combinators) is easy to misread.
-The runtime does print `khora: a fiber ended with an error nobody was waiting
-for` for a fiber that *failed* and was waited on rather than joined — but a
-cancellation is excluded from that message, so the cancelled worker above is
-silent. If you ever do see the line from a supervisor like this one, a child
-failed on its own and the failure is unobserved: investigate it rather than
-filtering it out.
+The runtime prints `khora: a fiber ended with an error nobody was waiting
+for` for a fiber that *failed* — written by that fiber the moment it ends,
+and neither `wait` nor `join` changes whether it appears. A cancellation is
+excluded from the message, so the cancelled worker above is silent. If you
+ever do see the line from a supervisor like this one, a child raised on its
+own: investigate it rather than filtering it out, and note that it may be a
+failure the program went on to handle.
 
 ## Why the check is before the call and not after
 
