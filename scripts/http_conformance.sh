@@ -158,9 +158,15 @@ check "HEAD /health is 200" "200" \
 # The headers a GET would have sent, including the length of the body that is
 # deliberately not coming. A HEAD reporting zero tells a client the resource is
 # empty, which is a different and wrong answer.
-head_length=$(curl -s -I "$base/health" \
+#
+# **Not `/health`**, whose body carries `uptime_ms`: that number gains a digit
+# as the process runs, and this check is two requests, so a run that straddles
+# 9999ms compares a 40-byte HEAD against a 41-byte GET and fails for a reason
+# that has nothing to do with HEAD. It did, on CI, once. `/links` is a listing
+# whose body does not change between two adjacent requests.
+head_length=$(curl -s -I "$base/links" \
     | tr -d '\r' | grep -i '^content-length:' | cut -d' ' -f2)
-get_length=$(curl -s "$base/health" | wc -c | tr -d ' ')
+get_length=$(curl -s "$base/links" | wc -c | tr -d ' ')
 check "HEAD reports the length GET sends" "$get_length" "$head_length"
 
 # And the connection is still framed after one. A HEAD that sent a body makes

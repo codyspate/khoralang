@@ -173,6 +173,16 @@ step 'the runtime archive defines what the code generator calls'
 # artifact, and a stale one is what every generated program links. Roadmap 16.11.
 sh "$root/scripts/check-runtime-symbols.sh"
 
+step 'the test fixtures agree with `std` about its signatures'
+# The LLVM suite's fixtures are Khora programs embedded in Rust string
+# literals, and each declares its own copy of whatever `std` items it uses. A
+# `std` signature change leaves them compiling against the old one until the
+# checker refuses them -- as a wall of unrelated errors, twenty-eight minutes
+# in. `Fiber::wait` gaining a `raises` row broke twenty-five call sites across
+# eight files that way, and a grep for callers in `std/`, `packages/` and
+# `examples/` finds none of them, because they are not `.kh` files.
+sh "$root/scripts/check-fixture-signatures.sh"
+
 step 'the published grammar matches the lexer'
 # `docs/grammar.ebnf` is served to MCP clients and mirrored into the public
 # reference, and at 1.0 language syntax stops changing without a major version
