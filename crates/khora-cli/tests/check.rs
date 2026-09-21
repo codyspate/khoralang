@@ -1017,3 +1017,127 @@ fn a_for_loop_over_a_row_carrying_list_compiles() {
     );
     assert!(ok, "expected success, got:\n{output}");
 }
+
+/// **The correct `raises` row in an annotation replaced a good error with a
+/// worse one.**
+///
+/// A function type carrying either clause was not echoed at all: it fell to
+/// `TypeRef::Opaque` and then to `Type::Unknown`, so the list's element type
+/// was unknown and the failure surfaced in the `for` desugar, naming
+/// `Iterator::next` — a function this source does not mention, three lines
+/// from the annotation. Adding the row that fixes the first error is the
+/// obvious move, and it was punished.
+#[test]
+fn a_raises_row_in_a_let_annotation_is_honoured() {
+    let (ok, output) = check(
+        "let_annotation_raises_row",
+        "module m;\n\
+         import std::core::{List, Iterator, Step};\n\
+         type Boom = | Went;\n\
+         pub fn main() -> Int raises Boom {\n\
+         \x20 let handlers: List<(Int) -> () raises Boom> =\n\
+         \x20   List::Cons(fn (_x: Int) => raise Boom::Went, List::Nil);\n\
+         \x20 for h in handlers { h(1)!; };\n\
+         \x20 0\n\
+         }\n",
+    );
+    assert!(ok, "expected success, got:\n{output}");
+}
+
+/// The half that goes green-to-red: an annotation that is only a comment is
+/// worse than no annotation, because it is believed.
+///
+/// The closure raises `Boom` and the annotation says `Bang`. While the row was
+/// dropped, `Unknown` agreed with both and this compiled clean. The error has
+/// to name the binding, not a line further on: the annotation is what is
+/// wrong.
+#[test]
+fn a_wrong_raises_row_in_a_let_annotation_is_refused_at_the_annotation() {
+    let (ok, output) = check(
+        "let_annotation_raises_row_wrong",
+        "module m;\n\
+         type Boom = | Went;\n\
+         type Bang = | Off;\n\
+         pub fn main() -> Int raises Bang {\n\
+         \x20 let f: (Int) -> () raises Bang = fn (_x: Int) => raise Boom::Went;\n\
+         \x20 f(1)!;\n\
+         \x20 0\n\
+         }\n",
+    );
+    assert!(
+        !ok,
+        "a closure raising `Boom` against an annotation saying `Bang` has to be \
+         refused; the annotation's row was being dropped:\n{output}"
+    );
+    assert!(
+        output.contains("Boom"),
+        "the error should name the row entry the annotation does not account \
+         for:\n{output}"
+    );
+    assert!(
+        output.contains("let f: (Int) -> () raises Bang"),
+        "the error should point at the annotated binding, not at a later use \
+         of it:\n{output}"
+    );
+}
+
+/// The same for `with`, which is a different clause reader: a `with` clause
+/// may name a `row` declaration and a `raises` clause may not.
+///
+/// Written as `with Deps`, so the annotation reaches the splice too — a `row`
+/// is structural and its fields replace the clause outright, a lookup only
+/// `khora-types` can do and the reason the echo carries the clause rather than
+/// reading it.
+#[test]
+fn a_with_row_in_a_let_annotation_is_honoured() {
+    let source = "module m;\n\
+         effect Ticks { now: () -> Int }\n\
+         row Deps = { ticks: Ticks };\n\
+         fn plain(f: (Int) -> Int) -> Int { f(1) }\n\
+         fn helper() -> Int with Deps {\n\
+         \x20 let f: (Int) -> Int with Deps = fn (x: Int) => x + ticks.now();\n\
+         \x20 f(1)\n\
+         }\n\
+         pub fn main() -> Int { helper() with { ticks: { now: fn () => 7 } } }\n";
+    let (ok, output) = check("let_annotation_with_row", source);
+    assert!(ok, "expected success, got:\n{output}");
+
+    // And the annotation is load-bearing: handed to a parameter whose row is
+    // closed and empty, the same `f` has to be refused. While the clause was
+    // dropped this compiled, which is what says the clause is now read.
+    let (ok, output) = check(
+        "let_annotation_with_row_escapes",
+        &source.replace("\x20 f(1)\n", "\x20 plain(f)\n"),
+    );
+    assert!(
+        !ok,
+        "a function requiring `ticks` cannot be passed where one requiring \
+         nothing is wanted; the annotation's `with` row was being dropped:\n{output}"
+    );
+    assert!(
+        output.contains("ticks"),
+        "the error should name the capability the parameter does not \
+         supply:\n{output}"
+    );
+}
+
+/// A row *variable* in a `let` annotation, which is the shape that would need
+/// its own scoping if the echo interpreted rows itself.
+///
+/// It does not: `'er` is resolved by the same `named_type` that resolves it in
+/// a signature, against the same `generics` list, so the parameter the
+/// enclosing `fn` declares is the one the annotation names. Nothing here is
+/// bound by the annotation.
+#[test]
+fn a_row_variable_in_a_let_annotation_names_the_enclosing_parameter() {
+    let (ok, output) = check(
+        "let_annotation_row_var",
+        "module m;\n\
+         fn run<'er>(g: (Int) -> Int raises 'er) -> Int raises 'er {\n\
+         \x20 let f: (Int) -> Int raises 'er = g;\n\
+         \x20 f(1)!\n\
+         }\n\
+         pub fn main() -> Int { run(fn (x: Int) => x + 1) }\n",
+    );
+    assert!(ok, "expected success, got:\n{output}");
+}

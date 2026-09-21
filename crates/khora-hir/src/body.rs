@@ -331,21 +331,42 @@ pub enum TypeRef {
     Unit,
     /// A bare integer in type position: the `3` in `Matrix<3, 4>`.
     Const(i64),
-    /// `(Int, String) -> Bool`, with no `with` or `raises` clause.
+    /// `(Int, String) -> Bool raises Oops`, clauses and all.
     ///
     /// Carried so that `let f: (Int) -> Int = fn x => ..` reaches the lambda
     /// as an expectation and is checked against it. Until it was, the
     /// annotation became `Opaque` and `let f: (Int) -> Int = fn x => "s"`
     /// checked clean: an annotation that is only a comment is worse than no
     /// annotation, because it is believed.
-    Fn { params: Vec<TypeRef>, ret: Box<TypeRef> },
+    ///
+    /// `requires` and `raises` are the clauses *as written*, `None` when the
+    /// clause is absent — which is not the same as an empty row, because a
+    /// `with` clause may name a `row` declaration whose fields only
+    /// `khora_types` can look up. This echo does not interpret them; it
+    /// carries them to the one function that does.
+    Fn {
+        params: Vec<TypeRef>,
+        ret: Box<TypeRef>,
+        requires: Option<Box<TypeRef>>,
+        raises: Option<Box<TypeRef>>,
+    },
     /// A row written in type-argument position: the `{ Oops: Oops }` in
     /// `Job<Int, { Oops: Oops }>`. Echoed because collapsing it to `Opaque`
     /// made the row slot `Type::Unknown`, which `undetermined` refuses.
-    Row { fields: Vec<(String, TypeRef)>, tail: Option<String> },
-    /// A shape this echo does not carry — a function type with effect
-    /// clauses, so far. Checked as `Unknown`, which is to say not checked,
-    /// which is what every annotation used to get.
+    ///
+    /// The tail is a whole type rather than a name because a `with` clause's
+    /// tail may be `Self::Effects`, and a name cannot say that.
+    Row { fields: Vec<(String, TypeRef)>, tail: Option<Box<TypeRef>> },
+    /// `Oops + Bang + 'er`, already flattened.
+    ///
+    /// **Flattened here, because `A + B + C` parses as `(A + B) + C`.** A
+    /// reader taking the direct operands sees a nested union and `C`, and the
+    /// nested one has no meaning as a row entry — it becomes one entry
+    /// labelled after nothing, so the row carries `C` and a ghost.
+    Union(Vec<TypeRef>),
+    /// A shape this echo does not carry — a `Variant` or a `Forall`. Checked
+    /// as `Unknown`, which is to say not checked, which is what every
+    /// annotation used to get.
     Opaque,
 }
 
@@ -375,11 +396,20 @@ impl TypeRef {
                         .unwrap_or_default(),
                 }
             }
-            // A function type's `with` and `raises` rows are not echoed: an
-            // echo of those is a second row interpreter. A function type
-            // *without* clauses is the common annotation on a closure, and it
-            // has nothing in it the echo cannot carry.
-            ast::Type::Fn(f) if f.with_clause().is_none() && f.raises_clause().is_none() => {
+            // **The clauses are carried, not interpreted.** A `with` clause
+            // may name a `row` declaration and a `raises` clause labels its
+            // entries by the error's declared name; both are lookups only
+            // `khora_types` can do, and an echo that did them here would be a
+            // second row interpreter drifting from the signature path. What
+            // this arm produces is the written shape, which
+            // `khora_types::syntax::row_of_ref` reads — the same function the
+            // signature path reads.
+            //
+            // Until it did, a function type carrying either clause fell to
+            // `Opaque` and then to `Type::Unknown`, so the *correct* row in a
+            // `let` annotation switched off the checking of that binding and
+            // moved the error to a line the reader did not write.
+            ast::Type::Fn(f) => {
                 let params = match f.param_type() {
                     Some(ast::Type::Tuple(t)) => {
                         t.elements().map(|e| TypeRef::of_syntax(&e)).collect()
@@ -391,7 +421,13 @@ impl TypeRef {
                     Some(other) => vec![TypeRef::of_syntax(&other)],
                 };
                 let ret = f.return_type().as_ref().map_or(TypeRef::Opaque, TypeRef::of_syntax);
-                TypeRef::Fn { params, ret: Box::new(ret) }
+                let clause = |c: Option<ast::Type>| c.map(|t| Box::new(TypeRef::of_syntax(&t)));
+                TypeRef::Fn {
+                    params,
+                    ret: Box::new(ret),
+                    requires: clause(f.with_clause().and_then(|c| c.row())),
+                    raises: clause(f.raises_clause().and_then(|c| c.row())),
+                }
             }
             ast::Type::Record(r) => {
                 let after_tail: Vec<ast::Field> =
@@ -407,18 +443,35 @@ impl TypeRef {
                 let tail = r
                     .row_tail()
                     .and_then(|t| t.types().next())
-                    .and_then(|t| match t {
-                        ast::Type::Path(p) => p.row_var().map(|v| v.text().to_string()),
-                        _ => None,
-                    });
+                    .map(|t| Box::new(TypeRef::of_syntax(&t)));
                 TypeRef::Row { fields, tail }
             }
-            ast::Type::Fn(_)
-            | ast::Type::Union(_)
-            | ast::Type::Variant(_)
-            | ast::Type::Forall(_) => TypeRef::Opaque,
+            // Flattened, because `A + B + C` parses as `(A + B) + C` and a
+            // nested union has no meaning as a row entry.
+            ast::Type::Union(u) => TypeRef::Union(
+                crate::body::union_operands(&ast::Type::Union(u.clone()))
+                    .iter()
+                    .map(TypeRef::of_syntax)
+                    .collect(),
+            ),
+            // **Named rather than a `_`, so the next variant is a compile
+            // error.** A shape this echo does not recognise becomes the type
+            // that agrees with everything, and the annotation passes by saying
+            // nothing — errata 30, 59, 60 and 88 are one story. Listing them
+            // asks the author of the next variant what it means here.
+            ast::Type::Variant(_) | ast::Type::Forall(_) => TypeRef::Opaque,
         }
     }
+}
+
+/// Every leaf of a `+` chain, however the parser nested them.
+///
+/// `A + B + C` parses as `(A + B) + C`, so a reader that takes a union's
+/// direct operands sees a nested union and `C` — and the nested one becomes
+/// one row entry labelled after nothing, so the row carries `C` and a ghost.
+fn union_operands(ty: &ast::Type) -> Vec<ast::Type> {
+    let ast::Type::Union(u) = ty else { return vec![ty.clone()] };
+    u.operands().flat_map(|operand| union_operands(&operand)).collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

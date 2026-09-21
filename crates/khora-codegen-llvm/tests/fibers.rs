@@ -656,6 +656,121 @@ fn main() -> Int {{
     );
 }
 
+/// The unobserved-failure line is written when the fiber fails, not at exit.
+///
+/// **A message whose position in the output lies is a message that sends a
+/// reader to the wrong place.** `limitations/index.md` and
+/// `cookbook/http-service.md` both said this line arrived "at process exit",
+/// and a developer reading a log where it sat between two startup prints
+/// concluded the runtime was emitting it spuriously — the failure it was
+/// reporting was a listener that could not bind, three lines earlier, and it
+/// was dismissed. The interleaving is the only evidence a reader has about
+/// *when* the failure happened, so it is worth pinning.
+///
+/// **What this pins is that the line exists, exactly once, on a clean run —
+/// not when it is written.** Ordering is not observable here: stdout and
+/// stderr reach the harness through separate pipes. Nor does the emit site
+/// discriminate, because a handle released at the end of `main` prints the
+/// same line; disabling the completion-time emitter leaves this test green.
+///
+/// The test that does discriminate is
+/// `a_joined_failure_is_still_reported_as_one_nobody_waited_for` below: `join`
+/// marks the outcome observed, so the release path stays silent and only the
+/// completion-time emitter can produce the line. Disable that emitter and it
+/// is the one that goes red.
+///
+/// A *detached* fiber is deliberately silent — `fiber.rs` calls that "a
+/// failure the program said it did not want to hear about" — so detaching is
+/// not a way to test this either.
+#[test]
+fn an_unobserved_failure_is_reported_exactly_once() {
+    let ran = run(
+        "fiber_unobserved_failure_timing",
+        &format!(
+            "{NURSERY}
+extern fn khora_sleep(millis: Int) -> ();
+
+fn bad() -> () raises Oops {{ raise Oops::Bad }}
+
+fn main() -> Int {{
+  print(1);
+  let f = Fiber::spawn(fn () => bad()!);
+  // **Nothing takes this fiber's answer.** The sleep is for the child to
+  // reach its raise while the parent still holds the handle, which is the
+  // shape a server has: spawn the listener, keep the handle, poll a flag.
+  khora_sleep(200);
+  print(2);
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "1\n2\n", "the program runs through: {:?}", ran.stdout);
+    assert_eq!(ran.code, Some(0), "an unobserved failure does not change the status");
+    assert!(
+        ran.stderr.contains("a fiber ended with an error nobody was waiting for"),
+        "a detached failure is announced by the fiber itself, with no release to \
+         do it later: {:?}",
+        ran.stderr
+    );
+    assert_eq!(
+        ran.stderr.matches("a fiber ended with an error nobody was waiting for").count(),
+        1,
+        "one failure is one message: {:?}",
+        ran.stderr
+    );
+}
+
+/// A failure is reported even when the program joined it and handled it.
+///
+/// **This is the over-reporting that makes the line worth ignoring, which is
+/// the failure that matters here.** The announcement is written by the fiber
+/// itself the moment its outcome is stored, before the completion latch is
+/// even signalled — so at that instant no joiner has taken the answer and the
+/// runtime cannot know that one is about to. `join` sets `observed`, but
+/// `announced` was already claimed, so the flag changes nothing on this path.
+///
+/// The consequence a reader meets: a program that spawns, joins and `catch`es
+/// a failure — having done everything right — still gets a line on stderr
+/// saying nobody was waiting for it. Somebody *was*. Trained on that, a reader
+/// discards the line, and then discards a true report of a listener that could
+/// not bind.
+///
+/// Pinned rather than fixed because fixing it is a design decision, not a
+/// mechanical one: announcing later would restore the missed alarm that moving
+/// it here was for — a server that holds its listener's handle and polls a
+/// stop flag never releases it, so a release-time report never comes. See
+/// REPORT.md under item 9. If this test starts failing because the line is
+/// gone, that is the fix landing, and the prose in
+/// `limitations/index.md` and `cookbook/http-service.md` moves with it.
+#[test]
+fn a_joined_failure_is_still_reported_as_one_nobody_waited_for() {
+    let ran = run(
+        "fiber_join_does_not_silence_report",
+        &format!(
+            "{NURSERY}
+fn bad() -> () raises Oops {{ raise Oops::Bad }}
+
+fn main() -> Int {{
+  let f = Fiber::spawn(fn () => bad()!);
+  // Joined and handled: the program observed this failure and acted on it.
+  Fiber::join(f)! catch {{ Oops::Bad => () }};
+  print(1);
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "1\n", "the catch ran and the program carried on");
+    assert_eq!(ran.code, Some(0));
+    assert!(
+        ran.stderr.contains("a fiber ended with an error nobody was waiting for"),
+        "the report is written by the fiber before any joiner can take the \
+         answer, so joining does not prevent it: {:?}",
+        ran.stderr
+    );
+}
+
 // --- nurseries -------------------------------------------------------------
 
 /// `std::core` spells these the same way; they are here so the file stays one

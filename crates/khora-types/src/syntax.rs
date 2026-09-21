@@ -22,23 +22,6 @@ pub(crate) fn record_fields(
     (labels, fields)
 }
 
-/// Every leaf of a `+` chain, however the parser nested them.
-///
-/// **`A + B + C` parses as `(A + B) + C`**, so a reader that takes a union's
-/// direct operands sees two: a nested union, and `C`. A nested union is not a
-/// shape `type_of_syntax` answers for, so it became `Unknown` — `A` and `B`
-/// collapsed into one entry labelled after nothing, and the row carried `C`
-/// and a ghost.
-///
-/// It failed loudly rather than silently: the call site was told the function
-/// does not raise `A`, which is true of the row that was built and a message
-/// about the wrong thing entirely. Nothing in the corpus had a three-error row
-/// until `Router::listen_tls` needed `'e + HttpError + TlsError`.
-pub(crate) fn union_operands(ty: &ast::Type) -> Vec<ast::Type> {
-    let ast::Type::Union(u) = ty else { return vec![ty.clone()] };
-    u.operands().flat_map(|operand| union_operands(&operand)).collect()
-}
-
 /// Which clause a row is being read for.
 ///
 /// The two are lowered by the same function and differ in one place: a `with`
@@ -61,27 +44,31 @@ pub(crate) fn row_of_syntax(
     homes: &TypeHomes,
 ) -> Type {
     let Some(clause) = clause else { return Type::empty_row() };
+    row_of_ref(&khora_hir::body::TypeRef::of_syntax(clause), kind, generics, homes)
+}
+
+/// The same, for a row a *body* wrote down inside a `let` annotation.
+///
+/// **One interpreter, reached from both.** `row_of_syntax` above resolves a
+/// signature's clause by echoing it into a [`TypeRef`] and calling this, so
+/// there is no second reading of `with Deps` or of `raises A + 'e` to drift
+/// out of step with the first. What it costs is one allocation of the echo per
+/// clause resolved, on a path that already allocates a `Type` per leaf.
+///
+/// [`TypeRef`]: khora_hir::body::TypeRef
+pub(crate) fn row_of_ref(
+    clause: &khora_hir::body::TypeRef,
+    kind: RowClause,
+    generics: &[String],
+    homes: &TypeHomes,
+) -> Type {
+    use khora_hir::body::TypeRef;
     match clause {
         // `with { ledger: Ledger | 'e }`
-        ast::Type::Record(r) => {
-            // With a tail, the labels after the `|` are nested inside it
-            // rather than beside it, so both places have to be read.
-            let after_tail: Vec<ast::Field> =
-                r.row_tail().map(|t| t.fields().collect()).unwrap_or_default();
-            let fields: Vec<(String, Type)> = r
-                .fields()
-                .chain(after_tail)
-                .filter_map(|f| {
-                    let label = f.name()?.ident()?;
-                    Some((label, type_of_syntax(f.ty().as_ref(), generics, homes)))
-                })
-                .collect();
-            let tail = r
-                .row_tail()
-                .and_then(|t| t.types().next())
-                .map(|t| type_of_syntax(Some(&t), generics, homes));
-            Type::row(fields, tail)
-        }
+        TypeRef::Row { fields, tail } => Type::row(
+            fields.iter().map(|(l, t)| (l.clone(), type_of_ref(t, generics, homes))).collect(),
+            tail.as_ref().map(|t| type_of_ref(t, generics, homes)),
+        ),
         // `raises DbError + ModelError`. An error row labels each entry with
         // the error's own type name: two errors of one type cannot be told
         // apart, and by name is how they are handled.
@@ -90,13 +77,11 @@ pub(crate) fn row_of_syntax(
         // in it: `raises 'e + HttpError` means "whatever the caller's handler
         // can raise, and also this". Reading it as a label gave the row an
         // entry called `'e`, which no `raises` clause could ever satisfy.
-        ast::Type::Union(u) => {
+        TypeRef::Union(operands) => {
             let mut fields = Vec::new();
             let mut tail = None;
-            // Flattened, because `A + B + C` parses as `(A + B) + C` and the
-            // direct operands of the outer union are a *union* and `C`.
-            for operand in union_operands(&ast::Type::Union(u.clone())) {
-                match type_of_syntax(Some(&operand), generics, homes) {
+            for operand in operands {
+                match type_of_ref(operand, generics, homes) {
                     Type::Param(name) if name.starts_with('\'') => {
                         tail = Some(Type::Param(name));
                     }
@@ -114,17 +99,15 @@ pub(crate) fn row_of_syntax(
             // capability entries in an error row, which is a different mistake
             // and is reported rather than obeyed.
             if kind == RowClause::Requires {
-                if let ast::Type::Path(p) = other {
-                    if p.row_var().is_none() {
-                        if let Some(name) = p.path().map(|path| path.text_path()) {
-                            if let Some(fields) = homes.row(&name) {
-                                return Type::row(fields.to_vec(), None);
-                            }
+                if let TypeRef::Named { name, .. } = other {
+                    if !name.starts_with('\'') {
+                        if let Some(fields) = homes.row(name) {
+                            return Type::row(fields.to_vec(), None);
                         }
                     }
                 }
             }
-            let ty = type_of_syntax(Some(other), generics, homes);
+            let ty = type_of_ref(other, generics, homes);
             match &ty {
                 // A bare row variable is the whole row.
                 Type::Param(name) if name.starts_with('\'') => Type::row(Vec::new(), Some(ty)),
@@ -137,28 +120,20 @@ pub(crate) fn row_of_syntax(
                 Type::Assoc { .. } if kind == RowClause::Requires => {
                     Type::row(Vec::new(), Some(ty))
                 }
-                _ => match error_label(other, generics, homes) {
-                    Some(entry) => Type::row(vec![entry], None),
-                    None => Type::empty_row(),
-                },
+                _ => Type::row(vec![error_label(&ty)], None),
             }
         }
     }
 }
 
 /// One entry of an error row, labelled by the error type's own name.
-pub(crate) fn error_label(
-    ty: &ast::Type,
-    generics: &[String],
-    homes: &TypeHomes,
-) -> Option<(String, Type)> {
-    let resolved = type_of_syntax(Some(ty), generics, homes);
-    let label = match &resolved {
+pub(crate) fn error_label(resolved: &Type) -> (String, Type) {
+    let label = match resolved {
         Type::Adt { name, .. } => name.clone(),
         Type::Param(name) => name.clone(),
         other => other.to_string(),
     };
-    Some((label, resolved))
+    (label, resolved.clone())
 }
 
 /// Maps written syntax to a type.
@@ -328,6 +303,14 @@ pub(crate) fn named_type(
                 Type::Applied { head: Box::new(Type::Param(other.to_string())), args }
             }
         }
+        // **A row variable is a parameter whether or not it is in scope.** The
+        // leading `'` cannot begin an identifier, so nothing declares a type by
+        // this name and `homes.of` can only answer `None` — which produces an
+        // `Adt` with no home that unifies with no row and reports against the
+        // wrong thing. Out of scope is an error, and it is reported where the
+        // name was written; the type it gets here decides what the *second*
+        // message says.
+        other if other.starts_with('\'') => Type::Param(other.to_string()),
         other => match homes.of(other) {
             // The declared name, not the local spelling. An alias renames a
             // mention and not a type: `import other::{Point as Other}` used to
@@ -357,15 +340,25 @@ pub fn type_of_ref(
         TypeRef::Unit => Type::Unit,
         TypeRef::Const(value) => Type::Const(*value),
         TypeRef::Opaque => Type::Unknown,
-        // No clauses were written, so the rows are what a signature without
-        // clauses gets: closed and empty. A closure that raises against this
-        // annotation is refused, the same way it is refused against a
-        // parameter written the same way.
-        TypeRef::Fn { params, ret } => Type::Fn {
+        // A clause absent is the closed empty row, which is what a signature
+        // without clauses gets: a closure that raises against this annotation
+        // is refused, the same way it is refused against a parameter written
+        // the same way.
+        //
+        // A clause present is read by `row_of_ref` — the same function the
+        // signature path reads it with, so `with Deps` and `raises A + 'e`
+        // mean in an annotation what they mean in a signature.
+        TypeRef::Fn { params, ret, requires, raises } => Type::Fn {
             params: params.iter().map(|t| type_of_ref(t, generics, homes)).collect(),
             ret: Box::new(type_of_ref(ret, generics, homes)),
-            requires: Box::new(Type::empty_row()),
-            raises: Box::new(Type::empty_row()),
+            requires: Box::new(match requires {
+                Some(row) => row_of_ref(row, RowClause::Requires, generics, homes),
+                None => Type::empty_row(),
+            }),
+            raises: Box::new(match raises {
+                Some(row) => row_of_ref(row, RowClause::Raises, generics, homes),
+                None => Type::empty_row(),
+            }),
         },
         TypeRef::Tuple(items) => {
             let items: Vec<Type> = items.iter().map(|t| type_of_ref(t, generics, homes)).collect();
@@ -377,13 +370,13 @@ pub fn type_of_ref(
         }
         // A row written as a type argument. `Opaque` here made the row slot
         // `Type::Unknown`, and `undetermined` refuses an ADT holding one.
-        TypeRef::Row { fields, tail } => Type::row(
-            fields
-                .iter()
-                .map(|(label, t)| (label.clone(), type_of_ref(t, generics, homes)))
-                .collect(),
-            tail.as_ref().map(|t| Type::Param(t.clone())),
-        ),
+        TypeRef::Row { .. } => row_of_ref(ty, RowClause::Requires, generics, homes),
+        // A `+` chain in a position that is not a clause. `A + B` has no
+        // meaning as a type on its own — only as a row — and `Unknown` is
+        // what the signature path answers for the same shape. Reported by
+        // `crate::unresolved` at the range it was written, which is the only
+        // place with a channel to report on.
+        TypeRef::Union(_) => Type::Unknown,
     }
 }
 

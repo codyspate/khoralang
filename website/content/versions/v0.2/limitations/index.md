@@ -231,10 +231,13 @@ nothing about how the fiber ended — there is no status and no
 writes before it fails, which is the sort of thing the failure row was supposed
 to make unnecessary. And a fiber that raised and was `wait`ed on rather than
 `join`ed prints `khora: a fiber ended with an error nobody was waiting for` to
-standard error at process exit, once per such fiber, with no way to suppress it
-and no effect on the exit status. **A cancellation is excluded from it.** The
-runtime emits that line only for a fiber that ended in a *failure* nobody
-observed; a cancelled fiber is silent, so a supervisor that cancels children
+standard error, once per such fiber, with no way to suppress it and no effect
+on the exit status. The line is written **the moment that fiber ends**, not at
+process exit, and neither `wait` nor `join` changes whether it appears: the
+fiber writes it before any joiner could have taken its outcome, so a failure
+the program joins and handles is reported too. **A cancellation is excluded
+from it.** The runtime emits that line only for a fiber that ended in a
+*failure*; a cancelled fiber is silent, so a supervisor that cancels children
 does not print it — it prints it only when a child fails on its own. Which
 makes the line worth reading rather than expecting: seeing it means a genuine
 unobserved failure, not the ordinary noise of a shutdown.

@@ -281,12 +281,21 @@ Fiber::wait(worker);
 Fiber::detach(server);
 ```
 
-`Fiber::wait` on a *failed* worker prints `khora: a fiber ended with
-an error nobody was waiting for` at exit. Cancellation is excluded from that
-message, so the shutdown above is silent — the line appears only when a worker
-failed on its own. It cannot be suppressed and does not change the exit status
-— see [known
-limitations](/docs/limitations/#concurrency-combinators).
+A worker that fails on its own prints `khora: a fiber ended with an error
+nobody was waiting for`. The line is written **the moment that fiber ends**,
+not at exit, and neither `Fiber::wait` nor `Fiber::join` changes whether it
+appears — the fiber writes it before any joiner could have taken its outcome,
+so a failure the program joins and handles is reported too. Cancellation is
+excluded, so the shutdown above is silent: the line appears only when a child
+raised. It cannot be suppressed and does not change the exit status — see
+[known limitations](/docs/limitations/#concurrency-combinators).
+
+Read it as "a fiber raised", not as "a failure went unhandled" — the wording
+claims more than the runtime checks, and a program that handles its failures
+correctly still sees it. What is reliable is the *position*: the line sits
+where the failure happened, so one among a program's first few lines means
+something failed during startup. A listener that could not bind is the usual
+one.
 
 Two things are worth being deliberate about. A request that arrives during the
 drain finds a closed channel, so `Channel::send` answers `false` — count it

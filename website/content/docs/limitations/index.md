@@ -234,21 +234,6 @@ The fix is for a nursery to distinguish a cancellation it absorbed from a child
 that merely finished; until then, do not read the exit status of a nursery-
 rooted program as a shutdown outcome.
 
-**Inside a closure there is no spelling that works.** A closure carries no
-`raises` row, so a `wait` in one has nowhere to put the cancellation and no
-annotation can give it somewhere:
-
-```khora
-around(tracer, "request", fn () => {
-  let child = Fiber::spawn(fn () => work(tracer));
-  Fiber::wait(child)          // refused, and `!` does not help
-});
-```
-
-The fix is a restructure rather than a spelling: lift the body into a named
-function that carries a row, spawn that, and catch at the `wait`. Worth
-knowing before reaching for `wait` inside a callback.
-
 **A long `clock.sleep` delays or survives the shutdown, and the two backends
 differ.** Measured against an eight-second sleep in a child fiber, one
 `SIGTERM`:
@@ -376,15 +361,30 @@ Two smaller things a supervisor meets on the way. `Fiber::wait` tells you
 nothing about how the fiber ended — there is no status and no
 `Option<Result<..>>` — so the only way to find out is a `Shared` cell the child
 writes before it fails, which is the sort of thing the failure row was supposed
-to make unnecessary. And a fiber that raised and was `wait`ed on rather than
-`join`ed prints `khora: a fiber ended with an error nobody was waiting for` to
-standard error at process exit, once per such fiber, with no way to suppress it
-and no effect on the exit status. **A cancellation is excluded from it.** The
-runtime emits that line only for a fiber that ended in a *failure* nobody
-observed; a cancelled fiber is silent, so a supervisor that cancels children
-does not print it — it prints it only when a child fails on its own. Which
-makes the line worth reading rather than expecting: seeing it means a genuine
-unobserved failure, not the ordinary noise of a shutdown.
+to make unnecessary. And a fiber that raised without anybody taking its answer
+prints `khora: a fiber ended with an error nobody was waiting for` to standard
+error, once per such fiber, with no way to suppress it and no effect on the
+exit status.
+
+**The line is written when that fiber ends, not at process exit**, and
+neither `Fiber::wait` nor `Fiber::join` changes whether it appears: the fiber
+writes it itself the moment it stores its outcome, which is before any joiner
+can have taken that outcome. So **a failure the program joins and handles is
+reported too**, and the message's own wording is wrong about that case —
+somebody was waiting. What it reliably means is narrower than it says: *a
+fiber ended in a failure*.
+
+The timing is the part worth using. The line sits at the point in the output
+where the failure happened, so a line among a program's first few lines means
+something failed during startup — a listener that could not bind is the usual
+one.
+
+**A cancellation is excluded from it.** The
+runtime emits that line only for a fiber that ended in a *failure*; a
+cancelled fiber is silent, so a supervisor that cancels children does not
+print it — it prints it only when a child failed on its own. That is what
+keeps the line worth reading: it is not the ordinary noise of a shutdown, and
+seeing one means a fiber somewhere raised.
 
 `Channel` also has no `select` (waiting on the first of several) and no zero-capacity rendezvous. `Channel::bounded(0)` gets a capacity of one rather than a rendezvous, deliberately.
 
