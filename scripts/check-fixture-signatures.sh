@@ -113,12 +113,18 @@ def defines_own(text: str, ty: str) -> bool:
     """
     return bool(re.search(rf"^\s*(?:pub\s+)?type\s+{re.escape(ty)}\b[^;\n]*=", text, re.M))
 
-std_methods = methods(pathlib.Path(std_path).read_text())
+# **`encoding="utf-8"` on every read, explicitly.** Python on Windows defaults
+# to the system code page -- cp1252 on the CI runner -- and `env.rs` carries a
+# deliberate Unicode fixture (`"naïve"`, `"日本語"`, `"🐛"`) whose bytes cp1252
+# cannot decode. A default-encoded read dies with a `UnicodeDecodeError` on a
+# machine where every other check passes, which is what happened on the commit
+# that added this script.
+std_methods = methods(pathlib.Path(std_path).read_text(encoding="utf-8"))
 
 drift = []
 checked = 0
 for path in sorted(pathlib.Path(fixture_dir).glob("*.rs")):
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     for (ty, name), sig in methods(text).items():
         if (ty, name) in ALLOWED:
             continue
