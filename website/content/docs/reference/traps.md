@@ -54,6 +54,8 @@ khora: the stack ran out
 
 on standard error, followed by the platform's stack-overflow exit status rather than 134.
 
+**The message covers the stack the program started on, and not every stack.** Reporting from an exhausted stack needs room set aside before the fault, and the runtime sets it aside at the entry point: an alternate signal stack on Unix, a thread stack guarantee on Windows. A fiber runs on a stack of its own and a spawned thread gets a fresh one, and neither carries that reservation — so an overflow there ends the process with the status above and no message. The status is the same either way; only the sentence is missing.
+
 Khora does not guarantee tail-call optimisation, so a function that recurses once per element of its input uses a frame per element. See [Known limitations](/docs/limitations/) for what that means for `List` in practice, and which operations are unaffected.
 
 ## Traps are not `raises`

@@ -110,6 +110,44 @@ fn report() {
 }
 
 #[cfg(windows)]
+/// How much of the faulting stack is kept back for the handler.
+///
+/// **Windows gives a handler no room unless it is asked.** The one guard page
+/// of slack is spent by the dispatch itself -- `RtlDispatchException` builds a
+/// context record and an exception record on the faulting stack before the
+/// first vectored handler is entered -- so a handler installed without a
+/// guarantee is one the process faults again on the way into, and dies with
+/// nothing written. The guarantee moves the guard page out by this much, and
+/// the dispatch takes its frames from the gap.
+///
+/// It costs this much address space per thread, reserved rather than
+/// committed. There is no way to ask what the dispatch needs, so the number is
+/// taken from the Rust runtime, which reserves the same for the same job, and
+/// is not derived from anything here.
+const GUARANTEE: u32 = 0x5000;
+
+#[cfg(windows)]
+/// Sets aside the room the handler runs in, for the calling thread.
+///
+/// Per *thread*, not per process: the guarantee lives in the thread
+/// environment block, so a thread that never calls this reports nothing even
+/// though the handler is installed process-wide.
+///
+/// A failure is not worth stopping for. It means the request was larger than
+/// the stack, and the outcome is the silence that came before this -- not
+/// worse.
+fn reserve() {
+    use windows_sys::Win32::System::Threading::SetThreadStackGuarantee;
+
+    let mut wanted = GUARANTEE;
+    // SAFETY: the call reads and writes the one `u32` it is given, which is a
+    // local of this frame, and touches nothing else.
+    unsafe {
+        SetThreadStackGuarantee(&raw mut wanted);
+    }
+}
+
+#[cfg(windows)]
 fn install() {
     use windows_sys::Win32::Foundation::EXCEPTION_STACK_OVERFLOW;
     use windows_sys::Win32::System::Diagnostics::Debug::{
@@ -143,6 +181,19 @@ fn install() {
         }
         CONTINUE_SEARCH
     }
+
+    // **Before the handler, and the reason the handler reports anything.**
+    // The page of slack a guard-page fault leaves is not the handler's to
+    // spend; the exception dispatch spends it first. Without this the handler
+    // is reached on some runs and not others -- whichever way the faulting
+    // frame happened to divide the last page -- and a message that appears
+    // intermittently is one nobody can rely on.
+    //
+    // **It covers this thread only.** A fiber switched onto a `corosensei`
+    // stack, and every thread the scheduler spawns, has a guarantee of zero
+    // and reports nothing on overflow. Reserving at each of those is a wider
+    // change than this one and is not made here.
+    reserve();
 
     // First in the chain, so nothing installed later can swallow it.
     // SAFETY: `handler` has the signature the system requires and outlives the
@@ -207,3 +258,62 @@ fn install() {
 /// Nothing to install where there is no operating system to fault.
 #[cfg(not(any(unix, windows)))]
 fn install() {}
+
+#[cfg(test)]
+mod tests {
+    /// **The handler has somewhere to run.**
+    ///
+    /// Both platforms report from a stack that is already gone, so both have
+    /// to set room aside *before* the fault -- there is none to be had
+    /// afterwards. Unix sets aside a separate stack with `sigaltstack` and a
+    /// `SIGSEGV` disposition that says to use it; Windows sets aside a slice
+    /// of the faulting one with `SetThreadStackGuarantee`. Neither is the
+    /// default, and a handler installed without its room reports nothing: the
+    /// dispatch faults again on the way in and the process dies silently,
+    /// which is the state this module exists to end.
+    ///
+    /// **It asserts the room and not the message**, because the room is what a
+    /// process that has not overflowed can read back from the platform.
+    /// `khora-codegen-llvm::debugging::running_out_of_stack_says_so` asserts
+    /// the message, and needs a child process to die to see it -- so it can
+    /// only say that reporting worked on the one run it took, where this says
+    /// the precondition holds at all.
+    #[test]
+    fn the_handler_has_somewhere_to_run() {
+        super::khora_begin();
+
+        #[cfg(unix)]
+        // SAFETY: both calls take a null pointer for the value to install,
+        // which is how each is spelled as a pure query, and write only through
+        // pointers to locals of this frame.
+        unsafe {
+            let mut stack: libc::stack_t = std::mem::zeroed();
+            libc::sigaltstack(std::ptr::null(), &raw mut stack);
+            assert!(!stack.ss_sp.is_null(), "no alternate stack to report on");
+            assert_eq!(stack.ss_flags & libc::SS_DISABLE, 0, "the alternate stack is off");
+
+            let mut action: libc::sigaction = std::mem::zeroed();
+            libc::sigaction(libc::SIGSEGV, std::ptr::null(), &raw mut action);
+            assert_ne!(
+                action.sa_flags & libc::SA_ONSTACK,
+                0,
+                "the handler would run on the stack that overflowed"
+            );
+        }
+
+        #[cfg(windows)]
+        // SAFETY: the call reads the current guarantee into the word it is
+        // given and raises it only if that word is larger, so passing zero is
+        // how it is spelled as a pure query.
+        unsafe {
+            use windows_sys::Win32::System::Threading::SetThreadStackGuarantee;
+
+            let mut current: u32 = 0;
+            assert_ne!(SetThreadStackGuarantee(&raw mut current), 0, "the query failed");
+            assert!(
+                current >= super::GUARANTEE,
+                "only {current} bytes are set aside for the handler"
+            );
+        }
+    }
+}

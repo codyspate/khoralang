@@ -1044,6 +1044,40 @@ fn a_raises_row_in_a_let_annotation_is_honoured() {
     assert!(ok, "expected success, got:\n{output}");
 }
 
+/// A row wider than the value that fills it is legal, nested or not.
+///
+/// **This pins a non-defect, because it looked like one.** A review of the
+/// annotation work reported that a wrong clause *inside a type argument* is
+/// caught only at the use site rather than at the `let`, and read that as the
+/// fix reaching one level down but landing in the wrong place. The `let` is
+/// not wrong: a lambda that raises nothing satisfies an annotation that says
+/// it may raise `Bang`, exactly as it does when the annotation is direct
+/// rather than nested. Widening is sound in both, so there is nothing at the
+/// binding to report, and the first genuine disagreement — passing that value
+/// where a *different* row is required — is reported where it happens.
+///
+/// Both halves are here so the next reader sees that the nested case follows
+/// the direct one rather than diverging from it. A change that starts refusing
+/// either is narrowing the language, and this says so.
+#[test]
+fn a_row_wider_than_the_value_that_fills_it_is_accepted() {
+    let (ok, output) = check(
+        "let_annotation_row_widening",
+        "module m;\n\
+         type Bang = | Off;\n\
+         type Wrap<A> = { inner: A };\n\
+         pub fn main() -> Int {\n\
+         \x20 let direct: (Int) -> () raises Bang = fn (_x: Int) => ();\n\
+         \x20 let nested: Wrap<(Int) -> () raises Bang> =\n\
+         \x20   { inner: fn (_x: Int) => () };\n\
+         \x20 let _ = direct;\n\
+         \x20 let _ = nested;\n\
+         \x20 0\n\
+         }\n",
+    );
+    assert!(ok, "expected success, got:\n{output}");
+}
+
 /// The half that goes green-to-red: an annotation that is only a comment is
 /// worse than no annotation, because it is believed.
 ///

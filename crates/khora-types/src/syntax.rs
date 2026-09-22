@@ -310,6 +310,14 @@ pub(crate) fn named_type(
         // wrong thing. Out of scope is an error, and it is reported where the
         // name was written; the type it gets here decides what the *second*
         // message says.
+        //
+        // **This arm must stay above the `homes.of` arm below.** Its position
+        // is the behaviour, not a formatting choice: `homes.of("'er")` answers
+        // `None`, so moving this down sends every row variable into the
+        // homeless-`Adt` branch and the misreport comes straight back. A test
+        // pins it — `a_row_variable_is_a_parameter_not_a_homeless_adt` in this
+        // file's `tests` module, which asserts on the type rather than on a
+        // diagnostic so it cannot be satisfied by a reworded message.
         other if other.starts_with('\'') => Type::Param(other.to_string()),
         other => match homes.of(other) {
             // The declared name, not the local spelling. An alias renames a
@@ -370,6 +378,19 @@ pub fn type_of_ref(
         }
         // A row written as a type argument. `Opaque` here made the row slot
         // `Type::Unknown`, and `undetermined` refuses an ADT holding one.
+        //
+        // **`Requires` rather than a choice.** A row in type-argument position
+        // has no clause flavour — nothing wrote `with` or `raises` around it —
+        // so one had to be picked, and the flavours differ in exactly one way:
+        // `Requires` is what enables the `homes.row` splice for a named `row`
+        // declaration. That splice cannot be reached from here, because it is
+        // guarded by `TypeRef::Named` inside the `Union` arm and a bare `Row`
+        // never enters it. Verified: output is byte-identical with either
+        // flavour, for a named `row` declaration used as a type argument.
+        //
+        // So this is safe rather than arbitrary, and it is safe *because of
+        // that guard*. Anyone widening the `Union` arm's splice to reach bare
+        // rows makes the flavour observable here and has to choose again.
         TypeRef::Row { .. } => row_of_ref(ty, RowClause::Requires, generics, homes),
         // A `+` chain in a position that is not a clause. `A + B` has no
         // meaning as a type on its own — only as a row — and `Unknown` is
@@ -383,6 +404,47 @@ pub fn type_of_ref(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A row variable resolves to a parameter, not to a homeless ADT.
+    ///
+    /// **This pins the order of two arms in `named_type`.** The `'`-prefix arm
+    /// sits above the `homes.of` arm, and that position is the behaviour:
+    /// `homes.of("'er")` answers `None`, because a leading `'` cannot begin an
+    /// identifier and nothing can declare a type by that name. Move the arm
+    /// below and every row variable becomes `Adt { home: None }`, which
+    /// unifies with no row and reports against the wrong thing — the misreport
+    /// this arm was added to fix.
+    ///
+    /// Asserting on the *type* rather than on a diagnostic is deliberate: a
+    /// test that reads an error message can be satisfied by rewording it, and
+    /// what matters here is which branch the name took.
+    #[test]
+    fn a_row_variable_is_a_parameter_not_a_homeless_adt() {
+        let homes = TypeHomes::default();
+
+        // In scope or not, the answer is the same. Out-of-scope is an error,
+        // but it is reported where the name was written, and the type decided
+        // here is what the *second* message talks about.
+        for name in ["'er", "'ef", "'r"] {
+            let got = named_type(name, Vec::new(), &[], &homes);
+            assert_eq!(
+                got,
+                Type::Param(name.to_string()),
+                "{name} took the `homes.of` branch, so the `'`-prefix arm is \
+                 no longer above it"
+            );
+        }
+
+        // The contrast that makes the assertion mean something: an ordinary
+        // undeclared name *does* belong in the homeless-`Adt` branch.
+        assert!(
+            matches!(
+                named_type("Nowhere", Vec::new(), &[], &homes),
+                Type::Adt { home: None, .. }
+            ),
+            "an undeclared ordinary name should still be a homeless Adt"
+        );
+    }
 
     /// `khora-hir` decides whether importing a name is allowed; this file
     /// decides whether the name means a builtin. They have to be the same set.
