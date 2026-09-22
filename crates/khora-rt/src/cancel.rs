@@ -99,7 +99,14 @@ fn end_the_program() -> ! {
          `Fiber::wait` waits for a fiber without asking for its answer, which is \
          what you want when the point was \"not before that finishes\". \
          `Fiber::detach` stops waiting altogether and asks the fiber to stop. \
-         Neither ends the program."
+         Neither ends the program.\n\
+         \n\
+         To keep an answer from a fiber that may be cancelled, have it publish \
+         to a `Shared` cell and read the cell after `Fiber::cancel` and \
+         `Fiber::detach`: a cell holds whatever the fiber managed before it \
+         stopped, including partial progress. The answer arrives beside the \
+         fiber rather than on its return type, and nothing types the relation \
+         between the two, which is the cost of the shape that works today."
     );
     // SAFETY: nothing returns past this, so no other frame observes the
     // released root.
