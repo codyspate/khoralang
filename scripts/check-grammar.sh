@@ -26,12 +26,24 @@ kinds='crates/khora-syntax/src/kind.rs'
 
 section () { sed -n "/^$1! {/,/^}/p" "$kinds" | grep -o '"[a-z_]*"' | tr -d '"' | sort -u; }
 
+# The reserved words are a plain `const` rather than a macro invocation: they
+# generate no `match` arm, because a reserved word has no kind to map to.
+reserved () {
+    sed -n '/^pub const RESERVED_WORDS/,/^];/p' "$kinds"         | sed 's|//.*||'         | grep -o '"[a-z_]*"' | tr -d '"' | sort -u
+}
+
 # Comments are stripped first: every entry in these tables carries one saying
 # where the word is a keyword, and those sentences name other keywords.
 # Without this the table appears to define `fn` because `extern` is documented
 # as "only before `fn`".
+#
+# The range ends at a **blank line**, not at a line ending in `;`. Every entry
+# carries a trailing comment, so no line in these tables ends in `;` and the
+# range ran to the end of the file -- which was invisible while
+# `ContextualKeyword` was the last table there, and made the next table added
+# below it appear to be part of it.
 table () {
-    sed -n "/^$1/,/;$/p" "$grammar"         | sed 's/([*].*[*])//g'         | grep -o '"[a-z_]*"' | tr -d '"' | sort -u
+    sed -n "/^$1/,/^ *$/p" "$grammar"         | sed 's/([*].*[*])//g'         | grep -o '"[a-z_]*"' | tr -d '"' | sort -u
 }
 
 # **Temporary files rather than `<(...)`.** `baseline.sh` runs every gate
@@ -43,11 +55,15 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 status=0
-for pair in "keywords:Keyword" "contextual_keywords:ContextualKeyword"; do
+for pair in "keywords:Keyword" "contextual_keywords:ContextualKeyword" "reserved:ReservedWord"; do
     lexer_section="${pair%%:*}"
     grammar_table="${pair##*:}"
 
-    section "$lexer_section" > "$work/lexer"
+    if [ "$lexer_section" = reserved ]; then
+        reserved > "$work/lexer"
+    else
+        section "$lexer_section" > "$work/lexer"
+    fi
     table "$grammar_table" > "$work/grammar"
     missing=$(comm -23 "$work/lexer" "$work/grammar")
     invented=$(comm -13 "$work/lexer" "$work/grammar")
@@ -69,11 +85,13 @@ done
 # A production written out and never referenced is the other way this drifted:
 # `TraitDecl`, `ImplDecl` and `ForExpr` were all defined and unreachable from
 # the start symbol, so a reader following the grammar could not get to a trait.
-# `Program` is the start symbol, and the three lexical tables are descriptions
-# of the token stream rather than productions anything derives.
+# `Program` is the start symbol, and the four lexical tables are descriptions
+# of the token stream rather than productions anything derives -- `ReservedWord`
+# most of all, since the whole point of it is that no production may contain
+# one.
 for rule in $(grep -oE '^[A-Za-z]+' "$grammar" | sort -u); do
     case "$rule" in
-        Program|Keyword|ContextualKeyword|Comment) continue ;;
+        Program|Keyword|ContextualKeyword|ReservedWord|Comment) continue ;;
     esac
     uses=$(grep -c "\b$rule\b" "$grammar" || true)
     if [ "$uses" -le 1 ]; then

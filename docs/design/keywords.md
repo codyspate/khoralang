@@ -260,3 +260,77 @@ means, and it is why a row cannot be used where a type is wanted.
 
 Composition -- `with { Deps | 'r }`, or two rows added together -- is not
 supported. Whole-row only until something needs more.
+
+## Words held for a Khora that does not exist yet
+
+Everything above is about words the language *has*. This is about five it does
+not:
+
+```text
+where yield macro unsafe unstable
+```
+
+They are refused as identifiers and mean nothing. The reason is structural
+rather than aesthetic: **Khora has no editions and no `unstable` marker**, so a
+keyword introduced after 1.0 breaks every program that had used the word as a
+name and there is no mechanism to migrate one. `compatibility.md` says a
+mechanical source break gets an edition and that the machinery lands "with the
+first change that needs it" — which means a post-1.0 keyword needs the edition
+machinery built before it, and until that exists every such keyword is simply
+unavailable. Holding a word back now costs one name. Holding it back afterwards
+is not available at any price.
+
+The test for an entry has two halves, and a word needs both:
+
+1. **Khora plausibly needs it.** Not "some language has it" — something in this
+   repository has to have said so. `where` is `typeclasses.md` §7's deferred
+   follow-on to `+`-separated bounds; `macro` is `testing.md` calling assertion
+   decomposition "a macro-shaped problem and not one to solve before there are
+   macros"; `unstable` is the roadmap naming the absence of exactly that marker
+   as a hole in the 1.0 freeze.
+2. **A user plausibly picks it as a name.** A word nobody would name a variable
+   costs nothing to reserve and buys nothing either. `yield` is an ordinary
+   English noun; `where` is a SQL clause, and errata 75 found `pub fn where_`
+   in `std::schema`, decorated against a reservation that did not exist.
+
+### What the reservation does not buy
+
+An option on a word, and nothing else. It does not promise the feature arrives
+and it does not fix the spelling: if generators land written `gen`, the
+reservation of `yield` bought a name nobody could use and no feature at all.
+That asymmetry is the whole argument for keeping the list short — the downside
+of an unspent word is certain and small, the downside of an unreserved one is
+unbounded and only discovered after 1.0.
+
+`reserved_words.rs` fails past eight entries, so the list cannot grow by
+accident.
+
+### Candidates refused, and why
+
+**`struct` is impossible rather than unwise.** `std/schema.kh` exports
+`pub fn struct<A>(fields: Fields<A>) -> Schema<A>` and `examples/khq` imports
+and calls it. It is the most obvious candidate in the language and the one this
+repository has already spent.
+
+**`async` and `await` would contradict a decision already taken.** The roadmap
+commits that the M:N scheduler changes nothing a program can see and adds no
+`async` keyword, and the parser already answers `async` in declaration position
+with "Khora has no `async`. Every function may suspend, so there is nothing to
+mark". Reserving the word would replace a message that teaches the model with
+one that says only "not yet", which is false as well as less useful.
+
+**`enum` and `union` are already answered better.** `parser/decls.rs` names the
+Khora spelling and shows `| Red | Green`. A reservation would downgrade that.
+
+**`static`, `try`** — both are rejected elsewhere in this document and in
+`vision.md` respectively, so reserving them would hold a word for a feature the
+project has decided against.
+
+**`self` and `Self` are already the language's**, as receiver and implementing
+type; `khora-hir` and `khora-types` both treat `"Self"` as a type parameter
+name.
+
+**`gen`** is the runner-up and was dropped for the same asymmetry read the
+other way: three letters, a far more likely local (`let gen = Random::seeded(..)`)
+than a keyword Khora commits to, and the feature it would serve is already
+covered by `yield`.

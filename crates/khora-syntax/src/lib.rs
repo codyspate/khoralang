@@ -21,7 +21,8 @@ use rowan::GreenNode;
 
 pub use event::ParseError;
 pub use kind::{
-    Khora, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, CONTEXTUAL_KEYWORDS, KEYWORDS,
+    is_reserved_word, Khora, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken,
+    CONTEXTUAL_KEYWORDS, KEYWORDS, RESERVED_WORDS,
 };
 pub use lexer::LexedStr;
 

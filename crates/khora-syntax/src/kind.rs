@@ -416,6 +416,68 @@ contextual_keywords! {
     "extern" => EXTERN_KW,
 }
 
+/// Words refused as identifiers that mean nothing yet.
+///
+/// **Khora has no editions and no `unstable` marker**, so a keyword added
+/// after 1.0 breaks every program that used the word as a name, with no
+/// mechanism to migrate one. Holding a word back now costs one name nobody may
+/// use; holding it back after 1.0 is not available at any price.
+///
+/// What this buys is the *option* to spend a word, and nothing more. It does
+/// not promise the feature arrives, and it does not promise the spelling: if
+/// generators arrive written `gen`, the reservation of `yield` bought a name
+/// nobody could use and no feature. That is why the list is short and why
+/// every entry below names the thing it is held for — a reservation with no
+/// stated purpose cannot be argued out of the list by the next reader.
+///
+/// These are deliberately **not** in [`KEYWORDS`]: a reserved word has no
+/// kind, no production and no position, so the lexer hands it to the parser as
+/// an `IDENT` like any other name and the parser refuses it where a name would
+/// be bound. Putting one in `KEYWORDS` would make the editor grammar colour a
+/// word the language does not have.
+///
+/// A word already used as an identifier in this repository cannot go here
+/// without breaking the build, which is why `struct` is absent: `std/schema.kh`
+/// exports `pub fn struct`.
+pub const RESERVED_WORDS: &[&str] = &[
+    // `docs/design/typeclasses.md` §7 lists a `where` clause as the follow-on
+    // to `+`-separated bounds. It is also the entry with direct evidence that
+    // a user reaches for the name: errata 75 found `pub fn where_` in
+    // `std::schema`, decorated against a reservation that did not exist.
+    "where",
+    // Generators are open work in the roadmap's §6 list, and suspension is
+    // what `yield` spells in every language that has it. It is an ordinary
+    // English noun -- a yield of a crop, a yield on a bond -- so a program
+    // that never suspends anything can still want the name.
+    "yield",
+    // `docs/design/testing.md` calls taking an assertion's comparison apart
+    // "a macro-shaped problem and not one to solve before there are macros",
+    // which is the repository expecting the feature in its own words. A tool
+    // that manipulates macros wants the word for a field or a local.
+    "macro",
+    // `extern fn` is permitted by package name in the manifest, so a package
+    // outside `std` can already declare one, and `docs/design/soundness.md`'s
+    // argument is that the trusted boundary is where the obligation lives.
+    // Marking that boundary in the source is the obvious next thing to want,
+    // and every language with the concept spells it this way.
+    "unsafe",
+    // The roadmap names this one first: there is no
+    // `unstable`/`preview`/`experimental` marker at any level, keyword,
+    // attribute or manifest. It is the escape hatch the 1.0 freeze has no
+    // other form of, and a word a feature-flag table plausibly uses as a key.
+    "unstable",
+];
+
+/// Whether `text` is a word held for a later Khora.
+///
+/// A linear scan of a five-element list, called where the parser is about to
+/// bind a name — not per token. A reserved word reached as a *field
+/// projection* (`config.unsafe`) is somebody else's field name and none of
+/// Khora's business.
+pub fn is_reserved_word(text: &str) -> bool {
+    RESERVED_WORDS.contains(&text)
+}
+
 impl From<SyntaxKind> for rowan::SyntaxKind {
     fn from(kind: SyntaxKind) -> Self {
         Self(kind as u16)

@@ -194,7 +194,7 @@ impl<'a> Parser<'a> {
     // --- contextual keywords ----------------------------------------------
 
     /// The source text of the token `n` ahead. Empty at EOF.
-    fn nth_text(&self, n: usize) -> &'a str {
+    pub(crate) fn nth_text(&self, n: usize) -> &'a str {
         match self.ranges.get(self.pos + n) {
             Some(range) => &self.text[*range],
             None => "",

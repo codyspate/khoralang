@@ -245,3 +245,20 @@ ContextualKeyword
                  | "bench"    (* only at the start of a declaration       *)
                  | "derive"   (* only at the start of a declaration       *)
                  | "extern" ; (* only before "fn"                         *)
+
+(* Reserved words: refused as an identifier, and meaning nothing yet.
+
+   Khora has no editions and no `unstable` marker, so a keyword added after 1.0
+   breaks every program that used the word as a name and there is no mechanism
+   to migrate one. Holding a word back costs one name; holding it back
+   afterwards is not available at any price.
+
+   These are *not* keywords and appear in no production above. The lexer hands
+   each to the parser as an Ident, which is then refused where a name would be
+   bound -- so `Ident` above excludes these as well as the keywords, and the
+   editor grammar must not colour them, because there is nothing to colour. *)
+ReservedWord   ::= "where"     (* a bound list; typeclasses.md 7        *)
+                 | "yield"     (* generators                            *)
+                 | "macro"
+                 | "unsafe"    (* a marked trusted boundary             *)
+                 | "unstable" ; (* the marker the 1.0 freeze has none of *)

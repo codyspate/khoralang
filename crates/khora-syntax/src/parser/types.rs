@@ -132,8 +132,31 @@ pub(super) fn name_ref(p: &mut Parser<'_>) {
     m.complete(p, NAME_REF);
 }
 
+/// Binds a name, refusing the words held for a later Khora.
+///
+/// **A reservation that only covered `let` would be worse than none.** The
+/// word has to be refused everywhere a program can *introduce* it — a
+/// parameter, a field, a function, a constant, a pattern binding — because
+/// those are the positions that stop compiling on the day the keyword lands,
+/// and letting one through now is the source break the reservation exists to
+/// prevent.
+///
+/// It is deliberately not refused in [`name_ref`]: a *use* of a name is only
+/// reachable if a binding of it got through, and a record key or a field
+/// projection on a foreign type is a name Khora did not choose.
+///
+/// The token is consumed either way, so a file with five of them reports five
+/// reservations rather than one and four cascading parse failures.
 pub(super) fn name(p: &mut Parser<'_>) {
     let m = p.start();
+    if p.at(IDENT) && crate::kind::is_reserved_word(p.nth_text(0)) {
+        let word = p.nth_text(0);
+        p.error(format!(
+            "`{word}` is reserved for a future version of Khora and cannot be used as a name. \
+             Nothing uses it yet -- it is held back because Khora has no editions, so a word \
+             claimed after 1.0 would break every program that had named something with it"
+        ));
+    }
     if !p.expect(IDENT) {
         m.abandon(p);
         return;

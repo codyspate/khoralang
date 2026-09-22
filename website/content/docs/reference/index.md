@@ -77,6 +77,7 @@ The rest of this page is the full index, by topic.
 - [Lints](./lints/) — the twelve checks `khora check` runs, their default levels, and how to set them in `[lints]`.
 - [Debugging a program](./debugging/) — backtraces, debug information, what a debugger can and cannot be relied on for.
 - [Compatibility and stability](./compatibility/) — what `0.x` promises, what counts as a breaking change, and what 1.0 is waiting for.
+- [Environment variables](./environment/) — every `KHORA_*` you may set: where Khora keeps its cache and toolchains, which profile a build uses, and the runtime's fiber backend.
 
 ## Where the other sections start
 

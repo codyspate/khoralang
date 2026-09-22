@@ -287,6 +287,34 @@ extern fn strlen(ptr: Ptr) -> U64;
 
 `in` is contextual in the `for pattern in expression` form.
 
+## Reserved words
+
+These words are refused as identifiers and mean nothing yet:
+
+```text
+where yield macro unsafe unstable
+```
+
+Using one as a name is an error naming the word, not a syntax error:
+
+```text
+error: `yield` is reserved for a future version of Khora and cannot be used as
+       a name. Nothing uses it yet -- it is held back because Khora has no
+       editions, so a word claimed after 1.0 would break every program that
+       had named something with it
+```
+
+They are held back because Khora has no editions and no `unstable` marker, so
+a keyword introduced after 1.0 would break every program that had used the
+word as a name, with no mechanism to migrate one. Reserving a word now costs
+one name; reserving it afterwards is not possible at all.
+
+**A reservation is an option, not a promise.** None of these words is
+scheduled, and the spellings are not fixed — if generators arrive written some
+other way, `yield` will have been held back for nothing. The list is short for
+that reason. They are also **not keywords**: an editor will not highlight them,
+because there is no construct to highlight.
+
 ## Punctuation with language meaning
 
 Common multi-character tokens include:

@@ -97,6 +97,15 @@ pub(crate) fn install() {
     // A causality check needs a way to turn this off: a test that passes with
     // the watcher disabled guards nothing, and the only way to know is to run
     // it both ways. Read once, at startup, before any thread exists.
+    //
+    // **The switch is `cfg(debug_assertions)` because a shipped program must
+    // not honour it.** It reaches every compiled binary otherwise, so a
+    // process whose environment happens to carry the name loses graceful
+    // shutdown on `SIGTERM` silently and with no way to notice -- measured as
+    // exit 143 with no finalizer, against 130 with one. A release build
+    // ignores the variable; the tests that need it run against a debug
+    // runtime, which is the only place it was ever read on purpose.
+    #[cfg(debug_assertions)]
     if std::env::var_os("KHORA_NO_SIGNALS").is_some() {
         return;
     }

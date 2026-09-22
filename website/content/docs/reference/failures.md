@@ -395,7 +395,7 @@ pub fn main() -> Int {
   with { reads: FsRead::real() } {
     match attempt(fn () => read_text(path)!) {
       Result::Ok(text) => { print(text); 0 },
-      Result::Err(IoError::NotFound(where)) => { eprint("no such file: ${where}"); 1 },
+      Result::Err(IoError::NotFound(missing)) => { eprint("no such file: ${missing}"); 1 },
       Result::Err(other) => { eprint("could not read it"); 1 },
     }
   }

@@ -257,6 +257,16 @@ step 'the documentation is addressed to a reader'
 sh scripts/check-maintainer-notes.sh > /dev/null
 bash scripts/no-maintainer-notes.sh
 
+step 'every KHORA_* a user can set is documented or deliberately not'
+# **An environment variable is a public interface that nothing declares.** It
+# has no signature, no manifest key and no `--help` entry, so the only way a
+# reader finds one is by being told -- and `KHORA_HOME`, which decides where
+# every cached artifact on the machine lands, was read by two crates and named
+# on no page at all. This compares what shipped code reads against the
+# reference page and two lists in the script, and fails on a name in none of
+# them. Under a second; it reads source rather than building anything.
+sh scripts/check-environment-surface.sh
+
 step 'the hand-written examples compile'
 # **The 580 in the Guide, the Reference and the Cookbook had never been
 # compiled at all, and 55 of them did not.** That is what this step is for.

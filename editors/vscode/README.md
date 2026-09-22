@@ -187,6 +187,14 @@ There are two lists, and they live in separate repository rules:
   These approximations are exactly the kind of thing semantic tokens will
   replace.
 
+There is a **third** list in the compiler, `RESERVED_WORDS`, and it
+deliberately has no rule here. Those words — `where`, `yield`, `macro`,
+`unsafe`, `unstable` — are refused as identifiers and mean nothing else;
+colouring one as a keyword would tell a reader there is a construct to look
+up, and there is not. `reserved_words.rs` asserts they appear in neither
+`KEYWORDS` nor `CONTEXTUAL_KEYWORDS`, which is what keeps this grammar honest
+about them.
+
 ## The icon
 
 `icon.png` is generated from the site's own `website/public/favicon.svg`:
