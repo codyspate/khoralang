@@ -22,8 +22,11 @@ pub extern "C" fn khora_cancel() {
 
 /// Whether a cancellation is pending *and may be acted on here*.
 ///
-/// Read at every cancellation point, so it is on the hot path of any loop that
-/// does fallible work. Two relaxed loads of a word, which is what it costs.
+/// Asked at every cancellation point, but only after generated code has loaded
+/// [`crate::poll::khora_poll`] and found some fiber in the process cancelled:
+/// a call here per loop trip was what made a loop in a function with a row
+/// ten times slower than the same loop without one. When it is asked, it is
+/// two relaxed loads of a word.
 ///
 /// The second word is [`Shielded`]: a cancellation that arrives while a
 /// finalizer is running is remembered rather than observed, so the finalizer
@@ -321,6 +324,13 @@ mod tests {
         7
     }
 
+    /// A fiber that cancels itself and then finishes normally, which an
+    /// infallible thunk does: it has nowhere to stop.
+    extern "C" fn cancelling_thunk(_code: *const u8, _body: *mut u8) -> u64 {
+        khora_cancel();
+        0
+    }
+
     /// A closure object of type `() -> A`: one field, the code pointer. The
     /// trampolines above ignore it, but `khora_fiber_spawn` reads it before
     /// calling and would fault on a null.
@@ -413,6 +423,30 @@ mod tests {
         let which = unsafe { khora_fiber_join(handle, &raw mut answer) };
         assert_eq!(which, 0);
         assert_eq!(answer, 7);
+        // SAFETY: the last reference to the handle.
+        unsafe { khora_fiber_release(handle) };
+    }
+
+    /// **A fiber that was cancelled and has finished is no longer counted**,
+    /// while its handle is still held.
+    ///
+    /// The handle keeps the fiber alive, so leaving the uncounting to its
+    /// `Drop` would mean one long-held handle to a cancelled fiber -- a
+    /// server's listener, stopped and kept -- sends every back-edge in the
+    /// process down the slow path until the process ends.
+    #[test]
+    fn a_cancelled_fiber_that_finished_is_uncounted_while_its_handle_is_held() {
+        // SAFETY: as above.
+        let handle = unsafe {
+            crate::fiber::khora_fiber_spawn(closure(), None, None, Some(cancelling_thunk), false, None)
+        };
+        let mut answer: u64 = 0;
+        // SAFETY: as above.
+        unsafe { khora_fiber_join(handle, &raw mut answer) };
+        // SAFETY: a live handle, joined.
+        let state = unsafe { crate::fiber::fiber_state(handle) }.expect("a live handle");
+        assert!(state.fiber.is_cancelled(), "the thunk did cancel itself");
+        assert!(!state.fiber.is_counted(), "a finished fiber is still counted");
         // SAFETY: the last reference to the handle.
         unsafe { khora_fiber_release(handle) };
     }

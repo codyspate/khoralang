@@ -64,8 +64,9 @@ thread_local! {
     /// budget is its own, and only its own thread ever touches it.
     ///
     /// That matters because this is the one hot path in the file — the
-    /// safepoint is emitted at every loop back-edge — and a call that cannot
-    /// be inlined would show up where nothing else here would.
+    /// safepoint is emitted at every loop back-edge, behind the poll word in
+    /// [`crate::poll`], which is non-zero whenever a pool exists — and a call
+    /// that cannot be inlined would show up where nothing else here would.
     static REMAINING: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
@@ -83,7 +84,10 @@ pub(crate) fn spend_safepoint() -> bool {
 
 /// A loop went round again.
 ///
-/// Emitted by code generation at every back-edge of a program that can spawn.
+/// Emitted by code generation at every back-edge of a program that can spawn,
+/// on the slow path of the load of [`crate::poll::khora_poll`]: reached only
+/// while a scheduler pool exists or some fiber is cancelled, because off a
+/// pool there is no budget and this does nothing.
 /// **A safepoint, not a cancellation point**: it cannot fail, nothing unwinds
 /// through it, and a fiber that yields here is not thereby cancellable. That
 /// distinction is what lets an infallible loop be preempted at all —
@@ -363,6 +367,10 @@ impl Scheduler {
         let locals: Vec<Arc<Mutex<VecDeque<Task>>>> =
             (0..workers).map(|_| Arc::new(Mutex::new(VecDeque::new()))).collect();
 
+        // Before any worker exists, because a worker grants a safepoint budget
+        // and a back-edge that has not been told a pool exists skips the
+        // safepoint. `crate::poll`.
+        crate::poll::pool_started();
         let shared = Arc::new(Shared {
             queued: Mutex::new(VecDeque::new()),
             locals,
@@ -604,6 +612,7 @@ impl Drop for Scheduler {
         for worker in self.workers.drain(..) {
             let _ = worker.join();
         }
+        crate::poll::pool_stopped();
     }
 }
 

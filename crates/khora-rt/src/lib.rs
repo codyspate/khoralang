@@ -167,6 +167,8 @@ mod migration;
 mod net;
 #[cfg(not(target_family = "wasm"))]
 mod nursery;
+#[cfg(not(target_family = "wasm"))]
+pub mod poll;
 mod print;
 #[cfg(not(target_family = "wasm"))]
 mod random;

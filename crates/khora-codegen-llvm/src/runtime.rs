@@ -54,6 +54,15 @@ pub const FAILED_WHICH: u64 = khora_rt::FAILED_WHICH as u64;
 /// must agree are one number.
 pub const STOPPED_WHICH: u64 = khora_rt::STOPPED_WHICH as u64;
 
+/// The global every loop back-edge and every `!` loads before asking the
+/// runtime anything. `khora_rt::poll` says what is in it.
+pub const POLL_WORD: &str = "khora_poll";
+
+/// The half of [`POLL_WORD`] a cancellation check reads: cancelled fibers
+/// still running. Taken from the runtime, because two numbers that must agree
+/// are one number.
+pub const POLL_CANCELLED: u64 = khora_rt::poll::POLL_CANCELLED;
+
 /// The exit status of a program that was cancelled and never stopped being.
 ///
 /// 128 + SIGINT, which is what a shell already means by "interrupted". A
@@ -336,6 +345,9 @@ pub struct Runtime<'ctx> {
     pub test_run: FunctionValue<'ctx>,
     /// `void khora_safepoint(void)`, at every loop back-edge.
     pub safepoint: FunctionValue<'ctx>,
+    /// `uint8_t khora_back_edge(void)`: the safepoint and the cancellation
+    /// question in one call, for a back-edge that asks both.
+    pub back_edge: FunctionValue<'ctx>,
     /// The same pair for `bench` blocks. Same signatures, because a bench body
     /// and a test body are the same shape; only the runner differs.
     pub bench_register: FunctionValue<'ctx>,
@@ -572,6 +584,7 @@ impl<'ctx> Runtime<'ctx> {
             ),
             test_run: declare("khora_test_run", i32t.fn_type(&[], false)),
             safepoint: declare("khora_safepoint", void.fn_type(&[], false)),
+            back_edge: declare("khora_back_edge", i8t.fn_type(&[], false)),
             bench_register: declare(
                 "khora_bench_register",
                 void.fn_type(&[ptr.into(), i64t.into(), ptr.into(), ptr.into()], false),

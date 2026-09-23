@@ -37,7 +37,7 @@
 //! word; now it loads a pointer.
 
 use std::cell::Cell;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::counters::COUNTER_ORDER;
@@ -62,11 +62,30 @@ pub(crate) struct SpanContext {
 pub(crate) struct Fiber {
     /// Only ever compared for equality. Never zero, so zero can mean "nobody".
     id: usize,
-    /// Whether this fiber has been asked to stop.
+    /// Whether this fiber has been asked to stop, and whether it has finished:
+    /// [`CANCELLED`] and [`RETIRED`], two bits of one word.
     ///
     /// Shared rather than owned, because a parent holding the handle sets it
     /// from outside.
-    cancelled: AtomicUsize,
+    ///
+    /// **One word, so that the flag and [`crate::poll`]'s count cannot
+    /// disagree.** The fiber is counted exactly while it is cancelled and not
+    /// retired, and every change to either bit is one compare-and-swap, so the
+    /// thread whose CAS moves the fiber into or out of that state is the one
+    /// that adjusts the count. With the flag and the count in two words,
+    /// `uncancel` could clear the flag, a racing `cancel` set it again and see
+    /// the fiber still counted, and `uncancel` then uncount it -- a fiber left
+    /// cancelled and uncounted, whose loops with no call in them never look.
+    ///
+    /// Retired is kept separately from cancelled because a fiber cancelled
+    /// *after* it finished -- a handle released or detached late, the ordinary
+    /// case -- must still read as cancelled but must not be counted, or nothing
+    /// would ever uncount it and every loop in the process would take the slow
+    /// path from then on.
+    state: AtomicU8,
+    /// The word this fiber is counted in. [`crate::poll::khora_poll`] except
+    /// in tests, which need a word no other test is changing under them.
+    poll: &'static AtomicU64,
     /// How deep this fiber is inside a region's finalizers.
     ///
     /// A count rather than a flag, because a finalizer that releases a region
@@ -136,13 +155,25 @@ pub(crate) struct Fiber {
     span: Mutex<SpanContext>,
 }
 
+/// The bit of [`Fiber`]'s state that says it has been asked to stop.
+const CANCELLED: u8 = 1;
+/// The bit that says it has finished. Never cleared.
+const RETIRED: u8 = 2;
+
+/// Whether a fiber in `state` is one [`crate::poll`] counts: cancelled, and
+/// still running.
+fn is_counted_state(state: u8) -> bool {
+    state & (CANCELLED | RETIRED) == CANCELLED
+}
+
 impl Fiber {
     /// The fiber a thread carries when nothing has been installed: the
     /// program's own computation.
     fn root() -> Fiber {
         Fiber {
             id: next_id(),
-            cancelled: AtomicUsize::new(0),
+            state: AtomicU8::new(0),
+            poll: &crate::poll::khora_poll,
             shielded: AtomicUsize::new(0),
             #[cfg(any(debug_assertions, feature = "fiber-audit"))]
             resuming: std::sync::atomic::AtomicBool::new(false),
@@ -168,10 +199,16 @@ impl Fiber {
     /// child's business, and a slot both could write would leave the parent
     /// holding a span it never entered.
     pub(crate) fn spawned() -> Arc<Fiber> {
+        Fiber::spawned_counting_in(&crate::poll::khora_poll)
+    }
+
+    /// [`Fiber::spawned`], counted in `poll` rather than the process's word.
+    fn spawned_counting_in(poll: &'static AtomicU64) -> Arc<Fiber> {
         let inherited = current(|spawner| spawner.span());
         Arc::new(Fiber {
             id: next_id(),
-            cancelled: AtomicUsize::new(0),
+            state: AtomicU8::new(0),
+            poll,
             shielded: AtomicUsize::new(0),
             #[cfg(any(debug_assertions, feature = "fiber-audit"))]
             resuming: std::sync::atomic::AtomicBool::new(false),
@@ -213,7 +250,7 @@ impl Fiber {
     }
 
     pub(crate) fn is_cancelled(&self) -> bool {
-        self.cancelled.load(COUNTER_ORDER) != 0
+        self.state.load(Ordering::Acquire) & CANCELLED != 0
     }
 
     /// Asks this fiber to stop. Idempotent: asking twice is asking once.
@@ -225,10 +262,47 @@ impl Fiber {
     /// blocked operation is made runnable so the fiber can unwind. Waking
     /// whatever it registered is what makes that true.
     pub(crate) fn cancel(&self) {
-        self.cancelled.store(1, COUNTER_ORDER);
+        self.set_cancelled();
         let parked = self.parked_on.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(moved) = parked.as_ref() {
             moved.notify_all();
+        }
+    }
+
+    /// Sets the [`CANCELLED`] bit, and counts this fiber in [`crate::poll`]
+    /// when that makes it one of the cancelled fibers still running.
+    ///
+    /// **The word is incremented before the CAS that makes the fiber counted,
+    /// and taken back if the CAS loses.** Whoever later uncounts it does so
+    /// only after a CAS that read the state this CAS wrote, so the subtraction
+    /// is ordered after the addition and the low half never goes below zero --
+    /// which in the shared word would borrow from the pool half and read as a
+    /// scheduler that does not exist. The cost of this order is a count one
+    /// too high for the width of a lost CAS, which sends a back-edge down the
+    /// slow path once and is otherwise harmless.
+    fn set_cancelled(&self) {
+        let mut seen = self.state.load(Ordering::Acquire);
+        loop {
+            if seen & CANCELLED != 0 {
+                return;
+            }
+            let next = seen | CANCELLED;
+            let counts = is_counted_state(next);
+            if counts {
+                crate::poll::count_cancelled(self.poll);
+            }
+            match self
+                .state
+                .compare_exchange(seen, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => return,
+                Err(now) => {
+                    if counts {
+                        crate::poll::uncount_cancelled(self.poll);
+                    }
+                    seen = now;
+                }
+            }
         }
     }
 
@@ -244,8 +318,57 @@ impl Fiber {
         *parked = None;
     }
 
+    /// Clears the [`CANCELLED`] bit, and takes this fiber off the count if it
+    /// was on it.
+    ///
+    /// **One CAS on the one word both the flag and the count follow.** With
+    /// them in two words, a `cancel` landing between this clearing the flag
+    /// and uncounting would set the flag again, see the fiber still counted,
+    /// and leave; the uncount then left a cancelled fiber off the count, and
+    /// its loops never looked. Here the CAS that clears the flag is the one
+    /// that decides the uncount, so a racing `cancel` either loses to it and
+    /// counts afresh, or wins and makes it retry.
     pub(crate) fn uncancel(&self) {
-        self.cancelled.store(0, COUNTER_ORDER);
+        let mut seen = self.state.load(Ordering::Acquire);
+        loop {
+            if seen & CANCELLED == 0 {
+                return;
+            }
+            match self.state.compare_exchange(
+                seen,
+                seen & !CANCELLED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    if is_counted_state(seen) {
+                        crate::poll::uncount_cancelled(self.poll);
+                    }
+                    return;
+                }
+                Err(now) => seen = now,
+            }
+        }
+    }
+
+    /// This fiber has finished, so no back-edge anywhere has a reason to look
+    /// for it again -- including after a cancellation that arrives late.
+    ///
+    /// Idempotent. Called by [`crate::fiber::khora_fiber_spawn`] the moment
+    /// the thunk returns, which is earlier than the `Drop` below would run:
+    /// the handle keeps the fiber alive for as long as anybody holds it, and
+    /// a server holds its listener's for the life of the process.
+    pub(crate) fn retire(&self) {
+        let before = self.state.fetch_or(RETIRED, Ordering::AcqRel);
+        if is_counted_state(before) {
+            crate::poll::uncount_cancelled(self.poll);
+        }
+    }
+
+    /// Whether [`crate::poll`] is counting this fiber as cancelled and running.
+    #[cfg(test)]
+    pub(crate) fn is_counted(&self) -> bool {
+        is_counted_state(self.state.load(Ordering::SeqCst))
     }
 
     /// Records that a frame gave up on a cancellation it could not carry.
@@ -293,6 +416,14 @@ impl Fiber {
 
 fn next_id() -> usize {
     NEXT.fetch_add(1, COUNTER_ORDER) + 1
+}
+
+/// A fiber nobody retired is uncounted when it goes: one the test or bench
+/// runner entered rather than spawned, or a thread's root at thread exit.
+impl Drop for Fiber {
+    fn drop(&mut self) {
+        self.retire();
+    }
 }
 
 thread_local! {
@@ -531,5 +662,219 @@ mod tests {
             first, second,
             "one worker carried both, so a thread-local id would have matched"
         );
+    }
+
+    // --- what `crate::poll` is told ------------------------------------------
+
+    /// A fresh word per test: tests run on threads of one process, and a count
+    /// another test is changing is not one this test can assert on.
+    fn word() -> &'static AtomicU64 {
+        Box::leak(Box::new(AtomicU64::new(0)))
+    }
+
+    fn counted(word: &AtomicU64) -> u64 {
+        word.load(Ordering::SeqCst)
+    }
+
+    /// Counted once however often it is asked, and uncounted when it finishes.
+    #[test]
+    fn a_cancelled_fiber_is_counted_once_until_it_finishes() {
+        let poll = word();
+        let fiber = Fiber::spawned_counting_in(poll);
+        assert_eq!(counted(poll), 0);
+        fiber.cancel();
+        fiber.cancel();
+        assert_eq!(counted(poll), 1, "asking twice is asking once");
+        fiber.retire();
+        assert_eq!(counted(poll), 0, "a finished fiber gives no back-edge a reason to look");
+        fiber.retire();
+        assert_eq!(counted(poll), 0, "and finishing is idempotent");
+    }
+
+    /// **The case a flag that stays set gets wrong.** A handle released or
+    /// detached after its fiber finished cancels a fiber that is not running;
+    /// counting it would leave the count up for the life of the process.
+    ///
+    /// Guards the [`RETIRED`] bit: finished stays finished. Red (`left: 1`)
+    /// when `retire` clears the cancelled bit instead of setting retired, the
+    /// reviewer's mutant M3.
+    #[test]
+    fn a_fiber_cancelled_after_it_finished_is_never_counted() {
+        let poll = word();
+        let fiber = Fiber::spawned_counting_in(poll);
+        fiber.retire();
+        fiber.cancel();
+        assert!(fiber.is_cancelled(), "the flag is still what was asked");
+        assert_eq!(counted(poll), 0);
+    }
+
+    /// `khora_cancel_reset` clears the flag, and the count with it.
+    #[test]
+    fn uncancelling_uncounts_and_a_second_cancel_counts_again() {
+        let poll = word();
+        let fiber = Fiber::spawned_counting_in(poll);
+        fiber.uncancel();
+        assert_eq!(counted(poll), 0, "uncancelling what was never cancelled takes nothing off");
+        fiber.cancel();
+        fiber.uncancel();
+        assert_eq!(counted(poll), 0);
+        fiber.cancel();
+        assert_eq!(counted(poll), 1);
+        fiber.retire();
+        assert_eq!(counted(poll), 0);
+    }
+
+    /// A fiber that is dropped without having been retired -- one entered by
+    /// the test or bench runner rather than spawned -- is uncounted then.
+    #[test]
+    fn dropping_a_counted_fiber_uncounts_it() {
+        let poll = word();
+        let fiber = Fiber::spawned_counting_in(poll);
+        fiber.cancel();
+        assert_eq!(counted(poll), 1);
+        drop(fiber);
+        assert_eq!(counted(poll), 0);
+    }
+
+    /// The program's own computation is what SIGTERM cancels, and it never
+    /// finishes, so only the count says a back-edge in `main` must look.
+    #[test]
+    fn the_root_is_counted_in_the_process_word() {
+        // Its own thread, so this thread's root is not left cancelled for the
+        // next test that runs on it.
+        std::thread::spawn(|| {
+            let before = crate::poll::khora_poll.load(Ordering::SeqCst);
+            current(|root| {
+                assert!(!root.is_spawned());
+                root.cancel();
+            });
+            let after = crate::poll::khora_poll.load(Ordering::SeqCst);
+            // Other tests on other threads may move the word too, but only
+            // by fibers of their own, and never below what they added.
+            assert!(
+                after & crate::poll::POLL_CANCELLED > 0 && after != before,
+                "the root's cancellation is counted (before {before:#x}, after {after:#x})"
+            );
+            current(|root| root.uncancel());
+        })
+        .join()
+        .expect("the thread");
+    }
+
+    /// **A cancel racing the fiber's finish.** Whichever wins, the count ends
+    /// at zero -- never stuck above it, and never below, which in the shared
+    /// word would borrow from the pool half and read as a scheduler that does
+    /// not exist.
+    ///
+    /// Red (`left: 2000`) when [`RETIRED`] is dropped from `retire` (mutant M3).
+    /// Against the earlier two-word protocol it also caught a `retire` that
+    /// checked the state and then acted on it in two steps, but only with a
+    /// `yield_now` widening the gap between them (mutant M2); unwidened, that
+    /// mutant passed five runs in five. `retire` is now one `fetch_or`, which
+    /// has no gap to widen.
+    #[test]
+    fn a_cancel_racing_the_finish_leaves_the_count_at_zero() {
+        const FIBERS: usize = 2000;
+        let poll = word();
+        let fibers: Vec<Arc<Fiber>> =
+            (0..FIBERS).map(|_| Fiber::spawned_counting_in(poll)).collect();
+        let cancelling = fibers.clone();
+        let canceller = std::thread::spawn(move || {
+            for fiber in &cancelling {
+                fiber.cancel();
+                fiber.uncancel();
+                fiber.cancel();
+            }
+        });
+        for fiber in &fibers {
+            fiber.retire();
+            assert!(counted(poll) <= FIBERS as u64, "the count went below zero");
+        }
+        canceller.join().expect("the canceller");
+        assert_eq!(counted(poll), 0, "every fiber finished, so nothing is counted");
+        drop(fibers);
+        assert_eq!(counted(poll), 0, "and dropping them takes nothing further off");
+    }
+
+    /// **Cancel racing uncancel on one fiber, in lockstep.** With the flag and
+    /// the count in two words, `uncancel` could clear the flag, `cancel` set it
+    /// again and see the fiber still counted, and then `uncancel` uncount it:
+    /// a fiber cancelled and not counted, whose call-free loops never look.
+    /// About 2% of rounds did that. A batch of many fibers races too loosely
+    /// to hit it, which is why this is one fiber, many times.
+    ///
+    /// Whatever order the two land in, the flag and the count must agree.
+    #[test]
+    fn cancel_racing_uncancel_leaves_flag_and_count_agreeing() {
+        use std::sync::atomic::AtomicUsize as Gen;
+        const ROUNDS: usize = 300_000;
+        let poll = word();
+        let fiber = Fiber::spawned_counting_in(poll);
+        let go = Arc::new(Gen::new(0));
+        let done = Arc::new(Gen::new(0));
+        let (other, go2, done2) = (fiber.clone(), go.clone(), done.clone());
+        let canceller = std::thread::spawn(move || {
+            for round in 1..=ROUNDS {
+                while go2.load(Ordering::Acquire) < round {
+                    std::hint::spin_loop();
+                }
+                other.cancel();
+                done2.fetch_add(1, Ordering::AcqRel);
+            }
+        });
+        let (mut missed, mut phantom) = (0usize, 0usize);
+        for round in 1..=ROUNDS {
+            fiber.cancel();
+            go.store(round, Ordering::Release);
+            fiber.uncancel();
+            while done.load(Ordering::Acquire) < round {
+                std::hint::spin_loop();
+            }
+            match (fiber.is_cancelled(), fiber.is_counted()) {
+                (true, false) => missed += 1,
+                (false, true) => phantom += 1,
+                (true, true) | (false, false) => {}
+            }
+            assert_eq!(
+                counted(poll),
+                u64::from(fiber.is_counted()),
+                "the word disagrees with the fiber in round {round}"
+            );
+        }
+        canceller.join().expect("the canceller");
+        assert_eq!((missed, phantom), (0, 0), "(cancelled and uncounted, counted and not cancelled)");
+    }
+
+    /// **Two cancellers of one fiber at once.** Both may see it uncounted and
+    /// both add; only one may keep what it added, or the fiber is counted
+    /// twice and uncounted once, and the count never comes back down.
+    #[test]
+    fn two_cancellers_at_once_count_the_fiber_once() {
+        const FIBERS: usize = 20_000;
+        const CANCELLERS: usize = 4;
+        let poll = word();
+        let fibers: Arc<Vec<Arc<Fiber>>> =
+            Arc::new((0..FIBERS).map(|_| Fiber::spawned_counting_in(poll)).collect());
+        let start = Arc::new(std::sync::Barrier::new(CANCELLERS));
+        let cancellers: Vec<_> = (0..CANCELLERS)
+            .map(|_| {
+                let fibers = fibers.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    for fiber in fibers.iter() {
+                        fiber.cancel();
+                    }
+                })
+            })
+            .collect();
+        for canceller in cancellers {
+            canceller.join().expect("a canceller");
+        }
+        assert_eq!(counted(poll), FIBERS as u64, "each cancelled fiber counted exactly once");
+        for fiber in fibers.iter() {
+            fiber.retire();
+        }
+        assert_eq!(counted(poll), 0);
     }
 }

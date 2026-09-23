@@ -380,16 +380,37 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// no error channel cannot report one and does not need to: the flag is
     /// the state of record, and the caller's next cancellation point sees it.
     /// `docs/design/effect-runtime.md` §6.
+    ///
+    /// **Behind [`Self::poll`], so a `!` in a loop is not a call per trip.**
+    /// Only the count of cancelled fibers is consulted here, not the pool
+    /// half, because a `!` has no safepoint to take.
     pub(super) fn check_cancellation(&mut self, range: TextRange) {
         if !self.raises || self.aborted {
             return;
         }
         let _ = range;
+        let (slow, carry_on) = self.poll(Some(runtime::POLL_CANCELLED));
+        self.at(slow);
+        self.ask_about_cancellation();
+        self.br(carry_on);
+        self.at(carry_on);
+    }
 
+    /// Calls `khora_cancelled` and leaves if it says so. The slow half of
+    /// every cancellation check; the caller has already decided to ask.
+    pub(super) fn ask_about_cancellation(&mut self) {
+        let asker = self.be.rt.cancelled;
+        self.ask_about_cancellation_with(asker);
+    }
+
+    /// The same, asking `asker`, which answers 1 when this frame should stop.
+    /// `khora_back_edge` is the other one: the safepoint and this question in
+    /// one call.
+    pub(super) fn ask_about_cancellation_with(&mut self, asker: FunctionValue<'ctx>) {
         let asked = self
             .be
             .builder
-            .build_call(self.be.rt.cancelled, &[], "cancelled")
+            .build_call(asker, &[], "cancelled")
             .expect("reading the cancellation flag")
             .try_as_basic_value()
             .basic()

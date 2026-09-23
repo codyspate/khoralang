@@ -543,6 +543,10 @@ pub unsafe extern "C" fn khora_fiber_spawn(
                 // register gets read.
                 (None, None) => fatal("a fiber was spawned with no way to call its thunk"),
             };
+            // Before anything else that can take time, because until this
+            // runs every back-edge in the process pays for this fiber's
+            // cancellation. `Fiber::retire`.
+            stopping.retire();
             // **A cancellation the thunk absorbed is the fiber's answer**, and
             // the word it handed back is not.
             //

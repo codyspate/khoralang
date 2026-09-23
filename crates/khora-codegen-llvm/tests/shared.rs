@@ -429,3 +429,99 @@ pub fn main() -> () raises Stop {
 
     assert_eq!(out, "7 7\n5 5\nkh kh\n3 3\n9 9\n1 1\n");
 }
+
+// --- a blocking change function, cancelled ----------------------------------
+
+/// The program: a fiber whose change function waits on a channel nobody sends
+/// on, cancelled from outside.
+const BLOCKED_CHANGE: &str = "module main;
+import std::core::{print, Fiber, Shared, Channel, Option};
+import std::clock::{Clock};
+
+pub type Stop = | Stop;
+
+fn stuck(cell: Shared<Int>, ch: Channel<Int>) -> Int raises Stop {
+  Shared::update(cell, fn x => {
+    let got = Channel::receive(ch);
+    match got { Option::Some(v) => x + v, Option::None => x + 100 }
+  })
+}
+
+pub fn main() -> Int raises Stop {
+  with { clock: Clock::real() } {
+    let cell = Shared::of(0);
+    let ch: Channel<Int> = Channel::bounded(1);
+    let child = Fiber::spawn(fn () => stuck(cell, ch)!);
+    clock.sleep(100);
+    Fiber::cancel(child);
+    Fiber::wait(child)! catch { _ => () };
+    print(\"stopped; cell=${Shared::get(cell)}\");
+    0
+  }
+}
+";
+
+/// Compiles [`BLOCKED_CHANGE`] once and runs it on `backend` with a deadline,
+/// killing it if it has not finished.
+fn blocked_change_on(backend: &str) -> (Option<i32>, String) {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("shared_blocked_change");
+    harness::ensure_runtime();
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
+    static BUILT: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+    {
+        let mut built = BUILT.lock().unwrap_or_else(|e| e.into_inner());
+        if !*built {
+            let _ = std::fs::remove_file(&exe);
+            let db = KhoraDatabase::new();
+            let root = SourceRoot::new(&db, sources(&db, &dir, BLOCKED_CHANGE));
+            if let Err(errors) = khora_codegen_llvm::compile(&db, root, &exe) {
+                let messages: Vec<String> = errors.into_iter().map(|e| e.message).collect();
+                panic!("compiling failed:\n  {}", messages.join("\n  "));
+            }
+            *built = true;
+        }
+    }
+    let mut child = Command::new(&exe)
+        .env("KHORA_FIBERS", backend)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("the program should run");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        if let Some(status) = child.try_wait().expect("waiting") {
+            let mut out = String::new();
+            std::io::Read::read_to_string(&mut child.stdout.take().expect("stdout"), &mut out)
+                .expect("reading stdout");
+            return (status.code(), out.replace("\r\n", "\n"));
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "`{backend}`: the cancelled fiber never left its change function; \
+                 the cell's lock is held for ever"
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// **A change function blocked on a channel still gives way to a
+/// cancellation**, on both backends.
+///
+/// `Channel::receive` inside a change function gives up when its fiber is
+/// cancelled, answers `None`, and the update finishes, so the lock is
+/// released. Holding cancellation off for the length of a change function
+/// (a "shield") would turn this into a hang: the receive would never see the
+/// cancellation, and the cell's lock would be held for ever. That makes the
+/// shield something to design together with the blocking primitives, and this
+/// is the test that says so.
+#[test]
+fn a_cancelled_fiber_blocked_inside_update_stops_on_both_backends() {
+    for backend in ["threads", "scheduler"] {
+        let (code, out) = blocked_change_on(backend);
+        assert_eq!(code, Some(0), "`{backend}`: {out}");
+        assert_eq!(out.trim(), "stopped; cell=100", "`{backend}`");
+    }
+}

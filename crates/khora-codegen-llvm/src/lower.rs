@@ -668,11 +668,94 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// no error row runs to its end" is untouched, and the shapes that were
     /// wrong are the ones that had a channel and no place to look at it.
     fn back_edge(&mut self) {
-        self.safepoint();
-        // The range is unused by the check and there is no expression here to
-        // take one from: a back-edge is a place in the control flow rather
-        // than something somebody wrote.
-        self.check_cancellation(TextRange::empty(0.into()));
+        let asks_safepoint = !self.be.single_threaded;
+        let asks_cancel = self.raises && !self.aborted;
+        if !asks_safepoint && !asks_cancel {
+            return;
+        }
+        // One load, one branch, for both questions. `khora_rt::poll`.
+        let (slow, carry_on) = self.poll(None);
+        self.at(slow);
+        if asks_safepoint && asks_cancel {
+            // Both questions in one call: two calls behind the branch cost
+            // more than the two unconditional calls this replaced, on the
+            // scheduler backend, where the branch is always taken.
+            let both = self.be.rt.back_edge;
+            self.ask_about_cancellation_with(both);
+        } else if asks_cancel {
+            self.ask_about_cancellation();
+        } else {
+            self.safepoint();
+        }
+        self.br(carry_on);
+        self.at(carry_on);
+    }
+
+    /// Loads the poll word, and branches to a new slow block when it is
+    /// non-zero -- masked by `mask` first, when given -- and to a new
+    /// fast block otherwise. Returns both, positioned nowhere.
+    ///
+    /// **What this prevents: a loop paying for a call per trip to be told
+    /// nothing has happened.** Both questions a back-edge asks were calls,
+    /// and on a short loop the calls were most of the loop. The runtime keeps
+    /// the word zero whenever both answers are certainly "no".
+    ///
+    /// A relaxed load, not a plain one: a plain load of a global the loop
+    /// never writes is one LLVM may hoist out of the loop, and then the loop
+    /// never sees a cancellation at all. Relaxed is what stops the hoist, and
+    /// on x86-64 and AArch64 it is the same instruction as a plain load.
+    ///
+    /// The slow branch is weighted as never taken, so the fast path is the
+    /// fall-through and the slow block is laid out away from the loop body.
+    pub(super) fn poll(&mut self, mask: Option<u64>) -> (BasicBlock<'ctx>, BasicBlock<'ctx>) {
+        let i64t = self.be.ctx.i64_type();
+        let word = match self.be.module.get_global(runtime::POLL_WORD) {
+            Some(global) => global,
+            None => {
+                let global = self.be.module.add_global(i64t, None, runtime::POLL_WORD);
+                global.set_linkage(inkwell::module::Linkage::External);
+                global
+            }
+        };
+        let loaded = self
+            .be
+            .builder
+            .build_load(i64t, word.as_pointer_value(), "poll")
+            .expect("reading the poll word")
+            .into_int_value();
+        let instruction = loaded.as_instruction().expect("a load is an instruction");
+        instruction
+            .set_atomic_ordering(AtomicOrdering::Monotonic)
+            .expect("a relaxed load");
+        instruction.set_alignment(8).expect("a word-aligned load");
+        let looked = match mask {
+            Some(mask) => self
+                .be
+                .builder
+                .build_and(loaded, i64t.const_int(mask, false), "poll.masked")
+                .expect("masking the poll word"),
+            None => loaded,
+        };
+        let asks = self
+            .be
+            .builder
+            .build_int_compare(IntPredicate::NE, looked, i64t.const_zero(), "poll.asks")
+            .expect("testing the poll word");
+        let slow = self.block("poll.slow");
+        let carry_on = self.block("poll.no");
+        let branch = self
+            .be
+            .builder
+            .build_conditional_branch(asks, slow, carry_on)
+            .expect("branching on the poll word");
+        let weights = self.be.ctx.metadata_node(&[
+            self.be.ctx.metadata_string("branch_weights").into(),
+            self.be.ctx.i32_type().const_int(1, false).into(),
+            self.be.ctx.i32_type().const_int(1 << 20, false).into(),
+        ]);
+        let kind = self.be.ctx.get_kind_id("prof");
+        branch.set_metadata(weights, kind).expect("weighting the poll branch");
+        (slow, carry_on)
     }
 
     /// Gives the scheduler a chance to take the worker back.
@@ -684,6 +767,10 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// already proves that to decide whether reference counting is atomic, and
     /// the same proof says there is nobody to be fair to. So the usual program
     /// pays exactly nothing for this.
+    ///
+    /// In a program that can, it is emitted on [`Self::poll`]'s slow path, and
+    /// reached only while a scheduler pool exists or a fiber is cancelled. The
+    /// thread backend has no pool and so no budget to spend.
     fn safepoint(&mut self) {
         if self.be.single_threaded {
             return;

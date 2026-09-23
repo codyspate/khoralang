@@ -100,6 +100,16 @@ run, so the call is under this benchmark's noise floor. A tight loop over a
 large byte buffer would show more, and the inlined flag check is what to reach
 for then.
 
+**Now behind a load.** The back-edge reads one word, `khora_poll`
+(`crates/khora-rt/src/poll.rs`), and calls `khora_safepoint` only when it is
+non-zero. Its high half counts live scheduler pools, so on the thread backend,
+where there is no pool and so no budget, the call is gone from the fast path.
+On this backend it is not: the pool half is non-zero while the pool exists, and
+every back-edge still makes the call. Inlining the budget itself needs a
+per-worker counter that generated code can reach. That is a thread-local, and
+"`REMAINING` is the one exception" near the end of this document says why that
+is safe only behind a call. The measurements are in the cheappolls report.
+
 **A program that cannot spawn emits no safepoints at all.** The compiler
 already proves that to decide whether reference counting is atomic, and the
 same proof says there is nobody to be fair to.

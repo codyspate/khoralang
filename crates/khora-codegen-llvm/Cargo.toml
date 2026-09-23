@@ -69,3 +69,9 @@ path = "tests/portability.rs"
 [[test]]
 name = "targets"
 path = "tests/targets.rs"
+
+# Sets `KHORA_EMIT_LLVM` to read the loop it compiled, so it is in the same
+# position as the three above.
+[[test]]
+name = "polls"
+path = "tests/polls.rs"
