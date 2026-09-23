@@ -392,7 +392,12 @@ impl<'a> Checker<'a> {
                 // which is how `Shared::modify`'s closure could write a
                 // `Changed` without importing the name.
                 self.hint = Some(result.clone());
+                // A `catch` around the closure is not around its body: the body
+                // is emitted as a function of its own, with no handler on its
+                // stack.
+                let catching = std::mem::take(&mut self.catching);
                 let ret = self.infer(body);
+                self.catching = catching;
                 let needs = self.absorb_requires(before);
                 // The labels the body *named* go in alongside the ones its
                 // calls asked for. Sorted with them, because code generation
@@ -1241,7 +1246,9 @@ impl<'a> Checker<'a> {
         // window: a demand from an enclosing expression is not in it, and a
         // nested `catch` has already narrowed its own.
         let before = self.demanded.len();
+        self.catching += 1;
         let value = self.infer(inner);
+        self.catching -= 1;
 
         // **What the operand can raise, read before the arms are looked at.**
         // An arm that names a constructor carries its own type; an arm that

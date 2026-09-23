@@ -228,7 +228,31 @@ pub(crate) struct Checker<'a> {
     /// `docs/design/effects.md`. Recorded rather than checked inline because
     /// the inner expression is inferred before its parent is known.
     pub(crate) marked: Vec<ExprId>,
+    /// How many `catch` operands enclose the expression being inferred, in the
+    /// current function or closure — a closure starts again at zero, because
+    /// it is compiled as a function of its own and an outer `catch` is not
+    /// on its stack.
+    pub(crate) catching: usize,
+    /// Every `Fiber::wait` outside a `catch`, for [`Checker::check_waits`].
+    pub(crate) waits: Vec<Wait>,
     pub(crate) errors: Vec<HirError>,
+}
+
+/// A `Fiber::wait` that needs a failure channel to be stopped through.
+///
+/// **Kept apart from [`Demand`] because its row cannot answer the question.**
+/// The row is the child's, and an infallible child makes it `{}` -- so as a
+/// demand it asks for nothing, `check` passed, and the code generator (which
+/// branches on the waiter's cancellation whatever the child's row is) refused
+/// the same program at `build`. Two commands disagreeing about one program.
+pub(crate) struct Wait {
+    pub(crate) range: TextRange,
+    /// The row this call itself raises, so a fallible child -- already
+    /// reported by the ordinary row check -- is not reported twice.
+    pub(crate) row: Type,
+    /// The enclosing closure's `raises` row, or `None` in a function body,
+    /// whose row is its signature's.
+    pub(crate) closure: Option<Type>,
 }
 
 impl<'a> Checker<'a> {

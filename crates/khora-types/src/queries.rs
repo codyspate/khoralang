@@ -210,6 +210,8 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             open_requires: Vec::new(),
             hint: None,
             marked: Vec::new(),
+            catching: 0,
+            waits: Vec::new(),
             errors: Vec::new(),
         };
         checker.check_function();

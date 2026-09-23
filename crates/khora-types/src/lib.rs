@@ -283,7 +283,7 @@ impl std::fmt::Display for Type {
 }
 
 /// Whether a row asks for nothing at all — no labels and no tail.
-fn is_empty_row(ty: &Type) -> bool {
+pub(crate) fn is_empty_row(ty: &Type) -> bool {
     matches!(ty, Type::Row { fields, tail } if fields.is_empty() && tail.is_none())
 }
 
