@@ -159,6 +159,26 @@ pub(crate) struct Fiber {
 const CANCELLED: u8 = 1;
 /// The bit that says it has finished. Never cleared.
 const RETIRED: u8 = 2;
+/// The bit that says a cancellation may interrupt this fiber's cleanup too.
+/// Never cleared. [`Fiber::force`] has the reason for both.
+const FORCED: u8 = 4;
+
+/// Which of the two requests to stop is being delivered.
+///
+/// **An enum passed down rather than a second copy of every delivery path.**
+/// A stop reaches a fiber by several routes -- its handle, the open-nursery
+/// walk, a nursery's wait and release, the release of a handle it holds, and
+/// the scheduler's wake -- and a force must take every one, or a forced parent
+/// leaves a child in cleanup that nobody forced. (The signal watcher only ever
+/// cancels.) Matched exhaustively where it is turned into bits or a call, so a
+/// third kind of stop cannot be added without those saying what it does.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Stop {
+    /// Stop at the next cancellation point, letting cleanup finish.
+    Cancel,
+    /// The same, and cleanup itself stops at its next cancellation point.
+    Force,
+}
 
 /// Whether a fiber in `state` is one [`crate::poll`] counts: cancelled, and
 /// still running.
@@ -262,15 +282,91 @@ impl Fiber {
     /// blocked operation is made runnable so the fiber can unwind. Waking
     /// whatever it registered is what makes that true.
     pub(crate) fn cancel(&self) {
-        self.set_cancelled();
+        self.stop(Stop::Cancel);
+    }
+
+    /// Cancels this fiber if it is not cancelled already, and lets the
+    /// cancellation interrupt its cleanup as well.
+    ///
+    /// **What this prevents: a shutdown that waits for ever on a finalizer
+    /// that never finishes.** Cleanup runs [`crate::cancel::Shielded`], so a
+    /// finalizer blocked on a `receive` nobody will answer holds its fiber --
+    /// and a nursery holding that fiber, and whoever waits on the nursery --
+    /// indefinitely. Nothing inside the program could end that, because asking
+    /// again is deliberately not escalation: see [`Fiber::cancel`] and the
+    /// test `a_shielded_fiber_cancelled_twice_still_finishes_its_cleanup`.
+    ///
+    /// **A separate request rather than a second `cancel`**, because the
+    /// runtime itself cancels one fiber more than once in ordinary operation --
+    /// a nursery cancels a child when its parent is cancelled and again when a
+    /// sibling fails -- and "the second cancel forces" would cut cleanup short
+    /// by accident in exactly the programs that did nothing wrong.
+    ///
+    /// **[`FORCED`] is never cleared**, by [`Fiber::uncancel`] included, which
+    /// declines to clear [`CANCELLED`] on a forced fiber. A force is the one
+    /// escalation there is, and what escalates to it is a deadline that has
+    /// run out; if code in the forced fiber's own cleanup could reset it, the
+    /// deadline would have fired and the fiber would run on, which is the hang
+    /// this exists to end.
+    ///
+    /// What it costs: cleanup that is forced is cut off at its next
+    /// cancellation point, so a `ROLLBACK` in flight may not be sent. That is
+    /// what was asked for. It cannot reach a single foreign call or file-system
+    /// syscall already in progress, which returns first.
+    ///
+    /// Idempotent, and counted exactly as a cancellation is: once, while
+    /// running.
+    pub(crate) fn force(&self) {
+        self.stop(Stop::Force);
+    }
+
+    /// Delivers `stop`: sets the bits, then wakes whatever this fiber is
+    /// parked on.
+    ///
+    /// **Setting the flag is not enough on its own**, for either kind. A fiber
+    /// parked in `Channel::receive` would not reach a cancellation point to see
+    /// it, and a forced fiber parked in a shielded finalizer is the case force
+    /// exists for.
+    pub(crate) fn stop(&self, stop: Stop) {
+        let bits = match stop {
+            Stop::Cancel => CANCELLED,
+            Stop::Force => CANCELLED | FORCED,
+        };
+        self.set_bits(bits);
         let parked = self.parked_on.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(moved) = parked.as_ref() {
             moved.notify_all();
         }
     }
 
-    /// Sets the [`CANCELLED`] bit, and counts this fiber in [`crate::poll`]
-    /// when that makes it one of the cancelled fibers still running.
+    /// Whether [`Fiber::force`] has been called on this fiber.
+    pub(crate) fn is_forced(&self) -> bool {
+        self.state.load(Ordering::Acquire) & FORCED != 0
+    }
+
+    /// The stop a fiber holding a child should pass on to it, if any: what
+    /// this fiber was asked for, force outranking cancel.
+    pub(crate) fn pending_stop(&self) -> Option<Stop> {
+        let state = self.state.load(Ordering::Acquire);
+        if state & FORCED != 0 {
+            Some(Stop::Force)
+        } else if state & CANCELLED != 0 {
+            Some(Stop::Cancel)
+        } else {
+            None
+        }
+    }
+
+    /// Sets `bits` -- [`CANCELLED`], with or without [`FORCED`] -- and counts
+    /// this fiber in [`crate::poll`] when that makes it one of the cancelled
+    /// fibers still running.
+    ///
+    /// **Counted on the transition, not on the request.** Whether this CAS
+    /// counts is decided by comparing the state it read with the state it
+    /// writes, so forcing a fiber that is already cancelled adds nothing, and
+    /// forcing one that is not counts it exactly as a cancel would. A force
+    /// that counted on its own would leave the word one too high for the life
+    /// of the process.
     ///
     /// **The word is incremented before the CAS that makes the fiber counted,
     /// and taken back if the CAS loses.** Whoever later uncounts it does so
@@ -280,14 +376,14 @@ impl Fiber {
     /// scheduler that does not exist. The cost of this order is a count one
     /// too high for the width of a lost CAS, which sends a back-edge down the
     /// slow path once and is otherwise harmless.
-    fn set_cancelled(&self) {
+    fn set_bits(&self, bits: u8) {
         let mut seen = self.state.load(Ordering::Acquire);
         loop {
-            if seen & CANCELLED != 0 {
+            if seen & bits == bits {
                 return;
             }
-            let next = seen | CANCELLED;
-            let counts = is_counted_state(next);
+            let next = seen | bits;
+            let counts = !is_counted_state(seen) && is_counted_state(next);
             if counts {
                 crate::poll::count_cancelled(self.poll);
             }
@@ -319,7 +415,14 @@ impl Fiber {
     }
 
     /// Clears the [`CANCELLED`] bit, and takes this fiber off the count if it
-    /// was on it.
+    /// was on it -- unless the fiber has been forced, when it does nothing.
+    ///
+    /// **A forced fiber cannot be uncancelled.** Force is what a caller's
+    /// deadline escalates to once cleanup has overrun, and `khora_cancel_reset`
+    /// is reachable from code running *in* that cleanup; letting it clear the
+    /// flag would let the thing being stopped decide not to be. Clearing
+    /// [`CANCELLED`] while leaving [`FORCED`] set would be worse still: a
+    /// state that says "forced" and stops nowhere.
     ///
     /// **One CAS on the one word both the flag and the count follow.** With
     /// them in two words, a `cancel` landing between this clearing the flag
@@ -327,11 +430,12 @@ impl Fiber {
     /// and leave; the uncount then left a cancelled fiber off the count, and
     /// its loops never looked. Here the CAS that clears the flag is the one
     /// that decides the uncount, so a racing `cancel` either loses to it and
-    /// counts afresh, or wins and makes it retry.
+    /// counts afresh, or wins and makes it retry. A racing force is the same:
+    /// if it lands first, the retry sees [`FORCED`] and leaves.
     pub(crate) fn uncancel(&self) {
         let mut seen = self.state.load(Ordering::Acquire);
         loop {
-            if seen & CANCELLED == 0 {
+            if seen & CANCELLED == 0 || seen & FORCED != 0 {
                 return;
             }
             match self.state.compare_exchange(
@@ -392,8 +496,13 @@ impl Fiber {
     /// disagreed once already, and a blocking primitive that stops on a
     /// cancellation a cancellation point would ignore hands back "the channel
     /// is closed" for a channel that is open.
+    ///
+    /// **Forced cuts through the shield, and nothing else does.** Both bits
+    /// come from one load, so this never pairs a cancellation from before a
+    /// force with a force from after it.
     pub(crate) fn stops_here(&self) -> bool {
-        self.is_cancelled() && !self.is_shielded()
+        let state = self.state.load(Ordering::Acquire);
+        state & CANCELLED != 0 && (state & FORCED != 0 || !self.is_shielded())
     }
 
     /// Whether this fiber is running cleanup that must not be interrupted.
@@ -872,6 +981,154 @@ mod tests {
             canceller.join().expect("a canceller");
         }
         assert_eq!(counted(poll), FIBERS as u64, "each cancelled fiber counted exactly once");
+        for fiber in fibers.iter() {
+            fiber.retire();
+        }
+        assert_eq!(counted(poll), 0);
+    }
+
+    // --- force: the one stop that reaches into cleanup ----------------------
+
+    /// **The regression the separate force operation exists to prevent.** The
+    /// runtime cancels one fiber more than once in ordinary operation -- a
+    /// nursery cancels a child when its parent is cancelled and again when a
+    /// sibling fails -- so if a second cancel escalated, cleanup in programs
+    /// that did nothing wrong would be cut short.
+    ///
+    /// Through the real cancellation point, [`crate::cancel::khora_cancelled`],
+    /// and the real shield, rather than the predicate alone.
+    #[test]
+    fn a_shielded_fiber_cancelled_twice_still_finishes_its_cleanup() {
+        let fiber = Fiber::spawned_counting_in(word());
+        let _entered = enter(fiber.clone());
+        let _cleanup = crate::cancel::Shielded::new();
+        fiber.cancel();
+        fiber.cancel();
+        assert_eq!(crate::cancel::khora_cancelled(), 0, "a second cancel cut cleanup short");
+        assert!(!fiber.is_forced());
+    }
+
+    /// A forced fiber stops at its next cancellation point, shield or no
+    /// shield: that is the whole of what force adds.
+    #[test]
+    fn a_shielded_fiber_that_is_forced_stops_at_its_next_cancellation_point() {
+        let fiber = Fiber::spawned_counting_in(word());
+        let _entered = enter(fiber.clone());
+        let _cleanup = crate::cancel::Shielded::new();
+        fiber.cancel();
+        assert_eq!(crate::cancel::khora_cancelled(), 0, "cancelled and shielded: cleanup runs");
+        fiber.force();
+        assert_eq!(crate::cancel::khora_cancelled(), 1, "forced: cleanup stops too");
+        // Nested cleanup is still cleanup.
+        let _inner = crate::cancel::Shielded::new();
+        assert_eq!(crate::cancel::khora_cancelled(), 1);
+    }
+
+    /// Force on a fiber nobody cancelled is a cancellation as well, and is
+    /// counted as one -- once, however it is repeated or mixed with cancel.
+    #[test]
+    fn forcing_an_uncancelled_fiber_cancels_it_and_counts_it_once() {
+        let poll = word();
+        let fiber = Fiber::spawned_counting_in(poll);
+        fiber.force();
+        assert!(fiber.is_cancelled(), "force implies cancel");
+        assert!(fiber.is_forced());
+        assert_eq!(counted(poll), 1);
+        fiber.force();
+        fiber.cancel();
+        assert_eq!(counted(poll), 1, "forcing again, or cancelling after, adds nothing");
+        fiber.retire();
+        assert_eq!(counted(poll), 0);
+    }
+
+    /// Forcing a fiber that is already cancelled escalates it without counting
+    /// it a second time. Red (`left: 2`) if the count followed the request
+    /// rather than the transition into the counted state.
+    #[test]
+    fn forcing_a_cancelled_fiber_does_not_count_it_again() {
+        let poll = word();
+        let fiber = Fiber::spawned_counting_in(poll);
+        fiber.cancel();
+        fiber.force();
+        assert!(fiber.is_forced());
+        assert_eq!(counted(poll), 1);
+        fiber.retire();
+        assert_eq!(counted(poll), 0);
+    }
+
+    /// A finished fiber forced late is flagged and never counted, the same
+    /// rule [`a_fiber_cancelled_after_it_finished_is_never_counted`] pins for
+    /// cancel.
+    #[test]
+    fn a_fiber_forced_after_it_finished_is_never_counted() {
+        let poll = word();
+        let fiber = Fiber::spawned_counting_in(poll);
+        fiber.retire();
+        fiber.force();
+        assert!(fiber.is_forced() && fiber.is_cancelled());
+        assert_eq!(counted(poll), 0);
+    }
+
+    /// **FORCED never clears, and `uncancel` does not undo a force.** What
+    /// escalates to a force is a deadline that ran out; cleanup running in
+    /// the forced fiber that could reset it would make the deadline fire and
+    /// the fiber run on. So `uncancel` on a forced fiber leaves the
+    /// cancellation, the force and the count exactly as they were.
+    #[test]
+    fn uncancel_does_not_undo_a_force() {
+        let poll = word();
+        let fiber = Fiber::spawned_counting_in(poll);
+        let _entered = enter(fiber.clone());
+        let _cleanup = crate::cancel::Shielded::new();
+        fiber.force();
+        fiber.uncancel();
+        crate::cancel::khora_cancel_reset();
+        assert!(fiber.is_cancelled(), "uncancel cleared a forced fiber's cancellation");
+        assert!(fiber.is_forced(), "uncancel cleared the force");
+        assert_eq!(counted(poll), 1, "and the count agrees with the flag");
+        assert_eq!(crate::cancel::khora_cancelled(), 1, "and it still stops in cleanup");
+    }
+
+    /// Cancellers and forcers of one set of fibers at once: each fiber is
+    /// counted exactly once and ends up forced. The shape of a nursery whose
+    /// sibling failed while its parent was being forced.
+    ///
+    /// What this guards is a lost CAS: the count taken back when a
+    /// `compare_exchange` loses to a racing cancel or force. No deterministic
+    /// test can reach that window; this one and
+    /// `two_cancellers_at_once_count_the_fiber_once` are its only guards, and
+    /// together they are probabilistic: with the take-back removed, at least
+    /// one of the two was red in 4 of 5 runs here (5 of 5 for the reviewer).
+    /// It also catches counting on the request rather than the
+    /// transition -- red on every run for the reviewer, 3 of 10 batch runs for
+    /// me, so the load decides -- but
+    /// [`forcing_a_cancelled_fiber_does_not_count_it_again`] is the
+    /// deterministic guard for that.
+    #[test]
+    fn cancelling_and_forcing_at_once_count_each_fiber_once() {
+        const FIBERS: usize = 20_000;
+        let poll = word();
+        let fibers: Arc<Vec<Arc<Fiber>>> =
+            Arc::new((0..FIBERS).map(|_| Fiber::spawned_counting_in(poll)).collect());
+        let start = Arc::new(std::sync::Barrier::new(4));
+        let workers: Vec<_> = [Stop::Cancel, Stop::Force, Stop::Cancel, Stop::Force]
+            .into_iter()
+            .map(|stop| {
+                let fibers = fibers.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    for fiber in fibers.iter() {
+                        fiber.stop(stop);
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().expect("a worker");
+        }
+        assert_eq!(counted(poll), FIBERS as u64, "each fiber counted exactly once");
+        assert!(fibers.iter().all(|f| f.is_forced()), "every force landed");
         for fiber in fibers.iter() {
             fiber.retire();
         }

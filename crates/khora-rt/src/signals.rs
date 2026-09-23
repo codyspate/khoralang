@@ -208,7 +208,7 @@ fn watch(set: libc::sigset_t, id: usize) {
             // waiting on a child nobody told to stop; then the flag and the
             // wake; then the pool, for a fiber asleep on a deadline or a
             // socket that the flag alone would not reach.
-            crate::nursery::cancel_open_crews(id);
+            crate::nursery::cancel_open_crews(id, crate::current::Stop::Cancel);
             if let Some(main) = MAIN.get() {
                 main.cancel();
             }

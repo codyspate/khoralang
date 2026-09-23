@@ -203,6 +203,7 @@ enum Entry {
 // opens `impl<'ctx> Backend<'ctx>` again. The struct, `new`, `error`, `finish`
 // and the small predicates other modules ask about stay here.
 mod closures;
+pub(crate) mod can_stop;
 mod driver;
 mod entry;
 mod exports;

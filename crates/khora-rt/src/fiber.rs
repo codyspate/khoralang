@@ -25,7 +25,7 @@
 
 use super::*;
 use crate::coro::Task;
-use crate::current::{enter, Fiber};
+use crate::current::{enter, Fiber, Stop};
 use crate::scheduler::{park_current, Scheduler};
 use crate::heap::SINGLE_THREADED;
 use crate::heap::{khora_alloc, khora_drop};
@@ -118,17 +118,12 @@ pub(crate) enum Completion {
 }
 
 impl Completion {
-    /// Waits for the fiber to finish, whatever happens to the waiter.
+    /// Waits for the fiber to finish, and gives up when this fiber is asked to
+    /// stop.
     ///
-    /// **Does not return early on a cancellation**, and callers that must
-    /// want [`Completion::wait_or_cancelled`]. Kept for the one waiter that
-    /// has to finish waiting: a handle's release, which is where structured
-    /// concurrency comes from and must not leave a child running.
-    fn wait(&self) {
-        self.wait_until(&|| false);
-    }
-
-    /// The same, but gives up when this fiber is asked to stop.
+    /// The waiter that must not give up -- a handle's release, which is where
+    /// structured concurrency comes from -- uses
+    /// [`FiberState::wait_passing_on_a_force`] instead.
     ///
     /// **Without this a parked joiner cannot be cancelled.** `join` and `wait`
     /// used to block on a `JoinHandle` or a latch with no flag check and no
@@ -743,7 +738,8 @@ pub(crate) unsafe fn wait_or_cancel_for(fiber: *mut u8) -> bool {
 /// cancels its children and then waits for them, and a release that gave up on
 /// its own cancellation would let a child outlive the binding — which is the
 /// whole of what structured concurrency promises. So the cancellation this
-/// fiber is already carrying does not shorten this wait.
+/// fiber is already carrying does not shorten this wait. A force that arrives
+/// during it is passed on: [`FiberState::wait_passing_on_a_force`].
 ///
 /// # Safety
 ///
@@ -751,7 +747,51 @@ pub(crate) unsafe fn wait_or_cancel_for(fiber: *mut u8) -> bool {
 pub(crate) unsafe fn wait_for(fiber: *mut u8) {
     // SAFETY: the caller guarantees a live handle.
     let Some(state) = (unsafe { fiber_state(fiber) }) else { return };
-    state.completion.wait();
+    state.wait_passing_on_a_force();
+}
+
+impl FiberState {
+    /// Waits for this fiber to finish, without giving up, and passes on a
+    /// force the *waiter* receives while it waits.
+    ///
+    /// **What this prevents: a deadline that fires and ends nothing.** The
+    /// deadline's shape is "cancel now, force if still running later", so the
+    /// force nearly always lands on a fiber that is already in its cleanup,
+    /// parked here on a child whose own shielded cleanup is stuck. Delivering
+    /// the waiter's stop once, when the wait began, passed on the cancel it
+    /// had then and nothing after; the force set a bit on a fiber parked in a
+    /// wait that never looked at it, and the child was never told.
+    ///
+    /// So the wait gives up once, when the waiter is forced and has not yet
+    /// passed it on, forces the child, and goes back to waiting. The child
+    /// still finishes before this returns: a force shortens its cleanup, not
+    /// this wait. Transitive without more machinery, because the forced child
+    /// may itself be parked here on a grandchild, and is woken by the force to
+    /// do the same.
+    ///
+    /// **A give-up rather than keeping the child findable by
+    /// `cancel_open_crews`**, because one of the three waits that needs this --
+    /// a handle's release -- has no crew to keep, and a fix in the wait covers
+    /// all three with one piece of code. It costs one extra atomic load each
+    /// time the waiter looks again: on every wake, and on a thread-backed
+    /// waiter also every [`crate::channel::LOOK_AGAIN`], the bound the wait
+    /// already had. On the scheduler the force's own wake (`stop_fiber`) is
+    /// what gets it looked at.
+    ///
+    /// `passed_on` is what makes it give up *once*: without it a forced waiter
+    /// would give up on every look and spin, re-forcing a child that is
+    /// already forced, until the child finished. That is wasted CPU rather
+    /// than a wrong answer, which is why no test catches its absence.
+    pub(crate) fn wait_passing_on_a_force(&self) {
+        let mut passed_on = false;
+        while self
+            .completion
+            .wait_until(&|| !passed_on && crate::current::current(|me| me.is_forced()))
+        {
+            deliver_to(self, Stop::Force);
+            passed_on = true;
+        }
+    }
 }
 
 /// Whether a finished fiber ended with an error, and takes the reporting on.
@@ -1043,7 +1083,55 @@ pub(crate) fn cancel_by_id(id: usize) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn khora_fiber_cancel(fiber: *mut u8) {
     // SAFETY: the caller guarantees a live handle.
+    unsafe { deliver(fiber, Stop::Cancel) }
+}
+
+/// Asks a fiber to stop at its next cancellation point **even inside its
+/// cleanup**, and passes the same request to every child of its nurseries.
+///
+/// What [`khora_fiber_cancel`] cannot do, and on purpose: cancelling a fiber
+/// that is already cancelled changes nothing, so its shielded finalizers run to
+/// completion however many times it is asked. A finalizer that blocks for ever
+/// therefore holds the fiber, and whoever waits for it, for ever. This is the
+/// way out, and the only one; `crate::current::Fiber::force` has the full
+/// argument, including why it is never undone.
+///
+/// Cancels the fiber too if nobody had. Idempotent. Returns immediately.
+///
+/// What it costs is what was asked for: cleanup cut off part-way, so a
+/// `ROLLBACK` may not be sent. A single foreign call or file-system syscall
+/// already in progress still runs to its end first.
+///
+/// # Safety
+///
+/// `fiber` must be a live object from [`khora_fiber_spawn`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_fiber_force(fiber: *mut u8) {
+    // SAFETY: the caller guarantees a live handle.
+    unsafe { deliver(fiber, Stop::Force) }
+}
+
+/// Delivers `stop` to a fiber by handle, and to its nurseries' children.
+///
+/// **One path for both kinds of stop**, because a force that took a shorter
+/// route than a cancel would miss whichever child the shorter route skips --
+/// and a forced parent whose child's cleanup is still shielded is still
+/// waiting on that child.
+///
+/// # Safety
+///
+/// `fiber` must be a live object from [`khora_fiber_spawn`].
+pub(crate) unsafe fn deliver(fiber: *mut u8, stop: Stop) {
+    // SAFETY: the caller guarantees a live handle.
     let Some(state) = (unsafe { fiber_state(fiber) }) else { return };
+    deliver_to(state, stop);
+}
+
+/// [`deliver`], to the state behind a handle rather than the handle.
+///
+/// For [`khora_fiber_release`], which has taken the state out of its handle
+/// before it waits, and still has to be able to pass a force on to it.
+fn deliver_to(state: &FiberState, stop: Stop) {
     // **Its nurseries' children go with it, here.** A fiber whose body is a
     // nursery does not finish until its children do, so flagging it alone asks
     // it to stop and makes stopping impossible: it is blocked joining a child
@@ -1051,7 +1139,7 @@ pub unsafe extern "C" fn khora_fiber_cancel(fiber: *mut u8) {
     // join returns. Delivered at the cancellation rather than waited for --
     // `khora_fibers_wait`'s between-rounds check cannot see a cancellation that
     // arrives mid-round, which is every cancellation that matters.
-    crate::nursery::cancel_open_crews(state.fiber.id());
+    crate::nursery::cancel_open_crews(state.fiber.id(), stop);
     if on_the_scheduler() {
         // Through the pool rather than the flag alone. Setting the flag is
         // what the child observes at its next `!`; waking it is what gets it
@@ -1059,9 +1147,12 @@ pub unsafe extern "C" fn khora_fiber_cancel(fiber: *mut u8) {
         // sit on the cancellation until whatever it was waiting for happened
         // anyway. A thread blocked in a syscall has no equivalent, which is
         // one more thing the scheduler buys.
-        fibers().cancel_fiber(state.fiber.id());
+        fibers().stop_fiber(state.fiber.id(), stop);
     } else {
-        state.fiber.cancel();
+        match stop {
+            Stop::Cancel => state.fiber.cancel(),
+            Stop::Force => state.fiber.force(),
+        }
     }
 }
 
@@ -1072,13 +1163,20 @@ pub unsafe extern "C" fn khora_fiber_cancel(fiber: *mut u8) {
 /// cannot outlive the binding that holds it. Put the handle in a region and the
 /// region waits; put it in a block and the block does.
 ///
-/// **A cancelled releaser asks the child to stop first**, which is what a
-/// nursery release already does. Without it, a fiber cancelled while holding a
+/// **A cancelled or forced releaser passes its stop on to the child first**,
+/// which is what a nursery release already does. Without it, a fiber cancelled while holding a
 /// child's handle stops at its next `!` and then blocks here for the child's
 /// full remaining run: the cancellation is observed promptly and the program
 /// still waits out the work it asked to abandon. Measured at 2000 ms against a
 /// 2000 ms child on both backends, which is the same number roadmap §16.7
-/// recorded for the wait itself.
+/// recorded for the wait itself. A force that reaches the releaser *during*
+/// the wait is passed on as well: [`FiberState::wait_passing_on_a_force`].
+///
+/// **What it stops need not be the releaser's own child.** A handle can sit
+/// in a structure, and whichever fiber drops the last reference to that
+/// structure releases the handle -- so a forced fiber that happens to be the
+/// last holder forces a fiber somebody else spawned. That is accepted: the
+/// last holder is the owner, and a cancel has always behaved the same way.
 ///
 /// The flag rather than `stops_here`: this runs inside a region release, which
 /// is [`crate::cancel::Shielded`], so the masked reading would say no every
@@ -1094,10 +1192,13 @@ pub unsafe extern "C" fn khora_fiber_release(fiber: *mut u8) {
     if fiber.is_null() {
         return;
     }
-    if crate::current::current(|holder| holder.is_cancelled()) {
-        // SAFETY: the caller guarantees a live handle, and cancelling reads
+    // **A forced releaser forces**, for the reason `deliver` gives: this is the
+    // other road a stop takes from a fiber to a child it holds, and it runs in
+    // the releaser's cleanup -- exactly where a force has to reach.
+    if let Some(stop) = crate::current::current(|holder| holder.pending_stop()) {
+        // SAFETY: the caller guarantees a live handle, and delivering reads
         // the state without taking it.
-        unsafe { khora_fiber_cancel(fiber) };
+        unsafe { deliver(fiber, stop) };
     }
     // SAFETY: the caller guarantees a live handle; the field holds what
     // `khora_fiber_spawn` wrote, and nothing else reads it after this.
@@ -1110,7 +1211,7 @@ pub unsafe extern "C" fn khora_fiber_release(fiber: *mut u8) {
         slot.write(std::ptr::null_mut());
 
         let state = Box::from_raw(state);
-        state.completion.wait();
+        state.wait_passing_on_a_force();
         // **After the wait, so there is an answer to discard.** A fiber whose
         // handle is released without anybody ever joining it is the one case
         // that still gets a word on stderr -- the error would otherwise leave

@@ -576,9 +576,16 @@ impl Scheduler {
     /// another chance to look; the fiber still observes the cancellation at its
     /// own next cancellation point.
     pub(crate) fn cancel_fiber(&self, fiber: usize) {
+        self.stop_fiber(fiber, crate::current::Stop::Cancel);
+    }
+
+    /// [`Scheduler::cancel_fiber`], for either kind of stop. The timers,
+    /// reactor and wake are the same for both, because a forced fiber asleep
+    /// in shielded cleanup is exactly the one that must be woken to see it.
+    pub(crate) fn stop_fiber(&self, fiber: usize, stop: crate::current::Stop) {
         let Some(state) = state_of(&self.shared, fiber) else { return };
 
-        state.cancel();
+        state.stop(stop);
         // Otherwise a hundred thousand cancelled sleepers hold the heap and
         // the watch list open.
         self.shared.timers.lock().expect("the timers").forget(fiber);

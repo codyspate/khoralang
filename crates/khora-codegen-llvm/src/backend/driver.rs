@@ -228,6 +228,14 @@ pub(super) fn build(
         }
     }
 
+    // **Report-only.** Which functions can reach a cancellation point, for
+    // the tagged calling convention that is not built yet. It changes nothing
+    // that is emitted, so it is not part of the build cache's key; a build the
+    // cache serves prints nothing.
+    if std::env::var_os("KHORA_CANCEL_T_REPORT").is_some() {
+        eprintln!("{}", super::can_stop::analyse(db, files, mono).summary());
+    }
+
     // Declare every definition before lowering any of them: a call site does
     // not know whether its callee has been emitted yet, and mutual recursion
     // means no ordering exists that would make it know.

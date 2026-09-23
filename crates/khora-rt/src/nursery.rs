@@ -73,9 +73,10 @@ const SWEEP_FLOOR: usize = 64;
 struct Crew(Mutex<Children>);
 
 // SAFETY: the handles are only ever read under this mutex, and the one thing
-// done to one from another thread -- `khora_fiber_cancel`, which sets an atomic
-// flag and wakes -- is safe from any thread. Crossing threads is the point: the
-// fiber cancelling a nursery is by definition not the fiber that opened it.
+// done to one from another thread -- `crate::fiber::deliver`, with either stop,
+// which sets atomic bits and wakes -- is safe from any thread. Crossing threads
+// is the point: the fiber stopping a nursery is by definition not the fiber
+// that opened it.
 unsafe impl Send for Crew {}
 unsafe impl Sync for Crew {}
 
@@ -121,18 +122,22 @@ fn closed(crew: &Arc<Crew>) {
     }
 }
 
-/// Cancels every child of every nursery `fiber` has open.
+/// Delivers `stop` to every child of every nursery `fiber` has open.
 ///
-/// Called by [`crate::fiber::khora_fiber_cancel`] as the cancellation is
-/// delivered. Transitive without recursing here: cancelling a child that is
-/// itself inside a nursery comes back through this function for that child.
+/// Called by [`crate::fiber::deliver`] as a cancellation or a force is
+/// delivered. Transitive without recursing here: stopping a child that is
+/// itself inside a nursery comes back through this function for that child,
+/// with the same `stop`. **A force has to take this path as well as a
+/// cancel**: a forced parent is blocked joining its children, so a child left
+/// in shielded cleanup because only its parent was forced keeps the parent
+/// exactly where the force was meant to get it out of.
 ///
 /// **Nothing is locked while a child is cancelled.** The handles are copied out
 /// from under both locks first. Cancelling reaches the scheduler, the timers and
 /// the reactor, and a child's own exit path takes the crew's lock to deregister
 /// itself — so cancelling while holding it is a deadlock that looks exactly like
 /// the hang this exists to fix.
-pub(crate) fn cancel_open_crews(fiber: usize) {
+pub(crate) fn cancel_open_crews(fiber: usize, stop: crate::current::Stop) {
     let crews: Vec<Arc<Crew>> = {
         let open = OPEN.lock().unwrap_or_else(|e| e.into_inner());
         open.iter()
@@ -152,7 +157,7 @@ pub(crate) fn cancel_open_crews(fiber: usize) {
         // SAFETY: a handle in `held` or `joining` is one the crew holds a
         // reference to; `joining` entries are removed before their round
         // releases them, so neither list can name a freed fiber.
-        unsafe { crate::fiber::khora_fiber_cancel(child) };
+        unsafe { crate::fiber::deliver(child, stop) };
     }
 }
 
@@ -362,7 +367,9 @@ fn record_failures(list: &Crew, count: i64) {
         crew.failed += count;
         // Only the first failure cancels. Later ones are arriving *because* of
         // it -- a sibling that stopped where it was told to and then failed on
-        // the way out -- and cancelling twice says nothing new.
+        // the way out -- and cancelling twice says nothing new: a second cancel
+        // is not escalation, which
+        // `a_shielded_fiber_cancelled_twice_still_finishes_its_cleanup` pins.
         if crew.failed > count {
             Vec::new()
         } else {
@@ -417,31 +424,29 @@ pub unsafe extern "C" fn khora_fibers_wait(fibers: *mut u8) -> i64 {
             return list.lock().unwrap_or_else(|e| e.into_inner()).failed;
         }
         // **And a round nobody is waiting on because *this* fiber was told to
-        // stop.** `docs/design/fibers.md` promises that cancelling a nursery
-        // cancels its children, transitively, and nothing else looks.
+        // stop.** Cancelling a nursery cancels its children, transitively.
         //
-        // **This covers only the cancellation that arrives between rounds, and
-        // that is not the common one.** A parent blocked in `wait_for` below is
-        // inside `JoinHandle::join` on the thread backend, which cannot be
-        // given a deadline, so a cancellation arriving then is not seen until
-        // the round it is waiting on completes -- and if the children are in
-        // `loop`s, it never does. The hang is still reachable: cancel a fiber
-        // that is already inside this call and it waits for ever.
-        //
-        // Closing it properly means cancelling at the point the cancellation is
-        // *delivered* rather than where it is noticed -- a fiber would have to
-        // know its open nurseries so `khora_fiber_cancel` could walk them --
-        // and that is a change to what a `Fiber` owns, with a lock order to get
-        // right between the fiber and the crew. It is not a repair.
+        // **This check covers only a stop that arrives between rounds.** One
+        // that arrives while this fiber is parked in `wait_for` below is
+        // delivered, not noticed: `cancel_open_crews` walks this crew's
+        // `joining` list at the moment of the cancel, and a force the waiter
+        // receives mid-wait is passed on by `wait_for` itself
+        // (`FiberState::wait_passing_on_a_force`).
         //
         // The children are still *waited* for after being cancelled. A nursery
         // that returned while one was winding up would not be structured, and
         // that is as true of a cancellation as it is of a failure.
         let stopping = crate::current::current(|fiber| fiber.stops_here());
+        // A forced waiter forces: the children are what it is waiting on.
+        let stop = if crate::current::current(|fiber| fiber.is_forced()) {
+            crate::current::Stop::Force
+        } else {
+            crate::current::Stop::Cancel
+        };
         if stopping || list.lock().unwrap_or_else(|e| e.into_inner()).failed > 0 {
             for Handed(fiber) in waiting.iter() {
                 // SAFETY: as below.
-                unsafe { khora_fiber_cancel(*fiber) };
+                unsafe { crate::fiber::deliver(*fiber, stop) };
             }
         }
         for index in 0..waiting.len() {
@@ -513,9 +518,17 @@ pub unsafe extern "C" fn khora_fibers_release(fibers: *mut u8) {
         // through `cancel_open_crews`, and must not find a crew going away.
         closed(&list);
         let mut round = std::mem::take(&mut list.lock().unwrap_or_else(|e| e.into_inner()).held);
+        // Cancelled whatever happened; forced when the fiber releasing it was,
+        // because this runs in that fiber's cleanup and the children are what
+        // it is waiting for.
+        let stop = if crate::current::current(|fiber| fiber.is_forced()) {
+            crate::current::Stop::Force
+        } else {
+            crate::current::Stop::Cancel
+        };
         while !round.is_empty() {
             for Handed(fiber) in round.iter() {
-                khora_fiber_cancel(*fiber);
+                crate::fiber::deliver(*fiber, stop);
             }
             for Handed(fiber) in round {
                 wait_for(fiber);
@@ -523,5 +536,431 @@ pub unsafe extern "C" fn khora_fibers_release(fibers: *mut u8) {
             }
             round = std::mem::take(&mut list.lock().unwrap_or_else(|e| e.into_inner()).held);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cancel::{khora_cancelled, Shielded};
+    use crate::fiber::{khora_fiber_cancel, khora_fiber_force, khora_fiber_join, khora_fiber_spawn};
+    use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    /// How long a child's cleanup waits to be stopped before it gives up and
+    /// reports that nothing reached it. A red run costs this much.
+    const PATIENCE: Duration = Duration::from_secs(5);
+
+    /// What a child in cleanup reports.
+    const RUNNING: usize = 0;
+    const STOPPED: usize = 1;
+    const RAN_OUT: usize = 2;
+
+    /// A closure object of type `() -> A`: one field, the code pointer. The
+    /// trampolines here ignore it, but `khora_fiber_spawn` reads it.
+    fn closure() -> *mut u8 {
+        let object = khora_alloc(std::mem::size_of::<*const u8>() as u64, 0);
+        // SAFETY: one field's worth of freshly allocated space, and nothing
+        // else holds the pointer yet.
+        unsafe {
+            object.add(KHORA_FIELD_OFFSET).cast::<*const u8>().write(std::ptr::null());
+        }
+        object
+    }
+
+    /// Spawns `thunk` as an infallible fiber with a non-pointer answer.
+    fn spawn(thunk: crate::PlainTrampoline1) -> *mut u8 {
+        // SAFETY: a live closure whose drop is the default, an infallible
+        // trampoline matching `plain`, and an answer that is not a pointer.
+        unsafe { khora_fiber_spawn(closure(), None, None, Some(thunk), false, None) }
+    }
+
+    /// Cleanup that stops only when a cancellation point says so: shielded,
+    /// as a region's finalizers are, and polling the real cancellation point.
+    fn shielded_cleanup(inside: &AtomicUsize, outcome: &AtomicUsize) {
+        let _cleanup = Shielded::new();
+        inside.store(1, Ordering::SeqCst);
+        let deadline = Instant::now() + PATIENCE;
+        while Instant::now() < deadline {
+            if khora_cancelled() == 1 {
+                outcome.store(STOPPED, Ordering::SeqCst);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        outcome.store(RAN_OUT, Ordering::SeqCst);
+    }
+
+    fn until(what: &str, done: impl Fn() -> bool) {
+        let deadline = Instant::now() + PATIENCE;
+        while !done() {
+            assert!(Instant::now() < deadline, "{what} never happened");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    extern "C" fn release_nursery(fibers: *mut u8) {
+        // SAFETY: only reached through `khora_drop`, with the last reference.
+        unsafe { khora_fibers_release(fibers) };
+    }
+
+    static NURSED_INSIDE: AtomicUsize = AtomicUsize::new(0);
+    static NURSED_OUTCOME: AtomicUsize = AtomicUsize::new(RUNNING);
+
+    extern "C" fn nursed_child(_code: *const u8, _body: *mut u8) -> u64 {
+        shielded_cleanup(&NURSED_INSIDE, &NURSED_OUTCOME);
+        0
+    }
+
+    extern "C" fn nursery_parent(_code: *const u8, _body: *mut u8) -> u64 {
+        let nursery = khora_fibers_open();
+        // SAFETY: a live nursery and a live handle, whose reference the
+        // nursery takes; then the nursery's last reference.
+        unsafe {
+            khora_fibers_adopt(nursery, spawn(nursed_child));
+            khora_fibers_wait(nursery);
+            khora_drop(nursery, Some(release_nursery));
+        }
+        0
+    }
+
+    /// **Force reaches a nursery's children.** A parent blocked waiting on a
+    /// nursery is forced, and the child it is waiting on -- in shielded
+    /// cleanup, where a cancel alone must not reach -- stops.
+    ///
+    /// Cancelled first, **twice**, and given time, so the test also says a
+    /// cancel was delivered and did not stop the cleanup. Twice because that
+    /// is the runtime's own shape: each cancel of the parent reaches the child
+    /// through `cancel_open_crews`, so a second cancel that escalated would
+    /// force a child here that nobody forced. Without this half, a child that
+    /// stopped on a cancel would pass for the wrong reason.
+    #[test]
+    fn a_forced_parent_stops_its_nursery_child_in_shielded_cleanup() {
+        let parent = spawn(nursery_parent);
+        until("the child reaching its cleanup", || NURSED_INSIDE.load(Ordering::SeqCst) == 1);
+
+        // SAFETY: a live handle, held by this test until it is joined.
+        unsafe {
+            khora_fiber_cancel(parent);
+            khora_fiber_cancel(parent);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(NURSED_OUTCOME.load(Ordering::SeqCst), RUNNING, "a cancel cut cleanup short");
+
+        let forced = Instant::now();
+        // SAFETY: as above.
+        unsafe { khora_fiber_force(parent) };
+        let mut answer = 0u64;
+        // SAFETY: as above, and a writable word; then the last reference.
+        unsafe {
+            khora_fiber_join(parent, &raw mut answer);
+            crate::fiber::khora_fiber_release(parent);
+        }
+        assert_eq!(
+            NURSED_OUTCOME.load(Ordering::SeqCst),
+            STOPPED,
+            "the force never reached the child (it waited {:?})",
+            forced.elapsed()
+        );
+    }
+
+    static HELD_INSIDE: AtomicUsize = AtomicUsize::new(0);
+    static HELD_OUTCOME: AtomicUsize = AtomicUsize::new(RUNNING);
+    static HELD_PARENT_READY: AtomicUsize = AtomicUsize::new(0);
+    static HELD_CHILD: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
+
+    extern "C" fn held_child(_code: *const u8, _body: *mut u8) -> u64 {
+        shielded_cleanup(&HELD_INSIDE, &HELD_OUTCOME);
+        0
+    }
+
+    extern "C" fn holding_parent(_code: *const u8, _body: *mut u8) -> u64 {
+        let child = spawn(held_child);
+        HELD_CHILD.store(child, Ordering::SeqCst);
+        HELD_PARENT_READY.store(1, Ordering::SeqCst);
+        // Until this fiber is forced, which is what the test does next.
+        let deadline = Instant::now() + PATIENCE;
+        while !crate::current::current(|me| me.is_forced()) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // Releasing the handle is what a frame's cleanup does with a fiber it
+        // holds, and it waits for the child.
+        // SAFETY: the only reference to a live handle.
+        unsafe { crate::fiber::khora_fiber_release(child) };
+        0
+    }
+
+    /// **Force reaches a child held by handle, through the handle's release.**
+    /// That release is the other road a stop takes from a fiber to its child,
+    /// and it runs in the holder's cleanup: a forced holder that passed on only
+    /// a cancel would wait for ever on a child whose own cleanup is shielded.
+    #[test]
+    fn a_forced_holder_forces_the_child_whose_handle_it_releases() {
+        let parent = spawn(holding_parent);
+        until("the parent holding its child", || HELD_PARENT_READY.load(Ordering::SeqCst) == 1);
+        until("the child reaching its cleanup", || HELD_INSIDE.load(Ordering::SeqCst) == 1);
+        // The child was cancelled once already, as a detached parent's child
+        // would be; that must not end its cleanup.
+        // SAFETY: the parent holds this handle until it is forced, below.
+        unsafe { khora_fiber_cancel(HELD_CHILD.load(Ordering::SeqCst)) };
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(HELD_OUTCOME.load(Ordering::SeqCst), RUNNING, "a cancel cut cleanup short");
+
+        // SAFETY: a live handle, held by this test until it is joined.
+        unsafe { khora_fiber_force(parent) };
+        let mut answer = 0u64;
+        // SAFETY: as above, and a writable word; then the last reference.
+        unsafe {
+            khora_fiber_join(parent, &raw mut answer);
+            crate::fiber::khora_fiber_release(parent);
+        }
+        assert_eq!(HELD_OUTCOME.load(Ordering::SeqCst), STOPPED, "the force never reached the child");
+    }
+
+    static LATE_WAIT_INSIDE: AtomicUsize = AtomicUsize::new(0);
+    static LATE_WAIT_OUTCOME: AtomicUsize = AtomicUsize::new(RUNNING);
+    static LATE_RELEASE_INSIDE: AtomicUsize = AtomicUsize::new(0);
+    static LATE_RELEASE_OUTCOME: AtomicUsize = AtomicUsize::new(RUNNING);
+
+    extern "C" fn late_wait_child(_code: *const u8, _body: *mut u8) -> u64 {
+        shielded_cleanup(&LATE_WAIT_INSIDE, &LATE_WAIT_OUTCOME);
+        0
+    }
+
+    extern "C" fn late_release_child(_code: *const u8, _body: *mut u8) -> u64 {
+        shielded_cleanup(&LATE_RELEASE_INSIDE, &LATE_RELEASE_OUTCOME);
+        0
+    }
+
+    /// A fiber forces itself, then -- as cleanup would -- opens a nursery and
+    /// adopts a child that goes into shielded cleanup of its own. The force
+    /// was delivered before the nursery existed, so `cancel_open_crews` never
+    /// saw it; only the nursery's own wait or release can pass it on.
+    fn forced_then_nursery(child: crate::PlainTrampoline1, inside: &AtomicUsize, wait: bool) {
+        crate::current::current(|me| me.force());
+        let _cleanup = Shielded::new();
+        let nursery = khora_fibers_open();
+        // SAFETY: a live nursery and a live handle, whose reference the
+        // nursery takes; then the nursery's last reference.
+        unsafe {
+            khora_fibers_adopt(nursery, spawn(child));
+            until("the child reaching its cleanup", || inside.load(Ordering::SeqCst) == 1);
+            if wait {
+                khora_fibers_wait(nursery);
+            }
+            khora_drop(nursery, Some(release_nursery));
+        }
+    }
+
+    extern "C" fn late_wait_parent(_code: *const u8, _body: *mut u8) -> u64 {
+        forced_then_nursery(late_wait_child, &LATE_WAIT_INSIDE, true);
+        0
+    }
+
+    extern "C" fn late_release_parent(_code: *const u8, _body: *mut u8) -> u64 {
+        forced_then_nursery(late_release_child, &LATE_RELEASE_INSIDE, false);
+        0
+    }
+
+    fn run_to_end(parent: *mut u8) {
+        let mut answer = 0u64;
+        // SAFETY: a live handle from `spawn`, a writable word; then its last
+        // reference.
+        unsafe {
+            khora_fiber_join(parent, &raw mut answer);
+            crate::fiber::khora_fiber_release(parent);
+        }
+    }
+
+    /// **A forced fiber waiting on a nursery forces its children**, including
+    /// children adopted after the force arrived.
+    #[test]
+    fn a_forced_fiber_waiting_on_a_nursery_forces_what_it_waits_for() {
+        run_to_end(spawn(late_wait_parent));
+        assert_eq!(LATE_WAIT_OUTCOME.load(Ordering::SeqCst), STOPPED, "the wait passed on only a cancel");
+    }
+
+    /// **A forced fiber releasing a nursery forces its children**: the release
+    /// is cleanup, and it waits for them.
+    #[test]
+    fn a_forced_fiber_releasing_a_nursery_forces_what_it_releases() {
+        run_to_end(spawn(late_release_parent));
+        assert_eq!(
+            LATE_RELEASE_OUTCOME.load(Ordering::SeqCst),
+            STOPPED,
+            "the release passed on only a cancel"
+        );
+    }
+
+    // --- a force that lands while the waiter is already in its cleanup -----
+    //
+    // The shape a deadline produces: cancel now, force once the cleanup has
+    // overrun. By then the cancelled fiber is inside a wait that does not give
+    // up, and a force that only walks `OPEN` finds nothing to pass on. Each
+    // test cancels, confirms the child is still running with the waiter
+    // inside that wait, and only then forces, so a child stopped by the cancel
+    // fails the test before the force is tried.
+
+    /// Until the waiter is cancelled, as a frame running on is until it
+    /// reaches its next cancellation point.
+    fn until_cancelled() {
+        let deadline = Instant::now() + PATIENCE;
+        while !crate::current::current(|me| me.is_cancelled()) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Cancel `parent`, wait until `inside` says it is in its cleanup's wait,
+    /// check `outcome` is still running, then force and wait for the end.
+    fn cancel_then_force_inside(
+        parent: *mut u8,
+        child_inside: &AtomicUsize,
+        waiting: &AtomicUsize,
+        outcome: &AtomicUsize,
+    ) {
+        until("the child reaching its cleanup", || child_inside.load(Ordering::SeqCst) == 1);
+        // SAFETY: a live handle from `spawn`, held by this test until the end.
+        unsafe { khora_fiber_cancel(parent) };
+        until("the parent reaching its wait", || waiting.load(Ordering::SeqCst) == 1);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(outcome.load(Ordering::SeqCst), RUNNING, "a cancel cut cleanup short");
+        // SAFETY: as above.
+        unsafe { khora_fiber_force(parent) };
+        run_to_end(parent);
+    }
+
+    static HANDLE_INSIDE: AtomicUsize = AtomicUsize::new(0);
+    static HANDLE_OUTCOME: AtomicUsize = AtomicUsize::new(RUNNING);
+    static HANDLE_RELEASING: AtomicUsize = AtomicUsize::new(0);
+
+    extern "C" fn handle_child(_code: *const u8, _body: *mut u8) -> u64 {
+        shielded_cleanup(&HANDLE_INSIDE, &HANDLE_OUTCOME);
+        0
+    }
+
+    extern "C" fn handle_holder(_code: *const u8, _body: *mut u8) -> u64 {
+        let child = spawn(handle_child);
+        until_cancelled();
+        let _cleanup = Shielded::new();
+        HANDLE_RELEASING.store(1, Ordering::SeqCst);
+        // SAFETY: the only reference to a live handle.
+        unsafe { crate::fiber::khora_fiber_release(child) };
+        0
+    }
+
+    /// Forced while already releasing a child's handle, which passed on only
+    /// the cancel it had when the release began.
+    #[test]
+    fn a_force_arriving_while_releasing_a_handle_reaches_the_child() {
+        cancel_then_force_inside(
+            spawn(handle_holder),
+            &HANDLE_INSIDE,
+            &HANDLE_RELEASING,
+            &HANDLE_OUTCOME,
+        );
+        assert_eq!(HANDLE_OUTCOME.load(Ordering::SeqCst), STOPPED, "the force never reached the child");
+    }
+
+    static CREW_INSIDE: AtomicUsize = AtomicUsize::new(0);
+    static CREW_OUTCOME: AtomicUsize = AtomicUsize::new(RUNNING);
+    static CREW_RELEASING: AtomicUsize = AtomicUsize::new(0);
+
+    extern "C" fn crew_child(_code: *const u8, _body: *mut u8) -> u64 {
+        shielded_cleanup(&CREW_INSIDE, &CREW_OUTCOME);
+        0
+    }
+
+    extern "C" fn crew_parent(_code: *const u8, _body: *mut u8) -> u64 {
+        let nursery = khora_fibers_open();
+        // SAFETY: a live nursery and a live handle, whose reference it takes.
+        unsafe { khora_fibers_adopt(nursery, spawn(crew_child)) };
+        until_cancelled();
+        let _cleanup = Shielded::new();
+        CREW_RELEASING.store(1, Ordering::SeqCst);
+        // SAFETY: the nursery's last reference.
+        unsafe { khora_drop(nursery, Some(release_nursery)) };
+        0
+    }
+
+    /// Forced while already releasing a nursery, whose crew the release took
+    /// out of `OPEN` before it began to wait.
+    #[test]
+    fn a_force_arriving_while_releasing_a_nursery_reaches_its_children() {
+        cancel_then_force_inside(spawn(crew_parent), &CREW_INSIDE, &CREW_RELEASING, &CREW_OUTCOME);
+        assert_eq!(CREW_OUTCOME.load(Ordering::SeqCst), STOPPED, "the force never reached the child");
+    }
+
+    static FULL_INSIDE: AtomicUsize = AtomicUsize::new(0);
+    static FULL_OUTCOME: AtomicUsize = AtomicUsize::new(RUNNING);
+    static FULL_ADOPTING: AtomicUsize = AtomicUsize::new(0);
+
+    extern "C" fn full_child(_code: *const u8, _body: *mut u8) -> u64 {
+        shielded_cleanup(&FULL_INSIDE, &FULL_OUTCOME);
+        0
+    }
+
+    extern "C" fn full_quick(_code: *const u8, _body: *mut u8) -> u64 {
+        0
+    }
+
+    extern "C" fn full_parent(_code: *const u8, _body: *mut u8) -> u64 {
+        let nursery = khora_fibers_open_bounded(1);
+        // SAFETY: a live nursery and live handles, whose references it takes;
+        // then the nursery's last reference.
+        unsafe {
+            khora_fibers_adopt(nursery, spawn(full_child));
+            until("the child reaching its cleanup", || FULL_INSIDE.load(Ordering::SeqCst) == 1);
+            FULL_ADOPTING.store(1, Ordering::SeqCst);
+            khora_fibers_adopt(nursery, spawn(full_quick));
+            khora_drop(nursery, Some(release_nursery));
+        }
+        0
+    }
+
+    /// Forced while blocked adopting into a full bounded nursery, waiting on
+    /// the oldest child, which is in neither `held` nor `joining`.
+    #[test]
+    fn a_force_arriving_while_adopting_into_a_full_nursery_reaches_the_oldest_child() {
+        cancel_then_force_inside(spawn(full_parent), &FULL_INSIDE, &FULL_ADOPTING, &FULL_OUTCOME);
+        assert_eq!(FULL_OUTCOME.load(Ordering::SeqCst), STOPPED, "the force never reached the child");
+    }
+
+    static DEEP_INSIDE: AtomicUsize = AtomicUsize::new(0);
+    static DEEP_OUTCOME: AtomicUsize = AtomicUsize::new(RUNNING);
+    static DEEP_RELEASING: AtomicUsize = AtomicUsize::new(0);
+
+    extern "C" fn deep_grandchild(_code: *const u8, _body: *mut u8) -> u64 {
+        shielded_cleanup(&DEEP_INSIDE, &DEEP_OUTCOME);
+        0
+    }
+
+    /// The middle fiber: holds the grandchild, and once cancelled releases it
+    /// in cleanup -- where the force must find it and pass it on again.
+    extern "C" fn deep_middle(_code: *const u8, _body: *mut u8) -> u64 {
+        let grandchild = spawn(deep_grandchild);
+        until_cancelled();
+        let _cleanup = Shielded::new();
+        // SAFETY: the only reference to a live handle.
+        unsafe { crate::fiber::khora_fiber_release(grandchild) };
+        0
+    }
+
+    extern "C" fn deep_top(_code: *const u8, _body: *mut u8) -> u64 {
+        let middle = spawn(deep_middle);
+        until_cancelled();
+        let _cleanup = Shielded::new();
+        DEEP_RELEASING.store(1, Ordering::SeqCst);
+        // SAFETY: the only reference to a live handle. Passes the cancel on to
+        // the middle fiber, which then begins releasing the grandchild.
+        unsafe { crate::fiber::khora_fiber_release(middle) };
+        0
+    }
+
+    /// **Transitive**: the fiber the force is forwarded to is itself inside a
+    /// release, and must forward it again, to the grandchild.
+    #[test]
+    fn a_force_arriving_in_cleanup_is_passed_on_to_grandchildren() {
+        cancel_then_force_inside(spawn(deep_top), &DEEP_INSIDE, &DEEP_RELEASING, &DEEP_OUTCOME);
+        assert_eq!(DEEP_OUTCOME.load(Ordering::SeqCst), STOPPED, "the force stopped a generation short");
     }
 }
