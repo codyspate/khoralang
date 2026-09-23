@@ -168,7 +168,8 @@ pub fn borrowed_arguments(owner: &str, method: &str) -> &'static [usize] {
         // *Releasing* a handle is what joins; that is the binding's business.
         (
             "Fiber",
-            "join" | "wait" | "cancel" | "detach" | "finished" | "cancelled" | "outcome",
+            "join" | "wait" | "cancel" | "abort" | "cancel_within" | "detach" | "finished"
+            | "cancelled" | "outcome",
         ) => RECEIVER,
         ("Fibers", "adopt" | "wait") => RECEIVER,
 
@@ -262,11 +263,20 @@ pub fn owns_a_reference(ty: &Type, unboxed: &khora_types::unboxed::Unboxed) -> b
 /// depends on the instantiation: `A` in `fn id<A>` is never boxed, and the
 /// same body at `A = List<Int>` holds a pointer that must be counted. Errata
 /// 24.
+///
+/// **`dispatches` is the code generator's own answer to "is this operator a
+/// call?"** -- whether monomorphization resolved the site to a function. An
+/// operator that is a call can be where a cancellation leaves the frame, and
+/// a plan that guessed from the operand's type got `String`'s `<` wrong: `==`
+/// on a `String` is a runtime compare, `<` is a call to `impl Ord`, and the
+/// guess leaked the moved binding on every cancel. Asking the same question
+/// codegen asks cannot drift from it.
 pub fn plan(
     body: &Body,
     types: &khora_types::BodyTypes,
     defined: &Defined,
     unboxed: &khora_types::unboxed::Unboxed,
+    dispatches: &dyn Fn(ExprId) -> bool,
 ) -> RcPlan {
     let mut planner = Planner {
         body,
@@ -278,6 +288,7 @@ pub fn plan(
         unwinds: false,
         unboxed,
         loop_exits: Vec::new(),
+        dispatches,
     };
     planner.plan_function();
     planner.settle_last_uses();
@@ -316,7 +327,17 @@ pub fn rc_plans(db: &dyn Db, file: SourceFile) -> Vec<(String, RcPlan)> {
             // freed twice.
             let body_types =
                 checked.bodies.iter().find(|(n, _)| n == name).map(|(_, t)| t).unwrap_or(&empty);
-            (name.clone(), plan(body, body_types, &defined, &unboxed))
+            // No monomorphization here. An operator on a machine word is an
+            // instruction; on anything else -- `String` included, whose `<` is
+            // a call -- it is taken to be one: the safe direction.
+            let is_call = |id: ExprId| match body.expr(id) {
+                Expr::Binary { lhs, .. } => !matches!(
+                    body_types.of(*lhs),
+                    Type::Int | Type::Fixed(_) | Type::Bool | Type::Unit | Type::Float
+                ),
+                _ => true,
+            };
+            (name.clone(), plan(body, body_types, &defined, &unboxed, &is_call))
         })
         .collect()
 }
@@ -367,6 +388,8 @@ struct Planner<'a> {
     unboxed: &'a khora_types::unboxed::Unboxed,
     /// What is live *after* each enclosing loop, innermost last.
     loop_exits: Vec<Live>,
+    /// Whether an operator site is a call to a function. [`plan`].
+    dispatches: &'a dyn Fn(ExprId) -> bool,
 }
 
 // One module per pass. An inherent impl may be split across modules of one

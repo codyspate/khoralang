@@ -51,10 +51,9 @@ impl<'ctx> Backend<'ctx> {
         let fn_type = if fallible {
             self.tagged_type().fn_type(&llvm_params, false)
         } else {
-            match &ret {
-                Type::Unit => self.ctx.void_type().fn_type(&llvm_params, false),
-                other => self.llvm_type(other)?.fn_type(&llvm_params, false),
-            }
+            // Tagged whatever the lambda does: its callers call through a
+            // pointer and cannot know which lambda they hold.
+            self.plain_tagged_type(&ret)?.fn_type(&llvm_params, false)
         };
 
         let f = self.module.add_function(&mangle(&symbol), fn_type, Some(Linkage::Internal));

@@ -2280,10 +2280,9 @@ impl<A, 'er> Share for Fiber<A, 'er> {}
 impl<A: Share, 'er> Fiber<A, 'er> {
   /// Runs `body` on a fiber of its own.
   ///
-  /// The thunk may fail, and a thunk that can is also one that can be
-  /// *stopped*: a cancellation travels out on the same tagged return an error
-  /// does, so a fiber with no failure row has no channel to be interrupted on
-  /// and runs to its end.
+  /// The fiber can be stopped whatever the thunk's row says: `Fiber::cancel`
+  /// stops it at its next loop, call or blocking operation, and its cleanup
+  /// runs on the way out.
   ///
   /// `A` must be `Share` for the reason every value crossing a fiber must be:
   /// it is computed on one and read on another, so a thing that cannot be held
@@ -2330,12 +2329,10 @@ impl<A: Share, 'er> Fiber<A, 'er> {
   /// comes from — so this is for the case where the waiting has to happen at a
   /// particular line rather than at the end of a scope.
   ///
-  /// **`raises 'er` because waiting can be interrupted.** A fiber parked here
-  /// is asked to stop like any other, and the `!` is where it stops — without
-  /// the row there would be no channel to say so on, and a parent waiting on a
-  /// slow child would not observe its own cancellation until the child ended.
-  /// The row is the waiter's, not the child's: this never takes the child's
-  /// answer, so a child that *failed* still says so where it always did.
+  /// **A cancellation point.** A fiber parked here is asked to stop like any
+  /// other, and stops here, whatever either fiber's row says. The row is the
+  /// child's: a waiter over a fallible child writes `!`, and one over a child
+  /// that cannot fail writes nothing.
   ///
   /// The child is not cancelled by the waiter giving up. Letting the handle go
   /// still waits, which is what keeps it from outliving the binding.
@@ -2477,19 +2474,59 @@ impl<A: Share, 'er> Fiber<A, 'er> {
 
   /// Asks the fiber to stop at its next cancellation point. Returns at once.
   ///
-  /// **It does not reach the work inside the fiber.** A cancellation is
-  /// delivered to a fiber and observed at its next `!`, loop back-edge or
-  /// wait. Work that does none of those — a tight arithmetic loop calling only
-  /// infallible functions — is not interrupted, because there is nowhere in it
-  /// to look.
+  /// A cancellation point is every loop iteration, every call to a function
+  /// that can reach one, every blocking `std` operation and every fiber or
+  /// channel operation. The fiber's `scoped` cleanup and `Region::defer`
+  /// finalizers run on the way out, to completion; `catch` does not see the
+  /// cancellation. A single foreign (C) call or file-system call already in
+  /// progress finishes first.
+  ///
+  /// **Asking twice is asking once.** Cleanup is not cut short by a second
+  /// cancel. `Fiber::abort` is the request that does, and `Fiber::cancel_within`
+  /// escalates to it after a deadline the caller chooses.
   ///
   /// A fiber whose body is a `nursery` cancels its children with it, so a
   /// cancelled fan-out stops rather than waiting on workers nobody told.
   ///
-  /// For work that has to be stoppable at a point of its own choosing, pass a
-  /// `Shared<Bool>` the work itself reads. `Fiber::detach` is the way out that
-  /// does not wait.
+  /// `Fiber::detach` is the way out that does not wait.
   pub fn cancel(self) -> ();
+
+  /// Stops the fiber at its next cancellation point **even inside its
+  /// cleanup**, and its nurseries' children with it.
+  ///
+  /// `cancel` lets cleanup run to completion, and asking again changes
+  /// nothing. So a finalizer that blocks for ever -- a `receive` nobody will
+  /// answer -- holds its fiber, and every fiber waiting on it, for ever. This
+  /// is the way to end that. It cancels the fiber too if nobody had. Asking
+  /// twice is asking once.
+  ///
+  /// **What it costs is what it says: cleanup cut off part-way.** A `ROLLBACK`
+  /// may not be sent; a connection may be dropped rather than returned. Reach
+  /// for it when waiting any longer is worse than that. A change function
+  /// running under `Shared::update` still finishes, because it holds the
+  /// cell's lock; a blocking call inside one gives up at once instead. A
+  /// single foreign (C) call or file-system call already in progress finishes
+  /// first.
+  ///
+  /// `Fiber::cancel_within` asks for this after a deadline you choose, which
+  /// is usually what a shutdown wants.
+  pub fn abort(self) -> ();
+
+  /// Cancels the fiber now, and aborts it if it is still running `millis`
+  /// milliseconds later.
+  ///
+  /// **A bound on how long cleanup may take, chosen by the caller.** Khora
+  /// has no default grace period: cleanup runs to completion unless something
+  /// in the program says otherwise, and this is that something.
+  ///
+  /// ```khora
+  /// Fiber::cancel_within(server, 5000);
+  /// Fiber::wait(server);   // at most five seconds of cleanup, then abort
+  /// ```
+  ///
+  /// Returns at once. A fiber that finishes before the deadline is not
+  /// aborted. The deadline is kept by a thread of its own until it expires.
+  pub fn cancel_within(self, millis: Int) -> ();
 
   /// Stops waiting for the fiber, and asks it to stop.
   ///
@@ -5472,14 +5509,11 @@ impl<A: Share> Channel<A> {
   /// rather than kept: a send with nowhere to put its value must not be the
   /// quietest possible leak.
   ///
-  /// **A cancellation point, which is what the row is for.** Waiting for room
-  /// is one of the two places in this library where a fiber can sit
-  /// indefinitely, so `Fiber::cancel` has to be able to reach it -- and a
-  /// cancellation travels out on a `raises` row or not at all. The row is a
-  /// variable because nothing here raises an error of its own; it carries the
-  /// caller's. A send that had to give up releases the value, the same as a
-  /// closed one.
-  pub fn send<'er>(self, value: A) -> Bool raises 'er;
+  /// **A cancellation point.** Waiting for room is one of the places a fiber
+  /// can sit indefinitely, so a cancellation reaches it here: the fiber stops
+  /// and the value is released, the same as on a closed channel. It needs no
+  /// `!`, because it cannot fail.
+  pub fn send(self, value: A) -> Bool;
 
   /// Takes a value out, waiting while the channel is empty.
   ///
@@ -5489,7 +5523,7 @@ impl<A: Share> Channel<A> {
   /// cancelled is always cancelled empty-handed: the runtime looks at the flag
   /// only once it has established the queue is empty, so a send arriving at
   /// the same moment still wins and the value is never dropped on the floor.
-  pub fn receive<'er>(self) -> Option<A> raises 'er;
+  pub fn receive(self) -> Option<A>;
 
   /// Takes a value if one is already there, and never waits.
   ///

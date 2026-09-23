@@ -93,7 +93,7 @@ fn wait(socket: Socket, interest: Interest, deadline: Option<std::time::Instant>
         // notice at, so it would retry, block, and park again. The scheduler
         // backend reached here; the thread backend never did, because
         // `block_until_ready` had no exit at all. Both halves are needed.
-        crate::scheduler::Waited::Ready => !crate::current::current(|f| f.stops_here()),
+        crate::scheduler::Waited::Ready => !crate::current::current(|f| f.gives_up_waiting()),
         crate::scheduler::Waited::TimedOut => false,
         // No worker to give back, so this thread does the waiting — and has to
         // honour the same deadline, because a program with no scheduler is

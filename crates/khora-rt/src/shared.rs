@@ -173,7 +173,12 @@ pub unsafe extern "C" fn khora_shared_set(cell: *mut u8, value: u64) {
 /// type, so the shim converting them to and from the one word every Khora value
 /// fits in is emitted per instantiation on the other side of the boundary.
 /// Only scalars and pointers cross here, as everywhere else.
-type Change = extern "C" fn(*const u8, *mut u8, u64) -> u64;
+///
+/// **The shim returns the change function's cancellation tag** and writes the
+/// new value through the pointer only when the tag is zero. A change function
+/// that came back with a tag computed nothing, and the word it would have
+/// written is a zero or a null nobody produced: see [`khora_shared_update`].
+type Change = extern "C" fn(*const u8, *mut u8, u64, *mut u64) -> u32;
 
 /// Reads, transforms and writes, all as one step.
 ///
@@ -183,27 +188,38 @@ type Change = extern "C" fn(*const u8, *mut u8, u64) -> u64;
 /// that updates the cell it is changing a deadlock, reported here rather than
 /// waited out.
 ///
-/// **`change` cannot fail, and that is what makes this safe rather than
-/// careful.** A function with no error row has no channel to be interrupted on
-/// — the same reason `khora_fiber_spawn` takes a null trampoline for one — so
-/// nothing can leave the critical section except by returning, and there is no
-/// path on which the lock is still held. Work that can fail belongs outside:
-/// compute it, then `set` the answer.
+/// **`change` cannot fail, and nothing inside it stops.** It runs
+/// [`crate::cancel::Pinned`]: no cancellation point in it acts, and a blocking
+/// call in it gives up with its "gave up" answer once the fiber is cancelled.
+/// Work that can fail belongs outside: compute it, then `set` the answer.
 ///
-/// Returns the value the cell ended up holding, as a new reference, so a caller
-/// can see what it did without a second read that another fiber could get
-/// between.
+/// **One thing can still come back without an answer: a `Fiber::join`, `wait`
+/// or `outcome` inside `change`** whose child was stopped, or which gave up
+/// because this fiber was. Those have no "gave up" value to carry on with, so
+/// the change function leaves on its cancellation tag. Then the change did not
+/// happen: the cell keeps the value it had, the lock is let go, and the tag is
+/// returned for the caller to leave on. Without that the cell would hold the
+/// zero -- for a `String`, a null the next read crashes on -- and the fiber
+/// would carry on as if it had not been stopped. The argument the change
+/// function was given is its own, and its unwind released it; the cell's
+/// reference was never handed over, so there is nothing to put back.
+///
+/// Writes the value the cell ended up holding through `out`, as a new
+/// reference, so a caller can see what it did without a second read that
+/// another fiber could get between. Returns 0, or the tag; `out` is not written
+/// when the tag is not 0.
 ///
 /// # Safety
 ///
 /// `cell` must be live, `change` a live Khora closure of type `(A) -> A`
-/// borrowed for the call, and `call` the shim matching it.
+/// borrowed for the call, `call` the shim matching it, and `out` writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn khora_shared_update(
     cell: *mut u8,
     change: *mut u8,
     call: Change,
-) -> u64 {
+    out: *mut u64,
+) -> u32 {
     // SAFETY: `cell` is live, which is this function's own documented
     // precondition and the one thing a C caller can get wrong.
     let Some(held) = (unsafe { held_of(cell) }) else {
@@ -225,10 +241,17 @@ pub unsafe extern "C" fn khora_shared_update(
     // SAFETY: the caller guarantees a live closure and a matching shim. A
     // closure's first field is its code pointer, which is the convention
     // generated code uses to call one.
-    let produced = unsafe {
+    let mut produced: u64 = 0;
+    let which = unsafe {
+        let _pinned = crate::cancel::Pinned::new();
         let code = *change.add(KHORA_FIELD_OFFSET).cast::<*const u8>();
-        call(code, change, cell.value)
+        call(code, change, cell.value, &raw mut produced)
     };
+    if which != 0 {
+        // The change did not happen. The cell still owns what it held.
+        held.holder.store(0, COUNTER_ORDER);
+        return which;
+    }
 
     let old = std::mem::replace(&mut cell.value, produced);
     if boxed {
@@ -242,15 +265,17 @@ pub unsafe extern "C" fn khora_shared_update(
     // SAFETY: the cell owned this and has just given it up. Outside the lock,
     // because a drop routine can reach a cell of its own.
     unsafe { release_word(old, boxed, glue) };
-    produced
+    // SAFETY: the caller guarantees `out` is writable.
+    unsafe { *out = produced };
+    0
 }
 
 /// How generated code hands over a change function that also answers.
 ///
 /// Two words come back where [`Change`] has one, and only scalars cross here,
-/// so the new state is returned and the answer is written through the pointer
-/// — the same shape the tagged-return trampolines use for the same reason.
-type Modify = extern "C" fn(*const u8, *mut u8, u64, *mut u64) -> u64;
+/// so the new state and the answer are both written through pointers and the
+/// tag is returned — the same shape as [`Change`], for the same reason.
+type Modify = extern "C" fn(*const u8, *mut u8, u64, *mut u64, *mut u64) -> u32;
 
 /// Reads, transforms, writes, and gives back something that is not the state.
 ///
@@ -263,6 +288,10 @@ type Modify = extern "C" fn(*const u8, *mut u8, u64, *mut u64) -> u64;
 /// So the change function returns both, and both are installed and handed back
 /// under the one lock.
 ///
+/// A change function that comes back with a cancellation tag changes nothing,
+/// exactly as in [`khora_shared_update`]: the cell keeps its value, the lock is
+/// let go, `answer` is not written, and the tag is returned.
+///
 /// # Safety
 ///
 /// `cell` must be live, `change` a live Khora closure borrowed for the call,
@@ -273,7 +302,7 @@ pub unsafe extern "C" fn khora_shared_modify(
     change: *mut u8,
     call: Modify,
     answer: *mut u64,
-) -> u64 {
+) -> u32 {
     // SAFETY: `cell` is live, which is this function's own documented
     // precondition and the one thing a C caller can get wrong.
     let Some(held) = (unsafe { held_of(cell) }) else {
@@ -291,11 +320,17 @@ pub unsafe extern "C" fn khora_shared_modify(
     }
 
     let mut produced_answer: u64 = 0;
+    let mut produced: u64 = 0;
     // SAFETY: the caller guarantees a live closure and a matching shim.
-    let produced = unsafe {
+    let which = unsafe {
+        let _pinned = crate::cancel::Pinned::new();
         let code = *change.add(KHORA_FIELD_OFFSET).cast::<*const u8>();
-        call(code, change, cell.value, &raw mut produced_answer)
+        call(code, change, cell.value, &raw mut produced, &raw mut produced_answer)
     };
+    if which != 0 {
+        held.holder.store(0, COUNTER_ORDER);
+        return which;
+    }
 
     let old = std::mem::replace(&mut cell.value, produced);
     held.holder.store(0, COUNTER_ORDER);
@@ -306,7 +341,7 @@ pub unsafe extern "C" fn khora_shared_modify(
     unsafe { release_word(old, boxed, glue) };
     // SAFETY: the caller guarantees `answer` is writable.
     unsafe { *answer = produced_answer };
-    produced
+    0
 }
 
 /// Releases a cell and the value in it.

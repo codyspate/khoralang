@@ -83,8 +83,46 @@ pub extern "C" fn khora_sleep(millis: i64) {
     if millis <= 0 {
         return;
     }
-    let patience = Duration::from_millis(millis as u64);
-    if !crate::scheduler::sleep_until(Instant::now() + patience) {
-        std::thread::sleep(patience);
+    // Already asked to stop: a sleep that began after the cancellation would
+    // otherwise wait out its whole length on the scheduler, where the wake is
+    // what ends a sleep and it has already happened.
+    if crate::current::current(|fiber| fiber.gives_up_waiting()) {
+        return;
     }
+    let until = Instant::now() + Duration::from_millis(millis as u64);
+    if !crate::scheduler::sleep_until(until) {
+        sleep_on_this_thread(until);
+    }
+}
+
+/// Blocks this thread until `until`, or until its fiber is cancelled.
+///
+/// **What this prevents: a cancelled fiber sleeping out the rest of a long
+/// sleep.** `std::thread::sleep` has no way to be woken, so a fiber on the
+/// thread backend cancelled one second into `clock.sleep(60_000)` stopped a
+/// minute later. The wait is on a condition variable registered with the
+/// fiber, which is what `Fiber::cancel` notifies, and
+/// [`crate::channel::LOOK_AGAIN`] bounds the cancellation that arrives
+/// between the look and the wait, the same way a parked `receive` does.
+///
+/// A cancelled sleep returns early and says nothing: the caller's next
+/// cancellation point is what stops the fiber. Inside a change function, where
+/// nothing stops, the sleep is simply shorter.
+fn sleep_on_this_thread(until: Instant) {
+    let moved = std::sync::Arc::new(std::sync::Condvar::new());
+    let lock = std::sync::Mutex::new(());
+    let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    crate::current::current(|fiber| fiber.park_on(&moved));
+    loop {
+        if crate::current::current(|fiber| fiber.gives_up_waiting()) {
+            break;
+        }
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let slice = left.min(crate::channel::LOOK_AGAIN);
+        guard = moved.wait_timeout(guard, slice).unwrap_or_else(|e| e.into_inner()).0;
+    }
+    crate::current::current(|fiber| fiber.unpark_from());
 }

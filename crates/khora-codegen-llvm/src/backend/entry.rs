@@ -277,18 +277,22 @@ impl<'ctx> Backend<'ctx> {
 
         let khora_main = self.functions[entry];
         let raises = self.signature_of(entry).is_some_and(|s| can_raise(&s));
+        // An infallible `main` that can reach a cancellation point hands back
+        // a cancellation tag, and a non-zero one can only be a cancellation:
+        // the root region's finalizers run and the program ends at 130, which
+        // is what a fallible `main` does.
+        let tagged = self.is_tagged(entry);
         let i32_type = self.ctx.i32_type();
         let main = self.entry_point();
         let entry = self.ctx.append_basic_block(main, "entry");
         self.builder.position_at_end(entry);
         // **Before `khora_begin`, which is what spawns the signal watcher.**
-        // A `main` with no `raises` row has no cancellation point anywhere
-        // below it, so a signal-borne cancellation would reach nothing and the
-        // program would run until `SIGKILL` -- where before the watcher it
-        // died at once. The watcher falls back to the default disposition when
+        // A `main` with no cancellation point anywhere below it would never
+        // observe a signal-borne cancellation, and the program would run until
+        // `SIGKILL`. The watcher falls back to the default disposition when
         // this has not been called, and the ordering is what makes the flag
         // true before there is a thread to read it.
-        if raises {
+        if raises || tagged {
             self.builder
                 .build_call(self.rt.root_can_raise, &[], "")
                 .expect("telling the runtime the root can carry a cancellation");
@@ -390,6 +394,31 @@ impl<'ctx> Backend<'ctx> {
 
             self.builder.position_at_end(ok);
             Some(word.into())
+        } else if tagged {
+            let pair = call
+                .try_as_basic_value()
+                .basic()
+                .expect("a tagged main returns a pair")
+                .into_struct_value();
+            let which = self
+                .builder
+                .build_extract_value(pair, 0, "which")
+                .expect("reading the tag")
+                .into_int_value();
+            let stopped = self
+                .builder
+                .build_int_compare(inkwell::IntPredicate::NE, which, i32_type.const_zero(), "cancelled")
+                .expect("testing the tag");
+            let cancelled = self.ctx.append_basic_block(main, "cancelled");
+            let ok = self.ctx.append_basic_block(main, "ok");
+            self.builder.build_conditional_branch(stopped, cancelled, ok).expect("branching on the tag");
+            self.builder.position_at_end(cancelled);
+            self.close_root_region();
+            self.builder
+                .build_return(Some(&i32_type.const_int(runtime::CANCELLED_EXIT, false)))
+                .expect("exiting on a cancellation");
+            self.builder.position_at_end(ok);
+            Some(self.builder.build_extract_value(pair, 1, "answer").expect("reading the answer"))
         } else {
             call.try_as_basic_value().basic()
         };

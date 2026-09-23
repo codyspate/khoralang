@@ -606,17 +606,51 @@ impl<'ctx> Backend<'ctx> {
         self.shaped(signature, false)
     }
 
-    /// The machine type of a function, as a Khora definition or as a foreign
-    /// declaration.
+    /// What an infallible Khora function returns when a cancellation may have
+    /// to leave through it: `{ which, answer }`, with the answer at its own
+    /// type.
     ///
-    /// The two differ in exactly one way, and it is the whole of decision 3 in
-    /// `docs/design/ffi.md`: **a `with` clause on a foreign function is a
-    /// permission, and nothing is appended to the call.** A C function has no
-    /// use for a Khora record of closures, so passing one would be meaningless;
-    /// but requiring it is how the boundary is governed, since nothing can open
-    /// a file without holding `Fs` and `Fs` is not something a function can
-    /// conjure.
-    pub(super) fn shaped(&self, signature: &Signature, foreign: bool) -> Option<FunctionType<'ctx>> {
+    /// **Not [`Self::tagged_type`]**, whose payload is a word: an inline
+    /// aggregate crossing as a word is spilled to the heap, which would put an
+    /// allocation on every `Iterator::next`. `()` is an `i64` zero here, as it
+    /// is everywhere a `()` has to be a value.
+    ///
+    /// `which` is 0 or [`runtime::CANCELLED_WHICH`]; an infallible function
+    /// has no error for it to be.
+    pub fn plain_tagged_type(&self, ret: &Type) -> Option<inkwell::types::StructType<'ctx>> {
+        let answer: BasicTypeEnum<'ctx> = match ret {
+            Type::Unit | Type::Never => self.ctx.i64_type().into(),
+            other => self.llvm_type(other)?,
+        };
+        Some(self.ctx.struct_type(&[self.ctx.i32_type().into(), answer], false))
+    }
+
+    /// Whether calls to the Khora function `name` hand back a cancellation
+    /// tag. False for C, for a fallible function (whose tag is its ordinary
+    /// [`Self::tagged_type`]) and for a function [`super::can_stop`] pruned.
+    pub fn is_tagged(&self, name: &str) -> bool {
+        self.is_defined(name)
+            && !self.untagged.contains(name)
+            && self.signature_of(name).is_some_and(|s| !can_raise(&s))
+    }
+
+    /// The machine type of the Khora function `name`, tagged unless it was
+    /// pruned.
+    pub(super) fn function_type_of(&self, name: &str, signature: &Signature) -> Option<FunctionType<'ctx>> {
+        if !can_raise(signature) && !self.untagged.contains(name) {
+            let params = self.parameter_types(signature, false)?;
+            return Some(self.plain_tagged_type(&signature.ret)?.fn_type(&params, false));
+        }
+        self.function_type(signature)
+    }
+
+    /// The parameters of a function's machine type: the written ones, then
+    /// its capabilities unless it is foreign. See [`Self::shaped`].
+    fn parameter_types(
+        &self,
+        signature: &Signature,
+        foreign: bool,
+    ) -> Option<Vec<BasicMetadataTypeEnum<'ctx>>> {
         let mut params: Vec<BasicMetadataTypeEnum<'ctx>> = Vec::new();
         for param in &signature.params {
             params.push(self.llvm_type(param)?.into());
@@ -629,6 +663,21 @@ impl<'ctx> Backend<'ctx> {
                 params.push(self.llvm_type(&capability)?.into());
             }
         }
+        Some(params)
+    }
+
+    /// The machine type of a function, as a Khora definition or as a foreign
+    /// declaration.
+    ///
+    /// The two differ in exactly one way, and it is the whole of decision 3 in
+    /// `docs/design/ffi.md`: **a `with` clause on a foreign function is a
+    /// permission, and nothing is appended to the call.** A C function has no
+    /// use for a Khora record of closures, so passing one would be meaningless;
+    /// but requiring it is how the boundary is governed, since nothing can open
+    /// a file without holding `Fs` and `Fs` is not something a function can
+    /// conjure.
+    pub(super) fn shaped(&self, signature: &Signature, foreign: bool) -> Option<FunctionType<'ctx>> {
+        let params = self.parameter_types(signature, foreign)?;
         // A function that can raise returns a tagged word instead of its
         // value: `{ i1 raised, i64 payload }`. One word suffices because every
         // Khora value is word-sized — the same fact `store_field` relies on —

@@ -318,6 +318,109 @@ impl<'ctx> Lower<'_, 'ctx> {
         self.return_tagged(none, payload);
     }
 
+    /// Returns `{ which, answer }` from an infallible function that carries a
+    /// cancellation tag. `answer` is at the function's own answer type, or an
+    /// `i64` zero for `()`.
+    pub(super) fn return_plain_tagged(&mut self, which: IntValue<'ctx>, answer: BasicValueEnum<'ctx>) {
+        let shape = self.plain_pair_type();
+        let value = self
+            .be
+            .builder
+            .build_insert_value(shape.get_undef(), which, 0, "t.which")
+            .expect("setting the tag");
+        let value = self
+            .be
+            .builder
+            .build_insert_value(value, answer, 1, "t.answer")
+            .expect("setting the answer");
+        self.be
+            .builder
+            .build_return(Some(&value.into_struct_value()))
+            .expect("returning a tagged answer");
+    }
+
+    /// The ordinary way out of a tagged infallible function: its answer, with
+    /// a zero tag. `()` and `Never` travel as the `i64` zero.
+    pub(super) fn return_plain_ok(&mut self, value: BasicValueEnum<'ctx>) {
+        let answer = match self.ret {
+            Type::Unit | Type::Never => self.be.ctx.i64_type().const_zero().into(),
+            _ => value,
+        };
+        let ok = self.be.ctx.i32_type().const_zero();
+        self.return_plain_tagged(ok, answer);
+    }
+
+    /// The pair this function returns. Only asked of a tagged function.
+    fn plain_pair_type(&self) -> inkwell::types::StructType<'ctx> {
+        self.function
+            .get_type()
+            .get_return_type()
+            .expect("a tagged function returns a pair")
+            .into_struct_type()
+    }
+
+    /// A zero of this function's answer type: the answer half of a pair whose
+    /// tag says there is no answer. Nobody reads it.
+    fn plain_answer_zero(&self) -> BasicValueEnum<'ctx> {
+        let field = self.plain_pair_type().get_field_type_at_index(1).expect("an answer field");
+        match field {
+            BasicTypeEnum::PointerType(p) => p.const_null().into(),
+            BasicTypeEnum::IntType(i) => i.const_zero().into(),
+            BasicTypeEnum::FloatType(f) => f.const_zero().into(),
+            BasicTypeEnum::StructType(s) => s.const_zero().into(),
+            BasicTypeEnum::ArrayType(a) => a.const_zero().into(),
+            BasicTypeEnum::VectorType(v) => v.const_zero().into(),
+            BasicTypeEnum::ScalableVectorType(v) => v.const_zero().into(),
+        }
+    }
+
+    /// Leaves on `which` if it is not 0, and carries on if it is.
+    ///
+    /// For a runtime call that hands back a change function's cancellation
+    /// tag rather than the pair a Khora callee returns: `Shared::update` and
+    /// `modify`. The same branch [`Self::split_cancelled`] emits, without an
+    /// answer half to take.
+    pub(super) fn leave_if_stopped(&mut self, which: IntValue<'ctx>) {
+        let stopped = self.raised(which);
+        let stop = self.block("t.cancelled");
+        let carry_on = self.block("t.ok");
+        self.be
+            .builder
+            .build_conditional_branch(stopped, stop, carry_on)
+            .expect("branching on the tag");
+        self.at(stop);
+        let none = self.be.ctx.i64_type().const_zero();
+        self.leave_with(which, none);
+        self.at(carry_on);
+    }
+
+    /// The branch after a call to a tagged infallible Khora function: unwind
+    /// if it came back cancelled, take the answer if it did not.
+    ///
+    /// The branch `split_tagged` emits, with the answer at its own type. It
+    /// needs no `raises` clause, because every frame that reaches it has a way
+    /// out: a fallible one's row, a tagged one's pair, or a `catch`, which
+    /// sends the cancellation on rather than handling it.
+    pub(super) fn split_cancelled(&mut self, result: BasicValueEnum<'ctx>, ret: &Type) -> BasicValueEnum<'ctx> {
+        let pair = result.into_struct_value();
+        let which = self
+            .be
+            .builder
+            .build_extract_value(pair, 0, "t.which")
+            .expect("reading the tag")
+            .into_int_value();
+        let answer = self
+            .be
+            .builder
+            .build_extract_value(pair, 1, "t.answer")
+            .expect("reading the answer");
+        self.leave_if_stopped(which);
+        match ret {
+            Type::Unit | Type::Never => self.be.unit_value(),
+            _ => answer,
+        }
+    }
+
     /// Returns `{ which, payload }` from a fallible function.
     ///
     /// `which` is 0 to return normally and otherwise the error's type id. It
@@ -373,25 +476,81 @@ impl<'ctx> Lower<'_, 'ctx> {
             .expect("testing the tag")
     }
 
+    /// Whether this frame has a way out for a cancellation: a `raises` row or
+    /// a cancellation tag.
+    ///
+    /// **False only in a function [`crate::backend::can_stop`] pruned**, and
+    /// such a function has no cancellation point to emit, by the definition of
+    /// pruned. So a false here that mattered would be a disagreement between
+    /// the analysis and the lowering, and the cost of one is a cancellation
+    /// observed a frame later rather than a miscompile.
+    pub(super) fn can_leave_on_a_cancel(&self) -> bool {
+        (self.raises || self.tagged) && !self.aborted
+    }
+
     /// Leaves at a cancellation point if a cancellation is pending.
     ///
-    /// Emitted only where this function can return a tagged value, because
-    /// that is the only channel a cancellation can travel on. A function with
-    /// no error channel cannot report one and does not need to: the flag is
-    /// the state of record, and the caller's next cancellation point sees it.
-    /// `docs/design/effect-runtime.md` §6.
+    /// Emitted wherever this function can hand a cancellation on, which is
+    /// every function that can reach a cancellation point:
+    /// [`Self::can_leave_on_a_cancel`].
     ///
     /// **Behind [`Self::poll`], so a `!` in a loop is not a call per trip.**
     /// Only the count of cancelled fibers is consulted here, not the pool
     /// half, because a `!` has no safepoint to take.
     pub(super) fn check_cancellation(&mut self, range: TextRange) {
-        if !self.raises || self.aborted {
+        if !self.can_leave_on_a_cancel() {
             return;
         }
         let _ = range;
         let (slow, carry_on) = self.poll(Some(runtime::POLL_CANCELLED));
         self.at(slow);
         self.ask_about_cancellation();
+        self.br(carry_on);
+        self.at(carry_on);
+    }
+
+    /// [`Self::check_cancellation`] after a runtime export that gives up on a
+    /// cancel, asked only when `result` is the answer a give-up can be.
+    /// `super::calls::GaveUp` says which that is. The answer is a machine
+    /// word or a raw pointer the runtime owns, so leaving drops nothing.
+    pub(super) fn check_cancellation_on(
+        &mut self,
+        gave_up: super::calls::GaveUp,
+        result: Option<BasicValueEnum<'ctx>>,
+        range: TextRange,
+    ) {
+        use super::calls::GaveUp;
+        if !self.can_leave_on_a_cancel() {
+            return;
+        }
+        let failed = match (gave_up, result) {
+            (GaveUp::Always, _) => None,
+            (GaveUp::Negative, Some(BasicValueEnum::IntValue(n))) => Some(
+                self.be
+                    .builder
+                    .build_int_compare(IntPredicate::SLT, n, n.get_type().const_zero(), "gave.up")
+                    .expect("testing for a failure"),
+            ),
+            (GaveUp::Null, Some(BasicValueEnum::PointerValue(p))) => Some(
+                self.be.builder.build_is_null(p, "gave.up").expect("testing for a null"),
+            ),
+            // An export on the list declared with an answer of a different
+            // shape: checking every answer would drop a real one, so this
+            // asks nothing, and the fiber stops a step later.
+            (GaveUp::Negative | GaveUp::Null, _) => return,
+        };
+        let Some(failed) = failed else {
+            self.check_cancellation(range);
+            return;
+        };
+        let ask = self.block("gave.up.ask");
+        let carry_on = self.block("gave.up.no");
+        self.be
+            .builder
+            .build_conditional_branch(failed, ask, carry_on)
+            .expect("branching on the failure value");
+        self.at(ask);
+        self.check_cancellation(range);
         self.br(carry_on);
         self.at(carry_on);
     }
@@ -454,7 +613,7 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// cancellation flag only once it has established there is nothing to
     /// take, so a send racing the cancellation still wins.
     pub(super) fn cancelled_empty_handed(&mut self, moved: IntValue<'ctx>, range: TextRange) {
-        if !self.raises || self.aborted {
+        if !self.can_leave_on_a_cancel() {
             return;
         }
         let empty = self.block("moved.not");
@@ -487,6 +646,19 @@ impl<'ctx> Lower<'_, 'ctx> {
                 which_phi.add_incoming(&[(&which, from)]);
                 word_phi.add_incoming(&[(&word, from)]);
                 self.br(handler);
+            }
+            // **A tagged frame hands the cancellation on.** Every Khora
+            // function that can reach a cancellation point returns a tag,
+            // whatever its row, so this is the ordinary way out of one: release
+            // the whole frame -- the regions among it, so their finalizers run
+            // -- and return the tag. The answer half is never read, because
+            // the caller branches on the tag first. An *error* cannot get
+            // here: the checker has ruled out an unhandled one in a function
+            // with no row.
+            None if !self.raises && self.tagged => {
+                self.unwind_to(0);
+                let answer = self.plain_answer_zero();
+                self.return_plain_tagged(which, answer);
             }
             // Nowhere left: no enclosing `catch` and no `raises` clause.
             //
@@ -605,7 +777,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         ret: &Type,
         range: TextRange,
     ) -> Flow<'ctx> {
-        if !self.raises && self.catches.is_empty() {
+        if !self.raises && !self.tagged && self.catches.is_empty() {
             return self.fail(
                 "this call can leave the function, but the function has no `raises` clause",
                 range,

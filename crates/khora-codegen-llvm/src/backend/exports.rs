@@ -132,7 +132,8 @@ impl<'ctx> Backend<'ctx> {
             wrapper.get_param_iter().map(|v| v.into()).collect();
         let call = self.builder.build_call(target, &args, "forward").expect("forwarding an export");
         let returns_value = can_raise(&signature) || signature.ret != Type::Unit;
-        match call.try_as_basic_value().basic().filter(|_| returns_value) {
+        let answer = self.answer_of_export(symbol, call.try_as_basic_value().basic());
+        match answer.filter(|_| returns_value) {
             Some(value) => {
                 self.builder.build_return(Some(&value)).expect("returning from an export");
             }
@@ -142,7 +143,30 @@ impl<'ctx> Backend<'ctx> {
         }
 
         self.builder.position_at_end(guarded);
-        self.emit_guarded_path(wrapper, target, name, &signature);
+        self.emit_guarded_path(wrapper, target, symbol, name, &signature);
+    }
+
+    /// What an export hands its C caller, out of what the Khora function
+    /// returned.
+    ///
+    /// **A cancellation tag does not cross.** C has no use for one, and a
+    /// cancellation cannot start on a host thread unless Khora code running
+    /// there asked for it; if it did, the answer half is a zero and the fiber's
+    /// flag stays set, which is all an export can do with a request to stop.
+    fn answer_of_export(
+        &mut self,
+        symbol: &str,
+        returned: Option<inkwell::values::BasicValueEnum<'ctx>>,
+    ) -> Option<inkwell::values::BasicValueEnum<'ctx>> {
+        let value = returned?;
+        if !self.is_tagged(symbol) {
+            return Some(value);
+        }
+        Some(
+            self.builder
+                .build_extract_value(value.into_struct_value(), 1, "answer")
+                .expect("the answer half"),
+        )
     }
 
     /// The path an export takes when the host asked for containment.
@@ -157,6 +181,7 @@ impl<'ctx> Backend<'ctx> {
         &mut self,
         wrapper: FunctionValue<'ctx>,
         target: FunctionValue<'ctx>,
+        symbol: &str,
         name: &str,
         signature: &Signature,
     ) {
@@ -173,7 +198,7 @@ impl<'ctx> Backend<'ctx> {
             self.builder.build_store(field, value).expect("storing an argument");
         }
 
-        let thunk = self.emit_export_thunk(target, name, ctx_ty, signature);
+        let thunk = self.emit_export_thunk(target, symbol, name, ctx_ty, signature);
         let raw = self
             .builder
             .build_call(
@@ -204,6 +229,7 @@ impl<'ctx> Backend<'ctx> {
     fn emit_export_thunk(
         &mut self,
         target: FunctionValue<'ctx>,
+        symbol: &str,
         name: &str,
         ctx_ty: inkwell::types::StructType<'ctx>,
         signature: &Signature,
@@ -232,7 +258,9 @@ impl<'ctx> Backend<'ctx> {
         }
         let call = self.builder.build_call(target, &args, "inner").expect("calling the export");
         let returns_value = can_raise(signature) || signature.ret != Type::Unit;
-        let word = match call.try_as_basic_value().basic().filter(|_| returns_value) {
+        let symbol = symbol.to_string();
+        let answer = self.answer_of_export(&symbol, call.try_as_basic_value().basic());
+        let word = match answer.filter(|_| returns_value) {
             Some(value) => self.to_word(value),
             None => i64t.const_zero(),
         };

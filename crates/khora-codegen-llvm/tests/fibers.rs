@@ -604,21 +604,17 @@ fn main() -> Int {{
     assert_eq!(ran.code, Some(0));
 }
 
-/// **The shape the stored outcome cannot answer for, and the reason this
-/// method reads the fiber rather than the answer.**
+/// **A fiber stopped inside a total `catch` reports the stop, whatever its
+/// answer's type.**
 ///
-/// `fiber.rs` suppresses `CANCELLED_WHICH` for an infallible thunk with a
-/// boxed answer: `Fiber<A, {}>::join` emits no branch on the tag, so it reads
-/// the word whatever the tag says, and storing a cancellation there would hand
-/// a joiner a null typed as `A`. A reader of the stored outcome therefore sees
-/// an ordinary answer for this fiber and cannot tell it was stopped.
-///
-/// `absorbed` lives on the fiber rather than in the stored pair, so asking it
-/// answers truthfully here **without changing what `join` reads** — which the
-/// second assertion is what pins. If a future change moves the answer into the
-/// stored outcome, the first assertion keeps passing and the second goes red.
+/// `inner`'s `catch` handles every error `step` can raise, and the
+/// cancellation goes past it: there is no zero `Int` handed back as if
+/// `inner` had finished. `worker` stops with it, and a joiner of a stopped
+/// fiber stops too, so `main` leaves at the `join` with the cancellation's
+/// exit status. This guards against the failure where a stopped fiber with a
+/// boxed answer handed its joiner a null typed as `Answer`.
 #[test]
-fn a_boxed_answer_that_absorbed_a_cancellation_still_reports_it() {
+fn a_boxed_answer_stopped_inside_a_total_catch_reports_the_stop() {
     let ran = run(
         "fiber_cancelled_boxed",
         &format!(
@@ -627,16 +623,11 @@ pub type Answer = {{ n: Int }};
 
 fn step() -> Int raises Oops {{ ok(1)! }}
 
-// The absorbing frame: a total `catch` in a function with no row of its own,
-// returning a scalar, so a zero is a value and the frame can absorb rather
-// than stop the program.
 fn inner() -> Int {{
   khora_cancel();
   step()! catch {{ Oops::Bad => 0 }}
 }}
 
-// The fiber root: infallible, and its answer is behind a pointer. This is the
-// pair -- `plain` and `boxed` -- that the suppression is keyed on.
 fn worker() -> Answer {{ {{ n: inner() + 7 }} }}
 
 fn main() -> Int {{
@@ -651,22 +642,15 @@ fn main() -> Int {{
         ),
     );
     assert_eq!(
-        ran.stdout, "1\n7\n",
-        "the handle reports the cancellation, and `join` still reads the answer \
-         it always read: {:?}",
+        ran.stdout, "1\n",
+        "the handle reports the stop, and `join` stops rather than reading an answer: {:?}",
         ran.stdout
     );
-    assert_eq!(ran.code, Some(0));
+    assert_eq!(ran.code, Some(130));
 }
 
-/// The same, on the scheduler backend.
-///
-/// **The suppression is in the runtime, not the backend, so both paths must
-/// answer alike** — and a suite that only ever runs the default backend never
-/// executes the coroutine path at all, which `run_on`'s own comment records as
-/// a thing this project has been bitten by. The boxed case is the one that
-/// justifies reading `absorbed` instead of the stored outcome, so it is the one
-/// least worth testing on half the implementations.
+/// The same, on the scheduler backend: a suite that only runs the default
+/// backend never executes the coroutine path.
 #[test]
 fn a_boxed_answer_reports_a_cancellation_on_the_scheduler_too() {
     let ran = run_on(
@@ -696,11 +680,11 @@ fn main() -> Int {{
         "scheduler",
     );
     assert_eq!(
-        ran.stdout, "1\n7\n",
+        ran.stdout, "1\n",
         "the scheduler backend must answer as the thread backend does: {:?}",
         ran.stdout
     );
-    assert_eq!(ran.code, Some(0));
+    assert_eq!(ran.code, Some(130));
 }
 
 /// Asking borrows the handle. A supervisor asks and keeps supervising, so a
@@ -855,15 +839,13 @@ fn main() -> Int {{
     assert_eq!(ran.code, Some(130));
 }
 
-/// The one shape left that cannot absorb one, and it says which.
-///
-/// The absorbing frame returns a zero of its own return type, and a Khora
-/// pointer has no zero that is a value: a null is not a live object and an
-/// infallible caller is entitled to read through what it is handed. So a
-/// boxed answer still stops the process -- and the message names *that*,
-/// rather than talking about servers.
+/// **A boxed answer stops cleanly, not by ending the process.** A frame that
+/// returns a pointer has no zero to hand back, and it does not need one: the
+/// cancellation leaves on its own tag, the fiber stops, and the waiter goes
+/// on. This guards against the failure where a pointer-returning frame inside
+/// a total `catch` took the whole process down.
 #[test]
-fn a_boxed_answer_cannot_absorb_a_cancellation_and_says_so() {
+fn a_boxed_answer_stops_its_fiber_without_ending_the_process() {
     let ran = run(
         "fiber_total_catch_boxed",
         &format!(
@@ -891,10 +873,11 @@ fn main() -> Int {{
 "
         ),
     );
-    assert_eq!(ran.code, Some(134));
+    assert_eq!(ran.stdout, "3\n", "{:?}", ran.stderr);
+    assert_eq!(ran.code, Some(0));
     assert!(
-        ran.stderr.contains("cannot hand back a value"),
-        "the message names the frame it is about: {:?}",
+        !ran.stderr.contains("cannot hand back a value"),
+        "no frame needed a zero it has not got: {:?}",
         ran.stderr
     );
     assert!(
@@ -1882,16 +1865,14 @@ fn main() -> Int {{ run_it()! catch {{ Oops::Bad => () }}; print(3); 0 }}
     assert_eq!(ran.code, Some(0));
 }
 
-/// **And a function with no error row still runs to its end**, which is the
-/// half that keeps the language rule the one it was.
+/// **A loop in a function with no error row is a cancellation point too.**
 ///
-/// Widening a back-edge into a cancellation point does not widen *which*
-/// functions have one: an error row is still the only channel a cancellation
-/// travels on. "A fiber with no error row has no channel to be interrupted on"
-/// is `docs/design/fibers.md`'s sentence and it is still true — so this loop
-/// counts all the way to five with a cancellation pending throughout.
+/// The fiber stops on the iteration after the cancel: `counting`'s loop
+/// stops, and so does the rest of `worker` -- its `print(50)` is after a call
+/// that came back cancelled, and the call is where `worker` leaves. Neither
+/// function has a `raises` row; the cancellation does not need one.
 #[test]
-fn a_loop_in_an_infallible_function_is_not_a_cancellation_point() {
+fn a_loop_in_an_infallible_function_is_a_cancellation_point() {
     let ran = run(
         "fiber_cancel_infallible",
         &format!(
@@ -1919,15 +1900,7 @@ fn main() -> Int {{ run_it()! catch {{ Oops::Bad => () }}; print(3); 0 }}
 "
         ),
     );
-    // Every iteration runs, and so does `print(50)`: calling an infallible
-    // function is not a `!` and `worker`'s body has no loop of its own, so
-    // there is no cancellation point anywhere between the flag being set and
-    // `worker` returning. That is the rule working, not a gap in it -- the
-    // fiber stops at its root, having done what it was written to do.
-    assert_eq!(
-        ran.stdout, "1\n2\n3\n4\n5\n50\n3\n",
-        "an infallible loop has no channel to be interrupted on"
-    );
+    assert_eq!(ran.stdout, "1\n2\n3\n", "the loop stopped, and so did its caller's tail");
     assert_eq!(ran.code, Some(0));
 }
 
@@ -2324,35 +2297,29 @@ fn main() -> Int {{
     assert_eq!(ran.code, Some(0));
 }
 
-/// A child that absorbed a cancellation **and then failed** reports the failure.
+/// A child stopped inside a total `catch` **reports the stop**, not an error
+/// it never reached.
 ///
-/// **This pins behaviour that already holds, because a review argued it did
-/// not.** The concern was real in shape: `khora_fiber_outcome` asks
-/// `khora_fiber_cancelled` before it reads the stored outcome, and that flag is
-/// set by any inner frame that absorbed a stop — so on paper a fiber that
-/// absorbed and then raised would answer `Stopped` with the error gone. It does
-/// not, on either ordering, and the error arrives with its payload intact.
-///
-/// The ordering cannot be changed to "read the outcome first" anyway: `observe`
-/// dups the payload where it is an object, and the stopped path returns without
-/// handing it out, so that reference would have no owner. This test is what
-/// says the current order costs nothing.
+/// `inner`'s `catch` does not see the cancellation, so `worker` never gets to
+/// its `raise`: the fiber stops at `inner`, and `outcome` says `Stopped`. The
+/// failure this guards against is the opposite answer: a frame that swallowed
+/// the stop, handed back a zero, and let its caller go on to fail with an
+/// error computed from that zero.
 #[test]
-fn a_child_that_absorbed_a_cancellation_and_then_failed_reports_the_failure() {
+fn a_child_stopped_inside_a_total_catch_reports_the_stop() {
     let ran = run(
         "fiber_outcome_failed_after_absorb",
         &format!(
             "{OUTCOME}
-// A payload-carrying error, so this also pins that the payload survives.
 pub type Boom = | Bad(code: Int);
 
-// **`khora_cancel()` is what makes this the shape under test.** It sets the
-// absorbed flag; without it nothing absorbs and the branch is never reached.
+// The cancel is taken by the `catch`'s operand, and the `catch` passes it on.
 fn inner() -> Int {{
   khora_cancel();
   ok(1)! catch {{ Oops::Bad => 0 }}
 }}
 
+// Never reaches its `raise`: the stop leaves at `inner()`.
 fn worker() -> Int raises Boom {{
   let seen = inner();
   raise Boom::Bad(7 + seen)
@@ -2371,11 +2338,11 @@ fn main() -> Int {{
 "
         ),
     );
-    // `-8` is `Boom::Bad(8)` reaching the catch with its payload. `-1` would be
-    // `Outcome::Stopped` — the error having silently become a stop.
+    // `-1` is `Outcome::Stopped`. `-8` would be `Boom::Bad(8)`: `inner`
+    // handing back a zero and `worker` failing on it.
     assert_eq!(
-        ran.stdout, "-8\n",
-        "the child's failure must arrive by name with its payload, not as a stop: {:?}",
+        ran.stdout, "-1\n",
+        "the child stopped in `inner` and never reached its `raise`: {:?}",
         ran.stdout
     );
     assert_eq!(ran.code, Some(0));

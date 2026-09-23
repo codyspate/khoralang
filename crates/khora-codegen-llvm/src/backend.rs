@@ -265,6 +265,33 @@ pub(crate) struct Backend<'ctx> {
     /// its cause, so it is worth one branch on a call that starts a thread to
     /// turn it into a message. `docs/design/reuse.md` §4.
     pub single_threaded: bool,
+    /// Khora functions that keep their plain return, because
+    /// [`can_stop`] found no cancellation point they can reach.
+    ///
+    /// **Every other infallible Khora function returns `{ which, answer }`**,
+    /// so a cancellation has a way out of it whatever its `raises` row says.
+    /// Getting this set wrong in the small direction is a miscompile: a caller
+    /// reading a pair as a value. So it is filled once, before anything is
+    /// declared, and nothing edits it afterwards.
+    pub(crate) untagged: HashSet<String>,
+    /// Functions that poll when they are entered: members of a named call
+    /// cycle, and every function that calls through a function value.
+    ///
+    /// **Recursion is a loop with no back-edge**, and recursion through a
+    /// closure or a function-typed field is invisible to the named call
+    /// graph -- `k.f(k, n - 1)` inside `walk` never names `walk`. Such a cycle
+    /// ran 28 s after a cancel and then reported that it had not been stopped.
+    /// Every cycle the call graph cannot see passes through an indirect call,
+    /// and the body holding that call is in the cycle, so polling at the entry
+    /// of every body that makes one puts a cancellation point on every trip
+    /// round it. What it costs is one poll -- a load and a branch -- per call
+    /// of such a function.
+    pub(crate) poll_at_entry: HashSet<String>,
+    /// Functions whose own body, lambdas included, calls through a function
+    /// value. A lambda lifted out of one of these polls when it is entered,
+    /// for the reason [`Self::poll_at_entry`] gives: a lambda that calls
+    /// itself through its own binding is the same invisible cycle.
+    pub(crate) lambdas_poll_in: HashSet<String>,
     /// Which types are held inline rather than behind a header.
     ///
     /// Whole-program, because it is a property of a type's declaration and
@@ -448,6 +475,9 @@ impl<'ctx> Backend<'ctx> {
             // Set by `build` once the reachable set is known. Assuming threads
             // until told otherwise is the safe direction.
             single_threaded: false,
+            untagged: HashSet::new(),
+            poll_at_entry: HashSet::new(),
+            lambdas_poll_in: HashSet::new(),
             unboxed: std::rc::Rc::new(khora_types::unboxed::Unboxed::default()),
             ctx,
             module,

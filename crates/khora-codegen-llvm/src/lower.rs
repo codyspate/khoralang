@@ -28,7 +28,7 @@
 use std::collections::HashMap;
 
 use inkwell::basic_block::BasicBlock;
-use inkwell::types::{BasicType, BasicTypeEnum};
+use inkwell::types::BasicTypeEnum;
 use inkwell::values::{BasicValueEnum, FunctionValue, IntValue, PointerValue};
 use inkwell::{AddressSpace, AtomicOrdering, AtomicRMWBinOp, IntPredicate};
 
@@ -61,6 +61,9 @@ pub(crate) fn emit_function<'ctx>(
     // the instance table rather than from the source signatures.
     let Some(signature) = be.signature_of(name) else { return };
     let empty = RcPlan::default();
+    let raises = can_raise(&signature);
+    let tagged = !raises && !be.untagged.contains(name);
+    let entry_poll = be.poll_at_entry.contains(name);
 
     let entry = be.ctx.append_basic_block(function, "entry");
     be.builder.position_at_end(entry);
@@ -74,7 +77,9 @@ pub(crate) fn emit_function<'ctx>(
         function,
         owner: name.to_string(),
         ret: signature.ret.clone(),
-        raises: can_raise(&signature),
+        raises,
+        tagged,
+        entry_poll,
         slots: HashMap::new(),
         scopes: Vec::new(),
         reuse: None,
@@ -88,6 +93,13 @@ pub(crate) fn emit_function<'ctx>(
     lower.allocate_slots();
     lower.take_evidence(&signature);
     lower.bind_parameters();
+    // A body that is not a block has no scope of its own to poll inside, and
+    // owns no binding the poll's unwind would have to release but the
+    // parameters, which `take_evidence`'s scope and the plan cover.
+    if lower.entry_poll && !matches!(body.root.map(|r| body.expr(r)), Some(Expr::Block { .. })) {
+        lower.entry_poll = false;
+        lower.check_cancellation(TextRange::empty(0.into()));
+    }
 
     let value = match body.root {
         Some(root) => lower.expr(root),
@@ -122,9 +134,17 @@ pub(crate) fn emit_closure<'ctx>(
         return;
     };
     let empty = RcPlan::default();
+    let raises = !matches!(
+        &site.raises,
+        Type::Row { fields, tail } if fields.is_empty() && tail.is_none()
+    );
     // A handle rather than a borrow: `be` is about to be held mutably by the
     // lowering, and the answer to "is this boxed" is needed inside it.
     let unboxed = be.unboxed.clone();
+    // A lambda lifted out of a body that calls through a function value may
+    // be the far end of that call -- `let f = fn n => .. f(n - 1)` -- so it
+    // polls when entered. `Backend::poll_at_entry`.
+    let entry_poll = be.lambdas_poll_in.contains(&site.owner);
 
     let entry = be.ctx.append_basic_block(function, "entry");
     be.builder.position_at_end(entry);
@@ -138,10 +158,9 @@ pub(crate) fn emit_closure<'ctx>(
         function,
         owner: site.owner.clone(),
         ret: site.ret.clone(),
-        raises: !matches!(
-            &site.raises,
-            Type::Row { fields, tail } if fields.is_empty() && tail.is_none()
-        ),
+        raises,
+        tagged: !raises,
+        entry_poll,
         slots: HashMap::new(),
         scopes: Vec::new(),
         reuse: None,
@@ -233,6 +252,13 @@ pub(crate) fn emit_closure<'ctx>(
         }
     }
     lower.scopes.push(owned);
+    // As in `emit_function`: a body that is not a block has no scope of its
+    // own to poll inside, so the poll goes here, where an unwind from it
+    // releases the parameters just pushed.
+    if lower.entry_poll && !matches!(body.expr(root), Expr::Block { .. }) {
+        lower.entry_poll = false;
+        lower.check_cancellation(TextRange::empty(0.into()));
+    }
 
     let value = lower.expr(root);
     if value.is_some() {
@@ -372,6 +398,16 @@ struct Lower<'a, 'ctx> {
     /// — and reading the enclosing signature made it emit its enclosing
     /// function's calling convention over its own.
     raises: bool,
+    /// Whether this function returns `{ which, answer }` although it cannot
+    /// raise, so that a cancellation has a way out of it.
+    /// [`crate::backend::can_stop`] decides for a named function; a lifted
+    /// lambda is always tagged, because it is called through a pointer by
+    /// callers that cannot know which lambda they hold.
+    tagged: bool,
+    /// Set until the entry poll of a function in a call cycle is emitted, at
+    /// the head of its outermost block, where the parameters it owns are
+    /// already in a scope that the unwind releases.
+    entry_poll: bool,
     /// How many `assert`s have been lowered in this body so far.
     ///
     /// Written order, which is the order a reader counts them in. Nothing
@@ -562,6 +598,18 @@ impl<'ctx> Lower<'_, 'ctx> {
             }
             return;
         }
+        if self.tagged {
+            // The ordinary way out of a tagged function is its answer with a
+            // zero tag. A body that ended by leaving already returned.
+            if let Some(value) = value {
+                self.return_plain_ok(value);
+            } else if self.here().get_terminator().is_none() && !self.aborted {
+                let zero = self.be.ctx.i64_type().const_zero();
+                self.return_plain_ok(zero.into());
+            }
+            self.seal_if_aborted();
+            return;
+        }
         if let Some(value) = value {
             let expected = self.function.get_type().get_return_type();
             match (&self.ret, expected) {
@@ -602,6 +650,10 @@ impl<'ctx> Lower<'_, 'ctx> {
         // A function whose lowering aborted can be left with blocks that were
         // created but never terminated. The module is about to be discarded,
         // but it still passes through inkwell, so leave it structurally sound.
+        self.seal_if_aborted();
+    }
+
+    fn seal_if_aborted(&mut self) {
         if self.aborted {
             for block in self.function.get_basic_blocks() {
                 if block.get_terminator().is_none() {
@@ -660,16 +712,12 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// while the worker is away is seen on the way back rather than a whole
     /// iteration later.
     ///
-    /// This widens the rule `docs/design/fibers.md` states — "a cancellation
-    /// point is a `!` in something that can raise" — to include a back-edge.
-    /// What it does not widen is *which functions* have one: an error row is
-    /// still the channel a cancellation travels on, and
-    /// [`Self::check_cancellation`] emits nothing without one. So "a fiber with
-    /// no error row runs to its end" is untouched, and the shapes that were
-    /// wrong are the ones that had a channel and no place to look at it.
+    /// Every function with a loop has a way out for the cancellation: a loop is
+    /// a reason [`crate::backend::can_stop`] tags a function, so an infallible
+    /// one returns a cancellation tag and a fallible one its row.
     fn back_edge(&mut self) {
         let asks_safepoint = !self.be.single_threaded;
-        let asks_cancel = self.raises && !self.aborted;
+        let asks_cancel = self.can_leave_on_a_cancel();
         if !asks_safepoint && !asks_cancel {
             return;
         }

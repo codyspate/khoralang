@@ -258,7 +258,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                     Ok(function) => function,
                     Err(message) => return self.fail(message, range),
                 };
-                let answer = self
+                let raw = self
                     .be
                     .builder
                     .build_call(function, &[left.into(), right.into()], "compare")
@@ -266,6 +266,14 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .expect("a comparison returns a value");
+                // An `eq` or `cmp` written with a loop in it can stop, and
+                // then hands back a cancellation tag like any other call.
+                let answer = if self.be.is_tagged(&symbol) {
+                    let ret = self.be.signature_of(&symbol).map_or(Type::Bool, |s| s.ret);
+                    self.split_cancelled(raw, &ret)
+                } else {
+                    raw
+                };
 
                 return match op {
                     // `!=` is `==` negated. Asking a type for both would be

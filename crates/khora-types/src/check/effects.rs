@@ -134,18 +134,6 @@ impl<'a> Checker<'a> {
             }
         }
 
-        if self.catching == 0 && as_written(key) == format!("{FIBER_TYPE}::wait") {
-            // `lambdas` holds only the `Type::Fn` the lambda arm pushes, so
-            // anything else is a checker bug. Treating it as "not in a
-            // closure" would silently apply the function-body rule to a
-            // closure, which is the wrong question to ask of it.
-            let closure = self.lambdas.last().map(|whole| match whole {
-                Type::Fn { raises, .. } => (**raises).clone(),
-                other => unreachable!("an enclosing lambda typed as {other:?}"),
-            });
-            self.waits.push(Wait { range, row: raises.clone(), closure });
-        }
-
         for (clause, row) in [(Clause::Requires, requires), (Clause::Raises, raises)] {
             // Zonked here, not later: the `installed` subtraction below needs
             // the labels, and `installed` is scoped to the `with` block this
@@ -457,71 +445,12 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Refuses a `Fiber::wait` that has no failure channel to be stopped
-    /// through.
-    ///
-    /// **A wait is a cancellation point whatever the child's row says.** The
-    /// row on `wait` is the child's, so over an infallible child it is `{}`
-    /// and demands nothing -- but the *waiter* can be cancelled while it is
-    /// parked, and a cancellation leaves the way an error does. The code
-    /// generator branches on that unconditionally, and refused at `build` the
-    /// program `check` had passed, at a position rendered in another file.
-    ///
-    /// A fallible child is skipped here: its row is a real demand, and the
-    /// ordinary check below reports it. Reporting it here too would say one
-    /// thing twice.
-    ///
-    /// Inside a `catch` nothing is recorded, because the handler is a channel.
-    ///
-    /// **Not caught here: a generic function whose only `raises` is a row
-    /// variable.** `fn waiter<'er>(..) -> () raises 'er` passes, and `build`
-    /// refuses the instantiation at `'er = {}`. Refusing every tail-only row
-    /// would also refuse the instantiations that build, so the gap is kept
-    /// and stated on the limitations page rather than traded for a false
-    /// refusal; `a_generic_wait_at_an_empty_row_is_refused_only_by_build`
-    /// pins it so a fix is noticed.
-    fn check_waits(&mut self) {
-        for Wait { range, row, closure } in std::mem::take(&mut self.waits) {
-            if !crate::is_empty_row(&self.unifier.zonk(&row)) {
-                continue;
-            }
-            match closure {
-                None => {
-                    if crate::is_empty_row(&self.signature.raises) {
-                        self.error(
-                            "`Fiber::wait` is a place this function can be cancelled, and it \
-                             has no `raises` clause for the cancellation to leave through -- \
-                             the fiber waiting here can be cancelled while it is parked, even \
-                             when the fiber being waited for cannot fail. Give the function a \
-                             `raises` clause (any error type will do: `-> Int raises String`), \
-                             or handle it here: `Fiber::wait(hand)! catch { _ => () }`",
-                            range,
-                        );
-                    }
-                }
-                Some(raises) => {
-                    if crate::is_empty_row(&self.unifier.zonk(&raises)) {
-                        self.error(
-                            "`Fiber::wait` is a place this closure can be cancelled, and the \
-                             closure raises nothing, so the cancellation has nowhere to go. \
-                             Handle it inside the closure -- `Fiber::wait(h)! catch { _ => () }` \
-                             -- or give the closure a failing type, as in \
-                             `let body: () -> Int raises Oops = fn () => ..`",
-                            range,
-                        );
-                    }
-                }
-            }
-        }
-    }
-
     /// Checks everything the body demanded against what the signature promised.
     ///
     /// Run once, after the body: a requirement is satisfied by the declaration
     /// or it is an error, and reporting it at the call that raised it is what
     /// makes the message actionable.
     pub(crate) fn check_effects(&mut self) {
-        self.check_waits();
         for Demand { fallible, clause, row, range, callee, site } in
             std::mem::take(&mut self.demanded)
         {

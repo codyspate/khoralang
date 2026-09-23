@@ -22,6 +22,8 @@ use std::sync::Mutex;
 struct Finalizer {
     closure: *mut u8,
     glue: Option<extern "C" fn(*mut u8)>,
+    /// How to call it. See [`khora_region_defer`].
+    call: Option<Trampoline1>,
 }
 
 /// A region's finalizers, in the order they were deferred.
@@ -120,15 +122,25 @@ pub extern "C" fn khora_region_open() -> *mut u8 {
 /// Takes ownership of `closure`: the region releases it after calling it, so
 /// the caller hands over a reference of its own rather than lending one.
 ///
+/// **`call` is how to call it, and generated code always passes one.** A Khora
+/// `() -> ()` closure hands back a cancellation tag and a word, a 16-byte
+/// aggregate; calling it through a `void` function pointer is right on some
+/// targets and reads a hidden return pointer nobody passed on x86-64 Windows,
+/// which is errata 35. The trampoline takes the pair apart on the generated
+/// side. `None` is a closure written in Rust, for this crate's own tests,
+/// which returns nothing.
+///
 /// # Safety
 ///
-/// `region` must be a live object from [`khora_region_open`], and `closure` a
-/// live Khora closure of type `() -> ()` whose drop routine is `glue`.
+/// `region` must be a live object from [`khora_region_open`], `closure` a
+/// live Khora closure of type `() -> ()` whose drop routine is `glue`, and
+/// `call`, when given, the trampoline matching it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn khora_region_defer(
     region: *mut u8,
     closure: *mut u8,
     glue: Option<extern "C" fn(*mut u8)>,
+    call: Option<Trampoline1>,
 ) {
     if region.is_null() {
         fatal("deferring a finalizer to a null region");
@@ -149,7 +161,12 @@ pub unsafe extern "C" fn khora_region_defer(
     //
     // SAFETY: as above; the box is alive until the region is released, and the
     // field is the only handle to it.
-    unsafe { (*list).lock().unwrap_or_else(|e| e.into_inner()).push(Finalizer { closure, glue }) };
+    unsafe {
+        (*list)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(Finalizer { closure, glue, call })
+    };
 }
 
 /// Runs a region's finalizers and frees its list.
@@ -202,12 +219,25 @@ pub unsafe extern "C" fn khora_region_release(region: *mut u8) {
 
     for finalizer in list.into_iter().rev() {
         // SAFETY: a closure's first field is its code pointer, and a `() -> ()`
-        // closure is called with its own object as the only argument. This is
-        // the same convention generated code uses to call one.
+        // closure is called with its own object as the only argument. Through
+        // the trampoline `khora_region_defer` was handed when there is one,
+        // which is every closure generated code built; directly for a Rust
+        // one, which returns nothing. What it answered is not read: a
+        // finalizer runs shielded, so it cannot have been stopped unless it
+        // was forced, and then there is nothing left here to do but go on to
+        // the next one, which the force stops at its first cancellation point.
         unsafe {
             let code = *finalizer.closure.add(KHORA_FIELD_OFFSET).cast::<*const u8>();
-            let call: extern "C" fn(*mut u8) = std::mem::transmute(code);
-            call(finalizer.closure);
+            match finalizer.call {
+                Some(call) => {
+                    let mut answer: u64 = 0;
+                    let _which = call(code, finalizer.closure, &raw mut answer);
+                }
+                None => {
+                    let call: extern "C" fn(*mut u8) = std::mem::transmute(code);
+                    call(finalizer.closure);
+                }
+            }
             khora_drop(finalizer.closure, finalizer.glue);
         }
     }
@@ -248,7 +278,7 @@ mod tests {
     fn a_finalizer_does_not_see_the_cancellation_that_is_running_it() {
         let region = khora_region_open();
         // SAFETY: a live region and a live closure whose drop is the default.
-        unsafe { khora_region_defer(region, closure(watching), None) };
+        unsafe { khora_region_defer(region, closure(watching), None, None) };
 
         khora_cancel();
         assert_eq!(khora_cancelled(), 1, "the flag is set before the region ends");
@@ -274,7 +304,7 @@ mod tests {
         let region = khora_region_open();
         // SAFETY: as above.
         unsafe {
-            khora_region_defer(region, closure(innermost), None);
+            khora_region_defer(region, closure(innermost), None, None);
             khora_region_release(region);
             khora_drop(region, None);
         }
@@ -286,7 +316,7 @@ mod tests {
     fn the_shield_survives_a_finalizer_that_ends_a_region() {
         let region = khora_region_open();
         // SAFETY: as above.
-        unsafe { khora_region_defer(region, closure(opens_another), None) };
+        unsafe { khora_region_defer(region, closure(opens_another), None, None) };
 
         khora_cancel();
         // SAFETY: as above.
@@ -312,8 +342,8 @@ mod tests {
         let region = khora_region_open();
         // SAFETY: as above.
         unsafe {
-            khora_region_defer(region, closure(counting), None);
-            khora_region_defer(region, closure(counting), None);
+            khora_region_defer(region, closure(counting), None, None);
+            khora_region_defer(region, closure(counting), None, None);
             khora_region_release(region);
             khora_drop(region, None);
         }

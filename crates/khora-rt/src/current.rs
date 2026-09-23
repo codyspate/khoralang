@@ -97,6 +97,9 @@ pub(crate) struct Fiber {
     /// On the fiber rather than on the thread, because a finalizer may park —
     /// and the worker that comes back to it may not be the one that left.
     shielded: AtomicUsize,
+    /// How deep this fiber is inside a `Shared::update` or `modify` change
+    /// function. [`crate::cancel::Pinned`] says why.
+    pinned: AtomicUsize,
     /// Set while a worker is inside this fiber's `resume`. See
     /// `crate::coro::ResumedOnce`; debug builds, and a release build asked for
     /// `fiber-audit`.
@@ -195,6 +198,7 @@ impl Fiber {
             state: AtomicU8::new(0),
             poll: &crate::poll::khora_poll,
             shielded: AtomicUsize::new(0),
+            pinned: AtomicUsize::new(0),
             #[cfg(any(debug_assertions, feature = "fiber-audit"))]
             resuming: std::sync::atomic::AtomicBool::new(false),
             spawned: false,
@@ -230,6 +234,7 @@ impl Fiber {
             state: AtomicU8::new(0),
             poll,
             shielded: AtomicUsize::new(0),
+            pinned: AtomicUsize::new(0),
             #[cfg(any(debug_assertions, feature = "fiber-audit"))]
             resuming: std::sync::atomic::AtomicBool::new(false),
             spawned: true,
@@ -502,7 +507,43 @@ impl Fiber {
     /// force with a force from after it.
     pub(crate) fn stops_here(&self) -> bool {
         let state = self.state.load(Ordering::Acquire);
-        state & CANCELLED != 0 && (state & FORCED != 0 || !self.is_shielded())
+        state & CANCELLED != 0
+            && !self.is_pinned()
+            && (state & FORCED != 0 || !self.is_shielded())
+    }
+
+    /// Whether a blocking wait should give up and hand back its "gave up"
+    /// answer: a closed channel's `None`, a `false` from a send, a wait that
+    /// returns early.
+    ///
+    /// [`Fiber::stops_here`], and one case more: **a cancelled fiber inside a
+    /// change function gives up waiting, shield or no shield**, because it
+    /// holds the cell's lock and a wait that never ends would hold it for
+    /// ever. It does not *stop* there -- [`crate::cancel::Pinned`] says why --
+    /// so the change function goes on with the "gave up" answer, returns, and
+    /// the fiber stops at its first cancellation point after the lock is let
+    /// go.
+    pub(crate) fn gives_up_waiting(&self) -> bool {
+        let state = self.state.load(Ordering::Acquire);
+        state & CANCELLED != 0
+            && (self.is_pinned() || state & FORCED != 0 || !self.is_shielded())
+    }
+
+    /// Whether this fiber is inside a change function.
+    fn is_pinned(&self) -> bool {
+        self.pinned.load(COUNTER_ORDER) != 0
+    }
+
+    /// Enters a change function. Nests, though a change function that updates
+    /// a cell is refused before it gets here.
+    pub(crate) fn pin(&self) {
+        self.pinned.fetch_add(1, COUNTER_ORDER);
+    }
+
+    /// Leaves one. Saturating, for the reason [`Fiber::unshield`] gives.
+    pub(crate) fn unpin(&self) {
+        let depth = self.pinned.load(COUNTER_ORDER);
+        self.pinned.store(depth.saturating_sub(1), COUNTER_ORDER);
     }
 
     /// Whether this fiber is running cleanup that must not be interrupted.

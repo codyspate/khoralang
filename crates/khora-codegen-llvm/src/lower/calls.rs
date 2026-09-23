@@ -390,11 +390,66 @@ impl<'ctx> Lower<'_, 'ctx> {
             let result = result.expect("a fallible call returns a tagged value");
             return self.split_tagged(result, &signature.ret, range);
         }
+        // An infallible Khora callee that can reach a cancellation point hands
+        // back a cancellation tag; C, and a callee that cannot, do not.
+        if self.be.is_tagged(name) {
+            let result = result.expect("a tagged call returns a pair");
+            return Some(self.split_cancelled(result, &signature.ret));
+        }
+        // **A runtime call that gave up on a cancel is not an ordinary
+        // return.** The blocking runtime exports come back early when the
+        // fiber is cancelled, with an answer that looks like a real one: a
+        // sleep that looks finished, a `-1` that looks like a broken peer, a
+        // null that looks like a failed handshake. Without a look at the flag
+        // the caller's tail runs on it -- counting an I/O error that did not
+        // happen, or doing one more step of the work it was told to abandon.
+        //
+        // **Only on the failure value**, as a channel op does: a read that
+        // got bytes has to hand them over, and leaving there would drop them.
+        // A "gave up" answer is always the failure value, so nothing real is
+        // lost on that path. `gives_up_on_cancel` is the list, and a blocking
+        // export not on it stops at the next cancellation point after it
+        // instead -- one step late, never not at all.
+        if signature.is_extern && !self.be.is_defined(name) {
+            if let Some(gave_up) = gives_up_on_cancel(name) {
+                self.check_cancellation_on(gave_up, result, range);
+            }
+        }
 
         Some(match signature.ret {
             Type::Unit => self.be.unit_value(),
             _ => result.unwrap_or_else(|| self.be.unit_value()),
         })
+    }
+}
+
+/// Which answer of a blocking runtime export can be a "gave up on a cancel".
+#[derive(Clone, Copy)]
+pub(super) enum GaveUp {
+    /// Every answer: there is no value to lose. `khora_sleep`.
+    Always,
+    /// A negative number, the answer every failure of it gives.
+    Negative,
+    /// A null pointer.
+    Null,
+}
+
+/// The runtime exports that come back early when their fiber is cancelled,
+/// and which of their answers that can be.
+///
+/// **A list, and deliberately short.** Every other `khora_` export either does
+/// not block -- `khora_print`, and `khora_cancel` itself: checking after those
+/// would make every `print` a cancellation point -- or does not give up on a
+/// cancel: `khora_net_connect` is a blocking `connect(2)`, and process wait is
+/// a blocking `wait`, both stated limits. TLS reads and writes go through
+/// `khora_net_recv` and `khora_net_send`, so they give up the same way.
+fn gives_up_on_cancel(name: &str) -> Option<GaveUp> {
+    match name {
+        "khora_sleep" => Some(GaveUp::Always),
+        "khora_net_accept" | "khora_net_recv" | "khora_net_send" | "khora_tls_read"
+        | "khora_tls_write" => Some(GaveUp::Negative),
+        "khora_tls_accept" | "khora_tls_connect" => Some(GaveUp::Null),
+        _ => None,
     }
 }
 

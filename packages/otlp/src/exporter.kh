@@ -137,7 +137,7 @@ impl Exporter {
         Exporter::draining(service, endpoint, reports, List::Nil, Map::new())));
     let answer = body(Exporter::tracer(exporter, clock, random))!;
     // Whatever the body did, the batch goes.
-    let _ = Channel::send(reports, Report::Stop)!;
+    let _ = Channel::send(reports, Report::Stop);
     answer
   }
 
@@ -212,7 +212,7 @@ impl Exporter {
   ) -> ()
     with { client: HttpClient }
   {
-    match Channel::receive(reports)! {
+    match Channel::receive(reports) {
       // The channel closed. Whatever is held goes, and then this ends.
       Option::None => Exporter::post(service, endpoint, held),
       Option::Some(Report::Stop) => Exporter::post(service, endpoint, held),
@@ -278,6 +278,6 @@ impl Exporter {
   /// For a service that wants its spans out before it answers a health check,
   /// or a test that wants them before it asserts.
   pub fn flush<'er>(self) -> () raises 'er {
-    let _ = Channel::send(self.reports, Report::Flush)!;
+    let _ = Channel::send(self.reports, Report::Flush);
   }
 }

@@ -163,7 +163,8 @@ pub(crate) fn install() {
 /// how they say the deadline is theirs.
 ///
 /// **A first signal that nobody can hear is the second signal.** When the root
-/// has no `raises` row the cancellation below would travel nowhere, so rather
+/// reaches no cancellation point the cancellation below would travel nowhere,
+/// so rather
 /// than ask and be ignored the watcher restores the default disposition
 /// straight away and the program dies exactly as it did before any of this
 /// existed. What is lost in that case is the finalizers — which were never

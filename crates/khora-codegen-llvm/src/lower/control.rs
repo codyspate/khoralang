@@ -50,6 +50,13 @@ impl<'ctx> Lower<'_, 'ctx> {
         let cleanups: Vec<Cleanup<'ctx>> =
             self.plan.drops_for(id).iter().map(|l| Cleanup::Local(*l)).collect();
         self.scopes.push(cleanups);
+        // The entry poll of a function in a call cycle, here rather than at
+        // the function's entry: the outermost block's scope is the one that
+        // releases the parameters, so an unwind from here releases them.
+        if self.entry_poll {
+            self.entry_poll = false;
+            self.check_cancellation(TextRange::empty(0.into()));
+        }
 
         for stmt in stmts {
             let reached = match stmt {
@@ -419,6 +426,10 @@ impl<'ctx> Lower<'_, 'ctx> {
     pub(super) fn return_value(&mut self, value: BasicValueEnum<'ctx>) {
         if self.raises {
             self.return_ok(value);
+            return;
+        }
+        if self.tagged {
+            self.return_plain_ok(value);
             return;
         }
         match self.ret {

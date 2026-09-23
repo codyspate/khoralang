@@ -43,7 +43,7 @@ impl<'ctx> Backend<'ctx> {
     /// Declares a function the file defines, under its mangled name.
     pub(super) fn declare_definition(&mut self, name: &str) {
         let Some(signature) = self.signature_of(name) else { return };
-        let Some(ty) = self.function_type(&signature) else {
+        let Some(ty) = self.function_type_of(name, &signature) else {
             self.error(
                 format!(
                     "`{name}` cannot be compiled: every parameter and the return type need a \

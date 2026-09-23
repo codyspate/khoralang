@@ -214,14 +214,16 @@ fn park_until_moved(moved: &Arc<Condvar>, state: std::sync::MutexGuard<'_, Queue
     crate::current::current(|fiber| fiber.unpark_from());
 }
 
-/// Whether this fiber has been asked to stop and may act on it.
+/// Whether this fiber should give up a wait: [`crate::current::Fiber::gives_up_waiting`].
 ///
-/// The same predicate `khora_cancelled` answers with, and deliberately the
-/// same *call* rather than the same expression written twice: a blocking
-/// primitive that gives up on a cancellation a cancellation point would ignore
-/// hands back "the channel is closed" for a channel that is open.
+/// The predicate `khora_cancelled` answers with, plus a change function's
+/// case, and deliberately one call rather than the same expression written
+/// twice: a blocking primitive that gives up on a cancellation a cancellation
+/// point would ignore hands back "the channel is closed" for a channel that is
+/// open -- which inside a change function is the point, and outside one is a
+/// bug.
 fn stopping() -> bool {
-    crate::current::current(|fiber| fiber.stops_here())
+    crate::current::current(|fiber| fiber.gives_up_waiting())
 }
 
 /// Sends a value, waiting while the channel is full.

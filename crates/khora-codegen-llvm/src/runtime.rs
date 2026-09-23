@@ -198,7 +198,8 @@ pub struct Runtime<'ctx> {
     pub str_find: FunctionValue<'ctx>,
     /// `void *khora_region_open(void)`
     pub region_open: FunctionValue<'ctx>,
-    /// `void khora_region_defer(void *region, void *closure, void (*glue)(void *))`
+    /// `void khora_region_defer(void *region, void *closure, void (*glue)(void *),
+    ///                          uint32_t (*call)(const void *, void *, uint64_t *))`
     pub region_defer: FunctionValue<'ctx>,
     /// `void khora_region_release(void *region)` — a `drop_fields` callback.
     pub region_release: FunctionValue<'ctx>,
@@ -227,10 +228,12 @@ pub struct Runtime<'ctx> {
     pub shared_get: FunctionValue<'ctx>,
     /// `void khora_shared_set(void *cell, uint64_t value)`
     pub shared_set: FunctionValue<'ctx>,
-    /// `uint64_t khora_shared_update(void *cell, void *change, Change call)`
+    /// `uint32_t khora_shared_update(void *cell, void *change, Change call,
+    ///                               uint64_t *out)` -- returns the change
+    /// function's cancellation tag; `out` is written only when it is 0.
     pub shared_update: FunctionValue<'ctx>,
-    /// `uint64_t khora_shared_modify(void *cell, void *change, Modify call,
-    ///                               uint64_t *answer)`
+    /// `uint32_t khora_shared_modify(void *cell, void *change, Modify call,
+    ///                               uint64_t *answer)` -- the same.
     pub shared_modify: FunctionValue<'ctx>,
     /// `void khora_shared_release(void *cell)`, a `drop_fields` callback.
     pub shared_release: FunctionValue<'ctx>,
@@ -293,6 +296,10 @@ pub struct Runtime<'ctx> {
     pub fiber_outcome: FunctionValue<'ctx>,
     /// `void khora_fiber_cancel(void *fiber)`
     pub fiber_cancel: FunctionValue<'ctx>,
+    /// `void khora_fiber_force(void *fiber)` — `Fiber::abort`.
+    pub fiber_force: FunctionValue<'ctx>,
+    /// `void khora_fiber_cancel_within(void *fiber, int64_t millis)`
+    pub fiber_cancel_within: FunctionValue<'ctx>,
     /// `void khora_fiber_release(void *fiber)` — a `drop_fields` callback.
     pub fiber_release: FunctionValue<'ctx>,
     /// `void *khora_fibers_open(void)`
@@ -443,7 +450,7 @@ impl<'ctx> Runtime<'ctx> {
             region_open: declare("khora_region_open", ptr.fn_type(&[], false)),
             region_defer: declare(
                 "khora_region_defer",
-                void.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+                void.fn_type(&[ptr.into(), ptr.into(), ptr.into(), ptr.into()], false),
             ),
             // Declared with the `drop_fields` shape, because that is what it
             // is: `khora_drop` calls it when the last reference to a region
@@ -465,11 +472,11 @@ impl<'ctx> Runtime<'ctx> {
             ),
             shared_update: declare(
                 "khora_shared_update",
-                i64t.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+                i32t.fn_type(&[ptr.into(), ptr.into(), ptr.into(), ptr.into()], false),
             ),
             shared_modify: declare(
                 "khora_shared_modify",
-                i64t.fn_type(&[ptr.into(), ptr.into(), ptr.into(), ptr.into()], false),
+                i32t.fn_type(&[ptr.into(), ptr.into(), ptr.into(), ptr.into()], false),
             ),
             shared_release: declare("khora_shared_release", void.fn_type(&[ptr.into()], false)),
             channel_open: declare(
@@ -530,6 +537,11 @@ impl<'ctx> Runtime<'ctx> {
                 ctx.i32_type().fn_type(&[ptr.into(), ptr.into()], false),
             ),
             fiber_cancel: declare("khora_fiber_cancel", void.fn_type(&[ptr.into()], false)),
+            fiber_force: declare("khora_fiber_force", void.fn_type(&[ptr.into()], false)),
+            fiber_cancel_within: declare(
+                "khora_fiber_cancel_within",
+                void.fn_type(&[ptr.into(), i64t.into()], false),
+            ),
             fiber_release: declare("khora_fiber_release", void.fn_type(&[ptr.into()], false)),
             fibers_open: declare("khora_fibers_open", ptr.fn_type(&[], false)),
             fibers_bounded: declare(

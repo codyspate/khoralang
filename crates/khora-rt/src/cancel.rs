@@ -81,9 +81,11 @@ pub extern "C" fn khora_root_absorbed() -> u8 {
 /// continues from where it was — the finalizer got its turn, and nothing else
 /// changed.
 ///
-/// The price is honest and worth stating: a finalizer that hangs cannot be
-/// interrupted. Everything with cancellation pays it, and the usual answer is
-/// a deadline on the cleanup itself, which Khora does not have yet.
+/// The price, and the bound on it: a finalizer that hangs is not interrupted by
+/// a cancel, however many are sent. `Fiber::abort` interrupts it -- a forced
+/// fiber is not held by this -- and `Fiber::cancel_within` asks for that after
+/// a deadline the caller chooses. What aborting costs is cleanup cut off
+/// part-way, which is why it is never the default.
 pub(crate) struct Shielded;
 
 impl Shielded {
@@ -96,6 +98,48 @@ impl Shielded {
 impl Drop for Shielded {
     fn drop(&mut self) {
         current(|fiber| fiber.unshield());
+    }
+}
+
+/// Holds this fiber inside a `Shared::update` or `modify` change function,
+/// for as long as it is alive.
+///
+/// **What this prevents: a cell whose lock is never let go of.** A change
+/// function runs under the cell's lock, in a Rust frame, so nothing inside it
+/// stops at a cancellation point: no cancellation point acts, not even for a
+/// forced fiber.
+///
+/// **And nothing inside one waits for ever on a cancelled fiber.** A blocking
+/// call there -- a `receive`, a sleep, a socket -- gives up and hands back its
+/// "gave up" answer as soon as the fiber is cancelled, shielded or not
+/// ([`crate::current::Fiber::gives_up_waiting`]). The change function carries
+/// on with that answer and returns, the lock is let go, and the fiber stops at
+/// its next cancellation point.
+///
+/// **A wait with no "gave up" answer still leaves.** `Fiber::join`, `wait` and
+/// `outcome` inside a change function come back cancelled when they give up,
+/// or when the child was stopped by somebody else, and the change function
+/// leaves on that tag. The shim hands the tag back instead of an answer, and
+/// [`crate::shared::khora_shared_update`] leaves the cell holding what it held:
+/// the change did not happen, and no zero nobody computed is stored. The lock
+/// is let go and the caller leaves on the tag like after any cancelled call.
+///
+/// What it costs is stated rather than hidden: a change function that loops
+/// without blocking runs to its end after a cancel, and after a force. One
+/// that loops for ever can only be ended by the process ending. The lock is
+/// the reason, and a change function is meant to be short.
+pub(crate) struct Pinned;
+
+impl Pinned {
+    pub(crate) fn new() -> Pinned {
+        current(|fiber| fiber.pin());
+        Pinned
+    }
+}
+
+impl Drop for Pinned {
+    fn drop(&mut self) {
+        current(|fiber| fiber.unpin());
     }
 }
 
@@ -144,6 +188,14 @@ fn end_the_program() -> ! {
 }
 
 /// Absorbs a cancellation at the frame that has nowhere to send it.
+///
+/// **Reached only from a function `can_stop` pruned** -- one that, by the
+/// analysis, reaches no cancellation point and so returns without a tag. Every
+/// other infallible function hands a cancellation on through its tag, and
+/// never calls this. What follows describes the older rule, under which every
+/// infallible frame could get here; it is kept until the absorbing path is
+/// removed, because a pruned frame that the analysis got wrong still lands
+/// here.
 ///
 /// # The frame this is called from
 ///

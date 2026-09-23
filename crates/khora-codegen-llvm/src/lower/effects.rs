@@ -62,10 +62,13 @@ impl<'ctx> Lower<'_, 'ctx> {
                 // here rather than leaked. Getting this backwards is a region
                 // whose count never reaches zero and finalizers that never run.
                 let glue = self.be.drop_glue(&Type::func(Vec::new(), Type::Unit));
+                // How the runtime calls it: a finalizer is a `() -> ()`
+                // closure, which hands back a cancellation tag and a word.
+                let call = self.be.answered_trampoline(None).as_global_value().as_pointer_value();
                 let defer = self.be.rt.region_defer;
                 self.be
                     .builder
-                    .build_call(defer, &[region.into(), closure.into(), glue.into()], "")
+                    .build_call(defer, &[region.into(), closure.into(), glue.into(), call.into()], "")
                     .expect("deferring a finalizer");
                 self.release_unless_lent(*region_arg, region, &region_ty);
                 Some(self.be.unit_value())
@@ -156,19 +159,32 @@ impl<'ctx> Lower<'_, 'ctx> {
                     );
                 };
                 let shim = shim.as_global_value().as_pointer_value();
+                let slot = self.entry_slot(self.be.ctx.i64_type().into(), "updated");
                 let update = self.be.rt.shared_update;
-                let word = self
+                let which = self
                     .be
                     .builder
-                    .build_call(update, &[handle.into(), closure.into(), shim.into()], "updated")
+                    .build_call(
+                        update,
+                        &[handle.into(), closure.into(), shim.into(), slot.into()],
+                        "updated",
+                    )
                     .expect("updating a shared cell")
                     .try_as_basic_value()
                     .basic()
-                    .expect("an update gives back a word")
+                    .expect("an update gives back a tag")
                     .into_int_value();
-                // Both were lent for the call and neither was kept.
+                // Both were lent for the call and neither was kept -- on
+                // either path, so before the branch.
                 self.drop(closure, &change_ty);
                 self.release_unless_lent(*cell, handle, &cell_ty);
+                self.leave_if_stopped(which);
+                let word = self
+                    .be
+                    .builder
+                    .build_load(self.be.ctx.i64_type(), slot, "updated")
+                    .expect("reading the new value")
+                    .into_int_value();
                 Some(self.be.word_to_value(word, &value_ty))
             }
             ("modify", [cell, change]) => {
@@ -196,22 +212,28 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let shim = shim.as_global_value().as_pointer_value();
                 let slot = self.entry_slot(self.be.ctx.i64_type().into(), "answer");
                 let modify = self.be.rt.shared_modify;
-                self.be
+                let which = self
+                    .be
                     .builder
                     .build_call(
                         modify,
                         &[handle.into(), closure.into(), shim.into(), slot.into()],
                         "modified",
                     )
-                    .expect("modifying a shared cell");
+                    .expect("modifying a shared cell")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("a modify gives back a tag")
+                    .into_int_value();
+                self.drop(closure, &change_ty);
+                self.release_unless_lent(*cell, handle, &cell_ty);
+                self.leave_if_stopped(which);
                 let word = self
                     .be
                     .builder
                     .build_load(self.be.ctx.i64_type(), slot, "answer")
                     .expect("reading the answer")
                     .into_int_value();
-                self.drop(closure, &change_ty);
-                self.release_unless_lent(*cell, handle, &cell_ty);
                 Some(self.be.word_to_value(word, &answer_ty))
             }
             _ => self.fail(
@@ -755,33 +777,24 @@ impl<'ctx> Lower<'_, 'ctx> {
                 // it finishes, so this gives up the reference the plan gave it.
                 let closure = self.expr(*body)?;
                 let glue = self.be.drop_glue(&Type::func(Vec::new(), Type::Unit));
-                // **Exactly one of the two trampolines.** A fallible thunk
-                // hands back a tag and writes its word through a pointer; an
-                // infallible one hands back the word itself. They differ in
-                // signature, and a pointer called through the wrong one reads
-                // a register nobody wrote -- which is why this is two slots
-                // rather than one and a flag.
-                let (call, plain) = if fallible {
-                    (
-                        self.be.tagged_trampoline(1).as_global_value().as_pointer_value(),
-                        self.be.null_pointer(),
-                    )
+                // **One trampoline shape for every thunk.** A fallible thunk
+                // hands back its tag and writes its word through a pointer; an
+                // infallible one hands back a cancellation tag and its answer,
+                // which the answered trampoline turns into the same two
+                // things. So the runtime reads a stopped fiber the same way
+                // whatever its row.
+                let call = if fallible {
+                    self.be.tagged_trampoline(1).as_global_value().as_pointer_value()
                 } else {
-                    // `Unit` is `void` at the ABI even though it has a word
-                    // representation everywhere else, so the callee genuinely
-                    // returns nothing and the shim invents the word.
+                    // `Unit` is carried as an `i64` zero in the pair, so the
+                    // shim invents the word rather than converting one.
                     let returns = match answers {
-                        Type::Unit => None,
+                        Type::Unit | Type::Never => None,
                         ref other => self.be.llvm_type(other),
                     };
-                    (
-                        self.be.null_pointer(),
-                        self.be
-                            .plain_trampoline(1, returns)
-                            .as_global_value()
-                            .as_pointer_value(),
-                    )
+                    self.be.answered_trampoline(returns).as_global_value().as_pointer_value()
                 };
+                let plain = self.be.null_pointer();
                 // How to let go of an answer nobody joined. An *error* is
                 // always a boxed `Adt`, which the runtime knows; only the
                 // successful word needs describing.
@@ -810,11 +823,12 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .expect("a fiber handle is a value");
                 Some(fiber)
             }
-            ("cancel", [fiber]) | ("detach", [fiber]) => {
+            ("cancel", [fiber]) | ("detach", [fiber]) | ("abort", [fiber]) => {
                 let ty = self.types.of(*fiber).clone();
                 let handle = self.expr(*fiber)?;
                 let call = match name {
                     "detach" => self.be.rt.fiber_detach,
+                    "abort" => self.be.rt.fiber_force,
                     _ => self.be.rt.fiber_cancel,
                 };
                 self.be
@@ -823,6 +837,17 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .expect("acting on a fiber");
                 // Borrowed, not consumed — the handle is still the caller's,
                 // and the plan handed this frame an owned reference.
+                self.release_unless_lent(*fiber, handle, &ty);
+                Some(self.be.unit_value())
+            }
+            ("cancel_within", [fiber, millis]) => {
+                let ty = self.types.of(*fiber).clone();
+                let handle = self.expr(*fiber)?;
+                let millis = self.expr(*millis)?;
+                self.be
+                    .builder
+                    .build_call(self.be.rt.fiber_cancel_within, &[handle.into(), millis.into()], "")
+                    .expect("cancelling a fiber with a deadline");
                 self.release_unless_lent(*fiber, handle, &ty);
                 Some(self.be.unit_value())
             }
@@ -906,7 +931,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 // `CANCELLED_WHICH` travel out as a raise no `catch` can name,
                 // and this builds `Outcome::Stopped` instead.
                 let ty = self.types.of(*fiber).clone();
-                let (answers, raised) = self.fiber_parts(site, &ty, range)?;
+                let (answers, _) = self.fiber_parts(site, &ty, range)?;
                 let handle = self.expr(*fiber)?;
 
                 let slot = self.entry_slot(self.be.ctx.i64_type().into(), "outcome.answer");
@@ -963,15 +988,9 @@ impl<'ctx> Lower<'_, 'ctx> {
                 // `split_tagged` is the answer-or-error pair `join` would have
                 // had.
                 //
-                // Unless the fiber's row is empty, in which case there is no
-                // error to branch on and no `raises` clause to leave through.
-                // A stop can still arrive on that path -- `khora_cancel_absorb`
-                // records one for a thunk whose *inner* frame absorbed it --
-                // so the `Stopped` branch is emitted either way, and only the
-                // error branch is conditional on the row.
-                if row_is_empty(&raised) {
-                    return self.outcome_of_word(which, word, &answers, &outcome_ty);
-                }
+                // Whatever the fiber's row: a `which` of `CANCELLED_WHICH`
+                // says *this* frame was stopped while it waited, and that
+                // leaves through the same branch.
                 let stopped = self.be.ctx.i32_type().const_int(runtime::STOPPED_WHICH, false);
                 let was_stopped = self
                     .be
@@ -985,22 +1004,28 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .build_conditional_branch(was_stopped, build_it, raise_it)
                     .expect("branching on whether the child was stopped");
 
-                // Not stopped: an answer or the child's error, which is
-                // exactly what `join` hands `split_tagged`. The value it
-                // produces is discarded -- `outcome_of_word` reads the word
-                // again on the far side, and building the `Answered` in one
-                // place keeps the two arms' `phi` to one shape.
+                // Not stopped: an answer, the child's error, or a cancellation
+                // of this frame. The last two leave here. **The word is not
+                // converted on this path**: an answer held inline crosses in a
+                // box that converting it frees, and `outcome_of_word` converts
+                // it on the far side -- converting it here as well freed the
+                // box twice.
                 self.at(raise_it);
-                let tagged = self.be.tagged_of(which, word);
-                self.split_tagged(tagged, &answers, range)?;
-                self.br(build_it);
+                let left = self.raised(which);
+                let leave = self.block("outcome.leave");
+                self.be
+                    .builder
+                    .build_conditional_branch(left, leave, build_it)
+                    .expect("branching on the tag");
+                self.at(leave);
+                self.leave_with(which, word);
 
                 self.at(build_it);
                 self.outcome_of_word(which, word, &answers, &outcome_ty)
             }
             ("join", [fiber]) => {
                 let ty = self.types.of(*fiber).clone();
-                let (answers, raised) = self.fiber_parts(site, &ty, range)?;
+                let (answers, _) = self.fiber_parts(site, &ty, range)?;
                 let handle = self.expr(*fiber)?;
 
                 // A stack slot rather than a return value, for the reason
@@ -1056,16 +1081,12 @@ impl<'ctx> Lower<'_, 'ctx> {
                 // the shape `split_tagged` wants, so the branch and the
                 // unwinding are the ones every fallible call already emits.
                 //
-                // Unless the fiber's row is empty, in which case there is
-                // nothing to branch on. A body that cannot fail also cannot be
-                // *cancelled* -- a cancellation travels out on the same tagged
-                // return an error does, so a thunk with no error row has no
-                // channel to be stopped on -- so `which` is 0 here by
-                // construction, and emitting the branch would only make a join
-                // demand a `raises` clause its caller has no use for.
-                if row_is_empty(&raised) {
-                    return Some(self.be.word_to_value(word, &answers));
-                }
+                // **Whatever the fiber's row.** A child with no row can still
+                // be stopped -- every infallible thunk hands back a
+                // cancellation tag -- and a joiner handed a stopped child's
+                // zero would compute with an answer nobody produced. So the
+                // join unwinds on it instead, as it does on a cancellation of
+                // the joiner itself.
                 let tagged = self.be.tagged_of(which, word);
                 self.split_tagged(tagged, &answers, range)
             }

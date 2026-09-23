@@ -8,14 +8,14 @@ A worker pool is a fiber that reads a job from a channel and does it. The obviou
 
 ```khora
 loop {
-  match Channel::receive(jobs)! {
+  match Channel::receive(jobs) {
     Option::None => break,
     Option::Some(job) => serve(job)!,   // the hole
   }
 }
 ```
 
-`Channel::receive` has already emptied that slot. The `!` on `serve` is a cancellation point, and a cancellation that arrived in between is taken *before* the call runs — so the job is in nobody's hands. Not served, not in the queue, gone. Nothing is printed and the fiber unwinds cleanly.
+`Channel::receive` has already emptied that slot. The call to `serve` is a cancellation point, and a cancellation that arrived in between is taken *before* the call runs — so the job is in nobody's hands. Not served, not in the queue, gone. Nothing is printed and the fiber unwinds cleanly.
 
 Measured over two hundred cancelled rounds, the loop above took 198 jobs out of the channel and accounted for none of them.
 
@@ -67,7 +67,7 @@ fn worker(
   abandoned: Shared<Int>,
 ) -> () raises Halt {
   loop {
-    match Channel::receive(jobs)! {
+    match Channel::receive(jobs) {
       Option::None => break,
       Option::Some(_job) => {
         let _ = Shared::update(took, fn n => n + 1);
@@ -96,8 +96,8 @@ pub fn main() -> Int {
     let abandoned = Shared::of(0);
 
     let hand = Fiber::spawn(fn () => worker(jobs, took, done, abandoned)!);
-    Channel::send(jobs, 1)!;
-    Channel::send(jobs, 2)!;
+    Channel::send(jobs, 1);
+    Channel::send(jobs, 2);
     clock.sleep(40);
     Fiber::cancel(hand);
     Fiber::wait(hand)!;

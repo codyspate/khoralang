@@ -464,22 +464,34 @@ pub fn main() -> Int raises Stop {
 /// Compiles [`BLOCKED_CHANGE`] once and runs it on `backend` with a deadline,
 /// killing it if it has not finished.
 fn blocked_change_on(backend: &str) -> (Option<i32>, String) {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("shared_blocked_change");
+    watched("shared_blocked_change", BLOCKED_CHANGE, backend)
+        .unwrap_or_else(|| {
+            panic!(
+                "`{backend}`: the cancelled fiber never left its change function; \
+                 the cell's lock is held for ever"
+            )
+        })
+}
+
+/// Compiles `source` once per `name` and runs it on `backend`, killing it
+/// after 20 s. `None` when it had to be killed.
+fn watched(name: &str, source: &str, backend: &str) -> Option<(Option<i32>, String)> {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     harness::ensure_runtime();
     std::fs::create_dir_all(&dir).expect("a workspace");
     let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
-    static BUILT: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+    static BUILT: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
     {
         let mut built = BUILT.lock().unwrap_or_else(|e| e.into_inner());
-        if !*built {
+        if !built.iter().any(|b| b == name) {
             let _ = std::fs::remove_file(&exe);
             let db = KhoraDatabase::new();
-            let root = SourceRoot::new(&db, sources(&db, &dir, BLOCKED_CHANGE));
+            let root = SourceRoot::new(&db, sources(&db, &dir, source));
             if let Err(errors) = khora_codegen_llvm::compile(&db, root, &exe) {
                 let messages: Vec<String> = errors.into_iter().map(|e| e.message).collect();
                 panic!("compiling failed:\n  {}", messages.join("\n  "));
             }
-            *built = true;
+            built.push(name.to_string());
         }
     }
     let mut child = Command::new(&exe)
@@ -493,15 +505,12 @@ fn blocked_change_on(backend: &str) -> (Option<i32>, String) {
             let mut out = String::new();
             std::io::Read::read_to_string(&mut child.stdout.take().expect("stdout"), &mut out)
                 .expect("reading stdout");
-            return (status.code(), out.replace("\r\n", "\n"));
+            return Some((status.code(), out.replace("\r\n", "\n")));
         }
         if std::time::Instant::now() > deadline {
             let _ = child.kill();
             let _ = child.wait();
-            panic!(
-                "`{backend}`: the cancelled fiber never left its change function; \
-                 the cell's lock is held for ever"
-            );
+            return None;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
@@ -512,15 +521,64 @@ fn blocked_change_on(backend: &str) -> (Option<i32>, String) {
 ///
 /// `Channel::receive` inside a change function gives up when its fiber is
 /// cancelled, answers `None`, and the update finishes, so the lock is
-/// released. Holding cancellation off for the length of a change function
-/// (a "shield") would turn this into a hang: the receive would never see the
-/// cancellation, and the cell's lock would be held for ever. That makes the
-/// shield something to design together with the blocking primitives, and this
-/// is the test that says so.
+/// released and the cell holds what the change function computed from that
+/// `None`. Nothing inside a change function *stops*, so the fiber stops at its
+/// first cancellation point after the update.
 #[test]
 fn a_cancelled_fiber_blocked_inside_update_stops_on_both_backends() {
     for backend in ["threads", "scheduler"] {
         let (code, out) = blocked_change_on(backend);
+        assert_eq!(code, Some(0), "`{backend}`: {out}");
+        assert_eq!(out.trim(), "stopped; cell=100", "`{backend}`");
+    }
+}
+
+/// The same change function, run by a finalizer: shielded cleanup.
+const BLOCKED_CHANGE_IN_CLEANUP: &str = "module main;
+import std::core::{print, Fiber, Shared, Channel, Option, Region};
+import std::clock::{Clock};
+
+fn stuck(cell: Shared<Int>, ch: Channel<Int>) -> Int {
+  let region = Region::open();
+  Region::defer(region, fn () => {
+    let _ = Shared::update(cell, fn x => {
+      let got = Channel::receive(ch);
+      match got { Option::Some(v) => x + v, Option::None => x + 100 }
+    });
+  });
+  let mut n = 0;
+  loop { n = n + 1; }
+}
+
+pub fn main() -> Int {
+  with { clock: Clock::real() } {
+    let cell = Shared::of(0);
+    let ch: Channel<Int> = Channel::bounded(1);
+    let child = Fiber::spawn(fn () => stuck(cell, ch));
+    clock.sleep(100);
+    Fiber::cancel(child);
+    Fiber::wait(child);
+    print(\"stopped; cell=${Shared::get(cell)}\");
+    0
+  }
+}
+";
+
+/// **A change function run by cleanup still gives up a blocked wait.**
+///
+/// Cleanup is shielded, so a `receive` in a finalizer ordinarily goes on
+/// waiting after a cancel. Inside a change function it must not: the fiber
+/// holds the cell's lock, and a wait that never ends holds it for ever. So a
+/// cancelled fiber inside a change function gives up the wait whether or not
+/// it is shielded, and the finalizer finishes with the "gave up" answer.
+#[test]
+fn a_change_function_in_cleanup_gives_up_its_wait_on_both_backends() {
+    for backend in ["threads", "scheduler"] {
+        let Some((code, out)) =
+            watched("shared_blocked_change_in_cleanup", BLOCKED_CHANGE_IN_CLEANUP, backend)
+        else {
+            panic!("`{backend}`: a shielded change function waited for ever holding the lock");
+        };
         assert_eq!(code, Some(0), "`{backend}`: {out}");
         assert_eq!(out.trim(), "stopped; cell=100", "`{backend}`");
     }

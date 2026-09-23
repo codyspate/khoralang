@@ -10,17 +10,18 @@ language rule, a supported feature, and unfinished work.
 **The ones most likely to affect you:**
 
 - [What a signal does](#what-a-signal-does-and-the-three-shapes-it-does-not-reach)
-  — `SIGTERM` and `SIGINT` unwind the program and run its finalizers, but an
-  infallible `main`, a blocking `connect_to` and Windows are not covered.
+  — `SIGTERM` and `SIGINT` unwind the program and run its finalizers, but a
+  `main` with no cancellation point, a blocking `connect_to` and Windows are
+  not covered.
 - [A bounded nursery runs `limit + 1` children](#what-a-nursery-actually-does),
   and a limit of zero means no limit at all — so **a bound of exactly one
   cannot be written**, which is the value a "one at a time" flag wants most.
 - [A child's failure usually does not cancel its siblings](#a-childs-failure-usually-cancels-no-siblings).
 - [A cancelled fiber waiting on a child stops only when the child
-  does](#a-cancelled-fiber-waiting-on-a-child-stops-when-the-child-does), and
-  `Fiber::join` on a child that cannot fail does not stop at all.
+  does](#a-cancelled-fiber-waiting-on-a-child-stops-when-the-child-does), if
+  it holds the child's last handle.
 - [The two fiber backends behave differently](#the-two-fiber-backends-are-distinguishable)
-  under cancellation.
+  in scheduling order.
 - [There is no `timeout` or `race`](#concurrency-combinators) in `std`; a
   deadline is built from a fiber and a clock.
 - [Only Linux has a scalable I/O backend](#io-scaling-on-macos-and-windows)
@@ -218,97 +219,38 @@ kill -TERM twice -> killed by signal 15 mid-finalizer
 
 ### What this does not cover
 
-**An infallible `main` dies rather than unwinding.** A cancellation travels the
-error channel, so a `main` with no `raises` row has nowhere for one to go. The
-runtime notices this and uses the platform's default instead — default
-disposition, re-raised at once — so such a program still answers `kill`, at
-wait-status 143 with no finalizers. Give `main` a `raises` row to get the
-graceful path.
+**A `main` that reaches no cancellation point dies rather than unwinding.**
+Such a `main` — no loop, no blocking call, no call to a function that has one
+— has nowhere to stop, so the runtime uses the platform's default instead:
+default disposition, re-raised at once. The program still answers `kill`, at
+wait-status 143 with no finalizers. Any `main` that loops, serves or waits
+takes the graceful path, whatever its `raises` row.
 
-A compiler warning for this shape — a `main` with no `raises` row and a `loop`
-or a `listen` in it — is decidable from the signature and is **not built**. The
-runtime fallback was chosen over it because it helps the program already
-running rather than the author who reads warnings; the warning is still worth
-having and is not yet written.
+**A compute-bound call to foreign code still delays the shutdown.** A fiber is
+asked to stop at a cancellation point, and a single C call already in progress
+is not one: it finishes first. The status is the truth about the outcome and
+not about the latency.
 
-**`Fiber::wait` cannot be called from a function with no failure channel.**
-This is the same rule met at compile time rather than at `kill` time, and it is
-sharper: `wait` is a cancellation point, a cancellation point needs a channel
-to travel, and a function with no `raises` row has none. So
-
-```khora
-fn main() -> Int {
-  let hand = Fiber::spawn(fn () => body());
-  Fiber::wait(hand)   // refused: a place this function can be cancelled
-}
-```
-
-is rejected even when `body` raises nothing at all. Both `khora check` and the
-editor report it at the call, with or without the `!`. What counts as a channel
-is a `raises` clause on the function doing the waiting, or a `catch` around the
-call (`Fiber::wait(hand)! catch { _ => () }`). A closure that raises nothing
-takes the `catch` inside its body, or a failing type from its binding —
-`let body: () -> Int raises Oops = fn () => ..`.
-
-**One shape is refused only by `khora build`.** A generic function whose only
-failure channel is a row variable — `fn waiter<'er>(f: Fiber<Int, 'er>) -> ()
-raises 'er` — passes `check`, and the build refuses it where it is used with a
-fiber that cannot fail, because that use leaves the function no channel. The
-build's error for it can be rendered against the wrong file, since the code
-generator's errors do not carry one. Give such a function a concrete error type
-in its row, or wait under a `catch`.
-
-`Fiber::join` has always behaved this way, so this is `wait` joining a rule
-that already existed rather than a new one. It is still a real cost: `wait` on
-a provably-infallible child needs no channel in principle, and requiring one
-is the implementation showing through. Making the empty row callable without
-`!` is the fix, and it is a type-system change rather than a runtime one.
-
-**A cancellation that a `loop` never notices still delays the shutdown.** A
-signalled program exits 130, so a supervisor can tell a shutdown from a clean
-finish and `restart: on-failure` fires. What the status does not tell you is
-*when* the children stopped.
-
-A fiber is asked to stop at a cancellation point, and a `loop` doing arithmetic
-has none. Measured, two children each spinning on a counter with no fallible
-call in the body:
-
-```
-two-child nursery + SIGTERM -> both children ran to completion, then exit 130
-two children in clock.sleep -> both woke, the sleep returned, then exit 130
-```
-
-The status is the truth about the outcome and not about the latency. A program
-that must stop promptly needs a cancellation point in its loop — a fallible
-call, or a `clock.sleep` — and a compute-bound loop with neither finishes what
-it is doing first.
-
-**A long `clock.sleep` delays or survives the shutdown, and the two backends
-differ.** Measured against an eight-second sleep in a child fiber, one
-`SIGTERM`:
-
-```
-thread backend     stopped after 6034 ms; the sleep completed normally
-scheduler backend  stopped after 3 ms; the sleep still returned normally
-```
-
-Under the default thread backend the sleep is simply not interrupted, so
-shutdown waits it out. Under the scheduler the fiber *is* woken — but the wake
-returns from `sleep` **normally rather than raising**, so the statement after
-the sleep runs before the fiber stops at its next cancellation point. A
-cancelled fiber runs one more step of the work it was told to abandon.
-
-This is the most reachable of the three gaps on this page: `clock.sleep` is in
-every poll loop and every retry backoff. Chunk a long sleep into a loop of
-short ones if shutdown latency matters, which makes the loop back-edge the
-cancellation point.
-
-**A blocking `connect_to` is not a cancellation point.** `khora_net_connect` is
-a blocking `connect(2)` on the worker, so a fiber inside one reaches no
+**A blocking `connect_to` is not a cancellation point.** `connect_to` is a
+blocking `connect(2)` on the worker, so a fiber inside one reaches no
 cancellation point until the kernel gives up — minutes, on an unroutable host.
 `accept` and `recv` are fine: they are reactor-driven, and an idle
 `Router::listen` server stops in about ten milliseconds. A non-blocking connect
 driven by the reactor would make it one, and it is not built.
+
+**Waiting for a child process is not a cancellation point.** `process.run`,
+`process.output` and `process.shell` wait for the program they started in one
+blocking call, so a fiber inside one stops only after that program exits. The
+program is not killed when the fiber is cancelled; whether it should be is not
+decided. Put a bound on the program itself (`timeout 10 ...`) where that
+matters.
+
+**A change function that never returns cannot be stopped.** A
+`Shared::update` or `modify` change function holds the cell's lock, so
+nothing in it stops at a cancellation point -- not even after `Fiber::abort`
+or `cancel_within`. A blocking call inside one gives up, but a loop that never
+ends holds the lock, and the fiber, until the process ends.
+[Sharing](/docs/reference/sharing/) has the rule.
 
 **Windows has none of this.** Windows has no `SIGTERM`, and no way for an
 arbitrary process to ask another to stop: `TerminateProcess` is `SIGKILL` with
@@ -317,8 +259,9 @@ two siblings) are not wired up in this release.
 
 So a program that must not lose work should still be crash-only — durable state
 advancing by one atomic append or rename — because `SIGKILL`, a power cut and
-the three cases above all remain. The ordinary deploy on Linux or macOS — one
-`SIGTERM` to a program whose `main` has a `raises` row — is not one of them.
+the cases above all remain. The ordinary deploy on Linux or macOS — one
+`SIGTERM` to a program whose `main` loops, serves or waits — is not one of
+them.
 [Running on Linux](/docs/deployment/linux/) and
 [Containers](/docs/deployment/containers/) say this in the setting where it
 bites.
@@ -388,32 +331,23 @@ The practical consequence is that `attempt` handles a body raising exactly one t
 
 ## A cancelled fiber waiting on a child stops when the child does
 
-`Fiber::wait` carries a `raises` row and is a cancellation point: a parent
-cancelled while waiting stops at the `!` and does not run the statement after
-it. **But it does not stop until the child it waits on has stopped**, because
-the parent's handle on the child is released on the way out, and releasing a
-handle cancels the child and waits for it. So the parent's latency is the
-child's: however long the child takes to reach its own next cancellation point.
+`Fiber::wait` and `Fiber::join` are cancellation points: a parent cancelled
+while waiting stops there and does not run the statement after it, whether or
+not the child can fail. **But if the parent holds the last handle on the
+child, it does not finish stopping until the child has**, because the handle
+is released on the way out, and a cancelled fiber releasing the last handle on
+another passes the cancellation on and waits for it. So that parent's latency
+is the child's: however long the child takes to reach its own next
+cancellation point. A child that reaches one often -- a loop, a call, a sleep
+-- stops at once.
 
-Measured on `khora 0.2.0 (a2593dd)`, x86_64 Linux, three runs per backend, a
-parent cancelled 50 ms into `Fiber::wait`:
+A parent that waits on a child somebody else also holds stops at once: its
+release is not the last, so it does not wait.
 
-| the child is | thread backend | scheduler backend | statement after the wait ran |
-| --- | --- | --- | --- |
-| in one `clock.sleep(2000)` | stopped at 2000 ms | stopped at 50 ms | 0 of 6 |
-| in a loop of `clock.sleep(50)!` | 50–101 ms | 50 ms | 0 of 6 |
-| an infallible 1500 ms loop | 1500 ms | 1500 ms | 0 of 6 |
+Releasing the last handle *without* being cancelled waits for the child and
+does not stop it: a `main` that returns while holding a handle on a fiber
+that never ends does not exit. Cancel it first.
 
-**`Fiber::join` on a child that cannot fail is not a cancellation point at
-all.** The row it raises is the child's, and a child with an empty row gives the
-join no channel: the same infallible 1500 ms child, joined instead of waited
-on, held the parent for 1500 ms and **the statement after the join ran in 6 of
-6 runs** — a cancelled fiber that still publishes a result. `join` on a
-fallible child stops like `wait` (60 ms and 50 ms, one run per backend,
-against a child with a cancellation point every 20 ms).
-
-So a supervisor that must stop promptly needs its children to have cancellation
-points, and should `wait` rather than `join` a child whose row is empty.
 `Fiber::outcome` hands back an answer without unwinding the asker when the
 answer is wanted.
 
@@ -548,28 +482,15 @@ it.
 
 ## The two fiber backends are distinguishable
 
-A program can tell which backend it has. Under `KHORA_FIBERS=scheduler` a fiber
-inside `clock.sleep` is woken by a cancellation and its sleep returns early;
-under the default thread backend the sleep runs to completion.
+Under cancellation the two backends answer alike: a fiber in `clock.sleep`, on
+a channel, on a socket read or on another fiber is woken by a cancellation on
+either one, and stops there. What still differs is scheduling -- which fiber
+runs when, and how many run at once -- so a program that depends on an order
+the language does not promise can see which backend it has.
 
-A `clock.sleep(400)` cancelled at 50 ms stopped in 0-1 ms under the scheduler
-and after 346-352 ms under threads — about a 350× difference on the same
-source, and 1898 ms against 1 ms at `sleep(2000)`. It is not only timing: a
-program built on nurseries executed more of its jobs in 4 of 20 scheduler runs
-than the thread backend ever did.
-
-**The default cannot change without a breaking-change note while that is true.**
-
-**Cancellation only lands where the fiber checks for it** — at a `!` in a
-function that can raise, or a loop back-edge. **Under the default thread
-backend a long `sleep` is not one of those points**, so work that must stop
-promptly has to be chunked into a loop; under the scheduler backend the sleep
-is woken and returns early, as above. Write for the thread backend: it is the
-default and the pessimistic case.
-
-Either way, the statements between the wake and the *next* cancellation point
-still run. Cancellation unwinds at a point, not between arbitrary instructions
-— [Concurrency](/docs/reference/concurrency/) has the model.
+Cancellation unwinds at a point, not between arbitrary instructions --
+[Concurrency](/docs/reference/concurrency/) has the model and the list of
+points.
 
 ## Cross-compilation and WebAssembly
 

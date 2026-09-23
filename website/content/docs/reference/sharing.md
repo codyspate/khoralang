@@ -61,7 +61,7 @@ Use `update` when the read and write must be one serialized transition:
 let after = Shared::update(count, fn n => n + 1);
 ```
 
-The `change` closure runs once while the cell is locked. Its type has no `raises` row and the operation must not suspend. Fallible, blocking, or otherwise suspension-capable work belongs outside the critical section, which keeps it small and stops external latency from turning into lock contention:
+The `change` closure runs once while the cell is locked. Its type has no `raises` row. Fallible, blocking, or otherwise slow work belongs outside the critical section, which keeps it small and stops external latency from turning into lock contention:
 
 ```khora
 let refreshed = fetch_value()!;
@@ -69,6 +69,12 @@ Shared::set(cache, refreshed);
 ```
 
 Calling `update` or `modify` recursively on the **same cell** from inside its own change function would deadlock. Khora detects that case and traps instead of waiting forever.
+
+**What a cancellation does to a change function.** Nothing inside one stops at a cancellation point -- not a loop, not a call, not even for a fiber stopped with `Fiber::abort` -- because it holds the cell's lock. What a cancellation does instead:
+
+- A blocking call inside it -- a channel `receive`, a `clock.sleep`, a socket read -- gives up at once with its "gave up" answer (`None`, an early return, `-1`), the change function carries on with that answer and returns, and the fiber stops after the `update`.
+- A `Fiber::join`, `wait` or `outcome` inside it that comes back stopped -- because this fiber was cancelled, or because the child was stopped by somebody else -- ends the change function. **The change does not happen**: the cell keeps the value it had, the lock is released, and the caller stops at the `update` as it would at any call to a stopped fiber.
+- A change function that loops without blocking runs to its end. One that loops for ever holds the lock for ever, and nothing -- not `abort`, not `cancel_within` -- ends it but the process ending.
 
 ## `Changed<A, B>` and `modify`
 
@@ -122,13 +128,13 @@ Typical use:
 ```khora
 let jobs = Channel::bounded(64);
 
-if Channel::send(jobs, job)! {
+if Channel::send(jobs, job) {
   ()
 } else {
   handle_closed_queue(job)
 }
 
-match Channel::receive(jobs)! {
+match Channel::receive(jobs) {
   Option::Some(next) => process(next),
   Option::None => (),
 }
@@ -136,11 +142,11 @@ match Channel::receive(jobs)! {
 
 A send to a full channel suspends until space becomes available. A receive from an empty open channel suspends until a value arrives. Suspension gives the scheduler worker back; it is not a busy wait or a blocked worker thread.
 
-Both take a `!`, because both are cancellation points. These are the only two operations in `std::core` where a fiber can wait indefinitely, so a fiber parked on one has to be reachable by `Fiber::cancel` -- and a cancellation travels out of a call on a `raises` row or not at all. The row is a variable: neither operation raises an error of its own, and it carries whatever the caller's does.
+Both are cancellation points, and neither takes a `!`: neither raises an error, and a fiber cancelled while parked on one stops there whatever its `raises` row says.
 
 A cancelled channel operation is always cancelled **empty-handed**. The runtime looks at the cancellation flag only once it has established there is nothing to take and no room to send, so a value arriving at the same moment as the cancellation is still delivered rather than dropped. A send that gives up releases its value, the same as a send to a closed channel.
 
-`poll` never waits, so it is not a cancellation point and carries no row. That is the distinction between the two: the ones that can block are marked.
+`poll` never waits, so it is not a cancellation point.
 
 `send` returns `false` when the channel is closed. Closing wakes waiters. Receivers drain values already queued before `receive` begins returning `Option::None`.
 

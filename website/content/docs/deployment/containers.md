@@ -107,9 +107,10 @@ default disposition and re-raises, so an operator who means it is not waiting
 on a slow finalizer.
 
 Two shapes are **not** covered and a drain at the layer above is still the
-answer for them: a `main` with no `raises` row has no channel for a
-cancellation to travel, so the runtime falls back to killing the process
-outright as it did before; and a fiber inside a blocking `connect_to` reaches
-no cancellation point until the kernel gives up. Writing handlers so that being
-killed between two instructions is recoverable at the next start remains worth
-doing — `SIGKILL` at the end of the grace period has not gone anywhere.
+answer for them: a `main` that reaches no cancellation point at all -- no
+loop, no blocking call, no call to a function with one -- has nowhere to stop,
+so the runtime kills the process outright; and a fiber inside a blocking
+`connect_to` reaches no cancellation point until the kernel gives up. Writing
+handlers so that being killed between two instructions is recoverable at the
+next start remains worth doing — `SIGKILL` at the end of the grace period has
+not gone anywhere.

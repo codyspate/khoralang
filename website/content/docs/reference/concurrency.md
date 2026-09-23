@@ -224,12 +224,38 @@ one unwinds the joiner along with it, and `continue_parent()` would never run.
 one: it returns `Outcome::Answered(value)` or `Outcome::Stopped` without
 unwinding the caller.
 
-`wait` is itself a cancellation point, so the fiber calling it needs a `raises`
-row — the waiter can be cancelled while it is parked, even when the child
-cannot fail. `khora check` refuses a `wait` in a function with no `raises`
-clause and no enclosing `catch`.
+`wait` is itself a cancellation point: a waiter cancelled while it is parked
+stops there. It needs no `raises` row for that.
 
 Cancelling a child does not cancel its parent.
+
+### When cleanup does not finish
+
+A cancelled fiber runs its cleanup — its regions' finalizers — to completion,
+and a second `Fiber::cancel` does not cut it short. A finalizer that blocks for
+ever therefore holds its fiber, and anything waiting on it, for ever. Two
+operations end that:
+
+```khora
+Fiber::abort(child);              // stop now, even inside cleanup
+Fiber::cancel_within(child, 5000); // cancel now; abort if still running in 5 s
+Fiber::wait(child);
+```
+
+`abort` stops the fiber at its next cancellation point **including inside a
+finalizer**, and the children of any nursery it holds with it. What it costs
+is cleanup cut off part-way: a `ROLLBACK` not sent, a connection dropped
+rather than returned. Khora has no default grace period, so nothing aborts a
+fiber unless the program asks. `cancel_within` is the usual way to ask: it
+bounds how long cleanup may take, and a fiber that finishes before the
+deadline is not aborted.
+
+Two things `abort` does not interrupt: a single foreign (C) or file-system
+call already in progress, which finishes first; and a change function running
+under `Shared::update` or `Shared::modify`, which holds the cell's lock and
+runs to its end. A blocking call inside one gives up at once instead; a
+`Fiber::join` or `wait` inside one that comes back stopped ends it with the
+cell unchanged. [Sharing](/docs/reference/sharing/) has the detail.
 
 **There is no `timeout`, no `race` and no `select`.** A deadline can be built by
 hand — [Timeouts and cancellation](/docs/cookbook/timeouts-and-cancellation/)
@@ -242,54 +268,60 @@ measurements.
 
 What does work is waiting on handles: [Take work off a queue safely](/docs/cookbook/taking-work-off-a-queue/) and [Bound concurrent work](/docs/cookbook/bounded-concurrency/) are the nearest recipes, and [known limitations](/docs/limitations/) is the page to check before assuming an operation exists.
 
-Cancellation is observed at cancellation points rather than between arbitrary source instructions. There are two:
+Cancellation is observed at cancellation points rather than between arbitrary source instructions. They are:
 
-- a `!` site, which is also where propagation and suspension are marked; and
-- a **loop back-edge** — the point where `loop` or `while` goes round again.
+- a `!` site, which is also where propagation and suspension are marked;
+- a **loop back-edge** — the point where `loop` or `while` goes round again;
+- a **call** to a function that can itself reach a cancellation point; and
+- a **blocking operation**: `Channel::send`, `Channel::receive`,
+  `Fiber::wait`, `Fiber::join`, `clock.sleep`, and accepting, reading and
+  writing on a network connection. A cancelled read, write or accept gives up
+  and the fiber stops there; it does not come back to the caller as a failed
+  read. Opening a connection and waiting for a child process are not
+  cancellation points: a fiber stops after the call returns.
 
-Both only exist in a function that can raise, because a `raises` row is the channel a cancellation travels on.
+Every function has them, whatever its `raises` row says. A cancellation leaves
+a function on a return of its own, not on the error channel.
 
-A `!` observes a pending cancellation *before* the call it marks, so a computation already asked to stop does not do work it is about to throw away, and the arguments are not evaluated. `Channel::send` and `Channel::receive` are the exception, and carry a row for exactly this reason — see below.
+A `!` observes a pending cancellation *before* the call it marks, so a computation already asked to stop does not do work it is about to throw away, and the arguments are not evaluated.
 
-**A value the fiber is already holding is discarded with it.** Between the point a value becomes the fiber's responsibility and the first `!` after that point, nobody else knows the fiber has it — so a cancellation there drops it, cleanly and silently. The shape that meets this is a worker taking a job off a channel and then calling something fallible with it. Register the value with a region before that `!` and the region's finalizer runs on the unwind; [Take work off a queue safely](/docs/cookbook/taking-work-off-a-queue/) is the recipe.
+**A value the fiber is already holding is discarded with it.** Between the point a value becomes the fiber's responsibility and the next cancellation point after that, nobody else knows the fiber has it — so a cancellation there drops it, cleanly and silently. The shape that meets this is a worker taking a job off a channel and then calling something with it. Register the value with a region before that call and the region's finalizer runs on the unwind; [Take work off a queue safely](/docs/cookbook/taking-work-off-a-queue/) is the recipe.
 
 Reading the flag after the call instead would move the problem rather than remove it: the fiber would be holding the call's result at the same point. Work in flight across a cancellation boundary is at risk whichever side the boundary is read on.
 
 The back-edge is why an ordinary background worker can be stopped:
 
 ```khora
-fn reaper() -> () with { clock: Clock } raises Stop {
+fn reporter() -> () with { clock: Clock } {
   loop {
-    clock.sleep(1000);
-    sweep();
+    clock.sleep(5000);
+    report();
   }
 }
 ```
 
-There is no `!` in that body. Without the back-edge it could not be cancelled, and a nursery that had to unwind past it would wait for ever.
+There is no `!` and no `raises` row. A fiber running it stops at the loop, at
+the sleep, or inside `report`, whichever it reaches first.
 
-A blocked or suspended operation is meant to be made runnable so that the fiber can unwind its structured scopes. That describes the coroutine backend; under the default thread backend a fiber inside `clock.sleep` sleeps to the end before it sees the cancellation. For most calls that is all it is: a *straight-line* blocking call is not itself a cancellation point, so the fiber wakes, finishes the call, and stops at the next `!` or back-edge after it.
-
-`Channel::send`, `Channel::receive` and `Fiber::wait` are the exception, because they are the operations in `std::core` with no bound on how long they may wait. A worker parked on an empty queue has no next back-edge to reach, so leaving it to find one meant it never stopped at all. All three therefore carry a `raises 'er` row and are written `Channel::receive(jobs)!`; the row is what gives the cancellation something to travel out on. `poll` never waits and is not a cancellation point.
+A blocked operation is woken by a cancellation on both backends, so a fiber
+parked in `clock.sleep`, on an empty channel or on another fiber stops without
+waiting out the wait. A single foreign (C) call or file-system call is not
+interrupted: the fiber finishes it and stops at the next cancellation point
+after it.
 
 The check on the two channel operations comes *after* the call rather than before it, and only when the call comes back **empty-handed**. The runtime looks at the cancellation flag only once it has established there is nothing to take and no room to send, so a value arriving at the same moment as the cancellation is delivered rather than discarded — a cancelled receive is never holding a value nobody will see again. A send that gives up releases its value, the same as a send to a closed channel.
 
-### A fiber with no failure row runs to its end
+### What cancellation costs
 
-A cancellation leaves a function the same way an error does, on the same tagged return. A function declared without `raises` has no such return, so it has nothing to travel on — it has no cancellation points, and neither `!` nor a loop back-edge puts one there.
+A function that can reach a cancellation point returns a small tag alongside
+its answer, and its caller checks it after the call. A function that reaches
+none — straight-line arithmetic, a field read — is compiled without one and
+cannot be stopped part-way, which is the point: there is nothing in it to stop
+at. A function that recurses -- by name, or through a closure or a
+function-typed field -- checks for a cancellation when it is entered, so deep
+recursion stops too.
 
-That is a language rule rather than a gap. It also means a background worker that genuinely cannot fail still needs an failure row to be stoppable:
-
-```khora
-// Cannot be cancelled: nothing to carry the cancellation out.
-fn reporter() -> () with { clock: Clock } {
-  loop { clock.sleep(5000); report(); }
-}
-```
-
-Give it a `raises` row — even one whose error it never raises — and the loop becomes cancellable.
-
-Cancellation is **not** a member of a `raises` row. A `catch` that handles every declared failure does not consume cancellation.
+Cancellation is **not** a member of a `raises` row. A `catch` that handles every declared failure, `_` included, does not see a cancellation: it passes through.
 
 During cancellation, intervening regions are released and their finalizers run before the fiber terminates. See [Memory and resources](/docs/reference/memory-and-resources/).
 

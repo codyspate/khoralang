@@ -82,38 +82,36 @@ impl<'ctx> Backend<'ctx> {
         f
     }
 
-    /// A shim that calls an *infallible* function and hands back its answer as
-    /// a word.
+    /// A shim that calls an *infallible* closure taking no arguments but
+    /// itself, and hands back its cancellation tag, with its answer as a word
+    /// written through a pointer.
     ///
-    /// The sibling of [`Backend::tagged_trampoline`], and it exists for a
-    /// different reason. The tagged one is about an aggregate two compilers
-    /// disagree about; this one is about the return type being unknown to the
-    /// runtime at all. A fiber's thunk may answer an `Int`, a `String`, a
-    /// record or a `Float`, and those come back in different registers -- so
-    /// the call is made here, where the callee's type is known, and what
-    /// crosses is the one word everything in this runtime fits in.
+    /// The same shape as [`Backend::tagged_trampoline`], so the runtime calls
+    /// every fiber's thunk one way. It exists for a different reason: the
+    /// thunk's answer may be an `Int`, a `String`, a record or a `Float`, and
+    /// those come back in different registers -- so the call is made here,
+    /// where the type is known, and what crosses is the one word everything in
+    /// this runtime fits in.
     ///
-    /// One shim per (arity, return type). `returns` is the callee's own type;
-    /// `None` is a function answering nothing, which still needs a shim
-    /// because the runtime's slot has to be filled with *some* word.
-    pub fn plain_trampoline(
-        &mut self,
-        arity: usize,
-        returns: Option<BasicTypeEnum<'ctx>>,
-    ) -> FunctionValue<'ctx> {
-        let key = (arity, returns.map_or_else(|| "void".to_string(), |t| t.to_string()));
+    /// **The tag is what lets a fiber with no error row say it was stopped.**
+    /// Every closure that cannot raise returns `{ which, answer }`, and a
+    /// non-zero `which` from one can only be a cancellation, which the runtime
+    /// records as the fiber's outcome in place of the answer.
+    ///
+    /// One shim per answer type. `returns` is the thunk's answer type, `None`
+    /// for `()`, whose pair still carries a word.
+    pub fn answered_trampoline(&mut self, returns: Option<BasicTypeEnum<'ctx>>) -> FunctionValue<'ctx> {
+        let key = (1, returns.map_or_else(|| "void".to_string(), |t| t.to_string()));
         if let Some(f) = self.plain_trampolines.get(&key) {
             return *f;
         }
 
         let ptr = self.ctx.ptr_type(AddressSpace::default());
+        let i32_type = self.ctx.i32_type();
         let i64_type = self.ctx.i64_type();
-        let params: Vec<BasicMetadataTypeEnum<'ctx>> =
-            std::iter::repeat_n(BasicMetadataTypeEnum::from(ptr), arity + 1).collect();
-
         let f = self.module.add_function(
-            &format!("kh$plain_call{arity}${}", self.plain_trampolines.len()),
-            i64_type.fn_type(&params, false),
+            &format!("kh$answered_call${}", self.plain_trampolines.len()),
+            i32_type.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
             Some(Linkage::Internal),
         );
         self.plain_trampolines.insert(key, f);
@@ -123,28 +121,45 @@ impl<'ctx> Backend<'ctx> {
         self.builder.position_at_end(entry);
 
         let code = f.get_nth_param(0).expect("a code pointer").into_pointer_value();
-        let args: Vec<BasicMetadataValueEnum<'ctx>> =
-            (0..arity).filter_map(|i| f.get_nth_param(i as u32 + 1)).map(|v| v.into()).collect();
+        let closure = f.get_nth_param(1).expect("the closure");
+        let out = f.get_nth_param(2).expect("somewhere to put the answer").into_pointer_value();
 
-        let callee_params: Vec<BasicMetadataTypeEnum<'ctx>> =
-            std::iter::repeat_n(BasicMetadataTypeEnum::from(ptr), arity).collect();
-        let callee_type = match returns {
-            Some(ty) => ty.fn_type(&callee_params, false),
-            None => self.ctx.void_type().fn_type(&callee_params, false),
-        };
-        let answered = self
+        let answer_ty = returns.unwrap_or_else(|| i64_type.into());
+        let pair_ty = self.ctx.struct_type(&[i32_type.into(), answer_ty], false);
+        let pair = self
             .builder
-            .build_indirect_call(callee_type, code, &args, "answer")
-            .expect("calling an infallible function")
+            .build_indirect_call(pair_ty.fn_type(&[ptr.into()], false), code, &[closure.into()], "answer")
+            .expect("calling an infallible closure")
             .try_as_basic_value()
-            .basic();
-        // A function answering nothing still owes the runtime a word, and zero
-        // is the one `()` is represented by everywhere else.
-        let word = match answered {
-            Some(value) => self.to_word(value),
-            None => i64_type.const_zero(),
-        };
-        self.builder.build_return(Some(&word)).expect("handing back the answer");
+            .basic()
+            .expect("a closure hands back a pair")
+            .into_struct_value();
+        let which = self
+            .builder
+            .build_extract_value(pair, 0, "which")
+            .expect("reading the tag")
+            .into_int_value();
+        let answer = self.builder.build_extract_value(pair, 1, "answer").expect("reading the answer");
+        // A stopped thunk's answer half is a zero nobody reads, and turning an
+        // inline answer into a word allocates the box it crosses in. So only
+        // an answered thunk's word is made; a stopped one hands back zero,
+        // which is also what a function answering nothing hands back.
+        let answered = self.ctx.append_basic_block(f, "answered");
+        let done = self.ctx.append_basic_block(f, "done");
+        let stopped = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::NE, which, i32_type.const_zero(), "stopped")
+            .expect("testing the tag");
+        self.builder.build_store(out, i64_type.const_zero()).expect("no answer yet");
+        self.builder.build_conditional_branch(stopped, done, answered).expect("branching on the tag");
+        self.builder.position_at_end(answered);
+        if returns.is_some() {
+            let word = self.to_word(answer);
+            self.builder.build_store(out, word).expect("handing back the answer");
+        }
+        self.builder.build_unconditional_branch(done).expect("to the return");
+        self.builder.position_at_end(done);
+        self.builder.build_return(Some(&which)).expect("handing back the tag");
 
         if let Some(block) = saved {
             self.builder.position_at_end(block);
@@ -181,10 +196,9 @@ impl<'ctx> Backend<'ctx> {
         let fn_type = if can_raise(&signature) {
             self.tagged_type().fn_type(&params, false)
         } else {
-            match &signature.ret {
-                Type::Unit => self.ctx.void_type().fn_type(&params, false),
-                other => self.llvm_type(other)?.fn_type(&params, false),
-            }
+            // A function value is called the way a closure is, and every
+            // closure that cannot raise hands back a cancellation tag.
+            self.plain_tagged_type(&signature.ret)?.fn_type(&params, false)
         };
 
         let f = self.module.add_function(
@@ -218,20 +232,26 @@ impl<'ctx> Backend<'ctx> {
             let call =
                 self.builder.build_call(target, &args, "forward").expect("forwarding a call");
 
-            // A fallible target hands back the tagged pair, which the adapter
-            // returns unchanged — it has nothing to add and nowhere to send an
-            // error of its own.
-            let returns_value = can_raise(&signature) || signature.ret != Type::Unit;
-            match call.try_as_basic_value().basic().filter(|_| returns_value) {
-                Some(value) => {
-                    self.builder
-                        .build_return(Some(&value))
-                        .expect("returning from an adapter");
-                }
-                None => {
-                    self.builder.build_return(None).expect("returning from an adapter");
-                }
+            // A fallible target hands back the tagged pair and a tagged one
+            // its cancellation pair, which the adapter returns unchanged — it
+            // has nothing to add and nowhere to send an error of its own. A
+            // target that cannot stop keeps its plain return, and the adapter
+            // gives it the zero tag every closure call expects.
+            if can_raise(&signature) || self.is_tagged(&symbol) {
+                let value = call.try_as_basic_value().basic().expect("a tagged call returns a pair");
+                self.builder.build_return(Some(&value)).expect("returning from an adapter");
+                continue;
             }
+            let shape = f.get_type().get_return_type().expect("a pair").into_struct_type();
+            let answer = match call.try_as_basic_value().basic() {
+                Some(value) if !matches!(signature.ret, Type::Unit | Type::Never) => value,
+                _ => self.ctx.i64_type().const_zero().into(),
+            };
+            let pair = self
+                .builder
+                .build_insert_value(shape.const_zero(), answer, 1, "pair")
+                .expect("the answer half");
+            self.builder.build_return(Some(&pair)).expect("returning from an adapter");
         }
     }
 }

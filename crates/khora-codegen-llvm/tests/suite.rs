@@ -36,6 +36,7 @@ mod arithmetic;
 mod arrays;
 mod backtick;
 mod benching;
+mod cancel_everywhere;
 mod channels;
 mod chars;
 mod combinators;

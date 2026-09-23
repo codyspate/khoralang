@@ -300,15 +300,18 @@ pub fn main() -> Int raises Stop + ChildFailed {
 }
 "#;
 
-/// The shape §1.1 is about: no `raises` row anywhere, so no cancellation point.
+/// The shape §1.1 is about: a `main` that reaches no cancellation point. A
+/// loop would be one, and so would any runtime call, so it waits in a foreign
+/// `pause()` -- third-party C, which runs to its end.
 const INFALLIBLE: &str = r#"module app::main;
 
 import std::core::{print};
 
+extern fn pause() -> Int;
+
 pub fn main() -> Int {
   print("ready");
-  let mut n = 0;
-  loop { n = n + 1; }
+  pause()
 }
 "#;
 
@@ -389,11 +392,11 @@ fn the_second_signal_kills_a_process_shutting_down_gracefully() {
     }
 }
 
-/// A `main` with no `raises` row dies rather than hanging.
+/// A `main` that reaches no cancellation point dies rather than hanging.
 ///
 /// **This is the regression the watcher introduced and the fallback closes.**
-/// Such a program has no cancellation point anywhere below the entry point, so
-/// a cancellation has nowhere to travel; before the watcher existed `SIGTERM`
+/// Such a program has nowhere for a cancellation to travel; before the watcher
+/// existed `SIGTERM`
 /// killed it outright, and a watcher that swallowed the signal instead would
 /// make the simplest program anybody writes stop answering `kill` — which is
 /// worse than the gap the watcher closes.

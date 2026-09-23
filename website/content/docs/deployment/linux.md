@@ -129,13 +129,15 @@ clean stop, and `TimeoutStopSec` stays the deadline: the runtime has no grace
 period of its own, so the number in your unit file is the only one. A second
 `SIGTERM` — or `TimeoutStopSec` expiring into `SIGKILL` — ends it at once.
 
-Two shapes still take the process the old way, and a service that must survive
-either should be written so that being killed at an arbitrary instant is
-survivable — commit before acknowledging, and let the next start recover:
+Two shapes still end the process without a clean stop, and a service that must
+survive either should be written so that being killed at an arbitrary instant
+is survivable — commit before acknowledging, and let the next start recover:
 
-- a `main` with **no `raises` row**, which has no channel for a cancellation to
-  travel; the runtime falls back to the default disposition, so the process
-  dies at wait-status 143 with no finalizers rather than hanging;
+- a `main` that reaches **no cancellation point at all** — no loop, no
+  blocking call, no call to a function that has one. There is nowhere in it to
+  stop, so the runtime uses the default disposition and the process dies at
+  wait-status 143 with no finalizers rather than hanging. Any `main` that
+  loops, serves or waits has a cancellation point, whatever its `raises` row;
 - a fiber inside a blocking `connect_to`, which reaches no cancellation point
   until `connect(2)` gives up.
 

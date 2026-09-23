@@ -150,6 +150,23 @@ pub(crate) struct CanStop {
 }
 
 impl CanStop {
+    /// Every function considered that cannot stop: the ones whose calls keep
+    /// their plain return.
+    pub(crate) fn keeps_a_plain_return(&self) -> HashSet<String> {
+        self.local.keys().filter(|symbol| !self.stops.contains(*symbol)).cloned().collect()
+    }
+
+    /// Every function whose own reasons include a call through a function
+    /// value, counted over its whole arena, so a lambda inside it counts.
+    /// `Backend::poll_at_entry` says why these poll when entered.
+    pub(crate) fn calls_through_values(&self) -> HashSet<String> {
+        self.local
+            .iter()
+            .filter(|(_, reasons)| reasons.contains(&Local::ClosureCall))
+            .map(|(symbol, _)| symbol.clone())
+            .collect()
+    }
+
     /// What `KHORA_CANCEL_T_REPORT` prints: the totals, then how many functions
     /// each rule fires in, before callees are counted.
     pub(crate) fn summary(&self) -> String {

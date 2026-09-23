@@ -137,7 +137,7 @@ impl Completion {
     /// stopped by this and is not waited for: the caller is unwinding and its
     /// own handle release is what still waits.
     fn wait_or_cancelled(&self) -> bool {
-        self.wait_until(&|| crate::current::current(|fiber| fiber.stops_here()))
+        self.wait_until(&|| crate::current::current(|fiber| fiber.gives_up_waiting()))
     }
 
     /// Waits until the fiber finishes or `give_up` says to stop asking.
@@ -169,6 +169,13 @@ impl Completion {
                 false
             }
             Completion::Fiber(done) => done.wait_until(give_up),
+        }
+    }
+
+    /// The latch the fiber closes as its last act, on either backend.
+    pub(crate) fn latch(&self) -> Arc<Done> {
+        match self {
+            Completion::Thread(_, done) | Completion::Fiber(done) => done.clone(),
         }
     }
 
@@ -1109,6 +1116,158 @@ pub unsafe extern "C" fn khora_fiber_cancel(fiber: *mut u8) {
 pub unsafe extern "C" fn khora_fiber_force(fiber: *mut u8) {
     // SAFETY: the caller guarantees a live handle.
     unsafe { deliver(fiber, Stop::Force) }
+}
+
+/// Cancels a fiber now, and forces it if it is still running `millis` later.
+///
+/// **What this prevents: a shutdown that waits for ever on cleanup that never
+/// finishes, in a program that has nobody to send the force.** Cleanup runs
+/// to completion and cancelling again does not cut it short, so a finalizer
+/// blocked on a `receive` nobody answers holds the fiber, and its nursery,
+/// and whoever waits on the nursery. The language has no timer of its own and
+/// no default grace period, so the number is the caller's, always.
+///
+/// Returns immediately. A fiber that has already finished costs nothing more:
+/// no deadline is recorded. Otherwise the deadline goes on one runtime-wide
+/// list ([`Deadlines`]), kept by one thread, so a server bounding every
+/// request's shutdown holds one entry per request -- a flag, a latch and a
+/// time -- rather than one sleeping thread. A fiber that finishes first is
+/// not forced.
+///
+/// **If the deadline thread cannot be started, the fiber is forced at once.**
+/// The operating system refused a thread, the program is already short of
+/// them, and waiting would need the thing that is missing; stopping the fiber
+/// now is the bound the caller asked for, reached early, where the other
+/// choice -- a panic out of an `extern "C"` function -- ends the process.
+///
+/// # Safety
+///
+/// `fiber` must be a live object from [`khora_fiber_spawn`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_fiber_cancel_within(fiber: *mut u8, millis: i64) {
+    // SAFETY: the caller guarantees a live handle.
+    let Some(state) = (unsafe { fiber_state(fiber) }) else { return };
+    let done = state.completion.latch();
+    if done.finished() {
+        return;
+    }
+    deliver_to(state, Stop::Cancel);
+    let when = std::time::Instant::now() + std::time::Duration::from_millis(millis.max(0) as u64);
+    if !Deadlines::add(Deadline { when, target: state.fiber.clone(), done }) {
+        deliver_to(state, Stop::Force);
+    }
+}
+
+/// One pending `cancel_within`: whom to force, and when, unless it has
+/// finished by then.
+struct Deadline {
+    when: std::time::Instant,
+    target: std::sync::Arc<crate::current::Fiber>,
+    done: std::sync::Arc<Done>,
+}
+
+impl Deadline {
+    /// Forces the fiber, the same road [`deliver_to`] takes, from the flag and
+    /// the id rather than the handle, which the deadline list does not hold.
+    fn expire(self) {
+        if self.done.finished() {
+            return;
+        }
+        crate::nursery::cancel_open_crews(self.target.id(), Stop::Force);
+        if on_the_scheduler() {
+            fibers().stop_fiber(self.target.id(), Stop::Force);
+        } else {
+            self.target.force();
+        }
+    }
+}
+
+impl PartialEq for Deadline {
+    fn eq(&self, other: &Self) -> bool {
+        self.when == other.when
+    }
+}
+impl Eq for Deadline {}
+impl PartialOrd for Deadline {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Deadline {
+    /// Reversed, so a `BinaryHeap` -- a max-heap -- holds the soonest on top.
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other.when.cmp(&self.when)
+    }
+}
+
+/// Every pending `cancel_within` in the process, and the one thread that
+/// keeps them.
+///
+/// **What this prevents: a thread per call.** A `cancel_within` per request,
+/// with a deadline of seconds, held one sleeping OS thread per request for the
+/// whole deadline -- three thousand calls, three thousand threads -- and
+/// `std::thread::spawn` panics when the OS refuses the next one. Here the cost
+/// of a pending deadline is one heap entry, and the thread count is one.
+///
+/// The thread sleeps on a condition variable until the soonest deadline or a
+/// new one, whichever comes first. It is started on the first deadline and
+/// never ends, like the reactor.
+struct Deadlines {
+    heap: std::sync::Mutex<std::collections::BinaryHeap<Deadline>>,
+    changed: std::sync::Condvar,
+}
+
+impl Deadlines {
+    /// The one list, and whether its thread is running.
+    fn get() -> Option<&'static Deadlines> {
+        static LIST: std::sync::OnceLock<Option<&'static Deadlines>> = std::sync::OnceLock::new();
+        *LIST.get_or_init(|| {
+            let list: &'static Deadlines = Box::leak(Box::new(Deadlines {
+                heap: std::sync::Mutex::new(std::collections::BinaryHeap::new()),
+                changed: std::sync::Condvar::new(),
+            }));
+            std::thread::Builder::new()
+                .name("khora-deadlines".into())
+                .spawn(move || list.keep())
+                .ok()
+                .map(|_| list)
+        })
+    }
+
+    /// Records `deadline`. False when there is no thread to keep it.
+    fn add(deadline: Deadline) -> bool {
+        let Some(list) = Deadlines::get() else { return false };
+        let mut heap = list.heap.lock().unwrap_or_else(|e| e.into_inner());
+        heap.push(deadline);
+        list.changed.notify_one();
+        true
+    }
+
+    /// The thread's whole life: wait for the soonest, expire what is due.
+    fn keep(&self) {
+        let mut heap = self.heap.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            let now = std::time::Instant::now();
+            let mut due = Vec::new();
+            while heap.peek().is_some_and(|d| d.when <= now) {
+                due.extend(heap.pop());
+            }
+            if !due.is_empty() {
+                // Outside the lock: a force reaches the scheduler and the
+                // nursery registry, and neither should wait on this list.
+                drop(heap);
+                for deadline in due {
+                    deadline.expire();
+                }
+                heap = self.heap.lock().unwrap_or_else(|e| e.into_inner());
+                continue;
+            }
+            heap = match heap.peek().map(|d| d.when.saturating_duration_since(now)) {
+                Some(wait) => self.changed.wait_timeout(heap, wait).unwrap_or_else(|e| e.into_inner()).0,
+                None => self.changed.wait(heap).unwrap_or_else(|e| e.into_inner()),
+            };
+        }
+    }
 }
 
 /// Delivers `stop` to a fiber by handle, and to its nurseries' children.

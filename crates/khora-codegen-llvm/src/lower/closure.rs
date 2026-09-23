@@ -197,18 +197,17 @@ impl<'ctx> Lower<'_, 'ctx> {
             param_types.push(ty.into());
         }
         let fallible = !row_is_empty(raises);
+        // Every lambda that cannot raise is tagged, so a closure's type says
+        // everything about how to call it; see `emit_closure`.
         let fn_type = if fallible {
             self.be.tagged_type().fn_type(&param_types, false)
         } else {
-            match ret {
-                Type::Unit => self.be.ctx.void_type().fn_type(&param_types, false),
-                other => match self.be.llvm_type(other) {
-                    Some(ty) => ty.fn_type(&param_types, false),
-                    None => {
-                        self.fail("a closure's result has no machine type", range)?;
-                        unreachable!("`fail` returns None")
-                    }
-                },
+            match self.be.plain_tagged_type(ret) {
+                Some(pair) => pair.fn_type(&param_types, false),
+                None => {
+                    self.fail("a closure's result has no machine type", range)?;
+                    unreachable!("`fail` returns None")
+                }
             }
         };
 
@@ -245,6 +244,14 @@ impl<'ctx> Lower<'_, 'ctx> {
             .build_indirect_call(fn_type, code, &values, "closure.call")
             .expect("calling a closure");
 
+        // Split here, inside the scope holding the closure, so an unwind on a
+        // cancellation releases it, and every consumer of `Invoked` still sees
+        // the plain answer of an infallible closure.
+        if !fallible {
+            let pair = call.try_as_basic_value().basic().expect("a tagged closure returns a pair");
+            let answer = self.split_cancelled(pair, ret);
+            return Some(Invoked { raw: Some(answer), fallible });
+        }
         Some(Invoked { raw: call.try_as_basic_value().basic(), fallible })
     }
 

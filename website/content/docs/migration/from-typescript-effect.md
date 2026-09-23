@@ -93,7 +93,7 @@ There is no description type to defer the read, because the `Env` handler is alr
 
 ## Interruption is not only at effect boundaries
 
-In Effect, a tight loop inside one synchronous step cannot be interrupted. Khora separates scheduler safepoints from cancellation points and emits a safepoint at every loop back-edge of a function that can raise, so a spinning loop in a fallible function is still cancellable. A function with no `raises` row has no cancellation point at all: the row is the channel a cancellation travels on.
+In Effect, a tight loop inside one synchronous step cannot be interrupted. Khora separates scheduler safepoints from cancellation points and puts a cancellation point at every loop back-edge, every call to a function that can reach one, and every blocking operation, so a spinning loop is cancellable whatever its function's `raises` row says. A cancellation does not travel on the error row: it has a return of its own, and a `catch` does not see it.
 
 ## Pipelines
 

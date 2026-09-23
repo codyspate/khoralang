@@ -1188,37 +1188,27 @@ pub fn main() -> Int {
 }
 ";
 
-/// **`check` refuses a `Fiber::wait` in a function with no `raises` clause.**
+/// **A `Fiber::wait` needs no `raises` clause.** A waiter cancelled while it
+/// is parked leaves on the cancellation's own channel, which every function
+/// that can reach a cancellation point has, so there is nothing to refuse.
 ///
-/// It passed the program and `build` refused it, so the two commands disagreed
-/// about one program and the editor, which runs the checker, showed nothing.
-/// The row on `wait` is the child's, and over an infallible child it is `{}`,
-/// which demands nothing -- but the waiter can be cancelled while it is parked,
-/// and a cancellation needs the failure channel whatever the child's row is.
-///
-/// The build's refusal was also rendered against a standard-library file,
-/// because a code-generator error carries no file; see
-/// `a_build_names_the_users_file_for_a_wait_with_no_channel` below.
+/// The failure this guards: a checker that still demanded a failure channel
+/// would refuse a program `build` compiles, and the editor, which runs the
+/// checker, would show an error on a line that is correct.
 #[test]
-fn a_wait_in_a_function_with_no_raises_clause_is_refused_by_check() {
+fn a_wait_in_a_function_with_no_raises_clause_checks() {
     let (ok, output) = command_on_package(
         "wait_no_raises_check",
         "check",
         &[("khora.toml", MANIFEST), ("src/main.kh", WAIT_IN_INFALLIBLE_MAIN)],
     );
 
-    assert!(!ok, "a wait with nowhere to be cancelled to must not check:\n{output}");
-    assert!(output.contains("`Fiber::wait` is a place this function can be cancelled"), "{output}");
-    // Why, and what to write -- both repairs, with a type to name.
-    assert!(output.contains("cancelled while it is parked"), "{output}");
-    assert!(output.contains("-> Int raises String"), "{output}");
-    assert!(output.contains("catch { _ => () }"), "{output}");
-    assert!(output.contains("main.kh:6:3"), "at the call, in the user's file:\n{output}");
+    assert!(ok, "{output}");
 }
 
 /// The method spelling reaches the same rule, under a different key.
 #[test]
-fn a_wait_spelled_as_a_method_is_refused_the_same_way() {
+fn a_wait_spelled_as_a_method_checks_the_same_way() {
     let source = WAIT_IN_INFALLIBLE_MAIN.replace("Fiber::wait(hand);", "hand.wait();");
     let (ok, output) = command_on_package(
         "wait_no_raises_method",
@@ -1226,17 +1216,13 @@ fn a_wait_spelled_as_a_method_is_refused_the_same_way() {
         &[("khora.toml", MANIFEST), ("src/main.kh", &source)],
     );
 
-    assert!(!ok, "{output}");
-    assert!(output.contains("`Fiber::wait` is a place this function can be cancelled"), "{output}");
-    assert!(output.contains("main.kh:6:3"), "{output}");
+    assert!(ok, "{output}");
 }
 
-/// **A `wait` inside a closure that raises nothing is refused at the call**,
-/// and told the two repairs that work in place: a `catch` inside the closure,
-/// or a failing type on it. It passed `check` and failed to build with a
-/// message about a `raises` clause a closure cannot write.
+/// **A `wait` inside a closure that raises nothing checks too**: a closure is
+/// a function, and has the cancellation's channel like any other.
 #[test]
-fn a_wait_inside_a_closure_that_raises_nothing_is_a_clear_refusal() {
+fn a_wait_inside_a_closure_that_raises_nothing_checks() {
     let (ok, output) = command_on_package(
         "wait_in_closure",
         "check",
@@ -1261,11 +1247,7 @@ pub fn main() -> Int raises Oops {
         ],
     );
 
-    assert!(!ok, "{output}");
-    assert!(output.contains("the closure raises nothing"), "{output}");
-    assert!(output.contains("Handle it inside the closure"), "{output}");
-    assert!(output.contains("give the closure a failing type"), "{output}");
-    assert!(output.contains("main.kh:8:39"), "{output}");
+    assert!(ok, "{output}");
 }
 
 /// **A `catch` is a channel, and so is a closure that already raises.** Both
@@ -1303,25 +1285,19 @@ pub fn main() -> Int {
     assert!(ok, "{output}");
 }
 
-/// **The build agrees with `check`, and says so in the user's file.**
-///
-/// A code-generator error carries a range and no file, and the build rendered
-/// it against whichever input sorted first -- a standard-library file, with the
-/// caret under a doc comment. The checker's refusal is what makes this one
-/// right: the build reports the checker's diagnostics per file, before any code
-/// is generated.
+/// **A `wait` with no channel builds and runs**, and the build and `check`
+/// agree about it. The program waits for its child and prints.
 #[cfg(feature = "llvm")]
 #[test]
-fn a_build_names_the_users_file_for_a_wait_with_no_channel() {
+fn a_wait_with_no_raises_clause_builds_and_runs() {
     let (ok, output) = command_on_package(
         "wait_no_raises_build",
-        "build",
+        "run",
         &[("khora.toml", MANIFEST), ("src/main.kh", WAIT_IN_INFALLIBLE_MAIN)],
     );
 
-    assert!(!ok, "{output}");
-    assert!(output.contains("main.kh:6:3"), "{output}");
-    assert!(!output.contains("clock_native.kh"), "not in a file the user never opened:\n{output}");
+    assert!(ok, "{output}");
+    assert!(output.contains("waited"), "{output}");
 }
 
 /// The same program with a channel checks, builds, runs, and waits.
@@ -1391,11 +1367,10 @@ pub fn main() -> Int {
     assert!(output.contains("6"), "{output}");
 }
 
-/// **A `catch` handler is not inside its operand.** A `wait` in a handler arm
-/// has no enclosing channel, and the code generator refuses it; the checker
-/// has to agree.
+/// **A `wait` in a `catch` handler arm checks.** The arm is outside its
+/// operand's `catch`, and needs no channel of its own for a cancellation.
 #[test]
-fn a_wait_in_a_catch_handler_is_refused() {
+fn a_wait_in_a_catch_handler_checks() {
     let (ok, output) = command_on_package(
         "wait_in_handler",
         "check",
@@ -1420,19 +1395,15 @@ pub fn main() -> Int {
         ],
     );
 
-    assert!(!ok, "{output}");
-    assert!(output.contains("`Fiber::wait` is a place this function can be cancelled"), "{output}");
+    assert!(ok, "{output}");
 }
 
-/// **A known gap, pinned so that closing it is noticed.** A generic function
-/// whose only `raises` is a row variable passes `check`, and `build` refuses
-/// the instantiation at an empty row. Refusing every such function would also
-/// refuse the instantiations that build. When this assertion starts failing,
-/// the checker has learned to see through the instantiation: update the
-/// limitations page and flip the test.
+/// **A generic waiter at an empty row checks and builds.** `check` and
+/// `build` disagreed about this program while a cancellation needed an error
+/// row: the checker could not see the instantiation that `build` refused.
 #[cfg(feature = "llvm")]
 #[test]
-fn a_generic_wait_at_an_empty_row_is_refused_only_by_build() {
+fn a_generic_wait_at_an_empty_row_checks_and_builds() {
     let source = "module main;
 import std::core::{Fiber, print};
 
@@ -1451,6 +1422,6 @@ pub fn main() -> Int {
     let (checked, check_out) = command_on_package("wait_generic_gap_check", "check", &files);
     let (built, build_out) = command_on_package("wait_generic_gap_build", "build", &files);
 
-    assert!(checked, "the gap is that check passes:\n{check_out}");
-    assert!(!built, "and build refuses:\n{build_out}");
+    assert!(checked, "{check_out}");
+    assert!(built, "{build_out}");
 }

@@ -228,13 +228,18 @@ pub(super) fn build(
         }
     }
 
-    // **Report-only.** Which functions can reach a cancellation point, for
-    // the tagged calling convention that is not built yet. It changes nothing
-    // that is emitted, so it is not part of the build cache's key; a build the
-    // cache serves prints nothing.
+    // **Which functions carry a cancellation tag**, decided before anything is
+    // declared, because the answer is each function's machine type. A caller
+    // and a callee that disagree about it is a miscompile, so this is the one
+    // place it is decided. Not part of the build cache's key separately: it is
+    // a function of the program, which the key already is.
+    let can_stop = super::can_stop::analyse(db, files, mono);
     if std::env::var_os("KHORA_CANCEL_T_REPORT").is_some() {
-        eprintln!("{}", super::can_stop::analyse(db, files, mono).summary());
+        eprintln!("{}", can_stop.summary());
     }
+    backend.untagged = can_stop.keeps_a_plain_return();
+    backend.lambdas_poll_in = can_stop.calls_through_values();
+    backend.poll_at_entry = can_stop.cyclic.union(&backend.lambdas_poll_in).cloned().collect();
 
     // Declare every definition before lowering any of them: a call site does
     // not know whether its callee has been emitted yet, and mutual recursion
@@ -270,7 +275,9 @@ pub(super) fn build(
         // Planned per *specialization*: `A` is unboxed in the generic body and
         // a counted pointer at `A = List<Int>`, so one plan for both is wrong
         // for whichever it was not made for.
-        let plan = khora_perceus::plan(body, instance_types, &defined, &backend.unboxed);
+        let symbol = instance.symbol();
+        let dispatches = |site| mono.callee(&symbol, site).is_some();
+        let plan = khora_perceus::plan(body, instance_types, &defined, &backend.unboxed, &dispatches);
         backend.source = source_of(db, mono, &instance.symbol());
         enter_debug_scope(db, &mut backend, mono, instance, body, &instance.symbol(), None);
         crate::lower::emit_function(
@@ -293,7 +300,11 @@ pub(super) fn build(
             continue;
         };
         let Some(body) = body_of(owner) else { continue };
-        let plan = khora_perceus::plan(body, owner_types, &defined, &backend.unboxed);
+        // A lambda's sites are the enclosing function's: it is lowered with
+        // that function's `owner`, so `mono.callee` is asked the same way.
+        let owner_symbol = owner.symbol();
+        let dispatches = |at| mono.callee(&owner_symbol, at).is_some();
+        let plan = khora_perceus::plan(body, owner_types, &defined, &backend.unboxed, &dispatches);
         // A lifted lambda belongs to the file its enclosing function came
         // from, and reads in a backtrace under the name of that function —
         // there is nothing else to call it, and a bare symbol would be worse.

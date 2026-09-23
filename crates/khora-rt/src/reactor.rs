@@ -490,7 +490,7 @@ pub(crate) fn block_until_ready(
         //
         // The same call `crate::channel` makes for a parked receive, for the
         // same reason and deliberately the same predicate.
-        if crate::current::current(|fiber| fiber.stops_here()) {
+        if crate::current::current(|fiber| fiber.gives_up_waiting()) {
             return false;
         }
         // A long wait rather than an indefinite one, so a socket closed from

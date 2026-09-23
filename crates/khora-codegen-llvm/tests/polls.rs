@@ -94,8 +94,8 @@ fn calls_by_block<'a>(body: &'a str, calls: &[&'a str]) -> Vec<(&'a str, &'a str
 }
 
 /// Two loops, one in a function with a row and one without, in a program
-/// that spawns -- so both have a safepoint, and the first has a cancellation
-/// check as well.
+/// that spawns. Both are cancellation points; the first also checks at its
+/// `!`.
 const LOOPS: &str = "module t;
 pub type Fiber<A, 'r>;
 impl<A, 'r> Fiber<A, 'r> {
@@ -215,16 +215,17 @@ fn in_a_release_build_the_poll_is_read_inside_the_loop() {
     }
 }
 
-/// A back-edge in a function with no row, in a program that spawns: only the
-/// safepoint, and it too behind the load.
+/// A back-edge in a function with no row, in a program that spawns: a loop is
+/// a cancellation point whatever the row says, so the one call is the
+/// back-edge's, which asks both questions -- and it too behind the load.
 #[test]
-fn an_infallible_loop_in_a_spawning_program_calls_the_safepoint_only_behind_the_poll() {
+fn an_infallible_loop_in_a_spawning_program_calls_the_runtime_only_behind_the_poll() {
     let body = function_ir("polls_quiet", LOOPS, "quiet");
-    let calls = calls_by_block(&body, &["khora_safepoint", "khora_cancelled"]);
+    let calls = calls_by_block(&body, &["khora_safepoint", "khora_cancelled", "khora_back_edge"]);
     assert_eq!(
         calls.iter().map(|(c, _)| *c).collect::<Vec<_>>(),
-        vec!["khora_safepoint"],
-        "one safepoint and no cancellation check, since there is no row:\n{body}"
+        vec!["khora_back_edge"],
+        "one call at the back-edge that asks both questions:\n{body}"
     );
     for (call, block) in &calls {
         assert!(
