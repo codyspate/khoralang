@@ -42,9 +42,10 @@ matching `libanswer.a` or `answer.lib`. `link-search` adds directories to search
 relative to the manifest. A name with no directory listed is looked for where the
 system keeps its libraries.
 
-Linking is governed by the same `extern` permission as declaring an `extern fn`:
-it is how those declarations are satisfied, so a package not trusted to declare
-them is not trusted to link them either.
+The `extern` permission governs the declarations rather than the link line: a
+package not allowed to declare an `extern fn` cannot call anything a library
+provides, so listing one in `link` gives it nothing to reach. What keeps the
+link line honest is the rule below — only the root package writes it.
 
 ### A dependency ships the library; the root package links it
 

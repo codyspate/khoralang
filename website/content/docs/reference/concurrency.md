@@ -214,22 +214,29 @@ Cancellation belongs to the target fiber:
 ```khora
 let child = Fiber::spawn(fn () => work());
 Fiber::cancel(child);
-Fiber::wait(child);
+Fiber::wait(child)!;
 continue_parent();
 ```
 
 `wait` rather than `join`, because a cancelled fiber has no answer: `join` on
 one unwinds the joiner along with it, and `continue_parent()` would never run.
+`Fiber::outcome` is the third choice, when the answer is wanted if there is
+one: it returns `Outcome::Answered(value)` or `Outcome::Stopped` without
+unwinding the caller.
+
+`wait` is itself a cancellation point, so the fiber calling it needs a `raises`
+row — the waiter can be cancelled while it is parked, even when the child
+cannot fail. `khora check` refuses a `wait` in a function with no `raises`
+clause and no enclosing `catch`.
 
 Cancelling a child does not cancel its parent.
 
 **There is no `timeout`, no `race` and no `select`.** A deadline can be built by
 hand — [Timeouts and cancellation](/docs/cookbook/timeouts-and-cancellation/)
 has the shape, and it works because cancelling a fiber cancels the children of
-any nursery it holds. A race cannot: `Fiber::wait` and `Fiber::join` are not
-cancellation points and carry no failure row, so a parent parked directly in one
-cannot be stopped before the child it is waiting on ends by itself, and a
-hand-written race is bounded by its slowest branch rather than its fastest.
+any nursery it holds. A race is harder: a parent cancelled while it waits stops
+only once the child it waits on has stopped, so a hand-written race is bounded
+by how quickly the losing branch reaches its next cancellation point.
 [Known limitations](/docs/limitations/#concurrency-combinators) has the
 measurements.
 
@@ -263,9 +270,9 @@ There is no `!` in that body. Without the back-edge it could not be cancelled, a
 
 A blocked or suspended operation is meant to be made runnable so that the fiber can unwind its structured scopes. That describes the coroutine backend; under the default thread backend a fiber inside `clock.sleep` sleeps to the end before it sees the cancellation. For most calls that is all it is: a *straight-line* blocking call is not itself a cancellation point, so the fiber wakes, finishes the call, and stops at the next `!` or back-edge after it.
 
-`Channel::send` and `Channel::receive` are the exception, because they are the only two operations in `std::core` with no bound on how long they may wait. A worker parked on an empty queue has no next back-edge to reach, so leaving it to find one meant it never stopped at all. Both therefore carry a `raises 'er` row and are written `Channel::receive(jobs)!`; the row is what gives the cancellation something to travel out on. `poll` never waits and is not a cancellation point.
+`Channel::send`, `Channel::receive` and `Fiber::wait` are the exception, because they are the operations in `std::core` with no bound on how long they may wait. A worker parked on an empty queue has no next back-edge to reach, so leaving it to find one meant it never stopped at all. All three therefore carry a `raises 'er` row and are written `Channel::receive(jobs)!`; the row is what gives the cancellation something to travel out on. `poll` never waits and is not a cancellation point.
 
-The check on these two comes *after* the call rather than before it, and only when the call comes back **empty-handed**. The runtime looks at the cancellation flag only once it has established there is nothing to take and no room to send, so a value arriving at the same moment as the cancellation is delivered rather than discarded — a cancelled receive is never holding a value nobody will see again. A send that gives up releases its value, the same as a send to a closed channel.
+The check on the two channel operations comes *after* the call rather than before it, and only when the call comes back **empty-handed**. The runtime looks at the cancellation flag only once it has established there is nothing to take and no room to send, so a value arriving at the same moment as the cancellation is delivered rather than discarded — a cancelled receive is never holding a value nobody will see again. A send that gives up releases its value, the same as a send to a closed channel.
 
 ### A fiber with no failure row runs to its end
 

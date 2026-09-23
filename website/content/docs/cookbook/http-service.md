@@ -233,22 +233,21 @@ document needs and not further.
 
 ## Stopping a service
 
-`Router::listen` serves until the process stops. **A `SIGTERM` or `SIGINT` now
+`Router::listen` serves until the process stops. **A `SIGTERM` or `SIGINT`
 stops it** — the signal becomes a cancellation at the root, a parked `accept`
 observes it in about ten milliseconds, and `scoped` finalizers run on the way
 out. For an ordinary deploy that is the whole answer and this section is
-optional reading.
+optional reading. It needs `main` to have a `raises` row, which is where the
+cancellation travels.
 
 A `/shutdown` route exists for the case the signal does not cover: a service
-that stops *itself* on a request, or one whose `main` has no `raises` row and
-so has no channel for a cancellation to travel. It runs `listen` on a fiber and
-lets go of that fiber when a route says to.
+that stops *itself* on a request. It runs `listen` on a fiber and lets go of
+that fiber when a route says to. The `main` around it still needs a `raises`
+row, because the `Fiber::wait` below is a place it can be cancelled.
 
-**Cancel the listener, or detach it — both work now.** `Fiber::cancel` on a
-listener used to hang the process forever, which is why older text here said to
-detach and never cancel. The runtime now checks for cancellation in the poll
-loop a parked `accept` sits in, so a cancelled listener unwinds and the process
-exits.
+**Cancel the listener, or detach it — both work.** A cancelled listener
+notices in the poll loop a parked `accept` sits in, unwinds, and releases its
+port.
 
 `cancel` is the better of the two when you want the port released before the
 next line runs: it stops the listener and `Fiber::wait` tells you when that has
@@ -276,7 +275,7 @@ loop {
 
 // Whatever the handlers feed: close it, and wait for the work already taken.
 Channel::close(jobs);
-Fiber::wait(worker);
+Fiber::wait(worker)!;
 // Only now.
 Fiber::detach(server);
 ```
@@ -314,7 +313,7 @@ exiting anyway:
 
 ```khora
 Fiber::cancel(server);
-Fiber::wait(server);
+Fiber::wait(server)!;
 ```
 
 This is the same fact as "drain first, stop last" seen from the other side: the
@@ -323,7 +322,7 @@ listener is a child like any other, and somebody has to end it.
 **A listener that cannot bind does not stop the process on its own.**
 `Router::listen` raises inside the fiber that `Fiber::spawn` started. The
 runtime prints `khora: a fiber ended with an error nobody was waiting for` when
-that happens, so the failure is no longer silent — but a `main` polling a stop
+that happens, so the failure is not silent — but a `main` polling a stop
 flag has still been told nothing it can act on, and keeps polling. A second
 copy started on a busy port serves nothing and, under a supervisor that
 restarts on exit, never restarts.

@@ -16,11 +16,17 @@ language rule, a supported feature, and unfinished work.
   and a limit of zero means no limit at all — so **a bound of exactly one
   cannot be written**, which is the value a "one at a time" flag wants most.
 - [A child's failure usually does not cancel its siblings](#a-childs-failure-usually-cancels-no-siblings).
-- [A cancelled fiber waiting on a child finishes waiting, then runs the rest of
-  its body](#a-cancelled-fiber-parked-in-fiberwait-keeps-going).
+- [A cancelled fiber waiting on a child stops only when the child
+  does](#a-cancelled-fiber-waiting-on-a-child-stops-when-the-child-does), and
+  `Fiber::join` on a child that cannot fail does not stop at all.
 - [The two fiber backends behave differently](#the-two-fiber-backends-are-distinguishable)
   under cancellation.
-- [There is no `timeout` or `race`](#concurrency-combinators).
+- [There is no `timeout` or `race`](#concurrency-combinators) in `std`; a
+  deadline is built from a fiber and a clock.
+- [Only Linux has a scalable I/O backend](#io-scaling-on-macos-and-windows)
+  for the fiber scheduler; macOS and Windows wait on sockets with `poll`.
+- [The `postgres` package does not speak TLS](#package-ecosystem), so rows
+  cross the network in the clear.
 - [Inbound connections are not permissioned](#inbound-connections-are-not-permissioned) —
   the manifest governs outbound only.
 
@@ -34,6 +40,14 @@ from source.
 A target is only called supported when the compiler, runtime, linker/sysroot,
 packaging, CI and deployment path work end to end. [Supported
 targets](/docs/deployment/supported-targets/) lists the ones that do.
+
+There are three: `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc` and
+`aarch64-apple-darwin`. **Linux on arm64 and Windows on arm64 are not among
+them** — the compiler can emit an object for `aarch64-unknown-linux-gnu`, but
+no toolchain is published for it and a build for it stops at the link. **There
+is no static or musl build**: the Linux toolchain and the programs it builds
+link dynamically against glibc, so Alpine and other musl distributions cannot
+run them, and a `scratch` container image is not an option.
 
 ## Recursion depth and very large lists
 
@@ -65,6 +79,13 @@ Dependencies can be pinned reproducibly to git revisions, but there is not yet a
 
 **One database driver is published: `postgres`.** `std::db` defines `Db`, transaction semantics and cancellation behaviour, and [`packages/postgres`](/docs/packages/postgres/) satisfies that interface — it speaks the wire protocol directly, authenticates with `scram-sha-256`, and supplies the `Db` handler. Depend on it with a git revision and a `subdir`; there is no registry yet. **SQLite and D1 have no driver**, and a program that needs one writes its own handler — `Db` is a record of closures, so that is a day's work and a test double is a few lines — over a native client it links with [`build.link`](/docs/reference/manifest/#build--what-to-produce).
 
+**`postgres` does not speak TLS.** It authenticates with `scram-sha-256`, so
+the password itself never crosses the network, but every query and every row
+read back travel in the clear. Connect over a loopback address or a network
+you already trust — a private network or a tunnel — and do not point it at a
+managed database across the public internet. A server whose `pg_hba.conf`
+admits only `hostssl` connections refuses it.
+
 **A dependency cannot link a native library on your behalf.** `build.link` is read from the root package's manifest and nowhere else, so a package that ships an archive and declares `extern fn` against it cannot put a flag on your link line — a transitive package adding a native library to your build would be a supply-chain change with no signal at the place that would have to consent. The package does the work and documents one line for you to add, which means every native library a program links can be read off its own manifest. [Foreign function interface](/docs/reference/ffi/#link-against-a-native-library) has the shape.
 
 ## Editor tooling
@@ -75,13 +96,30 @@ Rename covers a declaration and every file that names it, including the import t
 
 See [Editor setup](/docs/getting-started/editor/) for the language-server command and client setup.
 
+## A few build errors name the wrong file
+
+Almost every error is found by `khora check`, which runs per file and names the
+file and line it is in. A small number are found only while generating code —
+a `Fiber::wait` in a generic function used where it has no channel, an integer
+pattern too large for an `Int`, a compiler intrinsic such as `Fiber::wait`
+taken as a value (`let w = Fiber::wait;`). Those errors carry a line and column
+but not a file, and `khora build` renders them against the first source file
+it read, which may be a standard-library file or another file of your package.
+
+**Trust the message and the line number less than you would a `check` error.**
+If `khora check` passes and `khora build` reports an error at a place that
+cannot be the cause, search your own sources for the construct the message
+names. `khora check` passing and `khora build` failing is always worth
+[reporting](#reporting-a-limitation): each one is a rule the checker has not
+learned.
+
 ## Standard-library API docs
 
 `khora doc` generates the checked-in standard-library API reference from compiler-resolved declarations plus `///` and `//!` documentation comments. `khora doc --check` is used to detect drift between the source declarations and generated pages.
 
 Two important documentation-tooling gaps remain:
 
-- An API code block is only type-checked if it declares its own `module`. One of the 1,023 blocks on the generated pages does, and `scripts/check-api-programs.sh` checks it on every CI run; the rest are parsed as fragments and none are executed.
+- An API code block is only type-checked if it declares its own `module`. One of the roughly 1,200 blocks on the generated pages does, and it is type-checked on every CI run; the rest are parsed as fragments and none are executed.
 - Generated signatures name referenced types but do not yet cross-link those type names to their API pages.
 
 See the [Standard library](/docs/stdlib/) entry point for the generated reference.
@@ -182,10 +220,10 @@ kill -TERM twice -> killed by signal 15 mid-finalizer
 
 **An infallible `main` dies rather than unwinding.** A cancellation travels the
 error channel, so a `main` with no `raises` row has nowhere for one to go. The
-runtime notices this and falls back to the old behaviour — default disposition,
-re-raised at once — so such a program still answers `kill`, at wait-status 143
-with no finalizers. It loses nothing it previously had; it gains nothing
-either. Give `main` a `raises` row to get the graceful path.
+runtime notices this and uses the platform's default instead — default
+disposition, re-raised at once — so such a program still answers `kill`, at
+wait-status 143 with no finalizers. Give `main` a `raises` row to get the
+graceful path.
 
 A compiler warning for this shape — a `main` with no `raises` row and a `loop`
 or a `listen` in it — is decidable from the signature and is **not built**. The
@@ -201,15 +239,24 @@ to travel, and a function with no `raises` row has none. So
 ```khora
 fn main() -> Int {
   let hand = Fiber::spawn(fn () => body());
-  Fiber::wait(hand)   // refused: this call can leave the function
+  Fiber::wait(hand)   // refused: a place this function can be cancelled
 }
 ```
 
-is rejected even when `body` raises nothing at all — the empty row is still a
-row, and the diagnostics say so from three directions at once (`!` reports the
-missing clause, a `catch` reports that nothing raises, an annotation reports
-`expected Oops, found {}`). Give the waited-on function a `raises` row and
-catch it at the top.
+is rejected even when `body` raises nothing at all. Both `khora check` and the
+editor report it at the call, with or without the `!`. What counts as a channel
+is a `raises` clause on the function doing the waiting, or a `catch` around the
+call (`Fiber::wait(hand)! catch { _ => () }`). A closure that raises nothing
+takes the `catch` inside its body, or a failing type from its binding —
+`let body: () -> Int raises Oops = fn () => ..`.
+
+**One shape is refused only by `khora build`.** A generic function whose only
+failure channel is a row variable — `fn waiter<'er>(f: Fiber<Int, 'er>) -> ()
+raises 'er` — passes `check`, and the build refuses it where it is used with a
+fiber that cannot fail, because that use leaves the function no channel. The
+build's error for it can be rendered against the wrong file, since the code
+generator's errors do not carry one. Give such a function a concrete error type
+in its row, or wait under a `catch`.
 
 `Fiber::join` has always behaved this way, so this is `wait` joining a rule
 that already existed rather than a new one. It is still a real cost: `wait` on
@@ -260,9 +307,8 @@ cancellation point.
 a blocking `connect(2)` on the worker, so a fiber inside one reaches no
 cancellation point until the kernel gives up — minutes, on an unroutable host.
 `accept` and `recv` are fine: they are reactor-driven, and an idle
-`Router::listen` server stops in about ten milliseconds. The fix is a
-non-blocking connect driven by the reactor, which the roadmap schedules for
-Phase 13.
+`Router::listen` server stops in about ten milliseconds. A non-blocking connect
+driven by the reactor would make it one, and it is not built.
 
 **Windows has none of this.** Windows has no `SIGTERM`, and no way for an
 arbitrary process to ask another to stop: `TerminateProcess` is `SIGKILL` with
@@ -271,8 +317,9 @@ two siblings) are not wired up in this release.
 
 So a program that must not lose work should still be crash-only — durable state
 advancing by one atomic append or rename — because `SIGKILL`, a power cut and
-the three cases above all remain. What has changed is that the ordinary deploy
-is no longer one of them. [Running on Linux](/docs/deployment/linux/) and
+the three cases above all remain. The ordinary deploy on Linux or macOS — one
+`SIGTERM` to a program whose `main` has a `raises` row — is not one of them.
+[Running on Linux](/docs/deployment/linux/) and
 [Containers](/docs/deployment/containers/) say this in the setting where it
 bites.
 
@@ -280,7 +327,7 @@ bites.
 
 A fiber is an operating-system thread. The M:N scheduler — stackful coroutines on a worker pool — is built and is opt-in with `KHORA_FIBERS=scheduler`.
 
-It is not the default in 0.2.0, and is still not the default in the compiler this page describes, for three reasons, and one of them is a gap rather than a preference:
+It is not the default, for three reasons, and one of them is a gap rather than a preference:
 
 - Threads are faster at the connection counts a service runs at.
 - The scheduler exists for fiber **density**, and that claim is measured on Windows only. Linux caps `vm.max_map_count` at 65530 and guard pages split mappings, so the "100,000 waiting fibers" figure has not been reproduced on the platform most deployments use.
@@ -289,6 +336,23 @@ It is not the default in 0.2.0, and is still not the default in the compiler thi
 The two backends are distinguishable under cancellation — see [The two fiber
 backends are distinguishable](#the-two-fiber-backends-are-distinguishable)
 below — so the default cannot change without a breaking-change note.
+
+## I/O scaling on macOS and Windows
+
+This matters only under `KHORA_FIBERS=scheduler`. Under the default thread
+backend each fiber is an operating-system thread waiting on its own socket, and
+the ceiling is threads rather than the wait.
+
+Under the scheduler, a fiber waiting on a socket parks and one reactor wakes it
+when the socket is ready. **On Linux that reactor uses `epoll`**, which returns
+only the sockets that are ready. **On macOS and Windows it uses `poll`**
+(`WSAPoll` on Windows), which hands the kernel every watched socket on every
+wait, so the cost of one wait grows with the number of open connections.
+
+The scheduler exists for fiber density — many mostly idle connections — and
+that is exactly the case `poll` serves worst. A program built for tens of
+thousands of long-lived connections should run on Linux. macOS would need a
+`kqueue` backend and Windows an IOCP one; neither exists.
 
 ## Characters and strings
 
@@ -322,24 +386,36 @@ The practical consequence is that `attempt` handles a body raising exactly one t
 
 [The unions design note](https://github.com/codyspate/khoralang/blob/main/docs/design/unions.md) records what an anonymous union would mean, what it would cost, and why existentials are not part of the same question.
 
-## A cancelled fiber parked in `Fiber::wait` keeps going
+## A cancelled fiber waiting on a child stops when the child does
 
-`Fiber::wait` and `Fiber::join` are not cancellation points and carry no
-failure row, so a fiber parked in one cannot be stopped until the child it is
-waiting on ends by itself.
+`Fiber::wait` carries a `raises` row and is a cancellation point: a parent
+cancelled while waiting stops at the `!` and does not run the statement after
+it. **But it does not stop until the child it waits on has stopped**, because
+the parent's handle on the child is released on the way out, and releasing a
+handle cancels the child and waits for it. So the parent's latency is the
+child's: however long the child takes to reach its own next cancellation point.
 
-Cancelling a parent inside `Fiber::wait` on a 2000 ms child landed after
-1939-1984 ms, 20 runs out of 20 on both backends, against 0-5 ms for the same
-parent with no child to wait on.
+Measured on `khora 0.2.0 (a2593dd)`, x86_64 Linux, three runs per backend, a
+parent cancelled 50 ms into `Fiber::wait`:
 
-**Worse, the parent then ran the rest of its body** — the statement after the
-wait executed in 20 of 20 runs — so a fiber that was cancelled can still
-publish a result. A supervisor that cancels a worker and assumes it stopped is
-wrong on both counts: it did not stop promptly, and it did not stop.
+| the child is | thread backend | scheduler backend | statement after the wait ran |
+| --- | --- | --- | --- |
+| in one `clock.sleep(2000)` | stopped at 2000 ms | stopped at 50 ms | 0 of 6 |
+| in a loop of `clock.sleep(50)!` | 50–101 ms | 50 ms | 0 of 6 |
+| an infallible 1500 ms loop | 1500 ms | 1500 ms | 0 of 6 |
 
-Until `wait` and `join` carry a `raises` row of the kind `Channel::receive`
-already has, a parent that must stop promptly cannot be waiting on a child when
-the cancellation arrives.
+**`Fiber::join` on a child that cannot fail is not a cancellation point at
+all.** The row it raises is the child's, and a child with an empty row gives the
+join no channel: the same infallible 1500 ms child, joined instead of waited
+on, held the parent for 1500 ms and **the statement after the join ran in 6 of
+6 runs** — a cancelled fiber that still publishes a result. `join` on a
+fallible child stops like `wait` (60 ms and 50 ms, one run per backend,
+against a child with a cancellation point every 20 ms).
+
+So a supervisor that must stop promptly needs its children to have cancellation
+points, and should `wait` rather than `join` a child whose row is empty.
+`Fiber::outcome` hands back an answer without unwinding the asker when the
+answer is wanted.
 
 ## Concurrency combinators
 
@@ -354,21 +430,25 @@ handles, or uses `join_all` — measured three runs per backend on x86_64 Linux,
 and indistinguishable under `KHORA_FIBERS=scheduler`. At 500 ms per fiber over
 25 runs the three are 518, 514 and 516 ms.
 
-**What blocks a hand-written `race` or `timeout` is the wait above.** A `race`
-built out of `spawn` plus a wait is bounded by its *slowest* branch rather than
-its fastest, and a deadline built that way reports a cancellation the run then
-ignores.
+**A deadline can be built by hand, and a `race` only partly.** Put the work in
+a fiber, sleep the deadline, `Fiber::cancel` the handle and `Fiber::wait` for
+it; [Give work a deadline](/docs/cookbook/timeouts-and-cancellation/) has the
+program, and it returns within a few milliseconds of its deadline when the work
+has cancellation points. What such a deadline cannot do is stop work that has
+none — see the section above — and a hand-written `race` waiting on several
+fibers still has no way to wait on the *first* of them except through a
+`Channel` the branches send to.
 
 Two smaller things a supervisor meets on the way. `Fiber::wait` tells you
-nothing about how the fiber ended — there is no status and no
-`Option<Result<..>>`. `Fiber::cancelled` narrows that by one case: it answers
-whether the fiber was *stopped*, without waiting and without unwinding the
-asker, so a supervisor can tell a shutdown from a fault. It does not give you
-the answer, and it does not make `join` safe — a `join` on a cancelled fiber
-still unwinds its caller, and at the entry point still ends the program at 130.
-To keep what a fiber computed, the shape is still a `Shared` cell the child
-writes, which is the sort of thing the failure row was supposed to make
-unnecessary. And a fiber that raised without anybody taking its answer prints
+nothing about how the fiber ended. `Fiber::cancelled` answers whether the fiber
+was *stopped*, without waiting and without unwinding the asker, so a supervisor
+can tell a shutdown from a fault; `Fiber::outcome` goes one step further and
+hands back `Answered(value)` or `Stopped`, raising only when the child
+*failed*. A `join` on a cancelled fiber still unwinds its caller, and at the
+entry point still ends the program at 130, so `outcome` is the call for a
+caller that wants the answer and tolerates a stop. A stopped fiber's partial
+progress is never handed back; to keep it, the child writes a `Shared` cell.
+And a fiber that raised without anybody taking its answer prints
 `khora: a fiber ended with an error nobody was waiting for` to standard error,
 once per such fiber, with no way to suppress it and no effect on the exit
 status.
@@ -415,6 +495,9 @@ failure is reported rather than lost.
 
 The measurements below are `khora 0.2.0 (b16417c)` on x86_64 Linux, 20–25 runs
 per backend, under both the default thread backend and `KHORA_FIBERS=scheduler`.
+The first and fourth rows were re-measured on `khora 0.2.0 (a2593dd)`, three
+runs per backend, with the same result: `bounded_nursery(4)` peaked at 5, and
+with the failing child adopted last all eleven siblings ran to completion.
 
 ### The bound is on children held, not work in flight
 
@@ -511,4 +594,4 @@ Khora has not reached 1.0. Source compatibility across arbitrary development rev
 
 If the documentation says something should work and the compiler disagrees, treat that as a bug in either the implementation or the docs.
 
-Every hand-written example on this site is compiled as a step of the project's build gate, and the generated API pages are checked against their declarations by `khora doc --check`. Two gaps remain. A hand-written fragment is *parsed* rather than type-checked unless it declares its own `module`, so an example can be syntactically valid and still mean the wrong thing — `List<String` with the bracket missing is a valid comparison. And the examples inside `///` doc comments, which become the generated API pages, follow the same rule: one of them declares a `module` and is type-checked by `scripts/check-api-programs.sh` in CI, and the rest are parsed. None are executed, so an example that compiles can still print something other than what it says it prints. Where an example and the compiler disagree, reconcile them against the implementation rather than assuming either side is right.
+Every hand-written example on this site is compiled as a step of the project's build gate, and the generated API pages are checked against their declarations by `khora doc --check`. Two gaps remain. A hand-written fragment is *parsed* rather than type-checked unless it declares its own `module`, so an example can be syntactically valid and still mean the wrong thing — `List<String` with the bracket missing is a valid comparison. And the examples inside `///` doc comments, which become the generated API pages, follow the same rule: one of them declares a `module` and is type-checked in CI, and the rest are parsed. None are executed, so an example that compiles can still print something other than what it says it prints. Where an example and the compiler disagree, reconcile them against the implementation rather than assuming either side is right.
