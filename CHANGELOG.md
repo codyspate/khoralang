@@ -10,46 +10,186 @@ answer that is now right, then the rest. A bug that produced a *silently wrong*
 answer is listed under Breaking as well as Fixed, because code written around
 it will behave differently now.
 
-## Unreleased
+## 0.3.0-rc.1 — 2026-09-23
 
-Another round of strangers building real programs against the published
-documentation, and this time the tools that tell you whether your program works
-were the ones lying.
+Graceful shutdown, a way to ask a cancelled fiber what it ended as, native
+libraries on the link line — and another round of strangers building real
+programs against the published documentation, in which the tools that tell you
+whether your program works turned out to be the ones lying.
 
-The one to read first is the test and benchmark misattribution: with `test` or
-`bench` blocks in more than one file, verdicts and timings were reported under
-the wrong names. A test whose body was `assert(2 == 2)` could be reported
-`FAILED`, and a benchmark ladder could appear to get faster as its input grew.
+The one to read first is signal handling. `SIGTERM` and `SIGINT` used to end a
+Khora program where it stood; they now cancel it, its finalizers run, and it
+exits 130. That is the reason for this release, and it changes the exit status
+a supervisor sees, so it is under Breaking as well as Added.
 
 ### Breaking
 
-- **A dependency's `test` blocks are no longer part of your build.** They were,
-  with three consequences: a consumer could `import` a library's test module
-  and use types written for tests, `khora test` in a consumer ran every
+- **On Linux and macOS, `SIGTERM` and `SIGINT` unwind the program and exit
+  130, where they used to kill it outright.** A program whose `main` has a
+  `raises` row now runs its finalizers on `systemctl stop`, `docker stop`, a
+  Kubernetes rollout or `Ctrl-C`, and ends with exit status 130 rather than
+  being killed by the signal. Added, below, has what the program observes.
+
+  Listed as breaking for two reasons. The status changes: a wrapper script, a
+  health check or a restart policy that matched on "killed by signal 15" or on
+  exit status 143 sees an ordinary exit 130 instead. And the first signal is
+  now a request: a program busy in work with no cancellation point — see the
+  limits under Added — keeps running until that work ends or a second signal
+  arrives, where it used to die at once. A program whose `main` has no
+  `raises` row is unaffected: it still dies at the first signal, exactly as
+  before, with no finalizers.
+
+- **`Fiber::wait` is a cancellation point, and needs a failure channel.** A
+  fiber parked in `wait` could not be stopped before, which would have made
+  graceful shutdown work for some programs and not others. The waiter can be
+  cancelled while it is parked even when the fiber it waits on cannot fail, so
+  `khora check` refuses a `wait` in a function with no `raises` clause and no
+  enclosing `catch`, at the call, with or without a `!`. Inside a closure that
+  raises nothing, put a `catch` around the call or give the closure a failing
+  type. A generic function whose only channel is a row variable is refused by
+  `khora build` rather than `khora check`; Limitations has the shape.
+
+  A `wait` on a fiber whose body can fail raises that fiber's row, as `join`
+  always has: write `Fiber::wait(f)!` in a function that raises it. Give
+  `main` a `raises` row and catch the cancellation where the program can
+  answer it; that row is also what signal handling needs.
+
+- **A test suite that was green may be red after upgrading.** `khora test`
+  reported verdicts under the wrong names when `test` blocks were spread across
+  files — Fixed has the details — so a failing test could be reported `ok`
+  under another test's name. Three tests in Khora's own standard library suite
+  had been failing all along and reporting success this way. A test that fails
+  now was failing before; read it rather than the report you had.
+
+- **Listing a directory that exists but cannot be read raises
+  `IoError::Failed`, not `IoError::NotFound`.** Code that reads `NotFound` as
+  "absent, so create it" or "absent, so skip it" now takes the other branch on
+  an unreadable directory. Fixed has the bug.
+
+- **A row written in a local type annotation is checked, so `khora check`
+  refuses programs it used to accept.** A `let` annotation naming a function
+  type with a `with` or `raises` clause, or a type argument carrying a row —
+  `List<Job<Int, { Bad: Bad }>>` — was read as a type that agrees with
+  anything. Passing such a value to a parameter declaring a different row
+  compiled clean. It is now refused: at the `let` when the annotation disagrees
+  with the value, and at the call when the parameter does.
+
+  Listed as breaking because a program that compiled may not; it was already
+  wrong, and the annotation it wrote was never being read. Fixed, below, has
+  the other half: programs this reading accepts that were refused before.
+
+- **`where`, `yield`, `macro`, `unsafe` and `unstable` are reserved.** Khora
+  has no editions, so a keyword claimed after 1.0 would break every program
+  that used the word as a name with no way to migrate. These five are held
+  back now, while it is cheap; none of them means anything yet, and none is
+  highlighted as a keyword. Using one as a name is an error saying so, rather
+  than a parse error:
+
+  ```text
+  error: `yield` is reserved for a future version of Khora and cannot be used as
+         a name. ...
+  ```
+
+  Rename the binding, field or function.
+
+- **A dependency contributes only the modules under its own name.** A package
+  named `csv` publishes `csv` and every `csv::*`; a module beside it with any
+  other name — a `csv_test` holding the author's tests, or a `helpers` the
+  author never meant to publish — is no longer compiled into your build. It
+  was, with three consequences: a consumer could `import` a library's test
+  module and use types written for tests, `khora test` in a consumer ran every
   dependency's suite — so somebody else's failing test failed your run — and
   `khora doc` published a page for each test module in a library's public API.
 
-  Listed as breaking because a program that imported a dependency's test module
-  no longer compiles. That import was never intended to work; nothing in a
-  library's published surface should depend on how its author organised tests.
+  Listed as breaking because a program that imported such a module no longer
+  compiles, and a library whose public modules are not rooted at its package
+  name cannot be imported until its author moves them under it. A library that
+  puts its tests in the same file as its code, as `khora new --lib` does, is
+  imported as before.
+
+- **A directory named `build` is skipped when collecting sources**, at any
+  depth, alongside `target` and `.git`. `khora build` writes its output to
+  `build/`, and a stray `.kh` file there was compiled and its errors reported
+  against your program. The Getting started page already said `build/` was
+  skipped; the compiler now agrees.
+
+  Listed as breaking because a package that keeps modules in a directory named
+  `build` — `src/build/` — will find them missing. Rename the directory.
 
 ### Fixed
 
 - **`khora test` and `khora bench` reported results under the wrong names when
-  blocks were spread across files.** Test keys are numbered per file, so the
+  blocks were spread across files.** Test keys were numbered per file, so the
   nth block of one file and the nth of another shared one, and the lookup that
-  paired a compiled body with its name ignored which module it came from.
+  paired a compiled body with its name ignored which file it came from.
 
-  The visible effects: a test that cannot fail reported as failing, another
-  missing from the report entirely, totals that described a suite that did not
-  exist, and a `Dict` insertion benchmark that appeared to run six times faster
-  with four times the keys. The measurements themselves were correct; only the
+  The visible effects: a failing test reported `ok` with the run exiting 0, a
+  test that cannot fail reported as failing, totals that described a suite
+  that did not exist, and a `Dict` insertion benchmark that appeared to run six
+  times faster with four times the keys. The measurements themselves were
+  correct; only the
   names on them were wrong, so there was nothing in the output to suggest a
-  mix-up.
+  mix-up. Also under Breaking, because a verdict you have been reading may not
+  say what you thought it said.
 
-  Listed under Fixed rather than Breaking because no program's behaviour
-  changes — but a suite whose verdicts you have been reading may not say what
-  you thought it said.
+- **A record returned from a fiber could abort the process.** Joining a fiber
+  whose answer was a record holding a computed `String` printed the right
+  answer and then `khora runtime: drop of an object whose refcount is already
+  zero`, exit 134, with `khora check` clean. The value's contents were not
+  counted when it was read out of the fiber, so two owners released them.
+  20000 spawn-and-join cycles now hold steady in memory, so this is fixed
+  rather than traded for a leak.
+
+- **A path containing a non-ASCII character took the program down.** Every
+  filesystem call checks its path against the permission grant, and that check
+  cut multi-byte characters in half: one `Résumé.pdf` in a directory being
+  walked ended the program with `this slice cuts a character in half`, from
+  inside `std`, uncatchable, naming no path. Any path is now accepted, and a
+  path outside the grant is still refused.
+
+- **A directory that cannot be read was reported as not there.** Listing a
+  locked directory raised `IoError::NotFound`, which sends somebody to check a
+  path that is exactly where they left it instead of at the permission bit.
+  Files already drew this distinction; directories now draw it too, and an
+  absent directory still raises `NotFound`. Also under Breaking, because code
+  that branched on `NotFound` behaves differently.
+
+- **Cancelling a fiber whose body is a nursery returns.** It hung:
+  `Fiber::cancel` returned and `Fiber::wait` never did, with no message,
+  because the nursery's children were never told. The cancellation now reaches
+  them, and cancelling through a nursery costs what cancelling a directly
+  spawned child does. This is what makes a deadline expressible — see the new
+  Timeouts and cancellation recipe — and what signal handling is built on.
+
+- **Cancelling a fiber that is serving connections stops it.** `Fiber::cancel`
+  on a fiber in `Router::listen` hung the process for ever with nothing on any
+  stream, even for an idle listener: `main` ran to its last line and never
+  exited. A fiber waiting to accept a connection or to send now stops when it
+  is cancelled, on both fiber backends. The documentation had described this as
+  an abort with a named message, which it never was, and recommended
+  `Fiber::detach` instead, which leaves the listener just as stuck; both are
+  corrected.
+
+- **A `let` annotation that names a row is read.** Annotating a list of
+  closures with the row they actually raise —
+  `let handlers: List<(Int) -> () raises Boom> = [...]` — and then iterating
+  it failed with an error about `Iterator::next` and impl resolution, three
+  lines from anything you wrote. The row was being thrown away. It now checks
+  clean, and a `for` over a list of row-carrying values is no longer refused.
+
+  The same annotations were accepted when they named the *wrong* row, which is
+  the silently wrong half of this, and is under Breaking.
+
+- **A wrapper type is constructed by name wherever it is imported.**
+  `pub type Money = Int;` is built `Money(499)`, as the Types page teaches, but
+  from any module other than the declaring one that failed with *the type of
+  this expression was never worked out*. It now resolves everywhere;
+  `Money::Money(499)` still works too.
+
+- **`khora new --lib` generates the module declaration consumers expect.**
+  It wrote `module <name>::lib`, which forced every consumer to write
+  `import <name>::lib::{...}`. It writes `module <name>`, so consumers write
+  `import <name>::{...}`, which is what every page and README shows.
 
 - **A trapping test no longer reports the run as passing.** A suite of four
   tests, one dividing by zero, printed one `... ok` line and a bare
@@ -58,9 +198,9 @@ the wrong names. A test whose body was `assert(2 == 2)` could be reported
   interleaved with the harness's badly enough to produce the line
   `khora: test a ... ok`.
 
-  A trap still ends the process — containing one needs an unwinder, and
-  `contain.rs` has the argument — but the run now names the tests it did not
-  reach and says why they did not run.
+  A trap still ends the process, but the run now names the tests it did not
+  reach and says why they did not run, and the two streams no longer land
+  inside each other.
 
 - **Backtraces no longer print the build machine's paths.** Under `khora test`,
   thirteen of sixteen frames were the runtime's own, carrying
@@ -69,10 +209,178 @@ the wrong names. A test whose body was `assert(2 == 2)` could be reported
   were not, and under `khora run` the tail is short enough that nobody had
   looked.
 
-- **`khora new --lib` generates the module declaration consumers expect.**
-  (Was `module <name>::lib`, which forced `import <name>::lib::{...}`.)
+- **On Windows, running out of stack sometimes said nothing.** The process
+  ended with empty stderr where `khora: the stack ran out` should have been,
+  intermittently, because the handler that prints it had no stack of its own to
+  run on there. Room is now reserved for it, as it already was on Linux and
+  macOS. The message covers the main thread; a fiber's stack is separate, and
+  the Traps page says so.
+
+- **`khora doc` dropped the type parameter from headings.** A heading for
+  `Option<A>` rendered as the bare word `Option`, because the `<A>` was passed
+  through as an HTML tag, and every link to it was dead — twenty-eight of them
+  on the `std::core` and `std::schema` pages. Generated pages now escape it.
+
+- **`khora std search` finds methods.** `Int::of_string`, which is what
+  somebody looking to parse a number types, was not indexed; nor was any other
+  method in the standard library, because only top-level items were. Methods
+  are indexed as `Type::method`. The same index serves the MCP server, so
+  tooling could not see them either.
+
+- **A lambda with unbracketed parameters gets one error that names the fix.**
+  `fn acc, row => acc + row` produced twelve diagnostics, none of them about
+  the missing parentheses. It is one error at the comma, saying
+  `fn (a, b) => ...`.
+
+- **A `Show` error names the type you can fix.** Printing an `Option<Count>`
+  where `Count` has no `Show` advised writing `derive(Show)` on `Option`, which
+  is impossible. It now says `Option<Count>` has no `Show` because `Count` has
+  none, and suggests `derive(Show)` on `Count`.
+
+### Changed
+
+- **The status-130 message says how to keep a cancelled fiber's progress.**
+  When a `join` on a cancelled fiber ends the program, the message named the
+  calls that do not end it and stopped there. It now describes publishing to a
+  `Shared` cell and reading it after `cancel` and `detach`. `Fiber::outcome`,
+  under Added, is the typed way to ask.
+
+### Added
+
+- **Graceful shutdown on `SIGTERM` and `SIGINT`.** A signal becomes a
+  cancellation at the root of the program. There is no new API and nothing to
+  spell: nursery children are cancelled, scoped finalizers run, a `std::db`
+  transaction sends its `ROLLBACK`, and the process exits **130** — including
+  when a nursery absorbed the cancellation and `main` returned normally, so a
+  supervisor can tell a shutdown from a clean finish and `restart: on-failure`
+  fires. A run that was not signalled keeps the status `main` returned.
+
+  **The second signal is forceful.** The default disposition is restored and
+  the signal re-raised, so the process dies the way the platform says. The
+  deadline belongs to whoever sends the signals — `TimeoutStopSec`,
+  `terminationGracePeriodSeconds`, `docker stop --stop-timeout` — and the
+  runtime adds no timer of its own to disagree with it.
+
+  What it does not reach, all on the Limitations page with measurements:
+
+  - **`main` needs a `raises` row.** A cancellation travels the failure
+    channel, so a `main` without one has nowhere for it to go; such a program
+    dies at the first signal as it always did.
+  - **A loop with no cancellation point finishes first.** A compute-bound loop
+    with no fallible call stops only when it ends; until then the first signal
+    has no visible effect, and a second one kills it.
+  - **A long `clock.sleep` delays the shutdown or returns normally from it**,
+    depending on the fiber backend. Chunk long sleeps into short ones.
+  - **A blocking `connect_to` is not a cancellation point** until the operating
+    system gives up on the connection, which can be minutes.
+  - **Windows has none of this.** There is no `SIGTERM` there, and console
+    events are not wired up in this release.
+
+- **`Fiber::outcome` and `Outcome<A>`**, which wait for a fiber and say what it
+  ended as — `Outcome::Answered(value)` or `Outcome::Stopped` — without
+  unwinding the caller. `join` on a cancelled fiber unwinds its caller, and
+  from `main` that ends the program at 130, so a supervisor that wanted the
+  answer and could tolerate a stop had no safe call. A child that *failed*
+  still raises its failure by name on the fiber's own row; only a cancellation
+  comes back as a value. A stopped fiber's partial answer is not handed back,
+  because it is not one the program chose — publish partial progress to a
+  `Shared` cell.
+
+- **`Fiber::cancelled`**, which answers whether a fiber was stopped, without
+  waiting and without joining it. A supervisor loop asks it beside
+  `Fiber::finished`. A detached fiber answers `false`, so ask before detaching.
+
+- **A build can link against a native library.** `extern fn` could declare a C
+  symbol, but nothing could put the library on the link line, so importing
+  from C failed with `undefined reference`. Two keys in `[build]`:
+
+  ```toml
+  [build]
+  link = ["pq"]
+  link-search = ["./vendor"]
+  ```
+
+  **Only the root package's manifest is read.** A dependency may ship an
+  archive and declare `extern fn` against it, but it cannot add a library to
+  your link line; it documents the line for you to add, so every native
+  library a program links can be read off its own manifest. Declaring the
+  `extern fn` a library satisfies still needs the `extern` permission; the link
+  keys are refused for wasm. A changed archive makes a fresh build rather than
+  reusing a cached one.
+
+- **The build cache has a ceiling.** It grew without limit — every distinct
+  build kept a linked executable, and a machine that rebuilt often could fill
+  its disk. The default budget is 2 GiB, set with `KHORA_CACHE_BUDGET` in
+  bytes. Past it, the least recently used entries are evicted down to half the
+  budget. Eviction is best-effort: a cache that cannot be trimmed makes a build
+  slower, never a failure.
+
+- **`Response::of(status, content_type, body)`**, which sends a body that is
+  already serialised, as it is. `Response::json` encodes its argument, and a
+  `String` encodes to a JSON string, so hand-built JSON passed to `json` was
+  sent quoted and escaped. Prefer `derive(Encode)` and `json`; use `of` when
+  the bytes were serialised somewhere else.
+
+- **The `nested-verdict` lint.** `std::db::transaction` commits whenever its
+  body returns `Ok`, so a body typed `Result<Result<(), Refusal>, DbError>`
+  commits when the business refuses — and whatever it wrote before the refusal
+  stays written. The lint warns on exactly that call. Raise the refusal
+  instead, or write `// @klint allow nested-verdict` where committing a
+  `Result` value is what you meant.
+
+- **The `postgres` package speaks `scram-sha-256`**, the default
+  authentication on PostgreSQL 14 and later, so it connects to a stock server
+  rather than only to one set to `trust` or `password`. The server is made to
+  prove itself too, and a server asking for MD5 is refused with a message
+  saying how to move that role to `scram-sha-256`.
 
 ### Documentation
+
+- **A deadline is buildable, and there is a recipe for it.** Timeouts and
+  cancellation shows the shape — the work in a fiber, sleep the deadline,
+  cancel, wait — and the trap beside it: work with no failure channel has no
+  cancellation point, so it is not interrupted and the symptom is a hang with
+  no message.
+
+- **Environment variables have a reference page.** Every `KHORA_*` variable the
+  toolchain reads, with its default and legal values, including `KHORA_HOME`,
+  which decides where every cached artifact lands and was on no page. Two are
+  not what a reader would guess: `KHORA_LOCKED=0` turns locking *on*, because
+  only presence is read.
+
+- **Performance has a page for your own program.** The existing page is about
+  Khora's HTTP benchmark and now says so; the new one covers `--release`,
+  `KHORA_PROFILE` for `test` and `bench`, `khora bench`, timing stages with
+  `Clock::monotonic_millis`, and the absence of a sampling profiler.
+
+- **Packages are documented, and `std::db` says it ships no driver.** Several
+  pages implied first-party SQLite, PostgreSQL and D1 packages that did not
+  exist. A new Packages section lists what is maintained alongside the
+  compiler — `postgres`, `ai`, `otlp` — and how to depend on one by `git`
+  and `subdir`, since there is no registry.
+
+- **A refusal nested inside `Ok` commits a transaction**, and the
+  `std::db::transaction` documentation says so with the shape to use instead.
+  Its example uses PostgreSQL's `$1` placeholders, which is what the `postgres`
+  package takes. A PostgreSQL `numeric` arrives as `Cell::Text`, which was
+  documented only in the driver's README.
+
+- **The runtime's unobserved-failure message was described wrongly.** It is
+  printed when the fiber ends, not at process exit, and joining the fiber does
+  not silence it; a cancellation is not reported. Three pages said otherwise.
+
+- **A bare nullary constructor in a pattern binds.** `Ready => 1` matches every
+  value and names it `Ready`; the Patterns page said the reverse. A single-arm
+  or last-arm match compiles and warns only that `Ready` is never read — treat
+  that warning as an error in a match over a variant.
+
+- **A library's layout is documented.** Modules and packages says which file a
+  library's code goes in, what module to declare, that `khora build` has
+  nothing to build for one, and how to depend on it by path.
+
+- **New limitations, stated plainly.** A `forall` function value can be passed
+  but not yet called. A bound of exactly one is not expressible:
+  `bounded_nursery(0)` is unbounded and `bounded_nursery(1)` admits two.
 
 - **The absence of a prelude is stated where a reader will meet it.** Every
   `std::core` name needs an `import`, including `List`, `Dict` and `Option`,
@@ -85,10 +393,23 @@ the wrong names. A test whose body was `assert(2 == 2)` could be reported
   has exactly the fields ...`; Types showed an annotated example without saying
   the annotation was what made it work.
 
+- **Testing says what a trap does to a run.** A failed `assert` is a reported
+  failure and the run continues; a trap ends the process.
+
 - **A backtrace prints the qualified symbol**, `btrace$main$deep`, not the
   bare source name the Debugging page promised.
 
-- **`extern fn` cannot link against a native library** — documented, not fixed.
+- **Smaller corrections from reading the site against the compiler.**
+  `print` accepts a `String` and nothing else. The `raises` row is called the
+  failure row and the `with` row the capability row, everywhere. Cookbook
+  recipes have the same title in the index and the sidebar. The `std::fs`
+  `read_text` example imports what it uses and compiles as written.
+
+### Editor
+
+- **The VS Code extension has an icon and a gallery description** — keywords,
+  a homepage and an issue link — so a marketplace listing is findable and the
+  extensions pane shows the Khora mark rather than a blank tile.
 
 ## 0.2.0 — 2026-09-11
 

@@ -119,7 +119,7 @@ fn new_inside_a_pinned_workspace_does_not_repeat_the_pin() {
     std::fs::create_dir_all(root.join("packages")).expect("a workspace");
     std::fs::write(
         root.join("khora.toml"),
-        "[workspace]\nmembers = [\"packages/*\"]\n\n[toolchain]\nversion = \"0.2.0\"\n",
+        "[workspace]\nmembers = [\"packages/*\"]\n\n[toolchain]\nversion = \"0.3.0\"\n",
     )
     .expect("a root manifest");
 

@@ -5488,7 +5488,7 @@ fn a_pinned_project_is_not_told_anything() {
     let w = workspace(&[
         (
             "khora.toml",
-            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[toolchain]\nversion = \"0.2.0\"\n",
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[toolchain]\nversion = \"0.3.0\"\n",
         ),
         ("src/main.kh", "module app::main;\n\npub fn main() -> Int {\n  0\n}\n"),
     ]);

@@ -43,7 +43,7 @@ version = "0.1.0"
 
 # Which Khora builds this project. Required.
 [toolchain]
-version = "0.2.0"
+version = "0.3.0"
 ```
 
 The `[toolchain]` version is required, and it is what makes a project build the

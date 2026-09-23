@@ -30,7 +30,7 @@
 # toolchain on the machine of somebody developing the compiler is exactly the
 # thing that should not be building the compiler.
 [toolchain]
-version = "0.2.0"
+version = "0.3.0"
 
 [workspace]
 members = ["examples/*", "packages/*", "bench/*", "tests/*"]

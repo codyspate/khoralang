@@ -13,7 +13,7 @@ version = "0.1.0"
 
 # Which Khora builds this project. Required.
 [toolchain]
-version = "0.2.0"
+version = "0.3.0"
 ```
 
 Tables may appear in any order. A key the compiler does not recognise is a warning rather than an error, so a manifest written for a newer Khora still builds with an older one — you are told what was ignored instead of being stopped.
@@ -24,14 +24,14 @@ Tables may appear in any order. A key the compiler does not recognise is a warni
 
 ```toml
 [toolchain]
-version = "0.2.0"
+version = "0.3.0"
 ```
 
 | Key | Value |
 | --- | --- |
 | `version` | An exact version, or `latest`, or `latest.rc`. Required. |
 
-The version selects the compiler. Run `khora build` in a project pinned to `0.2.0` while `0.3.0` is on your path, and `0.3.0` hands the whole command over to the `0.2.0` you have installed — the build, the tests, the formatter and the editor's language server all follow the pin. A pinned version that is not installed stops the command and names it, rather than quietly building with something else.
+The version selects the compiler. Run `khora build` in a project pinned to `0.3.0` while `0.4.0` is on your path, and `0.4.0` hands the whole command over to the `0.3.0` you have installed — the build, the tests, the formatter and the editor's language server all follow the pin. A pinned version that is not installed stops the command and names it, rather than quietly building with something else.
 
 There are no ranges. A range needs a resolver, and a resolver reintroduces the thing a pin exists to remove: two machines agreeing on a constraint and disagreeing on a compiler.
 
@@ -88,7 +88,7 @@ version = "0.4.0"
 authors = ["A Name <a@example.com>"]
 
 [toolchain]
-version = "0.2.0"
+version = "0.3.0"
 ```
 
 | Key | Value |

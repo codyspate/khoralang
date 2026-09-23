@@ -25,7 +25,7 @@ name = "orders"
 version = "0.1.0"
 
 [toolchain]
-version = "0.2.0"
+version = "0.3.0"
 ```
 
 Source lives under `src/`. [The manifest](/docs/reference/manifest/) documents
@@ -276,7 +276,7 @@ Every project says which compiler builds it, and the field is required:
 
 ```toml
 [toolchain]
-version = "0.2.0"
+version = "0.3.0"
 ```
 
 The pin takes precedence over the machine default, and a pinned version that is

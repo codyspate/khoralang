@@ -42,7 +42,7 @@ Every archive is published with a `.sha256` beside it, and the installer checks
 it. If you fetched an archive by hand, check it the same way:
 
 ```bash
-sha256sum -c khora-0.2.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c khora-0.3.0-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 A checksum says the bytes are the ones that were published. It does not say who
@@ -52,7 +52,7 @@ a signed statement, made by GitHub during the release run, of which workflow in
 which repository at which commit produced that exact file.
 
 ```bash
-gh attestation verify khora-0.2.0-x86_64-unknown-linux-gnu.tar.gz   --repo codyspate/khoralang
+gh attestation verify khora-0.3.0-x86_64-unknown-linux-gnu.tar.gz   --repo codyspate/khoralang
 ```
 
 There is no maintainer key to trust and none to leak. The signing identity is
@@ -137,7 +137,7 @@ Use `khora` itself to install and switch compiler versions:
 
 ```bash
 khora update                      # install the newest release and use it
-khora toolchain install 0.2.0     # install a particular release
+khora toolchain install 0.3.0     # install a particular release
 khora toolchain default 0.1.0     # select an installed release as the default
 khora toolchain list              # list installed toolchains
 khora toolchain which             # show the version selected here and why
@@ -151,7 +151,7 @@ Every project says which compiler builds it, in `khora.toml`:
 
 ```toml
 [toolchain]
-version = "0.2.0"
+version = "0.3.0"
 ```
 
 **The field is required.** A project without it stops with a message carrying the two lines to add — the version, the quoting and the table name are not things anybody should have to guess.
@@ -191,7 +191,7 @@ cargo build -p khora-rt
 You can register a compiler you built locally as a Khora toolchain:
 
 ```bash
-khora toolchain link 0.2.0 target/debug/khora
+khora toolchain link 0.3.0 target/debug/khora
 ```
 
 ## Release candidates

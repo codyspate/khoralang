@@ -31,7 +31,7 @@ fn fixture(name: &str) -> PathBuf {
         root.join("khora.toml"),
         "# A comment that was written to be read.\n[workspace]\nmembers = [\"packages/*\"]\n\n\
          [workspace.package]\nversion = \"0.4.0\"\nauthors = [\"A Name <a@example.com>\"]\n\n\
-         [toolchain]\nversion = \"0.2.0\"\n",
+         [toolchain]\nversion = \"0.3.0\"\n",
     )
     .expect("the root manifest");
     for member in ["alpha", "beta"] {
@@ -123,7 +123,7 @@ fn a_level_writes_the_version_and_nothing_else() {
         "only the version should have moved: {text}"
     );
     assert!(
-        text.contains("[toolchain]\nversion = \"0.2.0\""),
+        text.contains("[toolchain]\nversion = \"0.3.0\""),
         "the pin is not the package version and must not move with it: {text}"
     );
 }

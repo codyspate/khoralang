@@ -59,7 +59,7 @@ name = "hello_khora"
 version = "0.1.0"
 
 [toolchain]
-version = "0.2.0"
+version = "0.3.0"
 ```
 
 Both tables are required. `[toolchain]` is what makes "this project builds the
@@ -198,7 +198,7 @@ name = "hello_khora"
 version = "0.1.0"
 
 [toolchain]
-version = "0.2.0"
+version = "0.3.0"
 
 [dependencies]
 postgres = { path = "../packages/postgres" }

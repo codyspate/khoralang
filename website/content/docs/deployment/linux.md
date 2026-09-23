@@ -25,7 +25,7 @@ For a build machine, pin the version and leave the shell profiles alone:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/codyspate/khoralang/main/install.sh \
-  | sh -s -- --version 0.2.0 --to /opt/khora --no-modify-path
+  | sh -s -- --version 0.3.0 --to /opt/khora --no-modify-path
 export PATH="/opt/khora/bin:$PATH"
 ```
 

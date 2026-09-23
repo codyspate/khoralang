@@ -908,7 +908,7 @@ fn only_the_root_package_may_link_a_native_library() {
     // Permitted to declare the extern, but naming no library to satisfy it.
     let manifest = app.join("khora.toml");
     let base = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
-                [toolchain]\nversion = \"0.2.0\"\n\n\
+                [toolchain]\nversion = \"0.3.0\"\n\n\
                 [permissions]\nextern = [\"app\"]\n";
     std::fs::write(&manifest, base).expect("the manifest");
 

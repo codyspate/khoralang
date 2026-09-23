@@ -24,7 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Pinned. A plain `curl | sh` takes the newest stable release, which makes the
 # image depend on the day it was built.
-ARG KHORA_VERSION=0.2.0
+ARG KHORA_VERSION=0.3.0
 RUN curl -fsSL https://raw.githubusercontent.com/codyspate/khoralang/main/install.sh \
       | sh -s -- --version "${KHORA_VERSION}" --to /opt/khora --no-modify-path
 ENV PATH="/opt/khora/bin:${PATH}"
@@ -52,7 +52,7 @@ ENTRYPOINT ["/usr/local/bin/myservice"]
 ```
 
 ```bash
-docker build --build-arg KHORA_VERSION=0.2.0 -t myservice:1 .
+docker build --build-arg KHORA_VERSION=0.3.0 -t myservice:1 .
 docker run --rm -p 8080:8080 myservice:1
 ```
 
