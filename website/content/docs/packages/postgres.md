@@ -10,7 +10,7 @@ is written against.
 
 ```toml
 [dependencies]
-postgres = { git = "https://github.com/codyspate/khoralang", rev = "main", subdir = "packages/postgres" }
+postgres = { git = "https://github.com/codyspate/khoralang", rev = "v0.3.0", subdir = "packages/postgres" }
 ```
 
 **[`packages/postgres/README.md`](https://github.com/codyspate/khoralang/blob/main/packages/postgres/README.md)

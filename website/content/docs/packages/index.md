@@ -21,13 +21,16 @@ repository, a revision, and the directory the package's own manifest sits in:
 
 ```toml
 [dependencies]
-postgres = { git = "https://github.com/codyspate/khoralang", rev = "main", subdir = "packages/postgres" }
+postgres = { git = "https://github.com/codyspate/khoralang", rev = "v0.3.0", subdir = "packages/postgres" }
 ```
 
 `khora.lock` records the commit each dependency resolved to, so a build stays
-reproducible even when the revision is a branch name. The full set of
-dependency keys is in [the manifest
-reference](/docs/reference/manifest/).
+reproducible even when the revision is a branch name. **Pin a tag when the
+dependency lives in the compiler's own repository** — `rev = "v0.3.0"`, the
+release your `[toolchain]` names — because `main` moves ahead of the compiler
+you have, and a package from a newer commit may use `std` that yours lacks.
+`khora install <url> --subdir <dir>` writes the line for you. The full set of
+dependency keys is in [the manifest reference](/docs/reference/manifest/).
 
 A registry is a 1.0 question. Until there is one, `git` and `subdir` are the
 whole mechanism, and a monorepo of packages works because `subdir` exists.

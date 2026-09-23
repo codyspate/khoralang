@@ -6,7 +6,7 @@ wire protocol, spoken directly over `std::net::socket`.
 ## Installing
 
 ```
-khora install https://github.com/codyspate/khoralang --subdir packages/postgres
+khora install https://github.com/codyspate/khoralang --subdir packages/postgres --rev v0.3.0
 ```
 
 `--subdir` because a git URL names a *repository*, and this package lives
@@ -15,7 +15,7 @@ inside one that is mostly a compiler. The command writes the entry, so
 
 ```toml
 [dependencies]
-postgres = { git = "https://github.com/codyspate/khoralang", rev = "main", subdir = "packages/postgres" }
+postgres = { git = "https://github.com/codyspate/khoralang", rev = "v0.3.0", subdir = "packages/postgres" }
 ```
 
 ## Using it as a `Db` capability
@@ -59,9 +59,9 @@ fn main() -> Int {
 
   let result = with_db(pool, fn () => store_person("Ada"));
   match result {
-    Result::Err(_) => print("no database connection"),
+    Result::Err(_) => print("the pool is closed"),
     Result::Ok(inner) => match inner {
-      Result::Err(_) => print("insert failed"),
+      Result::Err(why) => print("insert failed: ${why}"),
       Result::Ok(_) => print("stored"),
     },
   };
@@ -75,6 +75,14 @@ The application functions have no `db: Db` parameter. Their external authority
 is part of their type via `with { db: Db }`. `with_db` is the composition
 boundary that satisfies that requirement for the duration of a connection
 lease.
+
+**The two `Result`s answer different questions.** The outer one is whether a
+lease was obtained, and it is `Err` only when the pool has been closed. A
+database that cannot be reached is *not* that: `open` returns before any
+connection is made, each connection is opened by its own serving fiber, and one
+that could not connect answers every statement with the reason. So an
+unreachable server arrives as the inner `Err` — a `DbError` from the statement,
+naming the connection failure — and that is the arm to log.
 
 ## Using a connection directly
 

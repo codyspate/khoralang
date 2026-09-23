@@ -26,7 +26,7 @@ On Windows, in PowerShell:
 irm https://raw.githubusercontent.com/codyspate/khoralang/main/install.ps1 | iex
 ```
 
-The installer downloads the build for your platform, verifies it against the published checksum, and installs it under `~/.khora`. It does not compile Khora from source and does not require administrator access.
+The installer downloads the build for your platform, verifies it against the published checksum, and installs it under `~/.khora` — or under `$KHORA_HOME` when that variable is set, which is also where every later `khora` command looks for toolchains. The installer prints the directory it used. It does not compile Khora from source and does not require administrator access.
 
 Verify the installation:
 
@@ -39,7 +39,14 @@ Then continue with [Getting Started](/docs/getting-started/) or [Your first Khor
 ## Verify what you downloaded
 
 Every archive is published with a `.sha256` beside it, and the installer checks
-it. If you fetched an archive by hand, check it the same way:
+it. If you fetched an archive by hand, the release page lists both, at
+
+```text
+https://github.com/codyspate/khoralang/releases/download/v<version>/khora-<version>-<target>.tar.gz
+https://github.com/codyspate/khoralang/releases/download/v<version>/khora-<version>-<target>.tar.gz.sha256
+```
+
+(`.zip` on Windows), and you check it the same way:
 
 ```bash
 sha256sum -c khora-0.3.0-x86_64-unknown-linux-gnu.tar.gz.sha256
@@ -49,7 +56,8 @@ A checksum says the bytes are the ones that were published. It does not say who
 published them, and anybody who can replace the archive can replace the
 checksum next to it. For that, every archive also carries **build provenance**:
 a signed statement, made by GitHub during the release run, of which workflow in
-which repository at which commit produced that exact file.
+which repository at which commit produced that exact file. Checking it needs
+the GitHub CLI signed in to any account (`gh auth login`):
 
 ```bash
 gh attestation verify khora-0.3.0-x86_64-unknown-linux-gnu.tar.gz   --repo codyspate/khoralang
@@ -124,10 +132,10 @@ Khora compiles to native object code, so producing an executable requires the pl
 | --- | --- |
 | macOS | `xcode-select --install` |
 | Debian / Ubuntu | `apt install clang` or `apt install build-essential` |
-| Fedora / RHEL | `dnf install clang` |
+| Fedora / RHEL | `dnf install clang` or `dnf install gcc` |
 | Windows | [LLVM](https://releases.llvm.org), or the Visual Studio Build Tools with the **C++ Clang tools for Windows** component |
 
-Khora links through `clang`, so Windows needs one specifically. The **Desktop development with C++** workload does not install `clang` by itself — its **C++ Clang tools for Windows** component is separate — and MSVC's own `cl.exe` is not a substitute, because the driver is what locates the C runtime and system libraries. Installing LLVM is the shorter route.
+On Linux and macOS any of `clang`, `cc` or `gcc` will do as the driver. Windows needs `clang` specifically: the **Desktop development with C++** workload does not install it by itself — its **C++ Clang tools for Windows** component is separate — and MSVC's own `cl.exe` is not a substitute, because the driver is what locates the C runtime and system libraries. Installing LLVM is the shorter route.
 
 The installer checks for a usable linker and tells you if one is missing.
 
@@ -196,15 +204,18 @@ khora toolchain link 0.3.0 target/debug/khora
 
 ## Release candidates
 
-If you intentionally want to test a release candidate, opt into prerelease versions explicitly.
+If you intentionally want to test a release candidate, opt into prerelease versions explicitly. **These pages — the `next` documentation — describe the newest candidate**, and the release page on GitHub names which one that is.
 
-On macOS or Linux:
+On macOS or Linux, the newest release including candidates, or one by name:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/codyspate/khoralang/main/install.sh | sh -s -- --pre
+curl -fsSL https://raw.githubusercontent.com/codyspate/khoralang/main/install.sh | sh -s -- --version 0.3.0-rc.1
 ```
 
-On Windows PowerShell:
+`--version` takes the version without the leading `v`, and works for any published release, candidate or not.
+
+On Windows PowerShell, `installrc.ps1` is `install.ps1` with prereleases allowed — PowerShell cannot pass an argument to a script piped into `iex`, so the option is a second file rather than a flag:
 
 ```powershell
 irm https://raw.githubusercontent.com/codyspate/khoralang/main/installrc.ps1 | iex
@@ -218,5 +229,12 @@ khora update --pre
 ```
 
 `--pre` means prereleases are eligible; it does not prevent the tool from selecting a newer stable release. Release candidates have their own immutable version numbers such as `0.2.0-rc.1` and are not promoted in place.
+
+A project built with a candidate pins it by its full name — `khora new` writes the pin for whichever compiler ran it:
+
+```toml
+[toolchain]
+version = "0.3.0-rc.1"
+```
 
 When you are ready to write code, continue with [Your first Khora project](/docs/getting-started/first-project/).

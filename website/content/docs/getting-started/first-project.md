@@ -10,16 +10,28 @@ If `khora --version` does not work yet, start with [Installation](/docs/getting-
 
 ## Package structure
 
-Create a directory like this:
+Create one with `khora new`:
+
+```bash
+khora new hello_khora
+cd hello_khora
+```
+
+which writes this:
 
 ```text
 hello_khora/
+├── .gitignore
 ├── khora.toml
 └── src/
     └── main.kh
 ```
 
-`src/` is the convention and `khora new` writes it, but **the package is the
+`khora new --lib` writes a library instead. Creating the same files by hand
+works too; `khora new` only saves the typing and writes the `[toolchain]` pin
+for the compiler that ran it.
+
+`src/` is the convention, but **the package is the
 manifest's directory**, not `src/` alone: every `.kh` file beside `khora.toml`
 or under any directory below it is compiled. A scratch file dropped at the
 package root is part of the package and its errors are reported against it.

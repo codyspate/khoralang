@@ -63,6 +63,20 @@ produced or tested — and `ca-certificates`, if the service opens outbound TLS
 connections, because a `TlsClient` verifies against the machine's own trust
 store.
 
+**Strip the debug information before you ship it.** A release build emits none
+for your Khora code, but the runtime linked into every program carries its own
+— most of a release binary's size. `strip --strip-debug` removes that and
+nothing else, so a program behaves the same and a trap's backtrace still names
+its functions:
+
+```bash
+strip --strip-debug build/myservice
+```
+
+A bare `strip` saves a little more by removing the symbol table too, and then
+every backtrace frame reads `<unknown>`. Keep an unstripped copy if you want a
+debugger to see the runtime's frames.
+
 **Build on the machine family you deploy to.** Cross-compilation is not
 supported: `KHORA_TARGET` makes the compiler emit for another triple, which
 checks code generation and does not produce a runnable artifact.
