@@ -13,7 +13,7 @@ A section is complete only when its behavior is implemented, documented, tested,
 ## Current state
 
 Scored against the tree, item by item, against what is in the repository rather
-than against the roadmap's account of itself. **216 of 223**, counted from the
+than against the roadmap's account of itself. **218 of 223**, counted from the
 checkboxes below rather than from the summary table, whose per-section rows are
 maintained by hand and have drifted from them. Four moved with the
 release-candidate agent trials — the external-validation items in §19, which
@@ -97,9 +97,9 @@ Counted from the boxes on 2026-09-22; the rows sum to the line above.
 | 16. Public documentation | 46 / 46 |
 | 17. khoralang.com production documentation site | 12 / 12 |
 | 18. Reference applications and end-to-end proof | 6 / 6 |
-| 19. External-user validation | 4 / 5 |
+| 19. External-user validation | 5 / 5 |
 | 20. Public positioning and benchmark integrity | 7 / 7 |
-| 21. Release automation and final gate | 7 / 8 |
+| 21. Release automation and final gate | 8 / 8 |
 
 **What the shape of this says.** The two halves of the product are not at the
 same stage. Documentation (§16), tooling (§11) and the release machinery
@@ -505,15 +505,15 @@ Private testing is not a separate product milestone, but public release requires
   | `khora check` and `khora test` passing where `khora build` failed | a `src/bin` program compiled the package's test modules after dropping the `src/main.kh` they import | fixed |
   | `Fiber::cancel` on a fiber whose body is a nursery | never returned | fixed in `08e941b` -- a cancellation reaches the nursery's children as it is delivered. `cancelling_a_fiber_inside_a_nursery_returns` in `khora-codegen-llvm/tests/fibers.rs` passes (re-run 2026-09-22), and `/docs/cookbook/timeouts-and-cancellation/`'s deadline program, run as written, prints what the page says |
 
-- [ ] At least one fresh-machine "stranger test" completes:
+- [x] At least one fresh-machine "stranger test" completes:
 
   `discover -> install -> new project -> editor -> test -> dependency -> HTTP or CLI app -> debug -> deploy`
 
-  **Not done.** The trials cover `new project -> test -> CLI or HTTP app -> debug` convincingly and cover `install`, `editor`, `dependency` and `deploy` not at all. The first two steps are the ones a language is usually judged on and the exercise skips both. Re-checked 2026-09-22: still not done; a stranger run against the 0.3.0 release candidate from an empty home directory is briefed and has not yet reported.
+  **Done, against `v0.3.0-rc.1`.** An agent with an empty home directory, no Khora on its path and nothing but khoralang.com walked all nine steps and finished every one: it installed the candidate with the documented script and checked the archive's checksum by hand, scaffolded with `khora new`, drove `khora lsp` through `initialize`, diagnostics and hover over stdio, wrote a failing test and fixed it, added `packages/postgres` as a git dependency, wrote a 130-line exact-decimal CLI with its own tests, read a trap's backtrace down to its own line, and did a release build plus a systemd unit and timer that `systemd-analyze verify` accepts. Two caveats, both stated rather than hidden: the machine had no GUI, so "editor" is the language server over its protocol rather than VS Code, and it had no root, so the unit files were verified and not started. Nothing it hit needed source code or the author. What it did have to guess -- which docs describe a candidate, `--version`, `KHORA_HOME`, `rev = "main"` drifting, a postgres README arm that printed the wrong case, an unstripped 10 MB binary -- was fixed before the release; the report is `khora-agents/release/rel-stranger/REPORT.md`.
 
 - [x] No step requires unpublished repository knowledge or intervention from the language author. **Done:** no trial was answered, unblocked or corrected while it ran. Two spent real time on things the documentation does not say -- there is no stdin story in `std`, and no page on multi-binary packages -- and both worked around it and said so rather than asking.
 
-**Four of five, and the missing one is the installer.** The evidence here is about the language and its documentation; `install` and `deploy` on a machine that has never seen Khora are still unmeasured.
+**Five of five.** The last one was the installer and the deployment, measured on a machine that had never seen Khora; what remains unmeasured is a human, rather than an agent, doing the same.
 
 ---
 
@@ -537,7 +537,7 @@ Private testing is not a separate product milestone, but public release requires
 - [x] Documentation deployed to `khoralang.com` is generated from that same release/tag. **Done, by where the tree came from rather than by what the workflow checks out.** `/docs/v0.1/` is `git archive v0.1.0 website/content/docs`, and `versions.mjs` records the tag in `cutFrom`. The deploy still runs from `main`, because `main` is where both trees live and `next` has to track it — retargeting the workflow at the tag would have frozen `next`, which is the one tree that must not be frozen. `scripts/check-released-docs.sh` is a gate step: it fails when a `cutFrom` names a tag that does not exist, and *lists* pages that differ from it rather than failing, because correcting a page after a release is legitimate and only invisibility is not.
 - [x] Checksums/provenance/release notes are published together. **Done:** all three in the job that uploads. Checksums were already there; provenance is the attestation above; the notes are cut from `CHANGELOG.md` by `scripts/release-notes.sh` rather than written a second time, and a version with no entry stops the release rather than shipping a blank body. Notes are applied only when nobody has written one, so an edited draft is a decision rather than something to overwrite.
 - [x] Known limitations are current and prominent. **Done:** `/docs/limitations`, linked from the docs index.
-- [ ] The release candidate has completed the external-user validation above. **Left:** the stranger test in §19, and nothing else -- the other four items there are done.
+- [x] The release candidate has completed the external-user validation above. **Done:** `v0.3.0-rc.1`, by the stranger test in §19. Between the candidate and `v0.3.0` only documentation changed, and every change was a finding of that run.
 - [x] This document has been scored against the release candidate itself, item by item, and re-scored at every subsequent candidate. **Done:** Scored against the tree twice now -- #173, and again on 2026-09-03 with every open item checked against what is in the repository and the compiler run wherever a claim could be run. The second pass found four notes that had drifted from the tree: two of Phase 12's named remainders were fixed, the unresolved-name rendering was fixed, and the tracing cookbook it said was missing exists. That is the argument for the item rather than against it -- a gate scored once decays, and the decay is invisible until somebody re-reads it. The tag exists now: `v0.1.0` is `a2f03d1`, and that scoring pass is the one this release was cut from. Three commits landed between the pass and the tag -- `std::log`, this section's own stale note, and the packaging path -- and each updated the entries it touched, which is the discipline the item is asking for rather than an exception to it. A fourth drifted note was found the same way and is fixed above: §17 was still arguing for deferring documentation versioning one commit after it was built. A third read, on 2026-09-22 against `a2593dd`, re-checked the seven open items and the ticked ones the 53 commits since `v0.2.0` touched: two open notes had drifted (§1's 12.9, §2's macOS soak), one ticked note was false (§19's nursery-cancel row), one was overstated (§2's nursery sibling cancellation), and the summary table disagreed with the boxes in fifteen rows.
 
 ### Definition of public-release ready

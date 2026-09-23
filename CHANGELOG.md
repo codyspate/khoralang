@@ -10,7 +10,7 @@ answer that is now right, then the rest. A bug that produced a *silently wrong*
 answer is listed under Breaking as well as Fixed, because code written around
 it will behave differently now.
 
-## 0.3.0-rc.1 — 2026-09-23
+## 0.3.0 — 2026-09-23
 
 Graceful shutdown, a way to ask a cancelled fiber what it ended as, native
 libraries on the link line — and another round of strangers building real
@@ -410,6 +410,12 @@ a supervisor sees, so it is under Breaking as well as Added.
 - **The VS Code extension has an icon and a gallery description** — keywords,
   a homepage and an issue link — so a marketplace listing is findable and the
   extensions pane shows the Khora mark rather than a blank tile.
+
+## 0.3.0-rc.1 — 2026-09-23
+
+The candidate for 0.3.0, built from the same compiler source. Everything it
+contained is in the 0.3.0 entry above; between the two, only documentation
+changed.
 
 ## 0.2.0 — 2026-09-11
 
