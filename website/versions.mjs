@@ -66,6 +66,14 @@ export const versions = [
     from: 'content/docs',
   },
   {
+    id: 'v0.3',
+    label: 'v0.3',
+    stable: true,
+    /// The tag this tree was cut from, byte for byte.
+    cutFrom: 'v0.3.0',
+    from: 'content/versions/v0.3',
+  },
+  {
     id: 'v0.2',
     label: 'v0.2',
     stable: true,
