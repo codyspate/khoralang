@@ -276,8 +276,15 @@ pub(super) fn build(
         // a counted pointer at `A = List<Int>`, so one plan for both is wrong
         // for whichever it was not made for.
         let symbol = instance.symbol();
-        let dispatches = |site| mono.callee(&symbol, site).is_some();
-        let plan = khora_perceus::plan(body, instance_types, &defined, &backend.unboxed, &dispatches);
+        let stops = |site| can_stop_at(&backend, mono, &symbol, body, site);
+        let plan = khora_perceus::plan(
+            body,
+            instance_types,
+            &defined,
+            &backend.unboxed,
+            &stops,
+            backend.poll_at_entry.contains(&symbol),
+        );
         backend.source = source_of(db, mono, &instance.symbol());
         enter_debug_scope(db, &mut backend, mono, instance, body, &instance.symbol(), None);
         crate::lower::emit_function(
@@ -303,8 +310,17 @@ pub(super) fn build(
         // A lambda's sites are the enclosing function's: it is lowered with
         // that function's `owner`, so `mono.callee` is asked the same way.
         let owner_symbol = owner.symbol();
-        let dispatches = |at| mono.callee(&owner_symbol, at).is_some();
-        let plan = khora_perceus::plan(body, owner_types, &defined, &backend.unboxed, &dispatches);
+        let stops = |at| can_stop_at(&backend, mono, &owner_symbol, body, at);
+        // The owner's entry poll is not the lambda's, and a lambda's own
+        // parameters are released by `emit_closure`, not by this plan.
+        let plan = khora_perceus::plan(
+            body,
+            owner_types,
+            &defined,
+            &backend.unboxed,
+            &stops,
+            backend.poll_at_entry.contains(&owner_symbol),
+        );
         // A lifted lambda belongs to the file its enclosing function came
         // from, and reads in a backtrace under the name of that function —
         // there is nothing else to call it, and a bare symbol would be worse.
@@ -430,6 +446,53 @@ pub(super) fn build(
         debug.finalize();
     }
     backend.finish(&machine, out, stop, entry_point == Entry::Library, profile)
+}
+
+/// Whether a cancellation can leave the frame of `owner` at `site`: the
+/// question [`khora_perceus::plan`] asks of every call, operator and `${..}`.
+///
+/// **What this prevents: a leak on every cancel, from a plan and a lowering
+/// that disagree about where the frame can leave.** So it asks what
+/// `lower/calls.rs`, `lower/operators.rs` and `Expr::Shown`'s lowering will
+/// do with the same site. A call to a Khora body leaves only if that body is
+/// tagged or can raise, which is where Stage C's saving comes from: a callee
+/// [`super::can_stop`] pruned does not make its caller's bindings pay.
+/// Everything else -- an intrinsic, a foreign call, a call through a function
+/// value, a shape not recognised here -- is answered yes. That over-reports
+/// (`print` cannot stop), and over-reporting costs one release of a null slot.
+fn can_stop_at(
+    backend: &Backend<'_>,
+    mono: &khora_types::mono::Instances,
+    owner: &str,
+    body: &khora_hir::body::Body,
+    site: khora_hir::body::ExprId,
+) -> bool {
+    use khora_hir::body::Expr;
+    use khora_hir::Resolution;
+    let leaves_from = |symbol: &str| {
+        !backend.is_defined(symbol)
+            || backend.is_tagged(symbol)
+            || backend.signature_of(symbol).is_some_and(|s| khora_types::foreign::can_raise(&s))
+    };
+    match body.expr(site) {
+        Expr::Call { callee, .. } => match body.expr(*callee) {
+            Expr::Path(Resolution::Variant { .. }) => false,
+            // `call`'s own resolution: the specialization, or the name.
+            Expr::Path(Resolution::Item { name, .. }) => {
+                leaves_from(&mono.callee(owner, *callee).unwrap_or_else(|| name.clone()))
+            }
+            Expr::Path(Resolution::TraitItem { .. }) | Expr::Field { .. } => {
+                mono.callee(owner, *callee).is_none_or(|symbol| leaves_from(&symbol))
+            }
+            _ => true,
+        },
+        // An operator that dispatches is a call, and one that does not is an
+        // instruction.
+        Expr::Binary { .. } => mono.callee(owner, site).is_some_and(|symbol| leaves_from(&symbol)),
+        // Lowered as the value alone when nothing was resolved.
+        Expr::Shown(_) => mono.callee(owner, site).is_some_and(|symbol| leaves_from(&symbol)),
+        _ => true,
+    }
 }
 
 /// The text of the file a symbol's body came from.

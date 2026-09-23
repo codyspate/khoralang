@@ -553,6 +553,153 @@ pub fn main() -> Int {
     }
 }
 
+/// **A binding moved after a call that stops is released by the unwind.**
+///
+/// Each shape holds a `String` across a call that is cancelled, and hands it
+/// on after the call: straight-line, in a loop body, in a `match` arm (the
+/// arm's own binding and a `let` inside it), into a constructor, after a call
+/// through a closure, and a binding overwritten by the call's result (dead
+/// while the call runs, and still holding the old value). The fast ownership
+/// plan strikes a moved binding's
+/// release at its block, which leaks it on a path that leaves before the
+/// take. Each is run once and then twenty times; the live count must grow by
+/// the same amount both times.
+///
+/// Measured red with the per-binding rule off (`holding_at_a_stop` records
+/// nothing, so every body gets the fast plan): growth 19 for the straight,
+/// loop, constructor and closure-call shapes and 38 for the arm, on both
+/// backends. The overwritten shape is red (19) when only its own half of the
+/// rule is off, and the arm (19) when `own_arm_bindings` ignores it.
+/// **Shape 2, a lambda body holding the binding itself, stays at 0
+/// either way**: the last-use pass never moves a binding inside a lambda body
+/// (it counts the body's reads without walking it), so there is nothing to
+/// strike. It is here so that extending the pass into lambdas without
+/// extending this rule fails here.
+#[test]
+fn a_binding_moved_after_a_call_that_stops_leaks_nothing() {
+    const SOURCE: &str = "module main;
+import std::core::{Fiber, Option, print};
+import std::clock::{Clock};
+
+extern fn khora_live_count() -> Int;
+
+fn forever() -> Int {
+  let mut i = 0;
+  loop { i = i + 1; }
+}
+
+fn consume(s: String) -> Int { String::byte_length(s) }
+
+fn straight(tag: String) -> Int {
+  let held = \"held-${tag}\";
+  let n = forever();
+  n + consume(held)
+}
+
+fn in_loop(tag: String) -> Int {
+  let mut total = 0;
+  let mut i = 0;
+  while i < 3 {
+    let held = \"held-${tag}\";
+    let n = forever();
+    total = total + n + consume(held);
+    i = i + 1;
+  };
+  total
+}
+
+fn in_arm(tag: String) -> Int {
+  match Option::Some(\"bound-${tag}\") {
+    Option::Some(s) => {
+      let held = \"held-${tag}\";
+      let n = forever();
+      n + consume(s) + consume(held)
+    },
+    Option::None => 0,
+  }
+}
+
+fn into_constructor(tag: String) -> Int {
+  let held = \"held-${tag}\";
+  let n = forever();
+  let o = Option::Some(held);
+  match o {
+    Option::Some(s) => n + consume(s),
+    Option::None => n,
+  }
+}
+
+fn through_a_closure(tag: String) -> Int {
+  let held = \"held-${tag}\";
+  let spin = fn () => forever();
+  let n = spin();
+  n + consume(held)
+}
+
+fn fresh(n: Int) -> String { \"fresh-${n}\" }
+
+fn overwritten(tag: String) -> Int {
+  let mut s = \"old-${tag}\";
+  s = fresh(forever());
+  consume(s)
+}
+
+fn rounds(which: Int, n: Int) -> Int with { clock: Clock } {
+  let before = khora_live_count();
+  let mut round = 0;
+  let mut stopped = 0;
+  while round < n {
+    let tag = \"t${round}\";
+    let f = if which == 0 {
+      Fiber::spawn(fn () => straight(tag))
+    } else if which == 1 {
+      Fiber::spawn(fn () => in_loop(tag))
+    } else if which == 2 {
+      Fiber::spawn(fn () => { let held = \"held-${tag}\"; let k = forever(); k + consume(held) })
+    } else if which == 3 {
+      Fiber::spawn(fn () => in_arm(tag))
+    } else if which == 4 {
+      Fiber::spawn(fn () => into_constructor(tag))
+    } else if which == 5 {
+      Fiber::spawn(fn () => through_a_closure(tag))
+    } else {
+      Fiber::spawn(fn () => overwritten(tag))
+    };
+    clock.sleep(3);
+    Fiber::cancel(f);
+    Fiber::wait(f);
+    if Fiber::cancelled(f) { stopped = stopped + 1; };
+    round = round + 1;
+  };
+  let grew = khora_live_count() - before;
+  print(\"stopped ${stopped}\");
+  grew
+}
+
+pub fn main() -> Int {
+  with { clock: Clock::real() } {
+    let mut which = 0;
+    while which < 7 {
+      let once = rounds(which, 1);
+      let many = rounds(which, 20);
+      print(\"shape ${which}: per-cancel growth ${many - once}\");
+      which = which + 1;
+    };
+    0
+  }
+}
+";
+    let mut expected = String::new();
+    for shape in 0..7 {
+        expected.push_str(&format!("stopped 1\nstopped 20\nshape {shape}: per-cancel growth 0\n"));
+    }
+    for (backend, ran) in on_both("cancel_everywhere_moved", SOURCE) {
+        assert!(!ran.hung, "`{backend}`: {}", ran.stdout);
+        assert_eq!(ran.stdout, expected, "`{backend}`: {}", ran.stderr);
+        assert_eq!(ran.code, Some(0), "`{backend}`");
+    }
+}
+
 /// **Recursion through a function value stops promptly**, both through a
 /// record field (`k.f(k, n - 1)`, which never names `walk`) and through a
 /// lambda's own binding. Neither has a loop or a named call cycle; each runs
@@ -750,6 +897,107 @@ pub fn main() -> Int {
         let _ = child.kill();
         let _ = child.wait();
         assert!(threads < 20, "`{backend}`: {threads} threads with 6000 deadlines set");
+    }
+}
+
+/// **A frame stopped while it holds a reuse token frees the token.** `walk`
+/// takes each `Cons` cell as a token at its arm's head, to build the answer
+/// in, and then makes the recursive call; the bottom never returns. So a
+/// cancel lands with a thousand frames each holding a cell that no counter
+/// and no owner can see -- `khora_live_count` already counted it out, so
+/// only the process's memory shows the leak.
+///
+/// Measured by resident memory after 100 cancels and again after 900 more:
+/// with the token left unfreed it grew from 9 MB to 38 MB (threads backend;
+/// about 32 KB, one list's cells, per cancel). Freed on the way out, it does
+/// not grow. The bound is 4 MB.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_stopped_frame_frees_the_cell_it_was_going_to_reuse() {
+    const SOURCE: &str = "module main;
+import std::core::{print, Fiber, List};
+import std::clock::{Clock};
+
+fn build(n: Int) -> List<Int> {
+  let mut xs: List<Int> = List::Nil;
+  let mut i = 0;
+  while i < n { xs = List::Cons(i, xs); i = i + 1; };
+  xs
+}
+
+fn forever() -> Int {
+  let mut i = 0;
+  loop { i = i + 1; }
+}
+
+fn walk(xs: List<Int>) -> List<Int> {
+  match xs {
+    List::Nil => { let _ = forever(); List::Nil },
+    List::Cons(head, tail) => List::Cons(head, walk(tail)),
+  }
+}
+
+fn rounds(n: Int) -> () with { clock: Clock } {
+  let mut round = 0;
+  while round < n {
+    let f = Fiber::spawn(fn () => List::length(walk(build(1000))));
+    clock.sleep(2);
+    Fiber::cancel(f);
+    Fiber::wait(f);
+    round = round + 1;
+  }
+}
+
+pub fn main() -> Int {
+  with { clock: Clock::real() } {
+    rounds(100);
+    print(\"first\");
+    clock.sleep(400);
+    rounds(900);
+    print(\"second\");
+    clock.sleep(400);
+    0
+  }
+}
+";
+    /// Reads stdout up to `marker`, then the program's resident kilobytes.
+    fn resident_after(child: &mut std::process::Child, out: &mut impl Read, marker: &[u8]) -> u64 {
+        let mut seen = Vec::new();
+        let started = Instant::now();
+        let mut byte = [0u8; 1];
+        while !seen.ends_with(marker) && started.elapsed() < Duration::from_secs(120) {
+            match out.read(&mut byte) {
+                Ok(1) => seen.push(byte[0]),
+                _ => break,
+            }
+        }
+        assert!(seen.ends_with(marker), "never printed {:?}", String::from_utf8_lossy(marker));
+        std::thread::sleep(Duration::from_millis(100));
+        let status = std::fs::read_to_string(format!("/proc/{}/status", child.id()))
+            .expect("the program's status");
+        status
+            .lines()
+            .find_map(|l| l.strip_prefix("VmRSS:"))
+            .and_then(|n| n.trim().trim_end_matches("kB").trim().parse().ok())
+            .expect("a resident size")
+    }
+    let exe = build("cancel_everywhere_token", SOURCE);
+    for backend in BACKENDS {
+        let mut child = Command::new(&exe)
+            .env("KHORA_FIBERS", backend)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the program should run");
+        let mut out = child.stdout.take().expect("stdout");
+        let first = resident_after(&mut child, &mut out, b"first\n");
+        let second = resident_after(&mut child, &mut out, b"second\n");
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            second < first + 4096,
+            "`{backend}`: resident memory grew from {first} kB to {second} kB over 900 cancels"
+        );
     }
 }
 

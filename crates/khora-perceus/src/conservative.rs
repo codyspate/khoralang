@@ -134,12 +134,10 @@ impl<'a> Planner<'a> {
                 self.walk(inner);
             }
             // The value goes to `Show::show` as an argument and comes back as
-            // a `String`, so it is counted the way any other argument is --
-            // and it is a call, which a cancellation can leave through.
-            Expr::Shown(value) => {
-                self.unwinds = true;
-                self.walk(value)
-            }
+            // a `String`, so it is counted the way any other argument is. A
+            // cancellation can leave through that call, which the last-use
+            // pass settles per binding (`RcPlan::held_across`).
+            Expr::Shown(value) => self.walk(value),
             Expr::Record { fields, base, .. } => {
                 // The base is read for the fields nobody named, so it is used
                 // here as much as any of them.
@@ -245,10 +243,6 @@ impl<'a> Planner<'a> {
             Expr::Call { callee, args }
                 if matches!(self.body.expr(callee), Expr::Field { .. }) =>
             {
-                // A call can be where a cancellation leaves this frame, which
-                // is what `unwinds` means. Every call, because this plan is
-                // made per body and does not know which callees can stop.
-                self.unwinds = true;
                 let Expr::Field { base, name } = self.body.expr(callee).clone() else {
                     unreachable!("just matched")
                 };
@@ -264,17 +258,6 @@ impl<'a> Planner<'a> {
                 }
             }
             Expr::Call { callee, args } => {
-                // As above: any call can be where a cancellation leaves --
-                // **except a variant constructor**, which is written as a call
-                // and is an allocation: nothing in it can stop. Counting it
-                // would put every body that builds a `Some(x)` on the unwinding
-                // plan, and give up last-use moves in all of them for nothing.
-                if !matches!(
-                    self.body.expr(callee),
-                    Expr::Path(khora_hir::Resolution::Variant { .. })
-                ) {
-                    self.unwinds = true;
-                }
                 self.walk(callee);
                 let lent = self.lent_by(callee);
                 for (index, arg) in args.iter().enumerate() {
@@ -291,15 +274,6 @@ impl<'a> Planner<'a> {
                 }
             }
             Expr::Binary { lhs, rhs, .. } => {
-                // An operator that monomorphization resolved to a function --
-                // a user `eq`/`cmp`, or `String`'s `<`, which is `impl Ord` --
-                // is a call a cancellation can leave through. The question is
-                // the code generator's (`mono.callee` for this site), not a
-                // list of operand types, because a list is what got `<` on a
-                // `String` wrong.
-                if (self.dispatches)(id) {
-                    self.unwinds = true;
-                }
                 self.walk(lhs);
                 self.walk(rhs);
             }
@@ -323,18 +297,13 @@ impl<'a> Planner<'a> {
                 }
             }
             Expr::While { condition, body } => {
-                // A back-edge is a cancellation point in every function.
-                self.unwinds = true;
                 // The condition runs at least once and the body may run many
                 // times; both are inside the repetition as far as a last use is
                 // concerned.
                 self.walk(condition);
                 self.walk(body);
             }
-            Expr::Loop { body } => {
-                self.unwinds = true;
-                self.walk(body);
-            }
+            Expr::Loop { body } => self.walk(body),
             Expr::Break(Some(v)) => self.walk(v),
             // A `return` leaves the frame from the middle, which makes what is
             // still owned depend on where it left from.

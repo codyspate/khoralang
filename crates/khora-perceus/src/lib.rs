@@ -83,14 +83,32 @@ pub struct RcPlan {
     /// does a read no copy was ever planned for. Deriving takes from "no copy
     /// planned" put a slot-clearing store on reads that were neither.
     pub takes: HashSet<ExprId>,
-    /// Whether this body can leave a frame without reaching its end.
+    /// Whether this body can leave a frame on an *error* without reaching its
+    /// end: a `!`, `raise`, `catch` or `return`.
     ///
     /// Decides how a *take* is recorded. Where nothing unwinds, whether a
     /// binding was handed on is settled at compile time and the block does not
     /// release it; where something can, the block releases everything and a
     /// take clears the slot, so the question is answered at run time.
     /// `docs/design/reuse.md` §1.
+    ///
+    /// **A cancellation point does not set this.** Every call that can hand
+    /// back a cancellation, every back-edge and a polling entry is one, and
+    /// a whole-body answer put nearly every body on the conservative plan --
+    /// which withholds the reuse token from a recursive walk. Those are
+    /// settled per binding instead: [`Self::held_across`].
     pub unwinds: bool,
+    /// Bindings a cancellation point can find still holding their reference,
+    /// which a later read takes.
+    ///
+    /// **What this prevents: a leak on every cancel.** Striking a taken
+    /// binding from its block's releases is right on the path that reaches
+    /// the take, and leaks on a path that leaves the frame before it. So these
+    /// keep their release, and the take clears the slot, exactly as in a body
+    /// that [`Self::unwinds`]; every other binding in the body keeps the fast
+    /// plan. What it costs is one release of a null slot where the block
+    /// ends.
+    pub held_across: HashSet<LocalId>,
     /// Locals whose reference went to their last read rather than to a block.
     ///
     /// Recorded so the invariant stays checkable: "released exactly once" is
@@ -264,19 +282,25 @@ pub fn owns_a_reference(ty: &Type, unboxed: &khora_types::unboxed::Unboxed) -> b
 /// same body at `A = List<Int>` holds a pointer that must be counted. Errata
 /// 24.
 ///
-/// **`dispatches` is the code generator's own answer to "is this operator a
-/// call?"** -- whether monomorphization resolved the site to a function. An
-/// operator that is a call can be where a cancellation leaves the frame, and
-/// a plan that guessed from the operand's type got `String`'s `<` wrong: `==`
-/// on a `String` is a runtime compare, `<` is a call to `impl Ord`, and the
-/// guess leaked the moved binding on every cancel. Asking the same question
-/// codegen asks cannot drift from it.
+/// **`stops` is the code generator's own answer to "can a cancellation leave
+/// this frame here?"**, asked of every call, operator and `${..}` site. The
+/// planner cannot answer it: it depends on which callees
+/// the whole-program analysis pruned, and on whether monomorphization
+/// resolved an operator to a function. A plan that guessed from the operand's
+/// type got `String`'s `<` wrong -- `==` on a `String` is a runtime compare,
+/// `<` is a call to `impl Ord` -- and leaked the moved binding on every
+/// cancel. Asking the question codegen asks cannot drift from it, and a
+/// caller that cannot answer must say `true`.
+///
+/// `polls_at_entry` says the body asks about a cancellation before its first
+/// expression, where its parameters are the only thing it holds.
 pub fn plan(
     body: &Body,
     types: &khora_types::BodyTypes,
     defined: &Defined,
     unboxed: &khora_types::unboxed::Unboxed,
-    dispatches: &dyn Fn(ExprId) -> bool,
+    stops: &dyn Fn(ExprId) -> bool,
+    polls_at_entry: bool,
 ) -> RcPlan {
     let mut planner = Planner {
         body,
@@ -288,7 +312,9 @@ pub fn plan(
         unwinds: false,
         unboxed,
         loop_exits: Vec::new(),
-        dispatches,
+        stops,
+        polls_at_entry,
+        overwriting: Live::new(),
     };
     planner.plan_function();
     planner.settle_last_uses();
@@ -327,17 +353,21 @@ pub fn rc_plans(db: &dyn Db, file: SourceFile) -> Vec<(String, RcPlan)> {
             // freed twice.
             let body_types =
                 checked.bodies.iter().find(|(n, _)| n == name).map(|(_, t)| t).unwrap_or(&empty);
-            // No monomorphization here. An operator on a machine word is an
-            // instruction; on anything else -- `String` included, whose `<` is
-            // a call -- it is taken to be one: the safe direction.
-            let is_call = |id: ExprId| match body.expr(id) {
+            // No monomorphization and no whole-program analysis here, so every
+            // site is taken to be one a cancellation can leave through, but an
+            // operator on a machine word, which is an instruction. `String`'s
+            // `<` is a call. That is the safe direction. No body here is taken
+            // to poll when entered: that poll belongs to call-cycle members,
+            // a whole-program fact, and this plan is not what code generation
+            // uses -- it plans with [`plan`] per specialization.
+            let stops = |id: ExprId| match body.expr(id) {
                 Expr::Binary { lhs, .. } => !matches!(
                     body_types.of(*lhs),
                     Type::Int | Type::Fixed(_) | Type::Bool | Type::Unit | Type::Float
                 ),
                 _ => true,
             };
-            (name.clone(), plan(body, body_types, &defined, &unboxed, &is_call))
+            (name.clone(), plan(body, body_types, &defined, &unboxed, &stops, false))
         })
         .collect()
 }
@@ -378,7 +408,7 @@ struct Planner<'a> {
     /// A `match` arm's bindings are projections of the scrutinee's payload: no
     /// reference was made for them, so reading one has to copy, always.
     unowned: Live,
-    /// Whether this body can leave a frame early.
+    /// Whether this body can leave a frame early on an error. [`RcPlan::unwinds`].
     ///
     /// Moving a reference out of a binding makes the set a frame releases
     /// depend on how far execution got, which `docs/design/reuse.md` §1 does
@@ -388,8 +418,18 @@ struct Planner<'a> {
     unboxed: &'a khora_types::unboxed::Unboxed,
     /// What is live *after* each enclosing loop, innermost last.
     loop_exits: Vec<Live>,
-    /// Whether an operator site is a call to a function. [`plan`].
-    dispatches: &'a dyn Fn(ExprId) -> bool,
+    /// Whether a cancellation can leave the frame at a call, operator or
+    /// `${..}` site. [`plan`].
+    stops: &'a dyn Fn(ExprId) -> bool,
+    /// Whether the body polls before its first expression. [`plan`].
+    polls_at_entry: bool,
+    /// Bindings being assigned, while the value they are assigned is walked.
+    ///
+    /// Such a binding is dead there -- nothing reads what it holds -- and
+    /// still owns it until the assignment drops it, so a cancellation point
+    /// inside the value finds it holding a reference. Liveness alone says
+    /// nobody needs it and would let the block's release be struck.
+    overwriting: Live,
 }
 
 // One module per pass. An inherent impl may be split across modules of one

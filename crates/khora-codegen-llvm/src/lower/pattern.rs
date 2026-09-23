@@ -510,8 +510,10 @@ impl<'ctx> Lower<'_, 'ctx> {
                 .build_load(llvm_ty, slot, "arm.bound")
                 .expect("loading an arm binding to copy");
             self.retain(value, &ty);
-            // A binding the body hands on is released by whoever took it.
-            if !self.plan.moved.contains(&local) {
+            // A binding the body hands on is released by whoever took it --
+            // unless a cancellation point can come first, when the arm's scope
+            // keeps the release and the take clears the slot.
+            if !self.plan.moved.contains(&local) || self.plan.held_across.contains(&local) {
                 cleanups.push(Cleanup::Local(local));
             }
         }

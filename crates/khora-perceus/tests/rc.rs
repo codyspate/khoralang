@@ -325,3 +325,56 @@ fn a_packages_own_array_method_is_not_borrowed() {
         "`Array` here is this module's, not `std`'s: {p:?}"
     );
 }
+
+/// **A call that cannot stop costs a moved binding nothing; one that can
+/// costs it its strike.** `held` is taken by `consume` after a call to
+/// `step`. Where the code generator says `step` can stop -- tagged, or
+/// fallible -- a cancellation leaving there finds `held` still owned, so its
+/// block keeps the release and the take clears the slot. Where `step` was
+/// pruned, the binding is struck from the block like any other move.
+///
+/// This is the question per call site that replaced a per-body answer.
+/// `unwinds` is false in both, because neither body can leave on an error.
+#[test]
+fn a_moved_binding_keeps_its_release_only_across_a_call_that_can_stop() {
+    use khora_hir::body::Expr;
+    let db = KhoraDatabase::new();
+    let text = "module m;\n\
+                fn step() -> Int { 1 }\n\
+                fn consume(s: String) -> Int { 0 }\n\
+                fn f(s: String) -> Int {\n  let held = s;\n  let n = step();\n  n + consume(held)\n}\n";
+    let file = SourceFile::new(&db, "a.kh".into(), text.to_string());
+    let checked = khora_types::checked(&db, file);
+    let bodies = khora_hir::body::bodies(&db, file);
+    let body = &bodies.iter().find(|(n, _)| n == "f").expect("f").1;
+    let types = &checked.bodies.iter().find(|(n, _)| n == "f").expect("types").1;
+    let defined = khora_perceus::Defined::default();
+    let unboxed = nothing_unboxed();
+    let step_call = body
+        .exprs()
+        .find(|(_, e)| match e {
+            Expr::Call { callee, .. } => matches!(
+                body.expr(*callee),
+                Expr::Path(khora_hir::Resolution::Item { name, .. }) if name == "step"
+            ),
+            _ => false,
+        })
+        .map(|(id, _)| id)
+        .expect("the call to step");
+    let released = |p: &RcPlan| p.drops.values().flatten().copied().collect::<Vec<_>>();
+
+    let pruned = khora_perceus::plan(body, types, &defined, &unboxed, &|_| false, false);
+    let tagged =
+        khora_perceus::plan(body, types, &defined, &unboxed, &|site| site == step_call, false);
+
+    assert!(!pruned.unwinds && !tagged.unwinds, "neither body leaves on an error");
+    let held: Vec<_> =
+        tagged.moved.iter().copied().filter(|l| tagged.held_across.contains(l)).collect();
+    assert_eq!(held.len(), 1, "one moved binding is held across the call: {tagged:?}");
+    assert!(released(&tagged).contains(&held[0]), "and its block releases it: {tagged:?}");
+    assert!(pruned.held_across.is_empty(), "nothing is held across no stop: {pruned:?}");
+    assert!(
+        pruned.moved.iter().all(|l| !released(&pruned).contains(l)),
+        "every moved binding is struck when nothing can stop: {pruned:?}"
+    );
+}

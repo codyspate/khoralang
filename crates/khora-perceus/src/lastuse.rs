@@ -47,7 +47,12 @@ impl<'a> Planner<'a> {
         let Some(root) = self.body.root else { return };
         self.unowned = self.projected_bindings(root);
         self.unowned.extend(self.forwarded_capabilities());
-        self.live_before(root, &Live::new());
+        let on_entry = self.live_before(root, &Live::new());
+        // The poll at a cycle member's entry finds every parameter the body
+        // reads still held.
+        if self.polls_at_entry {
+            self.holding_at_a_stop(&on_entry);
+        }
 
         // Whoever took the reference releases it, so a binding that was taken
         // is struck from the release lists. This has to sweep every list rather
@@ -64,8 +69,18 @@ impl<'a> Planner<'a> {
         // generator clears the slot at the take, which makes "has this been
         // handed on" a question the slot answers rather than one the lowering
         // position has to.
+        //
+        // **Nor a binding a cancellation point finds still holding its
+        // reference**, for the same reason, one binding at a time:
+        // `RcPlan::held_across`. The rest of the body keeps the strike.
         if !self.unwinds {
-            let taken = self.plan.moved.clone();
+            let taken: Live = self
+                .plan
+                .moved
+                .iter()
+                .filter(|local| !self.plan.held_across.contains(*local))
+                .copied()
+                .collect();
             for releases in self.plan.drops.values_mut() {
                 releases.retain(|local| !taken.contains(local));
             }
@@ -126,9 +141,15 @@ impl<'a> Planner<'a> {
             Expr::Binary { op: BinOp::And | BinOp::Or, lhs, rhs } => {
                 let mut live = after.clone();
                 live.extend(self.reads_in(rhs));
+                // Not walked, so a stop inside it is not seen: count the whole
+                // of it as one.
+                self.holding_at_a_stop(&live);
                 self.live_before(lhs, &live)
             }
             Expr::Binary { lhs, rhs, .. } => {
+                if (self.stops)(id) {
+                    self.holding_at_a_stop(after);
+                }
                 let live = self.live_before(rhs, after);
                 self.live_before(lhs, &live)
             }
@@ -138,6 +159,7 @@ impl<'a> Planner<'a> {
                     // No `else` is an arm with nothing in it to hold a release.
                     let mut live = after.clone();
                     live.extend(self.reads_in(then_branch));
+                    self.holding_at_a_stop(&live);
                     return self.live_before(condition, &live);
                 };
                 let live = self.across_arms(&[then_branch, otherwise], &[], after);
@@ -159,6 +181,9 @@ impl<'a> Planner<'a> {
                     if let Some(guard) = arm.guard {
                         live.extend(self.reads_in(guard));
                     }
+                }
+                if arms.iter().any(|arm| arm.guard.is_some()) {
+                    self.holding_at_a_stop(&live);
                 }
                 self.live_before(scrutinee, &live)
             }
@@ -194,6 +219,7 @@ impl<'a> Planner<'a> {
                 if self.holds_a_continue(body) {
                     let mut live = after.clone();
                     live.extend(self.reads_in(body));
+                    self.holding_at_a_stop(&live);
                     return live;
                 }
                 let saved = self.plan.clone();
@@ -213,8 +239,12 @@ impl<'a> Planner<'a> {
                 }
                 if !settled {
                     live.extend(self.reads_in(body));
+                    self.holding_at_a_stop(&live);
                     return live;
                 }
+                // The back-edge polls with everything the next turn reads, and
+                // everything wanted after the loop, still held.
+                self.holding_at_a_stop(&live);
                 self.loop_exits.push(after.clone());
                 let settled = self.live_before(body, &live);
                 self.loop_exits.pop();
@@ -227,6 +257,7 @@ impl<'a> Planner<'a> {
                     let mut live = after.clone();
                     live.extend(self.reads_in(condition));
                     live.extend(self.reads_in(body));
+                    self.holding_at_a_stop(&live);
                     return live;
                 }
                 let saved = self.plan.clone();
@@ -248,8 +279,10 @@ impl<'a> Planner<'a> {
                 if !settled {
                     live.extend(self.reads_in(condition));
                     live.extend(self.reads_in(body));
+                    self.holding_at_a_stop(&live);
                     return live;
                 }
+                self.holding_at_a_stop(&live);
                 self.loop_exits.push(after.clone());
                 let inside = self.leaving_or_turning_again(body, &live, after);
                 let settled = self.live_before(condition, &inside);
@@ -282,6 +315,14 @@ impl<'a> Planner<'a> {
                 match self.body.expr(target).clone() {
                     Expr::Local(local) => {
                         live.remove(&local);
+                        // Dead while its new value is computed, and still
+                        // holding the old one: `overwriting`.
+                        let fresh = self.overwriting.insert(local);
+                        let before = self.live_before(value, &live);
+                        if fresh {
+                            self.overwriting.remove(&local);
+                        }
+                        return before;
                     }
                     _ => live.extend(self.reads_in(target)),
                 }
@@ -289,6 +330,15 @@ impl<'a> Planner<'a> {
             }
 
             Expr::Call { callee, args } => {
+                // A constructor is written as a call and is an allocation:
+                // nothing in it can stop.
+                let constructs = matches!(
+                    self.body.expr(callee),
+                    Expr::Path(khora_hir::Resolution::Variant { .. })
+                );
+                if !constructs && (self.stops)(id) {
+                    self.holding_at_a_stop(after);
+                }
                 let mut live = after.clone();
                 for arg in args.iter().rev() {
                     live = self.live_before(*arg, &live);
@@ -338,7 +388,12 @@ impl<'a> Planner<'a> {
             // both reads happen before the block's release and everything works,
             // and with a *later* use the binding stays live and everything
             // works. Only the exact middle case is wrong.
-            Expr::Shown(inner) => self.live_before(inner, after),
+            Expr::Shown(inner) => {
+                if (self.stops)(id) {
+                    self.holding_at_a_stop(after);
+                }
+                self.live_before(inner, after)
+            }
             // **A `break` leaves for after the loop, not for the next turn.**
             // What is live where it lands is the enclosing loop's own `after`,
             // and reading the ambient set instead would claim everything the
@@ -364,6 +419,26 @@ impl<'a> Planner<'a> {
 
             _ => after.clone(),
         }
+    }
+
+    /// Records the bindings a cancellation point finds still holding their
+    /// reference, given what is live after it.
+    ///
+    /// **What this prevents: a leak on every cancel.** A binding that is live
+    /// after a point where the frame can leave has not been handed on yet, so
+    /// if a later read takes it, striking its block's release would leave the
+    /// cancellation's unwind nobody to release it. One being overwritten is
+    /// dead and still holds the value it is about to lose, so it counts too.
+    /// Only a binding that is taken somewhere pays anything
+    /// ([`RcPlan::held_across`]); the rest keep their release regardless.
+    ///
+    /// Over-approximating costs a release of a null slot. Under-approximating
+    /// is the leak. A loop's trial turns put the plan back, and so drop what
+    /// they recorded here; the recording turn runs over the settled set, which
+    /// holds every trial's.
+    pub(super) fn holding_at_a_stop(&mut self, live: &Live) {
+        self.plan.held_across.extend(live.iter().copied());
+        self.plan.held_across.extend(self.overwriting.iter().copied());
     }
 
     /// What a `while`'s condition is standing in front of.

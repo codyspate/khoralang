@@ -637,6 +637,22 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// The frame stays alive in the second case, which is the entire
     /// difference between handling an error and propagating one.
     pub(super) fn leave_with(&mut self, which: IntValue<'ctx>, word: IntValue<'ctx>) {
+        // **A reuse token held here is freed on the way out.** An arm that
+        // may build in its matched cell takes the cell at its head and spends
+        // it at its constructor; a cancellation point between the two -- the
+        // recursive call in `Cons(h, walk(t))` is one -- leaves with the
+        // token in hand, and the token is memory no counter and no owner can
+        // see. Only a cancellation reaches here holding one: an arm that can
+        // leave on an error, a `break` or a `return` is never given a token
+        // (`khora_perceus` `may_leave_early`). Emitted on the leaving path
+        // only, so the path that reaches the constructor pays nothing.
+        if let Some((_, token)) = self.reuse.clone() {
+            let free_reuse = self.be.rt.free_reuse;
+            self.be
+                .builder
+                .build_call(free_reuse, &[token.into()], "")
+                .expect("freeing a reuse token on the way out");
+        }
         match self.catches.last() {
             Some(frame) => {
                 let (handler, depth) = (frame.handler, frame.scope_depth);
