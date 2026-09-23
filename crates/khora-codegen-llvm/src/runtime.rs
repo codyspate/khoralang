@@ -44,6 +44,16 @@ pub const CANCELLED_WHICH: u64 = khora_rt::CANCELLED_WHICH as u64;
 /// outside the range error-type ids come from, so no `catch` can name it.
 pub const FAILED_WHICH: u64 = khora_rt::FAILED_WHICH as u64;
 
+/// The `which` `khora_fiber_outcome` reports a *stopped child* under.
+///
+/// Distinct from [`CANCELLED_WHICH`], which on that one call means the
+/// *asker* was stopped while parked. The two want opposite handling — the
+/// child's stop becomes `Outcome::Stopped`, the asker's unwinds — and one tag
+/// for both would have `Fiber::outcome` swallow a cancellation aimed at its
+/// own frame. Defined from the runtime's constant, because two numbers that
+/// must agree are one number.
+pub const STOPPED_WHICH: u64 = khora_rt::STOPPED_WHICH as u64;
+
 /// The exit status of a program that was cancelled and never stopped being.
 ///
 /// 128 + SIGINT, which is what a shell already means by "interrupted". A
@@ -265,6 +275,13 @@ pub struct Runtime<'ctx> {
     /// cancelled fiber unwinds its caller and at the entry point ends the
     /// program.
     pub fiber_cancelled: FunctionValue<'ctx>,
+    /// `u32 khora_fiber_outcome(void *fiber, u64 *out)`
+    ///
+    /// Waits, and answers what the fiber ended as without unwinding the asker.
+    /// `join` answers the same shape with one tag fewer: a child that was
+    /// stopped comes back as `STOPPED_WHICH` here, where `join` reports
+    /// `CANCELLED_WHICH` and the caller has no row to name it on.
+    pub fiber_outcome: FunctionValue<'ctx>,
     /// `void khora_fiber_cancel(void *fiber)`
     pub fiber_cancel: FunctionValue<'ctx>,
     /// `void khora_fiber_release(void *fiber)` — a `drop_fields` callback.
@@ -495,6 +512,10 @@ impl<'ctx> Runtime<'ctx> {
             fiber_cancelled: declare(
                 "khora_fiber_cancelled",
                 ctx.bool_type().fn_type(&[ptr.into()], false),
+            ),
+            fiber_outcome: declare(
+                "khora_fiber_outcome",
+                ctx.i32_type().fn_type(&[ptr.into(), ptr.into()], false),
             ),
             fiber_cancel: declare("khora_fiber_cancel", void.fn_type(&[ptr.into()], false)),
             fiber_release: declare("khora_fiber_release", void.fn_type(&[ptr.into()], false)),

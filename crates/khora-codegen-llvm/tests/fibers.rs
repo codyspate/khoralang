@@ -2035,3 +2035,391 @@ fn main() -> Int {{
         }
     }
 }
+
+// --- asking a fiber what it ended as ---------------------------------------
+//
+// `Fiber::cancelled` answers *whether* a fiber was stopped and cannot hand
+// back what it computed; `Fiber::join` hands back the answer and, on a
+// cancelled fiber, unwinds its caller -- at the entry point ending the program
+// at 130, which no `catch` can name. So a supervisor that wants the answer
+// *and* tolerates a cancellation has neither call. `Fiber::outcome` is that
+// one: `Outcome::Answered(a)` or `Outcome::Stopped`, and a child *failure*
+// still raises on the fiber's own row.
+
+/// The prelude every `outcome` test below is built on.
+///
+/// `Outcome` is declared here rather than imported for the reason every
+/// fixture declares what it uses: these programs are self-contained modules
+/// and nothing in the test harness reads `std/core.kh`.
+const OUTCOME: &str = "module t;
+fn print(value: Int);
+extern fn khora_cancel();
+extern fn khora_live_count() -> Int;
+
+pub type Fiber<A, 'r>;
+impl<A, 'r> Fiber<A, 'r> {
+  fn spawn(body: () -> A raises 'r) -> Fiber<A, 'r>;
+  fn join(self) -> A raises 'r;
+  fn wait(self) -> () raises 'r;
+  fn cancelled(self) -> Bool;
+  fn outcome(self) -> Outcome<A> raises 'r;
+  fn cancel(self) -> ();
+  fn detach(self) -> ();
+}
+
+pub type Outcome<A> =
+  | Answered(value: A)
+  | Stopped;
+
+pub type Counted = { a: Int, b: Int, c: Int, d: Int, e: Int };
+fn counted(n: Int) -> Counted { { a: n, b: 0, c: 0, d: 0, e: 0 } }
+fn head(c: Counted) -> Int { c.a }
+
+pub type Oops = | Bad;
+fn ok(n: Int) -> Int raises Oops { n }
+";
+
+/// A cancelled fiber answers `Stopped`, and **the asker keeps running** --
+/// which is the whole of the difference from `join`, whose answer on the same
+/// fiber is an unwind its caller cannot name.
+#[test]
+fn a_cancelled_fiber_says_it_was_stopped() {
+    let ran = run(
+        "fiber_outcome_stopped",
+        &format!(
+            "{OUTCOME}
+fn worker() -> Int raises Oops {{
+  khora_cancel();
+  ok(1)!;
+  2
+}}
+
+fn main() -> Int {{
+  let f = Fiber::spawn(fn () => worker()!);
+  print(match Fiber::outcome(f)! catch {{ Oops::Bad => Outcome::Stopped }} {{
+    Outcome::Answered(n) => n,
+    Outcome::Stopped => 0 - 1,
+  }});
+  print(9);
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout, "-1\n9\n",
+        "the fiber was stopped, said so as a value, and the asker reached the \
+         line after it: {:?}",
+        ran.stdout
+    );
+    assert_eq!(ran.code, Some(0), "and asking did not end the program the way joining would");
+}
+
+/// A fiber that finished answers `Answered(v)` with the value it computed,
+/// which is the half that makes the other half worth reading.
+#[test]
+fn a_finished_fiber_hands_back_its_answer() {
+    let ran = run(
+        "fiber_outcome_answered",
+        &format!(
+            "{OUTCOME}
+fn main() -> Int {{
+  let f = Fiber::spawn(fn () => 42);
+  print(match Fiber::outcome(f) {{
+    Outcome::Answered(n) => n,
+    Outcome::Stopped => 0 - 1,
+  }});
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "42\n", "the answer came back intact: {:?}", ran.stdout);
+    assert_eq!(ran.code, Some(0));
+}
+
+/// **The ceremony claim, and the reason this design was chosen over a row on
+/// `join`.** On a fiber whose row is empty `outcome` is infallible: no `!`, no
+/// `catch`, no `raises` clause on the asker. A row on `join` would have put a
+/// `!` on every join including one that provably cannot fail, which is the
+/// cost `Fiber::join`'s own documentation records having refused once.
+///
+/// The `fn () -> Int` with no `raises` is what pins it: a `!` here would not
+/// compile, so a regression that made `outcome` fallible turns this red at
+/// compile time rather than at run time.
+#[test]
+fn an_empty_row_fiber_needs_no_bang() {
+    let ran = run(
+        "fiber_outcome_no_bang",
+        &format!(
+            "{OUTCOME}
+fn ask(f: Fiber<Int, {{}}>) -> Int {{
+  match Fiber::outcome(f) {{
+    Outcome::Answered(n) => n,
+    Outcome::Stopped => 0 - 1,
+  }}
+}}
+
+fn main() -> Int {{
+  let f = Fiber::spawn(fn () => 5);
+  Fiber::cancel(f);
+  print(ask(f));
+  0
+}}
+"
+        ),
+    );
+    assert!(
+        matches!(ran.stdout.as_str(), "5\n" | "-1\n"),
+        "an infallible fiber has no channel to be stopped on, so either it ran \
+         to its end or -- if a future runtime stops one -- it says so, and \
+         neither answer needed a `!`: {:?}",
+        ran.stdout
+    );
+    assert_eq!(ran.code, Some(0));
+}
+
+/// **A child *failure* still raises by name, and is not `Stopped`.**
+///
+/// The distinction this design rests on: only a child *cancellation* comes
+/// back as a value. A failure travels the fiber's own row exactly where it
+/// does today, so the `catch` arm names the case rather than wildcarding it.
+/// If `outcome` ever folded a failure into `Stopped`, the `-7` below becomes
+/// `-1` and this goes red.
+#[test]
+fn a_child_failure_still_raises_by_name() {
+    let ran = run(
+        "fiber_outcome_raises",
+        &format!(
+            "{OUTCOME}
+pub type Boom = | Bad(code: Int);
+
+fn worker() -> Int raises Boom {{ raise Boom::Bad(7) }}
+
+fn main() -> Int {{
+  let f = Fiber::spawn(fn () => worker()!);
+  print(match Fiber::outcome(f)! catch {{ Boom::Bad(code) => Outcome::Answered(0 - code) }} {{
+    Outcome::Answered(n) => n,
+    Outcome::Stopped => 0 - 1,
+  }});
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout, "-7\n",
+        "the failure came out by name with its payload, rather than as a \
+         cancellation: {:?}",
+        ran.stdout
+    );
+    assert_eq!(ran.code, Some(0));
+}
+
+/// **An inline-held answer is counted on the way into `Answered`.**
+///
+/// The same double free `join` documents at length: a record small enough to
+/// be held inline crosses as a word pointing at the box it was spilled into,
+/// and reading the fields back out copies a reference into this frame without
+/// counting it -- so this frame and the fiber's stored answer both release the
+/// same pointer, and the process aborts with `refcount is already zero` after
+/// printing the right number.
+///
+/// The trailing `0` is the live-object count, so this fails in both
+/// directions: a missing retain aborts, an eager one leaves the count above
+/// zero.
+#[test]
+fn an_inline_answer_is_counted_on_its_way_into_an_outcome() {
+    let ran = run(
+        "fiber_outcome_inline",
+        &format!(
+            "{OUTCOME}
+pub type Holder = {{ n: Int, held: Counted }};
+
+fn hold() -> Holder {{ {{ n: 7, held: counted(1) }} }}
+
+fn use_it() -> () {{
+  let f = Fiber::spawn(fn () => hold());
+  match Fiber::outcome(f) {{
+    Outcome::Answered(h) => {{ print(h.n); print(head(h.held)); }},
+    Outcome::Stopped => print(0 - 1),
+  }};
+}}
+
+fn main() -> Int {{
+  use_it();
+  print(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout, "7\n1\n0\n",
+        "the answer crossed intact and nothing was left over: {:?}",
+        ran.stdout
+    );
+    assert_eq!(ran.code, Some(0), "and the process was not aborted");
+}
+
+/// The stopped case on the coroutine backend.
+///
+/// **Not a duplicate.** A cancellation is delivered differently on each --- a
+/// thread reads its own flag, a task is resumed to find it --- so the stored
+/// outcome `outcome` reads is reached by two routes, and a suite that never
+/// sets `KHORA_FIBERS` executes only one of them.
+#[test]
+fn a_cancelled_fiber_says_it_was_stopped_on_the_scheduler_too() {
+    let ran = run_on(
+        "fiber_outcome_stopped_sched",
+        &format!(
+            "{OUTCOME}
+fn worker() -> Int raises Oops {{
+  khora_cancel();
+  ok(1)!;
+  2
+}}
+
+fn main() -> Int {{
+  let f = Fiber::spawn(fn () => worker()!);
+  print(match Fiber::outcome(f)! catch {{ Oops::Bad => Outcome::Stopped }} {{
+    Outcome::Answered(n) => n,
+    Outcome::Stopped => 0 - 1,
+  }});
+  print(9);
+  0
+}}
+"
+        ),
+        "scheduler",
+    );
+    assert_eq!(
+        ran.stdout, "-1\n9\n",
+        "the coroutine backend answers the same: {:?}",
+        ran.stdout
+    );
+    assert_eq!(ran.code, Some(0));
+}
+
+/// The answered case on the coroutine backend, for the same reason.
+#[test]
+fn a_finished_fiber_hands_back_its_answer_on_the_scheduler_too() {
+    let ran = run_on(
+        "fiber_outcome_answered_sched",
+        &format!(
+            "{OUTCOME}
+fn main() -> Int {{
+  let f = Fiber::spawn(fn () => 42);
+  print(match Fiber::outcome(f) {{
+    Outcome::Answered(n) => n,
+    Outcome::Stopped => 0 - 1,
+  }});
+  0
+}}
+"
+        ),
+        "scheduler",
+    );
+    assert_eq!(ran.stdout, "42\n", "{:?}", ran.stdout);
+    assert_eq!(ran.code, Some(0));
+}
+
+/// A child that absorbed a cancellation **and then failed** reports the failure.
+///
+/// **This pins behaviour that already holds, because a review argued it did
+/// not.** The concern was real in shape: `khora_fiber_outcome` asks
+/// `khora_fiber_cancelled` before it reads the stored outcome, and that flag is
+/// set by any inner frame that absorbed a stop — so on paper a fiber that
+/// absorbed and then raised would answer `Stopped` with the error gone. It does
+/// not, on either ordering, and the error arrives with its payload intact.
+///
+/// The ordering cannot be changed to "read the outcome first" anyway: `observe`
+/// dups the payload where it is an object, and the stopped path returns without
+/// handing it out, so that reference would have no owner. This test is what
+/// says the current order costs nothing.
+#[test]
+fn a_child_that_absorbed_a_cancellation_and_then_failed_reports_the_failure() {
+    let ran = run(
+        "fiber_outcome_failed_after_absorb",
+        &format!(
+            "{OUTCOME}
+// A payload-carrying error, so this also pins that the payload survives.
+pub type Boom = | Bad(code: Int);
+
+// **`khora_cancel()` is what makes this the shape under test.** It sets the
+// absorbed flag; without it nothing absorbs and the branch is never reached.
+fn inner() -> Int {{
+  khora_cancel();
+  ok(1)! catch {{ Oops::Bad => 0 }}
+}}
+
+fn worker() -> Int raises Boom {{
+  let seen = inner();
+  raise Boom::Bad(7 + seen)
+}}
+
+fn main() -> Int {{
+  let f = Fiber::spawn(fn () => worker()!);
+  // The catch answers a number `Stopped` never produces, so the two
+  // behaviours cannot print the same thing.
+  print(match Fiber::outcome(f)! catch {{ Boom::Bad(code) => Outcome::Answered(0 - code) }} {{
+    Outcome::Answered(v) => v,
+    Outcome::Stopped => 0 - 1,
+  }});
+  0
+}}
+"
+        ),
+    );
+    // `-8` is `Boom::Bad(8)` reaching the catch with its payload. `-1` would be
+    // `Outcome::Stopped` — the error having silently become a stop.
+    assert_eq!(
+        ran.stdout, "-8\n",
+        "the child's failure must arrive by name with its payload, not as a stop: {:?}",
+        ran.stdout
+    );
+    assert_eq!(ran.code, Some(0));
+}
+
+/// A **stopped** fiber whose answer is held inline does not crash.
+///
+/// **The retain must not be emitted before the stopped/answered branch.**
+/// `retain_spilled` decides from the type whether a walk exists, then loads the
+/// fields out of the word to hand to it -- so on the stopped arm, where the
+/// word is a zero, that load is from the null page. The program died with the
+/// stack guard's "the stack ran out", three frames from anything to do with
+/// fibers, and only when the answer is held inline *and* owns a counted field:
+/// the one case the retain exists for.
+#[test]
+fn a_stopped_fiber_with_an_inline_owning_answer_does_not_crash() {
+    let ran = run(
+        "fiber_outcome_stopped_inline",
+        &format!(
+            "{OUTCOME}
+pub type Holder = {{ n: Int, held: Counted }};
+
+fn worker() -> Holder raises Oops {{
+  khora_cancel();
+  ok(1)!;
+  {{ n: 7, held: counted(1) }}
+}}
+
+fn main() -> Int {{
+  let f = Fiber::spawn(fn () => worker()!);
+  print(match Fiber::outcome(f)! catch {{ Oops::Bad => Outcome::Stopped }} {{
+    Outcome::Answered(h) => h.n,
+    Outcome::Stopped => 0 - 1,
+  }});
+  print(9);
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout, "-1\n9\n",
+        "the stopped arm must not read a field out of a null word: {:?}",
+        ran.stdout
+    );
+    assert_eq!(ran.code, Some(0), "and the process must not be killed");
+}

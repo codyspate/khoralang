@@ -2259,6 +2259,19 @@ impl Scope {
 /// own.
 pub type Fiber<A, 'er>;
 
+/// What a fiber ended as, when the asking must not unwind the asker.
+///
+/// `Fiber::outcome` produces one. `Answered` carries what the fiber computed;
+/// `Stopped` says a cancellation reached it and carries nothing, because a
+/// fiber that was stopped has no answer to carry.
+///
+/// **`Stopped` is not a failure.** A child that *failed* raises on the fiber's
+/// own row and never appears here — which is what keeps a failure the
+/// caller's to interpret rather than one arm among two.
+pub type Outcome<A> =
+  | Answered(value: A)
+  | Stopped;
+
 /// A handle to a running fiber, and every operation on one is a message to the
 /// runtime rather than a write to shared memory. Joining twice is joining once,
 /// from either side.
@@ -2405,6 +2418,62 @@ impl<A: Share, 'er> Fiber<A, 'er> {
   /// handle always gives. `Fiber::finished` has the same shape for the same
   /// reason. Ask before detaching, or keep the handle.
   pub fn cancelled(self) -> Bool;
+
+  /// What the fiber ended as, waiting for it without unwinding this frame.
+  ///
+  /// **`cancelled` says a fiber was stopped and cannot hand back what it
+  /// computed; `join` hands back the answer and, on a stopped fiber, unwinds
+  /// the joiner.** At the entry point that ends the program with status 130,
+  /// which no `catch` can name. So a caller that wants the answer *and*
+  /// tolerates a stop had neither call, and this is that one: the stop comes
+  /// back as a value.
+  ///
+  /// ```khora
+  /// let f = Fiber::spawn(fn () => tally(rows));
+  /// Fiber::cancel(f);
+  /// match Fiber::outcome(f) {
+  ///   Outcome::Answered(n) => n,
+  ///   Outcome::Stopped => 0,
+  /// }
+  /// ```
+  ///
+  /// **The ceremony scales with the fiber's own row, which is the rule `join`
+  /// follows.** On a `Fiber<Int, {}>` this is infallible and needs no `!`. On
+  /// a fallible fiber it raises `'er`, and **a child that *failed* still comes
+  /// out by name** — only a child *cancellation* comes back as a value, so the
+  /// caller who decides what a failure means keeps deciding it.
+  ///
+  /// ```khora
+  /// match Fiber::outcome(worker)! catch {
+  ///   DbError::Disconnected(_why) => Outcome::Stopped,
+  /// } {
+  ///   Outcome::Answered(rows) => rows,
+  ///   Outcome::Stopped => List::Nil,
+  /// }
+  /// ```
+  ///
+  /// **It does not make `join` safe.** `join` on a cancelled fiber ends the
+  /// program as it always has; this is an alternative to that call and not a
+  /// repair of it. Nor does asking first make a later join safe: between the
+  /// question and the join is another instant in which a cancellation can
+  /// arrive.
+  ///
+  /// **A cancellation reaching *this* frame while it waits still stops it.**
+  /// The fiber asking is cancellable like any other, and that cancellation
+  /// travels the `!` rather than becoming an `Outcome::Stopped` — the value
+  /// reports what the *child* ended as, and a frame cannot swallow a
+  /// cancellation aimed at itself.
+  ///
+  /// **A fiber that was stopped after computing something answers `Stopped`,
+  /// and the value is not handed back.** A body whose inner frame absorbed a
+  /// cancellation carries a fabricated zero where that frame had no channel to
+  /// report on, so the alternative is an answer no part of the program
+  /// computed wearing the type of one that was. For partial progress, have the
+  /// fiber publish to a `Shared` cell and read the cell.
+  ///
+  /// Asking consumes nothing a second question would need: like `join`, asking
+  /// twice is asking once and gets the answer twice.
+  pub fn outcome(self) -> Outcome<A> raises 'er;
 
   /// Asks the fiber to stop at its next cancellation point. Returns at once.
   ///

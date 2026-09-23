@@ -471,6 +471,127 @@ impl<'ctx> Lower<'_, 'ctx> {
         Some(merged.as_basic_value())
     }
 
+    /// `Outcome::Answered(word)` when the fiber answered, `Outcome::Stopped`
+    /// when it was stopped.
+    ///
+    /// `which` is the tag `khora_fiber_outcome` reported. The caller has
+    /// already taken any *error* out of it, so the only two values that reach
+    /// here are `STOPPED_WHICH` and an ordinary answer.
+    ///
+    /// **`answers`, and never `Outcome::Answered`'s declared field.** That
+    /// field is the type parameter `A` as written in `std::core`, not the type
+    /// this instantiation carries. `option_of_word` records what using it cost
+    /// once: the payload was built and its drop routine chosen for a type that
+    /// does not exist at run time, and the symptom was a released object
+    /// calling an unrelated function as its glue, three frames from anything
+    /// to do with the call that produced it. `Outcome::Answered(A)` has
+    /// exactly that shape.
+    fn outcome_of_word(
+        &mut self,
+        which: inkwell::values::IntValue<'ctx>,
+        word: inkwell::values::IntValue<'ctx>,
+        answers: &Type,
+        outcome_ty: &Type,
+    ) -> Flow<'ctx> {
+        let (answered_tag, _) = self.be.variant_in(None, "Outcome", "Answered")?;
+        let (stopped_tag, _) = self.be.variant_in(None, "Outcome", "Stopped")?;
+
+        let field_ty = answers.clone();
+
+        let stopped_which = self.be.ctx.i32_type().const_int(runtime::STOPPED_WHICH, false);
+        let was_stopped = self
+            .be
+            .builder
+            .build_int_compare(IntPredicate::EQ, which, stopped_which, "outcome.was.stopped")
+            .expect("testing whether the fiber was stopped");
+
+        let function = self
+            .be
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .expect("a function to build in");
+        let stopped_block = self.be.ctx.append_basic_block(function, "outcome.stopped");
+        let answered_block = self.be.ctx.append_basic_block(function, "outcome.answered");
+        let after = self.be.ctx.append_basic_block(function, "outcome.end");
+
+        self.be
+            .builder
+            .build_conditional_branch(was_stopped, stopped_block, answered_block)
+            .expect("branching on what the fiber ended as");
+
+        // Held inline where the type allows it, for the reason `option_of_word`
+        // gives: this is one of the few places an ADT is made from a runtime
+        // answer rather than from an expression, so it is one of the few that
+        // would go on allocating after every other constructor stopped.
+        let inline = self.be.unboxed_type(outcome_ty).filter(|_| self.be.unboxed.holds(outcome_ty));
+
+        self.be.builder.position_at_end(answered_block);
+        // **The retain belongs here and not before the branch.** Both callers
+        // funnel through this block for the answered case, including the
+        // empty-row early return, so this covers every path that reads the
+        // word -- and the stopped arm, where the word is a zero, never reaches
+        // it. `retain_spilled` loads the fields out of the word before it calls
+        // the walk, so on a null that load is the crash rather than a no-op.
+        if self.be.unboxed.holds(&field_ty) {
+            self.retain_spilled(word, &field_ty);
+        }
+        let value = self.be.word_to_value(word, &field_ty);
+        let answered_value: BasicValueEnum<'ctx> = match inline {
+            Some(shape) => {
+                let tagged = self
+                    .be
+                    .builder
+                    .build_insert_value(
+                        shape.const_zero(),
+                        self.be.ctx.i32_type().const_int(u64::from(answered_tag), false),
+                        0,
+                        "answered.case",
+                    )
+                    .expect("writing an inline tag");
+                self.be.write_inline(tagged, outcome_ty, 0, value).into_struct_value().into()
+            }
+            None => {
+                let (_, words) = self.be.field_layout(std::slice::from_ref(&field_ty));
+                let object = self.allocate(words, answered_tag, "Answered");
+                self.store_field(object, 0, value, &field_ty);
+                object.into()
+            }
+        };
+        self.be.builder.build_unconditional_branch(after).expect("leaving the answered arm");
+        let answered_end = self.be.builder.get_insert_block().expect("the answered arm's end");
+
+        self.be.builder.position_at_end(stopped_block);
+        let stopped_value: BasicValueEnum<'ctx> = match inline {
+            // Nothing carried, so nothing but the tag is written: the fields
+            // beside it are never read on this arm.
+            Some(shape) => self
+                .be
+                .builder
+                .build_insert_value(
+                    shape.const_zero(),
+                    self.be.ctx.i32_type().const_int(u64::from(stopped_tag), false),
+                    0,
+                    "stopped.case",
+                )
+                .expect("writing an inline tag")
+                .into_struct_value()
+                .into(),
+            None => self.be.static_variant("Outcome", "Stopped", stopped_tag).into(),
+        };
+        self.be.builder.build_unconditional_branch(after).expect("leaving the stopped arm");
+        let stopped_end = self.be.builder.get_insert_block().expect("the stopped arm's end");
+
+        self.be.builder.position_at_end(after);
+        let merged = self
+            .be
+            .builder
+            .build_phi(answered_value.get_type(), "outcome")
+            .expect("merging the two arms");
+        merged.add_incoming(&[(&answered_value, answered_end), (&stopped_value, stopped_end)]);
+        Some(merged.as_basic_value())
+    }
+
     /// What a `Fiber<A, 'r>` answers, and what it can raise.
     ///
     /// From the handle's own type where it has one, and otherwise from what
@@ -775,6 +896,107 @@ impl<'ctx> Lower<'_, 'ctx> {
                 // in the loop it exists for.
                 self.release_unless_lent(*fiber, handle, &ty);
                 Some(answer)
+            }
+            ("outcome", [fiber]) => {
+                // **`join`'s lowering with the cancellation kept rather than
+                // raised.** Everything up to the branch is the same, for the
+                // same reasons -- the stack slot, the retain on an inline
+                // answer, the borrow-aware release -- and the difference is
+                // what happens to a child that was stopped: `join` lets
+                // `CANCELLED_WHICH` travel out as a raise no `catch` can name,
+                // and this builds `Outcome::Stopped` instead.
+                let ty = self.types.of(*fiber).clone();
+                let (answers, raised) = self.fiber_parts(site, &ty, range)?;
+                let handle = self.expr(*fiber)?;
+
+                let slot = self.entry_slot(self.be.ctx.i64_type().into(), "outcome.answer");
+                let which = self
+                    .be
+                    .builder
+                    .build_call(
+                        self.be.rt.fiber_outcome,
+                        &[handle.into(), slot.into()],
+                        "outcome.which",
+                    )
+                    .expect("asking a fiber what it ended as")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("an outcome answers")
+                    .into_int_value();
+                let word = self
+                    .be
+                    .builder
+                    .build_load(self.be.ctx.i64_type(), slot, "outcome.word")
+                    .expect("reading the answered word")
+                    .into_int_value();
+
+                // **The same double free `join` documents, and it applies here
+                // unchanged.** An answer held inline crosses as a word
+                // pointing at the box it was spilled into; reading the fields
+                // back out copies whatever they hold into this frame without
+                // counting it, and then this frame and the fiber's stored
+                // answer release the same pointer.
+                //
+                // Before the branch, because `Answered` is built on one arm
+                // and the empty-row path returns without reaching either --
+                // both read the word, so a retain on one of them is a retain
+                // on half the paths that need it.
+                //
+                // **On the answered arm only, because a stopped word is a
+                // zero.** `retain_spilled` is not a runtime test: it decides
+                // from the *type* whether a walk exists, then loads the fields
+                // out of the word to hand them to it. On the stopped arm that
+                // load is from the null page, and the program dies -- reported
+                // by the stack guard as "the stack ran out", three frames from
+                // anything to do with fibers, which is the same misdirection
+                // `option_of_word`'s comment was written about. It bites only
+                // when the answer is held inline *and* owns a counted field,
+                // which is the one case the retain exists for.
+                self.release_unless_lent(*fiber, handle, &ty);
+
+                let outcome_ty = self.types.of(site).clone();
+                // A child *failure* is still this frame's to re-raise, which
+                // is the whole of what `raises 'er` on this method means.
+                // `split_tagged` is the branch every fallible call emits, and
+                // `STOPPED_WHICH` is not an error tag -- so the stopped case
+                // is taken out of `which` first, and what reaches
+                // `split_tagged` is the answer-or-error pair `join` would have
+                // had.
+                //
+                // Unless the fiber's row is empty, in which case there is no
+                // error to branch on and no `raises` clause to leave through.
+                // A stop can still arrive on that path -- `khora_cancel_absorb`
+                // records one for a thunk whose *inner* frame absorbed it --
+                // so the `Stopped` branch is emitted either way, and only the
+                // error branch is conditional on the row.
+                if row_is_empty(&raised) {
+                    return self.outcome_of_word(which, word, &answers, &outcome_ty);
+                }
+                let stopped = self.be.ctx.i32_type().const_int(runtime::STOPPED_WHICH, false);
+                let was_stopped = self
+                    .be
+                    .builder
+                    .build_int_compare(IntPredicate::EQ, which, stopped, "outcome.stopped")
+                    .expect("testing for a stopped child");
+                let raise_it = self.block("outcome.raised");
+                let build_it = self.block("outcome.built");
+                self.be
+                    .builder
+                    .build_conditional_branch(was_stopped, build_it, raise_it)
+                    .expect("branching on whether the child was stopped");
+
+                // Not stopped: an answer or the child's error, which is
+                // exactly what `join` hands `split_tagged`. The value it
+                // produces is discarded -- `outcome_of_word` reads the word
+                // again on the far side, and building the `Answered` in one
+                // place keeps the two arms' `phi` to one shape.
+                self.at(raise_it);
+                let tagged = self.be.tagged_of(which, word);
+                self.split_tagged(tagged, &answers, range)?;
+                self.br(build_it);
+
+                self.at(build_it);
+                self.outcome_of_word(which, word, &answers, &outcome_ty)
             }
             ("join", [fiber]) => {
                 let ty = self.types.of(*fiber).clone();

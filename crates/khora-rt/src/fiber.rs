@@ -74,6 +74,25 @@ pub const FAILED_WHICH: u32 = u32::MAX - 1;
 /// it, because two numbers that must agree are one number.
 pub const CANCELLED_WHICH: u32 = u32::MAX;
 
+/// The `which` [`khora_fiber_outcome`] reports a *stopped child* under.
+///
+/// **The failure a third number prevents: an asker swallowing its own
+/// cancellation.** One tagged return carries two cancellations that want
+/// opposite handling. The child's stop is what `Fiber::outcome` exists to hand
+/// back as a value; the *asker's* — delivered while it was parked waiting —
+/// must unwind it, because `docs/design/effect-runtime.md` §6 forbids any
+/// construct from swallowing a cancellation aimed at the frame it is in.
+/// Spelling both `CANCELLED_WHICH` would make the second indistinguishable
+/// from the first, and the asker would carry on holding a cancellation it had
+/// been told about and discarded.
+///
+/// Reserved beside [`FAILED_WHICH`] and [`CANCELLED_WHICH`] and outside the
+/// range error-type ids are assigned from, so no `catch` can name it. Only
+/// [`khora_fiber_outcome`] produces one: no other call on this boundary has
+/// two cancellations to tell apart, and widening the meaning of a tag that
+/// every reader already interprets is how a reserved range stops being one.
+pub const STOPPED_WHICH: u32 = u32::MAX - 2;
+
 /// Whether fibers are coroutines on the scheduler rather than threads.
 ///
 /// Read once. A program that changed its mind halfway would have handles of
@@ -831,6 +850,95 @@ pub unsafe extern "C" fn khora_fiber_cancelled(fiber: *mut u8) -> bool {
         // far as this can be asked.
         None => false,
     }
+}
+
+/// Waits for a fiber, and answers what it ended as without unwinding.
+///
+/// **The question neither [`khora_fiber_join`] nor [`khora_fiber_cancelled`]
+/// can answer.** `cancelled` says *whether* a fiber was stopped and has no way
+/// to hand back what it computed; `join` hands back the answer and, on a
+/// stopped fiber, answers [`CANCELLED_WHICH`] — which is in no row, so no
+/// `catch` names it and at the entry point it ends the program at 130. A
+/// caller that wants the answer *and* tolerates a stop has neither call.
+///
+/// # What comes back
+///
+/// The same `which`/`out` shape as `join`, with one tag more:
+///
+/// - `0` — `out` holds the answer, and this call took a reference to it.
+/// - [`STOPPED_WHICH`] — the *child* was stopped. `out` is zero and holds
+///   nothing to release; the stored answer, where there is one, stays with the
+///   state and goes when the handle does.
+/// - [`CANCELLED_WHICH`] — the *asker* was stopped while parked here. It
+///   unwinds, exactly as a `join` in the same position does, because §6 of
+///   `docs/design/effect-runtime.md` forbids swallowing a cancellation aimed
+///   at the frame it reaches.
+/// - anything else — the child's error, to re-raise, as `join` reports it.
+///
+/// # Why the stopped answer is read off the fiber rather than the stored tag
+///
+/// [`khora_fiber_spawn`]'s `announce` gate deliberately does not store
+/// `CANCELLED_WHICH` for an infallible thunk with a boxed answer: `Fiber<A,
+/// {}>::join` emits no branch on the tag, so it reads the word whatever the
+/// tag says, and a stored cancellation would hand a joiner a null typed as
+/// `A`. Reading the `absorbed` flag on the shared `Fiber` reaches past that
+/// gate — the same route [`khora_fiber_cancelled`] takes, and for the same
+/// reason — so **this changes nothing about what `join` reads**, and the two
+/// questions cannot disagree about one fiber.
+///
+/// The cost is stated rather than hidden: a fiber that absorbed a cancellation
+/// *and* went on to produce a value is reported stopped, and the value it
+/// produced is not handed back. It is a value with a fabricated zero somewhere
+/// inside it — `khora_cancel_absorb` returns one where the absorbing frame had
+/// no channel — so the alternative is handing back an answer no part of the
+/// program computed, wearing the type of one that was.
+///
+/// # Safety
+///
+/// `fiber` must be a live object from [`khora_fiber_spawn`], and `out` a
+/// writable word.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_fiber_outcome(fiber: *mut u8, out: *mut u64) -> u32 {
+    // SAFETY: the caller promised a writable word. Written first, so every
+    // early exit below leaves it defined rather than each remembering to.
+    unsafe { out.write(0) };
+    // SAFETY: the caller guarantees a live handle.
+    let Some(state) = (unsafe { fiber_state(fiber) }) else {
+        // A released handle has nothing left to answer about, and `finished`
+        // and `cancelled` both take that position on the same state. Reporting
+        // a stop for a fiber nobody can name any more would be inventing one.
+        return 0;
+    };
+    // The asker's own cancellation, not the child's — and the child is left
+    // running, exactly as a `join` giving up here leaves it. `STOPPED_WHICH`
+    // is what the child's stop travels under, so the two are told apart by the
+    // tag rather than by the caller guessing.
+    if state.completion.wait_or_cancelled() {
+        return CANCELLED_WHICH;
+    }
+    // Asked before the answer is taken, because taking it hands out a
+    // reference this path must not hand out: `Outcome::Stopped` carries no
+    // `A`, so nothing on the far side would release it.
+    //
+    // **Reordering this to read the stored outcome first leaks.** `observe`
+    // dups the payload where it points at an object, and the stopped path
+    // returns without writing `out`, so that reference has no owner. A review
+    // argued the other order was needed to keep a child's failure from being
+    // reported as a stop; the shape it described -- an inner frame absorbing a
+    // cancellation, then the body raising -- was measured on this tree, with a
+    // payload-carrying error, and the failure already arrives by name with its
+    // payload intact. There is nothing here to trade a leak for.
+    //
+    // SAFETY: the caller guarantees a live handle, and this is the same
+    // handle.
+    if unsafe { khora_fiber_cancelled(fiber) } {
+        return STOPPED_WHICH;
+    }
+    state.observed.store(true, Ordering::Relaxed);
+    let outcome = state.legacy.observe();
+    // SAFETY: the caller promised a writable word.
+    unsafe { out.write(outcome.payload) };
+    outcome.which
 }
 
 /// The same, for a program that wants the ordering and not the answer.
