@@ -6386,6 +6386,17 @@ replaced, which is why this is a phase and not a patch.
 
 ### 17.2 `Fiber<A, {}>::join` cannot report that its fiber was cancelled
 
+**Partly closed.** `Fiber::cancelled(self) -> Bool` ships: a supervisor can now
+ask whether a fiber was stopped, including the boxed empty-row shape the
+`announce` gate suppresses, because the flag it reads lives on the fiber rather
+than in the tagged return. What is still open is the typed answer — asking
+`join` for a value *and* learning it was cancelled — which is the second step
+and needs a reader allowed to see a stored `CANCELLED_WHICH`.
+
+The exit status is closed separately: a signalled program whose root absorbed
+the cancellation now exits 130 rather than its own value, so a supervisor can
+tell a shutdown from a clean finish.
+
 The runtime records the cancellation. The code generator emits no branch on
 `which` for an empty row, so the joiner reads the word regardless: a non-boxed
 answer gets a zero, and a boxed one keeps the real answer rather than a null.

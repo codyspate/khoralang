@@ -187,6 +187,12 @@ pub struct Runtime<'ctx> {
     pub region_root: FunctionValue<'ctx>,
     /// `uint8_t khora_cancelled(void)`
     pub cancelled: FunctionValue<'ctx>,
+    /// `uint8_t khora_root_absorbed(void)`
+    ///
+    /// Asked by the entry point once `main` has returned normally. A nursery
+    /// absorbs the cancellation it was handed, so a signalled shutdown reaches
+    /// the success path and would otherwise exit with `main`'s own value.
+    pub root_absorbed: FunctionValue<'ctx>,
     /// `_Noreturn void khora_cancel_stop(void)`
     pub cancel_stop: FunctionValue<'ctx>,
     /// `void khora_cancel_absorb(void)`
@@ -252,6 +258,13 @@ pub struct Runtime<'ctx> {
     /// the one question a supervisor loop needs and the only one every other
     /// entry point answers by blocking.
     pub fiber_finished: FunctionValue<'ctx>,
+    /// `bool khora_fiber_cancelled(void *fiber)`
+    ///
+    /// Asks whether a fiber was *stopped* rather than allowed to finish. The
+    /// call that would otherwise answer is `khora_fiber_join`, which on a
+    /// cancelled fiber unwinds its caller and at the entry point ends the
+    /// program.
+    pub fiber_cancelled: FunctionValue<'ctx>,
     /// `void khora_fiber_cancel(void *fiber)`
     pub fiber_cancel: FunctionValue<'ctx>,
     /// `void khora_fiber_release(void *fiber)` — a `drop_fields` callback.
@@ -409,6 +422,7 @@ impl<'ctx> Runtime<'ctx> {
             region_release: declare("khora_region_release", void.fn_type(&[ptr.into()], false)),
             region_root: declare("khora_region_root", ptr.fn_type(&[], false)),
             cancelled: declare("khora_cancelled", i8t.fn_type(&[], false)),
+            root_absorbed: declare("khora_root_absorbed", i8t.fn_type(&[], false)),
             cancel_stop: declare("khora_cancel_stop", void.fn_type(&[], false)),
             cancel_absorb: declare("khora_cancel_absorb", void.fn_type(&[], false)),
             shared_open: declare(
@@ -476,6 +490,10 @@ impl<'ctx> Runtime<'ctx> {
             fiber_wait: declare("khora_fiber_wait", ctx.i32_type().fn_type(&[ptr.into()], false)),
             fiber_finished: declare(
                 "khora_fiber_finished",
+                ctx.bool_type().fn_type(&[ptr.into()], false),
+            ),
+            fiber_cancelled: declare(
+                "khora_fiber_cancelled",
                 ctx.bool_type().fn_type(&[ptr.into()], false),
             ),
             fiber_cancel: declare("khora_fiber_cancel", void.fn_type(&[ptr.into()], false)),

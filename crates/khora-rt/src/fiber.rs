@@ -786,6 +786,53 @@ pub unsafe extern "C" fn khora_fiber_finished(fiber: *mut u8) -> bool {
         .is_some()
 }
 
+/// Whether the fiber was stopped rather than allowed to finish.
+///
+/// **The question `join` charges the process for.** A supervisor that notices
+/// through [`khora_fiber_finished`] that its child is gone cannot tell a child
+/// that bound and returned from one somebody cancelled, and the call that would
+/// tell it is `join` -- which on a cancelled fiber unwinds its caller, and at
+/// the entry point ends the program at 130. This answers without waiting and
+/// without unwinding anything.
+///
+/// **Read from the fiber, not from the stored answer**, and that is the whole
+/// of why it is truthful. The `announce` computation in [`khora_fiber_spawn`]
+/// deliberately does not store `CANCELLED_WHICH` for an infallible thunk with
+/// a boxed answer, because `Fiber<A, {}>::join` reads the word whatever the tag
+/// is and a stored cancellation would hand a joiner a null typed as `A`. The
+/// `absorbed` flag lives on the shared `Fiber` rather than in the `Tagged`, so
+/// asking it reaches past that gate and **changes nothing about what `join`
+/// reads**. The stored tag is consulted as well, for the fiber that never
+/// reached its root -- a thread that unwound out of the thunk entirely.
+///
+/// Racy in the way [`khora_fiber_finished`] is racy and for the same reason: a
+/// `false` is a fact about the instant it was asked, and a fiber cancelled a
+/// microsecond later answers `true` at the next look. It says the fiber was
+/// stopped; it says nothing about what the fiber had computed.
+///
+/// # Safety
+///
+/// `fiber` must be a live object from [`khora_fiber_spawn`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_fiber_cancelled(fiber: *mut u8) -> bool {
+    // SAFETY: the caller guarantees a live handle.
+    let Some(state) = (unsafe { fiber_state(fiber) }) else {
+        // A released handle has nothing left to answer about, and `finished`
+        // takes the same position on the same state. Reporting a cancellation
+        // for a fiber nobody can name any more would be inventing one.
+        return false;
+    };
+    if state.fiber.has_absorbed() {
+        return true;
+    }
+    match state.legacy.outcome.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        Some(outcome) => outcome.which == CANCELLED_WHICH,
+        // Not finished, and nothing has absorbed anything. Still running, as
+        // far as this can be asked.
+        None => false,
+    }
+}
+
 /// The same, for a program that wants the ordering and not the answer.
 ///
 /// Answers [`CANCELLED_WHICH`] when the *waiter* was asked to stop and 0 when

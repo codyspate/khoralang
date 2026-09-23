@@ -217,22 +217,24 @@ a provably-infallible child needs no channel in principle, and requiring one
 is the implementation showing through. Making the empty row callable without
 `!` is the fix, and it is a type-system change rather than a runtime one.
 
-**A nursery shutdown exits 0, so a supervisor is told it succeeded.** When the
-root's body is a nursery, the children are cancelled and their finalizers run —
-that part works — but the nursery absorbs its children's cancellations, returns
-normally, and `main` runs on to its own `0`. Measured on both backends:
+**A cancellation that a `loop` never notices still delays the shutdown.** A
+signalled program exits 130, so a supervisor can tell a shutdown from a clean
+finish and `restart: on-failure` fires. What the status does not tell you is
+*when* the children stopped.
+
+A fiber is asked to stop at a cancellation point, and a `loop` doing arithmetic
+has none. Measured, two children each spinning on a counter with no fallible
+call in the body:
 
 ```
-two-child nursery + SIGTERM -> both finalizers ran, exit 0
-scoped finalizer  + SIGTERM -> finalizer ran,     exit 130
+two-child nursery + SIGTERM -> both children ran to completion, then exit 130
+two children in clock.sleep -> both woke, the sleep returned, then exit 130
 ```
 
-The unwinding is right and the status is wrong, which is the more dangerous
-half: a supervisor reading the exit status of a shutdown it signalled cannot
-tell it from a clean finish, and a `restart: on-failure` policy will not fire.
-The fix is for a nursery to distinguish a cancellation it absorbed from a child
-that merely finished; until then, do not read the exit status of a nursery-
-rooted program as a shutdown outcome.
+The status is the truth about the outcome and not about the latency. A program
+that must stop promptly needs a cancellation point in its loop — a fallible
+call, or a `clock.sleep` — and a compute-bound loop with neither finishes what
+it is doing first.
 
 **A long `clock.sleep` delays or survives the shutdown, and the two backends
 differ.** Measured against an eight-second sleep in a child fiber, one
@@ -359,12 +361,17 @@ ignores.
 
 Two smaller things a supervisor meets on the way. `Fiber::wait` tells you
 nothing about how the fiber ended — there is no status and no
-`Option<Result<..>>` — so the only way to find out is a `Shared` cell the child
-writes before it fails, which is the sort of thing the failure row was supposed
-to make unnecessary. And a fiber that raised without anybody taking its answer
-prints `khora: a fiber ended with an error nobody was waiting for` to standard
-error, once per such fiber, with no way to suppress it and no effect on the
-exit status.
+`Option<Result<..>>`. `Fiber::cancelled` narrows that by one case: it answers
+whether the fiber was *stopped*, without waiting and without unwinding the
+asker, so a supervisor can tell a shutdown from a fault. It does not give you
+the answer, and it does not make `join` safe — a `join` on a cancelled fiber
+still unwinds its caller, and at the entry point still ends the program at 130.
+To keep what a fiber computed, the shape is still a `Shared` cell the child
+writes, which is the sort of thing the failure row was supposed to make
+unnecessary. And a fiber that raised without anybody taking its answer prints
+`khora: a fiber ended with an error nobody was waiting for` to standard error,
+once per such fiber, with no way to suppress it and no effect on the exit
+status.
 
 **The line is written when that fiber ends, not at process exit**, and
 neither `Fiber::wait` nor `Fiber::join` changes whether it appears: the fiber

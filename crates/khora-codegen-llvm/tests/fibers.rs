@@ -353,6 +353,7 @@ impl<A, 'r> Fiber<A, 'r> {
   fn spawn(body: () -> A raises 'r) -> Fiber<A, 'r>;
   fn join(self) -> A raises 'r;
   fn wait(self) -> () raises 'r;
+  fn cancelled(self) -> Bool;
   fn cancel(self) -> ();
   fn detach(self) -> ();
 }
@@ -484,6 +485,253 @@ fn main() -> Int {{
         ),
     );
     assert_eq!(ran.stdout, "1\n2\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+// --- asking a fiber whether it was stopped ---------------------------------
+//
+// `Fiber::finished` answers *whether* a supervised fiber stopped and cannot
+// answer *why*, and the only call that would -- `Fiber::join` -- ends the
+// process at 130 on a cancelled fiber. So a supervisor that notices its
+// listener is gone has no way to tell "it bound and returned" from "somebody
+// cancelled it", which are the two cases it would act on differently.
+
+/// Compiles and runs `source`, with `KHORA_FIBERS` set to `backend`.
+///
+/// **The two backends fail differently under cancellation**, and this project
+/// has been bitten by testing only the default one: `on_the_scheduler()`
+/// defaults to the thread backend, so a suite that never sets this variable
+/// never runs the coroutine path at all.
+fn run_on(name: &str, source: &str, backend: &str) -> Ran {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    harness::ensure_runtime();
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
+    let _ = std::fs::remove_file(&exe);
+
+    let db = KhoraDatabase::new();
+    let file = SourceFile::new(&db, dir.join("main.kh"), source.to_string());
+    let root = SourceRoot::new(&db, vec![file]);
+
+    if let Err(errors) = khora_codegen_llvm::compile(&db, root, &exe) {
+        let messages: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
+        panic!("compiling `{name}` failed:\n  {}\n\n{source}", messages.join("\n  "));
+    }
+
+    let output = Command::new(&exe)
+        .env("KHORA_FIBERS", backend)
+        .output()
+        .expect("the program should run");
+    Ran {
+        stdout: String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+        stderr: String::from_utf8_lossy(&output.stderr).replace("\r\n", "\n"),
+        code: output.status.code(),
+    }
+}
+
+/// The program every `cancelled` test below runs, over a fallible fiber root.
+///
+/// The child cancels *itself*, so there is no race between a parent's
+/// `Fiber::cancel` and the child arriving at its first cancellation point --
+/// the flakiness `a_fiber_cancelled_before_it_starts_does_nothing` documents.
+/// `wait` rather than `join`, because joining a cancelled fiber is what ends
+/// the process, which is the hole this method exists beside.
+const STOPPED_AND_ASKED: &str = "
+fn worker() -> () raises Oops {
+  khora_cancel();
+  ok(1)!;
+  print(2);
+}
+
+fn main() -> Int {
+  let f = Fiber::spawn(fn () => worker()!);
+  Fiber::wait(f)! catch { Oops::Bad => () };
+  print(if Fiber::cancelled(f) { 1 } else { 0 });
+  0
+}
+";
+
+/// A fiber stopped part-way says so, where `finished` could only say that it
+/// had stopped.
+#[test]
+fn a_cancelled_fiber_reports_that_it_was_cancelled() {
+    let ran = run("fiber_cancelled_true", &format!("{CANCELLABLE}{STOPPED_AND_ASKED}"));
+    assert_eq!(
+        ran.stdout, "1\n",
+        "the tail after the cancellation point did not run, and the handle says why: {:?}",
+        ran.stdout
+    );
+    assert_eq!(ran.code, Some(0), "and asking did not end the program the way joining would");
+}
+
+/// The same program on the coroutine backend.
+///
+/// **Not a duplicate.** A cancellation is delivered differently on each — a
+/// thread reads its own flag, a task is resumed to find it — so a fiber's
+/// stored outcome is reached by two different routes and only one of them is
+/// covered by the test above.
+#[test]
+fn a_cancelled_fiber_reports_it_on_the_scheduler_too() {
+    let ran = run_on(
+        "fiber_cancelled_true_sched",
+        &format!("{CANCELLABLE}{STOPPED_AND_ASKED}"),
+        "scheduler",
+    );
+    assert_eq!(ran.stdout, "1\n", "the coroutine backend answers the same: {:?}", ran.stdout);
+    assert_eq!(ran.code, Some(0));
+}
+
+/// A fiber nobody stopped reports `false`, which is the half that makes the
+/// answer worth reading: a method that said `true` for every finished fiber
+/// would be `finished` under another name.
+#[test]
+fn a_fiber_that_finished_on_its_own_reports_no_cancellation() {
+    let ran = run(
+        "fiber_cancelled_false",
+        &format!(
+            "{CANCELLABLE}
+fn main() -> Int {{
+  let f = Fiber::spawn(fn () => print(1));
+  // The fiber's row is empty, so the wait's `!` has no case to name.
+  Fiber::wait(f)! catch {{ }};
+  print(if Fiber::cancelled(f) {{ 1 }} else {{ 0 }});
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "1\n0\n", "it ran to its end and says so: {:?}", ran.stdout);
+    assert_eq!(ran.code, Some(0));
+}
+
+/// **The shape the stored outcome cannot answer for, and the reason this
+/// method reads the fiber rather than the answer.**
+///
+/// `fiber.rs` suppresses `CANCELLED_WHICH` for an infallible thunk with a
+/// boxed answer: `Fiber<A, {}>::join` emits no branch on the tag, so it reads
+/// the word whatever the tag says, and storing a cancellation there would hand
+/// a joiner a null typed as `A`. A reader of the stored outcome therefore sees
+/// an ordinary answer for this fiber and cannot tell it was stopped.
+///
+/// `absorbed` lives on the fiber rather than in the stored pair, so asking it
+/// answers truthfully here **without changing what `join` reads** — which the
+/// second assertion is what pins. If a future change moves the answer into the
+/// stored outcome, the first assertion keeps passing and the second goes red.
+#[test]
+fn a_boxed_answer_that_absorbed_a_cancellation_still_reports_it() {
+    let ran = run(
+        "fiber_cancelled_boxed",
+        &format!(
+            "{CANCELLABLE}
+pub type Answer = {{ n: Int }};
+
+fn step() -> Int raises Oops {{ ok(1)! }}
+
+// The absorbing frame: a total `catch` in a function with no row of its own,
+// returning a scalar, so a zero is a value and the frame can absorb rather
+// than stop the program.
+fn inner() -> Int {{
+  khora_cancel();
+  step()! catch {{ Oops::Bad => 0 }}
+}}
+
+// The fiber root: infallible, and its answer is behind a pointer. This is the
+// pair -- `plain` and `boxed` -- that the suppression is keyed on.
+fn worker() -> Answer {{ {{ n: inner() + 7 }} }}
+
+fn main() -> Int {{
+  let f = Fiber::spawn(fn () => worker());
+  // The fiber's row is empty, so the wait's `!` has no case to name.
+  Fiber::wait(f)! catch {{ }};
+  print(if Fiber::cancelled(f) {{ 1 }} else {{ 0 }});
+  print(Fiber::join(f).n);
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout, "1\n7\n",
+        "the handle reports the cancellation, and `join` still reads the answer \
+         it always read: {:?}",
+        ran.stdout
+    );
+    assert_eq!(ran.code, Some(0));
+}
+
+/// The same, on the scheduler backend.
+///
+/// **The suppression is in the runtime, not the backend, so both paths must
+/// answer alike** — and a suite that only ever runs the default backend never
+/// executes the coroutine path at all, which `run_on`'s own comment records as
+/// a thing this project has been bitten by. The boxed case is the one that
+/// justifies reading `absorbed` instead of the stored outcome, so it is the one
+/// least worth testing on half the implementations.
+#[test]
+fn a_boxed_answer_reports_a_cancellation_on_the_scheduler_too() {
+    let ran = run_on(
+        "fiber_cancelled_boxed_scheduler",
+        &format!(
+            "{CANCELLABLE}
+pub type Answer = {{ n: Int }};
+
+fn step() -> Int raises Oops {{ ok(1)! }}
+
+fn inner() -> Int {{
+  khora_cancel();
+  step()! catch {{ Oops::Bad => 0 }}
+}}
+
+fn worker() -> Answer {{ {{ n: inner() + 7 }} }}
+
+fn main() -> Int {{
+  let f = Fiber::spawn(fn () => worker());
+  Fiber::wait(f)! catch {{ }};
+  print(if Fiber::cancelled(f) {{ 1 }} else {{ 0 }});
+  print(Fiber::join(f).n);
+  0
+}}
+"
+        ),
+        "scheduler",
+    );
+    assert_eq!(
+        ran.stdout, "1\n7\n",
+        "the scheduler backend must answer as the thread backend does: {:?}",
+        ran.stdout
+    );
+    assert_eq!(ran.code, Some(0));
+}
+
+/// Asking borrows the handle. A supervisor asks and keeps supervising, so a
+/// question that consumed what it was asked about would be unusable in the one
+/// loop it exists for.
+#[test]
+fn asking_whether_a_fiber_was_cancelled_does_not_consume_the_handle() {
+    let ran = run(
+        "fiber_cancelled_borrows",
+        &format!(
+            "{CANCELLABLE}
+fn main() -> Int {{
+  let f = Fiber::spawn(fn () => 5);
+  // Neither of these is the handle's last use, and neither may release it.
+  print(if Fiber::cancelled(f) {{ 1 }} else {{ 0 }});
+  print(if Fiber::cancelled(f) {{ 1 }} else {{ 0 }});
+  // The handle is still live enough to wait on and then to take an answer
+  // from, which a released one is not. A consumed handle shows up here as a
+  // use-after-free rather than as a wrong number.
+  Fiber::wait(f)! catch {{ }};
+  print(Fiber::join(f));
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout, "0\n0\n5\n",
+        "two questions answered, and the handle still had its answer: {:?}",
+        ran.stdout
+    );
     assert_eq!(ran.code, Some(0));
 }
 

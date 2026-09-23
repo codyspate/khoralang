@@ -33,6 +33,30 @@ pub extern "C" fn khora_cancelled() -> u8 {
     u8::from(current(|fiber| fiber.stops_here()))
 }
 
+/// Whether the fiber running `main` was cut short on its way out.
+///
+/// **A nursery shutdown used to exit 0, so a supervisor was told it
+/// succeeded.** When the root's body is a nursery the children are cancelled
+/// and their finalizers run, but the nursery absorbs the cancellation and
+/// returns normally, so control reaches the entry point's success path and
+/// `main` hands back its own value. Nothing between there and `exit` had asked
+/// whether the run was cut short, and a `restart: on-failure` policy reading
+/// that status could not tell a signalled shutdown from a clean finish.
+///
+/// **`is_cancelled` rather than `has_absorbed`, because absorbing is not the
+/// only way a cancellation arrives here.** A nursery that cancels its children
+/// and collects them never absorbs anything itself: the flag it sets is on the
+/// root, and the children return normally. Reading the absorbed flag alone
+/// reported 0 for exactly the shape this exists for -- measured.
+///
+/// Shielding is deliberately not consulted. A finalizer holds a cancellation
+/// off so it can finish; that says nothing about what the program's exit status
+/// should be once it has.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_root_absorbed() -> u8 {
+    u8::from(current(|fiber| fiber.is_cancelled() || fiber.has_absorbed()))
+}
+
 /// Holds a pending cancellation off for as long as it is alive.
 ///
 /// **Cleanup cannot itself be cancelled.** A transaction rolled back on the

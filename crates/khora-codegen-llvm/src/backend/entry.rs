@@ -414,6 +414,41 @@ impl<'ctx> Backend<'ctx> {
                 i32_type.const_zero()
             }
         };
+        // **A shutdown that the root absorbed is not a success.** A nursery
+        // handed a cancellation cancels its children, waits for them, and
+        // returns normally -- so control arrives here rather than on the
+        // `raised` path above, and `main`'s own value would become the exit
+        // status. A supervisor reading it could not tell a signalled shutdown
+        // from a clean finish, and `restart: on-failure` never fired. Asked
+        // after the value is computed and before it is returned, so the
+        // decision sees the same `Int` the program meant to exit with.
+        let absorbed_byte = self
+            .builder
+            .build_call(self.rt.root_absorbed, &[], "root.absorbed")
+            .expect("asking whether the root absorbed a cancellation")
+            .try_as_basic_value()
+            .basic()
+            .expect("khora_root_absorbed answers a byte")
+            .into_int_value();
+        let absorbed = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                absorbed_byte,
+                absorbed_byte.get_type().const_zero(),
+                "root.was.cancelled",
+            )
+            .expect("testing the absorbed flag");
+        let code = self
+            .builder
+            .build_select(
+                absorbed,
+                i32_type.const_int(runtime::CANCELLED_EXIT, false),
+                code,
+                "exit.status",
+            )
+            .expect("choosing between a shutdown and the program's own answer")
+            .into_int_value();
         self.close_root_region();
         self.builder.build_return(Some(&code)).expect("returning from main");
     }

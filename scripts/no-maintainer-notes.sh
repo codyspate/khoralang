@@ -35,7 +35,11 @@ report() {
 # A path into the repository, in backticks. A reader on the website cannot open
 # it. Either the sentence needs the substance inlined, or the path needs to
 # become a link to GitHub.
-paths=$(grep -rn '`docs/design/\|`docs/errata\|`docs/roadmap\|`crates/' "$pages" --include=*.md || true)
+#
+# **Unbackticked too.** The backtick was assumed and it is not required:
+# `docs/roadmap.md` in plain prose 404s exactly as hard, and it reached a
+# published page twice because this only looked for the quoted form.
+paths=$(grep -rnE '`?(docs/design/|docs/errata|docs/roadmap|crates/)' "$pages" --include=*.md | grep -v '](http' || true)
 report 'a repository path a website reader cannot open' "$paths"
 
 # The errata and the roadmap are internal indexes. A number from either means
@@ -46,6 +50,25 @@ report 'a reference to the errata or the roadmap by number' "$indexes"
 # Notes about the writing rather than about the subject.
 selfref=$(grep -rniE 'took a second attempt|the note that stood here|used to be written here|this said that it was|nobody noticed' "$pages" --include=*.md || true)
 report 'a note about a previous version of the note' "$selfref"
+
+# **The published pages state what the language does, not what changed.** A
+# reader arrives to learn how Khora behaves; which release altered it is the
+# changelog's business, and a page written in that voice goes stale the moment
+# the next thing lands. This is the shape it takes in practice: a sentence that
+# describes the repair rather than the behaviour.
+#
+# `is now`, `no longer` and their neighbours are the tell. They read as facts
+# but they are dated claims -- each one silently means "as against a version the
+# reader never used". The phrasings here were all written into published pages
+# by somebody who had just made the change, which is exactly whose voice this
+# script exists to catch.
+#
+# **`already` is deliberately not on the list.** "A failed handshake has already
+# closed the socket" is a statement about the order two things happen in, which
+# is exactly what an API page should say. The first version of this check flagged
+# it, and a gate that cries wolf on correct prose gets switched off.
+history=$(grep -rniE 'is now correct|now exits|now returns|used to (exit|return|be)|no longer (exits|returns|hangs)|this (is|was) now (fixed|closed)|partly closed' "$pages" --include=*.md || true)
+report 'a page written as a change rather than as a behaviour' "$history"
 
 # A link inside a link. Turning a bare path into a link twice produces
 # `[the note](https://.../[the note](https://.../x.md))`, which renders as

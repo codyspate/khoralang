@@ -747,6 +747,35 @@ impl<'ctx> Lower<'_, 'ctx> {
                 self.release_unless_lent(*fiber, handle, &ty);
                 Some(answer)
             }
+            ("cancelled", [fiber]) => {
+                // **The one question about a cancelled fiber that does not
+                // unwind the asker.** `join` on a cancelled fiber answers
+                // `CANCELLED_WHICH`, which is in no row and so no `catch` can
+                // name -- at the entry point that ends the program at 130. This
+                // is a `Bool` and an ordinary call, with no tag to split on.
+                //
+                // No branch on the fiber's row, unlike `join`: what comes back
+                // is a fact about the fiber rather than its answer, so a fiber
+                // whose row is empty and one that can fail are lowered the same
+                // way. That is what keeps this out of the `announce` gate's
+                // way -- the runtime reads the fiber's own flag, and nothing
+                // here reads the stored word at all.
+                let ty = self.types.of(*fiber).clone();
+                let handle = self.expr(*fiber)?;
+                let answer = self
+                    .be
+                    .builder
+                    .build_call(self.be.rt.fiber_cancelled, &[handle.into()], "fiber.cancelled")
+                    .expect("asking whether a fiber was cancelled")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("a bool is a value");
+                // Borrowed, like `finished`: a supervisor asks and keeps
+                // supervising, so consuming the handle would make this unusable
+                // in the loop it exists for.
+                self.release_unless_lent(*fiber, handle, &ty);
+                Some(answer)
+            }
             ("join", [fiber]) => {
                 let ty = self.types.of(*fiber).clone();
                 let (answers, raised) = self.fiber_parts(site, &ty, range)?;

@@ -198,20 +198,6 @@ impl Ended {
         }
     }
 
-    /// Asserts only that it ended, and answers what it printed.
-    ///
-    /// For the one shape whose exit status is not yet what it should be: the
-    /// claim under test is that the program unwound, and a status assertion
-    /// here would pin a number this codebase does not endorse.
-    fn ended_somehow(&self, what: &str) -> &str {
-        match self {
-            Ended::Ended { said, .. } => said,
-            Ended::StillRunning { said } => {
-                panic!("{what}: still running at the deadline. It said: {said:?}")
-            }
-        }
-    }
-
     /// Asserts a real signal death: `WIFSIGNALED`, with `signo` in `WTERMSIG`.
     ///
     /// **Not `exit(128 + signo)`**, which prints the same number through a
@@ -377,7 +363,7 @@ fn a_two_child_nursery_stops_both_children_and_runs_both_finalizers() {
         let program = start(&built, backend);
         program.signal("TERM");
         let ended = program.finish(Duration::from_secs(10));
-        let said = ended.ended_somehow(&format!("two children on {backend:?}"));
+        let said = ended.stopped_gracefully(&format!("two children on {backend:?}"));
         assert!(said.contains("FINALIZER one"), "the first child did not unwind: {said:?}");
         assert!(said.contains("FINALIZER two"), "the second child did not unwind: {said:?}");
     }

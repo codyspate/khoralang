@@ -2357,6 +2357,55 @@ impl<A: Share, 'er> Fiber<A, 'er> {
   /// sleeps between looks rather than one that spins.
   pub fn finished(self) -> Bool;
 
+  /// Whether the fiber was stopped, rather than allowed to finish.
+  ///
+  /// **`finished` says a supervised fiber is gone and cannot say why.** The
+  /// call that would say why is `join`, and on a cancelled fiber a `join`
+  /// unwinds its caller — at the entry point that ends the program with status
+  /// 130, which is not something a supervisor can catch. So the loop that
+  /// notices its listener has stopped has no way to tell a listener that
+  /// returned from one somebody cancelled, and those are the two cases it
+  /// would act on differently.
+  ///
+  /// ```khora
+  /// let server = Fiber::spawn(fn () => Router::listen_quietly(router, port)!);
+  /// loop {
+  ///   clock.sleep(50);
+  ///   if Fiber::finished(server) {
+  ///     if Fiber::cancelled(server) {
+  ///       // Somebody asked it to stop, so this is a shutdown and not a fault.
+  ///       break
+  ///     };
+  ///     // It ended on its own, which for a listener is never good news.
+  ///     Fiber::join(server)!;
+  ///     break
+  ///   };
+  ///   if Shared::get(stop) { break }
+  /// }
+  /// ```
+  ///
+  /// **It reports that the fiber was stopped, not what it had computed.** A
+  /// `true` says a cancellation reached the fiber and the fiber gave up on it;
+  /// it says nothing about how far the work got, and there is no way here to
+  /// take a partial answer. For that, have the fiber publish to a `Shared` cell
+  /// and read the cell.
+  ///
+  /// **`join` still ends the program on a cancelled fiber.** This does not
+  /// change that, and asking first does not make the join safe — between the
+  /// question and the join is another instant in which a cancellation can
+  /// arrive. Reach for `Fiber::wait`, which waits without taking the answer.
+  ///
+  /// A `false` is a fact about the instant it was asked, exactly as it is for
+  /// `finished`, so this belongs in a loop that sleeps between looks. Asking
+  /// does not consume the handle: a supervisor asks and keeps supervising.
+  ///
+  /// **A detached fiber answers `false`, whatever happened to it.**
+  /// `Fiber::detach` releases the shared state this reads, so after a detach
+  /// there is nothing left to ask and the honest answer is the one a released
+  /// handle always gives. `Fiber::finished` has the same shape for the same
+  /// reason. Ask before detaching, or keep the handle.
+  pub fn cancelled(self) -> Bool;
+
   /// Asks the fiber to stop at its next cancellation point. Returns at once.
   ///
   /// **It does not reach the work inside the fiber.** A cancellation is

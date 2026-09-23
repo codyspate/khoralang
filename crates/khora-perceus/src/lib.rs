@@ -168,7 +168,7 @@ pub fn borrowed_arguments(owner: &str, method: &str) -> &'static [usize] {
         // *Releasing* a handle is what joins; that is the binding's business.
         (
             "Fiber",
-            "join" | "wait" | "cancel" | "detach" | "finished",
+            "join" | "wait" | "cancel" | "detach" | "finished" | "cancelled",
         ) => RECEIVER,
         ("Fibers", "adopt" | "wait") => RECEIVER,
 

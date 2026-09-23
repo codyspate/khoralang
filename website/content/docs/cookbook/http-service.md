@@ -343,6 +343,11 @@ loop {
   if Fiber::finished(server) {
     // A listener that stopped without being asked never started. `join` has
     // the error; nothing below this is worth doing.
+    //
+    // Ask `cancelled` first. A fiber that was told to stop has no answer, and
+    // `join` on one ends the program at 130 rather than handing back the
+    // `HttpError` this branch is written to report.
+    if Fiber::cancelled(server) { break };
     error("the listener stopped on its own");
     Fiber::join(server)!;
     break
