@@ -179,6 +179,13 @@ impl<'ctx> Lower<'_, 'ctx> {
                 self.drop(closure, &change_ty);
                 self.release_unless_lent(*cell, handle, &cell_ty);
                 self.leave_if_stopped(which);
+                // A blocking call inside the change function may have given up
+                // on a cancel and handed back its "gave up" answer; the change
+                // function then returned normally, so the tag is 0 and the
+                // cancel is still pending. `Shared::set`/`get` are not
+                // cancellation points, so without asking here a tail made of
+                // them ran and the fiber reported that it was never cancelled.
+                self.check_cancellation(range);
                 let word = self
                     .be
                     .builder
@@ -228,6 +235,9 @@ impl<'ctx> Lower<'_, 'ctx> {
                 self.drop(closure, &change_ty);
                 self.release_unless_lent(*cell, handle, &cell_ty);
                 self.leave_if_stopped(which);
+                // As for `update`: a cancel the change function's blocking
+                // call gave up on is still pending when the tag is 0.
+                self.check_cancellation(range);
                 let word = self
                     .be
                     .builder
@@ -1202,6 +1212,10 @@ impl<'ctx> Lower<'_, 'ctx> {
                 // The nursery keeps the fiber's reference and only borrows its
                 // own, so exactly one of the two is given back.
                 self.release_unless_lent(*nursery, handle, &nursery_ty);
+                // A bounded nursery's adopt can wait for room, and a stop that
+                // arrives then is passed to the child it waits on rather than
+                // ending the wait; the adopter stops here, once it has room.
+                self.check_cancellation(range);
                 Some(self.be.unit_value())
             }
             ("wait", [nursery]) => {
@@ -1221,6 +1235,13 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .basic()
                     .expect("a count is a value");
                 self.release_unless_lent(*nursery, handle, &nursery_ty);
+                // **A waiter that was cancelled gets a count back too**: the
+                // runtime cancels the children, waits for them and answers
+                // how many failed, as though the round had ended. Taken as
+                // an answer, that ran the caller's tail after the cancel. The
+                // children are already waited for, so stopping here loses
+                // nothing.
+                self.check_cancellation(range);
                 Some(failed)
             }
             _ => self.fail(

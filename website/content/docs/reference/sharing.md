@@ -74,6 +74,7 @@ Calling `update` or `modify` recursively on the **same cell** from inside its ow
 
 - A blocking call inside it -- a channel `receive`, a `clock.sleep`, a socket read -- gives up at once with its "gave up" answer (`None`, an early return, `-1`), the change function carries on with that answer and returns, and the fiber stops after the `update`.
 - A `Fiber::join`, `wait` or `outcome` inside it that comes back stopped -- because this fiber was cancelled, or because the child was stopped by somebody else -- ends the change function. **The change does not happen**: the cell keeps the value it had, the lock is released, and the caller stops at the `update` as it would at any call to a stopped fiber.
+- **In cleanup, those three wait.** Inside a `Region::defer` finalizer or `scoped` cleanup, a plain cancel does not end a `join`, `wait` or `outcome` in a change function: it waits for the child with the lock held, the change happens, and the rest of the cleanup runs. Only `Fiber::abort` (or a `cancel_within` deadline running out) ends that wait, and then the cell keeps the value it had.
 - A change function that loops without blocking runs to its end. One that loops for ever holds the lock for ever, and nothing -- not `abort`, not `cancel_within` -- ends it but the process ending.
 
 ## `Changed<A, B>` and `modify`

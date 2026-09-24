@@ -335,9 +335,41 @@ pub unsafe extern "C" fn khora_fibers_adopt(fibers: *mut u8, fiber: *mut u8) {
         match waiting {
             None => return,
             Some(Handed(oldest)) => {
+                // **The child waited on for room is still a child, and a stop
+                // has to reach it.** Out of `held`, it was on no list
+                // `cancel_open_crews` walks, and `wait_for` does not give up:
+                // an adopter cancelled here waited the child out -- 16 s,
+                // measured -- and then carried on. So it goes on `joining`
+                // for the length of the wait, where a cancel that arrives
+                // mid-wait is delivered to it, and a stop already pending is
+                // passed on here. Registered before the question is asked, so
+                // a cancel landing between the two is seen by one of them.
+                //
+                // Still *waited* for, as `khora_fibers_wait` waits for the
+                // children it cancels: a stopped child is prompt, and one
+                // stuck in cleanup is what `abort` exists for. The adopter
+                // stops at the check its caller makes after this returns.
+                list.lock().unwrap_or_else(|e| e.into_inner()).joining.push(oldest);
+                if crate::current::current(|me| me.stops_here()) {
+                    let stop = if crate::current::current(|me| me.is_forced()) {
+                        crate::current::Stop::Force
+                    } else {
+                        crate::current::Stop::Cancel
+                    };
+                    // SAFETY: the handle came out of `held`, which holds the
+                    // only reference, and it is released only below.
+                    unsafe { crate::fiber::deliver(oldest, stop) };
+                }
                 // SAFETY: as above.
+                unsafe { wait_for(oldest) };
+                {
+                    let mut crew = list.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(at) = crew.joining.iter().position(|f| *f == oldest) {
+                        crew.joining.swap_remove(at);
+                    }
+                }
+                // SAFETY: as above, and out of `joining` before it goes.
                 unsafe {
-                    wait_for(oldest);
                     if failed_and_reported(oldest) {
                         record_failures(list, 1);
                     }
@@ -417,7 +449,9 @@ pub unsafe extern "C" fn khora_fibers_wait(fibers: *mut u8) -> i64 {
             let mut crew = list.lock().unwrap_or_else(|e| e.into_inner());
             let round = std::mem::take(&mut crew.held);
             // Visible to `cancel_open_crews` for as long as it is being joined.
-            crew.joining = round.iter().map(|Handed(f)| *f).collect();
+            // Added to, not replaced: an `adopt` waiting for room keeps the
+            // child it waits on here too.
+            crew.joining.extend(round.iter().map(|Handed(f)| *f));
             round
         };
         if waiting.is_empty() {

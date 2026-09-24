@@ -462,22 +462,15 @@ when the caller did, which is not what a transaction is.
 
 #### Cancellation inside a transaction
 
-`raises 'er` is the other half, and without it the paragraph above is
-theatre. [The effect-runtime design note](https://github.com/codyspate/khoralang/blob/main/docs/design/effect-runtime.md) §6: **a cancellation point is a
-`!` in a function that can raise**, and it travels out on the tagged return
-an error uses. A body typed `() -> Result<A, DbError>` with no row has no
-`!` anywhere inside it, so nothing in the transaction can observe a
-cancellation, and the frames above have no channel to receive one on
-either -- a region and a finalizer with no path that could ever reach it.
+A transaction is cancelled like any other code: at a loop, at a blocking
+`std` call, or at a call to a function that can reach one, whatever the
+body's `raises` row. A cancellation that lands in the body unwinds through
+here, releasing the region and running the rollback. The rollback itself
+runs as cleanup, so a plain cancel does not interrupt it; only `abort`
+does. A body that reaches no cancellation point runs to its commit.
 
-With the row, a body that does fallible work has cancellation points, and
-one that fires unwinds through here — releasing the region, running the
-rollback. A body that does no fallible work instantiates `'er` empty, needs
-no `!` at the call, and has nothing to interrupt: §6's promise is that an
-interruption is delayed to the next mark that can carry it, never lost, and
-a transaction with no marks in it runs to its commit.
-
-The row is the *caller's*, deliberately. A transaction over a body that can
+`raises 'er` is there for the body's own failures. The row is the
+*caller's*, deliberately. A transaction over a body that can
 fail its own way keeps that failure's type — folding it into `DbError`
 would be the loss `Result<A, DbError>` already declines to take.
 

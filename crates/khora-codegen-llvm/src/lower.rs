@@ -587,6 +587,34 @@ impl<'ctx> Lower<'_, 'ctx> {
 
     /// Emits the function's `ret`, and repairs the IR if lowering gave up.
     fn finish(&mut self, value: Flow<'ctx>) {
+        // **A body whose value is not of the type it promises is refused in the
+        // tagged and `raises` arms as it is in the plain one.** Both used to
+        // return it anyway: a `match` that mixes a field read of a function
+        // with a named function lowers to the unit placeholder, and a tagged
+        // function packed that into its answer as a null closure. The build
+        // succeeded and the first call crashed ("the stack ran out"). `Unit`
+        // and `Never` have nothing to produce, so for them a zero is the
+        // answer and not a stand-in.
+        if (self.raises || self.tagged)
+            && !self.aborted
+            && !matches!(self.ret, Type::Unit | Type::Never)
+            && !matches!(self.tail_type(), Type::Never)
+        {
+            let expected = if self.raises {
+                self.be.llvm_type(&self.ret)
+            } else {
+                self.plain_pair_type().get_field_type_at_index(1)
+            };
+            let wrong = match value {
+                Some(value) => expected != Some(value.get_type()),
+                None => self.here().get_terminator().is_none(),
+            };
+            if wrong {
+                self.refuse_a_body_with_no_value();
+                self.seal_if_aborted();
+                return;
+            }
+        }
         // A fallible function always returns the tagged pair, so falling off
         // the end of the body is the *ok* case rather than a bare return.
         if self.raises {
@@ -629,21 +657,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 _ if matches!(self.tail_type(), Type::Never) => {
                     self.be.builder.build_unreachable().expect("a body that cannot return");
                 }
-                _ => {
-                    // Reachable when a body's type is `Unknown` — a `loop` used
-                    // as a value, say. The checker accepts `Unknown` anywhere,
-                    // so it cannot have caught this.
-                    let ret = self.ret.clone();
-                    let range = self.body.root.map(|r| self.body.range(r)).unwrap_or_default();
-                    self.fail(
-                        format!(
-                            "this body does not produce the `{ret}` its signature promises in a \
-                             form the backend can return; annotate it or restructure the \
-                             expression it ends with"
-                        ),
-                        range,
-                    );
-                }
+                _ => self.refuse_a_body_with_no_value(),
             }
         }
 
@@ -651,6 +665,22 @@ impl<'ctx> Lower<'_, 'ctx> {
         // created but never terminated. The module is about to be discarded,
         // but it still passes through inkwell, so leave it structurally sound.
         self.seal_if_aborted();
+    }
+
+    /// Reachable when a body's type is `Unknown` -- a `loop` used as a value,
+    /// say -- or when its tail lowered to no value. The checker accepts
+    /// `Unknown` anywhere, so it cannot have caught either.
+    fn refuse_a_body_with_no_value(&mut self) {
+        let ret = self.ret.clone();
+        let range = self.body.root.map(|r| self.body.range(r)).unwrap_or_default();
+        self.fail(
+            format!(
+                "this body does not produce the `{ret}` its signature promises in a \
+                 form the backend can return; annotate it or restructure the \
+                 expression it ends with"
+            ),
+            range,
+        );
     }
 
     fn seal_if_aborted(&mut self) {

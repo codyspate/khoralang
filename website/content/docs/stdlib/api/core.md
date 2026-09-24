@@ -2058,10 +2058,9 @@ pub fn spawn(body: () -> A raises 'er) -> Fiber<A, 'er>
 
 Runs `body` on a fiber of its own.
 
-The thunk may fail, and a thunk that can is also one that can be
-*stopped*: a cancellation travels out on the same tagged return an error
-does, so a fiber with no failure row has no channel to be interrupted on
-and runs to its end.
+The fiber can be stopped whatever the thunk's row says: `Fiber::cancel`
+stops it at its next loop, call or blocking operation, and its cleanup
+runs on the way out.
 
 `A` must be `Share` for the reason every value crossing a fiber must be:
 it is computed on one and read on another, so a thing that cannot be held
@@ -2118,12 +2117,10 @@ Letting the binding go waits too — that is where structured concurrency
 comes from — so this is for the case where the waiting has to happen at a
 particular line rather than at the end of a scope.
 
-**`raises 'er` because waiting can be interrupted.** A fiber parked here
-is asked to stop like any other, and the `!` is where it stops — without
-the row there would be no channel to say so on, and a parent waiting on a
-slow child would not observe its own cancellation until the child ended.
-The row is the waiter's, not the child's: this never takes the child's
-answer, so a child that *failed* still says so where it always did.
+**A cancellation point.** A fiber parked here is asked to stop like any
+other, and stops here, whatever either fiber's row says. The row is the
+child's: a waiter over a fallible child writes `!`, and one over a child
+that cannot fail writes nothing.
 
 The child is not cancelled by the waiter giving up. Letting the handle go
 still waits, which is what keeps it from outliving the binding.
@@ -2268,11 +2265,11 @@ reports what the *child* ended as, and a frame cannot swallow a
 cancellation aimed at itself.
 
 **A fiber that was stopped after computing something answers `Stopped`,
-and the value is not handed back.** A body whose inner frame absorbed a
-cancellation carries a fabricated zero where that frame had no channel to
-report on, so the alternative is an answer no part of the program
-computed wearing the type of one that was. For partial progress, have the
-fiber publish to a `Shared` cell and read the cell.
+and the value is not handed back.** A fiber that was cancelled did not
+finish the work its answer stands for, so handing back whatever it had
+computed would be an answer wearing the type of one that was complete.
+For partial progress, have the fiber publish to a `Shared` cell and read
+the cell.
 
 Asking consumes nothing a second question would need: like `join`, asking
 twice is asking once and gets the answer twice.
@@ -2285,18 +2282,68 @@ pub fn cancel(self) ->()
 
 Asks the fiber to stop at its next cancellation point. Returns at once.
 
-**It does not reach the work inside the fiber.** A cancellation is
-delivered to a fiber and observed at its next `!`, loop back-edge or
-wait. Work that does none of those — a tight arithmetic loop calling only
-infallible functions — is not interrupted, because there is nowhere in it
-to look.
+A cancellation point is every loop iteration, every call to a function
+that can reach one, every blocking `std` operation and every fiber or
+channel operation. The fiber's `scoped` cleanup and `Region::defer`
+finalizers run on the way out, to completion; `catch` does not see the
+cancellation. A single foreign (C) call or file-system call already in
+progress finishes first.
+
+**Asking twice is asking once.** Cleanup is not cut short by a second
+cancel. `Fiber::abort` is the request that does, and `Fiber::cancel_within`
+escalates to it after a deadline the caller chooses.
 
 A fiber whose body is a `nursery` cancels its children with it, so a
 cancelled fan-out stops rather than waiting on workers nobody told.
 
-For work that has to be stoppable at a point of its own choosing, pass a
-`Shared<Bool>` the work itself reads. `Fiber::detach` is the way out that
-does not wait.
+`Fiber::detach` is the way out that does not wait.
+
+#### abort
+
+```khora
+pub fn abort(self) ->()
+```
+
+Stops the fiber at its next cancellation point **even inside its
+cleanup**, and its nurseries' children with it.
+
+`cancel` lets cleanup run to completion, and asking again changes
+nothing. So a finalizer that blocks for ever -- a `receive` nobody will
+answer -- holds its fiber, and every fiber waiting on it, for ever. This
+is the way to end that. It cancels the fiber too if nobody had. Asking
+twice is asking once.
+
+**What it costs is what it says: cleanup cut off part-way.** A `ROLLBACK`
+may not be sent; a connection may be dropped rather than returned. Reach
+for it when waiting any longer is worse than that. A change function
+running under `Shared::update` still finishes, because it holds the
+cell's lock; a blocking call inside one gives up at once instead. A
+single foreign (C) call or file-system call already in progress finishes
+first.
+
+`Fiber::cancel_within` asks for this after a deadline you choose, which
+is usually what a shutdown wants.
+
+#### cancel_within
+
+```khora
+pub fn cancel_within(self, millis: Int) ->()
+```
+
+Cancels the fiber now, and aborts it if it is still running `millis`
+milliseconds later.
+
+**A bound on how long cleanup may take, chosen by the caller.** Khora
+has no default grace period: cleanup runs to completion unless something
+in the program says otherwise, and this is that something.
+
+```khora
+Fiber::cancel_within(server, 5000);
+Fiber::wait(server);   // at most five seconds of cleanup, then abort
+```
+
+Returns at once. A fiber that finishes before the deadline is not
+aborted. The deadline is kept by a thread of its own until it expires.
 
 #### detach
 
@@ -4688,7 +4735,7 @@ for `dropping` where somebody would.
 #### send
 
 ```khora
-pub fn send<'er>(self, value: A) -> Bool raises 'er
+pub fn send(self, value: A) -> Bool
 ```
 
 Puts a value in, waiting while the channel is full.
@@ -4697,18 +4744,15 @@ False when the channel is closed, in which case the value is released
 rather than kept: a send with nowhere to put its value must not be the
 quietest possible leak.
 
-**A cancellation point, which is what the row is for.** Waiting for room
-is one of the two places in this library where a fiber can sit
-indefinitely, so `Fiber::cancel` has to be able to reach it -- and a
-cancellation travels out on a `raises` row or not at all. The row is a
-variable because nothing here raises an error of its own; it carries the
-caller's. A send that had to give up releases the value, the same as a
-closed one.
+**A cancellation point.** Waiting for room is one of the places a fiber
+can sit indefinitely, so a cancellation reaches it here: the fiber stops
+and the value is released, the same as on a closed channel. It needs no
+`!`, because it cannot fail.
 
 #### receive
 
 ```khora
-pub fn receive<'er>(self) -> Option<A> raises 'er
+pub fn receive(self) -> Option<A>
 ```
 
 Takes a value out, waiting while the channel is empty.
@@ -4800,11 +4844,19 @@ pub fn update(self, change: (A) -> A) -> A
 
 Reads, transforms and writes as one step, and gives back the new value.
 
-`change` runs once, under the lock. It cannot fail, and that is
-deliberate: a function with no failure row has no channel to be cancelled
-on, so nothing can leave the critical section except by returning and
-there is no path on which the lock is still held. Work that can fail
-belongs outside — compute it, then `set` the answer.
+`change` runs once, under the lock. It cannot fail, so nothing leaves the
+critical section with the lock still held; work that can fail belongs
+outside — compute it, then `set` the answer.
+
+**A cancellation does not stop `change` part-way.** A blocking call
+inside it — a `receive`, a sleep, a socket call — gives up on a cancel
+and hands back its "gave up" answer (`None`, `false`), `change` finishes
+with that answer and the cell takes the result, and the fiber stops
+right after the `update`. A `Fiber::join`, `wait` or `outcome` inside
+`change` has no such answer: on a cancel it leaves the cell as it was,
+and the fiber stops there. In cleanup — a `Region::defer` finalizer or
+`scoped` cleanup — those three wait for the child instead, holding the
+lock, because only `abort` stops cleanup.
 
 Updating the same cell from inside `change` is a deadlock, and stops the
 program with a message rather than waiting for itself.
@@ -4878,15 +4930,16 @@ Puts a running fiber under this nursery.
 
 The nursery takes the handle, so nothing else can outlive it with one.
 Adopting past a `bounded` limit waits for the oldest child to finish,
-which is what turns a ceiling into a queue.
+which is what turns a ceiling into a queue. A cancel that arrives during
+that wait is passed to the child being waited on, and the adopting fiber
+stops once it has finished.
 
 `Fiber<(), 'er>`: **adopting gives up the answer and keeps the failure.**
 A nursery holds its children as bare handles and waits for them; it could
 not hand back what they computed even if it kept it, so the answer is
-fixed at `()`. The *row* stays, because a cancellation travels out on the
-same tagged return an error does — a child whose row is empty has no
-channel to be stopped on, and a nursery that cannot stop its children is
-not a nursery.
+fixed at `()`. The row stays so a child's failure can still be counted
+and reported as `ChildFailed`. Cancelling the nursery's fiber cancels
+every child, whatever its row.
 
 #### wait
 

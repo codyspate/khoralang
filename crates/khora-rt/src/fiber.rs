@@ -136,8 +136,12 @@ impl Completion {
     /// Answers true when it gave up rather than waited. The child is *not*
     /// stopped by this and is not waited for: the caller is unwinding and its
     /// own handle release is what still waits.
+    ///
+    /// Gives up on [`crate::current::Fiber::gives_up_joining`], not on
+    /// `gives_up_waiting`: inside a shielded finalizer's change function a
+    /// plain cancel does not end the wait, and `abort` does.
     fn wait_or_cancelled(&self) -> bool {
-        self.wait_until(&|| crate::current::current(|fiber| fiber.gives_up_waiting()))
+        self.wait_until(&|| crate::current::current(|fiber| fiber.gives_up_joining()))
     }
 
     /// Waits until the fiber finishes or `give_up` says to stop asking.
@@ -1152,7 +1156,14 @@ pub unsafe extern "C" fn khora_fiber_cancel_within(fiber: *mut u8, millis: i64) 
         return;
     }
     deliver_to(state, Stop::Cancel);
-    let when = std::time::Instant::now() + std::time::Duration::from_millis(millis.max(0) as u64);
+    // **Saturating, because a panic here aborts the process.** `Instant +
+    // Duration` panics on overflow, and this is an `extern "C"` function. On
+    // Linux an `i64` of milliseconds cannot overflow an `Instant`; on a
+    // platform whose clock is narrower it can. A deadline past the last
+    // instant the clock can name never arrives, so it is not recorded: the
+    // fiber has its cancel, as with no deadline at all.
+    let wait = std::time::Duration::from_millis(millis.max(0) as u64);
+    let Some(when) = std::time::Instant::now().checked_add(wait) else { return };
     if !Deadlines::add(Deadline { when, target: state.fiber.clone(), done }) {
         deliver_to(state, Stop::Force);
     }
@@ -1291,14 +1302,13 @@ pub(crate) unsafe fn deliver(fiber: *mut u8, stop: Stop) {
 /// For [`khora_fiber_release`], which has taken the state out of its handle
 /// before it waits, and still has to be able to pass a force on to it.
 fn deliver_to(state: &FiberState, stop: Stop) {
-    // **Its nurseries' children go with it, here.** A fiber whose body is a
-    // nursery does not finish until its children do, so flagging it alone asks
-    // it to stop and makes stopping impossible: it is blocked joining a child
-    // nobody has told to stop, and will not read its own flag again until that
-    // join returns. Delivered at the cancellation rather than waited for --
-    // `khora_fibers_wait`'s between-rounds check cannot see a cancellation that
-    // arrives mid-round, which is every cancellation that matters.
-    crate::nursery::cancel_open_crews(state.fiber.id(), stop);
+    // **Its own flag first, then its nurseries' children.** A fiber parked on
+    // a child -- a nursery's wait, or an `adopt` waiting for room -- is woken
+    // by that child stopping, and then asks whether it was itself stopped. In
+    // the other order the child could stop, wake it and be let go of before
+    // the flag was set, so the waiter found none and ran on: an `adopt` on
+    // the scheduler reported `cancelled false` and ran the statement after
+    // it, intermittently.
     if on_the_scheduler() {
         // Through the pool rather than the flag alone. Setting the flag is
         // what the child observes at its next `!`; waking it is what gets it
@@ -1313,6 +1323,14 @@ fn deliver_to(state: &FiberState, stop: Stop) {
             Stop::Force => state.fiber.force(),
         }
     }
+    // **Its nurseries' children go with it, here.** A fiber whose body is a
+    // nursery does not finish until its children do, so flagging it alone asks
+    // it to stop and makes stopping impossible: it is blocked joining a child
+    // nobody has told to stop, and will not read its own flag again until that
+    // join returns. Delivered at the cancellation rather than waited for --
+    // `khora_fibers_wait`'s between-rounds check cannot see a cancellation that
+    // arrives mid-round, which is every cancellation that matters.
+    crate::nursery::cancel_open_crews(state.fiber.id(), stop);
 }
 
 /// Joins a fiber and frees its handle.

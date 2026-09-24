@@ -522,11 +522,33 @@ impl Fiber {
     /// ever. It does not *stop* there -- [`crate::cancel::Pinned`] says why --
     /// so the change function goes on with the "gave up" answer, returns, and
     /// the fiber stops at its first cancellation point after the lock is let
-    /// go.
+    /// go. A wait on another fiber has no such answer and asks
+    /// [`Fiber::gives_up_joining`] instead.
     pub(crate) fn gives_up_waiting(&self) -> bool {
         let state = self.state.load(Ordering::Acquire);
         state & CANCELLED != 0
             && (self.is_pinned() || state & FORCED != 0 || !self.is_shielded())
+    }
+
+    /// Whether a `join`, `wait` or `outcome` should stop waiting for another
+    /// fiber: [`Fiber::gives_up_waiting`] without the change-function case.
+    ///
+    /// **What this prevents: a plain cancel cutting cleanup short.** A join
+    /// has no "gave up" answer to carry on with. It comes back cancelled, and
+    /// the change function and then the finalizer around it leave on that tag,
+    /// so giving up here inside a shielded finalizer skipped the rest of the
+    /// cleanup -- a rollback that never ran -- on a cancel that only `abort`
+    /// is meant to be able to turn into that. So a join gives up exactly when
+    /// the fiber would stop once the change function returned: cancelled and
+    /// unshielded, or forced.
+    ///
+    /// What it costs: a finalizer whose change function joins holds the
+    /// cell's lock until the child finishes, which is the wait
+    /// [`crate::cancel::Pinned`] otherwise bounds. The bound here is the child,
+    /// and `abort` ends it.
+    pub(crate) fn gives_up_joining(&self) -> bool {
+        let state = self.state.load(Ordering::Acquire);
+        state & CANCELLED != 0 && (state & FORCED != 0 || !self.is_shielded())
     }
 
     /// Whether this fiber is inside a change function.

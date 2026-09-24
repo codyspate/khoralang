@@ -267,28 +267,36 @@ fn main() -> Int {{
 
 /// Cancellation is per fiber. The parent cancels the child and carries on —
 /// which is the whole reason the flag stopped being one per process.
+///
+/// The child spins, so it is certainly stopped rather than racing to its end,
+/// and the parent observes that through `outcome`, which reports a stop
+/// instead of passing it on the way `join` does.
 #[test]
 fn cancelling_a_fiber_does_not_cancel_the_parent() {
     let ran = run(
         "fiber_cancel_child",
         &format!(
-            "{FIBERS}
-pub type Oops = | Bad;
-fn ok(n: Int) -> Int raises Oops {{ n }}
-
+            "{OUTCOME}
 fn main() -> Int raises Oops {{
-  let f = Fiber::spawn(fn () => print(1));
+  let f = Fiber::spawn(fn () => {{
+    let mut i = 0;
+    while i >= 0 {{ i = i + 1; }};
+    i
+  }});
   Fiber::cancel(f);
-  Fiber::join(f);
-  print(ok(2)!);
+  print(match Fiber::outcome(f) {{
+    Outcome::Answered(_) => 1,
+    Outcome::Stopped => 2,
+  }});
+  print(ok(3)!);
   0
 }}
 "
         ),
     );
     assert_eq!(
-        ran.stdout, "1\n2\n",
-        "the parent passed its own cancellation point untouched"
+        ran.stdout, "2\n3\n",
+        "the child stopped and the parent passed its own cancellation point untouched"
     );
     assert_eq!(ran.code, Some(0), "and exited normally rather than 130");
 }

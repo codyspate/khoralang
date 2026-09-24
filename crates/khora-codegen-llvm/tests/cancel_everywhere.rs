@@ -489,13 +489,150 @@ pub fn main() -> Int {
     }
 }
 
+/// **A plain cancel does not cut a finalizer short through a change function
+/// that joins.** Only `abort` stops cleanup. The finalizer's `update` joins a
+/// child that finishes on its own after ~300 ms; the join must wait for it,
+/// the cell must hold the joined value, and the statements after the `update`
+/// must run. The control is the same finalizer with the join outside the
+/// change function, which always waited.
+#[test]
+fn a_cancel_does_not_cut_short_a_finalizer_whose_change_function_joins() {
+    const SOURCE: &str = "module main;
+import std::core::{print, Fiber, Shared, Region};
+import std::clock::{Clock};
+
+fn spin(n: Int) -> Int {
+  let mut i = 0;
+  let mut t = 0;
+  while i < n { t = (t * 31 + i) % 1000003; i = i + 1; };
+  t
+}
+
+fn worker(cell: Shared<String>, log: Shared<Int>) -> () {
+  with { clock: Clock::real() } {
+    let r = Region::open();
+    Region::defer(r, fn () => {
+      let other = Fiber::spawn(fn () => spin(30000000));
+      Shared::update(cell, fn s => { let got = Fiber::join(other); s + \"+fin${got}\" });
+      Shared::set(log, 1);
+    });
+    clock.sleep(5000);
+    print(\"TAIL worker body\");
+  }
+}
+
+fn control(cell: Shared<String>, log: Shared<Int>) -> () {
+  with { clock: Clock::real() } {
+    let r = Region::open();
+    Region::defer(r, fn () => {
+      let other = Fiber::spawn(fn () => spin(30000000));
+      let got = Fiber::join(other);
+      Shared::update(cell, fn s => s + \"+fin${got}\");
+      Shared::set(log, 1);
+    });
+    clock.sleep(5000);
+    print(\"TAIL control body\");
+  }
+}
+
+pub fn main() -> Int {
+  with { clock: Clock::real() } {
+    let cell = Shared::of(\"start\");
+    let log = Shared::of(0);
+    let f = Fiber::spawn(fn () => worker(cell, log));
+    clock.sleep(50);
+    Fiber::cancel(f);
+    Fiber::wait(f);
+    print(\"in change fn: cancelled ${Fiber::cancelled(f)}; finalizer finished ${Shared::get(log)}; cell = ${Shared::get(cell)}\");
+    let cell2 = Shared::of(\"start\");
+    let log2 = Shared::of(0);
+    let g = Fiber::spawn(fn () => control(cell2, log2));
+    clock.sleep(50);
+    Fiber::cancel(g);
+    Fiber::wait(g);
+    print(\"control: cancelled ${Fiber::cancelled(g)}; finalizer finished ${Shared::get(log2)}; cell = ${Shared::get(cell2)}\");
+    0
+  }
+}
+";
+    for (backend, ran) in on_both("cancel_everywhere_finupd", SOURCE) {
+        assert!(!ran.hung, "`{backend}`: {}", ran.stdout);
+        assert_eq!(
+            ran.stdout,
+            "in change fn: cancelled true; finalizer finished 1; cell = start+fin30993\n\
+             control: cancelled true; finalizer finished 1; cell = start+fin30993\n",
+            "`{backend}`: {}",
+            ran.stderr
+        );
+        assert_eq!(ran.code, Some(0), "`{backend}`");
+    }
+}
+
+/// **`abort` still ends a finalizer stuck in a change function's join.** The
+/// child never finishes, so after the plain cancel the join waits -- the fiber
+/// is checked to be still running 200 ms later -- and `abort` must end it with
+/// the cell unchanged and the rest of the finalizer skipped.
+#[test]
+fn abort_ends_a_finalizer_whose_change_function_joins_for_ever() {
+    const SOURCE: &str = "module main;
+import std::core::{print, Fiber, Shared, Region};
+import std::clock::{Clock};
+
+fn spin() -> Int {
+  let mut i = 0;
+  let mut t = 0;
+  while i < 300000000000 { t = (t * 31 + i) % 1000003; i = i + 1; };
+  t
+}
+
+fn worker(cell: Shared<Int>, log: Shared<Int>) -> () {
+  with { clock: Clock::real() } {
+    let r = Region::open();
+    Region::defer(r, fn () => {
+      let other = Fiber::spawn(fn () => spin());
+      Shared::update(cell, fn n => n + Fiber::join(other));
+      Shared::set(log, 1);
+    });
+    clock.sleep(5000);
+  }
+}
+
+pub fn main() -> Int {
+  with { clock: Clock::real() } {
+    let cell = Shared::of(41);
+    let log = Shared::of(0);
+    let f = Fiber::spawn(fn () => worker(cell, log));
+    clock.sleep(50);
+    Fiber::cancel(f);
+    clock.sleep(200);
+    print(\"after cancel, finished: ${Fiber::finished(f)}\");
+    Fiber::abort(f);
+    Fiber::wait(f);
+    print(\"after abort: cell = ${Shared::get(cell)}; rest of finalizer ran ${Shared::get(log)}\");
+    0
+  }
+}
+";
+    for (backend, ran) in on_both("cancel_everywhere_finupd_abort", SOURCE) {
+        assert!(!ran.hung, "`{backend}`: abort did not end the finalizer: {}", ran.stdout);
+        assert_eq!(
+            ran.stdout,
+            "after cancel, finished: false\n\
+             after abort: cell = 41; rest of finalizer ran 0\n",
+            "`{backend}`: {}",
+            ran.stderr
+        );
+        assert_eq!(ran.code, Some(0), "`{backend}`");
+    }
+}
+
 /// **A `String` `<` is a cancellation point that leaks nothing.** `pick`'s
 /// only way to stop is the comparison, which is a call to `impl Ord for
 /// String`, and `held` is moved into the answer after it. Fibers are cancelled
-/// inside the comparison, once and then twenty times; the live count moves by
-/// the same amount both times. (That amount is 1, for one round as for twenty
-/// -- measured, not explained here. A leak on the unwind is a delta that grows
-/// with the rounds, which is what this pins.)
+/// inside the comparison, once and then twenty times, and the live count must
+/// come back to where it started both times. It is read before the `print`,
+/// because a count read inside `${..}` also sees the pieces of that string
+/// already built.
 #[test]
 fn a_string_comparison_cancelled_leaks_nothing() {
     const SOURCE: &str = "module main;
@@ -527,8 +664,9 @@ fn rounds(a: String, b: String, n: Int) -> Int with { clock: Clock } {
     if Fiber::cancelled(f) { stopped = stopped + 1; };
     round = round + 1;
   };
+  let delta = khora_live_count() - before;
   print(\"stopped ${stopped}\");
-  khora_live_count() - before
+  delta
 }
 
 pub fn main() -> Int {
@@ -537,7 +675,7 @@ pub fn main() -> Int {
     let b = big(\"ab\");
     let once = rounds(a, b, 1);
     let many = rounds(a, b, 20);
-    print(\"per-cancel growth ${many - once}\");
+    print(\"live delta: once ${once}, twenty ${many}\");
     0
   }
 }
@@ -545,7 +683,7 @@ pub fn main() -> Int {
     for (backend, ran) in on_both("cancel_everywhere_strcmp", SOURCE) {
         assert!(!ran.hung, "`{backend}`: {}", ran.stdout);
         assert_eq!(
-            ran.stdout, "stopped 1\nstopped 20\nper-cancel growth 0\n",
+            ran.stdout, "stopped 1\nstopped 20\nlive delta: once 0, twenty 0\n",
             "`{backend}`: {}",
             ran.stderr
         );
@@ -704,10 +842,16 @@ pub fn main() -> Int {
 /// record field (`k.f(k, n - 1)`, which never names `walk`) and through a
 /// lambda's own binding. Neither has a loop or a named call cycle; each runs
 /// for seconds uncancelled. Both have to stop within 100 ms of the cancel.
+///
+/// The third shape's only indirect call is made by an intrinsic: `attempt`
+/// calls the thunk it is handed, which reaches `walk` again through an
+/// `Array` of records. No body in the cycle calls through a value itself, so
+/// only counting "hands a closure to an intrinsic" as an indirect call puts a
+/// poll on it; without that it ran for 100 s after the cancel.
 #[test]
 fn recursion_through_a_function_value_stops_promptly() {
     const SOURCE: &str = "module main;
-import std::core::{Fiber, print};
+import std::core::{Fiber, print, Array, Result, attempt};
 import std::clock::{Clock};
 
 type Knot = { f: (Knot, Int) -> Int };
@@ -723,6 +867,34 @@ fn by_rec_lambda() -> Int {
   f(45)
 }
 
+type Thunk = { t: () -> Int raises String };
+
+fn attempted(t: () -> Int raises String) -> Int {
+  match attempt(t) {
+    Result::Ok(v) => v,
+    Result::Err(_) => 0,
+  }
+}
+
+fn nothing() -> Int raises String { 0 }
+
+fn through_attempt(limit: Int) -> Int {
+  let depth: Array<Int> = Array::new(1, 0);
+  let knots: Array<Thunk> = Array::new(1, { t: nothing });
+  let t: () -> Int raises String = fn () => {
+    let d = Array::get(depth, 0);
+    if d > limit { 1 } else {
+      Array::set(depth, 0, d + 1);
+      let a = attempted(Array::get(knots, 0).t);
+      let b = attempted(Array::get(knots, 0).t);
+      Array::set(depth, 0, d);
+      a + b
+    }
+  };
+  Array::set(knots, 0, { t: t });
+  attempted(t)
+}
+
 fn stop_after(f: Fiber<Int, {}>, name: String) -> () with { clock: Clock } {
   clock.sleep(30);
   let t = clock.monotonic_millis();
@@ -735,6 +907,7 @@ pub fn main() -> Int {
   with { clock: Clock::real() } {
     stop_after(Fiber::spawn(fn () => knot()), \"knot\");
     stop_after(Fiber::spawn(fn () => by_rec_lambda()), \"lambda\");
+    stop_after(Fiber::spawn(fn () => through_attempt(28)), \"attempt\");
     0
   }
 }
@@ -744,12 +917,233 @@ pub fn main() -> Int {
         assert_eq!(
             ran.stdout,
             "knot: cancelled true; within 100 ms true\n\
-             lambda: cancelled true; within 100 ms true\n",
+             lambda: cancelled true; within 100 ms true\n\
+             attempt: cancelled true; within 100 ms true\n",
             "`{backend}`: {}",
             ran.stderr
         );
         assert_eq!(ran.code, Some(0), "`{backend}`");
     }
+}
+
+/// **A fiber cancelled while it waits in a nursery does not run the nursery's
+/// caller's tail.** The wait cancels the children, waits for them, and hands
+/// back a count; the caller must stop there rather than take the count for a
+/// round that ended and go on to `Shared::set`, which is not a cancellation
+/// point of its own.
+#[test]
+fn a_nursery_wait_that_was_cancelled_runs_no_tail() {
+    const SOURCE: &str = "module main;
+import std::core::{print, Fiber, Shared, nursery, Nursery, ChildFailed};
+import std::clock::{Clock};
+
+fn spin(n: Int) -> Int {
+  let mut i = 0;
+  let mut t = 0;
+  while i < n { t = (t * 31 + i) % 1000003; i = i + 1; };
+  t
+}
+
+fn group(log: Shared<Int>) -> Int raises ChildFailed {
+  let v = nursery(fn () => {
+    nursery.adopt(Fiber::spawn(fn () => { spin(300000000000); () }));
+    nursery.adopt(Fiber::spawn(fn () => { spin(300000000000); () }));
+    5
+  })!;
+  Shared::set(log, 1);
+  v
+}
+
+fn guarded(log: Shared<Int>, caught: Shared<Int>) -> Int {
+  group(log)! catch {
+    ChildFailed { children } => { Shared::set(caught, children); -1 },
+  }
+}
+
+pub fn main() -> Int {
+  with { clock: Clock::real() } {
+    let log = Shared::of(0);
+    let caught = Shared::of(0);
+    let f = Fiber::spawn(fn () => guarded(log, caught));
+    clock.sleep(50);
+    Fiber::cancel(f);
+    Fiber::wait(f);
+    print(\"cancelled ${Fiber::cancelled(f)}; tail ran ${Shared::get(log)}; catch saw ${Shared::get(caught)}\");
+    0
+  }
+}
+";
+    for (backend, ran) in on_both("cancel_everywhere_nursery_tail", SOURCE) {
+        assert!(!ran.hung, "`{backend}`: {}", ran.stdout);
+        assert_eq!(
+            ran.stdout, "cancelled true; tail ran 0; catch saw 0\n",
+            "`{backend}`: {}",
+            ran.stderr
+        );
+        assert_eq!(ran.code, Some(0), "`{backend}`");
+    }
+}
+
+/// **A cancel a change function's blocking call gave up on is not lost.** The
+/// `receive` inside the `update` hands back `None` on the cancel, the change
+/// function stores its "gave up" value and returns, and the fiber must stop
+/// right after the `update`: reported cancelled, and the `Shared::set` after
+/// it not run.
+#[test]
+fn a_cancel_absorbed_inside_a_change_function_stops_after_the_update() {
+    const SOURCE: &str = "module main;
+import std::core::{print, Fiber, Shared, Channel, Option};
+import std::clock::{Clock};
+
+fn updater(cell: Shared<Int>, log: Shared<Int>, ch: Channel<Int>) -> () {
+  Shared::update(cell, fn n => {
+    match Channel::receive(ch) { Option::Some(v) => n + v, Option::None => n + 100 }
+  });
+  Shared::set(log, 1);
+}
+
+fn modifier(cell: Shared<Int>, log: Shared<Int>, ch: Channel<Int>) -> () {
+  let got = Shared::modify(cell, fn n => {
+    match Channel::receive(ch) { Option::Some(v) => { state: n + v, result: v }, Option::None => { state: n + 100, result: 0 } }
+  });
+  Shared::set(log, got + 1);
+}
+
+pub fn main() -> Int {
+  with { clock: Clock::real() } {
+    let cell = Shared::of(1);
+    let log = Shared::of(0);
+    let ch: Channel<Int> = Channel::bounded(1);
+    let f = Fiber::spawn(fn () => updater(cell, log, ch));
+    clock.sleep(50);
+    Fiber::cancel(f);
+    Fiber::wait(f);
+    let c = Shared::get(cell);
+    let l = Shared::get(log);
+    print(\"update: cancelled ${Fiber::cancelled(f)}; cell ${c}; tail ran ${l}\");
+    let g = Fiber::spawn(fn () => modifier(cell, log, ch));
+    clock.sleep(50);
+    Fiber::cancel(g);
+    Fiber::wait(g);
+    let c2 = Shared::get(cell);
+    let l2 = Shared::get(log);
+    print(\"modify: cancelled ${Fiber::cancelled(g)}; cell ${c2}; tail ran ${l2}\");
+    0
+  }
+}
+";
+    for (backend, ran) in on_both("cancel_everywhere_update_tail", SOURCE) {
+        assert!(!ran.hung, "`{backend}`: {}", ran.stdout);
+        assert_eq!(
+            ran.stdout,
+            "update: cancelled true; cell 101; tail ran 0\n\
+             modify: cancelled true; cell 201; tail ran 0\n",
+            "`{backend}`: {}",
+            ran.stderr
+        );
+        assert_eq!(ran.code, Some(0), "`{backend}`");
+    }
+}
+
+/// **A bounded nursery's `adopt`, waiting for room, stops on a cancel.** With
+/// room for one child, the second `adopt` waits for the first, a long
+/// spinner. The cancel has to reach that child and end the wait, and the
+/// statement after the `adopt` must not run. It used to wait the spinner out
+/// (16 s) and then carry on, reporting the fiber not cancelled.
+#[test]
+fn a_bounded_adopt_waiting_for_room_stops_on_a_cancel() {
+    const SOURCE: &str = "module main;
+import std::core::{print, Fiber, Shared, bounded_nursery, Nursery, ChildFailed};
+import std::clock::{Clock};
+
+fn spin(n: Int) -> Int {
+  let mut i = 0;
+  let mut t = 0;
+  while i < n { t = (t * 31 + i) % 1000003; i = i + 1; };
+  t
+}
+
+fn group(log: Shared<Int>) -> Int raises ChildFailed {
+  bounded_nursery(1, fn () => {
+    nursery.adopt(Fiber::spawn(fn () => { spin(300000000000); () }));
+    Shared::set(log, 1);
+    nursery.adopt(Fiber::spawn(fn () => { spin(10); () }));
+    Shared::set(log, 2);
+    5
+  })!
+}
+
+fn guarded(log: Shared<Int>) -> Int {
+  group(log)! catch { ChildFailed { children } => -1 }
+}
+
+pub fn main() -> Int {
+  with { clock: Clock::real() } {
+    let log = Shared::of(0);
+    let f = Fiber::spawn(fn () => guarded(log));
+    clock.sleep(50);
+    let before = Shared::get(log);
+    let t1 = clock.monotonic_millis();
+    Fiber::cancel(f);
+    Fiber::wait(f);
+    let took = clock.monotonic_millis() - t1;
+    print(\"waiting for room: log ${before}; cancelled ${Fiber::cancelled(f)}; within 1 s ${took < 1000}; log ${Shared::get(log)}\");
+    0
+  }
+}
+";
+    for (backend, ran) in on_both("cancel_everywhere_bounded_adopt", SOURCE) {
+        assert!(!ran.hung, "`{backend}`: {}", ran.stdout);
+        assert_eq!(
+            ran.stdout, "waiting for room: log 1; cancelled true; within 1 s true; log 1\n",
+            "`{backend}`: {}",
+            ran.stderr
+        );
+        assert_eq!(ran.code, Some(0), "`{backend}`");
+    }
+}
+
+/// **A tagged body that lowers to no value is refused at build time**, as a
+/// plain one is, instead of returning a null function the caller then calls.
+/// `fetch` is tagged (`Map::get` loops), and its `match` mixes a field read
+/// with a named function, which lowers with no value at the join. It built,
+/// and crashed with "the stack ran out" at the first call.
+#[test]
+fn a_tagged_body_that_lowers_to_no_value_is_a_build_error() {
+    const SOURCE: &str = "module main;
+import std::core::{print, Map, Option};
+
+type Knot = { t: () -> Int };
+
+fn seven() -> Int { 7 }
+
+fn fetch(knots: Map<Int, Knot>) -> () -> Int {
+  match Map::get(knots, 0) {
+    Option::Some(k) => k.t,
+    Option::None => seven,
+  }
+}
+
+pub fn main() -> Int {
+  let knots: Map<Int, Knot> = Map::new();
+  print(\"${fetch(knots)()}\");
+  0
+}
+";
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cancel_everywhere_no_value");
+    harness::ensure_runtime();
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
+    let db = KhoraDatabase::new();
+    let root = SourceRoot::new(&db, sources(&db, &dir, SOURCE));
+    let Err(errors) = khora_codegen_llvm::compile(&db, root, &exe) else {
+        panic!("a body that produces no value compiled");
+    };
+    let messages: Vec<String> = errors.into_iter().map(|e| e.message).collect();
+    assert!(
+        messages.iter().any(|m| m.contains("does not produce the `() -> Int` its signature promises")),
+        "{messages:?}"
+    );
 }
 
 /// **A blocking socket call that gave up on a cancel is not taken for a

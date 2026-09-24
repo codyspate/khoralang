@@ -351,7 +351,7 @@ impl<'ctx> Lower<'_, 'ctx> {
     }
 
     /// The pair this function returns. Only asked of a tagged function.
-    fn plain_pair_type(&self) -> inkwell::types::StructType<'ctx> {
+    pub(super) fn plain_pair_type(&self) -> inkwell::types::StructType<'ctx> {
         self.function
             .get_type()
             .get_return_type()

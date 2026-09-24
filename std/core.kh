@@ -2462,11 +2462,11 @@ impl<A: Share, 'er> Fiber<A, 'er> {
   /// cancellation aimed at itself.
   ///
   /// **A fiber that was stopped after computing something answers `Stopped`,
-  /// and the value is not handed back.** A body whose inner frame absorbed a
-  /// cancellation carries a fabricated zero where that frame had no channel to
-  /// report on, so the alternative is an answer no part of the program
-  /// computed wearing the type of one that was. For partial progress, have the
-  /// fiber publish to a `Shared` cell and read the cell.
+  /// and the value is not handed back.** A fiber that was cancelled did not
+  /// finish the work its answer stands for, so handing back whatever it had
+  /// computed would be an answer wearing the type of one that was complete.
+  /// For partial progress, have the fiber publish to a `Shared` cell and read
+  /// the cell.
   ///
   /// Asking consumes nothing a second question would need: like `join`, asking
   /// twice is asking once and gets the answer twice.
@@ -5584,11 +5584,19 @@ impl<A: Share> Shared<A> {
   pub fn set(self, value: A) -> ();
   /// Reads, transforms and writes as one step, and gives back the new value.
   ///
-  /// `change` runs once, under the lock. It cannot fail, and that is
-  /// deliberate: a function with no failure row has no channel to be cancelled
-  /// on, so nothing can leave the critical section except by returning and
-  /// there is no path on which the lock is still held. Work that can fail
-  /// belongs outside — compute it, then `set` the answer.
+  /// `change` runs once, under the lock. It cannot fail, so nothing leaves the
+  /// critical section with the lock still held; work that can fail belongs
+  /// outside — compute it, then `set` the answer.
+  ///
+  /// **A cancellation does not stop `change` part-way.** A blocking call
+  /// inside it — a `receive`, a sleep, a socket call — gives up on a cancel
+  /// and hands back its "gave up" answer (`None`, `false`), `change` finishes
+  /// with that answer and the cell takes the result, and the fiber stops
+  /// right after the `update`. A `Fiber::join`, `wait` or `outcome` inside
+  /// `change` has no such answer: on a cancel it leaves the cell as it was,
+  /// and the fiber stops there. In cleanup — a `Region::defer` finalizer or
+  /// `scoped` cleanup — those three wait for the child instead, holding the
+  /// lock, because only `abort` stops cleanup.
   ///
   /// Updating the same cell from inside `change` is a deadlock, and stops the
   /// program with a message rather than waiting for itself.
@@ -5654,15 +5662,16 @@ impl Fibers {
   ///
   /// The nursery takes the handle, so nothing else can outlive it with one.
   /// Adopting past a `bounded` limit waits for the oldest child to finish,
-  /// which is what turns a ceiling into a queue.
+  /// which is what turns a ceiling into a queue. A cancel that arrives during
+  /// that wait is passed to the child being waited on, and the adopting fiber
+  /// stops once it has finished.
   ///
   /// `Fiber<(), 'er>`: **adopting gives up the answer and keeps the failure.**
   /// A nursery holds its children as bare handles and waits for them; it could
   /// not hand back what they computed even if it kept it, so the answer is
-  /// fixed at `()`. The *row* stays, because a cancellation travels out on the
-  /// same tagged return an error does — a child whose row is empty has no
-  /// channel to be stopped on, and a nursery that cannot stop its children is
-  /// not a nursery.
+  /// fixed at `()`. The row stays so a child's failure can still be counted
+  /// and reported as `ChildFailed`. Cancelling the nursery's fiber cancels
+  /// every child, whatever its row.
   pub fn adopt<'er>(self, fiber: Fiber<(), 'er>) -> ();
   /// Waits for every child, oldest first, and empties the nursery, and
   /// answers how many of them ended with an error.

@@ -159,10 +159,20 @@ impl CanStop {
     /// Every function whose own reasons include a call through a function
     /// value, counted over its whole arena, so a lambda inside it counts.
     /// `Backend::poll_at_entry` says why these poll when entered.
+    ///
+    /// **A function value handed to an intrinsic counts as a call through
+    /// it** ([`Local::HandsAClosure`]): `attempt(t)` calls `t`, and so do
+    /// `Shared::update`, `with_data` and `Region::defer`. Without this a cycle
+    /// whose only indirect call is made by `attempt` had no poll anywhere on
+    /// it, and ran for 100 s after a cancel before reporting it had not been
+    /// stopped. An intrinsic that is handed a function and does not call it
+    /// costs a poll at the entry of its caller, which is the safe direction.
     pub(crate) fn calls_through_values(&self) -> HashSet<String> {
         self.local
             .iter()
-            .filter(|(_, reasons)| reasons.contains(&Local::ClosureCall))
+            .filter(|(_, reasons)| {
+                reasons.contains(&Local::ClosureCall) || reasons.contains(&Local::HandsAClosure)
+            })
             .map(|(symbol, _)| symbol.clone())
             .collect()
     }

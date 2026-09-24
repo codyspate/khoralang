@@ -280,6 +280,15 @@ The two backends are distinguishable under cancellation — see [The two fiber
 backends are distinguishable](#the-two-fiber-backends-are-distinguishable)
 below — so the default cannot change without a breaking-change note.
 
+**A known defect: under load, the scheduler can finish a cancelled fiber
+without running its finalizer.** When four or more other fibers are sitting
+in cleanup blocked on a `receive`, a fiber cancelled while parked in
+`Channel::receive` can report `finished` and `cancelled` with its
+`Region::defer` finalizer never having run. Two such fibers in cleanup do not
+trigger it; the thread backend does not have it. Until it is fixed, do not
+rely on finalizers under `KHORA_FIBERS=scheduler` in a program that keeps
+several fibers blocked in cleanup at once.
+
 ## I/O scaling on macOS and Windows
 
 This matters only under `KHORA_FIBERS=scheduler`. Under the default thread

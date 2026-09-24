@@ -124,6 +124,11 @@ impl Drop for Shielded {
 /// the change did not happen, and no zero nobody computed is stored. The lock
 /// is let go and the caller leaves on the tag like after any cancelled call.
 ///
+/// **Those three do not give up on a plain cancel in cleanup.** Leaving on the
+/// tag would skip the rest of a shielded finalizer, and only `abort` may do
+/// that: [`crate::current::Fiber::gives_up_joining`]. So in a finalizer they
+/// wait for the child with the lock held, and `abort` is what ends the wait.
+///
 /// What it costs is stated rather than hidden: a change function that loops
 /// without blocking runs to its end after a cancel, and after a force. One
 /// that loops for ever can only be ended by the process ending. The lock is

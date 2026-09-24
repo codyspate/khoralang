@@ -198,7 +198,7 @@ fn serve() -> ()
 bounded_nursery(128, serve)
 ```
 
-Adopting past a bounded nursery's limit waits for older work to finish. Use this for work whose arrival rate is controlled externally so overload becomes backpressure instead of unbounded growth.
+Adopting past a bounded nursery's limit waits for older work to finish. Use this for work whose arrival rate is controlled externally so overload becomes backpressure instead of unbounded growth. A fiber cancelled while it waits for room passes the cancel to the child it is waiting on, and stops as soon as that child has.
 
 Two riders on the number, both measured rather than intended:
 
@@ -255,7 +255,9 @@ call already in progress, which finishes first; and a change function running
 under `Shared::update` or `Shared::modify`, which holds the cell's lock and
 runs to its end. A blocking call inside one gives up at once instead; a
 `Fiber::join` or `wait` inside one that comes back stopped ends it with the
-cell unchanged. [Sharing](/docs/reference/sharing/) has the detail.
+cell unchanged. Inside a finalizer, a plain cancel does not end such a
+`join` or `wait` — it waits for the child, and the rest of the finalizer runs —
+and `abort` does. [Sharing](/docs/reference/sharing/) has the detail.
 
 **There is no `timeout`, no `race` and no `select`.** A deadline can be built by
 hand — [Timeouts and cancellation](/docs/cookbook/timeouts-and-cancellation/)
@@ -317,9 +319,10 @@ A function that can reach a cancellation point returns a small tag alongside
 its answer, and its caller checks it after the call. A function that reaches
 none — straight-line arithmetic, a field read — is compiled without one and
 cannot be stopped part-way, which is the point: there is nothing in it to stop
-at. A function that recurses -- by name, or through a closure or a
-function-typed field -- checks for a cancellation when it is entered, so deep
-recursion stops too.
+at. A function that recurses -- by name, through a closure or a
+function-typed field, or through a function it hands to `attempt` or another
+`std` operation that calls it -- checks for a cancellation when it is
+entered, so deep recursion stops too.
 
 Cancellation is **not** a member of a `raises` row. A `catch` that handles every declared failure, `_` included, does not see a cancellation: it passes through.
 
