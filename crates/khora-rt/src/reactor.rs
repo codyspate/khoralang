@@ -102,10 +102,146 @@ pub(crate) struct Watch {
     pub(crate) deadline: Option<std::time::Instant>,
 }
 
+/// Every registered wait, indexed by socket and by fiber.
+///
+/// **Indexed because a flat list made every wait cost the whole server.**
+/// `register`, a readiness, `forget` and the kernel mask each scanned or
+/// rebuilt the entire list under the one lock every worker and the reactor
+/// thread take: at 256 connections on `bench/service` that lock was
+/// contended on 15% of acquisitions and the scheduler left 30% of its CPUs
+/// idle. With the index, each of those touches only the watches on one
+/// socket, usually one.
+///
+/// What it costs: two hash-map updates per registration and per removal, and
+/// a `Vec` per socket and per fiber that is almost always of length one.
+#[derive(Default)]
+struct Watches {
+    by_socket: std::collections::HashMap<Socket, Vec<Watch>>,
+    /// The sockets each fiber is waiting on, so `forget` does not search.
+    /// A socket appears once per watch, so a fiber that registered one socket
+    /// twice has it twice here.
+    by_fiber: std::collections::HashMap<usize, Vec<Socket>>,
+    len: usize,
+    /// No registered deadline is earlier than this.
+    ///
+    /// **A lower bound, not the minimum, and that is what keeps it cheap.**
+    /// Removing a watch never raises it, so a stale bound only costs one scan
+    /// that finds nothing and recomputes it — while a bound that could be
+    /// *later* than a real deadline would let `poll` sleep past it.
+    earliest: Option<std::time::Instant>,
+}
+
+impl Watches {
+    fn add(&mut self, watch: Watch) {
+        self.by_socket.entry(watch.socket).or_default().push(watch);
+        self.by_fiber.entry(watch.fiber).or_default().push(watch.socket);
+        self.len += 1;
+        if let Some(at) = watch.deadline {
+            self.earliest = Some(self.earliest.map_or(at, |e| e.min(at)));
+        }
+    }
+
+    /// The watches on one socket, which is all `Epoll::sync` needs to see.
+    fn on(&self, socket: Socket) -> &[Watch] {
+        self.by_socket.get(&socket).map_or(&[], Vec::as_slice)
+    }
+
+    /// Takes one watch's socket out of its fiber's entry.
+    fn unlink(&mut self, fiber: usize, socket: Socket) {
+        if let Some(sockets) = self.by_fiber.get_mut(&fiber) {
+            if let Some(at) = sockets.iter().position(|s| *s == socket) {
+                sockets.swap_remove(at);
+            }
+            if sockets.is_empty() {
+                self.by_fiber.remove(&fiber);
+            }
+        }
+    }
+
+    /// Removes every watch on `socket` that `take` selects, and answers them.
+    fn take_on(&mut self, socket: Socket, mut take: impl FnMut(&Watch) -> bool) -> Vec<Watch> {
+        let Some(list) = self.by_socket.get_mut(&socket) else { return Vec::new() };
+        let mut taken = Vec::new();
+        list.retain(|w| {
+            if take(w) {
+                taken.push(*w);
+                false
+            } else {
+                true
+            }
+        });
+        if list.is_empty() {
+            self.by_socket.remove(&socket);
+        }
+        for watch in &taken {
+            self.unlink(watch.fiber, socket);
+        }
+        self.len -= taken.len();
+        taken
+    }
+
+    /// Removes every watch `fiber` holds, and answers the sockets touched.
+    fn forget(&mut self, fiber: usize) -> Vec<Socket> {
+        let Some(mut sockets) = self.by_fiber.remove(&fiber) else { return Vec::new() };
+        sockets.sort_unstable();
+        sockets.dedup();
+        for socket in &sockets {
+            if let Some(list) = self.by_socket.get_mut(socket) {
+                let before = list.len();
+                list.retain(|w| w.fiber != fiber);
+                self.len -= before - list.len();
+                if list.is_empty() {
+                    self.by_socket.remove(socket);
+                }
+            }
+        }
+        sockets
+    }
+
+    /// Removes every watch whose deadline has passed, if any can have.
+    ///
+    /// Answers the watches removed. A full scan, but only when `earliest`
+    /// says a deadline may have passed; afterwards `earliest` is exact again.
+    fn expire(&mut self, now: std::time::Instant) -> Vec<Watch> {
+        match self.earliest {
+            Some(at) if at <= now => {}
+            Some(_) | None => return Vec::new(),
+        }
+        let mut expired = Vec::new();
+        let mut earliest: Option<std::time::Instant> = None;
+        self.by_socket.retain(|_, list| {
+            list.retain(|w| match w.deadline {
+                Some(at) if at <= now => {
+                    expired.push(*w);
+                    false
+                }
+                Some(at) => {
+                    earliest = Some(earliest.map_or(at, |e| e.min(at)));
+                    true
+                }
+                None => true,
+            });
+            !list.is_empty()
+        });
+        for watch in &expired {
+            self.unlink(watch.fiber, watch.socket);
+        }
+        self.len -= expired.len();
+        self.earliest = earliest;
+        expired
+    }
+
+    /// Every watch, for the `poll` backend, which hands the kernel the whole
+    /// set on every call.
+    fn all(&self) -> Vec<Watch> {
+        self.by_socket.values().flatten().copied().collect()
+    }
+}
+
 /// The descriptors fibers are waiting on.
 #[derive(Default)]
 pub(crate) struct Reactor {
-    watching: Mutex<Vec<Watch>>,
+    watching: Mutex<Watches>,
     /// The kernel-side set, where there is one.
     ///
     /// Opened on the first registration rather than in a constructor, for the
@@ -146,7 +282,7 @@ impl Reactor {
     pub(crate) fn register(&self, watch: Watch) {
         {
             let mut watching = self.watching.lock().expect("the reactor");
-            watching.push(watch);
+            watching.add(watch);
             // **Inside the lock, so the kernel and the list cannot disagree.**
             // `sync` writes the union of what the list holds; computing that
             // outside would race another registration on the same socket and
@@ -155,7 +291,42 @@ impl Reactor {
         }
         // After the entry is visible, so a `poll` woken by this cannot look
         // before there is something to see.
-        self.nudge();
+        //
+        // **Not on `epoll`, unless the deadline is close.** An `epoll_ctl`
+        // reaches an `epoll_wait` already in progress, so the kernel reports
+        // this socket to the poll in flight without being told; the nudge was
+        // two syscalls and a spurious wake of the thread in that poll, paid on
+        // half of all requests at 256 connections. What the kernel cannot do
+        // is shorten a timeout already computed, so a deadline that could fall
+        // inside the poll in flight still nudges. Every `poll` is capped at
+        // `LONGEST_SLICE`, so a deadline beyond it cannot.
+        //
+        // **Limit: `polling` is one bool for two pollers.** When the reactor
+        // thread and a worker are both in `poll`, one leaving clears the flag
+        // while the other is still asleep; a nudge sent in that window is
+        // dropped, and the deadline is reported at the end of that poller's
+        // slice instead -- up to about `LONGEST_SLICE` (50 ms) late. Already
+        // true on `main` before this change; not fixed here.
+        let near = watch.deadline.is_some_and(|at| {
+            at.saturating_duration_since(std::time::Instant::now()) < LONGEST_SLICE
+        });
+        if near || !self.kernel_sees_registrations() {
+            self.nudge();
+        }
+    }
+
+    /// Whether a registration reaches a wait already in progress with no help.
+    ///
+    /// True for `epoll`, whose set lives in the kernel. False for `poll`,
+    /// which was handed a copy of the list when it started.
+    #[cfg(target_os = "linux")]
+    fn kernel_sees_registrations(&self) -> bool {
+        self.scalable().is_some()
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn kernel_sees_registrations(&self) -> bool {
+        false
     }
 
     /// Forgets everything a fiber was waiting on.
@@ -165,10 +336,7 @@ impl Reactor {
     /// later against a socket it has stopped caring about.
     pub(crate) fn forget(&self, fiber: usize) {
         let mut watching = self.watching.lock().expect("the reactor");
-        let dropped: Vec<Socket> =
-            watching.iter().filter(|w| w.fiber == fiber).map(|w| w.socket).collect();
-        watching.retain(|w| w.fiber != fiber);
-        for socket in dropped {
+        for socket in watching.forget(fiber) {
             self.rearm(socket, &watching);
         }
     }
@@ -178,14 +346,14 @@ impl Reactor {
     /// Nothing on a platform with no scalable backend, where the whole set is
     /// handed to `poll` afresh every call and there is nothing to keep in step.
     #[cfg(target_os = "linux")]
-    fn rearm(&self, socket: Socket, watching: &[Watch]) {
+    fn rearm(&self, socket: Socket, watching: &Watches) {
         if let Some(epoll) = self.scalable() {
-            epoll.sync(socket, watching);
+            epoll.sync(socket, watching.on(socket));
         }
     }
 
     #[cfg(not(target_os = "linux"))]
-    fn rearm(&self, _socket: Socket, _watching: &[Watch]) {}
+    fn rearm(&self, _socket: Socket, _watching: &Watches) {}
 
     /// The kernel-side set, opened once.
     #[cfg(target_os = "linux")]
@@ -204,7 +372,7 @@ impl Reactor {
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.watching.lock().expect("the reactor").len()
+        self.watching.lock().expect("the reactor").len
     }
 
     /// Waits up to `timeout` for any registered socket, and returns the fibers
@@ -227,14 +395,26 @@ impl Reactor {
         // window where a registration is neither in the list nor able to say
         // so, and that fiber waits for the timeout.
         self.polling.store(true, Ordering::Release);
-        let mut watching = self.watching.lock().expect("the reactor").clone();
+        #[cfg(target_os = "linux")]
+        let scalable = self.scalable().is_some();
+        #[cfg(not(target_os = "linux"))]
+        let scalable = false;
+        // **Only the `poll` backend needs the whole set copied out.** `epoll`
+        // holds it in the kernel, and copying it anyway was a scan of every
+        // wait in the server, under the lock every registration takes, on
+        // every pass.
+        let (mut watching, empty, earliest) = {
+            let held = self.watching.lock().expect("the reactor");
+            let copy = if scalable { Vec::new() } else { held.all() };
+            (copy, held.len == 0, held.earliest)
+        };
         let waking = self.waker().map(|nudge| Watch {
             socket: socket_of(&nudge.listen),
             interest: Interest::Readable,
             fiber: WAKER_FIBER,
             deadline: None,
         });
-        if watching.is_empty() && waking.is_none() {
+        if empty && waking.is_none() {
             // Nothing to wait on and no way to be told. Sleeping rather than
             // spinning, because the alternative is a thread at a hundred per
             // cent doing nothing.
@@ -246,21 +426,17 @@ impl Reactor {
             watching.push(waking);
         }
 
-        // **Never wait past the soonest deadline.** A comparison per watch, in
-        // place of a heap that was taking one insertion per read.
+        // **Never wait past the soonest deadline.** `earliest` may be earlier
+        // than any deadline still registered, which costs an early return,
+        // never a late one.
         let now = std::time::Instant::now();
-        let mut slice = timeout;
-        for watch in &watching {
-            if let Some(at) = watch.deadline {
-                slice = slice.min(at.saturating_duration_since(now));
-            }
-        }
+        let timeout = timeout.min(LONGEST_SLICE);
+        let slice = match earliest {
+            Some(at) => timeout.min(at.saturating_duration_since(now)),
+            None => timeout,
+        };
 
         let mut woken = Vec::new();
-        #[cfg(target_os = "linux")]
-        let scalable = self.scalable().is_some();
-        #[cfg(not(target_os = "linux"))]
-        let scalable = false;
 
         if scalable {
             #[cfg(target_os = "linux")]
@@ -278,15 +454,9 @@ impl Reactor {
                     // **Every watch on the socket that the events answer**,
                     // because `epoll` reports a descriptor and the list is
                     // keyed by wait: two fibers on one socket are one event.
-                    let mut kept = Vec::with_capacity(watching.len());
-                    for watch in watching.drain(..) {
-                        if watch.socket == socket && crate::epoll::wakes(&watch, events) {
-                            woken.push(watch.fiber);
-                        } else {
-                            kept.push(watch);
-                        }
+                    for watch in watching.take_on(socket, |w| crate::epoll::wakes(w, events)) {
+                        woken.push(watch.fiber);
                     }
-                    *watching = kept;
                     // Disarmed here if nothing is left waiting on it, which is
                     // what keeps a level that stays high from spinning.
                     self.rearm(socket, &watching);
@@ -302,12 +472,15 @@ impl Reactor {
                     self.drain();
                     continue;
                 }
-                let Some(entry) = watching.iter().position(|w| {
-                    w.socket == index.socket && w.fiber == index.fiber
-                }) else {
-                    continue;
-                };
-                woken.push(watching.remove(entry).fiber);
+                // At most one: the entry `poll` reported, if nobody took it
+                // off in the meantime.
+                let mut first = true;
+                let taken = watching.take_on(index.socket, |w| {
+                    let hit = first && w.fiber == index.fiber;
+                    first &= !hit;
+                    hit
+                });
+                woken.extend(taken.iter().map(|w| w.fiber));
             }
         }
         let mut watching = self.watching.lock().expect("the reactor");
@@ -315,14 +488,11 @@ impl Reactor {
         // finds nothing, and `wait_until_ready_by` sees its deadline has
         // passed. A timeout and a readiness are the same event to everything
         // above here.
-        let later = std::time::Instant::now();
-        watching.retain(|w| match w.deadline {
-            Some(at) if at <= later => {
-                woken.push(w.fiber);
-                false
-            }
-            _ => true,
-        });
+        let expired = watching.expire(std::time::Instant::now());
+        for watch in &expired {
+            woken.push(watch.fiber);
+            self.rearm(watch.socket, &watching);
+        }
         woken
     }
 
@@ -384,6 +554,13 @@ impl Reactor {
 /// wait that has no fiber behind it, and two meanings on one number is how the
 /// wrong one gets woken.
 const WAKER_FIBER: usize = usize::MAX;
+
+/// The longest any [`Reactor::poll`] waits, whatever it is asked for.
+///
+/// **A registration relies on this to skip the nudge.** One whose deadline is
+/// further away than this cannot be missed by a poll already in flight, since
+/// that poll returns first and the next one sees the deadline.
+const LONGEST_SLICE: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Every watch whose socket is ready, or an empty list if the wait timed out.
 ///
@@ -685,6 +862,84 @@ mod tests {
         assert_eq!(reactor.len(), 0, "a woken watch is taken off");
     }
 
+    /// **A registration made while a `poll` is already waiting is seen by that
+    /// poll, with no nudge.** `register` skips the nudge on `epoll` because
+    /// `epoll_ctl` reaches an `epoll_wait` in progress. If it did not, this
+    /// socket would be reported when the poll timed out rather than when its
+    /// data arrived, and every request that registered mid-poll would pay
+    /// the slice.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_registration_during_a_poll_is_seen_by_that_poll() {
+        let (client, mut server) = a_connected_pair();
+        server.write_all(b"x").expect("the write should land");
+        let reactor = std::sync::Arc::new(Reactor::default());
+        // Opens the backend and the waker, so the poll below is a real
+        // `epoll_wait` and not the first-use setup.
+        let (idle, _idle_peer) = a_connected_pair();
+        reactor.register(Watch {
+            socket: socket_of(&idle),
+            interest: Interest::Readable,
+            fiber: 1,
+            deadline: None,
+        });
+        let polling = reactor.clone();
+        let began = std::time::Instant::now();
+        let waiter = std::thread::spawn(move || polling.poll(LONGEST_SLICE));
+        while !reactor.polling.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        std::thread::sleep(Duration::from_millis(5));
+        reactor.register(Watch {
+            socket: socket_of(&client),
+            interest: Interest::Readable,
+            fiber: 2,
+            deadline: None,
+        });
+        let woken = waiter.join().expect("the poll");
+        let took = began.elapsed();
+        assert_eq!(woken, [2], "the poll in flight did not report the new socket");
+        assert!(took < LONGEST_SLICE - Duration::from_millis(15), "it waited out its slice: {took:?}");
+    }
+
+    /// **A deadline registered during a poll ends that poll.** The kernel
+    /// cannot shorten a timeout already computed, so this is the one
+    /// registration on `epoll` that still has to nudge.
+    #[test]
+    fn a_deadline_registered_during_a_poll_is_honoured_by_that_poll() {
+        let reactor = std::sync::Arc::new(Reactor::default());
+        let (idle, _idle_peer) = a_connected_pair();
+        reactor.register(Watch {
+            socket: socket_of(&idle),
+            interest: Interest::Readable,
+            fiber: 1,
+            deadline: None,
+        });
+        let (quiet, _quiet_peer) = a_connected_pair();
+        let polling = reactor.clone();
+        let began = std::time::Instant::now();
+        let waiter = std::thread::spawn(move || polling.poll(LONGEST_SLICE));
+        while !reactor.polling.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        std::thread::sleep(Duration::from_millis(5));
+        reactor.register(Watch {
+            socket: socket_of(&quiet),
+            interest: Interest::Readable,
+            fiber: 3,
+            deadline: Some(std::time::Instant::now() + Duration::from_millis(5)),
+        });
+        let mut woken = waiter.join().expect("the poll");
+        // A poll the nudge ended may return before the deadline has passed,
+        // and callers go round again; none of them may sleep past it.
+        while woken.is_empty() && began.elapsed() < LONGEST_SLICE * 2 {
+            woken = reactor.poll(LONGEST_SLICE);
+        }
+        let took = began.elapsed();
+        assert_eq!(woken, [3], "the deadline was not reported");
+        assert!(took < LONGEST_SLICE - Duration::from_millis(15), "it slept past the deadline: {took:?}");
+    }
+
     /// Only the socket that became ready. The whole point is that one busy
     /// connection does not wake the other ninety-nine thousand.
     #[test]
@@ -804,5 +1059,60 @@ mod tests {
         let mut buffer = [0u8; 7];
         client.read_exact(&mut buffer).expect("reading");
         assert_eq!(&buffer, b"payload");
+    }
+
+    /// **A descriptor number reused after its deadline expired must be
+    /// watched again.** Base left the expired socket armed in `Epoll::armed`
+    /// after the deadline pass removed its watch without rearming. When the
+    /// number was reused by a fresh connection with the same interest mask,
+    /// `Epoll::set` saw the mask unchanged and made no `epoll_ctl` call, so
+    /// the kernel -- which had already dropped the closed descriptor's item
+    /// -- never told the reactor the new connection was ready. The fiber
+    /// waiting on it hung until its own deadline, or forever if it set none.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_descriptor_reused_after_its_deadline_expired_is_watched_again() {
+        use std::os::fd::AsRawFd;
+        let reactor = Reactor::default();
+        let (first, _first_peer) = a_connected_pair();
+        let number = socket_of(&first);
+        reactor.register(Watch {
+            socket: number,
+            interest: Interest::Readable,
+            fiber: 1,
+            deadline: Some(std::time::Instant::now() + Duration::from_millis(5)),
+        });
+        let began = std::time::Instant::now();
+        let mut woken = Vec::new();
+        while woken.is_empty() && began.elapsed() < Duration::from_secs(1) {
+            woken = reactor.poll(Duration::from_millis(50));
+        }
+        assert_eq!(woken, [1], "the deadline should end the first wait");
+        reactor.forget(1); // what wait_until_ready_by does after park
+        drop(first); // the server closes the idle connection
+
+        // A new connection lands on the same descriptor number.
+        let (second, mut second_peer) = a_connected_pair();
+        // SAFETY: test-only; `number` is closed (its file was dropped above),
+        // and `dup2` gives it to `second`'s open file, which is exactly what
+        // the kernel does on `accept` reusing a freed descriptor number.
+        let got = unsafe { libc::dup2(second.as_raw_fd(), number) };
+        assert_eq!(got, number);
+        drop(second); // only `number` refers to the new file now
+        second_peer.write_all(b"x").unwrap();
+        reactor.register(Watch { socket: number, interest: Interest::Readable, fiber: 2, deadline: None });
+        let began = std::time::Instant::now();
+        let mut woken = Vec::new();
+        while woken.is_empty() && began.elapsed() < Duration::from_millis(500) {
+            woken = reactor.poll(Duration::from_millis(50));
+        }
+        // SAFETY: we own `number` now (the `dup2` above made it ours; the
+        // stream that used to own it was dropped without closing it).
+        unsafe { libc::close(number) };
+        assert_eq!(
+            woken,
+            [2],
+            "LOST WAKEUP: data is waiting on a reused descriptor and the reactor never reported it"
+        );
     }
 }
