@@ -411,12 +411,20 @@ impl<'ctx> Lower<'_, 'ctx> {
         None
     }
 
+    /// **A `continue` is a back-edge too.** It goes round the loop without
+    /// reaching the end of the body, and the end of the body is where the
+    /// cancellation check sat -- so a loop that always went round by
+    /// `continue` never checked, and a cancelled fiber in one ran to its end.
+    /// The check follows the unwind, for the reason the body's own back-edge
+    /// follows its drops: a cancellation leaves from a frame that owes
+    /// nothing.
     pub(super) fn lower_continue(&mut self, range: TextRange) -> Flow<'ctx> {
         let Some(frame) = self.loops.last() else {
             return self.fail("`continue` outside a loop", range);
         };
         let (target, depth) = (frame.continue_to, frame.scope_depth);
         self.unwind_to(depth);
+        self.back_edge();
         self.br(target);
         None
     }

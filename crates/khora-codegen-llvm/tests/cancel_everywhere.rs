@@ -1617,3 +1617,75 @@ pub fn main() -> Int {
         assert_eq!(ran.code, Some(0), "`{backend}`");
     }
 }
+
+/// **A loop that goes round by `continue` stops too.** The check sat at the
+/// end of the body, and `continue` jumps to the head without reaching it, so a
+/// loop that always went round that way never checked and a cancelled fiber in
+/// one ran to its end. `while`, `loop` and `for`, each with its only way round
+/// a `continue`.
+#[test]
+fn a_loop_that_goes_round_by_continue_stops() {
+    const SOURCE: &str = "module main;
+import std::core::{print, Fiber, Step, Iterator, Range};
+import std::clock::{Clock};
+
+fn by_while(n: Int) -> Int {
+  let mut i = 0;
+  let mut total = 0;
+  while i < n {
+    i = i + 1;
+    if i > 0 { total = (total * 31 + i) % 1000003; continue; };
+  };
+  total
+}
+
+fn by_loop(n: Int) -> Int {
+  let mut i = 0;
+  let mut total = 0;
+  loop {
+    i = i + 1;
+    if i >= n { break total; };
+    total = (total * 31 + i) % 1000003;
+    continue;
+  }
+}
+
+fn by_for(n: Int) -> Int {
+  let mut total = 0;
+  for i in Range::Of(0, n) {
+    if i >= 0 { total = (total * 31 + i) % 1000003; continue; };
+  };
+  total
+}
+
+fn timed(which: Int) -> Bool {
+  with { clock: Clock::real() } {
+    let f = Fiber::spawn(fn () => match which {
+      0 => by_while(300000000000),
+      1 => by_loop(300000000000),
+      _ => by_for(300000000000),
+    });
+    clock.sleep(50);
+    let t0 = clock.monotonic_millis();
+    Fiber::cancel(f);
+    Fiber::wait(f);
+    let waited = clock.monotonic_millis() - t0;
+    Fiber::cancelled(f) && waited < 2000
+  }
+}
+
+pub fn main() -> Int {
+  print(\"while ${timed(0)}; loop ${timed(1)}; for ${timed(2)}\");
+  0
+}
+";
+    for (backend, ran) in on_both("cancel_everywhere_continue", SOURCE) {
+        assert!(!ran.hung, "`{backend}`: a loop never stopped: {}", ran.stdout);
+        assert_eq!(
+            ran.stdout, "while true; loop true; for true\n",
+            "`{backend}`: {}",
+            ran.stderr
+        );
+        assert_eq!(ran.code, Some(0), "`{backend}`");
+    }
+}
