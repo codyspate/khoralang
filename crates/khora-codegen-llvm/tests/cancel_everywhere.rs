@@ -708,6 +708,7 @@ pub fn main() -> Int {
 /// loop, constructor and closure-call shapes and 38 for the arm, on both
 /// backends. The overwritten shape is red (19) when only its own half of the
 /// rule is off, and the arm (19) when `own_arm_bindings` ignores it.
+///
 /// **Shape 2, a lambda body holding the binding itself, stays at 0
 /// either way**: the last-use pass never moves a binding inside a lambda body
 /// (it counts the body's reads without walking it), so there is nothing to

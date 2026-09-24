@@ -88,6 +88,7 @@ pub(crate) fn spend_safepoint() -> bool {
 /// on the slow path of the load of [`crate::poll::khora_poll`]: reached only
 /// while a scheduler pool exists or some fiber is cancelled, because off a
 /// pool there is no budget and this does nothing.
+///
 /// **A safepoint, not a cancellation point**: it cannot fail, nothing unwinds
 /// through it, and a fiber that yields here is not thereby cancellable. That
 /// distinction is what lets an infallible loop be preempted at all —

@@ -118,6 +118,7 @@ pub(crate) struct Watch {
 struct Watches {
     by_socket: std::collections::HashMap<Socket, Vec<Watch>>,
     /// The sockets each fiber is waiting on, so `forget` does not search.
+    ///
     /// A socket appears once per watch, so a fiber that registered one socket
     /// twice has it twice here.
     by_fiber: std::collections::HashMap<usize, Vec<Socket>>,
