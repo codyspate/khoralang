@@ -1549,3 +1549,71 @@ pub fn main() -> Int {
         assert_eq!(ran.code, Some(130), "`{backend}`: {}", ran.stderr);
     }
 }
+
+/// **A finalizer that blocks does not swallow another fiber's finalizer.** A
+/// region's finalizers run while the heap is releasing it; a finalizer that
+/// parks (here, on a `receive` nobody answers) used to leave that release
+/// open on its worker thread, and every object the next fiber on the worker
+/// freed -- its own region included -- was queued behind the parked one and
+/// never released. The target was cancelled, reported finished and
+/// cancelled, and its finalizer never ran. Several blocked cleanups are
+/// spread across the workers, so the target is certain to land on one.
+#[test]
+fn a_blocked_finalizer_does_not_swallow_the_next_fibers_finalizer() {
+    const SOURCE: &str = "module main;
+import std::core::{print, Fiber, Channel, Region, Shared};
+import std::clock::{Clock};
+
+fn sticky(ch: Channel<Int>) -> () {
+  let region = Region::open();
+  Region::defer(region, fn () => { let _ = Channel::receive(ch); () });
+  let _ = Channel::receive(ch);
+  ()
+}
+
+fn target(ch: Channel<Int>, flag: Shared<Int>) -> () {
+  let region = Region::open();
+  Region::defer(region, fn () => { Shared::set(flag, 1) });
+  let _ = Channel::receive(ch);
+  ()
+}
+
+fn trial(n: Int) -> Int {
+  with { clock: Clock::real() } {
+    let ch: Channel<Int> = Channel::bounded(1);
+    let other: Channel<Int> = Channel::bounded(1);
+    let flag = Shared::of(0);
+    let mut j = 0;
+    while j < n {
+      let g = Fiber::spawn(fn () => sticky(other));
+      Fiber::detach(g);
+      j = j + 1;
+    };
+    clock.sleep(20);
+    let h = Fiber::spawn(fn () => target(ch, flag));
+    clock.sleep(50);
+    Fiber::cancel(h);
+    Fiber::wait(h);
+    let ran = Shared::get(flag);
+    Fiber::detach(h);
+    ran
+  }
+}
+
+pub fn main() -> Int {
+  let mut missed = 0;
+  let mut round = 0;
+  while round < 3 {
+    missed = missed + (1 - trial(4)) + (1 - trial(8)) + (1 - trial(12));
+    round = round + 1;
+  };
+  print(\"finalizers missed: ${missed}\");
+  0
+}
+";
+    for (backend, ran) in on_both("cancel_everywhere_blocked_finalizer", SOURCE) {
+        assert!(!ran.hung, "`{backend}`: {}", ran.stdout);
+        assert_eq!(ran.stdout, "finalizers missed: 0\n", "`{backend}`: {}", ran.stderr);
+        assert_eq!(ran.code, Some(0), "`{backend}`");
+    }
+}

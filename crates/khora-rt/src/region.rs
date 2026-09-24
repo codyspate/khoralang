@@ -228,6 +228,15 @@ pub unsafe extern "C" fn khora_region_release(region: *mut u8) {
         // the next one, which the force stops at its first cancellation point.
         unsafe {
             let code = *finalizer.closure.add(KHORA_FIELD_OFFSET).cast::<*const u8>();
+            // **The finalizer runs outside the drain this release may be part
+            // of**, so an object whose scope ends inside it -- a region, a
+            // fiber handle, a nursery -- is released there, at the end of its
+            // scope, not after the finalizer returns (S3;
+            // `crate::heap::Isolated` has the argument). Around the call only:
+            // the closure's own captures are released below, back in the
+            // outer drain, so a chain of regions each captured by the last
+            // one's finalizer is still released flat.
+            let isolated = crate::heap::Isolated::new();
             match finalizer.call {
                 Some(call) => {
                     let mut answer: u64 = 0;
@@ -238,6 +247,7 @@ pub unsafe extern "C" fn khora_region_release(region: *mut u8) {
                     call(finalizer.closure);
                 }
             }
+            drop(isolated);
             khora_drop(finalizer.closure, finalizer.glue);
         }
     }
@@ -349,5 +359,184 @@ mod tests {
         }
         assert_eq!(COUNT.load(Ordering::SeqCst), 2);
         assert_eq!(khora_cancelled(), 0);
+    }
+
+    // --- S3: a drain left open across a finalizer ---------------------------
+    //
+    // `crate::heap` releases a graph through a per-thread queue: the first
+    // last-drop claims the drain, and every nested last-drop is queued behind
+    // it. A region's release runs user finalizers from inside that drain, and a
+    // finalizer may block. These tests pin what a finalizer that blocks, or
+    // that ends a scope of its own, must not do to anybody else's frees.
+
+    /// Waits up to five seconds for `done`, so a red run fails rather than
+    /// hangs.
+    fn eventually(done: impl Fn() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !done() {
+            if std::time::Instant::now() > deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        true
+    }
+
+    /// **S3.** A fiber whose finalizer is parked must not hold the frees of
+    /// the next fiber its worker runs.
+    ///
+    /// One worker, so the second fiber is certain to run on the thread the
+    /// first one parked on. Before the fix the second fiber's region went into
+    /// the parked fiber's drain queue and its finalizer never ran, while the
+    /// fiber itself finished: `finished true`, finalizer 0, which is what
+    /// `p/starve` showed from Khora.
+    #[test]
+    fn a_parked_finalizer_does_not_swallow_the_next_fibers_finalizer() {
+        use crate::coro::Task;
+        use crate::scheduler::{park_current, waker_for_current, Scheduler, Waker};
+
+        static PARKED: Mutex<Option<Waker>> = Mutex::new(None);
+        static FIRST_DONE: AtomicUsize = AtomicUsize::new(0);
+        static SECOND_RAN: AtomicUsize = AtomicUsize::new(0);
+        static SECOND_SAW: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+        extern "C" fn parks(_closure: *mut u8) {
+            *PARKED.lock().unwrap() = waker_for_current();
+            park_current();
+        }
+        extern "C" fn counts(_closure: *mut u8) {
+            SECOND_RAN.fetch_add(1, Ordering::SeqCst);
+        }
+
+        let pool = Scheduler::new(1);
+        pool.spawn(Task::new(|| {
+            let region = khora_region_open();
+            // SAFETY: a live region and a live closure whose drop is the default;
+            // the only reference, released the way generated code releases it.
+            unsafe {
+                khora_region_defer(region, closure(parks), None, None);
+                khora_drop(region, Some(release_shim));
+            }
+            FIRST_DONE.store(1, Ordering::SeqCst);
+        }));
+        assert!(eventually(|| PARKED.lock().unwrap().is_some()), "the first fiber never parked");
+
+        pool.spawn(Task::new(|| {
+            let region = khora_region_open();
+            // SAFETY: as above.
+            unsafe {
+                khora_region_defer(region, closure(counts), None, None);
+                khora_drop(region, Some(release_shim));
+            }
+            SECOND_SAW.store(SECOND_RAN.load(Ordering::SeqCst), Ordering::SeqCst);
+        }));
+        assert!(
+            eventually(|| SECOND_SAW.load(Ordering::SeqCst) != usize::MAX),
+            "the second fiber never finished"
+        );
+        assert_eq!(
+            SECOND_SAW.load(Ordering::SeqCst),
+            1,
+            "the second fiber's region ended and its finalizer had not run: its release was \
+             queued behind the first fiber's parked finalizer"
+        );
+
+        // Let the first one go, so the pool can wind down.
+        if let Some(waker) = PARKED.lock().unwrap().take() {
+            waker.wake();
+        }
+        pool.drain();
+        assert_eq!(FIRST_DONE.load(Ordering::SeqCst), 1);
+        assert_eq!(SECOND_RAN.load(Ordering::SeqCst), 1);
+    }
+
+    /// The same, for any `drop_fields` callback that suspends, not only a
+    /// region's. A fiber handle's release waits for the child, and a nursery's
+    /// release waits for every child, so both are this shape. The suspension is
+    /// what must not leave a drain behind on the worker.
+    #[test]
+    fn a_release_that_suspends_leaves_no_drain_on_its_worker() {
+        use crate::coro::Task;
+        use crate::scheduler::{park_current, waker_for_current, Scheduler, Waker};
+
+        static PARKED: Mutex<Option<Waker>> = Mutex::new(None);
+        static SECOND_RAN: AtomicUsize = AtomicUsize::new(0);
+        static SECOND_SAW: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+        extern "C" fn parks_while_releasing(_object: *mut u8) {
+            *PARKED.lock().unwrap() = waker_for_current();
+            park_current();
+        }
+        extern "C" fn counts(_closure: *mut u8) {
+            SECOND_RAN.fetch_add(1, Ordering::SeqCst);
+        }
+
+        let pool = Scheduler::new(1);
+        pool.spawn(Task::new(|| {
+            let object = khora_alloc(0, 0);
+            // SAFETY: the only reference, and a callback that touches no field.
+            unsafe { khora_drop(object, Some(parks_while_releasing)) };
+        }));
+        assert!(eventually(|| PARKED.lock().unwrap().is_some()), "the first fiber never parked");
+
+        pool.spawn(Task::new(|| {
+            let region = khora_region_open();
+            // SAFETY: as in the test above.
+            unsafe {
+                khora_region_defer(region, closure(counts), None, None);
+                khora_drop(region, Some(release_shim));
+            }
+            SECOND_SAW.store(SECOND_RAN.load(Ordering::SeqCst), Ordering::SeqCst);
+        }));
+        assert!(
+            eventually(|| SECOND_SAW.load(Ordering::SeqCst) != usize::MAX),
+            "the second fiber never finished"
+        );
+        assert_eq!(SECOND_SAW.load(Ordering::SeqCst), 1, "the region's release was queued behind a parked release");
+
+        if let Some(waker) = PARKED.lock().unwrap().take() {
+            waker.wake();
+        }
+        pool.drain();
+    }
+
+    /// **Both backends.** A region that ends inside a finalizer runs its own
+    /// finalizers there, at the end of its scope, not after the finalizer
+    /// that contains it has returned.
+    ///
+    /// No scheduler: this is the thread backend's form of the defect. Before
+    /// the fix the inner release was queued behind the outer finalizer, so
+    /// the outer one saw it not run, and a finalizer that then blocked (or a
+    /// fiber handle released there, whose release is a join) never reached it.
+    #[test]
+    fn a_region_ended_inside_a_finalizer_runs_its_finalizers_at_once() {
+        static INNER_RAN: AtomicUsize = AtomicUsize::new(0);
+        static OUTER_SAW: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+        extern "C" fn inner(_closure: *mut u8) {
+            INNER_RAN.fetch_add(1, Ordering::SeqCst);
+        }
+        extern "C" fn outer(_closure: *mut u8) {
+            let region = khora_region_open();
+            // SAFETY: as above.
+            unsafe {
+                khora_region_defer(region, closure(inner), None, None);
+                khora_drop(region, Some(release_shim));
+            }
+            OUTER_SAW.store(INNER_RAN.load(Ordering::SeqCst), Ordering::SeqCst);
+        }
+
+        let region = khora_region_open();
+        // SAFETY: as above.
+        unsafe {
+            khora_region_defer(region, closure(outer), None, None);
+            khora_drop(region, Some(release_shim));
+        }
+        assert_eq!(INNER_RAN.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            OUTER_SAW.load(Ordering::SeqCst),
+            1,
+            "the inner region's scope ended and its finalizer had not run yet"
+        );
     }
 }

@@ -57,6 +57,7 @@ thread_local! {
 /// `true` when the object was queued and this call is done with it. `false`
 /// when there was no drain in progress — the caller now owns one, and must
 /// release the object itself and then call [`drain`].
+#[inline(never)]
 fn queued(ptr: *mut u8, glue: Option<extern "C" fn(*mut u8)>) -> bool {
     PENDING.with(|pending| {
         let mut slot = pending.borrow_mut();
@@ -80,16 +81,99 @@ fn queued(ptr: *mut u8, glue: Option<extern "C" fn(*mut u8)>) -> bool {
 /// would panic.
 fn drain() {
     loop {
-        let next = PENDING.with(|pending| {
-            pending.borrow_mut().as_mut().and_then(|queue| queue.pop())
-        });
+        let next = next_queued();
         let Some((ptr, glue)) = next else { break };
         // SAFETY: the pointer was queued by a caller that had taken its
         // refcount to zero and had not freed it, so it is still allocated and
         // nothing else refers to it.
         unsafe { release_now(ptr as *mut u8, glue) };
     }
+    end_drain();
+}
+
+/// The next object in this thread's drain. See [`queued`] for why it is not
+/// inlined.
+#[inline(never)]
+fn next_queued() -> Option<Deferred> {
+    PENDING.with(|pending| pending.borrow_mut().as_mut().and_then(|queue| queue.pop()))
+}
+
+/// Ends this thread's drain.
+#[inline(never)]
+fn end_drain() {
     PENDING.with(|pending| *pending.borrow_mut() = None);
+}
+
+/// Swaps this thread's drain for `with`, answering what was there.
+#[inline(never)]
+fn swap_drain(with: Option<Vec<Deferred>>) -> Option<Vec<Deferred>> {
+    PENDING.with(|pending| std::mem::replace(&mut *pending.borrow_mut(), with))
+}
+
+/// Takes this thread's drain away, for a fiber about to suspend. See
+/// [`crate::coro::suspend`].
+pub(crate) fn take_drain() -> Option<Vec<Deferred>> {
+    swap_drain(None)
+}
+
+/// Puts a resumed fiber's drain back, on whichever thread it resumed on.
+pub(crate) fn restore_drain(drain: Option<Vec<Deferred>>) {
+    let left = swap_drain(drain);
+    // A worker resumes fibers from its own loop, never from inside a release,
+    // and every fiber that suspended took its drain with it -- so there is
+    // nothing here to overwrite.
+    debug_assert!(left.is_none(), "a fiber resumed onto a worker that already had a drain open");
+}
+
+/// Sets this thread's drain aside for as long as it is alive, and puts it back
+/// when it is dropped.
+///
+/// # S3: a finalizer that silently never ran
+///
+/// A `drop_fields` callback normally releases children, and they queue behind
+/// the drain in progress and cost no stack. A region's release does more than
+/// that: it runs the program's finalizers, and a finalizer may block. On the
+/// scheduler, blocking suspends the fiber and hands the worker to the next
+/// fiber, and until the fix that happened *with the drain still open in the
+/// worker's thread-local*. Every last-drop the next fiber made was queued
+/// behind a fiber that might never resume. That included its own region, so
+/// its finalizer never ran, while the fiber reported itself finished and
+/// cancelled. A fiber that did resume, on another worker, went on draining that
+/// worker's queue, which belonged to somebody else. `p/starve` lost the
+/// finalizer with four or more fibers blocked in cleanup, and so did 0.3.0.
+///
+/// The fix for that is in [`crate::coro::suspend`]: the drain belongs to the
+/// fiber, so it leaves with the fiber at the switch ([`take_drain`] /
+/// [`restore_drain`]).
+///
+/// # What this guard is for: a scope that ends inside a finalizer ends there
+///
+/// Without it, a region or a fiber handle dropped inside a finalizer was
+/// queued behind that finalizer. Its finalizers, or its join, happened only
+/// after the outer finalizer returned, so after the code that followed the
+/// scope and relied on it. If the outer finalizer then blocked, they never
+/// happened. That was true on the thread backend too. Inside the guard a
+/// nested free starts its own drain and finishes it before it returns, so
+/// ordinary graphs are still released iteratively. Only the finalizer's own
+/// frees nest one level deeper.
+pub(crate) struct Isolated(Option<Vec<Deferred>>);
+
+impl Isolated {
+    pub(crate) fn new() -> Isolated {
+        Isolated(swap_drain(None))
+    }
+}
+
+impl Drop for Isolated {
+    fn drop(&mut self) {
+        // Anything opened inside has been drained by whoever opened it, since
+        // a drain always ends before the `khora_drop` that claimed it returns.
+        let left = swap_drain(self.0.take());
+        debug_assert!(
+            left.is_none(),
+            "a drain opened inside an isolated release was still open when the release returned"
+        );
+    }
 }
 
 /// Runs an object's field-releasing callback and frees it.

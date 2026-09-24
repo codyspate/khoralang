@@ -292,6 +292,13 @@ pub(crate) fn suspend() -> bool {
     if yielder.is_null() {
         return false;
     }
+    // **This fiber's heap drain goes with it** (S3). A drain is a fiber's own
+    // work in progress -- a release that suspended part-way through a graph --
+    // and a thread-local is the wrong home for it across a switch: the next
+    // fiber on this worker would queue its frees behind this one, and this one
+    // would resume on another worker and go on draining somebody else's
+    // queue. `crate::heap::Isolated` has the whole story.
+    let drain = crate::heap::take_drain();
     // SAFETY: non-null only between entering a body and leaving it, and only
     // on the thread running it. `Task::with_fiber` sets it on entry and clears
     // it on exit, and the line below keeps it right across a wake.
@@ -302,6 +309,7 @@ pub(crate) fn suspend() -> bool {
     // and through `install`, so the write reaches *this* thread's slot. See
     // `installed` for what happens when it does not.
     install(yielder);
+    crate::heap::restore_drain(drain);
     true
 }
 
