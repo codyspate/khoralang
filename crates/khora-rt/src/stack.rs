@@ -50,7 +50,7 @@
 /// So the note names both possibilities and neither as "most likely". It
 /// cannot say which without a backtrace, and the thing it must not do is rule
 /// one out.
-const MESSAGE: &[u8] = b"khora: the stack ran out\nnote: a function that recurses as deep as its input will do this -- one you\n      wrote, a derived `Eq`, `Ord` or `Show` on a deeply nested value, or\n      `std::json::parse` on a document with a very long string in it, which\n      recurses per character. Most of `std` walks with loops and is not the\n      cause; `json` is the exception.\n";
+const MESSAGE: &[u8] = b"khora: the stack ran out, or the runtime touched memory that is not the program's (a segmentation fault; please report it)\nnote: a function that recurses as deep as its input will do this -- one you\n      wrote, a derived `Eq`, `Ord` or `Show` on a deeply nested value, or\n      `std::json::parse` on a document with a very long string in it, which\n      recurses per character. Most of `std` walks with loops and is not the\n      cause; `json` is the exception.\n";
 
 /// Installs the stack guard and the signal watcher, once, before anything else
 /// runs.
@@ -223,9 +223,10 @@ fn install() {
     /// against the thread's own guard page, which is a different lookup on
     /// each platform and needs the stack bounds a fiber switch keeps moving.
     /// A Khora program cannot produce a wild pointer through the language --
-    /// `Ptr` is opaque and never dereferenced -- so in practice a segmentation
-    /// fault here *is* the stack, and a message that is occasionally too
-    /// specific beats one that never appears.
+    /// `Ptr` is opaque and never dereferenced -- but the runtime can: a
+    /// use-after-free in `nursery::cancel_open_crews` faulted at address `0x20`
+    /// on the `khora-deadlines` thread and was reported here as the stack
+    /// running out. So the message names both.
     unsafe extern "C" fn handler(_signal: i32) {
         report();
         // SAFETY: `signal` with `SIG_DFL` is async-signal-safe and is what

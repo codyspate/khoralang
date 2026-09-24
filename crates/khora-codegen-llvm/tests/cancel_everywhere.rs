@@ -1514,8 +1514,8 @@ pub fn main() -> Int {
     for backend in BACKENDS {
         let ran = run(&with_deadline, backend, Duration::from_secs(20), None);
         assert!(!ran.hung, "`{backend}`: the deadline did not end the child: {}", ran.stdout);
+        assert_eq!(ran.code, Some(0), "`{backend}`: stdout {:?}, stderr {:?}", ran.stdout, ran.stderr);
         assert_eq!(ran.stdout, "child's finalizer started\nparent stopped\n", "`{backend}`");
-        assert_eq!(ran.code, Some(0), "`{backend}`");
 
         let ran = run(&without, backend, Duration::from_secs(3), None);
         assert!(ran.hung, "`{backend}`: without a deadline it should hang: {}", ran.stdout);

@@ -337,6 +337,73 @@ pub(crate) struct FiberState {
     observed: std::sync::atomic::AtomicBool,
 }
 
+/// Test-only: catches a fiber's state being freed while somebody is still
+/// delivering a stop through it.
+///
+/// A use-after-free crashes only when the freed block has been handed out
+/// again, which is about one run in four for the program that found it. This
+/// makes the question deterministic: a deliverer on a chosen thread pauses
+/// right after the stop has landed -- the moment the owner is free to finish
+/// and release -- until the owner has freed the state, and the free counts
+/// whether any deliverer was still reading through that state. Nothing here
+/// is compiled outside `cfg(test)`.
+#[cfg(test)]
+pub(crate) mod delivery_probe {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    /// The thread to pause, and the fiber whose delivery pauses it.
+    pub(crate) static PAUSE: Mutex<Option<(std::thread::ThreadId, usize)>> = Mutex::new(None);
+    /// Fibers whose state has been freed.
+    pub(crate) static FREED: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+    /// Fibers whose state a deliverer is reading through right now.
+    static BORROWED: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+    /// Fibers whose state was freed while in `BORROWED`: each one a
+    /// use-after-free.
+    pub(crate) static FREED_WHILE_DELIVERING: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+    pub(crate) fn borrow(id: usize) {
+        BORROWED.lock().unwrap().push(id);
+    }
+
+    pub(crate) fn unborrow(id: usize) {
+        let mut borrowed = BORROWED.lock().unwrap();
+        if let Some(at) = borrowed.iter().position(|b| *b == id) {
+            borrowed.swap_remove(at);
+        }
+    }
+
+    pub(crate) fn freed(id: usize) {
+        FREED.lock().unwrap().push(id);
+        if BORROWED.lock().unwrap().contains(&id) {
+            FREED_WHILE_DELIVERING.lock().unwrap().push(id);
+        }
+    }
+
+    /// Called once a stop has landed on `id`. True means the state the
+    /// caller is reading through is gone, and it must touch nothing more:
+    /// the test has its answer, and a red run should fail an assertion
+    /// rather than take the test process down.
+    pub(crate) fn after_stop(id: usize) -> bool {
+        let chosen = *PAUSE.lock().unwrap();
+        if chosen != Some((std::thread::current().id(), id)) {
+            return false;
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !FREED.lock().unwrap().contains(&id) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        FREED_WHILE_DELIVERING.lock().unwrap().contains(&id)
+    }
+}
+
+#[cfg(test)]
+impl Drop for FiberState {
+    fn drop(&mut self) {
+        delivery_probe::freed(self.fiber.id());
+    }
+}
+
 /// A latch a fiber closes once and any number of joiners wait on.
 ///
 /// **The completion-to-join handover, which is a two-sided problem.** A joiner
@@ -1233,6 +1300,34 @@ pub(crate) unsafe fn deliver(fiber: *mut u8, stop: Stop) {
 /// For [`khora_fiber_release`], which has taken the state out of its handle
 /// before it waits, and still has to be able to pass a force on to it.
 fn deliver_to(state: &FiberState, stop: Stop) {
+    #[cfg(test)]
+    let id = state.fiber.id();
+    #[cfg(test)]
+    delivery_probe::borrow(id);
+    deliver_to_fiber(&state.fiber, stop);
+    #[cfg(test)]
+    delivery_probe::unborrow(id);
+}
+
+/// [`deliver_to`], to the fiber's identity rather than to the state behind
+/// its handle.
+///
+/// **What this prevents: a stop delivered by somebody who does not own the
+/// handle reading the handle's state after its owner has freed it.** The
+/// state is freed by whoever releases the last reference to the handle, and
+/// delivering is what lets that happen: stopping a child is what wakes the
+/// parent that joins it and then releases it. `cancel_open_crews` on the
+/// `khora-deadlines` thread forced a nursery child, the child stopped, its
+/// parent finished its wait round and freed the child's state, and the
+/// deadline thread then read `state.fiber` out of the freed block to pass the
+/// force on to the child's own nurseries -- a `SIGSEGV` at address `0x20` in
+/// about one run in four of `cancel_everywhere::a_deadline_ends_a_nursery_
+/// child_stuck_in_cleanup` on the scheduler. The identity is an `Arc`, so a
+/// caller holding a clone can deliver however long the delivery takes.
+///
+/// Delivering to a fiber that has already finished does nothing: the pool no
+/// longer knows its id, its flag has no reader, and it has no nursery open.
+pub(crate) fn deliver_to_fiber(fiber: &std::sync::Arc<crate::current::Fiber>, stop: Stop) {
     // **Its own flag first, then its nurseries' children.** A fiber parked on
     // a child -- a nursery's wait, or an `adopt` waiting for room -- is woken
     // by that child stopping, and then asks whether it was itself stopped. In
@@ -1247,12 +1342,16 @@ fn deliver_to(state: &FiberState, stop: Stop) {
         // sit on the cancellation until whatever it was waiting for happened
         // anyway. A thread blocked in a syscall has no equivalent, which is
         // one more thing the scheduler buys.
-        fibers().stop_fiber(state.fiber.id(), stop);
+        fibers().stop_fiber(fiber.id(), stop);
     } else {
         match stop {
-            Stop::Cancel => state.fiber.cancel(),
-            Stop::Force => state.fiber.force(),
+            Stop::Cancel => fiber.cancel(),
+            Stop::Force => fiber.force(),
         }
+    }
+    #[cfg(test)]
+    if delivery_probe::after_stop(fiber.id()) {
+        return;
     }
     // **Its nurseries' children go with it, here.** A fiber whose body is a
     // nursery does not finish until its children do, so flagging it alone asks
@@ -1261,7 +1360,7 @@ fn deliver_to(state: &FiberState, stop: Stop) {
     // join returns. Delivered at the cancellation rather than waited for --
     // `khora_fibers_wait`'s between-rounds check cannot see a cancellation that
     // arrives mid-round, which is every cancellation that matters.
-    crate::nursery::cancel_open_crews(state.fiber.id(), stop);
+    crate::nursery::cancel_open_crews(fiber.id(), stop);
 }
 
 /// Joins a fiber and frees its handle.

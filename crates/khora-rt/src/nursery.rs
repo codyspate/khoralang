@@ -146,18 +146,29 @@ pub(crate) fn cancel_open_crews(fiber: usize, stop: crate::current::Stop) {
             .collect()
     };
 
-    let mut children: Vec<*mut u8> = Vec::new();
+    // **Identities, cloned under the crew's lock, not handles.** A handle in
+    // `held` or `joining` is live while this lock is held -- a round takes it
+    // out of `joining` under the lock before it releases it -- and not a
+    // moment longer. Delivering is what ends that: the child stops, its
+    // parent's wait returns, and the parent frees the handle and the state
+    // behind it while this is still delivering. A raw handle copied out here
+    // and dereferenced below was a use-after-free on the `khora-deadlines`
+    // thread (`crate::fiber::deliver_to_fiber` has the sequence). An
+    // `Arc<Fiber>` keeps the one thing delivery needs alive for as long as it
+    // needs it.
+    let mut children: Vec<Arc<crate::current::Fiber>> = Vec::new();
     for crew in &crews {
         let held = crew.lock().unwrap_or_else(|e| e.into_inner());
-        children.extend(held.held.iter().map(|Handed(f)| *f));
-        children.extend(held.joining.iter().copied());
+        for handle in held.held.iter().map(|Handed(f)| *f).chain(held.joining.iter().copied()) {
+            // SAFETY: live while the lock is held, as above.
+            if let Some(state) = unsafe { crate::fiber::fiber_state(handle) } {
+                children.push(state.fiber.clone());
+            }
+        }
     }
 
-    for child in children {
-        // SAFETY: a handle in `held` or `joining` is one the crew holds a
-        // reference to; `joining` entries are removed before their round
-        // releases them, so neither list can name a freed fiber.
-        unsafe { crate::fiber::deliver(child, stop) };
+    for child in &children {
+        crate::fiber::deliver_to_fiber(child, stop);
     }
 }
 
@@ -996,5 +1007,80 @@ mod tests {
     fn a_force_arriving_in_cleanup_is_passed_on_to_grandchildren() {
         cancel_then_force_inside(spawn(deep_top), &DEEP_INSIDE, &DEEP_RELEASING, &DEEP_OUTCOME);
         assert_eq!(DEEP_OUTCOME.load(Ordering::SeqCst), STOPPED, "the force stopped a generation short");
+    }
+
+    // --- a stop delivered by somebody who does not own the handle ---------
+
+    static FREED_CHILD_ID: AtomicUsize = AtomicUsize::new(0);
+    static FREED_PARENT_ID: AtomicUsize = AtomicUsize::new(0);
+    static FREED_INSIDE: AtomicUsize = AtomicUsize::new(0);
+    static FREED_WAITING: AtomicUsize = AtomicUsize::new(0);
+    static FREED_OUTCOME: AtomicUsize = AtomicUsize::new(RUNNING);
+
+    extern "C" fn freed_child(_code: *const u8, _body: *mut u8) -> u64 {
+        FREED_CHILD_ID.store(crate::current::current(|me| me.id()), Ordering::SeqCst);
+        shielded_cleanup(&FREED_INSIDE, &FREED_OUTCOME);
+        0
+    }
+
+    extern "C" fn freed_parent(_code: *const u8, _body: *mut u8) -> u64 {
+        FREED_PARENT_ID.store(crate::current::current(|me| me.id()), Ordering::SeqCst);
+        let nursery = khora_fibers_open();
+        // SAFETY: a live nursery and a live handle, whose reference the
+        // nursery takes; then the nursery's last reference.
+        unsafe {
+            khora_fibers_adopt(nursery, spawn(freed_child));
+            until("the child reaching its cleanup", || FREED_INSIDE.load(Ordering::SeqCst) == 1);
+            FREED_WAITING.store(1, Ordering::SeqCst);
+            // Joins the child, then frees its handle and state -- while the
+            // deliverer below may still be inside `cancel_open_crews`.
+            khora_fibers_wait(nursery);
+            khora_drop(nursery, Some(release_nursery));
+        }
+        0
+    }
+
+    /// **A stop passed on through a nursery does not read the child's state
+    /// after the child's parent has freed it.**
+    ///
+    /// The `SIGSEGV` behind `cancel_everywhere::a_deadline_ends_a_nursery_
+    /// child_stuck_in_cleanup`, made deterministic. `cancel_open_crews` runs
+    /// on a thread that owns nothing -- `khora-deadlines`, or whoever cancels
+    /// the parent -- and copied the children's raw handles out of the crew.
+    /// Forcing the child stops it; its parent's wait returns and frees the
+    /// handle and the `FiberState`; and the deliverer then read `state.fiber`
+    /// out of the freed block to pass the force on to the child's own
+    /// nurseries. Crashing needs the block to have been reused, which is one
+    /// run in four in that program and never on demand, so this holds the
+    /// deliverer at exactly that point until the parent has freed the state
+    /// (`crate::fiber::delivery_probe`) and asks whether it was freed from
+    /// under a delivery. On both backends: `KHORA_FIBERS=scheduler` runs it
+    /// on the pool.
+    #[test]
+    fn a_stop_passed_on_through_a_nursery_outlives_the_childs_release() {
+        let parent = spawn(freed_parent);
+        until("the parent waiting on its child", || FREED_WAITING.load(Ordering::SeqCst) == 1);
+        let parent_id = FREED_PARENT_ID.load(Ordering::SeqCst);
+        let child_id = FREED_CHILD_ID.load(Ordering::SeqCst);
+        // Into its wait, not just about to start it.
+        std::thread::sleep(Duration::from_millis(50));
+
+        let deliverer = std::thread::spawn(move || {
+            *crate::fiber::delivery_probe::PAUSE.lock().unwrap() = Some((std::thread::current().id(), child_id));
+            // What `Deadline::expire` does on the `khora-deadlines` thread.
+            cancel_open_crews(parent_id, crate::current::Stop::Force);
+        });
+        deliverer.join().expect("the deliverer");
+        run_to_end(parent);
+
+        assert_eq!(FREED_OUTCOME.load(Ordering::SeqCst), STOPPED, "the force never reached the child");
+        assert!(
+            crate::fiber::delivery_probe::FREED.lock().unwrap().contains(&child_id),
+            "the child's state was never freed, so the question was never asked"
+        );
+        assert!(
+            !crate::fiber::delivery_probe::FREED_WHILE_DELIVERING.lock().unwrap().contains(&child_id),
+            "the child's state was freed while a stop was still being delivered through it"
+        );
     }
 }
