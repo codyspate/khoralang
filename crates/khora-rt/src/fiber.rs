@@ -220,6 +220,16 @@ struct Legacy {
     /// How to release a successful answer. Null for a value with no fields to
     /// let go of.
     glue: Option<extern "C" fn(*mut u8)>,
+    /// How to release an error, given its `which` and its word.
+    ///
+    /// **Without it every failed fiber leaked what its error held.** The
+    /// runtime cannot know an error's type, so its reference was freed with
+    /// no drop routine: the object went and its `String`s stayed, once per
+    /// failure -- on a server whose handlers raise, once per request. The
+    /// compiler knows every error type by its id, and hands over the one
+    /// routine that dispatches on it. Null for a fiber whose row is empty,
+    /// which has no error to release.
+    error_glue: Option<extern "C" fn(u32, u64)>,
     /// Whether the "nobody was waiting for this" line has been written.
     ///
     /// Two places can write it: the fiber itself, the moment it finishes with
@@ -297,14 +307,24 @@ impl Legacy {
             let mut err = std::io::stderr().lock();
             let _ = err.write_all(b"khora: a fiber ended with an error nobody was waiting for\n");
         }
-        if self.points_at_an_object(&outcome) {
-            // An error's fields are not released: the runtime cannot know a
-            // value's drop routine and the row said `'e`. A bounded leak, on a
-            // path a joined fiber never takes.
-            let glue = if outcome.which == 0 { self.glue } else { None };
-            // SAFETY: see `points_at_an_object`; this reference is the state's
-            // own and nothing reads it after this.
-            unsafe { khora_drop(outcome.payload as *mut u8, glue) };
+        if !self.points_at_an_object(&outcome) {
+            return;
+        }
+        match (outcome.which, self.error_glue) {
+            (0, _) => {
+                // SAFETY: see `points_at_an_object`; this reference is the
+                // state's own and nothing reads it after this.
+                unsafe { khora_drop(outcome.payload as *mut u8, self.glue) };
+            }
+            (which, Some(release)) => release(which, outcome.payload),
+            // An error from a fiber spawned with no way to release one: only
+            // this crate's own tests spawn those, and their thunks do not
+            // raise. Freed without its fields rather than kept, so a mistake
+            // costs what the error held and not the object as well.
+            (_, None) => {
+                // SAFETY: as above.
+                unsafe { khora_drop(outcome.payload as *mut u8, None) };
+            }
         }
     }
 }
@@ -541,13 +561,17 @@ fn fibers() -> &'static Scheduler {
 ///
 /// `boxed` and `value_glue` describe the *answer*, so that a fiber nobody joins
 /// does not leak it and a fiber joined twice does not free it twice.
+/// `error_glue` does the same for an error: it is the compiler's routine that
+/// releases an error given its `which`, and null only where the thunk cannot
+/// raise.
 ///
 /// # Safety
 ///
 /// `body` must be a live Khora closure taking no arguments whose drop routine
 /// is `glue`; whichever trampoline is given must match whether it returns the
-/// tagged pair; and `boxed` must say truthfully whether its answer is a
-/// pointer.
+/// tagged pair; `boxed` must say truthfully whether its answer is a
+/// pointer; and `error_glue`, where given, must release any error the thunk
+/// can raise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn khora_fiber_spawn(
     body: *mut u8,
@@ -556,6 +580,7 @@ pub unsafe extern "C" fn khora_fiber_spawn(
     plain: Option<PlainTrampoline1>,
     boxed: bool,
     value_glue: Option<extern "C" fn(*mut u8)>,
+    error_glue: Option<extern "C" fn(u32, u64)>,
 ) -> *mut u8 {
     // The compiler said this program has one thread and emitted non-atomic
     // reference counting on the strength of it. Carrying on would race every
@@ -582,6 +607,7 @@ pub unsafe extern "C" fn khora_fiber_spawn(
         outcome: Mutex::new(None),
         boxed,
         glue: value_glue,
+        error_glue,
         announced: std::sync::atomic::AtomicBool::new(false),
     });
     let answers = legacy.clone();

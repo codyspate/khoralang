@@ -747,6 +747,43 @@ impl<'ctx> Lower<'_, 'ctx> {
         self.at(continue_to);
         Some(self.be.word_to_value(word, ret))
     }
+
+    /// [`Self::split_tagged`] for a word some structure keeps: the answer is
+    /// read with [`Backend::reload_kept`] rather than taken over.
+    ///
+    /// A fiber's stored answer is the case. The read is on the answer's side
+    /// of the branch only, because on the other side the word may be the zero
+    /// a stopped child leaves, and counting what a kept value holds loads
+    /// through the word.
+    pub(super) fn split_tagged_kept(
+        &mut self,
+        result: BasicValueEnum<'ctx>,
+        ret: &Type,
+        range: TextRange,
+    ) -> Flow<'ctx> {
+        if !self.raises && !self.tagged && self.catches.is_empty() {
+            return self.fail(
+                "this call can leave the function, but the function has no `raises` clause",
+                range,
+            );
+        }
+
+        let (which, word) = self.read_tagged(result);
+
+        let propagate = self.block("raised");
+        let continue_to = self.block("ok");
+        let raised = self.raised(which);
+        self.be
+            .builder
+            .build_conditional_branch(raised, propagate, continue_to)
+            .expect("branching on the tag");
+
+        self.at(propagate);
+        self.leave_with(which, word);
+
+        self.at(continue_to);
+        Some(self.be.reload_kept(word, ret))
+    }
 }
 
 /// The one-based line `at` starts on, or 0 when there is no source to count in.

@@ -111,6 +111,33 @@ cancellation point in every function, whatever the function's `raises` row;
   that spawned a single fiber ran a call-free loop about 1.8× slower on the
   default thread backend than one that spawned none.
 
+- **Joining twice a fiber that failed with a small error holding a `String`
+  ended the process** with "drop of an object whose refcount is already zero"
+  (status 134), on both fiber backends. Each join has its own copy of the
+  error, for an error type with no type parameters. A generic error type
+  (`type E<A>`) still leaks, and joined twice it can still end the process
+  the same way; see erratum 91.
+
+- **A fiber that failed leaked what its error held** when nobody joined it,
+  when it was joined twice, when its error was one of several carrying
+  variants, and, with `KHORA_UNBOXED=0`, when it was joined once. A program
+  that ran work in a fiber of its own and let it fail lost memory on each
+  failure. A server built on `std::net::http`'s `Router` did not. The error
+  is released with the fiber's handle, except for an error type with type
+  parameters.
+
+- **`Fiber::join` and `Fiber::outcome` on a handle that is not bound to a
+  name** (`Fiber::join(Fiber::spawn(..))`) leaked one object per `String` or
+  other counted field of a small record the fiber answered.
+
+- **`Shared::modify` leaked one object per call for each counted half** of
+  its `{ state, result }` answer when both halves are small enough to be held
+  without a heap object: a `Shared<String>` whose change function answers the
+  old or new `String`, say.
+
+- **A `SharedFn` whose closure captured a `String` or other counted value
+  leaked the capture** when it was released.
+
 ### Changed
 
 - **Cancellation costs something in functions with no `raises` row, and less

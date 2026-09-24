@@ -2392,3 +2392,193 @@ fn main() -> Int {{
     );
     assert_eq!(ran.code, Some(0), "and the process must not be killed");
 }
+
+// --- what a joined or failed fiber leaves behind ----------------------------
+//
+// A fiber keeps its answer or its error as one word until its handle is
+// released, and every joiner reads that word while the fiber still holds it.
+// Each program below does its work in `work` and reads the live-object count
+// in `main`, after every handle and binding is gone, so the count is 0 only
+// if nothing was counted twice or never released. Run on both backends: the
+// stored word is the runtime's, and the two backends keep it on different
+// paths.
+
+/// Compiles `main` against the real `std` and runs it on `backend`.
+///
+/// The fixture preludes above declare what they use, which is enough for
+/// integers; these programs need interpolated `String`s, which are what make
+/// an error own something.
+fn run_std_on(name: &str, main: &str, backend: &str) -> Ran {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}_{backend}"));
+    harness::ensure_runtime();
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
+    let _ = std::fs::remove_file(&exe);
+
+    let db = KhoraDatabase::new();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("std");
+    let mut files = Vec::new();
+    let mut stack = vec![root];
+    while let Some(here) = stack.pop() {
+        for entry in std::fs::read_dir(&here).expect("a readable std") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "kh")
+                && khora_db::selected_for_target(&path, khora_db::host_target())
+            {
+                let text = std::fs::read_to_string(&path).expect("readable");
+                files.push(SourceFile::new(&db, path, text));
+            }
+        }
+    }
+    files.push(SourceFile::new(&db, dir.join("main.kh"), main.to_string()));
+    let root = SourceRoot::new(&db, files);
+    if let Err(errors) = khora_codegen_llvm::compile(&db, root, &exe) {
+        let messages: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
+        panic!("compiling `{name}` failed:\n  {}\n\n{main}", messages.join("\n  "));
+    }
+
+    let output = Command::new(&exe)
+        .env("KHORA_FIBERS", backend)
+        .output()
+        .expect("the program should run");
+    Ran {
+        stdout: String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+        stderr: String::from_utf8_lossy(&output.stderr).replace("\r\n", "\n"),
+        code: output.status.code(),
+    }
+}
+
+/// The prelude of the programs below: one error small enough to be held
+/// inline, and one with two carrying variants, which is boxed.
+const FAILING: &str = r#"module main;
+import std::core::{Fiber, Outcome, print};
+
+extern fn khora_live_count() -> Int;
+
+type Oops = | Bad(msg: String, n: Int);
+type Two = | Bad2(msg: String, n: Int) | Worse(a: String, b: String);
+type Rec = { name: String, n: Int };
+
+fn fail() -> Int raises Oops { raise Oops::Bad("m${1}", 1) }
+fn fail2() -> Int raises Two { raise Two::Bad2("m${1}", 1) }
+
+pub fn main() -> () {
+  let t = work();
+  let live = khora_live_count();
+  print("${t} ${live}")
+}
+"#;
+
+/// Runs one `work` on both backends and checks it ran clean with nothing live.
+fn leaves_nothing(name: &str, work: &str, total: i64) {
+    for backend in ["threads", "scheduler"] {
+        let ran = run_std_on(name, &format!("{FAILING}\n{work}"), backend);
+        assert_eq!(ran.code, Some(0), "`{backend}`: {}", ran.stderr);
+        assert_eq!(
+            ran.stdout,
+            format!("{total} 0\n"),
+            "`{backend}`: the trailing number is the live-object count"
+        );
+    }
+}
+
+/// **Joining twice a fiber that raised an error held inline freed it twice.**
+///
+/// The error crosses in a box the fiber keeps, and each join read the
+/// `String` out of it without counting it: the first catch released the
+/// fiber's own reference, and the second aborted the process with "drop of
+/// an object whose refcount is already zero".
+#[test]
+fn an_inline_error_joined_twice_is_counted_for_each_joiner() {
+    leaves_nothing(
+        "fiber_error_joined_twice",
+        "fn work() -> Int {
+  let f = Fiber::spawn(fn () => fail()!);
+  let a = Fiber::join(f)! catch { Oops::Bad(m, n) => n + String::byte_length(m) };
+  let b = Fiber::join(f)! catch { Oops::Bad(m, n) => n + String::byte_length(m) };
+  a + b
+}",
+        6,
+    );
+}
+
+/// **A fiber's error was freed without releasing what it held.**
+///
+/// The fiber's own reference to its error is let go of when the handle is,
+/// and the runtime did that with no drop routine, because it cannot know an
+/// error's type. Every failed fiber leaked the error's fields -- on a server
+/// whose handlers raise, a leak per request. Joined once and caught, boxed
+/// and joined twice, re-raised a frame up, and never joined at all.
+#[test]
+fn a_failed_fiber_releases_its_error_on_every_path() {
+    leaves_nothing(
+        "fiber_error_every_path",
+        "fn inner() -> Int raises Oops {
+  let f = Fiber::spawn(fn () => fail()!);
+  Fiber::join(f)!
+}
+
+fn work() -> Int {
+  let f = Fiber::spawn(fn () => fail()!);
+  let a = Fiber::join(f)! catch { Oops::Bad(m, n) => n + String::byte_length(m) };
+  let g = Fiber::spawn(fn () => fail2()!);
+  let b = Fiber::join(g)! catch { Two::Bad2(m, n) => n, Two::Worse(x, y) => 0 };
+  let c = Fiber::join(g)! catch { Two::Bad2(m, n) => n, Two::Worse(x, y) => 0 };
+  let d = inner()! catch { Oops::Bad(m, n) => n };
+  let u = Fiber::spawn(fn () => fail()!);
+  let v = Fiber::spawn(fn () => fail2()!);
+  Fiber::wait(u)! catch { _ => () };
+  Fiber::wait(v)! catch { _ => () };
+  a + b + c + d
+}",
+        6,
+    );
+}
+
+/// The same, a few hundred times: the count must not grow with the number
+/// of failures, which is the shape a server's error path has.
+#[test]
+fn failing_fibers_in_a_loop_leave_nothing_behind() {
+    leaves_nothing(
+        "fiber_error_loop",
+        "fn one() -> Int {
+  let f = Fiber::spawn(fn () => fail()!);
+  let g = Fiber::spawn(fn () => fail2()!);
+  let a = Fiber::join(f)! catch { Oops::Bad(m, n) => n };
+  let b = Fiber::join(g)! catch { Two::Bad2(m, n) => n, Two::Worse(x, y) => 0 };
+  a + b
+}
+
+fn work() -> Int {
+  let mut t = 0;
+  let mut i = 0;
+  while i < 200 { t = t + one(); i = i + 1 };
+  t
+}",
+        400,
+    );
+}
+
+/// **Joining a handle that is a temporary leaked the answer's fields.**
+///
+/// The handle is released before the answer is read, so the reader's
+/// reference to the box the answer crossed in is the last one. Freeing that
+/// box as though the fields had moved out of it dropped the fiber's hold on
+/// them uncounted: one object per counted field, for `join` and `outcome`
+/// alike.
+#[test]
+fn an_answer_joined_from_a_temporary_handle_is_not_leaked() {
+    leaves_nothing(
+        "fiber_join_temporary",
+        "fn work() -> Int {
+  let r = Fiber::join(Fiber::spawn(fn () => { name: \"n${1}\", n: 1 }));
+  let o = Fiber::outcome(Fiber::spawn(fn () => { name: \"o${1}\", n: 1 }))! catch { _ => Outcome::Stopped };
+  let s = match o { Outcome::Answered(q) => String::byte_length(q.name) + q.n, Outcome::Stopped => 0 };
+  let e = Fiber::join(Fiber::spawn(fn () => fail()!))! catch { Oops::Bad(m, n) => n + String::byte_length(m) };
+  String::byte_length(r.name) + r.n + s + e
+}",
+        9,
+    );
+}

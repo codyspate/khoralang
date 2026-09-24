@@ -251,7 +251,9 @@ pub struct Runtime<'ctx> {
     /// `void khora_channel_release(void *channel)`, a `drop_fields` callback.
     pub channel_release: FunctionValue<'ctx>,
     /// `void *khora_fiber_spawn(void *body, void (*glue)(void *),
-    ///                            uint32_t (*call)(const void *, void *, uint64_t *))`
+    ///                            uint32_t (*call)(const void *, void *, uint64_t *),
+    ///                            void *plain, bool boxed, void (*value_glue)(void *),
+    ///                            void (*error_glue)(uint32_t, uint64_t))`
     pub fiber_spawn: FunctionValue<'ctx>,
     /// `uint32_t khora_fiber_join(void *fiber, uint64_t *out)`
     ///
@@ -503,6 +505,7 @@ impl<'ctx> Runtime<'ctx> {
                         ptr.into(),
                         ptr.into(),
                         ctx.bool_type().into(),
+                        ptr.into(),
                         ptr.into(),
                     ],
                     false,

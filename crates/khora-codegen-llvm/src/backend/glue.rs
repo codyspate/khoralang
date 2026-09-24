@@ -35,7 +35,7 @@ impl<'ctx> Backend<'ctx> {
             _ => return self.null_pointer(),
         };
 
-        // **The runtime's own types are the opaque ones.** Each of the six
+        // **The runtime's own types are the opaque ones.** Each of the seven
         // below is declared `pub type Region;` -- a name with no body, which
         // is what says the runtime owns the layout and Khora cannot look
         // inside. A program declaring its own `Region` declares a record, and
@@ -90,6 +90,14 @@ impl<'ctx> Backend<'ctx> {
         // one element is generated, and travels in the object.
         if is_the_runtimes && name == runtime::ARRAY_TYPE {
             return self.rt.array_release.as_global_value().as_pointer_value();
+        }
+
+        // **A shared function *is* its closure at run time**, so it is
+        // released as one. Asked by the wrapper's name, the generic path
+        // below finds a type with no fields and answers null, and every
+        // `SharedFn` was freed without releasing what it captured.
+        if is_the_runtimes && name == runtime::SHARED_FN_TYPE {
+            return self.closure_glue();
         }
 
         let key = type_key(ty);

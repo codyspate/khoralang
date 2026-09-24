@@ -230,12 +230,6 @@ impl<'ctx> Lower<'_, 'ctx> {
         self.drop(value, ty);
     }
 
-    /// Counts what an inline value holds, given the box it crossed in.
-    /// [`Backend::retain_spilled`] says when a reader owes this.
-    pub(super) fn retain_spilled(&mut self, word: inkwell::values::IntValue<'ctx>, ty: &Type) {
-        self.be.retain_spilled(word, ty);
-    }
-
     /// The capabilities a call needs, read out of the caller's own bindings.
     ///
     /// A label is in scope because the caller declared it in its own `with`

@@ -431,6 +431,86 @@ impl<'ctx> Backend<'ctx> {
         self.builder.build_return(None).expect("returning from the releaser");
     }
 
+    /// Turns an error some structure *keeps* into one the reader owns.
+    ///
+    /// **A fiber's error is read by every joiner while the fiber still holds
+    /// it**, and a `catch` reads an error as a hand-off: for one held inline
+    /// it copies the fields out of the box and frees the box with no glue, as
+    /// though they had moved. Here they have not, so two joiners released
+    /// one `String` twice and the process aborted. This gives the reader a box
+    /// of its own with the fields counted once more, and lets go of the
+    /// reader's reference to the kept box with that box's glue -- the glue,
+    /// because a handle released before the read leaves the reader's
+    /// reference the last one, and a free without it leaked every field.
+    ///
+    /// Costs an allocation per joined error of an inline type that holds
+    /// something counted; a boxed error, or one of plain words, comes back as
+    /// it went in. `word` is returned unchanged for any `which` that is not an
+    /// error -- an answer, or a cancellation -- so a caller need not branch.
+    ///
+    /// [`Backend::emit_error_taker`] is the definition, emitted with the
+    /// releaser once every error type has an id.
+    pub fn take_error(&mut self) -> FunctionValue<'ctx> {
+        if let Some(existing) = self.error_taker {
+            return existing;
+        }
+        let i64_type = self.ctx.i64_type();
+        let signature = i64_type.fn_type(&[self.ctx.i32_type().into(), i64_type.into()], false);
+        let function =
+            self.module.add_function("khora.take_error", signature, Some(Linkage::Internal));
+        self.error_taker = Some(function);
+        function
+    }
+
+    /// Defines [`Self::take_error`], if anything asked for it.
+    pub fn emit_error_taker(&mut self) {
+        let Some(function) = self.error_taker else { return };
+        let entry = self.ctx.append_basic_block(function, "entry");
+        let unchanged = self.ctx.append_basic_block(function, "unchanged");
+
+        let which = function.get_nth_param(0).expect("which").into_int_value();
+        let word = function.get_nth_param(1).expect("word").into_int_value();
+
+        let mut known: Vec<(String, u32)> =
+            self.error_ids.iter().map(|(n, i)| (n.clone(), *i)).collect();
+        known.sort_by_key(|(_, id)| *id);
+
+        let mut cases = Vec::new();
+        for (name, id) in &known {
+            let ty = self.named_type(name, None);
+            // Only an inline error with a counted field needs a box of its
+            // own. A boxed one is an object each joiner holds a reference to
+            // already, and one of plain words has nothing to count.
+            if !self.unboxed.holds(&ty) || !self.owns_a_reference(&ty) {
+                continue;
+            }
+            let Some(shape) = self.unboxed_type(&ty) else { continue };
+            let Some(retain) = self.inline_retain(&ty) else { continue };
+            let block = self.ctx.append_basic_block(function, &format!("take.{name}"));
+            self.builder.position_at_end(block);
+            let ptr = self.ctx.ptr_type(AddressSpace::default());
+            let kept = self
+                .builder
+                .build_int_to_ptr(word, ptr, "kept")
+                .expect("a word as the box a kept error is in");
+            let slot = crate::runtime::field_pointer(self.ctx, &self.builder, kept, 0);
+            let value = self.builder.build_load(shape, slot, "kept.error").expect("reading a kept error");
+            self.builder.build_call(retain, &[value.into()], "").expect("counting the reader's copy");
+            let taken = self.to_word(value);
+            let glue = self.spill_glue(&ty);
+            self.builder
+                .build_call(self.rt.drop, &[kept.into(), glue.into()], "")
+                .expect("letting go of the kept box");
+            self.builder.build_return(Some(&taken)).expect("handing over the reader's own box");
+            cases.push((self.ctx.i32_type().const_int(u64::from(*id), false), block));
+        }
+
+        self.builder.position_at_end(unchanged);
+        self.builder.build_return(Some(&word)).expect("handing back the word as it came");
+        self.builder.position_at_end(entry);
+        self.builder.build_switch(which, unchanged, &cases).expect("dispatching on the error type");
+    }
+
     /// The id of an error type, assigning one if this is the first sight of it.
     ///
     /// Encounter order within a single whole-program module, which is

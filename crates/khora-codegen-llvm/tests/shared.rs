@@ -495,6 +495,75 @@ pub fn main() -> () {
     assert_eq!(out, "18 0\n", "the trailing 0 is the live-object count");
 }
 
+/// **`modify` on a small state leaked one object per counted half, per call.**
+///
+/// A `Changed<String, _>` is two words, so the change function hands it back
+/// laid out flat rather than in a box. The flat value already owns both of
+/// its halves; counting each half again on the way out, as the boxed case
+/// must, left one count nobody would ever release. The three calls cover a
+/// new state with the old one as the answer, the old state kept with a
+/// scalar answer, and a new state built from the old one: live 3 before.
+#[test]
+fn a_modify_with_a_small_carrier_does_not_leak_its_halves() {
+    let out = run(
+        "shared_modify_inline_carrier",
+        r#"module main;
+import std::core::{Shared, print};
+
+extern fn khora_live_count() -> Int;
+
+fn work() -> Int {
+  let c = Shared::of("s${1}");
+  let a = String::byte_length(Shared::modify(c, fn s => { state: "q${2}", result: s }));
+  let b = Shared::modify(c, fn s => { state: s, result: String::byte_length(s) });
+  let d = String::byte_length(Shared::modify(c, fn s => { state: s + "x", result: s }));
+  a + b + d + String::byte_length(Shared::get(c))
+}
+
+pub fn main() -> () {
+  let t = work();
+  let live = khora_live_count();
+  print("${t} ${live}")
+}
+"#,
+    );
+    assert_eq!(out, "9 0\n", "the trailing 0 is the live-object count");
+}
+
+// --- a shared function ------------------------------------------------------
+
+/// **A `SharedFn` that captured a counted value leaked the capture.**
+///
+/// A `SharedFn` is its closure at run time, but releasing one looked up the
+/// drop routine by the wrapper's name, found a type with no fields, and freed
+/// the closure without releasing what it captured: one `String` per wrapper.
+#[test]
+fn a_shared_function_releases_what_it_captured() {
+    let out = run(
+        "shared_fn_capture",
+        r#"module main;
+import std::core::{SharedFn, print};
+
+extern fn khora_live_count() -> Int;
+
+fn work() -> Int {
+  let s = "cap${1}";
+  let f = SharedFn::of(fn x => x + String::byte_length(s));
+  let a = SharedFn::call(f, 1);
+  let b = SharedFn::call(f, 2);
+  a + b + String::byte_length(s)
+}
+
+pub fn main() -> () {
+  let t = work();
+  let live = khora_live_count();
+  print("${t} ${live}")
+}
+"#,
+    );
+    assert_eq!(out, "15 0\n", "the trailing 0 is the live-object count");
+}
+
 /// A record inside a record: the walk that counts the outer one has to reach
 /// the pointers of the inner one.
 #[test]

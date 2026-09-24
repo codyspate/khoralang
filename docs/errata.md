@@ -3684,3 +3684,57 @@ The general shape, again: **a box that is *kept* and a box that is *handed
 over* read back identically, and only one of them is a transfer.** Every
 reader of a word some structure keeps owes a retain of what the word holds —
 the box's own count covers the box, not its contents.
+
+## 91. A fiber keeps its error, and nobody could release it
+
+Erratum 90 fixed the four readers of a `Shared` cell and said the fiber paths
+had "already met this". They had met half of it. Four defects, one family:
+
+- **An inline error was read as a hand-off.** `Fiber::join` of a failed fiber
+  hands each joiner the fiber's error word, and the fiber keeps it. A `catch`
+  reads an error with `word_to_value`, which copies the fields out and frees
+  the box with null glue: right for a raise, where the raising frame gave its
+  error up, and wrong here. `type Oops = | Bad(msg: String, n: Int)` joined
+  twice aborted with "refcount is already zero", on both backends.
+  `retain_spilled` covered the *answer* and never the error.
+- **Nothing could release a fiber's own reference to its error.** `discard`
+  freed it with `khora_drop(payload, None)` and called the result "a bounded
+  leak, on a path a joined fiber never takes". A joined fiber takes that path
+  too: the handle's release discards the stored error whether or not anybody
+  joined. Every failed fiber leaked its error's fields: one object per
+  counted field per failure, unjoined; 200 over 200 failures of a boxed
+  error, joined once.
+- **A temporary handle's answer was reloaded with null glue.** The handle is
+  released before the answer is read, so the reader's box reference is the
+  last, and `retain_spilled` + null glue leaked the fields. This is erratum
+  90's temporary-cell case, on `join` and `outcome`.
+- Two neighbours of the same shape in `Shared`: `modify_shim` duplicated
+  each counted half out of an *inline* `Changed` carrier, which already owns
+  them (one leak per half per call), and `drop_glue` asked the opaque
+  `SharedFn` for a field layout, found none, and freed the closure with null
+  glue (one leak per capture).
+
+Fixes: `khora_fiber_spawn` takes the compiler's `khora.release_error` for a
+fallible thunk, and `discard` releases an error through it. `join` and
+`outcome` pass the error word through a new `khora.take_error`, which gives
+an inline error that owns something a box of the reader's own (fields
+counted, kept box released with its spill glue) and returns every other word
+unchanged. Answers are read with `reload_kept`, on the answered branch only,
+because a stopped child's word is a zero. `modify_shim`'s inline branch takes
+the halves without a dup. `drop_glue` answers `closure_glue` for `SharedFn`.
+Each part has a test that goes red with that part removed, and the runtime
+half was checked separately: with `discard` reverted, 400 failures (200
+inline, 200 boxed) leave 400 objects live.
+
+The general shape, a third time: **any word the runtime holds and a reader
+copies out needs the reader to count what the word holds, and the holder a
+glue to release it.** Of the runtime's words, the cell, the channel queue,
+the fiber's answer and now the fiber's error each have both, except an
+error type with type parameters. Its error id is keyed on the bare type
+name, so the releaser and the taker are built for the type without its
+arguments. `Gb<String>` held inline leaks its `String`, and joined twice it
+ends the process with 134. The fix, an id per instantiation, is a separate
+change. A test or bench
+entry point that raises (`testing.rs`, `benching.rs`) still frees the error
+with null glue; the process is about to report and exit, so it is not
+followed.

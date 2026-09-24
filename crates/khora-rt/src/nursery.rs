@@ -617,7 +617,7 @@ mod tests {
     fn spawn(thunk: crate::PlainTrampoline1) -> *mut u8 {
         // SAFETY: a live closure whose drop is the default, an infallible
         // trampoline matching `plain`, and an answer that is not a pointer.
-        unsafe { khora_fiber_spawn(closure(), None, None, Some(thunk), false, None) }
+        unsafe { khora_fiber_spawn(closure(), None, None, Some(thunk), false, None, None) }
     }
 
     /// Cleanup that stops only when a cancellation point says so: shielded,

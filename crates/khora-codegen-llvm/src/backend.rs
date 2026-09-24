@@ -408,6 +408,9 @@ pub(crate) struct Backend<'ctx> {
     ///
     /// `khora.release_error(which, word)`. See [`Backend::release_error`].
     error_releaser: Option<FunctionValue<'ctx>>,
+    /// What a joiner calls to own a copy of a fiber's kept error, declared on
+    /// first use. See [`Backend::take_error`].
+    error_taker: Option<FunctionValue<'ctx>>,
     pub errors: Vec<HirError>,
 }
 
@@ -510,6 +513,7 @@ impl<'ctx> Backend<'ctx> {
             modify_shims: HashMap::new(),
             error_ids: HashMap::new(),
             error_releaser: None,
+            error_taker: None,
             errors: Vec::new(),
         }
     }

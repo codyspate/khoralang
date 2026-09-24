@@ -221,22 +221,21 @@ impl<'ctx> Backend<'ctx> {
         let changed = self.builder.build_extract_value(pair, 1, "changed").expect("the answer half");
 
         // Field order is declaration order, and `Changed` declares `state`
-        // first. Both are duplicated out of the record before it goes.
+        // first.
         let (next, result) = if self.unboxed.holds(carrier) {
-            // Held inline, so the halves are already in registers and there is
-            // no carrier to release: it was a value, not a reference to one.
+            // **Held inline, so the halves are taken, not counted.** The
+            // change function handed back the carrier as a value, and a
+            // value owns its fields: reading them out moves them, and there
+            // is no carrier left to release. Counting each boxed half again
+            // here, as the boxed branch must, left one reference per half
+            // per call that nothing would ever release.
             let whole = changed.into_struct_value();
             let next = self.read_inline(whole, carrier, 0, state);
             let result = self.read_inline(whole, carrier, 1, answer);
-            for (value, ty) in [(next, state), (result, answer)] {
-                if is_boxed(ty, &self.unboxed) {
-                    self.builder
-                        .build_call(self.rt.dup, &[value.into()], "")
-                        .expect("keeping a half past its carrier");
-                }
-            }
             (next, result)
         } else {
+            // Both are duplicated out of the record before it goes: the
+            // record's glue releases what it held.
             let pair = changed.into_pointer_value();
             let fields = [state.clone(), answer.clone()];
             let next = self.read_from(pair, self.field_slot(&fields, 0), state);

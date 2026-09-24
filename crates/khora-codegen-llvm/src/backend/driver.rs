@@ -363,6 +363,7 @@ pub(super) fn build(
     // After every body and every lifted closure, because lowering is what
     // assigns error ids and the last one compiled may add another.
     backend.emit_error_releaser();
+    backend.emit_error_taker();
 
     match entry_point {
         Entry::Main => {

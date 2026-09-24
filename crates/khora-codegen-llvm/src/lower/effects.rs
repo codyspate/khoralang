@@ -569,16 +569,16 @@ impl<'ctx> Lower<'_, 'ctx> {
         let inline = self.be.unboxed_type(outcome_ty).filter(|_| self.be.unboxed.holds(outcome_ty));
 
         self.be.builder.position_at_end(answered_block);
-        // **The retain belongs here and not before the branch.** Both callers
-        // funnel through this block for the answered case, including the
-        // empty-row early return, so this covers every path that reads the
-        // word -- and the stopped arm, where the word is a zero, never reaches
-        // it. `retain_spilled` loads the fields out of the word before it calls
-        // the walk, so on a null that load is the crash rather than a no-op.
-        if self.be.unboxed.holds(&field_ty) {
-            self.retain_spilled(word, &field_ty);
-        }
-        let value = self.be.word_to_value(word, &field_ty);
+        // **Read as a kept value, and here rather than before the branch.**
+        // Both callers funnel through this block for the answered case,
+        // including the empty-row early return, so this covers every path
+        // that reads the word -- and the stopped arm, where the word is a
+        // zero, never reaches it. `reload_kept` loads the fields out of the
+        // word to count them, so on a null that load is the crash rather
+        // than a no-op. It frees the reader's reference to the box with the
+        // box's glue, which is what a handle released before this read needs:
+        // there the reader's reference is the last one.
+        let value = self.be.reload_kept(word, &field_ty);
         let answered_value: BasicValueEnum<'ctx> = match inline {
             Some(shape) => {
                 let tagged = self
@@ -821,6 +821,15 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let boxed =
                     self.be.ctx.bool_type().const_int(u64::from(self.be.counted_across(&answers)), false);
                 let value_glue = self.be.holding_glue(&answers);
+                // How to let go of an error nobody joined, and of the fiber's
+                // own reference to one somebody did. Null for a thunk that
+                // cannot raise: its tag is 0 or a cancellation, neither of
+                // which carries an object.
+                let error_glue = if fallible {
+                    self.be.release_error().as_global_value().as_pointer_value()
+                } else {
+                    self.be.null_pointer()
+                };
                 let spawn = self.be.rt.fiber_spawn;
                 let fiber = self
                     .be
@@ -834,6 +843,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                             plain.into(),
                             boxed.into(),
                             value_glue.into(),
+                            error_glue.into(),
                         ],
                         "fiber",
                     )
@@ -974,29 +984,32 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .build_load(self.be.ctx.i64_type(), slot, "outcome.word")
                     .expect("reading the answered word")
                     .into_int_value();
+                // The error a failed child raises is kept by the fiber, as
+                // `join` says; the word is unchanged for anything else.
+                let taker = self.be.take_error();
+                let word = self
+                    .be
+                    .builder
+                    .build_call(taker, &[which.into(), word.into()], "outcome.error")
+                    .expect("taking a child's error")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("a word")
+                    .into_int_value();
 
                 // **The same double free `join` documents, and it applies here
                 // unchanged.** An answer held inline crosses as a word
                 // pointing at the box it was spilled into; reading the fields
                 // back out copies whatever they hold into this frame without
                 // counting it, and then this frame and the fiber's stored
-                // answer release the same pointer.
-                //
-                // Before the branch, because `Answered` is built on one arm
-                // and the empty-row path returns without reaching either --
-                // both read the word, so a retain on one of them is a retain
-                // on half the paths that need it.
-                //
-                // **On the answered arm only, because a stopped word is a
-                // zero.** `retain_spilled` is not a runtime test: it decides
-                // from the *type* whether a walk exists, then loads the fields
-                // out of the word to hand them to it. On the stopped arm that
-                // load is from the null page, and the program dies -- reported
-                // by the stack guard as "the stack ran out", three frames from
-                // anything to do with fibers, which is the same misdirection
-                // `option_of_word`'s comment was written about. It bites only
-                // when the answer is held inline *and* owns a counted field,
-                // which is the one case the retain exists for.
+                // answer release the same pointer. `outcome_of_word` reads it
+                // as a kept value, on the answered arm only: a stopped word is
+                // a zero, and counting what a kept value holds loads through
+                // the word. On the stopped arm that load is from the null
+                // page, and the program dies -- reported by the stack guard as
+                // "the stack ran out", three frames from anything to do with
+                // fibers, which is the same misdirection `option_of_word`'s
+                // comment was written about.
                 self.release_unless_lent(*fiber, handle, &ty);
 
                 let outcome_ty = self.types.of(site).clone();
@@ -1069,8 +1082,21 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .build_load(self.be.ctx.i64_type(), slot, "word")
                     .expect("reading the joined word")
                     .into_int_value();
+                // **The fiber keeps its error, so a joiner has to take a copy
+                // of it.** `Backend::take_error` says why; the word comes back
+                // unchanged for an answer and for a cancellation.
+                let taker = self.be.take_error();
+                let word = self
+                    .be
+                    .builder
+                    .build_call(taker, &[which.into(), word.into()], "joined.error")
+                    .expect("taking a joined error")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("a word")
+                    .into_int_value();
 
-                // **A joined inline value has to be retained on the way out.**
+                // **A joined inline answer is read as a kept one.**
                 //
                 // The answer to a `join` is one word, and for a type held
                 // inline that word is a box the value crossed in. The runtime
@@ -1083,32 +1109,31 @@ impl<'ctx> Lower<'_, 'ctx> {
                 // pointer. The abort lands on whichever gets there second, as
                 // a double free somewhere with no evidence of a fiber in it.
                 //
+                // `Backend::reload_kept` counts the fields and frees the
+                // reader's box reference with the box's glue. The glue
+                // matters for a handle that is a temporary: it is released
+                // below, before the answer is read, so the reader's reference
+                // is the last and a free without glue leaked every field.
+                //
                 // A `Channel` has no matching bug because `receive` *moves*
                 // the value out of the queue, so the count is right by there
                 // being one owner throughout.
-                //
-                // Both exits below read the word, so this is not on either of
-                // their branches: a fiber whose row is empty returns straight
-                // out of `word_to_value` and would otherwise take the same
-                // uncounted copy.
-                if self.be.unboxed.holds(&answers) {
-                    self.retain_spilled(word, &answers);
-                }
                 self.release_unless_lent(*fiber, handle, &ty);
 
                 // **The child's failure becomes this frame's**, which is
                 // what `join` re-raising means: the two halves are already in
-                // the shape `split_tagged` wants, so the branch and the
-                // unwinding are the ones every fallible call already emits.
+                // the shape a fallible call's result has, so the branch and
+                // the unwinding are the ones every fallible call emits.
                 //
                 // **Whatever the fiber's row.** A child with no row can still
                 // be stopped -- every infallible thunk hands back a
                 // cancellation tag -- and a joiner handed a stopped child's
                 // zero would compute with an answer nobody produced. So the
                 // join unwinds on it instead, as it does on a cancellation of
-                // the joiner itself.
+                // the joiner itself. The answer is read on the far side of
+                // that branch only, because a stopped child's word is a zero.
                 let tagged = self.be.tagged_of(which, word);
-                self.split_tagged(tagged, &answers, range)
+                self.split_tagged_kept(tagged, &answers, range)
             }
             _ => self.fail(
                 format!("`Fiber::{name}` is not a fiber operation the backend knows"),

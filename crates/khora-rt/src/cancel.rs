@@ -214,7 +214,7 @@ mod tests {
         // SAFETY: a live closure whose drop is the default, and a tagged
         // trampoline matching `call`, with an answer that is not a pointer.
         let handle = unsafe {
-            crate::fiber::khora_fiber_spawn(closure(), None, Some(stopped_thunk), None, false, None)
+            crate::fiber::khora_fiber_spawn(closure(), None, Some(stopped_thunk), None, false, None, None)
         };
 
         let mut answer: u64 = 0;
@@ -239,7 +239,7 @@ mod tests {
     fn a_thunk_that_finished_answers_what_it_computed() {
         // SAFETY: as above, with a plain trampoline matching `plain`.
         let handle = unsafe {
-            crate::fiber::khora_fiber_spawn(closure(), None, None, Some(plain_thunk), false, None)
+            crate::fiber::khora_fiber_spawn(closure(), None, None, Some(plain_thunk), false, None, None)
         };
         let mut answer: u64 = 0;
         // SAFETY: as above.
@@ -251,7 +251,7 @@ mod tests {
 
         // SAFETY: as above.
         let handle = unsafe {
-            crate::fiber::khora_fiber_spawn(closure(), None, None, Some(cancelling_thunk), false, None)
+            crate::fiber::khora_fiber_spawn(closure(), None, None, Some(cancelling_thunk), false, None, None)
         };
         // SAFETY: as above.
         let which = unsafe { khora_fiber_join(handle, &raw mut answer) };
@@ -273,7 +273,7 @@ mod tests {
     fn a_cancelled_fiber_that_finished_is_uncounted_while_its_handle_is_held() {
         // SAFETY: as above.
         let handle = unsafe {
-            crate::fiber::khora_fiber_spawn(closure(), None, None, Some(cancelling_thunk), false, None)
+            crate::fiber::khora_fiber_spawn(closure(), None, None, Some(cancelling_thunk), false, None, None)
         };
         let mut answer: u64 = 0;
         // SAFETY: as above.
