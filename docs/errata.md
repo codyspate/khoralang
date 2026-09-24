@@ -3365,6 +3365,9 @@ null glue, because under `Fields::Scalars` there is nothing inside it to
 release first. Everything then balances against machinery that already existed:
 `khora_shared_get` duplicates under the lock, and the reader's reload releases.
 
+That argument holds only while the box holds nothing counted; erratum 90 is
+what it missed once records of pointers were held inline too.
+
 The general shape is worth keeping: **a representation change is not finished
 when values are built and read correctly.** It is finished when everything that
 *holds* one agrees about who owns it.
@@ -3627,3 +3630,57 @@ rather than failing by name. An in-process attempt in `fibers.rs` was abandoned:
 that file's bare prelude has no `std`, so `I32::of` and `Ptr::null` are not
 available in it. The fix is verified by hand instead — disabled, the repro exits
 124; restored, it exits 0 on both backends.
+
+## 90. A cell's reader copied the fields out of a box the cell still held
+
+A cell holding a record of pointers aborted the process on the first release
+after a read: "drop of an object whose refcount is already zero", exit 139,
+with the program's own output already printed. Four lines were enough:
+
+```khora
+type Rec = { name: String, tags: List<String> };
+fn read(r: Rec) -> Int { String::byte_length(r.name) + List::length(r.tags) }
+let cell = Shared::of({ name: "x", tags: List::Cons("a", List::Nil) });
+let t = read(Shared::get(cell));
+```
+
+The record is held inline, so the cell holds it in the box it crossed in, and
+erratum 82's balance applies: `khora_shared_get` duplicates the box, and the
+reader's reload frees that duplicate with null glue. Null glue is right for a
+box and wrong for what is in it. The reload copies `name` and `tags` into the
+reader, which now owns them, while the cell's box — still alive, holding
+the same two pointers, released by its spill glue when the cell goes — owns
+them too. Two owners, one count. Erratum 82's argument was made under
+`Fields::Scalars`, when there was nothing in the box to count.
+
+The same copy happens on three more paths through a cell, and all four crashed
+the same way:
+
+- `Shared::get`;
+- the value `Shared::update` hands back, which the cell also keeps;
+- the argument a change function is given, under both `update` and `modify`,
+  which the cell still holds while the function consumes it.
+
+`Fiber::join` and `Fiber::outcome` had already met this, as a stored answer
+the fiber keeps so that joining twice works, and already counted the fields
+before the reload (`retain_spilled`). The four cell paths now read through
+`reload_kept`, which counts the fields and then frees the reader's reference
+to the box with the box's own spill glue rather than null.
+
+**The glue matters where the cell is a temporary.**
+`read(Shared::get(Shared::of(r)))` releases the cell before its value is read,
+so the reader's reference is the box's last, and a null-glue free there takes
+the box's hold on the fields with it uncounted: two objects leaked per read.
+Where the cell survives, the glue never runs.
+
+A record, a record inside a record, an enum held inline (a user type, and
+`Option<String>`), and a temporary cell are each tested; each test fails with
+its part of the fix removed.
+
+`Channel::receive` needed nothing: the queue gives its reference up, so the
+reader is the only owner.
+
+The general shape, again: **a box that is *kept* and a box that is *handed
+over* read back identically, and only one of them is a transfer.** Every
+reader of a word some structure keeps owes a retain of what the word holds —
+the box's own count covers the box, not its contents.

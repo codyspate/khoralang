@@ -379,6 +379,195 @@ pub fn main() -> () {
     assert_eq!(out, "begin;execute;commit;done\n");
 }
 
+// --- a record held inline -------------------------------------------------
+//
+// A record of pointers is laid out flat, so a cell holds it in a box it
+// crossed in. Every read copies the fields out while the cell keeps them, and
+// a read that does not count them makes two owners of one reference: the
+// second release aborts the process with "drop of an object whose refcount is
+// already zero". Each program ends by reading the live-object count, which
+// is 0 only if nothing was over- or under-counted.
+
+/// The shape the bug was found in: a record of a `String` and a `List`, read
+/// by a function that consumes it, twice, then replaced and read again.
+#[test]
+fn a_record_read_out_of_a_cell_is_the_readers_own() {
+    let out = run(
+        "shared_record_get",
+        r#"module main;
+import std::core::{List, Shared, print};
+
+extern fn khora_live_count() -> Int;
+
+type Rec = { name: String, tags: List<String> };
+
+fn mk(n: Int) -> Rec { { name: "n${n}", tags: List::Cons("t${n}", List::Nil) } }
+fn read(r: Rec) -> Int { String::byte_length(r.name) + List::length(r.tags) }
+
+fn work() -> Int {
+  let cell = Shared::of(mk(1));
+  let a = read(Shared::get(cell));
+  let b = read(Shared::get(cell));
+  Shared::set(cell, mk(22));
+  a + b + read(Shared::get(cell))
+}
+
+pub fn main() -> () {
+  let t = work();
+  let live = khora_live_count();
+  print("${t} ${live}")
+}
+"#,
+    );
+    assert_eq!(out, "10 0\n", "three reads, and the trailing 0 is the live-object count");
+}
+
+/// A cell that is a temporary is released before its value is read, so the
+/// reader's reference to the box is the last one and freeing it has to take
+/// the box's hold on the fields with it. A box freed with no glue there
+/// leaked both fields of every read: the program printed a live count of 6.
+#[test]
+fn a_record_read_out_of_a_temporary_cell_is_not_leaked() {
+    let out = run(
+        "shared_record_temporary",
+        r#"module main;
+import std::core::{List, Shared, print};
+
+extern fn khora_live_count() -> Int;
+
+type Rec = { name: String, tags: List<String> };
+
+fn mk(n: Int) -> Rec { { name: "n${n}", tags: List::Cons("t${n}", List::Nil) } }
+fn read(r: Rec) -> Int { String::byte_length(r.name) + List::length(r.tags) }
+
+fn work() -> Int {
+  let a = read(Shared::get(Shared::of(mk(1))));
+  let b = read(Shared::update(Shared::of(mk(2)), fn r => r));
+  a + b
+}
+
+pub fn main() -> () {
+  let t = work();
+  let live = khora_live_count();
+  print("${t} ${live}")
+}
+"#,
+    );
+    assert_eq!(out, "6 0\n", "the trailing 0 is the live-object count");
+}
+
+/// The change function is handed the cell's value while the cell keeps it,
+/// and `update` hands back what the cell now holds while the cell keeps that
+/// too: two more readers of the same kind as `get`.
+#[test]
+fn an_update_lends_a_record_and_hands_back_the_cells_own() {
+    let out = run(
+        "shared_record_update",
+        r#"module main;
+import std::core::{List, Shared, print};
+
+extern fn khora_live_count() -> Int;
+
+type Rec = { name: String, tags: List<String> };
+
+fn mk(n: Int) -> Rec { { name: "n${n}", tags: List::Cons("t${n}", List::Nil) } }
+fn read(r: Rec) -> Int { String::byte_length(r.name) + List::length(r.tags) }
+
+fn work() -> Int {
+  let cell = Shared::of(mk(1));
+  // The argument handed straight back: the cell's fields, once more.
+  Shared::update(cell, fn r => r);
+  // A new record built from the old one's fields.
+  let a = read(Shared::update(cell, fn r => { name: r.name + "x", tags: List::Cons("z", r.tags) }));
+  // The old state kept as the answer, and a new one installed.
+  let kept = Shared::modify(cell, fn r => { state: mk(4), result: r });
+  let n = Shared::modify(cell, fn r => { state: r, result: 5 });
+  a + read(kept) + n + read(Shared::get(cell))
+}
+
+pub fn main() -> () {
+  let t = work();
+  let live = khora_live_count();
+  print("${t} ${live}")
+}
+"#,
+    );
+    assert_eq!(out, "18 0\n", "the trailing 0 is the live-object count");
+}
+
+/// A record inside a record: the walk that counts the outer one has to reach
+/// the pointers of the inner one.
+#[test]
+fn a_nested_record_read_out_of_a_cell_is_the_readers_own() {
+    let out = run(
+        "shared_record_nested",
+        r#"module main;
+import std::core::{List, Shared, print};
+
+extern fn khora_live_count() -> Int;
+
+type Rec = { name: String, tags: List<String> };
+type Outer = { id: Int, inner: Rec, label: String };
+
+fn read(r: Rec) -> Int { String::byte_length(r.name) + List::length(r.tags) }
+
+fn work() -> Int {
+  let cell = Shared::of({ id: 1, inner: { name: "n${1}", tags: List::Cons("t", List::Nil) }, label: "l${1}" });
+  let o = Shared::get(cell);
+  let p = Shared::get(cell);
+  read(o.inner) + String::byte_length(p.label) + read(Shared::get(cell).inner)
+}
+
+pub fn main() -> () {
+  let t = work();
+  let live = khora_live_count();
+  print("${t} ${live}")
+}
+"#,
+    );
+    assert_eq!(out, "8 0\n", "the trailing 0 is the live-object count");
+}
+
+/// An enum held inline, whose payload is counted only on the case that
+/// carries one: a user type with a `String` and a `List`, and `Option<String>`.
+#[test]
+fn an_inline_enum_read_out_of_a_cell_is_the_readers_own() {
+    let out = run(
+        "shared_enum_inline",
+        r#"module main;
+import std::core::{List, Option, Shared, print};
+
+extern fn khora_live_count() -> Int;
+
+type Named = | Called(n: String, t: List<String>) | Blank;
+
+fn nsize(b: Named) -> Int {
+  match b { Named::Called(n, t) => String::byte_length(n) + List::length(t), Named::Blank => 0 }
+}
+fn osize(o: Option<String>) -> Int {
+  match o { Option::Some(s) => String::byte_length(s), Option::None => 0 }
+}
+
+fn work() -> Int {
+  let cell = Shared::of(Named::Called("n${1}", List::Cons("x", List::Nil)));
+  let a = nsize(Shared::get(cell));
+  let b = nsize(Shared::get(cell));
+  let o = Shared::of(Option::Some("s${1}"));
+  let c = osize(Shared::get(o));
+  let d = osize(Shared::get(o));
+  a + b + c + d
+}
+
+pub fn main() -> () {
+  let t = work();
+  let live = khora_live_count();
+  print("${t} ${live}")
+}
+"#,
+    );
+    assert_eq!(out, "10 0\n", "the trailing 0 is the live-object count");
+}
+
 /// **A method call reaches an intrinsic, the same as the namespaced call.**
 ///
 /// `Shared::get(cell)` worked and `cell.get()` did not: only the namespaced

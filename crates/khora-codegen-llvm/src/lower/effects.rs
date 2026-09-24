@@ -130,7 +130,14 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .expect("a read gives back a word")
                     .into_int_value();
                 self.release_unless_lent(*cell, handle, &cell_ty);
-                Some(self.be.word_to_value(word, &value_ty))
+                // **The cell keeps its copy, so the reader's is a second
+                // owner.** `khora_shared_get` duplicates the *box* an inline
+                // value is held in, and a plain reload copies the fields out
+                // and frees that duplicate with null glue -- which left the
+                // reader and the cell's box owning the same `String` with one
+                // count between them, and the second release aborted.
+                // Erratum 90.
+                Some(self.be.reload_kept(word, &value_ty))
             }
             ("set", [cell, value]) => {
                 let cell_ty = self.types.of(*cell).clone();
@@ -192,7 +199,10 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .build_load(self.be.ctx.i64_type(), slot, "updated")
                     .expect("reading the new value")
                     .into_int_value();
-                Some(self.be.word_to_value(word, &value_ty))
+                // The cell keeps what it now holds and hands back a
+                // duplicate of its box, as `get` does, so it is read the same
+                // way.
+                Some(self.be.reload_kept(word, &value_ty))
             }
             ("modify", [cell, change]) => {
                 let cell_ty = self.types.of(*cell).clone();

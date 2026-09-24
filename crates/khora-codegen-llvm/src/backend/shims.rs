@@ -104,7 +104,9 @@ impl<'ctx> Backend<'ctx> {
         let out = f.get_nth_param(3).expect("somewhere for the new value").into_pointer_value();
 
         let llvm_ty = self.llvm_type(value_ty)?;
-        let given = self.word_to_value(word, value_ty);
+        // The cell keeps its value while the change function consumes a copy:
+        // the same second owner `Shared::get` makes. Erratum 90.
+        let given = self.reload_kept(word, value_ty);
         let callee_type = self.plain_tagged_type(value_ty)?.fn_type(&[ptr.into(), llvm_ty.into()], false);
         let pair = self
             .builder
@@ -204,7 +206,8 @@ impl<'ctx> Backend<'ctx> {
         let out = f.get_nth_param(4).expect("somewhere for the answer").into_pointer_value();
 
         let state_ty = self.llvm_type(state)?;
-        let given = self.word_to_value(word, state);
+        // As in `change_shim`: the cell still holds the state it lends.
+        let given = self.reload_kept(word, state);
         let callee_type = self.plain_tagged_type(carrier)?.fn_type(&[ptr.into(), state_ty.into()], false);
         let pair = self
             .builder

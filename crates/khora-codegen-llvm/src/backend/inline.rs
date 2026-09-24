@@ -251,6 +251,84 @@ impl<'ctx> Backend<'ctx> {
         f.as_global_value().as_pointer_value()
     }
 
+    /// Counts what an inline value holds, given the box it crossed in.
+    ///
+    /// **For a reader that copies rather than takes.** A value held inline
+    /// travels as one word pointing at a box, and reading it back out copies
+    /// the fields into the reading frame -- pointers and all. Where the
+    /// structure it came from *gave up* its reference, as a channel's queue
+    /// does, that copy is the only owner and nothing is owed. Where the
+    /// structure keeps one, as a fiber's stored answer and a `Shared` cell do,
+    /// the copy is a second owner of a pointer counted once, and the second
+    /// release of it aborts the process.
+    ///
+    /// Walks the fields rather than the box: the box's own count is already
+    /// right, and it is what the value is *in* rather than what it is.
+    ///
+    /// **Before [`Self::word_to_value`], never after.** That frees the reader's
+    /// reference to the box, and where it was the last one the fields are
+    /// gone by the time a later walk would load them.
+    ///
+    /// Loads through the word unconditionally, so a caller that can be handed
+    /// a zero (a stopped fiber's answer) must branch around it first.
+    pub fn retain_spilled(&mut self, word: inkwell::values::IntValue<'ctx>, ty: &Type) {
+        let Some(walk) = self.inline_retain(ty) else { return };
+        let Some(shape) = self.unboxed_type(ty) else { return };
+        let ptr = self.ctx.ptr_type(AddressSpace::default());
+        let object = self
+            .builder
+            .build_int_to_ptr(word, ptr, "spilled.retain")
+            .expect("a word as a spilled value");
+        let slot = crate::runtime::field_pointer(self.ctx, &self.builder, object, 0);
+        let value = self
+            .builder
+            .build_load(shape, slot, "spilled.fields")
+            .expect("reading a spilled value to count it");
+        self.builder
+            .build_call(walk, &[value.into()], "")
+            .expect("counting what a spilled value holds");
+    }
+
+    /// A word some structure *keeps* read back as a value the reader owns.
+    ///
+    /// [`Self::word_to_value`] is for a hand-off: it frees the box with null
+    /// glue because the fields have moved. A cell's value has not moved -- the
+    /// cell still holds the box -- so the reader counts the fields first
+    /// ([`Self::retain_spilled`]) and then lets go of its reference to the box
+    /// with the box's own glue.
+    ///
+    /// **The glue, not null, because the reader's reference may be the last.**
+    /// A cell that is a temporary, `Shared::get(Shared::of(r))`, is released
+    /// before the value is read, and then this is the free that takes the box.
+    /// Null glue there leaked every field once per read: the box's hold on
+    /// them went with it, uncounted. Where the cell survives the glue does
+    /// not run, so the one routine is right in both cases.
+    pub fn reload_kept(
+        &mut self,
+        word: inkwell::values::IntValue<'ctx>,
+        ty: &Type,
+    ) -> BasicValueEnum<'ctx> {
+        let Some(shape) = self.unboxed_type(ty).filter(|_| self.unboxed.holds(ty)) else {
+            return self.word_to_value(word, ty);
+        };
+        self.retain_spilled(word, ty);
+        let ptr = self.ctx.ptr_type(AddressSpace::default());
+        let object = self
+            .builder
+            .build_int_to_ptr(word, ptr, "kept")
+            .expect("a word as the box a kept value is in");
+        let slot = crate::runtime::field_pointer(self.ctx, &self.builder, object, 0);
+        let value = self
+            .builder
+            .build_load(shape, slot, "kept.reload")
+            .expect("reading a kept value");
+        let glue = self.spill_glue(ty);
+        self.builder
+            .build_call(self.rt.drop, &[object.into(), glue.into()], "")
+            .expect("letting go of the box a kept value is in");
+        value
+    }
+
     /// `drop_fields` for the box an inline value crosses a word boundary in.
     ///
     /// The box holds one aggregate at slot zero rather than a field list, so

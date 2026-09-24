@@ -65,6 +65,14 @@ cancellation point in every function, whatever the function's `raises` row;
 
 ### Fixed
 
+- **A `Shared` cell holding a record, or an enum laid out flat, whose fields
+  include a `String`, `List` or other counted value ended the process after it
+  was read.** `Shared::get`, the value `Shared::update` hands back, and the
+  value a change function is given under `update` or `modify` each left the
+  reader and the cell sharing one reference, and the process aborted with
+  "drop of an object whose refcount is already zero" once both let go.
+  Setting `KHORA_UNBOXED=0` avoided it.
+
 - **On the scheduler backend, a finalizer that blocked kept the next fiber's
   finalizers from running.** A fiber whose cleanup was parked (a `receive`
   nobody answers, say) left the worker's release queue open, and every release
