@@ -250,6 +250,11 @@ pub(crate) struct Reactor {
     /// never open one.
     #[cfg(target_os = "linux")]
     scalable: std::sync::OnceLock<Option<crate::epoll::Epoll>>,
+    /// Tests only: never open `epoll`, so Linux runs the `poll` fallback that
+    /// macOS and Windows always run. Without it every test here exercised
+    /// only `epoll` on the one platform they could be run on.
+    #[cfg(all(test, target_os = "linux"))]
+    without_epoll: bool,
     /// Set while a `poll` is in flight, so a caller can tell whether the
     /// reactor has looked since it registered.
     polling: AtomicBool,
@@ -311,7 +316,20 @@ impl Reactor {
         let near = watch.deadline.is_some_and(|at| {
             at.saturating_duration_since(std::time::Instant::now()) < LONGEST_SLICE
         });
-        if near || !self.kernel_sees_registrations() {
+        // Tests only: `REACTOR_MUTANT=drop-fallback` skips the nudge the `poll`
+        // fallback needs, and `drop-near` the one a near deadline needs, so
+        // the two `..._during_a_poll_...` tests can be watched going red on
+        // Linux. Compiled out of every build but `cargo test`.
+        #[cfg(test)]
+        let mutant = std::env::var("REACTOR_MUTANT").unwrap_or_default();
+        #[cfg(test)]
+        let (near, kernel) = (
+            near && mutant != "drop-near",
+            self.kernel_sees_registrations() || mutant == "drop-fallback",
+        );
+        #[cfg(not(test))]
+        let kernel = self.kernel_sees_registrations();
+        if near || !kernel {
             self.nudge();
         }
     }
@@ -361,6 +379,10 @@ impl Reactor {
     fn scalable(&self) -> Option<&crate::epoll::Epoll> {
         self.scalable
             .get_or_init(|| {
+                #[cfg(test)]
+                if self.without_epoll {
+                    return None;
+                }
                 let epoll = crate::epoll::Epoll::open()?;
                 // The waker is in the set from the moment there is a set, and
                 // never leaves it.
@@ -728,6 +750,26 @@ mod tests {
     use std::io::{Read, Write};
     use std::time::Duration;
 
+    /// Every backend this platform can run: `epoll` and the `poll` fallback on
+    /// Linux, the fallback alone elsewhere.
+    ///
+    /// **The fallback is what macOS and Windows run**, and before this the
+    /// `..._during_a_poll_...` tests only ever saw `epoll` on the one platform
+    /// they could be run on, so a nudge missing from the fallback path could
+    /// not fail anywhere but CI.
+    fn every_backend() -> Vec<(&'static str, Reactor)> {
+        #[cfg(target_os = "linux")]
+        {
+            vec![
+                ("epoll", Reactor::default()),
+                ("poll", Reactor { without_epoll: true, ..Reactor::default() }),
+            ]
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            vec![("poll", Reactor::default())]
+        }
+    }
     /// **The backend is the scalable one, and a fallback would be silent.**
     /// Every other test here passes either way, because a reactor that quietly
     /// went back to `poll` gives the same answers a little slower. So this one
@@ -863,20 +905,32 @@ mod tests {
         assert_eq!(reactor.len(), 0, "a woken watch is taken off");
     }
 
-    /// **A registration made while a `poll` is already waiting is seen by that
-    /// poll, with no nudge.** `register` skips the nudge on `epoll` because
-    /// `epoll_ctl` reaches an `epoll_wait` in progress. If it did not, this
-    /// socket would be reported when the poll timed out rather than when its
-    /// data arrived, and every request that registered mid-poll would pay
-    /// the slice.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_registration_during_a_poll_is_seen_by_that_poll() {
-        let (client, mut server) = a_connected_pair();
-        server.write_all(b"x").expect("the write should land");
-        let reactor = std::sync::Arc::new(Reactor::default());
-        // Opens the backend and the waker, so the poll below is a real
-        // `epoll_wait` and not the first-use setup.
+    /// Registers a watch while `reactor` is inside a `poll(LONGEST_SLICE)`,
+    /// and answers what that poll and any after it reported, and how long
+    /// from just before the poll began until something was reported.
+    ///
+    /// **Retries a round in which the test itself was late, and only that.**
+    /// A lost wake shows as the poll in flight running its whole
+    /// `LONGEST_SLICE`, so the bound the callers assert (`LONGEST_SLICE` less
+    /// 15 ms) only tells a lost wake from a delivered one if the registration
+    /// lands well inside that slice. The two macOS CI failures, 43.6 ms and
+    /// 57.5 ms, are what a *delivered* 5 ms deadline gives when the
+    /// registration lands at about 38 ms and 52 ms -- and 43.6 ms is shorter
+    /// than any lost wake can be, since the poll in flight runs 50 ms. So the
+    /// test thread was late, not the reactor. A registration later than
+    /// `REGISTER_BY` says nothing about the reactor either way, so that round
+    /// is repeated rather than judged; every round that *is* judged has the
+    /// original bound. A runner that never registers in time fails, saying
+    /// so, and never passes.
+    fn register_during_a_poll(
+        name: &str,
+        reactor: Reactor,
+        watch: impl Fn() -> Watch,
+    ) -> (Vec<usize>, Duration) {
+        const REGISTER_BY: Duration = Duration::from_millis(10);
+        let reactor = std::sync::Arc::new(reactor);
+        // Opens the backend and the waker, so the poll below is a real wait
+        // and not the first-use setup.
         let (idle, _idle_peer) = a_connected_pair();
         reactor.register(Watch {
             socket: socket_of(&idle),
@@ -884,23 +938,59 @@ mod tests {
             fiber: 1,
             deadline: None,
         });
-        let polling = reactor.clone();
-        let began = std::time::Instant::now();
-        let waiter = std::thread::spawn(move || polling.poll(LONGEST_SLICE));
-        while !reactor.polling.load(Ordering::Acquire) {
-            std::thread::yield_now();
+        let mut late = Vec::new();
+        for _ in 0..50 {
+            let polling = reactor.clone();
+            let began = std::time::Instant::now();
+            let waiter = std::thread::spawn(move || polling.poll(LONGEST_SLICE));
+            while !reactor.polling.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            let watch = watch();
+            let registered = began.elapsed();
+            reactor.register(watch);
+            let mut woken = waiter.join().expect("the poll");
+            // A poll the nudge ended may return before a deadline has passed,
+            // and callers go round again; none of them may sleep past it.
+            while woken.is_empty() && began.elapsed() < LONGEST_SLICE * 2 {
+                woken = reactor.poll(LONGEST_SLICE);
+            }
+            let took = began.elapsed();
+            if registered <= REGISTER_BY {
+                return (woken, took);
+            }
+            // Leave the reactor as the round found it.
+            reactor.forget(watch.fiber);
+            late.push(registered);
         }
-        std::thread::sleep(Duration::from_millis(5));
-        reactor.register(Watch {
-            socket: socket_of(&client),
-            interest: Interest::Readable,
-            fiber: 2,
-            deadline: None,
-        });
-        let woken = waiter.join().expect("the poll");
-        let took = began.elapsed();
-        assert_eq!(woken, [2], "the poll in flight did not report the new socket");
-        assert!(took < LONGEST_SLICE - Duration::from_millis(15), "it waited out its slice: {took:?}");
+        panic!("{name}: the test never registered within {REGISTER_BY:?} of the poll, so it could not judge the reactor: {late:?}");
+    }
+
+    /// **A registration made while a `poll` is already waiting is seen by that
+    /// poll.** `register` skips the nudge on `epoll` because `epoll_ctl`
+    /// reaches an `epoll_wait` in progress, and must *not* skip it on the
+    /// `poll` fallback -- what macOS and Windows run -- whose set was copied
+    /// when the poll began. Either way round, a mistake here reports the
+    /// socket when the poll times out rather than when its data arrived, and
+    /// every request that registered mid-poll pays the slice.
+    #[test]
+    fn a_registration_during_a_poll_is_seen_by_that_poll() {
+        for (name, reactor) in every_backend() {
+            let (client, mut server) = a_connected_pair();
+            server.write_all(b"x").expect("the write should land");
+            let (woken, took) = register_during_a_poll(name, reactor, || Watch {
+                socket: socket_of(&client),
+                interest: Interest::Readable,
+                fiber: 2,
+                deadline: None,
+            });
+            assert_eq!(woken, [2], "{name}: the poll in flight did not report the new socket");
+            assert!(
+                took < LONGEST_SLICE - Duration::from_millis(15),
+                "{name}: it waited out its slice: {took:?}"
+            );
+        }
     }
 
     /// **A deadline registered during a poll ends that poll.** The kernel
@@ -908,37 +998,20 @@ mod tests {
     /// registration on `epoll` that still has to nudge.
     #[test]
     fn a_deadline_registered_during_a_poll_is_honoured_by_that_poll() {
-        let reactor = std::sync::Arc::new(Reactor::default());
-        let (idle, _idle_peer) = a_connected_pair();
-        reactor.register(Watch {
-            socket: socket_of(&idle),
-            interest: Interest::Readable,
-            fiber: 1,
-            deadline: None,
-        });
-        let (quiet, _quiet_peer) = a_connected_pair();
-        let polling = reactor.clone();
-        let began = std::time::Instant::now();
-        let waiter = std::thread::spawn(move || polling.poll(LONGEST_SLICE));
-        while !reactor.polling.load(Ordering::Acquire) {
-            std::thread::yield_now();
+        for (name, reactor) in every_backend() {
+            let (quiet, _quiet_peer) = a_connected_pair();
+            let (woken, took) = register_during_a_poll(name, reactor, || Watch {
+                socket: socket_of(&quiet),
+                interest: Interest::Readable,
+                fiber: 3,
+                deadline: Some(std::time::Instant::now() + Duration::from_millis(5)),
+            });
+            assert_eq!(woken, [3], "{name}: the deadline was not reported");
+            assert!(
+                took < LONGEST_SLICE - Duration::from_millis(15),
+                "{name}: it slept past the deadline: {took:?}"
+            );
         }
-        std::thread::sleep(Duration::from_millis(5));
-        reactor.register(Watch {
-            socket: socket_of(&quiet),
-            interest: Interest::Readable,
-            fiber: 3,
-            deadline: Some(std::time::Instant::now() + Duration::from_millis(5)),
-        });
-        let mut woken = waiter.join().expect("the poll");
-        // A poll the nudge ended may return before the deadline has passed,
-        // and callers go round again; none of them may sleep past it.
-        while woken.is_empty() && began.elapsed() < LONGEST_SLICE * 2 {
-            woken = reactor.poll(LONGEST_SLICE);
-        }
-        let took = began.elapsed();
-        assert_eq!(woken, [3], "the deadline was not reported");
-        assert!(took < LONGEST_SLICE - Duration::from_millis(15), "it slept past the deadline: {took:?}");
     }
 
     /// Only the socket that became ready. The whole point is that one busy

@@ -633,6 +633,20 @@ pub fn main() -> Int {
 /// come back to where it started both times. It is read before the `print`,
 /// because a count read inside `${..}` also sees the pieces of that string
 /// already built.
+///
+/// **Each fiber compares until it is cancelled, so the cancel is the only way
+/// out.** It used to compare once and cancel after `clock.sleep(20)`, which
+/// assumed the comparison was still running when the cancel arrived. On a
+/// macOS arm64 runner it often was not: the program printed `stopped 0` /
+/// `stopped 16` with a live delta of 0, so there was nothing to cancel and
+/// no leak -- a missing precondition, not a leak. (One comparison of these
+/// 32 MiB strings takes about 230 ms on a Linux x86_64 box; whether the
+/// runner compares faster or its sleep overruns (the reactor tests show
+/// macOS runner sleeps overrunning by 30 ms and more), the fiber finished
+/// first either way.) Looping removes the dependence on either: the
+/// comparison is nearly all the time the loop spends, so each cancel still
+/// lands inside `impl Ord for String`, and the loop's only exit is the
+/// cancel.
 #[test]
 fn a_string_comparison_cancelled_leaks_nothing() {
     const SOURCE: &str = "module main;
@@ -652,12 +666,20 @@ fn big(seed: String) -> String {
   s
 }
 
+fn until_cancelled(round: Int, a: String, b: String) -> Int {
+  let mut total = 0;
+  loop {
+    let h = \"held-${round}\";
+    total = total + String::byte_length(pick(h, a, b));
+  }
+}
+
 fn rounds(a: String, b: String, n: Int) -> Int with { clock: Clock } {
   let before = khora_live_count();
   let mut round = 0;
   let mut stopped = 0;
   while round < n {
-    let f = Fiber::spawn(fn () => { let h = \"held-${round}\"; String::byte_length(pick(h, a, b)) });
+    let f = Fiber::spawn(fn () => until_cancelled(round, a, b));
     clock.sleep(20);
     Fiber::cancel(f);
     Fiber::wait(f);
@@ -1152,12 +1174,21 @@ pub fn main() -> Int {
 /// their failure value; the fiber must stop there, not count an I/O error that
 /// did not happen and run its tail. A channel receive, which already did this,
 /// is the control.
+///
+/// **`start()` first, as every other program that listens does.** It is a
+/// no-op on Linux and macOS and `WSAStartup` on Windows, where without it
+/// `socket()` fails with `WSANOTINITIALISED`: this program printed
+/// `setup false false false` there, and every later call got an invalid
+/// handle. Nothing initialised Winsock before `listen_on`: Rust's `std::net`
+/// does it lazily, and the runtime's first use of it (`connect_to`, the
+/// reactor's waker) comes after. Every test that listens and passes on
+/// Windows calls `start()`; this was the only one that did not.
 #[test]
 fn a_socket_call_that_gave_up_is_not_taken_for_a_failure() {
     const SOURCE: &str = "module main;
 import std::core::{print, Fiber, Array, Shared, Channel};
 import std::clock::{Clock};
-import std::net::socket::{listen_on, accept_on, connect_to, receive, invalid_handle};
+import std::net::socket::{start, listen_on, accept_on, connect_to, receive, invalid_handle};
 
 fn reader(conn: Int, errors: Shared<Int>) -> () {
   let buf: Array<U8> = Array::new(64, 0);
@@ -1180,6 +1211,7 @@ fn chan(ch: Channel<Int>) -> () {
 pub fn main() -> Int {
   with { clock: Clock::real() } {
     let errors = Shared::of(0);
+    if start() {} else { print(\"no sockets\") };
     let server = listen_on(PORT);
     let client = connect_to(\"127.0.0.1\", PORT);
     let conn = accept_on(server);
