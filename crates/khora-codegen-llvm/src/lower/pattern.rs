@@ -204,8 +204,29 @@ impl<'ctx> Lower<'_, 'ctx> {
         // Not ours: release the frame and hand it to whoever is next. Nested
         // `catch`es chain here, since `leave_with` looks at the stack again
         // and this runs with the inner frame already popped.
+        //
+        // **Except in a frame with nowhere to hand it**: no row, no tag and
+        // no outer `catch`. That is a frame `can_stop` pruned, so nothing in
+        // it produces a cancellation; the checker has made this `catch` total
+        // over every error the operand raises; and `assert` is only allowed
+        // in a test, which has a row. No tag reaches this block, and sealing
+        // it is what lets `leave_with` refuse a frame with nowhere to go
+        // rather than emit an answer nobody computed.
+        //
+        // **Sealed with a trap, not `unreachable`.** If `can_stop` ever
+        // under-counts a frame, a tag does arrive here, and `unreachable`
+        // would make that undefined behaviour the optimizer is free to run
+        // straight through. The trap names the broken rule and stops the
+        // program instead. It costs nothing, because the path never runs.
         self.at(onward);
-        self.leave_with(which, word);
+        if self.catches.is_empty() && !self.raises && !self.tagged {
+            self.trap(
+                "a cancellation or an error reached a `catch` in a function the compiler \
+                 decided could not be cancelled; this is a compiler bug",
+            );
+        } else {
+            self.leave_with(which, word);
+        }
 
         for ((owner, mine), (_, block)) in caught.iter().zip(&cases) {
             self.at(*block);

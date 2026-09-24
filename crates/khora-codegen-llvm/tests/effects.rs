@@ -750,6 +750,55 @@ fn main() -> Int {{ print(attempt(5)); print(attempt(0 - 5)); 0 }}
     assert_eq!(ran.code, Some(0));
 }
 
+/// The same `catch`, in the shapes the one above does not reach: a frame
+/// with a boxed answer, a `_` arm, and a `catch` inside a `catch`. None of
+/// these functions has a loop, a call or a `raises` row, so none carries a
+/// cancellation tag and none has anywhere to hand a tag on.
+///
+/// **What this pins: such a `catch` compiles, and its fall-through is never
+/// taken.** Its fall-through once led to a path that, for a cancellation,
+/// handed back a zero nobody computed -- or, for a boxed answer, ended the
+/// process. No cancellation can exist in a frame with no cancellation point,
+/// so the compiler seals that path, and refuses to build a frame that would
+/// need it.
+#[test]
+fn a_catch_in_a_frame_with_no_cancellation_point_needs_no_way_out() {
+    let ran = run(
+        "catch_direct_pruned",
+        &format!(
+            "{TWO_ERRORS}
+pub type Label = | Fine(n: Int) | Refused(n: Int);
+fn label(n: Int) -> Label {{
+  (if n < 0 {{ raise DbError::Refused }} else {{ Label::Fine(n) }}) catch {{
+    _ => Label::Refused(0 - 7),
+  }}
+}}
+fn nested(n: Int) -> Int {{
+  ((if n < 0 {{ raise DbError::Timeout }} else {{ if n == 0 {{ raise ModelError::TooLong }} else {{ n }} }}) catch {{
+    DbError::Timeout => 0 - 1,
+    DbError::Refused => 0 - 3,
+  }}) catch {{
+    ModelError::RateLimited(ms) => ms,
+    ModelError::TooLong => 0 - 2,
+  }}
+}}
+fn show(l: Label) -> Int {{ match l {{ Label::Fine(n) => n, Label::Refused(n) => n }} }}
+fn main() -> Int {{
+  print(show(label(1)));
+  print(show(label(0 - 1)));
+  print(nested(4));
+  print(nested(0 - 4));
+  print(nested(0));
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stderr, "");
+    assert_eq!(ran.stdout, "1\n-7\n4\n-1\n-2\n");
+    assert_eq!(ran.code, Some(0));
+}
+
 // --- composition -----------------------------------------------------------
 
 const LAYERED: &str = "module t;

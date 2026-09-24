@@ -145,25 +145,25 @@ slows at the boundary where it makes work instead of filling a queue. See
 off-by-one to subtract when the limit is a real resource.
 
 **Two of those three questions are answered today.** Every child is waited for
-and a failure is always reported as `ChildFailed`. The first failure is
-*intended* to cancel its siblings and does so unreliably — reliably when the
-failing child was adopted first, and usually not otherwise — so work that is
-expensive, holds a resource, or has an effect outside the process should check
-a `Shared` flag itself rather than expect the group to collapse promptly. The
-group does collapse and every child is waited for; it is the *promptness* that
-is not yet something to build on. [Known
-limitations](/docs/limitations/#a-childs-failure-usually-cancels-no-siblings)
+and a failure is always reported as `ChildFailed`. The first failure cancels
+the siblings still running when the nursery sees it, and it sees failures in
+adoption order: a failing child adopted first stops all its siblings within
+milliseconds, one adopted last is seen only after the others have finished and
+stops none. So work that is expensive, holds a resource, or has an effect
+outside the process should check a `Shared` flag itself rather than expect the
+group to collapse promptly. [Known
+limitations](/docs/limitations/#a-childs-failure-is-seen-late-unless-it-was-adopted-early)
 has the measurements. A Go reader coming off `errgroup`, where the first error
-does cancel the group's context, should not assume the same here.
+does cancel the group's context at once, should not assume the same here.
 
-Cancellation arrives without a `ctx.Done()` channel to select on, because a
-cancellation travels out on the same tagged return a failure does. It is
-observed at a `!` and at a **loop back-edge**, which is what makes an ordinary
-polling worker stoppable with nothing in it that looks like a cancellation
-check:
+Cancellation arrives without a `ctx.Done()` channel to select on, and without
+a `raises` row either: a cancelled fiber stops at its next **loop back-edge**,
+blocking call, or call to a function that has one, in any function. That is
+what makes an ordinary polling worker stoppable with nothing in it that looks
+like a cancellation check:
 
 ```khora
-fn reaper() -> () with { clock: Clock } raises Stop {
+fn reaper() -> () with { clock: Clock } {
   loop {
     clock.sleep(1000);
     sweep();

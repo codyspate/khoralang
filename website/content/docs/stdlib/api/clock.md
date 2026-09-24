@@ -114,17 +114,13 @@ The capability *is* the seam, which is the argument `Random::seeded`
 already makes about the other unrepeatable input.
 
 Zero or less returns at once. A caller who meant "let somebody else run"
-wants a safepoint, and every loop back-edge already has one — and a
-back-edge in a function that can raise is a cancellation point too, so a
-`loop { sleep(short) }` worker stops when it is asked to.
+wants a safepoint, and every loop back-edge already has one — and every
+back-edge is a cancellation point too, so a `loop { sleep(short) }`
+worker stops when it is asked to.
 
-**One long sleep is not a cancellation point.** Under the default thread
-backend a fiber inside `sleep` is not woken by a cancellation and
-shutdown waits the sleep out; under the scheduler backend it is woken,
-but the wake returns from `sleep` normally rather than raising, so the
-statement after it runs before the fiber stops. Chunk a long wait into a
-loop of short ones when shutdown latency matters — that is what puts a
-cancellation point inside it.
+**A sleep is a cancellation point.** A fiber inside `sleep` is woken by a
+cancellation on either fiber backend and stops there; the statement after
+the sleep does not run.
 
 ## Methods
 

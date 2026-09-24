@@ -465,10 +465,12 @@ fn fibers() -> &'static Scheduler {
 /// caller hands over a reference of its own.
 ///
 /// **Exactly one of `call` and `plain` is given.** `call` is the trampoline
-/// for a thunk that can fail, which hands back a tag; `plain` is the one for a
-/// thunk that cannot, which hands back its answer as a word. A thunk with no
-/// error row has no channel to say it was cancelled on, and so cannot be
-/// stopped part-way -- which is the same fact the two trampolines encode.
+/// generated code always passes: it hands back a tag, so a thunk that was
+/// stopped part-way reports `CANCELLED_WHICH` whatever its `raises` row, and a
+/// joiner can tell "it was stopped" from "it answered nought". `plain` hands
+/// back a bare word and so has no way to report a stop; only this crate's
+/// own tests pass it, for thunks written in Rust that are never cancelled
+/// part-way.
 ///
 /// `boxed` and `value_glue` describe the *answer*, so that a fiber nobody joins
 /// does not leak it and a fiber joined twice does not free it twice.
@@ -506,8 +508,8 @@ pub unsafe extern "C" fn khora_fiber_spawn(
     let done = Arc::new(Done::default());
     let closes = done.clone();
     let child = fiber.clone();
-    // A second reference, because `enter` takes the first and the answer is
-    // decided after the thunk has returned. See `absorbed` below.
+    // A second reference, because `enter` takes the first and the fiber is
+    // retired after the thunk has returned. `Fiber::retire`.
     let stopping = fiber.clone();
     let legacy = Arc::new(Legacy {
         outcome: Mutex::new(None),
@@ -553,47 +555,6 @@ pub unsafe extern "C" fn khora_fiber_spawn(
             // runs every back-edge in the process pays for this fiber's
             // cancellation. `Fiber::retire`.
             stopping.retire();
-            // **A cancellation the thunk absorbed is the fiber's answer**, and
-            // the word it handed back is not.
-            //
-            // An infallible thunk has no channel to say it was stopped on, so
-            // a total `catch` inside one releases its frame, calls
-            // `khora_cancel_absorb` and returns a zero -- see that function
-            // for why a zero and not something else. The zero arrives here as
-            // an ordinary `which == 0`, which would make the handle report a
-            // *value*: `join` would hand back nought, and a fiber that gave up
-            // half way would be indistinguishable from one that finished. So
-            // the record is read here, where the thunk has returned and
-            // nothing else has looked at the answer yet.
-            //
-            // The word is released first where it is a pointer. A thunk whose
-            // inner frame absorbed and whose outer frames carried on may hand
-            // back a perfectly real object; replacing it without letting go of
-            // it would leak one per cancelled fiber, which on a server is the
-            // shape of leak with no allocation site to blame.
-            //
-            // **Except for an infallible thunk with a boxed answer**, which is
-            // the one shape where this would do harm. `Fiber<A, {}>::join`
-            // emits no branch on `which` -- there is no row for it to unwind
-            // on, and the code generator says so in `fiber_intrinsic` -- so it
-            // reads the word whatever the tag is. Storing a cancellation there
-            // would hand a joiner a null typed as `A`. So that fiber keeps the
-            // answer it produced: the handle cannot report a cancellation
-            // because the *type* has nowhere to report one, which is the same
-            // rule as everywhere else here rather than a new exception to it.
-            let announce = !(plain.is_some() && boxed);
-            let outcome = if stopping.has_absorbed() && announce {
-                if boxed && outcome.which == 0 && outcome.payload != 0 {
-                    // SAFETY (the enclosing block's): the caller promised
-                    // `boxed` says truthfully whether a successful answer is a
-                    // Khora pointer, and this fiber owns the reference the
-                    // thunk just returned.
-                    khora_drop(outcome.payload as *mut u8, value_glue);
-                }
-                Tagged { which: CANCELLED_WHICH, payload: 0 }
-            } else {
-                outcome
-            };
             // **Stored before the closure is released**, because releasing it
             // may run arbitrary drop routines and a joiner woken in the middle
             // of that must find the answer already there.
@@ -869,15 +830,9 @@ pub unsafe extern "C" fn khora_fiber_finished(fiber: *mut u8) -> bool {
 /// the entry point ends the program at 130. This answers without waiting and
 /// without unwinding anything.
 ///
-/// **Read from the fiber, not from the stored answer**, and that is the whole
-/// of why it is truthful. The `announce` computation in [`khora_fiber_spawn`]
-/// deliberately does not store `CANCELLED_WHICH` for an infallible thunk with
-/// a boxed answer, because `Fiber<A, {}>::join` reads the word whatever the tag
-/// is and a stored cancellation would hand a joiner a null typed as `A`. The
-/// `absorbed` flag lives on the shared `Fiber` rather than in the `Tagged`, so
-/// asking it reaches past that gate and **changes nothing about what `join`
-/// reads**. The stored tag is consulted as well, for the fiber that never
-/// reached its root -- a thread that unwound out of the thunk entirely.
+/// **Read from the stored answer**, whose tag is `CANCELLED_WHICH` exactly
+/// when the thunk was stopped part-way: every thunk hands back a tag,
+/// whatever its `raises` row, so a stop and a finish cannot be confused.
 ///
 /// Racy in the way [`khora_fiber_finished`] is racy and for the same reason: a
 /// `false` is a fact about the instant it was asked, and a fiber cancelled a
@@ -896,13 +851,9 @@ pub unsafe extern "C" fn khora_fiber_cancelled(fiber: *mut u8) -> bool {
         // for a fiber nobody can name any more would be inventing one.
         return false;
     };
-    if state.fiber.has_absorbed() {
-        return true;
-    }
     match state.legacy.outcome.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
         Some(outcome) => outcome.which == CANCELLED_WHICH,
-        // Not finished, and nothing has absorbed anything. Still running, as
-        // far as this can be asked.
+        // Not finished. Still running, as far as this can be asked.
         None => false,
     }
 }
@@ -930,23 +881,8 @@ pub unsafe extern "C" fn khora_fiber_cancelled(fiber: *mut u8) -> bool {
 ///   at the frame it reaches.
 /// - anything else — the child's error, to re-raise, as `join` reports it.
 ///
-/// # Why the stopped answer is read off the fiber rather than the stored tag
-///
-/// [`khora_fiber_spawn`]'s `announce` gate deliberately does not store
-/// `CANCELLED_WHICH` for an infallible thunk with a boxed answer: `Fiber<A,
-/// {}>::join` emits no branch on the tag, so it reads the word whatever the
-/// tag says, and a stored cancellation would hand a joiner a null typed as
-/// `A`. Reading the `absorbed` flag on the shared `Fiber` reaches past that
-/// gate — the same route [`khora_fiber_cancelled`] takes, and for the same
-/// reason — so **this changes nothing about what `join` reads**, and the two
-/// questions cannot disagree about one fiber.
-///
-/// The cost is stated rather than hidden: a fiber that absorbed a cancellation
-/// *and* went on to produce a value is reported stopped, and the value it
-/// produced is not handed back. It is a value with a fabricated zero somewhere
-/// inside it — `khora_cancel_absorb` returns one where the absorbing frame had
-/// no channel — so the alternative is handing back an answer no part of the
-/// program computed, wearing the type of one that was.
+/// [`khora_fiber_cancelled`] decides the stopped case, so the two questions
+/// cannot disagree about one fiber.
 ///
 /// # Safety
 ///
@@ -977,12 +913,7 @@ pub unsafe extern "C" fn khora_fiber_outcome(fiber: *mut u8, out: *mut u64) -> u
     //
     // **Reordering this to read the stored outcome first leaks.** `observe`
     // dups the payload where it points at an object, and the stopped path
-    // returns without writing `out`, so that reference has no owner. A review
-    // argued the other order was needed to keep a child's failure from being
-    // reported as a stop; the shape it described -- an inner frame absorbing a
-    // cancellation, then the body raising -- was measured on this tree, with a
-    // payload-carrying error, and the failure already arrives by name with its
-    // payload intact. There is nothing here to trade a leak for.
+    // returns without writing `out`, so that reference has no owner.
     //
     // SAFETY: the caller guarantees a live handle, and this is the same
     // handle.

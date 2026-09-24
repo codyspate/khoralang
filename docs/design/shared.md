@@ -81,11 +81,13 @@ certification at the `handler for` literal that every handler goes through.
 ### `change` cannot fail, and that is the point
 
 `update` runs the change function **once, under the lock**. It has no error row,
-and that is what turns lock safety from a discipline into a fact: a function
-with no error row has no channel to be interrupted on — the same reason
-`khora_fiber_spawn` takes a null trampoline for one — so nothing can leave the
-critical section except by returning, and there is no path on which the lock is
-still held. Work that can fail belongs outside: compute it, then `set` the
+and the runtime **pins** the fiber while it runs: no cancellation point inside a
+change function acts, not even for an aborted fiber, and a blocking call inside
+one gives up with its "gave up" answer instead of waiting. So nothing leaves
+the critical section except by returning — and a `join`/`wait` inside one that
+comes back stopped leaves on its tag, with the shim leaving the cell as it was
+(`crates/khora-rt/src/cancel.rs`, `Pinned`). There is no path on which the lock
+is still held. Work that can fail belongs outside: compute it, then `set` the
 answer.
 
 `update` gives back what it left in the cell, so a caller can see what it did

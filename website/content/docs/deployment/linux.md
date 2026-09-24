@@ -142,5 +142,5 @@ is survivable — commit before acknowledging, and let the next start recover:
   until `connect(2)` gives up.
 
 [Cancellation-safe
-resources](/docs/cookbook/cancellation-safe-resources/) is the pattern, and it
-is now the pattern for a deploy as well as for a nursery.
+resources](/docs/cookbook/cancellation-safe-resources/) is the pattern, for a
+deploy as much as for a nursery.

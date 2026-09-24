@@ -599,15 +599,14 @@ impl<'ctx> Lower<'_, 'ctx> {
         self.at(carry_on);
     }
 
-    /// A cancellation point on the path where a blocking call gave up.
+    /// A cancellation point on the path where a blocking channel operation
+    /// gave up.
     ///
-    /// `Channel::send` and `Channel::receive` are the only two places in
-    /// `std::core` where a fiber can sit indefinitely, so they carry a row and
-    /// are cancellation points. But only when they come back **empty-handed**:
-    /// a receive that got a value hands it over and lets the caller's next `!`
-    /// see the flag, because unwinding while holding it would drop it on the
-    /// floor -- which is the failure this whole change exists to prevent, not
-    /// a new place to commit it.
+    /// `Channel::send` and `Channel::receive` are cancellation points, but
+    /// only when they come back **empty-handed**: a receive that got a value
+    /// hands it over, and the fiber stops at its next cancellation point
+    /// instead. Unwinding while holding the value would drop it on the floor
+    /// -- a message taken off the channel and seen by nobody.
     ///
     /// The runtime keeps the other half of that bargain: it checks the
     /// cancellation flag only once it has established there is nothing to
@@ -676,109 +675,41 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let answer = self.plain_answer_zero();
                 self.return_plain_tagged(which, answer);
             }
-            // Nowhere left: no enclosing `catch` and no `raises` clause.
+            // **Nowhere left: a frame `can_stop` pruned, with no `catch`
+            // around this point.** Refused rather than emitted, because
+            // nothing correct can be emitted here: the frame has no tag to
+            // hand a cancellation on with and no row to hand an error on with.
             //
-            // For an *error* the checker guarantees this is unreachable — a
-            // total `catch` still emits its fall-through, and that is the only
-            // way to get here. For a *cancellation* it is reachable, because a
-            // cancellation is not in any row and so nothing the checker looked
-            // at ruled it out.
+            // Nothing sound calls this. A pruned frame contains no
+            // cancellation point and calls nothing tagged, so no
+            // `CANCELLED_WHICH` exists in it; the checker has ruled out an
+            // unhandled error in a function with no row; and `assert`, the
+            // one source of `FAILED_WHICH`, is only allowed in a test, which
+            // has a row. A `catch`'s fall-through was the one site that
+            // emitted this path anyway, and [`Self::lower_catch`] seals it
+            // itself in such a frame.
             //
-            // **This frame absorbs it, where it can.** It is the only frame
-            // that can: nothing between here and the fiber's root has a
-            // channel either, or this one would have found it. So the frame is
-            // released — the regions among it, so their finalizers run, which
-            // is what a cancellation is *for* — and then it returns, the way
-            // the `raises` arm below returns a tag.
-            //
-            // What it returns is a zero, and that is the whole of the rule and
-            // its limit. A `()` promises nothing and a scalar zero is a value;
-            // a *pointer* zero is a null, and an infallible caller is entitled
-            // to read through what it is handed. So a pointer return goes to
-            // `khora_cancel_stop`, which says so and stops, and everything
-            // else goes to `khora_cancel_absorb`, which records that this
-            // fiber gave up and lets the `ret` below happen.
-            //
-            // On the program's own computation neither returns: both end it at
-            // 130, which is the outcome `docs/design/effect-runtime.md` §6
-            // describes and `reference/traps.md` tabulates. The `ret` after
-            // the call is dead there and load-bearing on a fiber.
+            // A call that arrives here is `can_stop` and the lowering
+            // disagreeing about the frame. It used to become a call that
+            // returned a zero nobody computed, or ended the process; a
+            // compiler panic is the direction that cannot ship. A frame that
+            // has already failed to lower is exempt: the error it reported is
+            // the one to show.
             None if !self.raises => {
-                let cancelled = self.be.ctx.i32_type().const_int(runtime::CANCELLED_WHICH, false);
-                let is_cancel = self
-                    .be
-                    .builder
-                    .build_int_compare(IntPredicate::EQ, which, cancelled, "cancelled")
-                    .expect("testing for a cancellation");
-                let stop = self.block("cancel.nowhere");
-                let sealed = self.block("error.impossible");
-                self.be
-                    .builder
-                    .build_conditional_branch(is_cancel, stop, sealed)
-                    .expect("branching on the tag");
-
-                self.at(stop);
-                match self.zero_answer() {
-                    Some(zero) => {
-                        self.unwind_to(0);
-                        let absorb = self.be.rt.cancel_absorb;
-                        self.be.builder.build_call(absorb, &[], "").expect("absorbing");
-                        match zero {
-                            Some(value) => {
-                                self.be
-                                    .builder
-                                    .build_return(Some(&value))
-                                    .expect("returning a zero for a cancelled frame");
-                            }
-                            None => {
-                                self.be
-                                    .builder
-                                    .build_return(None)
-                                    .expect("returning unit for a cancelled frame");
-                            }
-                        }
-                    }
-                    None => {
-                        let cancel_stop = self.be.rt.cancel_stop;
-                        self.be.builder.build_call(cancel_stop, &[], "").expect("stopping");
-                        self.be.builder.build_unreachable().expect("sealing after a stop");
-                    }
-                }
-
-                self.at(sealed);
-                self.be.builder.build_unreachable().expect("sealing an unhandled error");
+                assert!(
+                    self.aborted,
+                    "`{}`: a frame with no `raises` row and no cancellation tag has nowhere to \
+                     send an error or a cancellation; `can_stop` pruned a frame the lowering \
+                     leaves from",
+                    self.owner
+                );
+                self.be.builder.build_unreachable().expect("sealing a frame that already failed");
             }
             None => {
                 self.unwind_to(0);
                 let error = self.be.word_to_value(word, &Type::Str);
                 self.return_tagged(which, error);
             }
-        }
-    }
-
-    /// The zero this function could return in place of an answer it will never
-    /// compute, if there is one.
-    ///
-    /// `None` means there is not, which is the pointer case: every Khora
-    /// pointer is a live reference-counted object and a null is not one, so a
-    /// frame with a pointer return type has no value to hand back and the
-    /// cancellation it is holding cannot be absorbed here. `Some(None)` is a
-    /// `void` return — `()`, which promises nothing and so is never a
-    /// fabrication. `Some(Some(zero))` is a scalar, where the zero is a value
-    /// of the type even though it is not the one the caller was owed.
-    ///
-    /// Read off the emitted function rather than off [`Self::ret`], because
-    /// the calling convention is what this has to agree with: `()` is a word
-    /// everywhere in the type system and `void` at the ABI, and a lifted
-    /// lambda's return type is its own rather than its enclosing function's.
-    fn zero_answer(&self) -> Option<Option<BasicValueEnum<'ctx>>> {
-        match self.function.get_type().get_return_type() {
-            None => Some(None),
-            Some(BasicTypeEnum::IntType(int)) => Some(Some(int.const_zero().into())),
-            Some(BasicTypeEnum::FloatType(float)) => Some(Some(float.const_zero().into())),
-            // A pointer, or an aggregate nothing here builds: no zero that is
-            // a value.
-            Some(_) => None,
         }
     }
 

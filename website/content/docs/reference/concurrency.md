@@ -90,7 +90,7 @@ The answer is fixed at `()` and the row is not, and each half has its own reason
 
 The answer is fixed because a nursery has nothing to do with a result it cannot hand back: it holds children as bare handles and waits for them. A fiber whose result matters is one whose handle you keep and `join`.
 
-The row stays because a cancellation travels out on the same tagged return an error does. A child whose row is empty has no channel to be stopped on, and a nursery whose children cannot be stopped is not a nursery.
+The row stays for failures: it is how a child that can fail is adopted, and how its failure reaches the nursery. It has nothing to do with stopping a child. A cancellation leaves every function on a return of its own, whatever its row, so a child whose row is empty is stopped exactly like one whose row is not.
 
 `'er` is quantified per call rather than per handler, so children raising unrelated failures are adopted by one nursery. A body that starts children declares the requirement and adopts each handle; the child's body may raise, and no `catch` is needed at the adoption site:
 
@@ -137,11 +137,12 @@ service actually runs at. The coroutine's advantage is *density*: a suspended
 fiber costs roughly 4 KB against a thread's 33 KB, which matters when tens of
 thousands are waiting rather than working.
 
-**The two are distinguishable under cancellation**, so the choice is not yet an
-implementation detail: a fiber inside `clock.sleep` is woken by a cancellation
-under the scheduler and runs to completion under threads. [Known
+**The two answer cancellation alike** — a fiber in `clock.sleep`, on a channel
+or on another fiber is woken on either — but they schedule differently, so a
+program that depends on an order the language does not promise can tell them
+apart. [Known
 limitations](/docs/limitations/#the-two-fiber-backends-are-distinguishable) has
-the measurements.
+the detail.
 
 A thread gets the operating system's stack — two megabytes on Linux, one on
 Windows — and a coroutine gets one megabyte with a guard page, so deep
@@ -152,7 +153,7 @@ fault rather than corruption.
 
 ### A child that failed
 
-A nursery is a unit: the block asked for these fibers together, so one failing means the group's answer is not coming. The first failure is intended to cancel the siblings; every child is still waited for, and the nursery raises
+A nursery is a unit: the block asked for these fibers together, so one failing means the group's answer is not coming. The first failure cancels the siblings still running when the nursery sees it; every child is still waited for, and the nursery raises
 
 ```khora
 pub type ChildFailed = { children: Int };
@@ -160,7 +161,7 @@ pub type ChildFailed = { children: Int };
 
 A count rather than the child's own error, because `adopt` binds the row per adoption — two children may fail with two unrelated types and there is no one value to hand back. A child the nursery *cancelled* is not counted: that is what a nursery does to its children, not something that went wrong.
 
-**The cancelling half does not work yet.** A nursery reaps handles oldest-first, so a child's failure is invisible until every child adopted before it has finished — and by then there is usually nothing left to cancel. Measured with twelve 400 ms children, a failure in the last-adopted one cancelled no siblings in 25 runs out of 25. What still holds is the other half: every child is waited for and the failure is reported, never lost. Do not rely on a sibling's failure to stop work that is expensive, holds a resource, or has an effect outside the process — have that work check a `Shared` flag itself. [Known limitations](/docs/limitations/) has the numbers.
+**A failure is seen in adoption order.** A nursery reaps handles oldest-first, so a child's failure is not seen until every child adopted before it has finished, and it cancels only the siblings still running at that moment. A failing child adopted first cancels all its siblings within milliseconds; one adopted in the middle of twelve cancelled between two and six of the eleven in measurement; one adopted last is seen after every sibling has finished and cancels none. Every child is waited for and the failure is always reported. When a sibling's failure has to stop work that is expensive, holds a resource, or has an effect outside the process, adopt the child that can fail first, or have that work check a `Shared` flag itself. [Known limitations](/docs/limitations/#a-childs-failure-is-seen-late-unless-it-was-adopted-early) has the numbers.
 
 The body may be a named function or a lambda. A lambda resolves its capabilities where it is written, and as the argument to `nursery` that is inside the row `nursery` installs, so `nursery(fan_out)` and `nursery(fn () => fan_out())` mean the same thing.
 

@@ -60,12 +60,11 @@ Application code says `with { db: Db }`; `transaction` says the same thing.
 The concrete handler belongs at a composition boundary, not as a `Db`
 parameter threaded through domain functions.
 
-All three ways out are covered, and the third took two pieces rather than
-one: the rollback is registered with a region before the body runs, and the
-body carries a `raises` row so that a cancellation has a channel to reach
-it on. `transaction`'s own comment has the argument. What the runtime owes
-in return is that a finalizer running *because* of a cancellation is not
-itself cancelled — `khora-rt`'s `cancel::Shielded`.
+All three ways out are covered: the rollback is registered with a region
+before the body runs, and a region's finalizers run on every path out,
+a cancellation's included. `transaction`'s own comment has the argument.
+What the runtime owes in return is that a finalizer running *because* of a
+cancellation is not itself cancelled — `khora-rt`'s `cancel::Shielded`.
 
 ## Types
 

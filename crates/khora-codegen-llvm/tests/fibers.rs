@@ -349,7 +349,7 @@ fn main() -> Int {{ work(); print(khora_live_count()); 0 }}
     assert_eq!(ran.code, Some(0));
 }
 
-// --- a fiber root that absorbs a cancellation ------------------------------
+// --- a cancelled fiber's root ----------------------------------------------
 
 const CANCELLABLE: &str = "module t;
 fn print(value: Int);
@@ -727,32 +727,26 @@ fn main() -> Int {{
     assert_eq!(ran.code, Some(0));
 }
 
-// --- a total `catch` in a frame with no channel ----------------------------
+// --- a total `catch` in a function with no `raises` row --------------------
 //
-// These four are the shape the runtime's `khora_cancel_stop` comment used to
-// blame on `Router::listen`. It is not a serving bug and has no socket in it:
-// it is a *total* `catch` -- one naming every case in the row, or a `_` arm --
-// inside a function whose own `raises` row is empty. That function receives a
-// cancellation it cannot handle, because no arm can name one, and cannot pass
-// on, because it has no tagged return to pass it on with.
+// A *total* `catch` -- one naming every case in the row, or a `_` arm --
+// inside a function whose own `raises` row is empty. No arm can name a
+// cancellation, so the `catch` passes it on, and the function leaves on its
+// cancellation tag. The failure these guard against is the `catch` swallowing
+// the cancellation, or the process ending because the frame had nowhere to
+// send it.
 //
-// `std::net`'s `Router::serve_connection` is written exactly that way, which is
-// the only reason a server was where this showed up.
+// `std::net`'s `Router::serve_connection` is written exactly that way.
 
-/// The frame absorbs it, and the fiber stops. Nothing after the `catch` runs,
-/// every finalizer between the mark and here does, and the process lives.
-///
-/// **This aborted with status 134 before**, printing a paragraph about
-/// draining a listener at a program with no listener in it.
+/// The fiber stops. Nothing after the `catch` runs, every finalizer between
+/// the cancellation point and here does, and the process lives.
 #[test]
 fn a_fiber_that_catches_every_case_is_not_a_hole() {
     let ran = run(
         "fiber_total_catch",
         &format!(
             "{CANCELLABLE}
-// The cancellation point is the `!` *inside* here: `worker` cannot raise, so
-// nothing at its own call sites checks the flag. This is the rule working --
-// a cancellation point is a `!` in a function that can raise.
+// The cancellation point is the `!` inside `step`, reached through `catch`.
 fn step() -> Int raises Oops {{ ok(1)! }}
 
 fn worker() -> () {{

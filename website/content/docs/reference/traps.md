@@ -128,7 +128,7 @@ they are told apart from outside by the status:
 | the value | `main` returned an `Int`, truncated to what the platform's status holds. `()` is 0. |
 | 1 | An error reached the entry point and nothing handled it. `main` has nowhere to hand one, so it ends here. |
 | 130 | A **cancellation** reached the entry point. 128 + `SIGINT`, which is what a shell already means by "interrupted". |
-| 134 | A trap, everything above — and the runtime's own fatal errors, such as a cancellation reaching a spawned fiber's root. 128 + `SIGABRT`, and 134 on Windows too rather than a native abort code. |
+| 134 | A trap, everything above — and the runtime's own fatal errors. 128 + `SIGABRT`, and 134 on Windows too rather than a native abort code. |
 | the platform's | The stack ran out: `SIGSEGV` on Unix, which a shell reports as 139; `STATUS_STACK_OVERFLOW` on Windows, which a POSIX shell reports as 127. |
 
 **130 is the one that surprises people**, because a cancellation is not a
@@ -138,7 +138,9 @@ unwinds the joiner along with it, and if the joiner is `main` the program ends
 there. `join_all` joins, so it ends the same way. `Fiber::wait` waits without
 asking for an answer and does not do this — reach for it when what you needed
 was "not before that finishes" rather than the value, and `Fiber::detach` when
-you are no longer waiting at all. The program says all of this on the way out.
+you are no longer waiting at all. A cancellation that reaches a spawned
+fiber's root stops that fiber and nothing else; only one that reaches `main`
+ends the program.
 
 **The runtime's fatal errors exit 134 rather than aborting.** `abort()` leaves
 the status to the platform, and on Windows a POSIX shell reports that as 127 --

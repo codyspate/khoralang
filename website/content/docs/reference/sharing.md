@@ -213,19 +213,17 @@ Use `SharedFn` when a callback must be stored inside another shareable value, su
 A fiber handle is shareable, so one fiber can hold another's and act on it:
 
 ```khora
-pub type Stopped = | Stopped;
-
-pub fn main() -> () raises Stopped {
+pub fn main() -> () {
   let worker = Fiber::spawn(fn () => slowly());
   // The handle crosses, so a second fiber can stop the first.
   let watcher = Fiber::spawn(fn () => Fiber::cancel(worker));
-  Fiber::wait(watcher)!;
-  Fiber::wait(worker)!;
+  Fiber::wait(watcher);
+  Fiber::wait(worker);
   print("both settled")
 }
 ```
 
-The `raises` row on `main` is what lets it wait: the fiber doing the waiting can itself be cancelled while it is parked, and a cancellation needs a failure channel to leave through, even when the fibers being waited on cannot fail.
+`wait` needs no `!` here because neither child can fail. The fiber doing the waiting can itself be cancelled while it is parked, and it stops there whatever its own `raises` row.
 
 **This is what a supervisor is made of**, and what a deadline would be made of: there is no `timeout` or `race` in `std` (see [Concurrency](/docs/reference/concurrency/)), so anything of that shape is written from a handle one fiber holds and another cancels.
 

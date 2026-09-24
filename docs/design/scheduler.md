@@ -55,10 +55,9 @@ invite tuning the benchmark. What is in question is how many fibers can be
 This is the largest addition to what `fibers.md` decided, and the one most
 likely to be got wrong by treating the two as the same thing.
 
-Today a cancellation is observed at `!` in something that can raise, and a
-function with no error row has no channel to be interrupted on. That is a good
-language rule and it stays. But it means this fiber has no cancellation points
-at all:
+A cancellation point asks whether this fiber should stop; every function that
+can reach one has one, whatever its row (`effect-runtime.md` §6). The question
+this section answers is different, and a fiber like this one raises it:
 
 ```khora
 fn crunch() -> () {
@@ -66,18 +65,19 @@ fn crunch() -> () {
 }
 ```
 
-On a thread that is the operating system's problem. On M:N it is ours: that
-fiber owns a worker until the process ends.
+On a thread, sharing the CPU with it is the operating system's problem. On M:N
+it is ours: that fiber owns a worker until it reaches a point that yields.
 
-So the runtime needs two ideas that today are one:
+So the runtime has two ideas:
 
-- a **cancellation point** asks *should this fiber stop?* — it exists only
-  where a failure can propagate, and it unwinds through ordinary Khora cleanup;
+- a **cancellation point** asks *should this fiber stop?* — it unwinds through
+  ordinary Khora cleanup;
 - a **safepoint** asks *should somebody else run?* — it exists everywhere, it
   cannot fail, and it does nothing but switch stacks and come back.
 
 A safepoint is far cheaper than a cancellation point precisely because nothing
-can unwind through it. No error row, no finalizers, no tag.
+can unwind through it. No finalizers, no tag. A loop back-edge is both, behind
+one load of the poll word.
 
 **Where safepoints go.** A loop back-edge is the one that is required: it is
 the only place a Khora program can spin without doing anything else. Beyond
@@ -556,8 +556,8 @@ below are how it should be argued with.
 **A blocking call is not a cancellation point.** A fiber cancelled inside
 `fread` keeps waiting. The pool cannot interrupt foreign code, and returning
 early would mean handing the fiber back while another thread still holds its
-buffer. The cancellation is observed at the next `!`, which is the rule
-safepoints already follow — §1.
+buffer. The fiber stops at its next cancellation point after the call returns
+— §1.
 
 **The caller is `std::fs`.** Its `open`, `read`, `write` and `close` used to be
 foreign calls straight to C stdio, which was right while a fiber was a thread

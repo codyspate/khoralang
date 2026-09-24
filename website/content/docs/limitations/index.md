@@ -16,7 +16,9 @@ language rule, a supported feature, and unfinished work.
 - [A bounded nursery runs `limit + 1` children](#what-a-nursery-actually-does),
   and a limit of zero means no limit at all — so **a bound of exactly one
   cannot be written**, which is the value a "one at a time" flag wants most.
-- [A child's failure usually does not cancel its siblings](#a-childs-failure-usually-cancels-no-siblings).
+- [A child's failure is seen late unless it was adopted early](#a-childs-failure-is-seen-late-unless-it-was-adopted-early):
+  a failing child cancels its siblings only once every child adopted before it
+  has finished.
 - [A cancelled fiber waiting on a child stops only when the child
   does](#a-cancelled-fiber-waiting-on-a-child-stops-when-the-child-does), if
   it holds the child's last handle.
@@ -101,9 +103,9 @@ See [Editor setup](/docs/getting-started/editor/) for the language-server comman
 
 Almost every error is found by `khora check`, which runs per file and names the
 file and line it is in. A small number are found only while generating code —
-a `Fiber::wait` in a generic function used where it has no channel, an integer
-pattern too large for an `Int`, a compiler intrinsic such as `Fiber::wait`
-taken as a value (`let w = Fiber::wait;`). Those errors carry a line and column
+an integer pattern too large for an `Int`, a compiler intrinsic such as
+`Fiber::wait` taken as a value (`let w = Fiber::wait;`). Those errors carry a
+line and column
 but not a file, and `khora build` renders them against the first source file
 it read, which may be a standard-library file or another file of your package.
 
@@ -462,25 +464,26 @@ It is still a trap, because `Channel::bounded` does the opposite — it clamps a
 capacity below one *up* to one. A limit computed from configuration that comes
 out zero removes the bound rather than failing.
 
-### A child's failure usually cancels no siblings
+### A child's failure is seen late unless it was adopted early
 
 **Do not rely on a sibling's failure to stop work that is expensive, holds a
-resource, or has an effect outside the process.**
+resource, or has an effect outside the process**, unless the child that can
+fail is adopted before the siblings it should stop.
 
-A nursery reaps handles oldest-first, so a failure is invisible until every
-child adopted before it has finished — and by then there may be nothing left to
-cancel. Twelve children of 400 ms, one raising after 10 ms, 25 runs a side:
+A nursery reaps handles oldest-first, so a failure is not seen until every
+child adopted before it has finished; the siblings still running at that point
+are cancelled. Twelve children busy for 400 ms, one raising after 10 ms, on
+both fiber backends:
 
-| the doomed child was adopted | siblings cancelled, of 11 | runs where **nothing** was cancelled |
+| the failing child was adopted | siblings cancelled, of 11 | `ChildFailed` arrives |
 | --- | --- | --- |
-| first | 11, after 2-8 ms | 0 of 25 |
-| in the middle (6th of 12) | 0 (median; 0-5) | 13 of 25 |
-| last | 0 | 25 of 25 |
+| first | 11, in every run | about 10 ms after the start |
+| in the middle (6th of 12) | 2 to 6 | after the earlier five finish |
+| last | 0, in every run | about 405 ms after the start |
 
-`KHORA_FIBERS=scheduler` is the same shape. At the last position the group does
-not collapse in any useful sense: every sibling runs to completion and the
-nursery returns `ChildFailed` about 420 ms after a failure that happened at
-11 ms.
+With the children in `clock.sleep(400)` instead of busy the shape is the same,
+and a middle-position failure occasionally cancels none. At the last position
+every sibling runs to completion before the failure is reported.
 
 ### New children start after a sibling has failed
 

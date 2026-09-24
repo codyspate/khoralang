@@ -366,7 +366,7 @@ fn main() -> Int {{
 
 /// A cancellation is not an error the program declared, so nothing here
 /// declares one. It travels on the same tagged return an error does, under a
-/// `which` no error type can be assigned, and only the entry point absorbs it.
+/// `which` no error type can be assigned, and no `catch` sees it.
 const CANCEL: &str = "module t;
 fn print(value: Int);
 extern fn khora_cancel();

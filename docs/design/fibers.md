@@ -20,8 +20,9 @@ Five things already settled bear on the answer.
   signature rather than in a wrapper type that propagates through every
   caller.
 - **Fibers across cores** (A5), which is also phase 5's exit criterion.
-- **Cancellation is already built** (§6): a flag, checked at `!`, turning into
-  a tagged return that unwinds by the path errors already take.
+- **Cancellation is already built** (`effect-runtime.md` §6): a flag, checked
+  at every cancellation point, turning into a tagged return that unwinds by
+  the path errors already take.
 - **Reference counts are atomic** (D10), so a value crossing to another fiber
   is safe today.
 
@@ -241,19 +242,16 @@ generalisation nobody has needed yet.
 
 ## Per-fiber, not per-process
 
-Cancellation is a process-wide flag today, which was the right thing to build
-before there was anything to be per-fiber *of*. With fibers it becomes one flag
-per fiber, and three things follow:
+Cancellation is one flag per fiber, and three things follow:
 
-- `khora_cancelled` reads the running fiber's flag. Generated code already goes
-  through that call and never touches the flag directly, so this is a change
-  inside the runtime.
+- `khora_cancelled` reads the running fiber's flag. Generated code goes
+  through that call (behind the poll word) and never touches the flag
+  directly.
 - Cancelling a nursery cancels its children, transitively. That is the whole
   point of the tree.
 - A cancellation that reaches a fiber's root stops *that fiber*, not the
-  process. The frame with no error channel described in §6 stops being the
-  end of the world: a fiber root can carry a cancellation, which is what
-  `khora_cancel_stop` is standing in for until one exists.
+  process. Every thunk returns a tag, whatever its row, so the runtime always
+  knows whether the fiber was stopped or answered.
 
 ## What phase 5.3 builds, in order
 
@@ -267,24 +265,21 @@ per fiber, and three things follow:
    waits; put it in a block and the block waits. Nobody has to write `join`,
    and there is no way to write a fiber that escapes.
 
-2. **A fiber root that absorbs a cancellation** — *built*.
+2. **A fiber root that carries a cancellation** — *built*.
 
-   The spawned thunk is `() -> A raises 'er`. A thunk that can fail returns the
-   tagged pair, so the runtime reads how the fiber ended — done, cancelled, or
-   failed — and a cancellation stops *that fiber* rather than the program.
+   The spawned thunk is `() -> A raises 'er`, and it is always called through
+   a trampoline that returns a tag: the fallible pair, or the cancellation
+   tag an infallible function that can reach a cancellation point carries. So
+   the runtime reads how the fiber ended — done, cancelled, or failed — and a
+   cancellation stops *that fiber* rather than the program, whatever the
+   thunk's row.
 
-   Which makes the rule about cancellation points read the same from a fiber's
-   side as from anywhere else: **a fiber with no error row has no channel to be
-   interrupted on**, and runs to its end. That is not a limitation to explain
-   away, it is the same sentence as "a cancellation point is a `!` in something
-   that can raise".
-
-   **The rule now has a second clause: a loop back-edge, in something that can
-   raise.** Which functions have a cancellation point is unchanged -- the error
-   row is still the channel -- but `loop { sleep; work }` is how every periodic
-   job is written and it had no `!` in it, so a fiber shaped that way could not
-   be stopped and a nursery that had to unwind past one waited for ever. The
-   back-edge already emitted a safepoint; it emits the cancellation check too.
+   **Every function has cancellation points, whatever its row** (§6 of
+   `effect-runtime.md` has the list): a `!`, a loop back-edge, a call to a
+   function that can reach one, the entry of a recursive function, and every
+   blocking operation. `loop { sleep; work }` is how every periodic job is
+   written and it has no `!` and often no row; its back-edge and its sleep are
+   what let a nursery unwind past it.
 
    A child's error nobody is waiting for is reported on stderr rather than
    dropped in silence, which is what a panicking thread does everywhere else.
@@ -316,12 +311,12 @@ per fiber, and three things follow:
    The row is a different matter, and getting there took two wrong answers.
    `Fiber<(), {}>` was the first, and it reads better than anything else here:
    an empty row says "settle your failure before you hand this over", which
-   turns a line on stderr into a compile error. It is wrong. **A cancellation
-   travels out on the same tagged return an error does** — §"What phase 5.3
-   builds" (2) — so a fiber whose row is empty has no channel to be stopped on.
-   Requiring an adopted child to have settled its failures makes every adopted
-   child uncancellable, and a nursery that cannot cancel its children is not a
-   nursery. Three tests said so within a minute of the row being enforced.
+   turns a line on stderr into a compile error. It was wrong at the time
+   because a cancellation then travelled only on the error row, so a fiber
+   with an empty row could not be stopped. That reason is gone — every
+   function now carries its own cancellation tag — and whether `adopt` still
+   needs `'er` at all is now a question about failures only, left to the
+   breaking-change batch.
 
    The second wrong answer was a `Task`: the same runtime fiber under a handle
    with no parameters, keeping the row where cancellation reads it and dropping
@@ -378,13 +373,10 @@ per fiber, and three things follow:
 7. **`khora test` across cores**, the exit criterion's second half.
 
 **Phase 11 is designed in `docs/design/scheduler.md`**, which decides the parts
-this note only gestured at — and adds one it did not have. Cancellation is
-observed at `!`, so a function with no error row has no cancellation channel;
-that is the right *language* rule and it means an infallible loop has no way to
-be preempted. On threads the operating system solves that. On a scheduler it
-does not, so the runtime needs a **safepoint** that is separate from a
-cancellation point: it asks whether somebody else should run, it cannot fail,
-and it unwinds nothing.
+this note only gestured at — and adds one it did not have: a **safepoint**
+that is separate from a cancellation point. It asks whether somebody else
+should run, it cannot fail, and it unwinds nothing. A loop back-edge is both,
+behind one load of the poll word.
 
 Work stealing, stack growth and the coroutine switch itself are **Phase 11**,
 and are not on the path to phase 5's exit criterion. That entry in

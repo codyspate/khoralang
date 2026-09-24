@@ -1,17 +1,14 @@
-//! Which functions can reach a cancellation point. **Report-only for now.**
+//! Which functions can reach a cancellation point.
 //!
 //! **What this prevents: paying for a cancellation tag in functions that can
-//! never be cancelled part-way.** Strategy T puts a tag on a function's return
-//! so a cancellation has a way out of it, and branches on the tag after every
-//! call. A function that cannot reach a cancellation point has nothing to
-//! carry, so its calls can keep their plain return and pay nothing. This works
-//! out which functions those are, once, for the whole program.
-//!
-//! **Nothing reads the answer yet.** `KHORA_CANCEL_T_REPORT` prints a summary
-//! and codegen does not change. The tagged calling convention that would
-//! consume it is a later change, and it has to land in one commit, because a
-//! caller and a callee that disagree about a return type is a miscompile. This
-//! module can be tested on its own before that.
+//! never be cancelled part-way.** Every function that can reach a
+//! cancellation point returns a tag, so a cancellation has a way out of it,
+//! and every call to one branches on the tag. A function that cannot reach
+//! one has nothing to carry, so its calls keep their plain return and pay
+//! nothing. This works out which functions those are, once, for the whole
+//! program, before anything is declared: the answer is each function's
+//! machine type, and a caller and a callee that disagree about a return type
+//! is a miscompile.
 //!
 //! # The rule
 //!
@@ -55,7 +52,6 @@
 //! could change. The runtime's exports are a closed set, named by their
 //! `khora_` prefix, so the rule needs no list of which ones block: it tags a
 //! few that do not (`khora_decimal_*`, say), which costs a branch each.
-//! [`CanStop::only_foreign`] counts the functions tagged only because of it.
 //!
 //! # Intrinsics
 //!
@@ -106,33 +102,6 @@ pub(crate) enum Local {
     Intrinsic,
 }
 
-impl Local {
-    /// Every reason, for the report.
-    ///
-    /// **A new variant fails to compile in [`Local::COUNT`]'s match** until an
-    /// arm names it. That is where whoever adds it is made to look here; the
-    /// match cannot also check the number or the list, which is what
-    /// `every_reason_is_in_the_report` does.
-    const ALL: [Local; Local::COUNT] = [
-        Local::BackEdge,
-        Local::Try,
-        Local::ClosureCall,
-        Local::Blocking,
-        Local::HandsAClosure,
-        Local::Foreign,
-        Local::Intrinsic,
-    ];
-    const COUNT: usize = match Local::Foreign {
-        Local::BackEdge
-        | Local::Try
-        | Local::ClosureCall
-        | Local::Blocking
-        | Local::HandsAClosure
-        | Local::Foreign
-        | Local::Intrinsic => 7,
-    };
-}
-
 /// The whole program's answer, by symbol.
 #[derive(Default, Debug)]
 pub(crate) struct CanStop {
@@ -140,13 +109,8 @@ pub(crate) struct CanStop {
     pub stops: HashSet<String>,
     /// Functions in a call cycle, which poll when entered.
     pub cyclic: HashSet<String>,
-    /// Functions in [`Self::stops`] only because the [`Local::Foreign`] rule
-    /// is counted.
-    pub only_foreign: HashSet<String>,
     /// Each function's own reasons, before its callees are counted.
     pub local: HashMap<String, HashSet<Local>>,
-    /// How many functions were considered.
-    pub considered: usize,
 }
 
 impl CanStop {
@@ -175,26 +139,6 @@ impl CanStop {
             })
             .map(|(symbol, _)| symbol.clone())
             .collect()
-    }
-
-    /// What `KHORA_CANCEL_T_REPORT` prints: the totals, then how many functions
-    /// each rule fires in, before callees are counted.
-    pub(crate) fn summary(&self) -> String {
-        let reasons = Local::ALL
-            .map(|reason| {
-                let count = self.local.values().filter(|r| r.contains(&reason)).count();
-                format!("{reason:?} {count}")
-            })
-            .join(", ");
-        format!(
-            "cancel-T: {} functions, {} can stop ({} in a call cycle, {} only through a \
-             foreign call), {} keep a plain return\ncancel-T: by own reason: {reasons}",
-            self.considered,
-            self.stops.len(),
-            self.cyclic.len(),
-            self.only_foreign.len(),
-            self.considered - self.stops.len()
-        )
     }
 }
 
@@ -454,40 +398,33 @@ pub(crate) fn decide<'a>(
 ) -> CanStop {
     let mut edges: HashMap<String, Vec<String>> = HashMap::new();
     let mut local: HashMap<String, HashSet<Local>> = HashMap::new();
-    let mut considered = 0;
     for (symbol, body, types) in instances {
-        considered += 1;
         let (reasons, out) = scan(&symbol, body, types, mono, &is_defined, &is_extern);
         local.insert(symbol.clone(), reasons);
         edges.insert(symbol, out);
     }
 
     let cyclic = in_a_cycle(&edges);
-    let closure = |counts: &dyn Fn(&HashSet<Local>) -> bool| {
-        let mut stops: HashSet<String> = local
-            .iter()
-            .filter(|(_, reasons)| counts(reasons))
-            .map(|(symbol, _)| symbol.clone())
-            .collect();
-        stops.extend(cyclic.iter().cloned());
-        // Least fixed point: a caller of something that stops, stops.
-        loop {
-            let before = stops.len();
-            for (symbol, callees) in &edges {
-                if !stops.contains(symbol) && callees.iter().any(|c| stops.contains(c)) {
-                    stops.insert(symbol.clone());
-                }
-            }
-            if stops.len() == before {
-                return stops;
+    let mut stops: HashSet<String> = local
+        .iter()
+        .filter(|(_, reasons)| !reasons.is_empty())
+        .map(|(symbol, _)| symbol.clone())
+        .collect();
+    stops.extend(cyclic.iter().cloned());
+    // Least fixed point: a caller of something that stops, stops.
+    loop {
+        let before = stops.len();
+        for (symbol, callees) in &edges {
+            if !stops.contains(symbol) && callees.iter().any(|c| stops.contains(c)) {
+                stops.insert(symbol.clone());
             }
         }
-    };
-    let stops = closure(&|reasons| !reasons.is_empty());
-    let without_foreign = closure(&|reasons| reasons.iter().any(|r| *r != Local::Foreign));
-    let only_foreign = stops.difference(&without_foreign).cloned().collect();
+        if stops.len() == before {
+            break;
+        }
+    }
 
-    CanStop { stops, cyclic, only_foreign, local, considered }
+    CanStop { stops, cyclic, local }
 }
 
 /// Every symbol that can reach itself: a member of a strongly connected
@@ -725,8 +662,7 @@ fn main() -> Int { let b = same(true); let s = wait(true); same(1) + wait(2) }
 
     /// **The hole the prototype had.** A blocking `std` call is a foreign call,
     /// so a function whose only cancellation point is one must still carry the
-    /// tag. It is counted as foreign, and reported as tagged only for that
-    /// reason.
+    /// tag.
     #[test]
     fn a_call_to_a_foreign_function_stops() {
         let answer = analysed(
@@ -738,7 +674,6 @@ fn main() -> Int { nap(); 0 }
         );
         assert!(answer.local[&symbol(&answer, "nap")].contains(&Local::Foreign));
         assert!(stops(&answer, "nap"));
-        assert!(answer.only_foreign.contains(&symbol(&answer, "nap")));
         assert!(stops(&answer, "main"));
         assert!(
             !answer.local.keys().any(|s| s.ends_with("khora_sleep")),
@@ -814,18 +749,6 @@ fn main() -> Int { let c = { n: 3 }; look(c) + empty(c) }
         let mut found: Vec<String> = in_a_cycle(&edges).into_iter().collect();
         found.sort();
         assert_eq!(found, ["b", "c", "e"]);
-    }
-
-    /// The report's list has every reason once, so none is left out of the
-    /// counts it prints.
-    #[test]
-    fn every_reason_is_in_the_report() {
-        let listed: HashSet<Local> = Local::ALL.into_iter().collect();
-        assert_eq!(listed.len(), Local::ALL.len(), "a reason is listed twice");
-        let summary = CanStop::default().summary();
-        for reason in Local::ALL {
-            assert!(summary.contains(&format!("{reason:?} 0")), "{reason:?} missing: {summary}");
-        }
     }
 
     const SHARED_FN: &str = "pub type SharedFn<A, B, 'er>;

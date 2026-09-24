@@ -81,11 +81,7 @@ extern fn khora_live_count() -> Int;
 /// it; the region does, on a path `fold_lines` does not mention.
 ///
 /// **The cancellation travels out on the row**, as it does in every test in
-/// `db.rs`, rather than being caught. A `catch` does not absorb one — it is a
-/// tagged return and not a raise — and a cancellation that reaches a fiber's
-/// *root* is a case the runtime declines with
-/// `a cancellation reached a fiber's root, which cannot absorb one yet`.
-/// Reaching the root is a different missing feature from the one under test.
+/// `db.rs`, rather than being caught: no `catch` sees a cancellation.
 #[test]
 fn a_cancelled_fiber_closes_the_file_it_was_reading() {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fs_cancel_closes");

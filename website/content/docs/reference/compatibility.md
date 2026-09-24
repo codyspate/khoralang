@@ -43,15 +43,16 @@ A new lint can make `khora check` report something it did not report before. Tha
 
 ### The fiber backend is observable
 
-The two backends do not agree about cancellation. Under
-`KHORA_FIBERS=scheduler` a fiber inside `clock.sleep` is woken by a
-cancellation and its sleep returns early; under the default thread backend the
-sleep runs to completion. On the same source that is a 350x difference in wall
-clock.
+The two backends answer cancellation alike: a fiber in `clock.sleep`, on a
+channel, on a socket or on another fiber is woken by a cancellation under
+either one. They schedule differently — which fiber runs when, and how many run
+at once — so a program that depends on an order the language does not promise
+can see which backend it has.
 
 So the backend is not an implementation detail, and **the default cannot change
-without a breaking-change note.** [Known limitations](/docs/limitations/) has
-the measurements.
+without a breaking-change note.** [Known
+limitations](/docs/limitations/#the-two-fiber-backends-are-distinguishable) has
+the detail.
 
 ## Editions
 

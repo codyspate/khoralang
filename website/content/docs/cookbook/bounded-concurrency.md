@@ -44,7 +44,7 @@ pub fn main() raises ChildFailed {
 
 `launch_jobs` requires a `Nursery` capability because it adopts children. `bounded_nursery(64, launch_jobs)!` supplies that capability and does not return until all adopted children have finished.
 
-The `!` is there because a nursery raises [`ChildFailed`](/docs/reference/concurrency/#a-child-that-failed) when a child fails: every child is waited for, the failure is reported, and the block's answer does not arrive. It does not stop the siblings — see [Failure and cancellation](#failure-and-cancellation) below before you rely on it.
+The `!` is there because a nursery raises [`ChildFailed`](/docs/reference/concurrency/#a-child-that-failed) when a child fails: every child is waited for, the failure is reported, and the block's answer does not arrive. Whether it stops the siblings depends on where the failing child was adopted — see [Failure and cancellation](#failure-and-cancellation) below before you rely on it.
 
 The important line is not the `Fiber::spawn`; it is the adoption:
 
@@ -74,7 +74,7 @@ that was computed from configuration before you pass it.
 nursery.adopt(Fiber::spawn(fn () => handle(job)!));
 ```
 
-That row is what leaves the child cancellable: a cancellation travels out on the same tagged return an error does, so a child with an empty row would have no channel to be stopped on. The cost is that a child's failure is reported at runtime rather than caught at compile time, and that is the price of children that can be stopped.
+The row is for failures only. Every child can be cancelled whatever its row; the row is what lets a child that can fail be adopted, with its failure reported to the nursery at runtime as `ChildFailed` rather than caught at compile time.
 
 Keep a job's answer by holding its handle instead of adopting it. `Fiber::join` gives back what the body computed, and re-raises what it raised.
 
@@ -88,11 +88,11 @@ For a known, already-bounded handful of tasks, use an ordinary `nursery` instead
 
 The nursery owns its adopted children. On normal return it waits for them. If the nursery body leaves through failure or cancellation, children that are still running are cancelled and joined before the nursery is released.
 
-**A child's own failure does not stop its siblings.** A nursery reaps handles
-oldest-first, so a failure is invisible until every child adopted before it has
-finished — and by then there is usually nothing left to cancel. With twelve
-400 ms children, a failure in the last-adopted one cancelled no siblings in 25
-runs out of 25.
+**A child's own failure stops only the siblings still running when the
+nursery sees it.** A nursery reaps handles oldest-first, so a failure is not
+seen until every child adopted before it has finished. A failing child adopted
+first cancels all its siblings within milliseconds; one adopted last is seen
+after they have all finished, and cancels none.
 
 A bounded nursery also goes on admitting and starting new children after a
 failure has been recorded, so a limit of 64 over 1,000 jobs does not mean the

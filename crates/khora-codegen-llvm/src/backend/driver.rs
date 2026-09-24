@@ -234,9 +234,6 @@ pub(super) fn build(
     // place it is decided. Not part of the build cache's key separately: it is
     // a function of the program, which the key already is.
     let can_stop = super::can_stop::analyse(db, files, mono);
-    if std::env::var_os("KHORA_CANCEL_T_REPORT").is_some() {
-        eprintln!("{}", can_stop.summary());
-    }
     backend.untagged = can_stop.keeps_a_plain_return();
     backend.lambdas_poll_in = can_stop.calls_through_values();
     backend.poll_at_entry = can_stop.cyclic.union(&backend.lambdas_poll_in).cloned().collect();

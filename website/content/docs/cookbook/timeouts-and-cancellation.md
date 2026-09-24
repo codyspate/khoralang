@@ -106,34 +106,27 @@ if expired {
 The poll interval is the cost: 25 ms means up to 25 ms of latency added to a
 fast answer, against a deadline that would otherwise cost its whole length.
 
-## The work must have somewhere to be interrupted
+## Any work can be interrupted
 
-**A cancellation travels on a `raises` row.** It is observed at a `!`, at a loop
-back-edge in a function that can fail, or inside a wait. Work that does none of
-those is not interrupted — not because cancellation is unreliable, but because
-there is nowhere in it to look.
-
-This is the one that costs people an afternoon, because the failure is a hang
-with no message. The worker above is a named function with `raises Timeout`.
-Written as an inline lambda instead:
+A cancelled fiber stops at its next cancellation point: a loop going round, a
+call to a function that has one, or a blocking operation such as a sleep, a
+channel receive or a wait. Every function has them, whatever its `raises` row,
+so a lambda with no row is stopped as promptly as a named function:
 
 ```khora
-// Cannot be cancelled: the loop has no failure channel.
 nursery.adopt(Fiber::spawn(fn () => {
   let mut n = 0;
   loop { n = n + 1; }
 }));
 ```
 
-`Fiber::cancel` returns, and `Fiber::wait` never does. The fiber was asked to
-stop and had no cancellation point at which to notice.
+Cancelling the fiber holding that nursery stops this loop at its next trip.
 
-A lambda cannot declare a `with` row or a `raises` row of its own, so the fix is
-the shape used above: write the work as a named function that declares
-`raises`, and let the lambda call it with `!`.
-
-If the work genuinely cannot fail and must still be stoppable, give it a flag to
-read — `Shared<Bool>` — and check it in the loop.
+What is not interrupted is a single call into foreign (C) code or a
+file-system call already in progress, and a blocking connect or a wait for a
+child process: the fiber finishes the call and stops at the next cancellation
+point after it. A connect to an unroutable host is the common case, which is
+why the polling recipe above detaches as well as cancels.
 
 ## Cancelling a nursery cancels its children
 

@@ -10,6 +10,133 @@ answer that is now right, then the rest. A bug that produced a *silently wrong*
 answer is listed under Breaking as well as Fixed, because code written around
 it will behave differently now.
 
+## Unreleased
+
+Cancellation has its own channel. A cancelled fiber stops at its next
+cancellation point in every function, whatever the function's `raises` row;
+`raises` means only "can fail with these errors", and `!` marks only that.
+
+### Breaking
+
+- **Every function can be cancelled, whatever its `raises` row.** A loop, a
+  recursive call, a blocking operation or a call to a function that reaches
+  one is a cancellation point in a function with no row, as it always was in
+  one with a row. A fiber that used to run to its end after a cancel because
+  it had no row now stops, runs its finalizers, and is reported stopped:
+  `Fiber::cancelled` answers `true` and `Fiber::outcome` answers `Stopped`
+  for such a child, where they used to answer `false` and `Answered` with
+  whatever it had computed so far. A
+  `main` with no row that reaches a cancellation point is stopped by the
+  first `SIGTERM` or `SIGINT`, runs its finalizers and exits 130, where it
+  used to die at once with none.
+
+- **`Channel::send` and `Channel::receive` lose `raises 'er`.** A closed
+  channel is already the `Option` or `Bool` they return, and the row existed
+  only to give a cancellation somewhere to go. The `!` on a call is no longer
+  needed — `Channel::receive(jobs)` — and a leftover one is accepted.
+
+- **`Fiber::wait` needs no `raises` row.** `wait` is accepted in any
+  function; it and `join` need a `!` only when the child's own row is
+  non-empty. The refusal of a `wait` in a function with no `raises` clause,
+  and the separate refusal of a generic one at build time, are gone.
+
+- **A fiber cancelled before it starts does not run.** Its body checks for a
+  cancellation as it is entered.
+
+- **`Fiber::join` on a stopped child stops the joiner**, whatever the child's
+  row. A child with no row used to hand its joiner an answer it never
+  computed. Use `Fiber::outcome` to get an answer if there is one without
+  being stopped, or `Fiber::wait` to wait without asking for one.
+
+- **`catch` never sees a cancellation**, `_` arm included, in any function.
+  A total `catch` in a function with no row used to either hand back a zero
+  nobody computed or, where the answer was a boxed value, end the process with
+  status 134. The cancellation passes through, finalizers run, and the fiber
+  stops.
+
+- **A `Shared::update` or `modify` change function that is stopped leaves the
+  cell unchanged.** A change function runs to its end after a cancel; one that
+  comes back stopped because a `Fiber::join`, `wait` or `outcome` inside it was
+  stopped no longer stores anything, where it used to store a zero or a null.
+
+- **The scheduler backend lost finalizers under load** (see Fixed). Listed
+  here too because a program on `KHORA_FIBERS=scheduler` whose cleanup was
+  silently skipped now runs it.
+
+### Fixed
+
+- **On the scheduler backend, a finalizer that blocked kept the next fiber's
+  finalizers from running.** A fiber whose cleanup was parked (a `receive`
+  nobody answers, say) left the worker's release queue open, and every release
+  the next fiber on that worker made waited behind it for ever: its own
+  finalizers never ran, a cancelled parent's child was never told to stop, and
+  none of it was freed. The fiber still reported that it had finished. On the
+  thread backend, a region released inside a finalizer waited for that
+  finalizer to return.
+
+- **A cancelled `clock.sleep`, `accept`, `recv` or `send` ran the caller's
+  next statements.** The call came back early, as it should, and the code after
+  it carried on as though the call had succeeded. The fiber now stops at the
+  call. `clock.sleep` is woken by a cancellation on the thread backend as well
+  as the scheduler.
+
+- **A cancellation was lost after a nursery's wait and inside a change
+  function.** A cancel that arrived while a nursery was collecting its
+  children, or while a blocking call inside `Shared::update` was waiting, let
+  the fiber run to its end and report that it had not been cancelled.
+
+- **A bounded nursery's `adopt`, waiting for room, could not be cancelled.**
+
+- **A loop whose only way round was `continue` could not be cancelled.**
+
+- **`Fiber::outcome` could end the process with "refcount is already zero"**
+  (status 134) on a fiber that can fail whose answer is held inline and owns
+  a counted field — a small record holding a `List` or a `String`, say. The
+  answer was freed twice.
+
+- **A function with a `raises` row whose body produces no value of its
+  declared type built, and crashed** with "the stack ran out" at its first
+  call. `khora build` refuses it, as it already refused the same body in a
+  function with no row.
+
+- **One `Fiber::spawn` slowed every tight loop in the program.** A program
+  that spawned a single fiber ran a call-free loop about 1.8× slower on the
+  default thread backend than one that spawned none.
+
+### Changed
+
+- **Cancellation costs something in functions with no `raises` row, and less
+  in functions with one.** A function that can reach a cancellation point
+  returns a small tag beside its answer, and its caller checks it. Measured in
+  release builds on Linux x86-64, on the default thread backend: a tight loop
+  about 1.2× slower, recursion
+  about 1.6×, and a very short loop inside a function called in a hot path up
+  to about 3.8×. Ordinary iteration over collections is unchanged. The
+  cancellation check in a loop in a function that can fail went from 8.7× the
+  cost of the same loop without a row to 1.15×. Object code grows by about a
+  fifth. The scheduler backend and Windows are unmeasured.
+
+### Added
+
+- **`Fiber::abort(handle)`** stops a fiber at its next cancellation point
+  *including inside its cleanup*, and the children of any nursery it holds.
+  Cleanup otherwise runs to completion, and cancelling again does not change
+  that.
+- **`Fiber::cancel_within(handle, millis)`** cancels now and aborts the fiber
+  if it is still running after `millis` milliseconds. There is no built-in
+  deadline: the caller always chooses the number.
+
+### Documentation
+
+- The concurrency, sharing, effects, fiber-internals, traps, debugging,
+  compatibility, limitations, migration-from-Go, bounded-concurrency,
+  timeouts-and-cancellation and HTTP-service pages describe cancellation as
+  it is: every function can be cancelled, the `raises` row on a nursery's
+  children is for failures only, channel operations take no `!`, a helper
+  that only waits needs no row, `abort` and `cancel_within` are how a stuck
+  cleanup is ended, and a child's failure cancels the siblings still running
+  when the nursery sees it, which depends on the order they were adopted in.
+
 ## 0.3.0 — 2026-09-23
 
 Graceful shutdown, a way to ask a cancelled fiber what it ended as, native

@@ -198,8 +198,8 @@ fn boom(tracer: Tracer) -> Int raises Oops {
   around(tracer, "work", fn () => { raise Oops::Bad })!
 }
 
-/// A body that stops itself in the middle. On a fiber, so the cancellation is
-/// absorbed by the fiber's root instead of ending the program with 130.
+/// A body that stops itself in the middle. On a fiber, so the cancellation
+/// stops the fiber instead of ending the program with 130.
 fn stopped(tracer: Tracer) -> () raises Oops {
   around(tracer, "work", fn () => {
     khora_cancel();
@@ -278,7 +278,7 @@ fn a_cancelled_body_still_finishes_its_span() {
   print("the parent carried on");"#,
     );
     // Nothing after the span's close runs *in the fiber* — the cancellation
-    // carries on past it to the fiber's root, which absorbs it. The parent is
+    // carries on past it to the fiber's root, which stops the fiber. The parent is
     // untouched, which is what makes cancellation per-fiber rather than a way
     // to stop a program.
     assert_eq!(

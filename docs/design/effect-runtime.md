@@ -190,66 +190,105 @@ is already tested. No new reference-counting rule is introduced by effects,
 which is precisely what makes this design worth choosing over one that captures
 continuations.
 
-## 6. Cancellation points are the `!` marks
+## 6. Cancellation points
 
 A5 promises interruption that runs finalizers. With failures implemented as
-tagged returns, cancellation is a raise the runtime injects: a cancelled fiber's
-next checked call returns the cancellation instead of its result, and every
-frame between there and the fiber's root runs its drops on the way out.
+tagged returns, cancellation is a return the runtime injects: a cancelled
+fiber's next cancellation point returns the cancellation instead of carrying
+on, and every frame between there and the fiber's root runs its drops on the
+way out.
 
-That gives a property worth promising out loud: **a computation can only be
-interrupted at a point the source marks with `!`.** Nothing is torn down
-between two statements that do not mention it. That is a stronger and far more
-explainable guarantee than "interruption can happen anywhere", which is what
-thread cancellation usually means, and the reader can see the points.
+That gives a property worth promising out loud: **a computation is only
+interrupted at a cancellation point** — never between two statements that are
+not one. The points are few enough to list, and the list below is all of them.
 
 ### What it is, precisely
 
-**A cancellation travels on the same tagged return an error does, under a
-`which` no error type can be assigned.** Error-type ids start at 1 and count
-up; a cancellation is `u32::MAX`. Three things follow, and all three are the
-behavior wanted rather than a consequence to work around:
+**A cancellation travels on a tagged return under a `which` no error type can
+be assigned.** Error-type ids start at 1 and count up; a cancellation is
+`u32::MAX`. Three things follow, and all three are the behavior wanted rather
+than a consequence to work around:
 
 - **`catch` cannot swallow it.** A `catch` dispatches on the error type id and
-  a cancellation matches no case, so it falls through to the same path an
-  unhandled error takes. Nothing a program can write names it, because it is
-  not an error the program declared.
+  routes a cancellation to the propagate path by an explicit case, `_` arm
+  included. Nothing a program can write names it, because it is not an error
+  the program declared.
 - **It is not in any row.** No signature mentions it, no `raises` clause grows
   because of it, and the type system is untouched. Cancellation is the runtime
-  asking a computation to stop, not a failure it can have.
+  asking a computation to stop, not a failure it can have. `!` marks only a
+  row error; a cancellation leaves a function unmarked, as a panic does in
+  Rust or cancellation does in Go, Trio or Kotlin.
 - **The unwinding is the unwinding that already exists.** Every frame between
-  the mark and the root runs its drops on the way out, which is how a region's
-  finalizers run — see §10.
+  the point and the root runs its drops on the way out, which is how a
+  region's finalizers run — see §10.
 
-**The check comes before the call**, not after: a cancelled computation should
-stop rather than do work it is about to throw away, and checking before the
-arguments are evaluated leaves nothing half-built to leak.
+### Every function that can reach a point carries the tag
 
-### A cancellation point is a `!` in a function that can raise
+A fallible function already returns `{ which, payload }`. **An infallible one
+that can reach a cancellation point returns `{ which, answer }`**, the same
+shape with its own answer type in the second half, and its caller branches on
+`which` after the call exactly as it does after a `!`. So a cancellation has a
+way out of every such frame, whatever its `raises` row.
 
-The check is emitted where the tagged return exists to carry the answer. A
-function whose `raises` row is empty has no error channel, so it cannot report
-a cancellation — and does not need to. The flag is the state of record, and the
-caller's next cancellation point sees it. The interruption is delayed to the
-next mark that can carry it, never lost.
+Which functions those are is decided once, for the whole program, by
+`crates/khora-codegen-llvm/src/backend/can_stop.rs`, before anything is
+declared — the answer is each function's machine type, and a caller and callee
+that disagree about it is a miscompile. The analysis errs toward tagging: an
+unknown callee shape counts as a call through a function value, and an
+intrinsic counts unless it is on an explicit stop-free list. A function it
+**prunes** reaches no cancellation point, so no cancellation can arise inside
+it and it keeps a plain return. The lowering refuses (a compiler panic in
+`leave_with`) to emit a way out of a pruned frame, because there is nothing
+correct to emit; a `catch` in such a frame seals its fall-through instead.
 
-One case remains: a cancellation *arriving* at a frame with no error channel,
-which happens when a function catches every error in a row and so promises a
-value it can no longer produce. There is no frame between there and the entry
-point that could carry it, so the entry point's outcome is produced there
-instead — the root region's finalizers run and the process exits 130. This is
-the pre-fiber shape of "unwind to the fiber root"; once a fiber root exists it
-is a frame that *can* carry a cancellation, and ordinary code stops reaching
-it.
+The points are:
 
-**130, not 1.** A program that raised and did not handle it exits 1; one that
-was interrupted exits 130, which is 128 + SIGINT and what a shell already means
-by interrupted. They are different outcomes and worth telling apart from
-outside.
+- a **`!`**, checked before the call so a computation already asked to stop
+  does not evaluate arguments it is about to throw away;
+- a **loop back-edge**, behind one relaxed load of the poll word
+  (`crates/khora-rt/src/poll.rs`);
+- the **entry of a function in a call cycle** (including one through a
+  function value), because recursion is a loop with no back-edge;
+- a **call to a tagged function**, which is where a cancellation observed
+  further down arrives;
+- a **blocking operation** — channel send/receive (only when it comes back
+  empty-handed, so a value is never dropped), `Fiber::wait`/`join`/`outcome`,
+  `clock.sleep`, socket accept/read/write. Each gives up when its fiber is
+  cancelled and the call site checks.
 
-The cost is the flip side: a loop with no `!` in it is not interruptible.
-Whether long pure loops need an implicit yield is a phase 5 question, logged
-there rather than decided here.
+Not points, stated as limits: one foreign call or file-system syscall already
+in progress; `connect_to` and waiting for a child process (the fiber stops
+after they return); `Shared::get`/`set` waiting on a cell's lock.
+
+### Cleanup
+
+Finalizers run **shielded**: a cancellation arriving while one runs is
+remembered, not observed, so a `ROLLBACK` can do I/O. `cancel` is idempotent
+— the runtime itself cancels the same fiber more than once — so cancelling
+again changes nothing. `Fiber::abort` is the separate, explicit operation that
+cuts through the shield (and propagates to nursery children), and
+`Fiber::cancel_within(h, millis)` asks for it after a caller-chosen deadline.
+There is no built-in deadline. A `Shared::update`/`modify` change function is
+**pinned**: nothing in it stops, blocking calls in it give up, and the cell
+is left unchanged if it leaves on a tag (`crates/khora-rt/src/cancel.rs`,
+`Pinned`).
+
+### At the entry point
+
+**130, not 1.** A `main` that leaves on a cancellation — tagged or fallible —
+closes the root region and exits 130, which is 128 + SIGINT and what a shell
+already means by interrupted. A program that raised and did not handle it
+exits 1. A cancellation reaching a *spawned* fiber's root stops that fiber
+only; `join` on it unwinds the joiner, `wait` returns, `outcome` reports
+`Stopped`.
+
+### What it costs
+
+The branch after every tagged call and the widened return of every tagged
+infallible function, plus the back-edge load. Measured at the end of the
+redesign (release, Linux x86-64): a tight loop about 1.2×, recursion about
+1.6×, a very short loop called in a hot path up to about 3.8×; ordinary
+iteration unchanged. Windows is unmeasured.
 
 ## 7. Foreign code
 

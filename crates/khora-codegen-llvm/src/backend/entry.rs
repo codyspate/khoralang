@@ -443,18 +443,19 @@ impl<'ctx> Backend<'ctx> {
                 i32_type.const_zero()
             }
         };
-        // **A shutdown that the root absorbed is not a success.** A nursery
-        // handed a cancellation cancels its children, waits for them, and
-        // returns normally -- so control arrives here rather than on the
-        // `raised` path above, and `main`'s own value would become the exit
-        // status. A supervisor reading it could not tell a signalled shutdown
-        // from a clean finish, and `restart: on-failure` never fired. Asked
-        // after the value is computed and before it is returned, so the
+        // **A cancelled root is not a success, even when `main` returned.**
+        // A cancel that lands after `main`'s last cancellation point -- while
+        // a nursery is collecting children it has already stopped, say --
+        // lets `main` return normally, so control arrives here rather than on
+        // the cancelled path above, and `main`'s own value would become the
+        // exit status. A supervisor reading it could not tell a signalled
+        // shutdown from a clean finish, and `restart: on-failure` never fired.
+        // Asked after the value is computed and before it is returned, so the
         // decision sees the same `Int` the program meant to exit with.
         let absorbed_byte = self
             .builder
             .build_call(self.rt.root_absorbed, &[], "root.absorbed")
-            .expect("asking whether the root absorbed a cancellation")
+            .expect("asking whether the root was cancelled")
             .try_as_basic_value()
             .basic()
             .expect("khora_root_absorbed answers a byte")

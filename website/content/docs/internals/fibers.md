@@ -88,31 +88,36 @@ correct on both paths and the normal one simply has nothing to cancel.
 Cancelling a fiber does not stop it where it stands. It sets a flag, and the
 fiber notices at its next cancellation point.
 
-There are two:
+They are:
 
-- a `!` site, which is also where propagation and suspension are marked; and
-- a loop back-edge — the point where `loop` or `while` goes round again.
+- a `!` site, which is also where propagation and suspension are marked;
+- a loop back-edge — the point where `loop` or `while` goes round again;
+- a call to a function that can itself reach a cancellation point, and the
+  entry of a function that recurses; and
+- a blocking operation: channel sends and receives, waiting on or joining a
+  fiber, `clock.sleep`, and socket accepts, reads and writes.
 
-Both exist only in a function that can raise, because the `raises` row is what
-a cancellation travels out on. A cancelled fiber unwinds from one of them the
-same way a raise does, running each frame's releases and each region's
-finalisers as it goes.
+Every function has them, whatever its `raises` row. A function that can reach
+a cancellation point returns a small tag beside its answer, whether or not it
+can fail, and a cancelled fiber unwinds on that tag the same way a raise
+unwinds, running each frame's releases and each region's finalisers as it
+goes. A function that reaches none — straight-line arithmetic, a field read —
+is compiled without the tag, because there is nothing in it to stop at.
 
 This is why a cancelled program closes its files. The back-edge is why the
 ordinary shape of a periodic job can be stopped at all:
 
 ```khora
-fn ticker() with { clock: Clock } raises Stop {
+fn ticker() with { clock: Clock } {
   loop { clock.sleep(200); }
 }
 ```
 
-There is no `!` in that body. Without the back-edge, a nursery that had to
-unwind past it would wait for ever.
+There is no `!` and no `raises` row in that body. Without the back-edge, a
+nursery that had to unwind past it would wait for ever.
 
-What neither kind widens is *which* functions have a cancellation point. A
-function declared without `raises` has no tagged return for a cancellation to
-travel on, so it runs to its end.
+A cancellation is not an error: no `catch` sees one, `_` arm included. It
+passes through and carries on unwinding.
 
 ## Suspending is not a handler's job
 

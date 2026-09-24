@@ -17,14 +17,12 @@
 //! in *this* file can: `khora_cancel` sets the flag on the running fiber and
 //! these two programs hold no handle to the listener.
 //!
-//! **A handler cancelling itself is a third test, and it used to be a hole.**
-//! The comment here said the cancellation reached the connection fiber's root,
-//! "which the runtime still declines, and the process stops" — which was true,
-//! and was the whole of the release blocker: one cancelled request took the
-//! server down with status 134. `Router::serve_connection` catches `_` and has
-//! no `raises` row, so it is the frame with nowhere to send one. It absorbs
-//! now, and `a_handler_that_cancels_itself_stops_its_connection_and_not_the_server`
-//! is the proof.
+//! **A handler cancelling itself is a third test.** `Router::serve_connection`
+//! catches `_` and has no `raises` row. A cancellation passes through the `_`
+//! arm (no arm can name one) and out on the function's cancellation tag, which
+//! every function that can reach a cancellation point has. The connection's
+//! fiber stops and the server does not:
+//! `a_handler_that_cancels_itself_stops_its_connection_and_not_the_server`.
 //!
 //! Both would have failed before the fix, for the reason the fix exists:
 //! `std::net::socket` registered no release at all, so a socket was closed only
@@ -280,12 +278,11 @@ pub fn main() -> Int {{
 /// **A cancellation reaching a connection fiber's root stops that connection,
 /// not the server.**
 ///
-/// This is the shape `khora_cancel_stop`'s comment used to name, and it named
-/// it because `Router::served` is a function with no `raises` row that catches
-/// `_` -- "what a fiber runs, and it does not fail". A cancellation is in no
-/// row, so the `_` arm cannot name it, and the frame has no tagged return to
-/// pass it on with. Before, one cancelled request took the whole server down
-/// with status 134.
+/// `Router::served` is a function with no `raises` row that catches `_` --
+/// "what a fiber runs, and it does not fail". A cancellation is in no row, so
+/// the `_` arm cannot name it; it leaves on the function's cancellation tag.
+/// The failure this guards against is one cancelled request taking the whole
+/// server down.
 ///
 /// A handler cancelling itself is the only way a *program* can reach that
 /// frame from inside, and it stands in for every other way of getting there:

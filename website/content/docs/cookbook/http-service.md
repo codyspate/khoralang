@@ -237,13 +237,12 @@ document needs and not further.
 stops it** — the signal becomes a cancellation at the root, a parked `accept`
 observes it in about ten milliseconds, and `scoped` finalizers run on the way
 out. For an ordinary deploy that is the whole answer and this section is
-optional reading. It needs `main` to have a `raises` row, which is where the
-cancellation travels.
+optional reading. It needs nothing of `main`: a cancellation stops any
+function, whatever its `raises` row.
 
 A `/shutdown` route exists for the case the signal does not cover: a service
 that stops *itself* on a request. It runs `listen` on a fiber and lets go of
-that fiber when a route says to. The `main` around it still needs a `raises`
-row, because the `Fiber::wait` below is a place it can be cancelled.
+that fiber when a route says to.
 
 **Cancel the listener, or detach it — both work.** A cancelled listener
 notices in the poll loop a parked `accept` sits in, unwinds, and releases its

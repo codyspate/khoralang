@@ -209,19 +209,11 @@ pub struct Runtime<'ctx> {
     pub cancelled: FunctionValue<'ctx>,
     /// `uint8_t khora_root_absorbed(void)`
     ///
-    /// Asked by the entry point once `main` has returned normally. A nursery
-    /// absorbs the cancellation it was handed, so a signalled shutdown reaches
-    /// the success path and would otherwise exit with `main`'s own value.
+    /// Asked by the entry point once `main` has returned normally: whether
+    /// the root fiber was cancelled. A cancel that lands after `main`'s last
+    /// cancellation point lets `main` return its own value, and without this
+    /// a signalled shutdown would exit with it.
     pub root_absorbed: FunctionValue<'ctx>,
-    /// `_Noreturn void khora_cancel_stop(void)`
-    pub cancel_stop: FunctionValue<'ctx>,
-    /// `void khora_cancel_absorb(void)`
-    ///
-    /// Returns on a spawned fiber and does not on the entry point, which is
-    /// why it is declared separately from `cancel_stop` rather than being the
-    /// same call with a flag: the caller emits a `ret` after it, and that `ret`
-    /// is dead code in the second case and the whole point in the first.
-    pub cancel_absorb: FunctionValue<'ctx>,
     /// `void *khora_shared_open(uint64_t value, bool boxed, void (*glue)(void *))`
     pub shared_open: FunctionValue<'ctx>,
     /// `uint64_t khora_shared_get(void *cell)`
@@ -459,8 +451,6 @@ impl<'ctx> Runtime<'ctx> {
             region_root: declare("khora_region_root", ptr.fn_type(&[], false)),
             cancelled: declare("khora_cancelled", i8t.fn_type(&[], false)),
             root_absorbed: declare("khora_root_absorbed", i8t.fn_type(&[], false)),
-            cancel_stop: declare("khora_cancel_stop", void.fn_type(&[], false)),
-            cancel_absorb: declare("khora_cancel_absorb", void.fn_type(&[], false)),
             shared_open: declare(
                 "khora_shared_open",
                 ptr.fn_type(&[i64t.into(), ctx.bool_type().into(), ptr.into()], false),

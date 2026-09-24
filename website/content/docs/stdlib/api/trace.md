@@ -380,11 +380,11 @@ releases the binding holding the region. A body that returns marks the span
 finalizer to close it, and it closes as `Failed` because that is what
 happened.
 
-`raises 'er` is the other half. [The effect-runtime design note](https://github.com/codyspate/khoralang/blob/main/docs/design/effect-runtime.md) §6: a
-cancellation point is a `!` in a function that can raise, so a body with no
-row has none, nothing inside the span can be interrupted, and no frame here
-could carry the interruption if it were. A body that does no fallible work
-instantiates the row empty and needs no `!` at the call.
+`raises 'er` is the other half: it carries the body's own failures out,
+and a body that does no fallible work instantiates the row empty and needs
+no `!` at the call. The row has nothing to do with cancellation — a body is
+cancelled at its loops, blocking calls and calls whatever its row, and the
+span closes as `Failed` on the way out.
 
 ### around_result
 
