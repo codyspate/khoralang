@@ -330,7 +330,9 @@ fn first_allowed_cpu() -> String {
         .to_string()
 }
 
-/// Every `.kh` file of `std` for the host, plus the program.
+/// Every `.kh` file of `std` for the host, plus the program. Only the
+/// Linux-only test above builds one, so off Linux this would be dead code.
+#[cfg(target_os = "linux")]
 fn with_std(db: &KhoraDatabase, dir: &std::path::Path, main: &str) -> Vec<SourceFile> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("std");
     let mut out = Vec::new();
