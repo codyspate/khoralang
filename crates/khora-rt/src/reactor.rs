@@ -1146,7 +1146,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_descriptor_reused_after_its_deadline_expired_is_watched_again() {
-        use std::os::fd::AsRawFd;
+        use std::os::fd::{AsRawFd, IntoRawFd};
         let reactor = Reactor::default();
         let (first, _first_peer) = a_connected_pair();
         let number = socket_of(&first);
@@ -1163,14 +1163,21 @@ mod tests {
         }
         assert_eq!(woken, [1], "the deadline should end the first wait");
         reactor.forget(1); // what wait_until_ready_by does after park
-        drop(first); // the server closes the idle connection
 
-        // A new connection lands on the same descriptor number.
+        // A new connection lands on the same descriptor number, which is what
+        // `accept` does with a number the server just closed. Done as one
+        // `dup2` onto the live number rather than a close followed by a
+        // `dup2`: tests run on threads of one process, and a number left free
+        // for even a moment can be taken by another test's socket and closed
+        // again under this one, which reads as the very lost wakeup this test
+        // is looking for. `dup2` closes the old file and installs the new one
+        // atomically, so the kernel still drops the old file's epoll item.
+        let first = first.into_raw_fd(); // `number`, closed by the `dup2` below
         let (second, mut second_peer) = a_connected_pair();
-        // SAFETY: test-only; `number` is closed (its file was dropped above),
-        // and `dup2` gives it to `second`'s open file, which is exactly what
-        // the kernel does on `accept` reusing a freed descriptor number.
-        let got = unsafe { libc::dup2(second.as_raw_fd(), number) };
+        // SAFETY: test-only; `first` is `number` and owned here (taken out of
+        // its stream above), and `dup2` closes it and gives the number to
+        // `second`'s open file.
+        let got = unsafe { libc::dup2(second.as_raw_fd(), first) };
         assert_eq!(got, number);
         drop(second); // only `number` refers to the new file now
         second_peer.write_all(b"x").unwrap();
