@@ -1,5 +1,26 @@
 The Khora extension for Visual Studio Code.
 
+## Upgrading from 0.3.0
+
+The extension's ID is `khora.khora`. Version 0.3.0 was published as
+`khora-lang.khora`, which VS Code treats as a different extension, so remove
+it first or both will run:
+
+```
+code --uninstall-extension khora-lang.khora
+```
+
+## Changes in 0.3.1
+
+- The publisher is `khora`, the name the project owns on the Marketplace.
+- *Install Khora*, offered when no `khora` is found, opens the installation
+  page on khoralang.com. In 0.3.0 it opened a domain that does not resolve.
+- The status bar shows which toolchain answered, and turns yellow when a
+  project pins a version that is not installed.
+- Highlighting for character literals (`'a'`), `row` declarations, `///` doc
+  comments, string interpolation, and the `?`, `..` and comparison operators.
+- Requires VS Code 1.82 or later.
+
 ## Install
 
 Download `khora-vscode-<version>.vsix` below, then:
