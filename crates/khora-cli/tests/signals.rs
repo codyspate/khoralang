@@ -277,20 +277,28 @@ pub fn main() -> Int raises Stop {
 /// Two children under one nursery, each with its own finalizer.
 const TWO_CHILDREN: &str = r#"module app::main;
 
-import std::core::{ChildFailed, Fiber, Nursery, Scope, acquire, nursery, print, scoped};
+import std::core::{Channel, ChildFailed, Fiber, Nursery, Scope, acquire, nursery, print, scoped};
 
 pub type Stop = | Halted;
 
 fn tick() -> () raises Stop { () }
 
-fn child(name: String) -> () with { scope: Scope } raises Stop {
+fn child(name: String, up: Channel<Int>) -> () with { scope: Scope } raises Stop {
   acquire(name, fn n => print("FINALIZER " + n));
+  let _ = up.send(1);
   loop { tick()!; }
 }
 
+// `ready` waits for both children to hold their finalizers. A child the
+// signal reaches before it starts never runs at all, so it has no finalizer
+// to run, and printing `ready` straight after adopting them raced the
+// second child's first turn.
 fn both() -> () with { nursery: Nursery } raises Stop {
-  nursery.adopt(Fiber::spawn(fn () => scoped(fn () => child("one")!)!));
-  nursery.adopt(Fiber::spawn(fn () => scoped(fn () => child("two")!)!));
+  let up: Channel<Int> = Channel::bounded(2);
+  nursery.adopt(Fiber::spawn(fn () => scoped(fn () => child("one", up)!)!));
+  nursery.adopt(Fiber::spawn(fn () => scoped(fn () => child("two", up)!)!));
+  let _ = up.receive();
+  let _ = up.receive();
   print("ready");
 }
 
