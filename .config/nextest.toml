@@ -24,6 +24,18 @@
 filter = 'test(=load::a_server_under_more_load_than_it_can_serve_answers_everybody)'
 threads-required = 'num-test-threads'
 
+# The two reactor tests that time a registration against a poll already in
+# flight. Each starts a poll on one thread, sleeps 5 ms on another, and only
+# judges a round that registered within 10 ms of the poll beginning; a round
+# that didn't is repeated, fifty times, and then the test refuses to pass
+# rather than pass vacuously. Under the whole workspace on a three-core macOS
+# runner, those 5 ms sleeps overran to about 50 ms in every round, so neither
+# test ever got a round it could judge. It is the load guard above again: the
+# test needs the machine, and says so when it doesn't get it.
+[[profile.default.overrides]]
+filter = 'package(khora-rt) & (test(=reactor::tests::a_registration_during_a_poll_is_seen_by_that_poll) | test(=reactor::tests::a_deadline_registered_during_a_poll_is_honoured_by_that_poll))'
+threads-required = 'num-test-threads'
+
 # Everything that binds a socket, kept to a few at a time. The ports are all
 # distinct, so this is not about collisions: it is that a dozen servers and
 # their clients on one machine make every one of them slow, and the timeouts
