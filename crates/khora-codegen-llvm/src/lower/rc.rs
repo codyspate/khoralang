@@ -138,16 +138,58 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// `khora_drop` argued for: relaxed to add, because the caller already owns
     /// a reference and nothing is being published; release to subtract, pairing
     /// with the acquire fence inside `khora_drop_last`.
+    ///
+    /// **Neither path writes a static.** String literals and field-less
+    /// constructors are one object for the whole program, and every fiber on
+    /// every core counted them, so their cache lines bounced between cores.
+    /// Now the count word is loaded first, and a word at or above
+    /// `KHORA_IMMORTAL` skips the add. The skip answers the loaded word as
+    /// "previous", which `drop` reads as "survives", so no static reaches
+    /// `khora_drop_last`. The statics are in read-only memory, so a path
+    /// that forgot the test faults at once instead of corrupting a literal.
+    ///
+    /// The cost is a relaxed load, a compare and a branch in front of every
+    /// count operation, inline. The load is of the line the add needs anyway.
+    /// It is inline rather than a call because a call is what `dup` stopped
+    /// paying (`docs/design/reuse.md` §3). The compare is on the whole word,
+    /// so there is no mask.
     pub(super) fn adjust_count(&mut self, object: PointerValue<'ctx>, by: i64) -> IntValue<'ctx> {
         let i64t = self.be.ctx.i64_type();
         let one = i64t.const_int(1, false);
-        if self.be.single_threaded {
-            let previous = self
-                .be
-                .builder
-                .build_load(i64t, object, "rc")
-                .expect("loading a refcount")
-                .into_int_value();
+        let plain = self.be.single_threaded || crate::plain_counts_forced();
+        let previous = self
+            .be
+            .builder
+            .build_load(i64t, object, "rc")
+            .expect("loading a refcount")
+            .into_int_value();
+        if !plain {
+            // Atomic so that the load is not a data race with another
+            // thread's add. The immortal bit itself never changes.
+            let load = previous.as_instruction().expect("a load is an instruction");
+            load.set_alignment(8).expect("a count word is 8-aligned");
+            load.set_atomic_ordering(AtomicOrdering::Monotonic).expect("a relaxed load");
+        }
+        let immortal = self
+            .be
+            .builder
+            .build_int_compare(
+                IntPredicate::UGE,
+                previous,
+                i64t.const_int(khora_rt::KHORA_IMMORTAL, false),
+                "rc.immortal",
+            )
+            .expect("testing for a static");
+        let entry = self.be.builder.get_insert_block().expect("inside a block");
+        let count = self.block("rc.count");
+        let joined = self.block("rc.joined");
+        self.be
+            .builder
+            .build_conditional_branch(immortal, joined, count)
+            .expect("skipping a static's count");
+
+        self.at(count);
+        let counted = if plain {
             let next = if by > 0 {
                 self.be.builder.build_int_add(previous, one, "rc.up")
             } else {
@@ -155,17 +197,25 @@ impl<'ctx> Lower<'_, 'ctx> {
             }
             .expect("adjusting a refcount");
             self.be.builder.build_store(object, next).expect("storing a refcount");
-            return previous;
-        }
-        let (op, ordering) = if by > 0 {
-            (AtomicRMWBinOp::Add, AtomicOrdering::Monotonic)
+            previous
         } else {
-            (AtomicRMWBinOp::Sub, AtomicOrdering::Release)
+            let (op, ordering) = if by > 0 {
+                (AtomicRMWBinOp::Add, AtomicOrdering::Monotonic)
+            } else {
+                (AtomicRMWBinOp::Sub, AtomicOrdering::Release)
+            };
+            self.be
+                .builder
+                .build_atomicrmw(op, object, one, ordering)
+                .expect("adjusting a refcount")
         };
-        self.be
-            .builder
-            .build_atomicrmw(op, object, one, ordering)
-            .expect("adjusting a refcount")
+        let counted_end = self.be.builder.get_insert_block().expect("inside a block");
+        self.br(joined);
+
+        self.at(joined);
+        let phi = self.be.builder.build_phi(i64t, "rc.previous").expect("joining a count");
+        phi.add_incoming(&[(&previous, entry), (&counted, counted_end)]);
+        phi.as_basic_value().into_int_value()
     }
 
     /// Releases everything owned by scopes at or above `depth`, innermost

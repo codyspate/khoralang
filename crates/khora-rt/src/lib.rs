@@ -19,10 +19,18 @@
 //!
 //! | Offset | Size | Field | Who reads it |
 //! | --- | --- | --- | --- |
-//! | 0 | 8 | `refcount: usize` | runtime (`khora_dup`, `khora_drop`) |
+//! | 0 | 8 | `refcount: u64` (bit 62: immortal) | runtime (`khora_dup`, `khora_drop`) and generated code |
 //! | 8 | 4 | `tag: u32` | generated code, to switch on an ADT variant |
 //! | 12 | 4 | `field_bytes: u32` | runtime, to rebuild the allocation layout |
 //! | 16 | *n* | the object's fields | generated code |
+//!
+//! **Bit 62 of the count word marks an immortal object**: a string literal or
+//! a field-less constructor, which the code generator emits as a static with
+//! the word set to [`KHORA_IMMORTAL`] plus 2^40. Nothing counts one or frees
+//! one, and every writer of the word tests `count >= KHORA_IMMORTAL` first,
+//! so a static can live in read-only memory. The test is a compare rather
+//! than a mask, so it treats bit 63 as immortal too: a later flag in the word
+//! has to change the test with it.
 //!
 //! So [`KHORA_HEADER_SIZE`] is 16, [`KHORA_HEADER_ALIGN`] is 8, and **fields
 //! begin at offset [`KHORA_FIELD_OFFSET`] = 16 from the pointer `khora_alloc`
@@ -257,6 +265,28 @@ pub struct KhoraHeader {
     /// [`khora_alloc`], stored so [`khora_drop`] can rebuild the `Layout`.
     pub field_bytes: u32,
 }
+
+/// The count word of an object that is never freed and never counted.
+///
+/// **What this prevents: every core writing the count of `""` and
+/// `Option::None`.** A string literal and a field-less constructor are one
+/// static object for the whole program, so each `dup` and `drop` of one, on
+/// every fiber on every core, used to write the same cache line. Skipping
+/// those counts raised a four-core string handler's throughput 1.83×. A
+/// static is never freed, so its count never has to be
+/// right, and nothing writes it: generated code and [`khora_dup`],
+/// [`khora_drop`] and [`khora_drop_reuse`] each test the word first.
+///
+/// **One unsigned compare, no mask.** Any word at or above this is immortal,
+/// so the test is `count >= KHORA_IMMORTAL`. A heap count cannot get there:
+/// it would take 2^62 live references.
+///
+/// The code generator writes the word as this bit plus 2^40. The 2^40 is
+/// [`khora_refcount`]'s answer for a static, as it was before the bit existed.
+/// It also keeps the word huge if anything ever writes it anyway, though the
+/// statics are in read-only memory, so a write faults at the instruction that
+/// made it rather than corrupting a literal.
+pub const KHORA_IMMORTAL: u64 = 1 << 62;
 
 /// Size of [`KhoraHeader`] in bytes: 16 on a 64-bit target.
 pub const KHORA_HEADER_SIZE: usize = std::mem::size_of::<KhoraHeader>();

@@ -277,12 +277,26 @@ pub unsafe extern "C" fn khora_dup(ptr: *mut u8) {
     // header is initialized.
     unsafe {
         let header = ptr.cast::<KhoraHeader>();
+        // A static is in read-only memory, so this test is what keeps the add
+        // below from faulting on one. See `KHORA_IMMORTAL`.
+        if is_immortal(&(*header).refcount) {
+            return;
+        }
         // Relaxed is enough: the caller already owns a reference, so the
         // object cannot be freed underneath this, and nothing is being
         // published. Ordering is only needed on the *last* release, where
         // `khora_drop` establishes it.
         (*header).refcount.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+/// Whether this count word belongs to a static that nothing may write.
+///
+/// Relaxed is enough. The bit is in the initializer and never changes, so
+/// any load at all sees it.
+#[inline(always)]
+fn is_immortal(count: &AtomicU64) -> bool {
+    count.load(Ordering::Relaxed) >= KHORA_IMMORTAL
 }
 
 /// Decrements an object's refcount, freeing it when the count reaches zero.
@@ -320,6 +334,12 @@ pub unsafe extern "C" fn khora_drop(ptr: *mut u8, drop_fields: Option<extern "C"
         return;
     }
     let header = ptr.cast::<KhoraHeader>();
+
+    // SAFETY: `ptr` points at a live object per the contract above, so its
+    // header is initialized and valid to read.
+    if is_immortal(unsafe { &(*header).refcount }) {
+        return;
+    }
 
     // Release, so that everything this thread did to the object happens
     // before whichever thread performs the final decrement sees the count
@@ -383,6 +403,16 @@ pub unsafe extern "C" fn khora_drop_reuse(
         return std::ptr::null_mut();
     }
     let header = ptr.cast::<KhoraHeader>();
+
+    // **A static is never unique.** Its count is huge, so the decrement below
+    // would already answer "somebody else holds it". The test is here for
+    // what a write would do: the static is in read-only memory. See
+    // `KHORA_IMMORTAL`.
+    //
+    // SAFETY: live per the contract, so the header is initialized.
+    if is_immortal(unsafe { &(*header).refcount }) {
+        return std::ptr::null_mut();
+    }
 
     // SAFETY: live per the contract, so the header is initialized.
     let refcount = unsafe { (*header).refcount.fetch_sub(1, Ordering::Release) };
@@ -564,6 +594,9 @@ pub unsafe extern "C" fn khora_free_reuse(token: *mut u8) {
 /// Exists for tests: reference counting is invisible when it works, and a test
 /// that cannot see the count can only assert that nothing crashed.
 ///
+/// A static answers 2^40, without its immortal bit: the answer is a count,
+/// and the flag is not part of one.
+///
 /// # Safety
 ///
 /// `ptr` must be null or a live object from [`khora_alloc`].
@@ -574,7 +607,8 @@ pub unsafe extern "C" fn khora_refcount(ptr: *const u8) -> u64 {
     }
     // SAFETY: `ptr` points at a live object per the contract above, so its
     // header is initialized and valid to read.
-    unsafe { (*ptr.cast::<KhoraHeader>()).refcount.load(Ordering::Relaxed) }
+    let word = unsafe { (*ptr.cast::<KhoraHeader>()).refcount.load(Ordering::Relaxed) };
+    word & !KHORA_IMMORTAL
 }
 
 /// Frees an object without touching its reference count or its children.

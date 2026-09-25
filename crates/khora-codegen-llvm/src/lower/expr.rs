@@ -142,12 +142,13 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// allocated on every call, and a literal inside a loop allocated on every
     /// turn. A string is immutable, so one object can serve every mention.
     ///
-    /// The reference count starts enormous rather than at one. Nothing has to
-    /// know a static from a heap object that way: `khora_dup` and `khora_drop`
-    /// treat it like anything else, and the count cannot reach zero inside the
-    /// lifetime of any real program, so it is never handed to a free that would
-    /// not understand it. The alternative — a check on the hot path of every
-    /// drop — costs every object to protect these.
+    /// **Immortal.** The count word carries `KHORA_IMMORTAL`, and every count
+    /// operation tests for it and skips the write. That test is a compare and
+    /// a branch paid by every object. What it saves is every core writing the
+    /// count of the same literal, and those cache lines bouncing between cores.
+    /// The older design, an enormous count that `dup` and `drop` treated like
+    /// any other, avoided the test. It paid for that in contention.
+    /// `Backend::static_string` has the rest.
     pub(super) fn string_literal(&mut self, text: &str) -> Flow<'ctx> {
         Some(self.be.static_string(text).into())
     }

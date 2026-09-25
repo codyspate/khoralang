@@ -156,10 +156,12 @@ summary.
 
 The section claimed non-atomic counts *constrain code being written now*, on
 the grounds that every `dup` and `drop` already emitted assumes the
-single-threaded answer. That was wrong. Code generation never touches a
-refcount directly — every `dup` and `drop` is a call into `khora-rt` — so
+single-threaded answer. That was wrong. Code generation did not then touch a
+refcount directly — every `dup` and `drop` was a call into `khora-rt` — so
 atomicity was a change inside the runtime, invisible to everything already
-emitted, and it was made in phase 5 in about thirty lines.
+emitted, and it was made in phase 5 in about thirty lines. The add and the
+subtract have since been emitted inline (reuse.md §3); the argument for
+atomicity is unchanged.
 
 What settled it was not performance. A5 promises fibers running across cores,
 and a spawned fiber shares at least the closure it was handed, so a non-atomic
@@ -170,6 +172,36 @@ avoid — paid in every library signature to save an increment.
 `docs/design/effect-runtime.md` §9 has the decision in full, including where
 the cost comes back: phase 9, as an optimization for objects that provably do
 not escape their fiber, chosen by the compiler and invisible in every type.
+
+### Statics are immortal: bit 62 of the count word
+
+String literals and field-less constructors are static objects, one per
+distinct value for the whole program (`backend/statics.rs`). Their count word
+is `KHORA_IMMORTAL` (bit 62) plus 2^40, and they are emitted as read-only
+globals. Every writer of the count word tests `word >= KHORA_IMMORTAL` and
+skips the write:
+- the inline `dup`/`drop` in `lower/rc.rs` (`adjust_count`);
+- `khora_dup`, `khora_drop` and `khora_drop_reuse` in `heap.rs`.
+
+`khora_drop_reuse` hands back null for a static, so reuse never builds in one.
+`khora_refcount` masks the bit and answers 2^40.
+
+What it prevents is contention, not a wrong answer. Every fiber on every core
+counts `""`, `List::Nil` and `Option::None`, so each count operation on one of
+them wrote a cache line that every other core also writes. On a four-core
+handler doing string work, skipping those counts raised throughput 1.83×. A
+static is never freed, so its count never had to
+be right. Skipping it is sound under every threading model and needs no
+analysis.
+
+What it costs: a relaxed load, an unsigned compare and a branch in front of
+every inline count operation, and the code for them. The load is of the line
+the add then writes, so it adds no cache miss. The compare is on the whole
+word, not a mask, so it also treats bit 63 as immortal. A later flag in the
+word has to change the test.
+
+A write that skipped the test would fault in read-only memory. Before this
+change it would have written a literal's count silently.
 
 ## 5a. What may cross a fiber
 

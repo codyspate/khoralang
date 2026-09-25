@@ -222,3 +222,60 @@ fn a_branch_that_builds_a_constant_frees_the_token() {
     assert_eq!(lines[0], "4950", "the kept values are 0..=99");
     assert_eq!(lines[1], "0", "nothing left over, and nothing freed twice");
 }
+
+/// **A static is never reused.** A reuse arm frees the matched cell and
+/// builds its result there if the cell was unique. A field-less constructor
+/// or a string literal is one object for the whole program. Building a
+/// `Grown` in the one `Nil` would make every later `Nil` read as a `Grown`,
+/// with a length read from beyond the static's end.
+///
+/// Each arm below builds its result, so each takes a reuse token, and `grow`
+/// is called on `Nil` and on a list holding literals. The runtime refuses a
+/// token for a static. The statics are in read-only memory, so a runtime
+/// that forgot the test would fault here rather than corrupt `Nil`. The last
+/// line reads the literals and `Nil` again, which catches a corruption that
+/// did not fault.
+const GROWN_FROM_A_LITERAL: &str = "module main;
+import std::core::{print};
+
+extern fn khora_live_count() -> Int;
+
+type Words = | Nil | Word(String, Words) | Grown(String, Words);
+
+fn grow(w: Words) -> Words {
+  match w {
+    Words::Nil => Words::Grown(\"new\", Words::Nil),
+    Words::Word(s, rest) => Words::Grown(s + \"!\", grow(rest)),
+    Words::Grown(s, rest) => Words::Word(s, grow(rest)),
+  }
+}
+
+fn show(w: Words) -> String {
+  match w {
+    Words::Nil => \"nil\",
+    Words::Word(s, rest) => \"word \" + s + \" \" + show(rest),
+    Words::Grown(s, rest) => \"grown \" + s + \" \" + show(rest),
+  }
+}
+
+pub fn main() -> () {
+  let before = khora_live_count();
+  let mut i = 0;
+  while i < 100 {
+    let _ = show(grow(Words::Nil));
+    let _ = show(grow(Words::Word(\"lit\", Words::Nil)));
+    i = i + 1;
+  };
+  let live = khora_live_count() - before;
+  print(show(Words::Word(\"lit\", Words::Nil)));
+  print(Int::to_string(live))
+}
+";
+
+#[test]
+fn a_reuse_arm_never_builds_in_a_static() {
+    let out = run("reuse_static_scrutinee", GROWN_FROM_A_LITERAL);
+    let lines: Vec<&str> = out.trim().lines().collect();
+    assert_eq!(lines[0], "word lit nil", "the literal and `Nil` are what they were");
+    assert_eq!(lines[1], "0", "nothing left over, and nothing freed twice");
+}

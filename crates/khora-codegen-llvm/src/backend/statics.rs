@@ -1,12 +1,19 @@
 //! Values that are one object for the whole program.
 //!
 //! A string literal, and a constructor with no fields. Both are entirely
-//! described by their contents, so every occurrence can be the same address —
-//! and both carry an enormous reference count rather than a special case, so
-//! that `dup` and `drop` need not know a static from anything else and cannot
-//! take one to zero.
+//! described by their contents, so every occurrence can be the same address.
+//! Both are **immortal**: the count word carries `KHORA_IMMORTAL`, nothing
+//! counts them and nothing frees them. `adjust_count` and the runtime's
+//! `khora_dup`, `khora_drop` and `khora_drop_reuse` test the word before they
+//! write it.
 
 use super::*;
+
+/// The count word a static is born with.
+///
+/// The immortal bit, which every count operation tests, plus 2^40, which is
+/// what `khora_refcount` reports for a static once it has masked the bit off.
+const IMMORTAL_COUNT: u64 = khora_rt::KHORA_IMMORTAL | (1 << 40);
 
 impl<'ctx> Backend<'ctx> {
     /// The one object a field-less constructor ever produces.
@@ -21,9 +28,7 @@ impl<'ctx> Backend<'ctx> {
     /// types may each have a `None`, and giving them one object would make a
     /// tag comparison say they matched.
     ///
-    /// The reference count starts enormous for the reason
-    /// [`Backend::static_string`] gives: nothing then has to know a static from
-    /// a heap object, and the count cannot reach the free.
+    /// Immortal, for the reason [`Backend::static_string`] gives.
     pub fn static_variant(&mut self, owner: &str, case: &str, tag: u32) -> PointerValue<'ctx> {
         let key = format!("{owner}::{case}");
         if let Some(found) = self.static_variants.get(&key) {
@@ -37,7 +42,7 @@ impl<'ctx> Backend<'ctx> {
             self.ctx.struct_type(&[i64_type.into(), i32_type.into(), i32_type.into()], false);
         let initial = self.ctx.const_struct(
             &[
-                i64_type.const_int(1 << 40, false).into(),
+                i64_type.const_int(IMMORTAL_COUNT, false).into(),
                 i32_type.const_int(u64::from(tag), false).into(),
                 i32_type.const_zero().into(),
             ],
@@ -47,8 +52,7 @@ impl<'ctx> Backend<'ctx> {
         let global = self.module.add_global(shape, None, &format!("kh$case${key}"));
         global.set_initializer(&initial);
         global.set_linkage(Linkage::Private);
-        // Writable, not constant: every `dup` and `drop` that passes through
-        // writes the count, even though it can never reach zero.
+        global.set_constant(true);
         global.set_alignment(8);
 
         let pointer = global.as_pointer_value();
@@ -61,6 +65,15 @@ impl<'ctx> Backend<'ctx> {
     /// See [`Lower::string_literal`] for why. Cached by text, so a literal
     /// repeated across a program is one object however many times it is
     /// written.
+    ///
+    /// **Immortal, and read-only.** Every fiber on every core reaches the same
+    /// `""` and `"application/json"`, so a count written on each `dup` and
+    /// `drop` made those cache lines bounce between cores. Skipping those
+    /// counts raised a four-core string handler's throughput 1.83×. The
+    /// count word carries `KHORA_IMMORTAL` and nothing
+    /// writes it. So the global is `constant`, and a count operation that
+    /// forgot the test faults at the write. Without that, it would corrupt a
+    /// literal that every later use reads.
     pub fn static_string(&mut self, text: &str) -> PointerValue<'ctx> {
         if let Some(found) = self.static_strings.get(text) {
             return *found;
@@ -78,12 +91,9 @@ impl<'ctx> Backend<'ctx> {
             &[i64_type.into(), i32_type.into(), i32_type.into(), i64_type.into(), byte_array.into()],
             false,
         );
-        // Large enough that no program reaches zero, small enough to leave room
-        // above for the dups a long-running one performs.
-        let immortal = i64_type.const_int(1 << 40, false);
         let initial = self.ctx.const_struct(
             &[
-                immortal.into(),
+                i64_type.const_int(IMMORTAL_COUNT, false).into(),
                 i32_type.const_int(runtime::STRING_TAG, false).into(),
                 i32_type.const_int(runtime::FIELD_WORD + len, false).into(),
                 i64_type.const_int(len, false).into(),
@@ -95,9 +105,7 @@ impl<'ctx> Backend<'ctx> {
         let global = self.module.add_global(shape, None, "kh$string");
         global.set_initializer(&initial);
         global.set_linkage(Linkage::Private);
-        // Not `set_constant`: the reference count is written by every `dup` and
-        // `drop` that passes through, so the object lives in writable storage
-        // even though its bytes never change.
+        global.set_constant(true);
         global.set_alignment(8);
 
         let pointer = global.as_pointer_value();

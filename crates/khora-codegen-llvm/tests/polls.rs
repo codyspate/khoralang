@@ -39,6 +39,16 @@ fn function_ir(test: &str, source: &str, name: &str) -> String {
 /// The same, at `profile`. A release build's IR is the optimised module
 /// (`program.opt.ll`), which is where a hoisted load would show.
 fn function_ir_as(test: &str, source: &str, name: &str, profile: Profile) -> String {
+    let ir = module_ir_as(test, source, profile);
+    let start = ir
+        .lines()
+        .position(|l| l.starts_with("define") && l.contains(&format!("{name}\"(")))
+        .unwrap_or_else(|| panic!("no function ending `{name}` in the IR"));
+    ir.lines().skip(start).take_while(|l| *l != "}").collect::<Vec<_>>().join("\n")
+}
+
+/// Compiles `source` with its IR dumped, and returns the whole module.
+fn module_ir_as(test: &str, source: &str, profile: Profile) -> String {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(test);
     harness::ensure_runtime();
     let _ = std::fs::remove_dir_all(&dir);
@@ -62,12 +72,7 @@ fn function_ir_as(test: &str, source: &str, name: &str, profile: Profile) -> Str
     };
     let mut path = exe.clone().into_os_string();
     path.push(dumped);
-    let ir = std::fs::read_to_string(path).expect("the IR was dumped");
-    let start = ir
-        .lines()
-        .position(|l| l.starts_with("define") && l.contains(&format!("{name}\"(")))
-        .unwrap_or_else(|| panic!("no function ending `{name}` in the IR"));
-    ir.lines().skip(start).take_while(|l| *l != "}").collect::<Vec<_>>().join("\n")
+    std::fs::read_to_string(path).expect("the IR was dumped")
 }
 
 static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -352,4 +357,75 @@ fn with_std(db: &KhoraDatabase, dir: &std::path::Path, main: &str) -> Vec<Source
     }
     out.push(SourceFile::new(db, dir.join("main.kh"), main.to_string()));
     out
+}
+
+/// A program that spawns, so its counts are atomic, and that counts a string
+/// literal and a field-less constructor. Recursive, because a type whose
+/// cases are all field-less is held inline and has no static to count.
+const STATICS: &str = "module t;
+pub type Fiber<A, 'r>;
+impl<A, 'r> Fiber<A, 'r> {
+  fn spawn(body: () -> A raises 'r) -> Fiber<A, 'r>;
+  fn join(self) -> A raises 'r;
+}
+type Chain = | Empty | Link(Chain);
+
+fn pick(n: Int) -> Chain { if n > 0 { Chain::Link(Chain::Empty) } else { Chain::Empty } }
+
+fn name(c: Chain) -> String {
+  match c {
+    Chain::Empty => \"empty\",
+    Chain::Link(_) => \"link\",
+  }
+}
+
+fn main() -> Int {
+  let f = Fiber::spawn(fn () => name(pick(1)));
+  let s = Fiber::join(f);
+  let t = name(pick(0));
+  0
+}
+";
+
+/// **No count operation writes a static.** String literals and field-less
+/// constructors are one object each for the whole program. Every fiber on every
+/// core counted them, so their cache lines bounced between cores.
+///
+/// Read from the IR for the reason the poll tests are. Two structural facts
+/// carry it. Every static is a read-only global whose count word has
+/// `KHORA_IMMORTAL` set. Every atomic add or subtract sits in the block that
+/// the immortal test skips. If the second fails, the first turns it into a
+/// fault at run time, but only on a path a test happens to run.
+#[test]
+fn no_count_operation_writes_a_static() {
+    let ir = module_ir_as("polls_statics", STATICS, Profile::Debug);
+    let word = (khora_rt::KHORA_IMMORTAL | (1 << 40)).to_string();
+    let statics: Vec<&str> = ir
+        .lines()
+        .filter(|l| l.starts_with("@\"kh$string") || l.starts_with("@\"kh$case$"))
+        .collect();
+    assert!(statics.len() >= 3, "two literals and a case, at least:\n{}", statics.join("\n"));
+    for global in &statics {
+        assert!(global.contains("private constant"), "a static is writable: {global}");
+        assert!(global.contains(&format!("{{ i64 {word},")), "a static is not immortal: {global}");
+    }
+
+    let mut block = "entry";
+    let mut counted = 0;
+    for line in ir.lines() {
+        if !line.starts_with(' ') && !line.starts_with("define") {
+            if let Some((label, _)) = line.split_once(':') {
+                block = label;
+                continue;
+            }
+        }
+        if line.contains("atomicrmw") {
+            counted += 1;
+            assert!(
+                block.starts_with("rc.count"),
+                "an atomic count in `{block}`, which a static reaches:\n{line}"
+            );
+        }
+    }
+    assert!(counted > 0, "the program spawns, so its counts should be atomic");
 }

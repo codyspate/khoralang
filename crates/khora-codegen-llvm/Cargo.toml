@@ -75,3 +75,8 @@ path = "tests/targets.rs"
 [[test]]
 name = "polls"
 path = "tests/polls.rs"
+
+# Sets `KHORA_UNBOXED` to build its fixture both ways.
+[[test]]
+name = "crossings"
+path = "tests/crossings.rs"

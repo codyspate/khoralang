@@ -369,6 +369,10 @@ may link against, drop glue still calls them for the fields it releases, and the
 module documentation's claim that "generated code never touches the refcount" is
 the one thing here that had to be retracted rather than refined.
 
+Both inline operations now load the count first and skip a static: string
+literals and field-less constructors carry an immortal bit and live in
+read-only memory. `memory.md` §5 has the layout and why.
+
 **How the measurement nearly went wrong.** The first attempt at an envelope was
 a throwaway runtime with `khora_dup` and `khora_drop` returning immediately. It
 measured *slower* — nothing is ever freed, so the working set grows without

@@ -195,6 +195,22 @@ cancellation point in every function, whatever the function's `raises` row;
 
 ### Changed
 
+- **String literals and constructors with no fields are never reference
+  counted.** Every fiber that touched `""` or `Option::None` wrote the same
+  count, so on several cores those writes contended. They are immortal and
+  live in read-only memory. Each count operation pays one more load and
+  compare, and skips the write for them. Measured in release builds on
+  Linux x86-64, on the thread backend, as paired throughput against the
+  same build without it:
+  - a handler that parses and re-encodes a 350-byte JSON document:
+    1.07× on one core, 1.38× on four;
+  - a handler that lower-cases, splits and joins 64 strings: 1.11× on one
+    core, 1.83× on four;
+  - `bench/service`'s constant `/health`: 1.02× on one core, 1.06× on four.
+  Object code grows by about 15%, the linked binary by about 0.5%, and a
+  release build of `bench/service` takes about 13% longer. The scheduler
+  backend and non-x86 targets are unmeasured.
+
 - **Cancellation costs something in functions with no `raises` row, and less
   in functions with one.** A function that can reach a cancellation point
   returns a small tag beside its answer, and its caller checks it. Measured in

@@ -270,10 +270,9 @@ impl<'ctx> Lower<'_, 'ctx> {
         // reference-count operations and a free — twenty-four bytes of heap for
         // a value that is a constant.
         //
-        // The same trick, and the same reasoning, as a string literal: the
-        // count starts enormous rather than at one so that `khora_dup` and
-        // `khora_drop` need not know a static from anything else, and cannot
-        // take it to zero.
+        // Immortal, like a string literal: the count word carries
+        // `KHORA_IMMORTAL`, so no `dup` or `drop` writes it and nothing frees
+        // it. `Backend::static_variant`.
         if info.fields.is_empty() {
             // **A static case cannot build in the cell it was promised, so it
             // gives the cell back.** A branch is one path to a constructor and

@@ -61,6 +61,34 @@ pub fn unboxing_enabled() -> bool {
     !matches!(std::env::var("KHORA_UNBOXED").as_deref(), Ok("0"))
 }
 
+thread_local! {
+    static PLAIN_COUNTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// **For tests only: count references without atomics in a program that
+/// spawns.** Programs built this way are unsound and corrupt their own heap.
+///
+/// It exists so that the crossings fixture can be shown to fail. That
+/// fixture sends values to other fibers by every route the runtime has, and
+/// it passes when their counts are atomic. A fixture that also passes with
+/// plain counts could not catch a crossing that was missed. So the
+/// fixture's own test builds it this way and requires it to go wrong.
+///
+/// Per thread rather than global. A test binary compiles on several threads
+/// at once, and a global switch would give an unrelated test plain counts.
+/// There is no environment variable for it, so no user can set it by
+/// accident.
+#[doc(hidden)]
+pub fn force_plain_counts_on_this_thread(plain: bool) {
+    PLAIN_COUNTS.with(|p| p.set(plain));
+}
+
+/// Whether [`force_plain_counts_on_this_thread`] is on for this thread.
+#[cfg(feature = "llvm")]
+pub(crate) fn plain_counts_forced() -> bool {
+    PLAIN_COUNTS.with(|p| p.get())
+}
+
 #[cfg(feature = "llvm")]
 pub use backend::{
     compile, compile_benches, compile_library, compile_library_with, compile_tests, compile_with,

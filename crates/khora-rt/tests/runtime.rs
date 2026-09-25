@@ -9,14 +9,14 @@
 //! serializes access to it. New tests belong inside `isolated` even when they
 //! do not look at the counters, because allocating at all perturbs them.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use khora_rt::{
     khora_str_eq,
-    khora_alloc, khora_alloc_count, khora_drop, khora_dup, khora_live_count, khora_print_bool,
-    khora_print_int, khora_print_str, khora_refcount, khora_reset_counters, KHORA_FIELD_OFFSET,
-    KHORA_HEADER_ALIGN, KHORA_HEADER_SIZE,
+    khora_alloc, khora_alloc_count, khora_drop, khora_drop_reuse, khora_dup, khora_live_count,
+    khora_print_bool, khora_print_int, khora_print_str, khora_refcount, khora_reset_counters,
+    KhoraHeader, KHORA_FIELD_OFFSET, KHORA_HEADER_ALIGN, KHORA_HEADER_SIZE, KHORA_IMMORTAL,
 };
 
 /// Serializes tests, since the runtime's counters are shared by all of them.
@@ -248,6 +248,46 @@ fn dup_and_drop_move_the_refcount_by_exactly_one() {
         }
 
         assert_eq!(khora_live_count(), 0, "the balanced sequence must free the object");
+    });
+}
+
+/// **A static's count word is never written, by any entry point.**
+///
+/// The code generator puts string literals and field-less constructors in
+/// read-only memory with `KHORA_IMMORTAL` in the count word. A runtime entry
+/// that counted one anyway would fault there. Here the header is in writable
+/// memory instead, so a missed test shows as a changed word, not a crash,
+/// and the object must also not be freed or handed out for reuse, since it
+/// was never allocated.
+#[test]
+fn an_immortal_object_is_never_counted_freed_or_reused() {
+    isolated(|| {
+        let word = KHORA_IMMORTAL | (1 << 40);
+        let header = KhoraHeader { refcount: AtomicU64::new(word), tag: LEAF_TAG, field_bytes: 0 };
+        let object = std::ptr::from_ref(&header).cast::<u8>().cast_mut();
+
+        // SAFETY: `object` points at an initialized header that outlives every
+        // call, which is what dup, drop, drop_reuse and refcount require. None
+        // of them may free it, and the assertions below are that they did not.
+        unsafe {
+            khora_dup(object);
+            assert_eq!(header.refcount.load(Ordering::Relaxed), word, "dup wrote a static's count");
+
+            khora_drop(object, Some(record_teardown));
+            assert_eq!(header.refcount.load(Ordering::Relaxed), word, "drop wrote a static's count");
+
+            let token = khora_drop_reuse(object, Some(record_teardown));
+            assert!(token.is_null(), "a static was handed out for reuse");
+            assert_eq!(
+                header.refcount.load(Ordering::Relaxed),
+                word,
+                "drop_reuse wrote a static's count"
+            );
+
+            assert_eq!(khora_refcount(object), 1 << 40, "the count is reported without its flag");
+        }
+        assert_eq!(FIELD_DROPS.load(Ordering::Relaxed), 0, "a static's fields were released");
+        assert_eq!(khora_live_count(), 0, "a static is not a live allocation");
     });
 }
 
