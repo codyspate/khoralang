@@ -94,7 +94,7 @@ async function start(context) {
       settings,
     );
     if (chosen === install) {
-      commands.executeCommand("vscode.open", "https://khora-lang.org/docs/getting-started/installation/");
+      commands.executeCommand("vscode.open", "https://khoralang.com/docs/getting-started/installation/");
     } else if (chosen === settings) {
       commands.executeCommand("workbench.action.openSettings", "khora.server.path");
     }

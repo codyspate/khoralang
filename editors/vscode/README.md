@@ -74,8 +74,12 @@ or in VS Code: **Extensions**, the `...` menu, **Install from VSIX**.
 
 Then **fully quit and reopen VS Code** — extensions are scanned at startup, so
 reloading the window is not enough. Confirm with `code --list-extensions`, which
-should list `khora-lang.khora`. If `code` says *Please restart VS Code before
+should list `khora.khora`. If `code` says *Please restart VS Code before
 reinstalling*, it means exactly that, and the install did not happen.
+
+An installation from `vscode-v0.3.0` or earlier is `khora-lang.khora`, which
+VS Code treats as a different extension. Remove it first, or both run:
+`code --uninstall-extension khora-lang.khora`.
 
 It needs `khora` on `PATH`; see the toolchain releases, or set
 `khora.server.path`.
@@ -91,7 +95,7 @@ editors\vscode\install.ps1
 
 ```bash
 cd editors/vscode && npm ci && npm run package
-code --install-extension khora-lang.khora.vsix --force
+code --install-extension khora.khora.vsix --force
 ```
 
 `install.ps1` is the second of those with the mistakes taken out: it checks that

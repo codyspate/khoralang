@@ -20,7 +20,7 @@ below you want.
 4. Claim the namespace, once, from your own machine:
 
    ```
-   npx ovsx create-namespace khora-lang -p <token>
+   npx ovsx create-namespace khora -p <token>
    ```
 
 5. Add the token as the repository secret **`OVSX_PAT`**.
@@ -79,7 +79,7 @@ Use this if trusted publishing is not on your publisher page yet.
    - **Scopes**: Custom defined → show all scopes → **Marketplace → Manage**.
    - Expiration: a year, or 1 December 2026, whichever comes first.
 3. Create the publisher at <https://marketplace.visualstudio.com/manage> with
-   the same account. The publisher ID must be exactly **`khora-lang`**, because
+   the same account. The publisher ID must be exactly **`khora`**, because
    that is what `package.json` says and the two have to agree.
 4. Add the token as the repository secret **`VSCE_PAT`**.
 
@@ -113,7 +113,7 @@ Listings appear within a few minutes and become searchable within about an hour.
 ## Checking it worked
 
 ```
-code --install-extension khora-lang.khora
+code --install-extension khora.khora
 ```
 
 This installs *by name* rather than from a file, so it only succeeds once the

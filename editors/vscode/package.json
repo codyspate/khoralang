@@ -3,7 +3,7 @@
   "displayName": "Khora",
   "description": "Language support for Khora (.kh): errors as you type, hover types, go to definition, completion, semantic highlighting, effect-row inlay hints, and format on save.",
   "version": "0.3.0",
-  "publisher": "khora-lang",
+  "publisher": "khora",
   "license": "MIT OR Apache-2.0",
   "icon": "icon.png",
   "keywords": [
@@ -117,6 +117,6 @@
     "@vscode/vsce": "^3.2.1"
   },
   "scripts": {
-    "package": "vsce package --allow-missing-repository -o khora-lang.khora.vsix"
+    "package": "vsce package --allow-missing-repository -o khora.khora.vsix"
   }
 }

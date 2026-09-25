@@ -12,7 +12,7 @@ or in VS Code: **Extensions**, the `...` menu, **Install from VSIX**.
 
 Then fully quit and reopen VS Code — extensions are scanned at startup, so
 reloading the window is not enough. `code --list-extensions` should list
-`khora-lang.khora`.
+`khora.khora`.
 
 ## It needs the toolchain
 

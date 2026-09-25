@@ -104,7 +104,7 @@ jobs:
           npm run package
           version=$(node -p "require('./package.json').version")
           mkdir -p "$GITHUB_WORKSPACE/dist"
-          mv khora-lang.khora.vsix "$GITHUB_WORKSPACE/dist/khora-vscode-$version.vsix"
+          mv khora.khora.vsix "$GITHUB_WORKSPACE/dist/khora-vscode-$version.vsix"
 
       # The one check worth having: a `.vsix` missing `extension.js` or the
       # language client installs cleanly and then does nothing, which is the
