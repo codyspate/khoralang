@@ -298,7 +298,10 @@ impl<'ctx> Lower<'_, 'ctx> {
         // the expression's shape: `raise e` may raise a bound variable whose
         // type only inference knows.
         let which = match self.types.of(error) {
-            Type::Adt { name, .. } => self.be.error_id(&name.clone()),
+            ty @ Type::Adt { .. } => {
+                let ty = ty.clone();
+                self.be.error_id(&ty)
+            }
             other => {
                 let other = other.clone();
                 return self

@@ -1254,6 +1254,9 @@ impl<'a> Checker<'a> {
         // An arm that names a constructor carries its own type; an arm that
         // *binds* has only this to be typed by, and the row is already on the
         // demand stack because the operand has just been inferred.
+        // Every instantiation, not one per label: `Gx<Int>` and `Gx<String>`
+        // share the label `Gx`, and keeping the first gave a binding arm a
+        // type the other did not have, which read a pointer as an `Int`.
         let mut raised: Vec<(String, Type)> = Vec::new();
         for demand in &self.demanded[before..] {
             if demand.clause != Clause::Raises {
@@ -1261,12 +1264,20 @@ impl<'a> Checker<'a> {
             }
             if let Type::Row { fields, .. } = &demand.row {
                 for (label, ty) in fields {
-                    if !raised.iter().any(|(seen, _)| seen == label) {
-                        raised.push((label.clone(), ty.clone()));
+                    let ty = self.unifier.zonk(ty);
+                    if !raised.iter().any(|(seen, t)| seen == label && t == &ty) {
+                        raised.push((label.clone(), ty));
                     }
                 }
             }
         }
+        let mut labels: Vec<&str> = Vec::new();
+        for (label, _) in &raised {
+            if !labels.contains(&label.as_str()) {
+                labels.push(label);
+            }
+        }
+        let labels: Vec<String> = labels.into_iter().map(str::to_string).collect();
 
         // Each arm is matched against its own error type rather than against
         // one scrutinee, which is the other way this differs from `match`.
@@ -1289,8 +1300,8 @@ impl<'a> Checker<'a> {
             // this, which is the shape the Guide's own boundary-translation
             // recipe asks for and the one that did not scale.
             let binds = matches!(self.body.pat(arm.pat), Pat::Bind(_));
-            if owner.is_none() && binds && raised.len() != 1 {
-                let named: Vec<&str> = raised.iter().map(|(l, _)| l.as_str()).collect();
+            if owner.is_none() && binds && labels.len() != 1 {
+                let named: Vec<&str> = labels.iter().map(String::as_str).collect();
                 let complaint = if raised.is_empty() {
                     "this `catch` arm binds the failure, but the operand raises \
                      nothing for it to bind"
@@ -1311,6 +1322,22 @@ impl<'a> Checker<'a> {
                 everything = true;
                 if let Some((_, only)) = raised.first().filter(|_| binds) {
                     let only = only.clone();
+                    // One type, possibly at two instantiations: the binding
+                    // gets one layout, so they have to be one. A `_` reads
+                    // nothing and is released by the id it arrived with, so
+                    // it needs no such rule.
+                    let others: Vec<Type> = raised.iter().skip(1).map(|(_, t)| t.clone()).collect();
+                    for other in others {
+                        let at = self.body.pat_range(arm.pat);
+                        self.require(
+                            &only,
+                            &other,
+                            "a `catch` arm that binds the failure gives it one type, and this \
+                             operand raises one error type at two instantiations; catch them \
+                             in two `catch`es, or with `_`",
+                            at,
+                        );
+                    }
                     self.bind_pattern(arm.pat, &only);
                 }
                 if let Some(guard) = arm.guard {
@@ -1352,7 +1379,40 @@ impl<'a> Checker<'a> {
             if !caught.contains(&owner) {
                 caught.push(owner.clone());
             }
-            self.bind_pattern(arm.pat, &Type::adt(&owner));
+            // **Bound at what the operand raised, arguments and all.** The
+            // bare name gave every field of a generic error a fresh variable
+            // that nothing tied to the raise, so `Gx::X(s, v)` over a
+            // `Gx<Int>` could read `v` as a `String` and the program read
+            // an integer as a pointer. Unified with *every* raise of this
+            // type in the operand: one arm is compiled at one layout, so two
+            // instantiations of one type cannot share it.
+            let (arm_ty, _) = self.instantiate_adt(&owner);
+            let raises_of_owner: Vec<Type> = self.demanded[before..]
+                .iter()
+                .filter(|d| d.clause == Clause::Raises)
+                .filter_map(|d| match &d.row {
+                    Type::Row { fields, .. } => Some(fields),
+                    _ => None,
+                })
+                .flatten()
+                .filter(|(label, _)| label == &owner)
+                .map(|(_, ty)| ty.clone())
+                .collect();
+            // Only a second raise can disagree, since `arm_ty` starts fresh:
+            // one `catch` arm is compiled at one layout, so it cannot handle
+            // two instantiations of one type.
+            for ty in raises_of_owner {
+                let at = self.body.pat_range(arm.pat);
+                self.require(
+                    &arm_ty,
+                    &ty,
+                    "a `catch` arm handles one instantiation of a type, and this operand \
+                     raises two; catch them with `_`, or in two `catch`es",
+                    at,
+                );
+            }
+            self.caught.insert(arm.pat, arm_ty.clone());
+            self.bind_pattern(arm.pat, &arm_ty);
             if let Some(guard) = arm.guard {
                 self.expect(guard, &Type::Bool, "a match guard");
             }
@@ -1405,6 +1465,10 @@ impl<'a> Checker<'a> {
         // not excuse the mark — control still leaves the operand.
         let window: Vec<Demand> = self.demanded.split_off(before);
         let mut names = Vec::new();
+        // Whether the named arms left nothing of any row: no label and no
+        // tail. Published for code generation, which seals the way out of
+        // such a `catch`.
+        let mut total = !everything;
         let kept: Vec<Demand> = window
             .into_iter()
             .map(|mut demand| {
@@ -1421,14 +1485,22 @@ impl<'a> Checker<'a> {
                                 .filter(|(l, _)| !caught.contains(l))
                                 .cloned()
                                 .collect();
+                            if !left.is_empty() || tail.is_some() {
+                                total = false;
+                            }
                             demand.row = Type::row(left, tail.as_deref().cloned());
                         }
+                    } else {
+                        total = false;
                     }
                 }
                 demand
             })
             .collect();
         self.demanded.extend(kept);
+        if total && !caught.is_empty() {
+            self.total_catches.insert(inner);
+        }
 
         for owner in &caught {
             if !names.contains(owner) {

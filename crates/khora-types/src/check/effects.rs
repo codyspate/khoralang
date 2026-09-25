@@ -237,6 +237,13 @@ impl<'a> Checker<'a> {
 
     /// Takes the failures demanded since `before` as a closure's own row.
     ///
+    /// **One entry per error type, unified, not one dropped.** A body that
+    /// raises `Gx<Int>` in one branch and `Gx<String>` in another has two
+    /// entries labelled `Gx`, and keeping the first typed the closure as
+    /// raising only that one: a `catch` built for it let the other through,
+    /// and the program ended with 130 and no message. See
+    /// [`Self::settle_error_row`].
+    ///
     /// A closure cannot charge its failures to whoever wrote it: it may be
     /// called anywhere, and by then that function has returned. So they become
     /// part of *its* type, and the enclosing function answers only what it was
@@ -249,6 +256,7 @@ impl<'a> Checker<'a> {
         let window: Vec<Demand> = self.demanded.split_off(before);
         let mut fields: Vec<(String, Type)> = Vec::new();
         let mut tail = None;
+        let mut at = None;
 
         let kept: Vec<Demand> = window
             .into_iter()
@@ -256,6 +264,9 @@ impl<'a> Checker<'a> {
                 if demand.clause == Clause::Raises {
                     if let Type::Row { fields: raised, tail: rest } = self.unifier.zonk(&demand.row)
                     {
+                        if !raised.is_empty() {
+                            at = Some(demand.range);
+                        }
                         fields.extend(raised);
                         tail = tail.take().or(rest.map(|t| *t));
                         demand.row = Type::empty_row();
@@ -265,7 +276,64 @@ impl<'a> Checker<'a> {
             })
             .collect();
         self.demanded.extend(kept);
-        Type::row(fields, tail)
+        let row = Type::row(fields, tail);
+        match at {
+            Some(range) => self.settle_error_row(&row, range),
+            None => row,
+        }
+    }
+
+    /// An error row with each error type in it once.
+    ///
+    /// An error row labels each entry with its type's name, so two
+    /// instantiations of one type -- `Gx<Int>` and `Gx<String>` -- meet under
+    /// one label wherever rows are merged: a closure's body, `raises E + F`
+    /// instantiated at two of them. The row keeps both (see [`Type::row`]),
+    /// and this is where they are made one: unified, so that a variable is
+    /// solved by the other entry, and reported where they differ. **A row
+    /// cannot say "`Gx` at either of these"**, and everything downstream --
+    /// a `catch` arm, the code that releases the error -- reads one layout
+    /// per type.
+    ///
+    /// A capability row keeps one entry per label already, and passes through
+    /// unchanged.
+    pub(super) fn settle_error_row(&mut self, row: &Type, range: TextRange) -> Type {
+        let Type::Row { fields, tail } = self.unifier.zonk(row) else { return row.clone() };
+        let mut kept: Vec<(String, Type)> = Vec::with_capacity(fields.len());
+        for (label, ty) in fields {
+            let first = kept
+                .iter()
+                .find(|(l, t)| l == &label && label == label_of(t) && label == label_of(&ty))
+                .map(|(_, t)| t.clone());
+            match first {
+                Some(first) => {
+                    // Two declarations that share a name collide here too,
+                    // because an error row is labelled by the bare name; they
+                    // are not two instantiations of one type, and the message
+                    // should not say they are.
+                    let homes = |t: &Type| match t {
+                        Type::Adt { home: Some(home), .. } => Some(home.clone()),
+                        _ => None,
+                    };
+                    let why = match (homes(&first), homes(&ty)) {
+                        (Some(a), Some(b)) if a != b => format!(
+                            "an error type appears in a `raises` row once, by name, and this \
+                             raises `{label}` at two: two different types named `{label}`; \
+                             catch one of them where it is raised"
+                        ),
+                        _ => format!(
+                            "an error type appears in a `raises` row once, at one \
+                             instantiation, and this raises `{label}` at two; catch one of \
+                             them where it is raised"
+                        ),
+                    };
+                    self.require(&first, &ty, &why, range);
+                }
+                None => kept.push((label, ty)),
+            }
+        }
+        let settled = Type::row(kept, tail.map(|t| *t));
+        self.unifier.zonk(&settled)
     }
 
     /// Takes the capabilities a closure could not resolve lexically as its own.
@@ -459,6 +527,9 @@ impl<'a> Checker<'a> {
             // Zonked before anything is decided: a row recorded as a variable
             // is only now known to be anything.
             let row = self.unifier.zonk(&row);
+            // `raises E + F` at `E = Gx<Int>, F = Gx<String>` is only now two
+            // entries labelled `Gx`: at the call both were variables.
+            let row = if clause == Clause::Raises { self.settle_error_row(&row, range) } else { row };
             let empty =
                 matches!(&row, Type::Row { fields, tail } if fields.is_empty() && tail.is_none());
             // Nothing left to satisfy, but possibly still something to mark:

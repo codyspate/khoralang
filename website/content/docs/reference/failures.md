@@ -144,6 +144,29 @@ Name a constructor, or use `_` to handle them all without looking
 
 `_` remains the arm for "handle everything and do not look at it": it binds nothing, and the failure is released without being read.
 
+A failure type with a type parameter is handled at the instantiation that was raised. Over `fetch() raises Gx<Int>`, the arm `Gx::X(msg, v)` binds `v` as an `Int`, and an arm body that uses it as anything else is a type error. In a generic function, an arm over `Gx<A>` handles whichever `A` that call was made at.
+
+A `raises` row holds each failure type at one instantiation. Where a `Gx<Int>` and a `Gx<String>` would meet in one row -- the body of one closure, `raises E + F` with `E` and `F` both `Gx`, or one `catch` whose operand raises both -- the program is refused, because one arm reads one layout and nothing says which of the two arrived:
+
+```text
+a `catch` arm handles one instantiation of a type, and this operand raises
+two; catch them with `_`, or in two `catch`es
+```
+
+```text
+an error type appears in a `raises` row once, at one instantiation, and this
+raises `Gx` at two; catch one of them where it is raised
+```
+
+Put a `catch` around each call, or, directly around the two calls, use a `_` arm alone: `_` reads nothing, so it needs no layout. A `_` beside a `Gx::..` arm, or an arm that binds the failure, is refused like a named arm.
+
+A row is labelled by the failure type's name, so two *different* types of one name -- an `E` declared in `m::a` and another in `m::b` -- meet in a row the same way, and are refused the same way:
+
+```text
+an error type appears in a `raises` row once, by name, and this raises `E` at
+two: two different types named `E`; catch one of them where it is raised
+```
+
 ## Exhaustiveness by failure type
 
 Handling a named failure type commits to handling all of that type's variants:

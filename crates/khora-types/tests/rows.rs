@@ -1295,3 +1295,213 @@ fn an_unrequired_effect_falls_back_to_the_lowercased_name() {
         "expected the lowercased fallback: {found:?}"
     );
 }
+
+// --- catching an error whose type has a type parameter ----------------------
+
+const GENERIC_ERROR: &str = "module m;
+pub type Gx<A> = | X(s: String, v: A);
+fn fi() -> Int raises Gx<Int>;
+fn fs() -> Int raises Gx<String>;
+fn len(s: String) -> Int;
+";
+
+/// **An arm's fields are what the operand raised, not whatever the arm
+/// body wants them to be.** The arm was bound at `Gx` with no arguments, so
+/// `v` took a fresh variable that nothing tied to the raise: reading a
+/// `Gx<Int>`'s `v` as a `String` checked clean, and the program read an
+/// integer as a pointer.
+#[test]
+fn a_catch_arm_binds_the_fields_at_the_raised_instantiation() {
+    assert_reports(
+        &format!("{GENERIC_ERROR}pub fn f() -> Int {{ fi()! catch {{ Gx::X(s, v) => len(v) }} }}\n"),
+        "expected `String`, found `Int`",
+    );
+    assert_clean(&format!(
+        "{GENERIC_ERROR}pub fn f() -> Int {{ fi()! catch {{ Gx::X(s, v) => v + len(s) }} }}\n"
+    ));
+}
+
+/// One arm is compiled at one layout, so it cannot stand for `Gx<Int>` and
+/// `Gx<String>` at once. `_` still can, since it reads nothing.
+#[test]
+fn a_catch_arm_cannot_handle_two_instantiations_of_one_type() {
+    assert_reports(
+        &format!(
+            "{GENERIC_ERROR}pub fn f(b: Bool) -> Int {{ (if b {{ fi()! }} else {{ fs()! }}) catch {{ Gx::X(s, _) => 7 }} }}\n"
+        ),
+        "a `catch` arm handles one instantiation of a type",
+    );
+    assert_clean(&format!(
+        "{GENERIC_ERROR}pub fn f(b: Bool) -> Int {{ (if b {{ fi()! }} else {{ fs()! }}) catch {{ _ => 7 }} }}\n"
+    ));
+}
+
+// Two instantiations of one error type reaching one row by a route the
+// `catch` cannot see: the row labels both `Gx`, and keeping one of them
+// typed the operand as raising only that one, so a named arm built for it
+// let the other through and the program ended with 130 and no message.
+// Each shape is refused where the two meet.
+
+const TWO_ROUTES: &str = "module m;
+pub type Gx<A> = | X(s: String, v: A) | Y(n: Int);
+fn fi() -> Int raises Gx<Int>;
+fn fs() -> Int raises Gx<String>;
+fn ok() -> Int raises Gx<Int>;
+fn run<'er>(k: () -> Int raises 'er) -> Int raises 'er;
+fn both<E, F>(a: () -> Int raises E, b: () -> Int raises F) -> Int raises E + F;
+";
+
+const ONE_ROW_ONE_INSTANTIATION: &str = "raises `Gx` at two";
+
+/// A closure whose body raises both: its own row is where they meet.
+#[test]
+fn a_closure_raising_two_instantiations_of_one_error_type_is_refused() {
+    assert_reports(
+        &format!(
+            "{TWO_ROUTES}pub fn f(b: Bool) -> Int {{
+               let k = fn () => if b {{ fi()! }} else {{ fs()! }};
+               k()! catch {{ Gx::X(s, _) => 7, Gx::Y(n) => n }}
+             }}\n"
+        ),
+        ONE_ROW_ONE_INSTANTIATION,
+    );
+}
+
+/// The same closure handed through a row-polymorphic function.
+#[test]
+fn two_instantiations_through_a_row_variable_are_refused() {
+    assert_reports(
+        &format!(
+            "{TWO_ROUTES}pub fn f(b: Bool) -> Int {{
+               run(fn () => if b {{ fi()! }} else {{ fs()! }})! catch {{ Gx::X(s, _) => 7, Gx::Y(n) => n }}
+             }}\n"
+        ),
+        ONE_ROW_ONE_INSTANTIATION,
+    );
+}
+
+/// `raises E + F` instantiated at `Gx<Int>` and `Gx<String>`: two entries
+/// labelled by variables at the call, which are only `Gx` once solved.
+#[test]
+fn a_sum_row_instantiated_at_two_instantiations_is_refused() {
+    assert_reports(
+        &format!(
+            "{TWO_ROUTES}pub fn f() -> Int {{ both(ok, fs)! catch {{ Gx::X(s, _) => 7, Gx::Y(n) => n }} }}\n"
+        ),
+        "a `catch` arm handles one instantiation of a type",
+    );
+}
+
+/// The same with no `catch` at all: the two only meet when the call's row
+/// is checked against the signature, after `E` and `F` are solved.
+#[test]
+fn a_sum_row_at_two_instantiations_is_refused_without_a_catch() {
+    assert_reports(
+        &format!("{TWO_ROUTES}pub fn f() -> Int raises Gx<Int> {{ both(ok, fs)! }}\n"),
+        ONE_ROW_ONE_INSTANTIATION,
+    );
+}
+
+/// The shape where the row lost `Gx<String>` and `main` said it could not
+/// raise one: `main` then reported an unhandled `Gx<String>`.
+#[test]
+fn a_function_declaring_one_instantiation_cannot_raise_two() {
+    assert_reports(
+        &format!(
+            "{TWO_ROUTES}pub fn work(b: Bool) -> Int raises Gx<Int> {{
+               let k = fn () => if b {{ fi()! }} else {{ fs()! }};
+               k()! catch {{ Gx::X(s, v) => v, Gx::Y(n) => n }}
+             }}\n"
+        ),
+        ONE_ROW_ONE_INSTANTIATION,
+    );
+}
+
+/// **A binding arm gives the error one type**, and took the first raised,
+/// so over `Gx<String>` and `Gx<Int>` it read one as the other: a segmentation
+/// fault, or a pointer printed as a number.
+#[test]
+fn a_binding_catch_arm_over_two_instantiations_is_refused() {
+    assert_reports(
+        &format!(
+            "{TWO_ROUTES}pub fn f(b: Bool) -> Int {{
+               (if b {{ fs()! }} else {{ fi()! }}) catch {{ e => match e {{ Gx::X(s, _) => 1, Gx::Y(n) => n }} }}
+             }}\n"
+        ),
+        "a `catch` arm that binds the failure gives it one type",
+    );
+}
+
+/// `attempt` types its `Err` by the closure's row, which is where the two
+/// meet. Declared here with `std`'s signature, since these tests have no `std`.
+#[test]
+fn attempt_over_two_instantiations_is_refused() {
+    assert_reports(
+        "module m;
+         pub type Res<A, E> = | Good(v: A) | Bad(e: E);
+         fn attempt<A, E, 'ef>(body: () -> A with 'ef raises E) -> Res<A, E> with 'ef;
+         pub type Gx<A> = | X(s: String, v: A) | Y(n: Int);
+         fn fi() -> Int raises Gx<Int>;
+         fn fs() -> Int raises Gx<String>;
+         pub fn f(b: Bool) -> Int {
+           let r = attempt(fn () => if b { fi()! } else { fs()! });
+           1
+         }\n",
+        ONE_ROW_ONE_INSTANTIATION,
+    );
+}
+
+/// One instantiation reached by two routes is one entry, not two.
+#[test]
+fn one_instantiation_raised_twice_in_a_closure_is_accepted() {
+    assert_clean(&format!(
+        "{TWO_ROUTES}pub fn f(b: Bool) -> Int {{
+           let k = fn () => if b {{ fi()! }} else {{ ok()! }};
+           k()! catch {{ Gx::X(s, v) => v, Gx::Y(n) => n }}
+         }}\n"
+    ));
+}
+
+/// **Two different error types that share a name are refused in one row, and
+/// the message says they are two types.** An error row is labelled by the bare
+/// name, so `m::a::E` and `m::b::E` raised in one closure meet under `E` just
+/// as `Gx<Int>` and `Gx<String>` do. A named arm there read one type's field
+/// as the other's on 0.3.0. They are not two instantiations of one type,
+/// though, and a message calling them that sends the reader looking for a type
+/// parameter neither has.
+#[test]
+fn two_error_types_of_one_name_in_one_closure_are_named_as_two_types() {
+    let db = KhoraDatabase::new();
+    let a = SourceFile::new(
+        &db,
+        "a.kh".into(),
+        "module m::a;\npub type E = | Bad(n: Int);\npub fn fa() -> Int raises E;\n".to_string(),
+    );
+    let b = SourceFile::new(
+        &db,
+        "b.kh".into(),
+        "module m::b;\npub type E = | Worse(s: String);\npub fn fb() -> Int raises E;\n".to_string(),
+    );
+    let main = SourceFile::new(
+        &db,
+        "main.kh".into(),
+        "module m::main;\n\
+         import m::a::{fa};\n\
+         import m::b::{fb};\n\
+         pub fn work(b: Bool) -> Int {\n\
+           let k = fn () => if b { fa()! } else { fb()! };\n\
+           k()! catch { _ => 7 }\n\
+         }\n"
+        .to_string(),
+    );
+    khora_db::SourceRoot::new(&db, vec![a, b, main]);
+    let found: Vec<String> = diagnostics(&db, main).iter().map(|e| e.message.clone()).collect();
+    assert!(
+        found.iter().any(|m| m.contains("two different types named `E`")),
+        "expected the two-types message, got {found:?}"
+    );
+    assert!(
+        !found.iter().any(|m| m.contains("at one instantiation")),
+        "two unrelated types were called instantiations: {found:?}"
+    );
+}

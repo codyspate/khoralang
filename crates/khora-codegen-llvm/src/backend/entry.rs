@@ -40,12 +40,10 @@ impl<'ctx> Backend<'ctx> {
     /// ordinary path of stopping a program with a keystroke. It falls through
     /// to the default and prints nothing.
     fn say_what_escaped(&mut self, main: FunctionValue<'ctx>, which: inkwell::values::IntValue<'ctx>) {
-        let mut known: Vec<(String, u32)> =
-            self.error_ids.iter().map(|(n, i)| (n.clone(), *i)).collect();
+        let known = self.known_errors();
         if known.is_empty() {
             return;
         }
-        known.sort_by_key(|(_, id)| *id);
 
         // Where the caller left us, because filling in the cases moves the
         // builder and the switch has to terminate *this* block. Getting that
@@ -56,12 +54,15 @@ impl<'ctx> Backend<'ctx> {
 
         let quiet = self.ctx.append_basic_block(main, "escaped.unnamed");
         let mut cases = Vec::with_capacity(known.len());
-        for (name, id) in &known {
+        for (ty, id) in &known {
+            // With its arguments: two instantiations of one type are two ids,
+            // and `Gx<Int>` says which one escaped where `Gx` would not.
+            let name = ty.to_string();
             let block = self.ctx.append_basic_block(main, &format!("escaped.{name}"));
             self.builder.position_at_end(block);
             let text = self
                 .builder
-                .build_global_string_ptr(name, "escaped.name")
+                .build_global_string_ptr(&name, "escaped.name")
                 .expect("naming the error type")
                 .as_pointer_value();
             let len = self.ctx.i64_type().const_int(name.len() as u64, false);

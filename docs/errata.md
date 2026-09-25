@@ -3729,12 +3729,86 @@ inline, 200 boxed) leave 400 objects live.
 The general shape, a third time: **any word the runtime holds and a reader
 copies out needs the reader to count what the word holds, and the holder a
 glue to release it.** Of the runtime's words, the cell, the channel queue,
-the fiber's answer and now the fiber's error each have both, except an
-error type with type parameters. Its error id is keyed on the bare type
-name, so the releaser and the taker are built for the type without its
-arguments. `Gb<String>` held inline leaks its `String`, and joined twice it
-ends the process with 134. The fix, an id per instantiation, is a separate
-change. A test or bench
+the fiber's answer and now the fiber's error each have both (for an error
+type with type parameters, since erratum 92). A test or bench
 entry point that raises (`testing.rs`, `benching.rs`) still frees the error
 with null glue; the process is about to report and exit, so it is not
 followed.
+
+## 92. An error id stood for a type name, not a type
+
+Erratum 91's releaser and taker are chosen by the error's id, and the id was
+keyed on the bare type name. For `type Gb<A> = | B1(v: A, n: Int) | B2(..)`
+both emitters rebuilt the type as `Gb` with no arguments, which is boxed,
+while `Gb<String>` is held inline:
+
+- `khora.release_error` freed the spill box with null glue and leaked the
+  `String`: `g_direct_catch` (no fiber, `failg()! catch { .. }` twice) left 2
+  live, and a fiber joined twice 100 times left 100;
+- `khora.take_error` had no case for it, so each joiner got the fiber's own
+  box: `Gb<String>` joined twice through `attempt` with the `String` kept
+  ended the process with 134;
+- `Gx<Int>` (inline) and `Gx<Big>` (boxed) shared one id, so no single case
+  could be right for both.
+
+The fix keys `error_ids` on the monomorphised type, arguments and home
+included (`Backend::error_key`), and the releaser, the taker, the `catch` arm
+and `say_what_escaped` are built from that type. A `raise` in a generic body
+is lowered once per specialization, with its type already substituted, so it
+asks for its own instantiation's id.
+
+**A `catch` arm had no instantiation to ask for**, and that was a checker
+hole as well. `infer_catch` bound a named arm at `Type::adt(owner)`: no
+arguments and no home, so `bind_pattern` gave each field a fresh variable
+that nothing unified with what the operand raised. Over a `Gx<Int>`, the arm
+`Gx::X(s, v) => String::byte_length(v)` checked clean and read an integer as a
+pointer: exit 139, on 0.3.0 as well. The arm is now instantiated fresh,
+unified with every raise of that type in the operand, and recorded in
+`BodyTypes::caught`, which codegen reads (specialized with the rest of the
+body) to choose the id. One arm cannot handle two instantiations of a type,
+because it is compiled at one layout; that shape is refused with a message
+pointing at `_` or two `catch`es. It used to compile only because the two
+instantiations shared an id.
+
+**Where the rule is enforced.** An error row labels each entry with its
+type's name, and `Type::row` kept one entry per label, so two instantiations
+could reach one row by a route the `catch` never saw -- a closure whose body
+raised both (typed `raises { Gx: Gx<Int> | _ }`, the `Gx<String>` dropped),
+or `raises E + F` instantiated at two of them. A named arm compiled for the
+survivor let the other through, and a function with no row ended the
+program with 130 and no message; on 0.3.0, where the two shared an id, the
+same program ran. The rule is now enforced where rows *merge* as well as at
+the `catch`:
+- `Type::row` keeps a second entry under a label if its type differs and
+  the label is that type's own name. That is every error-row entry, and
+  also a capability labelled by its own type's name (`with Box<Int> +
+  Box<String>`, which used to drop the second silently). A capability row
+  with a name of its own (`with { b: Box<Int> }`) keeps one entry per
+  label, as before;
+- `Checker::settle_error_row` unifies the entries of one label, and reports
+  "an error type appears in a `raises` row once, at one instantiation" where
+  they differ. It runs when a closure's row is absorbed (`absorb_raises`)
+  and when each demand is checked against the signature (`check_effects`),
+  which is where `E + F` has been solved;
+- `infer_catch` keeps every instantiation in `raised` (zonked), so a
+  binding arm (`catch { e => .. }`) is refused over two, as a named arm is.
+  That arm had the same hole on 0.3.0 (a pointer read as an
+  `Int`, or 139), and `attempt` had it through the closure's row.
+
+Defensively, codegen seals the default of a `catch` the checker called total
+(`BodyTypes::is_total_catch`: named arms only, nothing of any row left) with
+a trap naming the invariant, so a future hole in this rule stops the program
+loudly instead of propagating.
+
+Not closed by this: `bind_pattern` never checks that a nested constructor
+pattern belongs to the scrutinee's type (for `match` too), and a `raise` of a
+value whose type is still a variable when the `catch` is checked charges no
+row. Both are in 0.3.0. Nor is the label: an error row is labelled by the
+type's bare name, not its name and home, so two different types named `E` in
+two modules collide in one row as two instantiations do. They are refused
+there too, with a message naming them as two types; keying the label on the
+home as well would let them sit side by side, and is a separate change.
+
+The general shape: **anything that selects a layout by a key must key on
+everything the layout depends on.** A type name is not a type once the type
+has parameters, and not once two modules can each declare one.

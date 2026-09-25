@@ -2403,12 +2403,9 @@ fn main() -> Int {{
 // stored word is the runtime's, and the two backends keep it on different
 // paths.
 
-/// Compiles `main` against the real `std` and runs it on `backend`.
-///
-/// The fixture preludes above declare what they use, which is enough for
-/// integers; these programs need interpolated `String`s, which are what make
-/// an error own something.
-fn run_std_on(name: &str, main: &str, backend: &str) -> Ran {
+/// Compiles `main` against the real `std`, answering the executable or the
+/// build's messages.
+fn build_std(name: &str, main: &str, backend: &str) -> Result<PathBuf, Vec<String>> {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}_{backend}"));
     harness::ensure_runtime();
     std::fs::create_dir_all(&dir).expect("a workspace");
@@ -2434,10 +2431,24 @@ fn run_std_on(name: &str, main: &str, backend: &str) -> Ran {
     }
     files.push(SourceFile::new(&db, dir.join("main.kh"), main.to_string()));
     let root = SourceRoot::new(&db, files);
-    if let Err(errors) = khora_codegen_llvm::compile(&db, root, &exe) {
-        let messages: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
-        panic!("compiling `{name}` failed:\n  {}\n\n{main}", messages.join("\n  "));
+    match khora_codegen_llvm::compile(&db, root, &exe) {
+        Ok(()) => Ok(exe),
+        Err(errors) => Err(errors.iter().map(|e| e.message.clone()).collect()),
     }
+}
+
+/// Compiles `main` against the real `std` and runs it on `backend`.
+///
+/// The fixture preludes above declare what they use, which is enough for
+/// integers; these programs need interpolated `String`s, which are what make
+/// an error own something.
+fn run_std_on(name: &str, main: &str, backend: &str) -> Ran {
+    let exe = match build_std(name, main, backend) {
+        Ok(exe) => exe,
+        Err(messages) => {
+            panic!("compiling `{name}` failed:\n  {}\n\n{main}", messages.join("\n  "))
+        }
+    };
 
     let output = Command::new(&exe)
         .env("KHORA_FIBERS", backend)
@@ -2581,4 +2592,241 @@ fn an_answer_joined_from_a_temporary_handle_is_not_leaked() {
 }",
         9,
     );
+}
+
+// --- errors whose type has a type parameter ---------------------------------
+//
+// An error's id says how the error is laid out and how it is released, and
+// `Gx<Int>` and `Gx<Big>` are laid out differently. Each program below
+// raises an instantiation of a generic error type; the count is 0 only if
+// every id stood for the one instantiation that was raised.
+
+/// Generic error types held inline (`Ge`, `Gb`), and one instantiated at two
+/// layouts (`Gx<Int>` held inline, `Gx<Big>` boxed).
+const GENERIC_ERRORS: &str = r#"
+import std::core::{attempt, Result, Share};
+
+type Ge<A> = | GBad(v: A, n: Int);
+type Gb<A> = | B1(v: A, n: Int) | B2(w: A, m: Int);
+type Big = { a: String, b: String, c: String, d: Int, e: Int };
+type Gx<A> = | X(s: String, v: A) | Y(n: Int);
+
+fn failg() -> Int raises Ge<String> { raise Ge::GBad("g${1}", 1) }
+fn failb() -> Int raises Gb<String> { raise Gb::B1("b${1}", 1) }
+fn fi() -> Int raises Gx<Int> { raise Gx::X("i${1}", 3) }
+fn fb() -> Int raises Gx<Big> {
+  let b: Big = { a: "a${1}", b: "bb${1}", c: "ccc${1}", d: 40, e: 2 };
+  raise Gx::X("s${1}", b)
+}
+fn bd(b: Big) -> Int { b.d + String::byte_length(b.c) }
+"#;
+
+/// **A generic error held inline, joined twice with its `String` kept,
+/// ended the process.** Its id stood for `Gb` with no arguments, which is
+/// boxed, so the joiner was given the fiber's own box rather than a copy of
+/// its own, and the second join freed the `String` the first had kept:
+/// status 134, "refcount is already zero".
+#[test]
+fn a_generic_error_joined_twice_keeps_what_each_joiner_took() {
+    leaves_nothing(
+        "generic_error_joined_twice",
+        &format!(
+            "{GENERIC_ERRORS}
+fn get(f: Fiber<Int, {{ Gb: Gb<String> }}>) -> String {{
+  let a = attempt(fn () => Fiber::join(f)!);
+  match a {{
+    Result::Err(e) => match e {{ Gb::B1(v, n) => v, Gb::B2(w, m) => w }},
+    Result::Ok(x) => \"none\",
+  }}
+}}
+
+fn work() -> Int {{
+  let f = Fiber::spawn(fn () => failb()!);
+  let s1 = get(f);
+  let s2 = get(f);
+  String::byte_length(s1) + String::byte_length(s2)
+}}"
+        ),
+        4,
+    );
+}
+
+/// **Every failure of a generic error type leaked what it held**: 100
+/// fibers, each joined twice, left 100 `String`s live. The releaser freed
+/// the box the error crossed in as though the error were boxed, with no glue.
+#[test]
+fn a_generic_error_joined_in_a_loop_leaves_nothing_behind() {
+    leaves_nothing(
+        "generic_error_loop",
+        &format!(
+            "{GENERIC_ERRORS}
+fn one() -> Int {{
+  let f = Fiber::spawn(fn () => failg()!);
+  let a = Fiber::join(f)! catch {{ Ge::GBad(v, n) => n + String::byte_length(v) }};
+  let b = Fiber::join(f)! catch {{ Ge::GBad(v, n) => n + String::byte_length(v) }};
+  a + b
+}}
+
+fn work() -> Int {{
+  let mut t = 0;
+  let mut i = 0;
+  while i < 100 {{ t = t + one(); i = i + 1 }};
+  t
+}}"
+        ),
+        600,
+    );
+}
+
+/// The same leak with no fiber anywhere: a `catch` that names the
+/// constructor, and a `_` that releases the error by its id.
+#[test]
+fn a_generic_error_caught_directly_is_released() {
+    leaves_nothing(
+        "generic_error_direct",
+        &format!(
+            "{GENERIC_ERRORS}
+fn work() -> Int {{
+  let a = failg()! catch {{ Ge::GBad(v, n) => n + String::byte_length(v) }};
+  let b = failg()! catch {{ _ => 1 }};
+  a + b
+}}"
+        ),
+        4,
+    );
+}
+
+/// Two instantiations of one error type shared an id, so one layout
+/// answered for both. `Gx<Int>` is held inline and `Gx<Big>` is boxed; each
+/// is raised and caught, joined twice, and read through `outcome`.
+#[test]
+fn two_instantiations_of_one_error_type_are_told_apart() {
+    leaves_nothing(
+        "generic_error_two_layouts",
+        &format!(
+            "{GENERIC_ERRORS}
+fn oi(f: Fiber<Int, {{ Gx: Gx<Int> }}>) -> Int {{
+  match Fiber::outcome(f)! catch {{ Gx::X(s, v) => Outcome::Answered(v * 100), Gx::Y(n) => Outcome::Stopped }} {{
+    Outcome::Answered(x) => x,
+    Outcome::Stopped => 0,
+  }}
+}}
+fn ob(f: Fiber<Int, {{ Gx: Gx<Big> }}>) -> Int {{
+  match Fiber::outcome(f)! catch {{ Gx::X(s, v) => Outcome::Answered(bd(v) * 100), Gx::Y(n) => Outcome::Stopped }} {{
+    Outcome::Answered(x) => x,
+    Outcome::Stopped => 0,
+  }}
+}}
+
+fn work() -> Int {{
+  let a = fi()! catch {{ Gx::X(s, v) => v, Gx::Y(n) => 0 }};
+  let b = fb()! catch {{ Gx::X(s, v) => bd(v), Gx::Y(n) => 0 }};
+  let f = Fiber::spawn(fn () => fi()!);
+  let g = Fiber::spawn(fn () => fb()!);
+  let c = Fiber::join(f)! catch {{ Gx::X(s, v) => v, Gx::Y(n) => 0 }};
+  let d = Fiber::join(g)! catch {{ Gx::X(s, v) => bd(v), Gx::Y(n) => 0 }};
+  let e = oi(f);
+  let h = ob(g);
+  let k = Fiber::join(g)! catch {{ Gx::X(s, v) => bd(v) + String::byte_length(s), Gx::Y(n) => 0 }};
+  a + b + c + d + e + h + k
+}}"
+        ),
+        // 3 + 44 + 3 + 44 + 300 + 4400 + 46: every term is distinct, so an
+        // arm taken at the other instantiation's layout changes the sum.
+        4840,
+    );
+}
+
+/// A generic function that raises and catches its own `Gx<A>` is compiled
+/// once per `A`, and each specialization's `catch` has to match the
+/// instantiation that specialization raises -- including one `Share`d
+/// across a fiber, and across the three layouts `Int`, `String` and `Big`.
+#[test]
+fn a_catch_in_generic_code_matches_its_own_instantiation() {
+    leaves_nothing(
+        "generic_error_in_generic_code",
+        &format!(
+            "{GENERIC_ERRORS}
+fn raiser<A>(a: A) -> Int raises Gx<A> {{ raise Gx::X(\"r${{1}}\", a) }}
+fn catcher<A>(a: A, d: Int) -> Int {{
+  raiser(a)! catch {{ Gx::X(s, v) => String::byte_length(s) + d, Gx::Y(n) => n }}
+}}
+fn joiner<A: Share>(a: A, d: Int) -> Int {{
+  let f = Fiber::spawn(fn () => raiser(a)!);
+  let x = Fiber::join(f)! catch {{ Gx::X(s, v) => d, Gx::Y(n) => n }};
+  let y = Fiber::join(f)! catch {{ Gx::X(s, v) => d, Gx::Y(n) => n }};
+  x + y
+}}
+
+fn work() -> Int {{
+  let b: Big = {{ a: \"a${{1}}\", b: \"b${{1}}\", c: \"c${{1}}\", d: 1, e: 2 }};
+  let b2: Big = {{ a: \"a${{1}}\", b: \"b${{1}}\", c: \"c${{1}}\", d: 1, e: 2 }};
+  catcher(5, 1) + catcher(\"five${{1}}\", 10) + catcher(b, 100)
+    + joiner(7, 1000) + joiner(\"s${{1}}\", 2000) + joiner(b2, 4000)
+}}"
+        ),
+        14117,
+    );
+}
+
+/// **A fiber whose thunk raises two instantiations of one error type** was
+/// typed as raising one of them, so a named arm on `join` let the other
+/// through and a function with no `raises` row ended the program with 130
+/// and no message. The thunk's row is where the two meet, and the build is
+/// refused there.
+#[test]
+fn a_fiber_raising_two_instantiations_of_one_error_type_is_refused() {
+    let program = format!(
+        "{FAILING}{GENERIC_ERRORS}
+fn fs() -> Int raises Gx<String> {{ raise Gx::X(\"s${{1}}\", \"t${{2}}\") }}
+fn work() -> Int {{
+  let b = false;
+  let f = Fiber::spawn(fn () => if b {{ fi()! }} else {{ fs()! }});
+  Fiber::join(f)! catch {{ Gx::X(s, _) => 7, Gx::Y(n) => n }}
+}}"
+    );
+    let Err(messages) = build_std("generic_error_fiber_two", &program, "threads") else {
+        panic!("a thunk raising `Gx<Int>` and `Gx<String>` built");
+    };
+    assert!(
+        messages.iter().any(|m| m.contains("raises `Gx` at two")),
+        "refused for another reason: {messages:?}"
+    );
+}
+
+/// **An error that reaches a `catch` the checker called total stops the
+/// program naming the rule**, rather than leaving a function with no
+/// `raises` row as an unhandled error: status 130 and no message.
+///
+/// The program is one the checker still accepts wrongly, and that is why it
+/// is here: `raise e` of a lambda parameter whose type is settled only
+/// later charges no row, so the `catch` thinks `Nf` is all it can see and a
+/// `Dn` arrives. When that hole is closed the program is refused at build
+/// time, and this test should become that assertion; until then it pins
+/// that the miss is loud.
+#[test]
+fn an_error_no_arm_names_in_a_total_catch_stops_the_program() {
+    let program = r#"module main;
+import std::core::{print};
+type Nf = { p: String };
+type Dn = { q: Int };
+fn nf() -> Int raises Nf { raise { p: "x" } }
+fn work() -> Int {
+  let b = true;
+  let k = fn (e) => (if b { raise e } else { nf()! }) catch { Nf { p } => String::byte_length(p) };
+  let d: Dn = { q: 4 };
+  k(d)
+}
+pub fn main() -> () { let t = work(); print("${t}") }
+"#;
+    for backend in ["threads", "scheduler"] {
+        let ran = run_std_on("total_catch_missed", program, backend);
+        assert!(
+            ran.stderr.contains("no arm names it; this is a compiler bug"),
+            "`{backend}`: exit {:?}, stderr {:?}",
+            ran.code,
+            ran.stderr
+        );
+        assert_ne!(ran.code, Some(0), "`{backend}`: and the program must not carry on");
+    }
 }

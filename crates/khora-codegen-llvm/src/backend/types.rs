@@ -381,15 +381,15 @@ impl<'ctx> Backend<'ctx> {
 
         // By id, so the switch reads in the order the ids were handed out and
         // two compilations of the same program emit the same function.
-        let mut known: Vec<(String, u32)> =
-            self.error_ids.iter().map(|(n, i)| (n.clone(), *i)).collect();
-        known.sort_by_key(|(_, id)| *id);
+        let known = self.known_errors();
 
         let mut cases = Vec::with_capacity(known.len());
-        for (name, id) in &known {
-            let block = self.ctx.append_basic_block(function, &format!("release.{name}"));
+        for (ty, id) in &known {
+            let block = self.ctx.append_basic_block(function, &format!("release.{ty}"));
             self.builder.position_at_end(block);
-            let ty = self.named_type(name, None);
+            // The id's own type, arguments and all: `Gb<String>` is held
+            // inline where `Gb` with no arguments answers "boxed".
+            let ty = ty.clone();
             if is_boxed(&ty, &self.unboxed) {
                 let value = self.word_to_value(word, &ty);
                 let glue = self.drop_glue(&ty);
@@ -471,13 +471,11 @@ impl<'ctx> Backend<'ctx> {
         let which = function.get_nth_param(0).expect("which").into_int_value();
         let word = function.get_nth_param(1).expect("word").into_int_value();
 
-        let mut known: Vec<(String, u32)> =
-            self.error_ids.iter().map(|(n, i)| (n.clone(), *i)).collect();
-        known.sort_by_key(|(_, id)| *id);
+        let known = self.known_errors();
 
         let mut cases = Vec::new();
-        for (name, id) in &known {
-            let ty = self.named_type(name, None);
+        for (ty, id) in &known {
+            let ty = ty.clone();
             // Only an inline error with a counted field needs a box of its
             // own. A boxed one is an object each joiner holds a reference to
             // already, and one of plain words has nothing to count.
@@ -486,7 +484,7 @@ impl<'ctx> Backend<'ctx> {
             }
             let Some(shape) = self.unboxed_type(&ty) else { continue };
             let Some(retain) = self.inline_retain(&ty) else { continue };
-            let block = self.ctx.append_basic_block(function, &format!("take.{name}"));
+            let block = self.ctx.append_basic_block(function, &format!("take.{ty}"));
             self.builder.position_at_end(block);
             let ptr = self.ctx.ptr_type(AddressSpace::default());
             let kept = self
@@ -513,17 +511,67 @@ impl<'ctx> Backend<'ctx> {
 
     /// The id of an error type, assigning one if this is the first sight of it.
     ///
+    /// One per *instantiation*: `ty` is the monomorphised type, arguments and
+    /// all, so `Gx<Int>` and `Gx<Big>` each get their own. A generic body is
+    /// lowered once per specialization with its types already substituted,
+    /// so a `raise` or a `catch` arm written against `Gx<A>` asks here for the
+    /// instantiation that specialization is at.
+    ///
+    /// Asked with [`Backend::error_key`] applied, so that a mention that
+    /// knows the declaring module and one that does not agree on the id.
+    ///
     /// Encounter order within a single whole-program module, which is
     /// deterministic for a given program and never crosses a module boundary —
     /// there is no separate compilation yet, and when there is, this becomes a
     /// link-time numbering rather than a lazy one.
-    pub fn error_id(&mut self, name: &str) -> u32 {
-        if let Some(id) = self.error_ids.get(name) {
+    pub fn error_id(&mut self, ty: &Type) -> u32 {
+        let key = self.error_key(ty);
+        if let Some(id) = self.error_ids.get(&key) {
             return *id;
         }
         let id = self.error_ids.len() as u32 + 1;
-        self.error_ids.insert(name.to_string(), id);
+        self.error_ids.insert(key, id);
         id
+    }
+
+    /// Every error type with an id, in id order, so that two compilations of
+    /// one program emit the same dispatch functions.
+    pub(super) fn known_errors(&self) -> Vec<(Type, u32)> {
+        let mut known: Vec<(Type, u32)> =
+            self.error_ids.iter().map(|(t, i)| (t.clone(), *i)).collect();
+        known.sort_by_key(|(_, id)| *id);
+        known
+    }
+
+    /// An error type as [`Backend::error_id`] keys it: every ADT in it,
+    /// arguments included, with its declaring module filled in.
+    ///
+    /// **Otherwise a raise and a `catch` of one type could get two ids.** A
+    /// `Type` carries its home as an option, and a mention with it filled in
+    /// and one without are different keys; a `catch` whose arm has a
+    /// different id from the raise does not match it, and the error goes on
+    /// to the caller. The home is found the way [`Self::named_type`] finds it.
+    pub fn error_key(&self, ty: &Type) -> Type {
+        match ty {
+            Type::Adt { name, home, args } => {
+                let home = home.clone().or_else(|| match self.named_type(name, None) {
+                    Type::Adt { home, .. } => home,
+                    _ => None,
+                });
+                let args = args.iter().map(|a| self.error_key(a)).collect();
+                Type::Adt { name: name.clone(), home, args }
+            }
+            Type::Tuple(items) => Type::Tuple(items.iter().map(|a| self.error_key(a)).collect()),
+            // `Gx<(Big) -> Int>` names `Big` inside a function type, and a
+            // mention of it with and without `Big`'s home would be two ids.
+            Type::Fn { params, ret, requires, raises } => Type::Fn {
+                params: params.iter().map(|p| self.error_key(p)).collect(),
+                ret: Box::new(self.error_key(ret)),
+                requires: requires.clone(),
+                raises: raises.clone(),
+            },
+            other => other.clone(),
+        }
     }
 
     /// A value as the one word a tagged return carries it in.

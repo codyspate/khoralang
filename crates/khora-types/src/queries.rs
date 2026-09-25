@@ -45,6 +45,25 @@ pub struct BodyTypes {
     /// Recorded as demanded, before any `with` block or `catch` discharges it —
     /// what the *call* needs, rather than what survives to the signature.
     call_rows: HashMap<ExprId, CallRows>,
+    /// The error type each named `catch` arm handles, with its arguments.
+    ///
+    /// **An arm names a constructor, and a constructor does not name an
+    /// instantiation.** `Gx::X(s, v)` is the arm for `Gx<Int>` in one
+    /// function and for `Gx<Big>` in another, and the two lay out and release
+    /// differently. Code generation dispatches a raised error by its
+    /// instantiated type, so it has to know which one the arm was checked
+    /// against, and only the checker has unified the arm with what the
+    /// operand raised.
+    caught: HashMap<PatId, Type>,
+    /// The operands of the `catch`es whose named arms leave nothing of what
+    /// the operand raises: no label and no row tail.
+    ///
+    /// **Code generation seals the way on out of these.** Anything other
+    /// than a cancellation or a failed assertion arriving there is an error
+    /// the checker did not see, and propagating it ran a function the
+    /// checker called infallible into an unhandled error: status 130 and no
+    /// message. Sealed, it stops the program naming the broken rule.
+    total_catches: HashSet<ExprId>,
 }
 
 /// The effect rows one call site asked for.
@@ -104,6 +123,18 @@ impl BodyTypes {
         self.lambda_captures.get(&id).map(Vec::as_slice).unwrap_or(&[])
     }
 
+    /// The error type a named `catch` arm handles, at its type arguments.
+    /// `None` for a `_` or a bound arm, and for a pattern that is not an arm.
+    pub fn caught(&self, arm: PatId) -> Option<&Type> {
+        self.caught.get(&arm)
+    }
+
+    /// Whether the `catch` over `operand` handles, by named arms alone,
+    /// everything the operand raises. See the field.
+    pub fn is_total_catch(&self, operand: ExprId) -> bool {
+        self.total_catches.contains(&operand)
+    }
+
     pub fn instantiations(&self) -> impl Iterator<Item = (&ExprId, &(String, Vec<Type>))> {
         self.instantiations.iter()
     }
@@ -139,6 +170,8 @@ impl BodyTypes {
             // substitute.
             lambda_captures: self.lambda_captures.clone(),
             call_rows: self.call_rows.clone(),
+            caught: self.caught.iter().map(|(k, v)| (*k, settle(v))).collect(),
+            total_catches: self.total_catches.clone(),
         }
     }
 }
@@ -204,6 +237,8 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             enclosing_lambdas: Vec::new(),
             lambda_captures: HashMap::new(),
             call_rows: HashMap::new(),
+            caught: HashMap::new(),
+            total_catches: HashSet::new(),
             installed: Vec::new(),
             loops: Vec::new(),
             open_raises: Vec::new(),
@@ -242,9 +277,19 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             .collect();
         let lambda_captures = std::mem::take(&mut checker.lambda_captures);
         let call_rows = std::mem::take(&mut checker.call_rows);
+        let caught = checker.caught.iter().map(|(k, v)| (*k, checker.unifier.zonk(v))).collect();
+        let total_catches = std::mem::take(&mut checker.total_catches);
         out.bodies.push((
             name.clone(),
-            BodyTypes { exprs, locals, instantiations, lambda_captures, call_rows },
+            BodyTypes {
+                exprs,
+                locals,
+                instantiations,
+                lambda_captures,
+                call_rows,
+                caught,
+                total_catches,
+            },
         ));
     }
     out

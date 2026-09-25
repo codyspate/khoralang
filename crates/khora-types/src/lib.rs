@@ -294,10 +294,31 @@ impl Type {
     }
 
     /// A row from labelled entries, canonically ordered.
+    ///
+    /// **A second entry under an error row's label is kept if its type
+    /// differs.** An error row labels each entry with its type's name, so
+    /// `Gx<Int>` and `Gx<String>` share the label `Gx`, and dropping one lost
+    /// an error the code still raised: a closure raising both was typed as
+    /// raising only the first, and a `catch` built for that one let the
+    /// other through as an unhandled error. Kept, the two meet whatever the
+    /// row is merged into -- a closure's row, a `catch`, a signature -- and
+    /// are unified there, which is where one type per label is enforced and
+    /// reported. A capability row labels a name against a type and keeps its
+    /// first entry, as it always has -- unless the label is the type's own
+    /// name (`with Box<Int> + Box<String>`), which is kept and unified the
+    /// same way.
     pub fn row(mut fields: Vec<(String, Type)>, tail: Option<Type>) -> Type {
         fields.sort_by(|a, b| a.0.cmp(&b.0));
-        fields.dedup_by(|a, b| a.0 == b.0);
-        Type::Row { fields, tail: tail.map(Box::new) }
+        let mut kept: Vec<(String, Type)> = Vec::with_capacity(fields.len());
+        for (label, ty) in fields {
+            let duplicate = kept.iter().any(|(l, t)| {
+                l == &label && (t == &ty || label != unify::row_label(&ty) || label != unify::row_label(t))
+            });
+            if !duplicate {
+                kept.push((label, ty));
+            }
+        }
+        Type::Row { fields: kept, tail: tail.map(Box::new) }
     }
 
     /// A nullary ADT whose declaring module is not known here.

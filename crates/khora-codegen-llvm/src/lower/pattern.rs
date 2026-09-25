@@ -144,9 +144,13 @@ impl<'ctx> Lower<'_, 'ctx> {
             return self.join(merge, reached, slot, &result_ty);
         }
 
-        // Group the arms by the error type they name, keeping written order so
-        // the emitted blocks read in the order the source does.
-        let mut caught: Vec<(String, Vec<MatchArm>)> = Vec::new();
+        // Group the arms by the error type they handle, keeping written order
+        // so the emitted blocks read in the order the source does. **By the
+        // instantiated type, not the name**: the checker recorded which one
+        // each arm was checked against, and in a specialization of a generic
+        // body that is already this specialization's. `Gx<Int>` and `Gx<Big>`
+        // are two ids and two layouts.
+        let mut caught: Vec<(Type, Vec<MatchArm>)> = Vec::new();
         let mut everything: Option<MatchArm> = None;
         for arm in arms {
             let Some(owner) = self.owner_of(arm.pat) else {
@@ -161,19 +165,33 @@ impl<'ctx> Lower<'_, 'ctx> {
                 }
                 continue;
             };
-            match caught.iter_mut().find(|(name, _)| name == &owner) {
+            // **Never guessed from the name.** An arm whose id differs from
+            // the raise's does not match it, and the error walks past a
+            // `catch` the checker called total. The checker records every
+            // named arm, so a miss here is a compiler bug, and says so.
+            let Some(handled) = self.types.caught(arm.pat).cloned() else {
+                return self.fail(
+                    format!(
+                        "the checker did not record which `{owner}` this `catch` arm \
+                         handles; this is a compiler bug"
+                    ),
+                    range,
+                );
+            };
+            let handled = self.be.error_key(&handled);
+            match caught.iter_mut().find(|(ty, _)| ty == &handled) {
                 Some((_, mine)) => mine.push(arm.clone()),
-                None => caught.push((owner, vec![arm.clone()])),
+                None => caught.push((handled, vec![arm.clone()])),
             }
         }
 
         let onward = self.block("catch.onward");
         let cases: Vec<(inkwell::values::IntValue<'ctx>, BasicBlock<'ctx>)> = caught
             .iter()
-            .map(|(owner, _)| {
-                let id = self.be.error_id(owner);
+            .map(|(handled, _)| {
+                let id = self.be.error_id(handled);
                 let tag = self.be.ctx.i32_type().const_int(u64::from(id), false);
-                (tag, self.block(&format!("catch.{owner}")))
+                (tag, self.block(&format!("catch.{handled}")))
             })
             .collect();
 
@@ -181,7 +199,19 @@ impl<'ctx> Lower<'_, 'ctx> {
         // still the propagate path; with one it is the arm, and the two things
         // that travel this channel without being errors are routed back to
         // propagating by name.
+        //
+        // **A `catch` the checker called total gets a sealed default.** Its
+        // named arms handle every error the operand raises, so only a
+        // cancellation or a failed assertion may pass on. An error arriving
+        // at the default means the checker lost an instantiation from a row;
+        // propagating it once ran a function with no `raises` row out to an
+        // exit of 130 and no message. The trap says which rule broke.
+        let total = everything.is_none() && self.types.is_total_catch(inner);
         let (fallthrough, mut escapes) = match &everything {
+            None if total => (
+                self.block("catch.missed"),
+                vec![runtime::CANCELLED_WHICH, runtime::FAILED_WHICH],
+            ),
             None => (onward, Vec::new()),
             Some(_) => (
                 self.block("catch.rest"),
@@ -227,20 +257,28 @@ impl<'ctx> Lower<'_, 'ctx> {
         } else {
             self.leave_with(which, word);
         }
+        if total {
+            self.at(fallthrough);
+            self.trap(
+                "an error reached a `catch` whose arms the compiler decided handle \
+                 everything its operand raises, and no arm names it; this is a compiler bug",
+            );
+        }
 
-        for ((owner, mine), (_, block)) in caught.iter().zip(&cases) {
+        for ((handled, mine), (_, block)) in caught.iter().zip(&cases) {
             self.at(*block);
-            // Named with its home: whether an error is a register or a
-            // pointer is answered from its declaration, and a home-less name
-            // answers "pointer" for every one of them.
-            let error_ty = self.be.named_type(owner, None);
+            // The instantiation the arms were checked against, with its home:
+            // whether an error is a register or a pointer is answered from
+            // its declaration *at these arguments*, and `Gb` with none
+            // answered "pointer" for a `Gb<String>` held in registers.
+            let error_ty = handled.clone();
             let error = self.be.word_to_value(word, &error_ty);
 
             // The raising frame moved the error into its return, so this frame
             // owns it. The arms borrow their bindings out of it, exactly as a
             // `match` borrows out of a temporary scrutinee, and it is released
             // on the way to the join.
-            let released = self.block(&format!("catch.{owner}.done"));
+            let released = self.block(&format!("catch.{handled}.done"));
             self.scopes.push(vec![Cleanup::Temp(error, error_ty.clone())]);
             let on = Scrutinee {
                 value: error,

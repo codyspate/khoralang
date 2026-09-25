@@ -403,7 +403,14 @@ pub(crate) struct Backend<'ctx> {
     /// A program-wide id for each error type, assigned on first sight. It is
     /// the `which` of a tagged return, so 1 is the lowest: 0 means the call
     /// did not raise. See `docs/design/effect-runtime.md` §2.
-    error_ids: HashMap<String, u32>,
+    ///
+    /// **Keyed on the instantiated type, not the name.** `Gx<Int>` and
+    /// `Gx<Big>` lay out differently, and every consumer of an id --
+    /// [`Backend::release_error`], [`Backend::take_error`], a `catch` arm --
+    /// decides a layout from it. Under one id for both, the releaser freed a
+    /// `Gb<String>` as though it were boxed and leaked the `String`, and two
+    /// joiners of one failed fiber freed it twice. [`Backend::error_id`].
+    error_ids: HashMap<Type, u32>,
     /// The releaser a wildcard `catch` calls, declared on first use.
     ///
     /// `khora.release_error(which, word)`. See [`Backend::release_error`].

@@ -159,6 +159,12 @@ pub(crate) struct Checker<'a> {
     /// because afterwards the row has been through subtraction and no longer
     /// says what the *call* wanted.
     pub(crate) call_rows: HashMap<ExprId, crate::CallRows>,
+    /// The error type each named `catch` arm handles, published as
+    /// [`crate::BodyTypes::caught`].
+    pub(crate) caught: HashMap<PatId, Type>,
+    /// The operands of the `catch`es whose named arms handle everything the
+    /// operand raises, published as [`crate::BodyTypes::is_total_catch`].
+    pub(crate) total_catches: HashSet<ExprId>,
     /// The capabilities in scope from enclosing `with` blocks.
     ///
     /// A call inside one is served by it, so its labels never reach the

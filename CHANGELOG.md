@@ -63,6 +63,34 @@ cancellation point in every function, whatever the function's `raises` row;
   here too because a program on `KHORA_FIBERS=scheduler` whose cleanup was
   silently skipped now runs it.
 
+- **An error type appears in a `raises` row at one instantiation.** An arm
+  that reads a field of a generic error at a type other than the one raised
+  is refused (see Fixed; it read the wrong type). So is anything that would
+  put two instantiations of one error type in one row, wherever they meet:
+  - one `catch` over `(if b { fi()! } else { fs()! })`, with `fi` raising
+    `Gx<Int>` and `fs` raising `Gx<String>`, when it has a `Gx::..` arm or an
+    arm that binds the failure (`catch { e => .. }`), including a `_` beside
+    a `Gx::..` arm;
+  - a closure whose body raises both, however it is then used: called,
+    passed to `attempt` or a row-polymorphic function, or given to
+    `Fiber::spawn`;
+  - `raises E + F` instantiated with `E` and `F` two instantiations of one
+    type;
+  - two *different* error types that share a name, declared in two modules
+    (an `m::a::E` and an `m::b::E`), wherever the same routes put them in
+    one row. An error row is labelled by the type's bare name, so the two
+    collide as two instantiations do; a named arm there read one type's
+    field as the other's on 0.3.0. The message says they are two types of
+    one name.
+
+  One arm reads one layout, and the program cannot say which instantiation
+  arrived. Catch each where it is raised, in a `catch` around each call, or
+  with a `_` arm alone.
+
+- **A `with` clause that names two instantiations of one capability type
+  under the type's own name** (`with Box<Int> + Box<String>`) is refused.
+  It used to keep the first and drop the second without a word.
+
 ### Fixed
 
 - **A `Shared` cell holding a record, or an enum laid out flat, whose fields
@@ -114,17 +142,44 @@ cancellation point in every function, whatever the function's `raises` row;
 - **Joining twice a fiber that failed with a small error holding a `String`
   ended the process** with "drop of an object whose refcount is already zero"
   (status 134), on both fiber backends. Each join has its own copy of the
-  error, for an error type with no type parameters. A generic error type
-  (`type E<A>`) still leaks, and joined twice it can still end the process
-  the same way; see erratum 91.
+  error.
 
 - **A fiber that failed leaked what its error held** when nobody joined it,
   when it was joined twice, when its error was one of several carrying
   variants, and, with `KHORA_UNBOXED=0`, when it was joined once. A program
   that ran work in a fiber of its own and let it fail lost memory on each
   failure. A server built on `std::net::http`'s `Router` did not. The error
-  is released with the fiber's handle, except for an error type with type
-  parameters.
+  is released with the fiber's handle.
+
+- **An error whose type has a type parameter leaked what it held** every
+  time one holding a `String` or other counted value was caught, with or
+  without a fiber: `type E<A> = | Bad(v: A, n: Int)`
+  raised as an `E<String>` left its `String` behind, and joined twice from a
+  failed fiber with the `String` kept, it ended the process with status 134.
+  Two instantiations of one such type, an `E<Int>` and an `E<Big>`, were
+  released as though they had one layout.
+
+- **A `catch` arm could read an error's field at the wrong type.** Over an
+  error `Gx<Int>`, the arm `Gx::X(s, v) => String::byte_length(v)` compiled
+  and read the `Int` as a `String`, ending the process with a segmentation
+  fault. The arm's fields have the types of what was raised, and that arm is
+  refused. The same held for an arm that binds the failure (`catch { e => .. }`)
+  and for `attempt`, over an operand that raised two instantiations of one
+  error type: one was read at the other's layout, printing a pointer as a
+  number or ending with a segmentation fault. Those operands are refused (see
+  Breaking).
+
+- **A closure raising two instantiations of one error type, caught by
+  `catch { Gx::Y(n) => n, _ => .. }`, ended the process with an illegal
+  instruction** (status 132). Such a closure is refused at build time (see
+  Breaking).
+
+- **Two modules that each declared an error type of the same name failed to
+  build**, with "not valid LLVM IR". Each module's type is its own.
+
+- **A named `catch` arm over an error such as `Gx<() -> Int>`, or one that
+  read a field of a `Gx<Big>`, was refused** with "the type of this
+  expression was never worked out". It compiles.
 
 - **`Fiber::join` and `Fiber::outcome` on a handle that is not bound to a
   name** (`Fiber::join(Fiber::spawn(..))`) leaked one object per `String` or
