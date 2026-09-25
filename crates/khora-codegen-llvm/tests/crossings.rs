@@ -230,8 +230,8 @@ fn every_crossing_counts_to_zero_boxed() {
 
 /// **The control: with plain counts the fixture has to go wrong.**
 ///
-/// Plain counts lose updates when two threads count one object at once.
-/// Every run on either backend should then end with a wrong count: a leak,
+/// Plain counts lose updates when two threads count one object at once, so
+/// every run on either backend should then end with a wrong count: a leak,
 /// a double free or a crash. Requiring every run to fail would make the
 /// test depend on how threads are scheduled. So this requires at least one
 /// failure on each backend.

@@ -946,7 +946,16 @@ mod tests {
             while !reactor.polling.load(Ordering::Acquire) {
                 std::thread::yield_now();
             }
-            std::thread::sleep(Duration::from_millis(5));
+            // Waited out by spinning, not by `sleep`. macOS coalesces a short
+            // sleep's timer with others, and on the hosted runner a 5 ms
+            // sleep came back after 13 to 55 ms in every round even with the
+            // machine to itself, so no round registered in time to be judged.
+            // A spin on the clock returns at 5 ms unless the thread is
+            // descheduled, which is what the late-round retry is for.
+            let polling_since = std::time::Instant::now();
+            while polling_since.elapsed() < Duration::from_millis(5) {
+                std::thread::yield_now();
+            }
             let watch = watch();
             let registered = began.elapsed();
             reactor.register(watch);
