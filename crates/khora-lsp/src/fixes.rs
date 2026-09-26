@@ -75,12 +75,13 @@ pub struct Row {
 /// not offered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signature {
-    /// Just past the return type: where a clause the function has none of goes.
+    /// Just past the return type: where a clause the function has none of goes,
+    /// unless it is a `raises` and there is a `with` row, which it follows.
     ///
     /// **After the return type rather than before the body**, because the space
     /// between them may already hold a clause of the other kind, and landing on
     /// the far side of `raises E` would write `raises E with { .. }` — which
-    /// the parser takes, in an order nothing in `std` is written in.
+    /// is a syntax error.
     pub clauses_at: TextSize,
     /// The `with` row, when the function already has one.
     pub with_row: Option<Row>,
@@ -177,9 +178,13 @@ fn add_to_with(entry: &str, sig: &Signature) -> Option<Fix> {
 fn add_to_raises(entry: &str, sig: &Signature) -> Option<Fix> {
     let title = format!("Add `{entry}` to this function's `raises` clause");
     let Some(row) = &sig.raises_row else {
+        // After the `with` row when there is one: `raises` before `with` is a
+        // syntax error, so the return type is the right place only when the
+        // function has no `with` clause.
+        let at = sig.with_row.as_ref().map_or(sig.clauses_at, |with| with.range.end());
         return Some(Fix {
             title,
-            range: TextRange::empty(sig.clauses_at),
+            range: TextRange::empty(at),
             replacement: format!(" raises {entry}"),
         });
     };
@@ -618,6 +623,18 @@ mod tests {
         let (text, sig) = signature("fn main() -> Int { load() }");
         let fixes = for_diagnostic(NEEDS_ERR, None, range(), "load()", "", Some(&sig));
         assert_eq!(applied(&text, &fixes[0]), "fn main() -> Int raises DbError { load() }");
+    }
+
+    /// **A `raises` clause lands after an existing `with`**, because `raises`
+    /// in front of `with` is a syntax error: a fix that wrote it would turn
+    /// one diagnostic into another.
+    #[test]
+    fn a_raises_clause_goes_after_the_with_clause() {
+        let (text, sig) = signature("fn main() -> Int with { log: Log } { load() }");
+        let fixes = for_diagnostic(NEEDS_ERR, None, range(), "load()", "", Some(&sig));
+        let after = applied(&text, &fixes[0]);
+        assert_eq!(after, "fn main() -> Int with { log: Log } raises DbError { load() }");
+        assert!(khora_syntax::parse(&format!("module m;\n{after}\n")).errors().is_empty(), "{after}");
     }
 
     /// **Nothing is offered without a signature to edit**, which is the state a

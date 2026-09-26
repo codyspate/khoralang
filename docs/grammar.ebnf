@@ -56,10 +56,12 @@ TypeArgs       ::= "<" Type ( "," Type )* ( "," )? ">" ;
 (* Effect clauses bind to an arrow and only to an arrow. In
    `fn f() -> Report with { .. }` the return type is just `Report` and the
    clause belongs to the declaration; in `f: A -> B with 'e` it belongs to the
-   function type. That is what lets both spellings coexist. *)
-Type           ::= UnionType ( "->" Type ( EffectClause )* )? ;
+   function type. That is what lets both spellings coexist.
+   At most one of each clause, `with` first: a second clause was once read
+   and silently ignored, so it is a syntax error that names the fix. *)
+Type           ::= UnionType ( "->" Type EffectClauses )? ;
 UnionType      ::= PrimaryType ( "+" PrimaryType )* ;  (* open error union    *)
-EffectClause   ::= WithClause | RaisesClause ;
+EffectClauses  ::= ( WithClause )? ( RaisesClause )? ;
 WithClause     ::= "with" Type ;                       (* a capability row    *)
 RaisesClause   ::= "raises" Type ;                     (* an error row        *)
 
@@ -90,7 +92,7 @@ VariantPayload ::= Field ( "," Field )* ( "," )?       (* named payload       *)
    and pointers, requires capabilities without receiving them, and cannot raise
    — docs/design/ffi.md, and the compiler checks it. *)
 FunctionDecl   ::= ( "pub" )? ( "extern" )? "fn" Ident ( TypeParams )? ParamList
-                   ( "->" Type )? ( EffectClause )* ( Block | ";" ) ;
+                   ( "->" Type )? EffectClauses ( Block | ";" ) ;
 
 (* A module-level constant. Its initialiser is evaluated at compile time. *)
 ConstDecl      ::= ( "pub" )? "const" Ident ( ":" Type )? "=" Expr ";" ;

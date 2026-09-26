@@ -202,10 +202,12 @@ fn intrinsic(value: Int) -> Int;
 General form:
 
 ```text
-pub? fn Name<TypeParams>? (Params) (-> Type)? EffectClause* (Block | ;)
+pub? fn Name<TypeParams>? (Params) (-> Type)? (with Row)? (raises Type)? (Block | ;)
 ```
 
 There is no `=` between a function signature and its block body, and a function definition has no semicolon after the block.
+
+A signature has at most one `with` clause and one `raises` clause, and `with` comes first. A second clause of either kind, or `raises` before `with`, is a syntax error: put every capability in one row (`with { a: A, b: B }`) and every error in one union (`raises A + B`). A function type follows the same rule.
 
 The clauses are read in order. `pub fn load<A>(id: Id) -> A with { store: Store }
 raises StoreError` says: given an `Id` it produces an `A`, it requires a

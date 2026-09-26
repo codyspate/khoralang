@@ -249,12 +249,12 @@ fn fn_decl(src: &mut Entropy<'_>) -> String {
             args.push(format!("{}: {}", lower(src), ty(src)));
         }
     }
-    let ret = if src.chance(192) { format!(" -> {}", ty(src)) } else { String::new() };
+    let ret = if src.chance(192) { format!(" -> {}", returned(ty(src))) } else { String::new() };
 
-    // `with` and `raises` come after the return type, in either order and any
-    // number of times. Broken onto their own lines about half the time,
-    // because that is how a signature carrying both is written in `std` and it
-    // is a shape the formatter has to put back where it found it.
+    // `with` and `raises` come after the return type, at most one of each and
+    // `with` first. Broken onto their own lines about half the time, because
+    // that is how a signature carrying both is written in `std` and it is a
+    // shape the formatter has to put back where it found it.
     let mut clauses = String::new();
     let sep = if src.chance(128) { "\n  " } else { " " };
     if src.chance(96) {
@@ -272,6 +272,16 @@ fn fn_decl(src: &mut Entropy<'_>) -> String {
         return format!("{v}fn {name}{params}({}){ret}{clauses};\n", args.join(", "));
     }
     format!("{v}fn {name}{params}({}){ret}{clauses} {}\n", args.join(", "), block(src))
+}
+
+/// A return type, parenthesised when it is a function type.
+///
+/// Effect clauses after a function type belong to its arrow, so in
+/// `fn f() -> (A) -> B with 'r with { .. }` both clauses land on the inner
+/// arrow, the second is refused, and the signature's own clause is lost.
+/// Parenthesised, the inner arrow's clauses stay inside.
+fn returned(ty: String) -> String {
+    if ty.contains("->") { format!("({ty})") } else { ty }
 }
 
 /// `<A, B: Show + Eq, 'ef>`, or nothing.
@@ -369,8 +379,11 @@ fn ty(src: &mut Entropy<'_>) -> String {
         6 => {
             // A function type carries its own effect clauses, which is the one
             // place `with` and `raises` appear inside a type rather than after
-            // a signature.
-            let mut out = format!("({}) -> {}", ty(&mut src), ty(&mut src));
+            // a signature. A return type that is itself a function type is
+            // parenthesised: `(A) -> (B) -> C with 'r` gives the clause to the
+            // inner arrow, so a second clause here would be that arrow's
+            // second, which the grammar refuses.
+            let mut out = format!("({}) -> {}", ty(&mut src), returned(ty(&mut src)));
             if src.chance(80) {
                 out.push_str(&format!(" with {}", row_var(&mut src)));
             }

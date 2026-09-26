@@ -3812,3 +3812,20 @@ home as well would let them sit side by side, and is a separate change.
 The general shape: **anything that selects a layout by a key must key on
 everything the layout depends on.** A type name is not a type once the type
 has parameters, and not once two modules can each declare one.
+
+## 96. A second effect clause was read and dropped
+
+`reference/declarations.md` gave a function's general form as
+`(-> Type)? EffectClause* (Block | ;)`, and `docs/grammar.ebnf` the same for
+function types: any number of `with` and `raises` clauses, in any order. The
+parser accepted exactly that, and everything after it read only the first
+clause of each kind, so a second one was discarded without a word.
+`fn f() -> Int raises Oops raises Worse` then refused `raise Worse::Awful` as
+not raised, and `with {} with { clock: Clock }` said `clock` was not in scope:
+each an error about the line that was right, caused by a line the compiler
+had silently ignored.
+
+A signature has at most one `with` clause and one `raises` clause, `with`
+first. Anything else is a syntax error that names the fix: one row
+(`with { a: A, b: B }`) or one union (`raises A + B`). Nothing in `std`,
+`packages/`, `examples/`, `tests/` or `bench/` wrote another shape.

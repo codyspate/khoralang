@@ -477,7 +477,7 @@ fn row_decl(p: &mut Parser<'_>) {
     m.complete(p, ROW_DECL);
 }
 
-/// `pub? fn name<Params>?(params) ("->" Type)? EffectClause* ( Block | ";" )`
+/// `pub? fn name<Params>?(params) ("->" Type)? ("with" Row)? ("raises" Type)? ( Block | ";" )`
 ///
 /// No `=` before the body, and no semicolon after it. The rule is simply:
 /// `{` introduces a definition, `;` declares a signature only — which is how

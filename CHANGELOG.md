@@ -115,6 +115,13 @@ cancellation point in every function, whatever the function's `raises` row;
   Keep one import, or rename one with `as`. The same item imported twice is
   not an error.
 
+- **At most one `with` clause and one `raises` clause, `with` first.**
+  `raises A raises B`, `with {..} with {..}` and `raises E with {..}` are
+  syntax errors, in a signature and in a function type. A second clause was
+  accepted and ignored, which surfaced as an error about a correct line
+  elsewhere (a `raise` "not raised", a capability "not in scope"). Write one
+  row, `with { a: A, b: B }`, and one union, `raises A + B`, in that order.
+
 ### Fixed
 
 - **A `postgres` query could return another caller's rows.** When a read

@@ -903,8 +903,9 @@ fn fmt_options(start: Option<&Path>) -> Result<khora_fmt::Options> {
 
 /// How loud each lint is, from the `[lints]` table nearest `start`.
 ///
-/// A lint the manifest does not mention takes `khora_lint::default_level`.
-/// A manifest that cannot be read is an error; see [`manifest_governing`].
+/// A lint the manifest does not mention takes `khora_lint::default_level`,
+/// and a manifest that cannot be read is an error: see
+/// [`manifest_governing`].
 fn lint_levels(start: Option<&Path>) -> Result<std::collections::BTreeMap<String, LintLevel>> {
     let mut out = std::collections::BTreeMap::new();
     let Some((_, parsed)) = manifest_governing(start)? else { return Ok(out) };

@@ -20,20 +20,54 @@ pub(super) fn type_(p: &mut Parser<'_>) {
     }
 }
 
-/// `with <row>` and `raises <type>`, in any order, zero or more times.
+/// `[ with <row> ] [ raises <type> ]`: at most one of each, `with` first.
 ///
 /// Shared by function types and function declarations so the two can never
 /// drift apart.
+///
+/// **A second clause, or `raises` before `with`, is a parse error.** This
+/// accepted both clauses in any order and any number of times, and everything
+/// downstream read only the first of each, so a second clause was dropped
+/// without a word: `raises Oops raises Worse` then refused `raise
+/// Worse::Awful` as not raised, an error about the line that was right. One
+/// order is also the only one `std` is written in.
+///
+/// The clause is still parsed as a clause after the error, so a misordered
+/// signature is one diagnostic rather than a cascade through the body.
 pub(super) fn effect_clauses(p: &mut Parser<'_>) {
+    let (mut seen_with, mut seen_raises) = (false, false);
     while p.at(WITH_KW) || p.at(RAISES_KW) {
         if !p.tick() {
             break;
         }
+        let at = p.current_range();
         let m = p.start();
-        if p.eat(WITH_KW) {
+        if p.at(WITH_KW) {
+            if seen_with {
+                p.error_at(
+                    at,
+                    "a function has one `with` clause. Put every capability in one \
+                     row, as in `with { a: A, b: B }`",
+                );
+            } else if seen_raises {
+                p.error_at(
+                    at,
+                    "`with` comes before `raises`. Write `with { .. } raises E`",
+                );
+            }
+            seen_with = true;
+            p.bump(WITH_KW);
             type_(p);
             m.complete(p, WITH_CLAUSE);
         } else {
+            if seen_raises {
+                p.error_at(
+                    at,
+                    "a function has one `raises` clause. Join the errors in one, \
+                     as in `raises A + B`",
+                );
+            }
+            seen_raises = true;
             p.bump(RAISES_KW);
             type_(p);
             m.complete(p, RAISES_CLAUSE);

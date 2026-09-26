@@ -17,7 +17,7 @@ import Path::* ;
 
 pub? const Pattern (: Type)? = Expr ;
 derive(...)? pub? type Name<TypeParams>? (= TypeDef)? ;
-pub? fn Name<TypeParams>? (Params) (-> Type)? EffectClause* (Block | ;) 
+pub? fn Name<TypeParams>? (Params) (-> Type)? (with Row)? (raises Type)? (Block | ;)
 pub? effect Name<TypeParams>? { Field, ... }
 pub? context Name { name: Expr, ... }
 pub? trait Name<TypeParams>? (: Bounds)? { TraitItem* }
@@ -25,7 +25,7 @@ impl<TypeParams>? Type (for Type)? { TraitItem* }
 
 test "name" Block
 bench "name" Block
-extern fn name(Params) (-> Type)? EffectClause* ;
+extern fn name(Params) (-> Type)? (with Row)? ;
 ```
 
 Current public visibility is spelled `pub`.
