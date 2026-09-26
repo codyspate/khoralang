@@ -329,7 +329,10 @@ fn no_group_is_named_like_a_lint() {
     let built_in = groups::built_in(Some(&std)).unwrap();
     let path = package("lint_named_built_in", "", &[]);
     let why = levels_with(&path, built_in).expect_err("a built-in group named like a lint");
-    names(&why, &std.join("lints/unused-import.toml"), "group.name", "is a lint");
+    // Joined a component at a time, as the loader builds it: a path spelled
+    // `lints/unused-import.toml` compares equal on Windows but displays with
+    // a `/` where the message has a `\`.
+    names(&why, &std.join("lints").join("unused-import.toml"), "group.name", "is a lint");
 
     // Local.
     let path = package(

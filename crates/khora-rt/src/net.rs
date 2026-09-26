@@ -788,6 +788,13 @@ mod tests {
     /// and fails if a forced read did not move, because then the premise
     /// is wrong.
     ///
+    /// **Which worker a read is on is itself a thread-local, and this test
+    /// hit the bug it guards against.** With the worker read inline in the
+    /// reader, the optimised macOS build looked it up once and reported
+    /// every forced read as staying put. So `worker` is out of line, for the
+    /// same reason as `would_block`. The mistake fails the test, never
+    /// passes it: a stale read gives the same worker before and after.
+    ///
     /// What it guards: only the development profile. The optimised runtime
     /// re-reads errno every turn with or without `#[inline(never)]` (see
     /// `would_block`), so under `--release` this passes either way.
@@ -822,6 +829,22 @@ mod tests {
             stayed: usize,
             // Reads that changed worker, forced or not.
             moved: usize,
+        }
+
+        /// The worker running the caller, read afresh on every call.
+        ///
+        /// **Out of line, because an inlined read of it hit the bug this test
+        /// is about.** `std::thread::current()` reads a thread-local, and as a
+        /// closure in the reader's body the optimised aarch64-macOS build
+        /// looked up that thread-local's address once, before the read loop,
+        /// and used it again after `khora_net_recv` had moved the fiber. It
+        /// then reported the worker the read left as the one it came back
+        /// on: every forced read counted as staying, while an occupier spun
+        /// on that worker. Called here, the address is found on the thread
+        /// that makes the call.
+        #[inline(never)]
+        fn worker() -> std::thread::ThreadId {
+            std::thread::current().id()
         }
 
         // Read numbers start at 1, so 0 is "none yet". `reading` is the read
@@ -862,7 +885,6 @@ mod tests {
             pool.spawn(Task::new(move || {
                 let _client = client;
                 *waker.lock().unwrap() = waker_for_current();
-                let worker = || std::thread::current().id();
                 let start = Instant::now();
                 let mut seen = Tally::default();
                 while seen.forced < MOVES && start.elapsed() < DEADLINE {
