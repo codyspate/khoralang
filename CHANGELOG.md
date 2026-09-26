@@ -98,6 +98,16 @@ cancellation point in every function, whatever the function's `raises` row;
   under the type's own name** (`with Box<Int> + Box<String>`) is refused.
   It used to keep the first and drop the second without a word.
 
+- **A `khora.toml` that does not load stops `check`, `build`, `run`, `test`,
+  `bench` and `fmt`**, with the file, line and key that are wrong. In 0.3.0,
+  given a path to a project from outside it, these commands went on with the
+  default lint levels and formatter settings, so one bad `[lints]` entry --
+  a level spelled `"loud"`, a table without `level` -- turned every `deny`
+  beside it into a `warn`, and `khora check` passed the program the manifest
+  said must fail. Fix the entry the message names. The language server keeps
+  running on the defaults, and reports the manifest as an error on the line
+  to fix.
+
 ### Fixed
 
 - **A `postgres` query could return another caller's rows.** When a read

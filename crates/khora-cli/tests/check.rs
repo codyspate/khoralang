@@ -1425,3 +1425,83 @@ pub fn main() -> Int {
     assert!(checked, "{check_out}");
     assert!(built, "{build_out}");
 }
+
+/// A program with one unused import, which `unused-import = "deny"` fails.
+const UNUSED_IMPORT: &str = "module fixture::main;\nimport std::core::{List, print};\n\n\
+                             pub fn main() -> Int {\n  print(\"hi\");\n  0\n}\n";
+
+/// A manifest that denies `unused-import`, followed by `rest`.
+fn denying(rest: &str) -> String {
+    format!("{MANIFEST}\n[lints]\nunused-import = \"deny\"\n{rest}")
+}
+
+/// **A `[lints]` table the manifest reader refuses does not turn `deny` into
+/// `warn`.**
+///
+/// Every command that read the lint policy dropped a manifest it could not
+/// load and carried on with the defaults, so one bad entry -- a level spelled
+/// `"loud"`, or a table with no `level` -- silently switched off every `deny`
+/// beside it. `khora check` then exited zero on the program the manifest had
+/// said must fail. The design review's `man3` and `man5` probes, verbatim in
+/// their lint tables.
+#[test]
+fn a_manifest_that_does_not_load_fails_check_rather_than_dropping_its_lints() {
+    // The control: the same program and the same `deny`, in a manifest that
+    // loads. Without it, the two cases below could pass for any reason that
+    // makes `check` fail.
+    let (ok, output) = command_on_package(
+        "bad_lints_control",
+        "check",
+        &[("khora.toml", &denying("")), ("src/main.kh", UNUSED_IMPORT)],
+    );
+    assert!(!ok && output.contains("[unused-import]"), "the deny holds:\n{output}");
+
+    for (name, rest, says) in [
+        ("bad_lints_table", "\n[lints.idiomatic]\nenabled = true\n", "idiomatic"),
+        ("bad_lints_level", "unused-binding = \"loud\"\n", "loud"),
+    ] {
+        let (ok, output) = command_on_package(
+            name,
+            "check",
+            &[("khora.toml", &denying(rest)), ("src/main.kh", UNUSED_IMPORT)],
+        );
+        assert!(!ok, "{name}: a manifest that does not load must fail the check:\n{output}");
+        assert!(output.contains("khora.toml"), "{name}: it names the manifest:\n{output}");
+        assert!(output.contains(says), "{name}: and what is wrong in it:\n{output}");
+        assert!(
+            !output.contains("warning: `List`"),
+            "{name}: not a check run on the defaults:\n{output}"
+        );
+    }
+}
+
+/// The same, for `khora fmt`: a `[fmt]` table it cannot read would otherwise
+/// reformat every file in the formatter's defaults, against the style the
+/// manifest asked for.
+#[test]
+fn a_manifest_that_does_not_load_fails_fmt() {
+    let (ok, output) = command_on_package(
+        "bad_manifest_fmt",
+        "fmt",
+        &[
+            ("khora.toml", &format!("{MANIFEST}\n[fmt]\nindent-style = \"tab\"\nindent-width = \"four\"\n")),
+            ("src/main.kh", UNUSED_IMPORT),
+        ],
+    );
+    assert!(!ok, "{output}");
+    assert!(output.contains("khora.toml"), "{output}");
+}
+
+/// And `khora build`, which reads the same `[lints]` and must refuse the same
+/// manifest rather than produce an artifact `check` would have failed.
+#[cfg(feature = "llvm")]
+#[test]
+fn a_manifest_that_does_not_load_fails_build() {
+    let (ok, output) = command_on_package(
+        "bad_lints_build",
+        "build",
+        &[("khora.toml", &denying("unused-binding = \"loud\"\n")), ("src/main.kh", UNUSED_IMPORT)],
+    );
+    assert!(!ok, "{output}");
+    assert!(output.contains("loud"), "{output}");
+}

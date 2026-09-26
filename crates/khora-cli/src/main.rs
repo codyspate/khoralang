@@ -714,7 +714,7 @@ fn over_members(
 }
 
 fn check_one(paths: &[PathBuf]) -> Result<bool> {
-    report_manifest_warnings(paths.first().map(PathBuf::as_path));
+    report_manifest_warnings(paths.first().map(PathBuf::as_path))?;
 
     let mut files = collect_sources(paths)?;
 
@@ -756,7 +756,7 @@ fn check_one(paths: &[PathBuf]) -> Result<bool> {
 
     // Read once. A file outside any package gets the defaults, so `khora check
     // scratch.kh` works without a manifest.
-    let levels = lint_levels(paths.first().map(PathBuf::as_path));
+    let levels = lint_levels(paths.first().map(PathBuf::as_path))?;
     warn_about_unknown_lints(&levels);
 
     let mut total = 0usize;
@@ -845,29 +845,52 @@ fn check_one(paths: &[PathBuf]) -> Result<bool> {
 /// On stderr and never fatal: a manifest written against a newer toolchain has
 /// to stay buildable by an older one, which is the whole reason the audit
 /// warns rather than erroring.
-fn report_manifest_warnings(start: Option<&Path>) {
-    let Some(manifest_path) = start.and_then(nearest_manifest) else { return };
-    let Ok(parsed) = khora_manifest::Manifest::load(&manifest_path) else { return };
+///
+/// **A manifest that does not load is fatal here**, which is a different thing
+/// from a warning: see [`manifest_governing`].
+fn report_manifest_warnings(start: Option<&Path>) -> Result<()> {
+    let Some((manifest_path, parsed)) = manifest_governing(start)? else { return Ok(()) };
     for warning in &parsed.warnings {
         eprintln!("warning: {}: {warning}", manifest_path.display());
     }
+    Ok(())
 }
 
-/// The `[fmt]` settings governing `start`, or the formatter's own defaults.
+/// The manifest nearest `start`, loaded, or `None` outside any package.
 ///
-/// A manifest that cannot be read contributes nothing rather than failing the
-/// command, the same rule `lint_levels` follows: complaining about the manifest
-/// is `khora check`'s job, and two commands reporting one error differently is
-/// worse than one reporting it.
-fn fmt_options(start: Option<&Path>) -> khora_fmt::Options {
-    let Some(manifest_path) = start.and_then(nearest_manifest) else {
-        return khora_fmt::Options::default();
+/// **A manifest that exists and does not load is an error, never an empty
+/// one.** Every reader of `[lints]` and `[fmt]` used to take a failed load as
+/// "no settings", so one bad entry -- a level spelled `"loud"`, a table missing
+/// its `level` -- silently replaced the whole policy with the defaults: every
+/// `deny` beside it became a `warn`, and `khora check` exited zero on the
+/// program the manifest said must fail. The setting somebody wrote down is the
+/// one they stop thinking about, so the silent direction is the harmful one.
+///
+/// The cost is that a manifest with one mistake in it stops `check`, `build`,
+/// `test` and `fmt` until it is fixed, where it used to let them run on the
+/// defaults. The error names the file, the line and the key, so that is one
+/// edit.
+fn manifest_governing(start: Option<&Path>) -> Result<Option<(PathBuf, khora_manifest::Parsed)>> {
+    let Some(manifest_path) = start.and_then(nearest_manifest) else { return Ok(None) };
+    match khora_manifest::Manifest::load(&manifest_path) {
+        Ok(parsed) => Ok(Some((manifest_path, parsed))),
+        Err(why) => anyhow::bail!("{why}"),
+    }
+}
+
+/// The `[fmt]` settings governing `start`, or the formatter's own defaults
+/// when there is no manifest or it has no `[fmt]`.
+///
+/// A manifest that cannot be read is an error, for the reason on
+/// [`manifest_governing`]: formatting a tree in the defaults because the
+/// `[fmt]` table beside them had a typo rewrites every file against the style
+/// the project asked for.
+fn fmt_options(start: Option<&Path>) -> Result<khora_fmt::Options> {
+    let Some((_, parsed)) = manifest_governing(start)? else {
+        return Ok(khora_fmt::Options::default());
     };
-    let Ok(parsed) = khora_manifest::Manifest::load(&manifest_path) else {
-        return khora_fmt::Options::default();
-    };
-    let Some(table) = parsed.manifest.fmt else { return khora_fmt::Options::default() };
-    match table.indent_style {
+    let Some(table) = parsed.manifest.fmt else { return Ok(khora_fmt::Options::default()) };
+    Ok(match table.indent_style {
         Some(khora_manifest::IndentStyle::Tab) => khora_fmt::Options::tabs(),
         // Spaces either way: `indent-width` on its own is a width in spaces,
         // because nobody writes `indent-width = 4` meaning four tabs.
@@ -875,26 +898,21 @@ fn fmt_options(start: Option<&Path>) -> khora_fmt::Options {
             Some(width) => khora_fmt::Options::spaces(width),
             None => khora_fmt::Options::default(),
         },
-    }
+    })
 }
 
 /// How loud each lint is, from the `[lints]` table nearest `start`.
 ///
-/// A lint the manifest does not mention warns: this set is quiet enough to be
-/// worth hearing and not worth failing a build over.
-///
-/// A manifest that cannot be read contributes nothing rather than failing the
-/// command — complaining about the manifest is `khora check`'s job, not every
-/// other command's.
-fn lint_levels(start: Option<&Path>) -> std::collections::BTreeMap<String, LintLevel> {
+/// A lint the manifest does not mention takes `khora_lint::default_level`.
+/// A manifest that cannot be read is an error; see [`manifest_governing`].
+fn lint_levels(start: Option<&Path>) -> Result<std::collections::BTreeMap<String, LintLevel>> {
     let mut out = std::collections::BTreeMap::new();
-    let Some(manifest_path) = start.and_then(nearest_manifest) else { return out };
-    let Ok(parsed) = khora_manifest::Manifest::load(&manifest_path) else { return out };
+    let Some((_, parsed)) = manifest_governing(start)? else { return Ok(out) };
 
     for (name, lint) in &parsed.manifest.lints {
         out.insert(name.clone(), lint.level);
     }
-    out
+    Ok(out)
 }
 
 /// Complains about a `[lints]` entry that names no lint.
@@ -1519,7 +1537,7 @@ fn fmt_one(paths: &[PathBuf], check: bool) -> Result<bool> {
     if files.is_empty() {
         anyhow::bail!("no `.kh` files found");
     }
-    let options = fmt_options(paths.first().map(PathBuf::as_path));
+    let options = fmt_options(paths.first().map(PathBuf::as_path))?;
 
     let mut changed = Vec::new();
     let mut failed = 0usize;
@@ -1665,7 +1683,7 @@ fn harness(
 ) -> Result<bool> {
     // `test` and `bench` both arrive here, and both compile a program from the
     // same manifest `build` would have read. See the note in `build`.
-    report_manifest_warnings(Some(path));
+    report_manifest_warnings(Some(path))?;
     // `natives` is deliberately unused here: the harness does not consult the
     // build cache, so there is no key for an archive to be part of. The linked
     // library still reaches the test binary, because `record_natives` told the
@@ -1743,7 +1761,7 @@ fn build(
     // sentence with exactly one useful moment to arrive, and `build` was the
     // one command that never printed it. `run` reaches this through `build`.
     // Roadmap 16.5.
-    report_manifest_warnings(Some(path));
+    report_manifest_warnings(Some(path))?;
 
     // **A package with a `src/bin` builds every program in it.**
     //

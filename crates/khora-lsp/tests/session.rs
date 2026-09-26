@@ -276,6 +276,57 @@ fn the_manifest_decides_how_loud_a_lint_is() {
     assert!(last_diagnostics(&replies).is_empty(), "`allow` should be silent: {replies:?}");
 }
 
+/// **A manifest the server cannot read is an error the reader sees, not a
+/// policy quietly replaced by the defaults.**
+///
+/// The server read `[lints]` through a loader that returned an empty table on
+/// any failure, so one bad entry beside `dangling-expression = "deny"` put the
+/// editor back on the defaults: the finding the manifest had made an error
+/// arrived as a warning, and the only other trace was a notification worded as
+/// a warning about the toolchain pin. The same failure `khora check` refuses
+/// to run over.
+#[test]
+fn a_manifest_that_does_not_load_is_an_error_in_the_editor() {
+    let w = workspace(&[
+        (
+            "khora.toml",
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[toolchain]\nversion = \"0.3.0\"\n\n\
+             [lints]\ndangling-expression = \"deny\"\nunused-binding = \"loud\"\n",
+        ),
+        ("src/main.kh", "module app::main;\n"),
+    ]);
+    let path = w.root.join("src/main.kh");
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&path, "module app::main;\nfn f(x: Int) -> Int { x + 1; x }\n"),
+        exit(),
+    ]);
+
+    let told = replies
+        .iter()
+        .find(|reply| reply.get("method").and_then(Value::as_str) == Some("window/showMessage"))
+        .expect("the reader should be told");
+    let text = told.pointer("/params/message").and_then(Value::as_str).expect("a message");
+    assert!(text.contains("loud"), "it says what is wrong: {text}");
+    // `1` is Error in `MessageType`.
+    assert_eq!(told.pointer("/params/type").and_then(Value::as_i64), Some(1), "{told}");
+
+    // And it stays visible, on the manifest itself, where the fix is made.
+    let manifest = url::Url::from_file_path(w.root.join("khora.toml")).expect("a URL").to_string();
+    let on_manifest = replies
+        .iter()
+        .find(|r| {
+            r.get("method").and_then(Value::as_str) == Some("textDocument/publishDiagnostics")
+                && r.pointer("/params/uri").and_then(Value::as_str) == Some(manifest.as_str())
+        })
+        .expect("a diagnostic on the manifest");
+    let first = on_manifest.pointer("/params/diagnostics/0").expect("one diagnostic");
+    assert_eq!(first.get("severity"), Some(&json!(1)), "{first}");
+    assert!(first.get("message").and_then(Value::as_str).is_some_and(|m| m.contains("loud")), "{first}");
+    // Line 10 of the manifest, 0-based 9: the value that is wrong.
+    assert_eq!(first.pointer("/range/start/line"), Some(&json!(9)), "{first}");
+}
+
 /// Editing is the whole point: the diagnostics must reflect the version of the
 /// file that the edits settle on.
 ///

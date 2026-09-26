@@ -145,7 +145,7 @@ pub struct Server {
     /// build, and the diff blames whoever touched the file.
     fmt: khora_fmt::Options,
     /// Something to say to the reader once, as soon as there is a client to
-    /// say it to.
+    /// say it to, with its `MessageType` (1 error, 2 warning).
     ///
     /// **The project's toolchain pin, when there isn't one.** `[toolchain]` is
     /// required, and every other command refuses without it -- but the server
@@ -154,10 +154,24 @@ pub struct Server {
     /// crashed", with the reason in a log they have no reason to open. So the
     /// server starts, and says so where they are already looking.
     ///
+    /// **Or a manifest that does not load**, as an error: see
+    /// [`Server::manifest_error`].
+    ///
     /// Held rather than sent because `initialize` returns one result and the
     /// notification has to follow it: a server that talks before the client has
     /// been answered is talking to something that is not listening yet.
-    notice: Option<String>,
+    notice: Option<(i64, String)>,
+    /// Why the workspace's manifest did not load, as a diagnostic on the
+    /// manifest itself, published once after `initialize`.
+    ///
+    /// **Without it a bad manifest was a policy silently replaced.** The
+    /// server read `[lints]` through a loader that returned an empty table on
+    /// any failure, so one bad entry put every `deny` beside it back to its
+    /// default, and a finding the project had made an error arrived as a
+    /// warning. The server still runs on the defaults -- refusing to would take
+    /// away every other diagnostic -- but the reader is told it is doing so,
+    /// as an error, on the line to fix.
+    manifest_error: Option<(Url, Diagnostic)>,
     /// Set by `exit`, and by `shutdown` followed by a closed stream.
     pub finished: bool,
     /// Apply an edit without reporting on it.
@@ -177,6 +191,7 @@ impl Default for Server {
             levels: HashMap::new(),
             fmt: khora_fmt::Options::default(),
             notice: None,
+            manifest_error: None,
             finished: false,
             quiet: false,
         }
@@ -251,13 +266,16 @@ impl Server {
             ("initialize", Some(id)) => {
                 let reply = ok(id, self.initialize(&params));
                 let mut out = vec![reply];
-                if let Some(message) = self.notice.take() {
-                    // `2` is Warning in the protocol's `MessageType`. Not an
-                    // error: the file in front of them still checks, and every
-                    // diagnostic in it is still right.
+                if let Some((kind, message)) = self.notice.take() {
                     out.push(notification(
                         "window/showMessage",
-                        json!({ "type": 2, "message": message }),
+                        json!({ "type": kind, "message": message }),
+                    ));
+                }
+                if let Some((url, diagnostic)) = self.manifest_error.take() {
+                    out.push(notification(
+                        "textDocument/publishDiagnostics",
+                        json!({ "uri": url.as_str(), "diagnostics": [to_value(diagnostic)] }),
                     ));
                 }
                 out
@@ -385,7 +403,10 @@ impl Server {
             .unwrap_or(Encoding::Utf16);
 
         if let Some(root) = workspace_root(params) {
-            self.notice = pin_notice(&root);
+            // `2` is Warning in the protocol's `MessageType`. Not an error:
+            // the file in front of them still checks, and every diagnostic in
+            // it is still right.
+            self.notice = pin_notice(&root).map(|message| (2, message));
             self.load(&root);
         }
 
@@ -526,8 +547,27 @@ impl Server {
             files.push(file);
         }
         SourceRoot::new(&self.db, files);
-        self.levels = lint_levels(root);
-        self.fmt = fmt_options(root);
+        let manifest = root.join("khora.toml");
+        match khora_manifest::Manifest::load(&manifest) {
+            Ok(parsed) => {
+                self.levels = lint_levels(&parsed);
+                self.fmt = fmt_options(&parsed);
+            }
+            // No manifest is a scratch directory, and entitled to the defaults.
+            Err(_) if !manifest.is_file() => {}
+            Err(why) => {
+                // `1` is Error: every lint level and `[fmt]` setting in the
+                // file is being ignored, which is not a detail.
+                self.notice = Some((
+                    1,
+                    format!(
+                        "{why}\n\nUntil it is fixed, every `[lints]` and `[fmt]` setting in it \
+                         is ignored, and each lint takes its default level."
+                    ),
+                ));
+                self.manifest_error = manifest_diagnostic(&manifest, &why, self.encoding);
+            }
+        }
     }
 
     fn opened(&mut self, params: &Value) -> Vec<Value> {
@@ -1768,15 +1808,12 @@ fn gather(root: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The `[fmt]` settings for a workspace, or the formatter's own defaults.
+/// The `[fmt]` settings in a loaded manifest, or the formatter's own defaults.
 ///
 /// The same reading `khora fmt` does, and it has to stay the same reading:
 /// see the `fmt` field.
-fn fmt_options(root: &Path) -> khora_fmt::Options {
-    let Ok(parsed) = khora_manifest::Manifest::load(&root.join("khora.toml")) else {
-        return khora_fmt::Options::default();
-    };
-    let Some(table) = parsed.manifest.fmt else { return khora_fmt::Options::default() };
+fn fmt_options(parsed: &khora_manifest::Parsed) -> khora_fmt::Options {
+    let Some(table) = &parsed.manifest.fmt else { return khora_fmt::Options::default() };
     match table.indent_style {
         Some(khora_manifest::IndentStyle::Tab) => khora_fmt::Options::tabs(),
         Some(khora_manifest::IndentStyle::Space) | None => match table.indent_width {
@@ -1786,16 +1823,42 @@ fn fmt_options(root: &Path) -> khora_fmt::Options {
     }
 }
 
-/// The `[lints]` levels for a workspace, or the defaults.
-fn lint_levels(root: &Path) -> HashMap<String, LintLevel> {
+/// The `[lints]` levels in a loaded manifest.
+fn lint_levels(parsed: &khora_manifest::Parsed) -> HashMap<String, LintLevel> {
     let mut out = HashMap::new();
-    let Ok(parsed) = khora_manifest::Manifest::load(&root.join("khora.toml")) else {
-        return out;
-    };
     for (name, lint) in &parsed.manifest.lints {
         out.insert(name.clone(), lint.level);
     }
     out
+}
+
+/// A manifest's load failure as an error diagnostic on the manifest, at the
+/// place `toml` pointed to, or on its first line when it pointed nowhere (a
+/// workspace root that is missing has no line).
+fn manifest_diagnostic(
+    manifest: &Path,
+    why: &khora_manifest::ManifestError,
+    encoding: Encoding,
+) -> Option<(Url, Diagnostic)> {
+    let url = Url::from_file_path(manifest).ok()?;
+    let text = std::fs::read_to_string(manifest).unwrap_or_default();
+    let index = LineIndex::new(&text);
+    let range = match why.span() {
+        Some(span) => {
+            let clamp = |at: usize| text_size::TextSize::new(at.min(text.len()) as u32);
+            index.range(text_size::TextRange::new(clamp(span.start), clamp(span.end)), encoding)
+        }
+        None => lsp_types::Range::default(),
+    };
+    Some((
+        url,
+        Diagnostic {
+            range,
+            severity: Some(DiagnosticSeverity::ERROR),
+            message: why.message().to_string(),
+            ..Diagnostic::default()
+        },
+    ))
 }
 
 /// Where the workspace is, from whichever of the three spellings the client
