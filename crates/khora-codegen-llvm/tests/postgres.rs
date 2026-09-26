@@ -1768,3 +1768,381 @@ fn main() -> Int {
         );
     }
 }
+
+// --- a cancel between `BEGIN` and the rollback -----------------------------
+//
+// **What these prevent: a write answered `Ok` that is never committed.** A
+// fiber cancelled after `transaction` sent `BEGIN` -- including while it
+// waits for the `BEGIN`'s own reply -- must not unwind with the server inside
+// a transaction and nothing registered to end it. Otherwise `with_db` hands
+// the connection back that way, and the next borrower's autocommit
+// statements run inside the leftover transaction: answered `Ok`, and rolled
+// back when that transaction ends.
+
+/// What [`record_queries`] heard, and how the conversation ended.
+struct Recorded {
+    /// Every simple query, in the order it arrived.
+    heard: Vec<String>,
+    /// `Terminate` for a clean close; otherwise the I/O error or the message
+    /// this server has no answer for, as text.
+    ended: String,
+}
+
+/// A server that records every simple query, answers each one, and waits
+/// `stall` before answering the first `BEGIN`.
+///
+/// The stall is what puts the cancel in the gap: the Khora fiber has sent
+/// `BEGIN` and is waiting for the reply when it is cancelled, so the server
+/// is inside a transaction the fiber was never told about.
+///
+/// **Never panics once it has a connection.** A panic in this thread reached
+/// the test only as "the server: Any", which named neither the error nor what
+/// had been said before it. Every failure ends the conversation instead, and
+/// is reported in [`Recorded::ended`] beside the queries heard up to it.
+fn record_queries(listener: TcpListener, stall: std::time::Duration) -> Recorded {
+    let (mut stream, _) = listener.accept().expect("a connection");
+    let mut heard = Vec::new();
+    let ended = match converse(&mut stream, stall, &mut heard) {
+        Ok(()) => "Terminate".to_string(),
+        Err(why) => why,
+    };
+    Recorded { heard, ended }
+}
+
+/// The body of [`record_queries`], with every failure as an `Err` naming
+/// the step it happened at.
+fn converse(
+    stream: &mut TcpStream,
+    stall: std::time::Duration,
+    heard: &mut Vec<String>,
+) -> Result<(), String> {
+    let step = |what: &'static str| move |e: std::io::Error| format!("{what}: {e}");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(20)))
+        .map_err(step("setting a read deadline"))?;
+    let mut length = [0u8; 4];
+    stream.read_exact(&mut length).map_err(step("reading the startup length"))?;
+    let mut startup = vec![0u8; (i32::from_be_bytes(length) as usize).saturating_sub(4)];
+    stream.read_exact(&mut startup).map_err(step("reading the startup payload"))?;
+    send(stream, b'R', &0i32.to_be_bytes()).map_err(step("writing AuthenticationOk"))?;
+    send(stream, b'Z', b"I").map_err(step("writing the first ReadyForQuery"))?;
+
+    let mut stalled = false;
+    loop {
+        let mut kind = [0u8; 1];
+        stream.read_exact(&mut kind).map_err(step("reading a message type"))?;
+        let mut length = [0u8; 4];
+        stream.read_exact(&mut length).map_err(step("reading a message length"))?;
+        let mut payload = vec![0u8; (i32::from_be_bytes(length) as usize).saturating_sub(4)];
+        stream.read_exact(&mut payload).map_err(step("reading a message payload"))?;
+        match kind[0] {
+            b'Q' => {
+                let sql = String::from_utf8_lossy(payload.strip_suffix(&[0]).unwrap_or(&payload))
+                    .into_owned();
+                if sql == "BEGIN" && !stalled {
+                    stalled = true;
+                    std::thread::sleep(stall);
+                }
+                heard.push(sql.clone());
+                send(stream, b'C', &cstring(&sql)).map_err(step("writing CommandComplete"))?;
+                send(stream, b'Z', b"I").map_err(step("writing ReadyForQuery"))?;
+            }
+            // 'X' Terminate: the pool closed.
+            b'X' => return Ok(()),
+            other => return Err(format!("the driver sent {:?}, which this server does not answer", other as char)),
+        }
+    }
+}
+
+/// [`write_message`], answering the write's error instead of panicking on it.
+fn send(stream: &mut TcpStream, kind: u8, payload: &[u8]) -> std::io::Result<()> {
+    let mut out = vec![kind];
+    out.extend_from_slice(&((payload.len() + 4) as i32).to_be_bytes());
+    out.extend_from_slice(payload);
+    stream.write_all(&out)
+}
+
+/// **A cancel while `BEGIN` waits for its reply is followed by a `ROLLBACK`
+/// on the wire, before the connection's next borrower speaks.**
+///
+/// No real server: the fake one stalls its answer to the first `BEGIN` for a
+/// second, the program cancels the transaction's fiber 200 ms in, and then
+/// runs one more transaction on the same pooled connection. What the server
+/// heard, in order, is the assertion.
+#[test]
+fn a_cancel_while_begin_is_answered_puts_a_rollback_on_the_wire() {
+    // The fake answers one connection, and the port is in the program, so
+    // each backend gets a server and a build of its own.
+    for backend in ["threads", "scheduler"] {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
+        let port = listener.local_addr().expect("an address").port();
+        let server = std::thread::spawn(move || {
+            record_queries(listener, std::time::Duration::from_millis(1000))
+        });
+        // The port is in the name as well, so two copies of this test running
+        // at once (a stress run) never compile to one path.
+        let exe = build(&format!("pg_cancel_in_begin_{backend}_{port}"), &cancel_in_begin_program(port));
+        let ran = run_watched(&exe, backend, std::time::Duration::from_secs(30));
+        let recorded = server.join().expect("the server thread does not panic once connected");
+        assert!(!ran.hung, "{backend}: the program hung: {:?}", ran.stdout);
+        assert_eq!(
+            ran.stdout, "the next transaction committed\n",
+            "{backend}: stderr {}; the server heard {:?} and ended with {}",
+            ran.stderr, recorded.heard, recorded.ended
+        );
+        assert_eq!(
+            (recorded.heard.as_slice(), recorded.ended.as_str()),
+            (["BEGIN", "ROLLBACK", "BEGIN", "COMMIT"].map(String::from).as_slice(), "Terminate"),
+            "{backend}: a transaction cancelled while its BEGIN was answered must roll back \
+             before the connection is lent again, and the pool must close the connection cleanly"
+        );
+    }
+}
+
+/// The program for [`a_cancel_while_begin_is_answered_puts_a_rollback_on_the_wire`]:
+/// cancel a transaction 200 ms into its `BEGIN`, then run another on the
+/// same pooled connection.
+fn cancel_in_begin_program(port: u16) -> String {
+    format!(
+        "module demo::main;
+import std::core::{{Fiber, Fibers, Result, print}};
+import std::db::{{Db, DbError, transaction}};
+import postgres::db::{{Settings}};
+import postgres::pool::{{Pool, close, open, with_db}};
+
+extern fn khora_sleep(millis: Int) -> ();
+
+fn empty() -> Result<Int, DbError> with {{ db: Db }} {{
+  transaction(fn () => Result::Ok(1))
+}}
+
+fn main() -> Int {{
+  let settings: Settings = {{ host: \"127.0.0.1\", port: {port}, user: \"khora\", database: \"khora\", secret: \"\" }};
+  let crew = Fibers::open();
+  let pool = open(crew, settings, 1);
+  let f = Fiber::spawn(fn () => {{ let _ = with_db(pool, empty); () }});
+  khora_sleep(200);
+  Fiber::cancel(f);
+  Fiber::wait(f);
+  match with_db(pool, empty) {{
+    Result::Ok(_) => print(\"the next transaction committed\"),
+    Result::Err(_) => print(\"the next transaction failed\"),
+  }};
+  close(pool);
+  0
+}}
+"
+    )
+}
+
+/// The program for [`a_cancelled_transaction_never_costs_a_write_against_a_real_server`].
+///
+/// Two phases on a pool of one, each 100 trials of: a fiber looping
+/// `with_db(transaction(..))`, cancelled after 1 to 4 ms.
+///
+/// - **Left open.** Then `SAVEPOINT` on the pool's connection, which the
+///   server refuses outside a transaction block: accepted means the
+///   connection came back inside one.
+/// - **Lost.** Then an autocommit `insert` answered `Ok`, and a transaction
+///   whose body fails. Inside a leftover transaction the failed one's
+///   `ROLLBACK` takes the insert with it, so every leftover costs a row.
+///   Afterwards the pool is closed and a second pool counts the rows.
+const LOST_WRITES: &str = r#"module demo::main;
+import std::core::{Fiber, Fibers, List, Result, print};
+import std::db::{Cell, Db, DbError, Row, transaction};
+import postgres::db::{Settings};
+import postgres::pool::{Pool, close, open, with_db};
+
+extern fn khora_sleep(millis: Int) -> ();
+
+fn empty() -> Result<Int, DbError> with { db: Db } {
+  transaction(fn () => Result::Ok(1))
+}
+
+fn churn(pool: Pool) -> () {
+  let mut going = true;
+  while going {
+    let _ = with_db(pool, empty);
+    ()
+  }
+}
+
+fn cancelled_churn(pool: Pool, trial: Int) -> () {
+  let f = Fiber::spawn(fn () => churn(pool));
+  khora_sleep(1 + trial % 4);
+  Fiber::cancel(f);
+  Fiber::wait(f);
+}
+
+fn left_open() -> Int with { db: Db } {
+  match db.execute("savepoint tx_gap_probe", List::Nil) {
+    Result::Ok(_) => { let _ = db.rollback(); 1 },
+    Result::Err(_) => 0,
+  }
+}
+
+fn insert(n: Int) -> Int with { db: Db } {
+  match db.execute("insert into tx_gap_regression (n) values ($1)", List::Cons(Cell::Number(n), List::Nil)) {
+    Result::Ok(_) => 1,
+    Result::Err(_) => 0,
+  }
+}
+
+fn refused() -> Result<Int, DbError> with { db: Db } {
+  transaction(fn () => Result::Err(DbError::Rejected("the body failed")))
+}
+
+fn fresh_table() -> () with { db: Db } {
+  let _ = db.execute("drop table if exists tx_gap_regression", List::Nil);
+  let _ = db.execute("create table tx_gap_regression (n int4)", List::Nil);
+}
+
+fn counted() -> Int with { db: Db } {
+  match db.query("select count(*)::int4 from tx_gap_regression", List::Nil) {
+    Result::Ok(List::Cons(row, _)) => match row.cells {
+      List::Cons(Cell::Number(n), _) => n,
+      _ => 0 - 1,
+    },
+    _ => 0 - 1,
+  }
+}
+
+fn main() -> Int {
+  let settings: Settings = { host: "127.0.0.1", port: 5433, user: "khora", database: "khora", secret: "khora" };
+  let crew = Fibers::open();
+  let pool = open(crew, settings, 1);
+  let _ = with_db(pool, fresh_table);
+
+  let mut trial = 0;
+  let mut open_after = 0;
+  while trial < 100 {
+    cancelled_churn(pool, trial);
+    open_after = open_after + match with_db(pool, left_open) { Result::Ok(n) => n, Result::Err(_) => 0 };
+    trial = trial + 1
+  };
+
+  trial = 0;
+  let mut told_ok = 0;
+  while trial < 100 {
+    cancelled_churn(pool, trial);
+    told_ok = told_ok + match with_db(pool, fn () => insert(trial)) { Result::Ok(n) => n, Result::Err(_) => 0 };
+    let _ = with_db(pool, refused);
+    trial = trial + 1
+  };
+  close(pool);
+
+  let crew2 = Fibers::open();
+  let again = open(crew2, settings, 1);
+  let there = match with_db(again, counted) { Result::Ok(n) => n, Result::Err(_) => 0 - 2 };
+  close(again);
+  print("left open " + Int::to_string(open_after) + " of 100");
+  print("writes answered Ok " + Int::to_string(told_ok) + ", present " + Int::to_string(there));
+  0
+}
+"#;
+
+/// **A cancelled transaction never hands its connection back inside the
+/// transaction, and never costs a later caller a write it was told had
+/// succeeded.** The regression test for a cancel landing between `BEGIN`
+/// and the rollback's registration, against the server that has to believe
+/// it; [`LOST_WRITES`] says how each is observed.
+///
+/// Skipped without `KHORA_POSTGRES`, like its neighbours.
+#[test]
+fn a_cancelled_transaction_never_costs_a_write_against_a_real_server() {
+    if std::env::var_os("KHORA_POSTGRES").is_none() {
+        eprintln!(
+            "skipping: set KHORA_POSTGRES=1 and bring up \
+             packages/postgres/docker-compose.yml to run this"
+        );
+        return;
+    }
+    let exe = build("pg_lost_writes", LOST_WRITES);
+    // Both backends run before anything is asserted, so a failure shows both.
+    let ran: Vec<(&str, Watched)> = ["threads", "scheduler"]
+        .into_iter()
+        .map(|backend| (backend, run_watched(&exe, backend, std::time::Duration::from_secs(120))))
+        .collect();
+    let seen: Vec<String> =
+        ran.iter().map(|(backend, r)| format!("{backend}: {:?}, hung {}", r.stdout, r.hung)).collect();
+    for (backend, ran) in &ran {
+        assert!(!ran.hung, "{backend} hung: {seen:?}");
+        assert_eq!(ran.code, Some(0), "{backend}: stderr {}", ran.stderr);
+        assert_eq!(
+            ran.stdout, "left open 0 of 100\nwrites answered Ok 100, present 100\n",
+            "a cancelled transaction must neither leave its connection inside a transaction \
+             nor cost a later write: {seen:?}"
+        );
+    }
+}
+
+/// **The driver answers a `ROLLBACK` with no transaction open with `Ok`.**
+///
+/// What this prevents: a pool losing a healthy connection on every cancel
+/// that lands before `transaction`'s `BEGIN` goes out. `transaction`
+/// registers its rollback first, so such a cancel sends a `ROLLBACK` the
+/// server has no transaction for. PostgreSQL answers it with a warning
+/// (`NoticeResponse`) and `CommandComplete`, not an error. A driver that read
+/// the warning as a failure would make `undo` call `broken`, and the pool
+/// would close the connection.
+///
+/// Checked twice on one connection, with a statement between them, so the
+/// connection is shown still usable after the stray rollback. Skipped
+/// without `KHORA_POSTGRES`, like its neighbours.
+#[test]
+fn a_rollback_with_no_transaction_open_is_ok_against_a_real_server() {
+    if std::env::var_os("KHORA_POSTGRES").is_none() {
+        eprintln!(
+            "skipping: set KHORA_POSTGRES=1 and bring up \
+             packages/postgres/docker-compose.yml to run this"
+        );
+        return;
+    }
+    let main = format!(
+        "module demo::main;
+import std::core::{{Fibers, List, Result, print}};
+import std::db::{{Db, DbError}};
+import postgres::db::{{Settings}};
+import postgres::pool::{{close, open, with_db}};
+
+fn said(answer: Result<(), DbError>) -> String {{
+  match answer {{
+    Result::Ok(_) => \"ok\",
+    Result::Err(problem) => problem.show(),
+  }}
+}}
+
+fn stray() -> () with {{ db: Db }} {{
+  print(\"first stray rollback: \" + said(db.rollback()));
+  match db.query(\"select 1\", List::Nil) {{
+    Result::Ok(_) => print(\"the connection still answers\"),
+    Result::Err(problem) => print(\"the connection failed: \" + problem.show()),
+  }};
+  print(\"second stray rollback: \" + said(db.rollback()));
+}}
+
+fn main() -> Int {{
+  let settings: Settings = {REAL};
+  let crew = Fibers::open();
+  let pool = open(crew, settings, 1);
+  match with_db(pool, stray) {{
+    Result::Ok(_) => (),
+    Result::Err(problem) => print(\"no lease: \" + problem.show()),
+  }};
+  close(pool);
+  0
+}}
+"
+    );
+    let exe = build("pg_stray_rollback", &main);
+    for backend in ["threads", "scheduler"] {
+        let ran = run_watched(&exe, backend, std::time::Duration::from_secs(30));
+        assert!(!ran.hung, "{backend}: the program hung: {:?}", ran.stdout);
+        assert_eq!(ran.code, Some(0), "{backend}: stderr {}", ran.stderr);
+        assert_eq!(
+            ran.stdout,
+            "first stray rollback: ok\nthe connection still answers\nsecond stray rollback: ok\n",
+            "{backend}: a ROLLBACK with no transaction open must be answered Ok"
+        );
+    }
+}

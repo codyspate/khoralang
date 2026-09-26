@@ -139,9 +139,9 @@ Neither `transfer` nor `transfer_body` knows whether `db` is PostgreSQL, SQLite,
 
 If either `execute` returns `Result::Err`, `transfer_body` returns that error. `transaction` sees the failed result and rolls the transaction back instead of committing it.
 
-If the body is cancelled at a cancellation point, the transaction's internal region finalizer performs the rollback during unwinding. A caller does not need a second cancellation-specific transaction API.
+If the fiber is cancelled at any point after `transaction` starts, including while it waits for the server to answer `BEGIN` or `COMMIT`, the transaction's internal region finalizer performs the rollback during unwinding, so a pooled connection never goes back to the pool inside an open transaction. A caller does not need a second cancellation-specific transaction API.
 
-If `commit` itself fails, the commit error is returned. The helper does not report success for a transaction the database did not commit.
+If `commit` itself fails, the commit error is returned. The helper does not report success for a transaction the database did not commit. A commit that loses its connection is reported as `DbError::Disconnected` with a message saying it is not known whether the transaction committed: the `COMMIT` may have reached the server, so do not treat that error as "nothing happened" and blindly retry.
 
 ## Install a real database at the boundary
 

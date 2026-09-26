@@ -61,7 +61,7 @@ The concrete handler belongs at a composition boundary, not as a `Db`
 parameter threaded through domain functions.
 
 All three ways out are covered: the rollback is registered with a region
-before the body runs, and a region's finalizers run on every path out,
+before `BEGIN` is sent, and a region's finalizers run on every path out,
 a cancellation's included. `transaction`'s own comment has the argument.
 What the runtime owes in return is that a finalizer running *because* of a
 cancellation is not itself cancelled — `khora-rt`'s `cancel::Shielded`.
@@ -217,6 +217,12 @@ rollback: () -> Result<(), DbError>
 ```
 
 Rolls the transaction in progress back.
+
+**May be called when no transaction is open**, and must answer `Ok`
+then. `transaction` registers its rollback before it sends `BEGIN`, so a
+cancel that lands before the `BEGIN` went out still rolls back, and a
+handler that refused would be told `broken` about a healthy connection.
+PostgreSQL answers a stray `ROLLBACK` with a warning, not an error.
 
 #### broken
 
@@ -448,12 +454,30 @@ happens in production: a request times out, the nursery stops its children,
 and a connection goes back to the pool inside an open transaction holding
 its locks.
 
-So the rollback is **registered before the body runs** rather than decided
-after it, with `scoped` and `acquire`: a region's finalizers run on every
-path out, because every path out already releases the binding holding the
+So the rollback is **registered before `BEGIN` is sent** rather than decided
+after the body, with a region: a region's finalizers run on every path
+out, because every path out already releases the binding holding the
 region. Committing marks the transaction settled, and a settled transaction
 has nothing left to undo — so the finalizer costs a boolean on the ordinary
 path and is the whole contract on the extraordinary one.
+
+**Before `BEGIN`, not after it**, because a fiber can be cancelled while it
+waits for the server to answer `BEGIN`, and by then the server is inside
+the transaction. A rollback registered only once `begin` returns would
+miss that cancel, and the connection would go back to its pool with the
+transaction still open, where the next borrower's writes are answered
+`Ok` and never committed. What registering first costs is a `ROLLBACK`
+sent to a server that never received the `BEGIN`, which it answers with a
+warning.
+
+**A cancel during the commit also rolls back.** Whether a `COMMIT` cut off
+before its reply ran on the server is unknown, and a `ROLLBACK` is right
+either way: after a commit that ran it changes nothing, and after one that
+did not it ends the transaction. The connection goes back to its pool
+outside a transaction in both cases. A commit that loses its *connection*
+is answered `Disconnected` with a message saying the outcome is unknown,
+because the transaction may have committed, and a caller who reads
+"disconnected" as "it did not happen" and retries can apply it twice.
 
 The region is **this function's own**, for the reason `postgres::pool` gives
 at greater length: a transaction that borrowed its caller's scope would end

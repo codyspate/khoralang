@@ -56,12 +56,12 @@ module std::db;
 //! parameter threaded through domain functions.
 //!
 //! All three ways out are covered: the rollback is registered with a region
-//! before the body runs, and a region's finalizers run on every path out,
+//! before `BEGIN` is sent, and a region's finalizers run on every path out,
 //! a cancellation's included. `transaction`'s own comment has the argument.
 //! What the runtime owes in return is that a finalizer running *because* of a
 //! cancellation is not itself cancelled — `khora-rt`'s `cancel::Shielded`.
 
-import std::core::{Eq, List, Option, Pair, Result, Scope, Show, acquire, scoped};
+import std::core::{Eq, List, Option, Pair, Region, Result, Show};
 import std::decimal::{Decimal};
 import std::schema::{Raw};
 
@@ -133,6 +133,12 @@ pub effect Db {
   /// Commits the transaction in progress.
   commit: () -> Result<(), DbError>,
   /// Rolls the transaction in progress back.
+  ///
+  /// **May be called when no transaction is open**, and must answer `Ok`
+  /// then. `transaction` registers its rollback before it sends `BEGIN`, so a
+  /// cancel that lands before the `BEGIN` went out still rolls back, and a
+  /// handler that refused would be told `broken` about a healthy connection.
+  /// PostgreSQL answers a stray `ROLLBACK` with a warning, not an error.
   rollback: () -> Result<(), DbError>,
   /// Says this connection's state is no longer known.
   ///
@@ -192,12 +198,30 @@ pub effect Db {
 /// and a connection goes back to the pool inside an open transaction holding
 /// its locks.
 ///
-/// So the rollback is **registered before the body runs** rather than decided
-/// after it, with `scoped` and `acquire`: a region's finalizers run on every
-/// path out, because every path out already releases the binding holding the
+/// So the rollback is **registered before `BEGIN` is sent** rather than decided
+/// after the body, with a region: a region's finalizers run on every path
+/// out, because every path out already releases the binding holding the
 /// region. Committing marks the transaction settled, and a settled transaction
 /// has nothing left to undo — so the finalizer costs a boolean on the ordinary
 /// path and is the whole contract on the extraordinary one.
+///
+/// **Before `BEGIN`, not after it**, because a fiber can be cancelled while it
+/// waits for the server to answer `BEGIN`, and by then the server is inside
+/// the transaction. A rollback registered only once `begin` returns would
+/// miss that cancel, and the connection would go back to its pool with the
+/// transaction still open, where the next borrower's writes are answered
+/// `Ok` and never committed. What registering first costs is a `ROLLBACK`
+/// sent to a server that never received the `BEGIN`, which it answers with a
+/// warning.
+///
+/// **A cancel during the commit also rolls back.** Whether a `COMMIT` cut off
+/// before its reply ran on the server is unknown, and a `ROLLBACK` is right
+/// either way: after a commit that ran it changes nothing, and after one that
+/// did not it ends the transaction. The connection goes back to its pool
+/// outside a transaction in both cases. A commit that loses its *connection*
+/// is answered `Disconnected` with a message saying the outcome is unknown,
+/// because the transaction may have committed, and a caller who reads
+/// "disconnected" as "it did not happen" and retries can apply it twice.
 ///
 /// The region is **this function's own**, for the reason `postgres::pool` gives
 /// at greater length: a transaction that borrowed its caller's scope would end
@@ -281,15 +305,70 @@ pub fn transaction<A, 'ef, 'er>(
   with { 'ef | db: Db }
   raises 'er
 {
+  // **The rollback is registered before `BEGIN` is sent**, because from the
+  // moment it is sent the server may be inside a transaction, and the fiber
+  // can be cancelled while it waits to hear so. Registering it after
+  // `begin()` returned left that wait and every call up to the registration
+  // as places a cancel unwound with nothing to undo it, and the connection
+  // went back to its pool inside the transaction: the next borrower's writes
+  // were answered `Ok` and never committed.
+  //
+  // What that costs is a `ROLLBACK` sent when the cancel lands before the
+  // `BEGIN` has gone out. An engine outside a transaction answers it with a
+  // warning, not an error, so it changes nothing.
+  //
+  // `Region::open` and `Region::defer` are not cancellation points, so
+  // nothing lies between here and the registration.
+  let settled = { done: false };
+  let region = Region::open();
+  Region::defer(region, fn () => undo(settled));
   match db.begin() {
     // A `BEGIN` that could not be sent because the connection is gone leaves
     // an unusable connection, exactly as a lost commit does. A `BEGIN` the
-    // engine refused does not.
+    // engine refused does not. Either way no transaction was opened, so
+    // there is nothing to roll back.
     Result::Err(problem) => {
+      settled.done = true;
       told_if_disconnected(problem);
       Result::Err(problem)
     },
-    Result::Ok(_) => scoped(fn () => guarded(body))!,
+    // A failed body is rolled back by the region on the way out, like a
+    // cancelled one, so the rollback runs as cleanup: a cancel arriving while
+    // it waits for its reply does not cut it short. The caller is told
+    // `RolledBack` with the body's reason whatever the rollback's own answer
+    // was; the engine's complaint about the rollback is a worse thing to
+    // report than the reason it was needed, and `undo` tells the handler.
+    Result::Ok(_) => match body()! {
+      Result::Err(problem) => Result::Err(DbError::RolledBack(problem.show())),
+      Result::Ok(answer) => {
+        let committed = db.commit();
+        // Settled only once the commit has answered. A cancel that lands
+        // while `COMMIT` is on its way leaves the transaction's fate unknown,
+        // and the rollback the region then sends is right either way: after
+        // a `COMMIT` that ran, it is a warning and changes nothing; after one
+        // that did not, it ends the transaction.
+        settled.done = true;
+        match committed {
+          // **A refused commit and a lost connection are not the same
+          // failure.** An engine that *refuses* a commit -- a deferred
+          // constraint, a serialization failure -- has answered: the
+          // transaction is over and the connection is fine. A connection that
+          // *died* during the commit has answered nothing, so whether the
+          // transaction committed is unknown, and the caller is told that in
+          // so many words. A bare "disconnected" reads as "it did not
+          // happen", and a caller who retries on it can apply a committed
+          // transaction twice.
+          Result::Err(DbError::Disconnected(why)) => {
+            db.broken();
+            let unknown = "the connection was lost during the commit, so it is not known whether the transaction committed: ";
+            Result::Err(DbError::Disconnected(unknown + why))
+          },
+          Result::Err(DbError::Rejected(why)) => Result::Err(DbError::Rejected(why)),
+          Result::Err(DbError::RolledBack(why)) => Result::Err(DbError::RolledBack(why)),
+          Result::Ok(_) => Result::Ok(answer),
+        }
+      },
+    },
   }
 }
 
@@ -299,62 +378,6 @@ pub fn transaction<A, 'ef, 'er>(
 /// both have been written, and a record field is the one thing two closures
 /// can share and one can change.
 type Settled = { mut done: Bool };
-
-/// The body, with the rollback registered before it starts.
-///
-/// Separate from `transaction` because `acquire` needs a `Scope`, and
-/// `transaction`'s whole point is that its caller does not have to have one.
-fn guarded<A, 'ef, 'er>(
-  body: () -> Result<A, DbError> with 'ef raises 'er
-) -> Result<A, DbError>
-  with { 'ef | db: Db, scope: Scope }
-  raises 'er
-{
-  let settled = { done: false };
-  acquire(settled, fn state => undo(state));
-  match body()! {
-    Result::Err(problem) => {
-      // The rollback's own failure is not allowed to hide the reason for it.
-      // A caller who sees `RolledBack` knows the transaction did not commit,
-      // which is the fact they have to act on; the engine's complaint about
-      // the rollback is a second problem and a worse thing to report.
-      settled.done = true;
-      // The caller is told `RolledBack` either way -- the engine's complaint
-      // about the rollback is a worse thing to report than the reason it was
-      // needed -- but the *connection* is a separate question, and the handler
-      // is told about it.
-      match db.rollback() {
-        Result::Ok(_) => (),
-        Result::Err(_why) => db.broken(),
-      };
-      Result::Err(DbError::RolledBack(problem.show()))
-    },
-    // Settled *before* the commit is attempted, so a refused commit is
-    // reported as itself rather than rolled back on the way out. An engine
-    // that refuses a commit has already ended the transaction; sending a
-    // rollback after it would ask about one that is no longer there.
-    Result::Ok(answer) => {
-      settled.done = true;
-      match db.commit() {
-        // **A refused commit and a lost connection are not the same failure**,
-        // and this used to treat them as one. An engine that *refuses* a
-        // commit -- a deferred constraint, a serialization failure -- has
-        // answered: the transaction is over, the connection is fine, and
-        // handing it back to a pool is right. A connection that *died* during
-        // the commit has answered nothing. The `COMMIT` may or may not have
-        // reached the server, so the transaction's outcome is unknown, and the
-        // connection is certainly unusable. Returning that to a pool hands the
-        // next borrower a socket with an unfinished transaction on the other
-        // end of it.
-        Result::Err(problem) => {
-          told_if_disconnected(problem);
-          Result::Err(problem)
-        },
-        Result::Ok(_) => Result::Ok(answer),
-      }
-    },
-  }
-}
 
 /// Tells the handler its connection is gone, when that is what happened.
 ///
@@ -374,8 +397,9 @@ fn told_if_disconnected(problem: DbError) -> () with { db: Db } {
 
 /// Rolls back, unless the transaction has already ended.
 ///
-/// Reached on the way out of the region, which is every way out — including
-/// the cancellation that never touched a line of `guarded`.
+/// Reached on the way out of the region, which is every way out that has not
+/// settled the transaction: a failed body, a raise, and a cancellation that
+/// never touched a line of `transaction`.
 fn undo(settled: Settled) -> () with { db: Db } {
   if settled.done {
     ()

@@ -18,6 +18,19 @@ cancellation point in every function, whatever the function's `raises` row;
 
 ### Breaking
 
+- **A `std::db::Db` handler's `rollback` can be called when no transaction
+  is open, and must answer `Ok` then.** `transaction` registers its rollback
+  before it sends `BEGIN`, so a cancel that lands before the `BEGIN` goes
+  out, or while `COMMIT` waits for its reply, is followed by a `ROLLBACK`. A
+  handler that answers `Err` is told `broken`, and a pool built on it drops
+  the connection. PostgreSQL answers a stray `ROLLBACK` with a warning,
+  which the `postgres` package reads as `Ok`. The rollback of a body that
+  failed runs as cleanup, which a plain cancel does not interrupt, so a
+  handler whose rollback blocks is waited for. A commit that loses its
+  connection is answered `Disconnected` with a message that says the outcome
+  is unknown. Under Fixed: 0.3.0 could lose a write it had acknowledged with
+  `Ok`.
+
 - **A `postgres` connection whose reply is cut off is closed, not reused.**
   In 0.3.0 it went on serving, and later queries on it got the answer to the
   query before (under Fixed). It is closed instead, and a pool does not replace
@@ -140,6 +153,28 @@ cancellation point in every function, whatever the function's `raises` row;
     group file, or delete it.
 
 ### Fixed
+
+- **0.3.0 could lose a database write it had acknowledged with `Ok`.** A
+  fiber cancelled just after `std::db::transaction` sent `BEGIN` (while it
+  waited for the server's answer, or on its way into the body) stopped
+  without rolling back, so its connection went back to the `postgres` pool
+  inside an open transaction. The next caller to borrow that connection ran
+  its statements inside the leftover transaction: an autocommit `insert` was
+  answered `Ok`, then rolled back when that transaction ended, and the row
+  was gone. Against a real server, with fibers cancelled 1 to 4 ms into a
+  loop of transactions, 0.3.0 left the connection inside a transaction after
+  about half of the cancels, on both fiber backends, and lost acknowledged
+  writes in every run. `transaction` registers its rollback before it sends
+  `BEGIN`. A cancel that lands while `COMMIT` waits for its reply also rolls
+  back, which changes nothing if the commit ran and ends the transaction if
+  it did not, and the rollback of a failed body runs as cleanup, so a cancel
+  cannot cut it short.
+
+- **A commit that lost its connection said only "disconnected".** The
+  `COMMIT` may have run on the server before the connection went, so a caller
+  that read the error as "not committed" and retried could apply the
+  transaction twice. The error is still `DbError::Disconnected`, and its text
+  says it is not known whether the transaction committed.
 
 - **A `postgres` query could return another caller's rows.** When a read
   failed partway through a reply, the caller was told `Disconnected`, but the

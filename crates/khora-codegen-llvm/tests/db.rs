@@ -800,3 +800,143 @@ fn worker() -> () {{
     );
     assert!(!out.contains("rollback"), "there is no transaction to roll back: {out:?}");
 }
+
+// ---------------------------------------------------------------------------
+// A cancellation between `BEGIN` and the rollback's registration
+// ---------------------------------------------------------------------------
+//
+// **What these prevent: a connection handed back to a pool inside an open
+// transaction, where the next borrower's autocommit writes are answered `Ok`
+// and never committed.** Every point between `BEGIN` reaching the server and
+// the rollback's registration is a place a cancel unwinds with the server
+// inside a transaction and nothing left to end it. Against a real server a
+// rollback registered after `begin` returned left about half of 300 cancels
+// that way, and lost writes answered `Ok`.
+//
+// The handler here is cancelled inside the operation it is asked to perform,
+// after saying it was asked: the `BEGIN` has reached the server and the fiber
+// stops while it waits for the reply. That is the widest form of the gap, and
+// no later registration point can close it -- only one before `begin` can.
+
+/// A handler cancelled inside the operation named `at`.
+///
+/// `turn` is a loop that goes round twice, so its back edge is a cancellation
+/// point in any function; a cancel set just before it is taken there.
+const CANCELLED_AT: &str = r#"extern fn khora_cancel();
+
+fn turn() -> () {
+  let mut i = 0;
+  while i < 2 { i = i + 1 };
+}
+
+fn cancelled_in(at: String) -> Db {
+  handler for Db {
+    query: fn (_sql, _binds) => Result::Ok(List::Nil),
+    execute: fn (_sql, _binds) => Result::Ok(1),
+    begin: fn () => {
+      print("begin");
+      if at.eq("begin") { khora_cancel(); turn() } else {};
+      Result::Ok(())
+    },
+    commit: fn () => {
+      print("commit");
+      if at.eq("commit") { khora_cancel(); turn() } else {};
+      Result::Ok(())
+    },
+    rollback: fn () => {
+      print("rollback sent");
+      if at.eq("rollback") { khora_cancel(); turn() } else {};
+      print("rollback answered");
+      Result::Ok(())
+    },
+    broken: fn () => print("broken"),
+  }
+}
+
+fn worker(at: String, fails: Bool) -> () {
+  with { db: cancelled_in(at) } {
+    let _answer: Result<Int, DbError> = transaction(fn () =>
+      if fails { Result::Err(DbError::Rejected("no")) } else { Result::Ok(1) });
+    ()
+  }
+}
+"#;
+
+fn cancelled_at(name: &str, at: &str, fails: bool) -> String {
+    run_with(
+        name,
+        CANCELLED_AT,
+        &format!(
+            "  let f = Fiber::spawn(fn () => worker(\"{at}\", {fails}));\n  \
+             Fiber::wait(f);\n  print(\"the parent carried on\");"
+        ),
+    )
+}
+
+/// **A cancel that arrives while `BEGIN` waits for its reply rolls back.**
+///
+/// The server has the `BEGIN`; the fiber has not been told. Without a
+/// rollback the connection goes back to its pool inside the transaction.
+#[test]
+fn a_cancel_while_begin_waits_for_its_reply_rolls_back() {
+    let out = cancelled_at("db_cancel_in_begin", "begin", false);
+    assert_eq!(
+        out, "begin\nrollback sent\nrollback answered\nthe parent carried on\n",
+        "the `BEGIN` reached the server, so a cancel before its reply must still roll back"
+    );
+}
+
+/// **A cancel that arrives while `COMMIT` waits for its reply rolls back as
+/// well**, so the connection is never handed on with the transaction's state
+/// in doubt: either the `COMMIT` ran and the `ROLLBACK` is a harmless no-op,
+/// or it did not and the `ROLLBACK` ends the transaction.
+#[test]
+fn a_cancel_while_commit_waits_for_its_reply_rolls_back() {
+    let out = cancelled_at("db_cancel_in_commit", "commit", false);
+    assert_eq!(
+        out, "begin\ncommit\nrollback sent\nrollback answered\nthe parent carried on\n",
+        "a commit cut short by a cancel must be followed by a rollback"
+    );
+}
+
+/// **The rollback after a failed body is cleanup, and a cancel does not cut
+/// it short.** What this prevents: a cancel arriving while that `ROLLBACK`
+/// waits for its reply, stopping the fiber with the transaction's end
+/// unheard and the connection on its way back to a pool.
+#[test]
+fn a_cancel_during_the_rollback_of_a_failed_body_does_not_stop_it() {
+    let out = cancelled_at("db_cancel_in_rollback", "rollback", true);
+    assert_eq!(
+        out, "begin\nrollback sent\nrollback answered\nthe parent carried on\n",
+        "the rollback of a failed body must run to its end"
+    );
+}
+
+/// **A commit whose connection was lost says the outcome is unknown.** The
+/// `COMMIT` may have run on the server before the connection went, so a
+/// caller told only "disconnected" could reasonably retry a transaction that
+/// is already committed.
+#[test]
+fn a_commit_lost_with_its_connection_says_the_outcome_is_unknown() {
+    let out = run_with(
+        "db_lost_commit_unknown",
+        &format!(
+            r#"{DYING}
+fn worker() -> () {{
+  with {{ db: dying("commit") }} {{
+    let answer: Result<Int, DbError> = transaction(fn () => Result::Ok(1));
+    match answer {{
+      Result::Ok(_) => print("committed, which is wrong"),
+      Result::Err(problem) => print(problem.show()),
+    }}
+  }}
+}}
+"#
+        ),
+        r#"  worker();"#,
+    );
+    assert!(
+        out.contains("disconnected: the connection was lost during the commit, so it is not known whether the transaction committed: the server went away"),
+        "the caller must be told the commit's outcome is unknown, got: {out:?}"
+    );
+}
