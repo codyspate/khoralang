@@ -239,7 +239,69 @@ pub(crate) struct Checker<'a> {
     /// it is compiled as a function of its own and an outer `catch` is not
     /// on its stack.
     pub(crate) catching: usize,
+    /// Every `raise` whose value's type was still a variable when it was
+    /// checked, to be charged once the type settles. See
+    /// [`Checker::settle_raises`].
+    pub(crate) pending_raises: Vec<PendingRaise>,
+    /// Row tails this machinery made, each solved after the body from tails
+    /// made before it, in the order they were made. See
+    /// [`Checker::settle_raises`].
+    pub(crate) derived_tails: Vec<DerivedTail>,
+    /// Every closure error row, by its tail, with the entries beside it: what
+    /// the row said it carried when it was built. See
+    /// [`Checker::settle_raises`] for why a closed tail is not the whole row.
+    pub(crate) owner_rows: Vec<(Type, Vec<(String, Type)>)>,
     pub(crate) errors: Vec<HirError>,
+}
+
+/// A `raise` of a value whose type was not known yet.
+///
+/// **Such a raise used to be charged to no row at all.** `fn (e) => (if b {
+/// raise e } else { fs()! }) catch { .. }` pushed no demand for `raise e`, so
+/// neither the `catch` beside it nor the closure's own row saw it, and the
+/// error escaped a function the checker had called infallible: exit 130 with
+/// no message, later a trap. Its demand carries `tail`, a row variable, and
+/// that variable is solved to whatever of the raise is left once the type
+/// has settled and the `catch`es around it have had their say.
+pub(crate) struct PendingRaise {
+    /// The raised value's type, a variable when recorded.
+    pub(crate) ty: Type,
+    /// The row variable standing for this raise in its demand.
+    pub(crate) tail: Type,
+    pub(crate) range: TextRange,
+    /// How many lambdas enclosed the raise: only a `catch` in the same body
+    /// is around it, since a closure is compiled as a function of its own.
+    pub(crate) depth: usize,
+    /// The `catch`es whose operand it is in, innermost first.
+    pub(crate) handlers: Vec<Handler>,
+}
+
+/// A row tail standing for others, solved once the body is inferred.
+///
+/// **Defined, never linked.** Merging used to hang each tail off the end of
+/// the last, a linked list threaded through the raises: the same closure
+/// called twice linked a tail to itself, and `khora check` then refused with
+/// "infinite type" or walked the loop for ever, and two closures merged in
+/// both orders made a two-tail cycle. A derived tail is defined only in
+/// terms of tails that existed before it, and is solved after all of them,
+/// so there is no chain to walk and no order in which one can loop.
+pub(crate) enum DerivedTail {
+    /// A closure's body merged several open rows: `head` is what the
+    /// closure's row carries, and stands for everything in every member.
+    Merged { head: Type, members: Vec<Type> },
+    /// A `catch` with named arms whose operand's row ended in `source`: `out`
+    /// is what leaves the `catch`, which is `source` less what the arms name.
+    Caught { out: Type, source: Type, arms: Vec<(String, Type, TextRange)> },
+}
+
+/// What one `catch` handles, as far as a raise not yet typed is concerned.
+pub(crate) enum Handler {
+    /// A `_` arm: everything.
+    Everything,
+    /// A binding arm, at the type the binding was given.
+    Binds(Type, TextRange),
+    /// Named arms: each error type and the instantiation its arm was bound at.
+    Named(Vec<(String, Type, TextRange)>),
 }
 
 impl<'a> Checker<'a> {

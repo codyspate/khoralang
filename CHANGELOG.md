@@ -152,6 +152,41 @@ cancellation point in every function, whatever the function's `raises` row;
     ignored the whole table as an unrecognized key. Point the entry at the
     group file, or delete it.
 
+- **A constructor pattern of one type, matched against a value of another,
+  is refused**, at any depth, in `match`, `catch`, `let` and a pattern inside
+  a tuple or record pattern: "this pattern is a `Result` case, and the value
+  here is a `Big`". This includes a pattern over a type parameter ("... the
+  value here is a `T`"). Where both types were held on the heap the program
+  built and read the field out of the wrong constructor (see Fixed).
+
+- **`(raise X) catch { X => 7 }` is an `Int`**, the type its arms produce.
+  It was typed as the operand's, which never finishes, so it fitted wherever
+  a value was wanted and yielded 0 there (see Fixed). A use that only fitted
+  because of that is refused: `let s: String = (raise X) catch { X => 7 }`.
+
+- **A `raise` of a value whose type is worked out later is charged to the
+  `catch`es and the row around it**, as a `raise` of a value of known type
+  is. Programs this refuses:
+  - the error escapes a closure's `catch` and the closure is called without
+    `!`: "`k` can leave this function, so the call needs `!`";
+  - the value turns out to be a second instantiation of an error type the
+    `catch` beside it names: "a `catch` arm handles one instantiation of a
+    type, and this operand raises two; catch them with `_`, or in two
+    `catch`es". A program of this shape whose other branch was the one that
+    ran happened to give the right answer, and is refused all the same;
+  - the value's type is never worked out at all: "the type of this raised
+    value was never worked out";
+  - the value turns out to be an error type that the closure's row, already
+    fixed by where the closure is passed (`attempt`, `retry`, a parameter
+    written `() -> Int raises Nf`), does not carry: "this `raise` sends `Dn`,
+    and the closure it is in had its error row closed to `{ Nf: Nf }`, which
+    does not carry it", naming where the row was fixed and suggesting an
+    annotation. Another closure calling this one beside a
+    `Dn` of its own does not count: the row has to carry it. 0.3.0 built
+    these and crashed, or, where the raising branch never ran or the error
+    happened to reach a `catch` that named it, gave the right answer.
+
+
 ### Fixed
 
 - **0.3.0 could lose a database write it had acknowledged with `Ok`.** A
@@ -301,6 +336,30 @@ cancellation point in every function, whatever the function's `raises` row;
   `catch { Gx::Y(n) => n, _ => .. }`, ended the process with an illegal
   instruction** (status 132). Such a closure is refused at build time (see
   Breaking).
+
+- **A constructor pattern was never checked against the type of the value it
+  matched.** In 0.3.0, `match o { Option::Some(Result::Ok(v)) => .., _ => .. }`
+  over an `Option<Big>` built, ran, and read `v` from the `Some`'s layout,
+  printing an answer with nothing to say it was wrong; so did the same
+  pattern inside an error's `catch` arm (`Ng::A(Option::Some(Result::Ok(v)))`
+  over `type Ng = | A(v: Option<Big>)`). Where the value was an `Int` --
+  `match 3 { Option::Some(v) => v, _ => 0 }`, or an `Option` pattern over an
+  `Int` field of an error -- and for a generic error's arm, the compiler
+  itself crashed. Each is refused, with the two types named (see Breaking).
+
+- **A `catch` whose operand always raises yielded 0.** In 0.3.0,
+  `(raise F::W) catch { F::W => 7, .. }` used as a function's result or an
+  argument gave 0, and a `let` of it was refused; with an `if` around the
+  `raise` it gave 7. It gives what the arm produces, in every position,
+  including a block that ends in a `raise`, a nested `catch`, and a `raise`
+  in every branch of an `if` or `match`.
+
+- **An error raised through a value whose type was worked out later escaped
+  a function that could not fail.** In 0.3.0, `raise e` with `e` a closure's
+  parameter, beside a call the `catch` handled, was charged to nothing: the
+  error went past the `catch` and the program ended with "khora: the stack
+  ran out" and status 139. The raise is charged like any other, so the
+  `catch` handles it or the closure's row carries it to the caller.
 
 - **Two modules that each declared an error type of the same name failed to
   build**, with "not valid LLVM IR". Each module's type is its own.

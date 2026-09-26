@@ -3800,18 +3800,202 @@ Defensively, codegen seals the default of a `catch` the checker called total
 a trap naming the invariant, so a future hole in this rule stops the program
 loudly instead of propagating.
 
-Not closed by this: `bind_pattern` never checks that a nested constructor
-pattern belongs to the scrutinee's type (for `match` too), and a `raise` of a
-value whose type is still a variable when the `catch` is checked charges no
-row. Both are in 0.3.0. Nor is the label: an error row is labelled by the
-type's bare name, not its name and home, so two different types named `E` in
-two modules collide in one row as two instantiations do. They are refused
-there too, with a message naming them as two types; keying the label on the
-home as well would let them sit side by side, and is a separate change.
+Not closed by this, and closed since: `bind_pattern` never checked that a
+nested constructor pattern belongs to the scrutinee's type (erratum 93), and
+a `raise` of a value whose type was still a variable when the `catch` was
+checked charged no row (erratum 95). Both are in 0.3.0. Nor is the label: an
+error row is labelled by the type's bare name, not its name and home, so two
+different types named `E` in two modules collide in one row as two
+instantiations do. They are refused there too, with a message naming them as
+two types; keying the label on the home as well would let them sit side by
+side, and is a separate change.
 
 The general shape: **anything that selects a layout by a key must key on
 everything the layout depends on.** A type name is not a type once the type
 has parameters, and not once two modules can each declare one.
+
+## 93. A constructor pattern was trusted to name the value's type
+
+In 0.3.0. `bind_pattern` read a constructor pattern's field types off the
+pattern's own declaration, substituted at whatever arguments the value had,
+and never asked whether the value was of that type at all. `substitution_for`
+fell back to fresh variables when it was not, "downstream of another error"
+-- but no error had been reported. So:
+
+- `match 3 { Option::Some(v) => v, _ => 0 }` checked clean, and the code
+  generator panicked ("expected PointerValue", `lower/pattern.rs`);
+- `Option<Big>` matched with `Option::Some(Result::Ok(v))`: both heap
+  objects, so the tag test and the field load went through, and `v` was read
+  from the `Some`'s payload at `Result::Ok`'s offset. It printed `t 5` with
+  nothing wrong to see, on both fiber backends and both `KHORA_UNBOXED`
+  values;
+- the same inside a non-generic error's `catch` arm
+  (`Ng::A(Option::Some(Result::Ok(v)))`: `t 5` with that layout, and with
+  another a heap address, different on every run); the generic form
+  (`Gx::X(s, Option::Some(Result::Ok(v)))` over a `Gx<Option<Big>>`)
+  panicked the 0.3.0 code generator instead. And in a `let` pattern, which
+  then reported only refutability, about the wrong type.
+
+`bind_pattern` now calls `pattern_fits` for every `TupleStruct`, `Record`
+and `Path` pattern that resolves to a variant: a fresh instance of the
+pattern's type is unified with the value's. A mismatch is reported ("this
+pattern is a `T` case, and the value here is a `U`"), the pattern goes into
+`broken_pats` so coverage does not report about the invented shape, and its
+fields bind `Unknown`. A variable is solved to the pattern's type, which is
+how a lambda parameter matched on learns what it is; a rigid parameter is
+refused by the unifier's own rule. `Unknown` and `Never` are not compared.
+Tuple patterns already had the equivalent check.
+
+The general shape: **a pattern is a claim about a type, and a claim nobody
+checks is a cast.** Every other way of taking a value apart -- a field read,
+a call -- unified first.
+
+## 94. A `catch` over a raise that always happens was a `Never`
+
+In 0.3.0. `infer_catch` returned the operand's type, after `require`-ing the
+arms' type against it. For `(raise F::W) catch { F::W => 7 }` the operand is
+a `Never`, which unifies with anything and so accepted the arms' `Int`
+without becoming it. The `catch` was a `Never`:
+
+- a `let` of it was refused by the backend ("`v` has type `Never`");
+- anywhere else, `lower_catch` read the `catch`'s type, found `Never`, kept
+  no result slot, and joined to `unit_value` -- an `i64 0`. As a function's
+  result or an argument it was 0. A `String` arm panicked the code generator
+  instead;
+- through an `if` (`if n < 0 { raise F::W } else { n }`) the operand is an
+  `Int`, which is why that spelling gave 7.
+
+The `catch`'s type is the join: the operand's, unless the operand is `Never`,
+in which case the arms'. Code generation needed no change -- it already takes
+the slot from the `catch`'s type, not the operand's; it was being told
+`Never`. A `catch` whose arms all diverge too stays `Never`.
+
+## 95. A raise of a value not yet typed was charged to no row
+
+In 0.3.0. `raise e` pushed its demand only when `e`'s type was already known:
+`Var` and `Unknown` were skipped together, the second rightly (it is somebody
+else's error) and the first wrongly. With `e` a lambda parameter typed by a
+later call, the `catch` around the raise saw nothing it raised, the closure's
+row did not carry it, and the error escaped a function the checker had called
+infallible: exit 139 on 0.3.0, 130 with no message after erratum 92's row
+change, and the total-`catch` trap after its seal. On its own in the operand
+(`(raise e) catch { .. }`) it was refused, "nothing in this expression
+raises", which hid the hole.
+
+A raise of a `Var` now records a `PendingRaise` and pushes a demand whose row
+is one fresh tail. The demand travels as any other. Each `catch` records what
+it would do with the pending raises in its own body's operand (`Handler`);
+one with named arms whose operand's row ends in such a tail puts a new tail
+in its place (`DerivedTail::Caught`), standing for the old one less what the
+arms name, so a raise reaching it through a closure's row is handled there
+too. `absorb_raises` used to keep the first tail of several and drop the
+rest, which would have dropped a pending raise; it keeps each distinct tail
+once, and where one of them is a pending raise's gives the closure's row a
+fresh tail defined as their union (`DerivedTail::Merged`).
+
+**The first version chained the tails instead**, hanging each off the end of
+the last through the raises. The same closure called twice from another met
+its own tail twice and linked it to itself: two calls were refused as an
+"infinite type", three made `khora check` walk the loop for ever -- and the
+language server with it. Two closures merged in both orders made a two-tail
+cycle. A derived tail is defined only from tails that existed before it and
+is solved once, after the body, so nothing is linked to anything.
+
+That does not keep the definitions free of cycles. Unification can make an
+older tail and a newer one the same variable: two closures given one type
+-- `List::Cons(k, List::Cons(w, List::Nil))`, `same(k, w)` for a
+`fn same<T>(a: T, b: T)`, `if c { k } else { w }` -- tie `w`'s `catch` tail
+to `k`'s pending tail, and reading what one stands for leads back to it.
+
+**The second version dropped a raise reached by two paths.** The walk that
+reads the definitions kept one visited set, so that a mistake could not
+hang it -- but a pending raise reached once through a `catch` and once
+directly (`outer = fn (x) => ((k(x)! + nf0(false)!) catch { Nf { p } => 1 })
++ k(x)!`) was a second visit, and contributed nothing. `outer`'s row closed
+to `{}`; with no `catch` above it the program exited 130 with nothing
+printed, and in a function declared `raises Nf` it ended "the stack ran
+out". A missed entry is not caught by the total-`catch` trap unless a
+`catch` stands between it and `main`. The fix then was to cut only at the
+path being read, so only a cycle stopped the walk, and to remember each
+definition's content for the rest of the read, with each entry kept once per
+label and type. Without the memory, a chain of such diamonds is walked once
+per path -- `2^n` for `n` levels -- and a depth of 22 did not check in a
+minute.
+
+**The third version remembered a content a cycle had cut short.** With `k`
+and `w` tied as above, `w = fn (x) => (outer(x)! + nf0(false)!) catch { Nf
+{ p } => 1 }` and `outer` calling both `k` and a `k2` that raises `Dn`, the
+walk reached `w`'s `catch` tail from inside the cycle, found `k`'s tail
+already on its path, and stored what it had so far: nothing. That stored
+nothing was what `w`'s row was solved to, so `w`'s `Dn` was never charged,
+a function declared `raises Nf` was accepted, and the `Dn` ended in the
+total-`catch` trap.
+
+**The fourth version was right and did not finish.** It remembered only a
+content no cut to a definition further up the path had touched. That gave
+the right answers, but a definition on a cycle was then read once per
+simple path into it, and a list of middleware layers -- each wrapping the
+one before in a `catch`, all kept in one `List`, so every layer's tail is
+one variable -- has a factorial number of those: ten layers took 20 s to
+check, and twelve never finished, in `khora check` and in the language
+server alike. A chain of diamonds tied top to bottom (`same(l0, l22)`) was
+exponential the same way.
+
+**Now the definitions are solved as equations.** Every definition is a
+union, or a tail less the labels a `catch` names; both are monotone and
+idempotent, so the equations have a least solution. Starting from nothing,
+each definition is read once, and read again only when a definition it
+reads has grown, until nothing grows. A first version re-read every
+definition in rounds until a whole round changed nothing; a chain built
+against the order the closures were written cost a round per link, each
+round re-read everything else as well, and a 60-link chain beside a 60-layer
+handler list carrying 60 late-typed errors took 26 s to check. With the
+re-reads driven by what changed, that program checks in under a second of
+the checker's own time. A content only grows, and is drawn from a finite
+set -- the entries the pending raises leave, and one rest -- so it changes
+at most (entries + 1) times, and each change re-reads only its readers.
+A `catch` arm's instantiation check runs once, on the final contents, so
+an instantiation that reaches the arm only after another tie has carried
+it is still refused. The arm checks report in the order the closures were
+written; the walk reported them in the order it reached them, so a program
+with two such mismatches lists the same two errors, possibly the other
+way round.
+
+After the body, `settle_raises` (before `close_open_rows`) reads what every
+pending and derived tail stands for, then solves each:
+- a pending raise's own leftover: nothing if a `_` or binding arm in its
+  body took it (a binding arm at the binding's type), else `{ label: ty }`;
+  named arms are applied through the `Caught` tail, and a `Gx<Int>` into an
+  arm bound at `Gx<String>` is refused as "raises two";
+- a type never worked out is refused ("the type of this raised value was
+  never worked out"), and a type that is not an error type as `raise`
+  already did;
+- an entry that every closure row ending in that tail carries is unified
+  with it and adds nothing. **Every row**, because one tail ends several:
+  `k`'s own row, and the row of each closure that calls `k(x)!` beside an
+  `Nf` of its own. Counting an entry any of them carried let `k`, closed by
+  a signature at `raises Dn`, raise `Nf` through it, into the total-`catch`
+  trap. **The tail may already be closed**: a closure
+  passed where a signature fixes its error type (`attempt`, `retry`, a
+  parameter written `() -> Int raises Nf`) has its row closed by that
+  unification while the raise's type is unknown. The first version then
+  required `{}` to hold `Nf` and refused programs 0.3.0 ran right, saying
+  `Nf` was "not accounted for" in a row that said `raises Nf`. An entry whose
+  type is itself still a variable -- `attempt`'s `E` when the pending raise
+  is the only thing that could fix it -- is filled by the raise. Only an
+  entry the closed row cannot hold is refused, naming the row and saying it
+  was fixed by a type the closure, or a closure that calls it, was matched
+  against: a parameter, a typed `let`, or a function it was made one type
+  with.
+  An entry counts as carried by every row only at one type in all of them.
+
+**What this does not do.** A `catch` whose operand contains *only* a pending
+raise, and no other raise of the type its arms name, is still refused
+("nothing in this expression raises"): the arms have nothing to be checked
+against when the `catch` is. It is a refusal, not a wrong answer.
+
+The general shape: **"not known yet" is not "nothing".** A check that skips a
+case it cannot decide yet has to come back to it.
 
 ## 96. A second effect clause was read and dropped
 
@@ -3829,3 +4013,4 @@ A signature has at most one `with` clause and one `raises` clause, `with`
 first. Anything else is a syntax error that names the fix: one row
 (`with { a: A, b: B }`) or one union (`raises A + B`). Nothing in `std`,
 `packages/`, `examples/`, `tests/` or `bench/` wrote another shape.
+

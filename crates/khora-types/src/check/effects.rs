@@ -10,6 +10,60 @@
 
 use super::*;
 
+/// One error a pending raise leaves over, with where it was raised.
+#[derive(Clone)]
+struct Entry {
+    label: String,
+    ty: Type,
+    range: TextRange,
+}
+
+/// What a tail stands for once the body is known: the errors in it, and the
+/// ordinary row variable it ends in, if any.
+#[derive(Default, Clone)]
+struct Content {
+    entries: Vec<Entry>,
+    rest: Option<Type>,
+}
+
+impl Content {
+    /// Adds `more`, keeping one entry per label and type.
+    ///
+    /// **Without this a chain of diamonds doubles its entry list at every
+    /// level**: a tail reached by two paths contributes its entries twice,
+    /// and the level above reaches both copies twice again.
+    fn absorb(&mut self, more: Content) {
+        for entry in more.entries {
+            if !self.entries.iter().any(|e| e.label == entry.label && e.ty == entry.ty) {
+                self.entries.push(entry);
+            }
+        }
+        if self.rest.is_none() {
+            self.rest = more.rest;
+        }
+    }
+}
+
+/// Where one tail named in a definition takes its content from.
+enum Source {
+    /// The definitions of that tail: several, where unification made
+    /// several tails one variable.
+    Defs(Vec<usize>),
+    /// A tail no definition defines: an ordinary row variable, which the
+    /// content ends in.
+    Rest(Type),
+}
+
+/// How one tail [`Checker::settle_raises`] solves is defined.
+enum Def {
+    /// A raise's own leftover.
+    Pending(Vec<Entry>),
+    /// The union of several tails.
+    Merged(Vec<Type>),
+    /// A tail less what a `catch`'s named arms take.
+    Caught(Type, Vec<(String, Type, TextRange)>),
+}
+
 impl<'a> Checker<'a> {
     /// Closes every lambda row nothing ever asked to be wider.
     ///
@@ -255,7 +309,7 @@ impl<'a> Checker<'a> {
     pub(super) fn absorb_raises(&mut self, before: usize) -> Type {
         let window: Vec<Demand> = self.demanded.split_off(before);
         let mut fields: Vec<(String, Type)> = Vec::new();
-        let mut tail = None;
+        let mut tails: Vec<Type> = Vec::new();
         let mut at = None;
 
         let kept: Vec<Demand> = window
@@ -268,7 +322,9 @@ impl<'a> Checker<'a> {
                             at = Some(demand.range);
                         }
                         fields.extend(raised);
-                        tail = tail.take().or(rest.map(|t| *t));
+                        if let Some(rest) = rest {
+                            tails.push(*rest);
+                        }
                         demand.row = Type::empty_row();
                     }
                 }
@@ -276,11 +332,458 @@ impl<'a> Checker<'a> {
             })
             .collect();
         self.demanded.extend(kept);
+        let tail = self.join_tails(tails);
+        if let Some(tail) = &tail {
+            self.owner_rows.push((tail.clone(), fields.clone()));
+        }
         let row = Type::row(fields, tail);
         match at {
             Some(range) => self.settle_error_row(&row, range),
             None => row,
         }
+    }
+
+    /// The one tail a closure's row carries for the open rows its body met.
+    ///
+    /// **A second tail is not dropped when it stands for a raise not yet
+    /// typed.** Keeping only the first charged that raise to nobody again.
+    /// The same tail met twice -- a closure called twice -- is one tail.
+    /// Several distinct ones, one of them this machinery's, get a fresh head
+    /// defined as their union and solved by [`Self::settle_raises`]. Ordinary
+    /// row variables alone keep the first, as they always have.
+    fn join_tails(&mut self, tails: Vec<Type>) -> Option<Type> {
+        let mut distinct: Vec<Type> = Vec::new();
+        for tail in tails {
+            let tail = self.unifier.shallow(&tail);
+            if !distinct.contains(&tail) {
+                distinct.push(tail);
+            }
+        }
+        if distinct.len() <= 1 || !distinct.iter().any(|t| self.is_derived_or_pending(t)) {
+            return distinct.into_iter().next();
+        }
+        let head = self.unifier.fresh();
+        self.derived_tails.push(DerivedTail::Merged { head: head.clone(), members: distinct });
+        Some(head)
+    }
+
+    /// Whether `tail` is one that [`Self::settle_raises`] will solve.
+    pub(super) fn is_derived_or_pending(&self, tail: &Type) -> bool {
+        let tail = self.unifier.shallow(tail);
+        if !matches!(tail, Type::Var(_)) {
+            return false;
+        }
+        self.pending_raises.iter().any(|p| self.unifier.shallow(&p.tail) == tail)
+            || self.derived_tails.iter().any(|d| {
+                let own = match d {
+                    DerivedTail::Merged { head, .. } => head,
+                    DerivedTail::Caught { out, .. } => out,
+                };
+                self.unifier.shallow(own) == tail
+            })
+    }
+
+    /// Charges every `raise` whose value was not typed when it was checked.
+    ///
+    /// Run once the body has been inferred, when the value's type has
+    /// settled. A `_` or binding arm in the raise's own body takes it (a
+    /// binding arm at the binding's type); named arms take it through the
+    /// [`DerivedTail::Caught`] their `catch` left in the row, at the
+    /// instantiation each arm was bound at, so `Gx<Int>` raised into a
+    /// `catch` built for `Gx<String>` is the refusal a typed raise gets. What
+    /// nothing takes goes wherever its demand went -- the enclosing
+    /// function's row or a closure's.
+    ///
+    /// Every definition is read before any tail is solved, so one read does
+    /// not see another half settled.
+    ///
+    /// **A type never worked out is refused**, rather than charged to
+    /// nothing: nothing can say which `catch` arm would read it, or at what
+    /// layout.
+    pub(crate) fn settle_raises(&mut self) {
+        // What each pending raise leaves over once its own body's `catch`es
+        // have had their say.
+        let mut defs: Vec<(Type, Def)> = Vec::new();
+        for pending in std::mem::take(&mut self.pending_raises) {
+            let PendingRaise { ty, tail, range, handlers, .. } = pending;
+            let left = self.leftover(&ty, range, &handlers);
+            defs.push((tail, Def::Pending(left)));
+        }
+        for derived in std::mem::take(&mut self.derived_tails) {
+            match derived {
+                DerivedTail::Merged { head, members } => defs.push((head, Def::Merged(members))),
+                DerivedTail::Caught { out, source, arms } => {
+                    defs.push((out, Def::Caught(source, arms)))
+                }
+            }
+        }
+
+        // Every content is read before any tail is solved, so each is read
+        // from the state inference left, not from one half settled.
+        let contents = self.contents_of(&defs);
+        for ((own, _), content) in defs.iter().zip(contents) {
+            self.solve_tail(own, content);
+        }
+    }
+
+    /// What one pending raise leaves over: nothing if a `catch` in its own
+    /// body took it, else its type under its label.
+    fn leftover(&mut self, ty: &Type, range: TextRange, handlers: &[Handler]) -> Vec<Entry> {
+        let ty = self.unifier.zonk(ty);
+        match &ty {
+            Type::Adt { .. } | Type::Param(_) => {}
+            Type::Var(_) => {
+                self.error(
+                    "the type of this raised value was never worked out; \
+                     annotate the value's type where it is bound"
+                        .to_string(),
+                    range,
+                );
+                return Vec::new();
+            }
+            Type::Unknown | Type::Never => return Vec::new(),
+            Type::Int
+            | Type::Fixed(_)
+            | Type::Float
+            | Type::Bool
+            | Type::Str
+            | Type::Unit
+            | Type::Ptr
+            | Type::Char
+            | Type::Fn { .. }
+            | Type::Applied { .. }
+            | Type::Row { .. }
+            | Type::Tuple(_)
+            | Type::Assoc { .. }
+            | Type::Const(_) => {
+                self.error(
+                    format!(
+                        "`{ty}` is not an error type, so it cannot be raised: \
+                         an error type is one a `type` declaration names"
+                    ),
+                    range,
+                );
+                return Vec::new();
+            }
+        }
+        let label = label_of(&ty);
+        for handler in handlers {
+            match handler {
+                Handler::Everything => return Vec::new(),
+                Handler::Binds(bound, at) => {
+                    self.require(
+                        bound,
+                        &ty,
+                        "a `catch` arm that binds the failure gives it one type, and this \
+                         operand raises one error type at two instantiations; catch them \
+                         in two `catch`es, or with `_`",
+                        *at,
+                    );
+                    return Vec::new();
+                }
+                Handler::Named(_) => {
+                    // Named arms are applied by the `Caught` tail the `catch`
+                    // put in its place (see `infer_catch`), which also covers
+                    // a raise reaching it through a closure's row; applying
+                    // them here as well would report every mismatch twice.
+                }
+            }
+        }
+        vec![Entry { label, ty, range }]
+    }
+
+    /// What every tail `defs` defines stands for: the least solution of the
+    /// definitions, read as equations.
+    ///
+    /// **The definitions can form a cycle.** Each names only tails that
+    /// existed before it, but unification can make an older tail and a newer
+    /// one the same variable: two closures given one type --
+    /// `List::Cons(k, List::Cons(w, ..))`, `same(k, w)` for a
+    /// `fn same<T>(a: T, b: T)`, or `if c { k } else { w }` -- tie `w`'s
+    /// `catch` tail to `k`'s pending tail. A list of middleware layers, each
+    /// wrapping the one before in a `catch`, makes every layer's tail one
+    /// variable, and every definition then reads every other.
+    ///
+    /// **So this computes a least fixed point rather than walking.** Every
+    /// definition is a union, or a tail less the labels a `catch` names;
+    /// both are monotone and idempotent, so the equations have a least
+    /// solution, and starting from nothing and re-reading a definition
+    /// whenever something it reads grows, until nothing does, reaches it --
+    /// in whatever order the re-reads happen. A walk that followed paths and
+    /// cut at its own had the same answer, but only by visiting every simple
+    /// path: remembering a content read inside a cycle before the cycle
+    /// closed kept an error out of a row and into the total-`catch` trap,
+    /// and not remembering it made a twelve-layer list of handlers never
+    /// finish checking.
+    ///
+    /// **A worklist, not rounds.** Re-reading every definition until a whole
+    /// pass changed nothing cost one pass per link of a chain built against
+    /// definition order, and each pass re-read everything else too: a
+    /// 60-link chain beside a 60-layer handler list took 26 s. Now each
+    /// definition is queued once, and again only when one it reads grows;
+    /// this was chosen over condensing strongly connected components first
+    /// for being one queue with nothing to get subtly wrong. That would also
+    /// read each cycle's members only while their cycle is unsettled, and
+    /// is the change to make if this ever shows up in a profile.
+    ///
+    /// **The cost is bounded.** A content only grows -- an entry added, or a
+    /// first rest -- and is drawn from the entries the pending raises leave
+    /// plus one rest, so it changes at most `entries + 1` times, and each
+    /// change queues its readers. So there are at most
+    /// `defs + (entries + 1) x edges` evaluations, where `edges` is the
+    /// number of (definition, reader) pairs, and each costs a read of its
+    /// sources' contents, deduplicated by `Content::absorb`'s linear scan.
+    ///
+    /// A `catch` arm's instantiation check -- `Gx<Int>` into an arm bound
+    /// at `Gx<String>` -- runs once, after the queue is empty, on the final
+    /// contents: an instantiation that reaches the arm only once another tie
+    /// has carried it is still checked, a mismatch is reported once, and the
+    /// checks run, and report, in the order the definitions were made.
+    fn contents_of(&mut self, defs: &[(Type, Def)]) -> Vec<Content> {
+        let sources: Vec<Vec<Source>> = defs
+            .iter()
+            .map(|(_, def)| match def {
+                Def::Pending(_) => Vec::new(),
+                Def::Merged(members) => members.iter().map(|m| self.source_of(defs, m)).collect(),
+                Def::Caught(source, _) => vec![self.source_of(defs, source)],
+            })
+            .collect();
+        let mut value: Vec<Content> = vec![Content::default(); defs.len()];
+        // Who reads each definition: re-read one only when something it
+        // reads has grown.
+        let mut readers: Vec<Vec<usize>> = vec![Vec::new(); defs.len()];
+        for (index, from) in sources.iter().enumerate() {
+            for source in from {
+                match source {
+                    Source::Defs(read) => {
+                        for &other in read {
+                            if !readers[other].contains(&index) {
+                                readers[other].push(index);
+                            }
+                        }
+                    }
+                    Source::Rest(_) => {}
+                }
+            }
+        }
+        let mut queued = vec![true; defs.len()];
+        let mut queue: std::collections::VecDeque<usize> = (0..defs.len()).collect();
+        while let Some(index) = queue.pop_front() {
+            queued[index] = false;
+            let next = match &defs[index].1 {
+                Def::Pending(left) => {
+                    let mut out = Content::default();
+                    out.absorb(Content { entries: left.clone(), rest: None });
+                    out
+                }
+                Def::Merged(_) => {
+                    let mut out = Content::default();
+                    for source in &sources[index] {
+                        out.absorb(read_source(source, &value));
+                    }
+                    out
+                }
+                Def::Caught(_, arms) => {
+                    let found = read_source(&sources[index][0], &value);
+                    Content {
+                        entries: found
+                            .entries
+                            .into_iter()
+                            .filter(|e| !arms.iter().any(|(owner, _, _)| *owner == e.label))
+                            .collect(),
+                        rest: found.rest,
+                    }
+                }
+            };
+            // Contents only grow: entries are only added, and a rest, once
+            // found, is kept -- as `Content::absorb` keeps the first -- so a
+            // longer list or a first rest is the only change there can be,
+            // and each content changes a bounded number of times.
+            let mut next = next;
+            if value[index].rest.is_some() {
+                next.rest = value[index].rest.clone();
+            }
+            if next.entries.len() != value[index].entries.len()
+                || next.rest.is_some() != value[index].rest.is_some()
+            {
+                value[index] = next;
+                for &reader in &readers[index] {
+                    if !queued[reader] {
+                        queued[reader] = true;
+                        queue.push_back(reader);
+                    }
+                }
+            }
+        }
+        for (index, (_, def)) in defs.iter().enumerate() {
+            let arms = match def {
+                Def::Caught(_, arms) => arms,
+                Def::Pending(_) | Def::Merged(_) => continue,
+            };
+            for entry in read_source(&sources[index][0], &value).entries {
+                if let Some((_, arm_ty, at)) = arms.iter().find(|(owner, _, _)| *owner == entry.label) {
+                    self.require(
+                        arm_ty,
+                        &entry.ty,
+                        "a `catch` arm handles one instantiation of a type, and this \
+                         operand raises two; catch them with `_`, or in two `catch`es",
+                        *at,
+                    );
+                }
+            }
+        }
+        value
+    }
+
+    /// Where `tail` takes its content from: the definitions of it, or, for
+    /// a tail this machinery did not make, itself as the rest of the row.
+    fn source_of(&self, defs: &[(Type, Def)], tail: &Type) -> Source {
+        let here = self.unifier.shallow(tail);
+        let mine: Vec<usize> = (0..defs.len())
+            .filter(|&i| {
+                let own = &defs[i].0;
+                own == tail || (matches!(here, Type::Var(_)) && self.unifier.shallow(own) == here)
+            })
+            .collect();
+        if mine.is_empty() {
+            Source::Rest(tail.clone())
+        } else {
+            Source::Defs(mine)
+        }
+    }
+
+    /// Solves one tail to what it stands for.
+    ///
+    /// **A tail something else has already closed is checked, not solved.**
+    /// A closure passed where a signature fixes its error type -- `attempt`,
+    /// `retry`, a parameter written `() -> Int raises Nf` -- has its row
+    /// closed by that unification while the raise's type is still unknown,
+    /// so the tail is `{}` by the time the raise is charged. Requiring `{}`
+    /// to hold `Nf` refused programs whose row already said `raises Nf`, with
+    /// a message saying `Nf` was not accounted for. So each entry is looked
+    /// for in the row the tail ended in and in the entries the closure's row
+    /// carried beside it; one found there is unified with it and adds
+    /// nothing, and only one found nowhere, in a row that cannot grow, is
+    /// refused.
+    fn solve_tail(&mut self, own: &Type, content: Content) {
+        let Content { entries, rest } = content;
+        let range = entries.first().map(|e| e.range);
+        let as_fields = |entries: &[Entry]| -> Vec<(String, Type)> {
+            entries.iter().map(|e| (e.label.clone(), e.ty.clone())).collect()
+        };
+        if matches!(self.unifier.shallow(own), Type::Var(_)) {
+            let rest = match rest {
+                Some(rest) => rest,
+                None => self.fresh_open_raises(),
+            };
+            let row = Type::row(as_fields(&entries), Some(rest));
+            let _ = self.unifier.unify(own, &row);
+            return;
+        }
+        let Type::Row { fields, tail } = self.unifier.zonk(own) else { return };
+        let mut known = fields.clone();
+        known.extend(self.carried_beside(own));
+        let mut missing: Vec<Entry> = Vec::new();
+        for entry in entries {
+            match known.iter().find(|(label, _)| *label == entry.label) {
+                Some((_, carried)) => {
+                    let carried = carried.clone();
+                    self.require(&carried, &entry.ty, "the error this `raise` sends", entry.range);
+                }
+                None => missing.push(entry),
+            }
+        }
+        // An entry whose type is still a variable -- `attempt`'s `E` before
+        // anything said what it is -- is a place for one error type, not a
+        // type of its own, and the first entry nothing else carries fills it.
+        let mut unfilled: Vec<Type> = known
+            .iter()
+            .map(|(_, ty)| self.unifier.shallow(ty))
+            .filter(|ty| matches!(ty, Type::Var(_)))
+            .collect();
+        let mut still_missing: Vec<Entry> = Vec::new();
+        for entry in missing {
+            match unfilled.pop() {
+                Some(place) => {
+                    self.require(&place, &entry.ty, "the error this `raise` sends", entry.range);
+                }
+                None => still_missing.push(entry),
+            }
+        }
+        let missing = still_missing;
+        if missing.is_empty() {
+            return;
+        }
+        match tail {
+            Some(open) if matches!(self.unifier.shallow(&open), Type::Var(_)) => {
+                let fresh = self.fresh_open_raises();
+                let _ = self.unifier.unify(&open, &Type::row(as_fields(&missing), Some(fresh)));
+            }
+            _ => {
+                let carried = Type::row(known, None);
+                for entry in missing {
+                    self.error(
+                        format!(
+                            "this `raise` sends `{ty}`, and the closure it is in had its error \
+                             row closed to `{carried}`, which does not carry it: the row was \
+                             fixed by a type this closure, or a closure that calls it, was \
+                             matched against -- a parameter it is passed to, a typed `let`, \
+                             or another function it was made one type with. Annotate the \
+                             raised value's type where it is bound, as `{ty}`, or raise it \
+                             where that type allows it",
+                            ty = entry.ty
+                        ),
+                        range.unwrap_or(entry.range),
+                    );
+                }
+            }
+        }
+    }
+
+    /// A fresh row tail, closed to `{}` by `close_open_rows` if nothing
+    /// widens it.
+    fn fresh_open_raises(&mut self) -> Type {
+        let open = self.unifier.fresh();
+        self.open_raises.push(open.clone());
+        open
+    }
+
+    /// The entries every closure row ending in `tail` carried beside it.
+    ///
+    /// **Every row, not any row.** One tail ends several closure rows: a
+    /// closure `k` with a pending raise has `{ | t }`, and each closure that
+    /// calls `k(x)!` beside a typed call gets `{ Nf | t }`. The union credited
+    /// `k`, closed by a signature at `raises Dn`, with a caller's `Nf`, so a
+    /// raise of `Nf` inside `k` was accepted and ran into the total-`catch`
+    /// trap. The row that was closed is always one of these rows -- every
+    /// closure row is recorded -- so an entry all of them carry is in it.
+    /// What it costs: an entry only some callers carry is not credited, and
+    /// the raise is judged against the closed row alone.
+    ///
+    /// The same tail, or one solved to the same variable -- never two tails
+    /// that merely both became `{}`, which says nothing about their rows.
+    ///
+    /// An entry counts as carried by every row only at the same type in each,
+    /// as [`Content::absorb`] compares them: `Gx<Int>` in one row and
+    /// `Gx<String>` in another is not one entry.
+    fn carried_beside(&self, tail: &Type) -> Vec<(String, Type)> {
+        let here = self.unifier.shallow(tail);
+        let mut rows: Vec<Vec<(String, Type)>> = Vec::new();
+        for (owner_tail, beside) in &self.owner_rows {
+            let same = owner_tail == tail
+                || (matches!(here, Type::Var(_)) && self.unifier.shallow(owner_tail) == here);
+            if same {
+                rows.push(beside.iter().map(|(l, t)| (l.clone(), self.unifier.zonk(t))).collect());
+            }
+        }
+        let Some((first, others)) = rows.split_first() else { return Vec::new() };
+        first
+            .iter()
+            .filter(|(label, ty)| {
+                others.iter().all(|row| row.iter().any(|(l, t)| l == label && t == ty))
+            })
+            .cloned()
+            .collect()
     }
 
     /// An error row with each error type in it once.
@@ -742,4 +1245,18 @@ fn one_error_type_note(expected: &Type, found: &Type) -> String {
          `catch` instead",
         named.join(" and ")
     )
+}
+
+/// What `source` reads from `value`, the contents so far.
+fn read_source(source: &Source, value: &[Content]) -> Content {
+    match source {
+        Source::Rest(tail) => Content { entries: Vec::new(), rest: Some(tail.clone()) },
+        Source::Defs(indices) => {
+            let mut out = Content::default();
+            for &index in indices {
+                out.absorb(value[index].clone());
+            }
+            out
+        }
+    }
 }

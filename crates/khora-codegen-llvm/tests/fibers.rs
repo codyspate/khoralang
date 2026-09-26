@@ -2794,16 +2794,18 @@ fn work() -> Int {{
     );
 }
 
-/// **An error that reaches a `catch` the checker called total stops the
-/// program naming the rule**, rather than leaving a function with no
-/// `raises` row as an unhandled error: status 130 and no message.
+/// **An error the `catch` beside it does not name, raised through a value
+/// whose type is settled only later, is refused at build time.**
 ///
-/// The program is one the checker still accepts wrongly, and that is why it
-/// is here: `raise e` of a lambda parameter whose type is settled only
-/// later charges no row, so the `catch` thinks `Nf` is all it can see and a
-/// `Dn` arrives. When that hole is closed the program is refused at build
-/// time, and this test should become that assertion; until then it pins
-/// that the miss is loud.
+/// `raise e` of a lambda parameter charged no row, so the `catch` thought
+/// `Nf` was all it could see and a `Dn` arrived at run time: status 130 with
+/// no message, then the trap that seals a total `catch`. The raise is now
+/// charged once `e` is known to be a `Dn`, so the closure raises `Dn` and the
+/// call to it needs `!` and a row.
+///
+/// This was the only program known to reach that trap. The trap stays, as
+/// the loud answer if the checker ever loses an error again, and has no
+/// program left that reaches it.
 #[test]
 fn an_error_no_arm_names_in_a_total_catch_stops_the_program() {
     let program = r#"module main;
@@ -2819,14 +2821,11 @@ fn work() -> Int {
 }
 pub fn main() -> () { let t = work(); print("${t}") }
 "#;
-    for backend in ["threads", "scheduler"] {
-        let ran = run_std_on("total_catch_missed", program, backend);
-        assert!(
-            ran.stderr.contains("no arm names it; this is a compiler bug"),
-            "`{backend}`: exit {:?}, stderr {:?}",
-            ran.code,
-            ran.stderr
-        );
-        assert_ne!(ran.code, Some(0), "`{backend}`: and the program must not carry on");
-    }
+    let Err(messages) = build_std("total_catch_missed", program, "threads") else {
+        panic!("a raise of `Dn` the `catch` does not name built");
+    };
+    assert!(
+        messages.iter().any(|m| m.contains("`k` needs `Dn`, which this function does not raise")),
+        "refused for another reason: {messages:?}"
+    );
 }

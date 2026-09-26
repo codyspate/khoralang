@@ -246,9 +246,15 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             hint: None,
             marked: Vec::new(),
             catching: 0,
+            pending_raises: Vec::new(),
+            derived_tails: Vec::new(),
+            owner_rows: Vec::new(),
             errors: Vec::new(),
         };
         checker.check_function();
+        // Before the rows are closed: what a raise not yet typed leaves over
+        // is a tail of its own, and closing it is what says it left nothing.
+        checker.settle_raises();
         checker.close_open_rows();
         checker.check_bounds();
         checker.settle_projections();

@@ -251,6 +251,28 @@ impl<'a> Checker<'a> {
                         callee: "raise".to_string(),
                         site: None,
                     });
+                } else if matches!(ty, Type::Var(_)) {
+                    // **Not yet known is not nothing.** A demand whose row
+                    // is only a variable is carried like any other -- through
+                    // the `catch`es around it, into a closure's row -- and
+                    // `settle_raises` solves the variable to what is left of
+                    // the raise once its type is known.
+                    let tail = self.unifier.fresh();
+                    self.pending_raises.push(PendingRaise {
+                        ty: ty.clone(),
+                        tail: tail.clone(),
+                        range,
+                        depth: self.lambdas.len(),
+                        handlers: Vec::new(),
+                    });
+                    self.demanded.push(Demand {
+                        fallible: false,
+                        clause: Clause::Raises,
+                        row: Type::row(Vec::new(), Some(tail)),
+                        range,
+                        callee: "raise".to_string(),
+                        site: None,
+                    });
                 }
                 Type::Never
             }
@@ -1246,9 +1268,12 @@ impl<'a> Checker<'a> {
         // window: a demand from an enclosing expression is not in it, and a
         // nested `catch` has already narrowed its own.
         let before = self.demanded.len();
+        let pending_before = self.pending_raises.len();
         self.catching += 1;
         let value = self.infer(inner);
         self.catching -= 1;
+        let pending_after = self.pending_raises.len();
+        let mut handler = Handler::Named(Vec::new());
 
         // **What the operand can raise, read before the arms are looked at.**
         // An arm that names a constructor carries its own type; an arm that
@@ -1339,6 +1364,10 @@ impl<'a> Checker<'a> {
                         );
                     }
                     self.bind_pattern(arm.pat, &only);
+                    handler = Handler::Binds(only.clone(), self.body.pat_range(arm.pat));
+                }
+                if !binds {
+                    handler = Handler::Everything;
                 }
                 if let Some(guard) = arm.guard {
                     self.expect(guard, &Type::Bool, "a match guard");
@@ -1412,6 +1441,9 @@ impl<'a> Checker<'a> {
                 );
             }
             self.caught.insert(arm.pat, arm_ty.clone());
+            if let Handler::Named(named) = &mut handler {
+                named.push((owner.clone(), arm_ty.clone(), self.body.pat_range(arm.pat)));
+            }
             self.bind_pattern(arm.pat, &arm_ty);
             if let Some(guard) = arm.guard {
                 self.expect(guard, &Type::Bool, "a match guard");
@@ -1429,6 +1461,21 @@ impl<'a> Checker<'a> {
                         result = Some(Type::Unknown);
                     }
                 }
+            }
+        }
+
+        // A raise whose type is not known yet is asked about later; what this
+        // `catch` would do with it is recorded for then. Only for a raise in
+        // this body: one inside a closure in the operand leaves that closure,
+        // not this `catch`'s operand.
+        let depth = self.lambdas.len();
+        for pending in &mut self.pending_raises[pending_before..pending_after] {
+            if pending.depth == depth {
+                pending.handlers.push(match &handler {
+                    Handler::Everything => Handler::Everything,
+                    Handler::Binds(ty, at) => Handler::Binds(ty.clone(), *at),
+                    Handler::Named(arms) => Handler::Named(arms.clone()),
+                });
             }
         }
 
@@ -1456,14 +1503,28 @@ impl<'a> Checker<'a> {
 
         // The bodies stand in for the operand's value, so the whole expression
         // has one type whichever way it went.
+        //
+        // **That type is the join, and an operand that never finishes adds
+        // nothing to it.** `(raise X) catch { X => 7 }` is typed from the
+        // arm: returning the operand's `Never` told code generation the
+        // expression has no value, so it kept no slot for the arm's `7`, and
+        // used as a value the `catch` read 0.
+        let mut joined = value.clone();
         if let Some(handled) = result.clone() {
             self.require(&value, &handled, "a `catch` arm", range);
+            if matches!(self.unifier.shallow(&value), Type::Never) {
+                joined = handled;
+            }
         }
 
         // Subtract. The demand stays even when nothing is left of its row: it
         // is also what checks that the call wore its `!`, and a `catch` does
         // not excuse the mark — control still leaves the operand.
         let window: Vec<Demand> = self.demanded.split_off(before);
+        let caught_arms: Vec<(String, Type, TextRange)> = match &handler {
+            Handler::Named(arms) => arms.clone(),
+            Handler::Everything | Handler::Binds(..) => Vec::new(),
+        };
         let mut names = Vec::new();
         // Whether the named arms left nothing of any row: no label and no
         // tail. Published for code generation, which seals the way out of
@@ -1488,7 +1549,24 @@ impl<'a> Checker<'a> {
                             if !left.is_empty() || tail.is_some() {
                                 total = false;
                             }
-                            demand.row = Type::row(left, tail.as_deref().cloned());
+                            // A tail that stands for a raise not typed yet
+                            // (in the operand, or in a closure it calls) is
+                            // still to be decided; what leaves the `catch`
+                            // is that, less what these arms name, worked out
+                            // once it is known.
+                            let tail = match tail.as_deref() {
+                                Some(t) if !caught_arms.is_empty() && self.is_derived_or_pending(t) => {
+                                    let out = self.unifier.fresh();
+                                    self.derived_tails.push(DerivedTail::Caught {
+                                        out: out.clone(),
+                                        source: t.clone(),
+                                        arms: caught_arms.clone(),
+                                    });
+                                    Some(out)
+                                }
+                                other => other.cloned(),
+                            };
+                            demand.row = Type::row(left, tail);
                         }
                     } else {
                         total = false;
@@ -1511,7 +1589,7 @@ impl<'a> Checker<'a> {
             }
         }
 
-        value
+        joined
     }
 }
 

@@ -18,6 +18,14 @@ impl<'a> Checker<'a> {
                 let variant = variant_case(&resolution)
                     .and_then(|(h, t, n)| self.types.variant_of(h.as_ref(), &t, &n))
                     .cloned();
+                if let Some(v) = variant.as_ref() {
+                    if !self.pattern_fits(pat, &v.type_name, ty) {
+                        for field in &fields {
+                            self.bind_pattern(*field, &Type::Unknown);
+                        }
+                        return;
+                    }
+                }
                 // Field types are declared against the type's own parameters,
                 // so they have to be read at the scrutinee's instantiation:
                 // matching `Option<Int>` binds `v` to `Int`, not to `A`.
@@ -45,6 +53,14 @@ impl<'a> Checker<'a> {
                 let variant = variant_case(&resolution)
                     .and_then(|(h, t, n)| self.types.variant_of(h.as_ref(), &t, &n))
                     .cloned();
+                if let Some(v) = variant.as_ref() {
+                    if !self.pattern_fits(pat, &v.type_name, ty) {
+                        for (_, field) in &fields {
+                            self.bind_pattern(*field, &Type::Unknown);
+                        }
+                        return;
+                    }
+                }
                 let mapping = variant
                     .as_ref()
                     .map(|v| self.substitution_for(&v.type_name, ty))
@@ -124,8 +140,49 @@ impl<'a> Checker<'a> {
                     self.bind_pattern(*field, &component);
                 }
             }
-            Pat::Wildcard | Pat::Literal(_) | Pat::Path(_) | Pat::Missing => {}
+            Pat::Path(resolution) => {
+                let owner = variant_case(&resolution)
+                    .and_then(|(h, t, n)| self.types.variant_of(h.as_ref(), &t, &n))
+                    .map(|v| v.type_name.clone());
+                if let Some(owner) = owner {
+                    self.pattern_fits(pat, &owner, ty);
+                }
+            }
+            Pat::Wildcard | Pat::Literal(_) | Pat::Missing => {}
         }
+    }
+
+    /// Whether a constructor pattern of `owner` can match a value of `ty`,
+    /// reporting it when it cannot.
+    ///
+    /// **Without this a pattern was trusted to name the right type**, and
+    /// the field types were read off its declaration whatever the value was.
+    /// `match 3 { Option::Some(v) => .. }` then reached the code generator and
+    /// panicked it; `Option<Big>` matched with `Result::Ok(v)` built, ran,
+    /// and read `v` from a `Some`'s layout, a wrong answer with no error.
+    ///
+    /// Unified with a fresh instance of `owner` rather than compared, so a
+    /// value whose type is still a variable takes the pattern's type -- the
+    /// way a lambda parameter matched on learns what it is -- and a rigid
+    /// parameter is refused by the unifier's own rule. An `Unknown` or a
+    /// `Never` is already somebody else's error, or cannot arrive, so neither
+    /// is compared.
+    fn pattern_fits(&mut self, pat: PatId, owner: &str, ty: &Type) -> bool {
+        let settled = self.unifier.shallow(ty);
+        if matches!(settled, Type::Unknown | Type::Never) {
+            return true;
+        }
+        let (expected, _) = self.instantiate_adt(owner);
+        if self.unifier.unify(&expected, &settled).is_ok() {
+            return true;
+        }
+        let found = self.unifier.zonk(&settled);
+        self.error(
+            format!("this pattern is a `{owner}` case, and the value here is a `{found}`"),
+            self.body.pat_range(pat),
+        );
+        self.broken_pats.insert(pat);
+        false
     }
 
     /// Remembers a `match` to check once the types have settled.
