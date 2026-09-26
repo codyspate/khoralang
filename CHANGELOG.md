@@ -18,6 +18,13 @@ cancellation point in every function, whatever the function's `raises` row;
 
 ### Breaking
 
+- **A `postgres` connection whose reply is cut off is closed, not reused.**
+  In 0.3.0 it went on serving, and later queries on it got the answer to the
+  query before (under Fixed). It is closed instead, and a pool does not replace
+  it: the pool goes on lending it out, and every query given that lease is
+  answered `Disconnected` until the pool is closed. A pool of two that loses
+  one this way answers about half of its later queries `Disconnected`.
+
 - **Every function can be cancelled, whatever its `raises` row.** A loop, a
   recursive call, a blocking operation or a call to a function that reaches
   one is a cancellation point in a function with no row, as it always was in
@@ -92,6 +99,38 @@ cancellation point in every function, whatever the function's `raises` row;
   It used to keep the first and drop the second without a word.
 
 ### Fixed
+
+- **A `postgres` query could return another caller's rows.** When a read
+  failed partway through a reply, the caller was told `Disconnected`, but the
+  connection went back into service with the rest of that reply still
+  arriving on it. The next query on the connection read the old reply as its
+  own, and every query after it got the answer to the one before. In 0.3.0
+  this needs a read to fail in the middle of a reply, on either fiber
+  backend: a receive deadline shorter than a slow reply is enough, and so is
+  any other failed receive. A connection whose reply is cut off is closed
+  and never used again, and its caller and anybody queued on it get
+  `Disconnected`.
+
+- **A `postgres` statement bigger than the socket's send buffer hung.** That
+  is about 2.6 MB on Linux over loopback. A socket write
+  sent what fitted in the kernel's buffer and reported that count, and every
+  write in `std::net::socket` took any count that was not negative as the
+  whole message. The driver sent the first part of the statement, the
+  server waited for the rest, and the driver waited for the answer: for
+  ever, or until a receive deadline ended it with `Disconnected`. Both fiber
+  backends, in 0.3.0 too. `transmit` and `transmit_bytes` send every
+  byte or report a failure, which also covers an HTTP response bigger than
+  the socket buffer written to a slow client.
+
+- **In a toolchain built from source, a socket read, write or accept on the
+  scheduler backend could fail although nothing was wrong.** This affected
+  programs linked against the development-profile runtime -- `khora build`
+  from a source checkout, and the test suites -- and not the released
+  toolchain, whose runtime is built differently and did not have it. A fiber
+  that waited for a socket and resumed on a different worker decided whether
+  to wait again by reading the error number of the worker it had left, so a
+  read could fail in the middle of a live stream. The error number is read
+  on the thread that made the call, in every build.
 
 - **A `postgres` pool lost a connection when a fiber waiting in `with_db` was
   cancelled just as a connection reached it.** The connection was handed over,

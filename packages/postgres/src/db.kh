@@ -48,7 +48,7 @@ module postgres::db;
 
 import std::core::{Channel, List, Option, Result};
 import std::db::{Cell, Db, DbError, Row};
-import postgres::conn::{Answer, Connection, PgError, ask, close, open, run};
+import postgres::conn::{Answer, Connection, PgError, ask, close, open, run, usable};
 
 /// What a caller wants done.
 pub type Work =
@@ -125,6 +125,18 @@ fn answer_all(c: Connection, requests: Channel<Request>) -> () {
         // a channel that will be released rather than one somebody is expected
         // to come back for.
         Channel::close(request.reply);
+        // **A connection that failed partway through a reply is never served
+        // again.** The rest of that reply is still on its way, and the next
+        // statement would read it as its own answer -- and every caller after
+        // that one would get the answer before theirs. The caller whose reply
+        // was cut off has been told `Disconnected`; closing `requests` makes
+        // this the `broken` path in `over`, so everybody after is told the
+        // same, and `serve` closes the socket.
+        if !usable(c) {
+          Channel::close(requests);
+          refuse(requests, gone());
+          going = false
+        };
       },
     }
   };

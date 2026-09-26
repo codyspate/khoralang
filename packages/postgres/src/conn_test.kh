@@ -87,7 +87,7 @@ test "a bool column is a Flag" {
 /// A connection whose buffer already holds `bytes`, so `next_message` answers
 /// from it without reading the socket.
 fn holding(bytes: Array<U8>) -> Connection {
-  { handle: invalid_handle(), pending: bytes, start: 0, scram: Option::None }
+  { handle: invalid_handle(), pending: bytes, start: 0, scram: Option::None, broken: false }
 }
 
 /// **An idle connection holds no buffer from its last reply.** Taking a

@@ -100,6 +100,22 @@ pub type Connection = {
   /// message, so that message has to survive until the challenge arrives.
   /// Every other exchange here is a request and its replies.
   mut scram: Option<Session>,
+  /// Whether a read or a write failed partway through an exchange.
+  ///
+  /// **What this prevents: a caller given the answer to somebody else's
+  /// query.** A reply cut off by a failed read is still arriving, so the next
+  /// statement sent on the connection reads the rest of the old reply as its
+  /// own, and every statement after it is one reply behind. A write that
+  /// failed, or that sent fewer bytes than the request, may have left part of
+  /// a frame on the wire, which puts the server out of step instead. Neither
+  /// can be repaired from this side: the driver cannot tell how much of the
+  /// reply is still coming. So once this is set, `ask` and `run` refuse
+  /// without touching the socket, and `postgres::db` stops serving the
+  /// connection and closes it.
+  ///
+  /// What it costs: one failed read ends the connection, including a read
+  /// that timed out on a server that was only slow.
+  mut broken: Bool,
 };
 
 /// What a column is called and what type the server says it is.
@@ -159,6 +175,7 @@ pub fn next_message(c: Connection) -> Result<Message, PgError> {
         let buffer: Array<U8> = Array::new(8192, 0);
         let read = receive(c.handle, buffer);
         if read <= 0 {
+          c.broken = true;
           answer = Result::Err(PgError::Closed(
               "the server closed the connection while a reply was expected"
             ));
@@ -227,7 +244,9 @@ pub fn open(
         ))
     } else {
       let empty: Array<U8> = Array::new(0, 0);
-      let c: Connection = { handle: handle, pending: empty, start: 0, scram: Option::None };
+      let c: Connection = {
+        handle: handle, pending: empty, start: 0, scram: Option::None, broken: false,
+      };
       let hello = startup(user, database);
       if transmit_bytes(handle, hello) < 0 {
         shut(handle);
@@ -406,9 +425,35 @@ pub fn close(c: Connection) -> () {
 
 // --- querying --------------------------------------------------------------
 
+/// Whether this connection can still carry a statement.
+///
+/// False once an exchange has failed partway, for good: see `broken`.
+pub fn usable(c: Connection) -> Bool {
+  !c.broken
+}
+
+/// The answer to any statement on a broken connection.
+fn out_of_step() -> Result<Answer, PgError> {
+  Result::Err(PgError::Closed(
+      "an earlier reply on this connection was cut off, so it cannot be used again"
+    ))
+}
+
+/// Sends one request's frames, marking the connection broken unless every
+/// byte went. `transmit_bytes` sends all of them or fails, so the length
+/// check costs a comparison and holds even if a transport ever returns a
+/// short count.
+fn send_frames(c: Connection, frames: Array<U8>) -> Bool {
+  let sent = transmit_bytes(c.handle, frames) == Array::length(frames);
+  if !sent { c.broken = true };
+  sent
+}
+
 /// Runs one statement and reads everything it produces.
 pub fn run(c: Connection, sql: String) -> Result<Answer, PgError> {
-  if transmit_bytes(c.handle, query(sql)) < 0 {
+  if c.broken {
+    out_of_step()
+  } else if !send_frames(c, query(sql)) {
     Result::Err(PgError::Closed("the query could not be sent"))
   } else {
     collect(c)
@@ -429,7 +474,9 @@ pub fn run(c: Connection, sql: String) -> Result<Answer, PgError> {
 /// a cache and not a slice of protocol. Round trips are unchanged either way:
 /// this is one write and one read, the same as `run`.
 pub fn ask(c: Connection, sql: String, values: List<Cell>) -> Result<Answer, PgError> {
-  if transmit_bytes(c.handle, extended(sql, to_wire(values))) < 0 {
+  if c.broken {
+    out_of_step()
+  } else if !send_frames(c, extended(sql, to_wire(values))) {
     Result::Err(PgError::Closed("the query could not be sent"))
   } else {
     collect(c)

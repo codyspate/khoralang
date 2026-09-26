@@ -1319,3 +1319,452 @@ fn main() -> Int {{
         );
     }
 }
+
+// --- a reply cut off in the middle -------------------------------------------
+
+/// How long the scripted server stalls in the middle of the first reply.
+const STALL_MS: u64 = 1000;
+
+/// The receive deadline the program puts on its connections: a tenth of the
+/// stall, so even a loaded machine reads the stall as a failed read.
+const DEADLINE_MS: u64 = 100;
+
+/// One frontend message, or `None` once the driver has hung up.
+fn next_frame(stream: &mut TcpStream) -> Option<(u8, Vec<u8>)> {
+    let mut kind = [0u8; 1];
+    stream.read_exact(&mut kind).ok()?;
+    let mut length = [0u8; 4];
+    stream.read_exact(&mut length).ok()?;
+    let mut payload = vec![0u8; (i32::from_be_bytes(length) as usize).checked_sub(4)?];
+    stream.read_exact(&mut payload).ok()?;
+    Some((kind[0], payload))
+}
+
+/// One backend message as bytes, so a reply can be cut wherever a test likes.
+fn framed(kind: u8, payload: &[u8]) -> Vec<u8> {
+    let mut out = vec![kind];
+    out.extend_from_slice(&((payload.len() + 4) as i32).to_be_bytes());
+    out.extend_from_slice(payload);
+    out
+}
+
+/// Answers `select N` with one `int4` row holding `N`, on every connection it
+/// is given, until the driver hangs up.
+///
+/// **The first reply of all is cut in the middle of its `DataRow`**, and the
+/// rest follows [`STALL_MS`] later on the same connection, the way a slow
+/// server or a lost segment delivers it. Nothing is closed: whatever the
+/// driver sends next on that connection is read and answered after the late
+/// half.
+///
+/// Each reply sent whole is noted in `heard` as `answered N`, and the
+/// connection that was cut notes `the cut connection ended` when the driver
+/// hangs up on it, so a test can say in which order the two happened.
+fn answer_numbers(
+    mut stream: TcpStream,
+    cut: &std::sync::atomic::AtomicBool,
+    heard: &std::sync::Mutex<Vec<String>>,
+) {
+    let mut this_one_was_cut = false;
+    answer_numbers_until_hung_up(&mut stream, cut, heard, &mut this_one_was_cut);
+    if this_one_was_cut {
+        heard.lock().expect("the notes").push("the cut connection ended".to_string());
+    }
+}
+
+fn answer_numbers_until_hung_up(
+    stream: &mut TcpStream,
+    cut: &std::sync::atomic::AtomicBool,
+    heard: &std::sync::Mutex<Vec<String>>,
+    this_one_was_cut: &mut bool,
+) {
+    let _ = stream.set_nodelay(true);
+    let mut length = [0u8; 4];
+    if stream.read_exact(&mut length).is_err() {
+        return;
+    }
+    let mut startup = vec![0u8; (i32::from_be_bytes(length) as usize).saturating_sub(4)];
+    if stream.read_exact(&mut startup).is_err() {
+        return;
+    }
+    let mut hello = framed(b'R', &0i32.to_be_bytes());
+    hello.extend(framed(b'Z', b"I"));
+    if stream.write_all(&hello).is_err() {
+        return;
+    }
+    loop {
+        // One request: the extended protocol's frames up to `Sync`, or one
+        // simple `Query`. The SQL is in `Parse` after the statement's name.
+        let mut sql = String::new();
+        loop {
+            let Some((kind, payload)) = next_frame(stream) else { return };
+            let text = |skip: usize| {
+                let parts: Vec<&[u8]> = payload.split(|b| *b == 0).collect();
+                String::from_utf8_lossy(parts.get(skip).copied().unwrap_or(&[])).into_owned()
+            };
+            match kind {
+                b'X' => return,
+                b'P' => sql = text(1),
+                b'Q' => {
+                    sql = text(0);
+                    break;
+                }
+                b'S' => break,
+                _ => {}
+            }
+        }
+        let n = sql.trim().trim_start_matches("select ").trim().to_string();
+
+        let mut description = 1i16.to_be_bytes().to_vec();
+        description.extend_from_slice(&cstring("n"));
+        description.extend_from_slice(&0i32.to_be_bytes());
+        description.extend_from_slice(&0i16.to_be_bytes());
+        description.extend_from_slice(&23i32.to_be_bytes());
+        description.extend_from_slice(&4i16.to_be_bytes());
+        description.extend_from_slice(&(-1i32).to_be_bytes());
+        description.extend_from_slice(&0i16.to_be_bytes());
+        let mut row = 1i16.to_be_bytes().to_vec();
+        row.extend_from_slice(&(n.len() as i32).to_be_bytes());
+        row.extend_from_slice(n.as_bytes());
+
+        let mut reply = framed(b'T', &description);
+        let middle = reply.len() + 3;
+        reply.extend(framed(b'D', &row));
+        reply.extend(framed(b'C', &cstring("SELECT 1")));
+        reply.extend(framed(b'Z', b"I"));
+
+        let sent = if cut.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            stream.write_all(&reply)
+        } else {
+            *this_one_was_cut = true;
+            stream.write_all(&reply[..middle]).and_then(|_| {
+                std::thread::sleep(std::time::Duration::from_millis(STALL_MS));
+                stream.write_all(&reply[middle..])
+            })
+        };
+        if sent.is_err() {
+            return;
+        }
+        if !*this_one_was_cut || n != "1" {
+            heard.lock().expect("the notes").push(format!("answered {n}"));
+        }
+    }
+}
+
+/// The cut-reply program, run against [`answer_numbers`] on `backend`: what
+/// it printed, and what the server saw, in order.
+///
+/// A pool of two; the first reply of all is cut and stalled, with a receive
+/// deadline much shorter than the stall. Asks 1, sleeps past the stall so the
+/// late half has arrived, asks 2 to 6 one at a time, and closes the pool.
+///
+/// The deadline is set on every descriptor a connection could be given,
+/// before the pool opens, because the driver does not hand its socket out.
+fn run_the_cut_reply(name: &str, backend: &str) -> (Watched, Vec<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
+    let port = listener.local_addr().expect("an address").port();
+    let cut = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let heard = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let server = {
+        let (cut, heard) = (cut.clone(), heard.clone());
+        std::thread::spawn(move || {
+            // A pool of two opens two connections.
+            let mut served = Vec::new();
+            for _ in 0..2 {
+                let Ok((stream, _)) = listener.accept() else { break };
+                let (cut, heard) = (cut.clone(), heard.clone());
+                served.push(std::thread::spawn(move || answer_numbers(stream, &cut, &heard)));
+            }
+            for s in served {
+                let _ = s.join();
+            }
+        })
+    };
+    let exe = build(&format!("{name}_{backend}"), &cut_reply_program().replace("PORT", &port.to_string()));
+    let ran = run_watched(&exe, backend, std::time::Duration::from_secs(60));
+    server.join().expect("the scripted server");
+    let heard = heard.lock().expect("the notes").clone();
+    (ran, heard)
+}
+
+fn cut_reply_program() -> String {
+    format!(
+        "module demo::main;
+import std::core::{{Fibers, List, Result, print}};
+import std::db::{{Cell, Db, DbError, Row}};
+import postgres::db::{{Settings}};
+import postgres::pool::{{Pool, close, open, with_db}};
+
+extern fn khora_net_set_timeout(handle: I32, millis: Int) -> I32;
+extern fn khora_sleep(millis: Int) -> ();
+
+fn shown(rows: List<Row>) -> String {{
+  match rows {{
+    List::Nil => \"no rows\",
+    List::Cons(row, _) => match row.cells {{
+      List::Cons(Cell::Number(n), _) => Int::to_string(n),
+      _ => \"a row of another shape\",
+    }},
+  }}
+}}
+
+fn ask(pool: Pool, n: Int) -> () {{
+  let sql = \"select \" + Int::to_string(n);
+  let said = match with_db(pool, fn () => db.query(sql, List::Nil)) {{
+    Result::Err(_) => \"no connection\",
+    Result::Ok(Result::Err(why)) => match why {{
+      DbError::Disconnected(_) => \"disconnected\",
+      DbError::Rejected(m) => \"rejected: \" + m,
+      DbError::RolledBack(m) => \"rolled back: \" + m,
+    }},
+    Result::Ok(Result::Ok(rows)) => shown(rows),
+  }};
+  print(\"asked \" + Int::to_string(n) + \": \" + said);
+}}
+
+fn main() -> Int {{
+  let mut fd = 3;
+  while fd < 4096 {{
+    khora_net_set_timeout(I32::of(fd), {DEADLINE_MS});
+    fd = fd + 1
+  }};
+  let settings: Settings = {{
+    host: \"127.0.0.1\", port: PORT, user: \"khora\", database: \"khora\", secret: \"\",
+  }};
+  let crew = Fibers::open();
+  let pool = open(crew, settings, 2);
+  ask(pool, 1);
+  // Past the stall, so the late half of the first reply has arrived.
+  khora_sleep({STALL_MS} + 500);
+  let mut n = 2;
+  while n <= 6 {{
+    ask(pool, n);
+    n = n + 1
+  }};
+  close(pool);
+  print(\"closed\");
+  0
+}}
+"
+    )
+}
+
+/// **A reply cut off by a failed read never becomes the next caller's
+/// answer.** The rest of that reply is still on its way when the read gives
+/// up, so a driver that goes on using the connection hands it to whoever
+/// asks next, and every later caller on that connection gets the answer
+/// before theirs.
+///
+/// The first caller must be told `Disconnected`; after the late half has
+/// arrived, every statement must get its own number or a clean error, and
+/// `close` must return. Before the fix, `asked 3` got 1 and `asked 5` got 3.
+///
+/// Not on Windows, where a socket is a handle and not a small number.
+#[test]
+fn a_reply_cut_off_mid_stream_is_never_another_callers_answer() {
+    if cfg!(windows) {
+        eprintln!("skipping: the deadline is set by descriptor number, and a Windows socket is a handle");
+        return;
+    }
+    for backend in ["threads", "scheduler"] {
+        let (ran, _) = run_the_cut_reply("postgres_cut_reply", backend);
+        assert!(!ran.hung, "{backend}: the program hung: stdout {:?}", ran.stdout);
+        assert_eq!(ran.code, Some(0), "{backend}: stderr {}", ran.stderr);
+        assert_eq!(
+            ran.stdout,
+            "asked 1: disconnected\n\
+             asked 2: 2\n\
+             asked 3: disconnected\n\
+             asked 4: 4\n\
+             asked 5: disconnected\n\
+             asked 6: 6\n\
+             closed\n",
+            "{backend}: a caller must get its own number or an error, never another's"
+        );
+    }
+}
+
+/// **The connection whose reply was cut off is hung up at once, not kept
+/// open until the pool closes.**
+///
+/// Refusing it is not the same as dropping it. A connection that answers
+/// every later request `Disconnected` but is never closed holds a socket, a
+/// serving fiber and a server backend for the life of the pool, and the
+/// server goes on writing the rest of a reply nobody will read. So the
+/// server here must see the cut connection end before it is asked anything
+/// else: the driver learns the reply was cut at the deadline, 100 ms in, and
+/// the next request comes 1.5 s later.
+///
+/// With the connection only refused, the hang-up came when the pool closed,
+/// after every other answer.
+#[test]
+fn a_connection_whose_reply_was_cut_off_is_closed_straight_away() {
+    if cfg!(windows) {
+        eprintln!("skipping: the deadline is set by descriptor number, and a Windows socket is a handle");
+        return;
+    }
+    for backend in ["threads", "scheduler"] {
+        let (ran, heard) = run_the_cut_reply("postgres_cut_closed", backend);
+        assert!(!ran.hung, "{backend}: the program hung: stdout {:?}", ran.stdout);
+        assert_eq!(ran.code, Some(0), "{backend}: stderr {}", ran.stderr);
+        assert_eq!(
+            heard.first().map(String::as_str),
+            Some("the cut connection ended"),
+            "{backend}: the server answered something before the driver hung up on the cut connection: {heard:?}"
+        );
+    }
+}
+
+// --- a request bigger than the socket buffer -------------------------------
+
+/// Answers each extended-protocol request with one `int4` row: the length of
+/// its first bound parameter, or 7 when it has none.
+///
+/// **It reads every byte of every frame before it answers**, the way a real
+/// server does, and gives up after ten seconds of silence. A driver that sent
+/// part of a frame therefore gets no answer, and then a closed connection.
+fn answer_parameter_lengths(mut stream: TcpStream) {
+    let _ = stream.set_nodelay(true);
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+    let mut length = [0u8; 4];
+    if stream.read_exact(&mut length).is_err() {
+        return;
+    }
+    let mut startup = vec![0u8; (i32::from_be_bytes(length) as usize).saturating_sub(4)];
+    if stream.read_exact(&mut startup).is_err() {
+        return;
+    }
+    let mut hello = framed(b'R', &0i32.to_be_bytes());
+    hello.extend(framed(b'Z', b"I"));
+    if stream.write_all(&hello).is_err() {
+        return;
+    }
+    loop {
+        let mut answer = 7usize;
+        loop {
+            let Some((kind, payload)) = next_frame(&mut stream) else { return };
+            match kind {
+                b'X' => return,
+                // Bind: portal, statement, the format codes, then the values,
+                // each a length and its bytes.
+                b'B' => {
+                    let mut at = payload.iter().position(|b| *b == 0).map_or(0, |p| p + 1);
+                    at += payload[at..].iter().position(|b| *b == 0).map_or(0, |p| p + 1);
+                    let formats = i16::from_be_bytes([payload[at], payload[at + 1]]) as usize;
+                    at += 2 + 2 * formats;
+                    let values = i16::from_be_bytes([payload[at], payload[at + 1]]);
+                    at += 2;
+                    if values > 0 {
+                        let bytes = &payload[at..at + 4];
+                        answer = i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+                    }
+                }
+                b'S' => break,
+                _ => {}
+            }
+        }
+        let n = answer.to_string();
+        let mut description = 1i16.to_be_bytes().to_vec();
+        description.extend_from_slice(&cstring("n"));
+        description.extend_from_slice(&0i32.to_be_bytes());
+        description.extend_from_slice(&0i16.to_be_bytes());
+        description.extend_from_slice(&23i32.to_be_bytes());
+        description.extend_from_slice(&4i16.to_be_bytes());
+        description.extend_from_slice(&(-1i32).to_be_bytes());
+        description.extend_from_slice(&0i16.to_be_bytes());
+        let mut row = 1i16.to_be_bytes().to_vec();
+        row.extend_from_slice(&(n.len() as i32).to_be_bytes());
+        row.extend_from_slice(n.as_bytes());
+        let mut reply = framed(b'T', &description);
+        reply.extend(framed(b'D', &row));
+        reply.extend(framed(b'C', &cstring("SELECT 1")));
+        reply.extend(framed(b'Z', b"I"));
+        if stream.write_all(&reply).is_err() {
+            return;
+        }
+    }
+}
+
+/// **A parameter bigger than the socket buffer arrives whole.**
+///
+/// A non-blocking `send` takes what fits in the kernel's buffer, about
+/// 2.6 MB on Linux loopback, and reports that count. The driver counted any
+/// count that was not negative as the whole request, so a 4 MiB parameter
+/// went out as its first 2.6 MB. The server waited for the rest of the frame
+/// and the driver waited for its reply: a hang, or with a receive deadline a
+/// `Disconnected`.
+///
+/// A pool of one, a 4 MiB text parameter, then a small query on the same
+/// connection. The first must come back as its own length and the second as
+/// 7. Both backends.
+#[test]
+fn a_parameter_larger_than_the_socket_buffer_goes_whole() {
+    let main = "module demo::main;
+import std::core::{Fibers, List, Result, print};
+import std::db::{Cell, Db, DbError, Row};
+import postgres::db::{Settings};
+import postgres::pool::{Pool, close, open, with_db};
+
+fn said(r: Result<Result<List<Row>, DbError>, DbError>) -> String {
+  match r {
+    Result::Err(_) => \"no connection\",
+    Result::Ok(Result::Err(why)) => match why {
+      DbError::Disconnected(m) => \"disconnected: \" + m,
+      DbError::Rejected(m) => \"rejected: \" + m,
+      DbError::RolledBack(m) => \"rolled back: \" + m,
+    },
+    Result::Ok(Result::Ok(rows)) => match rows {
+      List::Cons(row, _) => match row.cells {
+        List::Cons(Cell::Number(n), _) => Int::to_string(n),
+        _ => \"a row of another shape\",
+      },
+      List::Nil => \"no rows\",
+    },
+  }
+}
+
+fn big(n: Int) -> String {
+  let mut s = \"x\";
+  while String::byte_length(s) < n {
+    s = s + s
+  };
+  s
+}
+
+fn main() -> Int {
+  let settings: Settings = {
+    host: \"127.0.0.1\", port: PORT, user: \"khora\", database: \"khora\", secret: \"\",
+  };
+  let crew = Fibers::open();
+  let pool = open(crew, settings, 1);
+  let payload = big(4194304);
+  print(\"big: \" + said(with_db(pool, fn () =>
+    db.query(\"select length($1)\", List::Cons(Cell::Text(payload), List::Nil)))));
+  print(\"then: \" + said(with_db(pool, fn () => db.query(\"select 7\", List::Nil))));
+  close(pool);
+  print(\"closed\");
+  0
+}
+";
+    for backend in ["threads", "scheduler"] {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
+        let port = listener.local_addr().expect("an address").port();
+        let server = std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                answer_parameter_lengths(stream);
+            }
+        });
+        let exe = build(
+            &format!("postgres_big_parameter_{backend}"),
+            &main.replace("PORT", &port.to_string()),
+        );
+        let ran = run_watched(&exe, backend, std::time::Duration::from_secs(60));
+        server.join().expect("the scripted server");
+        assert!(!ran.hung, "{backend}: the program hung: stdout {:?}", ran.stdout);
+        assert_eq!(ran.code, Some(0), "{backend}: stderr {}", ran.stderr);
+        assert_eq!(
+            ran.stdout, "big: 4194304\nthen: 7\nclosed\n",
+            "{backend}: a request bigger than the socket buffer must reach the server whole"
+        );
+    }
+}
