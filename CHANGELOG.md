@@ -16,77 +16,81 @@ Cancellation has its own channel. A cancelled fiber stops at its next
 cancellation point in every function, whatever the function's `raises` row;
 `raises` means only "can fail with these errors", and `!` marks only that.
 
+Read these first. Four fixes are for programs that gave a wrong answer with
+nothing to say so, so code that ran on 0.3.0 may behave differently: a
+`postgres` query could return another caller's rows; `std::db::transaction`
+could lose writes it had answered `Ok`; the type checker let through a
+pattern of the wrong type, a `catch` that yielded 0, and a `raise` that no
+`catch` saw; and a `catch` arm could read a generic error's field at the
+wrong type. Two language features are removed: glob imports, and a second
+`with` or `raises` clause. And a function with no `raises` row can be
+cancelled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
+`catch` do for such code.
+
 ### Breaking
 
-- **A `std::db::Db` handler's `rollback` can be called when no transaction
-  is open, and must answer `Ok` then.** `transaction` registers its rollback
+- **A `postgres` query could return another caller's rows** (see Fixed). A
+  program that ran with a receive deadline, or on a network that dropped
+  reads, may have acted on answers that belonged to other queries. The
+  connection that caused it is closed instead of reused. A pool does not
+  replace a connection closed this way: it goes on lending it, and every
+  query given that lease is answered `Disconnected` until the pool is
+  closed. A pool of two that loses one this way answers about half of its
+  later queries `Disconnected`.
+
+- **`std::db::transaction` could lose a write it had acknowledged with `Ok`**
+  (see Fixed), and a `std::db::Db` handler's `rollback` must accept being
+  called when no transaction is open. `transaction` registers its rollback
   before it sends `BEGIN`, so a cancel that lands before the `BEGIN` goes
   out, or while `COMMIT` waits for its reply, is followed by a `ROLLBACK`. A
-  handler that answers `Err` is told `broken`, and a pool built on it drops
-  the connection. PostgreSQL answers a stray `ROLLBACK` with a warning,
-  which the `postgres` package reads as `Ok`. The rollback of a body that
-  failed runs as cleanup, which a plain cancel does not interrupt, so a
-  handler whose rollback blocks is waited for. A commit that loses its
-  connection is answered `Disconnected` with a message that says the outcome
-  is unknown. Under Fixed: 0.3.0 could lose a write it had acknowledged with
-  `Ok`.
+  handler must answer `Ok` then; one that answers `Err` is told `broken`, and
+  a pool built on it drops the connection. PostgreSQL answers a stray
+  `ROLLBACK` with a warning, which the `postgres` package reads as `Ok`. The
+  rollback of a body that failed runs as cleanup, which a plain cancel does
+  not interrupt, so a handler whose rollback blocks is waited for.
 
-- **A `postgres` connection whose reply is cut off is closed, not reused.**
-  In 0.3.0 it went on serving, and later queries on it got the answer to the
-  query before (under Fixed). It is closed instead, and a pool does not replace
-  it: the pool goes on lending it out, and every query given that lease is
-  answered `Disconnected` until the pool is closed. A pool of two that loses
-  one this way answers about half of its later queries `Disconnected`.
+- **A constructor pattern of one type, matched against a value of another,
+  is refused**, at any depth, in `match`, `catch`, `let` and a pattern inside
+  a tuple or record pattern: "this pattern is a `Result` case, and the value
+  here is a `Big`". This includes a pattern over a type parameter ("... the
+  value here is a `T`"). Where both types were held on the heap, 0.3.0 built
+  the program and read the field out of the wrong constructor (see Fixed).
 
-- **Every function can be cancelled, whatever its `raises` row.** A loop, a
-  recursive call, a blocking operation or a call to a function that reaches
-  one is a cancellation point in a function with no row, as it always was in
-  one with a row. A fiber that used to run to its end after a cancel because
-  it had no row now stops, runs its finalizers, and is reported stopped:
-  `Fiber::cancelled` answers `true` and `Fiber::outcome` answers `Stopped`
-  for such a child, where they used to answer `false` and `Answered` with
-  whatever it had computed so far. A
-  `main` with no row that reaches a cancellation point is stopped by the
-  first `SIGTERM` or `SIGINT`, runs its finalizers and exits 130, where it
-  used to die at once with none.
+- **`(raise X) catch { X => 7 }` is an `Int`**, the type its arms produce.
+  0.3.0 typed it as the operand's, which never finishes, so it fitted
+  wherever a value was wanted and yielded 0 there (see Fixed). A use that
+  fitted only because of that is refused:
+  `let s: String = (raise X) catch { X => 7 }`.
 
-- **`Channel::send` and `Channel::receive` lose `raises 'er`.** A closed
-  channel is already the `Option` or `Bool` they return, and the row existed
-  only to give a cancellation somewhere to go. The `!` on a call is no longer
-  needed — `Channel::receive(jobs)` — and a leftover one is accepted.
+- **A `raise` of a value whose type is worked out later is charged to the
+  `catch`es and the row around it**, as a `raise` of a value of known type
+  is. On 0.3.0 such an error went past every `catch` (see Fixed). Programs
+  this refuses:
+  - the error escapes a closure's `catch` and the closure is called without
+    `!`: "`k` can leave this function, so the call needs `!`";
+  - the value turns out to be a second instantiation of an error type the
+    `catch` beside it names: "a `catch` arm handles one instantiation of a
+    type, and this operand raises two; catch them with `_`, or in two
+    `catch`es". A program of this shape whose other branch was the one that
+    ran happened to give the right answer, and is refused all the same;
+  - the value's type is never worked out at all: "the type of this raised
+    value was never worked out";
+  - the value turns out to be an error type that the closure's row, already
+    fixed by where the closure is passed (`attempt`, `retry`, a parameter
+    written `() -> Int raises Nf`), does not carry: "this `raise` sends `Dn`,
+    and the closure it is in had its error row closed to `{ Nf: Nf }`, which
+    does not carry it", naming where the row was fixed and suggesting an
+    annotation. Another closure calling this one beside a `Dn` of its own
+    does not count: the row has to carry it.
 
-- **`Fiber::wait` needs no `raises` row.** `wait` is accepted in any
-  function; it and `join` need a `!` only when the child's own row is
-  non-empty. The refusal of a `wait` in a function with no `raises` clause,
-  and the separate refusal of a generic one at build time, are gone.
-
-- **A fiber cancelled before it starts does not run.** Its body checks for a
-  cancellation as it is entered.
-
-- **`Fiber::join` on a stopped child stops the joiner**, whatever the child's
-  row. A child with no row used to hand its joiner an answer it never
-  computed. Use `Fiber::outcome` to get an answer if there is one without
-  being stopped, or `Fiber::wait` to wait without asking for one.
-
-- **`catch` never sees a cancellation**, `_` arm included, in any function.
-  A total `catch` in a function with no row used to either hand back a zero
-  nobody computed or, where the answer was a boxed value, end the process with
-  status 134. The cancellation passes through, finalizers run, and the fiber
-  stops.
-
-- **A `Shared::update` or `modify` change function that is stopped leaves the
-  cell unchanged.** A change function runs to its end after a cancel; one that
-  comes back stopped because a `Fiber::join`, `wait` or `outcome` inside it was
-  stopped no longer stores anything, where it used to store a zero or a null.
-
-- **The scheduler backend lost finalizers under load** (see Fixed). Listed
-  here too because a program on `KHORA_FIBERS=scheduler` whose cleanup was
-  silently skipped now runs it.
+  0.3.0 built these and crashed, or, where the raising branch never ran or
+  the error happened to reach a `catch` that named it, gave the right answer.
 
 - **An error type appears in a `raises` row at one instantiation.** An arm
   that reads a field of a generic error at a type other than the one raised
-  is refused (see Fixed; it read the wrong type). So is anything that would
-  put two instantiations of one error type in one row, wherever they meet:
+  is refused; on 0.3.0 it read the wrong type (see Fixed). So is anything
+  that would put two instantiations of one error type in one row, wherever
+  they meet:
   - one `catch` over `(if b { fi()! } else { fs()! })`, with `fi` raising
     `Gx<Int>` and `fs` raising `Gx<String>`, when it has a `Gx::..` arm or an
     arm that binds the failure (`catch { e => .. }`), including a `_` beside
@@ -107,12 +111,61 @@ cancellation point in every function, whatever the function's `raises` row;
   arrived. Catch each where it is raised, in a `catch` around each call, or
   with a `_` arm alone.
 
-- **A `with` clause that names two instantiations of one capability type
-  under the type's own name** (`with Box<Int> + Box<String>`) is refused.
-  It used to keep the first and drop the second without a word.
+- **Every function can be cancelled, whatever its `raises` row.** A loop, a
+  recursive call, a blocking operation or a call to a function that reaches
+  one is a cancellation point in a function with no row, as it always was in
+  one with a row. On 0.3.0 a fiber with no row ran to its end after a cancel;
+  it stops, runs its finalizers, and is reported stopped:
+  `Fiber::cancelled` answers `true` and `Fiber::outcome` answers `Stopped`
+  for such a child, where 0.3.0 answered `false` and `Answered` with whatever
+  it had computed so far. A `main` with no row that reaches a cancellation
+  point is stopped by the first `SIGTERM` or `SIGINT`, runs its finalizers
+  and exits 130; on 0.3.0 it died at once, with status 143 and no
+  finalizers.
+
+- **`Fiber::join` on a stopped child stops the joiner**, whatever the child's
+  row. On 0.3.0 a child with no row handed its joiner an answer it never
+  computed. Use `Fiber::outcome` to get an answer if there is one without
+  being stopped, or `Fiber::wait` to wait without asking for one.
+
+- **`catch` never sees a cancellation**, `_` arm included, in any function.
+  On 0.3.0 a total `catch` in a function with no row either handed back a
+  zero nobody computed or, where the answer was a boxed value, ended the
+  process with status 134. The cancellation passes through, finalizers run,
+  and the fiber stops.
+
+- **A fiber cancelled before it starts does not run.** Its body checks for a
+  cancellation as it is entered, so none of its statements run.
+
+- **A `Shared::update` or `modify` change function that is stopped leaves the
+  cell unchanged.** A change function runs to its end after a cancel. One
+  that comes back stopped, because a `Fiber::join`, `wait` or `outcome`
+  inside it was stopped, stores nothing; 0.3.0 stored a zero or a null.
+
+- **`Channel::send` and `Channel::receive` lose `raises 'er`.** A closed
+  channel is already the `Option` or `Bool` they return, and the row existed
+  only to give a cancellation somewhere to go. A call needs no `!` --
+  `Channel::receive(jobs)` -- and a leftover one is accepted.
+
+- **Glob imports are removed.** `import a::b::*;` is a syntax error. Name
+  what the file uses: `import a::b::{X, Y};`.
+
+- **At most one `with` clause and one `raises` clause, `with` first.**
+  `raises A raises B`, `with {..} with {..}` and `raises E with {..}` are
+  syntax errors, in a signature and in a function type. 0.3.0 accepted a
+  second clause and ignored it, which surfaced as an error about a correct
+  line elsewhere (a `raise` "not raised", a capability "not in scope").
+  Write one row, `with { a: A, b: B }`, and one union, `raises A + B`, in
+  that order.
+
+- **A name imported twice is refused**, with both imports named:
+  `import a::{f}; import b::{f};` or two `as` aliases that give one name.
+  0.3.0 used whichever import came first, so swapping two `import` lines
+  changed which function the program called. Keep one import, or rename one
+  with `as`. The same item imported twice is not an error.
 
 - **A `khora.toml` that does not load stops `check`, `build`, `run`, `test`,
-  `bench` and `fmt`**, with the file, line and key that are wrong. In 0.3.0,
+  `bench` and `fmt`**, with the file, line and key that are wrong. On 0.3.0,
   given a path to a project from outside it, these commands went on with the
   default lint levels and formatter settings, so one bad `[lints]` entry --
   a level spelled `"loud"`, a table without `level` -- turned every `deny`
@@ -121,23 +174,6 @@ cancellation point in every function, whatever the function's `raises` row;
   running on the defaults, and reports the manifest as an error on the line
   to fix.
 
-- **A name imported twice is refused**, with both imports named:
-  `import a::{f}; import b::{f};`, two `as` aliases that give one name, and a
-  glob that brings a name already imported. The program used whichever
-  import came first, so swapping two `import` lines changed what it called.
-  Keep one import, or rename one with `as`. The same item imported twice is
-  not an error.
-
-- **At most one `with` clause and one `raises` clause, `with` first.**
-  `raises A raises B`, `with {..} with {..}` and `raises E with {..}` are
-  syntax errors, in a signature and in a function type. A second clause was
-  accepted and ignored, which surfaced as an error about a correct line
-  elsewhere (a `raise` "not raised", a capability "not in scope"). Write one
-  row, `with { a: A, b: B }`, and one union, `raises A + B`, in that order.
-
-- **Glob imports are removed.** `import a::b::*;` is a syntax error. Name
-  what the file uses: `import a::b::{X, Y};`.
-
 - **Three `khora.toml` shapes that 0.3.0 warned about and ran are refused**,
   because lint groups give them a meaning. Each stops `check`, `build`,
   `run`, `test` and `bench`, naming the file and the key:
@@ -145,53 +181,37 @@ cancellation point in every function, whatever the function's `raises` row;
     A group is always a table: write `[lints.idiomatic]`, with
     `level = "warn"` under it if you want one level for every lint in it;
   - a group named for a package, `"acme::strict"`, as a string or as a
-    table under `[lints]`. Groups published in packages are not yet
-    supported: copy the group file into the project and declare it under
+    table under `[lints]`. Groups published in packages are not supported
+    yet: copy the group file into the project and declare it under
     `[lint-groups]`;
   - a `[lint-groups]` entry whose file is missing or does not parse. 0.3.0
     ignored the whole table as an unrecognized key. Point the entry at the
     group file, or delete it.
 
-- **A constructor pattern of one type, matched against a value of another,
-  is refused**, at any depth, in `match`, `catch`, `let` and a pattern inside
-  a tuple or record pattern: "this pattern is a `Result` case, and the value
-  here is a `Big`". This includes a pattern over a type parameter ("... the
-  value here is a `T`"). Where both types were held on the heap the program
-  built and read the field out of the wrong constructor (see Fixed).
+- **A `with` clause that names two instantiations of one capability type
+  under the type's own name** (`with Box<Int> + Box<String>`) is refused.
+  0.3.0 kept the first and dropped the second without a word.
 
-- **`(raise X) catch { X => 7 }` is an `Int`**, the type its arms produce.
-  It was typed as the operand's, which never finishes, so it fitted wherever
-  a value was wanted and yielded 0 there (see Fixed). A use that only fitted
-  because of that is refused: `let s: String = (raise X) catch { X => 7 }`.
-
-- **A `raise` of a value whose type is worked out later is charged to the
-  `catch`es and the row around it**, as a `raise` of a value of known type
-  is. Programs this refuses:
-  - the error escapes a closure's `catch` and the closure is called without
-    `!`: "`k` can leave this function, so the call needs `!`";
-  - the value turns out to be a second instantiation of an error type the
-    `catch` beside it names: "a `catch` arm handles one instantiation of a
-    type, and this operand raises two; catch them with `_`, or in two
-    `catch`es". A program of this shape whose other branch was the one that
-    ran happened to give the right answer, and is refused all the same;
-  - the value's type is never worked out at all: "the type of this raised
-    value was never worked out";
-  - the value turns out to be an error type that the closure's row, already
-    fixed by where the closure is passed (`attempt`, `retry`, a parameter
-    written `() -> Int raises Nf`), does not carry: "this `raise` sends `Dn`,
-    and the closure it is in had its error row closed to `{ Nf: Nf }`, which
-    does not carry it", naming where the row was fixed and suggesting an
-    annotation. Another closure calling this one beside a
-    `Dn` of its own does not count: the row has to carry it. 0.3.0 built
-    these and crashed, or, where the raising branch never ran or the error
-    happened to reach a `catch` that named it, gave the right answer.
-
+- **On the scheduler backend, a finalizer could be skipped** (see Fixed). A
+  program on `KHORA_FIBERS=scheduler` whose cleanup was silently skipped
+  under load runs it.
 
 ### Fixed
 
-- **0.3.0 could lose a database write it had acknowledged with `Ok`.** A
-  fiber cancelled just after `std::db::transaction` sent `BEGIN` (while it
-  waited for the server's answer, or on its way into the body) stopped
+- **A `postgres` query could return another caller's rows.** When a read
+  failed partway through a reply, the caller was told `Disconnected`, but the
+  connection went back into service with the rest of that reply still
+  arriving on it. The next query on the connection read the old reply as its
+  own, and every query after it got the answer to the one before: in one
+  soak, 100 of 300 answers were wrong. In 0.3.0 this needs a read to fail in
+  the middle of a reply, on either fiber backend: a receive deadline shorter
+  than a slow reply is enough, and so is any other failed receive. A
+  connection whose reply is cut off is closed and never used again, and its
+  caller and anybody queued on it get `Disconnected`.
+
+- **`std::db::transaction` could lose a database write it had acknowledged
+  with `Ok`.** A fiber cancelled just after `transaction` sent `BEGIN` (while
+  it waited for the server's answer, or on its way into the body) stopped
   without rolling back, so its connection went back to the `postgres` pool
   inside an open transaction. The next caller to borrow that connection ran
   its statements inside the leftover transaction: an autocommit `insert` was
@@ -204,138 +224,6 @@ cancellation point in every function, whatever the function's `raises` row;
   back, which changes nothing if the commit ran and ends the transaction if
   it did not, and the rollback of a failed body runs as cleanup, so a cancel
   cannot cut it short.
-
-- **A commit that lost its connection said only "disconnected".** The
-  `COMMIT` may have run on the server before the connection went, so a caller
-  that read the error as "not committed" and retried could apply the
-  transaction twice. The error is still `DbError::Disconnected`, and its text
-  says it is not known whether the transaction committed.
-
-- **A `postgres` query could return another caller's rows.** When a read
-  failed partway through a reply, the caller was told `Disconnected`, but the
-  connection went back into service with the rest of that reply still
-  arriving on it. The next query on the connection read the old reply as its
-  own, and every query after it got the answer to the one before. In 0.3.0
-  this needs a read to fail in the middle of a reply, on either fiber
-  backend: a receive deadline shorter than a slow reply is enough, and so is
-  any other failed receive. A connection whose reply is cut off is closed
-  and never used again, and its caller and anybody queued on it get
-  `Disconnected`.
-
-- **A `postgres` statement bigger than the socket's send buffer hung.** That
-  is about 2.6 MB on Linux over loopback. A socket write
-  sent what fitted in the kernel's buffer and reported that count, and every
-  write in `std::net::socket` took any count that was not negative as the
-  whole message. The driver sent the first part of the statement, the
-  server waited for the rest, and the driver waited for the answer: for
-  ever, or until a receive deadline ended it with `Disconnected`. Both fiber
-  backends, in 0.3.0 too. `transmit` and `transmit_bytes` send every
-  byte or report a failure, which also covers an HTTP response bigger than
-  the socket buffer written to a slow client.
-
-- **In a toolchain built from source, a socket read, write or accept on the
-  scheduler backend could fail although nothing was wrong.** This affected
-  programs linked against the development-profile runtime -- `khora build`
-  from a source checkout, and the test suites -- and not the released
-  toolchain, whose runtime is built differently and did not have it. A fiber
-  that waited for a socket and resumed on a different worker decided whether
-  to wait again by reading the error number of the worker it had left, so a
-  read could fail in the middle of a live stream. The error number is read
-  on the thread that made the call, in every build.
-
-- **A `postgres` pool lost a connection when a fiber waiting in `with_db` was
-  cancelled just as a connection reached it.** The connection was handed over,
-  and the fiber stopped before its return to the pool was arranged, so nothing
-  gave it back. Each such cancel shrank the pool by one for good; once it was
-  empty, every `with_db` and `Pool::close` waited for ever. A service whose
-  request timeouts cancel handlers meets this under load. The return is
-  arranged before the fiber can be stopped, on both fiber backends.
-
-- **The editor's "Write it as one interpolated string" assist changed what
-  a `$` and a `{` meeting across a join print.** On `"$" + "{a}"` it offered
-  `"${a}"`, which prints the value of `a` where the original prints `${a}`.
-  The assist writes `"\${a}"`.
-
-- **A `Shared` cell holding a record, or an enum laid out flat, whose fields
-  include a `String`, `List` or other counted value ended the process after it
-  was read.** `Shared::get`, the value `Shared::update` hands back, and the
-  value a change function is given under `update` or `modify` each left the
-  reader and the cell sharing one reference, and the process aborted with
-  "drop of an object whose refcount is already zero" once both let go.
-  Setting `KHORA_UNBOXED=0` avoided it.
-
-- **On the scheduler backend, a finalizer that blocked kept the next fiber's
-  finalizers from running.** A fiber whose cleanup was parked (a `receive`
-  nobody answers, say) left the worker's release queue open, and every release
-  the next fiber on that worker made waited behind it for ever: its own
-  finalizers never ran, a cancelled parent's child was never told to stop, and
-  none of it was freed. The fiber still reported that it had finished. On the
-  thread backend, a region released inside a finalizer waited for that
-  finalizer to return.
-
-- **A cancelled `clock.sleep`, `accept`, `recv` or `send` ran the caller's
-  next statements.** The call came back early, as it should, and the code after
-  it carried on as though the call had succeeded. The fiber now stops at the
-  call. `clock.sleep` is woken by a cancellation on the thread backend as well
-  as the scheduler.
-
-- **A cancellation was lost after a nursery's wait and inside a change
-  function.** A cancel that arrived while a nursery was collecting its
-  children, or while a blocking call inside `Shared::update` was waiting, let
-  the fiber run to its end and report that it had not been cancelled.
-
-- **A bounded nursery's `adopt`, waiting for room, could not be cancelled.**
-
-- **A loop whose only way round was `continue` could not be cancelled.**
-
-- **`Fiber::outcome` could end the process with "refcount is already zero"**
-  (status 134) on a fiber that can fail whose answer is held inline and owns
-  a counted field — a small record holding a `List` or a `String`, say. The
-  answer was freed twice.
-
-- **A function with a `raises` row whose body produces no value of its
-  declared type built, and crashed** with "the stack ran out" at its first
-  call. `khora build` refuses it, as it already refused the same body in a
-  function with no row.
-
-- **One `Fiber::spawn` slowed every tight loop in the program.** A program
-  that spawned a single fiber ran a call-free loop about 1.8× slower on the
-  default thread backend than one that spawned none.
-
-- **Joining twice a fiber that failed with a small error holding a `String`
-  ended the process** with "drop of an object whose refcount is already zero"
-  (status 134), on both fiber backends. Each join has its own copy of the
-  error.
-
-- **A fiber that failed leaked what its error held** when nobody joined it,
-  when it was joined twice, when its error was one of several carrying
-  variants, and, with `KHORA_UNBOXED=0`, when it was joined once. A program
-  that ran work in a fiber of its own and let it fail lost memory on each
-  failure. A server built on `std::net::http`'s `Router` did not. The error
-  is released with the fiber's handle.
-
-- **An error whose type has a type parameter leaked what it held** every
-  time one holding a `String` or other counted value was caught, with or
-  without a fiber: `type E<A> = | Bad(v: A, n: Int)`
-  raised as an `E<String>` left its `String` behind, and joined twice from a
-  failed fiber with the `String` kept, it ended the process with status 134.
-  Two instantiations of one such type, an `E<Int>` and an `E<Big>`, were
-  released as though they had one layout.
-
-- **A `catch` arm could read an error's field at the wrong type.** Over an
-  error `Gx<Int>`, the arm `Gx::X(s, v) => String::byte_length(v)` compiled
-  and read the `Int` as a `String`, ending the process with a segmentation
-  fault. The arm's fields have the types of what was raised, and that arm is
-  refused. The same held for an arm that binds the failure (`catch { e => .. }`)
-  and for `attempt`, over an operand that raised two instantiations of one
-  error type: one was read at the other's layout, printing a pointer as a
-  number or ending with a segmentation fault. Those operands are refused (see
-  Breaking).
-
-- **A closure raising two instantiations of one error type, caught by
-  `catch { Gx::Y(n) => n, _ => .. }`, ended the process with an illegal
-  instruction** (status 132). Such a closure is refused at build time (see
-  Breaking).
 
 - **A constructor pattern was never checked against the type of the value it
   matched.** In 0.3.0, `match o { Option::Some(Result::Ok(v)) => .., _ => .. }`
@@ -355,18 +243,136 @@ cancellation point in every function, whatever the function's `raises` row;
   in every branch of an `if` or `match`.
 
 - **An error raised through a value whose type was worked out later escaped
-  a function that could not fail.** In 0.3.0, `raise e` with `e` a closure's
-  parameter, beside a call the `catch` handled, was charged to nothing: the
-  error went past the `catch` and the program ended with "khora: the stack
-  ran out" and status 139. The raise is charged like any other, so the
-  `catch` handles it or the closure's row carries it to the caller.
+  every `catch`.** In 0.3.0, `raise e` with `e` a closure's parameter, beside
+  a call the `catch` handled, was charged to nothing: the error went past the
+  `catch`, and the program ended with status 130 and nothing printed, or with
+  "khora: the stack ran out" and status 139. The raise is charged like any
+  other, so the `catch` handles it or the closure's row carries it to the
+  caller.
 
-- **Two modules that each declared an error type of the same name failed to
-  build**, with "not valid LLVM IR". Each module's type is its own.
+- **A `catch` arm could read an error's field at the wrong type.** Over an
+  error `Gx<Int>`, the arm `Gx::X(s, v) => String::byte_length(v)` compiled
+  and read the `Int` as a `String`, ending the process with a segmentation
+  fault. The arm's fields have the types of what was raised, and that arm is
+  refused. The same held for an arm that binds the failure (`catch { e => .. }`)
+  and for `attempt`, over an operand that raised two instantiations of one
+  error type: one was read at the other's layout, printing a pointer as a
+  number or ending with a segmentation fault. Those operands are refused (see
+  Breaking).
 
-- **A named `catch` arm over an error such as `Gx<() -> Int>`, or one that
-  read a field of a `Gx<Big>`, was refused** with "the type of this
-  expression was never worked out". It compiles.
+- **On the scheduler backend, a finalizer that blocked kept the next fiber's
+  finalizers from running.** A fiber whose cleanup was parked (a `receive`
+  nobody answers, say) left its worker's release queue open, and every
+  release the next fiber on that worker made waited behind it for ever: its
+  own finalizers never ran, a cancelled parent's child was never told to
+  stop, and none of it was freed. The fiber still reported that it had
+  finished. On the thread backend, a region released inside a finalizer
+  waited for that finalizer to return.
+
+- **A `postgres` pool lost a connection when a fiber waiting in `with_db` was
+  cancelled just as a connection reached it.** The connection was handed over,
+  and the fiber stopped before its return to the pool was arranged, so nothing
+  gave it back. Each such cancel shrank the pool by one for good; once it was
+  empty, every `with_db` and `Pool::close` waited for ever. A service whose
+  request timeouts cancel handlers meets this under load. The return is
+  arranged before the fiber can be stopped, on both fiber backends.
+
+- **A socket write bigger than the socket's send buffer went out only in
+  part.** That is about 2.6 MB on Linux over loopback. A write sent what
+  fitted in the kernel's buffer and reported that count, and every write in
+  `std::net::socket` took any count that was not negative as the whole
+  message. A `postgres` statement that size hung: the driver sent the first
+  part, the server waited for the rest, and the driver waited for the
+  answer, for ever or until a receive deadline ended it with
+  `Disconnected`. An HTTP response that size, written to a client that read
+  it slowly, could be cut short with nothing reported. Both fiber backends.
+  `transmit` and `transmit_bytes` send every byte or report a failure.
+
+- **On the scheduler backend on Linux, a connection could go unanswered for
+  ever after a receive deadline expired.** A wait that ended at its deadline
+  left its socket recorded as watched. When that connection was closed and a
+  new one was given the same descriptor number, the new connection's data
+  was never reported, and the fiber waiting for it never woke. An expired
+  wait is forgotten along with its socket.
+
+- **A commit that lost its connection said only "disconnected".** The
+  `COMMIT` may have run on the server before the connection went, so a caller
+  that read the error as "not committed" and retried could apply the
+  transaction twice. The error is still `DbError::Disconnected`, and its text
+  says it is not known whether the transaction committed.
+
+- **In a toolchain built from source, a socket read, write or accept on the
+  scheduler backend could fail although nothing was wrong.** This affected
+  programs linked against the development-profile runtime -- `khora build`
+  from a source checkout, and the test suites -- and not the released
+  toolchain, whose runtime is built differently and did not have it. A fiber
+  that waited for a socket and resumed on a different worker decided whether
+  to wait again by reading the error number of the worker it had left, so a
+  read could fail in the middle of a live stream. The error number is read
+  on the thread that made the call, in every build.
+
+- **A cancelled `clock.sleep`, `accept`, `recv` or `send` ran the caller's
+  next statements.** The call came back early, as it should, and the code
+  after it carried on as though the call had succeeded. The fiber stops at
+  the call. `clock.sleep` is woken by a cancellation on the thread backend as
+  well as the scheduler.
+
+- **A cancellation was lost after a nursery's wait and inside a change
+  function.** A cancel that arrived while a nursery was collecting its
+  children, or while a blocking call inside `Shared::update` or `modify` was
+  waiting, let the fiber run on to its end and report that it had not been
+  cancelled.
+
+- **A bounded nursery's `adopt`, waiting for room, could not be cancelled.**
+  The fiber waited until an older child finished, then ran on and reported
+  that it had not been cancelled.
+
+- **A loop whose only way round was `continue` could not be cancelled.** In a
+  function with a `raises` row, a `while`, `loop` or `for` that went round
+  only by `continue` never checked for a cancellation, and ran to its end.
+
+- **`Fiber::outcome` could end the process with "refcount is already zero"**
+  (status 134) on a fiber that can fail whose answer is held inline and owns
+  a counted field -- a small record holding a `List` or a `String`, say. The
+  answer was freed twice.
+
+- **A `Shared` cell holding a record, or an enum laid out flat, whose fields
+  include a `String`, `List` or other counted value ended the process after it
+  was read.** `Shared::get`, the value `Shared::update` hands back, and the
+  value a change function is given under `update` or `modify` each left the
+  reader and the cell sharing one reference, and the process aborted with
+  "drop of an object whose refcount is already zero" once both let go.
+  Setting `KHORA_UNBOXED=0` avoided it.
+
+- **Joining twice a fiber that failed with a small error holding a `String`
+  ended the process** with "drop of an object whose refcount is already zero"
+  (status 134), on both fiber backends. Each join has its own copy of the
+  error.
+
+- **A closure raising two instantiations of one error type, caught by
+  `catch { Gx::Y(n) => n, _ => .. }`, ended the process with an illegal
+  instruction** (status 132). Such a closure is refused at build time (see
+  Breaking).
+
+- **A function with a `raises` row whose body produces no value of its
+  declared type built, and crashed** with "the stack ran out" at its first
+  call. `khora build` refuses it, as it already refused the same body in a
+  function with no row.
+
+- **A fiber that failed leaked what its error held** when nobody joined it,
+  when it was joined twice, when its error was one of several carrying
+  variants, and, with `KHORA_UNBOXED=0`, when it was joined once. A program
+  that ran work in a fiber of its own and let it fail lost memory on each
+  failure. A server built on `std::net::http`'s `Router` did not. The error
+  is released with the fiber's handle.
+
+- **An error whose type has a type parameter leaked what it held** every
+  time one holding a `String` or other counted value was caught, with or
+  without a fiber: `type E<A> = | Bad(v: A, n: Int)` raised as an
+  `E<String>` left its `String` behind, and joined twice from a failed fiber
+  with the `String` kept, it ended the process with status 134. Two
+  instantiations of one such type, an `E<Int>` and an `E<Big>`, were
+  released as though they had one layout.
 
 - **`Fiber::join` and `Fiber::outcome` on a handle that is not bound to a
   name** (`Fiber::join(Fiber::spawn(..))`) leaked one object per `String` or
@@ -380,18 +386,32 @@ cancellation point in every function, whatever the function's `raises` row;
 - **A `SharedFn` whose closure captured a `String` or other counted value
   leaked the capture** when it was released.
 
+- **Two modules that each declared an error type of the same name failed to
+  build**, with "not valid LLVM IR". Each module's type is its own.
+
+- **A named `catch` arm over an error such as `Gx<() -> Int>`, or one that
+  read a field of a `Gx<Big>`, was refused** with "the type of this
+  expression was never worked out". It compiles.
+
+- **The editor's "Write it as one interpolated string" assist changed what
+  a `$` and a `{` meeting across a join print.** On `"$" + "{a}"` it offered
+  `"${a}"`, which prints the value of `a` where the original prints `${a}`.
+  The assist writes `"\${a}"`. If you applied it to such a join, check the
+  line: the program prints the value.
+
 ### Changed
 
-- **A channel send woke every thread blocked on the channel.** On the
-  default thread backend every fiber is a thread, and all but one of the
-  woken threads found nothing and blocked again. A connection pool is a
-  channel, so with more requests than connections, each connection given
-  back woke every waiting request. A send wakes one blocked receiver and a
-  receive wakes one blocked sender; `close` still wakes everyone, and a
-  cancelled fiber is still woken at once. Measured on Linux x86-64, thread
-  backend, the TechEmpower single-query test (64 connections, a pool of
-  16): server CPU per request 368 -> 229 us, 1.6× the requests per second.
-  Fibers on the scheduler backend park differently and are unchanged.
+- **A channel send wakes one blocked receiver, not every one.** On the
+  default thread backend every fiber is a thread, and a send woke every
+  thread blocked on the channel, all but one of which found nothing and
+  blocked again. A connection pool is a channel, so with more requests than
+  connections, each connection given back woke every waiting request. A send
+  wakes one blocked receiver and a receive wakes one blocked sender; `close`
+  still wakes everyone, and a cancelled fiber is still woken at once.
+  Measured on Linux x86-64, thread backend, the TechEmpower single-query test
+  (64 connections, a pool of 16): server CPU per request 368 -> 229 us, 1.6×
+  the requests per second. Fibers on the scheduler backend park differently
+  and are unchanged.
 
 - **The `postgres` package copies each message once.** Building a query
   pushed every byte three times and copied it into an array three times,
@@ -402,6 +422,14 @@ cancellation point in every function, whatever the function's `raises` row;
   connections: single query 229 -> 187 us of server CPU per request on
   the thread backend and 244 -> 196 on the scheduler; Fortunes 415 -> 350
   (thread backend). The bytes sent are unchanged.
+
+- **A server on the scheduler backend answers about a quarter more requests
+  at 256 connections.** Every socket wait, wake and poll scanned one list of
+  every watched socket behind one lock, and workers queued on it while
+  requests waited. Measured with a small `std::net::http` `Router` service on
+  Linux x86-64, scheduler backend, server on 4 CPUs and load generator on 2:
+  71.6k -> 88.9k requests per second at 256 connections, +2% at 32. The
+  thread backend does not use this code and is unchanged.
 
 - **String literals and constructors with no fields are never reference
   counted.** Every fiber that touched `""` or `Option::None` wrote the same
@@ -414,21 +442,37 @@ cancellation point in every function, whatever the function's `raises` row;
     1.07× on one core, 1.38× on four;
   - a handler that lower-cases, splits and joins 64 strings: 1.11× on one
     core, 1.83× on four;
-  - `bench/service`'s constant `/health`: 1.02× on one core, 1.06× on four.
+  - a `std::net::http` `Router` service answering a constant health check:
+    1.02× on one core, 1.06× on four.
+
   Object code grows by about 15%, the linked binary by about 0.5%, and a
-  release build of `bench/service` takes about 13% longer. The scheduler
+  release build of that service takes about 13% longer. The scheduler
   backend and non-x86 targets are unmeasured.
 
 - **Cancellation costs something in functions with no `raises` row, and less
   in functions with one.** A function that can reach a cancellation point
-  returns a small tag beside its answer, and its caller checks it. Measured in
-  release builds on Linux x86-64, on the default thread backend: a tight loop
-  about 1.2× slower, recursion
-  about 1.6×, and a very short loop inside a function called in a hot path up
-  to about 3.8×. Ordinary iteration over collections is unchanged. The
-  cancellation check in a loop in a function that can fail went from 8.7× the
-  cost of the same loop without a row to 1.15×. Object code grows by about a
-  fifth. The scheduler backend and Windows are unmeasured.
+  returns a small tag beside its answer, and its caller checks it. Measured
+  in release builds on Linux x86-64, on the default thread backend:
+  - a tight loop is about 1.2× slower, recursion about 1.6×, and a very
+    short loop inside a function called in a hot path up to about 3.8×.
+    Ordinary iteration over collections is unchanged;
+  - the cancellation check in a loop in a function that can fail went from
+    8.7× the cost of the same loop without a row to 1.15×;
+  - a single `Fiber::spawn` anywhere in a program made every call-free loop
+    in it about 1.8× slower. The same loop took 530 ms in such a program,
+    and takes 344 ms.
+
+  Object code grows by about a fifth. The scheduler backend and Windows are
+  unmeasured.
+
+- **`Fiber::wait` needs no `raises` row.** `wait` is accepted in any
+  function; it and `join` need a `!` only when the child's own row is
+  non-empty. 0.3.0 refused a `wait` in a function with no `raises` clause,
+  and refused a generic one only at build time.
+
+- **A segmentation fault is reported as one.** The message that said "the
+  stack ran out" for every segmentation fault says it may also be the
+  runtime touching memory that is not the program's, and asks for a report.
 
 ### Added
 
@@ -436,9 +480,11 @@ cancellation point in every function, whatever the function's `raises` row;
   *including inside its cleanup*, and the children of any nursery it holds.
   Cleanup otherwise runs to completion, and cancelling again does not change
   that.
-- **`Fiber::cancel_within(handle, millis)`** cancels now and aborts the fiber
-  if it is still running after `millis` milliseconds. There is no built-in
-  deadline: the caller always chooses the number.
+
+- **`Fiber::cancel_within(handle, millis)`** cancels at once and aborts the
+  fiber if it is still running after `millis` milliseconds. There is no
+  built-in deadline: the caller always chooses the number.
+
 - **Lint groups.** A group is a TOML file naming built-in lints and the
   level each runs at when the group is on. `[lints.<group>]` in `khora.toml`
   switches a group on, and an optional `level` sets every lint in it. A lint's
@@ -464,6 +510,36 @@ cancellation point in every function, whatever the function's `raises` row;
   that only waits needs no row, `abort` and `cancel_within` are how a stuck
   cleanup is ended, and a child's failure cancels the siblings still running
   when the nursery sees it, which depends on the order they were adopted in.
+
+- The lints and manifest reference pages describe lint groups. The grammar,
+  declarations and modules-and-packages pages describe imports without
+  globs and the one-`with`, one-`raises` rule. The `postgres` package page
+  and the database-transactions cookbook describe how a connection is given
+  back to the pool and how `transaction` rolls back after a cancel.
+
+### Editor
+
+- **The language server starts.** The VS Code extension 0.3.0 launched
+  `khora lsp --stdio`, which every released toolchain refuses, so the server
+  exited before it answered and nothing but syntax colouring worked. From
+  extension 0.3.2 it launches `khora lsp`, and works with every released
+  toolchain.
+
+- **The extension's ID is `khora.khora`.** Version 0.3.0 was published as
+  `khora-lang.khora`, which VS Code treats as a different extension, so
+  remove it first or both will run:
+  `code --uninstall-extension khora-lang.khora`. "Install Khora", offered
+  when no `khora` is found, opens the installation page on khoralang.com;
+  0.3.0 opened a domain that does not resolve.
+
+- **The extension's page in VS Code and on the Marketplace** says how to get
+  started, and lists every feature, both settings with their defaults, the
+  commands, and what to do when the server does not start.
+
+- **The "add this error to `raises`" quick fix writes the clause after a
+  `with` row.** On a function with a `with` clause it wrote
+  `raises E with {..}`, a shape that is a syntax error in this release and
+  that 0.3.0 accepted without reading all of it.
 
 ## 0.3.0 — 2026-09-23
 
