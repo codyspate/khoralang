@@ -2,7 +2,7 @@
   "name": "khora",
   "displayName": "Khora",
   "description": "Language support for Khora (.kh): errors as you type, hover types, go to definition, completion, semantic highlighting, effect-row inlay hints, and format on save.",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "publisher": "khora",
   "license": "MIT OR Apache-2.0",
   "icon": "icon.png",

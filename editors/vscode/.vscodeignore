@@ -21,3 +21,4 @@ scripts/**
 node_modules/sharp/**
 node_modules/@img/**
 *.vsix
+DEVELOPING.md

@@ -10,6 +10,14 @@ it first or both will run:
 code --uninstall-extension khora-lang.khora
 ```
 
+## Changes in 0.3.3
+
+- **A new extension page.** The page shown in VS Code and on the
+  Marketplace describes what the extension does and how to set it up: every
+  feature, the settings, the commands and troubleshooting. Notes for people
+  working on the extension itself are in `DEVELOPING.md` in the repository.
+  No change to what the extension does.
+
 ## Changes in 0.3.2
 
 - **The language server starts.** 0.3.0 and 0.3.1 launched `khora lsp --stdio`, which

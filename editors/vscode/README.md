@@ -1,218 +1,161 @@
-# Khora for VS Code
+# Khora for Visual Studio Code
 
-Errors as you type, hover types, format on save, and syntax highlighting for
-`.kh` files.
+Official language support for [Khora](https://khoralang.com): errors as you
+type, types on hover, completion, navigation, refactorings, and formatting
+for `.kh` files.
 
-**Everything but the highlighting comes from the compiler.** The extension
-starts `khora lsp` — a subcommand of the toolchain rather than a second program
-to install — and shows what it says. So a diagnostic in the editor is the same
-diagnostic `khora check` gives, from the same query, and there is no second
-implementation to drift.
+Every feature except syntax colouring comes from the Khora compiler itself,
+through its built-in language server. What the editor shows is exactly what
+`khora check` reports, so the two can never disagree.
 
-Requires `khora` on `PATH`, which both installers arrange. Point
-`khora.server.path` at an executable to use a different one, which is what to
-do when working on the compiler itself.
+## Getting started
 
-## What it does
+1. **Install Khora.** Follow the instructions at
+   [khoralang.com](https://khoralang.com/docs/getting-started/installation/). The installer
+   puts `khora` on your `PATH`.
+2. **Install this extension** from the Extensions view: search for *Khora*.
+3. **Open a folder with `.kh` files.** The language server starts on its own.
+   The status bar shows which Khora version is answering.
 
-| | from |
+No other setup is needed.
+
+## Features
+
+### Errors and warnings as you type
+
+Type errors, missing capabilities, unhandled errors and lint findings appear
+while you edit, with the same messages the command line gives. Lint levels
+from your project's `khora.toml` (including lint groups) are applied.
+
+### Hover
+
+Hover over any name to see its type, and its documentation if it has any.
+
+### Inlay hints: what a call needs and what it can raise
+
+Khora infers which capabilities a call uses and which errors it can raise.
+The extension shows both, in line, at each call where either one applies:
+
+```khora
+let answer = charge(account, amount);   // with { db: Db, clock: Clock } raises DbError
+```
+
+Calls that need nothing and can't fail get no hint, so the marked lines are
+the ones that cross a boundary. Inferred types are shown where the source
+doesn't already say them.
+
+### Completion and signature help
+
+Completion for locals, fields, methods, modules and imports, and parameter
+hints as you type a call.
+
+### Navigation
+
+- **Go to Definition**, **Go to Type Definition** and **Go to Implementation**
+- **Find All References**, and highlighting of every use of the name under the
+  cursor
+- **Rename** across files
+- **Outline** and breadcrumbs for the current file, and **Go to Symbol in
+  Workspace** (`Ctrl+T` / `Cmd+T`)
+
+### Quick fixes and refactorings
+
+Open the lightbulb (`Ctrl+.` / `Cmd+.`) for fixes from the diagnostic under
+the cursor, and for refactorings. A selection:
+
+- add a missing import;
+- add `!` to a call that can raise, or add the error to the function's
+  `raises` clause;
+- handle a failure with `catch`, or turn it into a `Result` with `attempt`;
+- add a `raises` or `with` clause, or an arm to a `catch`;
+- write a call as a pipeline (`|>`), or a pipeline as a call;
+- extract an expression into a `let` or a function, inline a binding, or
+  lift a lambda into a function;
+- invert an `if`, write an `if` as a `match`, or add an `else` branch;
+- generate a test or a benchmark for a function;
+- export a declaration with `pub`, or stop exporting it;
+- start a documentation comment or an example block.
+
+### Run tests from the editor
+
+Each `test` in a file gets a **▶ Run** link above it, which runs that test
+with `khora test`.
+
+### Formatting
+
+Format Document, and format on save for Khora files, using the same formatter
+as `khora fmt`. Formatting options come from your project's `khora.toml`.
+
+### Semantic highlighting
+
+On top of the usual syntax colouring, the compiler tells the editor what each
+name is: a local, a parameter, an imported function, a type, a capability.
+So colour follows meaning, not just spelling.
+
+### Also
+
+Code folding, smart selection expansion (`Shift+Alt+→` / `Ctrl+Shift+Cmd+→`),
+bracket matching, comment toggling, and auto-closing pairs.
+
+## Toolchain versions
+
+If a project pins a Khora version in `khora.toml` (`[toolchain] version`), the
+language server switches to that version automatically, just as the `khora`
+command does. The status bar shows the version in use; hover over it to see
+why that version was chosen.
+
+The status bar item turns yellow when the project pins a version that isn't
+installed. Install it with `khora toolchain install <version>`.
+
+## Settings
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `khora.server.path` | *(empty)* | Path to the `khora` executable. Empty means use the one on `PATH`. Set it to use a different installation, such as a compiler you built yourself. |
+| `khora.trace.server` | `off` | Record the messages between the editor and the language server in the **Khora** output panel: `off`, `messages` or `verbose`. Useful when reporting a bug. |
+
+Format on save is turned on for Khora files only. To turn it off:
+
+```json
+"[khora]": {
+  "editor.formatOnSave": false
+}
+```
+
+## Commands
+
+Open the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`) and type *Khora*:
+
+| Command | What it does |
 | --- | --- |
-| Errors and warnings as you type | `khora_types::diagnostics` and `khora_lint::findings` |
-| Hover: the type of the thing under the cursor | the checker's `BodyTypes` |
-| Go to definition, references, rename | `khora_hir::resolve_path`, and `Body` for locals |
-| Completion | the checker's types, and `khora-types`' signature keys |
-| Semantic highlighting over the grammar | the resolver, for what a regex cannot decide |
-| Format on save | `khora_fmt`, the same formatter the baseline gates on |
-| Add a missing import, from the diagnostic that says it is missing | `khora_lsp::imports` over what the modules export |
-| Highlighting, comment toggling, bracket matching | the TextMate grammar here |
+| **Khora: Restart Language Server** | Restart the server, for example after installing a new Khora version or changing `khora.server.path`. |
+| **Khora: Show Language Server Output** | Open the **Khora** output panel, where the server's own messages go. Clicking the status bar item does the same. |
 
-The corner of the window says which toolchain answered — `Khora 0.1.0` — with
-the reason on hover. **The pin is honoured whether or not this is shown**:
-`khora lsp` hands over to the version a project's `[toolchain]` names, because
-the shim runs before argument parsing. What was missing was any way to see
-which one you got, which matters the moment there are two on the machine. The
-item turns yellow when a project pins a version that is not installed, since
-that is a project which will not build.
+## Troubleshooting
 
-Nothing here decides which toolchain to use. `khora toolchain which` decides,
-and the extension shows its sentence — a second copy of that rule in JavaScript
-would be a second answer to disagree with the first.
+**"could not start `khora lsp`"**: the extension couldn't find or run
+`khora`. Check that `khora --version` works in a terminal. If VS Code was
+open while you installed Khora, restart VS Code so it picks up the new
+`PATH`, or set `khora.server.path` to the full path of the executable.
 
-Format on save is on by default for `.kh` and nothing else — `package.json`
-scopes it under `[khora]`, so it cannot turn the setting on for a language
-somebody has deliberately left it off for.
+**No errors or hovers, only colours**: the language server isn't running.
+Run **Khora: Show Language Server Output** to see why.
 
-Two commands, both under **Khora:** in the palette — *Restart Language Server*,
-for after rebuilding the compiler, and *Show Language Server Output*, which is
-where the server's own complaints go. `khora.trace.server` puts the protocol
-traffic in the same place.
+**Settings in `khora.toml` don't take effect**: a `khora.toml` that fails to
+load is shown as an error on the line to fix. Until it's fixed, the server
+uses default settings.
 
-## Working on it
-
-Open **this folder** (`editors/vscode`) in VS Code, run `npm install` once, and
-press **F5**. That launches an Extension Development Host — a second window with
-the extension loaded live. Reload the host window after editing `src/`.
-
-## Installing it
-
-**Download the `.vsix` from a release.** The extension is released on its own
-tags — `vscode-v0.3.0` and so on — separately from the toolchain, because it
-versions and changes for its own reasons.
-
-GitHub marks those releases *Pre-release*, and that is not a warning about the
-extension. It means "this is not the repository's headline release", which is
-true: the headline release is the compiler. Errata 52 is what happens when it
-is not marked.
-
-<https://github.com/codyspate/khoralang/releases?q=vscode&expanded=true>
-
-```bash
-code --install-extension khora-vscode-0.3.0.vsix
-```
-
-or in VS Code: **Extensions**, the `...` menu, **Install from VSIX**.
-
-Then **fully quit and reopen VS Code** — extensions are scanned at startup, so
-reloading the window is not enough. Confirm with `code --list-extensions`, which
-should list `khora.khora`. If `code` says *Please restart VS Code before
-reinstalling*, it means exactly that, and the install did not happen.
-
-An installation from `vscode-v0.3.0` or earlier is `khora-lang.khora`, which
-VS Code treats as a different extension. Remove it first, or both run:
-`code --uninstall-extension khora-lang.khora`.
-
-It needs `khora` on `PATH`; see the toolchain releases, or set
-`khora.server.path`.
-
-### From this checkout
-
-To install what is in the tree rather than what was released — which is what
-you want when working on the extension or on the compiler:
-
-```powershell
-editors\vscode\install.ps1
-```
-
-```bash
-cd editors/vscode && npm ci && npm run package
-code --install-extension khora.khora.vsix --force
-```
-
-`install.ps1` is the second of those with the mistakes taken out: it checks that
-the `.vsix` it built actually contains `src/extension.js` and
-`vscode-languageclient`, and it reads `code`'s exit status instead of announcing
-success over a failed install.
-
-That check is there because it used to build the zip by hand — a `.vsix` is an
-OPC package and PowerShell can write one without npm — and the hand-built one
-copied the manifest, the language configuration and the syntaxes, and *not*
-`src/extension.js` and not `node_modules`. It installed without complaint, lit
-up the keywords, and had no language server in it at all. Highlighting without
-diagnostics is the visible symptom; there was no error anywhere to find it by.
-
-**Do not just drop the folder into `~/.vscode/extensions`.** That was the first
-approach here and it silently did nothing: the extension never entered VS Code's
-extension index, so nothing loaded and no error appeared. A junction fails the
-same way.
+**Upgrading from an extension older than 0.3.1**: earlier versions were
+published as `khora-lang.khora`. Uninstall that one, or both will run.
 
 ## Other editors
 
-Syntax support is three separate layers, and this file is only the first:
+The language server works with any editor that speaks the Language Server
+Protocol: run `khora lsp` over standard input and output. See
+[Editor setup](https://khoralang.com/docs/getting-started/editor/).
 
-| Layer | Reaches | Nature |
-| --- | --- | --- |
-| TextMate grammar (this) | VS Code, Sublime, TextMate, IntelliJ, GitHub Linguist | Regex; cannot be correct for Khora |
-| Tree-sitter | Neovim, Helix, Zed, Emacs 29+, GitHub code navigation | Incremental parser, grammar in JS compiled to C |
-| LSP semantic tokens | Every editor with an LSP client | Driven by the actual compiler |
+## Feedback
 
-**Semantic tokens over LSP is the real answer, and it is now here.** It is
-editor-agnostic by construction and reuses the compiler instead of duplicating
-it, which is the only way a local can be told from an import. The grammar below
-is the base layer it sits on.
-
-A tree-sitter grammar would mean maintaining a *second* parser alongside the
-`rowan` one. The cost of even a single duplicate is visible here: the
-`keywords_match_the_lexer` test exists to stop this grammar drifting from the
-lexer, and it has already caught a real break. Worth doing only if Neovim,
-Helix or Zed users are wanted before the language server ships.
-
-The TextMate grammar earns its place regardless of the LSP, because GitHub
-Linguist uses it to highlight `.kh` in the repository and on the web.
-
-## What the grammar covers
-
-- Highlighting for keywords, types, functions, strings, numbers, row variables
-  (`'r`) and operators, with `|>` scoped separately so the language's signature
-  operator stands out.
-- Nested block comments, matching the lexer.
-- `//` and `/* */` comment toggling, bracket matching, auto-closing pairs.
-
-`<` and `>` are deliberately **not** auto-closing pairs. They are comparison
-operators as often as they are type brackets, and auto-closing them is more
-annoying than helpful.
-
-## Limits
-
-This is a TextMate grammar: it pattern-matches text and knows nothing about
-scopes or types.
-
-It used to be much worse. Under the old "universal dot" rule, `Effect.map`,
-`report.risk` and `RiskLevel.Low` were syntactically identical, and no regex
-could tell a module path from a field access from a constructor — the grammar
-could only approximate by capitalization. Splitting `::` from `.` (errata 13)
-removed that limit: a path is now visibly a path, so modules, types,
-constructors and associated items color correctly, and a name after `.` is
-never mistaken for a type.
-
-What a regex still cannot do is anything needing resolution — telling a local
-binding from an imported name, or a field from a method. **Semantic tokens do
-that now**, layered over this grammar the same way rust-analyzer layers over
-Rust's. This is the base layer: keywords, literals and punctuation, which the
-server deliberately does not send a second opinion about.
-
-## Keeping it in sync
-
-The keyword list here is a copy of what the lexer accepts, which is exactly the
-kind of duplication that rots. `crates/khora-syntax/tests/editor_grammar.rs`
-fails the build if the two disagree, so adding a keyword to the compiler without
-updating this grammar is caught by `cargo test`.
-
-There are two lists, and they live in separate repository rules:
-
-- `#keywords` mirrors `KEYWORDS` — the hard keywords, matched as bare words.
-- `#contextual-keywords` mirrors `CONTEXTUAL_KEYWORDS` — `handler`, `in`,
-  `context`, `test`, `bench`, `derive` and `extern`, which are ordinary
-  identifiers everywhere except one position each. `for` used to be on this
-  list and is a hard keyword now, which is the sort of drift the sync test
-  exists to catch. Matching them as bare words would color a
-  parameter named `handler` or a variable named `test`, so each rule instead
-  reproduces the position the parser recognizes: `handler` before `for`,
-  `context` at the start of a declaration, `test`/`bench` before a name string.
-  These approximations are exactly the kind of thing semantic tokens will
-  replace.
-
-There is a **third** list in the compiler, `RESERVED_WORDS`, and it
-deliberately has no rule here. Those words — `where`, `yield`, `macro`,
-`unsafe`, `unstable` — are refused as identifiers and mean nothing else;
-colouring one as a keyword would tell a reader there is a construct to look
-up, and there is not. `reserved_words.rs` asserts they appear in neither
-`KEYWORDS` nor `CONTEXTUAL_KEYWORDS`, which is what keeps this grammar honest
-about them.
-
-## The icon
-
-`icon.png` is generated from the site's own `website/public/favicon.svg`:
-
-```
-npm install --no-save sharp && node scripts/make-icon.mjs
-```
-
-It is committed, because packaging should not need a native image library.
-Regenerate it when the site's mark changes; the script is the only place the
-two are connected, and the alternative is an extension quietly wearing an old
-logo.
-
-The bar in the mark is lifted from `#172033` to `#334867` on the way. The
-favicon is read against the site's dark page, where a near-black upright is a
-quiet counterweight to the chevron; on a 128px gallery tile at that colour it
-disappears and the mark reads as a lone `>`.
+Report bugs and ask questions on
+[GitHub](https://github.com/codyspate/khoralang/issues). Khora is released
+under the MIT or Apache-2.0 licence, at your option.
