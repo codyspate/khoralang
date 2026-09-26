@@ -214,6 +214,111 @@ fn stdout_carries_the_protocol_and_nothing_else() {
     );
 }
 
+/// **An assist that changes what a program prints is worse than none.** On
+/// `"$" + "{a}"` the assist offered `"${a}"`: two literals whose join spells a
+/// hole, written back as one literal where it *is* a hole. The first prints
+/// `${a}`; the second prints the value of `a`. A check that the edit parses
+/// and type-checks passes it, which is why this builds and runs both forms
+/// and compares what they print.
+#[cfg(feature = "llvm")]
+#[test]
+fn the_interpolation_assist_writes_a_program_that_prints_the_same() {
+    // Each is `(chain, why it is here)`. `a` is a `String` holding `A`.
+    let chains = [
+        (r#""$" + "{a}""#, "a join that spells a hole"),
+        (r#""cost: $" + "{" + a + "}""#, "the same, with a real hole after it"),
+        (r#""\$" + "{a}""#, "an escaped dollar, which must stay one escape"),
+        (r#""\\$" + "{a}""#, "a backslash then a bare dollar"),
+        (r#""$" + a"#, "a dollar before a real hole, which is not a join"),
+        (r#""hello " + a + "!""#, "the ordinary case"),
+    ];
+    // The rewrite each chain is offered, gathered first, each from a program
+    // holding only that chain.
+    let mut pairs = Vec::new();
+    for (chain, why) in chains {
+        let before = format!(
+            "module main;\nimport std::core::{{print}};\n\n\
+             pub fn main() -> Int {{\n  let a = \"A\";\n  print({chain});\n  0\n}}\n"
+        );
+        let tmp = project(&[("src/main.kh", &before)]);
+        let file = tmp.path().join("src/main.kh");
+        let line = 5;
+        let column = before.lines().nth(line).and_then(|l| l.find('+')).expect("a `+`");
+
+        let mut server = Server::start(tmp.path());
+        server.send(&serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "rootUri": url_of(tmp.path()),
+                        "capabilities": { "general": { "positionEncodings": ["utf-8"] } } }
+        }));
+        server.send(&serde_json::json!({
+            "jsonrpc": "2.0", "method": "textDocument/didOpen",
+            "params": { "textDocument": {
+                "uri": url_of(&file), "languageId": "khora", "version": 1, "text": before
+            }}
+        }));
+        server.send(&serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "textDocument/codeAction",
+            "params": {
+                "textDocument": { "uri": url_of(&file) },
+                "range": { "start": { "line": line, "character": column },
+                           "end": { "line": line, "character": column } },
+                "context": { "diagnostics": [], "only": ["refactor.rewrite"] }
+            }
+        }));
+        server.send(&serde_json::json!({ "jsonrpc": "2.0", "method": "exit" }));
+        let said = server.drain();
+        let offered = said
+            .iter()
+            .find(|m| m.get("id").and_then(serde_json::Value::as_i64) == Some(2))
+            .and_then(|m| m.get("result").and_then(serde_json::Value::as_array).cloned())
+            .unwrap_or_default();
+        let assist = offered.iter().find(|a| {
+            a.get("title").and_then(serde_json::Value::as_str).is_some_and(|t| t.contains("interpolated"))
+        });
+        // Every chain here has a safe rewrite, so a refusal would make the
+        // comparison below vacuous.
+        let assist = assist.unwrap_or_else(|| panic!("{why}: no assist offered: {said:?}"));
+        let edit = assist
+            .pointer("/edit/changes")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|c| c.values().next())
+            .and_then(|e| e.get(0))
+            .expect("one edit")
+            .clone();
+        let written = edit.get("newText").and_then(serde_json::Value::as_str).expect("new text");
+        pairs.push((chain, written.to_string(), why));
+    }
+
+    // One program runs every pair, both forms on adjacent lines: a build is
+    // the slow part, and twelve of them made this test take minutes.
+    let mut body = String::from("  let a = \"A\";\n");
+    for (chain, written, _) in &pairs {
+        body.push_str(&format!("  print({chain});\n  print({written});\n"));
+    }
+    let program = format!(
+        "module main;\nimport std::core::{{print}};\n\npub fn main() -> Int {{\n{body}  0\n}}\n"
+    );
+    let tmp = project(&[("src/main.kh", &program)]);
+    let out = Command::new(env!("CARGO_BIN_EXE_khora"))
+        .args(["run", "src/main.kh"])
+        .current_dir(tmp.path())
+        .env("KHORA_HOME", tmp.path().join("empty-home"))
+        .output()
+        .expect("running `khora run`");
+    assert!(
+        out.status.success(),
+        "{program}\nshould run: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let printed = String::from_utf8_lossy(&out.stdout).into_owned();
+    let lines: Vec<&str> = printed.lines().collect();
+    assert_eq!(lines.len(), 2 * pairs.len(), "{printed}");
+    for ((chain, written, why), both) in pairs.iter().zip(lines.chunks(2)) {
+        assert_eq!(both[0], both[1], "{why}: `{chain}` was rewritten as `{written}`");
+    }
+}
+
 /// `exit` ends the process, so closing an editor does not leave a compiler
 /// running with the whole standard library in memory.
 #[test]

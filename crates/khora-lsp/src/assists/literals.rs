@@ -40,6 +40,13 @@ pub fn assists(tree: &SyntaxNode, text: &str, selection: TextRange) -> Vec<Assis
 ///
 /// Refused when a piece is itself a string containing `${`, because the result
 /// would nest a hole inside a hole and this is not the thing to decide that.
+///
+/// **A `$` that meets a `{` across a join is escaped.** `"$" + "{a}"` prints
+/// `${a}`, because neither literal holds a hole; written back as one literal
+/// with nothing done, it is `"${a}"`, which prints the value of `a`. So a
+/// literal piece that begins with `{` after one that ends in an unescaped `$`
+/// writes that `$` as `\$`. A `$` before a hole is safe as it stands: `$${a}`
+/// is a dollar and then a hole.
 fn to_interpolation(tree: &SyntaxNode, text: &str, selection: TextRange) -> Option<Assist> {
     let node = covering(tree, selection, SyntaxKind::BIN_EXPR)?;
     // The outermost `+` chain the cursor is in, so a three-piece message is
@@ -67,6 +74,10 @@ fn to_interpolation(tree: &SyntaxNode, text: &str, selection: TextRange) -> Opti
             if inner.contains("${") {
                 return None;
             }
+            if inner.starts_with('{') && ends_in_bare_dollar(&built) {
+                built.pop();
+                built.push_str("\\$");
+            }
             built.push_str(inner);
         } else {
             // A hole holds an expression, and the parser reads to the matching
@@ -83,6 +94,16 @@ fn to_interpolation(tree: &SyntaxNode, text: &str, selection: TextRange) -> Opti
             replacement: format!("\"{built}\""),
         }],
     })
+}
+
+/// Whether `built` ends in a `$` that no backslash escapes.
+///
+/// Counted rather than looked at one character back: `\\$` is an escaped
+/// backslash and then a bare dollar, and is exactly the case a one-character
+/// look would get wrong.
+fn ends_in_bare_dollar(built: &str) -> bool {
+    let Some(before) = built.strip_suffix('$') else { return false };
+    before.chars().rev().take_while(|&c| c == '\\').count() % 2 == 0
 }
 
 /// Whether a binary expression's operator is `+`.

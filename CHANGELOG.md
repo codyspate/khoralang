@@ -150,6 +150,11 @@ cancellation point in every function, whatever the function's `raises` row;
   request timeouts cancel handlers meets this under load. The return is
   arranged before the fiber can be stopped, on both fiber backends.
 
+- **The editor's "Write it as one interpolated string" assist changed what
+  a `$` and a `{` meeting across a join print.** On `"$" + "{a}"` it offered
+  `"${a}"`, which prints the value of `a` where the original prints `${a}`.
+  The assist writes `"\${a}"`.
+
 - **A `Shared` cell holding a record, or an enum laid out flat, whose fields
   include a `String`, `List` or other counted value ended the process after it
   was read.** `Shared::get`, the value `Shared::update` hands back, and the

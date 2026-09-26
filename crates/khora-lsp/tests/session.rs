@@ -2646,6 +2646,26 @@ fn a_concatenated_message_becomes_one_interpolated_string() {
     assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
 }
 
+/// **A `$` and a `{` that meet across a join stay text.** `"$" + "{a}"` prints
+/// `${a}`; the joined literal must escape the dollar, or it becomes a hole
+/// and prints `a`. What each form prints is compared in `khora-cli`'s
+/// `the_interpolation_assist_writes_a_program_that_prints_the_same`, which
+/// needs the backend; this pins the text without it.
+#[test]
+fn a_dollar_that_meets_a_brace_across_a_join_is_escaped() {
+    let text = concat!(
+        "module main;\n\n",
+        "fn go(a: String) -> String {\n",
+        "  \"$\" + \"{a}\" + \"\\\\$\" + \"{b}\" + \"$\" + a\n",
+        "}\n",
+    );
+    let (_, after) = assist_named(text, 3, 6, 6, "interpolated");
+    // The first dollar escaped; `\\$` is a backslash and a bare dollar, so it
+    // gains one too; the last is a dollar before a real hole, left alone.
+    assert!(after.contains(r#""\${a}\\\${b}$${a}""#), "{after}");
+    assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
 /// **Arithmetic is not a message.** A `+` chain with no string literal in it is
 /// left alone, or every sum in the file would be offered a rewrite into
 /// nonsense.
