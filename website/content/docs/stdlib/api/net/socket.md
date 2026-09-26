@@ -122,6 +122,10 @@ many bytes went: every one of them, or a negative number if the write
 failed. After a failure some of `text` may have gone, so the connection is
 no longer in step with its peer.
 
+A peer that has reset the connection (a killed client, a load balancer)
+is a failed write like any other: the write returns a negative number,
+and no `SIGPIPE` stops the program.
+
 ### connect_to
 
 ```khora

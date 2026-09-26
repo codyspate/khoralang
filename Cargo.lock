@@ -632,6 +632,7 @@ dependencies = [
  "khora-pkg",
  "khora-rt",
  "khora-types",
+ "libc",
  "tempfile",
  "text-size",
 ]

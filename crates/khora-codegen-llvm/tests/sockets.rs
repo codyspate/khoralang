@@ -244,3 +244,151 @@ fn main() -> Int {{
         "the bytes arrived unchanged — a zero and a high byte included"
     );
 }
+
+/// **A client that resets its connection mid-response costs that response,
+/// not the server.**
+///
+/// After a peer's RST (a killed browser tab, a load balancer, `kill -9`), a
+/// `send` on the connection makes the kernel raise `SIGPIPE`, and a Khora
+/// binary keeps that signal's default action, which ends the process. So one
+/// client that vanished took down every other client's server, on both fiber
+/// backends.
+///
+/// The server serves each connection in a fiber. The first client asks, then
+/// resets; the server goes on writing its answer until writes fail, and
+/// prints how that went. The second client must still be served, and the
+/// server must exit 0 rather than die of signal 13.
+///
+/// Unix only: Windows has no `SIGPIPE`, and a send to a reset peer there
+/// was always an ordinary failure.
+#[cfg(unix)]
+#[test]
+fn a_client_that_resets_mid_response_does_not_stop_the_server() {
+    const PORT: u16 = 18735;
+    let exe = build(
+        "socket_reset_peer",
+        &format!(
+            "module demo::main;
+import std::core::{{Array, Fiber, print}};
+import std::clock::{{Clock}};
+import std::net::socket::{{start, listen_on, accept_on, receive, transmit, shut, invalid_handle}};
+
+/// Writes to `connection` until two writes have failed, at most `tries` times.
+///
+/// Two, because the first write after a reset fails quietly with
+/// `ECONNRESET`, and the next one is the write that raised `SIGPIPE`. A
+/// handler that writes its answer in several pieces and checks at the end
+/// makes that second write as a matter of course.
+fn answer(connection: Int, tries: Int) -> Bool {{
+  with {{ clock: Clock::real() }} {{
+    let mut i = 0;
+    let mut failures = 0;
+    while i < tries && failures < 2 {{
+      if transmit(connection, \"part of a long answer\\n\") < 0 {{ failures = failures + 1 }};
+      clock.sleep(5);
+      i = i + 1;
+    }};
+    failures == 2
+  }}
+}}
+
+fn serve(connection: Int, n: Int) -> () {{
+  let buffer: Array<U8> = Array::new(64, 0);
+  let read = receive(connection, buffer);
+  if n == 1 {{
+    if answer(connection, 200) {{ print(\"1: the write failed\") }} else {{ print(\"1: every write went\") }}
+  }} else {{
+    transmit(connection, \"served \" + Int::to_string(read));
+    print(\"2: served\")
+  }};
+  shut(connection)
+}}
+
+pub fn main() -> Int {{
+  if start() {{}} else {{ print(\"no sockets\") }};
+  let server = listen_on({PORT});
+  if server == invalid_handle() {{
+    print(\"could not listen\");
+    1
+  }} else {{
+    print(\"listening\");
+    let mut n = 1;
+    while n <= 2 {{
+      let connection = accept_on(server);
+      let which = n;
+      Fiber::join(Fiber::spawn(fn () => serve(connection, which)));
+      n = n + 1;
+    }};
+    shut(server);
+    0
+  }}
+}}
+"
+        ),
+    );
+
+    // Both backends run before anything is asserted, so a failure names every
+    // backend it happens on.
+    let mut failures = Vec::new();
+    for backend in ["threads", "scheduler"] {
+        let mut child = std::process::Command::new(&exe)
+            .env("KHORA_FIBERS", backend)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("the server should start");
+        let mut stdout = child.stdout.take().expect("piped");
+        let mut opened = [0u8; 10];
+        read_exactly(&mut stdout, &mut opened);
+        assert_eq!(&opened, b"listening\n", "`{backend}`: expected the server to listen");
+
+        // The first client: asks, then resets without reading the answer.
+        let first = connect_retrying(PORT);
+        (&first).write_all(b"give me everything").expect("the first request");
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        reset(first);
+
+        // The second: an ordinary request, which must still be answered. A
+        // server that has died may refuse it or reset it; either is recorded
+        // rather than panicked on, so the exit status below is still read.
+        let mut answer = String::new();
+        if let Ok(mut second) = std::net::TcpStream::connect(("127.0.0.1", PORT)) {
+            let _ = second.write_all(b"hello");
+            let _ = second.read_to_string(&mut answer);
+        }
+
+        let mut rest = String::new();
+        let _ = stdout.read_to_string(&mut rest);
+        let status = child.wait().expect("the server should finish");
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            failures.push(format!("`{backend}`: killed by signal {signal} (13 is SIGPIPE); it printed {rest:?}"));
+        } else if answer != "served 5" || rest != "1: the write failed\n2: served\n" || status.code() != Some(0) {
+            failures.push(format!(
+                "`{backend}`: exit {:?}, the second client got {answer:?}, the server printed {rest:?}",
+                status.code()
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Closes `stream` with an RST instead of a FIN: `SO_LINGER` on, timeout zero.
+#[cfg(unix)]
+fn reset(stream: std::net::TcpStream) {
+    use std::os::fd::AsRawFd;
+    let linger = libc::linger { l_onoff: 1, l_linger: 0 };
+    // SAFETY: `linger` is a live `struct linger` and the length is its size;
+    // `stream` owns the descriptor for the whole call.
+    let set = unsafe {
+        libc::setsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_LINGER,
+            (&raw const linger).cast(),
+            std::mem::size_of::<libc::linger>() as libc::socklen_t,
+        )
+    };
+    assert_eq!(set, 0, "SO_LINGER 0 is what makes the close an RST");
+    drop(stream);
+}

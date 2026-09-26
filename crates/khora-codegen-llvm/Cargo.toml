@@ -52,6 +52,11 @@ khora-pkg.workspace = true
 khora-manifest.workspace = true
 tempfile = "3"
 
+# `tests/sockets.rs` closes a client with an RST (`SO_LINGER` 0), which `std`
+# has no stable call for.
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
 [[test]]
 name = "suite"
 path = "tests/suite.rs"

@@ -37,6 +37,9 @@ use crate::reactor::{Interest, Socket};
 /// `accept`. Once per socket rather than once per operation, because it is a
 /// syscall and a read is not.
 ///
+/// On Apple's platforms it also sets `SO_NOSIGPIPE` (see [`no_sigpipe`]), so
+/// that a peer's reset cannot kill the process through this socket.
+///
 /// **A socket nobody prepared still works**: it blocks, exactly as it always
 /// did, and the retry loops below simply never see a would-block. That is the
 /// right failure mode for a socket that arrived from somewhere this runtime
@@ -55,6 +58,10 @@ pub extern "C" fn khora_net_prepare(socket: Socket) -> i32 {
     }
     #[cfg(not(windows))]
     {
+        #[cfg(target_vendor = "apple")]
+        if no_sigpipe(socket) != 0 {
+            return -1;
+        }
         // SAFETY: an ordinary `fcntl` on a descriptor the caller owns.
         let flags = unsafe { libc::fcntl(socket, libc::F_GETFL, 0) };
         if flags < 0 {
@@ -422,10 +429,54 @@ unsafe fn raw_send(socket: Socket, from: *const u8, length: isize) -> isize {
     unsafe { send(socket, from, length.min(i32::MAX as isize) as i32, 0) as isize }
 }
 
+/// The flags every `send` in the runtime passes.
+///
+/// **What this prevents: one client that resets its connection killing the
+/// whole process.** After a peer's RST (a killed browser tab, a load
+/// balancer, `kill -9`), a `send` on that socket makes the kernel raise
+/// `SIGPIPE`, whose default action ends the process, and a Khora binary keeps
+/// the default. With `MSG_NOSIGNAL` the same `send` fails with `EPIPE` or
+/// `ECONNRESET` instead, and the caller gets the -1 it gets for any other
+/// failed send.
+///
+/// Per call, not per process: a CLI whose stdout goes to `head` still dies of
+/// `SIGPIPE` on the pipe, as Unix programs do. Apple's platforms have no
+/// `MSG_NOSIGNAL`; [`no_sigpipe`] covers them per socket instead.
+#[cfg(all(unix, not(target_vendor = "apple")))]
+const SEND_FLAGS: libc::c_int = libc::MSG_NOSIGNAL;
+#[cfg(target_vendor = "apple")]
+const SEND_FLAGS: libc::c_int = 0;
+
+/// Sets `SO_NOSIGPIPE`, so a `send` to a peer that reset the connection fails
+/// instead of killing the process.
+///
+/// Apple's half of [`SEND_FLAGS`]: macOS has no `MSG_NOSIGNAL`, only this
+/// per-socket option. It is set in [`khora_net_prepare`] because every socket
+/// the runtime sends on passes through it: listening, accepted, connected,
+/// and the TLS client's. A socket that never went through it keeps the
+/// signal, which is the same boundary as non-blocking mode.
+///
+/// Returns 0, or -1 with the error in `errno`.
+#[cfg(target_vendor = "apple")]
+fn no_sigpipe(socket: Socket) -> i32 {
+    let on: libc::c_int = 1;
+    // SAFETY: `on` is a live `c_int` and the length is its size; `socket` is a
+    // descriptor the caller owns.
+    unsafe {
+        libc::setsockopt(
+            socket,
+            libc::SOL_SOCKET,
+            libc::SO_NOSIGPIPE,
+            (&raw const on).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    }
+}
+
 #[cfg(not(windows))]
 unsafe fn raw_send(socket: Socket, from: *const u8, length: isize) -> isize {
     // SAFETY: the caller's guarantee.
-    unsafe { libc::send(socket, from.cast(), length as usize, 0) }
+    unsafe { libc::send(socket, from.cast(), length as usize, SEND_FLAGS) }
 }
 
 #[cfg(windows)]
@@ -757,6 +808,122 @@ mod tests {
         drop(client);
         assert_eq!(sent, SIZE as isize, "off a worker: a short write was reported as the whole send");
         assert_eq!(reader.join().expect("the reader"), SIZE, "off a worker: the peer got less");
+    }
+
+    /// Set in the copy of the test binary that
+    /// [`a_send_to_a_reset_peer_fails_and_the_process_lives`] starts.
+    #[cfg(unix)]
+    const RESET_PEER_CHILD: &str = "KHORA_RT_RESET_PEER_CHILD";
+
+    /// **A send to a peer that reset the connection is a failed send, not a
+    /// dead process.**
+    ///
+    /// Once the peer has sent an RST (a killed browser tab, a load balancer,
+    /// `kill -9`), the first `send` fails with `ECONNRESET` and the next makes
+    /// the kernel raise `SIGPIPE`, whose default action ends the process. A
+    /// Khora binary keeps that default, so one client that vanished took the
+    /// whole server with it, on both fiber backends.
+    ///
+    /// **The send runs in a fresh copy of this test binary.** Rust's own
+    /// start-up ignores `SIGPIPE`, so in-process this test would pass with or
+    /// without the fix. The copy puts the default back, the way a Khora binary
+    /// has it, and the parent checks it was not killed by a signal. Only the
+    /// copy changes the disposition, because it is process-wide and every
+    /// other test in this binary shares it.
+    #[cfg(unix)]
+    #[test]
+    fn a_send_to_a_reset_peer_fails_and_the_process_lives() {
+        use std::os::unix::process::ExitStatusExt;
+        if std::env::var_os(RESET_PEER_CHILD).is_some() {
+            sends_to_reset_peers();
+            return;
+        }
+        let status = std::process::Command::new(std::env::current_exe().expect("the test binary"))
+            .args(["--exact", "net::tests::a_send_to_a_reset_peer_fails_and_the_process_lives"])
+            .args(["--nocapture", "--test-threads=1"])
+            .env(RESET_PEER_CHILD, "1")
+            .status()
+            .expect("the copy of the test binary should start");
+        assert_eq!(status.signal(), None, "the process was killed by signal {:?} (13 is SIGPIPE)", status.signal());
+        assert!(status.success(), "the copy failed: {status:?}");
+    }
+
+    /// The half of the test above that runs in the copy, with `SIGPIPE` back
+    /// at its default: a reset peer, once off a worker and once on one.
+    #[cfg(unix)]
+    fn sends_to_reset_peers() {
+        use crate::coro::Task;
+        use crate::scheduler::Scheduler;
+        use std::sync::{Arc, Mutex};
+
+        // SAFETY: `signal` with a valid signal number and `SIG_DFL`. The child
+        // runs this one test on one thread, so no other test's writes depend
+        // on the disposition Rust's start-up chose.
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+
+        /// A connected, prepared socket whose peer has already reset it.
+        fn reset_by_its_peer() -> (std::net::TcpStream, Socket) {
+            let (client, peer) = a_connected_pair();
+            let socket = socket_of(&client);
+            assert_eq!(khora_net_prepare(socket), 0);
+            let linger = libc::linger { l_onoff: 1, l_linger: 0 };
+            // SAFETY: `linger` is a live `struct linger` and the length is its
+            // size; `peer` owns the descriptor for the whole call.
+            let set = unsafe {
+                libc::setsockopt(
+                    socket_of(&peer),
+                    libc::SOL_SOCKET,
+                    libc::SO_LINGER,
+                    (&raw const linger).cast(),
+                    std::mem::size_of::<libc::linger>() as libc::socklen_t,
+                )
+            };
+            assert_eq!(set, 0, "SO_LINGER 0 is what makes the close an RST");
+            drop(peer);
+            // The RST has to arrive before the sends for them to meet it.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            (client, socket)
+        }
+
+        /// Sends until one fails; the first failure's `errno` with it. Several
+        /// sends, because only the second after an RST raises the signal.
+        fn send_until_it_fails(socket: Socket) -> Option<i32> {
+            for _ in 0..8 {
+                // SAFETY: five readable bytes.
+                if unsafe { khora_net_send(socket, b"hello".as_ptr(), 5) } < 0 {
+                    let errno = std::io::Error::last_os_error().raw_os_error();
+                    // Past the first failure, to the one that signals.
+                    // SAFETY: as above.
+                    let again = unsafe { khora_net_send(socket, b"hello".as_ptr(), 5) };
+                    assert_eq!(again, -1, "a send after a failed one should fail too");
+                    return errno;
+                }
+            }
+            None
+        }
+
+        // Off a worker, where `errno` is still this thread's to read.
+        let (_client, socket) = reset_by_its_peer();
+        let errno = send_until_it_fails(socket).expect("off a worker: a send to a reset peer succeeded");
+        assert!(
+            errno == libc::EPIPE || errno == libc::ECONNRESET,
+            "off a worker: the failure should be EPIPE or ECONNRESET, not errno {errno}"
+        );
+
+        // On a worker.
+        let failed = Arc::new(Mutex::new(None));
+        let seen = failed.clone();
+        let pool = Scheduler::new(2);
+        pool.spawn(Task::new(move || {
+            let (_client, socket) = reset_by_its_peer();
+            *seen.lock().expect("the outcome") = Some(send_until_it_fails(socket).is_some());
+        }));
+        pool.drain();
+        assert_eq!(
+            *failed.lock().expect("the outcome"),
+            Some(true),
+            "on a worker: a send to a reset peer succeeded"
+        );
     }
 
     /// **A read that resumes on another worker judges its retry by its own

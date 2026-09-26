@@ -277,6 +277,16 @@ cancelled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   request timeouts cancel handlers meets this under load. The return is
   arranged before the fiber can be stopped, on both fiber backends.
 
+- **One client that reset its connection could kill a whole Khora server.**
+  After a peer's RST (a killed browser tab, a load balancer, `kill -9`), the
+  server's next write to that connection raised `SIGPIPE`, whose default
+  action ended the process on Linux and macOS, on both fiber backends. Every
+  other client lost its connection with it. A write to a reset connection
+  fails like any other failed write: `std::net::socket::transmit` returns a
+  negative number, and the server goes on serving. Only sockets are
+  affected: a program whose output is piped into `head` still stops on
+  `SIGPIPE`, as Unix programs do.
+
 - **A socket write bigger than the socket's send buffer went out only in
   part.** That is about 2.6 MB on Linux over loopback. A write sent what
   fitted in the kernel's buffer and reported that count, and every write in

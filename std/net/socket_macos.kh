@@ -170,6 +170,10 @@ pub fn receive(connection: Int, buffer: Array<U8>) -> Int {
 /// many bytes went: every one of them, or a negative number if the write
 /// failed. After a failure some of `text` may have gone, so the connection is
 /// no longer in step with its peer.
+///
+/// A peer that has reset the connection (a killed client, a load balancer)
+/// is a failed write like any other: the write returns a negative number,
+/// and no `SIGPIPE` stops the program.
 pub fn transmit(connection: Int, text: String) -> Int {
   String::with_data(text, fn (from, n) => khora_net_send(I32::of(connection), from, n))
 }
