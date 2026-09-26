@@ -824,6 +824,14 @@ mod tests {
     /// left the descriptor armed after waking its fiber would report it again
     /// on every pass with nobody to wake. The fiber is woken once; the second
     /// look finds nothing and waits out its timeout.
+    ///
+    /// **The bound tells a spin from a wait; it does not measure the timer.**
+    /// The second poll waits one [`LONGEST_SLICE`] (50 ms), which `poll`
+    /// caps every timeout at, while a descriptor left armed makes it return
+    /// in microseconds. Half the slice sits between the two with room either
+    /// side: a Windows wait can end one timer tick (about 15.6 ms) early,
+    /// and a 50 ms wait that did so failed a bound of the full 50 ms at
+    /// 49.55 ms, with nothing wrong in the reactor.
     #[test]
     fn a_socket_left_readable_is_reported_once() {
         let (client, mut server) = a_connected_pair();
@@ -845,12 +853,12 @@ mod tests {
         assert_eq!(woken, vec![21]);
 
         let began = std::time::Instant::now();
-        let again = reactor.poll(Duration::from_millis(80));
+        let again = reactor.poll(LONGEST_SLICE);
+        let waited = began.elapsed();
         assert!(again.is_empty(), "the descriptor was still armed with nobody waiting");
         assert!(
-            began.elapsed() >= Duration::from_millis(50),
-            "it returned at once, which is the spin this is about: {:?}",
-            began.elapsed()
+            waited >= LONGEST_SLICE / 2,
+            "it returned at once, which is the spin this is about: {waited:?}"
         );
     }
 

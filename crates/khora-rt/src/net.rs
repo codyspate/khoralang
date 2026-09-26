@@ -770,10 +770,27 @@ mod tests {
     /// anything else, the read returned -1 in the middle of a live stream --
     /// which a Postgres connection took for the server hanging up.
     ///
-    /// So: one reader, woken over and over while it waits, so that it retries
-    /// many times and moves between workers; and polluting fibers on every
-    /// worker whose failed `close(-1)` leaves `EBADF` behind. Every read must
-    /// get its byte. Before the fix this failed within the first few reads.
+    /// **The move is forced, not hoped for.** Before each read the reader
+    /// queues an occupier on its own worker. Once the reader parks, that
+    /// worker runs the occupier, which leaves `EBADF` in the worker's errno
+    /// with a failing `close(-1)` and then spins, with no park and no yield,
+    /// until the read is over. A wake can then only be taken up by another
+    /// worker. A shouter thread wakes the reader over and over while it
+    /// waits, so its retries would block again on the new worker and are
+    /// judged by errno. The writer sends each byte only after the occupier
+    /// has said where it landed, so every such read has a wait to move in.
+    /// Left to chance, the reader went back to the worker it parked on: on
+    /// the 3-core macOS runner, 30 s of reads never moved once.
+    ///
+    /// A thief can take the occupier before its own worker gets to it. That
+    /// read proves nothing, is not counted, and the next read tries again.
+    /// The test fails unless `MOVES` reads were forced within `DEADLINE`,
+    /// and fails if a forced read did not move, because then the premise
+    /// is wrong.
+    ///
+    /// What it guards: only the development profile. The optimised runtime
+    /// re-reads errno every turn with or without `#[inline(never)]` (see
+    /// `would_block`), so under `--release` this passes either way.
     ///
     /// Unix only: the pollution is a failing `close`, and Windows keeps a
     /// socket's error somewhere else.
@@ -781,34 +798,51 @@ mod tests {
     #[test]
     fn a_read_that_changes_worker_is_not_failed_by_the_old_workers_errno() {
         use crate::coro::Task;
-        use crate::scheduler::{Scheduler, Waker, park_current, waker_for_current};
+        use crate::scheduler::{Scheduler, Waker, schedule, waker_for_current};
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
 
-        // At least READS reads, and more until MOVES of them have changed
-        // worker. On a 3-core macOS runner 60 reads once all stayed on one
-        // worker, and the test proved nothing. DEADLINE bounds the wait for
-        // those moves; hitting it still fails the test below.
-        const READS: usize = 60;
-        const MOVES: usize = 5;
-        const DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
-        const POLLUTERS: usize = 6;
+        // Reads that must be forced off their worker. DEADLINE bounds the
+        // wait for them; hitting it fails the test below.
+        const MOVES: usize = 20;
+        const DEADLINE: Duration = Duration::from_secs(30);
+        // Occupiers queued per read. A thief takes half a queue per steal, so
+        // sixteen outlast the few steals that fit in the moment between the
+        // reader queueing them and parking.
+        const OCCUPIERS: usize = 16;
 
-        let wakers: Arc<Mutex<Vec<Waker>>> = Arc::new(Mutex::new(Vec::new()));
-        let stop = Arc::new(AtomicBool::new(false));
-        let failed = Arc::new(AtomicUsize::new(0));
-        let moved = Arc::new(AtomicUsize::new(0));
+        #[derive(Debug, Default)]
+        struct Tally {
+            reads: usize,
+            failed: usize,
+            // Reads whose worker an occupier held, and of those, how many
+            // resumed on it anyway.
+            forced: usize,
+            stayed: usize,
+            // Reads that changed worker, forced or not.
+            moved: usize,
+        }
 
-        // Wakes every registered fiber, repeatedly, until told to stop. A
-        // wake for a fiber that is running leaves a notification its next
-        // park consumes, so this is harmless to everybody but a waiter.
-        let shouting = Arc::new(AtomicBool::new(true));
+        // Read numbers start at 1, so 0 is "none yet". `reading` is the read
+        // in progress, `finished` the last one to return, and `held` the last
+        // one whose worker an occupier took.
+        let reading = Arc::new(AtomicUsize::new(0));
+        let finished = Arc::new(AtomicUsize::new(0));
+        let held = Arc::new(AtomicUsize::new(0));
+        let over = Arc::new(AtomicBool::new(false));
+        let waker: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
+        let tally = Arc::new(Mutex::new(Tally::default()));
+
+        // Wakes the reader, over and over, until the test is over. A wake
+        // while it runs leaves a notification its next park consumes, so
+        // each wait ends at once and the read retries: on whichever worker
+        // took the wake, and judged by errno.
         let shouter = {
-            let wakers = wakers.clone();
-            let shouting = shouting.clone();
+            let (waker, over) = (waker.clone(), over.clone());
             std::thread::spawn(move || {
-                while shouting.load(Ordering::SeqCst) {
-                    for waker in wakers.lock().unwrap().iter() {
+                while !over.load(Ordering::SeqCst) {
+                    if let Some(waker) = waker.lock().unwrap().as_ref() {
                         waker.wake();
                     }
                     std::thread::yield_now();
@@ -816,84 +850,116 @@ mod tests {
             })
         };
 
-        let pool = Scheduler::new(4);
-        for _ in 0..POLLUTERS {
-            let wakers = wakers.clone();
-            let stop = stop.clone();
-            pool.spawn(Task::new(move || {
-                if let Some(waker) = waker_for_current() {
-                    wakers.lock().unwrap().push(waker);
-                }
-                while !stop.load(Ordering::SeqCst) {
-                    // SAFETY: closing an invalid descriptor touches nothing;
-                    // it fails with EBADF, which is the point.
-                    unsafe { libc::close(-1) };
-                    park_current();
-                }
-            }));
-        }
-
+        // Two workers: holding the reader's worker leaves exactly one other
+        // for its wake to go to.
+        let pool = Scheduler::new(2);
         let (client, mut peer) = a_connected_pair();
         let socket = socket_of(&client);
         assert_eq!(khora_net_prepare(socket), 0);
         {
-            let wakers = wakers.clone();
-            let stop = stop.clone();
-            let failed = failed.clone();
-            let moved = moved.clone();
+            let (reading, finished, held) = (reading.clone(), finished.clone(), held.clone());
+            let (over, waker, tally) = (over.clone(), waker.clone(), tally.clone());
             pool.spawn(Task::new(move || {
                 let _client = client;
-                if let Some(waker) = waker_for_current() {
-                    wakers.lock().unwrap().push(waker);
-                }
+                *waker.lock().unwrap() = waker_for_current();
                 let worker = || std::thread::current().id();
-                let start = std::time::Instant::now();
-                let mut reads = 0;
-                while reads < READS
-                    || (moved.load(Ordering::SeqCst) < MOVES && start.elapsed() < DEADLINE)
-                {
-                    reads += 1;
+                let start = Instant::now();
+                let mut seen = Tally::default();
+                while seen.forced < MOVES && start.elapsed() < DEADLINE {
+                    seen.reads += 1;
+                    let n = seen.reads;
                     let before = worker();
+                    reading.store(n, Ordering::SeqCst);
+                    for _ in 0..OCCUPIERS {
+                        let (finished, held) = (finished.clone(), held.clone());
+                        // Lands on the reader's worker once the reader has
+                        // parked, since the reader holds it until then.
+                        let queued = schedule(Task::new(move || {
+                            // Stolen onto another worker, or too late: this
+                            // read is not held, and the next one tries again.
+                            if finished.load(Ordering::SeqCst) >= n || worker() != before {
+                                return;
+                            }
+                            held.store(n, Ordering::SeqCst);
+                            // SAFETY: closing an invalid descriptor touches
+                            // nothing; it fails with EBADF, which is the
+                            // stale errno a moved read must not see.
+                            unsafe { libc::close(-1) };
+                            // No park and no yield, so this worker is not
+                            // free again until the read is over.
+                            while finished.load(Ordering::SeqCst) < n {
+                                std::hint::spin_loop();
+                            }
+                        }));
+                        assert!(queued, "the reader is on a worker, so this cannot fail");
+                    }
                     let mut byte = [0u8; 1];
                     // SAFETY: one writable byte.
                     let read = unsafe { khora_net_recv(socket, byte.as_mut_ptr(), 1) };
-                    if read != 1 {
-                        failed.fetch_add(1, Ordering::SeqCst);
-                    }
-                    if worker() != before {
-                        moved.fetch_add(1, Ordering::SeqCst);
-                    }
+                    let after = worker();
+                    finished.store(n, Ordering::SeqCst);
+                    // Sound to read after `finished`: an occupier that saw the
+                    // read unfinished on `before` spins there until now, so
+                    // the read cannot have come back to `before`.
+                    let was_held = held.load(Ordering::SeqCst) == n;
+                    seen.failed += usize::from(read != 1);
+                    seen.moved += usize::from(after != before);
+                    seen.forced += usize::from(was_held);
+                    seen.stayed += usize::from(was_held && after == before);
                 }
-                stop.store(true, Ordering::SeqCst);
+                *tally.lock().unwrap() = seen;
+                over.store(true, Ordering::SeqCst);
             }));
         }
 
-        // One byte every few milliseconds, so each read waits long enough to
-        // be woken spuriously many times.
-        let writer_stop = stop.clone();
-        let writer = std::thread::spawn(move || {
-            while !writer_stop.load(Ordering::SeqCst) {
-                std::thread::sleep(std::time::Duration::from_millis(5));
-                if peer.write_all(b"x").is_err() {
-                    break;
+        // One byte per read, sent only after an occupier holds the reader's
+        // worker (or 20 ms without one), and 10 ms after that, so the moved
+        // reader has retried against an empty socket first. 2 ms was too
+        // short on two CPUs: the occupier spins on one, and the reader and
+        // the shouter share the other, so with `#[inline(never)]` removed
+        // 2 of 10 runs saw the byte arrive before any retry and passed.
+        let writer = {
+            let (reading, finished, held, over) =
+                (reading.clone(), finished.clone(), held.clone(), over.clone());
+            std::thread::spawn(move || {
+                let nap = || std::thread::sleep(Duration::from_micros(200));
+                while !over.load(Ordering::SeqCst) {
+                    let n = reading.load(Ordering::SeqCst);
+                    if n == 0 || finished.load(Ordering::SeqCst) >= n {
+                        nap();
+                        continue;
+                    }
+                    let asked = Instant::now();
+                    while held.load(Ordering::SeqCst) < n && asked.elapsed() < Duration::from_millis(20) {
+                        nap();
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                    if peer.write_all(b"x").is_err() {
+                        break;
+                    }
+                    while finished.load(Ordering::SeqCst) < n && !over.load(Ordering::SeqCst) {
+                        nap();
+                    }
                 }
-            }
-            peer
-        });
+                peer
+            })
+        };
 
         pool.drain();
-        shouting.store(false, Ordering::SeqCst);
         shouter.join().expect("the shouter");
         let _peer = writer.join().expect("the writer");
 
-        let (failed, moved) = (failed.load(Ordering::SeqCst), moved.load(Ordering::SeqCst));
-        assert!(
-            moved > 0,
-            "no read changed worker in {DEADLINE:?}, so this proves nothing about errno"
-        );
+        let seen = std::mem::take(&mut *tally.lock().unwrap());
+        eprintln!("errno test: {seen:?}");
         assert_eq!(
-            failed, 0,
-            "{failed} reads of a live stream failed ({moved} changed worker)"
+            seen.stayed, 0,
+            "a read whose worker was held resumed on it anyway, so holding it does not force a move: {seen:?}"
         );
+        assert!(
+            seen.forced >= MOVES,
+            "only {} reads were forced to change worker in {DEADLINE:?}, so this proves too little about errno: {seen:?}",
+            seen.forced
+        );
+        assert_eq!(seen.failed, 0, "reads of a live stream failed: {seen:?}");
     }
 }
