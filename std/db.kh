@@ -302,9 +302,8 @@ type Settled = { mut done: Bool };
 
 /// The body, with the rollback registered before it starts.
 ///
-/// Separate from `transaction` for the reason `postgres::pool`'s `held` is
-/// separate from `with_db`: `acquire` needs a `Scope`, and `transaction`'s
-/// whole point is that its caller does not have to have one.
+/// Separate from `transaction` because `acquire` needs a `Scope`, and
+/// `transaction`'s whole point is that its caller does not have to have one.
 fn guarded<A, 'ef, 'er>(
   body: () -> Result<A, DbError> with 'ef raises 'er
 ) -> Result<A, DbError>

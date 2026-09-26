@@ -990,3 +990,332 @@ fn main() -> Int {
         "the cancelled insert must be gone and the committed one must be there"
     );
 }
+
+// --- a lease handed over at the moment its waiter is cancelled --------------
+
+/// How one watched run ended.
+struct Watched {
+    stdout: String,
+    stderr: String,
+    code: Option<i32>,
+    /// Whether the watchdog had to kill it. A pool that has lost a connection
+    /// shows up as this: `close` waits for a serving fiber nobody will stop.
+    hung: bool,
+}
+
+/// Runs `exe` on fiber backend `backend`, killing it after `patience`.
+fn run_watched(exe: &std::path::Path, backend: &str, patience: std::time::Duration) -> Watched {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(exe)
+        .env("KHORA_FIBERS", backend)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the program should run");
+    let started = std::time::Instant::now();
+    let mut hung = false;
+    while child.try_wait().expect("waiting").is_none() {
+        if started.elapsed() > patience {
+            let _ = child.kill();
+            hung = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let status = child.wait().expect("reaping");
+    let (mut stdout, mut stderr) = (String::new(), String::new());
+    let _ = child.stdout.take().expect("stdout").read_to_string(&mut stdout);
+    let _ = child.stderr.take().expect("stderr").read_to_string(&mut stderr);
+    Watched {
+        stdout: stdout.replace("\r\n", "\n"),
+        stderr: stderr.replace("\r\n", "\n"),
+        code: status.code(),
+        hung,
+    }
+}
+
+/// Settings for a server that is not there: every connection is refused.
+///
+/// The pool does not need one to be tested. A serving fiber whose connection
+/// would not open still takes requests off its channel and still ends when the
+/// channel closes, so its lease goes round the pool exactly as a working
+/// connection's does -- and a lost lease still hangs `close`.
+const NOWHERE: &str = "{ host: \"127.0.0.1\", port: 1, user: \"khora\", database: \"khora\", secret: \"khora\" }";
+
+/// Settings for the real server `KHORA_POSTGRES` promises.
+const REAL: &str = "{ host: \"127.0.0.1\", port: 5433, user: \"khora\", database: \"khora\", secret: \"khora\" }";
+
+/// A pool of one. Each trial takes the connection itself, parks a waiter in
+/// `with_db`, then gives the connection back and cancels the waiter straight
+/// after, so the cancel lands while the waiter is being handed the connection
+/// or just after. Whichever it is, the connection must end up back in the
+/// pool, and `close` must return.
+fn handover_program(settings: &str, leased: &str) -> String {
+    format!(
+        "module demo::main;
+import std::core::{{Channel, Fiber, Fibers, List, Option, Result, print}};
+import std::db::{{Db, DbError, Row}};
+import postgres::db::{{Settings}};
+import postgres::pool::{{Pool, close, open, with_db}};
+
+extern fn khora_sleep(millis: Int) -> ();
+
+fn leased() -> Int
+  with {{ db: Db }}
+{{
+  {leased}
+}}
+
+fn lease(pool: Pool) -> () {{
+  let _ = with_db(pool, leased);
+  ()
+}}
+
+fn main() -> Int {{
+  let settings: Settings = {settings};
+  let crew = Fibers::open();
+  let pool = open(crew, settings, 1);
+  let mut trial = 0;
+  let mut lost = 0 - 1;
+  while trial < 200 && lost < 0 {{
+    match Channel::receive(pool.idle) {{
+      Option::None => (),
+      Option::Some(held) => {{
+        let waiter = Fiber::spawn(fn () => lease(pool));
+        khora_sleep(1 + trial % 3);
+        Channel::send(pool.idle, held);
+        Fiber::cancel(waiter);
+        Fiber::wait(waiter);
+      }},
+    }};
+    if Channel::depth(pool.idle) != 1 {{ lost = trial }} else {{}};
+    trial = trial + 1
+  }};
+  if lost >= 0 {{
+    print(\"lost the connection at trial \" + Int::to_string(lost));
+  }} else {{
+    print(\"kept it through 200 trials\");
+    close(pool);
+    print(\"closed\");
+  }};
+  0
+}}
+"
+    )
+}
+
+/// Runs a handover program on both backends and asserts the lease survived.
+///
+/// Both backends are run before anything is asserted, so a failure reports
+/// what each of them did.
+fn assert_the_lease_comes_back(name: &str, source: &str) {
+    let exe = build(name, source);
+    let ran: Vec<(&str, Watched)> = ["threads", "scheduler"]
+        .into_iter()
+        .map(|backend| (backend, run_watched(&exe, backend, std::time::Duration::from_secs(60))))
+        .collect();
+    let seen: Vec<String> =
+        ran.iter().map(|(backend, r)| format!("{backend}: {:?}, hung {}", r.stdout, r.hung)).collect();
+    for (backend, ran) in &ran {
+        assert!(
+            !ran.hung,
+            "{backend} hung, which is what a lost connection does to `close`: {seen:?}"
+        );
+        assert_eq!(ran.code, Some(0), "{backend}: stderr {}", ran.stderr);
+        assert_eq!(
+            ran.stdout, "kept it through 200 trials\nclosed\n",
+            "a waiter cancelled as it was handed the connection must give it back: {seen:?}"
+        );
+    }
+}
+
+/// **A waiter cancelled as the connection reaches it gives the connection
+/// back.** The receive hands the connection over and does not look at the
+/// cancel, which is right: a receive that got a value never drops it. What
+/// came after it was the hole -- the give-back was registered inside `scoped`
+/// and `acquire`, each entered through a cancellation check, so a cancel
+/// taken there unwound holding a connection no finalizer knew about. The
+/// pool shrank by one and `close` then waited for ever.
+///
+/// No server is needed: the lease goes round the pool whether or not its
+/// connection opened. Both backends; before the fix this lost the connection
+/// at the first trial on threads and within ten on the scheduler.
+#[test]
+fn a_waiter_cancelled_at_the_hand_over_gives_the_connection_back() {
+    assert_the_lease_comes_back("pool_handover", &handover_program(NOWHERE, "0"));
+}
+
+/// The same, with the waiter's body querying a real server.
+///
+/// Skipped without `KHORA_POSTGRES`, like its neighbours.
+#[test]
+fn a_waiter_cancelled_at_the_hand_over_against_a_real_server() {
+    if std::env::var_os("KHORA_POSTGRES").is_none() {
+        eprintln!(
+            "skipping: set KHORA_POSTGRES=1 and bring up \
+             packages/postgres/docker-compose.yml to run this"
+        );
+        return;
+    }
+    let leased = "match db.query(\"select 1\", List::Nil) {
+    Result::Ok(_) => 1,
+    Result::Err(_) => 0,
+  }";
+    assert_the_lease_comes_back("pool_handover_real", &handover_program(REAL, leased));
+}
+
+/// Every way out of `with_db` gives the lease back, and nobody is starved.
+///
+/// A pool of two, no server. In order: a body that returns; a body that
+/// raises; a body cancelled while it runs; a waiter cancelled while it is
+/// still parked for a connection; and eight fibers taking twenty-five leases
+/// each, all of which must be served. The pool must hold both connections
+/// after each, and `close` must return.
+///
+/// **Not a regression test for the hand-over**: none of these cancels lands
+/// in the gap that one guards, so this is green with or without that fix. It
+/// pins the paths the fix rewrote, which a wrong fix would break.
+#[test]
+fn a_pool_gives_every_lease_back_however_the_body_ends() {
+    let main = format!(
+        "module demo::main;
+import std::core::{{Channel, Fiber, Fibers, Option, Result, print}};
+import std::db::{{Db}};
+import postgres::db::{{Request, Settings}};
+import postgres::pool::{{Pool, close, open, with_db}};
+
+extern fn khora_sleep(millis: Int) -> ();
+
+pub type Oops = | Failed;
+
+fn seven() -> Int with {{ db: Db }} {{ 7 }}
+
+fn fail() -> Int with {{ db: Db }} raises Oops {{ raise Oops::Failed }}
+
+fn served_wrongly() -> Int with {{ db: Db }} {{
+  print(\"a cancelled waiter was served, which is wrong\");
+  0
+}}
+
+fn stuck(entered: Channel<Int>, never: Channel<Int>) -> Int with {{ db: Db }} {{
+  Channel::send(entered, 1);
+  match Channel::receive(never) {{
+    Option::Some(n) => n,
+    Option::None => 0,
+  }}
+}}
+
+fn idle(pool: Pool) -> String {{ \"idle \" + Int::to_string(Channel::depth(pool.idle)) }}
+
+fn succeed(pool: Pool) -> Int {{
+  match with_db(pool, seven) {{
+    Result::Ok(n) => n,
+    Result::Err(_) => 0 - 1,
+  }}
+}}
+
+fn raising(pool: Pool) -> () raises Oops {{
+  with_db(pool, fail)!;
+}}
+
+fn caught(pool: Pool) -> () {{
+  raising(pool)! catch {{ Oops::Failed => print(\"raised: \" + idle(pool)) }};
+}}
+
+fn cancelled_inside(pool: Pool) -> () {{
+  let entered: Channel<Int> = Channel::bounded(1);
+  let never: Channel<Int> = Channel::bounded(1);
+  let f = Fiber::spawn(fn () => {{
+    let _ = with_db(pool, fn () => stuck(entered, never));
+    print(\"the cancelled body carried on, which is wrong\");
+  }});
+  let _ = Channel::receive(entered);
+  Fiber::cancel(f);
+  Fiber::wait(f);
+  print(\"cancelled while leased: \" + idle(pool));
+}}
+
+fn put_back(pool: Pool, taken: Option<Channel<Request>>) -> () {{
+  match taken {{
+    Option::None => print(\"nothing to put back, which is wrong\"),
+    Option::Some(requests) => {{ Channel::send(pool.idle, requests); () }},
+  }}
+}}
+
+fn cancelled_waiting(pool: Pool) -> () {{
+  let a = Channel::receive(pool.idle);
+  let b = Channel::receive(pool.idle);
+  let f = Fiber::spawn(fn () => {{
+    let _ = with_db(pool, served_wrongly);
+    ()
+  }});
+  khora_sleep(20);
+  Fiber::cancel(f);
+  Fiber::wait(f);
+  put_back(pool, a);
+  put_back(pool, b);
+  print(\"cancelled while waiting: \" + idle(pool));
+}}
+
+fn worker(pool: Pool, done: Channel<Int>) -> () {{
+  let mut n = 0;
+  let mut served = 0;
+  while n < 25 {{
+    if succeed(pool) == 7 {{ served = served + 1 }} else {{}};
+    n = n + 1
+  }};
+  Channel::send(done, served);
+  ()
+}}
+
+fn shared_out(pool: Pool) -> () {{
+  let done: Channel<Int> = Channel::bounded(8);
+  let mut spawned = 0;
+  while spawned < 8 {{
+    let _ = Fiber::spawn(fn () => worker(pool, done));
+    spawned = spawned + 1
+  }};
+  let mut total = 0;
+  let mut heard = 0;
+  while heard < 8 {{
+    match Channel::receive(done) {{
+      Option::Some(n) => total = total + n,
+      Option::None => (),
+    }};
+    heard = heard + 1
+  }};
+  print(\"served \" + Int::to_string(total) + \" of 200: \" + idle(pool));
+}}
+
+fn main() -> Int {{
+  let settings: Settings = {NOWHERE};
+  let crew = Fibers::open();
+  let pool = open(crew, settings, 2);
+  print(\"returned \" + Int::to_string(succeed(pool)) + \": \" + idle(pool));
+  caught(pool);
+  cancelled_inside(pool);
+  cancelled_waiting(pool);
+  shared_out(pool);
+  close(pool);
+  print(\"closed\");
+  0
+}}
+"
+    );
+    let exe = build("pool_every_way_out", &main);
+    for backend in ["threads", "scheduler"] {
+        let ran = run_watched(&exe, backend, std::time::Duration::from_secs(60));
+        assert!(!ran.hung, "{backend}: the program hung: stdout {:?}", ran.stdout);
+        assert_eq!(ran.code, Some(0), "{backend}: stderr {}", ran.stderr);
+        assert_eq!(
+            ran.stdout,
+            "returned 7: idle 2\n\
+             raised: idle 2\n\
+             cancelled while leased: idle 2\n\
+             cancelled while waiting: idle 2\n\
+             served 200 of 200: idle 2\n\
+             closed\n",
+            "{backend}"
+        );
+    }
+}

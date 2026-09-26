@@ -93,6 +93,14 @@ cancellation point in every function, whatever the function's `raises` row;
 
 ### Fixed
 
+- **A `postgres` pool lost a connection when a fiber waiting in `with_db` was
+  cancelled just as a connection reached it.** The connection was handed over,
+  and the fiber stopped before its return to the pool was arranged, so nothing
+  gave it back. Each such cancel shrank the pool by one for good; once it was
+  empty, every `with_db` and `Pool::close` waited for ever. A service whose
+  request timeouts cancel handlers meets this under load. The return is
+  arranged before the fiber can be stopped, on both fiber backends.
+
 - **A `Shared` cell holding a record, or an enum laid out flat, whose fields
   include a `String`, `List` or other counted value ended the process after it
   was read.** `Shared::get`, the value `Shared::update` hands back, and the

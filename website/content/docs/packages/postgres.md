@@ -34,7 +34,9 @@ with_db(pool, fn () =>
 ```
 
 `with_db` leases a connection, installs it as the `db` capability for the
-duration, and returns it afterwards — including when the body raises.
+duration, and returns it afterwards — including when the body raises, and
+including when the fiber is cancelled, whether in the body or while it is
+still waiting for a connection.
 `transfer` never names a connection, which is what keeps the capability from
 turning back into a parameter threaded through every signature.
 

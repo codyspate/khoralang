@@ -29,9 +29,20 @@ module postgres::pool;
 //! capability row instead of accepting a connection value just because the
 //! provider happens to be a pool.
 //!
-//! Returning the lease is `Scope`'s job: the return is registered with
-//! `acquire` before the body runs, and a region's finalizers run on the way out
-//! however the way out is reached.
+//! Returning the lease is a region's job: the return is registered with
+//! `Region::defer` before the body runs, and a region's finalizers run on the
+//! way out however the way out is reached.
+//!
+//! **Before the body is not early enough; it has to be before the first
+//! cancellation point after the receive.** The first version registered it
+//! through `scoped` and `acquire`, each of which checks for a cancellation
+//! when it is entered. A fiber cancelled while it waited for a connection,
+//! and handed one at the same moment, stopped at that check holding a
+//! connection that no finalizer knew about. A pool of one lost its only
+//! connection within two hundred such cancels, and then `with_db` and `close`
+//! both waited for ever. `Region::open` and `Region::defer` are not
+//! cancellation points, so nothing lies between the receive and the
+//! registration.
 //!
 //! **The region has to be `with_db`'s own**, and the first version got this
 //! wrong in a way worth recording. It required a `Scope` from its caller,
@@ -50,7 +61,7 @@ module postgres::pool;
 //! the server to notice when the connection is reused. The lease then comes
 //! back to a connection that is ready, which is why the two belong together.
 
-import std::core::{Channel, Fiber, Fibers, Option, Result, Scope, acquire, scoped};
+import std::core::{Channel, Fiber, Fibers, Option, Region, Result};
 import std::db::{Db, DbError};
 import postgres::db::{Request, Settings, over, serve};
 
@@ -104,10 +115,10 @@ pub fn open(crew: Fibers, settings: Settings, count: Int) -> Pool {
 ///
 /// Waits when all connections are busy. The connection goes back **when this
 /// call returns**, however it returns -- normally, raising, or cancelled --
-/// because the lease is registered with `acquire` in a region this function
-/// opens. A pool that loses a connection to an error is a pool that works until
-/// the first bad day; one that holds a lease past the call is a pool of `n`
-/// uses.
+/// because the lease is registered with a region this function opens, before
+/// anything after the receive can be cancelled. A pool that loses a connection
+/// to an error is a pool that works until the first bad day; one that holds a
+/// lease past the call is a pool of `n` uses.
 ///
 /// The `db` requirement is handled here and removed from the caller's row. Any
 /// other requirements and raised failures on `body` pass straight through.
@@ -121,26 +132,24 @@ pub fn with_db<A, 'ef, 'er>(
 {
   match Channel::receive(pool.idle) {
     Option::None => Result::Err(DbError::Disconnected("the pool is closed")),
-    // The region opened here is what ends the lease. See the note at the head
-    // of this module for what happened when it was the caller's.
-    Option::Some(requests) => scoped(fn () => held(pool.idle, requests, body))!,
+    // **The give-back is registered before anything in this function can
+    // poll.** A receive that returns a value has handed the connection to
+    // this fiber, and from then on only a registered finalizer can bring it
+    // back. `Region::open` and `Region::defer` are not cancellation points;
+    // `scoped`, `acquire` and `Scope::defer` are all entered through a poll,
+    // and a cancel taken at any of them unwound holding a connection nobody
+    // else knew about. One such cancel costs the pool a connection, for good,
+    // and when the last one goes every `with_db` and `close` waits for ever.
+    //
+    // The region is this arm's, so the lease ends when the call does -- see
+    // the note at the head of this module for what happened when it was the
+    // caller's.
+    Option::Some(requests) => {
+      let lease = Region::open();
+      Region::defer(lease, fn () => give_back(pool.idle, requests));
+      Result::Ok(body()! with { db: over(requests) })
+    },
   }
-}
-
-/// The body, with the lease registered before it starts.
-///
-/// Separate from `with_db` because `acquire` needs a `Scope` and `with_db`'s
-/// whole point is that its caller does not have to have one.
-fn held<A, 'ef, 'er>(
-  idle: Channel<Channel<Request>>,
-  requests: Channel<Request>,
-  body: () -> A with { 'ef | db: Db } raises 'er,
-) -> Result<A, DbError>
-  with { 'ef | scope: Scope }
-  raises 'er
-{
-  let leased = acquire(requests, fn back => give_back(idle, back));
-  Result::Ok(body()! with { db: over(leased) })
 }
 
 /// Puts a connection back, or lets it go if the pool has closed.
