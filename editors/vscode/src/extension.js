@@ -13,7 +13,7 @@
 // name, and the extension development host reports those on the first F5.
 
 const { workspace, window, commands, StatusBarAlignment, ThemeColor } = require("vscode");
-const { LanguageClient, TransportKind } = require("vscode-languageclient/node");
+const { LanguageClient } = require("vscode-languageclient/node");
 const { execFile } = require("child_process");
 
 /** The running client, so the restart command has something to stop. */
@@ -54,10 +54,15 @@ async function start(context) {
   // `khora lsp` rather than a `khora-lsp` binary: the toolchain is one
   // executable, which is what 13.25 decided, and an extension that needed a
   // second download would undo it.
+  //
+  // **No `transport`.** Naming `TransportKind.stdio` makes
+  // `vscode-languageclient` append `--stdio` to the arguments, and a toolchain
+  // before 0.4 refuses any argument to `lsp`, so the server exited with code 2
+  // before it said anything. Left unset, the library still talks over stdin
+  // and stdout, and passes the arguments as written.
   const server = {
     command,
     args: ["lsp"],
-    transport: TransportKind.stdio,
   };
 
   const client_options = {

@@ -1,6 +1,6 @@
 The Khora extension for Visual Studio Code.
 
-## Upgrading from 0.3.0
+## Upgrading from 0.3.0 or earlier
 
 The extension's ID is `khora.khora`. Version 0.3.0 was published as
 `khora-lang.khora`, which VS Code treats as a different extension, so remove
@@ -9,6 +9,13 @@ it first or both will run:
 ```
 code --uninstall-extension khora-lang.khora
 ```
+
+## Changes in 0.3.2
+
+- **The language server starts.** 0.3.0 and 0.3.1 launched `khora lsp --stdio`, which
+  every released toolchain refuses with *unexpected argument '--stdio'*, so
+  the server exited before it answered and nothing but syntax colouring
+  worked. It launches `khora lsp`.
 
 ## Changes in 0.3.1
 
