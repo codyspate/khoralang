@@ -93,18 +93,60 @@ struct Queue {
     senders: Vec<Waker>,
     /// Fibers waiting for a value. Woken by a send.
     receivers: Vec<Waker>,
+    /// Threads blocked in [`park_until_moved`] for room, and for a value.
+    ///
+    /// **What lets a send or receive wake one thread, or none, instead of
+    /// all of them.** On the thread backend every fiber is a thread, so a
+    /// pool's idle channel has one blocked thread per request waiting for a
+    /// connection. Waking all of them for each connection given back made
+    /// every one take the lock, find nothing, and block again: a futex storm
+    /// that was 42% of a database request's CPU. Counted under the lock the
+    /// waiters block with, so a count of zero means nobody is blocked and
+    /// nobody can start blocking without first seeing the new state.
+    threads_sending: usize,
+    threads_receiving: usize,
+    /// How many times a blocked thread was woken by a notification rather
+    /// than its timeout. Tests only.
+    #[cfg(test)]
+    woken: usize,
     /// No more values will ever be sent.
     closed: bool,
 }
 
 struct Channel {
     state: Mutex<Queue>,
-    /// For waiters that are threads rather than fibers.
-    moved: Arc<Condvar>,
+    /// For threads waiting for room. One variable per side, so that a
+    /// receive, which can only ever help a sender, never wakes a receiver.
+    room: Arc<Condvar>,
+    /// For threads waiting for a value.
+    arrived: Arc<Condvar>,
     capacity: usize,
     full: WhenFull,
     boxed: bool,
     glue: Option<extern "C" fn(*mut u8)>,
+}
+
+impl Channel {
+    /// Wakes one thread blocked for a value, if any is.
+    ///
+    /// **One, because one value can satisfy one receiver.** A second woken
+    /// thread would find the queue empty again and block again, having cost
+    /// two context switches. `waiting` is the count read under the lock that
+    /// changed the queue, so a thread that blocks later sees the value first
+    /// and never waits for this wake.
+    fn a_value_arrived(&self, waiting: usize) {
+        if waiting > 0 {
+            self.arrived.notify_one();
+        }
+    }
+
+    /// Wakes one thread blocked for room, if any is. [`Self::a_value_arrived`]'s
+    /// argument, the other way round.
+    fn room_appeared(&self, waiting: usize) {
+        if waiting > 0 {
+            self.room.notify_one();
+        }
+    }
 }
 
 impl Channel {
@@ -166,9 +208,14 @@ pub unsafe extern "C" fn khora_channel_open(
             items: VecDeque::new(),
             senders: Vec::new(),
             receivers: Vec::new(),
+            threads_sending: 0,
+            threads_receiving: 0,
+            #[cfg(test)]
+            woken: 0,
             closed: false,
         }),
-        moved: Arc::new(Condvar::new()),
+        room: Arc::new(Condvar::new()),
+        arrived: Arc::new(Condvar::new()),
         capacity: if capacity < 1 { 1 } else { capacity as usize },
         full: WhenFull::of(strategy),
         boxed,
@@ -193,12 +240,16 @@ pub unsafe extern "C" fn khora_channel_open(
 /// against the same flag. One number rather than two that drift.
 pub(crate) const LOOK_AGAIN: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// Waits for the channel to move, off the scheduler.
+/// Blocks a caller that has no scheduler worker to give back (every fiber on
+/// the thread backend; `main` and other plain threads on either) until the
+/// side it waits for moves: `moved` is the channel's `arrived` variable for a
+/// receiver and its `room` variable for a sender.
 ///
-/// **Two mechanisms, and both are load-bearing.** Registering the condition
+/// **Two mechanisms, and both are load-bearing.** Registering that condition
 /// variable with the fiber is what makes cancellation immediate: `cancel`
-/// notifies whatever the fiber left there, so an idle parked fiber costs
-/// nothing until somebody actually cancels it.
+/// notifies all of whatever the fiber left there, so a cancelled thread is
+/// woken even though a send or receive would wake only one waiter on it, and
+/// an idle parked fiber costs nothing until somebody actually cancels it.
 ///
 /// The timeout is what makes it *correct*. A cancellation landing between the
 /// caller's flag check and this `wait` would notify a thread that is not
@@ -208,9 +259,24 @@ pub(crate) const LOOK_AGAIN: std::time::Duration = std::time::Duration::from_mil
 /// keep a reference to. So the registration is the fast path and the timeout
 /// is the bound: an ordinary cancellation is observed at once, and the one
 /// that loses the race is observed within `LOOK_AGAIN`.
-fn park_until_moved(moved: &Arc<Condvar>, state: std::sync::MutexGuard<'_, Queue>) {
+///
+/// `waiting` picks the count this thread is in while it blocks, which is what
+/// tells the other side whether there is anybody to notify at all.
+fn park_until_moved(
+    moved: &Arc<Condvar>,
+    mut state: std::sync::MutexGuard<'_, Queue>,
+    waiting: fn(&mut Queue) -> &mut usize,
+) {
+    *waiting(&mut state) += 1;
     crate::current::current(|fiber| fiber.park_on(moved));
-    let _woken = moved.wait_timeout(state, LOOK_AGAIN).unwrap_or_else(|e| e.into_inner());
+    let (mut state, _timeout) =
+        moved.wait_timeout(state, LOOK_AGAIN).unwrap_or_else(|e| e.into_inner());
+    *waiting(&mut state) -= 1;
+    #[cfg(test)]
+    if !_timeout.timed_out() {
+        state.woken += 1;
+    }
+    drop(state);
     crate::current::current(|fiber| fiber.unpark_from());
 }
 
@@ -254,8 +320,9 @@ pub unsafe extern "C" fn khora_channel_send(handle: *mut u8, value: u64) -> bool
         if state.items.len() < channel.capacity {
             state.items.push_back(value);
             let waiting = std::mem::take(&mut state.receivers);
+            let threads = state.threads_receiving;
             drop(state);
-            channel.moved.notify_all();
+            channel.a_value_arrived(threads);
             for waker in waiting {
                 waker.wake();
             }
@@ -280,13 +347,14 @@ pub unsafe extern "C" fn khora_channel_send(handle: *mut u8, value: u64) -> bool
                 let evicted = state.items.pop_front();
                 state.items.push_back(value);
                 let waiting = std::mem::take(&mut state.receivers);
+                let threads = state.threads_receiving;
                 drop(state);
                 // After the lock, for the reason `release` gives: a drop
                 // routine may reach a channel of its own.
                 if let Some(old) = evicted {
                     channel.release(old);
                 }
-                channel.moved.notify_all();
+                channel.a_value_arrived(threads);
                 for waker in waiting {
                     waker.wake();
                 }
@@ -314,7 +382,7 @@ pub unsafe extern "C" fn khora_channel_send(handle: *mut u8, value: u64) -> bool
                 park_current();
             }
             // Not a fiber, so there is no worker to give back.
-            None => park_until_moved(&channel.moved, state),
+            None => park_until_moved(&channel.room, state, |q| &mut q.threads_sending),
         }
     }
 }
@@ -340,8 +408,9 @@ pub unsafe extern "C" fn khora_channel_receive(handle: *mut u8, out: *mut u64) -
         let mut state = channel.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(value) = state.items.pop_front() {
             let waiting = std::mem::take(&mut state.senders);
+            let threads = state.threads_sending;
             drop(state);
-            channel.moved.notify_all();
+            channel.room_appeared(threads);
             for waker in waiting {
                 waker.wake();
             }
@@ -369,7 +438,7 @@ pub unsafe extern "C" fn khora_channel_receive(handle: *mut u8, out: *mut u64) -
                 drop(state);
                 park_current();
             }
-            None => park_until_moved(&channel.moved, state),
+            None => park_until_moved(&channel.arrived, state, |q| &mut q.threads_receiving),
         }
     }
 }
@@ -396,7 +465,9 @@ pub unsafe extern "C" fn khora_channel_close(handle: *mut u8) {
         state.closed = true;
         (std::mem::take(&mut state.senders), std::mem::take(&mut state.receivers))
     };
-    channel.moved.notify_all();
+    // Everyone, on both sides: a closed channel answers every one of them.
+    channel.room.notify_all();
+    channel.arrived.notify_all();
     for waker in senders.into_iter().chain(receivers) {
         waker.wake();
     }
@@ -435,8 +506,9 @@ pub unsafe extern "C" fn khora_channel_poll(handle: *mut u8, out: *mut u64) -> b
     // Room appeared, so anybody waiting for it is woken -- exactly as a
     // receive does, because to a blocked sender this *is* a receive.
     let waiting = std::mem::take(&mut state.senders);
+    let threads = state.threads_sending;
     drop(state);
-    channel.moved.notify_all();
+    channel.room_appeared(threads);
     for waker in waiting {
         waker.wake();
     }
@@ -611,6 +683,182 @@ mod tests {
         unsafe { khora_channel_close(channel as *mut u8) };
         assert_eq!(reader.join().expect("the reader is released"), None);
         unsafe { khora_channel_release(channel as *mut u8) };
+    }
+
+    /// The count of blocked threads, and of wakes that were notifications
+    /// rather than timeouts.
+    fn blocked_and_woken(handle: *mut u8) -> (usize, usize) {
+        let channel = unsafe { channel_of(handle) }.expect("a live channel");
+        let state = channel.state.lock().unwrap();
+        (state.threads_receiving + state.threads_sending, state.woken)
+    }
+
+    fn until(mut done: impl FnMut() -> bool) {
+        let start = std::time::Instant::now();
+        while !done() {
+            assert!(start.elapsed() < std::time::Duration::from_secs(10), "gave up waiting");
+            std::thread::yield_now();
+        }
+    }
+
+    /// **One value wakes one blocked thread.** On the thread backend a pool's
+    /// idle channel has a blocked thread per request waiting for a
+    /// connection; waking every one of them for each connection given back
+    /// had them all take the lock, find nothing and block again, which was
+    /// 42% of a database request's CPU.
+    #[test]
+    fn one_value_wakes_one_blocked_receiver() {
+        const READERS: usize = 8;
+        let channel = open(1) as usize;
+        let readers: Vec<_> =
+            (0..READERS).map(|_| std::thread::spawn(move || take(channel as *mut u8))).collect();
+        until(|| blocked_and_woken(channel as *mut u8).0 == READERS);
+
+        assert!(unsafe { khora_channel_send(channel as *mut u8, 1) });
+        until(|| blocked_and_woken(channel as *mut u8).0 == READERS - 1);
+        // Long enough for every thread a broadcast would have woken to have
+        // run: they are runnable the moment the send returns.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let (_, woken) = blocked_and_woken(channel as *mut u8);
+
+        unsafe { khora_channel_close(channel as *mut u8) };
+        let got: Vec<_> = readers.into_iter().filter_map(|r| r.join().unwrap()).collect();
+        assert_eq!(got, [1]);
+        assert_eq!(woken, 1, "one value should wake one thread, not every thread waiting");
+        unsafe { khora_channel_release(channel as *mut u8) };
+    }
+
+    /// The other half of waking one: **nobody is left waiting for the
+    /// timeout.** Every value must reach a blocked thread by notification; a
+    /// wake that went to nobody would show here as a receiver released by its
+    /// `LOOK_AGAIN` timeout instead.
+    #[test]
+    fn every_value_reaches_a_blocked_receiver_by_notification() {
+        const READERS: usize = 8;
+        let channel = open(1) as usize;
+        let readers: Vec<_> =
+            (0..READERS).map(|_| std::thread::spawn(move || take(channel as *mut u8))).collect();
+        until(|| blocked_and_woken(channel as *mut u8).0 == READERS);
+
+        for value in 0..READERS as u64 {
+            assert!(unsafe { khora_channel_send(channel as *mut u8, value) });
+        }
+        let mut got: Vec<u64> = readers.into_iter().filter_map(|r| r.join().unwrap()).collect();
+        got.sort_unstable();
+        assert_eq!(got, (0..READERS as u64).collect::<Vec<_>>());
+        let (_, woken) = blocked_and_woken(channel as *mut u8);
+        assert!(woken >= READERS, "{woken} of {READERS} receivers were woken by a send");
+        unsafe { khora_channel_release(channel as *mut u8) };
+    }
+
+    /// The same for room: one receive wakes one blocked sender.
+    #[test]
+    fn one_receive_wakes_one_blocked_sender() {
+        const WRITERS: usize = 6;
+        let channel = open(1) as usize;
+        assert!(unsafe { khora_channel_send(channel as *mut u8, 100) });
+        let writers: Vec<_> = (0..WRITERS as u64)
+            .map(|w| std::thread::spawn(move || unsafe { khora_channel_send(channel as *mut u8, w) }))
+            .collect();
+        until(|| blocked_and_woken(channel as *mut u8).0 == WRITERS);
+
+        assert_eq!(take(channel as *mut u8), Some(100));
+        until(|| blocked_and_woken(channel as *mut u8).0 == WRITERS - 1);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let (_, woken) = blocked_and_woken(channel as *mut u8);
+        assert_eq!(woken, 1, "one slot of room should wake one sender");
+
+        for _ in 0..WRITERS {
+            assert!(take(channel as *mut u8).is_some());
+        }
+        for writer in writers {
+            assert!(writer.join().unwrap());
+        }
+        unsafe { khora_channel_release(channel as *mut u8) };
+    }
+
+    /// **A cancel racing a send does not strand a value.** Waking one thread
+    /// per value rests on the woken thread taking it. A cancelled receiver
+    /// may be the one notified, or may leave while another is; either way a
+    /// value must never sit queued while a live receiver stays blocked, which
+    /// only the `LOOK_AGAIN` timeout would rescue, 250 ms later.
+    ///
+    /// Each round blocks 8 cancellable receivers, sends 4 values and cancels
+    /// 0 to 2 of them, sometimes before the sends, sometimes during them, and
+    /// sometimes while the receivers are still parking. The oracle is read
+    /// 120 ms after the last send: under `LOOK_AGAIN`, so only a lost wake
+    /// can fail it, and it costs that long only when it fails.
+    #[test]
+    fn a_cancel_racing_a_send_strands_no_value() {
+        use crate::current::{enter, Fiber};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        const READERS: usize = 8;
+        const SENDS: u64 = 4;
+        const STALL: std::time::Duration = std::time::Duration::from_millis(120);
+        let mut stalls = Vec::new();
+        for round in 0..24usize {
+            let cancels = round % 3;
+            let channel = open(64) as usize;
+            let fibers: Vec<Arc<Fiber>> = (0..READERS).map(|_| Fiber::spawned()).collect();
+            let returned = Arc::new(AtomicUsize::new(0));
+            let readers: Vec<_> = fibers
+                .iter()
+                .map(|fiber| {
+                    let fiber = Arc::clone(fiber);
+                    let returned = Arc::clone(&returned);
+                    std::thread::spawn(move || {
+                        let _in = enter(fiber);
+                        let got = take(channel as *mut u8);
+                        returned.fetch_add(1, Ordering::SeqCst);
+                        got
+                    })
+                })
+                .collect();
+            // Three rounds in four wait until every receiver is blocked; the
+            // fourth races the park itself.
+            if round % 4 != 3 {
+                until(|| blocked_and_woken(channel as *mut u8).0 == READERS);
+            }
+            let cancel_first = round % 2 == 0;
+            if cancel_first {
+                (0..cancels).for_each(|victim| fibers[victim].cancel());
+            }
+            let sender = std::thread::spawn(move || {
+                for value in 0..SENDS {
+                    assert!(unsafe { khora_channel_send(channel as *mut u8, value) });
+                    std::thread::yield_now();
+                }
+            });
+            if !cancel_first {
+                (0..cancels).for_each(|victim| fibers[READERS - 1 - victim].cancel());
+            }
+            sender.join().unwrap();
+
+            let deadline = std::time::Instant::now() + STALL;
+            let depth = || unsafe { khora_channel_depth(channel as *mut u8) };
+            while depth() > 0
+                && returned.load(Ordering::SeqCst) < READERS
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::yield_now();
+            }
+            if depth() > 0 && returned.load(Ordering::SeqCst) < READERS {
+                stalls.push((round, depth(), returned.load(Ordering::SeqCst)));
+            }
+
+            unsafe { khora_channel_close(channel as *mut u8) };
+            let mut got: Vec<u64> = readers.into_iter().filter_map(|r| r.join().unwrap()).collect();
+            while let Some(left) = take(channel as *mut u8) {
+                got.push(left);
+            }
+            got.sort_unstable();
+            assert_eq!(got, (0..SENDS).collect::<Vec<_>>(), "round {round}: a value lost or doubled");
+            unsafe { khora_channel_release(channel as *mut u8) };
+        }
+        assert!(
+            stalls.is_empty(),
+            "a value stayed queued while a receiver was blocked (round, queued, returned): {stalls:?}"
+        );
     }
 
     #[test]

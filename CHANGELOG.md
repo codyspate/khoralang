@@ -195,6 +195,17 @@ cancellation point in every function, whatever the function's `raises` row;
 
 ### Changed
 
+- **A channel send woke every thread blocked on the channel.** On the
+  default thread backend every fiber is a thread, and all but one of the
+  woken threads found nothing and blocked again. A connection pool is a
+  channel, so with more requests than connections, each connection given
+  back woke every waiting request. A send wakes one blocked receiver and a
+  receive wakes one blocked sender; `close` still wakes everyone, and a
+  cancelled fiber is still woken at once. Measured on Linux x86-64, thread
+  backend, the TechEmpower single-query test (64 connections, a pool of
+  16): server CPU per request 368 -> 229 us, 1.6× the requests per second.
+  Fibers on the scheduler backend park differently and are unchanged.
+
 - **String literals and constructors with no fields are never reference
   counted.** Every fiber that touched `""` or `Option::None` wrote the same
   count, so on several cores those writes contended. They are immortal and
