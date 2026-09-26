@@ -785,7 +785,13 @@ mod tests {
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use std::sync::{Arc, Mutex};
 
+        // At least READS reads, and more until MOVES of them have changed
+        // worker. On a 3-core macOS runner 60 reads once all stayed on one
+        // worker, and the test proved nothing. DEADLINE bounds the wait for
+        // those moves; hitting it still fails the test below.
         const READS: usize = 60;
+        const MOVES: usize = 5;
+        const DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
         const POLLUTERS: usize = 6;
 
         let wakers: Arc<Mutex<Vec<Waker>>> = Arc::new(Mutex::new(Vec::new()));
@@ -841,7 +847,12 @@ mod tests {
                     wakers.lock().unwrap().push(waker);
                 }
                 let worker = || std::thread::current().id();
-                for _ in 0..READS {
+                let start = std::time::Instant::now();
+                let mut reads = 0;
+                while reads < READS
+                    || (moved.load(Ordering::SeqCst) < MOVES && start.elapsed() < DEADLINE)
+                {
+                    reads += 1;
                     let before = worker();
                     let mut byte = [0u8; 1];
                     // SAFETY: one writable byte.
@@ -859,8 +870,9 @@ mod tests {
 
         // One byte every few milliseconds, so each read waits long enough to
         // be woken spuriously many times.
+        let writer_stop = stop.clone();
         let writer = std::thread::spawn(move || {
-            for _ in 0..READS {
+            while !writer_stop.load(Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_millis(5));
                 if peer.write_all(b"x").is_err() {
                     break;
@@ -877,11 +889,11 @@ mod tests {
         let (failed, moved) = (failed.load(Ordering::SeqCst), moved.load(Ordering::SeqCst));
         assert!(
             moved > 0,
-            "no read changed worker in {READS}, so this proves nothing about errno"
+            "no read changed worker in {DEADLINE:?}, so this proves nothing about errno"
         );
         assert_eq!(
             failed, 0,
-            "{failed} of {READS} reads of a live stream failed ({moved} changed worker)"
+            "{failed} reads of a live stream failed ({moved} changed worker)"
         );
     }
 }
