@@ -795,11 +795,7 @@ fn check_one(paths: &[PathBuf]) -> Result<bool> {
             continue;
         }
 
-        for finding in khora_lint::findings(&db, *input) {
-            let level = levels.get(finding.lint).copied().unwrap_or_else(|| khora_lint::default_level(finding.lint));
-            if level == LintLevel::Allow {
-                continue;
-            }
+        for (finding, level) in khora_lint::reported(&db, *input, &levels) {
             let error = khora_hir::HirError {
                 message: format!("{} [{}]", finding.message, finding.lint),
                 range: finding.range,
@@ -847,8 +843,14 @@ fn check_one(paths: &[PathBuf]) -> Result<bool> {
 /// warns rather than erroring.
 ///
 /// **A manifest that does not load is fatal here**, which is a different thing
-/// from a warning: see [`manifest_governing`].
+/// from a warning: see [`manifest_governing`]. So is a lint policy that cannot
+/// be resolved -- a group file that is wrong, a group written as a string, a
+/// lint's table with no `level` -- checked here so that `build`, `run`, `test`
+/// and `bench` refuse it as `check` does. The manifest crate accepts all three,
+/// because only `khora-lint` knows which names are groups; without this the
+/// same `khora.toml` would stop `check` and build cleanly.
 fn report_manifest_warnings(start: Option<&Path>) -> Result<()> {
+    lint_levels(start)?;
     let Some((manifest_path, parsed)) = manifest_governing(start)? else { return Ok(()) };
     for warning in &parsed.warnings {
         eprintln!("warning: {}: {warning}", manifest_path.display());
@@ -901,19 +903,17 @@ fn fmt_options(start: Option<&Path>) -> Result<khora_fmt::Options> {
     })
 }
 
-/// How loud each lint is, from the `[lints]` table nearest `start`.
+/// How loud each lint is, from the `[lints]` table nearest `start` and the
+/// lint groups it can see.
 ///
-/// A lint the manifest does not mention takes `khora_lint::default_level`,
-/// and a manifest that cannot be read is an error: see
-/// [`manifest_governing`].
-fn lint_levels(start: Option<&Path>) -> Result<std::collections::BTreeMap<String, LintLevel>> {
-    let mut out = std::collections::BTreeMap::new();
-    let Some((_, parsed)) = manifest_governing(start)? else { return Ok(out) };
-
-    for (name, lint) in &parsed.manifest.lints {
-        out.insert(name.clone(), lint.level);
-    }
-    Ok(out)
+/// A manifest that cannot be read is an error, see [`manifest_governing`], and
+/// so is a group file that cannot be used or a `[lints]` entry that misuses
+/// one: the same silent direction, a policy replaced by the defaults.
+fn lint_levels(start: Option<&Path>) -> Result<khora_lint::Levels> {
+    let built_in = khora_lint::groups::built_in(khora_db::standard_library().as_deref())?;
+    let governing = manifest_governing(start)?;
+    let manifest = governing.as_ref().map(|(path, parsed)| (&parsed.manifest, path.as_path()));
+    Ok(khora_lint::Levels::new(manifest, built_in)?)
 }
 
 /// Complains about a `[lints]` entry that names no lint.
@@ -930,21 +930,21 @@ fn lint_levels(start: Option<&Path>) -> Result<std::collections::BTreeMap<String
 /// toolchain reading it, and refusing to check a package because a future
 /// release added a lint would make the toolchain pin harder to move than it
 /// needs to be.
-fn warn_about_unknown_lints(levels: &std::collections::BTreeMap<String, LintLevel>) {
-    let unknown: Vec<&str> = levels
-        .keys()
-        .map(String::as_str)
-        .filter(|name| !khora_lint::LINTS.contains(name))
-        .collect();
+fn warn_about_unknown_lints(levels: &khora_lint::Levels) {
+    let unknown = levels.unknown();
     if unknown.is_empty() {
         return;
     }
-    for name in &unknown {
-        eprintln!("warning: `{name}` in `[lints]` is not a lint, so it does nothing");
+    for name in unknown {
+        eprintln!("warning: `{name}` in `[lints]` is not a lint or a lint group, so it does nothing");
     }
     // Named once at the end rather than once per typo: the list is the same
     // twelve names either way and repeating it is what makes a warning noise.
     eprintln!("note: the lints are {}", khora_lint::LINTS.join(", "));
+    let groups: Vec<&str> = levels.group_names().collect();
+    if !groups.is_empty() {
+        eprintln!("note: the lint groups are {}", groups.join(", "));
+    }
     eprintln!();
 }
 

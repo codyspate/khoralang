@@ -136,8 +136,8 @@ pub struct Server {
     lines: HashMap<Url, LineIndex>,
     /// How this client counts a character offset.
     encoding: Encoding,
-    /// How loud each lint is, from the workspace's manifest.
-    levels: HashMap<String, LintLevel>,
+    /// How loud each lint is, from the workspace's manifest and lint groups.
+    levels: khora_lint::Levels,
     /// The `[fmt]` settings, so that format-on-save and `khora fmt` agree.
     ///
     /// A formatter that gives one answer in the editor and another on the
@@ -188,7 +188,7 @@ impl Default for Server {
             files: HashMap::new(),
             lines: HashMap::new(),
             encoding: Encoding::default(),
-            levels: HashMap::new(),
+            levels: khora_lint::Levels::default(),
             fmt: khora_fmt::Options::default(),
             notice: None,
             manifest_error: None,
@@ -548,13 +548,13 @@ impl Server {
         }
         SourceRoot::new(&self.db, files);
         let manifest = root.join("khora.toml");
-        match khora_manifest::Manifest::load(&manifest) {
+        let loaded = match khora_manifest::Manifest::load(&manifest) {
             Ok(parsed) => {
-                self.levels = lint_levels(&parsed);
                 self.fmt = fmt_options(&parsed);
+                Some(parsed)
             }
             // No manifest is a scratch directory, and entitled to the defaults.
-            Err(_) if !manifest.is_file() => {}
+            Err(_) if !manifest.is_file() => None,
             Err(why) => {
                 // `1` is Error: every lint level and `[fmt]` setting in the
                 // file is being ignored, which is not a detail.
@@ -562,10 +562,29 @@ impl Server {
                     1,
                     format!(
                         "{why}\n\nUntil it is fixed, every `[lints]` and `[fmt]` setting in it \
-                         is ignored, and each lint takes its default level."
+                         is ignored, and each lint takes its default level. Fix it and \
+                         restart the language server: the settings are read when it starts."
                     ),
                 ));
                 self.manifest_error = manifest_diagnostic(&manifest, &why, self.encoding);
+                None
+            }
+        };
+        // The groups are read even without a manifest: a broken built-in
+        // group file is the toolchain's mistake and every project should hear
+        // of it, the way `khora check` refuses to run.
+        match lint_levels(loaded.as_ref().map(|parsed| (&parsed.manifest, manifest.as_path()))) {
+            Ok(levels) => self.levels = levels,
+            Err(why) => {
+                self.notice = Some((
+                    1,
+                    format!(
+                        "{why}\n\nUntil it is fixed, every `[lints]` setting is ignored, and \
+                         each lint takes its default level. Fix it and restart the language \
+                         server: the lint settings are read when it starts."
+                    ),
+                ));
+                self.manifest_error = group_diagnostic(&why);
             }
         }
     }
@@ -926,11 +945,7 @@ impl Server {
             return out;
         }
 
-        for finding in khora_lint::findings(&self.db, file) {
-            let level = self.levels.get(finding.lint).copied().unwrap_or_else(|| khora_lint::default_level(finding.lint));
-            if level == LintLevel::Allow {
-                continue;
-            }
+        for (finding, level) in khora_lint::reported(&self.db, file, &self.levels) {
             out.push(Diagnostic {
                 range: index.range(finding.range, self.encoding),
                 severity: Some(match level {
@@ -1823,13 +1838,12 @@ fn fmt_options(parsed: &khora_manifest::Parsed) -> khora_fmt::Options {
     }
 }
 
-/// The `[lints]` levels in a loaded manifest.
-fn lint_levels(parsed: &khora_manifest::Parsed) -> HashMap<String, LintLevel> {
-    let mut out = HashMap::new();
-    for (name, lint) in &parsed.manifest.lints {
-        out.insert(name.clone(), lint.level);
-    }
-    out
+/// The lint levels for a loaded manifest, or for none.
+fn lint_levels(
+    manifest: Option<(&khora_manifest::Manifest, &Path)>,
+) -> Result<khora_lint::Levels, khora_lint::groups::GroupError> {
+    let built_in = khora_lint::groups::built_in(khora_db::standard_library().as_deref())?;
+    khora_lint::Levels::new(manifest, built_in)
 }
 
 /// A manifest's load failure as an error diagnostic on the manifest, at the
@@ -1858,6 +1872,32 @@ fn manifest_diagnostic(
             message: why.message().to_string(),
             ..Diagnostic::default()
         },
+    ))
+}
+
+/// A lint-group error as a diagnostic on the file it is in.
+///
+/// On the line `toml` reported when the file did not parse; otherwise on the
+/// first line, because a group error found after parsing comes from tables
+/// that keep no spans. The message names the key, which is the cost -- one
+/// search in a file that is usually a dozen lines.
+fn group_diagnostic(why: &khora_lint::groups::GroupError) -> Option<(Url, Diagnostic)> {
+    let url = Url::from_file_path(&why.file).ok()?;
+    let range = match why.position {
+        Some((line, _)) => {
+            let at = lsp_types::Position { line: line.saturating_sub(1) as u32, character: 0 };
+            lsp_types::Range { start: at, end: at }
+        }
+        None => lsp_types::Range::default(),
+    };
+    let message = if why.key.is_empty() {
+        why.message.clone()
+    } else {
+        format!("`{}`: {}", why.key, why.message)
+    };
+    Some((
+        url,
+        Diagnostic { range, severity: Some(DiagnosticSeverity::ERROR), message, ..Diagnostic::default() },
     ))
 }
 

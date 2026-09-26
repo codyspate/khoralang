@@ -11,6 +11,7 @@ use serde::{Deserialize, Deserializer};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::Deref;
+use std::path::PathBuf;
 
 use crate::error::ManifestError;
 use crate::inherit::{Maybe, Resolved};
@@ -43,6 +44,14 @@ pub struct Manifest {
     pub fmt: Option<Fmt>,
     /// Lint configuration, keyed by lint name.
     pub lints: Lints,
+    /// `[lint-groups]`: this project's own lint groups, name to group file.
+    ///
+    /// A path written here is relative to this manifest. One taken from
+    /// `[workspace.lint-groups]` along with `lints.workspace = true` is made
+    /// absolute against the root when the manifest is loaded from disk, so a
+    /// reader joins every entry onto this manifest's directory and gets the
+    /// right file either way.
+    pub lint_groups: BTreeMap<String, PathBuf>,
     /// Dependencies, keyed by module path such as `std.effect`.
     pub dependencies: BTreeMap<String, Dependency>,
     /// Which compiler this project expects.
@@ -66,6 +75,8 @@ pub(crate) struct RawManifest {
     pub(crate) fmt: Option<Fmt>,
     #[serde(default)]
     pub(crate) lints: Lints,
+    #[serde(default, rename = "lint-groups")]
+    pub(crate) lint_groups: BTreeMap<String, PathBuf>,
     #[serde(default)]
     pub(crate) dependencies: BTreeMap<String, Dependency>,
     #[serde(default)]
@@ -300,7 +311,7 @@ impl RawManifest {
             other => other,
         };
 
-        let lints = if self.lints.workspace {
+        let (lints, lint_groups) = if self.lints.workspace {
             if !self.lints.entries.is_empty() {
                 return Err(ManifestError::invalid_value(
                     "lints",
@@ -309,7 +320,19 @@ impl RawManifest {
                         .to_string(),
                 ));
             }
-            match root.map(|table| table.lints.clone()) {
+            // The groups go with the lints that switch them on. A member's own
+            // `[lint-groups]` could only be named from its own `[lints]`, which
+            // it just gave up, so it would configure nothing.
+            if !self.lint_groups.is_empty() {
+                return Err(ManifestError::invalid_value(
+                    "lint-groups",
+                    "`lints.workspace = true` takes `[workspace.lint-groups]` with the lints, \
+                     so nothing could switch these groups on. Declare them in the root \
+                     manifest's `[workspace.lint-groups]`"
+                        .to_string(),
+                ));
+            }
+            match root.map(|table| (table.lints.clone(), table.lint_groups.clone())) {
                 Some(inherited) => inherited,
                 None => {
                     return Err(inheritance_error(
@@ -320,7 +343,7 @@ impl RawManifest {
                 }
             }
         } else {
-            self.lints
+            (self.lints, self.lint_groups)
         };
 
         Ok(Manifest {
@@ -329,6 +352,7 @@ impl RawManifest {
             permissions,
             fmt,
             lints,
+            lint_groups,
             dependencies: self.dependencies,
             toolchain: match self.toolchain {
                 Some(toolchain) => {
@@ -411,6 +435,13 @@ pub struct Workspace {
     /// `[workspace.lints]`, for a member writing `workspace = true`.
     #[serde(default)]
     pub lints: Lints,
+    /// `[workspace.lint-groups]`: the group files `[workspace.lints]` may
+    /// switch on, relative to the root.
+    ///
+    /// Taken along with the lints by a member that inherits them. Without it
+    /// a root could enable a group its members have no file for.
+    #[serde(default, rename = "lint-groups")]
+    pub lint_groups: BTreeMap<String, PathBuf>,
     /// `[workspace.policy]`: a cap on what any member may ask for.
     pub policy: Option<Policy>,
 }
@@ -1059,12 +1090,24 @@ impl<'de> Visitor<'de> for LintsVisitor {
 ///
 /// Written either as a bare level (`unused-capabilities = "deny"`) or as a table
 /// carrying the level plus knobs the lint itself defines
-/// (`cyclomatic-complexity = { level = "warn", max = 15 }`). Both collapse to
-/// this one type so callers never have to branch on which spelling was used.
+/// (`cyclomatic-complexity = { level = "warn", max = 15 }`).
+///
+/// **The same key can name a lint group**, and a group is always a table whose
+/// `level` is optional (`[lints.idiomatic]` alone switches it on). This crate
+/// cannot tell the two apart: the groups are files found beside `std` or named
+/// under `[lint-groups]`, and reading them is `khora-lint`'s job. So `level` is
+/// optional here, [`Lint::bare`] records which spelling was used, and
+/// `khora_lint` refuses a lint table with no `level` and a group written as a
+/// bare string. Checking either here would mean guessing which one the key is.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Lint {
-    /// How loud the lint is.
-    pub level: LintLevel,
+    /// How loud the lint is, or every member of the group, when written.
+    pub level: Option<LintLevel>,
+    /// Whether this was the bare-string form, `name = "warn"`.
+    ///
+    /// A group refuses it and a lint accepts it, so the difference has to
+    /// survive parsing.
+    pub bare: bool,
     /// Everything in the table other than `level`.
     ///
     /// Deliberately untyped and unvalidated: the set of knobs belongs to
@@ -1076,7 +1119,7 @@ pub struct Lint {
 impl Lint {
     /// A lint set to `level` with no options, as the bare-string form produces.
     pub fn new(level: LintLevel) -> Lint {
-        Lint { level, options: BTreeMap::new() }
+        Lint { level: Some(level), bare: true, options: BTreeMap::new() }
     }
 
     /// Looks up one lint-defined option, such as `max`.
@@ -1122,7 +1165,7 @@ impl<'de> Visitor<'de> for LintVisitor {
                 options.insert(key, map.next_value::<toml::Value>()?);
             }
         }
-        Ok(Lint { level: level.ok_or_else(|| de::Error::missing_field("level"))?, options })
+        Ok(Lint { level, bare: false, options })
     }
 }
 

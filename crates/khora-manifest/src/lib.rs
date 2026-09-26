@@ -28,7 +28,7 @@
 //! .expect("a well-formed manifest");
 //!
 //! assert!(parsed.warnings.is_empty());
-//! assert_eq!(parsed.manifest.lints["unused-capabilities"].level, LintLevel::Deny);
+//! assert_eq!(parsed.manifest.lints["unused-capabilities"].level, Some(LintLevel::Deny));
 //! ```
 //!
 //! Positions survive parsing, so a driver can report against the source:
@@ -197,7 +197,15 @@ impl Manifest {
         };
 
         let table = root.as_ref().map(|found| &found.table);
-        let parsed = Manifest::finish(raw, table, text)?;
+        let inherits_lints = raw.lints.workspace;
+        let mut parsed = Manifest::finish(raw, table, text)?;
+        // Inherited group files are relative to the root that named them, and
+        // a reader resolves against the member. Absolute is right for both.
+        if let (true, Some(found)) = (inherits_lints, &root) {
+            for file in parsed.manifest.lint_groups.values_mut() {
+                *file = found.directory.join(&*file);
+            }
+        }
         if let (Policing::Enforced, Some(found), Some(policy)) =
             (policing, &root, table.and_then(|table| table.policy.as_ref()))
         {

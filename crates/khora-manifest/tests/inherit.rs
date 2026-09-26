@@ -149,8 +149,8 @@ fn a_member_takes_the_lints_whole() {
     );
 
     let lints = Manifest::load(&manifest).expect("it loads").manifest.lints;
-    assert_eq!(lints["unused-capabilities"].level, LintLevel::Deny);
-    assert_eq!(lints["cyclomatic-complexity"].level, LintLevel::Warn);
+    assert_eq!(lints["unused-capabilities"].level, Some(LintLevel::Deny));
+    assert_eq!(lints["cyclomatic-complexity"].level, Some(LintLevel::Warn));
 }
 
 #[test]

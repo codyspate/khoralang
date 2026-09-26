@@ -1,0 +1,11 @@
+# The `idiomatic` lint group: one way to write Khora.
+#
+# Switched on in a project's khora.toml with `[lints.idiomatic]`. Each lint
+# below runs at the level written beside it; `level = "..."` in that table
+# sets all of them at once.
+
+[group]
+name = "idiomatic"
+description = "One way to write Khora."
+
+[group.lints]

@@ -125,6 +125,20 @@ cancellation point in every function, whatever the function's `raises` row;
 - **Glob imports are removed.** `import a::b::*;` is a syntax error. Name
   what the file uses: `import a::b::{X, Y};`.
 
+- **Three `khora.toml` shapes that 0.3.0 warned about and ran are refused**,
+  because lint groups give them a meaning. Each stops `check`, `build`,
+  `run`, `test` and `bench`, naming the file and the key:
+  - a lint group written as a string, `idiomatic = "warn"` under `[lints]`.
+    A group is always a table: write `[lints.idiomatic]`, with
+    `level = "warn"` under it if you want one level for every lint in it;
+  - a group named for a package, `"acme::strict"`, as a string or as a
+    table under `[lints]`. Groups published in packages are not yet
+    supported: copy the group file into the project and declare it under
+    `[lint-groups]`;
+  - a `[lint-groups]` entry whose file is missing or does not parse. 0.3.0
+    ignored the whole table as an unrecognized key. Point the entry at the
+    group file, or delete it.
+
 ### Fixed
 
 - **A `postgres` query could return another caller's rows.** When a read
@@ -331,6 +345,20 @@ cancellation point in every function, whatever the function's `raises` row;
 - **`Fiber::cancel_within(handle, millis)`** cancels now and aborts the fiber
   if it is still running after `millis` milliseconds. There is no built-in
   deadline: the caller always chooses the number.
+- **Lint groups.** A group is a TOML file naming built-in lints and the
+  level each runs at when the group is on. `[lints.<group>]` in `khora.toml`
+  switches a group on, and an optional `level` sets every lint in it. A lint's
+  own `[lints]` entry beats the group, whatever order the tables are in. One
+  group's `level` also decides a lint that another enabled group holds, and
+  two enabled groups that disagree at the same step are an error naming
+  both. The toolchain ships `idiomatic`, which holds no lints in this
+  release. A project declares its own groups by path under `[lint-groups]`,
+  and a workspace member with `lints.workspace = true` takes the root's
+  `[workspace.lint-groups]` with its lints. A group file that is missing, does
+  not parse or names something that is not a lint stops `check` and `build`
+  with the file and the key. The editor applies groups at the same levels.
+  `// @klint allow <group>` is reported by `unknown-allow` as naming a group,
+  with the group's lints listed.
 
 ### Documentation
 

@@ -75,7 +75,7 @@ fn the_reference_manifest_parses_with_no_warnings() {
         ["unused-capability"],
         "a `[lints]` entry lands in the map under the name as written"
     );
-    assert_eq!(manifest.lints["unused-capability"].level, LintLevel::Deny);
+    assert_eq!(manifest.lints["unused-capability"].level, Some(LintLevel::Deny));
 
     // `std` is found beside the compiler rather than declared. `ai` is
     // declared, because it stopped being `std::ai` -- `docs/design/std-surface.md`.
@@ -194,12 +194,15 @@ fn lints_accept_a_bare_level_or_a_table() {
     );
 
     let lints = parsed.manifest.lints;
-    assert_eq!(lints["bare"].level, LintLevel::Warn);
+    assert_eq!(lints["bare"].level, Some(LintLevel::Warn));
     assert!(lints["bare"].options.is_empty(), "the bare form carries no options");
     assert_eq!(
-        lints["levelled"], lints["bare"],
+        (lints["levelled"].level, &lints["levelled"].options),
+        (lints["bare"].level, &lints["bare"].options),
         "both spellings of the same level should produce the same lint"
     );
+    // The one difference kept: a lint group refuses the bare form.
+    assert!(lints["bare"].bare && !lints["levelled"].bare);
 
     let options = &lints["with-options"].options;
     assert_eq!(options.len(), 2, "everything except `level` is an option: {options:?}");
@@ -241,17 +244,15 @@ fn every_lint_level_round_trips() {
     assert_eq!(LintLevel::from_name("forbid"), None, "only three levels are specified");
 }
 
+/// A table with no `level` parses: it is how a lint group is switched on, and
+/// only `khora-lint` knows which names are groups. That crate refuses a
+/// *lint* table with no level.
 #[test]
-fn a_lint_table_must_say_which_level() {
-    let error = parse_error(
+fn a_lint_table_without_a_level_is_left_for_the_lint_crate() {
+    let parsed = parse(
         "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[lints]\ncomplexity = { max = 15 }\n",
     );
-
-    assert!(
-        error.message().contains("level"),
-        "the error should name the missing field, got `{}`",
-        error.message()
-    );
+    assert_eq!(parsed.manifest.lints["complexity"].level, None);
 }
 
 #[test]

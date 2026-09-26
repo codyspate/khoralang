@@ -691,6 +691,7 @@ dependencies = [
  "khora-types",
  "salsa",
  "text-size",
+ "toml",
 ]
 
 [[package]]

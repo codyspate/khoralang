@@ -276,6 +276,72 @@ fn the_manifest_decides_how_loud_a_lint_is() {
     assert!(last_diagnostics(&replies).is_empty(), "`allow` should be silent: {replies:?}");
 }
 
+/// **A lint group switched on in the manifest governs the editor as it does
+/// the build.** A server with its own `levels.get(..)` and no idea groups
+/// exist leaves a group's `deny` a warning in the editor, and a group's
+/// `allow` still showing. This pins the editor's side of
+/// `khora_lint::reported`.
+#[test]
+fn a_lint_group_decides_how_loud_a_lint_is_in_the_editor() {
+    let group = "[group]\nname = \"strict\"\ndescription = \"t\"\n\n[group.lints]\ndangling-expression = \"deny\"\n";
+    for (lints, severity) in [("[lints.strict]\n", Some(1)), ("[lints.strict]\nlevel = \"allow\"\n", None)] {
+        let w = workspace(&[
+            (
+                "khora.toml",
+                &format!(
+                    "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[lint-groups]\nstrict = \"strict.toml\"\n\n{lints}"
+                ),
+            ),
+            ("strict.toml", group),
+            ("src/main.kh", "module app::main;\n"),
+        ]);
+        let path = w.root.join("src/main.kh");
+        let replies = session(&[
+            initialize(&w.root),
+            did_open(&path, "module app::main;\nfn f(x: Int) -> Int { x + 1; x }\n"),
+            exit(),
+        ]);
+        let found = last_diagnostics(&replies);
+        match severity {
+            Some(severity) => {
+                assert_eq!(found.len(), 1, "{lints}: {found:?}");
+                assert_eq!(found[0].get("severity"), Some(&json!(severity)), "{lints}: {found:?}");
+            }
+            None => assert!(found.is_empty(), "{lints}: `allow` should be silent: {found:?}"),
+        }
+    }
+}
+
+/// A group file the server cannot use is an error on that file, the way a
+/// manifest that does not load is.
+#[test]
+fn a_lint_group_that_cannot_be_used_is_an_error_in_the_editor() {
+    let w = workspace(&[
+        (
+            "khora.toml",
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[lint-groups]\nstrict = \"strict.toml\"\n\n[lints.strict]\n",
+        ),
+        ("strict.toml", "[group]\nname = \"strict\"\n\n[group.lints]\nno-such-lint = \"deny\"\n"),
+        ("src/main.kh", "module app::main;\n"),
+    ]);
+    let replies = session(&[initialize(&w.root), exit()]);
+    let told = replies
+        .iter()
+        .find(|reply| reply.get("method").and_then(Value::as_str) == Some("window/showMessage"))
+        .expect("the reader should be told");
+    let text = told.pointer("/params/message").and_then(Value::as_str).expect("a message");
+    assert!(text.contains("no-such-lint") && text.contains("strict.toml"), "{text}");
+    // Levels are read at `initialize`, so fixing the file is not enough.
+    assert!(text.contains("restart the language server"), "{text}");
+    assert_eq!(told.pointer("/params/type").and_then(Value::as_i64), Some(1), "{told}");
+    let file = url::Url::from_file_path(w.root.join("strict.toml")).expect("a URL").to_string();
+    assert!(
+        replies.iter().any(|r| r.get("method").and_then(Value::as_str) == Some("textDocument/publishDiagnostics")
+            && r.pointer("/params/uri").and_then(Value::as_str) == Some(file.as_str())),
+        "a diagnostic on the group file: {replies:?}"
+    );
+}
+
 /// **A manifest the server cannot read is an error the reader sees, not a
 /// policy quietly replaced by the defaults.**
 ///
@@ -308,6 +374,8 @@ fn a_manifest_that_does_not_load_is_an_error_in_the_editor() {
         .expect("the reader should be told");
     let text = told.pointer("/params/message").and_then(Value::as_str).expect("a message");
     assert!(text.contains("loud"), "it says what is wrong: {text}");
+    // Levels are read at `initialize`, so fixing the file is not enough.
+    assert!(text.contains("restart the language server"), "{text}");
     // `1` is Error in `MessageType`.
     assert_eq!(told.pointer("/params/type").and_then(Value::as_i64), Some(1), "{told}");
 

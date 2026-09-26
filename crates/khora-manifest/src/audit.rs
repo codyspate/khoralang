@@ -66,6 +66,7 @@ static ROOT: Schema = Schema::Fields(&[
     ("permissions", &PERMISSIONS),
     ("fmt", &FMT),
     ("lints", &LINTS),
+    ("lint-groups", &LINT_GROUPS),
     ("dependencies", &DEPENDENCIES),
     ("build", &BUILD),
     ("tasks", &TASKS),
@@ -79,6 +80,7 @@ static WORKSPACE: Schema = Schema::Fields(&[
     ("permissions", &PERMISSIONS),
     ("fmt", &FMT),
     ("lints", &LINTS),
+    ("lint-groups", &LINT_GROUPS),
     ("policy", &POLICY),
 ]);
 
@@ -159,6 +161,9 @@ static SEMICOLONS: Schema = Schema::Removed(
 // Open on purpose: a lint's options are declared by the lint, not by the
 // manifest format, so `max = 15` must not read as a mistake.
 static LINTS: Schema = Schema::Map(&OPEN);
+
+// Group name to file path; the names are the project's.
+static LINT_GROUPS: Schema = Schema::Map(&OPEN);
 
 static DEPENDENCIES: Schema = Schema::Map(&DEPENDENCY);
 static DEPENDENCY: Schema = Schema::Fields(&[

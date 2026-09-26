@@ -98,6 +98,7 @@ version = "0.3.0"
 | `package` | Values members may inherit — `version`, `authors`, `publish`. |
 | `permissions` | A grants table members may take whole. |
 | `fmt`, `lints` | Shared formatting and lint settings. |
+| `lint-groups` | Lint group files, for `lints` to switch on. See [`[lint-groups]`](#lint-groups--this-projects-own-lint-groups). |
 | `policy` | A cap on what any member may grant. See below. |
 
 A root does not have to declare a package, and forcing it to would mean inventing a name for something that does not exist — a name that then turns up in error messages.
@@ -277,7 +278,24 @@ undocumented-export = "deny"
 unused-import = "allow"
 ```
 
-Each key is a lint name and each value is `allow`, `warn` or `deny`. The names are in [Lints](/docs/reference/lints/). `workspace = true` takes the root's table whole.
+Each key is a lint name or a lint group, and a lint's value is `allow`, `warn` or `deny`. A group is always a table, `[lints.<group>]`, with an optional `level`. The names, and how groups combine with lints, are in [Lints](/docs/reference/lints/). `workspace = true` takes the root's table whole, together with the root's `[workspace.lint-groups]`.
+
+`[lints]` and `[lint-groups]` are read by `khora check`, `build`, `run`, `test` and `bench`, and by the language server. `khora fmt` and `khora doc` do not read them, so a lint setting that stops `check` does not stop those two.
+
+## `[lint-groups]` — this project's own lint groups
+
+```toml
+[lint-groups]
+strict = "lints/strict.toml"
+
+[lints.strict]
+```
+
+Each key is a group name and each value is the path of the group's file, relative to this manifest. Declaring a group does not switch it on; the `[lints.strict]` table does. The file's format is under [Groups](/docs/reference/lints/#groups).
+
+A name here cannot be a lint's name or a built-in group's name, and cannot contain `::`. A file that is missing, does not parse or names a lint that does not exist is an error naming the file and the key, and `khora check` and `khora build` stop until it is fixed.
+
+In a workspace root the table is `[workspace.lint-groups]`, with paths relative to the root. A member with `lints.workspace = true` takes it along with `[workspace.lints]`, and a `[lint-groups]` table of its own beside that flag is an error.
 
 ## `[build]` — what to produce
 

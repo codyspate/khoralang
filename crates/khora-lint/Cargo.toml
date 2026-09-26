@@ -18,3 +18,6 @@ khora-types.workspace = true
 khora-manifest.workspace = true
 salsa.workspace = true
 text-size.workspace = true
+# Group files. The manifest crate parses `khora.toml`; a group file is this
+# crate's format, because only this crate knows what a lint is.
+toml.workspace = true

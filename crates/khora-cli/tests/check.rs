@@ -1435,6 +1435,106 @@ fn denying(rest: &str) -> String {
     format!("{MANIFEST}\n[lints]\nunused-import = \"deny\"\n{rest}")
 }
 
+/// A group file holding `unused-import` at `level`.
+fn group_holding_unused_import(name: &str, level: &str) -> String {
+    format!("[group]\nname = \"{name}\"\ndescription = \"t\"\n\n[group.lints]\nunused-import = \"{level}\"\n")
+}
+
+/// **A lint group decides what `khora check` fails on.** Declared by path,
+/// switched on by its table, and each member at the level its file gives it
+/// -- the path from the manifest through the resolver to the exit code, which
+/// the resolver's own tests cannot see.
+#[test]
+fn a_lint_group_decides_what_check_fails_on() {
+    let manifest = |lints: &str| {
+        format!("{MANIFEST}\n[lint-groups]\nstrict = \"lints/strict.toml\"\n\n{lints}")
+    };
+    let group = group_holding_unused_import("strict", "deny");
+    for (name, lints, fails) in [
+        ("group_off", "", false),
+        ("group_on", "[lints.strict]\n", true),
+        ("group_allow", "[lints.strict]\nlevel = \"allow\"\n", false),
+        ("group_entry_wins", "[lints]\nunused-import = \"warn\"\n\n[lints.strict]\n", false),
+    ] {
+        let (ok, output) = command_on_package(
+            name,
+            "check",
+            &[
+                ("khora.toml", &manifest(lints)),
+                ("lints/strict.toml", &group),
+                ("src/main.kh", UNUSED_IMPORT),
+            ],
+        );
+        assert_eq!(!ok, fails, "{name}:\n{output}");
+    }
+}
+
+/// A `[lints]` misuse of a group fails the check, naming the file and key,
+/// rather than being read as an unknown lint and warned about.
+#[test]
+fn a_lint_group_written_as_a_string_fails_check() {
+    let (ok, output) = command_on_package(
+        "group_string_form",
+        "check",
+        &[
+            (
+                "khora.toml",
+                &format!("{MANIFEST}\n[lint-groups]\nstrict = \"strict.toml\"\n\n[lints]\nstrict = \"deny\"\n"),
+            ),
+            ("strict.toml", &group_holding_unused_import("strict", "deny")),
+            ("src/main.kh", UNUSED_IMPORT),
+        ],
+    );
+    assert!(!ok, "{output}");
+    assert!(output.contains("khora.toml") && output.contains("lints.strict"), "{output}");
+    assert!(output.contains("[lints.strict]"), "it shows the table form: {output}");
+}
+
+/// **`[workspace.lints]` carries its groups to the members.** A root that
+/// switches a group on and declares it under `[workspace.lint-groups]` governs
+/// a member with `lints.workspace = true`, with the group file found relative
+/// to the root, not the member.
+#[test]
+fn a_member_inherits_the_workspace_lint_groups() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("inherited_lint_groups");
+    let _ = std::fs::remove_dir_all(&root);
+    let member = root.join("packages").join("alpha");
+    std::fs::create_dir_all(member.join("src")).expect("a member directory");
+    std::fs::create_dir_all(root.join("lints")).expect("a lints directory");
+    std::fs::write(
+        root.join("khora.toml"),
+        format!(
+            "[workspace]\nmembers = [\"packages/*\"]\n\n\
+             [workspace.lint-groups]\nstrict = \"lints/strict.toml\"\n\n\
+             [workspace.lints.strict]\n\n\
+             [toolchain]\nversion = \"{}\"\n",
+            khora_toolchain::RUNNING,
+        ),
+    )
+    .expect("a workspace root");
+    std::fs::write(root.join("lints/strict.toml"), group_holding_unused_import("strict", "deny"))
+        .expect("a group file");
+    std::fs::write(
+        member.join("khora.toml"),
+        "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\n\n[lints]\nworkspace = true\n",
+    )
+    .expect("a member manifest");
+    std::fs::write(
+        member.join("src").join("main.kh"),
+        "module alpha::main;\nimport std::core::{List, print};\n\npub fn main() -> Int {\n  print(\"hi\");\n  0\n}\n",
+    )
+    .expect("a member source file");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_khora"))
+        .arg("check")
+        .arg(&member)
+        .output()
+        .expect("could not run `khora`");
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(!out.status.success(), "the inherited group denies the unused import:\n{text}");
+    assert!(text.contains("[unused-import]"), "{text}");
+}
+
 /// **A `[lints]` table the manifest reader refuses does not turn `deny` into
 /// `warn`.**
 ///
@@ -1504,4 +1604,61 @@ fn a_manifest_that_does_not_load_fails_build() {
     );
     assert!(!ok, "{output}");
     assert!(output.contains("loud"), "{output}");
+}
+
+/// **A built-in group file that is broken stops `khora check`**, even in a
+/// project that never switches the group on, and names the file. A toolchain
+/// that skipped it would ship a group that is silently empty.
+///
+/// The fixture toolchain is a copy of this tree's `std` with one malformed
+/// file added to `lints/`, reached through `KHORA_STD`.
+#[test]
+fn a_broken_built_in_group_file_fails_check() {
+    fn copy(from: &std::path::Path, to: &std::path::Path) {
+        std::fs::create_dir_all(to).expect("a directory");
+        for entry in std::fs::read_dir(from).expect("reading std").flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                copy(&path, &to.join(entry.file_name()));
+            } else {
+                std::fs::copy(&path, to.join(entry.file_name())).expect("copying std");
+            }
+        }
+    }
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("broken_built_in_group");
+    let _ = std::fs::remove_dir_all(&root);
+    let std_dir = root.join("std");
+    copy(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../std"), &std_dir);
+    std::fs::write(std_dir.join("lints/broken.toml"), "[group\nname = ").expect("a broken group file");
+    let package = root.join("app");
+    std::fs::create_dir_all(package.join("src")).expect("a package");
+    std::fs::write(package.join("khora.toml"), MANIFEST).expect("a manifest");
+    std::fs::write(package.join("src/main.kh"), UNUSED_IMPORT).expect("a source file");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_khora"))
+        .arg("check")
+        .arg(&package)
+        .env("KHORA_STD", &std_dir)
+        .output()
+        .expect("could not run `khora`");
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(!out.status.success(), "a broken built-in group must stop the check:\n{text}");
+    assert!(text.contains("broken.toml"), "it names the file:\n{text}");
+}
+
+/// `khora build` refuses a lint policy `check` refuses, when only the lint
+/// crate can see what is wrong with it. A `[lints.<lint>]` table with no
+/// `level` loads as a manifest (a group's table may omit `level`), so a build
+/// that asked only the manifest reader would produce an artifact from a
+/// `khora.toml` that `check` stops on.
+#[cfg(feature = "llvm")]
+#[test]
+fn a_lint_policy_check_refuses_fails_build() {
+    let (ok, output) = command_on_package(
+        "lint_no_level_build",
+        "build",
+        &[("khora.toml", &denying("\n[lints.unused-binding]\n")), ("src/main.kh", UNUSED_IMPORT)],
+    );
+    assert!(!ok, "{output}");
+    assert!(output.contains("lints.unused-binding") && output.contains("needs a `level`"), "{output}");
 }

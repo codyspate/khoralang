@@ -39,8 +39,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod allow;
 mod exported;
+pub mod groups;
 
 pub use crate::allow::MARKER;
+pub use crate::groups::{level, Levels};
 
 use khora_db::{Db, SourceFile};
 use khora_types::{BodyTypes, Type};
@@ -142,12 +144,12 @@ pub const UNKNOWN_ALLOW: &str = "unknown-allow";
 /// they have settled.
 pub const USELESS_ALLOW: &str = "useless-allow";
 
-/// How loud a lint is when the manifest does not say.
+/// How loud a lint is when neither the manifest nor an enabled group says:
+/// step 5 of the precedence in [`groups`].
 ///
-/// Warn for everything except [`USELESS_ALLOW`], for the reason on it. A
-/// function rather than a constant so that both the CLI and the language
-/// server ask the same question -- they each had `unwrap_or(Warn)` written out
-/// before this existed, which is two places to forget.
+/// Warn for everything except [`USELESS_ALLOW`], for the reason on it. Ask
+/// [`level`] rather than this for a lint about to be reported; this is only
+/// the last step of that answer.
 pub fn default_level(lint: &str) -> khora_manifest::LintLevel {
     if lint == USELESS_ALLOW || lint == UNDOCUMENTED_EXPORT {
         khora_manifest::LintLevel::Allow
@@ -254,6 +256,47 @@ fn suppress(text: &str, found: Vec<Finding>) -> Vec<Finding> {
         }
     }
     kept
+}
+
+/// What `file`'s lints report under `levels`, each with the level it is
+/// reported at; a lint at `allow` is left out.
+///
+/// **The one place the CLI and the language server turn findings into
+/// reports**, so that a group, a pragma and a `[lints]` entry mean the same
+/// thing in the editor as in the build.
+///
+/// It also finishes `unknown-allow` for a pragma that names a group:
+/// [`findings`] sees one file and cannot know which groups a package has, so
+/// it says only "not a lint". A reader who wrote `// @klint allow idiomatic`
+/// meant something, and is told what: a group, and which lints are in it.
+pub fn reported(db: &dyn Db, file: SourceFile, levels: &groups::Levels) -> Vec<(Finding, khora_manifest::LintLevel)> {
+    let mut out = Vec::new();
+    let mut pragmas: Option<Vec<allow::Allow>> = None;
+    for finding in findings(db, file) {
+        let level = groups::level(levels, finding.lint);
+        if level == khora_manifest::LintLevel::Allow {
+            continue;
+        }
+        let mut finding = finding.clone();
+        if finding.lint == UNKNOWN_ALLOW {
+            let pragmas = pragmas.get_or_insert_with(|| allow::allows(file.text(db)));
+            let named = pragmas.iter().find(|pragma| pragma.range == finding.range);
+            if let Some((name, members)) =
+                named.and_then(|pragma| levels.group(&pragma.lint).map(|m| (&pragma.lint, m)))
+            {
+                finding.message = if members.is_empty() {
+                    format!("`{name}` is a group, and a pragma names one lint. `{name}` holds no lints, so there is nothing here to allow")
+                } else {
+                    format!(
+                        "`{name}` is a group, and a pragma names one lint. Name the lint: {}",
+                        members.join(", ")
+                    )
+                };
+            }
+        }
+        out.push((finding, level));
+    }
+    out
 }
 
 /// The byte offset each line starts at.
