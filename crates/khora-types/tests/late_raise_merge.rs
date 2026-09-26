@@ -690,13 +690,20 @@ fn a_catch_arm_is_checked_against_an_error_that_arrives_late() {
     );
 }
 
-/// combo_080_080: the same at 80 and 80, 84 s on the rounds.
+/// combo_080_080: the same at 80 and 80, 84 s on the rounds (53 s on a quiet
+/// machine).
+///
+/// **A limit of 20 s, not 3.** The worklist checks this in 1.4-2.8 s on the
+/// Linux and macOS runners, and took just over 3 s on the Windows one, whose
+/// debug build is slower. The limit is there to catch the rounds coming
+/// back, which take 53-84 s here, so 20 s still fails them by more than
+/// twice over while leaving a slow runner several times the room it needs.
 #[test]
 fn a_longer_chain_beside_a_denser_cycle_checks_quickly() {
     let text = combo(80, 80);
     let started = std::time::Instant::now();
-    let found = errors_within(&text, Duration::from_secs(3));
+    let found = errors_within(&text, Duration::from_secs(20));
     let took = started.elapsed();
     assert!(found.is_empty(), "expected no errors, got {:?}", &found[..found.len().min(3)]);
-    assert!(took < Duration::from_secs(3), "checking took {took:?}, over 3 s");
+    assert!(took < Duration::from_secs(20), "checking took {took:?}, over 20 s");
 }
