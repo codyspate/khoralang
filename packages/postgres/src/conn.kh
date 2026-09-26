@@ -83,6 +83,15 @@ pub type Connection = {
   /// so the socket's boundaries and the protocol's have nothing to do with
   /// each other. This is where that is absorbed.
   mut pending: Array<U8>,
+  /// Where the first unconsumed byte of `pending` is.
+  ///
+  /// **What stops reading a reply being quadratic in its rows.** Taking a
+  /// message used to copy everything after it into a new buffer, so a read
+  /// holding `n` messages copied the tail `n` times -- a Fortunes reply is a
+  /// dozen `DataRow`s in one packet. Moving an offset costs nothing; the
+  /// consumed bytes are dropped once, when the next read has to append, or
+  /// when the last whole message is taken and nothing is left.
+  mut start: Int,
   /// The SCRAM exchange in progress, if one is.
   ///
   /// **Authentication is the one part of this protocol with state that spans
@@ -110,13 +119,14 @@ pub type Answer = {
 
 // --- reading messages ------------------------------------------------------
 
-/// Appends what arrived to what was left over.
-fn extend(head: Array<U8>, tail: Array<U8>, tail_len: Int) -> Array<U8> {
-  let head_len = Array::length(head);
+/// The unconsumed part of `head` from `from`, followed by the first
+/// `tail_len` bytes of `tail`.
+fn extend(head: Array<U8>, from: Int, tail: Array<U8>, tail_len: Int) -> Array<U8> {
+  let head_len = Array::length(head) - from;
   let out: Array<U8> = Array::new(head_len + tail_len, 0);
   let mut i = 0;
   while i < head_len {
-    Array::set(out, i, Array::get(head, i));
+    Array::set(out, i, Array::get(head, from + i));
     i = i + 1
   };
   let mut j = 0;
@@ -127,27 +137,21 @@ fn extend(head: Array<U8>, tail: Array<U8>, tail_len: Int) -> Array<U8> {
   out
 }
 
-/// Drops the first `count` bytes.
-fn advance(bytes: Array<U8>, count: Int) -> Array<U8> {
-  let total = Array::length(bytes);
-  let left = total - count;
-  let out: Array<U8> = Array::new(left, 0);
-  let mut i = 0;
-  while i < left {
-    Array::set(out, i, Array::get(bytes, count + i));
-    i = i + 1
-  };
-  out
-}
-
 /// One message, reading from the socket until a whole one has arrived.
 pub fn next_message(c: Connection) -> Result<Message, PgError> {
   let mut answer: Result<Message, PgError> = Result::Err(PgError::Closed("no message"));
   let mut going = true;
   while going {
-    match message_at(c.pending, 0) {
+    match message_at(c.pending, c.start) {
       Option::Some(m) => {
-        c.pending = advance(c.pending, message_width(m));
+        c.start = c.start + message_width(m);
+        // Drained: let the buffer go, so an idle connection holds nothing
+        // from its last reply. Otherwise a pooled connection that once
+        // answered a 1 MB row keeps that megabyte until its next query.
+        if c.start == Array::length(c.pending) {
+          c.pending = Array::new(0, 0);
+          c.start = 0
+        };
         answer = Result::Ok(m);
         going = false
       },
@@ -160,7 +164,8 @@ pub fn next_message(c: Connection) -> Result<Message, PgError> {
             ));
           going = false
         } else {
-          c.pending = extend(c.pending, buffer, read)
+          c.pending = extend(c.pending, c.start, buffer, read);
+          c.start = 0
         }
       },
     }
@@ -222,7 +227,7 @@ pub fn open(
         ))
     } else {
       let empty: Array<U8> = Array::new(0, 0);
-      let c: Connection = { handle: handle, pending: empty, scram: Option::None };
+      let c: Connection = { handle: handle, pending: empty, start: 0, scram: Option::None };
       let hello = startup(user, database);
       if transmit_bytes(handle, hello) < 0 {
         shut(handle);

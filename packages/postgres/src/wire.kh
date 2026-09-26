@@ -99,16 +99,43 @@ impl Writer {
 
   pub fn length(self) -> Int { Vector::length(self.bytes) }
 
+  /// Starts a framed message in this buffer: the type byte, and four bytes
+  /// for a length that [`Writer::close`] fills in once the payload is written.
+  /// Answers where the length goes.
+  ///
+  /// **What stops a message being copied once per layer.** `framed` takes a
+  /// finished payload and copies it into a second buffer, and `extended` used
+  /// to copy each of its five framed messages into a third: every byte was
+  /// pushed three times and copied into an array three times, which was a
+  /// fifth of a single-row query's CPU. Framing in place writes each byte once.
+  pub fn open(self, kind: Int) -> Int {
+    Writer::u8(self, kind);
+    let at = Writer::length(self);
+    Writer::i32(self, 0);
+    at
+  }
+
+  /// Ends the message [`Writer::open`] started, writing its length: four for
+  /// the length itself plus everything written since, which is
+  /// [`framed`]'s rule computed from the same buffer.
+  pub fn close(self, at: Int) -> () {
+    let length = Writer::length(self) - at;
+    Vector::set(self.bytes, at, U8::of(Int::and(Int::shr(length, 24), 255)));
+    Vector::set(self.bytes, at + 1, U8::of(Int::and(Int::shr(length, 16), 255)));
+    Vector::set(self.bytes, at + 2, U8::of(Int::and(Int::shr(length, 8), 255)));
+    Vector::set(self.bytes, at + 3, U8::of(Int::and(length, 255)));
+  }
+
   /// What has been written, as an array ready to send.
+  ///
+  /// `Vector::at` rather than `Vector::get`: the index is the loop's own, and
+  /// `get` would build an `Option` per byte to say so.
   pub fn finish(self) -> Array<U8> {
     let count = Vector::length(self.bytes);
     let out: Array<U8> = Array::new(count, 0);
     let mut at = 0;
     while at < count {
-      match Vector::get(self.bytes, at) {
-        Option::Some(b) => Array::set(out, at, b),
-        Option::None => (),
-      };
+      Array::set(out, at, Vector::at(self.bytes, at));
       at = at + 1
     };
     out
@@ -124,9 +151,9 @@ impl Writer {
 /// arithmetic repeated at every call site.
 pub fn framed(kind: Int, payload: Array<U8>) -> Array<U8> {
   let out = Writer::new();
-  Writer::u8(out, kind);
-  Writer::i32(out, Array::length(payload) + 4);
+  let at = Writer::open(out, kind);
   Writer::raw(out, payload);
+  Writer::close(out, at);
   Writer::finish(out)
 }
 
@@ -183,25 +210,37 @@ pub fn query(sql: String) -> Array<U8> {
 /// one of and replaces without being asked. That is what a query run once
 /// wants; a name is what reuse would want, and reuse is not here yet.
 pub fn parse(name: String, sql: String) -> Array<U8> {
-  let body = Writer::new();
-  Writer::cstring(body, name);
-  Writer::cstring(body, sql);
-  Writer::i16(body, 0);
-  framed(80, Writer::finish(body))
+  let out = Writer::new();
+  write_parse(out, name, sql);
+  Writer::finish(out)
+}
+
+fn write_parse(out: Writer, name: String, sql: String) -> () {
+  let at = Writer::open(out, 80);
+  Writer::cstring(out, name);
+  Writer::cstring(out, sql);
+  Writer::i16(out, 0);
+  Writer::close(out, at)
 }
 
 /// `Bind`: the values, in order, for a parsed statement.
 pub fn bind(portal: String, statement: String, values: List<Option<String>>) -> Array<U8> {
-  let body = Writer::new();
-  Writer::cstring(body, portal);
-  Writer::cstring(body, statement);
+  let out = Writer::new();
+  write_bind(out, portal, statement, values);
+  Writer::finish(out)
+}
+
+fn write_bind(out: Writer, portal: String, statement: String, values: List<Option<String>>) -> () {
+  let at = Writer::open(out, 66);
+  Writer::cstring(out, portal);
+  Writer::cstring(out, statement);
 
   // Zero parameter format codes. One code would apply to every parameter and
   // zero means the default, which is text — and saying nothing is clearer than
   // saying the default out loud.
-  Writer::i16(body, 0);
+  Writer::i16(out, 0);
 
-  Writer::i16(body, List::length(values));
+  Writer::i16(out, List::length(values));
   let mut rest = values;
   let mut going = true;
   while going {
@@ -211,10 +250,10 @@ pub fn bind(portal: String, statement: String, values: List<Option<String>>) -> 
         match head {
           // NULL. A length of -1, which is four bytes of `ff` and not an empty
           // value: `WHERE x = ''` and `WHERE x IS NULL` are different questions.
-          Option::None => Writer::i32(body, 0 - 1),
+          Option::None => Writer::i32(out, 0 - 1),
           Option::Some(text) => {
-            Writer::i32(body, String::byte_length(text));
-            Writer::text(body, text)
+            Writer::i32(out, String::byte_length(text));
+            Writer::text(out, text)
           },
         };
         rest = tail
@@ -223,8 +262,8 @@ pub fn bind(portal: String, statement: String, values: List<Option<String>>) -> 
   };
 
   // Zero result format codes: text back, which `data_row` already assumes.
-  Writer::i16(body, 0);
-  framed(66, Writer::finish(body))
+  Writer::i16(out, 0);
+  Writer::close(out, at)
 }
 
 /// `Describe` a portal, which is what produces the `RowDescription`.
@@ -232,10 +271,16 @@ pub fn bind(portal: String, statement: String, values: List<Option<String>>) -> 
 /// Describing the *statement* would answer a different question — what
 /// parameters it takes — and the column types are what `oid_to_cell` needs.
 pub fn describe_portal(name: String) -> Array<U8> {
-  let body = Writer::new();
-  Writer::u8(body, 80);
-  Writer::cstring(body, name);
-  framed(68, Writer::finish(body))
+  let out = Writer::new();
+  write_describe_portal(out, name);
+  Writer::finish(out)
+}
+
+fn write_describe_portal(out: Writer, name: String) -> () {
+  let at = Writer::open(out, 68);
+  Writer::u8(out, 80);
+  Writer::cstring(out, name);
+  Writer::close(out, at)
 }
 
 /// `Execute`: run a bound portal, returning at most `rows` of them.
@@ -244,10 +289,16 @@ pub fn describe_portal(name: String) -> Array<U8> {
 /// whole answers, so zero is what it always passes; a cursor is what the other
 /// values are for.
 pub fn execute(portal: String, rows: Int) -> Array<U8> {
-  let body = Writer::new();
-  Writer::cstring(body, portal);
-  Writer::i32(body, rows);
-  framed(69, Writer::finish(body))
+  let out = Writer::new();
+  write_execute(out, portal, rows);
+  Writer::finish(out)
+}
+
+fn write_execute(out: Writer, portal: String, rows: Int) -> () {
+  let at = Writer::open(out, 69);
+  Writer::cstring(out, portal);
+  Writer::i32(out, rows);
+  Writer::close(out, at)
 }
 
 /// `Sync`: the end of the exchange, and the thing that gets a `ReadyForQuery`.
@@ -257,8 +308,14 @@ pub fn execute(portal: String, rows: Int) -> Array<U8> {
 /// why — which is why this is never optional and never left to a caller to
 /// remember.
 pub fn sync() -> Array<U8> {
-  let empty: Array<U8> = Array::new(0, 0);
-  framed(83, empty)
+  let out = Writer::new();
+  write_sync(out);
+  Writer::finish(out)
+}
+
+fn write_sync(out: Writer) -> () {
+  let at = Writer::open(out, 83);
+  Writer::close(out, at)
 }
 
 /// One statement with its values, as a single write.
@@ -266,14 +323,15 @@ pub fn sync() -> Array<U8> {
 /// Parse, Bind, Describe, Execute, Sync against the unnamed statement and the
 /// unnamed portal — the whole exchange in one buffer, because five writes is
 /// five chances to leave the backend halfway through a message if one of them
-/// fails.
+/// fails. Each message is framed where it lies in that buffer rather than
+/// built on its own and copied in.
 pub fn extended(sql: String, values: List<Option<String>>) -> Array<U8> {
   let out = Writer::new();
-  Writer::raw(out, parse("", sql));
-  Writer::raw(out, bind("", "", values));
-  Writer::raw(out, describe_portal(""));
-  Writer::raw(out, execute("", 0));
-  Writer::raw(out, sync());
+  write_parse(out, "", sql);
+  write_bind(out, "", "", values);
+  write_describe_portal(out, "");
+  write_execute(out, "", 0);
+  write_sync(out);
   Writer::finish(out)
 }
 
@@ -384,31 +442,20 @@ impl Reader {
   }
 
   /// Bytes up to a zero, as text. The zero is consumed and not returned.
+  ///
+  /// Finds the zero first and copies once. Growing a `Vector` a byte at a
+  /// time and then copying that out was every column name and command tag
+  /// allocated three ways.
   pub fn cstring(self) -> String {
-    let out = Vector::new();
-    let mut going = true;
-    while going {
-      if Reader::remaining(self) <= 0 {
-        going = false
-      } else {
-        let b = Reader::u8(self);
-        if b == 0 { going = false } else { Vector::push(out, U8::of(b)) }
-      }
+    let end = Array::length(self.bytes);
+    let mut stop = self.at;
+    while stop < end && U8::to_int(Array::get(self.bytes, stop)) != 0 {
+      stop = stop + 1
     };
-    // `Vector` has `to_list` and no `to_array`, so the copy is written out.
-    // Worth noticing rather than working around silently: a byte buffer that
-    // cannot become the array every byte-oriented call wants is a gap in
-    // `std`, and this is the second one this package has found.
-    let count = Vector::length(out);
-    let bytes: Array<U8> = Array::new(count, 0);
-    let mut i = 0;
-    while i < count {
-      match Vector::get(out, i) {
-        Option::Some(b) => Array::set(bytes, i, b),
-        Option::None => (),
-      };
-      i = i + 1
-    };
+    let bytes = Reader::take(self, stop - self.at);
+    // Past the zero, if there was one; a string that ran to the end of the
+    // message has none to skip.
+    if self.at < end { self.at = self.at + 1 };
     String::from_bytes(bytes)
   }
 

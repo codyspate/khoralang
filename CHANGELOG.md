@@ -214,6 +214,16 @@ cancellation point in every function, whatever the function's `raises` row;
   16): server CPU per request 368 -> 229 us, 1.6× the requests per second.
   Fibers on the scheduler backend park differently and are unchanged.
 
+- **The `postgres` package copies each message once.** Building a query
+  pushed every byte three times and copied it into an array three times,
+  and reading a reply copied the rest of the buffer once per message, so
+  a reply of n rows cost n copies of its tail. Each message is framed
+  where it is written, and a reply is consumed by moving an offset.
+  Measured on Linux x86-64 against PostgreSQL 17, TechEmpower tests, 64
+  connections: single query 229 -> 187 us of server CPU per request on
+  the thread backend and 244 -> 196 on the scheduler; Fortunes 415 -> 350
+  (thread backend). The bytes sent are unchanged.
+
 - **String literals and constructors with no fields are never reference
   counted.** Every fiber that touched `""` or `Option::None` wrote the same
   count, so on several cores those writes contended. They are immortal and
