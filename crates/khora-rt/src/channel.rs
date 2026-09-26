@@ -701,6 +701,15 @@ mod tests {
         }
     }
 
+    /// **At most one extra wake is tolerated, and a broadcast is still far
+    /// outside it.** A wait that is being entered just as a notify lands can
+    /// return without timing out, so it is counted as a notification. That
+    /// can happen to a waiter re-parking after its own `LOOK_AGAIN` timeout,
+    /// for example. That happened in 6 of 200 runs on an idle machine, and
+    /// failed CI twice. A broadcast wakes every waiter, 6 or 8 here, so a
+    /// bound of 2 still fails against one.
+    const WAKE_SLACK: usize = 1;
+
     /// **One value wakes one blocked thread.** On the thread backend a pool's
     /// idle channel has a blocked thread per request waiting for a
     /// connection; waking every one of them for each connection given back
@@ -724,7 +733,10 @@ mod tests {
         unsafe { khora_channel_close(channel as *mut u8) };
         let got: Vec<_> = readers.into_iter().filter_map(|r| r.join().unwrap()).collect();
         assert_eq!(got, [1]);
-        assert_eq!(woken, 1, "one value should wake one thread, not every thread waiting");
+        assert!(
+            (1..=1 + WAKE_SLACK).contains(&woken),
+            "one value should wake one thread, not every thread waiting: {woken} of {READERS} woke"
+        );
         unsafe { khora_channel_release(channel as *mut u8) };
     }
 
@@ -766,7 +778,10 @@ mod tests {
         until(|| blocked_and_woken(channel as *mut u8).0 == WRITERS - 1);
         std::thread::sleep(std::time::Duration::from_millis(50));
         let (_, woken) = blocked_and_woken(channel as *mut u8);
-        assert_eq!(woken, 1, "one slot of room should wake one sender");
+        assert!(
+            (1..=1 + WAKE_SLACK).contains(&woken),
+            "one slot of room should wake one sender: {woken} of {WRITERS} woke"
+        );
 
         for _ in 0..WRITERS {
             assert!(take(channel as *mut u8).is_some());
