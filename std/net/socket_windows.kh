@@ -163,7 +163,10 @@ pub fn receive(connection: Int, buffer: Array<U8>) -> Int {
     khora_net_recv(connection, into, n))
 }
 
-/// Writes `text`, and says how many bytes went. Negative if the write failed.
+/// Writes all of `text`, waiting for room when the peer is slow, and says how
+/// many bytes went: every one of them, or a negative number if the write
+/// failed. After a failure some of `text` may have gone, so the connection is
+/// no longer in step with its peer.
 pub fn transmit(connection: Int, text: String) -> Int {
   String::with_data(text, fn (from, n) =>
     khora_net_send(connection, from, n))
@@ -186,7 +189,8 @@ pub fn connect_to(host: String, port: Int) -> Int {
   String::with_data(host, fn (from, n) => khora_net_connect(from, n, port))
 }
 
-/// Writes bytes, and says how many went. Negative if the write failed.
+/// Writes all of `bytes`, and says how many went: every one of them, or a
+/// negative number if the write failed, as for [`transmit`].
 ///
 /// [`transmit`] takes a `String`, which is right for a protocol made of text
 /// and wrong for one made of bytes: a wire protocol frames its messages with a

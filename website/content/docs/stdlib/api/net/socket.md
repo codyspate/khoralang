@@ -117,7 +117,10 @@ Zero means the other end closed; negative means the read failed.
 pub fn transmit(connection: Int, text: String) -> Int
 ```
 
-Writes `text`, and says how many bytes went. Negative if the write failed.
+Writes all of `text`, waiting for room when the peer is slow, and says how
+many bytes went: every one of them, or a negative number if the write
+failed. After a failure some of `text` may have gone, so the connection is
+no longer in step with its peer.
 
 ### connect_to
 
@@ -148,7 +151,8 @@ than one left to be found.
 pub fn transmit_bytes(connection: Int, bytes: Array<U8>) -> Int
 ```
 
-Writes bytes, and says how many went. Negative if the write failed.
+Writes all of `bytes`, and says how many went: every one of them, or a
+negative number if the write failed, as for [`transmit`](#transmit).
 
 [`transmit`](#transmit) takes a `String`, which is right for a protocol made of text
 and wrong for one made of bytes: a wire protocol frames its messages with a

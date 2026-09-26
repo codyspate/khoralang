@@ -66,6 +66,29 @@ pub extern "C" fn khora_net_prepare(socket: Socket) -> i32 {
 }
 
 /// Whether the last socket call failed only because it would have blocked.
+///
+/// **`#[inline(never)]` is load-bearing: it keeps `errno` read on the thread
+/// that made the call.** `errno` is a thread-local, and the compiler treats
+/// its address as fixed for the life of a function. Inlined into the retry
+/// loops below, the development-profile build (which `khora build` from a
+/// source checkout and every test suite link) took the address once, before
+/// the loop, and reused it on every turn. The release profile inlined it too
+/// and happened not to. A turn that suspends in [`wait`] can resume on another
+/// worker, and the next failed `recv` was then judged by the errno of the
+/// thread it left -- whatever that worker's last failed syscall had been. A
+/// would-block read came back as a real failure, `khora_net_recv` returned -1
+/// in the middle of a stream nobody had closed, and the Postgres driver took
+/// that for a lost connection. `crate::current::running` is the same bug
+/// about the running fiber.
+///
+/// **What makes it safe is that the function reading the thread-local has no
+/// suspension point inside it.** Out of line, this computes errno's address
+/// and reads it with nothing in between that can move the fiber; the only
+/// suspension is in its callers, which no longer hold the address at all.
+/// Whether the compiler hoists is an optimisation choice that differs by
+/// profile, so it must not be what correctness rests on. What it costs: one
+/// call per would-block, next to a syscall.
+#[inline(never)]
 fn would_block() -> bool {
     #[cfg(windows)]
     {
@@ -285,22 +308,43 @@ pub unsafe extern "C" fn khora_net_recv(socket: Socket, into: *mut u8, length: i
     }
 }
 
-/// `send`, retried until it says something other than "not yet".
+/// `send`, until every byte has gone or the send has failed.
 ///
-/// One attempt, not a loop over a partial write: a short write is the caller's
-/// to notice, and `std::net::socket` already loops over one because a blocking
-/// `send` could always return early.
+/// **What this prevents: a large write reported as sent when most of it was
+/// not.** On a non-blocking socket, `send` takes what fits in the kernel's
+/// buffer (about 2.6 MB on Linux loopback) and reports that count. Every
+/// caller in `std::net::socket` read any count that was not negative as
+/// "sent", and so did the HTTP transport, which promises "the text, all of
+/// it, or -1". A Postgres request with a 4 MB parameter went out as its
+/// first 2.6 MB. The server waited for the rest of the frame and the driver
+/// waited for its reply, so the connection hung.
+///
+/// So this waits for room and goes on until `length` bytes have gone. It
+/// returns `length`, or -1 if a `send` failed or the fiber was cancelled
+/// while it waited. After a -1 an unknown prefix may have gone, so the
+/// stream is out of step and the caller should give up on the connection.
+/// What it costs: a caller that wanted to do something else while a slow
+/// peer drained its buffer cannot, which no caller here does.
 ///
 /// # Safety
 ///
 /// `from` must point at `length` readable bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn khora_net_send(socket: Socket, from: *const u8, length: isize) -> isize {
-    loop {
-        // SAFETY: the caller guarantees `length` readable bytes at `from`.
-        let written = unsafe { raw_send(socket, from, length) };
-        if written >= 0 || !would_block() {
-            return written;
+    let mut sent: isize = 0;
+    while sent < length {
+        // SAFETY: the caller guarantees `length` readable bytes at `from`,
+        // and `sent < length`, so `length - sent` bytes remain from here.
+        let written = unsafe { raw_send(socket, from.offset(sent), length - sent) };
+        if written > 0 {
+            sent += written;
+            continue;
+        }
+        // Zero bytes accepted for a non-empty write is not progress, and no
+        // platform promises the next attempt makes any. Treated as a failure
+        // rather than retried for ever.
+        if written == 0 || !would_block() {
+            return -1;
         }
         // A write that cannot proceed is back-pressure from the peer, and the
         // deadline `std::net` sets is a *receive* timeout. Left alone until
@@ -311,6 +355,7 @@ pub unsafe extern "C" fn khora_net_send(socket: Socket, from: *const u8, length:
             return -1;
         }
     }
+    sent
 }
 
 /// `accept`, retried until a connection arrives.
@@ -644,5 +689,199 @@ mod tests {
         assert!(deadline_for(socket).is_some());
         khora_net_forget(socket);
         assert!(deadline_for(socket).is_none(), "a reused handle would inherit it");
+    }
+
+    /// **A send bigger than the socket buffer sends all of it.**
+    ///
+    /// A non-blocking `send` takes what fits in the kernel's buffer and says
+    /// how much that was -- about 2.6 MB on Linux loopback. Every caller in
+    /// `std::net::socket` treated any count that was not negative as "sent",
+    /// so a Postgres request with a 4 MB parameter went out as its first
+    /// 2.6 MB: the server waited for the rest of the frame and the driver
+    /// waited for a reply, which is a hang with no receive deadline.
+    ///
+    /// Sixteen megabytes to a peer that starts reading late and slowly, once
+    /// on a worker and once off one. Both must report every byte, and the peer
+    /// must receive every byte.
+    #[test]
+    fn a_send_larger_than_the_socket_buffer_sends_all_of_it() {
+        use crate::coro::Task;
+        use crate::scheduler::Scheduler;
+        use std::io::Read;
+        use std::sync::{Arc, Mutex};
+
+        const SIZE: usize = 16 << 20;
+
+        fn a_slow_reader(mut peer: std::net::TcpStream) -> std::thread::JoinHandle<usize> {
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let mut total = 0;
+                let mut chunk = vec![0u8; 64 << 10];
+                loop {
+                    match peer.read(&mut chunk) {
+                        Ok(0) | Err(_) => return total,
+                        Ok(n) => total += n,
+                    }
+                }
+            })
+        }
+
+        // On a worker.
+        let (client, peer) = a_connected_pair();
+        let socket = socket_of(&client);
+        assert_eq!(khora_net_prepare(socket), 0);
+        let reader = a_slow_reader(peer);
+        let seen = Arc::new(Mutex::new(None));
+        let said = seen.clone();
+        let pool = Scheduler::new(2);
+        pool.spawn(Task::new(move || {
+            let bytes = vec![7u8; SIZE];
+            // SAFETY: `SIZE` readable bytes.
+            let sent = unsafe { khora_net_send(socket, bytes.as_ptr(), SIZE as isize) };
+            *said.lock().expect("the outcome") = Some(sent);
+            drop(client);
+        }));
+        pool.drain();
+        let sent = seen.lock().expect("the outcome").expect("it ran");
+        assert_eq!(sent, SIZE as isize, "on a worker: a short write was reported as the whole send");
+        assert_eq!(reader.join().expect("the reader"), SIZE, "on a worker: the peer got less");
+
+        // Off one.
+        let (client, peer) = a_connected_pair();
+        let socket = socket_of(&client);
+        assert_eq!(khora_net_prepare(socket), 0);
+        let reader = a_slow_reader(peer);
+        let bytes = vec![7u8; SIZE];
+        // SAFETY: `SIZE` readable bytes.
+        let sent = unsafe { khora_net_send(socket, bytes.as_ptr(), SIZE as isize) };
+        drop(client);
+        assert_eq!(sent, SIZE as isize, "off a worker: a short write was reported as the whole send");
+        assert_eq!(reader.join().expect("the reader"), SIZE, "off a worker: the peer got less");
+    }
+
+    /// **A read that resumes on another worker judges its retry by its own
+    /// thread's `errno`.**
+    ///
+    /// The retry loop decides "would block, wait again" from `errno`, which
+    /// is per thread. With `would_block` inlined, the compiler took `errno`'s
+    /// address once, before the loop, so after a wait that resumed the fiber
+    /// on another worker, a retry that would block again was judged by the
+    /// errno of the worker it had left. If that worker's last failed call was
+    /// anything else, the read returned -1 in the middle of a live stream --
+    /// which a Postgres connection took for the server hanging up.
+    ///
+    /// So: one reader, woken over and over while it waits, so that it retries
+    /// many times and moves between workers; and polluting fibers on every
+    /// worker whose failed `close(-1)` leaves `EBADF` behind. Every read must
+    /// get its byte. Before the fix this failed within the first few reads.
+    ///
+    /// Unix only: the pollution is a failing `close`, and Windows keeps a
+    /// socket's error somewhere else.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_read_that_changes_worker_is_not_failed_by_the_old_workers_errno() {
+        use crate::coro::Task;
+        use crate::scheduler::{Scheduler, Waker, park_current, waker_for_current};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        const READS: usize = 60;
+        const POLLUTERS: usize = 6;
+
+        let wakers: Arc<Mutex<Vec<Waker>>> = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let failed = Arc::new(AtomicUsize::new(0));
+        let moved = Arc::new(AtomicUsize::new(0));
+
+        // Wakes every registered fiber, repeatedly, until told to stop. A
+        // wake for a fiber that is running leaves a notification its next
+        // park consumes, so this is harmless to everybody but a waiter.
+        let shouting = Arc::new(AtomicBool::new(true));
+        let shouter = {
+            let wakers = wakers.clone();
+            let shouting = shouting.clone();
+            std::thread::spawn(move || {
+                while shouting.load(Ordering::SeqCst) {
+                    for waker in wakers.lock().unwrap().iter() {
+                        waker.wake();
+                    }
+                    std::thread::yield_now();
+                }
+            })
+        };
+
+        let pool = Scheduler::new(4);
+        for _ in 0..POLLUTERS {
+            let wakers = wakers.clone();
+            let stop = stop.clone();
+            pool.spawn(Task::new(move || {
+                if let Some(waker) = waker_for_current() {
+                    wakers.lock().unwrap().push(waker);
+                }
+                while !stop.load(Ordering::SeqCst) {
+                    // SAFETY: closing an invalid descriptor touches nothing;
+                    // it fails with EBADF, which is the point.
+                    unsafe { libc::close(-1) };
+                    park_current();
+                }
+            }));
+        }
+
+        let (client, mut peer) = a_connected_pair();
+        let socket = socket_of(&client);
+        assert_eq!(khora_net_prepare(socket), 0);
+        {
+            let wakers = wakers.clone();
+            let stop = stop.clone();
+            let failed = failed.clone();
+            let moved = moved.clone();
+            pool.spawn(Task::new(move || {
+                let _client = client;
+                if let Some(waker) = waker_for_current() {
+                    wakers.lock().unwrap().push(waker);
+                }
+                let worker = || std::thread::current().id();
+                for _ in 0..READS {
+                    let before = worker();
+                    let mut byte = [0u8; 1];
+                    // SAFETY: one writable byte.
+                    let read = unsafe { khora_net_recv(socket, byte.as_mut_ptr(), 1) };
+                    if read != 1 {
+                        failed.fetch_add(1, Ordering::SeqCst);
+                    }
+                    if worker() != before {
+                        moved.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+                stop.store(true, Ordering::SeqCst);
+            }));
+        }
+
+        // One byte every few milliseconds, so each read waits long enough to
+        // be woken spuriously many times.
+        let writer = std::thread::spawn(move || {
+            for _ in 0..READS {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                if peer.write_all(b"x").is_err() {
+                    break;
+                }
+            }
+            peer
+        });
+
+        pool.drain();
+        shouting.store(false, Ordering::SeqCst);
+        shouter.join().expect("the shouter");
+        let _peer = writer.join().expect("the writer");
+
+        let (failed, moved) = (failed.load(Ordering::SeqCst), moved.load(Ordering::SeqCst));
+        assert!(
+            moved > 0,
+            "no read changed worker in {READS}, so this proves nothing about errno"
+        );
+        assert_eq!(
+            failed, 0,
+            "{failed} of {READS} reads of a live stream failed ({moved} changed worker)"
+        );
     }
 }
