@@ -793,6 +793,9 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
         match &import.kind {
             ImportKind::Glob => {
                 for item in exported.items.iter().filter(|i| i.is_public) {
+                    if !admit(&mut out, &import.path, &item.name, &item.name, import.range) {
+                        continue;
+                    }
                     out.names.push((
                         item.name.clone(),
                         Resolution::Item {
@@ -816,6 +819,9 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
                     let local = wanted.alias.clone();
                     match exported.item(&wanted.name) {
                         Some(item) if item.is_public => {
+                            if !admit(&mut out, &import.path, &local, &item.name, wanted.range) {
+                                continue;
+                            }
                             // The resolution carries the *local* spelling:
                             // signatures, types and every other downstream map
                             // are keyed by what this file calls the thing, and
@@ -939,6 +945,43 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
     }
 
     out
+}
+
+/// Whether an import may bind `local` to `module`'s `name`, recording an error
+/// if it may not.
+///
+/// **Two imports of one name are an error naming both, never a silent
+/// pick.** Every lookup takes the first entry for a name, so the second
+/// import was dropped without a word: `f()` called whichever module's `f` was
+/// imported first, and swapping two `import` lines changed what the program
+/// did. That also made sorting imports an unsafe edit. A glob is the worst
+/// case, because nothing on either line spells the name that collided.
+///
+/// The same item reached twice (`import a::{f}; import a::*;`) means one thing
+/// and is admitted once, silently; that is `unused-import`'s business if
+/// anyone's. A file's own declaration still shadows an import, which is a
+/// different rule.
+fn admit(out: &mut FileScope, module: &ModulePath, local: &str, name: &str, range: TextRange) -> bool {
+    let Some(earlier) = out.origins.iter().find(|o| o.local == local) else { return true };
+    if earlier.module == *module && earlier.name == name {
+        return false;
+    }
+    // Spelled as the `import` line spells it. `ModulePath`'s `Display` joins
+    // with `.`, which is not how a path is written in source.
+    let spelled = |m: &ModulePath, n: &str| {
+        let path = m.segments().join("::");
+        if n == local { format!("`{path}`") } else { format!("`{path}::{n}`") }
+    };
+    out.errors.push(HirError {
+        message: format!(
+            "`{local}` is imported twice: from {} and from {}. Keep one, or import \
+             one of them under another name with `as`",
+            spelled(&earlier.module, &earlier.name),
+            spelled(module, name),
+        ),
+        range,
+    });
+    false
 }
 
 /// Brings the names a source-expanded derive writes into the deriving file.

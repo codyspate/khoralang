@@ -108,6 +108,13 @@ cancellation point in every function, whatever the function's `raises` row;
   running on the defaults, and reports the manifest as an error on the line
   to fix.
 
+- **A name imported twice is refused**, with both imports named:
+  `import a::{f}; import b::{f};`, two `as` aliases that give one name, and a
+  glob that brings a name already imported. The program used whichever
+  import came first, so swapping two `import` lines changed what it called.
+  Keep one import, or rename one with `as`. The same item imported twice is
+  not an error.
+
 ### Fixed
 
 - **A `postgres` query could return another caller's rows.** When a read

@@ -214,8 +214,8 @@ That is the reason this document unblocks Phase 2.1 without settling everything.
   have to consider instances, not just items declared against the type.
   Coherence rules are D6.
 - ~~**`Schema::Spec` (D3).**~~ Decided below.
-- **Glob imports and ambiguity.** If `import a::*;` and `import b::*;` both
-  export `f`, referring to `f` should be an error naming both, not a silent pick.
+- **Glob imports and ambiguity.** Decided: two imports that give one name
+  are an error naming both, for named imports, aliases and globs alike.
 
 ## D3 — projecting an associated type off a type variable
 

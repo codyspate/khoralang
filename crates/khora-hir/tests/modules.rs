@@ -184,6 +184,101 @@ fn a_glob_import_brings_every_exported_item() {
     ]);
 }
 
+/// A second module exporting `double`, for the collisions below.
+const OTHER: (&str, &str) = (
+    "other.kh",
+    "module demo::other;\n\
+     pub fn double(x: Int) -> Int { x + x + 1 }\n\
+     pub fn triple(x: Int) -> Int { x * 3 }\n",
+);
+
+/// **Two imports of one name are an error that names both.**
+///
+/// The later import was dropped without a word, so `f()` called whichever
+/// module's `f` came first in the file, and swapping two `import` lines
+/// changed what the program did. Sorting imports -- by hand or by a tool --
+/// was therefore not a safe edit. The message names both modules, so the
+/// reader does not have to go looking for the other half.
+#[test]
+fn a_name_imported_from_two_modules_is_an_error_naming_both() {
+    for imports in [
+        "import demo::lib::{double};\nimport demo::other::{double};\n",
+        "import demo::other::{double};\nimport demo::lib::{double};\n",
+    ] {
+        let found = errors(&[
+            LIB,
+            OTHER,
+            (
+                "main.kh",
+                &format!("module demo::main;\n{imports}pub fn run() -> Int {{ double(21) }}\n"),
+            ),
+        ]);
+        assert!(
+            found.iter().any(|e| e.contains("`double`")
+                && e.contains("`demo::lib`")
+                && e.contains("`demo::other`")),
+            "{imports}: expected one error naming both imports, got {found:?}"
+        );
+    }
+}
+
+/// An alias is a second name, and the same rule holds for it: two imports
+/// that both end up called `twice` are the same collision.
+#[test]
+fn two_aliases_to_one_name_are_an_error() {
+    assert_reports(
+        &[
+            LIB,
+            OTHER,
+            (
+                "main.kh",
+                "module demo::main;\n\
+                 import demo::lib::{double as twice};\n\
+                 import demo::other::{triple as twice};\n\
+                 pub fn run() -> Int { twice(21) }\n",
+            ),
+        ],
+        "`twice` is imported twice",
+    );
+}
+
+/// And the same for a glob, whose collisions are invisible in the source:
+/// nothing on either `import` line says `double`.
+#[test]
+fn a_glob_that_brings_a_name_already_imported_is_an_error() {
+    assert_reports(
+        &[
+            LIB,
+            OTHER,
+            (
+                "main.kh",
+                "module demo::main;\n\
+                 import demo::other::{double};\n\
+                 import demo::lib::*;\n\
+                 pub fn run() -> Int { double(21) }\n",
+            ),
+        ],
+        "`double` is imported twice",
+    );
+}
+
+/// The same item imported twice means one thing, so it is not this error.
+/// (`unused-import` is where a redundant line is worth mentioning.)
+#[test]
+fn one_item_imported_twice_is_not_a_collision() {
+    let found = errors(&[
+        LIB,
+        (
+            "main.kh",
+            "module demo::main;\n\
+             import demo::lib::{double};\n\
+             import demo::lib::{double};\n\
+             pub fn run() -> Int { double(21) }\n",
+        ),
+    ]);
+    assert!(!found.iter().any(|e| e.contains("imported twice")), "{found:?}");
+}
+
 /// A file's own declaration wins over an import of the same name, which is
 /// what shadowing means everywhere else in the language.
 #[test]
