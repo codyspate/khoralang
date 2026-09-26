@@ -235,8 +235,23 @@ fn variance_markers_parse() {
 
 #[test]
 fn import_forms_parse() {
-    let parse = parse("module m;\nimport std::core::{Option, Result as R};\nimport std::ai::*;\n");
+    let parse = parse("module m;\nimport std::core::{Option, Result as R};\n");
     assert!(parse.errors().is_empty(), "{:?}", parse.errors());
+}
+
+/// **A glob import is refused, with the fix.** It was the one import whose
+/// collisions nothing in the source spells: two globs exporting one name, or a
+/// glob and a named import of it, are only visible by reading both modules.
+/// Nothing in `std`, `packages/`, `examples/`, `tests/` or `bench/` used one.
+#[test]
+fn a_glob_import_is_refused_and_names_the_fix() {
+    let parse = parse("module m;\nimport std::ai::*;\npub fn f() -> Int { 1 }\n");
+    let messages: Vec<&str> = parse.errors().iter().map(|e| e.message.as_str()).collect();
+    assert_eq!(messages.len(), 1, "one error, not a cascade: {messages:?}");
+    assert!(
+        messages[0].contains("glob") && messages[0].contains("import std::ai::{"),
+        "{messages:?}"
+    );
 }
 
 #[test]

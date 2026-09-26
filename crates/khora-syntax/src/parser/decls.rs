@@ -8,6 +8,7 @@ use super::types::{
 };
 use super::Parser;
 use crate::kind::SyntaxKind::*;
+use text_size::TextRange;
 
 pub(super) fn source_file_contents(p: &mut Parser<'_>) {
     // `module` must come first, but accepting it out of order here and
@@ -166,21 +167,39 @@ fn module_decl(p: &mut Parser<'_>) {
     m.complete(p, MODULE_DECL);
 }
 
-/// `import a::b::{X, Y as Z};` or `import a::b::*;`
+/// `import a::b::{X, Y as Z};`
+///
+/// **`import a::b::*;` is refused**, with the braced form to write instead,
+/// because a glob was the one import whose collisions nothing in the source
+/// spells: two modules exporting one name could only be seen by reading both.
+/// It is still parsed into an `IMPORT_GLOB` node, so the error is one
+/// diagnostic and the rest of the file parses as written.
 fn import_decl(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(IMPORT_KW);
+    let from = p.current_range().start();
     path(p);
     if p.at(COLON_COLON) && p.nth_at(1, L_BRACE) {
         p.bump(COLON_COLON);
         import_list(p);
     } else if p.at(COLON_COLON) && p.nth_at(1, STAR) {
+        let module = p.slice(TextRange::new(from, p.current_range().start()));
         let glob = p.start();
+        let at = p.current_range();
         p.bump(COLON_COLON);
+        let at = at.cover(p.current_range());
         p.bump(STAR);
         glob.complete(p, IMPORT_GLOB);
+        p.error_at(
+            at,
+            format!(
+                "glob imports are not part of Khora. Name what this file uses: \
+                 `import {}::{{A, B}};`",
+                module.trim()
+            ),
+        );
     } else {
-        p.error("expected `::{...}` or `::*` after the module path");
+        p.error("expected `::{...}` after the module path");
     }
     p.expect(SEMICOLON);
     m.complete(p, IMPORT_DECL);

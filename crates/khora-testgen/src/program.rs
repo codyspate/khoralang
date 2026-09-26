@@ -102,11 +102,8 @@ fn upper(src: &mut Entropy<'_>) -> &'static str {
 const IMPORT_PATHS: &[&str] = &["std::core", "std::io", "std::net::http", "a::b::c"];
 
 fn import(src: &mut Entropy<'_>, path: &str) -> String {
-    // The `::{..}` or `::*` tail is mandatory. A bare `import std::core;` is a
-    // diagnostic, not a shorter spelling.
-    if src.chance(32) {
-        return format!("import {path}::*;\n");
-    }
+    // The `::{..}` tail is mandatory. A bare `import std::core;` is a
+    // diagnostic, not a shorter spelling, and so is a glob `::*`.
     let mut items: Vec<String> = Vec::new();
     for _ in 0..=src.count(2) {
         let name = if src.chance(128) { lower(src) } else { upper(src) };

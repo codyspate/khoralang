@@ -28,16 +28,12 @@ Aliased name:
 import app::storage::{User as StoredUser};
 ```
 
-Glob import:
-
-```khora
-import app::prelude::*;
-```
-
 Grouped imports allow a trailing comma.
 
+There is no glob import. `import app::prelude::*;` is a syntax error: name what the file uses, as in `import app::prelude::{A, B};`, so every name a module uses can be found on one of its `import` lines. A name imported twice from two places is an error that names both imports; rename one with `as`.
+
 **The braces are not optional, even for one name.** `import std::core::print;`
-is a parse error — `expected `::{...}` or `::*` after the module path`. Write
+is a parse error — `expected `::{...}` after the module path`. Write
 `import std::core::{print};`.
 
 ### Names that need no import

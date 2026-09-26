@@ -201,6 +201,11 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// The source text in `range`, for a message that quotes what was written.
+    pub(crate) fn slice(&self, range: TextRange) -> &'a str {
+        self.text.get(std::ops::Range::<usize>::from(range)).unwrap_or("")
+    }
+
     /// True when the current token is the `IDENT` spelling the contextual
     /// keyword `kind`.
     pub(crate) fn at_contextual(&self, kind: SyntaxKind) -> bool {

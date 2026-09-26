@@ -171,8 +171,12 @@ fn an_alias_renames_what_it_imports() {
     ]);
 }
 
+/// **A glob is a syntax error, and is still resolved behind it.** The parser
+/// keeps the node so the rest of the file reads as written; resolving through
+/// it keeps the parse error the only thing the reader is told, rather than one
+/// "cannot find" per name the glob would have brought.
 #[test]
-fn a_glob_import_brings_every_exported_item() {
+fn a_refused_glob_is_still_resolved_so_no_error_piles_on() {
     assert_clean(&[
         LIB,
         (

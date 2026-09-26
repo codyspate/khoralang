@@ -9,7 +9,7 @@ Declaration    ::= ModuleDecl | ImportDecl | TypeDecl | TraitDecl | ImplDecl
                  | ConstDecl | TestDecl ;
 
 ModuleDecl     ::= "module" Path ";" ;
-ImportDecl     ::= "import" Path "::" ( "{" ImportList "}" | "*" ) ";" ;
+ImportDecl     ::= "import" Path "::" "{" ImportList "}" ";" ;  (* no glob `::*` *)
 ImportList     ::= ImportItem ( "," ImportItem )* ( "," )? ;
 ImportItem     ::= Ident ( "as" Ident )? ;
 

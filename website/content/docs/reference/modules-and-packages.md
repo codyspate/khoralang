@@ -64,11 +64,12 @@ methods — the first bullet above, the same shape as `Response::text` — and i
 how a call is disambiguated when a type implements two traits that declare the
 same method. See [Traits](./traits/#two-traits-declaring-the-same-method).
 
-A glob import does not change that either: `import app::helper::*;` brings the
-names in unqualified, and `helper::greeting()` still does not resolve. Every
+An import brings names in unqualified, and `helper::greeting()` does not
+resolve however `helper`'s names were imported. Every
 name a module uses is imported unqualified, so two modules that export the same
 name are separated with `as` — `import app::money::{add as money_add};` —
-rather than by qualifying the call.
+rather than by qualifying the call. Importing both under one name is an error
+that names the two imports.
 
 ### A field needs its type imported
 

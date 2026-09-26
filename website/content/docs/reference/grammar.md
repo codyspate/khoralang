@@ -13,7 +13,6 @@ A source file is a sequence of declarations. Common forms are:
 ```text
 module Path ;
 import Path::{...} ;
-import Path::* ;
 
 pub? const Pattern (: Type)? = Expr ;
 derive(...)? pub? type Name<TypeParams>? (= TypeDef)? ;

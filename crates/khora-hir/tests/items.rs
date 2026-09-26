@@ -243,8 +243,10 @@ fn an_aliased_import_resolves_under_its_local_name() {
     );
 }
 
+/// A glob is refused by the parser; this is the resolver's recovery behind
+/// that error. See `modules.rs`.
 #[test]
-fn a_glob_import_brings_public_items_into_scope() {
+fn a_refused_glob_still_brings_public_items_into_scope() {
     let db = KhoraDatabase::new();
     let core = file(&db, "core.kh", "module std::core;\npub fn identity() -> Int { 1 }\n");
     let app = file(&db, "app.kh", "module app::main;\nimport std::core::*;\n");

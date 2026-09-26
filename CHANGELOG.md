@@ -122,6 +122,9 @@ cancellation point in every function, whatever the function's `raises` row;
   elsewhere (a `raise` "not raised", a capability "not in scope"). Write one
   row, `with { a: A, b: B }`, and one union, `raises A + B`, in that order.
 
+- **Glob imports are removed.** `import a::b::*;` is a syntax error. Name
+  what the file uses: `import a::b::{X, Y};`.
+
 ### Fixed
 
 - **A `postgres` query could return another caller's rows.** When a read
