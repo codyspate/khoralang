@@ -698,8 +698,9 @@ import std::clock::{Clock};
 
 pub type Stop = | Stop;
 
-fn stuck(cell: Shared<Int>, ch: Channel<Int>) -> Int raises Stop {
+fn stuck(cell: Shared<Int>, ch: Channel<Int>, inside: Channel<Int>) -> Int raises Stop {
   Shared::update(cell, fn x => {
+    Channel::send(inside, 1);
     let got = Channel::receive(ch);
     match got { Option::Some(v) => x + v, Option::None => x + 100 }
   })
@@ -709,8 +710,9 @@ pub fn main() -> Int raises Stop {
   with { clock: Clock::real() } {
     let cell = Shared::of(0);
     let ch: Channel<Int> = Channel::bounded(1);
-    let child = Fiber::spawn(fn () => stuck(cell, ch)!);
-    clock.sleep(100);
+    let inside: Channel<Int> = Channel::bounded(1);
+    let child = Fiber::spawn(fn () => stuck(cell, ch, inside)!);
+    let _ = Channel::receive(inside);
     Fiber::cancel(child);
     Fiber::wait(child)! catch { _ => () };
     print(\"stopped; cell=${Shared::get(cell)}\");
@@ -796,7 +798,7 @@ const BLOCKED_CHANGE_IN_CLEANUP: &str = "module main;
 import std::core::{print, Fiber, Shared, Channel, Option, Region};
 import std::clock::{Clock};
 
-fn stuck(cell: Shared<Int>, ch: Channel<Int>) -> Int {
+fn stuck(cell: Shared<Int>, ch: Channel<Int>, ready: Channel<Int>) -> Int {
   let region = Region::open();
   Region::defer(region, fn () => {
     let _ = Shared::update(cell, fn x => {
@@ -804,6 +806,7 @@ fn stuck(cell: Shared<Int>, ch: Channel<Int>) -> Int {
       match got { Option::Some(v) => x + v, Option::None => x + 100 }
     });
   });
+  Channel::send(ready, 1);
   let mut n = 0;
   loop { n = n + 1; }
 }
@@ -812,8 +815,9 @@ pub fn main() -> Int {
   with { clock: Clock::real() } {
     let cell = Shared::of(0);
     let ch: Channel<Int> = Channel::bounded(1);
-    let child = Fiber::spawn(fn () => stuck(cell, ch));
-    clock.sleep(100);
+    let ready: Channel<Int> = Channel::bounded(1);
+    let child = Fiber::spawn(fn () => stuck(cell, ch, ready));
+    let _ = Channel::receive(ready);
     Fiber::cancel(child);
     Fiber::wait(child);
     print(\"stopped; cell=${Shared::get(cell)}\");

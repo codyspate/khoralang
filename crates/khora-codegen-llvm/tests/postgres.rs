@@ -1856,22 +1856,46 @@ struct Recorded {
     ended: String,
 }
 
-/// A server that records every simple query, answers each one, and waits
-/// `stall` before answering the first `BEGIN`.
+/// A server that records every simple query and answers each one, holding
+/// its answer to the first `BEGIN` until the program says it has cancelled.
 ///
-/// The stall is what puts the cancel in the gap: the Khora fiber has sent
-/// `BEGIN` and is waiting for the reply when it is cancelled, so the server
-/// is inside a transaction the fiber was never told about.
+/// **What the hold is for: the cancel has to land while `BEGIN` waits for
+/// its reply**, so that the server is inside a transaction the fiber was never
+/// told about. The server tells the program on `control` when `BEGIN` has
+/// arrived; the program cancels, says so on `control`, and only then is
+/// `BEGIN` answered. It used to stall the reply a fixed second and have the
+/// program cancel after a fixed 200 ms; on a slow macOS runner the whole
+/// transaction was over before the cancel, and the server heard `BEGIN`,
+/// `COMMIT`.
+///
+/// The reply cannot wait for the rollback instead: the pool's serving fiber
+/// owns the socket and sends nothing more until `BEGIN` is answered.
 ///
 /// **Never panics once it has a connection.** A panic in this thread reached
 /// the test only as "the server: Any", which named neither the error nor what
 /// had been said before it. Every failure ends the conversation instead, and
 /// is reported in [`Recorded::ended`] beside the queries heard up to it.
-fn record_queries(listener: TcpListener, stall: std::time::Duration) -> Recorded {
-    record_queries_stalling(listener, stall, "BEGIN")
+fn record_queries(listener: TcpListener, control: TcpListener) -> Recorded {
+    let (mut stream, _) = listener.accept().expect("a connection");
+    let mut heard = Vec::new();
+    let ended = match converse(&mut stream, Hold::UntilSpokenTo(control), "BEGIN", &mut heard) {
+        Ok(()) => "Terminate".to_string(),
+        Err(why) => why,
+    };
+    Recorded { heard, ended }
 }
 
-/// [`record_queries`], stalling the first `statement` rather than `BEGIN`.
+/// How [`converse`] holds its answer to the statement it was told to hold.
+enum Hold {
+    /// Sleep this long, then answer.
+    For(std::time::Duration),
+    /// Say `B` on the first connection to this listener, then answer only
+    /// once the program has written a byte back on it.
+    UntilSpokenTo(TcpListener),
+}
+
+/// [`record_queries`], stalling the first `statement` a fixed time rather
+/// than holding the first `BEGIN`.
 fn record_queries_stalling(
     listener: TcpListener,
     stall: std::time::Duration,
@@ -1879,18 +1903,30 @@ fn record_queries_stalling(
 ) -> Recorded {
     let (mut stream, _) = listener.accept().expect("a connection");
     let mut heard = Vec::new();
-    let ended = match converse(&mut stream, stall, statement, &mut heard) {
+    let ended = match converse(&mut stream, Hold::For(stall), statement, &mut heard) {
         Ok(()) => "Terminate".to_string(),
         Err(why) => why,
     };
     Recorded { heard, ended }
 }
 
+/// Reads one frontend message, naming the step that failed.
+fn next_message(stream: &mut TcpStream) -> Result<(u8, Vec<u8>), String> {
+    let step = |what: &'static str| move |e: std::io::Error| format!("{what}: {e}");
+    let mut kind = [0u8; 1];
+    stream.read_exact(&mut kind).map_err(step("reading a message type"))?;
+    let mut length = [0u8; 4];
+    stream.read_exact(&mut length).map_err(step("reading a message length"))?;
+    let mut payload = vec![0u8; (i32::from_be_bytes(length) as usize).saturating_sub(4)];
+    stream.read_exact(&mut payload).map_err(step("reading a message payload"))?;
+    Ok((kind[0], payload))
+}
+
 /// The body of [`record_queries`], with every failure as an `Err` naming
 /// the step it happened at.
 fn converse(
     stream: &mut TcpStream,
-    stall: std::time::Duration,
+    hold: Hold,
     statement: &str,
     heard: &mut Vec<String>,
 ) -> Result<(), String> {
@@ -1905,23 +1941,28 @@ fn converse(
     send(stream, b'R', &0i32.to_be_bytes()).map_err(step("writing AuthenticationOk"))?;
     send(stream, b'Z', b"I").map_err(step("writing the first ReadyForQuery"))?;
 
-    let mut stalled = false;
+    let mut hold = Some(hold);
     loop {
-        let mut kind = [0u8; 1];
-        stream.read_exact(&mut kind).map_err(step("reading a message type"))?;
-        let mut length = [0u8; 4];
-        stream.read_exact(&mut length).map_err(step("reading a message length"))?;
-        let mut payload = vec![0u8; (i32::from_be_bytes(length) as usize).saturating_sub(4)];
-        stream.read_exact(&mut payload).map_err(step("reading a message payload"))?;
-        match kind[0] {
+        let (kind, payload) = next_message(stream)?;
+        match kind {
             b'Q' => {
                 let sql = String::from_utf8_lossy(payload.strip_suffix(&[0]).unwrap_or(&payload))
                     .into_owned();
-                if sql == statement && !stalled {
-                    stalled = true;
-                    std::thread::sleep(stall);
-                }
                 heard.push(sql.clone());
+                if sql == statement {
+                    match hold.take() {
+                        None => {}
+                        Some(Hold::For(stall)) => std::thread::sleep(stall),
+                        Some(Hold::UntilSpokenTo(control)) => {
+                            let (mut told, _) = control.accept().map_err(step("accepting the control connection"))?;
+                            told.set_read_timeout(Some(std::time::Duration::from_secs(20)))
+                                .map_err(step("setting the control deadline"))?;
+                            told.write_all(b"B").map_err(step("saying BEGIN has arrived"))?;
+                            let mut cancelled = [0u8; 1];
+                            told.read_exact(&mut cancelled).map_err(step("waiting to hear the cancel was delivered"))?;
+                        }
+                    }
+                }
                 send(stream, b'C', &cstring(&sql)).map_err(step("writing CommandComplete"))?;
                 send(stream, b'Z', b"I").map_err(step("writing ReadyForQuery"))?;
             }
@@ -1943,8 +1984,8 @@ fn send(stream: &mut TcpStream, kind: u8, payload: &[u8]) -> std::io::Result<()>
 /// **A cancel while `BEGIN` waits for its reply is followed by a `ROLLBACK`
 /// on the wire, before the connection's next borrower speaks.**
 ///
-/// No real server: the fake one stalls its answer to the first `BEGIN` for a
-/// second, the program cancels the transaction's fiber 200 ms in, and then
+/// No real server: the fake one holds its answer to the first `BEGIN` until
+/// the program has cancelled the transaction's fiber, and the program then
 /// runs one more transaction on the same pooled connection. What the server
 /// heard, in order, is the assertion.
 #[test]
@@ -1954,12 +1995,12 @@ fn a_cancel_while_begin_is_answered_puts_a_rollback_on_the_wire() {
     for backend in ["threads", "scheduler"] {
         let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
         let port = listener.local_addr().expect("an address").port();
-        let server = std::thread::spawn(move || {
-            record_queries(listener, std::time::Duration::from_millis(1000))
-        });
+        let control = TcpListener::bind("127.0.0.1:0").expect("a control port");
+        let told = control.local_addr().expect("an address").port();
+        let server = std::thread::spawn(move || record_queries(listener, control));
         // The port is in the name as well, so two copies of this test running
         // at once (a stress run) never compile to one path.
-        let exe = build(&format!("pg_cancel_in_begin_{backend}_{port}"), &cancel_in_begin_program(port));
+        let exe = build(&format!("pg_cancel_in_begin_{backend}_{port}"), &cancel_in_begin_program(port, told));
         let ran = run_watched(&exe, backend, std::time::Duration::from_secs(30));
         let recorded = server.join().expect("the server thread does not panic once connected");
         assert!(!ran.hung, "{backend}: the program hung: {:?}", ran.stdout);
@@ -1978,17 +2019,16 @@ fn a_cancel_while_begin_is_answered_puts_a_rollback_on_the_wire() {
 }
 
 /// The program for [`a_cancel_while_begin_is_answered_puts_a_rollback_on_the_wire`]:
-/// cancel a transaction 200 ms into its `BEGIN`, then run another on the
-/// same pooled connection.
-fn cancel_in_begin_program(port: u16) -> String {
+/// cancel a transaction once the server says its `BEGIN` has arrived, then
+/// run another on the same pooled connection.
+fn cancel_in_begin_program(port: u16, told: u16) -> String {
     format!(
         "module demo::main;
-import std::core::{{Fiber, Fibers, Result, print}};
+import std::core::{{Array, Fiber, Fibers, Result, print}};
 import std::db::{{Db, DbError, transaction}};
+import std::net::socket::{{start, connect_to, receive, transmit, shut}};
 import postgres::db::{{Settings}};
 import postgres::pool::{{Pool, close, open, with_db}};
-
-extern fn khora_sleep(millis: Int) -> ();
 
 fn empty() -> Result<Int, DbError> with {{ db: Db }} {{
   transaction(fn () => Result::Ok(1))
@@ -1996,11 +2036,16 @@ fn empty() -> Result<Int, DbError> with {{ db: Db }} {{
 
 fn main() -> Int {{
   let settings: Settings = {{ host: \"127.0.0.1\", port: {port}, user: \"khora\", database: \"khora\", secret: \"\" }};
+  if start() {{}} else {{ print(\"no sockets\") }};
   let crew = Fibers::open();
   let pool = open(crew, settings, 1);
   let f = Fiber::spawn(fn () => {{ let _ = with_db(pool, empty); () }});
-  khora_sleep(200);
+  let control = connect_to(\"127.0.0.1\", {told});
+  let one: Array<U8> = Array::new(1, 0);
+  let _ = receive(control, one);
   Fiber::cancel(f);
+  let _ = transmit(control, \"c\");
+  shut(control);
   Fiber::wait(f);
   match with_db(pool, empty) {{
     Result::Ok(_) => print(\"the next transaction committed\"),

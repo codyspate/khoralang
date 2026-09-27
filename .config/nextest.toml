@@ -36,6 +36,16 @@ threads-required = 'num-test-threads'
 filter = 'package(khora-rt) & (test(=reactor::tests::a_registration_during_a_poll_is_seen_by_that_poll) | test(=reactor::tests::a_deadline_registered_during_a_poll_is_honoured_by_that_poll))'
 threads-required = 'num-test-threads'
 
+# A pool that reconnects every few milliseconds for eight seconds, against a
+# server that sours every connection: thousands of loopback connections. On a
+# three-core macOS runner, the two pool tests that ran beside it could not
+# finish a handshake to their own fake server within five seconds, and
+# failed. They were starved, not wrong. This one gets the machine, as the
+# load test above does.
+[[profile.default.overrides]]
+filter = 'test(=postgres::a_caller_outlasts_any_number_of_failed_checks)'
+threads-required = 'num-test-threads'
+
 # The pool's backoff test bounds each gap between reconnect attempts from
 # above: the capped delay plus one 25 ms sleep's overrun, with ten times a
 # slice as the margin. Sharing the machine with the rest of the workspace is

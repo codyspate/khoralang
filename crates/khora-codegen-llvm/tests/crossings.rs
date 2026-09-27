@@ -141,9 +141,9 @@ fn sources(db: &KhoraDatabase, dir: &std::path::Path, main: &str) -> Vec<SourceF
 /// turns.
 static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Compiles the fixture into its own directory, with `KHORA_UNBOXED` set to
+/// Compiles `source` into its own directory, with `KHORA_UNBOXED` set to
 /// `unboxed` and counts forced plain if `plain`.
-fn build(name: &str, unboxed: &str, plain: bool) -> PathBuf {
+fn build(name: &str, source: &str, unboxed: &str, plain: bool) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     harness::ensure_runtime();
     std::fs::create_dir_all(&dir).expect("a workspace");
@@ -156,7 +156,7 @@ fn build(name: &str, unboxed: &str, plain: bool) -> PathBuf {
     unsafe { std::env::set_var("KHORA_UNBOXED", unboxed) };
     khora_codegen_llvm::force_plain_counts_on_this_thread(plain);
     let db = KhoraDatabase::new();
-    let root = SourceRoot::new(&db, sources(&db, &dir, CROSSINGS));
+    let root = SourceRoot::new(&db, sources(&db, &dir, source));
     let outcome = khora_codegen_llvm::compile(&db, root, &exe);
     khora_codegen_llvm::force_plain_counts_on_this_thread(false);
     unsafe { std::env::remove_var("KHORA_UNBOXED") };
@@ -202,7 +202,7 @@ const BACKENDS: [&str; 2] = ["threads", "scheduler"];
 
 /// Builds with `unboxed` and runs on both backends, three times each.
 fn every_crossing_counts_to_zero(unboxed: &str) {
-    let exe = build(&format!("crossings_unboxed_{unboxed}"), unboxed, false);
+    let exe = build(&format!("crossings_unboxed_{unboxed}"), CROSSINGS, unboxed, false);
     for backend in BACKENDS {
         for attempt in 1..=3 {
             let ran = run(&exe, backend);
@@ -236,9 +236,22 @@ fn every_crossing_counts_to_zero_boxed() {
 /// test depend on how threads are scheduled. So this requires at least one
 /// failure on each backend.
 ///
+/// **It runs until the first wrong run, not a fixed five, and each side
+/// reads five times as long as in the fixture.** On two free CPUs the first
+/// run is wrong nearly every time. A busy runner is closer to one CPU, where
+/// an update is lost only when the kernel preempts a thread between the load
+/// and the store of a count: on the Windows runner, sharing two cores with
+/// the rest of the suite, five runs of the fixture as it stands were all
+/// correct. Measured here on one CPU, the thread backend with the fixture's
+/// reads was correct 17 to 19 runs in 20. Longer reads give more
+/// preemptions a chance to land in a count; more runs give more chances. What
+/// it costs is time on a machine where plain counts somehow stopped losing
+/// updates: [`CONTROL_RUNS`] runs or [`CONTROL_PATIENCE`] per backend,
+/// whichever is first, before it fails.
+///
 /// **Skipped on a machine with one CPU.** There the kernel almost never
 /// preempts a thread between the load and the store of a plain count, so
-/// the thread backend loses no update and five correct runs say nothing
+/// the thread backend loses no update and correct runs say nothing
 /// about the fixture. Measured: plain counts on one CPU gave 20 correct runs
 /// of 20 on threads, and 0 of 20 on two CPUs or more.
 #[test]
@@ -247,13 +260,58 @@ fn the_fixture_fails_when_counts_are_not_atomic() {
         eprintln!("skipped: one CPU cannot show a lost plain-count update");
         return;
     }
-    let exe = build("crossings_plain", "1", true);
+    assert_eq!(CROSSINGS.matches(FIXTURE_READS).count(), 8, "the fixture's read counts moved");
+    let longer = CROSSINGS.replace(FIXTURE_READS, CONTROL_READS);
+    let exe = build("crossings_plain", &longer, "1", true);
+    let correct = control_correct();
     for backend in BACKENDS {
-        let runs: Vec<Result<String, String>> = (0..5).map(|_| run(&exe, backend)).collect();
+        let began = Instant::now();
+        let mut runs: Vec<Result<String, String>> = Vec::new();
+        while runs.len() < CONTROL_RUNS && began.elapsed() < CONTROL_PATIENCE {
+            let ran = run(&exe, backend);
+            let wrong = ran.as_deref() != Ok(correct.as_str());
+            runs.push(ran);
+            if wrong {
+                break;
+            }
+        }
         assert!(
-            runs.iter().any(|ran| ran.as_deref() != Ok(CORRECT)),
-            "`{backend}`: five runs with plain counts were all correct, so the fixture \
-             cannot tell atomic counts from plain ones: {runs:?}"
+            runs.iter().any(|ran| ran.as_deref() != Ok(correct.as_str())),
+            "`{backend}`: {} runs with plain counts were all correct, so the fixture \
+             cannot tell atomic counts from plain ones: {:?}",
+            runs.len(),
+            runs.first()
         );
     }
+}
+
+/// How many times each side of a crossing reads in [`CROSSINGS`].
+const FIXTURE_READS: &str = "20000";
+
+/// How many times each side reads in the control's build of it.
+const CONTROL_READS: &str = "100000";
+
+/// Most runs the control makes per backend before it gives up.
+const CONTROL_RUNS: usize = 40;
+
+/// Longest the control keeps running one backend before it gives up.
+const CONTROL_PATIENCE: Duration = Duration::from_secs(60);
+
+/// What a correct run of the control's build prints. The eight long reads
+/// each add a record's length (name plus tags: 56, 56, 36, 36, 26, 26, 16,
+/// 0 for the nursery child, whose answer is dropped) per read, 252 in all,
+/// and the rest of the fixture adds a fixed 92100; [`CORRECT`] is the same
+/// sum at 20000 reads.
+fn control_correct() -> String {
+    let reads: u64 = CONTROL_READS.parse().expect("a count");
+    format!("total {} live 0", 252 * reads + 92100)
+}
+
+/// **[`control_correct`] is the fixture's own sum**, checked here against
+/// [`CORRECT`] at the fixture's read count, so a wrong formula cannot make
+/// every control run look wrong.
+#[test]
+fn the_control_expects_what_the_fixture_prints() {
+    let reads: u64 = FIXTURE_READS.parse().expect("a count");
+    assert_eq!(format!("total {} live 0", 252 * reads + 92100), CORRECT);
 }

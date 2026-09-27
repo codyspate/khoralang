@@ -10,6 +10,15 @@
 //! with it.
 //!
 //! Compiled against `std` itself, because these are programs a user writes.
+//!
+//! **A program that cancels a fiber at a point waits for the fiber to say it
+//! has reached that point**, on a channel, instead of sleeping first. A fiber
+//! cancelled before its first turn never runs: no finalizer is registered and
+//! no change function is entered. On a slow runner a 50 ms sleep ended
+//! before the fiber had started, and a test either printed the wrong thing or
+//! passed without exercising what it names. A sleep that is left after such
+//! a signal is there so the cancel usually lands inside a blocking call the
+//! fiber cannot signal from; the signal is what makes the order certain.
 
 use crate::harness;
 
@@ -126,12 +135,13 @@ fn on_both(name: &str, source: &str) -> Vec<(&'static str, Ran)> {
 #[test]
 fn an_infallible_loop_stops_when_its_fiber_is_cancelled() {
     const SOURCE: &str = "module main;
-import std::core::{print, Region, Fiber};
+import std::core::{print, Region, Fiber, Channel};
 import std::clock::{Clock};
 
-fn spin(n: Int) -> Int {
+fn spin(n: Int, ready: Channel<Int>) -> Int {
   let region = Region::open();
   Region::defer(region, fn () => print(\"finalizer ran\"));
+  Channel::send(ready, 1);
   let mut i = 0;
   let mut total = 0;
   while i < n { total = (total * 31 + i) % 1000003; i = i + 1; };
@@ -139,16 +149,17 @@ fn spin(n: Int) -> Int {
   total
 }
 
-fn caller(n: Int) -> Int {
-  let got = spin(n);
+fn caller(n: Int, ready: Channel<Int>) -> Int {
+  let got = spin(n, ready);
   print(\"caller's tail ran\");
   got
 }
 
 pub fn main() -> Int {
   with { clock: Clock::real() } {
-    let f = Fiber::spawn(fn () => caller(300000000000));
-    clock.sleep(50);
+    let ready: Channel<Int> = Channel::bounded(1);
+    let f = Fiber::spawn(fn () => caller(300000000000, ready));
+    let _ = Channel::receive(ready);
     Fiber::cancel(f);
     let t0 = clock.monotonic_millis();
     Fiber::wait(f);
@@ -174,7 +185,7 @@ pub fn main() -> Int {
 #[test]
 fn join_on_a_stopped_child_unwinds_an_infallible_parent() {
     const SOURCE: &str = "module main;
-import std::core::{print, Fiber};
+import std::core::{print, Fiber, Channel};
 import std::clock::{Clock};
 
 fn spin() -> Int {
@@ -184,8 +195,9 @@ fn spin() -> Int {
   t
 }
 
-fn parent() -> Int {
+fn parent(ready: Channel<Int>) -> Int {
   let child = Fiber::spawn(fn () => spin());
+  Channel::send(ready, 1);
   let got = Fiber::join(child);
   print(\"parent's tail ran with ${got}\");
   got
@@ -193,8 +205,9 @@ fn parent() -> Int {
 
 pub fn main() -> Int {
   with { clock: Clock::real() } {
-    let b = Fiber::spawn(fn () => parent());
-    clock.sleep(50);
+    let ready: Channel<Int> = Channel::bounded(1);
+    let b = Fiber::spawn(fn () => parent(ready));
+    let _ = Channel::receive(ready);
     Fiber::cancel(b);
     Fiber::wait(b);
     print(\"parent cancelled: ${Fiber::cancelled(b)}\");
@@ -215,14 +228,15 @@ pub fn main() -> Int {
 #[test]
 fn a_pointer_returning_frame_stops_without_ending_the_process() {
     const SOURCE: &str = "module main;
-import std::core::{print, Region, Fiber};
+import std::core::{print, Region, Fiber, Channel};
 import std::clock::{Clock};
 
 fn step() -> Int raises String { 1 }
 
-fn name_it() -> String {
+fn name_it(ready: Channel<Int>) -> String {
   let region = Region::open();
   Region::defer(region, fn () => print(\"finalizer ran\"));
+  Channel::send(ready, 1);
   let mut n = 0;
   while n < 300000000000 {
     n = n + (step()! catch { _ => 1 });
@@ -232,8 +246,9 @@ fn name_it() -> String {
 
 pub fn main() -> Int {
   with { clock: Clock::real() } {
-    let a = Fiber::spawn(fn () => name_it());
-    clock.sleep(50);
+    let ready: Channel<Int> = Channel::bounded(1);
+    let a = Fiber::spawn(fn () => name_it(ready));
+    let _ = Channel::receive(ready);
     Fiber::cancel(a);
     Fiber::wait(a);
     print(\"cancelled: ${Fiber::cancelled(a)}\");
@@ -311,12 +326,13 @@ pub fn main() -> Int {
 #[test]
 fn a_total_catch_does_not_see_a_cancellation() {
     const SOURCE: &str = "module main;
-import std::core::{print, Fiber, Shared};
+import std::core::{print, Fiber, Shared, Channel};
 import std::clock::{Clock};
 
 fn step() -> Int raises String { 0 }
 
-fn worker(caught: Shared<Int>) -> () {
+fn worker(caught: Shared<Int>, ready: Channel<Int>) -> () {
+  Channel::send(ready, 1);
   loop {
     let _ = step()! catch { _ => { Shared::set(caught, Shared::get(caught) + 1); 0 } };
   }
@@ -325,8 +341,9 @@ fn worker(caught: Shared<Int>) -> () {
 pub fn main() -> Int {
   with { clock: Clock::real() } {
     let caught = Shared::of(0);
-    let f = Fiber::spawn(fn () => worker(caught));
-    clock.sleep(50);
+    let ready: Channel<Int> = Channel::bounded(1);
+    let f = Fiber::spawn(fn () => worker(caught, ready));
+    let _ = Channel::receive(ready);
     Fiber::cancel(f);
     Fiber::wait(f);
     print(\"cancelled: ${Fiber::cancelled(f)}; caught: ${Shared::get(caught)}\");
@@ -348,17 +365,20 @@ pub fn main() -> Int {
 #[test]
 fn a_cancelled_sleep_does_not_run_the_statement_after_it() {
     const SOURCE: &str = "module main;
-import std::core::{print, Fiber};
+import std::core::{print, Fiber, Channel};
 import std::clock::{Clock};
 
-fn napper() -> () with { clock: Clock } {
+fn napper(ready: Channel<Int>) -> () with { clock: Clock } {
+  Channel::send(ready, 1);
   clock.sleep(8000);
   print(\"statement after the sleep ran\");
 }
 
 pub fn main() -> Int {
   with { clock: Clock::real() } {
-    let f = Fiber::spawn(fn () => napper());
+    let ready: Channel<Int> = Channel::bounded(1);
+    let f = Fiber::spawn(fn () => napper(ready));
+    let _ = Channel::receive(ready);
     clock.sleep(100);
     let t0 = clock.monotonic_millis();
     Fiber::cancel(f);
@@ -385,7 +405,7 @@ pub fn main() -> Int {
 #[test]
 fn a_join_cancelled_inside_a_change_function_changes_nothing() {
     const SOURCE: &str = "module main;
-import std::core::{print, Fiber, Shared};
+import std::core::{print, Fiber, Shared, Channel};
 import std::clock::{Clock};
 
 fn spin() -> Int {
@@ -395,21 +415,21 @@ fn spin() -> Int {
   t
 }
 
-fn updater(cell: Shared<Int>) -> () {
+fn updater(cell: Shared<Int>, inside: Channel<Int>) -> () {
   let other = Fiber::spawn(fn () => spin());
-  Shared::update(cell, fn n => { let got = Fiber::join(other); n + got + 1 });
+  Shared::update(cell, fn n => { Channel::send(inside, 1); let got = Fiber::join(other); n + got + 1 });
   print(\"TAIL updater ran\");
 }
 
-fn updater_s(text: Shared<String>) -> () {
+fn updater_s(text: Shared<String>, inside: Channel<Int>) -> () {
   let other = Fiber::spawn(fn () => spin());
-  Shared::update(text, fn s => { let got = Fiber::join(other); s + \"!${got}\" });
+  Shared::update(text, fn s => { Channel::send(inside, 1); let got = Fiber::join(other); s + \"!${got}\" });
   print(\"TAIL updater_s ran\");
 }
 
-fn modifier(cell: Shared<Int>) -> () {
+fn modifier(cell: Shared<Int>, inside: Channel<Int>) -> () {
   let other = Fiber::spawn(fn () => spin());
-  let answer = Shared::modify(cell, fn n => { let got = Fiber::join(other); { state: n + got, result: got } });
+  let answer = Shared::modify(cell, fn n => { Channel::send(inside, 1); let got = Fiber::join(other); { state: n + got, result: got } });
   print(\"TAIL modifier ran ${answer}\");
 }
 
@@ -417,18 +437,19 @@ pub fn main() -> Int {
   with { clock: Clock::real() } {
     let cell = Shared::of(41);
     let text = Shared::of(\"hello\");
-    let f = Fiber::spawn(fn () => updater(cell));
-    clock.sleep(50);
+    let inside: Channel<Int> = Channel::bounded(1);
+    let f = Fiber::spawn(fn () => updater(cell, inside));
+    let _ = Channel::receive(inside);
     Fiber::cancel(f);
     Fiber::wait(f);
     print(\"int: cancelled ${Fiber::cancelled(f)}; cell = ${Shared::get(cell)}\");
-    let g = Fiber::spawn(fn () => updater_s(text));
-    clock.sleep(50);
+    let g = Fiber::spawn(fn () => updater_s(text, inside));
+    let _ = Channel::receive(inside);
     Fiber::cancel(g);
     Fiber::wait(g);
     print(\"string: cancelled ${Fiber::cancelled(g)}; text = ${Shared::get(text)}\");
-    let h = Fiber::spawn(fn () => modifier(cell));
-    clock.sleep(50);
+    let h = Fiber::spawn(fn () => modifier(cell, inside));
+    let _ = Channel::receive(inside);
     Fiber::cancel(h);
     Fiber::wait(h);
     print(\"modify: cancelled ${Fiber::cancelled(h)}; cell = ${Shared::get(cell)}\");
@@ -498,7 +519,7 @@ pub fn main() -> Int {
 #[test]
 fn a_cancel_does_not_cut_short_a_finalizer_whose_change_function_joins() {
     const SOURCE: &str = "module main;
-import std::core::{print, Fiber, Shared, Region};
+import std::core::{print, Fiber, Shared, Region, Channel};
 import std::clock::{Clock};
 
 fn spin(n: Int) -> Int {
@@ -508,7 +529,7 @@ fn spin(n: Int) -> Int {
   t
 }
 
-fn worker(cell: Shared<String>, log: Shared<Int>) -> () {
+fn worker(cell: Shared<String>, log: Shared<Int>, ready: Channel<Int>) -> () {
   with { clock: Clock::real() } {
     let r = Region::open();
     Region::defer(r, fn () => {
@@ -516,12 +537,13 @@ fn worker(cell: Shared<String>, log: Shared<Int>) -> () {
       Shared::update(cell, fn s => { let got = Fiber::join(other); s + \"+fin${got}\" });
       Shared::set(log, 1);
     });
+    Channel::send(ready, 1);
     clock.sleep(5000);
     print(\"TAIL worker body\");
   }
 }
 
-fn control(cell: Shared<String>, log: Shared<Int>) -> () {
+fn control(cell: Shared<String>, log: Shared<Int>, ready: Channel<Int>) -> () {
   with { clock: Clock::real() } {
     let r = Region::open();
     Region::defer(r, fn () => {
@@ -530,6 +552,7 @@ fn control(cell: Shared<String>, log: Shared<Int>) -> () {
       Shared::update(cell, fn s => s + \"+fin${got}\");
       Shared::set(log, 1);
     });
+    Channel::send(ready, 1);
     clock.sleep(5000);
     print(\"TAIL control body\");
   }
@@ -539,15 +562,16 @@ pub fn main() -> Int {
   with { clock: Clock::real() } {
     let cell = Shared::of(\"start\");
     let log = Shared::of(0);
-    let f = Fiber::spawn(fn () => worker(cell, log));
-    clock.sleep(50);
+    let ready: Channel<Int> = Channel::bounded(1);
+    let f = Fiber::spawn(fn () => worker(cell, log, ready));
+    let _ = Channel::receive(ready);
     Fiber::cancel(f);
     Fiber::wait(f);
     print(\"in change fn: cancelled ${Fiber::cancelled(f)}; finalizer finished ${Shared::get(log)}; cell = ${Shared::get(cell)}\");
     let cell2 = Shared::of(\"start\");
     let log2 = Shared::of(0);
-    let g = Fiber::spawn(fn () => control(cell2, log2));
-    clock.sleep(50);
+    let g = Fiber::spawn(fn () => control(cell2, log2, ready));
+    let _ = Channel::receive(ready);
     Fiber::cancel(g);
     Fiber::wait(g);
     print(\"control: cancelled ${Fiber::cancelled(g)}; finalizer finished ${Shared::get(log2)}; cell = ${Shared::get(cell2)}\");
@@ -575,7 +599,7 @@ pub fn main() -> Int {
 #[test]
 fn abort_ends_a_finalizer_whose_change_function_joins_for_ever() {
     const SOURCE: &str = "module main;
-import std::core::{print, Fiber, Shared, Region};
+import std::core::{print, Fiber, Shared, Region, Channel};
 import std::clock::{Clock};
 
 fn spin() -> Int {
@@ -585,7 +609,7 @@ fn spin() -> Int {
   t
 }
 
-fn worker(cell: Shared<Int>, log: Shared<Int>) -> () {
+fn worker(cell: Shared<Int>, log: Shared<Int>, ready: Channel<Int>) -> () {
   with { clock: Clock::real() } {
     let r = Region::open();
     Region::defer(r, fn () => {
@@ -593,6 +617,7 @@ fn worker(cell: Shared<Int>, log: Shared<Int>) -> () {
       Shared::update(cell, fn n => n + Fiber::join(other));
       Shared::set(log, 1);
     });
+    Channel::send(ready, 1);
     clock.sleep(5000);
   }
 }
@@ -601,8 +626,9 @@ pub fn main() -> Int {
   with { clock: Clock::real() } {
     let cell = Shared::of(41);
     let log = Shared::of(0);
-    let f = Fiber::spawn(fn () => worker(cell, log));
-    clock.sleep(50);
+    let ready: Channel<Int> = Channel::bounded(1);
+    let f = Fiber::spawn(fn () => worker(cell, log, ready));
+    let _ = Channel::receive(ready);
     Fiber::cancel(f);
     clock.sleep(200);
     print(\"after cancel, finished: ${Fiber::finished(f)}\");
@@ -650,7 +676,7 @@ pub fn main() -> Int {
 #[test]
 fn a_string_comparison_cancelled_leaks_nothing() {
     const SOURCE: &str = "module main;
-import std::core::{Fiber, print};
+import std::core::{Fiber, Channel, print};
 import std::clock::{Clock};
 
 extern fn khora_live_count() -> Int;
@@ -666,8 +692,9 @@ fn big(seed: String) -> String {
   s
 }
 
-fn until_cancelled(round: Int, a: String, b: String) -> Int {
+fn until_cancelled(round: Int, a: String, b: String, ready: Channel<Int>) -> Int {
   let mut total = 0;
+  Channel::send(ready, 1);
   loop {
     let h = \"held-${round}\";
     total = total + String::byte_length(pick(h, a, b));
@@ -675,11 +702,13 @@ fn until_cancelled(round: Int, a: String, b: String) -> Int {
 }
 
 fn rounds(a: String, b: String, n: Int) -> Int with { clock: Clock } {
+  let ready: Channel<Int> = Channel::bounded(1);
   let before = khora_live_count();
   let mut round = 0;
   let mut stopped = 0;
   while round < n {
-    let f = Fiber::spawn(fn () => until_cancelled(round, a, b));
+    let f = Fiber::spawn(fn () => until_cancelled(round, a, b, ready));
+    let _ = Channel::receive(ready);
     clock.sleep(20);
     Fiber::cancel(f);
     Fiber::wait(f);
@@ -957,7 +986,7 @@ pub fn main() -> Int {
 #[test]
 fn a_nursery_wait_that_was_cancelled_runs_no_tail() {
     const SOURCE: &str = "module main;
-import std::core::{print, Fiber, Shared, nursery, Nursery, ChildFailed};
+import std::core::{print, Fiber, Shared, Channel, nursery, Nursery, ChildFailed};
 import std::clock::{Clock};
 
 fn spin(n: Int) -> Int {
@@ -967,18 +996,19 @@ fn spin(n: Int) -> Int {
   t
 }
 
-fn group(log: Shared<Int>) -> Int raises ChildFailed {
+fn group(log: Shared<Int>, ready: Channel<Int>) -> Int raises ChildFailed {
   let v = nursery(fn () => {
     nursery.adopt(Fiber::spawn(fn () => { spin(300000000000); () }));
     nursery.adopt(Fiber::spawn(fn () => { spin(300000000000); () }));
+    Channel::send(ready, 1);
     5
   })!;
   Shared::set(log, 1);
   v
 }
 
-fn guarded(log: Shared<Int>, caught: Shared<Int>) -> Int {
-  group(log)! catch {
+fn guarded(log: Shared<Int>, caught: Shared<Int>, ready: Channel<Int>) -> Int {
+  group(log, ready)! catch {
     ChildFailed { children } => { Shared::set(caught, children); -1 },
   }
 }
@@ -987,8 +1017,9 @@ pub fn main() -> Int {
   with { clock: Clock::real() } {
     let log = Shared::of(0);
     let caught = Shared::of(0);
-    let f = Fiber::spawn(fn () => guarded(log, caught));
-    clock.sleep(50);
+    let ready: Channel<Int> = Channel::bounded(1);
+    let f = Fiber::spawn(fn () => guarded(log, caught, ready));
+    let _ = Channel::receive(ready);
     Fiber::cancel(f);
     Fiber::wait(f);
     print(\"cancelled ${Fiber::cancelled(f)}; tail ran ${Shared::get(log)}; catch saw ${Shared::get(caught)}\");
@@ -1085,7 +1116,7 @@ pub fn main() -> Int {
 #[test]
 fn a_bounded_adopt_waiting_for_room_stops_on_a_cancel() {
     const SOURCE: &str = "module main;
-import std::core::{print, Fiber, Shared, bounded_nursery, Nursery, ChildFailed};
+import std::core::{print, Fiber, Shared, Channel, bounded_nursery, Nursery, ChildFailed};
 import std::clock::{Clock};
 
 fn spin(n: Int) -> Int {
@@ -1095,25 +1126,27 @@ fn spin(n: Int) -> Int {
   t
 }
 
-fn group(log: Shared<Int>) -> Int raises ChildFailed {
+fn group(log: Shared<Int>, ready: Channel<Int>) -> Int raises ChildFailed {
   bounded_nursery(1, fn () => {
     nursery.adopt(Fiber::spawn(fn () => { spin(300000000000); () }));
     Shared::set(log, 1);
+    Channel::send(ready, 1);
     nursery.adopt(Fiber::spawn(fn () => { spin(10); () }));
     Shared::set(log, 2);
     5
   })!
 }
 
-fn guarded(log: Shared<Int>) -> Int {
-  group(log)! catch { ChildFailed { children } => -1 }
+fn guarded(log: Shared<Int>, ready: Channel<Int>) -> Int {
+  group(log, ready)! catch { ChildFailed { children } => -1 }
 }
 
 pub fn main() -> Int {
   with { clock: Clock::real() } {
     let log = Shared::of(0);
-    let f = Fiber::spawn(fn () => guarded(log));
-    clock.sleep(50);
+    let ready: Channel<Int> = Channel::bounded(1);
+    let f = Fiber::spawn(fn () => guarded(log, ready));
+    let _ = Channel::receive(ready);
     let before = Shared::get(log);
     let t1 = clock.monotonic_millis();
     Fiber::cancel(f);
@@ -1196,20 +1229,23 @@ import std::core::{print, Fiber, Array, Shared, Channel};
 import std::clock::{Clock};
 import std::net::socket::{start, listen_on, accept_on, connect_to, receive, invalid_handle};
 
-fn reader(conn: Int, errors: Shared<Int>) -> () {
+fn reader(conn: Int, errors: Shared<Int>, ready: Channel<Int>) -> () {
   let buf: Array<U8> = Array::new(64, 0);
+  Channel::send(ready, 1);
   let n = receive(conn, buf);
   if n < 0 { Shared::set(errors, Shared::get(errors) + 1); print(\"TAIL recv\"); }
   else { print(\"TAIL recv got bytes\"); }
 }
 
-fn acceptor(server: Int, errors: Shared<Int>) -> () {
+fn acceptor(server: Int, errors: Shared<Int>, ready: Channel<Int>) -> () {
+  Channel::send(ready, 1);
   let c = accept_on(server);
   if c == invalid_handle() { Shared::set(errors, Shared::get(errors) + 1); print(\"TAIL accept\"); }
   else { print(\"TAIL accept got one\"); }
 }
 
-fn chan(ch: Channel<Int>) -> () {
+fn chan(ch: Channel<Int>, ready: Channel<Int>) -> () {
+  Channel::send(ready, 1);
   let _ = Channel::receive(ch);
   print(\"TAIL channel\");
 }
@@ -1222,14 +1258,18 @@ pub fn main() -> Int {
     let client = connect_to(\"127.0.0.1\", PORT);
     let conn = accept_on(server);
     print(\"setup ${server >= 0} ${client >= 0} ${conn >= 0}\");
-    let r = Fiber::spawn(fn () => reader(conn, errors));
+    let ready: Channel<Int> = Channel::bounded(1);
+    let r = Fiber::spawn(fn () => reader(conn, errors, ready));
+    let _ = Channel::receive(ready);
     clock.sleep(50); Fiber::cancel(r); Fiber::wait(r);
     print(\"reader cancelled ${Fiber::cancelled(r)}\");
-    let a = Fiber::spawn(fn () => acceptor(server, errors));
+    let a = Fiber::spawn(fn () => acceptor(server, errors, ready));
+    let _ = Channel::receive(ready);
     clock.sleep(50); Fiber::cancel(a); Fiber::wait(a);
     print(\"acceptor cancelled ${Fiber::cancelled(a)}\");
     let ch: Channel<Int> = Channel::bounded(1);
-    let c = Fiber::spawn(fn () => chan(ch));
+    let c = Fiber::spawn(fn () => chan(ch, ready));
+    let _ = Channel::receive(ready);
     clock.sleep(50); Fiber::cancel(c); Fiber::wait(c);
     print(\"channel cancelled ${Fiber::cancelled(c)}\");
     print(\"I/O errors counted: ${Shared::get(errors)}\");
@@ -1435,17 +1475,24 @@ pub fn main() -> Int {
 }
 
 /// A fiber whose finalizer blocks for ever on a `receive`.
+///
+/// **The fiber says its finalizer is registered before it is cancelled.** A
+/// 50 ms pause was not enough: on a slow Windows runner the cancel arrived
+/// before the fiber's first turn, a fiber stopped then never runs, and the
+/// program printed no `finalizer started`. Waiting on `ready` fixes the
+/// order.
 const STUBBORN: &str = "module main;
 import std::core::{print, Fiber, Channel, Region};
 import std::clock::{Clock};
 
-fn stubborn(ch: Channel<Int>) -> () {
+fn stubborn(ch: Channel<Int>, ready: Channel<Int>) -> () {
   let region = Region::open();
   Region::defer(region, fn () => {
     print(\"finalizer started\");
     let _ = Channel::receive(ch);
     print(\"finalizer gave up\");
   });
+  Channel::send(ready, 1);
   let mut n = 0;
   loop { n = n + 1; }
 }
@@ -1453,8 +1500,9 @@ fn stubborn(ch: Channel<Int>) -> () {
 pub fn main() -> Int {
   with { clock: Clock::real() } {
     let ch: Channel<Int> = Channel::bounded(1);
-    let f = Fiber::spawn(fn () => stubborn(ch));
-    clock.sleep(50);
+    let ready: Channel<Int> = Channel::bounded(1);
+    let f = Fiber::spawn(fn () => stubborn(ch, ready));
+    let _ = Channel::receive(ready);
     Fiber::cancel(f);
     Fiber::cancel(f);
     clock.sleep(200);
@@ -1511,24 +1559,25 @@ fn a_deadline_ends_a_nursery_child_stuck_in_cleanup() {
 import std::core::{print, Fiber, Fibers, Channel, Region, Nursery};
 import std::clock::{Clock};
 
-fn stubborn(ch: Channel<Int>) -> () {
+fn stubborn(ch: Channel<Int>, ready: Channel<Int>) -> () {
   let region = Region::open();
   Region::defer(region, fn () => {
     print(\"child's finalizer started\");
     let _ = Channel::receive(ch);
   });
+  Channel::send(ready, 1);
   let mut n = 0;
   loop { n = n + 1; }
 }
 
-fn fan(ch: Channel<Int>) -> () with { nursery: Nursery } {
-  nursery.adopt(Fiber::spawn(fn () => stubborn(ch)))
+fn fan(ch: Channel<Int>, ready: Channel<Int>) -> () with { nursery: Nursery } {
+  nursery.adopt(Fiber::spawn(fn () => stubborn(ch, ready)))
 }
 
-fn body(ch: Channel<Int>) -> () {
+fn body(ch: Channel<Int>, ready: Channel<Int>) -> () {
   let crew = Fibers::open();
   let _ = with { nursery: handler for Nursery { adopt: fn f => Fibers::adopt(crew, f) } } {
-    fan(ch)
+    fan(ch, ready)
   };
   let _ = Fibers::wait(crew);
 }
@@ -1536,8 +1585,9 @@ fn body(ch: Channel<Int>) -> () {
 pub fn main() -> Int {
   with { clock: Clock::real() } {
     let ch: Channel<Int> = Channel::bounded(1);
-    let parent = Fiber::spawn(fn () => body(ch));
-    clock.sleep(100);
+    let ready: Channel<Int> = Channel::bounded(1);
+    let parent = Fiber::spawn(fn () => body(ch, ready));
+    let _ = Channel::receive(ready);
     STOP;
     Fiber::wait(parent);
     print(\"parent stopped\");
@@ -1610,9 +1660,10 @@ fn sticky(ch: Channel<Int>) -> () {
   ()
 }
 
-fn target(ch: Channel<Int>, flag: Shared<Int>) -> () {
+fn target(ch: Channel<Int>, flag: Shared<Int>, ready: Channel<Int>) -> () {
   let region = Region::open();
   Region::defer(region, fn () => { Shared::set(flag, 1) });
+  Channel::send(ready, 1);
   let _ = Channel::receive(ch);
   ()
 }
@@ -1629,8 +1680,9 @@ fn trial(n: Int) -> Int {
       j = j + 1;
     };
     clock.sleep(20);
-    let h = Fiber::spawn(fn () => target(ch, flag));
-    clock.sleep(50);
+    let ready: Channel<Int> = Channel::bounded(1);
+    let h = Fiber::spawn(fn () => target(ch, flag, ready));
+    let _ = Channel::receive(ready);
     Fiber::cancel(h);
     Fiber::wait(h);
     let ran = Shared::get(flag);
@@ -1665,7 +1717,7 @@ pub fn main() -> Int {
 #[test]
 fn a_loop_that_goes_round_by_continue_stops() {
     const SOURCE: &str = "module main;
-import std::core::{print, Fiber, Step, Iterator, Range};
+import std::core::{print, Fiber, Channel, Step, Iterator, Range};
 import std::clock::{Clock};
 
 fn by_while(n: Int) -> Int {
@@ -1699,11 +1751,16 @@ fn by_for(n: Int) -> Int {
 
 fn timed(which: Int) -> Bool {
   with { clock: Clock::real() } {
-    let f = Fiber::spawn(fn () => match which {
-      0 => by_while(300000000000),
-      1 => by_loop(300000000000),
-      _ => by_for(300000000000),
+    let ready: Channel<Int> = Channel::bounded(1);
+    let f = Fiber::spawn(fn () => {
+      Channel::send(ready, 1);
+      match which {
+        0 => by_while(300000000000),
+        1 => by_loop(300000000000),
+        _ => by_for(300000000000),
+      }
     });
+    let _ = Channel::receive(ready);
     clock.sleep(50);
     let t0 = clock.monotonic_millis();
     Fiber::cancel(f);
