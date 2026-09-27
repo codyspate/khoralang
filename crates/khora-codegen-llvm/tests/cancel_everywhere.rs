@@ -1012,21 +1012,29 @@ pub fn main() -> Int {
 /// function stores its "gave up" value and returns, and the fiber must stop
 /// right after the `update`: reported cancelled, and the `Shared::set` after
 /// it not run.
+///
+/// **Each fiber says it is inside its change function before it is
+/// cancelled.** A fixed pause was not enough: on a slow runner a 50 ms sleep
+/// ended before `modifier` reached `modify`, the cancel stopped it before the
+/// change function ran, and the cell read 101 where 201 was expected. The
+/// `inside` channel fixes the order.
 #[test]
 fn a_cancel_absorbed_inside_a_change_function_stops_after_the_update() {
     const SOURCE: &str = "module main;
 import std::core::{print, Fiber, Shared, Channel, Option};
 import std::clock::{Clock};
 
-fn updater(cell: Shared<Int>, log: Shared<Int>, ch: Channel<Int>) -> () {
+fn updater(cell: Shared<Int>, log: Shared<Int>, ch: Channel<Int>, inside: Channel<Int>) -> () {
   Shared::update(cell, fn n => {
+    Channel::send(inside, 1);
     match Channel::receive(ch) { Option::Some(v) => n + v, Option::None => n + 100 }
   });
   Shared::set(log, 1);
 }
 
-fn modifier(cell: Shared<Int>, log: Shared<Int>, ch: Channel<Int>) -> () {
+fn modifier(cell: Shared<Int>, log: Shared<Int>, ch: Channel<Int>, inside: Channel<Int>) -> () {
   let got = Shared::modify(cell, fn n => {
+    Channel::send(inside, 1);
     match Channel::receive(ch) { Option::Some(v) => { state: n + v, result: v }, Option::None => { state: n + 100, result: 0 } }
   });
   Shared::set(log, got + 1);
@@ -1037,15 +1045,16 @@ pub fn main() -> Int {
     let cell = Shared::of(1);
     let log = Shared::of(0);
     let ch: Channel<Int> = Channel::bounded(1);
-    let f = Fiber::spawn(fn () => updater(cell, log, ch));
-    clock.sleep(50);
+    let inside: Channel<Int> = Channel::bounded(2);
+    let f = Fiber::spawn(fn () => updater(cell, log, ch, inside));
+    let _in = Channel::receive(inside);
     Fiber::cancel(f);
     Fiber::wait(f);
     let c = Shared::get(cell);
     let l = Shared::get(log);
     print(\"update: cancelled ${Fiber::cancelled(f)}; cell ${c}; tail ran ${l}\");
-    let g = Fiber::spawn(fn () => modifier(cell, log, ch));
-    clock.sleep(50);
+    let g = Fiber::spawn(fn () => modifier(cell, log, ch, inside));
+    let _in2 = Channel::receive(inside);
     Fiber::cancel(g);
     Fiber::wait(g);
     let c2 = Shared::get(cell);
