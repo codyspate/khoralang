@@ -36,6 +36,14 @@ threads-required = 'num-test-threads'
 filter = 'package(khora-rt) & (test(=reactor::tests::a_registration_during_a_poll_is_seen_by_that_poll) | test(=reactor::tests::a_deadline_registered_during_a_poll_is_honoured_by_that_poll))'
 threads-required = 'num-test-threads'
 
+# The pool's backoff test bounds each gap between reconnect attempts from
+# above: the capped delay plus one 25 ms sleep's overrun, with ten times a
+# slice as the margin. Sharing the machine with the rest of the workspace is
+# how a sleep overruns by more than that, so it runs alone, like the two above.
+[[profile.default.overrides]]
+filter = 'test(=postgres::reconnect_attempts_back_off_up_to_the_cap)'
+threads-required = 'num-test-threads'
+
 # Everything that binds a socket, kept to a few at a time. The ports are all
 # distinct, so this is not about collisions: it is that a dozen servers and
 # their clients on one machine make every one of them slow, and the timeouts

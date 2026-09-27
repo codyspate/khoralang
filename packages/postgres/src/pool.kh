@@ -60,16 +60,61 @@ module postgres::pool;
 //! mid-flight sends the `ROLLBACK` on its way out rather than leaving it to
 //! the server to notice when the connection is reused. The lease then comes
 //! back to a connection that is ready, which is why the two belong together.
+//!
+//! # Reconnecting, shrinking, and growing back
+//!
+//! **Each slot's serving fiber owns its connection's whole life**, including
+//! losing it. `with_db` learns how a connection is doing only by asking the
+//! fiber that owns it.
+//!
+//! - A slot is in `idle` only while it is connected. `open` puts no slot
+//!   there; each serving fiber puts its own there once its connection opens.
+//! - Every lease starts with a `Check`: is the socket still open (a server
+//!   restart closes idle connections, and nothing reads an idle socket to
+//!   notice), and is the connection outside a transaction? A slot that fails
+//!   is not lent: its serving fiber marks it broken, `with_db` gives it back
+//!   at once and takes the next one.
+//! - Every lease ends by closing the request channel the slot offered for
+//!   it; the serving fiber answers what is still queued, and the close is
+//!   how it learns the lease is over. That is the only way back into `idle`,
+//!   so a slot that broke during the lease (a cut-off reply, `broken`, a
+//!   `ROLLBACK` an `abort` cut short) is reconnected instead of lent again.
+//!   A close needs no room and cannot be refused, so no way of stopping the
+//!   borrower -- and no number of fibers it left with requests queued --
+//!   keeps the lease from ending.
+//! - Reconnecting closes the old socket first and never reads it again, then
+//!   tries on the pool's fast `Schedule`. Meanwhile the slot counts as
+//!   `reconnecting`, and callers wait for it.
+//! - When the fast schedule gives up, the slot **shrinks out**: it counts as
+//!   `down`, and tries again on the slow interval until it connects (and
+//!   rejoins `idle`) or the pool closes.
+//! - **A pool with no slot live or reconnecting fails its callers at once**,
+//!   with the reason the last attempt failed. The callers already waiting
+//!   are woken by the down token (`Offer::Down`), put into `idle` when the
+//!   last slot shrinks. A caller that receives it puts it back for the next
+//!   one and answers `Disconnected`; once a slot is live or reconnecting
+//!   again, the next caller to receive it drops it.
+//!
+//! What it costs: a request channel per lease, one `Check` message per lease,
+//! and one non-blocking read. What it does not see: a
+//! connection that dies between the `Check` and the borrower's first
+//! statement. That statement is answered `Disconnected`, and the slot
+//! reconnects when the lease ends.
 
-import std::core::{Channel, Fiber, Fibers, Option, Region, Result};
+import std::core::{Changed, Channel, Fiber, Fibers, Option, Region, Result, Shared};
+import std::clock::{Clock};
 import std::db::{Db, DbError};
-import postgres::db::{Request, Settings, over, serve};
+import std::random::{Random};
+import std::resilience::{Schedule};
+import postgres::conn::{Connection, usable};
+import postgres::db::{Fitness, Request, Settings, connect, fitness, hang_up, over, serve_lease};
 
 /// A set of connections, each with a fiber serving it.
 pub type Pool = {
-  /// The ones nobody is using. A connection is *in* this channel exactly when
-  /// it is free, which is the whole of the bookkeeping.
-  idle: Channel<Channel<Request>>,
+  /// What is ready to lend: a slot whose connection is open and unused, as
+  /// the request channel for its next lease -- plus, at most once, the down
+  /// token. The module doc has both.
+  idle: Channel<Offer>,
   /// The fibers doing the serving.
   ///
   /// **Held here because a pool that did not hold them would stop working on
@@ -82,43 +127,170 @@ pub type Pool = {
   /// Keeping it is also the honest ownership: these fibers exist for this pool
   /// and end with it, which is what `close` then has something to wait for.
   crew: Fibers,
+  /// How many slots are in each state, the last reason a connection failed,
+  /// and whether the pool is closing.
+  tally: Shared<Tally>,
 };
 
-/// Opens `count` connections and adopts a serving fiber for each into `crew`.
+/// How a pool reconnects a connection it has lost.
+pub type Reconnect = {
+  /// The fast phase: when to try again after a failure, and when to give up.
+  /// A slot whose schedule gives up shrinks out of the pool.
+  fast: Schedule,
+  /// The slow phase: how often, in milliseconds, a slot that shrank out
+  /// tries again, with 80-120% jitter. `None` makes the shrink permanent.
+  slow: Option<Int>,
+  /// How long, in milliseconds, a connection attempt waits for the server to
+  /// finish its handshake before it counts as failed and the schedule goes
+  /// on. Without it, a server that accepts and never answers held the slot,
+  /// its waiting callers, and `close` for ever. The TCP connect before the
+  /// handshake is not covered: see "What it cannot cut short" on `close`.
+  handshake: Int,
+};
+
+impl Reconnect {
+  /// Exponential backoff from 50 ms, doubling to a 5 s cap, with 50-100%
+  /// jitter, for at most 30 s; then a try every 30 s. A handshake gets 10 s.
+  ///
+  /// **Why these numbers.** The fast phase is for the ordinary bad minute --
+  /// a server restart, a failover, a dropped route -- and callers wait
+  /// through it, so its total is a caller's patience. 30 s is HikariCP's
+  /// default `connectionTimeout`, how long a borrower there waits before it
+  /// is failed. The backoff is HikariCP's own shape for creating connections
+  /// (10 ms doubling to a 5 s cap); 50 ms first still reaches a server that
+  /// was only restarting on the first or second try, and the 5 s cap keeps a
+  /// pool of 20 from making 20 connection attempts a second at a server that
+  /// is down. The jitter spreads a fleet's retries apart after an outage
+  /// they all saw at once.
+  ///
+  /// The slow phase is why a pool shrunk to nothing grows back without a
+  /// restart. HikariCP keeps creating connections up to its minimum, which is
+  /// the pool size by default, and its housekeeper runs every 30 s; 30 s is
+  /// that. Other pools do less: pgx refills in the background only up to
+  /// `MinConns`, which is zero unless set, and deadpool and node-postgres
+  /// create a connection only when a caller asks, so their callers meet the
+  /// connect error themselves. A slot here costs one attempt per 30 s
+  /// against a server that is down.
+  ///
+  /// 10 s for a handshake is pgJDBC's default `connectTimeout`, and ten times
+  /// what a healthy server needs even over a slow link. libpq's
+  /// `connect_timeout` and pgx's `ConnectTimeout` default to no bound at all,
+  /// which is the hang this field exists to rule out.
+  pub fn default() -> Reconnect {
+    {
+      fast: Schedule::UpTo(Schedule::backoff(50, 5000), 30000), slow: Option::Some(30000),
+      handshake: 10000,
+    }
+  }
+
+  /// One attempt, then shrink for good.
+  pub fn never() -> Reconnect {
+    { fast: Schedule::once(), slow: Option::None, handshake: 10000 }
+  }
+}
+
+/// What `with_db` takes from `idle`.
+///
+/// **The down token is a case of its own, not a channel that looks like
+/// one.** Told apart by the shape of a channel -- one with a request already
+/// queued -- a slot could pass for the token whenever something sent to it
+/// outside a lease, a detached fiber still holding an old lease's `db` for
+/// one, and its give-back then kept the slot out of `idle` for good.
+pub type Offer =
+  /// A slot, as the request channel for this one lease. Its serving fiber
+  /// makes a fresh one for every lease and reads it until it is closed.
+  | Slot(Channel<Request>)
+  /// There is nothing to lend: no slot is live or reconnecting.
+  | Down;
+
+/// How many slots are in each state. See `health`.
+pub type Health = {
+  /// Connected: idle, or lent to somebody.
+  live: Int,
+  /// Lost, and being reconnected on the fast schedule. Callers wait for
+  /// these.
+  reconnecting: Int,
+  /// Shrunk out: the fast schedule gave up. Retrying on the slow interval,
+  /// if there is one, and never lent until a retry succeeds.
+  down: Int,
+};
+
+/// The pool's shared bookkeeping, changed only under its lock.
+type Tally = {
+  live: Int,
+  reconnecting: Int,
+  down: Int,
+  /// Why the last connection attempt failed.
+  last: String,
+  closing: Bool,
+  /// Whether the down token is in `idle`, so there is never more than one.
+  token: Bool,
+};
+
+/// Where a slot is.
+type Phase =
+  | Live
+  | Reconnecting
+  | Down;
+
+/// One try at a lease.
+type Tried<A> =
+  | Done(A)
+  /// The slot failed its `Check` and has been given back; take another.
+  | Again
+  | Refused(DbError);
+
+/// Opens a pool of `count` connections that reconnects with
+/// `Reconnect::default()`.
+pub fn open(crew: Fibers, settings: Settings, count: Int) -> Pool {
+  open_with(crew, settings, count, Reconnect::default())
+}
+
+/// Opens `count` slots and adopts a serving fiber for each into `crew`.
 ///
 /// **Returns before any of them has connected.** A serving fiber opens its own
-/// connection, so `open` is a spawn and not a round trip; a connection that
-/// will not open answers every request with the reason, which is what a caller
-/// sees rather than a failure here. That also means a pool is usable the
-/// instant it exists, and the ones still connecting simply are not idle yet.
+/// connection, so this is a spawn and not a round trip. `with_db` waits for
+/// the first connection to open; a pool that cannot connect at all answers
+/// `Disconnected` with the reason once every slot's fast schedule has given
+/// up.
 ///
-/// Below one connection is one. A pool of none would take a lease that never
-/// arrives, which is a hang rather than an error.
-pub fn open(crew: Fibers, settings: Settings, count: Int) -> Pool {
+/// Below one connection is one.
+pub fn open_with(crew: Fibers, settings: Settings, count: Int, plan: Reconnect) -> Pool {
   let wanted = if count < 1 { 1 } else { count };
-  let idle: Channel<Channel<Request>> = Channel::bounded(wanted);
+  // One more than the slots, for the down token. Each slot has at most one
+  // offer here at a time: it makes the next only once the last lease is over.
+  let idle: Channel<Offer> = Channel::bounded(wanted + 1);
+  let tally = Shared::of({
+      live: 0, reconnecting: wanted, down: 0, last: "no connection has been tried yet",
+      closing: false, token: false,
+    });
   let mut made = 0;
   while made < wanted {
-    // Capacity one: a connection serves one statement at a time, so a deeper
-    // queue would only let a fiber that already holds the lease run ahead of
-    // itself. Depth belongs to `idle`, where it means "how many connections",
-    // and not here, where it would mean nothing.
-    let requests: Channel<Request> = Channel::bounded(1);
-    Fibers::adopt(crew, Fiber::spawn(fn () => serve(settings, requests)));
-    Channel::send(idle, requests);
+    Fibers::adopt(crew, Fiber::spawn(fn () => slot(settings, plan, idle, tally)));
     made = made + 1
   };
-  { idle: idle, crew: crew }
+  { idle: idle, crew: crew, tally: tally }
+}
+
+/// How many slots are live, reconnecting, and shrunk out, right now.
+///
+/// For tests and health checks. A pool with none live or reconnecting answers
+/// every `with_db` with `Disconnected` at once.
+pub fn health(pool: Pool) -> Health {
+  let t = Shared::get(pool.tally);
+  { live: t.live, reconnecting: t.reconnecting, down: t.down }
 }
 
 /// Runs `body` with a leased connection installed as the `db: Db` capability.
 ///
-/// Waits when all connections are busy. The connection goes back **when this
-/// call returns**, however it returns -- normally, raising, or cancelled --
-/// because the lease is registered with a region this function opens, before
-/// anything after the receive can be cancelled. A pool that loses a connection
-/// to an error is a pool that works until the first bad day; one that holds a
-/// lease past the call is a pool of `n` uses.
+/// Waits while every connection is busy or reconnecting. The connection goes
+/// back **when this call returns**, however it returns -- normally, raising,
+/// or cancelled -- because the lease is registered with a region this
+/// function opens, before anything after the receive can be cancelled.
+///
+/// **Answers `Err(Disconnected(reason))` at once when no connection is live
+/// or reconnecting**, with the reason the last attempt failed, rather than
+/// waiting for a slow retry that may be half a minute away.
 ///
 /// The `db` requirement is handled here and removed from the caller's row. Any
 /// other requirements and raised failures on `body` pass straight through.
@@ -130,8 +302,34 @@ pub fn with_db<A, 'ef, 'er>(
   with 'ef
   raises 'er
 {
+  // **A loop, not a call to itself.** A slot whose server finishes the
+  // handshake and then fails every check offers a new connection every few
+  // milliseconds; taking each by a call to `with_db` cost a frame apiece,
+  // and a caller that waited through a few seconds of that ran out of stack.
+  let mut tried = one_try(pool, body)!;
+  while again(tried) { tried = one_try(pool, body)! };
+  match tried {
+    Tried::Done(answer) => Result::Ok(answer),
+    // Not reached: the loop leaves only on `Done` or `Refused`.
+    Tried::Again => Result::Err(DbError::Disconnected("the pool is closed")),
+    Tried::Refused(why) => Result::Err(why),
+  }
+}
+
+fn again<A>(tried: Tried<A>) -> Bool {
+  match tried { Tried::Again => true, Tried::Done(_) => false, Tried::Refused(_) => false }
+}
+
+/// One offer from `idle` and its lease, which ends when this returns.
+fn one_try<A, 'ef, 'er>(
+  pool: Pool,
+  body: () -> A with { 'ef | db: Db } raises 'er,
+) -> Tried<A>
+  with 'ef
+  raises 'er
+{
   match Channel::receive(pool.idle) {
-    Option::None => Result::Err(DbError::Disconnected("the pool is closed")),
+    Option::None => Tried::Refused(DbError::Disconnected("the pool is closed")),
     // **The give-back is registered before anything in this function can
     // poll.** A receive that returns a value has handed the connection to
     // this fiber, and from then on only a registered finalizer can bring it
@@ -141,42 +339,339 @@ pub fn with_db<A, 'ef, 'er>(
     // else knew about. One such cancel costs the pool a connection, for good,
     // and when the last one goes every `with_db` and `close` waits for ever.
     //
-    // The region is this arm's, so the lease ends when the call does -- see
-    // the note at the head of this module for what happened when it was the
-    // caller's.
-    Option::Some(requests) => {
+    // The region is this arm's, so the lease ends when the arm does: before
+    // a slot that failed its `Check` is replaced by another, not after.
+    Option::Some(offer) => {
       let lease = Region::open();
-      Region::defer(lease, fn () => give_back(pool.idle, requests));
-      Result::Ok(body()! with { db: over(requests) })
+      Region::defer(lease, returner(pool.idle, pool.tally, offer));
+      match offer {
+        Offer::Slot(requests) => match fitness(requests) {
+          Fitness::Fit => Tried::Done(body()! with { db: over(requests) }),
+          Fitness::Unfit => Tried::Again,
+          // A lease's channel is closed only by its own give-back, and by
+          // `close` while it sits in `idle`; neither can have happened yet.
+          // Trying again meets the closed `idle` if the pool is closing.
+          Fitness::Gone => Tried::Again,
+        },
+        Offer::Down => answer_down(pool),
+      }
     },
   }
 }
 
-/// Puts a connection back, or lets it go if the pool has closed.
+/// A caller was handed the down token: the reason, or another try if a
+/// connection has come back since the token was made.
 ///
-/// A failed send here is not an error to report: it means somebody closed the
-/// pool while this fiber held the lease, which is what shutting down looks like
-/// from the inside.
-fn give_back(idle: Channel<Channel<Request>>, requests: Channel<Request>) -> () {
-  Channel::send(idle, requests);
+/// **Only decides; the lease's give-back does the passing on.** Sending the
+/// token back to `idle` from here would come after several cancellation
+/// points, and a caller stopped before the send would unwind holding it:
+/// `tally` would still say a token was out, so no other would ever be made,
+/// and every later `with_db` would wait for ever. The give-back re-offers it
+/// under the rule this leaves in `tally.token`, and it runs however the
+/// caller stops.
+fn answer_down<A>(pool: Pool) -> Tried<A> {
+  let keep = Shared::modify(pool.tally, fn t => {
+      let down = !t.closing && t.live + t.reconnecting == 0;
+      {
+        state: { live: t.live, reconnecting: t.reconnecting, down: t.down, last: t.last,
+          closing: t.closing, token: down },
+        result: down,
+      }
+    });
+  if keep { Tried::Refused(DbError::Disconnected(Shared::get(pool.tally).last)) } else { Tried::Again }
+}
+
+/// The give-back `with_db` registers, built outside `with_db`.
+///
+/// **What this prevents: an `abort` losing the lease without running a line
+/// of the give-back.** A lambda written inside a function that calls a
+/// function value polls when it is entered, because it may be the far end of
+/// that call. `with_db` calls `body`, so a give-back written inline there
+/// polled first, and an `abort` -- which stops cleanup at its next
+/// cancellation point -- landing while a transaction's `ROLLBACK` waited
+/// stopped it at that poll. The give-back never ran, the pool was one
+/// connection short for good, and at none every later `with_db` and `close`
+/// waited for ever. Built here, in a function that calls no function value,
+/// the lambda has no entry poll.
+///
+/// **Whether the lease is the down token is fixed here, from the offer's
+/// case, and never learned by trying a send.** A send that fails is followed
+/// by a cancellation check, and an aborted caller stops at it, so a give-back
+/// that branched on a send's answer never got as far as acting on it.
+fn returner(idle: Channel<Offer>, tally: Shared<Tally>, offer: Offer) -> () -> () {
+  fn () => give_back(idle, tally, offer)
+}
+
+/// Ends a lease, in one step that cannot wait and cannot fail.
+///
+/// **A slot's lease ends by closing its request channel.** The serving
+/// fiber answers whatever is still queued, reads the close as the end of the
+/// lease, and decides whether to lend the connection again or reconnect it.
+///
+/// A message on that channel would need room, and that is how leases were
+/// lost: a body whose own fibers each had a request queued could leave the
+/// channel full, an aborted fiber does not wait for room, and the dropped
+/// message left the serving fiber waiting for ever on a lease that had ended.
+/// No capacity is enough, because the number of fibers is the caller's.
+/// `Channel::close` needs no room, never waits and never gives up, and it is
+/// final: anything the lease's fibers send after it is refused, so none of
+/// it can reach the next lease, whose channel is a new one.
+///
+/// The down token goes back into `idle` for the next caller while the pool
+/// still has nothing live or reconnecting -- the rule `answer_down` applies,
+/// and `tally.token` is where it left its decision. That send cannot wait
+/// either: `idle` has room for every slot and one token, and this token is
+/// not in it.
+fn give_back(idle: Channel<Offer>, tally: Shared<Tally>, offer: Offer) -> () {
+  match offer {
+    Offer::Slot(requests) => Channel::close(requests),
+    Offer::Down => {
+      let t = Shared::get(tally);
+      if t.token && !t.closing { Channel::send(idle, Offer::Down); () }
+    },
+  }
+}
+
+// --- the serving fiber -------------------------------------------------------
+
+/// One slot, for the pool's whole life: connect, lend, reconnect.
+fn slot(
+  settings: Settings,
+  plan: Reconnect,
+  idle: Channel<Offer>,
+  tally: Shared<Tally>,
+) -> () {
+  with { clock: Clock::real(), random: Random::real() } {
+    let mut going = true;
+    while going {
+      match reconnect(settings, plan, idle, tally) {
+        Option::None => going = false,
+        Option::Some(c) => {
+          going = lend(c, idle, tally);
+          // **Closed before anything else is tried**, and never read again:
+          // whatever the server was still sending on it goes with it.
+          hang_up(c);
+          if going { moved(tally, idle, Phase::Live, Phase::Reconnecting) };
+        },
+      }
+    };
+  }
+}
+
+/// Lends `c` until its connection breaks. `false` when the pool is closing.
+///
+/// **Every lease gets a request channel of its own**, made here and offered
+/// in `idle`, and the lease is over when that channel is closed and drained.
+/// A fresh channel per lease is what makes the close safe to use as the
+/// signal: a fiber from an old lease that still holds its `db` sends to a
+/// closed channel and is refused, and nothing it sends can be read as a
+/// request of the next lease. The same close is how `close` ends a slot that
+/// is waiting in `idle`, so the two are told apart by `tally.closing`, which
+/// `close` sets before it closes anything.
+fn lend(c: Connection, idle: Channel<Offer>, tally: Shared<Tally>) -> Bool {
+  let mut open = true;
+  let mut lending = true;
+  while lending {
+    // Room for one waiting request: a connection answers one at a time, and
+    // a lease with more fibers than that makes the rest wait for their turn.
+    let requests: Channel<Request> = Channel::bounded(1);
+    if !Channel::send(idle, Offer::Slot(requests)) {
+      // `idle` is closed: the pool is closing.
+      open = false;
+      lending = false
+    } else {
+      serve_lease(c, requests);
+      if closing(tally) {
+        open = false;
+        lending = false
+      } else if !usable(c) {
+        lending = false
+      }
+    }
+  };
+  open
+}
+
+/// Connects, on the fast schedule and then the slow interval. `None` when the
+/// pool closes first, or when the slot shrinks for good.
+fn reconnect(
+  settings: Settings,
+  plan: Reconnect,
+  idle: Channel<Offer>,
+  tally: Shared<Tally>,
+) -> Option<Connection>
+  with { clock: Clock, random: Random }
+{
+  let began = clock.monotonic_millis();
+  let mut attempts = 0;
+  let mut phase = Phase::Reconnecting;
+  let mut outcome: Option<Connection> = Option::None;
+  let mut going = true;
+  while going {
+    if closing(tally) {
+      going = false
+    } else {
+      match connect(settings, plan.handshake) {
+        Result::Ok(c) => {
+          if closing(tally) {
+            // Opened just as the pool closed: nobody will lend it.
+            hang_up(c)
+          } else {
+            outcome = Option::Some(c)
+          };
+          going = false
+        },
+        Result::Err(why) => {
+          remember(tally, why);
+          attempts = attempts + 1;
+          let wait = match phase {
+            Phase::Down => slow_wait(plan),
+            // Not reached: a slot only reconnects from `Reconnecting` or
+            // `Down`. Stopping is the answer that cannot loop.
+            Phase::Live => Option::None,
+            Phase::Reconnecting => {
+              let now = clock.monotonic_millis() - began;
+              match Schedule::next_after(plan.fast, attempts, now) {
+                Option::Some(at) => Option::Some(at - now),
+                Option::None => {
+                  phase = Phase::Down;
+                  moved(tally, idle, Phase::Reconnecting, Phase::Down);
+                  slow_wait(plan)
+                },
+              }
+            },
+          };
+          match wait {
+            Option::None => going = false,
+            Option::Some(millis) => if !pause(tally, millis) { going = false },
+          }
+        },
+      }
+    }
+  };
+  match outcome {
+    Option::Some(c) => {
+      moved(tally, idle, phase, Phase::Live);
+      Option::Some(c)
+    },
+    Option::None => Option::None,
+  }
+}
+
+/// The slow interval with 80-120% jitter, or `None` for a permanent shrink.
+fn slow_wait(plan: Reconnect) -> Option<Int> with { random: Random } {
+  match plan.slow {
+    Option::None => Option::None,
+    Option::Some(every) => Option::Some(every * random.in_range(80, 121) / 100),
+  }
+}
+
+/// How long one slice of a reconnect's wait is.
+///
+/// **What this bounds: how long `close` waits for a slot that is between
+/// attempts.** The runtime has no receive with a deadline, so a slot cannot
+/// sleep on something `close` could wake; it sleeps in slices and looks at
+/// the pool between them. The cost is a wake every slice per waiting slot.
+fn slice() -> Int { 25 }
+
+/// Waits `millis`, or less if the pool closes. `false` if it closed.
+fn pause(tally: Shared<Tally>, millis: Int) -> Bool with { clock: Clock } {
+  let until = clock.monotonic_millis() + millis;
+  let mut open = true;
+  let mut waiting = true;
+  while waiting {
+    let left = until - clock.monotonic_millis();
+    if closing(tally) {
+      open = false;
+      waiting = false
+    } else if left <= 0 {
+      waiting = false
+    } else {
+      clock.sleep(if left < slice() { left } else { slice() })
+    }
+  };
+  open
+}
+
+fn closing(tally: Shared<Tally>) -> Bool {
+  Shared::get(tally).closing
+}
+
+/// Keeps `why` as the reason a pool with nothing live gives its callers.
+fn remember(tally: Shared<Tally>, why: DbError) -> () {
+  let text = match why {
+    DbError::Disconnected(m) => m,
+    DbError::Rejected(m) => m,
+    DbError::RolledBack(m) => m,
+  };
+  Shared::update(tally, fn t => {
+      live: t.live, reconnecting: t.reconnecting, down: t.down, last: text,
+      closing: t.closing, token: t.token,
+    });
+}
+
+/// Moves one slot from `from` to `to`, and puts the down token into `idle`
+/// when that leaves nothing live or reconnecting.
+fn moved(tally: Shared<Tally>, idle: Channel<Offer>, from: Phase, to: Phase) -> () {
+  let token_now = Shared::modify(tally, fn t => {
+      let live = t.live + step(Phase::Live, from, to);
+      let reconnecting = t.reconnecting + step(Phase::Reconnecting, from, to);
+      let down = t.down + step(Phase::Down, from, to);
+      let wanted = !t.closing && !t.token && live + reconnecting == 0;
+      {
+        state: { live: live, reconnecting: reconnecting, down: down, last: t.last,
+          closing: t.closing, token: t.token || wanted },
+        result: wanted,
+      }
+    });
+  if token_now {
+    Channel::send(idle, Offer::Down);
+    ()
+  };
+}
+
+/// What moving a slot from `from` to `to` does to the count of `which`.
+fn step(which: Phase, from: Phase, to: Phase) -> Int {
+  (if same(which, to) { 1 } else { 0 }) - (if same(which, from) { 1 } else { 0 })
+}
+
+fn same(a: Phase, b: Phase) -> Bool {
+  match a {
+    Phase::Live => match b { Phase::Live => true, Phase::Reconnecting => false, Phase::Down => false },
+    Phase::Reconnecting =>
+      match b { Phase::Live => false, Phase::Reconnecting => true, Phase::Down => false },
+    Phase::Down => match b { Phase::Live => false, Phase::Reconnecting => false, Phase::Down => true },
+  }
 }
 
 /// Stops every serving fiber and waits for them.
 ///
-/// The request channels are closed **only for the idle ones**, which is
-/// deliberate rather than a limitation: a connection somebody is using is one
-/// whose statement is still running, and closing its channel underneath the
-/// fiber holding it would answer a live query with `Disconnected`. A lease
-/// returned to a closed pool is released rather than queued, and its serving
-/// fiber ends when its request channel does — so waiting on the crew is what
-/// makes this a shutdown rather than a request to shut down.
+/// **Prompt, including for slots that are reconnecting.** The pool is marked
+/// closing first; a slot between attempts sees that within one `slice`, a slot
+/// that finishes opening a connection after it hangs up at once, and the idle
+/// ones are ended by closing their request channels. A connection somebody is
+/// using is not closed underneath them: its lease ends when their `with_db`
+/// returns, and its serving fiber, finding `idle` closed, hangs up then. So
+/// waiting on the crew is what makes this a shutdown rather than a request
+/// to shut down.
+///
+/// What it cannot cut short: a connection attempt already under way. One in
+/// the startup exchange ends within the plan's `handshake` bound, when its
+/// read gives up; one still inside the operating system's TCP `connect` ends
+/// when that does, which for an address that drops packets is the system's
+/// connect timeout -- minutes on Linux.
 pub fn close(pool: Pool) -> () {
+  Shared::update(pool.tally, fn t => {
+      live: t.live, reconnecting: t.reconnecting, down: t.down, last: t.last,
+      closing: true, token: t.token,
+    });
   Channel::close(pool.idle);
   let mut going = true;
   while going {
     match Channel::receive(pool.idle) {
       Option::None => going = false,
-      Option::Some(requests) => Channel::close(requests),
+      Option::Some(Offer::Slot(requests)) => Channel::close(requests),
+      Option::Some(Offer::Down) => (),
     }
   };
   // **The count is discarded here, and only here.** `Fibers::wait` answers

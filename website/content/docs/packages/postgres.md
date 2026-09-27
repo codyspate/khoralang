@@ -43,6 +43,81 @@ turning back into a parameter threaded through every signature.
 A connection can also be used directly, without a pool, for a script or a
 migration. The README covers that shape.
 
+## Lost connections
+
+A pool reconnects a connection it loses, and never lends one that is down.
+
+- **What counts as lost.** A reply cut off partway, a `ROLLBACK` that did not
+  arrive (`std::db` calls `broken`), a connection the server closed or reset
+  while it sat idle, and one left inside a transaction. Each connection is
+  checked before it is lent, so one the server closed between leases is
+  caught there rather than by the next query. A notification, a notice or a
+  parameter change the server sent to an idle connection does not count: the
+  connection is lent as it is, with its session.
+- **A stopped caller costs nothing.** A fiber stopped by `cancel`, `abort` or
+  `cancel_within` anywhere in `with_db` — waiting for a connection, holding
+  one, in the middle of a statement, inside a transaction's `ROLLBACK`, or
+  while fibers it started are still using `db` — gives its connection back,
+  and the pool stays its full size. Statements those fibers had already
+  queued are answered first and their answers dropped; anything they send
+  afterwards is refused with `Disconnected`, and never reaches the next
+  borrower.
+- **Reconnecting.** The old socket is closed first and nothing more is read
+  from it. The new one is tried on a backoff: 50 ms, doubling to 5 s, each
+  delay drawn at 50-100% of its value, for up to 30 s. `with_db` waits
+  through it, the same way it waits when every connection is busy.
+- **Shrinking.** A connection that has not come back after 30 s leaves the
+  pool. It is not lent, and it tries again every 30 s (±20%) until it
+  connects, when it rejoins. So a pool that lost its server grows back to
+  full size within one retry interval of the server's return.
+- **An empty pool answers at once.** When no connection is live or
+  reconnecting, `with_db` returns `Err(DbError::Disconnected(reason))` with
+  the reason the last attempt failed, and so do the callers that were
+  already waiting. It does not wait for the next 30-second retry.
+
+```khora
+import std::resilience::{Schedule};
+import postgres::pool::{Reconnect, health, open_with};
+
+let plan: Reconnect = {
+  fast: Schedule::UpTo(Schedule::backoff(100, 2000), 10000),
+  slow: Option::Some(60000),
+  handshake: 5000,
+};
+let pool = open_with(crew, settings, 8, plan);
+let now = health(pool);   // { live, reconnecting, down }
+```
+
+`Reconnect::default()` is what `open` uses. `Reconnect::never()` makes one
+attempt and never retries, and `slow: Option::None` keeps a connection that
+gave up out of the pool for good. `handshake` is how long, in milliseconds,
+an attempt waits for the server to finish the startup exchange before it
+counts as failed and the backoff goes on; the default is 10 s. A server that
+accepts connections and never answers is therefore a server that is down,
+not a pool that hangs. `health` is for a readiness check or a test: a pool
+with `live` and `reconnecting` both 0 is failing its callers.
+
+`open` returns before any connection has opened, and a pool lends nothing
+until one does. A pool whose server is unreachable answers its first callers
+`Disconnected` once the 30-second backoff has run out.
+
+**Limits.**
+
+- A connection that dies between the check and the borrower's first
+  statement answers that statement `Disconnected`. The pool does not
+  resend it, because it cannot know whether the server ran it. Retrying is
+  the caller's decision, and the connection reconnects once the lease ends.
+- `close` ends a connection that is waiting to retry within about 25 ms, and
+  one in the middle of the startup exchange within the `handshake` bound. The
+  TCP connect before that exchange has no bound of its own: an address that
+  drops packets rather than refusing takes the operating system's connect
+  timeout, which is minutes on Linux, and `close` waits for it.
+- A connection whose peer vanished without closing (a cable pulled, a
+  firewall dropping the flow) looks healthy until a statement times out on
+  it. The check reads what has arrived and cannot see that.
+- Each lease costs a request channel of its own and one message to the
+  connection's serving fiber, the check, on top of the statements themselves.
+
 ## Authentication
 
 `scram-sha-256` is the default on PostgreSQL 14 and later, and it is what this

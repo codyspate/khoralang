@@ -3,11 +3,12 @@ module postgres::conn;
 import std::core::{Array, List, Option, Result, Vector};
 import std::db::{Cell, DbError, Row};
 import std::decimal::{Decimal};
-import std::net::socket::{connect_to, invalid_handle, receive, shut, start, transmit_bytes};
+import std::net::socket::{connect_to, invalid_handle, nothing_yet, receive, receive_now, set_receive_timeout, shut, start, transmit_bytes};
 import postgres::wire::{Message, Reader, extended, message_at, message_width, password, query, sasl_initial, sasl_response, startup, terminate};
 import postgres::scram::{Opening, ScramError, Session, begin, encode64, finish, verify};
 
 extern fn khora_random_seed() -> Int;
+extern fn khora_monotonic_millis() -> Int;
 
 /// A connection to a PostgreSQL server, and the conversation it has.
 ///
@@ -116,6 +117,9 @@ pub type Connection = {
   /// What it costs: one failed read ends the connection, including a read
   /// that timed out on a server that was only slow.
   mut broken: Bool,
+  /// Whether the last `ReadyForQuery` said a transaction is open. See
+  /// `in_transaction`.
+  mut open_transaction: Bool,
 };
 
 /// What a column is called and what type the server says it is.
@@ -234,6 +238,33 @@ pub fn open(
   database: String,
   secret: String,
 ) -> Result<Connection, PgError> {
+  open_within(host, port, user, database, secret, 0)
+}
+
+/// `open`, with the handshake bounded: a server that has not finished it
+/// within `millis` is given up on, and the answer is `Closed` saying so. Zero
+/// is no bound, which is `open`.
+///
+/// **What this prevents: a connect that never ends because the server never
+/// speaks.** A server stuck in its own startup, or a port something else is
+/// listening on, accepts the connection and then says nothing; `open` waits
+/// for its first message for ever. A pool reconnecting to it hung the slot,
+/// the callers waiting on the slot, and `close`, which waits for the slot.
+///
+/// The bound is on each read of the handshake, not on the whole of it, so a
+/// server that answers each message just inside it can take longer in all. It
+/// does not bound the TCP connect before it, for the reason `open` gives: an
+/// unroutable host still takes the operating system's connect timeout. Once
+/// the handshake is over the bound is lifted, and statements wait for their
+/// replies as long as they take.
+pub fn open_within(
+  host: String,
+  port: Int,
+  user: String,
+  database: String,
+  secret: String,
+  millis: Int,
+) -> Result<Connection, PgError> {
   if !start() {
     Result::Err(PgError::Unreachable("the socket layer would not start"))
   } else {
@@ -246,21 +277,49 @@ pub fn open(
       let empty: Array<U8> = Array::new(0, 0);
       let c: Connection = {
         handle: handle, pending: empty, start: 0, scram: Option::None, broken: false,
+        open_transaction: false,
       };
       let hello = startup(user, database);
+      let began = khora_monotonic_millis();
+      if millis > 0 { let _ = set_receive_timeout(handle, millis); () };
       if transmit_bytes(handle, hello) < 0 {
         shut(handle);
         Result::Err(PgError::Closed("the startup message could not be sent"))
       } else {
         match handshake(c, secret) {
-          Result::Ok(_) => Result::Ok(c),
+          Result::Ok(_) => {
+            if millis > 0 { let _ = set_receive_timeout(handle, 0); () };
+            Result::Ok(c)
+          },
           Result::Err(why) => {
             shut(handle);
-            Result::Err(why)
+            Result::Err(if millis > 0 { unanswered(why, millis, khora_monotonic_millis() - began) } else { why })
           },
         }
       }
     }
+  }
+}
+
+/// A handshake that failed under a bound, told as what happened.
+///
+/// A read that runs out of time comes back like a closed connection, so a
+/// server that never answered would be reported as one that hung up. Only a
+/// failure that took the whole bound is a timeout: a server that closed the
+/// connection at once -- one that is restarting, say -- keeps its own
+/// message, and so do a refusal and a missing feature.
+fn unanswered(why: PgError, millis: Int, took: Int) -> PgError {
+  match why {
+    PgError::Closed(said) => if took >= millis {
+      PgError::Closed(
+        "the server did not finish the handshake within " + Int::to_string(millis) + " ms"
+      )
+    } else {
+      PgError::Closed(said)
+    },
+    PgError::Unreachable(said) => PgError::Unreachable(said),
+    PgError::Refused(said) => PgError::Refused(said),
+    PgError::Unsupported(said) => PgError::Unsupported(said),
   }
 }
 
@@ -418,8 +477,15 @@ fn authenticate(c: Connection, m: Message, secret: String) -> Result<Bool, PgErr
 }
 
 /// Closes politely, so the server logs a disconnection and not a broken pipe.
+///
+/// **A broken connection is shut without the goodbye.** The server may already
+/// have closed it, and a write to a socket the other end has reset stops the
+/// whole process with `SIGPIPE`, which the runtime does not ignore. A pool
+/// closes every connection it reconnects, most of them because the server
+/// went away, so the one write this saves is the one most likely to land on a
+/// reset socket.
 pub fn close(c: Connection) -> () {
-  transmit_bytes(c.handle, terminate());
+  if !c.broken { transmit_bytes(c.handle, terminate()); () };
   shut(c.handle);
 }
 
@@ -430,6 +496,99 @@ pub fn close(c: Connection) -> () {
 /// False once an exchange has failed partway, for good: see `broken`.
 pub fn usable(c: Connection) -> Bool {
   !c.broken
+}
+
+/// Marks the connection as not to be used again.
+///
+/// For a caller that knows something the connection does not: `std::db`'s
+/// `broken`, sent when a `ROLLBACK` did not arrive. Every later statement is
+/// refused without touching the socket, as after a cut-off reply.
+pub fn forsake(c: Connection) -> () {
+  c.broken = true
+}
+
+/// Whether a connection nobody is using is still worth lending.
+///
+/// **What this prevents: a borrower handed a connection the server has
+/// already closed.** A server that restarts, or an administrator who ends a
+/// backend, closes connections that are sitting idle, and nothing is read
+/// from an idle connection to notice. This reads whatever has arrived without
+/// waiting: nothing yet is the healthy answer. The end of the stream is a
+/// closed connection and a failed read is a reset one, so both count as
+/// broken, and the connection is marked so. A reset connection taken for a
+/// quiet one was the costly case: the next statement was written to it, and
+/// `SIGPIPE` ended the process.
+///
+/// **Bytes are read as messages, and the ones a server sends unasked on a
+/// healthy connection are kept for the next reply.** A notification from
+/// `LISTEN`, a notice, or a changed parameter can arrive while a connection
+/// sits idle; counted as broken, each cost a healthy connection a reconnect
+/// and any session state it held. They are left where the next exchange
+/// reads them, and it skips them as it always has. Anything else -- the
+/// `ErrorResponse` a server sends before it hangs up, above all -- counts as
+/// broken. A message still arriving is judged by the next statement.
+///
+/// What it costs: one non-blocking read per lease, more if the server has
+/// sent something. What it cannot see: a connection that dies between this
+/// check and the statement after it, or a peer that vanished without
+/// closing (no `FIN` arrives, so the read would block, which is the healthy
+/// answer).
+pub fn still_open(c: Connection) -> Bool {
+  if c.broken {
+    false
+  } else {
+    let mut open = true;
+    let mut reading = true;
+    // A bound, so a server that never stops talking cannot hold the check.
+    let mut rounds = 16;
+    while reading && rounds > 0 {
+      let probe: Array<U8> = Array::new(8192, 0);
+      let read = receive_now(c.handle, probe);
+      if nothing_yet(read) {
+        reading = false
+      } else if read <= 0 {
+        open = false;
+        reading = false
+      } else {
+        c.pending = extend(c.pending, c.start, probe, read);
+        c.start = 0;
+        rounds = rounds - 1
+      }
+    };
+    if open && !only_unasked(c.pending, c.start) { open = false };
+    if !open { c.broken = true };
+    open
+  }
+}
+
+/// Whether every whole message in `bytes` from `from` on is one a server
+/// sends unasked on a healthy connection: `NotificationResponse` ('A'),
+/// `NoticeResponse` ('N') or `ParameterStatus` ('S').
+fn only_unasked(bytes: Array<U8>, from: Int) -> Bool {
+  let mut at = from;
+  let mut fine = true;
+  let mut going = true;
+  while going && fine {
+    match message_at(bytes, at) {
+      Option::None => going = false,
+      Option::Some(m) => {
+        fine = m.kind == 65 || m.kind == 78 || m.kind == 83;
+        at = at + message_width(m)
+      },
+    }
+  };
+  fine
+}
+
+/// Whether the server said, in its last `ReadyForQuery`, that a transaction
+/// is still open on this connection.
+///
+/// A pool asks before lending a connection again. A transaction left open --
+/// a borrower stopped by `abort` before its `ROLLBACK` went out -- would run
+/// the next borrower's statements inside it, and their writes would go when
+/// it ends.
+pub fn in_transaction(c: Connection) -> Bool {
+  c.open_transaction
 }
 
 /// The answer to any statement on a broken connection.
@@ -539,6 +698,9 @@ fn collect(c: Connection) -> Result<Answer, PgError> {
           // 'Z' ReadyForQuery ends every exchange, including a failed one —
           // which is why the error is remembered rather than returned here:
           // leaving the stream mid-reply would desynchronise the next query.
+          // Its one byte is the transaction state: 'I' (73) is outside one.
+          c.open_transaction = Array::length(m.payload) > 0
+          && U8::to_int(Array::get(m.payload, 0)) != 73;
           going = false
         } else if m.kind == 84 {
           columns = describe(m)

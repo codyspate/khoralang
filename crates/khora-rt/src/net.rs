@@ -260,8 +260,16 @@ pub extern "C" fn khora_net_forget(socket: Socket) {
 /// connection with a quiet peer is abandoned by the kernel rather than closed
 /// by anybody.
 ///
-/// So this is one syscall. A read that would have blocked is -1, the same as a
-/// read that failed, because the caller does the same thing with both: stop.
+/// So this is one syscall, and it never waits. A read that would have blocked
+/// is -1, and a read that failed for any other reason is -2.
+///
+/// **The two negatives are different answers because a caller checking a
+/// connection needs both.** A pool asking whether an idle connection is still
+/// open reads what has arrived: nothing yet (-1) is the healthy answer, and a
+/// connection the peer reset (`ECONNRESET`, -2) is not. With both folded into
+/// -1, a reset connection looked healthy, the next statement was written to
+/// it, and the process died of `SIGPIPE`. A caller that only wants to stop
+/// (`shut`'s drain) can go on treating any negative as "stop".
 ///
 /// # Safety
 ///
@@ -274,7 +282,13 @@ pub unsafe extern "C" fn khora_net_recv_now(
 ) -> isize {
     // SAFETY: the caller guarantees `length` writable bytes at `into`.
     let read = unsafe { raw_recv(socket, into, length) };
-    if read >= 0 { read } else { -1 }
+    if read >= 0 {
+        read
+    } else if would_block() {
+        -1
+    } else {
+        -2
+    }
 }
 
 /// `recv`, retried until it says something other than "not yet".

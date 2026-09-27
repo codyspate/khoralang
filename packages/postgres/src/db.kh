@@ -48,7 +48,7 @@ module postgres::db;
 
 import std::core::{Channel, List, Option, Result};
 import std::db::{Cell, Db, DbError, Row};
-import postgres::conn::{Answer, Connection, PgError, ask, close, open, run, usable};
+import postgres::conn::{Answer, Connection, PgError, ask, close, forsake, in_transaction, open, open_within, run, still_open, usable};
 
 /// What a caller wants done.
 pub type Work =
@@ -58,7 +58,14 @@ pub type Work =
   | Execute(sql: String, values: List<Cell>)
   | Begin
   | Commit
-  | Rollback;
+  | Rollback
+  /// The connection cannot be trusted with another statement: `std::db` asks
+  /// this when a `ROLLBACK` did not arrive. Answered at once; every statement
+  /// after it on this connection is refused without touching the socket.
+  | Break
+  /// Is this connection still worth using? Asked by the pool once per lease,
+  /// before the borrower's first statement.
+  | Check;
 
 /// What comes back.
 ///
@@ -168,6 +175,8 @@ fn apology(work: Work, why: DbError) -> Reply {
     Work::Begin => Reply::Finished(Result::Err(why)),
     Work::Commit => Reply::Finished(Result::Err(why)),
     Work::Rollback => Reply::Finished(Result::Err(why)),
+    Work::Break => Reply::Finished(Result::Ok(())),
+    Work::Check => Reply::Finished(Result::Err(why)),
   }
 }
 
@@ -181,7 +190,47 @@ fn answer(c: Connection, work: Work) -> Reply {
     Work::Begin => Reply::Finished(statement(c, "BEGIN")),
     Work::Commit => Reply::Finished(statement(c, "COMMIT")),
     Work::Rollback => Reply::Finished(statement(c, "ROLLBACK")),
+    Work::Break => {
+      forsake(c);
+      Reply::Finished(Result::Ok(()))
+    },
+    Work::Check =>
+      if still_open(c) && !in_transaction(c) {
+        Reply::Finished(Result::Ok(()))
+      } else {
+        forsake(c);
+        Reply::Finished(Result::Err(gone()))
+      },
   }
+}
+
+/// Answers one lease's requests on `c`, until the lease is over: until
+/// `requests`, which belongs to this lease alone, is closed and drained.
+///
+/// **The end of a lease is the close of its channel**, done by the pool's
+/// give-back, so the fiber that owns the connection is the one that learns
+/// it is free. That is what lets the pool check a connection before lending
+/// it again: a connection that broke during the lease, or that was left
+/// inside a transaction because an `abort` cut the `ROLLBACK` off, is
+/// reconnected by its serving fiber instead of being handed to the next
+/// caller. Requests already queued when the lease ends are answered first;
+/// their senders may have stopped, and an answer nobody reads is released
+/// with its channel.
+///
+/// A connection that breaks part-way through a lease stays leased: the
+/// statements after the break are refused with `Disconnected` without
+/// touching the socket, and the reconnect happens once the lease is over.
+pub fn serve_lease(c: Connection, requests: Channel<Request>) -> () {
+  let mut going = true;
+  while going {
+    match Channel::receive(requests) {
+      Option::None => going = false,
+      Option::Some(request) => {
+        Channel::send(request.reply, answer(c, request.work));
+        Channel::close(request.reply);
+      },
+    }
+  };
 }
 
 /// A `Db` that sends its work to whoever is serving `requests`.
@@ -192,25 +241,57 @@ pub fn over(requests: Channel<Request>) -> Db {
     begin: fn () => ask_done(requests, Work::Begin),
     commit: fn () => ask_done(requests, Work::Commit),
     rollback: fn () => ask_done(requests, Work::Rollback),
-    // **Closing the request channel is the whole of it.**
+    // **Telling the serving fiber is the whole of it.**
     //
     // `std::db` calls this when a `ROLLBACK` did not arrive, which leaves a
-    // connection that may still be holding a transaction open. Closing the
-    // channel ends the serving fiber's receive loop, and `serve` closes the
-    // socket on its way out -- so the connection is gone rather than lent to
-    // somebody who would inherit uncommitted rows and locks.
-    //
-    // The pool is not told and does not have to be. `give_back` puts the
-    // channel back among the idle ones as usual; the next borrower's first
-    // `exchange` sends into a closed channel, gets no acceptance, and is
-    // answered `Disconnected`. A pool of `n` becomes a pool of `n - 1` and
-    // says so at the point somebody tries to use it, which is better than a
-    // pool of `n` where one of them is wrong.
-    //
-    // Reconnecting instead is what a mature pool does and is not 0.1.0's job:
-    // it needs a retry policy, a backoff, and a decision about what a caller
-    // sees while it happens. `Disconnected` is the honest answer until then.
-    broken: fn () => Channel::close(requests),
+    // connection that may still be holding a transaction open. The serving
+    // fiber marks it broken, so nothing else in this lease reaches the
+    // socket. Outside a pool, `serve` then closes the connection; in a pool,
+    // the serving fiber reconnects it when the lease ends, so the next
+    // borrower gets a fresh connection rather than uncommitted rows and
+    // locks.
+    broken: fn () => { let _ = ask_done(requests, Work::Break); () },
+  }
+}
+
+/// Opens a connection for a pool's serving fiber, in `std::db`'s terms. The
+/// handshake is bounded by `within` ms; see `open_within`.
+pub fn connect(settings: Settings, within: Int) -> Result<Connection, DbError> {
+  match open_within(settings.host, settings.port, settings.user, settings.database, settings.secret, within) {
+    Result::Err(why) => Result::Err(PgError::to_db(why)),
+    Result::Ok(c) => Result::Ok(c),
+  }
+}
+
+/// Closes a pool's connection. Nothing still on its way is read.
+pub fn hang_up(c: Connection) -> () {
+  close(c)
+}
+
+/// Whether a connection a pool is about to lend can be lent.
+pub type Fitness =
+  /// Connected, outside a transaction, and not closed by the server.
+  | Fit
+  /// Its serving fiber found it unusable, marked it, and will reconnect it
+  /// when this lease is given back.
+  | Unfit
+  /// Nobody took the question: the request channel is closed. A lease's
+  /// channel is closed by its own give-back, and by the pool's `close` while
+  /// it waits in `idle`, so a borrower that has just taken it does not meet
+  /// this; it is answered rather than assumed impossible.
+  | Gone;
+
+/// Asks the serving fiber behind `requests` whether it can be lent.
+pub fn fitness(requests: Channel<Request>) -> Fitness {
+  let reply: Channel<Reply> = Channel::bounded(1);
+  if !Channel::send(requests, { work: Work::Check, reply: reply }) {
+    Fitness::Gone
+  } else {
+    match Channel::receive(reply) {
+      Option::Some(Reply::Finished(Result::Ok(_))) => Fitness::Fit,
+      Option::Some(_) => Fitness::Unfit,
+      Option::None => Fitness::Unfit,
+    }
   }
 }
 

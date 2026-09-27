@@ -77,12 +77,18 @@ boundary that satisfies that requirement for the duration of a connection
 lease.
 
 **The two `Result`s answer different questions.** The outer one is whether a
-lease was obtained, and it is `Err` only when the pool has been closed. A
-database that cannot be reached is *not* that: `open` returns before any
-connection is made, each connection is opened by its own serving fiber, and one
-that could not connect answers every statement with the reason. So an
-unreachable server arrives as the inner `Err` — a `DbError` from the statement,
-naming the connection failure — and that is the arm to log.
+lease was obtained. It is `Err` when the pool has been closed, and when no
+connection is live or reconnecting: then it is `Disconnected` with the reason
+the last connection attempt failed ("could not reach 127.0.0.1:5433"), and
+that is the arm to log. The inner one is the statement's own answer; a
+connection lost in the middle of a lease answers its remaining statements
+`Disconnected` there, and is reconnected once the lease ends.
+
+A pool reconnects the connections it loses, with backoff, and shrinks while
+it cannot: `open_with` takes the schedule, and `health` counts the
+connections that are live, reconnecting and down. The
+[package page](https://khoralang.com/docs/packages/postgres/) has the
+numbers and the limits.
 
 ## Using a connection directly
 

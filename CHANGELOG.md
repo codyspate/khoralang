@@ -32,11 +32,8 @@ cancelled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 - **A `postgres` query could return another caller's rows** (see Fixed). A
   program that ran with a receive deadline, or on a network that dropped
   reads, may have acted on answers that belonged to other queries. The
-  connection that caused it is closed instead of reused. A pool does not
-  replace a connection closed this way: it goes on lending it, and every
-  query given that lease is answered `Disconnected` until the pool is
-  closed. A pool of two that loses one this way answers about half of its
-  later queries `Disconnected`.
+  connection that caused it is closed instead of reused, and its pool slot
+  reconnects it (see the pool entry below).
 
 - **`std::db::transaction` could lose a write it had acknowledged with `Ok`**
   (see Fixed), and a `std::db::Db` handler's `rollback` must accept being
@@ -195,6 +192,43 @@ cancelled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 - **On the scheduler backend, a finalizer could be skipped** (see Fixed). A
   program on `KHORA_FIBERS=scheduler` whose cleanup was silently skipped
   under load runs it.
+
+- **A `postgres` pool reconnects the connections it loses, and lends only
+  connected ones.** A connection whose reply was cut off, that `std::db`
+  called `broken`, that the server closed while it sat idle, or that an
+  `abort` left inside a transaction, is closed and reconnected by its own
+  serving fiber, with exponential backoff from 50 ms to a 5 s cap, with
+  jitter, for up to 30 s. Callers wait for it rather than being lent it. A
+  connection that cannot be reconnected in that time leaves the pool and
+  retries every 30 s, and rejoins when it connects. A pool with no
+  connection live or reconnecting answers `with_db` at once with
+  `Disconnected` and the reason the last attempt failed, including callers
+  that were already waiting. In 0.3.0 a lost connection stayed in the pool
+  and every lease on it was answered `Disconnected` until the pool closed,
+  and a connection that never opened answered every request with the
+  reason. `open` therefore returns a pool that lends nothing until a
+  connection opens. `open_with` takes a `Reconnect` plan: its `fast`
+  schedule, its `slow` interval (`None` to stay out for good), and a
+  `handshake` bound in milliseconds (10 s by default), after which a server
+  that accepted the connection and has not finished the startup exchange
+  counts as a failed attempt. `Reconnect::never()` makes one attempt and no
+  retry. A connection the server reset while it sat idle is caught by the
+  check before it is lent; one the server sent a notification, a notice or
+  a parameter change is lent as it is. A borrower stopped by `cancel`,
+  `abort` or `cancel_within` anywhere in `with_db` -- waiting, holding the
+  connection, mid-statement, inside a transaction's `ROLLBACK`, or with
+  fibers of its own still using `db` -- gives its connection back, and a
+  caller stopped while it was being told the pool is down leaves the next
+  caller to be told the same. `health` reports how many connections are
+  live, reconnecting and down. `Pool`, `Work` and `Connection` changed
+  shape: `Pool.idle` holds `Offer`s, `Work` gained `Check`, `Connection`
+  gained a field, so code that builds or reads them by hand must follow.
+
+- **`std::net::socket::receive_now` answers `-1` only when nothing has
+  arrived yet**, and a lower number when the read failed. A caller that
+  treated every negative as "nothing yet" can tell a reset connection from a
+  quiet one with `nothing_yet`; a caller that stops on any negative is
+  unaffected.
 
 ### Fixed
 

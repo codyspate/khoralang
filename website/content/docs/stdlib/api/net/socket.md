@@ -188,7 +188,22 @@ pub fn receive_now(connection: Int, buffer: Array<U8>) -> Int
 
 Reads what has already arrived, without waiting for more.
 
-Zero means the other end closed; negative means the read failed **or would
-have blocked**, which are one answer here because a caller does the same
-thing with both.
+Zero means the other end closed. Negative means nothing can be read now:
+`-1` because nothing has arrived yet, anything lower because the read
+failed (the peer reset the connection, say). A caller that only wants to
+stop reading treats every negative alike; one checking whether a
+connection is still usable tells them apart with `nothing_yet`.
+
+### nothing_yet
+
+```khora
+pub fn nothing_yet(read: Int) -> Bool
+```
+
+Whether a `receive_now` result means only that nothing has arrived yet.
+
+**What this prevents: a reset connection taken for a quiet one.** Both
+answer `receive_now` with a negative; only this one is still usable, and
+writing to the other ends the process on the platforms that raise
+`SIGPIPE`.
 

@@ -625,8 +625,6 @@ import std::core::{Channel, Fiber, Fibers, List, Option, Result, print};
 import std::db::{Cell, Db, DbError, Row, transaction};
 import postgres::db::{Request, Settings, over, serve};
 
-pub effect Nursery { adopt: (Fiber) -> (), }
-
 fn one(c: Cell) -> List<Cell> { List::Cons(c, List::Nil) }
 
 fn show(answer: Result<List<Row>, DbError>) -> String {
@@ -722,9 +720,7 @@ fn main() -> Int {
   };
   let requests: Channel<Request> = Channel::bounded(4);
   let crew = Fibers::open();
-  with { nursery: handler for Nursery { adopt: fn f => Fibers::adopt(crew, f) } } {
-    nursery.adopt(Fiber::spawn(fn () => serve(settings, requests)));
-  };
+  Fibers::adopt(crew, Fiber::spawn(fn () => serve(settings, requests)));
   work(requests);
   Channel::close(requests);
   let _stopped = Fibers::wait(crew);
@@ -766,6 +762,9 @@ import std::core::{Channel, Fibers, List, Result, print};
 import std::db::{Cell, Db, DbError, Row};
 import postgres::db::{Settings};
 import postgres::pool::{Pool, close, open, with_db};
+
+extern fn khora_sleep(millis: Int) -> ();
+extern fn khora_monotonic_millis() -> Int;
 
 pub type Oops = | Failed;
 
@@ -835,6 +834,10 @@ fn main() -> Int {
   let crew = Fibers::open();
   let pool = open(crew, settings, 2);
   run_jobs(pool);
+  // A lease ends when its serving fiber reads the give-back, just after
+  // `with_db` returns, so the count is read once it has settled.
+  let deadline = khora_monotonic_millis() + 5000;
+  while Channel::depth(pool.idle) != 2 && khora_monotonic_millis() < deadline { khora_sleep(5) };
   print(Int::to_string(Channel::depth(pool.idle)));
   close(pool);
   let _stopped = Fibers::wait(crew);
@@ -969,7 +972,9 @@ fn main() -> Int {
   schema(pool);
 
   let f = Fiber::spawn(fn () => interrupted(pool)!);
-  Fiber::join(f);
+  // `wait`, not `join`: the child is stopped, and joining a stopped child
+  // stops the joiner. `catch` is for the row `wait` carries from the child.
+  Fiber::wait(f)! catch { Oops::Bad => () };
   print("the parent carried on");
 
   committed(pool);
@@ -1034,13 +1039,41 @@ fn run_watched(exe: &std::path::Path, backend: &str, patience: std::time::Durati
     }
 }
 
-/// Settings for a server that is not there: every connection is refused.
+/// Settings for a server that accepts every connection and says nothing
+/// after the handshake, on a port of its own for this test.
 ///
-/// The pool does not need one to be tested. A serving fiber whose connection
-/// would not open still takes requests off its channel and still ends when the
-/// channel closes, so its lease goes round the pool exactly as a working
-/// connection's does -- and a lost lease still hangs `close`.
-const NOWHERE: &str = "{ host: \"127.0.0.1\", port: 1, user: \"khora\", database: \"khora\", secret: \"khora\" }";
+/// **A pool lends only connections that opened**, so a pool test needs
+/// something that accepts. Nothing here queries: the bodies under test do
+/// not touch the database, and the pool's own `Check` before each lease is a
+/// read that finds nothing waiting, which is the healthy answer.
+fn a_quiet_server() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
+    let port = listener.local_addr().expect("an address").port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            std::thread::spawn(move || {
+                let mut length = [0u8; 4];
+                if stream.read_exact(&mut length).is_err() {
+                    return;
+                }
+                let mut startup = vec![0u8; (i32::from_be_bytes(length) as usize).saturating_sub(4)];
+                if stream.read_exact(&mut startup).is_err() {
+                    return;
+                }
+                let mut hello = framed(b'R', &0i32.to_be_bytes());
+                hello.extend(framed(b'Z', b"I"));
+                if stream.write_all(&hello).is_err() {
+                    return;
+                }
+                // Until the driver hangs up.
+                let mut sink = [0u8; 64];
+                while matches!(stream.read(&mut sink), Ok(n) if n > 0) {}
+            });
+        }
+    });
+    format!("{{ host: \"127.0.0.1\", port: {port}, user: \"khora\", database: \"khora\", secret: \"khora\" }}")
+}
 
 /// Settings for the real server `KHORA_POSTGRES` promises.
 const REAL: &str = "{ host: \"127.0.0.1\", port: 5433, user: \"khora\", database: \"khora\", secret: \"khora\" }";
@@ -1066,6 +1099,18 @@ fn leased() -> Int
   {leased}
 }}
 
+/// How many slots are idle once the pool has settled at `want`, or what it
+/// settled at after five seconds. A lease ends when its serving fiber reads
+/// the give-back, which is after `with_db` has returned.
+fn settled(pool: Pool, want: Int) -> Int {{
+  let mut left = 5000;
+  while Channel::depth(pool.idle) != want && left > 0 {{
+    khora_sleep(1);
+    left = left - 1
+  }};
+  Channel::depth(pool.idle)
+}}
+
 fn lease(pool: Pool) -> () {{
   let _ = with_db(pool, leased);
   ()
@@ -1088,7 +1133,7 @@ fn main() -> Int {{
         Fiber::wait(waiter);
       }},
     }};
-    if Channel::depth(pool.idle) != 1 {{ lost = trial }} else {{}};
+    if settled(pool, 1) != 1 {{ lost = trial }} else {{}};
     trial = trial + 1
   }};
   if lost >= 0 {{
@@ -1142,7 +1187,7 @@ fn assert_the_lease_comes_back(name: &str, source: &str) {
 /// at the first trial on threads and within ten on the scheduler.
 #[test]
 fn a_waiter_cancelled_at_the_hand_over_gives_the_connection_back() {
-    assert_the_lease_comes_back("pool_handover", &handover_program(NOWHERE, "0"));
+    assert_the_lease_comes_back("pool_handover", &handover_program(&a_quiet_server(), "0"));
 }
 
 /// The same, with the waiter's body querying a real server.
@@ -1177,12 +1222,13 @@ fn a_waiter_cancelled_at_the_hand_over_against_a_real_server() {
 /// pins the paths the fix rewrote, which a wrong fix would break.
 #[test]
 fn a_pool_gives_every_lease_back_however_the_body_ends() {
+    let quiet = a_quiet_server();
     let main = format!(
         "module demo::main;
 import std::core::{{Channel, Fiber, Fibers, Option, Result, print}};
 import std::db::{{Db}};
-import postgres::db::{{Request, Settings}};
-import postgres::pool::{{Pool, close, open, with_db}};
+import postgres::db::{{Settings}};
+import postgres::pool::{{Offer, Pool, close, open, with_db}};
 
 extern fn khora_sleep(millis: Int) -> ();
 
@@ -1205,7 +1251,19 @@ fn stuck(entered: Channel<Int>, never: Channel<Int>) -> Int with {{ db: Db }} {{
   }}
 }}
 
-fn idle(pool: Pool) -> String {{ \"idle \" + Int::to_string(Channel::depth(pool.idle)) }}
+/// How many slots are idle once the pool has settled at `want`, or what it
+/// settled at after five seconds. A lease ends when its serving fiber reads
+/// the give-back, which is after `with_db` has returned.
+fn settled(pool: Pool, want: Int) -> Int {{
+  let mut left = 5000;
+  while Channel::depth(pool.idle) != want && left > 0 {{
+    khora_sleep(1);
+    left = left - 1
+  }};
+  Channel::depth(pool.idle)
+}}
+
+fn idle(pool: Pool) -> String {{ \"idle \" + Int::to_string(settled(pool, 2)) }}
 
 fn succeed(pool: Pool) -> Int {{
   match with_db(pool, seven) {{
@@ -1235,10 +1293,10 @@ fn cancelled_inside(pool: Pool) -> () {{
   print(\"cancelled while leased: \" + idle(pool));
 }}
 
-fn put_back(pool: Pool, taken: Option<Channel<Request>>) -> () {{
+fn put_back(pool: Pool, taken: Option<Offer>) -> () {{
   match taken {{
     Option::None => print(\"nothing to put back, which is wrong\"),
-    Option::Some(requests) => {{ Channel::send(pool.idle, requests); () }},
+    Option::Some(offer) => {{ Channel::send(pool.idle, offer); () }},
   }}
 }}
 
@@ -1288,7 +1346,7 @@ fn shared_out(pool: Pool) -> () {{
 }}
 
 fn main() -> Int {{
-  let settings: Settings = {NOWHERE};
+  let settings: Settings = {quiet};
   let crew = Fibers::open();
   let pool = open(crew, settings, 2);
   print(\"returned \" + Int::to_string(succeed(pool)) + \": \" + idle(pool));
@@ -1493,7 +1551,7 @@ fn cut_reply_program() -> String {
 import std::core::{{Fibers, List, Result, print}};
 import std::db::{{Cell, Db, DbError, Row}};
 import postgres::db::{{Settings}};
-import postgres::pool::{{Pool, close, open, with_db}};
+import postgres::pool::{{Pool, Reconnect, close, open_with, with_db}};
 
 extern fn khora_net_set_timeout(handle: I32, millis: Int) -> I32;
 extern fn khora_sleep(millis: Int) -> ();
@@ -1532,7 +1590,14 @@ fn main() -> Int {{
     host: \"127.0.0.1\", port: PORT, user: \"khora\", database: \"khora\", secret: \"\",
   }};
   let crew = Fibers::open();
-  let pool = open(crew, settings, 2);
+  // No handshake bound. `open_within` bounds the handshake with a receive
+  // deadline on the socket and clears it once the handshake is over, which
+  // clears the deadline set above too: the stall is then waited out, every
+  // caller gets its own answer, and this program no longer cuts anything.
+  // Any harness that cuts replies by a deadline set before the pool opens
+  // needs `handshake: 0` for the same reason.
+  let usual = Reconnect::default();
+  let pool = open_with(crew, settings, 2, {{ fast: usual.fast, slow: usual.slow, handshake: 0 }});
   ask(pool, 1);
   // Past the stall, so the late half of the first reply has arrived.
   khora_sleep({STALL_MS} + 500);
@@ -1556,8 +1621,11 @@ fn main() -> Int {{
 /// before theirs.
 ///
 /// The first caller must be told `Disconnected`; after the late half has
-/// arrived, every statement must get its own number or a clean error, and
-/// `close` must return. Before the fix, `asked 3` got 1 and `asked 5` got 3.
+/// arrived, every statement must get its own number, and `close` must
+/// return. The cut connection is closed and its slot reconnected before it
+/// is lent again, so no later caller is answered `Disconnected` either.
+/// Before the crosstalk fix, `asked 3` got 1 and `asked 5` got 3; before
+/// reconnect, both were answered `Disconnected`.
 ///
 /// Not on Windows, where a socket is a handle and not a small number.
 #[test]
@@ -1574,12 +1642,12 @@ fn a_reply_cut_off_mid_stream_is_never_another_callers_answer() {
             ran.stdout,
             "asked 1: disconnected\n\
              asked 2: 2\n\
-             asked 3: disconnected\n\
+             asked 3: 3\n\
              asked 4: 4\n\
-             asked 5: disconnected\n\
+             asked 5: 5\n\
              asked 6: 6\n\
              closed\n",
-            "{backend}: a caller must get its own number or an error, never another's"
+            "{backend}: a caller must get its own number, never another's, and a cut connection must be replaced"
         );
     }
 }
@@ -1800,9 +1868,18 @@ struct Recorded {
 /// had been said before it. Every failure ends the conversation instead, and
 /// is reported in [`Recorded::ended`] beside the queries heard up to it.
 fn record_queries(listener: TcpListener, stall: std::time::Duration) -> Recorded {
+    record_queries_stalling(listener, stall, "BEGIN")
+}
+
+/// [`record_queries`], stalling the first `statement` rather than `BEGIN`.
+fn record_queries_stalling(
+    listener: TcpListener,
+    stall: std::time::Duration,
+    statement: &str,
+) -> Recorded {
     let (mut stream, _) = listener.accept().expect("a connection");
     let mut heard = Vec::new();
-    let ended = match converse(&mut stream, stall, &mut heard) {
+    let ended = match converse(&mut stream, stall, statement, &mut heard) {
         Ok(()) => "Terminate".to_string(),
         Err(why) => why,
     };
@@ -1814,6 +1891,7 @@ fn record_queries(listener: TcpListener, stall: std::time::Duration) -> Recorded
 fn converse(
     stream: &mut TcpStream,
     stall: std::time::Duration,
+    statement: &str,
     heard: &mut Vec<String>,
 ) -> Result<(), String> {
     let step = |what: &'static str| move |e: std::io::Error| format!("{what}: {e}");
@@ -1839,7 +1917,7 @@ fn converse(
             b'Q' => {
                 let sql = String::from_utf8_lossy(payload.strip_suffix(&[0]).unwrap_or(&payload))
                     .into_owned();
-                if sql == "BEGIN" && !stalled {
+                if sql == statement && !stalled {
                     stalled = true;
                     std::thread::sleep(stall);
                 }
@@ -2143,6 +2221,1351 @@ fn main() -> Int {{
             ran.stdout,
             "first stray rollback: ok\nthe connection still answers\nsecond stray rollback: ok\n",
             "{backend}: a ROLLBACK with no transaction open must be answered Ok"
+        );
+    }
+}
+
+// --- reconnect, shrink and grow back ----------------------------------------
+//
+// **What these prevent: a pool that goes on lending a connection it has
+// lost, and a pool that hangs its callers once it has none.** Each program
+// drives [`Scripted`] with statements it understands as commands, so the
+// order of events is the program's own and no test sleeps on the scheduler's
+// timing: `kill others` hangs up every other connection, and `down N` hangs
+// up every connection and turns new ones away for `N` ms (`-1`: for good).
+
+/// A fake server a program can break on purpose. See the section comment.
+struct Scripted {
+    port: u16,
+    state: std::sync::Arc<ScriptedState>,
+}
+
+struct ScriptedState {
+    /// Until when connections are turned away: accepted, their startup read,
+    /// and then closed, the way a server that is restarting answers.
+    refusing_until: std::sync::Mutex<Option<std::time::Instant>>,
+    /// Until when new connections finish the handshake and are then sent a
+    /// `DataRow` nobody asked for, so every check before a lease fails.
+    sour_until: std::sync::Mutex<Option<std::time::Instant>>,
+    /// Every connection being served, to hang up on.
+    open: std::sync::Mutex<Vec<(usize, TcpStream)>>,
+    /// When each connection attempt arrived, and whether it was turned away.
+    attempts: std::sync::Mutex<Vec<(std::time::Instant, bool)>>,
+    next: std::sync::atomic::AtomicUsize,
+}
+
+impl Scripted {
+    fn start() -> Scripted {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
+        let port = listener.local_addr().expect("an address").port();
+        let state = std::sync::Arc::new(ScriptedState {
+            refusing_until: std::sync::Mutex::new(None),
+            sour_until: std::sync::Mutex::new(None),
+            open: std::sync::Mutex::new(Vec::new()),
+            attempts: std::sync::Mutex::new(Vec::new()),
+            next: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let shared = state.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { break };
+                let now = std::time::Instant::now();
+                let refusing = shared
+                    .refusing_until
+                    .lock()
+                    .expect("the switch")
+                    .is_some_and(|until| now < until);
+                shared.attempts.lock().expect("the attempts").push((now, refusing));
+                let state = shared.clone();
+                if refusing {
+                    std::thread::spawn(move || turn_away(stream));
+                } else {
+                    std::thread::spawn(move || state.serve(stream));
+                }
+            }
+        });
+        Scripted { port, state }
+    }
+
+    fn settings(&self) -> String {
+        format!(
+            "{{ host: \"127.0.0.1\", port: {}, user: \"khora\", database: \"khora\", secret: \"\" }}",
+            self.port
+        )
+    }
+
+    /// The gaps between connection attempts that were turned away, in order.
+    fn refused_gaps(&self) -> Vec<std::time::Duration> {
+        let attempts = self.state.attempts.lock().expect("the attempts");
+        let refused: Vec<std::time::Instant> =
+            attempts.iter().filter(|(_, turned)| *turned).map(|(at, _)| *at).collect();
+        refused.windows(2).map(|w| w[1] - w[0]).collect()
+    }
+}
+
+/// Reads the startup message, so the driver's one write lands, and hangs up.
+fn turn_away(mut stream: TcpStream) {
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+    let mut length = [0u8; 4];
+    if stream.read_exact(&mut length).is_ok() {
+        let mut startup = vec![0u8; (i32::from_be_bytes(length) as usize).saturating_sub(4)];
+        let _ = stream.read_exact(&mut startup);
+    }
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+}
+
+impl ScriptedState {
+    fn serve(&self, mut stream: TcpStream) {
+        let id = self.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _ = stream.set_nodelay(true);
+        if let Ok(clone) = stream.try_clone() {
+            self.open.lock().expect("the connections").push((id, clone));
+        }
+        let mut length = [0u8; 4];
+        if stream.read_exact(&mut length).is_err() {
+            return;
+        }
+        let mut startup = vec![0u8; (i32::from_be_bytes(length) as usize).saturating_sub(4)];
+        if stream.read_exact(&mut startup).is_err() {
+            return;
+        }
+        let mut hello = framed(b'R', &0i32.to_be_bytes());
+        hello.extend(framed(b'Z', b"I"));
+        let sour = self
+            .sour_until
+            .lock()
+            .expect("the switch")
+            .is_some_and(|until| std::time::Instant::now() < until);
+        if sour {
+            // Not kept in `open`: thousands of these arrive, and each is
+            // over when the pool hangs up on it.
+            self.open.lock().expect("the connections").retain(|(other, _)| *other != id);
+            hello.extend(framed(b'D', &[0, 1, 0, 0, 0, 2, b'9', b'9']));
+            let _ = stream.write_all(&hello);
+            while next_frame(&mut stream).is_some() {}
+            return;
+        }
+        if stream.write_all(&hello).is_err() {
+            return;
+        }
+        loop {
+            let mut sql = String::new();
+            loop {
+                let Some((kind, payload)) = next_frame(&mut stream) else { return };
+                let text = |skip: usize| {
+                    let parts: Vec<&[u8]> = payload.split(|b| *b == 0).collect();
+                    String::from_utf8_lossy(parts.get(skip).copied().unwrap_or(&[])).into_owned()
+                };
+                match kind {
+                    b'X' => return,
+                    b'P' => sql = text(1),
+                    b'Q' => {
+                        sql = text(0);
+                        break;
+                    }
+                    b'S' => break,
+                    _ => {}
+                }
+            }
+            let sql = sql.trim().to_string();
+            let (n, then) = if sql == "kill others" {
+                ("0".to_string(), Then::KillOthers)
+            } else if sql.trim() == "rst others" {
+                ("0".to_string(), Then::ResetOthers)
+            } else if sql.trim() == "notify others" {
+                ("0".to_string(), Then::NotifyOthers)
+            } else if sql.trim() == "error others" {
+                ("0".to_string(), Then::ErrorOthers)
+            } else if sql.trim() == "conns" {
+                let accepted = self.attempts.lock().expect("the attempts").len();
+                (accepted.to_string(), Then::Nothing)
+            } else if let Some(millis) = sql.strip_prefix("sour ") {
+                let millis: u64 = millis.trim().parse().unwrap_or(0);
+                ("0".to_string(), Then::Sour(millis))
+            } else if let Some(millis) = sql.strip_prefix("down ") {
+                let millis: i64 = millis.trim().parse().unwrap_or(-1);
+                ("0".to_string(), Then::Down(millis))
+            } else if let Some(millis) = sql.strip_prefix("stall ") {
+                // Holds the lease: the answer comes `millis` later.
+                let millis: u64 = millis.trim().parse().unwrap_or(0);
+                std::thread::sleep(std::time::Duration::from_millis(millis));
+                ("0".to_string(), Then::Nothing)
+            } else {
+                (sql.trim_start_matches("select ").trim().to_string(), Then::Nothing)
+            };
+            if stream.write_all(&number_reply(&n)).is_err() {
+                return;
+            }
+            match then {
+                Then::Nothing => {}
+                Then::KillOthers => self.hang_up(|other| other != id),
+                Then::Sour(millis) => {
+                    *self.sour_until.lock().expect("the switch") =
+                        Some(std::time::Instant::now() + std::time::Duration::from_millis(millis));
+                    self.hang_up(|_| true);
+                    return;
+                }
+                Then::NotifyOthers => {
+                    let mut unasked = Vec::new();
+                    // `NotificationResponse`: sender pid, channel, payload.
+                    let mut note = 4242i32.to_be_bytes().to_vec();
+                    note.extend_from_slice(&cstring("jobs"));
+                    note.extend_from_slice(&cstring("ready"));
+                    unasked.extend(framed(b'A', &note));
+                    // `NoticeResponse`: severity and message fields, then 0.
+                    let mut notice = vec![b'S'];
+                    notice.extend_from_slice(&cstring("NOTICE"));
+                    notice.push(b'M');
+                    notice.extend_from_slice(&cstring("a notice nobody asked for"));
+                    notice.push(0);
+                    unasked.extend(framed(b'N', &notice));
+                    let mut open = self.open.lock().expect("the connections");
+                    for (other, stream) in open.iter_mut() {
+                        if *other != id {
+                            let _ = stream.write_all(&unasked);
+                        }
+                    }
+                }
+                Then::ErrorOthers => {
+                    // The `FATAL` a server sends before it ends a backend, with
+                    // the socket left open, so only the message says so.
+                    let mut error = vec![b'S'];
+                    error.extend_from_slice(&cstring("FATAL"));
+                    error.push(b'M');
+                    error.extend_from_slice(&cstring("terminating connection due to administrator command"));
+                    error.push(0);
+                    let unasked = framed(b'E', &error);
+                    let mut open = self.open.lock().expect("the connections");
+                    for (other, stream) in open.iter_mut() {
+                        if *other != id {
+                            let _ = stream.write_all(&unasked);
+                        }
+                    }
+                }
+                Then::ResetOthers => {
+                    let mut open = self.open.lock().expect("the connections");
+                    for (other, stream) in open.iter() {
+                        if *other != id {
+                            reset(stream);
+                        }
+                    }
+                    open.retain(|(other, _)| *other == id);
+                }
+                Then::Down(millis) => {
+                    let until = if millis < 0 {
+                        std::time::Instant::now() + std::time::Duration::from_secs(86_400)
+                    } else {
+                        std::time::Instant::now() + std::time::Duration::from_millis(millis as u64)
+                    };
+                    *self.refusing_until.lock().expect("the switch") = Some(until);
+                    self.hang_up(|_| true);
+                    return;
+                }
+            }
+        }
+    }
+
+    fn hang_up(&self, which: impl Fn(usize) -> bool) {
+        let mut open = self.open.lock().expect("the connections");
+        for (id, stream) in open.iter() {
+            if which(*id) {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
+        }
+        open.retain(|(id, _)| !which(*id));
+    }
+}
+
+/// What the scripted server does after answering a statement.
+enum Then {
+    Nothing,
+    KillOthers,
+    /// Every other connection is reset: `RST`, not `FIN`.
+    ResetOthers,
+    /// Every other connection is sent a notification and a notice, unasked.
+    NotifyOthers,
+    /// Every other connection is sent a `FATAL` `ErrorResponse`, unasked, and
+    /// left open.
+    ErrorOthers,
+    /// For `N` ms, every new connection fails its check; then this one hangs up.
+    Sour(u64),
+    Down(i64),
+}
+
+/// Closes `stream` with an `RST`: zero linger, then the last handle goes.
+///
+/// The standard library's `set_linger` is unstable, so this sets it the way a
+/// server that aborts connections does.
+#[cfg(unix)]
+fn reset(stream: &std::net::TcpStream) {
+    use std::os::fd::AsRawFd;
+    #[repr(C)]
+    struct Linger {
+        onoff: std::ffi::c_int,
+        linger: std::ffi::c_int,
+    }
+    unsafe extern "C" {
+        fn setsockopt(
+            fd: std::ffi::c_int,
+            level: std::ffi::c_int,
+            name: std::ffi::c_int,
+            value: *const std::ffi::c_void,
+            length: u32,
+        ) -> std::ffi::c_int;
+    }
+    #[cfg(target_os = "linux")]
+    const SOL_SOCKET: std::ffi::c_int = 1;
+    #[cfg(target_os = "linux")]
+    const SO_LINGER: std::ffi::c_int = 13;
+    #[cfg(not(target_os = "linux"))]
+    const SOL_SOCKET: std::ffi::c_int = 0xffff;
+    #[cfg(not(target_os = "linux"))]
+    const SO_LINGER: std::ffi::c_int = 0x0080;
+    let linger = Linger { onoff: 1, linger: 0 };
+    // SAFETY: `stream` owns an open socket for the length of this call, and
+    // `linger` is a live `struct linger` whose size is the length passed.
+    unsafe {
+        setsockopt(
+            stream.as_raw_fd(),
+            SOL_SOCKET,
+            SO_LINGER,
+            (&raw const linger).cast(),
+            std::mem::size_of::<Linger>() as u32,
+        );
+    }
+    // Shutting the read side sends nothing; it wakes the serving thread's
+    // read, which returns, and its close then sends the `RST` the zero linger
+    // asks for, since the clone here is dropped too.
+    let _ = stream.shutdown(std::net::Shutdown::Read);
+}
+
+/// Not built: the tests that use it are Unix-only.
+#[cfg(not(unix))]
+fn reset(stream: &std::net::TcpStream) {
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+}
+
+/// One `int4` row holding `n`, and the end of the exchange.
+fn number_reply(n: &str) -> Vec<u8> {
+    let mut description = 1i16.to_be_bytes().to_vec();
+    description.extend_from_slice(&cstring("n"));
+    description.extend_from_slice(&0i32.to_be_bytes());
+    description.extend_from_slice(&0i16.to_be_bytes());
+    description.extend_from_slice(&23i32.to_be_bytes());
+    description.extend_from_slice(&4i16.to_be_bytes());
+    description.extend_from_slice(&(-1i32).to_be_bytes());
+    description.extend_from_slice(&0i16.to_be_bytes());
+    let mut row = 1i16.to_be_bytes().to_vec();
+    row.extend_from_slice(&(n.len() as i32).to_be_bytes());
+    row.extend_from_slice(n.as_bytes());
+    let mut reply = framed(b'T', &description);
+    reply.extend(framed(b'D', &row));
+    reply.extend(framed(b'C', &cstring("SELECT 1")));
+    reply.extend(framed(b'Z', b"I"));
+    reply
+}
+
+/// What every reconnect program starts with: `ask`, which answers a
+/// statement's number or the error as text, and `until`, a clock-poll for a
+/// pool state with a deadline.
+const RECONNECT_PRELUDE: &str = "module demo::main;
+import std::core::{Channel, Fiber, Fibers, List, Option, Result, print};
+import std::db::{Cell, Db, DbError, Row};
+import std::resilience::{Schedule};
+import postgres::db::{Settings};
+import postgres::pool::{Health, Pool, Reconnect, close, health, open, open_with, with_db};
+
+extern fn khora_sleep(millis: Int) -> ();
+extern fn khora_monotonic_millis() -> Int;
+
+fn now() -> Int { khora_monotonic_millis() }
+
+fn shown(rows: List<Row>) -> String {
+  match rows {
+    List::Cons(row, _) => match row.cells {
+      List::Cons(Cell::Number(n), _) => Int::to_string(n),
+      _ => \"a row of another shape\",
+    },
+    List::Nil => \"no rows\",
+  }
+}
+
+fn ask(pool: Pool, sql: String) -> String {
+  match with_db(pool, fn () => db.query(sql, List::Nil)) {
+    Result::Err(why) => \"no lease: \" + why.show(),
+    Result::Ok(Result::Err(why)) => why.show(),
+    Result::Ok(Result::Ok(rows)) => shown(rows),
+  }
+}
+
+fn is(h: Health, live: Int, reconnecting: Int, down: Int) -> Bool {
+  h.live == live && h.reconnecting == reconnecting && h.down == down
+}
+
+fn said(h: Health) -> String {
+  Int::to_string(h.live) + \" live, \" + Int::to_string(h.reconnecting) + \" reconnecting, \"
+    + Int::to_string(h.down) + \" down\"
+}
+
+/// Waits up to `within` ms for the pool to reach a state; answers what it
+/// reached.
+fn until(pool: Pool, live: Int, reconnecting: Int, down: Int, within: Int) -> String {
+  let deadline = now() + within;
+  while !is(health(pool), live, reconnecting, down) && now() < deadline {
+    khora_sleep(5)
+  };
+  said(health(pool))
+}
+
+/// Waits `ms` by the clock. Used only after the server has been told to hang
+/// up, as a margin for its `FIN` to cross loopback, so the next statement
+/// finds the connection closed rather than racing the hang-up.
+fn hold(ms: Int) -> () {
+  let deadline = now() + ms;
+  while now() < deadline { khora_sleep(5) }
+}
+
+/// Waits up to five seconds for `want` connections to be idle.
+fn settled(pool: Pool, want: Int) -> Int {
+  let deadline = now() + 5000;
+  while Channel::depth(pool.idle) != want && now() < deadline {
+    khora_sleep(5)
+  };
+  Channel::depth(pool.idle)
+}
+";
+
+/// Builds `body` after [`RECONNECT_PRELUDE`], with `SETTINGS` filled in.
+fn reconnect_program(settings: &str, body: &str) -> String {
+    format!("{RECONNECT_PRELUDE}\n{}", body.replace("SETTINGS", settings))
+}
+
+/// Runs a reconnect program against its own [`Scripted`] server on both
+/// backends, and answers each backend's run with the server it had.
+fn run_scripted(name: &str, body: &str, patience: u64) -> Vec<(&'static str, Watched, Scripted)> {
+    ["threads", "scheduler"]
+        .into_iter()
+        .map(|backend| {
+            let server = Scripted::start();
+            let exe = build(&format!("{name}_{backend}"), &reconnect_program(&server.settings(), body));
+            let ran = run_watched(&exe, backend, std::time::Duration::from_secs(patience));
+            (backend, ran, server)
+        })
+        .collect()
+}
+
+/// Asserts each run ended cleanly with `expected` on stdout.
+fn assert_ran(runs: &[(&str, Watched, Scripted)], expected: &str, what: &str) {
+    for (backend, ran, _) in runs {
+        assert!(!ran.hung, "{backend} hung ({what}): stdout {:?}", ran.stdout);
+        assert_eq!(ran.code, Some(0), "{backend}: stderr {}", ran.stderr);
+        assert_eq!(ran.stdout, expected, "{backend}: {what}");
+    }
+}
+
+/// **A borrower stopped by `abort` never costs the pool its connection**,
+/// whether the abort lands in the body, with a statement in flight, while
+/// the borrower waits in `with_db` and is handed the connection, or while
+/// fibers the body spawned are using the lease's `db`. A pool of one, 200
+/// trials at each point; after each, the pool must be whole within three
+/// seconds (one live connection, idle), and in the child-fiber phases the
+/// next caller must get its own number. The child-fiber phases stop the
+/// borrower with `abort` and with `cancel_within(5)`, a grace shorter than
+/// the children's statements.
+///
+/// A stopped borrower can leave requests queued on the connection's
+/// channel -- one of its own, or one per child fiber -- and the end of its
+/// lease must still reach the serving fiber. Sent as a message, it needed
+/// room: with room for one, one queued request was enough to lose the slot,
+/// and with room for two, three children were. An aborted fiber does not
+/// wait for room, so the send gave up and the serving fiber waited for ever
+/// on a lease that had ended: `1 live, 0 reconnecting, 0 down`, idle 0.
+#[test]
+fn aborted_borrowers_never_lose_a_slot() {
+    let body = r#"fn churn(pool: Pool) -> () {
+  let mut going = true;
+  while going {
+    let _ = ask(pool, "select 1");
+    ()
+  }
+}
+
+fn holder(pool: Pool) -> () {
+  let _ = ask(pool, "stall 20");
+  ()
+}
+
+fn looper(n: Int) -> () with { db: Db } {
+  let mut going = true;
+  while going { let _ = db.query("stall " + Int::to_string(n), List::Nil); () }
+}
+
+/// A body that runs its statements from three fibers of its own.
+fn fanout() -> Int with { db: Db } {
+  let a = Fiber::spawn(fn () => looper(20));
+  let b = Fiber::spawn(fn () => looper(21));
+  let c = Fiber::spawn(fn () => looper(22));
+  Fiber::wait(a);
+  Fiber::wait(b);
+  Fiber::wait(c);
+  1
+}
+
+fn parent(pool: Pool) -> () {
+  let _ = with_db(pool, fanout);
+  ()
+}
+
+/// 200 borrowers whose children use `db`, each stopped 30-49 ms in; the
+/// trial the slot was lost at or the next caller went unanswered, or -1.
+fn children(pool: Pool, abort: Bool) -> Int {
+  let mut trial = 0;
+  let mut lost = 0 - 1;
+  while trial < 200 && lost < 0 {
+    let f = Fiber::spawn(fn () => parent(pool));
+    khora_sleep(30 + trial % 20);
+    if abort { Fiber::abort(f) } else { Fiber::cancel_within(f, 5) };
+    Fiber::wait(f);
+    if !whole(pool) { lost = trial } else {
+      let want = Int::to_string(1000 + trial);
+      if ask(pool, "select " + want) != want { lost = trial }
+    };
+    trial = trial + 1
+  };
+  lost
+}
+
+fn whole(pool: Pool) -> Bool {
+  let deadline = now() + 3000;
+  let mut ok = false;
+  while !ok && now() < deadline {
+    ok = is(health(pool), 1, 0, 0) && Channel::depth(pool.idle) == 1;
+    if !ok { khora_sleep(2) }
+  };
+  ok
+}
+
+/// 200 aborts at one point; the trial the slot was lost at, or -1.
+fn storm(pool: Pool, handover: Bool) -> Int {
+  let mut seed = 12345;
+  let mut trial = 0;
+  let mut lost = 0 - 1;
+  while trial < 200 && lost < 0 {
+    seed = (seed * 1103515245 + 12345) % 2147483648;
+    let r = seed / 65536 % 1000;
+    if handover {
+      let h = Fiber::spawn(fn () => holder(pool));
+      khora_sleep(2);
+      let f = Fiber::spawn(fn () => churn(pool));
+      khora_sleep(14 + r % 12);
+      Fiber::abort(f);
+      Fiber::wait(f);
+      Fiber::wait(h);
+    } else {
+      let f = Fiber::spawn(fn () => churn(pool));
+      khora_sleep(1 + r % 5);
+      Fiber::abort(f);
+      Fiber::wait(f);
+    };
+    if !whole(pool) { lost = trial };
+    trial = trial + 1
+  };
+  lost
+}
+
+fn report(point: String, lost: Int, pool: Pool) -> () {
+  if lost < 0 { print(point + ": whole after 200 aborts") } else {
+    print(point + ": lost at trial " + Int::to_string(lost) + ": " + said(health(pool)) + ", idle "
+      + Int::to_string(Channel::depth(pool.idle)))
+  }
+}
+
+fn main() -> Int {
+  let settings: Settings = SETTINGS;
+  let plan: Reconnect = { fast: Schedule::UpTo(Schedule::backoff(10, 60), 2000), slow: Option::Some(100), handshake: 10000 };
+  let pool = open_with(Fibers::open(), settings, 1, plan);
+  print("start: " + until(pool, 1, 0, 0, 5000));
+  let body = storm(pool, false);
+  report("body", body, pool);
+  if body < 0 {
+    let handover = storm(pool, true);
+    report("handover", handover, pool);
+    if handover < 0 {
+      let aborted = children(pool, true);
+      report("children, abort", aborted, pool);
+      if aborted < 0 {
+        let graced = children(pool, false);
+        report("children, cancel_within(5)", graced, pool);
+        if graced < 0 {
+          print("after: " + ask(pool, "select 42"));
+          close(pool);
+          print("closed")
+        }
+      }
+    }
+  };
+  0
+}
+"#;
+    let runs = run_scripted("pool_abort_storm", body, 360);
+    assert_ran(
+        &runs,
+        "start: 1 live, 0 reconnecting, 0 down\nbody: whole after 200 aborts\n\
+         handover: whole after 200 aborts\nchildren, abort: whole after 200 aborts\n\
+         children, cancel_within(5): whole after 200 aborts\nafter: 42\nclosed\n",
+        "an aborted borrower must not cost the pool its connection",
+    );
+}
+
+/// **A caller whose every offered connection fails its check waits, and is
+/// answered once one passes.** A pool of one; for eight seconds each new
+/// connection finishes its handshake and is then sent a `DataRow` nobody
+/// asked for, so the check before each lease fails and the slot
+/// reconnects. A caller in a fiber of its own asks throughout, and must get
+/// its own answer, once, after the server recovers.
+///
+/// `with_db` took the next offer by calling itself, one frame per failed
+/// check, and a slot fails one a few milliseconds after it connects: the
+/// caller's stack ran out within seconds, and the process ended with a
+/// segmentation fault.
+#[test]
+fn a_caller_outlasts_any_number_of_failed_checks() {
+    let body = r#"fn asker(pool: Pool, told: Channel<String>) -> () {
+  Channel::send(told, ask(pool, "select 42"));
+  ()
+}
+
+fn main() -> Int {
+  let settings: Settings = SETTINGS;
+  let pool = open(Fibers::open(), settings, 1);
+  print("start: " + until(pool, 1, 0, 0, 5000));
+  print("sour: " + ask(pool, "sour 8000"));
+  let told: Channel<String> = Channel::bounded(1);
+  let f = Fiber::spawn(fn () => asker(pool, told));
+  Fiber::wait(f);
+  print("asked: " + (match Channel::receive(told) { Option::Some(s) => s, Option::None => "nothing" }));
+  print("health: " + until(pool, 1, 0, 0, 5000));
+  close(pool);
+  print("closed");
+  0
+}
+"#;
+    let runs = run_scripted("pool_sour_checks", body, 90);
+    assert_ran(
+        &runs,
+        "start: 1 live, 0 reconnecting, 0 down\nsour: 0\nasked: 42\nhealth: 1 live, 0 reconnecting, 0 down\nclosed\n",
+        "a caller must outlast failed checks",
+    );
+}
+
+/// **A caller stopped while it holds the down token hands it on**, so the
+/// callers after it are still answered at once. A pool of one that has shrunk
+/// for good (no slow phase): every `with_db` takes the down token and is
+/// answered `Disconnected`. 200 trials of a fiber doing that in a loop,
+/// stopped 1-3 ms in, first by `cancel` and then by `abort`; after each, a
+/// fresh caller must be answered within 500 ms.
+///
+/// The token went back only from the body of `with_db`, after several
+/// cancellation points, so a caller stopped in between unwound holding it,
+/// and every later `with_db` waited for ever.
+#[test]
+fn a_stopped_caller_never_keeps_the_down_token() {
+    let body = r#"fn churn(pool: Pool) -> () {
+  let mut going = true;
+  while going {
+    let _ = ask(pool, "select 1");
+    ()
+  }
+}
+
+fn answer_to(pool: Pool, told: Channel<Int>) -> () {
+  let _ = ask(pool, "select 2");
+  Channel::send(told, 1);
+  ()
+}
+
+/// Asks in a fiber of its own and waits at most `within` ms for the answer.
+fn answered_within(pool: Pool, within: Int) -> Bool {
+  let told: Channel<Int> = Channel::bounded(1);
+  let f = Fiber::spawn(fn () => answer_to(pool, told));
+  let deadline = now() + within;
+  while Channel::depth(told) == 0 && now() < deadline { khora_sleep(2) };
+  let ok = Channel::depth(told) == 1;
+  if ok { Fiber::wait(f) } else { Fiber::detach(f) };
+  ok
+}
+
+/// 200 stopped callers; the trial after which a fresh caller hung, or -1.
+fn storm(pool: Pool, abort: Bool) -> Int {
+  let mut trial = 0;
+  let mut hung = 0 - 1;
+  while trial < 200 && hung < 0 {
+    let f = Fiber::spawn(fn () => churn(pool));
+    khora_sleep(1 + trial % 3);
+    if abort { Fiber::abort(f) } else { Fiber::cancel(f) };
+    Fiber::wait(f);
+    if !answered_within(pool, 500) { hung = trial };
+    trial = trial + 1
+  };
+  hung
+}
+
+fn report(how: String, hung: Int) -> () {
+  if hung < 0 { print(how + ": every caller answered") } else {
+    print(how + ": a caller hung after trial " + Int::to_string(hung))
+  }
+}
+
+fn main() -> Int {
+  let settings: Settings = SETTINGS;
+  let plan: Reconnect = { fast: Schedule::UpTo(Schedule::backoff(10, 20), 60), slow: Option::None, handshake: 10000 };
+  let pool = open_with(Fibers::open(), settings, 1, plan);
+  print("start: " + until(pool, 1, 0, 0, 5000));
+  print("down: " + ask(pool, "down -1"));
+  hold(100);
+  let _ = ask(pool, "select 1");
+  print("shrunk: " + until(pool, 0, 0, 1, 3000));
+  let cancelled = storm(pool, false);
+  report("cancel", cancelled);
+  if cancelled < 0 { report("abort", storm(pool, true)) };
+  0
+}
+"#;
+    let runs = run_scripted("pool_token_storm", body, 240);
+    assert_ran(
+        &runs,
+        "start: 1 live, 0 reconnecting, 0 down\ndown: 0\nshrunk: 0 live, 0 reconnecting, 1 down\n\
+         cancel: every caller answered\nabort: every caller answered\n",
+        "a stopped caller must not keep the down token",
+    );
+}
+
+/// **A healthy idle connection that the server sent a notification or a
+/// notice is lent, not reconnected.** A pool of two; the scripted server
+/// writes a `NotificationResponse` and a `NoticeResponse` to the idle
+/// connection, unasked, the way `LISTEN`/`NOTIFY` and `RAISE NOTICE` do; then
+/// both connections are leased at once, and each must answer its own
+/// statement, and the server must have accepted no connection beyond the
+/// first two.
+///
+/// Then the server sends the idle connection a `FATAL` `ErrorResponse` and
+/// leaves the socket open, as a server ending a backend does just before it
+/// hangs up: that one must be reconnected (a third connection), and no
+/// caller may be answered with an error.
+///
+/// The check before each lease counted any unread bytes as a broken
+/// connection, so the notified one was closed and reconnected: a third
+/// connection, and whatever session state the first one held was gone.
+#[test]
+fn an_idle_connection_that_was_sent_a_notification_is_lent() {
+    let body = r#"fn pair(pool: Pool) -> String {
+  let told: Channel<String> = Channel::bounded(2);
+  let a = Fiber::spawn(fn () => { let _ = with_db(pool, fn () => {
+      let _ = db.query("stall 200", List::Nil);
+      Channel::send(told, "a");
+      ()
+    }); () });
+  let b = Fiber::spawn(fn () => { let _ = with_db(pool, fn () => {
+      let _ = db.query("stall 200", List::Nil);
+      Channel::send(told, "b");
+      ()
+    }); () });
+  Fiber::wait(a);
+  Fiber::wait(b);
+  Int::to_string(Channel::depth(told))
+}
+
+fn main() -> Int {
+  let settings: Settings = SETTINGS;
+  let pool = open(Fibers::open(), settings, 2);
+  print("start: " + until(pool, 2, 0, 0, 5000));
+  print("notify: " + ask(pool, "notify others"));
+  hold(100);
+  print("leased at once: " + pair(pool));
+  print("own answers: " + ask(pool, "select 7") + " " + ask(pool, "select 8"));
+  print("connections: " + ask(pool, "conns"));
+  print("error: " + ask(pool, "error others"));
+  hold(100);
+  print("leased at once: " + pair(pool));
+  print("own answers: " + ask(pool, "select 7") + " " + ask(pool, "select 8"));
+  print("connections: " + ask(pool, "conns"));
+  print("health: " + until(pool, 2, 0, 0, 5000));
+  close(pool);
+  print("closed");
+  0
+}
+"#;
+    let runs = run_scripted("pool_notified_idle", body, 60);
+    assert_ran(
+        &runs,
+        "start: 2 live, 0 reconnecting, 0 down\nnotify: 0\nleased at once: 2\nown answers: 7 8\n\
+         connections: 2\nerror: 0\nleased at once: 2\nown answers: 7 8\nconnections: 3\n\
+         health: 2 live, 0 reconnecting, 0 down\nclosed\n",
+        "a notified idle connection must be lent, not reconnected",
+    );
+}
+
+/// **A connection the server reset while it sat idle is not lent**, so the
+/// statement after it neither fails nor ends the process. A pool of two; the
+/// server resets the idle one (`RST`), then 20 statements one after another.
+/// Each must be answered with its own number, and the process must exit
+/// normally.
+///
+/// The check before each lease read the reset as "nothing has arrived", the
+/// healthy answer, because a read that failed and a read that would have
+/// blocked were one answer. The next statement was written to the reset
+/// socket, and `SIGPIPE` killed the process before anything was printed.
+#[cfg(unix)]
+#[test]
+fn a_connection_reset_while_idle_is_not_lent() {
+    let body = r#"fn main() -> Int {
+  let settings: Settings = SETTINGS;
+  let pool = open(Fibers::open(), settings, 2);
+  print("start: " + until(pool, 2, 0, 0, 5000));
+  print("reset: " + ask(pool, "rst others"));
+  hold(100);
+  let mut n = 1;
+  let mut wrong = 0;
+  while n <= 20 {
+    let got = ask(pool, "select " + Int::to_string(n));
+    if got != Int::to_string(n) { wrong = wrong + 1 };
+    n = n + 1
+  };
+  print("wrong " + Int::to_string(wrong) + " of 20");
+  print("back: " + until(pool, 2, 0, 0, 5000));
+  close(pool);
+  print("closed");
+  0
+}
+"#;
+    let runs = run_scripted("pool_reset_idle", body, 60);
+    assert_ran(
+        &runs,
+        "start: 2 live, 0 reconnecting, 0 down\nreset: 0\nwrong 0 of 20\n\
+         back: 2 live, 0 reconnecting, 0 down\nclosed\n",
+        "a reset idle connection must not be lent",
+    );
+}
+
+/// **A server that accepts connections and never answers them is a server
+/// that is down, not a pool that hangs.** The listener here takes each
+/// connection and says nothing, the way a server stuck in its own startup
+/// does. With a `handshake` bound of 300 ms and a fast phase of about a
+/// second, callers must be answered `Disconnected` with the reason once the
+/// fast phase has run out, and `close` must return within the bound plus a
+/// margin even though an attempt is in the middle of its handshake.
+///
+/// With no bound on the handshake, the first attempt waited for the server's
+/// first message for ever: the caller was never answered, and `close`,
+/// which waits for the slot, never returned.
+#[test]
+fn a_server_that_never_answers_the_handshake_is_given_up_on() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
+    let port = listener.local_addr().expect("an address").port();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { break };
+            held.push(stream);
+        }
+    });
+    let body = r#"fn main() -> Int {
+  let settings: Settings = SETTINGS;
+  let plan: Reconnect = {
+    fast: Schedule::UpTo(Schedule::backoff(20, 40), 1000), slow: Option::Some(60000), handshake: 300,
+  };
+  let pool = open_with(Fibers::open(), settings, 1, plan);
+  let began = now();
+  let got = ask(pool, "select 1");
+  let waited = now() - began;
+  print("caller: " + got);
+  print("answered in time: " + (if waited < 5000 { "yes" } else { Int::to_string(waited) }));
+  print("health: " + said(health(pool)));
+  // `pool` is down now and waits 60 s between tries, so a second pool is
+  // what has an attempt in its handshake: 100 ms in, of a 300 ms bound.
+  let again = open_with(Fibers::open(), settings, 1, plan);
+  hold(100);
+  let closing = now();
+  close(again);
+  let took = now() - closing;
+  print("close mid-handshake: " + (if took < 300 + 1000 { "prompt" } else { Int::to_string(took) + " ms" }));
+  close(pool);
+  print("closed");
+  0
+}
+"#;
+    let settings = format!(
+        "{{ host: \"127.0.0.1\", port: {port}, user: \"khora\", database: \"khora\", secret: \"\" }}"
+    );
+    for backend in ["threads", "scheduler"] {
+        let exe = build(&format!("pool_mute_{backend}"), &reconnect_program(&settings, body));
+        let ran = run_watched(&exe, backend, std::time::Duration::from_secs(60));
+        assert!(!ran.hung, "{backend} hung: stdout {:?}", ran.stdout);
+        assert_eq!(ran.code, Some(0), "{backend}: stderr {}", ran.stderr);
+        assert_eq!(
+            ran.stdout,
+            "caller: no lease: disconnected: the server did not finish the handshake within 300 ms\n\
+             answered in time: yes\nhealth: 0 live, 0 reconnecting, 1 down\n\
+             close mid-handshake: prompt\nclosed\n",
+            "{backend}: a mute server must be given up on"
+        );
+    }
+}
+
+/// **A pool of two that loses one connection answers nobody `Disconnected`
+/// while the other is live.** The server hangs up the idle connection; the
+/// pool finds out when it next checks that connection before lending it,
+/// lends the other one instead, and reconnects the lost one. Twenty
+/// statements must each get their own number, and the pool must be back to
+/// two live connections.
+///
+/// With the check before each lease disabled, the lost connection is lent
+/// and its borrowers are answered `Disconnected`.
+#[test]
+fn a_pool_of_two_that_loses_one_answers_every_caller() {
+    let body = "fn main() -> Int {
+  let settings: Settings = SETTINGS;
+  let pool = open(Fibers::open(), settings, 2);
+  print(\"start: \" + until(pool, 2, 0, 0, 5000));
+  print(\"kill: \" + ask(pool, \"kill others\"));
+  hold(100);
+  let mut wrong = 0;
+  let mut n = 1;
+  while n <= 20 {
+    let got = ask(pool, \"select \" + Int::to_string(n));
+    if got != Int::to_string(n) {
+      print(\"asked \" + Int::to_string(n) + \": \" + got);
+      wrong = wrong + 1
+    };
+    n = n + 1
+  };
+  print(\"wrong \" + Int::to_string(wrong) + \" of 20\");
+  print(\"after: \" + until(pool, 2, 0, 0, 5000));
+  close(pool);
+  print(\"closed\");
+  0
+}
+";
+    let runs = run_scripted("pool_one_killed", body, 60);
+    assert_ran(
+        &runs,
+        "start: 2 live, 0 reconnecting, 0 down\nkill: 0\nwrong 0 of 20\nafter: 2 live, 0 reconnecting, 0 down\nclosed\n",
+        "no caller may be answered Disconnected while a live connection exists",
+    );
+}
+
+/// **A pool that cannot reconnect fails its waiting callers with the reason,
+/// and does not hang.** One connection; the server goes down for good; three
+/// callers wait. When the reconnect schedule (at most 500 ms) gives up, all
+/// three must be answered `Disconnected` with the reason the last attempt
+/// failed, within the schedule plus a margin; a new caller must be answered
+/// at once; and `close` must return.
+///
+/// With the pool not waking its waiters when the last connection goes, the
+/// three wait for ever.
+#[test]
+fn a_pool_that_cannot_reconnect_fails_its_waiters_with_the_reason() {
+    let body = "fn waiter(pool: Pool, done: Channel<String>) -> () {
+  let began = now();
+  let got = ask(pool, \"select 1\");
+  let when = if now() - began < 2500 { \"in time\" } else { \"late\" };
+  Channel::send(done, got + \" (\" + when + \")\");
+  ()
+}
+
+fn main() -> Int {
+  let settings: Settings = SETTINGS;
+  let plan: Reconnect = { fast: Schedule::UpTo(Schedule::backoff(20, 100), 500), slow: Option::None, handshake: 10000 };
+  let pool = open_with(Fibers::open(), settings, 1, plan);
+  print(\"start: \" + until(pool, 1, 0, 0, 5000));
+  print(\"down: \" + ask(pool, \"down -1\"));
+  hold(100);
+  let done: Channel<String> = Channel::bounded(3);
+  // Adopted rather than bound to `_`: a handle let go waits for its fiber,
+  // which would run the waiters one after another instead of together.
+  let crew = Fibers::open();
+  let mut spawned = 0;
+  while spawned < 3 {
+    Fibers::adopt(crew, Fiber::spawn(fn () => waiter(pool, done)));
+    spawned = spawned + 1
+  };
+  let mut heard = 0;
+  while heard < 3 {
+    match Channel::receive(done) {
+      Option::Some(got) => print(\"waiter: \" + got),
+      Option::None => (),
+    };
+    heard = heard + 1
+  };
+  let began = now();
+  let got = ask(pool, \"select 2\");
+  print(\"new caller: \" + got + (if now() - began < 200 { \" (at once)\" } else { \" (late)\" }));
+  print(\"health: \" + said(health(pool)));
+  close(pool);
+  print(\"closed\");
+  0
+}
+";
+    let reason = "no lease: disconnected: the server closed the connection while a reply was expected";
+    let expected = format!(
+        "start: 1 live, 0 reconnecting, 0 down\ndown: 0\n\
+         waiter: {reason} (in time)\nwaiter: {reason} (in time)\nwaiter: {reason} (in time)\n\
+         new caller: {reason} (at once)\nhealth: 0 live, 0 reconnecting, 1 down\nclosed\n"
+    );
+    let runs = run_scripted("pool_cannot_reconnect", body, 60);
+    assert_ran(&runs, &expected, "waiters must get the reason, not hang");
+}
+
+/// **Reconnect attempts back off: the gaps grow, and stay under the cap plus
+/// jitter.** One connection, a schedule of `backoff(40, 320)`, and a server
+/// that turns connections away for 2.5 s. The server records when each
+/// attempt arrived. The first gap is the first delay (20-40 ms) plus a
+/// connect; the later ones are capped delays (160-320 ms) plus a connect.
+///
+/// The pool must reconnect once the server is back.
+///
+/// With a fixed 40 ms delay in place of the schedule, the late gaps stay
+/// short.
+#[test]
+fn reconnect_attempts_back_off_up_to_the_cap() {
+    let body = "fn main() -> Int {
+  let settings: Settings = SETTINGS;
+  let plan: Reconnect = { fast: Schedule::UpTo(Schedule::backoff(40, 320), 20000), slow: Option::None, handshake: 10000 };
+  let pool = open_with(Fibers::open(), settings, 1, plan);
+  print(\"start: \" + until(pool, 1, 0, 0, 5000));
+  print(\"down: \" + ask(pool, \"down 2500\"));
+  hold(100);
+  print(\"through the outage: \" + ask(pool, \"select 7\"));
+  print(\"after: \" + until(pool, 1, 0, 0, 5000));
+  close(pool);
+  0
+}
+";
+    let runs = run_scripted("pool_backoff", body, 60);
+    assert_ran(
+        &runs,
+        "start: 1 live, 0 reconnecting, 0 down\ndown: 0\nthrough the outage: 7\nafter: 1 live, 0 reconnecting, 0 down\n",
+        "a caller waits through the outage and is served",
+    );
+    for (backend, _, server) in &runs {
+        let gaps: Vec<u128> = server.refused_gaps().iter().map(|g| g.as_millis()).collect();
+        assert!(gaps.len() >= 5, "{backend}: too few attempts to judge a backoff: {gaps:?}");
+        assert!(gaps[0] < 200, "{backend}: the first retry came late: {gaps:?}");
+        // **The margin is one slice's overrun, and that is all a wait can
+        // overrun by.** `pause` sleeps in 25 ms slices against an absolute
+        // deadline on the monotonic clock: each slice is `min(left, 25)`, so
+        // a slice that overran only shortens what is left, and the wait ends
+        // at the first wake past the deadline. Thirteen slices of a 316 ms
+        // wait do not add their overruns up; only the last one shows. 250 ms
+        // is ten times a slice, which is the overrun recorded for loaded
+        // runners here, and the test runs alone (`.config/nextest.toml`) so
+        // it is not the load.
+        assert!(
+            gaps.iter().all(|g| *g <= 320 + 250),
+            "{backend}: a gap passed the cap plus jitter and a margin: {gaps:?}"
+        );
+        assert!(
+            gaps[gaps.len() - 2..].iter().all(|g| *g >= 150),
+            "{backend}: the late gaps did not grow to the capped delay: {gaps:?}"
+        );
+    }
+}
+
+/// **`close` returns promptly while a connection is waiting to retry.** The
+/// schedule waits 1.5-3 s between attempts; `close` is called well inside
+/// such a wait and must return within a second, with the waiting caller
+/// answered and every fiber ended.
+///
+/// With the wait not looking at `close`, `close` waits out the delay.
+#[test]
+fn close_during_a_reconnect_wait_returns_promptly() {
+    let body = "fn main() -> Int {
+  let settings: Settings = SETTINGS;
+  let plan: Reconnect = { fast: Schedule::UpTo(Schedule::backoff(3000, 3000), 60000), slow: Option::Some(30000), handshake: 10000 };
+  let pool = open_with(Fibers::open(), settings, 1, plan);
+  print(\"start: \" + until(pool, 1, 0, 0, 5000));
+  print(\"down: \" + ask(pool, \"down -1\"));
+  hold(100);
+  let told: Channel<String> = Channel::bounded(1);
+  let f = Fiber::spawn(fn () => { Channel::send(told, ask(pool, \"select 1\")); () });
+  print(\"reconnecting: \" + until(pool, 0, 1, 0, 5000));
+  let settle = now() + 300;
+  while now() < settle { khora_sleep(5) };
+  let began = now();
+  close(pool);
+  print(if now() - began < 1000 { \"closed in time\" } else { \"closed late\" });
+  Fiber::wait(f);
+  match Channel::receive(told) { Option::Some(got) => print(\"waiter: \" + got), Option::None => print(\"waiter: nothing\") };
+  print(\"waiter ended\");
+  0
+}
+";
+    let runs = run_scripted("pool_close_in_backoff", body, 60);
+    assert_ran(
+        &runs,
+        "start: 1 live, 0 reconnecting, 0 down\ndown: 0\nreconnecting: 0 live, 1 reconnecting, 0 down\n\
+         closed in time\nwaiter: no lease: disconnected: the pool is closed\nwaiter ended\n",
+        "close must end a reconnect's wait",
+    );
+}
+
+/// **Cancelled borrowers never cost the pool a connection, while
+/// connections are being lost and reconnected.** A pool of two; 200 trials of
+/// a fiber looping `select 1`, cancelled 1-4 ms in; every tenth trial the
+/// server hangs up the other connection first, so cancels land while a slot
+/// is being checked, handed back and reconnected. Afterwards both
+/// connections must be live and idle, and twenty statements must all be
+/// answered.
+///
+/// With a cancellation point between taking a slot and registering its
+/// give-back (the check run first), the pool loses slots.
+#[test]
+fn cancelled_borrowers_never_lose_a_slot_while_reconnecting() {
+    let body = "fn churn(pool: Pool) -> () {
+  let mut going = true;
+  while going {
+    let _ = ask(pool, \"select 1\");
+    ()
+  }
+}
+
+fn main() -> Int {
+  let settings: Settings = SETTINGS;
+  let plan: Reconnect = { fast: Schedule::UpTo(Schedule::backoff(5, 50), 10000), slow: Option::Some(200), handshake: 10000 };
+  let pool = open_with(Fibers::open(), settings, 2, plan);
+  print(\"start: \" + until(pool, 2, 0, 0, 5000));
+  let mut trial = 0;
+  while trial < 200 {
+    if trial % 10 == 0 { let _ = ask(pool, \"kill others\"); hold(20) };
+    let f = Fiber::spawn(fn () => churn(pool));
+    khora_sleep(1 + trial % 4);
+    Fiber::cancel(f);
+    Fiber::wait(f);
+    trial = trial + 1
+  };
+  print(\"after: \" + until(pool, 2, 0, 0, 10000));
+  print(\"idle: \" + Int::to_string(settled(pool, 2)));
+  let mut right = 0;
+  let mut n = 1;
+  while n <= 20 {
+    if ask(pool, \"select \" + Int::to_string(n)) == Int::to_string(n) { right = right + 1 };
+    n = n + 1
+  };
+  print(\"answered \" + Int::to_string(right) + \" of 20\");
+  close(pool);
+  print(\"closed\");
+  0
+}
+";
+    let runs = run_scripted("pool_cancel_storm", body, 120);
+    assert_ran(
+        &runs,
+        "start: 2 live, 0 reconnecting, 0 down\nafter: 2 live, 0 reconnecting, 0 down\nidle: 2\n\
+         answered 20 of 20\nclosed\n",
+        "no slot may be lost to a cancel",
+    );
+}
+
+/// **A pool that shrank to nothing grows back when the server returns.**
+/// Two connections; a fast schedule of at most 300 ms and a slow retry every
+/// 500 ms (±20%). The server is down for 2 s: both connections shrink out,
+/// and a caller is answered `Disconnected` at once. Once the server is back,
+/// both must be live again within the outage plus one slow interval plus a
+/// margin, and serve.
+///
+/// With the slow retry disabled, the pool stays at nothing.
+#[test]
+fn a_pool_shrunk_to_nothing_grows_back_when_the_server_returns() {
+    let body = "fn main() -> Int {
+  let settings: Settings = SETTINGS;
+  let plan: Reconnect = { fast: Schedule::UpTo(Schedule::backoff(20, 100), 300), slow: Option::Some(500), handshake: 10000 };
+  let pool = open_with(Fibers::open(), settings, 2, plan);
+  print(\"start: \" + until(pool, 2, 0, 0, 5000));
+  let began = now();
+  print(\"down: \" + ask(pool, \"down 2000\"));
+  hold(100);
+  print(\"while down: \" + ask(pool, \"select 1\"));
+  print(\"shrunk: \" + until(pool, 0, 0, 2, 3000));
+  let asked = now();
+  let got = ask(pool, \"select 2\");
+  print(\"at nothing: \" + got + (if now() - asked < 200 { \" (at once)\" } else { \" (late)\" }));
+  print(\"grown: \" + until(pool, 2, 0, 0, began + 2000 + 600 + 1500 - now()));
+  print(\"after: \" + ask(pool, \"select 3\"));
+  close(pool);
+  0
+}
+";
+    let reason = "no lease: disconnected: the server closed the connection while a reply was expected";
+    let expected = format!(
+        "start: 2 live, 0 reconnecting, 0 down\ndown: 0\nwhile down: {reason}\n\
+         shrunk: 0 live, 0 reconnecting, 2 down\nat nothing: {reason} (at once)\n\
+         grown: 2 live, 0 reconnecting, 0 down\nafter: 3\n"
+    );
+    let runs = run_scripted("pool_grows_back", body, 60);
+    assert_ran(&runs, &expected, "a shrunk pool must grow back within one slow interval");
+}
+
+/// **An `abort` during a transaction's `ROLLBACK` does not cost the pool its
+/// connection.** A pool of one; a transaction whose body spins is cancelled
+/// with `cancel_within(100)`, and the server stalls the `ROLLBACK` for a
+/// second, so the abort lands while the rollback waits. The next transaction
+/// must get the connection and commit, and the server must hear the
+/// rollback before it.
+///
+/// With the give-back written inline in `with_db`, the abort stopped it at
+/// its entry and the next transaction waited for ever.
+#[test]
+fn an_abort_during_a_rollback_gives_the_connection_back() {
+    let main = "module demo::main;
+import std::core::{Fiber, Fibers, Result, print};
+import std::db::{Db, DbError, transaction};
+import postgres::db::{Settings};
+import postgres::pool::{Pool, close, open, with_db};
+
+extern fn khora_sleep(millis: Int) -> ();
+
+fn spinning() -> Result<Int, DbError> with { db: Db } {
+  transaction(fn () => {
+    let mut i = 0;
+    while true { i = i + 1 };
+    Result::Ok(i)
+  })
+}
+
+fn empty() -> Result<Int, DbError> with { db: Db } {
+  transaction(fn () => Result::Ok(1))
+}
+
+fn main() -> Int {
+  let settings: Settings = { host: \"127.0.0.1\", port: PORT, user: \"khora\", database: \"khora\", secret: \"\" };
+  let pool = open(Fibers::open(), settings, 1);
+  let f = Fiber::spawn(fn () => { let _ = with_db(pool, spinning); () });
+  khora_sleep(200);
+  Fiber::cancel_within(f, 100);
+  Fiber::wait(f);
+  match with_db(pool, empty) {
+    Result::Ok(Result::Ok(_)) => print(\"the next transaction committed\"),
+    _ => print(\"the next transaction failed\"),
+  };
+  close(pool);
+  0
+}
+";
+    for backend in ["threads", "scheduler"] {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
+        let port = listener.local_addr().expect("an address").port();
+        let server = std::thread::spawn(move || {
+            record_queries_stalling(listener, std::time::Duration::from_millis(1000), "ROLLBACK")
+        });
+        let exe = build(&format!("pg_abort_in_rollback_{backend}_{port}"), &main.replace("PORT", &port.to_string()));
+        let ran = run_watched(&exe, backend, std::time::Duration::from_secs(20));
+        if ran.hung {
+            // The server waits 20 s for a message; do not wait for it too.
+            panic!("{backend}: hung, which is what a lost lease does: {:?}", ran.stdout);
+        }
+        let recorded = server.join().expect("the server thread does not panic once connected");
+        assert_eq!(ran.code, Some(0), "{backend}: stderr {}", ran.stderr);
+        assert_eq!(ran.stdout, "the next transaction committed\n", "{backend}: heard {:?}", recorded.heard);
+        assert_eq!(
+            (recorded.heard.as_slice(), recorded.ended.as_str()),
+            (["BEGIN", "ROLLBACK", "BEGIN", "COMMIT"].map(String::from).as_slice(), "Terminate"),
+            "{backend}: the aborted transaction's rollback, then the next transaction on the same connection"
+        );
+    }
+}
+
+/// **A pool rides out a real server restart.** Four connections under load
+/// from four fibers for six seconds, while `KHORA_POSTGRES_RESTART` restarts
+/// the server a second and a half in. Every answer that arrives must be the
+/// caller's own number (errors are counted, not assumed away); afterwards the
+/// pool must be back to four live connections and fifty statements must all
+/// succeed.
+///
+/// Needs `KHORA_POSTGRES` and `KHORA_POSTGRES_RESTART` (a command that
+/// restarts the server on 5433, such as `pg_ctl restart -m fast`); skipped
+/// without them.
+#[test]
+fn a_pool_rides_out_a_real_server_restart() {
+    let (Some(_), Some(restart)) =
+        (std::env::var_os("KHORA_POSTGRES"), std::env::var("KHORA_POSTGRES_RESTART").ok())
+    else {
+        eprintln!("skipping: set KHORA_POSTGRES=1 and KHORA_POSTGRES_RESTART to a restart command");
+        return;
+    };
+    let body = "fn load(pool: Pool, me: Int, until_ms: Int, done: Channel<String>) -> () {
+  let mut ok = 0;
+  let mut failed = 0;
+  let mut wrong = 0;
+  let mut n = me * 1000000;
+  while now() < until_ms {
+    let got = ask(pool, \"select \" + Int::to_string(n));
+    if got == Int::to_string(n) { ok = ok + 1 } else {
+      match Int::of_string(got) { Option::None => failed = failed + 1, Option::Some(_) => wrong = wrong + 1 }
+    };
+    n = n + 1
+  };
+  Channel::send(done, Int::to_string(ok) + \" \" + Int::to_string(failed) + \" \" + Int::to_string(wrong));
+  ()
+}
+
+fn main() -> Int {
+  let settings: Settings = SETTINGS;
+  let pool = open(Fibers::open(), settings, 4);
+  print(\"start: \" + until(pool, 4, 0, 0, 10000));
+  let done: Channel<String> = Channel::bounded(4);
+  let stop = now() + 6000;
+  let crew = Fibers::open();
+  let mut me = 1;
+  while me <= 4 {
+    let mine = me;
+    Fibers::adopt(crew, Fiber::spawn(fn () => load(pool, mine, stop, done)));
+    me = me + 1
+  };
+  let mut heard = 0;
+  while heard < 4 {
+    match Channel::receive(done) { Option::Some(line) => print(\"LOAD \" + line), Option::None => () };
+    heard = heard + 1
+  };
+  let mut right = 0;
+  let mut n = 1;
+  while n <= 50 {
+    if ask(pool, \"select \" + Int::to_string(n)) == Int::to_string(n) { right = right + 1 };
+    n = n + 1
+  };
+  print(\"after: \" + until(pool, 4, 0, 0, 10000));
+  print(\"answered \" + Int::to_string(right) + \" of 50\");
+  close(pool);
+  0
+}
+";
+    for backend in ["threads", "scheduler"] {
+        let exe = build(&format!("pg_restart_{backend}"), &reconnect_program(REAL, body));
+        let restarter = {
+            let restart = restart.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+                std::process::Command::new("sh").arg("-c").arg(&restart).status()
+            })
+        };
+        let ran = run_watched(&exe, backend, std::time::Duration::from_secs(90));
+        let restarted = restarter.join().expect("the restart thread");
+        assert!(restarted.is_ok_and(|s| s.success()), "{backend}: the restart command failed");
+        assert!(!ran.hung, "{backend} hung: {:?}", ran.stdout);
+        assert_eq!(ran.code, Some(0), "{backend}: stderr {}", ran.stderr);
+        eprintln!("{backend}: {}", ran.stdout);
+        let loads: Vec<Vec<u64>> = ran
+            .stdout
+            .lines()
+            .filter_map(|l| l.strip_prefix("LOAD "))
+            .map(|l| l.split(' ').map(|n| n.parse().expect("a count")).collect())
+            .collect();
+        assert_eq!(loads.len(), 4, "{backend}: {}", ran.stdout);
+        assert!(loads.iter().all(|l| l[2] == 0), "{backend}: a caller got another's answer: {loads:?}");
+        let rest: Vec<&str> = ran.stdout.lines().filter(|l| !l.starts_with("LOAD ")).collect();
+        assert_eq!(
+            rest,
+            ["start: 4 live, 0 reconnecting, 0 down", "after: 4 live, 0 reconnecting, 0 down", "answered 50 of 50"],
+            "{backend}: the pool must be whole again and serve after the restart"
         );
     }
 }
