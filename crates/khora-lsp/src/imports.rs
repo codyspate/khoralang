@@ -91,7 +91,7 @@ pub fn providers(db: &dyn Db, files: &[SourceFile], name: &str, skip: &str) -> V
 /// action built from it produced `import std.core::{List};`, which does not
 /// parse, and compared unequal to the `std::core` already imported two lines
 /// above, so it also failed to merge and added a second import of the same
-/// module. One wrong separator, three wrong behaviours.
+/// module. One wrong separator, three wrong behaviors.
 pub fn written(path: &khora_hir::ModulePath) -> String {
     path.segments().join("::")
 }

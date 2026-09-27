@@ -73,7 +73,7 @@ when it moves the fiber.
 **Making an unsampled span free.** If tracing costs when it is off, it gets
 turned off, and then it does not exist. With Perceus an unsampled span must
 allocate nothing at all — which is a constraint on the record type and the
-sampling decision's position, not an optimisation to add later. The decision has
+sampling decision's position, not an optimization to add later. The decision has
 to be taken at span *start*, in the handler, so that nothing downstream is
 built.
 

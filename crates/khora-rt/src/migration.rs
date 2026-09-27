@@ -1,6 +1,6 @@
 //! What survives a fiber changing worker.
 //!
-//! **The claim the release gate makes** is that no language-visible behaviour
+//! **The claim the release gate makes** is that no language-visible behavior
 //! depends on a fiber staying on one operating-system thread, unless the
 //! program has explicitly entered a documented thread-affine FFI boundary. It
 //! had never been tested, and it is the sort of claim that stays true until
@@ -47,7 +47,7 @@
 //! errno-like thread state, a thread-affine handle. A rule stated and never
 //! demonstrated is a rule nobody can check a library against, so the second
 //! half of this module stands up a *pretend* thread-affine library — one that
-//! records the thread it was initialised on and notices when it is used from
+//! records the thread it was initialized on and notices when it is used from
 //! another — and shows both halves: obeying the rule works, and breaking it is
 //! caught by the library rather than by luck.
 
@@ -87,7 +87,7 @@ mod tests {
     ///
     /// **It was 25, and 25 was not enough.** Both
     /// `a_thread_affine_handle_held_across_a_suspension_is_used_from_the_wrong_thread`
-    /// and its neighbour failed on macOS and Windows CI with "no fiber changed
+    /// and its neighbor failed on macOS and Windows CI with "no fiber changed
     /// worker in 25 runs" -- not always, and never on a developer's machine.
     /// The runners have two to four cores and are heavily loaded, and
     /// `GLOBAL_INTERVAL` lets a worker take its own queue thirty-one times
@@ -190,8 +190,8 @@ mod tests {
                 let done = completions.clone();
                 let desk = box_office.clone();
                 pool.spawn(Task::new(move || {
-                    let cancelling = each % 2 == 0;
-                    if cancelling {
+                    let canceling = each % 2 == 0;
+                    if canceling {
                         current(|fiber| fiber.cancel());
                     }
                     let span = SpanContext {
@@ -216,7 +216,7 @@ mod tests {
                         if id != mine {
                             said.lock().unwrap().push(format!("id {mine} became {id}"));
                         }
-                        if current(|fiber| fiber.is_cancelled()) != cancelling {
+                        if current(|fiber| fiber.is_canceled()) != canceling {
                             said.lock()
                                 .unwrap()
                                 .push(format!("fiber {mine} lost its cancellation flag"));
@@ -272,7 +272,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// A pretend foreign library that may only be used from the thread that
-    /// initialised it.
+    /// initialized it.
     ///
     /// Real ones are everywhere: an OpenGL context, a COM apartment, a GUI
     /// toolkit's main loop, SQLite built without `SQLITE_THREADSAFE`. All of
@@ -282,11 +282,11 @@ mod tests {
     }
 
     impl Affine {
-        fn initialise() -> Affine {
+        fn initialize() -> Affine {
             Affine { owner: std::thread::current().id() }
         }
 
-        /// Whether this call is on the thread that initialised it.
+        /// Whether this call is on the thread that initialized it.
         fn used_here(&self) -> bool {
             std::thread::current().id() == self.owner
         }
@@ -306,7 +306,7 @@ mod tests {
         for _ in 0..FIBERS {
             let complaints = broke.clone();
             pool.spawn(Task::new(move || {
-                let library = Affine::initialise();
+                let library = Affine::initialize();
                 for _ in 0..256 {
                     if !library.used_here() {
                         complaints.fetch_add(1, Ordering::SeqCst);
@@ -328,8 +328,8 @@ mod tests {
     ///
     /// The same library used either side of a suspension. The fiber comes back
     /// on a different worker, and the handle is then in use from a thread that
-    /// did not initialise it. A real library answers that with undefined
-    /// behaviour; this one counts it.
+    /// did not initialize it. A real library answers that with undefined
+    /// behavior; this one counts it.
     ///
     /// The assertion is that it **does** happen: the point is to demonstrate
     /// the hazard the reference warns about, not to hope it is absent.
@@ -383,7 +383,7 @@ mod tests {
                 let said = complaints.clone();
                 let desk = box_office.clone();
                 pool.spawn(Task::new(move || {
-                    let library = Affine::initialise();
+                    let library = Affine::initialize();
                     for _ in 0..TURNS {
                         // Exactly what the reference forbids: the handle is
                         // held across the suspension and used again after it.
@@ -424,7 +424,7 @@ mod tests {
             let complaints = moved.clone();
             pool.spawn(Task::new(move || {
                 let split = crate::blocking::blocking(|| {
-                    let library = Affine::initialise();
+                    let library = Affine::initialize();
                     let mut wrong = 0;
                     for _ in 0..1000 {
                         if !library.used_here() {

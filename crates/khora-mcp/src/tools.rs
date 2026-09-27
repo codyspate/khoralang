@@ -31,7 +31,7 @@ Use `khora_check` constantly. It runs the real compiler over a snippet and \
 returns real diagnostics, so you can find out whether something works instead \
 of guessing. Check before you answer, not after.
 
-Four things have no close analogue elsewhere, and are where guesses fail:
+Four things have no close analog elsewhere, and are where guesses fail:
 
   - A function that needs a capability declares it: `with { rng: Random }`. \
 Callers supply it and it propagates; forgetting it is a type error, not a \

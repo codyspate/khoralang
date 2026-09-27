@@ -34,7 +34,7 @@ struct Children {
     /// over a bounded nursery of 256 was 256 lock-unlock pairs per connection —
     /// 2,134 requests a second against 6,406 for the same architecture written
     /// straight in Rust. Set to twice the survivors after each sweep, so the
-    /// work is amortised to about one check per adoption however many children
+    /// work is amortized to about one check per adoption however many children
     /// there are.
     sweep_at: usize,
     held: Vec<Handed>,
@@ -89,12 +89,12 @@ impl std::ops::Deref for Crew {
 
 /// Every nursery currently open, and the fiber that opened it.
 ///
-/// **A cancellation has to be delivered, not waited for.** Cancelling a fiber
+/// **A cancellation has to be delivered, not waited for.** Canceling a fiber
 /// whose body is a nursery flags that fiber and nothing else; the fiber is
 /// inside `khora_fibers_wait`, blocked in `JoinHandle::join` on a child that
 /// nobody has told to stop. It will not look at its own flag again until that
 /// join returns, and if the child is in a `loop` it never does. Measured: the
-/// same child cancelled directly stops in 107 ms, and under a nursery never.
+/// same child canceled directly stops in 107 ms, and under a nursery never.
 ///
 /// So the parent-to-child edge has to exist at the moment the cancellation
 /// arrives, and this is it.
@@ -132,10 +132,10 @@ fn closed(crew: &Arc<Crew>) {
 /// in shielded cleanup because only its parent was forced keeps the parent
 /// exactly where the force was meant to get it out of.
 ///
-/// **Nothing is locked while a child is cancelled.** The handles are copied out
-/// from under both locks first. Cancelling reaches the scheduler, the timers and
+/// **Nothing is locked while a child is canceled.** The handles are copied out
+/// from under both locks first. Canceling reaches the scheduler, the timers and
 /// the reactor, and a child's own exit path takes the crew's lock to deregister
-/// itself — so cancelling while holding it is a deadlock that looks exactly like
+/// itself — so canceling while holding it is a deadlock that looks exactly like
 /// the hang this exists to fix.
 pub(crate) fn cancel_open_crews(fiber: usize, stop: crate::current::Stop) {
     let crews: Vec<Arc<Crew>> = {
@@ -270,7 +270,7 @@ unsafe fn fiber_finished(fiber: *mut u8) -> bool {
 /// whether it has finished takes its lock, so sweeping each time cost a
 /// bounded nursery 256 lock-unlock pairs per connection and two thirds of the
 /// server's throughput. `sweep_at` holds it to about one check per adoption
-/// amortised, by only walking the list once it has grown to twice what the
+/// amortized, by only walking the list once it has grown to twice what the
 /// last sweep left behind.
 ///
 /// # Safety
@@ -349,7 +349,7 @@ pub unsafe extern "C" fn khora_fibers_adopt(fibers: *mut u8, fiber: *mut u8) {
                 // **The child waited on for room is still a child, and a stop
                 // has to reach it.** Out of `held`, it was on no list
                 // `cancel_open_crews` walks, and `wait_for` does not give up:
-                // an adopter cancelled here waited the child out -- 16 s,
+                // an adopter canceled here waited the child out -- 16 s,
                 // measured -- and then carried on. So it goes on `joining`
                 // for the length of the wait, where a cancel that arrives
                 // mid-wait is delivered to it, and a stop already pending is
@@ -401,7 +401,7 @@ pub unsafe extern "C" fn khora_fibers_adopt(fibers: *mut u8, fiber: *mut u8) {
 /// is what this replaced -- siblings running on for as long as they liked while
 /// the failure waited to be noticed.
 ///
-/// Cancelled rather than killed: a child stops at its next `!` and runs its
+/// Canceled rather than killed: a child stops at its next `!` and runs its
 /// finalizers on the way out, which is the only kind of stopping this runtime
 /// has and the only kind worth having.
 fn record_failures(list: &Crew, count: i64) {
@@ -410,9 +410,9 @@ fn record_failures(list: &Crew, count: i64) {
         crew.failed += count;
         // Only the first failure cancels. Later ones are arriving *because* of
         // it -- a sibling that stopped where it was told to and then failed on
-        // the way out -- and cancelling twice says nothing new: a second cancel
+        // the way out -- and canceling twice says nothing new: a second cancel
         // is not escalation, which
-        // `a_shielded_fiber_cancelled_twice_still_finishes_its_cleanup` pins.
+        // `a_shielded_fiber_canceled_twice_still_finishes_its_cleanup` pins.
         if crew.failed > count {
             Vec::new()
         } else {
@@ -469,7 +469,7 @@ pub unsafe extern "C" fn khora_fibers_wait(fibers: *mut u8) -> i64 {
             return list.lock().unwrap_or_else(|e| e.into_inner()).failed;
         }
         // **And a round nobody is waiting on because *this* fiber was told to
-        // stop.** Cancelling a nursery cancels its children, transitively.
+        // stop.** Canceling a nursery cancels its children, transitively.
         //
         // **This check covers only a stop that arrives between rounds.** One
         // that arrives while this fiber is parked in `wait_for` below is
@@ -478,7 +478,7 @@ pub unsafe extern "C" fn khora_fibers_wait(fibers: *mut u8) -> i64 {
         // receives mid-wait is passed on by `wait_for` itself
         // (`FiberState::wait_passing_on_a_force`).
         //
-        // The children are still *waited* for after being cancelled. A nursery
+        // The children are still *waited* for after being canceled. A nursery
         // that returned while one was winding up would not be structured, and
         // that is as true of a cancellation as it is of a failure.
         let stopping = crate::current::current(|fiber| fiber.stops_here());
@@ -530,7 +530,7 @@ pub unsafe extern "C" fn khora_fibers_wait(fibers: *mut u8) -> i64 {
 ///
 /// This is a `drop_fields` callback, and it is the whole of structured
 /// concurrency's failure case: the block is leaving without finishing, so the
-/// answers its children were computing are no longer wanted. Cancelled *first*
+/// answers its children were computing are no longer wanted. Canceled *first*
 /// and in one pass, so the children stop concurrently rather than one waiting
 /// out the next.
 ///
@@ -554,16 +554,16 @@ pub unsafe extern "C" fn khora_fibers_release(fibers: *mut u8) {
         slot.write(std::ptr::null_mut());
 
         // Same rounds as `khora_fibers_wait`, for the same reason: a child
-        // being cancelled runs its finalizers on the way out, and one of those
+        // being canceled runs its finalizers on the way out, and one of those
         // may still be adopting. The list is this function's alone now — the
         // slot was nulled above — so each round takes what the last one did not
         // know about.
         let list = Arc::from_raw(list as *const Crew);
-        // Out of the registry first: a child cancelled below may come back
+        // Out of the registry first: a child canceled below may come back
         // through `cancel_open_crews`, and must not find a crew going away.
         closed(&list);
         let mut round = std::mem::take(&mut list.lock().unwrap_or_else(|e| e.into_inner()).held);
-        // Cancelled whatever happened; forced when the fiber releasing it was,
+        // Canceled whatever happened; forced when the fiber releasing it was,
         // because this runs in that fiber's cleanup and the children are what
         // it is waiting for.
         let stop = if crate::current::current(|fiber| fiber.is_forced()) {
@@ -587,7 +587,7 @@ pub unsafe extern "C" fn khora_fibers_release(fibers: *mut u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cancel::{khora_cancelled, Shielded};
+    use crate::cancel::{khora_canceled, Shielded};
     use crate::fiber::{khora_fiber_cancel, khora_fiber_force, khora_fiber_join, khora_fiber_spawn};
     use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
@@ -627,7 +627,7 @@ mod tests {
         inside.store(1, Ordering::SeqCst);
         let deadline = Instant::now() + PATIENCE;
         while Instant::now() < deadline {
-            if khora_cancelled() == 1 {
+            if khora_canceled() == 1 {
                 outcome.store(STOPPED, Ordering::SeqCst);
                 return;
             }
@@ -673,7 +673,7 @@ mod tests {
     /// nursery is forced, and the child it is waiting on -- in shielded
     /// cleanup, where a cancel alone must not reach -- stops.
     ///
-    /// Cancelled first, **twice**, and given time, so the test also says a
+    /// Canceled first, **twice**, and given time, so the test also says a
     /// cancel was delivered and did not stop the cleanup. Twice because that
     /// is the runtime's own shape: each cancel of the parent reaches the child
     /// through `cancel_open_crews`, so a second cancel that escalated would
@@ -744,7 +744,7 @@ mod tests {
         let parent = spawn(holding_parent);
         until("the parent holding its child", || HELD_PARENT_READY.load(Ordering::SeqCst) == 1);
         until("the child reaching its cleanup", || HELD_INSIDE.load(Ordering::SeqCst) == 1);
-        // The child was cancelled once already, as a detached parent's child
+        // The child was canceled once already, as a detached parent's child
         // would be; that must not end its cleanup.
         // SAFETY: the parent holds this handle until it is forced, below.
         unsafe { khora_fiber_cancel(HELD_CHILD.load(Ordering::SeqCst)) };
@@ -840,17 +840,17 @@ mod tests {
     // --- a force that lands while the waiter is already in its cleanup -----
     //
     // The shape a deadline produces: cancel now, force once the cleanup has
-    // overrun. By then the cancelled fiber is inside a wait that does not give
+    // overrun. By then the canceled fiber is inside a wait that does not give
     // up, and a force that only walks `OPEN` finds nothing to pass on. Each
     // test cancels, confirms the child is still running with the waiter
     // inside that wait, and only then forces, so a child stopped by the cancel
     // fails the test before the force is tried.
 
-    /// Until the waiter is cancelled, as a frame running on is until it
+    /// Until the waiter is canceled, as a frame running on is until it
     /// reaches its next cancellation point.
-    fn until_cancelled() {
+    fn until_canceled() {
         let deadline = Instant::now() + PATIENCE;
-        while !crate::current::current(|me| me.is_cancelled()) && Instant::now() < deadline {
+        while !crate::current::current(|me| me.is_canceled()) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(1));
         }
     }
@@ -885,7 +885,7 @@ mod tests {
 
     extern "C" fn handle_holder(_code: *const u8, _body: *mut u8) -> u64 {
         let child = spawn(handle_child);
-        until_cancelled();
+        until_canceled();
         let _cleanup = Shielded::new();
         HANDLE_RELEASING.store(1, Ordering::SeqCst);
         // SAFETY: the only reference to a live handle.
@@ -919,7 +919,7 @@ mod tests {
         let nursery = khora_fibers_open();
         // SAFETY: a live nursery and a live handle, whose reference it takes.
         unsafe { khora_fibers_adopt(nursery, spawn(crew_child)) };
-        until_cancelled();
+        until_canceled();
         let _cleanup = Shielded::new();
         CREW_RELEASING.store(1, Ordering::SeqCst);
         // SAFETY: the nursery's last reference.
@@ -979,11 +979,11 @@ mod tests {
         0
     }
 
-    /// The middle fiber: holds the grandchild, and once cancelled releases it
+    /// The middle fiber: holds the grandchild, and once canceled releases it
     /// in cleanup -- where the force must find it and pass it on again.
     extern "C" fn deep_middle(_code: *const u8, _body: *mut u8) -> u64 {
         let grandchild = spawn(deep_grandchild);
-        until_cancelled();
+        until_canceled();
         let _cleanup = Shielded::new();
         // SAFETY: the only reference to a live handle.
         unsafe { crate::fiber::khora_fiber_release(grandchild) };
@@ -992,7 +992,7 @@ mod tests {
 
     extern "C" fn deep_top(_code: *const u8, _body: *mut u8) -> u64 {
         let middle = spawn(deep_middle);
-        until_cancelled();
+        until_canceled();
         let _cleanup = Shielded::new();
         DEEP_RELEASING.store(1, Ordering::SeqCst);
         // SAFETY: the only reference to a live handle. Passes the cancel on to

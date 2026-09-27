@@ -4,7 +4,7 @@
 #
 # `docs/grammar.ebnf` is served to MCP clients by `khora-mcp` and mirrored into
 # the public reference, and at 1.0 "language syntax" is a frozen surface -- so
-# the grammar is the artefact people will be held to, and nothing checked it.
+# the grammar is the artifact people will be held to, and nothing checked it.
 # It had drifted far: it named `export` as the visibility keyword, which the
 # lexer does not have and `reference/declarations.md` says outright is not it;
 # `trait`, `impl`, `for` and `pub` were missing from its keyword table;

@@ -98,7 +98,7 @@ so a typo is a compile error rather than a link error. The one language where a
 bodyless declaration silently means "elsewhere" is C — and C is where the
 undefined-symbol experience comes from.
 
-`extern` is a **contextual** keyword, recognised only where a `fn` declaration
+`extern` is a **contextual** keyword, recognized only where a `fn` declaration
 begins. It costs nothing to make it one, and it means adding the word could not
 break a program that was already using it for something.
 

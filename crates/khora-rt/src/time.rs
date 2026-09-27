@@ -95,17 +95,17 @@ pub extern "C" fn khora_sleep(millis: i64) {
     }
 }
 
-/// Blocks this thread until `until`, or until its fiber is cancelled.
+/// Blocks this thread until `until`, or until its fiber is canceled.
 ///
-/// **What this prevents: a cancelled fiber sleeping out the rest of a long
+/// **What this prevents: a canceled fiber sleeping out the rest of a long
 /// sleep.** `std::thread::sleep` has no way to be woken, so a fiber on the
-/// thread backend cancelled one second into `clock.sleep(60_000)` stopped a
+/// thread backend canceled one second into `clock.sleep(60_000)` stopped a
 /// minute later. The wait is on a condition variable registered with the
 /// fiber, which is what `Fiber::cancel` notifies, and
 /// [`crate::channel::LOOK_AGAIN`] bounds the cancellation that arrives
 /// between the look and the wait, the same way a parked `receive` does.
 ///
-/// A cancelled sleep returns early and says nothing: the caller's next
+/// A canceled sleep returns early and says nothing: the caller's next
 /// cancellation point is what stops the fiber. Inside a change function, where
 /// nothing stops, the sleep is simply shorter.
 fn sleep_on_this_thread(until: Instant) {

@@ -201,7 +201,7 @@ method, `bench/measure.json`. The shape holds and one number does not.
   the one reading that has now been taken twice on unlike machines.
 - **The library costs half the floor here rather than a quarter.** Four cores
   against sixteen, and the parsing and routing are the part that does not
-  parallelise into spare ones. The Windows figure is not wrong; it is the one
+  parallelize into spare ones. The Windows figure is not wrong; it is the one
   that had more machine to spend.
 - Above Go's `net/http` rather than a little under it. **That does not settle
   it either way.** Khora and the Rust control were still climbing when the
@@ -219,7 +219,7 @@ What that supports is a narrow claim, and it should be made narrowly: **Khora's
 reference-counted, garbage-collector-free runtime is not the bottleneck in a
 network service, and it holds a service in a fraction of the memory.** It does
 not support a claim to lead on throughput, which it does not. It does not yet
-support a claim against Rust on latency distribution, on behaviour under
+support a claim against Rust on latency distribution, on behavior under
 overload, or on anything with a real database in it, because none of those has
 been measured. `docs/roadmap.md` phase 9 records what was measured and, twice,
 where the prediction was wrong.

@@ -700,7 +700,7 @@ mod tests {
     /// **A scale nothing can represent is refused rather than quietly met.**
     ///
     /// The clamp this replaced computed to thirty-eight places and returned the
-    /// answer labelled as having a hundred, which is a wrong number wearing the
+    /// answer labeled as having a hundred, which is a wrong number wearing the
     /// right hat.
     #[test]
     fn a_scale_no_significand_reaches_is_not_quietly_answered() {

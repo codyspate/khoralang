@@ -240,7 +240,7 @@ fn main() -> Int {{ print(work()); print(khora_live_count()); 0 }}
 /// `from_fn` is the answer: `make` runs once per cell, so each one is its own.
 /// Both are here together because the contrast is the whole point — the first
 /// assertion is not a bug being pinned as correct, it is the documented
-/// behaviour of `new` that `from_fn` exists to avoid.
+/// behavior of `new` that `from_fn` exists to avoid.
 #[test]
 fn from_fn_gives_every_cell_its_own_value() {
     let ran = run(

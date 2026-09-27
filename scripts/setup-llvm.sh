@@ -30,7 +30,7 @@ PREFIX_VAR=LLVM_SYS_221_PREFIX
 #
 # `say` was careful about that and the installers underneath it were not.
 # `brew install` and apt.llvm.org's script write progress to stdout, so the
-# whole install log -- including an ASCII-armoured GPG key -- ended up in
+# whole install log -- including an ASCII-armored GPG key -- ended up in
 # `$prefix`, and CI's `echo "VAR=$prefix" >> "$GITHUB_ENV"` rejected the
 # multi-line value with `Invalid format 'mQINBFE9lCwBEADi0WUAApM/'`. The
 # backend job had never once passed, on any platform.
@@ -195,7 +195,7 @@ case "$(uname -s)" in
                 && rm -f stub.c stub.obj )
         fi
         ;;
-    *) die "unrecognised platform $(uname -s); set $PREFIX_VAR yourself." ;;
+    *) die "unrecognized platform $(uname -s); set $PREFIX_VAR yourself." ;;
 esac
 
 config=$(config_in "$prefix")

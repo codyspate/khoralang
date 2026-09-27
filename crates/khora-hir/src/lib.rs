@@ -177,7 +177,7 @@ pub fn test_key(index: usize) -> String {
 /// difference lives.
 ///
 /// Monomorphization prefixes a body's key with its module — `app$main$#test$0`
-/// — so a test is not recognised by what its symbol *starts* with. Searching
+/// — so a test is not recognized by what its symbol *starts* with. Searching
 /// is still exact rather than loose: `#` cannot occur in a Khora identifier
 /// and module segments are identifiers, so `#test$` can only have come from
 /// [`test_key`].
@@ -1309,7 +1309,7 @@ fn resolve_through_imports(
 ///
 /// - **The distance has to be small relative to the name.** A third of its
 ///   length, so `prnt` finds `print` and `x` does not find `y`. Single-letter
-///   names have no near neighbours worth naming.
+///   names have no near neighbors worth naming.
 /// - **Only one suggestion, and only if it is clearly the closest.** Two
 ///   candidates at the same distance is not a suggestion, it is a menu, and a
 ///   reader who takes the first is as likely to be wrong as right.
@@ -1351,7 +1351,11 @@ pub fn did_you_mean<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -
 }
 
 /// Levenshtein distance, two rows at a time.
-fn edit_distance(a: &str, b: &str) -> usize {
+///
+/// Public so the type checker's near-case suggestion measures a typo the
+/// way [`did_you_mean`] does; two copies would drift, and a case name and a
+/// function name that are equally close would then disagree about it.
+pub fn edit_distance(a: &str, b: &str) -> usize {
     let b: Vec<char> = b.chars().collect();
     let mut previous: Vec<usize> = (0..=b.len()).collect();
     let mut current = vec![0usize; b.len() + 1];
@@ -1417,7 +1421,7 @@ mod did_you_mean_tests {
         assert_eq!(suggest("cat", &["car", "bat"]), None);
     }
 
-    /// A short name has no near neighbours worth naming: at two characters
+    /// A short name has no near neighbors worth naming: at two characters
     /// every other two-character name is one edit away.
     #[test]
     fn a_short_name_gets_no_suggestion() {

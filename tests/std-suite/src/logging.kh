@@ -12,7 +12,7 @@ module std_suite::logging;
 //!
 //! What stays in Rust is the rendering. `Log::json` writes to stderr through
 //! `eprint`, and a program cannot read its own stderr -- so
-//! `a_record_is_one_json_object_per_line` and its two neighbours keep their own
+//! `a_record_is_one_json_object_per_line` and its two neighbors keep their own
 //! programs, along with the one whose whole claim is *which stream* each half
 //! went to.
 

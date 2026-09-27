@@ -272,7 +272,7 @@ fn main() -> Int {{
 /// and the parent observes that through `outcome`, which reports a stop
 /// instead of passing it on the way `join` does.
 #[test]
-fn cancelling_a_fiber_does_not_cancel_the_parent() {
+fn canceling_a_fiber_does_not_cancel_the_parent() {
     let ran = run(
         "fiber_cancel_child",
         &format!(
@@ -349,9 +349,9 @@ fn main() -> Int {{ work(); print(khora_live_count()); 0 }}
     assert_eq!(ran.code, Some(0));
 }
 
-// --- a cancelled fiber's root ----------------------------------------------
+// --- a canceled fiber's root ----------------------------------------------
 
-const CANCELLABLE: &str = "module t;
+const CANCELABLE: &str = "module t;
 fn print(value: Int);
 extern fn khora_cancel();
 extern fn khora_live_count() -> Int;
@@ -361,7 +361,7 @@ impl<A, 'r> Fiber<A, 'r> {
   fn spawn(body: () -> A raises 'r) -> Fiber<A, 'r>;
   fn join(self) -> A raises 'r;
   fn wait(self) -> () raises 'r;
-  fn cancelled(self) -> Bool;
+  fn canceled(self) -> Bool;
   fn cancel(self) -> ();
   fn detach(self) -> ();
 }
@@ -376,18 +376,18 @@ pub type Oops = | Bad;
 fn ok(n: Int) -> Int raises Oops { n }
 ";
 
-/// Phase 5's exit criterion, for one fiber: cancelled, it runs every finalizer
+/// Phase 5's exit criterion, for one fiber: canceled, it runs every finalizer
 /// in scope, and it stops *itself* rather than the program.
 ///
 /// The fiber cancels itself so the test is deterministic — a parent that
 /// cancels immediately after spawning wins the race and the child stops at its
 /// first mark, which is correct but proves less.
 #[test]
-fn a_cancelled_fiber_runs_every_finalizer_and_stops_only_itself() {
+fn a_canceled_fiber_runs_every_finalizer_and_stops_only_itself() {
     let ran = run(
         "fiber_cancel_finalizers",
         &format!(
-            "{CANCELLABLE}
+            "{CANCELABLE}
 fn worker() -> () raises Oops {{
   let region = Region::open();
   Region::defer(region, fn () => print(99));
@@ -400,7 +400,7 @@ fn worker() -> () raises Oops {{
 fn run_it() -> () raises Oops {{
   let f = Fiber::spawn(fn () => worker()!);
   // `wait`, not `join`: this needs the ordering and not the answer, and a
-  // cancelled fiber has no answer to give -- a join would have nothing to
+  // canceled fiber has no answer to give -- a join would have nothing to
   // hand back and would unwind this frame along with it.
   Fiber::wait(f)!;
 }}
@@ -421,7 +421,7 @@ fn main() -> Int {{
     assert_eq!(ran.code, Some(0), "and the program was not taken down with it");
 }
 
-/// Cancelling a child immediately after spawning it, which **is** a race, and
+/// Canceling a child immediately after spawning it, which **is** a race, and
 /// the test says so rather than pretending otherwise.
 ///
 /// This asserted `"3\n"` or `"1\n3\n"` and was flaky on macOS, which produced
@@ -437,15 +437,15 @@ fn main() -> Int {{
 /// without `print(1)` before it.
 ///
 /// **Phase 11 makes the strong version true.** With a real scheduler a child
-/// spawned and cancelled before any suspension point has not been scheduled at
+/// spawned and canceled before any suspension point has not been scheduled at
 /// all, so `"3\n"` becomes the only answer. Worth tightening then, and worth
 /// not asserting until it is.
 #[test]
-fn a_fiber_cancelled_before_it_starts_does_nothing() {
+fn a_fiber_canceled_before_it_starts_does_nothing() {
     let ran = run(
         "fiber_cancel_early",
         &format!(
-            "{CANCELLABLE}
+            "{CANCELABLE}
 fn worker() -> () raises Oops {{
   print(1);
   ok(1)!;
@@ -456,7 +456,7 @@ fn main() -> Int {{
   let f = Fiber::spawn(fn () => worker()!);
   Fiber::cancel(f);
   // `wait`, not `join`: this needs the ordering and not the answer, and a
-  // cancelled fiber has no answer to give -- a join would have nothing to
+  // canceled fiber has no answer to give -- a join would have nothing to
   // hand back and would unwind this frame along with it.
   Fiber::wait(f)! catch {{ Oops::Bad => () }};
   print(3);
@@ -482,7 +482,7 @@ fn an_infallible_fiber_runs_to_its_end() {
     let ran = run(
         "fiber_infallible",
         &format!(
-            "{CANCELLABLE}
+            "{CANCELABLE}
 fn main() -> Int {{
   let f = Fiber::spawn(fn () => {{ khora_cancel(); print(1); }});
   Fiber::join(f);
@@ -500,9 +500,9 @@ fn main() -> Int {{
 //
 // `Fiber::finished` answers *whether* a supervised fiber stopped and cannot
 // answer *why*, and the only call that would -- `Fiber::join` -- ends the
-// process at 130 on a cancelled fiber. So a supervisor that notices its
+// process at 130 on a canceled fiber. So a supervisor that notices its
 // listener is gone has no way to tell "it bound and returned" from "somebody
-// cancelled it", which are the two cases it would act on differently.
+// canceled it", which are the two cases it would act on differently.
 
 /// Compiles and runs `source`, with `KHORA_FIBERS` set to `backend`.
 ///
@@ -537,12 +537,12 @@ fn run_on(name: &str, source: &str, backend: &str) -> Ran {
     }
 }
 
-/// The program every `cancelled` test below runs, over a fallible fiber root.
+/// The program every `canceled` test below runs, over a fallible fiber root.
 ///
 /// The child cancels *itself*, so there is no race between a parent's
 /// `Fiber::cancel` and the child arriving at its first cancellation point --
-/// the flakiness `a_fiber_cancelled_before_it_starts_does_nothing` documents.
-/// `wait` rather than `join`, because joining a cancelled fiber is what ends
+/// the flakiness `a_fiber_canceled_before_it_starts_does_nothing` documents.
+/// `wait` rather than `join`, because joining a canceled fiber is what ends
 /// the process, which is the hole this method exists beside.
 const STOPPED_AND_ASKED: &str = "
 fn worker() -> () raises Oops {
@@ -554,7 +554,7 @@ fn worker() -> () raises Oops {
 fn main() -> Int {
   let f = Fiber::spawn(fn () => worker()!);
   Fiber::wait(f)! catch { Oops::Bad => () };
-  print(if Fiber::cancelled(f) { 1 } else { 0 });
+  print(if Fiber::canceled(f) { 1 } else { 0 });
   0
 }
 ";
@@ -562,8 +562,8 @@ fn main() -> Int {
 /// A fiber stopped part-way says so, where `finished` could only say that it
 /// had stopped.
 #[test]
-fn a_cancelled_fiber_reports_that_it_was_cancelled() {
-    let ran = run("fiber_cancelled_true", &format!("{CANCELLABLE}{STOPPED_AND_ASKED}"));
+fn a_canceled_fiber_reports_that_it_was_canceled() {
+    let ran = run("fiber_canceled_true", &format!("{CANCELABLE}{STOPPED_AND_ASKED}"));
     assert_eq!(
         ran.stdout, "1\n",
         "the tail after the cancellation point did not run, and the handle says why: {:?}",
@@ -579,10 +579,10 @@ fn a_cancelled_fiber_reports_that_it_was_cancelled() {
 /// stored outcome is reached by two different routes and only one of them is
 /// covered by the test above.
 #[test]
-fn a_cancelled_fiber_reports_it_on_the_scheduler_too() {
+fn a_canceled_fiber_reports_it_on_the_scheduler_too() {
     let ran = run_on(
-        "fiber_cancelled_true_sched",
-        &format!("{CANCELLABLE}{STOPPED_AND_ASKED}"),
+        "fiber_canceled_true_sched",
+        &format!("{CANCELABLE}{STOPPED_AND_ASKED}"),
         "scheduler",
     );
     assert_eq!(ran.stdout, "1\n", "the coroutine backend answers the same: {:?}", ran.stdout);
@@ -595,14 +595,14 @@ fn a_cancelled_fiber_reports_it_on_the_scheduler_too() {
 #[test]
 fn a_fiber_that_finished_on_its_own_reports_no_cancellation() {
     let ran = run(
-        "fiber_cancelled_false",
+        "fiber_canceled_false",
         &format!(
-            "{CANCELLABLE}
+            "{CANCELABLE}
 fn main() -> Int {{
   let f = Fiber::spawn(fn () => print(1));
   // The fiber's row is empty, so the wait's `!` has no case to name.
   Fiber::wait(f)! catch {{ }};
-  print(if Fiber::cancelled(f) {{ 1 }} else {{ 0 }});
+  print(if Fiber::canceled(f) {{ 1 }} else {{ 0 }});
   0
 }}
 "
@@ -624,9 +624,9 @@ fn main() -> Int {{
 #[test]
 fn a_boxed_answer_stopped_inside_a_total_catch_reports_the_stop() {
     let ran = run(
-        "fiber_cancelled_boxed",
+        "fiber_canceled_boxed",
         &format!(
-            "{CANCELLABLE}
+            "{CANCELABLE}
 pub type Answer = {{ n: Int }};
 
 fn step() -> Int raises Oops {{ ok(1)! }}
@@ -642,7 +642,7 @@ fn main() -> Int {{
   let f = Fiber::spawn(fn () => worker());
   // The fiber's row is empty, so the wait's `!` has no case to name.
   Fiber::wait(f)! catch {{ }};
-  print(if Fiber::cancelled(f) {{ 1 }} else {{ 0 }});
+  print(if Fiber::canceled(f) {{ 1 }} else {{ 0 }});
   print(Fiber::join(f).n);
   0
 }}
@@ -662,9 +662,9 @@ fn main() -> Int {{
 #[test]
 fn a_boxed_answer_reports_a_cancellation_on_the_scheduler_too() {
     let ran = run_on(
-        "fiber_cancelled_boxed_scheduler",
+        "fiber_canceled_boxed_scheduler",
         &format!(
-            "{CANCELLABLE}
+            "{CANCELABLE}
 pub type Answer = {{ n: Int }};
 
 fn step() -> Int raises Oops {{ ok(1)! }}
@@ -679,7 +679,7 @@ fn worker() -> Answer {{ {{ n: inner() + 7 }} }}
 fn main() -> Int {{
   let f = Fiber::spawn(fn () => worker());
   Fiber::wait(f)! catch {{ }};
-  print(if Fiber::cancelled(f) {{ 1 }} else {{ 0 }});
+  print(if Fiber::canceled(f) {{ 1 }} else {{ 0 }});
   print(Fiber::join(f).n);
   0
 }}
@@ -699,16 +699,16 @@ fn main() -> Int {{
 /// question that consumed what it was asked about would be unusable in the one
 /// loop it exists for.
 #[test]
-fn asking_whether_a_fiber_was_cancelled_does_not_consume_the_handle() {
+fn asking_whether_a_fiber_was_canceled_does_not_consume_the_handle() {
     let ran = run(
-        "fiber_cancelled_borrows",
+        "fiber_canceled_borrows",
         &format!(
-            "{CANCELLABLE}
+            "{CANCELABLE}
 fn main() -> Int {{
   let f = Fiber::spawn(fn () => 5);
   // Neither of these is the handle's last use, and neither may release it.
-  print(if Fiber::cancelled(f) {{ 1 }} else {{ 0 }});
-  print(if Fiber::cancelled(f) {{ 1 }} else {{ 0 }});
+  print(if Fiber::canceled(f) {{ 1 }} else {{ 0 }});
+  print(if Fiber::canceled(f) {{ 1 }} else {{ 0 }});
   // The handle is still live enough to wait on and then to take an answer
   // from, which a released one is not. A consumed handle shows up here as a
   // use-after-free rather than as a wrong number.
@@ -745,7 +745,7 @@ fn a_fiber_that_catches_every_case_is_not_a_hole() {
     let ran = run(
         "fiber_total_catch",
         &format!(
-            "{CANCELLABLE}
+            "{CANCELABLE}
 // The cancellation point is the `!` inside `step`, reached through `catch`.
 fn step() -> Int raises Oops {{ ok(1)! }}
 
@@ -775,18 +775,18 @@ fn main() -> Int {{
     assert_eq!(ran.code, Some(0), "and the process was not taken down");
 }
 
-/// The same frame, reached by joining a child that was cancelled rather than by
-/// this fiber's own flag. `Fiber::join` on a cancelled fiber unwinds its
+/// The same frame, reached by joining a child that was canceled rather than by
+/// this fiber's own flag. `Fiber::join` on a canceled fiber unwinds its
 /// joiner -- there is no answer to hand back -- and here the joiner is a fiber
 /// whose thunk cannot fail.
 ///
 /// **This is the reported reproducer**, and it aborted with 134.
 #[test]
-fn a_fiber_that_joins_a_child_it_cancelled_stops_only_itself() {
+fn a_fiber_that_joins_a_child_it_canceled_stops_only_itself() {
     let ran = run(
-        "fiber_join_cancelled_nested",
+        "fiber_join_canceled_nested",
         &format!(
-            "{CANCELLABLE}
+            "{CANCELABLE}
 fn child() -> Int raises Oops {{
   khora_cancel();
   ok(1)!;
@@ -823,7 +823,7 @@ fn a_total_catch_at_the_entry_point_still_ends_the_program() {
     let ran = run(
         "cancel_total_catch_main",
         &format!(
-            "{CANCELLABLE}
+            "{CANCELABLE}
 fn step() -> Int raises Oops {{ ok(1)! }}
 
 fn main() -> Int {{
@@ -851,7 +851,7 @@ fn a_boxed_answer_stops_its_fiber_without_ending_the_process() {
     let ran = run(
         "fiber_total_catch_boxed",
         &format!(
-            "{CANCELLABLE}
+            "{CANCELABLE}
 pub type Answer = {{ n: Int }};
 
 fn boxed() -> Answer raises Oops {{
@@ -963,7 +963,7 @@ fn main() -> Int {{
 /// **This is the over-reporting that makes the line worth ignoring, which is
 /// the failure that matters here.** The announcement is written by the fiber
 /// itself the moment its outcome is stored, before the completion latch is
-/// even signalled — so at that instant no joiner has taken the answer and the
+/// even signaled — so at that instant no joiner has taken the answer and the
 /// runtime cannot know that one is about to. `join` sets `observed`, but
 /// `announced` was already claimed, so the flag changes nothing on this path.
 ///
@@ -1008,7 +1008,7 @@ fn main() -> Int {{
     );
 }
 
-/// A cancelled fiber says nothing on standard error.
+/// A canceled fiber says nothing on standard error.
 ///
 /// **This is the exclusion four documentation pages rest on** and nothing
 /// tested it. `limitations/index.md` bolds it, `taking-work-off-a-queue.md`
@@ -1016,17 +1016,17 @@ fn main() -> Int {{
 /// and the whole argument for reading the line rather than filtering it out
 /// is that a shutdown does not produce it.
 ///
-/// The only things keeping that true are the two `which != CANCELLED_WHICH`
+/// The only things keeping that true are the two `which != CANCELED_WHICH`
 /// guards in `fiber.rs`, and they sit in the blocks anybody touching this
 /// message will edit. Without this test a regression there turns every
 /// graceful shutdown into a false alarm and the suite stays green — which is
 /// precisely the failure the prose says trains readers to ignore the line.
 #[test]
-fn a_cancelled_fiber_is_not_reported_as_an_unobserved_failure() {
+fn a_canceled_fiber_is_not_reported_as_an_unobserved_failure() {
     let ran = run(
         "fiber_cancel_is_silent",
         &format!(
-            "{CANCELLABLE}
+            "{CANCELABLE}
 extern fn khora_sleep(millis: Int) -> ();
 
 fn worker() -> () raises Oops {{
@@ -1223,7 +1223,7 @@ fn main() -> Int {{
     // Whether the child reaches its first `print` before the parent raises is a
     // race, and not one worth removing: what is being pinned is that the child
     // was *stopped* — the program terminates at all, since `forever` loops until
-    // cancelled — and that nothing leaked on the way.
+    // canceled — and that nothing leaked on the way.
     assert!(
         ran.stdout == "7\n0\n" || ran.stdout == "1\n7\n0\n",
         "stopped, with the fallback and nothing left over: {:?}",
@@ -1246,7 +1246,7 @@ fn main() -> Int {{
 ///
 /// **The count is one, and that is the second assertion in it.** Two children
 /// finish here and both of them stop early — one by raising and two by being
-/// cancelled because of it. A cancellation is not a failure: it is what a
+/// canceled because of it. A cancellation is not a failure: it is what a
 /// nursery does to its children, and counting it would make every early exit
 /// look like a fault.
 #[test]
@@ -1280,7 +1280,7 @@ fn main() -> Int {{
         ),
     );
     // One failure, two cancellations, and nothing left over. That the program
-    // ends at all is the other half: `forever` loops until it is cancelled, so
+    // ends at all is the other half: `forever` loops until it is canceled, so
     // a nursery that let its siblings run would hang here rather than fail.
     assert_eq!(ran.stdout, "1\n0\n", "one failure and nothing leaked: {:?}", ran.stdout);
     assert_eq!(ran.code, Some(0));
@@ -1354,7 +1354,7 @@ fn main() -> Int {{ work(); print(khora_live_count()); 0 }}
 ///
 /// A cancellation travels the same tagged channel an error does and is in
 /// nobody's row, so `catch { _ => .. }` taking the switch's default would stop
-/// one dead — and a nursery whose children cannot be cancelled is not
+/// one dead — and a nursery whose children cannot be canceled is not
 /// structured concurrency at all. It keeps the propagate path by an explicit
 /// case on its `which`.
 ///
@@ -1365,7 +1365,7 @@ fn a_wildcard_catch_does_not_swallow_a_cancellation() {
     let ran = run(
         "fiber_cancel_wildcard",
         &format!(
-            "{CANCELLABLE}
+            "{CANCELABLE}
 fn worker() -> () raises Oops {{
   let region = Region::open();
   Region::defer(region, fn () => print(99));
@@ -1380,7 +1380,7 @@ fn worker() -> () raises Oops {{
 fn run_it() -> () raises Oops {{
   let f = Fiber::spawn(fn () => worker()!);
   // `wait`, not `join`: this needs the ordering and not the answer, and a
-  // cancelled fiber has no answer to give -- a join would have nothing to
+  // canceled fiber has no answer to give -- a join would have nothing to
   // hand back and would unwind this frame along with it.
   Fiber::wait(f)!;
 }}
@@ -1470,7 +1470,7 @@ fn attempt<A, E, 'e>(body: () -> A with 'e raises E) -> Result<A, E> with 'e;
 /// whatever it found into `Err`.
 ///
 /// Two things were wrong with that, and the second is the serious one. A
-/// cancelled computation came back as an ordinary failure, so a retry policy
+/// canceled computation came back as an ordinary failure, so a retry policy
 /// would retry a fiber that had been asked to stop. And a cancellation carries
 /// no payload, so the `Err` held a null typed as the body's error — a
 /// `problem.show()` away from reading through it.
@@ -1480,9 +1480,9 @@ fn attempt<A, E, 'e>(body: () -> A with 'e raises E) -> Result<A, E> with 'e;
 #[test]
 fn attempt_does_not_turn_a_cancellation_into_an_error() {
     let ran = run(
-        "fiber_attempt_cancelled",
+        "fiber_attempt_canceled",
         &format!(
-            "{CANCELLABLE}{ATTEMPTING}
+            "{CANCELABLE}{ATTEMPTING}
 fn worker() -> () raises Oops {{
   let region = Region::open();
   Region::defer(region, fn () => print(99));
@@ -1498,7 +1498,7 @@ fn worker() -> () raises Oops {{
 fn run_it() -> () raises Oops {{
   let f = Fiber::spawn(fn () => worker()!);
   // `wait`, not `join`: this needs the ordering and not the answer, and a
-  // cancelled fiber has no answer to give -- a join would have nothing to
+  // canceled fiber has no answer to give -- a join would have nothing to
   // hand back and would unwind this frame along with it.
   Fiber::wait(f)!;
 }}
@@ -1525,7 +1525,7 @@ fn attempt_still_makes_a_real_failure_a_value() {
     let ran = run(
         "fiber_attempt_error",
         &format!(
-            "{CANCELLABLE}{ATTEMPTING}
+            "{CANCELABLE}{ATTEMPTING}
 fn bad() -> Int raises Oops {{ raise Oops::Bad }}
 
 fn main() -> Int {{
@@ -1729,7 +1729,7 @@ fn main() -> Int {{
     assert_eq!(ran.code, Some(0));
 }
 
-/// **An adopted child keeps the channel it is cancelled on**, which is why
+/// **An adopted child keeps the channel it is canceled on**, which is why
 /// `Nursery::adopt` takes `Fiber<(), 'er>` and not `Fiber<(), {}>`.
 ///
 /// The empty row was tried and it reads better: "settle your failure before
@@ -1741,9 +1741,9 @@ fn main() -> Int {{
 /// The child here loops forever with a cancellation point in it, the nursery's
 /// block ends, and the program finishes. Under the empty-row version it hung.
 #[test]
-fn an_adopted_child_can_still_be_cancelled() {
+fn an_adopted_child_can_still_be_canceled() {
     let ran = run(
-        "adopted_cancellable",
+        "adopted_cancelable",
         &format!(
             "{NURSERY}
 fn forever() -> () raises Oops {{
@@ -1798,11 +1798,11 @@ fn main() -> Int {{ work(); print(khora_live_count()); 0 }}
 ///
 /// The fiber cancels itself so the ordering is fixed rather than raced.
 #[test]
-fn a_loop_stops_at_its_back_edge_when_cancelled() {
+fn a_loop_stops_at_its_back_edge_when_canceled() {
     let ran = run(
         "fiber_cancel_loop",
         &format!(
-            "{CANCELLABLE}
+            "{CANCELABLE}
 fn spinner() -> () raises Oops {{
   let region = Region::open();
   Region::defer(region, fn () => print(99));
@@ -1833,16 +1833,16 @@ fn main() -> Int {{
         "the loop must stop at the first back-edge after the cancellation, \
          run its finalizer, and leave the parent alone"
     );
-    assert_eq!(ran.code, Some(0), "the parent is not cancelled with it");
+    assert_eq!(ran.code, Some(0), "the parent is not canceled with it");
 }
 
 /// The same for `while`, which is a different lowering and had the same gap.
 #[test]
-fn a_while_loop_stops_at_its_back_edge_when_cancelled() {
+fn a_while_loop_stops_at_its_back_edge_when_canceled() {
     let ran = run(
         "fiber_cancel_while",
         &format!(
-            "{CANCELLABLE}
+            "{CANCELABLE}
 fn counter() -> () raises Oops {{
   let mut n = 0;
   let mut going = true;
@@ -1871,14 +1871,14 @@ fn main() -> Int {{ run_it()! catch {{ Oops::Bad => () }}; print(3); 0 }}
 ///
 /// The fiber stops on the iteration after the cancel: `counting`'s loop
 /// stops, and so does the rest of `worker` -- its `print(50)` is after a call
-/// that came back cancelled, and the call is where `worker` leaves. Neither
+/// that came back canceled, and the call is where `worker` leaves. Neither
 /// function has a `raises` row; the cancellation does not need one.
 #[test]
 fn a_loop_in_an_infallible_function_is_a_cancellation_point() {
     let ran = run(
         "fiber_cancel_infallible",
         &format!(
-            "{CANCELLABLE}
+            "{CANCELABLE}
 fn counting() -> () {{
   let mut n = 0;
   while n < 5 {{
@@ -1906,7 +1906,7 @@ fn main() -> Int {{ run_it()! catch {{ Oops::Bad => () }}; print(3); 0 }}
     assert_eq!(ran.code, Some(0));
 }
 
-/// **Cancelling a fiber whose body is a nursery returns.**
+/// **Canceling a fiber whose body is a nursery returns.**
 ///
 /// It used to hang, with no exit code and no message: `Fiber::cancel` returned
 /// and `Fiber::wait` never did. `khora_fiber_cancel` flagged the one fiber it
@@ -1915,7 +1915,7 @@ fn main() -> Int {{ run_it()! catch {{ Oops::Bad => () }}; print(3); 0 }}
 /// would have read its own flag. The between-rounds check in `khora_fibers_wait`
 /// runs before the cancellation arrives and cannot help.
 ///
-/// The child is cancellable on its own: the same `loop` under a direct
+/// The child is cancelable on its own: the same `loop` under a direct
 /// `Fiber::spawn` stops in about 100 ms. The nursery was the whole difference,
 /// which is why the fix is `cancel_open_crews` reaching the children as the
 /// cancellation is *delivered*.
@@ -1924,7 +1924,7 @@ fn main() -> Int {{ run_it()! catch {{ Oops::Bad => () }}; print(3); 0 }}
 /// under `Command::output` would take the whole suite down with it rather than
 /// failing this one test.
 #[test]
-fn cancelling_a_fiber_inside_a_nursery_returns() {
+fn canceling_a_fiber_inside_a_nursery_returns() {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("nursery_cancel");
     harness::ensure_runtime();
     std::fs::create_dir_all(&dir).expect("a workspace");
@@ -1945,7 +1945,7 @@ fn fan() -> () with {{ nursery: Nursery }} {{
 }}
 
 // `body` carries `raises Oops` so the `Fiber::wait` below has a channel to be
-// cancelled on. The row is empty in practice -- nothing here raises -- but
+// canceled on. The row is empty in practice -- nothing here raises -- but
 // `wait` is a cancellation point now, and a cancellation point in a function
 // with no failure channel has nowhere to go. See `limitations/index.md`.
 fn body() -> () raises Oops {{
@@ -1958,7 +1958,7 @@ fn body() -> () raises Oops {{
 
 fn main() -> Int {{
   let hand = Fiber::spawn(fn () => body()!);
-  // **Cancelled after the parent is already inside the wait.** That is the
+  // **Canceled after the parent is already inside the wait.** That is the
   // whole of the bug: a cancellation arriving before the join begins is seen
   // by the between-rounds check and works even unfixed. Without this pause the
   // test passes against the defect it exists to catch.
@@ -2002,7 +2002,7 @@ fn main() -> Int {{
             None if std::time::Instant::now() > deadline => {
                 let _ = child.kill();
                 panic!(
-                    "`Fiber::wait` never returned: cancelling a fiber whose body \
+                    "`Fiber::wait` never returned: canceling a fiber whose body \
                      is a nursery hangs again"
                 );
             }
@@ -2013,9 +2013,9 @@ fn main() -> Int {{
 
 // --- asking a fiber what it ended as ---------------------------------------
 //
-// `Fiber::cancelled` answers *whether* a fiber was stopped and cannot hand
+// `Fiber::canceled` answers *whether* a fiber was stopped and cannot hand
 // back what it computed; `Fiber::join` hands back the answer and, on a
-// cancelled fiber, unwinds its caller -- at the entry point ending the program
+// canceled fiber, unwinds its caller -- at the entry point ending the program
 // at 130, which no `catch` can name. So a supervisor that wants the answer
 // *and* tolerates a cancellation has neither call. `Fiber::outcome` is that
 // one: `Outcome::Answered(a)` or `Outcome::Stopped`, and a child *failure*
@@ -2036,7 +2036,7 @@ impl<A, 'r> Fiber<A, 'r> {
   fn spawn(body: () -> A raises 'r) -> Fiber<A, 'r>;
   fn join(self) -> A raises 'r;
   fn wait(self) -> () raises 'r;
-  fn cancelled(self) -> Bool;
+  fn canceled(self) -> Bool;
   fn outcome(self) -> Outcome<A> raises 'r;
   fn cancel(self) -> ();
   fn detach(self) -> ();
@@ -2054,11 +2054,11 @@ pub type Oops = | Bad;
 fn ok(n: Int) -> Int raises Oops { n }
 ";
 
-/// A cancelled fiber answers `Stopped`, and **the asker keeps running** --
+/// A canceled fiber answers `Stopped`, and **the asker keeps running** --
 /// which is the whole of the difference from `join`, whose answer on the same
 /// fiber is an unwind its caller cannot name.
 #[test]
-fn a_cancelled_fiber_says_it_was_stopped() {
+fn a_canceled_fiber_says_it_was_stopped() {
     let ran = run(
         "fiber_outcome_stopped",
         &format!(
@@ -2244,7 +2244,7 @@ fn main() -> Int {{
 /// outcome `outcome` reads is reached by two routes, and a suite that never
 /// sets `KHORA_FIBERS` executes only one of them.
 #[test]
-fn a_cancelled_fiber_says_it_was_stopped_on_the_scheduler_too() {
+fn a_canceled_fiber_says_it_was_stopped_on_the_scheduler_too() {
     let ran = run_on(
         "fiber_outcome_stopped_sched",
         &format!(
@@ -2330,7 +2330,7 @@ fn worker() -> Int raises Boom {{
 fn main() -> Int {{
   let f = Fiber::spawn(fn () => worker()!);
   // The catch answers a number `Stopped` never produces, so the two
-  // behaviours cannot print the same thing.
+  // behaviors cannot print the same thing.
   print(match Fiber::outcome(f)! catch {{ Boom::Bad(code) => Outcome::Answered(0 - code) }} {{
     Outcome::Answered(v) => v,
     Outcome::Stopped => 0 - 1,

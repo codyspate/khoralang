@@ -503,7 +503,7 @@ fn defining(units: &[Unit<'_>], from: usize, name: &str) -> Option<(usize, Strin
     // declared, and the caller's `None` branch handles it.
     // **A trait's *default* method is `Iterator::count`: `::` but no `#`.**
     // `select_impl` returns `None` for a method an impl leaves to the trait and
-    // keeps the trait's own key, so no impl head is in the name. It travelled
+    // keeps the trait's own key, so no impl head is in the name. It traveled
     // in with its trait exactly as a compound key does, and searching for it is
     // safe for the same reason the `#` case is: the name resolves to a trait
     // this file can see, which an `extern fn` somebody declared never does.

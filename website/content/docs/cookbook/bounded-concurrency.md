@@ -74,7 +74,7 @@ that was computed from configuration before you pass it.
 nursery.adopt(Fiber::spawn(fn () => handle(job)!));
 ```
 
-The row is for failures only. Every child can be cancelled whatever its row; the row is what lets a child that can fail be adopted, with its failure reported to the nursery at runtime as `ChildFailed` rather than caught at compile time.
+The row is for failures only. Every child can be canceled whatever its row; the row is what lets a child that can fail be adopted, with its failure reported to the nursery at runtime as `ChildFailed` rather than caught at compile time.
 
 Keep a job's answer by holding its handle instead of adopting it. `Fiber::join` gives back what the body computed, and re-raises what it raised.
 
@@ -86,7 +86,7 @@ For a known, already-bounded handful of tasks, use an ordinary `nursery` instead
 
 ## Failure and cancellation
 
-The nursery owns its adopted children. On normal return it waits for them. If the nursery body leaves through failure or cancellation, children that are still running are cancelled and joined before the nursery is released.
+The nursery owns its adopted children. On normal return it waits for them. If the nursery body leaves through failure or cancellation, children that are still running are canceled and joined before the nursery is released.
 
 **A child's own failure stops only the siblings still running when the
 nursery sees it.** A nursery reaps handles oldest-first, so a failure is not

@@ -293,9 +293,9 @@ pub fn type_at(
     offset: TextSize,
 ) -> Option<Definition> {
     // **A call's callee has a *function* type, and the question is about what
-    // it produces.** The cursor on `make` in `Colour::make()` sits inside the
-    // path, whose type is `() -> Colour`; the answer somebody wants is
-    // `Colour`. So a function type is followed to its result.
+    // it produces.** The cursor on `make` in `Color::make()` sits inside the
+    // path, whose type is `() -> Color`; the answer somebody wants is
+    // `Color`. So a function type is followed to its result.
     let found = type_under(db, file, offset)?;
     let produced = match &found {
         khora_types::Type::Fn { ret, .. } => ret.as_ref().clone(),

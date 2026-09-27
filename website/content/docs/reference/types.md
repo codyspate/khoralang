@@ -292,7 +292,7 @@ are bare:
 
 The bare spelling above is the one a `raises` clause takes. In
 **type-argument** position — the one place a row has to be written down rather
-than inferred — an failure row's entries are *labelled*, and an failure row labels
+than inferred — an failure row's entries are *labeled*, and an failure row labels
 each type with its own name. A `Fiber`'s second parameter is a row, so the form
 that works everywhere is:
 
@@ -308,7 +308,7 @@ compiler prints the shape it wanted:
 ```
 error: this argument: expected `() -> () raises { | Oops }`, found
        `() -> () raises { Oops: Oops }`; `Oops` is a type and a row belongs
-       here. A row's entries are labelled, and an failure row labels each type
+       here. A row's entries are labeled, and an failure row labels each type
        with its own name — write it `{ Oops: Oops }`. The bare name is right in
        a `raises` clause and only a type argument needs the braces
 ```
@@ -318,7 +318,7 @@ annotation it happens to check, because the annotation is unified against an
 inferred type. In a parameter or return type it is read as `{ | Oops }` — an
 open-tail row *variable* named `Oops` — the declaration is accepted silently,
 and the mismatch surfaces at the call site with the caret on the argument
-rather than on the signature. Write the labelled form and it is right in both
+rather than on the signature. Write the labeled form and it is right in both
 places.
 
 Most code never writes one, because a signature's `raises` clause takes the

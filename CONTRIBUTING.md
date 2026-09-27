@@ -106,8 +106,8 @@ was believed, what turned out to be true, and what the alternative was.
 
 `docs/errata.md` records what was believed and turned out to be false. If your
 change corrects a mistaken belief — in the code, in a comment, or in a design
-document — add an entry. The section that matters is **What generalises**: the
-class of mistake, so the next one is recognisable.
+document — add an entry. The section that matters is **What generalizes**: the
+class of mistake, so the next one is recognizable.
 
 Errata 62 is a good model. The bug had a diagnosis written down in a commit
 message and a roadmap entry, and the diagnosis was wrong; four attempts to
@@ -128,7 +128,7 @@ Expect questions about the second one. They are not an objection.
 
 ## What is out of scope
 
-- Reformatting, renaming or reorganising code without a behavioural reason.
+- Reformatting, renaming or reorganizing code without a behavioral reason.
 - New `std` modules without a design document and an argument for why the
   vocabulary belongs in `std` rather than in a package. `docs/design/effect-survey.md` §3.2 is the rule.
 - Performance changes without a measurement, on a stated machine, in one

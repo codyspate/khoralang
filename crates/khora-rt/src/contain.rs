@@ -31,7 +31,7 @@
 //!
 //! # Off by default, and why
 //!
-//! A host that opted into nothing keeps today's behaviour. `khora_trapped()`
+//! A host that opted into nothing keeps today's behavior. `khora_trapped()`
 //! is only useful to a caller that checks it, and one that does not would
 //! silently take a zero for an answer — so containment is opt-in, per process,
 //! through `khora_set_trap_policy`.
@@ -391,7 +391,7 @@ mod tests {
         khora_set_trap_policy(0);
     }
 
-    /// The default is the old behaviour, and `begin` says so by declining.
+    /// The default is the old behavior, and `begin` says so by declining.
     #[test]
     fn containment_is_off_unless_asked_for() {
         let _sole = alone();

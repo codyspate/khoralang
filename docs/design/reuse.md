@@ -174,7 +174,7 @@ What made the change survivable, and is worth keeping for 9.2:
 
 - the object-count assertions the suite already carries, which is what makes
   this observable at all. `docs/design/compatibility.md` says allocation
-  behaviour is not part of the language's promise — those tests are the
+  behavior is not part of the language's promise — those tests are the
   compiler's own instrument, not a contract with anybody;
 - the runtime's refusal to decrement a count that is already zero, which turns
   every one of the three rules above from a silent corruption into a message
@@ -521,9 +521,9 @@ against can be measured directly rather than described. Counted with
 **Three and a half allocations per input element, and the release build is
 byte-for-byte the same number as the debug build.** LLVM removes none of them.
 
-`combinators::a_pipeline_materialises_nothing` pins the half of this that is
+`combinators::a_pipeline_materializes_nothing` pins the half of this that is
 already right: live objects during the walk are flat in `n`, so no stage
-materialises its output. Flat is not free, though — each `next` allocates its
+materializes its output. Flat is not free, though — each `next` allocates its
 `Step` and its successor record and then frees them, and a live count cannot
 see churn. The two measurements answer different questions and only the
 allocation count answers this one.
@@ -571,7 +571,7 @@ LIVE_COUNT.fetch_add(1, COUNTER_ORDER);
 
 `crates/khora-rt/src/counters.rs` opens by saying "None of it is
 load-bearing", and it is in every release binary. Removing an allocation is
-therefore not merely hard for the optimiser but **illegal**: the counters are a
+therefore not merely hard for the optimizer but **illegal**: the counters are a
 side effect and a correct compiler must keep them. This document says above
 that allocation timing is unobservable, citing a decision taken in advance
 "precisely so this work would be legal"; the runtime does not hold up that end.
@@ -666,9 +666,9 @@ combinator pipeline and zero allocations.
 **Nothing a program can observe.** `docs/design/compatibility.md` decides that
 when memory is allocated and freed is not observable, and that decision was
 taken before this work rather than after it, precisely so this work would be
-legal. A program whose behaviour changes because an allocation stopped
+legal. A program whose behavior changes because an allocation stopped
 happening was relying on something it was never promised — and if one is found,
-it is a bug in this analysis, not a licence to keep the allocation.
+it is a bug in this analysis, not a license to keep the allocation.
 
 The one exception is the compiler's own tests, which assert exact object
 counts. Those numbers will move, and each move should be read as the finding it

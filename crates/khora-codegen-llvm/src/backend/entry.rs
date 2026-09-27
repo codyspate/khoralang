@@ -332,7 +332,7 @@ impl<'ctx> Backend<'ctx> {
 
         // An entry point that can raise has nowhere to hand the error, so an
         // uncaught raise is a failing exit. This is what makes a program that
-        // raises runnable at all before `catch` lands, and it is the behaviour
+        // raises runnable at all before `catch` lands, and it is the behavior
         // a shell expects either way.
         let result = if raises {
             let tagged = call
@@ -371,22 +371,22 @@ impl<'ctx> Backend<'ctx> {
             // did are different outcomes, and worth telling apart from
             // outside: 130 is 128 + SIGINT, which is what a shell already
             // means by "interrupted".
-            let cancelled_which =
-                self.ctx.i32_type().const_int(runtime::CANCELLED_WHICH, false);
-            let was_cancelled = self
+            let canceled_which =
+                self.ctx.i32_type().const_int(runtime::CANCELED_WHICH, false);
+            let was_canceled = self
                 .builder
                 .build_int_compare(
                     inkwell::IntPredicate::EQ,
                     which,
-                    cancelled_which,
-                    "cancelled",
+                    canceled_which,
+                    "canceled",
                 )
                 .expect("testing for a cancellation");
             let status = self
                 .builder
                 .build_select(
-                    was_cancelled,
-                    i32_type.const_int(runtime::CANCELLED_EXIT, false),
+                    was_canceled,
+                    i32_type.const_int(runtime::CANCELED_EXIT, false),
                     i32_type.const_int(1, false),
                     "status",
                 )
@@ -408,15 +408,15 @@ impl<'ctx> Backend<'ctx> {
                 .into_int_value();
             let stopped = self
                 .builder
-                .build_int_compare(inkwell::IntPredicate::NE, which, i32_type.const_zero(), "cancelled")
+                .build_int_compare(inkwell::IntPredicate::NE, which, i32_type.const_zero(), "canceled")
                 .expect("testing the tag");
-            let cancelled = self.ctx.append_basic_block(main, "cancelled");
+            let canceled = self.ctx.append_basic_block(main, "canceled");
             let ok = self.ctx.append_basic_block(main, "ok");
-            self.builder.build_conditional_branch(stopped, cancelled, ok).expect("branching on the tag");
-            self.builder.position_at_end(cancelled);
+            self.builder.build_conditional_branch(stopped, canceled, ok).expect("branching on the tag");
+            self.builder.position_at_end(canceled);
             self.close_root_region();
             self.builder
-                .build_return(Some(&i32_type.const_int(runtime::CANCELLED_EXIT, false)))
+                .build_return(Some(&i32_type.const_int(runtime::CANCELED_EXIT, false)))
                 .expect("exiting on a cancellation");
             self.builder.position_at_end(ok);
             Some(self.builder.build_extract_value(pair, 1, "answer").expect("reading the answer"))
@@ -444,19 +444,19 @@ impl<'ctx> Backend<'ctx> {
                 i32_type.const_zero()
             }
         };
-        // **A cancelled root is not a success, even when `main` returned.**
+        // **A canceled root is not a success, even when `main` returned.**
         // A cancel that lands after `main`'s last cancellation point -- while
         // a nursery is collecting children it has already stopped, say --
         // lets `main` return normally, so control arrives here rather than on
-        // the cancelled path above, and `main`'s own value would become the
-        // exit status. A supervisor reading it could not tell a signalled
+        // the canceled path above, and `main`'s own value would become the
+        // exit status. A supervisor reading it could not tell a signaled
         // shutdown from a clean finish, and `restart: on-failure` never fired.
         // Asked after the value is computed and before it is returned, so the
         // decision sees the same `Int` the program meant to exit with.
         let absorbed_byte = self
             .builder
             .build_call(self.rt.root_absorbed, &[], "root.absorbed")
-            .expect("asking whether the root was cancelled")
+            .expect("asking whether the root was canceled")
             .try_as_basic_value()
             .basic()
             .expect("khora_root_absorbed answers a byte")
@@ -467,14 +467,14 @@ impl<'ctx> Backend<'ctx> {
                 inkwell::IntPredicate::NE,
                 absorbed_byte,
                 absorbed_byte.get_type().const_zero(),
-                "root.was.cancelled",
+                "root.was.canceled",
             )
             .expect("testing the absorbed flag");
         let code = self
             .builder
             .build_select(
                 absorbed,
-                i32_type.const_int(runtime::CANCELLED_EXIT, false),
+                i32_type.const_int(runtime::CANCELED_EXIT, false),
                 code,
                 "exit.status",
             )

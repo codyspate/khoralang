@@ -23,7 +23,7 @@ into a permanent promise. One of those has already been withdrawn.
 
 ## The floor: what is not a choice
 
-Two mechanical tests, no judgement required. `std` is the part of the ecosystem
+Two mechanical tests, no judgment required. `std` is the part of the ecosystem
 **version-locked to the compiler**, so an item must be in it if either holds.
 
 **The compiler names it.** Remove it and ordinary syntax stops working:
@@ -101,7 +101,7 @@ worst ergonomic taxes -- `Effect.gen`, `yield*`, `Layer` wiring, the `R` channel
 top of it.
 
 **And the ceiling is lower than Effect's**, because the parts of Effect that
-exist only to work around TypeScript are not needed: HKT defunctionalisation,
+exist only to work around TypeScript are not needed: HKT defunctionalization,
 branded types (Khora's newtypes wrap nominally), and `Schema`'s `R` parameter,
 which would duplicate the effect rows the language already has.
 

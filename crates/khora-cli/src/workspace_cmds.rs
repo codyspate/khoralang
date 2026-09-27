@@ -113,7 +113,7 @@ pub fn new(directory: &Path, library: bool) -> Result<()> {
             // **The package's own name, not `name::lib`.** The module path is
             // what a consumer writes, and `module semver::lib` makes them
             // write `import semver::lib::{..}` -- naming a file that is an
-            // artefact of this scaffold rather than anything about the
+            // artifact of this scaffold rather than anything about the
             // library. `module semver` gives them `import semver::{..}`,
             // which is the import every doc page and every README writes.
             // Both forms check clean, so nothing enforced this and the
@@ -135,7 +135,7 @@ pub fn new(directory: &Path, library: bool) -> Result<()> {
     // the things a build left among the sources, and every one of them was a
     // symptom rather than a rule: a compiled program landed in `src/` beside
     // the `.kh` it came from, so the first `git status` after a first build
-    // listed files nobody recognised. `khora build` writes into `build/` now,
+    // listed files nobody recognized. `khora build` writes into `build/` now,
     // and one directory is the whole of what a package does not track.
     //
     // Written by the scaffold rather than documented, because a rule about a

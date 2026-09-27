@@ -188,7 +188,7 @@ fn lints_accept_a_bare_level_or_a_table() {
 
         [lints]
         bare = "warn"
-        levelled = { level = "warn" }
+        leveled = { level = "warn" }
         with-options = { level = "warn", max = 15, note = "why" }
         "#,
     );
@@ -197,12 +197,12 @@ fn lints_accept_a_bare_level_or_a_table() {
     assert_eq!(lints["bare"].level, Some(LintLevel::Warn));
     assert!(lints["bare"].options.is_empty(), "the bare form carries no options");
     assert_eq!(
-        (lints["levelled"].level, &lints["levelled"].options),
+        (lints["leveled"].level, &lints["leveled"].options),
         (lints["bare"].level, &lints["bare"].options),
         "both spellings of the same level should produce the same lint"
     );
     // The one difference kept: a lint group refuses the bare form.
-    assert!(lints["bare"].bare && !lints["levelled"].bare);
+    assert!(lints["bare"].bare && !lints["leveled"].bare);
 
     let options = &lints["with-options"].options;
     assert_eq!(options.len(), 2, "everything except `level` is an option: {options:?}");

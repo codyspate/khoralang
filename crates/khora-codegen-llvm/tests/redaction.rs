@@ -116,7 +116,7 @@ fn exposing_a_secret_gives_it_back() {
     assert_eq!(out, "hunter2\n");
 }
 
-/// **The build stops rather than serialising a secret.**
+/// **The build stops rather than serializing a secret.**
 ///
 /// This is the test that says why `Redacted` is a type and not a convention.
 /// `derive(Encode)` walks the fields, finds no instance, and refuses — so a
@@ -243,7 +243,7 @@ fn main() -> () {
 }
 
 /// **`List` gained `Show` and `Eq` because `Validated` needed them**, and the
-/// reason it needed them generalises: a record holding a `List` could not
+/// reason it needed them generalizes: a record holding a `List` could not
 /// derive `Show`, so the container people reach for by default was the one
 /// that made a struct unprintable.
 #[test]

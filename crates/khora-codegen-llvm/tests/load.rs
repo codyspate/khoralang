@@ -681,7 +681,7 @@ fn main() -> () raises ChildFailed {{
 /// once — and that backlog was 16, so twenty-four clients hung the test rather
 /// than the server. The second attempt is how the backlog was found.
 ///
-/// Both were the test synchronising harder than the thing under test needs. A
+/// Both were the test synchronizing harder than the thing under test needs. A
 /// thread per client, each connecting and asking straight away, overlaps
 /// perfectly well — and the peak each answer carries is the evidence that it
 /// did, which is better than a barrier's promise that it should have.

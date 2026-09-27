@@ -325,7 +325,7 @@ and nobody wants while the program is behaving.
 import std::log::{Log, trace};
 
 fn charge(amount: Int, card: String) -> Int with { log: Log } {
-  trace("authorising ${amount} against ${card}");
+  trace("authorizing ${amount} against ${card}");
   amount
 }
 ```

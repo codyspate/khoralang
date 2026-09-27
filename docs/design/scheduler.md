@@ -42,7 +42,7 @@ invite tuning the benchmark. What is in question is how many fibers can be
    not an implementation detail of it.
 2. Blocking-looking Khora I/O suspends the *fiber*, never the worker.
 3. **Scheduling fairness and cancellation are separate.** Infallible work may
-   yield without becoming cancellable.
+   yield without becoming cancelable.
 4. Structured concurrency survives unchanged: cancellation, then finalization,
    then join; a child cannot escape its nursery.
 5. Scale is demonstrated by memory and waiting-fiber measurements, not by spawn
@@ -140,7 +140,7 @@ runtime:    try the syscall
 ```
 
 The property worth defending aggressively is the first line. No `async`, no
-`await`, no `Future`, no coloured functions. `std::net::socket` keeps its
+`await`, no `Future`, no colored functions. `std::net::socket` keeps its
 blocking shape and every existing Khora program benefits without being touched.
 
 **One interface, three backends — but not the interface you would expect.**
@@ -204,7 +204,7 @@ What is claimed, and tested against real loopback sockets: a fiber that would
 have blocked suspends instead, its worker carries on running everything else,
 the right fiber is woken by the right peer, a hangup wakes a reader rather than
 leaking it, and a fiber waiting on a socket nobody will ever write to is still
-cancellable.
+cancelable.
 
 **Verified on Linux as well as Windows — after Linux found a real bug that
 Windows could not.** `scripts/check-linux.sh` runs these tests under WSL2, a
@@ -260,7 +260,7 @@ Raising a sysctl is not "routine on an ordinary developer machine".
 - Anonymous memory is committed lazily by the operating system when touched, so
   an idle fiber costs the pages it has actually used and not its slot size.
 - Overflow becomes a **clean runtime error naming the fiber**, rather than a
-  silent write into the neighbouring stack. That is strictly better than a
+  silent write into the neighboring stack. That is strictly better than a
   guard page's segfault.
 - No stack maps, because nothing ever moves.
 
@@ -376,7 +376,7 @@ for.
 
 ---
 
-## 5. Cancelling something that is asleep
+## 5. Canceling something that is asleep
 
 Today cancellation is observed by running code. That is sufficient when every
 fiber is a thread the operating system will schedule regardless.
@@ -385,7 +385,7 @@ It stops being sufficient the moment a fiber can be `WAITING` on a socket that
 will never become ready. Setting a flag it will never run to read is not
 cancellation; it is a leak with good intentions.
 
-So cancelling a fiber must:
+So canceling a fiber must:
 
 1. record the cancellation;
 2. if it is suspended, **remove or neutralize its wait registration** and make
@@ -419,7 +419,7 @@ deterministic test time needs no support from anything here. A runtime that
 owns sleeping has to grow a test clock of its own, and then explain it.
 
 **11F found the shape of the eventual problem, and left it alone.** A fiber
-released before its deadline — woken by I/O, or cancelled — leaves the deadline
+released before its deadline — woken by I/O, or canceled — leaves the deadline
 in the heap, because taking it out means rebuilding the heap and doing that per
 wake is quadratic. The entry is discarded when it comes due, so the waste is
 bounded by how long deadlines are and how often sleepers are released early,
@@ -472,7 +472,7 @@ true of the new one.
 The runtime keeps per-fiber state in thread-locals today, which is correct
 exactly as long as a fiber *is* a thread:
 
-- `cancel.rs` — `CANCELLED`, the cancellation flag, and `ON_FIBER`;
+- `cancel.rs` — `CANCELED`, the cancellation flag, and `ON_FIBER`;
 - `shared.rs` — `FIBER`, a per-fiber id.
 
 After M:N, fiber 42 may start on worker 3 and resume on worker 7. Anything in
@@ -553,7 +553,7 @@ one that blocked at startup does not keep the threads for its whole life.
 deliberately modest and is a starting point rather than a result; the counters
 below are how it should be argued with.
 
-**A blocking call is not a cancellation point.** A fiber cancelled inside
+**A blocking call is not a cancellation point.** A fiber canceled inside
 `fread` keeps waiting. The pool cannot interrupt foreign code, and returning
 early would mean handing the fiber back while another thread still holds its
 buffer. The fiber stops at its next cancellation point after the call returns
@@ -654,7 +654,7 @@ the reactor was easiest to write on its own thread.
 So the shape to move toward:
 
 ```
-Khora application  — synchronous, direct style, no colour
+Khora application  — synchronous, direct style, no color
         │
    a blocking-looking call
         │
@@ -676,8 +676,8 @@ queues are not implicated by any measurement**, and one of them is positively
 exonerated: turning preemption off entirely moved throughput by three per cent,
 on a workload where 78% of resumes ended in it.
 
-So none of them should be optimised on suspicion. If a later measurement
-implicates one, that measurement is the licence; until then, effort spent there
+So none of them should be optimized on suspicion. If a later measurement
+implicates one, that measurement is the license; until then, effort spent there
 is effort not spent on the wake path, and a change made there muddies the next
 benchmark.
 
@@ -702,7 +702,7 @@ rather than above it.
 
 §2 already argues this and it becomes load-bearing here. epoll and kqueue
 report *readiness*; IOCP reports *completion*. An interface shaped like the
-first forces the third to pretend, and the pretence is where correctness goes.
+first forces the third to pretend, and the pretense is where correctness goes.
 What the scheduler asks for is "tell me when this operation can make progress",
 and what a backend does about that is its own business.
 
@@ -713,10 +713,10 @@ complicates the language has the bargain backwards. Any new I/O architecture
 has to leave all of these true:
 
   - Khora source stays synchronous and direct — no `async`, no `await`, no
-    futures, no second colour of function, no executor handles;
+    futures, no second color of function, no executor handles;
   - a socket that would block suspends a **fiber**, never a worker;
   - safepoints stay separate from cancellation points — §1;
-  - cancelling a fiber waiting on I/O makes it runnable, so its finalizers run;
+  - canceling a fiber waiting on I/O makes it runnable, so its finalizers run;
   - the lost-wakeup invariant holds — `crate::wait`;
   - nursery and structured-concurrency semantics are untouched;
   - fibers migrate between workers, and no thread identity is ever a fiber
@@ -803,7 +803,7 @@ Staged so that a failure is attributable to the thing that just changed.
 | **11A** context switch, one worker, many fibers, explicit yield, join | stack switching, and the current-fiber pointer replacing thread-locals |
 | **11B** N workers, local and global queues, migration, safepoints — **done** | CPU parallelism, and fairness |
 | **11C** timers, suspend, wake, a `poll` reactor, and socket calls that suspend a fiber — **done** | a hundred thousand waiting on *timers*; sockets need a scalable backend |
-| **11D** work stealing — **done** | locality, once the simple scheduler's behaviour is understood |
+| **11D** work stealing — **done** | locality, once the simple scheduler's behavior is understood |
 | **11E** bounded blocking pool — **done** | that unavoidable blocking cannot stall a worker |
 | **11F** scale and soak — **done** | the adversarial tests below |
 
@@ -835,7 +835,7 @@ The worst scheduler bugs do not appear under load; they appear under
 *interleaving*. Randomized stress tests, run thousands of times, for:
 
 wake against suspend; cancel against wake; cancel against completion; join
-against completion; a nursery cancelled while children are being spawned;
+against completion; a nursery canceled while children are being spawned;
 worker shutdown during a wake; a timer firing during cancellation; socket
 readiness arriving after deregistration; a fiber dropped while waiting; steal
 contention; a child failing as a sibling completes.

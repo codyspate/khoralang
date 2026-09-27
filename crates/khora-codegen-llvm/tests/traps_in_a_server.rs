@@ -91,7 +91,7 @@ fn raising(_req: Request) -> Response raises Broke {
 ///
 /// The addend comes from the request so that the arithmetic cannot be folded
 /// away at compile time -- a constant overflow is a compile error, and a
-/// handler the optimiser proved unreachable would test nothing.
+/// handler the optimizer proved unreachable would test nothing.
 fn trapping(req: Request) -> Response {
   let step = String::byte_length(req.path);
   let mut n = 9223372036854775807;
@@ -206,7 +206,7 @@ fn a_trap_in_a_handler_ends_the_server_and_a_raise_does_not() {
 
     // --- a raise is contained at the request, which is the control
     //
-    // If this were the trap's behaviour too, the assertion below would be
+    // If this were the trap's behavior too, the assertion below would be
     // testing nothing about traps.
     let raised = ask("/raise");
     assert!(raised.starts_with("HTTP/1.1 500"), "a raise is a 500, got {raised:?}");

@@ -90,7 +90,7 @@ Capabilities begin from what authority a function requires and how a handler sup
 
 - **Getting Started** is linear and opinionated. A new developer follows it once.
 - **Reference** is precise and complete, ordered so that a straight read works
-  and organised so that a lookup lands. It both teaches the mental model and
+  and organized so that a lookup lands. It both teaches the mental model and
   gives the exact rule.
 - **Standard Library** is what ships with the toolchain: prose for the modules
   that need it, generated pages for every declaration.

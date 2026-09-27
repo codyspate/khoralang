@@ -145,7 +145,7 @@ impl Writer {
 /// Wraps a payload in a type byte and a length.
 ///
 /// **The length is four plus the payload**, counting itself and not the type
-/// byte. Getting that wrong desynchronises the stream one message later, where
+/// byte. Getting that wrong desynchronizes the stream one message later, where
 /// the symptom is an unrelated message type and no clue which frame was
 /// mis-sized — so it is one function, used by everything, rather than
 /// arithmetic repeated at every call site.

@@ -1,6 +1,6 @@
 //! Backslash escapes, and what happens to one the language does not know.
 //!
-//! **The point of this file is the refusal.** An unrecognised escape used to be
+//! **The point of this file is the refusal.** An unrecognized escape used to be
 //! kept as the two characters it was written with, so `"\u{0}"` — the spelling
 //! Rust, JavaScript and Python all use — became six literal characters
 //! starting with a backslash. It compiled, it ran, and it produced a string
@@ -104,7 +104,7 @@ fn a_unicode_escape_that_is_not_a_character_is_refused() {
 }
 
 /// **A backslash before a newline continues the line**, which is what
-/// `packages/postgres` was already written as and what every neighbouring
+/// `packages/postgres` was already written as and what every neighboring
 /// language means by it.
 #[test]
 fn a_backslash_before_a_newline_continues_the_line() {

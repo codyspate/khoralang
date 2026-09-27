@@ -32,9 +32,9 @@ compose, and an HTTP server answered one caller at a time.
 
 ## What was rejected
 
-**A shareability bit in the function type, inferred.** Sound, and it *colours*:
+**A shareability bit in the function type, inferred.** Sound, and it *colors*:
 a `Router` holds a handler, so `Router` carries the handler's bit, and so does
-every container of a function above it. Colouring is the thing the rows exist to
+every container of a function above it. Coloring is the thing the rows exist to
 avoid, and buying concurrency with it would trade this language's best property
 for its second-best.
 
@@ -177,7 +177,7 @@ there is no constructor to name:
 Router::answer_on(router, transport) catch { _ => respond_500() }
 ```
 
-`_` subtracts the whole row, tail included. Every neighbour has the form
+`_` subtracts the whole row, tail included. Every neighbor has the form
 (`catch_unwind`, `recover`, `catchAll`); this one is checked rather than
 dynamic, and it costs what it should — the arm learns nothing about what went
 wrong, because there is no name to learn it under.
@@ -207,7 +207,7 @@ An `impl Share` is a promise the runtime has to keep, so:
 
 ## What `Share` is not yet
 
-**A boundary.** The compiler recognises `Share`, `Fiber`, `SharedFn` and the
+**A boundary.** The compiler recognizes `Share`, `Fiber`, `SharedFn` and the
 rest by their bare names, so a file that declares its own `Array` gets the
 array intrinsics, and a compiler-special concept can be entered by spelling.
 The orphan rule closes the reachable forgery; calling any of this a safety

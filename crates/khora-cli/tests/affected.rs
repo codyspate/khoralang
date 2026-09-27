@@ -119,7 +119,7 @@ fn a_change_in_a_dependency_runs_the_member_that_reaches_it() {
 #[test]
 fn a_change_nobody_owns_runs_everything_and_says_which_file() {
     // The rule that makes this safe to trust. A tool that answers "nothing was
-    // affected" because it did not recognise a file is worse than no tool.
+    // affected" because it did not recognize a file is worse than no tool.
     let root = fixture("unowned");
     std::fs::write(root.join("build.sh"), "#!/bin/sh\necho hello\n").expect("a stray file");
 

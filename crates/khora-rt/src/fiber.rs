@@ -47,7 +47,7 @@ unsafe impl Send for Handed {}
 /// What a fallible Khora function returns: `{ i32 which, i64 payload }`.
 ///
 /// `which` is 0 for an ordinary return and otherwise the error's type id, with
-/// [`CANCELLED_WHICH`] reserved for a cancellation. The layout is the code
+/// [`CANCELED_WHICH`] reserved for a cancellation. The layout is the code
 /// generator's — see `docs/design/effect-runtime.md` §2 — and `repr(C)` is what
 /// makes both sides agree about it.
 #[repr(C)]
@@ -72,7 +72,7 @@ pub const FAILED_WHICH: u32 = u32::MAX - 1;
 /// count up — so no `catch` can name it and none will match it by accident.
 /// The code generator's constant is defined *from* this one rather than beside
 /// it, because two numbers that must agree are one number.
-pub const CANCELLED_WHICH: u32 = u32::MAX;
+pub const CANCELED_WHICH: u32 = u32::MAX;
 
 /// The `which` [`khora_fiber_outcome`] reports a *stopped child* under.
 ///
@@ -82,11 +82,11 @@ pub const CANCELLED_WHICH: u32 = u32::MAX;
 /// back as a value; the *asker's* — delivered while it was parked waiting —
 /// must unwind it, because `docs/design/effect-runtime.md` §6 forbids any
 /// construct from swallowing a cancellation aimed at the frame it is in.
-/// Spelling both `CANCELLED_WHICH` would make the second indistinguishable
+/// Spelling both `CANCELED_WHICH` would make the second indistinguishable
 /// from the first, and the asker would carry on holding a cancellation it had
 /// been told about and discarded.
 ///
-/// Reserved beside [`FAILED_WHICH`] and [`CANCELLED_WHICH`] and outside the
+/// Reserved beside [`FAILED_WHICH`] and [`CANCELED_WHICH`] and outside the
 /// range error-type ids are assigned from, so no `catch` can name it. Only
 /// [`khora_fiber_outcome`] produces one: no other call on this boundary has
 /// two cancellations to tell apart, and widening the meaning of a tag that
@@ -125,7 +125,7 @@ impl Completion {
     /// structured concurrency comes from -- uses
     /// [`FiberState::wait_passing_on_a_force`] instead.
     ///
-    /// **Without this a parked joiner cannot be cancelled.** `join` and `wait`
+    /// **Without this a parked joiner cannot be canceled.** `join` and `wait`
     /// used to block on a `JoinHandle` or a latch with no flag check and no
     /// timeout, so a fiber parked in either observed a cancellation only once
     /// the child had finished on its own -- measured at 2000 ms against a
@@ -140,7 +140,7 @@ impl Completion {
     /// Gives up on [`crate::current::Fiber::gives_up_joining`], not on
     /// `gives_up_waiting`: inside a shielded finalizer's change function a
     /// plain cancel does not end the wait, and `abort` does.
-    fn wait_or_cancelled(&self) -> bool {
+    fn wait_or_canceled(&self) -> bool {
         self.wait_until(&|| crate::current::current(|fiber| fiber.gives_up_joining()))
     }
 
@@ -272,7 +272,7 @@ impl Legacy {
     /// and counting it would make every early exit look like one.
     fn failed(&self) -> bool {
         match self.outcome.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-            Some(outcome) => outcome.which != 0 && outcome.which != CANCELLED_WHICH,
+            Some(outcome) => outcome.which != 0 && outcome.which != CANCELED_WHICH,
             // Not finished, which a caller that waited first cannot see.
             None => false,
         }
@@ -280,7 +280,7 @@ impl Legacy {
 
     /// Whether the stored word is a Khora object this state has a reference to.
     fn points_at_an_object(&self, outcome: &Tagged) -> bool {
-        if outcome.payload == 0 || outcome.which == CANCELLED_WHICH {
+        if outcome.payload == 0 || outcome.which == CANCELED_WHICH {
             return false;
         }
         outcome.which != 0 || self.boxed
@@ -301,7 +301,7 @@ impl Legacy {
         let Some(outcome) = taken else { return };
         if reported
             && outcome.which != 0
-            && outcome.which != CANCELLED_WHICH
+            && outcome.which != CANCELED_WHICH
             && !self.announced.swap(true, Ordering::Relaxed)
         {
             let mut err = std::io::stderr().lock();
@@ -553,10 +553,10 @@ fn fibers() -> &'static Scheduler {
 ///
 /// **Exactly one of `call` and `plain` is given.** `call` is the trampoline
 /// generated code always passes: it hands back a tag, so a thunk that was
-/// stopped part-way reports `CANCELLED_WHICH` whatever its `raises` row, and a
+/// stopped part-way reports `CANCELED_WHICH` whatever its `raises` row, and a
 /// joiner can tell "it was stopped" from "it answered nought". `plain` hands
 /// back a bare word and so has no way to report a stop; only this crate's
-/// own tests pass it, for thunks written in Rust that are never cancelled
+/// own tests pass it, for thunks written in Rust that are never canceled
 /// part-way.
 ///
 /// `boxed` and `value_glue` describe the *answer*, so that a fiber nobody joins
@@ -672,7 +672,7 @@ pub unsafe extern "C" fn khora_fiber_spawn(
             let held = answers.outcome.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(outcome) = held.as_ref() {
                 if outcome.which != 0
-                    && outcome.which != CANCELLED_WHICH
+                    && outcome.which != CANCELED_WHICH
                     && !answers.announced.swap(true, Ordering::Relaxed)
                 {
                     let mut err = std::io::stderr().lock();
@@ -728,7 +728,7 @@ pub(crate) unsafe fn fiber_state<'a>(fiber: *mut u8) -> Option<&'a FiberState> {
     // SAFETY: the caller guarantees a live handle, whose field holds what
     // `khora_fiber_spawn` wrote there. Shared rather than exclusive: the handle
     // is shareable, so another fiber may be inside this state at the same
-    // moment and a `&mut` would be undefined behaviour on its own.
+    // moment and a `&mut` would be undefined behavior on its own.
     unsafe { (*fiber.add(KHORA_FIELD_OFFSET).cast::<*mut FiberState>()).as_ref() }
 }
 
@@ -754,19 +754,19 @@ pub unsafe extern "C" fn khora_fiber_join(fiber: *mut u8, out: *mut u64) -> u32 
         unsafe { out.write(0) };
         return 0;
     };
-    // **A joiner that is cancelled while parked unwinds rather than waits.**
-    // The child is left running and is not cancelled here: what the joiner is
+    // **A joiner that is canceled while parked unwinds rather than waits.**
+    // The child is left running and is not canceled here: what the joiner is
     // giving up is the *waiting*, and the handle's release still waits, which
     // is what keeps the child from outliving the binding.
     //
     // A zero word rather than the child's answer, because there is not one
-    // yet. `CANCELLED_WHICH` is outside the range of error-type ids, so the
+    // yet. `CANCELED_WHICH` is outside the range of error-type ids, so the
     // caller's `!` unwinds without any `catch` being able to name it, and the
     // word is never read on that path.
-    if state.completion.wait_or_cancelled() {
+    if state.completion.wait_or_canceled() {
         // SAFETY: the caller promised a writable word.
         unsafe { out.write(0) };
-        return CANCELLED_WHICH;
+        return CANCELED_WHICH;
     }
     state.observed.store(true, Ordering::Relaxed);
     let outcome = state.legacy.observe();
@@ -794,7 +794,7 @@ pub unsafe extern "C" fn khora_fiber_join(fiber: *mut u8, out: *mut u64) -> u32 
 pub(crate) unsafe fn wait_or_cancel_for(fiber: *mut u8) -> bool {
     // SAFETY: the caller guarantees a live handle.
     let Some(state) = (unsafe { fiber_state(fiber) }) else { return false };
-    state.completion.wait_or_cancelled()
+    state.completion.wait_or_canceled()
 }
 
 /// The same, for a waiter that must not give up.
@@ -892,7 +892,7 @@ pub(crate) unsafe fn failed_and_reported(fiber: *mut u8) -> bool {
 /// before the first pass. Answering this lets the loop end.
 ///
 /// True the instant the outcome is stored, which is before the completion
-/// latch is signalled, so a fiber this reports as finished is one whose answer
+/// latch is signaled, so a fiber this reports as finished is one whose answer
 /// `join` can take without blocking.
 ///
 /// # Safety
@@ -918,17 +918,17 @@ pub unsafe extern "C" fn khora_fiber_finished(fiber: *mut u8) -> bool {
 ///
 /// **The question `join` charges the process for.** A supervisor that notices
 /// through [`khora_fiber_finished`] that its child is gone cannot tell a child
-/// that bound and returned from one somebody cancelled, and the call that would
-/// tell it is `join` -- which on a cancelled fiber unwinds its caller, and at
+/// that bound and returned from one somebody canceled, and the call that would
+/// tell it is `join` -- which on a canceled fiber unwinds its caller, and at
 /// the entry point ends the program at 130. This answers without waiting and
 /// without unwinding anything.
 ///
-/// **Read from the stored answer**, whose tag is `CANCELLED_WHICH` exactly
+/// **Read from the stored answer**, whose tag is `CANCELED_WHICH` exactly
 /// when the thunk was stopped part-way: every thunk hands back a tag,
 /// whatever its `raises` row, so a stop and a finish cannot be confused.
 ///
 /// Racy in the way [`khora_fiber_finished`] is racy and for the same reason: a
-/// `false` is a fact about the instant it was asked, and a fiber cancelled a
+/// `false` is a fact about the instant it was asked, and a fiber canceled a
 /// microsecond later answers `true` at the next look. It says the fiber was
 /// stopped; it says nothing about what the fiber had computed.
 ///
@@ -936,7 +936,7 @@ pub unsafe extern "C" fn khora_fiber_finished(fiber: *mut u8) -> bool {
 ///
 /// `fiber` must be a live object from [`khora_fiber_spawn`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn khora_fiber_cancelled(fiber: *mut u8) -> bool {
+pub unsafe extern "C" fn khora_fiber_canceled(fiber: *mut u8) -> bool {
     // SAFETY: the caller guarantees a live handle.
     let Some(state) = (unsafe { fiber_state(fiber) }) else {
         // A released handle has nothing left to answer about, and `finished`
@@ -945,7 +945,7 @@ pub unsafe extern "C" fn khora_fiber_cancelled(fiber: *mut u8) -> bool {
         return false;
     };
     match state.legacy.outcome.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-        Some(outcome) => outcome.which == CANCELLED_WHICH,
+        Some(outcome) => outcome.which == CANCELED_WHICH,
         // Not finished. Still running, as far as this can be asked.
         None => false,
     }
@@ -953,10 +953,10 @@ pub unsafe extern "C" fn khora_fiber_cancelled(fiber: *mut u8) -> bool {
 
 /// Waits for a fiber, and answers what it ended as without unwinding.
 ///
-/// **The question neither [`khora_fiber_join`] nor [`khora_fiber_cancelled`]
-/// can answer.** `cancelled` says *whether* a fiber was stopped and has no way
+/// **The question neither [`khora_fiber_join`] nor [`khora_fiber_canceled`]
+/// can answer.** `canceled` says *whether* a fiber was stopped and has no way
 /// to hand back what it computed; `join` hands back the answer and, on a
-/// stopped fiber, answers [`CANCELLED_WHICH`] — which is in no row, so no
+/// stopped fiber, answers [`CANCELED_WHICH`] — which is in no row, so no
 /// `catch` names it and at the entry point it ends the program at 130. A
 /// caller that wants the answer *and* tolerates a stop has neither call.
 ///
@@ -968,13 +968,13 @@ pub unsafe extern "C" fn khora_fiber_cancelled(fiber: *mut u8) -> bool {
 /// - [`STOPPED_WHICH`] — the *child* was stopped. `out` is zero and holds
 ///   nothing to release; the stored answer, where there is one, stays with the
 ///   state and goes when the handle does.
-/// - [`CANCELLED_WHICH`] — the *asker* was stopped while parked here. It
+/// - [`CANCELED_WHICH`] — the *asker* was stopped while parked here. It
 ///   unwinds, exactly as a `join` in the same position does, because §6 of
 ///   `docs/design/effect-runtime.md` forbids swallowing a cancellation aimed
 ///   at the frame it reaches.
 /// - anything else — the child's error, to re-raise, as `join` reports it.
 ///
-/// [`khora_fiber_cancelled`] decides the stopped case, so the two questions
+/// [`khora_fiber_canceled`] decides the stopped case, so the two questions
 /// cannot disagree about one fiber.
 ///
 /// # Safety
@@ -989,7 +989,7 @@ pub unsafe extern "C" fn khora_fiber_outcome(fiber: *mut u8, out: *mut u64) -> u
     // SAFETY: the caller guarantees a live handle.
     let Some(state) = (unsafe { fiber_state(fiber) }) else {
         // A released handle has nothing left to answer about, and `finished`
-        // and `cancelled` both take that position on the same state. Reporting
+        // and `canceled` both take that position on the same state. Reporting
         // a stop for a fiber nobody can name any more would be inventing one.
         return 0;
     };
@@ -997,8 +997,8 @@ pub unsafe extern "C" fn khora_fiber_outcome(fiber: *mut u8, out: *mut u64) -> u
     // running, exactly as a `join` giving up here leaves it. `STOPPED_WHICH`
     // is what the child's stop travels under, so the two are told apart by the
     // tag rather than by the caller guessing.
-    if state.completion.wait_or_cancelled() {
-        return CANCELLED_WHICH;
+    if state.completion.wait_or_canceled() {
+        return CANCELED_WHICH;
     }
     // Asked before the answer is taken, because taking it hands out a
     // reference this path must not hand out: `Outcome::Stopped` carries no
@@ -1010,7 +1010,7 @@ pub unsafe extern "C" fn khora_fiber_outcome(fiber: *mut u8, out: *mut u64) -> u
     //
     // SAFETY: the caller guarantees a live handle, and this is the same
     // handle.
-    if unsafe { khora_fiber_cancelled(fiber) } {
+    if unsafe { khora_fiber_canceled(fiber) } {
         return STOPPED_WHICH;
     }
     state.observed.store(true, Ordering::Relaxed);
@@ -1022,7 +1022,7 @@ pub unsafe extern "C" fn khora_fiber_outcome(fiber: *mut u8, out: *mut u64) -> u
 
 /// The same, for a program that wants the ordering and not the answer.
 ///
-/// Answers [`CANCELLED_WHICH`] when the *waiter* was asked to stop and 0 when
+/// Answers [`CANCELED_WHICH`] when the *waiter* was asked to stop and 0 when
 /// the fiber finished, which is the shape every fallible call across this
 /// boundary uses. There is no other tag: this never takes the fiber's answer,
 /// so a child that failed is still the child's business.
@@ -1033,7 +1033,7 @@ pub unsafe extern "C" fn khora_fiber_outcome(fiber: *mut u8, out: *mut u64) -> u
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn khora_fiber_wait(fiber: *mut u8) -> u32 {
     // SAFETY: the caller guarantees a live handle.
-    if unsafe { wait_or_cancel_for(fiber) } { CANCELLED_WHICH } else { 0 }
+    if unsafe { wait_or_cancel_for(fiber) } { CANCELED_WHICH } else { 0 }
 }
 
 /// Lets go of a fiber without waiting for it.
@@ -1124,8 +1124,8 @@ pub unsafe extern "C" fn khora_fiber_cancel(fiber: *mut u8) {
 /// Asks a fiber to stop at its next cancellation point **even inside its
 /// cleanup**, and passes the same request to every child of its nurseries.
 ///
-/// What [`khora_fiber_cancel`] cannot do, and on purpose: cancelling a fiber
-/// that is already cancelled changes nothing, so its shielded finalizers run to
+/// What [`khora_fiber_cancel`] cannot do, and on purpose: canceling a fiber
+/// that is already canceled changes nothing, so its shielded finalizers run to
 /// completion however many times it is asked. A finalizer that blocks for ever
 /// therefore holds the fiber, and whoever waits for it, for ever. This is the
 /// way out, and the only one; `crate::current::Fiber::force` has the full
@@ -1150,7 +1150,7 @@ pub unsafe extern "C" fn khora_fiber_force(fiber: *mut u8) {
 ///
 /// **What this prevents: a shutdown that waits for ever on cleanup that never
 /// finishes, in a program that has nobody to send the force.** Cleanup runs
-/// to completion and cancelling again does not cut it short, so a finalizer
+/// to completion and canceling again does not cut it short, so a finalizer
 /// blocked on a `receive` nobody answers holds the fiber, and its nursery,
 /// and whoever waits on the nursery. The language has no timer of its own and
 /// no default grace period, so the number is the caller's, always.
@@ -1359,7 +1359,7 @@ pub(crate) fn deliver_to_fiber(fiber: &std::sync::Arc<crate::current::Fiber>, st
     // by that child stopping, and then asks whether it was itself stopped. In
     // the other order the child could stop, wake it and be let go of before
     // the flag was set, so the waiter found none and ran on: an `adopt` on
-    // the scheduler reported `cancelled false` and ran the statement after
+    // the scheduler reported `canceled false` and ran the statement after
     // it, intermittently.
     if on_the_scheduler() {
         // Through the pool rather than the flag alone. Setting the flag is
@@ -1396,8 +1396,8 @@ pub(crate) fn deliver_to_fiber(fiber: &std::sync::Arc<crate::current::Fiber>, st
 /// cannot outlive the binding that holds it. Put the handle in a region and the
 /// region waits; put it in a block and the block does.
 ///
-/// **A cancelled or forced releaser passes its stop on to the child first**,
-/// which is what a nursery release already does. Without it, a fiber cancelled while holding a
+/// **A canceled or forced releaser passes its stop on to the child first**,
+/// which is what a nursery release already does. Without it, a fiber canceled while holding a
 /// child's handle stops at its next `!` and then blocks here for the child's
 /// full remaining run: the cancellation is observed promptly and the program
 /// still waits out the work it asked to abandon. Measured at 2000 ms against a
@@ -1413,7 +1413,7 @@ pub(crate) fn deliver_to_fiber(fiber: &std::sync::Arc<crate::current::Fiber>, st
 ///
 /// The flag rather than `stops_here`: this runs inside a region release, which
 /// is [`crate::cancel::Shielded`], so the masked reading would say no every
-/// time. What is being asked is "was this fiber cancelled", and the shield
+/// time. What is being asked is "was this fiber canceled", and the shield
 /// exists to protect the cleanup rather than to hide that.
 ///
 /// # Safety

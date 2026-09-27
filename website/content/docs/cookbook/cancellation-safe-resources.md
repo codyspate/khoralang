@@ -74,7 +74,7 @@ When `fail_after_open` raises, the scope unwinds, the registered release runs, a
 
 ## Cancellation uses the same lifetime rule
 
-Cancellation does not require a second cleanup mechanism. If a fiber is cancelled at a cancellation point while it owns this scope, unwinding releases the scope and runs the same registered finalizers before the fiber is finished.
+Cancellation does not require a second cleanup mechanism. If a fiber is canceled at a cancellation point while it owns this scope, unwinding releases the scope and runs the same registered finalizers before the fiber is finished.
 
 That is the key production rule: **do not rely on the line after the work to release a resource**. Put release behavior into the resource lifetime itself.
 

@@ -1,6 +1,6 @@
 //! Where a codegen test's time actually goes.
 //!
-//! Not an assertion about behaviour — a measurement, printed, so that the next
+//! Not an assertion about behavior — a measurement, printed, so that the next
 //! person deciding what to speed up is reading numbers rather than the
 //! roadmap's guess. Roadmap 14.28 and 14.29 both name a suspect; this says
 //! which one is right on this machine.
@@ -60,7 +60,7 @@ fn where_the_time_goes() {
     std::fs::create_dir_all(&directory).expect("a directory");
     let exe = directory.join(if cfg!(windows) { "p.exe" } else { "p" });
 
-    // First one in a process pays for whatever LLVM initialises lazily.
+    // First one in a process pays for whatever LLVM initializes lazily.
     let first = verify_once("a");
     let second = verify_once("b");
     let third = verify_once("c");

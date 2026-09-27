@@ -192,11 +192,11 @@ pub unsafe extern "C" fn khora_float_text(value: f64, into: *mut u8, capacity: i
 ///
 /// Rust's `{:.*}` rounds the *decimal expansion of the double*, which is what
 /// C's `printf`, Go's `strconv` and every other language's fixed formatter do,
-/// so a Khora program and its neighbours agree about `0.125` at two places.
+/// so a Khora program and its neighbors agree about `0.125` at two places.
 ///
 /// `places` is clamped to nought through thirty. A double carries about
 /// seventeen significant digits, so beyond that the extra characters are an
-/// artefact of the binary value rather than information -- and an unclamped
+/// artifact of the binary value rather than information -- and an unclamped
 /// count is an allocation a caller can ask for by accident.
 ///
 /// Same contract as the shortest form: answers the length needed and writes

@@ -163,7 +163,7 @@ let answer = charge(account, amount);   // with { db: Db } raises DbError
 A call that needs nothing and cannot fail gets no hint, which is most calls.
 
 **Highlighting is two layers.** A TextMate grammar
-(`editors/vscode/syntaxes`) colours keywords, literals and punctuation, and
+(`editors/vscode/syntaxes`) colors keywords, literals and punctuation, and
 every editor that reads TextMate grammars can use it. Over that, the server
 sends semantic tokens for everything a regular expression cannot decide: a
 local against an imported name, a parameter against a local, a field against a

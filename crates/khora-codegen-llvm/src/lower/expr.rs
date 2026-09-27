@@ -1,6 +1,6 @@
 //! The expression dispatch, and the leaves.
 //!
-//! One arm per `Expr`, most of them a line handing off to a neighbouring
+//! One arm per `Expr`, most of them a line handing off to a neighboring
 //! module. Literals and local reads are here because they have nowhere else to
 //! be — and a local read is where a take clears its slot, which is the one
 //! piece of reference counting that could not live in `rc`.
@@ -16,7 +16,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         // **The one place a source position is attached to code.** Every
         // expression passes through here, so setting the debug location once
         // at the top covers whatever the arm below emits — including the arms
-        // that emit nothing themselves and hand off to a neighbouring module.
+        // that emit nothing themselves and hand off to a neighboring module.
         self.be.at(range);
         match self.body.expr(id).clone() {
             Expr::Unit => Some(self.be.unit_value()),
@@ -63,7 +63,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             // `!` is the identity on values. The branch it stands for is
             // emitted by the call underneath, which knows it is marked.
             // `!` is a cancellation point as well as an error branch. The
-            // check comes *before* the call, so a cancelled computation stops
+            // check comes *before* the call, so a canceled computation stops
             // rather than doing work it is about to throw away — and before
             // the arguments are evaluated, so there is nothing half-built to
             // leak on the way out.

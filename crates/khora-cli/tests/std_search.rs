@@ -59,7 +59,7 @@ fn a_miss_says_so_and_says_why() {
     assert!(said.contains("may not exist"), "{said}");
 }
 
-/// The limit is honoured and the remainder is counted, so a broad query says
+/// The limit is honored and the remainder is counted, so a broad query says
 /// how much it did not show rather than silently truncating.
 #[test]
 fn a_broad_query_is_capped_and_says_how_many_more() {

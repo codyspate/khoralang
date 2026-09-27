@@ -37,8 +37,8 @@ with { ledger: Ledger::real() } {
 no walking of frames to find the innermost one, and no cost that grows with
 nesting depth.
 
-Row polymorphism (`'ef`) specialises the same way generics do. Khora
-monomorphises the whole program, so a row variable is concrete at every call
+Row polymorphism (`'ef`) specializes the same way generics do. Khora
+monomorphizes the whole program, so a row variable is concrete at every call
 site reachable from `main` for the same reason a type variable is.
 
 ## A failure is a tagged return

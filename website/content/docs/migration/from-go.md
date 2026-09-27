@@ -6,7 +6,7 @@ sidebar:
 
 Go and Khora agree about the shape of the artifact: one native executable, no
 VM beside it, fast start, and an operational story you can hold in your head.
-They disagree about how much of a service's behaviour belongs in the type. Four
+They disagree about how much of a service's behavior belongs in the type. Four
 places where a Go habit needs adjusting, with the Khora each of them becomes.
 
 ## Errors: the second return value moves into the type
@@ -82,7 +82,7 @@ with {
 
 Everything inside that block can call functions declaring `with { db: Db }`
 without being handed a `db` argument, and a function that does *not* declare it
-cannot reach one. That is the part with no Go analogue: the absence of ambient
+cannot reach one. That is the part with no Go analog: the absence of ambient
 authority is checked, so a helper five layers down cannot quietly open a socket.
 
 The habit to drop: the `context.Context` first parameter. It is carrying three
@@ -157,7 +157,7 @@ has the measurements. A Go reader coming off `errgroup`, where the first error
 does cancel the group's context at once, should not assume the same here.
 
 Cancellation arrives without a `ctx.Done()` channel to select on, and without
-a `raises` row either: a cancelled fiber stops at its next **loop back-edge**,
+a `raises` row either: a canceled fiber stops at its next **loop back-edge**,
 blocking call, or call to a function that has one, in any function. That is
 what makes an ordinary polling worker stoppable with nothing in it that looks
 like a cancellation check:

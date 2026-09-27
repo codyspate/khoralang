@@ -447,7 +447,7 @@ fn adversarial_execution_leaves_nothing_behind() {
         // **After the spawn, never before.** `wake_fiber` can only wake a
         // fiber the pool has been told about, and `spawn` is what tells it; a
         // wake that arrives first finds nothing and is dropped, which is the
-        // right behaviour and left one fiber parked for ever about twice in a
+        // right behavior and left one fiber parked for ever about twice in a
         // hundred runs. The adversary's window above does not care — its wakes
         // are best-effort by design — but the releaser's one wake is the only
         // one a `Waiting` fiber will get.
@@ -699,7 +699,7 @@ fn pin() -> Option<Restore> {
 ///
 /// `adversarial_execution_leaves_nothing_behind` is adversarial in its
 /// *messages*: it wakes and cancels fibers that have no business being woken or
-/// cancelled. It is not adversarial in its *schedule* -- four workers on a
+/// canceled. It is not adversarial in its *schedule* -- four workers on a
 /// sixteen-core machine mostly do not contend, and a handover race that needs
 /// one thread to be preempted between two stores is a race that machine will
 /// not run.
@@ -715,9 +715,9 @@ fn pin() -> Option<Restore> {
 /// - **A saturated blocking pool.** Background work keeps every pool thread
 ///   busy, so a `Blocking` fiber queues and its submitter waits -- the fiber ↔
 ///   blocking-thread handover under back-pressure rather than at leisure.
-/// - **Cancellation storms.** Everything known is cancelled at once, in
+/// - **Cancellation storms.** Everything known is canceled at once, in
 ///   bursts, rather than one at a time: a fiber is far likelier to be
-///   cancelled *during* a transition than between two.
+///   canceled *during* a transition than between two.
 ///
 /// The invariants asserted are the same ones, for the same reason: a scheduler
 /// has no answer to get wrong, so a failure is arithmetic that does not come

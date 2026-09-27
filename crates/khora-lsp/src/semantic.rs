@@ -199,7 +199,7 @@ fn from_paths(db: &dyn Db, root: SourceRoot, file: SourceFile, out: &mut Vec<Tok
             Ok(Resolution::Variant { .. }) => Some(ENUM_MEMBER),
             Ok(Resolution::TraitItem { .. }) => Some(FUNCTION),
             // Unresolved, or something the resolver declines to guess at. Left
-            // to the grammar rather than coloured wrongly.
+            // to the grammar rather than colored wrongly.
             _ => None,
         };
 

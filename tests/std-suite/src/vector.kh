@@ -107,7 +107,7 @@ test "a vector pushes, pops and indexes" {
 /// all, and every element still there afterwards.
 ///
 /// The capacities are asserted rather than just the contents. Doubling is what
-/// makes `push` amortised constant, and a growth policy that quietly became a
+/// makes `push` amortized constant, and a growth policy that quietly became a
 /// fixed increment would still pass a test that only looked at the elements --
 /// it would just be quadratic.
 test "a vector grows past its first allocation" {

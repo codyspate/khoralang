@@ -8,7 +8,7 @@
 //! # The `unsafe` here is a different kind
 //!
 //! Every `unsafe` block below is `build_in_bounds_gep`, which `inkwell` marks
-//! unsafe because an out-of-bounds `inbounds` GEP is undefined behaviour **in
+//! unsafe because an out-of-bounds `inbounds` GEP is undefined behavior **in
 //! the program being generated** rather than in this one. Nothing a Rust
 //! reader can see locally discharges it; what discharges it is an instruction
 //! emitted a few lines above — a `check_index`, a `clamp`, a comparison
@@ -564,7 +564,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 // Alignment 1 on both sides: the destination is word-aligned and
                 // the source usually is, but neither is *guaranteed* to be by
                 // anything written down, and claiming an alignment the data does
-                // not have is undefined behaviour rather than a slow copy.
+                // not have is undefined behavior rather than a slow copy.
                 self.be
                     .builder
                     .build_memcpy(elements, 1, bytes, 1, length)

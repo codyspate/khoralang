@@ -331,7 +331,7 @@ impl FnShape {
     }
 }
 
-/// The labelled entries of a row, or none for anything that is not one.
+/// The labeled entries of a row, or none for anything that is not one.
 fn row_fields(ty: &Type) -> Vec<(String, Type)> {
     match ty {
         Type::Row { fields, .. } => fields.clone(),
@@ -847,7 +847,7 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// pays exactly nothing for this.
     ///
     /// In a program that can, it is emitted on [`Self::poll`]'s slow path, and
-    /// reached only while a scheduler pool exists or a fiber is cancelled. The
+    /// reached only while a scheduler pool exists or a fiber is canceled. The
     /// thread backend has no pool and so no budget to spend.
     fn safepoint(&mut self) {
         if self.be.single_threaded {
@@ -943,7 +943,7 @@ impl<'ctx> Lower<'_, 'ctx> {
 /// Parses an integer literal.
 ///
 /// Underscores are stripped and the radix prefixes the lexer admits are
-/// honoured. The value is parsed as `i64` because that is what `Int` is; a
+/// honored. The value is parsed as `i64` because that is what `Int` is; a
 /// literal that does not fit is a diagnostic rather than a wrap.
 fn parse_int(text: &str) -> Option<i64> {
     let cleaned: String = text.chars().filter(|c| *c != '_').collect();

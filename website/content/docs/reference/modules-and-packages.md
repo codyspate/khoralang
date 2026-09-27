@@ -45,7 +45,7 @@ print(Int::to_string(response.status));
 ```
 
 - `::` walks types, traits, constructors and associated items;
-- `.` projects a field, or calls behaviour on a runtime value.
+- `.` projects a field, or calls behavior on a runtime value.
 
 So `Response::text` is visibly not `response.status`.
 

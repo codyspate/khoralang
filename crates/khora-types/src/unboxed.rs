@@ -3,7 +3,7 @@
 //! A Khora record has **no identity**: it is an immutable value compared
 //! structurally, so whether it lives behind a pointer is a representation
 //! choice the compiler may make and no program can observe. That is the
-//! property most languages lack, and it is the whole licence for this module.
+//! property most languages lack, and it is the whole license for this module.
 //!
 //! What it buys is measured rather than assumed. `bench/iteration` walks a
 //! list three ways and the idiomatic one is 83ms against 18ms for the same

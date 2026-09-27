@@ -232,10 +232,10 @@ pub fn resolve(manifest_path: &Path, store: &Store, locked: bool) -> Result<Reso
             &lock_dir,
         ));
     }
-    lockfile.normalise();
+    lockfile.normalize();
 
     let mut before = existing;
-    before.normalise();
+    before.normalize();
     let changed = before != lockfile;
 
     if changed && locked {

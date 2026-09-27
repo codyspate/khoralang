@@ -48,7 +48,7 @@ cd "$(dirname "$0")/.."
 # from the same list, runs it, and compares the transcript to what the Rust
 # side said. **A case cannot be added to one side only**, which is the whole
 # mechanism: the two matchers drifted apart in coverage before they drifted
-# apart in behaviour.
+# apart in behavior.
 echo '== the permission matchers'
 cargo test -p khora-manifest --test permissions_agree
 cargo test -p khora-codegen-llvm --features llvm --test suite -- agreement::

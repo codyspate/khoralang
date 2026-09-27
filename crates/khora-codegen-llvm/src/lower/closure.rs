@@ -249,7 +249,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         // the plain answer of an infallible closure.
         if !fallible {
             let pair = call.try_as_basic_value().basic().expect("a tagged closure returns a pair");
-            let answer = self.split_cancelled(pair, ret);
+            let answer = self.split_canceled(pair, ret);
             return Some(Invoked { raw: Some(answer), fallible });
         }
         Some(Invoked { raw: call.try_as_basic_value().basic(), fallible })

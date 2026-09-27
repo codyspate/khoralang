@@ -380,7 +380,7 @@ fn editing_one_file_does_not_relower_another() {
 ///
 /// This was the one "not in scope" message in the compiler that did not name
 /// the fix. `cannot find constructor `Result::Ok`` — and nothing else, where
-/// its neighbours all say where the name comes from: ``derive(Show)` needs
+/// its neighbors all say where the name comes from: ``derive(Show)` needs
 /// `Show` in scope; import it from `std::core``, ``JsonError` is not in scope
 /// here … add it to an `import``. Two mistakes shared the sentence, and they
 /// have different fixes: an absent type wants an import, and a misspelled case

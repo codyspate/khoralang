@@ -28,7 +28,7 @@ freed* without changing what any program computes. That is only a safe thing to
 do if "when memory is allocated and freed" was never something a program was
 entitled to observe — and nobody had written down whether it was.
 
-It is not, and this document is where that is said. Optimising first and
+It is not, and this document is where that is said. Optimizing first and
 deciding afterwards is how an accident becomes a promise.
 
 ## What is observable
@@ -101,7 +101,7 @@ plainly because it removes an entire category of promise:
 
 - **A package ships source.** `khora-pkg` (roadmap 10.2) resolves and builds
   source, and the content-addressed cache holds build products keyed by the
-  inputs that produced them, not artefacts other people's compilers may link.
+  inputs that produced them, not artifacts other people's compilers may link.
 - **A Khora library cannot be dynamically loaded into a Khora program.**
 - **Two versions of the compiler need not produce compatible objects**, and no
   effort will be spent making them.
@@ -119,13 +119,13 @@ Semantic versioning, with the usual reading and one clarification.
 - **Major** may break anything in "What is observable".
 - **Minor** may add. New items, new modules, new trait implementations for
   existing types, new optional parameters to a manifest.
-- **Patch** fixes behaviour that disagreed with this document.
+- **Patch** fixes behavior that disagreed with this document.
 
 The clarification is that **a bug fix is not automatically a patch release.**
-If a program could reasonably have been written against the old behaviour, and
-the old behaviour was not documented as unspecified, correcting it is a major
+If a program could reasonably have been written against the old behavior, and
+the old behavior was not documented as unspecified, correcting it is a major
 change however wrong it was. The alternative is a policy that permits any
-change on the grounds that the old behaviour was a mistake.
+change on the grounds that the old behavior was a mistake.
 
 ### What a minor release may not do
 
@@ -142,7 +142,7 @@ Three of these are Khora-specific and would be easy to get wrong.
   requirement to a `std` function is exactly as breaking as changing its
   parameters, and it does not look like it.
 - **Add a function to a public trait**, unless it has a default body and the
-  default is not a behaviour change for existing implementations.
+  default is not a behavior change for existing implementations.
 - **Tighten a bound**, including adding `Share`.
 
 Widening is fine in all the same places: removing a requirement, removing an
@@ -160,7 +160,7 @@ path, because the first widely-used package that does not move pins everyone.
   means.
 - **An edition may not change what an existing, unchanged program computes.**
   If the same source is valid in two editions, it means the same thing in both.
-  A migration that silently alters behaviour is worse than one that refuses to
+  A migration that silently alters behavior is worse than one that refuses to
   compile, because only one of the two can be reviewed.
 - **An edition may not fork the standard library's semantics.** One `std` per
   compiler version, shared by every edition in the build. An edition that
@@ -187,7 +187,7 @@ The promise is procedural rather than substantive.
 
 - **Anything may change**, including the meaning of existing programs.
 - **Every change that alters what a valid program does is named in the release
-  notes**, with the old behaviour and the new one. A change nobody wrote down
+  notes**, with the old behavior and the new one. A change nobody wrote down
   is a bug in the release, separately from whether the change was right.
 - **A change that breaks source gets a migration note**; if the migration is
   mechanical, it gets an edition instead, and the edition machinery lands with
@@ -250,7 +250,7 @@ Stating the policy is not meeting it. 1.0 is blocked on at least:
   So this entry was stale in the direction that matters: it named an open
   question whose answer was already a promise a reader could act on, and
   `reference/memory-and-resources.md` said only "when the region is released"
-  without defining it. Three pages, one behaviour, and the one place that
+  without defining it. Three pages, one behavior, and the one place that
   called it undecided was the policy that decides what may still change.
 
   The consequence stands and is now explicit: **block scope is observable and

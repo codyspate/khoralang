@@ -138,10 +138,10 @@ pub fn release(
             // Not a default, and not inferred. `docs/design/compatibility.md`
             // is explicit that a bug fix is not automatically a patch release:
             // if a program could reasonably have been written against the old
-            // behaviour, correcting it is major however wrong it was. That is
-            // a judgement about observable behaviour, and a tool that guessed
+            // behavior, correcting it is major however wrong it was. That is
+            // a judgment about observable behavior, and a tool that guessed
             // would be guessing about the one thing it cannot see.
-            println!("  Which one is a judgement about observable behaviour, so this does not");
+            println!("  Which one is a judgment about observable behavior, so this does not");
             println!("  guess. `docs/design/compatibility.md` has the rule, including that a");
             println!("  bug fix is not automatically a patch.");
         }
@@ -221,7 +221,7 @@ fn write_version(manifest: &Path, from: &str, to: &str) -> Result<()> {
 ///
 /// **A skeleton, and it says so.** `docs/design/compatibility.md` requires that
 /// before 1.0 every change altering what a valid program does is named in the
-/// notes, with the old behaviour and the new one. That is prose, and no tool
+/// notes, with the old behavior and the new one. That is prose, and no tool
 /// writes it. What a tool can do is group the commit subjects and leave a
 /// required section empty — an empty required section is the only honest thing
 /// it can say, and it says "you are not done".
@@ -232,10 +232,10 @@ fn write_notes(
     changed: &[PathBuf],
     commits: &BTreeMap<PathBuf, Vec<String>>,
 ) -> Result<()> {
-    let mut text = format!("# {version}\n\n## Behaviour changes\n\n");
+    let mut text = format!("# {version}\n\n## Behavior changes\n\n");
     text.push_str(
         "<!-- Required before 1.0: every change that alters what a valid program does,\n\
-         \x20    with the old behaviour and the new one. `docs/design/compatibility.md`.\n\
+         \x20    with the old behavior and the new one. `docs/design/compatibility.md`.\n\
          \x20    An empty section here means the release is not ready, not that there\n\
          \x20    were none -- say \"none\" if there were none. -->\n\n",
     );

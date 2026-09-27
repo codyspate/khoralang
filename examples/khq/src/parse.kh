@@ -147,7 +147,7 @@ fn operators(cursor: Cursor, floor: Int) -> Filter raises Problem {
 /// The operator a token stands for, if it is one.
 ///
 /// `and` and `or` are words rather than punctuation, which is why this takes a
-/// `Kind` and not a byte: they have to be recognised here and be ordinary
+/// `Kind` and not a byte: they have to be recognized here and be ordinary
 /// field names everywhere else.
 fn operator_of(kind: Kind) -> Option<Op> {
   match kind {
@@ -383,7 +383,7 @@ fn call(cursor: Cursor, token: Token, name: String) -> Filter raises Problem {
   // `;` because `,` is an operator inside them. This language has the same
   // problem and takes the other way out: an argument is parsed at the
   // `operators` level, so a `,` ends it, and a filter that really wants a
-  // comma inside an argument parenthesises it.
+  // comma inside an argument parenthesizes it.
   let mut going = current(cursor).kind != Kind::CloseParen;
   while going {
     Vector::push(args, operators(cursor, 0)!);

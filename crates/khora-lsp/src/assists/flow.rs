@@ -28,7 +28,7 @@ pub fn assists(tree: &SyntaxNode, text: &str, selection: TextRange) -> Vec<Assis
     out.extend(chain_to_match(tree, text, selection));
     out.extend(unwrap_block(tree, text, selection));
     out.extend(de_morgan(tree, text, selection));
-    out.extend(parenthesise(tree, text, selection));
+    out.extend(parenthesize(tree, text, selection));
     out
 }
 
@@ -193,7 +193,7 @@ fn split_and(tree: &SyntaxNode, text: &str, selection: TextRange) -> Option<Assi
 
 /// **`(x)` becomes `x`, where the parentheses were doing nothing.**
 ///
-/// Only where the parenthesised expression is a whole statement, a whole
+/// Only where the parenthesized expression is a whole statement, a whole
 /// branch condition or the argument of a call — places where precedence
 /// cannot bite. Anywhere inside an operator expression the parentheses may be
 /// the only thing holding the meaning together, and this refuses rather than
@@ -282,7 +282,7 @@ fn operands(node: &SyntaxNode, operator: SyntaxKind) -> Option<(SyntaxNode, Synt
 /// **Not `!(..)` wrapped round everything**, because a negation somebody has
 /// to read is worse than the one they wrote. A comparison flips to its
 /// opposite comparison, a leading `!` comes off, and anything else is
-/// parenthesised and negated — which is the only safe answer for a call or a
+/// parenthesized and negated — which is the only safe answer for a call or a
 /// name.
 ///
 /// `<` becomes `>=` rather than `>`: the third case is what makes it a
@@ -346,7 +346,7 @@ fn indent_of(text: &str, node: &SyntaxNode) -> String {
 /// one: people distribute the `!` and leave the `&&` alone, which is a
 /// different condition that agrees with the original exactly half the time.
 ///
-/// Offered on a `!` whose operand is a parenthesised `&&` or `||`, which is
+/// Offered on a `!` whose operand is a parenthesized `&&` or `||`, which is
 /// the only shape where the answer is unambiguous.
 fn de_morgan(tree: &SyntaxNode, text: &str, selection: TextRange) -> Option<Assist> {
     let node = covering(tree, selection, SyntaxKind::PREFIX_EXPR)?;
@@ -398,7 +398,7 @@ fn de_morgan(tree: &SyntaxNode, text: &str, selection: TextRange) -> Option<Assi
 /// The mirror of removing them, and the one that is always safe: brackets
 /// round a whole expression change nothing, and the reason to want them is
 /// that the precedence is right and unobvious.
-fn parenthesise(tree: &SyntaxNode, text: &str, selection: TextRange) -> Option<Assist> {
+fn parenthesize(tree: &SyntaxNode, text: &str, selection: TextRange) -> Option<Assist> {
     if selection.is_empty() {
         return None;
     }

@@ -165,7 +165,7 @@ impl Request {
     Request::of(Method::Post, path, body)
   }
 
-  /// The query string is honoured here too, so a hand-built request behaves
+  /// The query string is honored here too, so a hand-built request behaves
   /// like one off the wire. A test that writes `Request::get("/x?a=1")` and
   /// finds no `a` would be testing the constructor rather than the code.
   pub fn of(method: Method, target: String, body: String) -> Request {
@@ -246,7 +246,7 @@ impl Response {
     { status: status, body: body, content_type: "text/plain", headers: List::Nil }
   }
 
-  /// A body that is already serialised, with the content type you name.
+  /// A body that is already serialized, with the content type you name.
   ///
   /// **For JSON you built yourself, this and not `json`.** `Response::json`
   /// encodes its argument, and a `String` encodes to a *JSON string* — so
@@ -258,7 +258,7 @@ impl Response {
   /// Prefer `derive(Encode)` on a record and `json` when you can: it removes
   /// the hand-written escaping that is the usual reason a body is a `String`
   /// in the first place. Use this when the bytes come from somewhere that
-  /// already serialised them.
+  /// already serialized them.
   pub fn of(status: Int, content_type: String, body: String) -> Response {
     { status: status, body: body, content_type: content_type, headers: List::Nil }
   }
@@ -603,7 +603,7 @@ fn parse_request_line(line: String) -> Option<RequestLine> {
     Option::Some(after_method) => match Method::of(after_method.head) {
       Option::None => Option::None,
       Option::Some(method) => match String::split_once(after_method.rest, " ") {
-        // `GET /path` with no version is still a request line worth honouring.
+        // `GET /path` with no version is still a request line worth honoring.
         Option::None => Option::Some({ method: method, target: after_method.rest }),
         Option::Some(after_path) => Option::Some({ method: method, target: after_path.head }),
       },
@@ -662,7 +662,7 @@ fn add_pair(out: Map<String, String>, pair: String, from: Int, to: Int) -> () {
 
 /// `percent_decode` of `text[from .. to]`.
 ///
-/// This one does cut the piece out, unlike its neighbours: a decoder has to
+/// This one does cut the piece out, unlike its neighbors: a decoder has to
 /// look at every byte anyway, so there is nothing to save by handing it a range
 /// instead — and the piece it is given is a name or a value, not the whole
 /// remaining query.
@@ -864,7 +864,7 @@ fn read_request(transport: Transport, into: Array<U8>, from: Int) -> Int {
       }
     }
   }
-  // A full buffer is how `answer_bytes` recognises a request that is too big,
+  // A full buffer is how `answer_bytes` recognizes a request that is too big,
   // and a promise too big to keep means the same thing — so it is reported the
   // same way rather than by a second channel. Nothing reads the buffer on that
   // path; the 413 is decided before anything is parsed.
@@ -965,7 +965,7 @@ fn content_length(head: String) -> Int {
 ///
 /// **This is the layer between a socket and a router**, and it is public
 /// because a router is a matter of taste and this is not. Framing a request
-/// correctly — reading until it is whole, honouring `Content-Length`, holding
+/// correctly — reading until it is whole, honoring `Content-Length`, holding
 /// what a pipelined client sent early, refusing one that will not fit — is the
 /// same work whatever shape the framework above it has, and it is the work that
 /// fails in production rather than in testing.
@@ -1550,8 +1550,8 @@ impl Router {
   ///
   /// **Registered rather than closed after the loop, because the loop does not
   /// end.** It is left by the process stopping, by a raise, or by this fiber
-  /// being cancelled, and only a region runs on all three. Without it a
-  /// cancelled `listen` left the port bound for the life of the process, which
+  /// being canceled, and only a region runs on all three. Without it a
+  /// canceled `listen` left the port bound for the life of the process, which
   /// is what a test that stops a server and binds the port again sees.
   fn held_open<'er>(router: Router<'er>, server: Int) -> ()
     with { scope: Scope }
@@ -1742,7 +1742,7 @@ impl Router {
   ///
   /// **The close is registered rather than written after the catch**, because
   /// the catch does not cover the third way out. A fiber serving a connection
-  /// can be cancelled -- by its nursery ending, or by the server shutting down
+  /// can be canceled -- by its nursery ending, or by the server shutting down
   /// -- and cancellation unwinds without running the line below the block. The
   /// region runs on every exit, which is the whole reason `Scope` exists.
   ///
@@ -2132,7 +2132,7 @@ impl HttpClient {
 fn perform(call: Call, limit: Int) -> Result<Answer, CallError> {
   match parse_url(call.url) {
     Option::None => Result::Err(CallError::BadUrl(call.url)),
-    // **Checked after the URL is parsed and before anything is dialled.**
+    // **Checked after the URL is parsed and before anything is dialed.**
     // After, because the host is not known until then and a grant is about the
     // host rather than the text somebody wrote; before, because the point of
     // the grant is that no connection is attempted -- a refusal that has
@@ -2165,7 +2165,7 @@ fn attempted(url: Url, call: Call, limit: Int) -> Result<Answer, CallError>
   match dial(url) {
     Result::Err(why) => Result::Err(why),
     // **Registered, for the reason `serve_connection` registers its own.** A
-    // call cancelled mid-`converse` used to leave the socket open, and over
+    // call canceled mid-`converse` used to leave the socket open, and over
     // TLS the session with it; the scope this already runs in closes both
     // however the call ends.
     Result::Ok(transport) => {
@@ -2556,7 +2556,7 @@ fn dechunked(body: String) -> String {
 /// **Only what a client needs to dial and ask.** No fragment, because a
 /// fragment never leaves the browser; no userinfo, because credentials in a
 /// URL are deprecated and accepting them would mean deciding how to encode
-/// them; and no normalisation of the path, because a server may have signed
+/// them; and no normalization of the path, because a server may have signed
 /// exactly the bytes it was given.
 pub fn parse_url(text: String) -> Option<Url> {
   match String::split_once(text, "://") {

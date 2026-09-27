@@ -58,10 +58,10 @@ itself thread-affine, which [FFI](/docs/reference/ffi/) covers.
 What makes Khora's concurrency *structured* is that a fiber cannot outlive the
 block that started it. That is not a separate mechanism — it is
 [regions](/docs/reference/memory-and-resources/#region-syntax), which
-already run their finalisers on every way out of a block.
+already run their finalizers on every way out of a block.
 
 A nursery opens a region and installs a `Nursery` capability whose `spawn`
-registers each fiber with it. Every path out of the block runs the finalisers,
+registers each fiber with it. Every path out of the block runs the finalizers,
 and those wait for the children: running off the end, an early `return`, a
 raise passing through, a cancellation.
 
@@ -85,7 +85,7 @@ correct on both paths and the normal one simply has nothing to cancel.
 
 ## Cancellation is cooperative, at cancellation points
 
-Cancelling a fiber does not stop it where it stands. It sets a flag, and the
+Canceling a fiber does not stop it where it stands. It sets a flag, and the
 fiber notices at its next cancellation point.
 
 They are:
@@ -99,12 +99,12 @@ They are:
 
 Every function has them, whatever its `raises` row. A function that can reach
 a cancellation point returns a small tag beside its answer, whether or not it
-can fail, and a cancelled fiber unwinds on that tag the same way a raise
-unwinds, running each frame's releases and each region's finalisers as it
+can fail, and a canceled fiber unwinds on that tag the same way a raise
+unwinds, running each frame's releases and each region's finalizers as it
 goes. A function that reaches none — straight-line arithmetic, a field read —
 is compiled without the tag, because there is nothing in it to stop at.
 
-This is why a cancelled program closes its files. The back-edge is why the
+This is why a canceled program closes its files. The back-edge is why the
 ordinary shape of a periodic job can be stopped at all:
 
 ```khora

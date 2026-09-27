@@ -1,6 +1,6 @@
 //! `khora release`.
 //!
-//! Roadmap 14.20. The dangerous behaviours of a release tool are the ones it
+//! Roadmap 14.20. The dangerous behaviors of a release tool are the ones it
 //! does *not* have — it must not tag, must not push, and must not decide the
 //! semver level for you — so several of these assert an absence. The rest are
 //! about not mangling a manifest full of comments that were written to be
@@ -93,8 +93,8 @@ fn it_says_which_members_changed_and_which_did_not() {
 #[test]
 fn it_does_not_choose_the_level_for_you() {
     // `docs/design/compatibility.md` is explicit that a bug fix is not
-    // automatically a patch release. Which level a change is, is a judgement
-    // about observable behaviour, and a tool that guessed would be guessing
+    // automatically a patch release. Which level a change is, is a judgment
+    // about observable behavior, and a tool that guessed would be guessing
     // about the one thing it cannot see.
     let root = fixture("no_guess");
 
@@ -144,7 +144,7 @@ fn the_levels_move_what_they_say() {
 
 #[test]
 fn it_never_tags() {
-    // The one behaviour worth being certain about. `release.yml` puts a person
+    // The one behavior worth being certain about. `release.yml` puts a person
     // between "built" and "visible" deliberately.
     let root = fixture("no_tag");
     run(&root, &["release", "--since", "v0.4.0", "--minor"]);
@@ -168,7 +168,7 @@ fn it_says_a_tag_is_still_yours_to_make() {
 
 #[test]
 fn the_notes_leave_the_required_section_empty() {
-    // The pre-1.0 rule wants every behaviour change described in both
+    // The pre-1.0 rule wants every behavior change described in both
     // directions. A commit subject says what changed, not what it changed
     // *from*, so the tool cannot fill this in — and an empty required section
     // is the only honest thing it can say.
@@ -180,7 +180,7 @@ fn the_notes_leave_the_required_section_empty() {
 
     let notes = std::fs::read_to_string(root.join("NOTES.md")).expect("the notes");
     assert!(notes.starts_with("# 0.5.0"), "{notes}");
-    assert!(notes.contains("## Behaviour changes"), "{notes}");
+    assert!(notes.contains("## Behavior changes"), "{notes}");
     assert!(notes.contains("alpha: go returns two now"), "the subjects are grouped: {notes}");
     assert!(
         notes.contains("not ready"),

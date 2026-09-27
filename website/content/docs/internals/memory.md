@@ -37,7 +37,7 @@ allocate a second list; the cells are rewritten as the walk goes.
 
 What you can rely on:
 
-- **Reuse never changes behaviour.** If the optimisation cannot be applied the
+- **Reuse never changes behavior.** If the optimization cannot be applied the
   program allocates instead, and nothing observable differs.
 - **You cannot detect it from inside the program**, other than by counting
   allocations.
@@ -80,7 +80,7 @@ reference graph acyclic unless you deliberately write a cycle:
 - **Values are built bottom-up.** A constructor's arguments are evaluated
   before the object exists, so a new object can only point at older ones.
 - **Closures capture by value** at the moment they are created.
-- **A `let` initialiser cannot see its own binding.** `let x = f(x)` refers to
+- **A `let` initializer cannot see its own binding.** `let x = f(x)` refers to
   an outer `x`, not the one being declared.
 
 So a cycle requires assigning through a `mut` field, into an object that
@@ -116,4 +116,4 @@ Memory is reclaimed when the last reference goes. A file handle, a socket or a
 transaction has an *observable* end — the other side notices — so those are
 closed by [regions](/docs/reference/memory-and-resources/#region-syntax)
 rather than by the reference count, at a point the program states rather than
-one the optimiser chooses.
+one the optimizer chooses.

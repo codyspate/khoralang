@@ -123,7 +123,7 @@ impl Lockfile {
     /// Writes it, header comment and all.
     pub fn write(&self, path: &Path) -> Result<()> {
         let text = toml::to_string_pretty(self)
-            .context("serialising the lockfile")?;
+            .context("serializing the lockfile")?;
         std::fs::write(path, format!("{HEADER}{text}"))
             .with_context(|| format!("writing {}", path.display()))
     }
@@ -154,7 +154,7 @@ impl Lockfile {
     }
 
     /// Sorts, so that a diff shows a change rather than a walk order.
-    pub fn normalise(&mut self) {
+    pub fn normalize(&mut self) {
         self.version = FORMAT_VERSION;
         for package in &mut self.packages {
             package.dependencies.sort();

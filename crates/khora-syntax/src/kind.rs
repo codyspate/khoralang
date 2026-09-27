@@ -433,7 +433,7 @@ contextual_keywords! {
 /// These are deliberately **not** in [`KEYWORDS`]: a reserved word has no
 /// kind, no production and no position, so the lexer hands it to the parser as
 /// an `IDENT` like any other name and the parser refuses it where a name would
-/// be bound. Putting one in `KEYWORDS` would make the editor grammar colour a
+/// be bound. Putting one in `KEYWORDS` would make the editor grammar color a
 /// word the language does not have.
 ///
 /// A word already used as an identifier in this repository cannot go here

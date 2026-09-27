@@ -146,7 +146,7 @@ fn line_end(source: String, from: Int) -> Int {
 /// ```
 ///
 /// The gutter is as wide as the line number, so a query long enough to wrap
-/// still lines up. Nothing here is coloured: this goes to a terminal that may
+/// still lines up. Nothing here is colored: this goes to a terminal that may
 /// be a pipe, and a program that writes escape codes into a file somebody is
 /// reading later has decided something on their behalf.
 pub fn render(source: String, trouble: Problem) -> String {

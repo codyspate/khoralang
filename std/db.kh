@@ -20,7 +20,7 @@ module std::db;
 //!
 //! # What the middle layer actually is
 //!
-//! **What a transaction does when its fiber is cancelled.** That is the part
+//! **What a transaction does when its fiber is canceled.** That is the part
 //! that fails in production and never in testing, the part every package would
 //! answer differently, and the part that is Khora's to answer rather than an
 //! engine's — because cancellation semantics belong to the language. A
@@ -35,7 +35,7 @@ module std::db;
 //!
 //! `transaction` commits when its body returns and rolls back when it does not
 //! — including when the body raises, and including when the fiber running it is
-//! cancelled. **A handler that cannot promise that is a broken handler**, and
+//! canceled. **A handler that cannot promise that is a broken handler**, and
 //! the test beside this module is written against the promise rather than
 //! against any engine.
 //!
@@ -59,7 +59,7 @@ module std::db;
 //! before `BEGIN` is sent, and a region's finalizers run on every path out,
 //! a cancellation's included. `transaction`'s own comment has the argument.
 //! What the runtime owes in return is that a finalizer running *because* of a
-//! cancellation is not itself cancelled — `khora-rt`'s `cancel::Shielded`.
+//! cancellation is not itself canceled — `khora-rt`'s `cancel::Shielded`.
 
 import std::core::{Eq, List, Option, Pair, Region, Result, Show};
 import std::decimal::{Decimal};
@@ -245,7 +245,7 @@ pub effect Db {
 ///
 /// # How the third way out is covered
 ///
-/// A body can return, it can fail, and its fiber can be **cancelled** — and
+/// A body can return, it can fail, and its fiber can be **canceled** — and
 /// the third one does not pass through any `match` written here. A
 /// cancellation travels the same tagged return an error does, straight out of
 /// this function, so a version that only inspected `body()`'s answer was
@@ -261,7 +261,7 @@ pub effect Db {
 /// has nothing left to undo — so the finalizer costs a boolean on the ordinary
 /// path and is the whole contract on the extraordinary one.
 ///
-/// **Before `BEGIN`, not after it**, because a fiber can be cancelled while it
+/// **Before `BEGIN`, not after it**, because a fiber can be canceled while it
 /// waits for the server to answer `BEGIN`, and by then the server is inside
 /// the transaction. A rollback registered only once `begin` returns would
 /// miss that cancel, and the connection would go back to its pool with the
@@ -285,7 +285,7 @@ pub effect Db {
 ///
 /// # Cancellation inside a transaction
 ///
-/// A transaction is cancelled like any other code: at a loop, at a blocking
+/// A transaction is canceled like any other code: at a loop, at a blocking
 /// `std` call, or at a call to a function that can reach one, whatever the
 /// body's `raises` row. A cancellation that lands in the body unwinds through
 /// here, releasing the region and running the rollback. The rollback itself
@@ -386,7 +386,7 @@ pub fn transaction<A, 'ef, 'er>(
 {
   // **The rollback is registered before `BEGIN` is sent**, because from the
   // moment it is sent the server may be inside a transaction, and the fiber
-  // can be cancelled while it waits to hear so. Registering it after
+  // can be canceled while it waits to hear so. Registering it after
   // `begin()` returned left that wait and every call up to the registration
   // as places a cancel unwound with nothing to undo it, and the connection
   // went back to its pool inside the transaction: the next borrower's writes
@@ -432,7 +432,7 @@ pub fn transaction<A, 'ef, 'er>(
       let undone = if level == 0 { db.rollback() } else { db.rollback_to(level) };
       match undone {
         Result::Ok(_) => (),
-        // **The path with nobody to tell.** A cancelled fiber has no caller
+        // **The path with nobody to tell.** A canceled fiber has no caller
         // waiting for an answer, so this is the only place the failure can
         // go -- and going nowhere is what let a connection return to a pool
         // having neither committed nor, as far as anything knew, rolled back.
@@ -451,7 +451,7 @@ pub fn transaction<A, 'ef, 'er>(
       Result::Err(problem)
     },
     // A failed body is rolled back by the region on the way out, like a
-    // cancelled one, so the rollback runs as cleanup: a cancel arriving while
+    // canceled one, so the rollback runs as cleanup: a cancel arriving while
     // it waits for its reply does not cut it short. The caller is told
     // `RolledBack` with the body's reason whatever the rollback's own answer
     // was; the engine's complaint about the rollback is a worse thing to

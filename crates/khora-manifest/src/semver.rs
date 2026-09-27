@@ -137,7 +137,7 @@ impl Version {
             if part.is_empty() {
                 return Err(format!("`{text}` has an empty {name} version"));
             }
-            // Rejected rather than accepted-and-normalised: `01.0.0` and
+            // Rejected rather than accepted-and-normalized: `01.0.0` and
             // `1.0.0` would otherwise be two spellings of one version, and a
             // lockfile would eventually hold both.
             if part.len() > 1 && part.starts_with('0') {
@@ -252,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn pre_1_0_is_recognised() {
+    fn pre_1_0_is_recognized() {
         assert!(Version::parse("0.9.9").expect("valid").is_pre_1_0());
         assert!(!Version::parse("1.0.0").expect("valid").is_pre_1_0());
     }

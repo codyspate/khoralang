@@ -27,7 +27,7 @@ Every other language's inlay hints show inferred types. Khora infers two more,
 and they are the ones a reader is missing. The same information in Effect lives
 inside a nested generic and is the source of its worst error messages.
 
-**Effect rows are monomorphised whole-program.** `effect-runtime.md`: a row
+**Effect rows are monomorphized whole-program.** `effect-runtime.md`: a row
 variable is concrete at every call site. Effect builds a data structure and
 interprets it; Khora resolves it statically. "Effects are close to free in a
 release build" is a claim Effect can never make.
@@ -38,13 +38,13 @@ Node's floor. Measured, in `bench/README.md`.
 ## 1. Build `Stream` fusible, because it is only designed once
 
 Effect's `Stream` is a runtime interpreter: each `map` or `filter` stage is an
-allocation and a dispatch. With whole-program monomorphisation and Perceus
+allocation and a dispatch. With whole-program monomorphization and Perceus
 reuse, `map |> filter |> fold` can lower to **one loop with no intermediate
 allocation**, the way Rust's iterators do.
 
 Rust has the codegen and not the ergonomics. Effect has the ergonomics and not
 the codegen. Nothing has both, and fusion is an architectural property -- it
-comes from designing for it, not from optimising later. A `Stream` built as a
+comes from designing for it, not from optimizing later. A `Stream` built as a
 closure of closures inherits Effect's ceiling permanently.
 
 `Stream` is also named in non-negotiable #1 as one of the things higher-kinded
@@ -64,7 +64,7 @@ What is *this* note's is only the claim that it must fuse. Read §3.4 first.
 The idea with the widest gap between "Khora can" and "Effect cannot".
 
 Every interaction with the outside world goes through a handler, and
-`derive(Encode)` can serialise an operation's arguments and result. So a build
+`derive(Encode)` can serialize an operation's arguments and result. So a build
 can wrap every handler, record `(operation, arguments, result)` in order, and a
 replay handler can feed that log back and reproduce the run exactly.
 
@@ -128,7 +128,7 @@ somebody else's program.
 Effect's shape is partly a record of TypeScript's limits, and importing those
 would be importing a workaround for a constraint Khora does not have.
 
-- **HKT defunctionalisation** -- Khora has native `* -> *`.
+- **HKT defunctionalization** -- Khora has native `* -> *`.
 - **Branded types** -- newtypes already wrap nominally.
 - **`Schema`'s `R` parameter** -- effect rows are on functions already; putting
   requirements in the schema type duplicates the effect system with worse

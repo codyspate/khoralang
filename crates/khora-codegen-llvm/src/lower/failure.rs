@@ -73,7 +73,7 @@ impl<'ctx> Lower<'_, 'ctx> {
 
         // Two things travel this channel without being errors, and `catch`
         // already routes both of them back to propagating — see
-        // `lower_catch`, where a `_` arm sends `CANCELLED_WHICH` and
+        // `lower_catch`, where a `_` arm sends `CANCELED_WHICH` and
         // `FAILED_WHICH` to `onward` by name. `attempt` is the *other* total
         // handler and it did not, which is a hole in the same rule:
         // `effect-runtime.md` §6 says a cancellation cannot be swallowed
@@ -85,16 +85,16 @@ impl<'ctx> Lower<'_, 'ctx> {
         // the body's error — `Result::Err(problem)` whose `problem.show()`
         // reads through it. Found by 13.3, whose rolled-back transaction ran
         // fallible work in a finalizer and got back `Err` from a body that had
-        // been cancelled rather than having failed.
+        // been canceled rather than having failed.
         self.at(failed);
         let escape = self.block("attempt.onward");
         let erred = self.block("attempt.raised");
-        let cancelled = self.be.ctx.i32_type().const_int(runtime::CANCELLED_WHICH, false);
+        let canceled = self.be.ctx.i32_type().const_int(runtime::CANCELED_WHICH, false);
         let aborted = self.be.ctx.i32_type().const_int(runtime::FAILED_WHICH, false);
         let is_cancel = self
             .be
             .builder
-            .build_int_compare(IntPredicate::EQ, which, cancelled, "attempt.cancelled")
+            .build_int_compare(IntPredicate::EQ, which, canceled, "attempt.canceled")
             .expect("testing for a cancellation");
         let is_abort = self
             .be
@@ -381,11 +381,11 @@ impl<'ctx> Lower<'_, 'ctx> {
     ///
     /// For a runtime call that hands back a change function's cancellation
     /// tag rather than the pair a Khora callee returns: `Shared::update` and
-    /// `modify`. The same branch [`Self::split_cancelled`] emits, without an
+    /// `modify`. The same branch [`Self::split_canceled`] emits, without an
     /// answer half to take.
     pub(super) fn leave_if_stopped(&mut self, which: IntValue<'ctx>) {
         let stopped = self.raised(which);
-        let stop = self.block("t.cancelled");
+        let stop = self.block("t.canceled");
         let carry_on = self.block("t.ok");
         self.be
             .builder
@@ -398,13 +398,13 @@ impl<'ctx> Lower<'_, 'ctx> {
     }
 
     /// The branch after a call to a tagged infallible Khora function: unwind
-    /// if it came back cancelled, take the answer if it did not.
+    /// if it came back canceled, take the answer if it did not.
     ///
     /// The branch `split_tagged` emits, with the answer at its own type. It
     /// needs no `raises` clause, because every frame that reaches it has a way
     /// out: a fallible one's row, a tagged one's pair, or a `catch`, which
     /// sends the cancellation on rather than handling it.
-    pub(super) fn split_cancelled(&mut self, result: BasicValueEnum<'ctx>, ret: &Type) -> BasicValueEnum<'ctx> {
+    pub(super) fn split_canceled(&mut self, result: BasicValueEnum<'ctx>, ret: &Type) -> BasicValueEnum<'ctx> {
         let pair = result.into_struct_value();
         let which = self
             .be
@@ -498,14 +498,14 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// [`Self::can_leave_on_a_cancel`].
     ///
     /// **Behind [`Self::poll`], so a `!` in a loop is not a call per trip.**
-    /// Only the count of cancelled fibers is consulted here, not the pool
+    /// Only the count of canceled fibers is consulted here, not the pool
     /// half, because a `!` has no safepoint to take.
     pub(super) fn check_cancellation(&mut self, range: TextRange) {
         if !self.can_leave_on_a_cancel() {
             return;
         }
         let _ = range;
-        let (slow, carry_on) = self.poll(Some(runtime::POLL_CANCELLED));
+        let (slow, carry_on) = self.poll(Some(runtime::POLL_CANCELED));
         self.at(slow);
         self.ask_about_cancellation();
         self.br(carry_on);
@@ -558,10 +558,10 @@ impl<'ctx> Lower<'_, 'ctx> {
         self.at(carry_on);
     }
 
-    /// Calls `khora_cancelled` and leaves if it says so. The slow half of
+    /// Calls `khora_canceled` and leaves if it says so. The slow half of
     /// every cancellation check; the caller has already decided to ask.
     pub(super) fn ask_about_cancellation(&mut self) {
-        let asker = self.be.rt.cancelled;
+        let asker = self.be.rt.canceled;
         self.ask_about_cancellation_with(asker);
     }
 
@@ -572,7 +572,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         let asked = self
             .be
             .builder
-            .build_call(asker, &[], "cancelled")
+            .build_call(asker, &[], "canceled")
             .expect("reading the cancellation flag")
             .try_as_basic_value()
             .basic()
@@ -595,7 +595,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         // The same way out an error takes: release what this frame owns — the
         // regions among it, so their finalizers run — and hand the tag on.
         self.at(stop);
-        let which = self.be.ctx.i32_type().const_int(runtime::CANCELLED_WHICH, false);
+        let which = self.be.ctx.i32_type().const_int(runtime::CANCELED_WHICH, false);
         let none = self.be.ctx.i64_type().const_zero();
         self.leave_with(which, none);
 
@@ -614,7 +614,7 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// The runtime keeps the other half of that bargain: it checks the
     /// cancellation flag only once it has established there is nothing to
     /// take, so a send racing the cancellation still wins.
-    pub(super) fn cancelled_empty_handed(&mut self, moved: IntValue<'ctx>, range: TextRange) {
+    pub(super) fn canceled_empty_handed(&mut self, moved: IntValue<'ctx>, range: TextRange) {
         if !self.can_leave_on_a_cancel() {
             return;
         }
@@ -685,7 +685,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             //
             // Nothing sound calls this. A pruned frame contains no
             // cancellation point and calls nothing tagged, so no
-            // `CANCELLED_WHICH` exists in it; the checker has ruled out an
+            // `CANCELED_WHICH` exists in it; the checker has ruled out an
             // unhandled error in a function with no row; and `assert`, the
             // one source of `FAILED_WHICH`, is only allowed in a test, which
             // has a row. A `catch`'s fall-through was the one site that

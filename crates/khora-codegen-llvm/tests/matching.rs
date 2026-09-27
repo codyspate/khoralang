@@ -198,18 +198,18 @@ fn patterns_of_the_right_type_still_run() {
 
 /// **A case name written bare is refused, and nothing is built.** It bound
 /// every value: this program printed `3` (the `Red` arm) for
-/// `Colour::Green`, and the `catch` one built a binary that died with
+/// `Color::Green`, and the `catch` one built a binary that died with
 /// `Illegal instruction`.
 #[test]
 fn a_bare_case_name_is_refused_and_nothing_is_built() {
-    let colour = "pub type Colour = | Red | Green | Blue;\n\
-        fn describe(c: Colour) -> Int { match c { Colour::Blue => 1, Red => 3 } }\n";
+    let color = "pub type Color = | Red | Green | Blue;\n\
+        fn describe(c: Color) -> Int { match c { Color::Blue => 1, Red => 3 } }\n";
     let found = refused(
         "bare_case_match",
-        &format!("{PRELUDE}{colour}fn main() -> Int {{ print(describe(Colour::Green)); 0 }}\n"),
+        &format!("{PRELUDE}{color}fn main() -> Int {{ print(describe(Color::Green)); 0 }}\n"),
     );
     assert!(
-        found.iter().any(|e| e.contains("`Red` is a case of `Colour`") && e.contains("`Colour::Red`")),
+        found.iter().any(|e| e.contains("`Red` is a case of `Color`") && e.contains("`Color::Red`")),
         "{found:?}"
     );
     let exe = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("bare_case_match").join(
@@ -234,9 +234,9 @@ fn the_qualified_case_runs() {
     let ran = run_both(
         "qualified_case",
         &format!(
-            "{PRELUDE}pub type Colour = | Red | Green | Blue;\n\
-             fn describe(c: Colour) -> Int {{ match c {{ Colour::Blue => 1, Colour::Red => 3, other => 7 }} }}\n\
-             fn main() -> Int {{ print(describe(Colour::Green)); print(describe(Colour::Red)); 0 }}\n"
+            "{PRELUDE}pub type Color = | Red | Green | Blue;\n\
+             fn describe(c: Color) -> Int {{ match c {{ Color::Blue => 1, Color::Red => 3, other => 7 }} }}\n\
+             fn main() -> Int {{ print(describe(Color::Green)); print(describe(Color::Red)); 0 }}\n"
         ),
     );
     assert_eq!(ran.stdout, "7\n3\n", "stderr: {}", ran.stderr);

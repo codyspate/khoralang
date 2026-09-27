@@ -450,7 +450,7 @@ fn f(cells: Array<U8>) -> Int { let byte: U8 = Array::get(cells, 0); 0 }
 }
 
 /// Pushing an expected type into a call solves variables earlier than the
-/// arguments do, and an error row's entry is labelled by *its type's* name — so
+/// arguments do, and an error row's entry is labeled by *its type's* name — so
 /// an entry whose variable had just been solved was still called `_`, matched
 /// nothing on the other side, and reported a label nobody was missing.
 ///
@@ -974,14 +974,14 @@ fn a_separated_literal_is_measured_without_its_underscores() {
 
 /// **A bare name that is a case of the value's type is refused, at the name.**
 ///
-/// A bare name in a pattern is a *binding*, so `Red => ..` where `Colour::Red`
-/// was meant matches every colour. 0.3.0 said so only when an arm after it
+/// A bare name in a pattern is a *binding*, so `Red => ..` where `Color::Red`
+/// was meant matches every color. 0.3.0 said so only when an arm after it
 /// was unreachable, and against that arm, which was the one written
 /// correctly. The rule is about the name, wherever it stands.
 #[test]
 fn a_bare_constructor_name_says_it_is_a_binding() {
     assert_reports(
-        "module m;\npub type Colour = | Red | Green;\nfn go(c: Colour) -> Int { match c { Red => 1, Green => 2 } }\n",
+        "module m;\npub type Color = | Red | Green;\nfn go(c: Color) -> Int { match c { Red => 1, Green => 2 } }\n",
         "a bare name in a pattern binds rather than matching one",
     );
 }
@@ -990,8 +990,8 @@ fn a_bare_constructor_name_says_it_is_a_binding() {
 #[test]
 fn the_suggestion_names_the_scrutinees_own_type() {
     assert_reports(
-        "module m;\npub type Colour = | Red | Green;\nfn go(c: Colour) -> Int { match c { Red => 1, Green => 2 } }\n",
-        "`Colour::Red`",
+        "module m;\npub type Color = | Red | Green;\nfn go(c: Color) -> Int { match c { Red => 1, Green => 2 } }\n",
+        "`Color::Red`",
     );
 }
 
@@ -1006,7 +1006,7 @@ fn an_ordinary_binding_is_not_blamed_for_being_a_constructor() {
     let db = KhoraDatabase::new();
     let found = errors(
         &db,
-        "module m;\npub type Colour = | Red | Green;\nfn go(c: Colour) -> Int { match c { n => 1, Colour::Green => 2 } }\n",
+        "module m;\npub type Color = | Red | Green;\nfn go(c: Color) -> Int { match c { n => 1, Color::Green => 2 } }\n",
     );
     assert!(
         found.iter().any(|e| e.contains("unreachable")),

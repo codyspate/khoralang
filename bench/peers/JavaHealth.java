@@ -1,6 +1,6 @@
 // The JDK's built-in HTTP server, answering what `bench/service` answers.
 //
-// Labelled carefully in the table: `com.sun.net.httpserver` ships with the JDK
+// Labeled carefully in the table: `com.sun.net.httpserver` ships with the JDK
 // and is not what a production Java service runs on. It is here because it is
 // the only Java server available without fetching a framework, and a number
 // with a caveat beats an empty row.

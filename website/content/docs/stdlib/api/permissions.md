@@ -106,7 +106,7 @@ pub fn normalized(path: String) -> String
 
 One spelling of a path, so a grant and a request can be compared.
 
-Two things are levelled, and both were reported as traps by somebody who
+Two things are leveled, and both were reported as traps by somebody who
 hit them:
 
 - **`\\` becomes `/`**, so a grant written with forward slashes covers a
@@ -117,13 +117,13 @@ hit them:
   `read = ["./data/**"]` into a manifest, opened `data/foo.txt`, and were
   refused by a grant that looks like it says yes.
 
-**`..` is neither resolved nor levelled here; `granted` refuses the path
+**`..` is neither resolved nor leveled here; `granted` refuses the path
 outright.** Both of the other answers widen a grant, which is the one
 direction a permission check must never be wrong in.
 
 Resolving `a/../b` to `b` is only correct if `a` is a real directory. Where
 `a` is a symlink, `a/..` is the parent of what `a` points *at*, so the open
-lands on the target's neighbour `b` while the check approved the `b` beside
+lands on the target's neighbor `b` while the check approved the `b` beside
 `a` -- it would be answering about a file the filesystem does not open.
 Telling those apart needs the filesystem, and this function has only the
 string.

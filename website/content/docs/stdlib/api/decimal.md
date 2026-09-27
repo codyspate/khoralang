@@ -403,7 +403,7 @@ hide a case somebody meets:
 - `+` is a leading sign here. `Int::of_string` refuses one, and says why
   at some length -- so the two disagree, and a program reading `+5` out
   of a configuration file gets a number from one and `None` from the
-  other. Neither behaviour is being changed here, because changing either
+  other. Neither behavior is being changed here, because changing either
   is a compatibility decision about a published parser rather than a
   repair; what is fixed is that the disagreement was written down in
   neither place.

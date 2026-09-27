@@ -509,7 +509,7 @@ today, one of them a gap rather than a preference.
 
 `docs/roadmap.md` has the order, the reasons, and what each one costs.
 
-## Licence
+## License
 
 MIT or Apache-2.0, at your option — `LICENSE-MIT` and `LICENSE-APACHE`. The
 Rust ecosystem's default pair, and what `Cargo.toml` has declared since the

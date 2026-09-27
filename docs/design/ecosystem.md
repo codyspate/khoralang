@@ -221,7 +221,7 @@ is a framework, and it belongs in a first-party package where it can version on
 its own.
 
 The middle layer for databases exists, but it is not the engine. **It is what a
-transaction does when its fiber is cancelled.** A transaction that returns
+transaction does when its fiber is canceled.** A transaction that returns
 without rolling back, holding a connection and its locks, is the truncated
 request at a packet boundary of this subject: it fails in production, never in
 testing, and every package would answer it differently. It is also Khora's to

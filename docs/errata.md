@@ -148,7 +148,7 @@ Khora has two separators, split by *when* the thing on the left exists:
   `ledger.get_history(id)`, `req.params.get("id")`.
 
 The specification's argument for one dot is symbol economy, and that is the
-wrong thing to economise on. `Foo.bar` is unreadable to a *human*: nothing in it
+wrong thing to economize on. `Foo.bar` is unreadable to a *human*: nothing in it
 says whether `Foo` is a module, a type or a variable, so a reader who does not
 already know the codebase cannot tell a namespace lookup from a field load, and
 neither can a tool. Rust's `::`/`.` split is not clutter — it carries
@@ -993,7 +993,7 @@ and it is the one that would have caught all five.
 `Int::to_string` is written in `std::core`, in Khora, in four lines. Calling it
 crashed the compiler: *"Found PointerValue but expected the IntValue variant"*.
 
-The code generator recognises `Int::` methods by their owner and sends them to
+The code generator recognizes `Int::` methods by their owner and sends them to
 `int_intrinsic`, which implements `wrapping_add`, `xor`, `shl` and the rest —
 all two-argument integer operations. `Int::to_string` is a one-argument method
 returning a `String`, so the second argument it did not have was read as an
@@ -1107,7 +1107,7 @@ runtime has existed.
 compiler and then one directory up. A compiler built with `cargo build` sits in
 `target/debug`, and beside `target/debug/khora.exe` is `target/debug/khora_rt.lib`.
 The search is correct and does exactly what it says. The problem is what it
-implies: the runtime's optimisation level tracked **how the compiler was built**
+implies: the runtime's optimization level tracked **how the compiler was built**
 rather than what it is for, and nothing in the profile said otherwise.
 
 Measured on parsing an eighty-byte HTTP request: 9,000 nanoseconds against
@@ -1124,7 +1124,7 @@ opt-level = 3
 It was found while chasing something else. `String::find` is a call to
 `memmem`; it measured 315 nanoseconds against an expected 40, which is the kind
 of gap that means the thing being measured is not the thing you think it is.
-Chasing *that* found a whole archive compiled without optimisation.
+Chasing *that* found a whole archive compiled without optimization.
 
 **A compiler's output is not the compiler.** The runtime is an artifact the
 toolchain ships, and it should be built the way a shipped artifact is built no
@@ -1199,13 +1199,13 @@ against had no such field, and the read found garbage.
 
 **The guard from before stays, and is no longer a workaround.** A name the
 compiler already means may not be given a definition. Identity fixed the
-general collision but the *backend* still recognises `Array`, `Shared`, `Fiber`
+general collision but the *backend* still recognizes `Array`, `Shared`, `Fiber`
 and the rest by bare name — a smaller and more contained thing than the type
 system did, and one that will only go when those declarations get an identity
 the code generator can ask about. Until then a `type Array = { .. }` would
 still be handed the runtime's layout, so it is still refused.
 
-The rule this belongs to is not "`Unknown` is a silence" but its neighbour:
+The rule this belongs to is not "`Unknown` is a silence" but its neighbor:
 **an identifier is not an identity.** Entry 45 said a benchmark off by a
 constant factor everywhere is a configuration bug; this one says a lookup that
 is right whenever you only tried one module is not a lookup, it is a
@@ -1231,11 +1231,11 @@ finished. The ablation removed a cost and added a larger one.
 
 **An ablation has to preserve the invariant the thing being ablated exists to
 maintain.** Reference counting is not overhead attached to a program that would
-otherwise be correct; it is what makes the memory behaviour bounded. Removing it
+otherwise be correct; it is what makes the memory behavior bounded. Removing it
 does not produce the same program without a cost, it produces a different
 program with a leak, and the number that comes back is about the leak.
 
-The measurement that worked was the ordinary one: build the optimisation, run
+The measurement that worked was the ordinary one: build the optimization, run
 the benchmark, compare. The two halves were then separable because they are
 different mechanisms — inlining the counter arithmetic (§3) and dropping the
 atomics (§4) — and each could be measured against the state before it.
@@ -1337,7 +1337,7 @@ has one in the middle, and it means the same nothing there. The CST stays
 lossless because the mark is emitted as a whitespace token like any other, which
 `a_byte_order_mark_survives_a_round_trip` pins.
 
-**How it was found, which is the part that generalises.** By installing
+**How it was found, which is the part that generalizes.** By installing
 `v0.1.0-rc.1` from the published release on a machine with no Khora checkout on
 its `PATH`, and writing the first program with the shell that was already open.
 Every test in this repository writes its sources with Rust's `fs::write`, which
@@ -1472,7 +1472,7 @@ reproducibility claim, which is about the compiler's output given a fixed
 archive, but it does mean the cache key's runtime component changes whenever
 `khora-rt` is relinked even without a real change — correct, and pessimistic.
 
-**What generalises.** A cache is an oracle for "did anything change", and
+**What generalizes.** A cache is an oracle for "did anything change", and
 pointing one at your own build is a stronger check than any test that only asks
 whether the build succeeded. The first three fixes were attempts to make a
 disagreement go away; the thing that worked was making the disagreement
@@ -1530,7 +1530,7 @@ pre-release, from the release's own flag. The filtering is theirs to do,
 because "which of the things this repository publishes is a compiler" is not a
 question GitHub has been told the answer to.
 
-**What generalises.** A repository that publishes one artifact can let the
+**What generalizes.** A repository that publishes one artifact can let the
 forge decide what "latest" means. The moment it publishes two, that endpoint
 starts answering a question nobody asked, and it answers it with a 200 and a
 plausible-looking tag rather than an error. The failure surfaced in the
@@ -1604,7 +1604,7 @@ restore makes `take({ 5 })` fail, because a block's tail stops narrowing a
 literal. A fix for the first half that quietly dropped the hint would have
 passed everything else.
 
-### What generalises
+### What generalizes
 
 **A hint is a statement about a value, so it belongs to the expression that
 produces the value.** `self.hint` is a field rather than an argument, which
@@ -1675,7 +1675,7 @@ getting it right:
   parameter are all "not settled", and a second message about a type nothing
   has decided is noise after the first.
 
-### What generalises
+### What generalizes
 
 **Two checks that never meet are one check.** The row was validated as a
 record and the requirement as a set of labels, and each was correct about its
@@ -1686,7 +1686,7 @@ The reason it survived is worth more than the fix. Every `with` in the
 repository is *correct*, so no test ever supplied a wrong-typed capability;
 the hole was only reachable by writing a program nobody would write on
 purpose. It was found by writing the negative case for a new feature -- the
-test asserting that the **old** behaviour still worked -- which is an argument
+test asserting that the **old** behavior still worked -- which is an argument
 for writing those even when the answer seems obvious. The answer was not what
 anybody would have guessed.
 
@@ -1756,7 +1756,7 @@ error: `demo.a` and `demo.b` import each other: demo.a -> demo.b -> demo.a.
        Move what they share into a module they can both import
 ```
 
-### What generalises
+### What generalizes
 
 **A cycle in the input becomes a cycle in the query graph**, and a memoizing
 compiler turns that into a panic rather than an error, in a component that
@@ -1831,11 +1831,11 @@ src/main.kh` names a file inside one.
 The `fn main(` search is restricted the same way, which was a second latent
 bug: a dependency containing `fn main(` could have named the executable.
 
-### What generalises
+### What generalizes
 
 **A fallback with no condition is a fallback that always runs.** The comment
 described a guard -- "when there is only one" -- that the code never had, and a
-comment that describes an intention rather than the behaviour is worse than
+comment that describes an intention rather than the behavior is worse than
 none, because it stops the next reader looking.
 
 And the shape of the near-miss is worth keeping: **sorting made this
@@ -1910,7 +1910,7 @@ It also reached `main`: the commit before this one shipped
 `package = []`, because `git add -A` ran between a `khora check std` and the
 baseline that put it back.
 
-### What generalises
+### What generalizes
 
 **`parent()` has three answers, not two**, and the third one is shaped like
 success. `Some("")` passes every check that asks whether a value is present
@@ -2023,7 +2023,7 @@ It also made the diagnostic sharper. A missing nested case is now named --
 `Err(Forbidden(_))` rather than `Err(_)` -- because the checker can finally see
 inside.
 
-### What generalises
+### What generalizes
 
 Two of the three are the same bug: **a fact that was available at the point of
 use, and thrown away on the way there.** The scrutinee knew its type
@@ -2084,7 +2084,7 @@ Three lines above that catch-all is a comment about errata 30:
 > nothing.
 
 The same failure, one case further along. Both are a type the converter did not
-recognise becoming the one type that agrees with everything.
+recognize becoming the one type that agrees with everything.
 
 ### The fix, and what it cost
 
@@ -2105,13 +2105,13 @@ The first fix was a `Task` — the same runtime fiber under a handle with no
 parameters. It worked, and it was a type whose only reason to exist was one
 signature. The second and better one was to make the signature expressible:
 **an effect operation can now quantify over a row**, so `adopt` takes
-`Fiber<(), 'er>` and the child keeps the channel it is cancelled on. Eight lines
+`Fiber<(), 'er>` and the child keeps the channel it is canceled on. Eight lines
 in `check/expr.rs`, because the substitution in `record_field` has already
 replaced every row the *effect* declares — so a `'x` still standing in an
 operation's type is the operation's own, and instantiating it is what
 `instantiate` already does for a generic function. `docs/design/fibers.md`.
 
-### What generalises
+### What generalizes
 
 **A permissive default is not a small bug, and it hides in the arm nobody
 wrote.** `_ => Type::Unknown` is a reasonable-looking line that turns every
@@ -2155,7 +2155,7 @@ rather than worked around in silence.
 with `src/main.exe.o` and, on Windows, `src/main.pdb`. `khora test` and
 `khora bench` wrote `khora-tests.exe` and `khora-benches.exe` into whichever
 directory they had just compiled. So the first `git status` after a first build
-listed files nobody recognised, sitting in the directory a person keeps their
+listed files nobody recognized, sitting in the directory a person keeps their
 program in.
 
 The evidence that this was wrong was already checked in. This repository's
@@ -2196,7 +2196,7 @@ outside any package still gets its executable beside it: `khora build
 scratch.kh` writes `scratch.exe`, the way every other compiler answers that,
 rather than inventing a `build/` next to somebody's scratch file.
 
-### What generalises
+### What generalizes
 
 **A workaround that has to be repeated is a design defect with a paper trail.**
 Nobody was wrong to add `examples/**/src/*.pdb`; each addition fixed the
@@ -2268,10 +2268,10 @@ program -- which is the table the merge had pruned. Both same-named types have
 to exist, both have to have impls, and the call has to go through a generic in
 a third module that knows neither. The regression test in
 `crates/khora-codegen-llvm/tests/modules.rs` is built to that shape, and was
-checked against the old behaviour twice: once for the missing body, and once
+checked against the old behavior twice: once for the missing body, and once
 for the wrong answer.
 
-### What generalises
+### What generalizes
 
 **A name is not a type, and the compiler said so in a comment.**
 `ImplDef::head`'s own documentation reads "resolution is nominal, so this is a
@@ -2348,7 +2348,7 @@ Serializing the five tests with a mutex in the module fixes it. Not
 nothing else, the fix belongs in the file with the problem, and a nextest-only
 answer would not have fixed the runner that actually had it.
 
-### What generalises
+### What generalizes
 
 **A flake's title is a hypothesis, and it is usually the first thing anybody
 noticed rather than the cause.** "Intermittent, on Linux" was two observations
@@ -2376,7 +2376,7 @@ with no arm did not fail — it agreed. Four forms had no arm: `Paren`, `Union`,
 ```khora
 fn takes(xs: List<(Int)>) -> Int             // accepted a List<String>
 fn hold(r: Result<Int, A + B>) -> Int        // accepted a Result<Int, C>
-fn colour(x: | Red | Blue) -> Int            // `Red` and `Blue` undeclared,
+fn color(x: | Red | Blue) -> Int            // `Red` and `Blue` undeclared,
                                              // and nothing said so
 ```
 
@@ -2403,7 +2403,7 @@ a type that was "never worked out".
 `docs/design/unions.md` records what a union would mean if it existed, and the
 decision that `+` is conjunction and `|` would be disjunction.
 
-### What generalises
+### What generalizes
 
 **Errata 60 wrote this down already**, about `_ => Type::Unknown` in two other
 matches: *"a permissive default is not a small bug, and it hides in the arm
@@ -2428,7 +2428,7 @@ been read.
 Section 3, resource and database semantics, was scored 2 of 6. Two of the four
 unticked items were already satisfied by `crates/khora-codegen-llvm/tests/db.rs`,
 a file the scoring pass never opened -- including the one that reads as the
-section's whole point, that a cancelled fiber rolls back. Section 15,
+section's whole point, that a canceled fiber rolls back. Section 15,
 compatibility and governance, was scored 1 of 8 on the same day #149 wrote
 `CONTRIBUTING.md`, `CHANGELOG.md` and the compatibility page, which between them
 satisfy seven of its eight items. Section 13, the package ecosystem, had three
@@ -2778,7 +2778,7 @@ The types they answer are `String`, `Int`, `Decimal` and `Bool`.
 constructors."* Four of the five shipped under a different name. The fifth,
 `secret`, matched — which is the tell. A deliberate alternative scheme would
 have renamed that one too; what happened instead was that each constructor got
-named as it was written, by whatever word described its behaviour at the
+named as it was written, by whatever word described its behavior at the
 moment, and nothing afterwards compared the result to the plan.
 
 **Nothing could have caught it.** `khora doc --check` verifies that the
@@ -2906,7 +2906,7 @@ Sweeping the `.kh` sources found four:
 | | why it was there |
 | --- | --- |
 | `where_` | nothing |
-| `then_` | nothing — `then` is not reserved either; it existed to match its neighbour |
+| `then_` | nothing — `then` is not reserved either; it existed to match its neighbor |
 | `else_` | **real**: `else` is a hard keyword, and the parser answers `expected an identifier` for a field named `else` |
 | `at_` | **real**: it shadowed `khq`'s own `diag::at` |
 
@@ -2924,9 +2924,9 @@ for and getting no answer.
 
 **Where they come from.** Nobody sits down to name a field `then_`. One
 identifier collides for a real reason, the underscore fixes it in a second, and
-the next one gets an underscore because the neighbouring line has one. That is
+the next one gets an underscore because the neighboring line has one. That is
 how `then_` was born, sitting beside a legitimate `else_`. The habit then
-travelled into `examples/khq`, which is a reference application — the thing a
+traveled into `examples/khq`, which is a reference application — the thing a
 new reader copies from.
 
 There is no checker for this one. A trailing underscore is legal, sometimes
@@ -3111,7 +3111,7 @@ the corrected column is the interesting one -- it is where Khora is actually
 ahead -- which is a reminder that the measurement least worth trusting is
 often the one nobody expected to care about.
 
-### The lesson that generalises
+### The lesson that generalizes
 
 The rig had a ladder, a settling check and a refusal to report a climbing rate.
 It had every piece of measurement hygiene except an oracle. Nobody asked the
@@ -3124,7 +3124,7 @@ three phases of recorded numbers.
 
 ## 78. `shut` waited for a peer that had nothing to say
 
-Found by a test written for something else. `net_cancel.rs` proves a cancelled
+Found by a test written for something else. `net_cancel.rs` proves a canceled
 fiber gives its socket back, and the peer at the other end saw the close in 24
 milliseconds -- then the program did not reach its *next line* for another
 120.0 seconds. Every run, to within a few milliseconds of exactly two minutes.
@@ -3173,7 +3173,7 @@ socket buffer when the server decides.
 
 The test that found it now guards it: it reads to the end with the peer still
 open and silent, and fails if that takes twenty seconds, against a floor of
-sixty that the platform itself imposes on the old behaviour.
+sixty that the platform itself imposes on the old behavior.
 
 **Two lessons, and the second is the uncomfortable one.**
 
@@ -3583,7 +3583,7 @@ against a build that still dropped the row, since dropping it is what let the
 invalid program through. Both tests were run with the fix disabled and both
 failed before either was believed.
 
-## 89. A cancelled listener was told, and had nowhere to hear it
+## 89. A canceled listener was told, and had nowhere to hear it
 
 `Fiber::cancel` on a fiber parked in `accept` hung the process for ever. `main`
 ran to its last line and never exited, with no message on any stream, and an
@@ -3708,7 +3708,7 @@ had "already met this". They had met half of it. Four defects, one family:
   released before the answer is read, so the reader's box reference is the
   last, and `retain_spilled` + null glue leaked the fields. This is erratum
   90's temporary-cell case, on `join` and `outcome`.
-- Two neighbours of the same shape in `Shared`: `modify_shim` duplicated
+- Two neighbors of the same shape in `Shared`: `modify_shim` duplicated
   each counted half out of an *inline* `Changed` carrier, which already owns
   them (one leak per half per call), and `drop_glue` asked the opaque
   `SharedFn` for a field layout, found none, and freed the closure with null
@@ -3751,7 +3751,7 @@ while `Gb<String>` is held inline:
 - `Gx<Int>` (inline) and `Gx<Big>` (boxed) shared one id, so no single case
   could be right for both.
 
-The fix keys `error_ids` on the monomorphised type, arguments and home
+The fix keys `error_ids` on the monomorphized type, arguments and home
 included (`Backend::error_key`), and the releaser, the taker, the `catch` arm
 and `say_what_escaped` are built from that type. A `raise` in a generic body
 is lowered once per specialization, with its type already substituted, so it
@@ -3781,7 +3781,7 @@ same program ran. The rule is now enforced where rows *merge* as well as at
 the `catch`:
 - `Type::row` keeps a second entry under a label if its type differs and
   the label is that type's own name. That is every error-row entry, and
-  also a capability labelled by its own type's name (`with Box<Int> +
+  also a capability labeled by its own type's name (`with Box<Int> +
   Box<String>`, which used to drop the second silently). A capability row
   with a name of its own (`with { b: Box<Int> }`) keeps one entry per
   label, as before;
@@ -3804,7 +3804,7 @@ Not closed by this, and closed since: `bind_pattern` never checked that a
 nested constructor pattern belongs to the scrutinee's type (erratum 93), and
 a `raise` of a value whose type was still a variable when the `catch` was
 checked charged no row (erratum 95). Both are in 0.3.0. Nor is the label: an
-error row is labelled by the type's bare name, not its name and home, so two
+error row is labeled by the type's bare name, not its name and home, so two
 different types named `E` in two modules collide in one row as two
 instantiations do. They are refused there too, with a message naming them as
 two types; keying the label on the home as well would let them sit side by
@@ -4019,8 +4019,8 @@ first. Anything else is a syntax error that names the fix: one row
 
 In 0.3.0. A bare name in a pattern is a binding, and nothing asked whether
 it was also the name of one of its value's cases. So
-`match c { Colour::Blue => "cool", Red => "warm" }` built, and answered
-`warm` for `Colour::Green`: `Red` bound every colour. The one thing said was
+`match c { Color::Blue => "cool", Red => "warm" }` built, and answered
+`warm` for `Color::Green`: `Red` bound every color. The one thing said was
 `` `Red` is bound and never read ``, which the arm reading the name removed.
 A `catch` of the same shape,
 `load(n)! catch { LoadError::Broken(_) => 1, Missing => 2 }`, built a binary
@@ -4034,7 +4034,7 @@ Lowering records which bindings were written as a bare name in a pattern
 `settle_bare_names` asks, after the body and before coverage, whether that
 type declares a case of that name, looking in the declaring module when the
 file never imported the type. A hit is refused, naming the pattern to write
-(`Colour::Red`, `FsError::NotFound(_)`), and goes into `broken_pats`, so the
+(`Color::Red`, `FsError::NotFound(_)`), and goes into `broken_pats`, so the
 same `match` is not also reported as having an unreachable arm. The narrower
 message in `report_match_coverage` is gone. A type's only case (a record
 type's own name in a `catch`) is refused with `_` as the fix, since the

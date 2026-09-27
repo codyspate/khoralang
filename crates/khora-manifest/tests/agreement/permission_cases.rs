@@ -17,7 +17,7 @@
 //!
 //! **A case cannot be added to one side only**, which is the entire point: the
 //! file is `#[path]`-included by both, so the two suites cannot drift apart in
-//! coverage the way the two matchers drifted apart in behaviour.
+//! coverage the way the two matchers drifted apart in behavior.
 //!
 //! Adding a case is one entry in [`CASES`]. Adding a *pair* -- another
 //! contract with two implementations -- is described in
@@ -57,7 +57,7 @@ use Kind::{Host, Name, Path};
 
 /// The table.
 ///
-/// Ordinary cases are here to pin the behaviour everything relies on; the rest
+/// Ordinary cases are here to pin the behavior everything relies on; the rest
 /// are the corners where the two matchers have actually disagreed, or where
 /// agreeing is not obvious from either file alone.
 pub const CASES: &[Case] = &[
@@ -226,7 +226,7 @@ pub const CASES: &[Case] = &[
         grants: &["./logs/**"],
         subject: "logs\\..\\secret.txt",
         granted: false,
-        why: "separators are levelled before the `..` is looked for, so this is \
+        why: "separators are leveled before the `..` is looked for, so this is \
               the escape again in another spelling",
     },
     // -- names: a `*` with nothing to stop at ---------------------------------

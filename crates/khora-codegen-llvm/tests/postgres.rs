@@ -146,7 +146,7 @@ fn serve(listener: TcpListener, auth: i32, rows: Vec<Vec<Option<&'static str>>>)
     write_message(&mut stream, b'R', &0i32.to_be_bytes());
 
     // A parameter and a key, because a real server sends them and a driver
-    // that choked on what it did not recognise would break on the next
+    // that choked on what it did not recognize would break on the next
     // server version.
     let mut parameter = cstring("server_version");
     parameter.extend_from_slice(&cstring("16.0"));
@@ -493,7 +493,7 @@ fn main() -> Int {
 /// that `'; drop table` arrives as eleven characters of text and not as SQL --
 /// and only PostgreSQL can answer that.
 ///
-/// Skipped without `KHORA_POSTGRES`, like its neighbour.
+/// Skipped without `KHORA_POSTGRES`, like its neighbor.
 #[test]
 fn bound_parameters_against_a_real_server() {
     if std::env::var_os("KHORA_POSTGRES").is_none() {
@@ -609,7 +609,7 @@ fn main() -> Int {
 /// possible -- one fiber owns the connection, the handler holds a channel --
 /// which is what `docs/design/channels.md` exists for.
 ///
-/// Skipped without `KHORA_POSTGRES`, like its neighbours.
+/// Skipped without `KHORA_POSTGRES`, like its neighbors.
 #[test]
 fn the_db_capability_against_a_real_server() {
     if std::env::var_os("KHORA_POSTGRES").is_none() {
@@ -856,10 +856,10 @@ fn main() -> Int {
     );
 }
 
-/// **13.3, against the server that has to believe it.** A fiber cancelled
+/// **13.3, against the server that has to believe it.** A fiber canceled
 /// inside a transaction leaves nothing behind.
 #[test]
-fn a_cancelled_transaction_leaves_nothing_behind() {
+fn a_canceled_transaction_leaves_nothing_behind() {
     if std::env::var_os("KHORA_POSTGRES").is_none() {
         eprintln!(
             "skipping: set KHORA_POSTGRES=1 and bring up \
@@ -985,18 +985,18 @@ fn main() -> Int {
 }
 "#;
 
-    let exe = build("postgres_cancelled_transaction", main);
+    let exe = build("postgres_canceled_transaction", main);
     let ran = std::process::Command::new(&exe).output().expect("the program should run");
     let out = String::from_utf8_lossy(&ran.stdout).replace("\r\n", "\n");
     assert_eq!(ran.status.code(), Some(0), "the program should end cleanly: {out}");
     assert_eq!(
         out,
         "the parent carried on\nwrote one\nrows: 1\n",
-        "the cancelled insert must be gone and the committed one must be there"
+        "the canceled insert must be gone and the committed one must be there"
     );
 }
 
-// --- a lease handed over at the moment its waiter is cancelled --------------
+// --- a lease handed over at the moment its waiter is canceled --------------
 
 /// How one watched run ended.
 struct Watched {
@@ -1169,12 +1169,12 @@ fn assert_the_lease_comes_back(name: &str, source: &str) {
         assert_eq!(ran.code, Some(0), "{backend}: stderr {}", ran.stderr);
         assert_eq!(
             ran.stdout, "kept it through 200 trials\nclosed\n",
-            "a waiter cancelled as it was handed the connection must give it back: {seen:?}"
+            "a waiter canceled as it was handed the connection must give it back: {seen:?}"
         );
     }
 }
 
-/// **A waiter cancelled as the connection reaches it gives the connection
+/// **A waiter canceled as the connection reaches it gives the connection
 /// back.** The receive hands the connection over and does not look at the
 /// cancel, which is right: a receive that got a value never drops it. What
 /// came after it was the hole -- the give-back was registered inside `scoped`
@@ -1186,15 +1186,15 @@ fn assert_the_lease_comes_back(name: &str, source: &str) {
 /// connection opened. Both backends; before the fix this lost the connection
 /// at the first trial on threads and within ten on the scheduler.
 #[test]
-fn a_waiter_cancelled_at_the_hand_over_gives_the_connection_back() {
+fn a_waiter_canceled_at_the_hand_over_gives_the_connection_back() {
     assert_the_lease_comes_back("pool_handover", &handover_program(&a_quiet_server(), "0"));
 }
 
 /// The same, with the waiter's body querying a real server.
 ///
-/// Skipped without `KHORA_POSTGRES`, like its neighbours.
+/// Skipped without `KHORA_POSTGRES`, like its neighbors.
 #[test]
-fn a_waiter_cancelled_at_the_hand_over_against_a_real_server() {
+fn a_waiter_canceled_at_the_hand_over_against_a_real_server() {
     if std::env::var_os("KHORA_POSTGRES").is_none() {
         eprintln!(
             "skipping: set KHORA_POSTGRES=1 and bring up \
@@ -1212,7 +1212,7 @@ fn a_waiter_cancelled_at_the_hand_over_against_a_real_server() {
 /// Every way out of `with_db` gives the lease back, and nobody is starved.
 ///
 /// A pool of two, no server. In order: a body that returns; a body that
-/// raises; a body cancelled while it runs; a waiter cancelled while it is
+/// raises; a body canceled while it runs; a waiter canceled while it is
 /// still parked for a connection; and eight fibers taking twenty-five leases
 /// each, all of which must be served. The pool must hold both connections
 /// after each, and `close` must return.
@@ -1239,7 +1239,7 @@ fn seven() -> Int with {{ db: Db }} {{ 7 }}
 fn fail() -> Int with {{ db: Db }} raises Oops {{ raise Oops::Failed }}
 
 fn served_wrongly() -> Int with {{ db: Db }} {{
-  print(\"a cancelled waiter was served, which is wrong\");
+  print(\"a canceled waiter was served, which is wrong\");
   0
 }}
 
@@ -1280,17 +1280,17 @@ fn caught(pool: Pool) -> () {{
   raising(pool)! catch {{ Oops::Failed => print(\"raised: \" + idle(pool)) }};
 }}
 
-fn cancelled_inside(pool: Pool) -> () {{
+fn canceled_inside(pool: Pool) -> () {{
   let entered: Channel<Int> = Channel::bounded(1);
   let never: Channel<Int> = Channel::bounded(1);
   let f = Fiber::spawn(fn () => {{
     let _ = with_db(pool, fn () => stuck(entered, never));
-    print(\"the cancelled body carried on, which is wrong\");
+    print(\"the canceled body carried on, which is wrong\");
   }});
   let _ = Channel::receive(entered);
   Fiber::cancel(f);
   Fiber::wait(f);
-  print(\"cancelled while leased: \" + idle(pool));
+  print(\"canceled while leased: \" + idle(pool));
 }}
 
 fn put_back(pool: Pool, taken: Option<Offer>) -> () {{
@@ -1300,7 +1300,7 @@ fn put_back(pool: Pool, taken: Option<Offer>) -> () {{
   }}
 }}
 
-fn cancelled_waiting(pool: Pool) -> () {{
+fn canceled_waiting(pool: Pool) -> () {{
   let a = Channel::receive(pool.idle);
   let b = Channel::receive(pool.idle);
   let f = Fiber::spawn(fn () => {{
@@ -1312,7 +1312,7 @@ fn cancelled_waiting(pool: Pool) -> () {{
   Fiber::wait(f);
   put_back(pool, a);
   put_back(pool, b);
-  print(\"cancelled while waiting: \" + idle(pool));
+  print(\"canceled while waiting: \" + idle(pool));
 }}
 
 fn worker(pool: Pool, done: Channel<Int>) -> () {{
@@ -1351,8 +1351,8 @@ fn main() -> Int {{
   let pool = open(crew, settings, 2);
   print(\"returned \" + Int::to_string(succeed(pool)) + \": \" + idle(pool));
   caught(pool);
-  cancelled_inside(pool);
-  cancelled_waiting(pool);
+  canceled_inside(pool);
+  canceled_waiting(pool);
   shared_out(pool);
   close(pool);
   print(\"closed\");
@@ -1369,8 +1369,8 @@ fn main() -> Int {{
             ran.stdout,
             "returned 7: idle 2\n\
              raised: idle 2\n\
-             cancelled while leased: idle 2\n\
-             cancelled while waiting: idle 2\n\
+             canceled while leased: idle 2\n\
+             canceled while waiting: idle 2\n\
              served 200 of 200: idle 2\n\
              closed\n",
             "{backend}"
@@ -1840,7 +1840,7 @@ fn main() -> Int {
 // --- a cancel between `BEGIN` and the rollback -----------------------------
 //
 // **What these prevent: a write answered `Ok` that is never committed.** A
-// fiber cancelled after `transaction` sent `BEGIN` -- including while it
+// fiber canceled after `transaction` sent `BEGIN` -- including while it
 // waits for the `BEGIN`'s own reply -- must not unwind with the server inside
 // a transaction and nothing registered to end it. Otherwise `with_db` hands
 // the connection back that way, and the next borrower's autocommit
@@ -1857,7 +1857,7 @@ struct Recorded {
 }
 
 /// A server that records every simple query and answers each one, holding
-/// its answer to the first `BEGIN` until the program says it has cancelled.
+/// its answer to the first `BEGIN` until the program says it has canceled.
 ///
 /// **What the hold is for: the cancel has to land while `BEGIN` waits for
 /// its reply**, so that the server is inside a transaction the fiber was never
@@ -1958,8 +1958,8 @@ fn converse(
                             told.set_read_timeout(Some(std::time::Duration::from_secs(20)))
                                 .map_err(step("setting the control deadline"))?;
                             told.write_all(b"B").map_err(step("saying BEGIN has arrived"))?;
-                            let mut cancelled = [0u8; 1];
-                            told.read_exact(&mut cancelled).map_err(step("waiting to hear the cancel was delivered"))?;
+                            let mut canceled = [0u8; 1];
+                            told.read_exact(&mut canceled).map_err(step("waiting to hear the cancel was delivered"))?;
                         }
                     }
                 }
@@ -1985,7 +1985,7 @@ fn send(stream: &mut TcpStream, kind: u8, payload: &[u8]) -> std::io::Result<()>
 /// on the wire, before the connection's next borrower speaks.**
 ///
 /// No real server: the fake one holds its answer to the first `BEGIN` until
-/// the program has cancelled the transaction's fiber, and the program then
+/// the program has canceled the transaction's fiber, and the program then
 /// runs one more transaction on the same pooled connection. What the server
 /// heard, in order, is the assertion.
 #[test]
@@ -2012,7 +2012,7 @@ fn a_cancel_while_begin_is_answered_puts_a_rollback_on_the_wire() {
         assert_eq!(
             (recorded.heard.as_slice(), recorded.ended.as_str()),
             (["BEGIN", "ROLLBACK", "BEGIN", "COMMIT"].map(String::from).as_slice(), "Terminate"),
-            "{backend}: a transaction cancelled while its BEGIN was answered must roll back \
+            "{backend}: a transaction canceled while its BEGIN was answered must roll back \
              before the connection is lent again, and the pool must close the connection cleanly"
         );
     }
@@ -2058,10 +2058,10 @@ fn main() -> Int {{
     )
 }
 
-/// The program for [`a_cancelled_transaction_never_costs_a_write_against_a_real_server`].
+/// The program for [`a_canceled_transaction_never_costs_a_write_against_a_real_server`].
 ///
 /// Two phases on a pool of one, each 100 trials of: a fiber looping
-/// `with_db(transaction(..))`, cancelled after 1 to 4 ms.
+/// `with_db(transaction(..))`, canceled after 1 to 4 ms.
 ///
 /// - **Left open.** Then `SAVEPOINT` on the pool's connection, which the
 ///   server refuses outside a transaction block: accepted means the
@@ -2090,7 +2090,7 @@ fn churn(pool: Pool) -> () {
   }
 }
 
-fn cancelled_churn(pool: Pool, trial: Int) -> () {
+fn canceled_churn(pool: Pool, trial: Int) -> () {
   let f = Fiber::spawn(fn () => churn(pool));
   khora_sleep(1 + trial % 4);
   Fiber::cancel(f);
@@ -2139,7 +2139,7 @@ fn main() -> Int {
   let mut trial = 0;
   let mut open_after = 0;
   while trial < 100 {
-    cancelled_churn(pool, trial);
+    canceled_churn(pool, trial);
     open_after = open_after + match with_db(pool, left_open) { Result::Ok(n) => n, Result::Err(_) => 0 };
     trial = trial + 1
   };
@@ -2147,7 +2147,7 @@ fn main() -> Int {
   trial = 0;
   let mut told_ok = 0;
   while trial < 100 {
-    cancelled_churn(pool, trial);
+    canceled_churn(pool, trial);
     told_ok = told_ok + match with_db(pool, fn () => insert(trial)) { Result::Ok(n) => n, Result::Err(_) => 0 };
     let _ = with_db(pool, refused);
     trial = trial + 1
@@ -2164,15 +2164,15 @@ fn main() -> Int {
 }
 "#;
 
-/// **A cancelled transaction never hands its connection back inside the
+/// **A canceled transaction never hands its connection back inside the
 /// transaction, and never costs a later caller a write it was told had
 /// succeeded.** The regression test for a cancel landing between `BEGIN`
 /// and the rollback's registration, against the server that has to believe
 /// it; [`LOST_WRITES`] says how each is observed.
 ///
-/// Skipped without `KHORA_POSTGRES`, like its neighbours.
+/// Skipped without `KHORA_POSTGRES`, like its neighbors.
 #[test]
-fn a_cancelled_transaction_never_costs_a_write_against_a_real_server() {
+fn a_canceled_transaction_never_costs_a_write_against_a_real_server() {
     if std::env::var_os("KHORA_POSTGRES").is_none() {
         eprintln!(
             "skipping: set KHORA_POSTGRES=1 and bring up \
@@ -2193,7 +2193,7 @@ fn a_cancelled_transaction_never_costs_a_write_against_a_real_server() {
         assert_eq!(ran.code, Some(0), "{backend}: stderr {}", ran.stderr);
         assert_eq!(
             ran.stdout, "left open 0 of 100\nwrites answered Ok 100, present 100\n",
-            "a cancelled transaction must neither leave its connection inside a transaction \
+            "a canceled transaction must neither leave its connection inside a transaction \
              nor cost a later write: {seen:?}"
         );
     }
@@ -2211,7 +2211,7 @@ fn a_cancelled_transaction_never_costs_a_write_against_a_real_server() {
 ///
 /// Checked twice on one connection, with a statement between them, so the
 /// connection is shown still usable after the stray rollback. Skipped
-/// without `KHORA_POSTGRES`, like its neighbours.
+/// without `KHORA_POSTGRES`, like its neighbors.
 #[test]
 fn a_rollback_with_no_transaction_open_is_ok_against_a_real_server() {
     if std::env::var_os("KHORA_POSTGRES").is_none() {
@@ -3184,9 +3184,9 @@ fn main() -> Int {
   hold(100);
   let _ = ask(pool, "select 1");
   print("shrunk: " + until(pool, 0, 0, 1, 3000));
-  let cancelled = storm(pool, false);
-  report("cancel", cancelled);
-  if cancelled < 0 { report("abort", storm(pool, true)) };
+  let canceled = storm(pool, false);
+  report("cancel", canceled);
+  if canceled < 0 { report("abort", storm(pool, true)) };
   0
 }
 "#;
@@ -3568,9 +3568,9 @@ fn close_during_a_reconnect_wait_returns_promptly() {
     );
 }
 
-/// **Cancelled borrowers never cost the pool a connection, while
+/// **Canceled borrowers never cost the pool a connection, while
 /// connections are being lost and reconnected.** A pool of two; 200 trials of
-/// a fiber looping `select 1`, cancelled 1-4 ms in; every tenth trial the
+/// a fiber looping `select 1`, canceled 1-4 ms in; every tenth trial the
 /// server hangs up the other connection first, so cancels land while a slot
 /// is being checked, handed back and reconnected. Afterwards both
 /// connections must be live and idle, and twenty statements must all be
@@ -3579,7 +3579,7 @@ fn close_during_a_reconnect_wait_returns_promptly() {
 /// With a cancellation point between taking a slot and registering its
 /// give-back (the check run first), the pool loses slots.
 #[test]
-fn cancelled_borrowers_never_lose_a_slot_while_reconnecting() {
+fn canceled_borrowers_never_lose_a_slot_while_reconnecting() {
     let body = "fn churn(pool: Pool) -> () {
   let mut going = true;
   while going {
@@ -3665,7 +3665,7 @@ fn a_pool_shrunk_to_nothing_grows_back_when_the_server_returns() {
 }
 
 /// **An `abort` during a transaction's `ROLLBACK` does not cost the pool its
-/// connection.** A pool of one; a transaction whose body spins is cancelled
+/// connection.** A pool of one; a transaction whose body spins is canceled
 /// with `cancel_within(100)`, and the server stalls the `ROLLBACK` for a
 /// second, so the abort lands while the rollback waits. The next transaction
 /// must get the connection and commit, and the server must hear the
@@ -4053,7 +4053,7 @@ fn main() -> () {
 "##;
 
 /// **A cancel inside a nested transaction leaves nothing behind**, over 200
-/// trials. Odd trials are cancelled inside the inner body, even ones after
+/// trials. Odd trials are canceled inside the inner body, even ones after
 /// it answered `Ok`: its writes are then part of an outer transaction that
 /// never commits. A quarter of them cancel without waiting for either, so
 /// the cancel can land anywhere from reading the depth onward. What this
@@ -4087,7 +4087,7 @@ const NESTED_STORM_PROGRAM: &str = r##"module demo::main;
 //! A 200-trial cancel storm inside an inner transaction, real server 5433.
 //!
 //! Each trial: a fiber opens a transaction, writes a row, opens an inner
-//! transaction, writes a row, says it is in, and spins until cancelled. The
+//! transaction, writes a row, says it is in, and spins until canceled. The
 //! parent waits for that evidence, then a varying delay, then cancels. Before
 //! the evidence, the cancel can land anywhere from `depth` to the inner write.
 //! After each cancel the same (only) connection is asked whether it is inside

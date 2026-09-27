@@ -223,7 +223,7 @@ fn cells_do_not_coerce() {
 /// the child stops at its first mark, which is correct and proves less. Here
 /// the interesting moment is precisely "after `begin`, before `commit`", and
 /// that is a moment only the child can name.
-const CANCELLABLE: &str = r#"extern fn khora_cancel();
+const CANCELABLE: &str = r#"extern fn khora_cancel();
 
 pub type Oops = | Bad;
 
@@ -232,7 +232,7 @@ pub type Oops = | Bad;
 fn mark() -> Int raises Oops { 1 }
 "#;
 
-/// **The half 13.3 named.** A fiber cancelled inside a transaction rolls back,
+/// **The half 13.3 named.** A fiber canceled inside a transaction rolls back,
 /// and does not commit.
 ///
 /// The cancellation never touches a line of `transaction`: it travels out of
@@ -240,11 +240,11 @@ fn mark() -> Int raises Oops { 1 }
 /// ending — the same mechanism that would have run it if the body had raised,
 /// reached by a path the source of `transaction` does not mention.
 #[test]
-fn a_cancelled_fiber_rolls_back_and_does_not_commit() {
+fn a_canceled_fiber_rolls_back_and_does_not_commit() {
     let out = run_with(
-        "db_cancelled",
+        "db_canceled",
         &format!(
-            r#"{CANCELLABLE}
+            r#"{CANCELABLE}
 fn worker() -> () raises Oops {{
   with {{ db: recording(false) }} {{
     transaction(fn () => {{
@@ -261,7 +261,7 @@ fn worker() -> () raises Oops {{
         ),
         r#"  let f = Fiber::spawn(fn () => worker()!);
   // `wait`, not `join`: this needs the ordering and not the answer, and a
-  // cancelled fiber has no answer to give -- a join would have nothing to
+  // canceled fiber has no answer to give -- a join would have nothing to
   // hand back and would unwind this frame along with it.
   Fiber::wait(f)! catch { Oops::Bad => () };
   print("the parent carried on");"#,
@@ -269,7 +269,7 @@ fn worker() -> () raises Oops {{
     assert_eq!(
         out,
         "begin\nexecute\nrollback\nthe parent carried on\n",
-        "a cancelled transaction must roll back, and must not commit"
+        "a canceled transaction must roll back, and must not commit"
     );
 }
 
@@ -285,7 +285,7 @@ fn a_committed_transaction_does_not_roll_back_on_the_way_out() {
     let out = run_with(
         "db_commit_settles",
         &format!(
-            r#"{CANCELLABLE}
+            r#"{CANCELABLE}
 fn worker() -> () raises Oops {{
   with {{ db: recording(false) }} {{
     match transaction(fn () => {{
@@ -301,7 +301,7 @@ fn worker() -> () raises Oops {{
         ),
         r#"  let f = Fiber::spawn(fn () => worker()!);
   // `wait`, not `join`: this needs the ordering and not the answer, and a
-  // cancelled fiber has no answer to give -- a join would have nothing to
+  // canceled fiber has no answer to give -- a join would have nothing to
   // hand back and would unwind this frame along with it.
   Fiber::wait(f)! catch { Oops::Bad => () };"#,
     );
@@ -356,7 +356,7 @@ fn a_failing_rollback_does_not_hide_the_reason_for_it() {
     let out = run_with(
         "db_rollback_fails",
         &format!(
-            r#"{CANCELLABLE}{BRITTLE}
+            r#"{CANCELABLE}{BRITTLE}
 fn worker() -> () raises Oops {{
   with {{ db: brittle() }} {{
     let answer: Result<Int, DbError> = transaction(fn () => {{
@@ -387,7 +387,7 @@ fn worker() -> () raises Oops {{
 /// **On the cancellation path a failed rollback reaches the handler.**
 ///
 /// The error path has somebody to tell: it returns `RolledBack` and the caller
-/// reads it. A cancelled fiber has no caller waiting for an answer, so the
+/// reads it. A canceled fiber has no caller waiting for an answer, so the
 /// failure used to go nowhere — and the connection went back to a pool having
 /// neither committed nor, as far as anything knew, rolled back.
 ///
@@ -402,9 +402,9 @@ fn worker() -> () raises Oops {{
 #[test]
 fn a_failed_rollback_during_cancellation_tells_the_handler() {
     let out = run_with(
-        "db_rollback_fails_cancelled",
+        "db_rollback_fails_canceled",
         &format!(
-            r#"{CANCELLABLE}{BRITTLE}
+            r#"{CANCELABLE}{BRITTLE}
 fn worker() -> () raises Oops {{
   with {{ db: brittle() }} {{
     transaction(fn () => {{
@@ -427,7 +427,7 @@ fn worker() -> () raises Oops {{
     );
 }
 
-/// **A cancelled lease comes back to a connection that is not mid-transaction.**
+/// **A canceled lease comes back to a connection that is not mid-transaction.**
 ///
 /// This is the composition `packages/postgres` is built on and neither half
 /// tested: `with_db` registers the lease's return with a region it opens, and
@@ -435,7 +435,7 @@ fn worker() -> () raises Oops {{
 /// inside. The pool's correctness is entirely the claim that the inner
 /// finalizer runs first.
 ///
-/// If it did not, a cancelled fiber would put a connection back in the idle
+/// If it did not, a canceled fiber would put a connection back in the idle
 /// channel with an open transaction on it, and the next borrower would inherit
 /// somebody else's uncommitted rows and locks. No engine reports that; it
 /// looks like the second query being wrong.
@@ -443,11 +443,11 @@ fn worker() -> () raises Oops {{
 /// So the assertion is the order, not the presence: `rollback` before the
 /// lease goes back, on the cancellation path.
 #[test]
-fn a_cancelled_lease_is_returned_only_after_the_rollback() {
+fn a_canceled_lease_is_returned_only_after_the_rollback() {
     let out = run_with(
         "db_lease_ordering",
         &format!(
-            r#"{CANCELLABLE}
+            r#"{CANCELABLE}
 fn worker() -> () raises Oops {{
   with {{ db: recording(false) }} {{
     // The two regions `with_db` and `transaction` open, in the order the pool
@@ -484,7 +484,7 @@ fn a_failed_body_rolls_back_exactly_once() {
     let out = run_with(
         "db_rollback_once",
         &format!(
-            r#"{CANCELLABLE}
+            r#"{CANCELABLE}
 fn worker() -> () raises Oops {{
   with {{ db: recording(false) }} {{
     let answer: Result<Int, DbError> = transaction(fn () => {{
@@ -501,14 +501,14 @@ fn worker() -> () raises Oops {{
         ),
         r#"  let f = Fiber::spawn(fn () => worker()!);
   // `wait`, not `join`: this needs the ordering and not the answer, and a
-  // cancelled fiber has no answer to give -- a join would have nothing to
+  // canceled fiber has no answer to give -- a join would have nothing to
   // hand back and would unwind this frame along with it.
   Fiber::wait(f)! catch { Oops::Bad => () };"#,
     );
     assert_eq!(out, "begin\nrollback\nrolled back: rejected: no\n");
 }
 
-/// **The rollback's own work is not cancellable.** A real `rollback` sends a
+/// **The rollback's own work is not cancelable.** A real `rollback` sends a
 /// statement and reads a reply, and every `!` on that path is a cancellation
 /// point that would find the flag still set — so a rollback caused by a
 /// cancellation would be interrupted by the same cancellation, before it
@@ -523,7 +523,7 @@ fn a_rollback_may_do_fallible_work_while_the_cancellation_waits() {
     let out = run_with(
         "db_rollback_shielded",
         &format!(
-            r#"{CANCELLABLE}
+            r#"{CANCELABLE}
 /// Like `recording`, but its rollback has a cancellation point in it.
 fn talkative() -> Db {{
   handler for Db {{
@@ -563,7 +563,7 @@ fn worker() -> () raises Oops {{
         ),
         r#"  let f = Fiber::spawn(fn () => worker()!);
   // `wait`, not `join`: this needs the ordering and not the answer, and a
-  // cancelled fiber has no answer to give -- a join would have nothing to
+  // canceled fiber has no answer to give -- a join would have nothing to
   // hand back and would unwind this frame along with it.
   Fiber::wait(f)! catch { Oops::Bad => () };
   print("the parent carried on");"#,
@@ -849,23 +849,23 @@ fn worker() -> () {{
 // rollback registered after `begin` returned left about half of 300 cancels
 // that way, and lost writes answered `Ok`.
 //
-// The handler here is cancelled inside the operation it is asked to perform,
+// The handler here is canceled inside the operation it is asked to perform,
 // after saying it was asked: the `BEGIN` has reached the server and the fiber
 // stops while it waits for the reply. That is the widest form of the gap, and
 // no later registration point can close it -- only one before `begin` can.
 
-/// A handler cancelled inside the operation named `at`.
+/// A handler canceled inside the operation named `at`.
 ///
 /// `turn` is a loop that goes round twice, so its back edge is a cancellation
 /// point in any function; a cancel set just before it is taken there.
-const CANCELLED_AT: &str = r#"extern fn khora_cancel();
+const CANCELED_AT: &str = r#"extern fn khora_cancel();
 
 fn turn() -> () {
   let mut i = 0;
   while i < 2 { i = i + 1 };
 }
 
-fn cancelled_in(at: String) -> Db {
+fn canceled_in(at: String) -> Db {
   handler for Db {
     query: fn (_sql, _binds) => Result::Ok(List::Nil),
     execute: fn (_sql, _binds) => Result::Ok(1),
@@ -894,7 +894,7 @@ fn cancelled_in(at: String) -> Db {
 }
 
 fn worker(at: String, fails: Bool) -> () {
-  with { db: cancelled_in(at) } {
+  with { db: canceled_in(at) } {
     let _answer: Result<Int, DbError> = transaction(fn () =>
       if fails { Result::Err(DbError::Rejected("no")) } else { Result::Ok(1) });
     ()
@@ -902,10 +902,10 @@ fn worker(at: String, fails: Bool) -> () {
 }
 "#;
 
-fn cancelled_at(name: &str, at: &str, fails: bool) -> String {
+fn canceled_at(name: &str, at: &str, fails: bool) -> String {
     run_with(
         name,
-        CANCELLED_AT,
+        CANCELED_AT,
         &format!(
             "  let f = Fiber::spawn(fn () => worker(\"{at}\", {fails}));\n  \
              Fiber::wait(f);\n  print(\"the parent carried on\");"
@@ -919,7 +919,7 @@ fn cancelled_at(name: &str, at: &str, fails: bool) -> String {
 /// rollback the connection goes back to its pool inside the transaction.
 #[test]
 fn a_cancel_while_begin_waits_for_its_reply_rolls_back() {
-    let out = cancelled_at("db_cancel_in_begin", "begin", false);
+    let out = canceled_at("db_cancel_in_begin", "begin", false);
     assert_eq!(
         out, "begin\nrollback sent\nrollback answered\nthe parent carried on\n",
         "the `BEGIN` reached the server, so a cancel before its reply must still roll back"
@@ -932,7 +932,7 @@ fn a_cancel_while_begin_waits_for_its_reply_rolls_back() {
 /// or it did not and the `ROLLBACK` ends the transaction.
 #[test]
 fn a_cancel_while_commit_waits_for_its_reply_rolls_back() {
-    let out = cancelled_at("db_cancel_in_commit", "commit", false);
+    let out = canceled_at("db_cancel_in_commit", "commit", false);
     assert_eq!(
         out, "begin\ncommit\nrollback sent\nrollback answered\nthe parent carried on\n",
         "a commit cut short by a cancel must be followed by a rollback"
@@ -945,7 +945,7 @@ fn a_cancel_while_commit_waits_for_its_reply_rolls_back() {
 /// unheard and the connection on its way back to a pool.
 #[test]
 fn a_cancel_during_the_rollback_of_a_failed_body_does_not_stop_it() {
-    let out = cancelled_at("db_cancel_in_rollback", "rollback", true);
+    let out = canceled_at("db_cancel_in_rollback", "rollback", true);
     assert_eq!(
         out, "begin\nrollback sent\nrollback answered\nthe parent carried on\n",
         "the rollback of a failed body must run to its end"

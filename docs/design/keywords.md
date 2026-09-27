@@ -237,7 +237,7 @@ Three rules, each picked so a reader can predict it:
 that needs six of them says so once. It is the type-level counterpart of
 `context`, which names a bundle of the handlers that supply them.
 
-**It is recognised only at declaration position**, like `handler`, `context`,
+**It is recognized only at declaration position**, like `handler`, `context`,
 `test`, `bench` and `derive`. `std::db` exports a `Row` and about eighty places
 name a local `row`; reserving the word outright would rename all of them for a
 declaration form nobody writes twice a day. No declaration may begin with a bare

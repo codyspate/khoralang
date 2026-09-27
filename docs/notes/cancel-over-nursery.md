@@ -1,4 +1,4 @@
-# Cancelling a fiber whose body is a nursery never returned
+# Canceling a fiber whose body is a nursery never returned
 
 Status: **fixed.** Kept because the diagnosis took four attempts and three of
 them failed for reasons worth writing down.
@@ -13,7 +13,7 @@ Fiber::wait(hand);        // never returned
 ```
 
 No exit code, no message, no backtrace. The same worker spawned directly and
-cancelled the same way stopped in about 100 ms. The nursery was the whole
+canceled the same way stopped in about 100 ms. The nursery was the whole
 difference.
 
 ## Why
@@ -34,7 +34,7 @@ The trace, with the instrumentation that settled it:
 [wait] between-rounds check: stopping=false    <- runs before the cancel
 [wait] joining child 0...
 [wait]   child 0 is fiber 3
-cancelling...
+canceling...
 [cancel] flagging fiber 2                      <- the parent, and only the parent
 cancel returned; waiting...                    <- forever
 ```
@@ -53,9 +53,9 @@ Three parts, and all three are needed.
    which made exactly the fibers a cancellation needs to reach findable by
    nobody. This was invisible until `cancel_open_crews` reported `crew with 0
    child(ren)` on a nursery that plainly had one.
-3. **Nothing locked while a child is cancelled.** The handles are copied out
+3. **Nothing locked while a child is canceled.** The handles are copied out
    from under both locks first. A child's exit path takes the crew's lock to
-   deregister itself, so cancelling while holding it deadlocks — and a deadlock
+   deregister itself, so canceling while holding it deadlocks — and a deadlock
    here is indistinguishable from the original hang, which is why the second
    attempt looked like no progress at all.
 
@@ -86,10 +86,10 @@ one-file target. It should have been the first thing tried, not the fourth.
 
 ## The regression test
 
-`cancelling_a_fiber_inside_a_nursery_returns`, in
+`canceling_a_fiber_inside_a_nursery_returns`, in
 `crates/khora-codegen-llvm/tests/fibers.rs`.
 
-It sleeps 100 ms before cancelling, and **that pause is the test**. A
+It sleeps 100 ms before canceling, and **that pause is the test**. A
 cancellation arriving before the parent enters the join is caught by the
 between-rounds check and succeeds even against the unfixed runtime; without the
 pause the test passes on the very defect it exists to catch. It also runs the

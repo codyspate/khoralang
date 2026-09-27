@@ -957,7 +957,7 @@ fn main() -> Int {{
 }
 
 /// The same value called under two different handlers. This is what a
-/// requirement travelling in the type buys over capturing it at the mention:
+/// requirement traveling in the type buys over capturing it at the mention:
 /// the function is mounted once and served differently.
 #[test]
 fn one_function_value_serves_two_handlers() {
@@ -1457,7 +1457,7 @@ fn main() -> Int {{ khora_print_int(counter); 0 }}
 ///
 /// `A + B + C` parses as `(A + B) + C`, and the reader took the outer union's
 /// direct operands — a nested union, and `C`. The nested one is not a shape it
-/// answers for, so `A` and `B` collapsed into one entry labelled after
+/// answers for, so `A` and `B` collapsed into one entry labeled after
 /// `Unknown` and the row carried `C` and a ghost. Loud rather than silent: the
 /// caller was told the function does not raise `A`, which was true of the row
 /// that got built and useless as a message.
@@ -1518,25 +1518,25 @@ extern fn khora_live_count() -> Int;
 
 pub trait Eq { fn eq(self, other: Self) -> Bool; }
 
-pub type Colour = | Red | Green | Blue(shade: Int);
+pub type Color = | Red | Green | Blue(shade: Int);
 
-impl Eq for Colour {
-  fn eq(self, other: Colour) -> Bool {
+impl Eq for Color {
+  fn eq(self, other: Color) -> Bool {
     match self {
-      Colour::Red => match other {
-        Colour::Red => true,
-        Colour::Green => false,
-        Colour::Blue(s) => false,
+      Color::Red => match other {
+        Color::Red => true,
+        Color::Green => false,
+        Color::Blue(s) => false,
       },
-      Colour::Green => match other {
-        Colour::Red => false,
-        Colour::Green => true,
-        Colour::Blue(s) => false,
+      Color::Green => match other {
+        Color::Red => false,
+        Color::Green => true,
+        Color::Blue(s) => false,
       },
-      Colour::Blue(mine) => match other {
-        Colour::Red => false,
-        Colour::Green => false,
-        Colour::Blue(theirs) => mine == theirs,
+      Color::Blue(mine) => match other {
+        Color::Red => false,
+        Color::Green => false,
+        Color::Blue(theirs) => mine == theirs,
       },
     }
   }
@@ -1553,10 +1553,10 @@ fn equality_on_an_adt_calls_its_eq_impl() {
         &format!(
             "{EQ}
 fn main() -> Int {{
-  khora_print_int(if Colour::Red == Colour::Red {{ 1 }} else {{ 0 }});
-  khora_print_int(if Colour::Red == Colour::Green {{ 1 }} else {{ 0 }});
-  khora_print_int(if Colour::Blue(3) == Colour::Blue(3) {{ 1 }} else {{ 0 }});
-  khora_print_int(if Colour::Blue(3) == Colour::Blue(4) {{ 1 }} else {{ 0 }});
+  khora_print_int(if Color::Red == Color::Red {{ 1 }} else {{ 0 }});
+  khora_print_int(if Color::Red == Color::Green {{ 1 }} else {{ 0 }});
+  khora_print_int(if Color::Blue(3) == Color::Blue(3) {{ 1 }} else {{ 0 }});
+  khora_print_int(if Color::Blue(3) == Color::Blue(4) {{ 1 }} else {{ 0 }});
   khora_print_int(khora_live_count());
   0
 }}
@@ -1576,8 +1576,8 @@ fn inequality_is_equality_negated() {
         &format!(
             "{EQ}
 fn main() -> Int {{
-  khora_print_int(if Colour::Blue(3) != Colour::Blue(4) {{ 1 }} else {{ 0 }});
-  khora_print_int(if Colour::Green != Colour::Green {{ 1 }} else {{ 0 }});
+  khora_print_int(if Color::Blue(3) != Color::Blue(4) {{ 1 }} else {{ 0 }});
+  khora_print_int(if Color::Green != Color::Green {{ 1 }} else {{ 0 }});
   0
 }}
 "
@@ -1629,16 +1629,16 @@ extern fn khora_print_int(value: Int);
 
 pub trait Eq { fn eq(self, other: Self) -> Bool; }
 
-pub type Colour = | Red | Green;
+pub type Color = | Red | Green;
 
 fn main() -> Int {
-  khora_print_int(if Colour::Red == Colour::Green { 1 } else { 0 });
+  khora_print_int(if Color::Red == Color::Green { 1 } else { 0 });
   0
 }
 ",
     );
     assert!(
-        found.iter().any(|m| m.contains("no `Eq` impl") && m.contains("impl Eq for Colour")),
+        found.iter().any(|m| m.contains("no `Eq` impl") && m.contains("impl Eq for Color")),
         "expected the missing impl to be named, got {found:?}"
     );
 }

@@ -112,7 +112,7 @@ fn release_is_the_smaller_object_for_this_program() {
 /// **Release is reproducible with nothing set**, which is the whole reason the
 /// profile owns the debug-information decision.
 ///
-/// Across processes, like its neighbour in `reproducible.rs`: within one
+/// Across processes, like its neighbor in `reproducible.rs`: within one
 /// process every `HashSet` shares a seed, so an in-process comparison cannot
 /// see the failure this one can. The **executable** is compared as well as the
 /// object, because the artifact somebody ships is the executable, and on

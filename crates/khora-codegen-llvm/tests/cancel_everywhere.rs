@@ -13,7 +13,7 @@
 //!
 //! **A program that cancels a fiber at a point waits for the fiber to say it
 //! has reached that point**, on a channel, instead of sleeping first. A fiber
-//! cancelled before its first turn never runs: no finalizer is registered and
+//! canceled before its first turn never runs: no finalizer is registered and
 //! no change function is entered. On a slow runner a 50 ms sleep ended
 //! before the fiber had started, and a test either printed the wrong thing or
 //! passed without exercising what it names. A sleep that is left after such
@@ -87,15 +87,15 @@ fn run(exe: &PathBuf, backend: &str, patience: Duration, signal_after: Option<Du
         .spawn()
         .expect("the program should run");
     let started = Instant::now();
-    let mut signalled = false;
+    let mut signaled = false;
     let mut hung = false;
     loop {
         if child.try_wait().expect("waiting").is_some() {
             break;
         }
         if let Some(after) = signal_after {
-            if !signalled && started.elapsed() >= after {
-                signalled = true;
+            if !signaled && started.elapsed() >= after {
+                signaled = true;
                 #[cfg(unix)]
                 {
                     let _ = Command::new("kill").arg("-TERM").arg(child.id().to_string()).status();
@@ -133,7 +133,7 @@ fn on_both(name: &str, source: &str) -> Vec<(&'static str, Ran)> {
 /// its caller has no row, and the thunk has no row. The finalizer runs and the
 /// caller's tail does not.
 #[test]
-fn an_infallible_loop_stops_when_its_fiber_is_cancelled() {
+fn an_infallible_loop_stops_when_its_fiber_is_canceled() {
     const SOURCE: &str = "module main;
 import std::core::{print, Region, Fiber, Channel};
 import std::clock::{Clock};
@@ -164,7 +164,7 @@ pub fn main() -> Int {
     let t0 = clock.monotonic_millis();
     Fiber::wait(f);
     let waited = clock.monotonic_millis() - t0;
-    print(\"cancelled: ${Fiber::cancelled(f)}; prompt: ${waited < 2000}\");
+    print(\"canceled: ${Fiber::canceled(f)}; prompt: ${waited < 2000}\");
     0
   }
 }
@@ -172,7 +172,7 @@ pub fn main() -> Int {
     for (backend, ran) in on_both("cancel_everywhere_loop", SOURCE) {
         assert!(!ran.hung, "`{backend}`: the loop never stopped: {}", ran.stdout);
         assert_eq!(
-            ran.stdout, "finalizer ran\ncancelled: true; prompt: true\n",
+            ran.stdout, "finalizer ran\ncanceled: true; prompt: true\n",
             "`{backend}`: {}",
             ran.stderr
         );
@@ -210,14 +210,14 @@ pub fn main() -> Int {
     let _ = Channel::receive(ready);
     Fiber::cancel(b);
     Fiber::wait(b);
-    print(\"parent cancelled: ${Fiber::cancelled(b)}\");
+    print(\"parent canceled: ${Fiber::canceled(b)}\");
     0
   }
 }
 ";
     for (backend, ran) in on_both("cancel_everywhere_join", SOURCE) {
         assert!(!ran.hung, "`{backend}`: {}", ran.stdout);
-        assert_eq!(ran.stdout, "parent cancelled: true\n", "`{backend}`: {}", ran.stderr);
+        assert_eq!(ran.stdout, "parent canceled: true\n", "`{backend}`: {}", ran.stderr);
         assert_eq!(ran.code, Some(0), "`{backend}`");
     }
 }
@@ -251,7 +251,7 @@ pub fn main() -> Int {
     let _ = Channel::receive(ready);
     Fiber::cancel(a);
     Fiber::wait(a);
-    print(\"cancelled: ${Fiber::cancelled(a)}\");
+    print(\"canceled: ${Fiber::canceled(a)}\");
     print(\"process still here\");
     0
   }
@@ -260,7 +260,7 @@ pub fn main() -> Int {
     for (backend, ran) in on_both("cancel_everywhere_pointer", SOURCE) {
         assert!(!ran.hung, "`{backend}`: {}", ran.stdout);
         assert_eq!(
-            ran.stdout, "finalizer ran\ncancelled: true\nprocess still here\n",
+            ran.stdout, "finalizer ran\ncanceled: true\nprocess still here\n",
             "`{backend}`: {}",
             ran.stderr
         );
@@ -269,7 +269,7 @@ pub fn main() -> Int {
 }
 
 /// **Three infallible frames unwind and release everything they held.**
-/// Twenty fibers are cancelled in the innermost of three frames, each holding
+/// Twenty fibers are canceled in the innermost of three frames, each holding
 /// lists and a string; the live count comes back to where it started.
 #[test]
 fn three_infallible_frames_unwind_and_leak_nothing() {
@@ -346,24 +346,24 @@ pub fn main() -> Int {
     let _ = Channel::receive(ready);
     Fiber::cancel(f);
     Fiber::wait(f);
-    print(\"cancelled: ${Fiber::cancelled(f)}; caught: ${Shared::get(caught)}\");
+    print(\"canceled: ${Fiber::canceled(f)}; caught: ${Shared::get(caught)}\");
     0
   }
 }
 ";
     for (backend, ran) in on_both("cancel_everywhere_catch", SOURCE) {
         assert!(!ran.hung, "`{backend}`: {}", ran.stdout);
-        assert_eq!(ran.stdout, "cancelled: true; caught: 0\n", "`{backend}`: {}", ran.stderr);
+        assert_eq!(ran.stdout, "canceled: true; caught: 0\n", "`{backend}`: {}", ran.stderr);
         assert_eq!(ran.code, Some(0), "`{backend}`");
     }
 }
 
-/// **A cancelled `clock.sleep` does not run the statement after it**, on
+/// **A canceled `clock.sleep` does not run the statement after it**, on
 /// either backend. The sleep is woken and gives up early, answering as if it
 /// had finished; without a check after it the fiber would run one more step of
 /// the work it was told to abandon -- here, the `print`.
 #[test]
-fn a_cancelled_sleep_does_not_run_the_statement_after_it() {
+fn a_canceled_sleep_does_not_run_the_statement_after_it() {
     const SOURCE: &str = "module main;
 import std::core::{print, Fiber, Channel};
 import std::clock::{Clock};
@@ -384,26 +384,26 @@ pub fn main() -> Int {
     Fiber::cancel(f);
     Fiber::wait(f);
     let waited = clock.monotonic_millis() - t0;
-    print(\"cancelled: ${Fiber::cancelled(f)}; prompt: ${waited < 2000}\");
+    print(\"canceled: ${Fiber::canceled(f)}; prompt: ${waited < 2000}\");
     0
   }
 }
 ";
     for (backend, ran) in on_both("cancel_everywhere_sleep", SOURCE) {
         assert!(!ran.hung, "`{backend}`: {}", ran.stdout);
-        assert_eq!(ran.stdout, "cancelled: true; prompt: true\n", "`{backend}`: {}", ran.stderr);
+        assert_eq!(ran.stdout, "canceled: true; prompt: true\n", "`{backend}`: {}", ran.stderr);
         assert_eq!(ran.code, Some(0), "`{backend}`");
     }
 }
 
-/// **A `Fiber::join` inside a change function that comes back cancelled
-/// leaves the cell as it was**, and the fiber stops. The updater is cancelled
+/// **A `Fiber::join` inside a change function that comes back canceled
+/// leaves the cell as it was**, and the fiber stops. The updater is canceled
 /// while its change function waits on a child; the cell must keep `41` -- not
 /// the zero the unwound change function would have handed back -- and a
 /// `String` cell must keep `hello` rather than a null the next read crashes
 /// on.
 #[test]
-fn a_join_cancelled_inside_a_change_function_changes_nothing() {
+fn a_join_canceled_inside_a_change_function_changes_nothing() {
     const SOURCE: &str = "module main;
 import std::core::{print, Fiber, Shared, Channel};
 import std::clock::{Clock};
@@ -442,17 +442,17 @@ pub fn main() -> Int {
     let _ = Channel::receive(inside);
     Fiber::cancel(f);
     Fiber::wait(f);
-    print(\"int: cancelled ${Fiber::cancelled(f)}; cell = ${Shared::get(cell)}\");
+    print(\"int: canceled ${Fiber::canceled(f)}; cell = ${Shared::get(cell)}\");
     let g = Fiber::spawn(fn () => updater_s(text, inside));
     let _ = Channel::receive(inside);
     Fiber::cancel(g);
     Fiber::wait(g);
-    print(\"string: cancelled ${Fiber::cancelled(g)}; text = ${Shared::get(text)}\");
+    print(\"string: canceled ${Fiber::canceled(g)}; text = ${Shared::get(text)}\");
     let h = Fiber::spawn(fn () => modifier(cell, inside));
     let _ = Channel::receive(inside);
     Fiber::cancel(h);
     Fiber::wait(h);
-    print(\"modify: cancelled ${Fiber::cancelled(h)}; cell = ${Shared::get(cell)}\");
+    print(\"modify: canceled ${Fiber::canceled(h)}; cell = ${Shared::get(cell)}\");
     0
   }
 }
@@ -461,9 +461,9 @@ pub fn main() -> Int {
         assert!(!ran.hung, "`{backend}`: {}", ran.stdout);
         assert_eq!(
             ran.stdout,
-            "int: cancelled true; cell = 41\n\
-             string: cancelled true; text = hello\n\
-             modify: cancelled true; cell = 41\n",
+            "int: canceled true; cell = 41\n\
+             string: canceled true; text = hello\n\
+             modify: canceled true; cell = 41\n",
             "`{backend}`: {}",
             ran.stderr
         );
@@ -472,7 +472,7 @@ pub fn main() -> Int {
 }
 
 /// **A change function that joins a child somebody else stopped changes
-/// nothing, and its caller stops** -- although nobody cancelled the caller.
+/// nothing, and its caller stops** -- although nobody canceled the caller.
 /// Joining a stopped fiber stops the joiner, inside a change function as
 /// everywhere else: `main` exits 130 with the cell still `41`, and it does not
 /// go on with an update that answered a zero.
@@ -567,14 +567,14 @@ pub fn main() -> Int {
     let _ = Channel::receive(ready);
     Fiber::cancel(f);
     Fiber::wait(f);
-    print(\"in change fn: cancelled ${Fiber::cancelled(f)}; finalizer finished ${Shared::get(log)}; cell = ${Shared::get(cell)}\");
+    print(\"in change fn: canceled ${Fiber::canceled(f)}; finalizer finished ${Shared::get(log)}; cell = ${Shared::get(cell)}\");
     let cell2 = Shared::of(\"start\");
     let log2 = Shared::of(0);
     let g = Fiber::spawn(fn () => control(cell2, log2, ready));
     let _ = Channel::receive(ready);
     Fiber::cancel(g);
     Fiber::wait(g);
-    print(\"control: cancelled ${Fiber::cancelled(g)}; finalizer finished ${Shared::get(log2)}; cell = ${Shared::get(cell2)}\");
+    print(\"control: canceled ${Fiber::canceled(g)}; finalizer finished ${Shared::get(log2)}; cell = ${Shared::get(cell2)}\");
     0
   }
 }
@@ -583,8 +583,8 @@ pub fn main() -> Int {
         assert!(!ran.hung, "`{backend}`: {}", ran.stdout);
         assert_eq!(
             ran.stdout,
-            "in change fn: cancelled true; finalizer finished 1; cell = start+fin30993\n\
-             control: cancelled true; finalizer finished 1; cell = start+fin30993\n",
+            "in change fn: canceled true; finalizer finished 1; cell = start+fin30993\n\
+             control: canceled true; finalizer finished 1; cell = start+fin30993\n",
             "`{backend}`: {}",
             ran.stderr
         );
@@ -654,13 +654,13 @@ pub fn main() -> Int {
 
 /// **A `String` `<` is a cancellation point that leaks nothing.** `pick`'s
 /// only way to stop is the comparison, which is a call to `impl Ord for
-/// String`, and `held` is moved into the answer after it. Fibers are cancelled
+/// String`, and `held` is moved into the answer after it. Fibers are canceled
 /// inside the comparison, once and then twenty times, and the live count must
 /// come back to where it started both times. It is read before the `print`,
 /// because a count read inside `${..}` also sees the pieces of that string
 /// already built.
 ///
-/// **Each fiber compares until it is cancelled, so the cancel is the only way
+/// **Each fiber compares until it is canceled, so the cancel is the only way
 /// out.** It used to compare once and cancel after `clock.sleep(20)`, which
 /// assumed the comparison was still running when the cancel arrived. On a
 /// macOS arm64 runner it often was not: the program printed `stopped 0` /
@@ -674,7 +674,7 @@ pub fn main() -> Int {
 /// lands inside `impl Ord for String`, and the loop's only exit is the
 /// cancel.
 #[test]
-fn a_string_comparison_cancelled_leaks_nothing() {
+fn a_string_comparison_canceled_leaks_nothing() {
     const SOURCE: &str = "module main;
 import std::core::{Fiber, Channel, print};
 import std::clock::{Clock};
@@ -692,7 +692,7 @@ fn big(seed: String) -> String {
   s
 }
 
-fn until_cancelled(round: Int, a: String, b: String, ready: Channel<Int>) -> Int {
+fn until_canceled(round: Int, a: String, b: String, ready: Channel<Int>) -> Int {
   let mut total = 0;
   Channel::send(ready, 1);
   loop {
@@ -707,12 +707,12 @@ fn rounds(a: String, b: String, n: Int) -> Int with { clock: Clock } {
   let mut round = 0;
   let mut stopped = 0;
   while round < n {
-    let f = Fiber::spawn(fn () => until_cancelled(round, a, b, ready));
+    let f = Fiber::spawn(fn () => until_canceled(round, a, b, ready));
     let _ = Channel::receive(ready);
     clock.sleep(20);
     Fiber::cancel(f);
     Fiber::wait(f);
-    if Fiber::cancelled(f) { stopped = stopped + 1; };
+    if Fiber::canceled(f) { stopped = stopped + 1; };
     round = round + 1;
   };
   let delta = khora_live_count() - before;
@@ -744,7 +744,7 @@ pub fn main() -> Int {
 
 /// **A binding moved after a call that stops is released by the unwind.**
 ///
-/// Each shape holds a `String` across a call that is cancelled, and hands it
+/// Each shape holds a `String` across a call that is canceled, and hands it
 /// on after the call: straight-line, in a loop body, in a `match` arm (the
 /// arm's own binding and a `let` inside it), into a constructor, after a call
 /// through a closure, and a binding overwritten by the call's result (dead
@@ -858,7 +858,7 @@ fn rounds(which: Int, n: Int) -> Int with { clock: Clock } {
     clock.sleep(3);
     Fiber::cancel(f);
     Fiber::wait(f);
-    if Fiber::cancelled(f) { stopped = stopped + 1; };
+    if Fiber::canceled(f) { stopped = stopped + 1; };
     round = round + 1;
   };
   let grew = khora_live_count() - before;
@@ -893,7 +893,7 @@ pub fn main() -> Int {
 /// **Recursion through a function value stops promptly**, both through a
 /// record field (`k.f(k, n - 1)`, which never names `walk`) and through a
 /// lambda's own binding. Neither has a loop or a named call cycle; each runs
-/// for seconds uncancelled. Both have to stop within 100 ms of the cancel.
+/// for seconds uncanceled. Both have to stop within 100 ms of the cancel.
 ///
 /// The third shape's only indirect call is made by an intrinsic: `attempt`
 /// calls the thunk it is handed, which reaches `walk` again through an
@@ -952,7 +952,7 @@ fn stop_after(f: Fiber<Int, {}>, name: String) -> () with { clock: Clock } {
   let t = clock.monotonic_millis();
   Fiber::cancel(f);
   Fiber::wait(f);
-  print(\"${name}: cancelled ${Fiber::cancelled(f)}; within 100 ms ${clock.monotonic_millis() - t < 100}\");
+  print(\"${name}: canceled ${Fiber::canceled(f)}; within 100 ms ${clock.monotonic_millis() - t < 100}\");
 }
 
 pub fn main() -> Int {
@@ -968,9 +968,9 @@ pub fn main() -> Int {
         assert!(!ran.hung, "`{backend}`: {}", ran.stdout);
         assert_eq!(
             ran.stdout,
-            "knot: cancelled true; within 100 ms true\n\
-             lambda: cancelled true; within 100 ms true\n\
-             attempt: cancelled true; within 100 ms true\n",
+            "knot: canceled true; within 100 ms true\n\
+             lambda: canceled true; within 100 ms true\n\
+             attempt: canceled true; within 100 ms true\n",
             "`{backend}`: {}",
             ran.stderr
         );
@@ -978,13 +978,13 @@ pub fn main() -> Int {
     }
 }
 
-/// **A fiber cancelled while it waits in a nursery does not run the nursery's
+/// **A fiber canceled while it waits in a nursery does not run the nursery's
 /// caller's tail.** The wait cancels the children, waits for them, and hands
 /// back a count; the caller must stop there rather than take the count for a
 /// round that ended and go on to `Shared::set`, which is not a cancellation
 /// point of its own.
 #[test]
-fn a_nursery_wait_that_was_cancelled_runs_no_tail() {
+fn a_nursery_wait_that_was_canceled_runs_no_tail() {
     const SOURCE: &str = "module main;
 import std::core::{print, Fiber, Shared, Channel, nursery, Nursery, ChildFailed};
 import std::clock::{Clock};
@@ -1022,7 +1022,7 @@ pub fn main() -> Int {
     let _ = Channel::receive(ready);
     Fiber::cancel(f);
     Fiber::wait(f);
-    print(\"cancelled ${Fiber::cancelled(f)}; tail ran ${Shared::get(log)}; catch saw ${Shared::get(caught)}\");
+    print(\"canceled ${Fiber::canceled(f)}; tail ran ${Shared::get(log)}; catch saw ${Shared::get(caught)}\");
     0
   }
 }
@@ -1030,7 +1030,7 @@ pub fn main() -> Int {
     for (backend, ran) in on_both("cancel_everywhere_nursery_tail", SOURCE) {
         assert!(!ran.hung, "`{backend}`: {}", ran.stdout);
         assert_eq!(
-            ran.stdout, "cancelled true; tail ran 0; catch saw 0\n",
+            ran.stdout, "canceled true; tail ran 0; catch saw 0\n",
             "`{backend}`: {}",
             ran.stderr
         );
@@ -1041,11 +1041,11 @@ pub fn main() -> Int {
 /// **A cancel a change function's blocking call gave up on is not lost.** The
 /// `receive` inside the `update` hands back `None` on the cancel, the change
 /// function stores its "gave up" value and returns, and the fiber must stop
-/// right after the `update`: reported cancelled, and the `Shared::set` after
+/// right after the `update`: reported canceled, and the `Shared::set` after
 /// it not run.
 ///
 /// **Each fiber says it is inside its change function before it is
-/// cancelled.** A fixed pause was not enough: on a slow runner a 50 ms sleep
+/// canceled.** A fixed pause was not enough: on a slow runner a 50 ms sleep
 /// ended before `modifier` reached `modify`, the cancel stopped it before the
 /// change function ran, and the cell read 101 where 201 was expected. The
 /// `inside` channel fixes the order.
@@ -1083,14 +1083,14 @@ pub fn main() -> Int {
     Fiber::wait(f);
     let c = Shared::get(cell);
     let l = Shared::get(log);
-    print(\"update: cancelled ${Fiber::cancelled(f)}; cell ${c}; tail ran ${l}\");
+    print(\"update: canceled ${Fiber::canceled(f)}; cell ${c}; tail ran ${l}\");
     let g = Fiber::spawn(fn () => modifier(cell, log, ch, inside));
     let _in2 = Channel::receive(inside);
     Fiber::cancel(g);
     Fiber::wait(g);
     let c2 = Shared::get(cell);
     let l2 = Shared::get(log);
-    print(\"modify: cancelled ${Fiber::cancelled(g)}; cell ${c2}; tail ran ${l2}\");
+    print(\"modify: canceled ${Fiber::canceled(g)}; cell ${c2}; tail ran ${l2}\");
     0
   }
 }
@@ -1099,8 +1099,8 @@ pub fn main() -> Int {
         assert!(!ran.hung, "`{backend}`: {}", ran.stdout);
         assert_eq!(
             ran.stdout,
-            "update: cancelled true; cell 101; tail ran 0\n\
-             modify: cancelled true; cell 201; tail ran 0\n",
+            "update: canceled true; cell 101; tail ran 0\n\
+             modify: canceled true; cell 201; tail ran 0\n",
             "`{backend}`: {}",
             ran.stderr
         );
@@ -1112,7 +1112,7 @@ pub fn main() -> Int {
 /// room for one child, the second `adopt` waits for the first, a long
 /// spinner. The cancel has to reach that child and end the wait, and the
 /// statement after the `adopt` must not run. It used to wait the spinner out
-/// (16 s) and then carry on, reporting the fiber not cancelled.
+/// (16 s) and then carry on, reporting the fiber not canceled.
 #[test]
 fn a_bounded_adopt_waiting_for_room_stops_on_a_cancel() {
     const SOURCE: &str = "module main;
@@ -1152,7 +1152,7 @@ pub fn main() -> Int {
     Fiber::cancel(f);
     Fiber::wait(f);
     let took = clock.monotonic_millis() - t1;
-    print(\"waiting for room: log ${before}; cancelled ${Fiber::cancelled(f)}; within 1 s ${took < 1000}; log ${Shared::get(log)}\");
+    print(\"waiting for room: log ${before}; canceled ${Fiber::canceled(f)}; within 1 s ${took < 1000}; log ${Shared::get(log)}\");
     0
   }
 }
@@ -1160,7 +1160,7 @@ pub fn main() -> Int {
     for (backend, ran) in on_both("cancel_everywhere_bounded_adopt", SOURCE) {
         assert!(!ran.hung, "`{backend}`: {}", ran.stdout);
         assert_eq!(
-            ran.stdout, "waiting for room: log 1; cancelled true; within 1 s true; log 1\n",
+            ran.stdout, "waiting for room: log 1; canceled true; within 1 s true; log 1\n",
             "`{backend}`: {}",
             ran.stderr
         );
@@ -1209,7 +1209,7 @@ pub fn main() -> Int {
 }
 
 /// **A blocking socket call that gave up on a cancel is not taken for a
-/// failure.** A cancelled `receive` and a cancelled `accept_on` come back with
+/// failure.** A canceled `receive` and a canceled `accept_on` come back with
 /// their failure value; the fiber must stop there, not count an I/O error that
 /// did not happen and run its tail. A channel receive, which already did this,
 /// is the control.
@@ -1218,7 +1218,7 @@ pub fn main() -> Int {
 /// no-op on Linux and macOS and `WSAStartup` on Windows, where without it
 /// `socket()` fails with `WSANOTINITIALISED`: this program printed
 /// `setup false false false` there, and every later call got an invalid
-/// handle. Nothing initialised Winsock before `listen_on`: Rust's `std::net`
+/// handle. Nothing initialized Winsock before `listen_on`: Rust's `std::net`
 /// does it lazily, and the runtime's first use of it (`connect_to`, the
 /// reactor's waker) comes after. Every test that listens and passes on
 /// Windows calls `start()`; this was the only one that did not.
@@ -1262,16 +1262,16 @@ pub fn main() -> Int {
     let r = Fiber::spawn(fn () => reader(conn, errors, ready));
     let _ = Channel::receive(ready);
     clock.sleep(50); Fiber::cancel(r); Fiber::wait(r);
-    print(\"reader cancelled ${Fiber::cancelled(r)}\");
+    print(\"reader canceled ${Fiber::canceled(r)}\");
     let a = Fiber::spawn(fn () => acceptor(server, errors, ready));
     let _ = Channel::receive(ready);
     clock.sleep(50); Fiber::cancel(a); Fiber::wait(a);
-    print(\"acceptor cancelled ${Fiber::cancelled(a)}\");
+    print(\"acceptor canceled ${Fiber::canceled(a)}\");
     let ch: Channel<Int> = Channel::bounded(1);
     let c = Fiber::spawn(fn () => chan(ch, ready));
     let _ = Channel::receive(ready);
     clock.sleep(50); Fiber::cancel(c); Fiber::wait(c);
-    print(\"channel cancelled ${Fiber::cancelled(c)}\");
+    print(\"channel canceled ${Fiber::canceled(c)}\");
     print(\"I/O errors counted: ${Shared::get(errors)}\");
     0
   }
@@ -1293,9 +1293,9 @@ pub fn main() -> Int {
         assert_eq!(
             ran.stdout,
             "setup true true true\n\
-             reader cancelled true\n\
-             acceptor cancelled true\n\
-             channel cancelled true\n\
+             reader canceled true\n\
+             acceptor canceled true\n\
+             channel canceled true\n\
              I/O errors counted: 0\n",
             "`{backend}`: {}",
             ran.stderr
@@ -1476,7 +1476,7 @@ pub fn main() -> Int {
 
 /// A fiber whose finalizer blocks for ever on a `receive`.
 ///
-/// **The fiber says its finalizer is registered before it is cancelled.** A
+/// **The fiber says its finalizer is registered before it is canceled.** A
 /// 50 ms pause was not enough: on a slow Windows runner the cancel arrived
 /// before the fiber's first turn, a fiber stopped then never runs, and the
 /// program printed no `finalizer started`. Waiting on `ready` fixes the
@@ -1516,7 +1516,7 @@ pub fn main() -> Int {
 ";
 
 /// **A shielded finalizer survives a double cancel and is ended by
-/// `Fiber::abort`.** Cancelling twice is cancelling once: the finalizer is
+/// `Fiber::abort`.** Canceling twice is canceling once: the finalizer is
 /// still waiting after both. `abort` cuts it short.
 #[test]
 fn a_finalizer_survives_a_second_cancel_and_is_ended_by_abort() {
@@ -1548,7 +1548,7 @@ fn a_finalizer_blocked_for_ever_hangs_its_fiber_without_an_escalation() {
 }
 
 /// **A nursery child whose finalizer blocks for ever is ended by the
-/// deadline.** The parent is cancelled with `Fiber::cancel_within`; its child,
+/// deadline.** The parent is canceled with `Fiber::cancel_within`; its child,
 /// in a nursery, is in shielded cleanup waiting on a `receive` nobody answers.
 /// When the deadline passes the parent is aborted, and the abort reaches the
 /// child through the nursery. Without the deadline, the same program is
@@ -1644,8 +1644,8 @@ pub fn main() -> Int {
 /// parks (here, on a `receive` nobody answers) used to leave that release
 /// open on its worker thread, and every object the next fiber on the worker
 /// freed -- its own region included -- was queued behind the parked one and
-/// never released. The target was cancelled, reported finished and
-/// cancelled, and its finalizer never ran. Several blocked cleanups are
+/// never released. The target was canceled, reported finished and
+/// canceled, and its finalizer never ran. Several blocked cleanups are
 /// spread across the workers, so the target is certain to land on one.
 #[test]
 fn a_blocked_finalizer_does_not_swallow_the_next_fibers_finalizer() {
@@ -1711,7 +1711,7 @@ pub fn main() -> Int {
 
 /// **A loop that goes round by `continue` stops too.** The check sat at the
 /// end of the body, and `continue` jumps to the head without reaching it, so a
-/// loop that always went round that way never checked and a cancelled fiber in
+/// loop that always went round that way never checked and a canceled fiber in
 /// one ran to its end. `while`, `loop` and `for`, each with its only way round
 /// a `continue`.
 #[test]
@@ -1766,7 +1766,7 @@ fn timed(which: Int) -> Bool {
     Fiber::cancel(f);
     Fiber::wait(f);
     let waited = clock.monotonic_millis() - t0;
-    Fiber::cancelled(f) && waited < 2000
+    Fiber::canceled(f) && waited < 2000
   }
 }
 

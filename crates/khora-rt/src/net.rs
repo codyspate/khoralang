@@ -7,7 +7,7 @@
 //!
 //! The same shape it has now. `recv` takes a handle, a buffer and a length, and
 //! returns how many bytes arrived — it simply calls one of these instead of the
-//! C symbol. No `async`, no `await`, no second colour of function, and no
+//! C symbol. No `async`, no `await`, no second color of function, and no
 //! change to a single line of Khora above it.
 //!
 //! # Why the loop is here and not in Khora
@@ -92,7 +92,7 @@ pub extern "C" fn khora_net_prepare(socket: Socket) -> i32 {
 /// suspension point inside it.** Out of line, this computes errno's address
 /// and reads it with nothing in between that can move the fiber; the only
 /// suspension is in its callers, which no longer hold the address at all.
-/// Whether the compiler hoists is an optimisation choice that differs by
+/// Whether the compiler hoists is an optimization choice that differs by
 /// profile, so it must not be what correctness rests on. What it costs: one
 /// call per would-block, next to a syscall.
 #[inline(never)]
@@ -126,7 +126,7 @@ fn wait(socket: Socket, interest: Interest, deadline: Option<std::time::Instant>
         crate::scheduler::Waited::Ready => !crate::current::current(|f| f.gives_up_waiting()),
         crate::scheduler::Waited::TimedOut => false,
         // No worker to give back, so this thread does the waiting — and has to
-        // honour the same deadline, because a program with no scheduler is
+        // honor the same deadline, because a program with no scheduler is
         // still a program that asked for one.
         crate::scheduler::Waited::Unscheduled => {
             crate::reactor::block_until_ready(socket, interest, deadline)
@@ -341,7 +341,7 @@ pub unsafe extern "C" fn khora_net_recv(socket: Socket, into: *mut u8, length: i
 /// waited for its reply, so the connection hung.
 ///
 /// So this waits for room and goes on until `length` bytes have gone. It
-/// returns `length`, or -1 if a `send` failed or the fiber was cancelled
+/// returns `length`, or -1 if a `send` failed or the fiber was canceled
 /// while it waited. After a -1 an unknown prefix may have gone, so the
 /// stream is out of step and the caller should give up on the connection.
 /// What it costs: a caller that wanted to do something else while a slow
@@ -371,7 +371,7 @@ pub unsafe extern "C" fn khora_net_send(socket: Socket, from: *const u8, length:
         // deadline `std::net` sets is a *receive* timeout. Left alone until
         // something asks for a send deadline by name.
         //
-        // Cancelled stops here too, for the reason `accept` does above.
+        // Canceled stops here too, for the reason `accept` does above.
         if !wait(socket, Interest::Writable, None) {
             return -1;
         }
@@ -408,8 +408,8 @@ pub unsafe extern "C" fn khora_net_accept(
         // loop would be a server that stops serving.
         //
         // **The answer is not discarded.** With no deadline, false means this
-        // fiber was cancelled, and retrying then parks again on a socket that
-        // will never be ready — which is the shape that hung a cancelled
+        // fiber was canceled, and retrying then parks again on a socket that
+        // will never be ready — which is the shape that hung a canceled
         // listener for ever. A negative return is what every other failure
         // here gives back; `std::net` reads the sign.
         if !wait(socket, Interest::Readable, None) {
@@ -971,12 +971,12 @@ mod tests {
     ///
     /// **Which worker a read is on is itself a thread-local, and this test
     /// hit the bug it guards against.** With the worker read inline in the
-    /// reader, the optimised macOS build looked it up once and reported
+    /// reader, the optimized macOS build looked it up once and reported
     /// every forced read as staying put. So `worker` is out of line, for the
     /// same reason as `would_block`. The mistake fails the test, never
     /// passes it: a stale read gives the same worker before and after.
     ///
-    /// What it guards: only the development profile. The optimised runtime
+    /// What it guards: only the development profile. The optimized runtime
     /// re-reads errno every turn with or without `#[inline(never)]` (see
     /// `would_block`), so under `--release` this passes either way.
     ///
@@ -1016,7 +1016,7 @@ mod tests {
         ///
         /// **Out of line, because an inlined read of it hit the bug this test
         /// is about.** `std::thread::current()` reads a thread-local, and as a
-        /// closure in the reader's body the optimised aarch64-macOS build
+        /// closure in the reader's body the optimized aarch64-macOS build
         /// looked up that thread-local's address once, before the read loop,
         /// and used it again after `khora_net_recv` had moved the fiber. It
         /// then reported the worker the read left as the one it came back

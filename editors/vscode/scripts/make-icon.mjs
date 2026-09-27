@@ -10,7 +10,7 @@
 // The favicon draws on transparency and is read against a dark page. A
 // marketplace tile sits on whatever background the gallery uses -- white in the
 // light theme -- and the dark bar in the mark would vanish into it, so the
-// canvas is filled with the site's own background colour first.
+// canvas is filled with the site's own background color first.
 
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -24,10 +24,10 @@ const out = join(here, "..", "icon.png");
 // `#0b1120` is the site's page background, so the tile reads as a piece of the
 // same design rather than as a sticker on top of one.
 //
-// **The bar is recoloured, and that is not a liberty.** In the favicon it is
+// **The bar is recolored, and that is not a liberty.** In the favicon it is
 // `#172033` -- a near-black upright read against the site's own dark page,
 // where it is a quiet counterweight to the chevron. On a 128px tile at the
-// same colour it disappears into the background entirely and the mark reads as
+// same color it disappears into the background entirely and the mark reads as
 // a lone `>`, which is a different logo. It is lifted to the slate the site
 // uses for muted text, so the shape survives being small.
 const BACKGROUND = { r: 11, g: 17, b: 32, alpha: 1 };

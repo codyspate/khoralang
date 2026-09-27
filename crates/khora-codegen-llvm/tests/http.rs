@@ -325,7 +325,7 @@ fn the_server_reads_what_a_client_actually_sends() {
         .expect("a request");
     closing.flush().expect("flush");
     let answer = read_message(&mut closing);
-    assert!(answer.contains("Connection: close"), "the opt-out is honoured: {answer}");
+    assert!(answer.contains("Connection: close"), "the opt-out is honored: {answer}");
     let mut nothing = String::new();
     closing.read_to_string(&mut nothing).expect("the server should hang up");
     assert!(nothing.is_empty(), "nothing should follow: {nothing:?}");
@@ -416,7 +416,7 @@ fn the_server_reads_what_a_client_actually_sends() {
     //
     // Four gigabytes is more than the buffer, so it is refused on the spot —
     // and *on the spot* is the point. The reader waits for a body that was
-    // promised, so a promise it can never satisfy has to be recognised rather
+    // promised, so a promise it can never satisfy has to be recognized rather
     // than waited out, or one lying client holds a connection for the whole
     // ten-second deadline.
     //

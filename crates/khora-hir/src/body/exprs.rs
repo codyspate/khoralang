@@ -644,7 +644,7 @@ impl<'a> Ctx<'a> {
         self.add_expr(Expr::Unresolved(segments.join("::")), range)
     }
 
-    /// The labelled expressions of a record literal.
+    /// The labeled expressions of a record literal.
     pub(super) fn lower_record_fields(&mut self, e: &ast::RecordExpr) -> Vec<(String, ExprId)> {
         e.fields()
             .filter_map(|f| {

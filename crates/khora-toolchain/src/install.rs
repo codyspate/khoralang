@@ -50,7 +50,7 @@ use anyhow::{bail, Context, Result};
 /// Where releases are published.
 ///
 /// `KHORA_RELEASE_REPO` overrides it, which is what somebody running their own
-/// builds inside an organisation would set.
+/// builds inside an organization would set.
 pub fn repository() -> String {
     std::env::var("KHORA_RELEASE_REPO").unwrap_or_else(|_| "codyspate/khoralang".to_string())
 }
@@ -685,7 +685,7 @@ mod tests {
     #[test]
     fn an_unpacked_release_lands_where_installed_looks_for_it() {
         let home = tempfile::tempdir().expect("a temporary directory");
-        // Serialised against the other `KHORA_HOME` test, since the variable is
+        // Serialized against the other `KHORA_HOME` test, since the variable is
         // process-wide.
         let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("KHORA_HOME", home.path());

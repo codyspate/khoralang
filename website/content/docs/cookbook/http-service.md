@@ -106,8 +106,8 @@ two reasons to:
   a preflight first, and a handler mounted here is what answers it — including
   the `Allow` header the default would have sent, since the mount replaces the
   default rather than adding to it. The actual `GET` or `POST` response needs
-  `Access-Control-Allow-Origin` too: the preflight authorises the request, it
-  does not authorise the answer.
+  `Access-Control-Allow-Origin` too: the preflight authorizes the request, it
+  does not authorize the answer.
 
 ```khora
 fn preflight(req: Request) -> Response {
@@ -244,7 +244,7 @@ A `/shutdown` route exists for the case the signal does not cover: a service
 that stops *itself* on a request. It runs `listen` on a fiber and lets go of
 that fiber when a route says to.
 
-**Cancel the listener, or detach it — both work.** A cancelled listener
+**Cancel the listener, or detach it — both work.** A canceled listener
 notices in the poll loop a parked `accept` sits in, unwinds, and releases its
 port.
 
@@ -342,10 +342,10 @@ loop {
     // A listener that stopped without being asked never started. `join` has
     // the error; nothing below this is worth doing.
     //
-    // Ask `cancelled` first. A fiber that was told to stop has no answer, and
+    // Ask `canceled` first. A fiber that was told to stop has no answer, and
     // `join` on one ends the program at 130 rather than handing back the
     // `HttpError` this branch is written to report.
-    if Fiber::cancelled(server) { break };
+    if Fiber::canceled(server) { break };
     error("the listener stopped on its own");
     Fiber::join(server)!;
     break

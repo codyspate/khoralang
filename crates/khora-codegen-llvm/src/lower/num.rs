@@ -18,7 +18,7 @@ impl<'ctx> Lower<'_, 'ctx> {
     ///
     /// - **Wrapping arithmetic**, because ordinary arithmetic *traps* — see
     ///   `checked_arithmetic`. A hash, a checksum and a PRNG are the places
-    ///   that genuinely want the other behaviour, and asking for it by name is
+    ///   that genuinely want the other behavior, and asking for it by name is
     ///   how the trap stays the default without being in the way.
     /// - **Bit operations**, which are what a hash is made of and what a wire
     ///   format is written in.
@@ -371,7 +371,7 @@ impl<'ctx> Lower<'_, 'ctx> {
     ///
     /// Trapping in *every* build is the decision: a program that passes its
     /// tests and then wraps in production is the failure worth this branch, and
-    /// two behaviours put the difference where it is most expensive to find.
+    /// two behaviors put the difference where it is most expensive to find.
     pub(super) fn checked_arithmetic(
         &mut self,
         intrinsic: &str,

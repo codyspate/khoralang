@@ -47,7 +47,7 @@ impl<'ctx> Backend<'ctx> {
     /// back as `-9223372036854775808`, the most negative `Int`, from positive
     /// inputs. `Float::to_int`'s own documentation promised the opposite in as
     /// many words -- "clamps to the nearest end, and a `NaN` is zero.
-    /// Undefined behaviour is the alternative and is not one" -- and the
+    /// Undefined behavior is the alternative and is not one" -- and the
     /// lowering's comment claimed the saturating form "is what this uses".
     /// Neither was true; nothing had asked the machine. Roadmap 16.
     pub fn saturating_fptosi(&mut self) -> FunctionValue<'ctx> {

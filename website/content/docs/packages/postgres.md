@@ -21,7 +21,7 @@ what is missing. This page is the overview.
 
 The point of the package is that a caller does not hold a connection. It holds
 `Db`, and `std::db`'s [`transaction`](/docs/stdlib/api/db/) decides what
-happens when a fiber is cancelled mid-statement:
+happens when a fiber is canceled mid-statement:
 
 ```khora
 import postgres::pool::{open, with_db};
@@ -42,7 +42,7 @@ statement in the transaction failed, is reported as `DbError::RolledBack`.
 
 `with_db` leases a connection, installs it as the `db` capability for the
 duration, and returns it afterwards — including when the body raises, and
-including when the fiber is cancelled, whether in the body or while it is
+including when the fiber is canceled, whether in the body or while it is
 still waiting for a connection.
 `transfer` never names a connection, which is what keeps the capability from
 turning back into a parameter threaded through every signature.

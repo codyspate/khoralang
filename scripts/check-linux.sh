@@ -2,7 +2,7 @@
 # The runtime's tests on Linux, from a Windows machine, for nothing.
 #
 # **Why this exists.** `khora-rt`'s reactor is the one part of the tree whose
-# behaviour differs per platform in a way no amount of care can check locally:
+# behavior differs per platform in a way no amount of care can check locally:
 # it is `WSAPoll` on Windows and `poll` on Linux and macOS, and only the first
 # runs here. `.github/workflows/runtime.yml` is the answer that costs Actions
 # minutes; this is the answer that costs none, and it is faster.
@@ -27,7 +27,7 @@ fi
 
 # A target directory inside the WSL filesystem rather than on `/mnt/c`. Cargo
 # on a 9p mount is slow enough to be worth the one line, and mixing Windows and
-# Linux artefacts in one `target/` would have each rebuild the other's.
+# Linux artifacts in one `target/` would have each rebuild the other's.
 TARGET=/tmp/khora-linux-target
 
 # How many times to run the suite. The scheduler's bugs are races, and one of

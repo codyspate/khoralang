@@ -191,7 +191,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 // function then returned normally, so the tag is 0 and the
                 // cancel is still pending. `Shared::set`/`get` are not
                 // cancellation points, so without asking here a tail made of
-                // them ran and the fiber reported that it was never cancelled.
+                // them ran and the fiber reported that it was never canceled.
                 self.check_cancellation(range);
                 let word = self
                     .be
@@ -327,10 +327,10 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .expect("a send answers");
                 // The value was handed over -- the queue owns it now, and
                 // releases it if the channel was closed, or if this fiber was
-                // cancelled before it could find room. The handle was only
+                // canceled before it could find room. The handle was only
                 // borrowed.
                 self.release_unless_lent(*channel, handle, &channel_ty);
-                self.cancelled_empty_handed(answered.into_int_value(), range);
+                self.canceled_empty_handed(answered.into_int_value(), range);
                 Some(answered)
             }
             // `receive` waits and `poll` does not; everything else about the
@@ -371,7 +371,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 // `poll` never waits, so it can never be the thing a
                 // cancellation is stuck behind and carries no row.
                 if name != "poll" {
-                    self.cancelled_empty_handed(arrived, range);
+                    self.canceled_empty_handed(arrived, range);
                 }
                 let answer_ty = self.types.of(site).clone();
                 self.option_of_word(arrived, word, &held, &answer_ty)
@@ -779,7 +779,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         match (name, args) {
             ("spawn", [body]) => {
                 // Whether the thunk returns the tagged pair, which is how a
-                // fiber says it was cancelled or that it failed, and what it
+                // fiber says it was canceled or that it failed, and what it
                 // answers when it does not. Both read from the thunk's own
                 // type: a closure carries its rows, so these are facts about
                 // the value rather than guesses about it.
@@ -877,7 +877,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 self.be
                     .builder
                     .build_call(self.be.rt.fiber_cancel_within, &[handle.into(), millis.into()], "")
-                    .expect("cancelling a fiber with a deadline");
+                    .expect("canceling a fiber with a deadline");
                 self.release_unless_lent(*fiber, handle, &ty);
                 Some(self.be.unit_value())
             }
@@ -886,7 +886,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 // waiter parked here observed nothing until the child finished
                 // on its own, so a `main` ending in a wait could not be
                 // stopped at all (roadmap §16.7). The runtime answers
-                // `CANCELLED_WHICH` when the *waiter* was asked to stop, and
+                // `CANCELED_WHICH` when the *waiter* was asked to stop, and
                 // the branch below is the `!` that unwinds on it -- which is
                 // why `Fiber::wait` carries a `raises 'er` row.
                 let ty = self.types.of(*fiber).clone();
@@ -923,10 +923,10 @@ impl<'ctx> Lower<'_, 'ctx> {
                 self.release_unless_lent(*fiber, handle, &ty);
                 Some(answer)
             }
-            ("cancelled", [fiber]) => {
-                // **The one question about a cancelled fiber that does not
-                // unwind the asker.** `join` on a cancelled fiber answers
-                // `CANCELLED_WHICH`, which is in no row and so no `catch` can
+            ("canceled", [fiber]) => {
+                // **The one question about a canceled fiber that does not
+                // unwind the asker.** `join` on a canceled fiber answers
+                // `CANCELED_WHICH`, which is in no row and so no `catch` can
                 // name -- at the entry point that ends the program at 130. This
                 // is a `Bool` and an ordinary call, with no tag to split on.
                 //
@@ -941,8 +941,8 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let answer = self
                     .be
                     .builder
-                    .build_call(self.be.rt.fiber_cancelled, &[handle.into()], "fiber.cancelled")
-                    .expect("asking whether a fiber was cancelled")
+                    .build_call(self.be.rt.fiber_canceled, &[handle.into()], "fiber.canceled")
+                    .expect("asking whether a fiber was canceled")
                     .try_as_basic_value()
                     .basic()
                     .expect("a bool is a value");
@@ -958,7 +958,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 // same reasons -- the stack slot, the retain on an inline
                 // answer, the borrow-aware release -- and the difference is
                 // what happens to a child that was stopped: `join` lets
-                // `CANCELLED_WHICH` travel out as a raise no `catch` can name,
+                // `CANCELED_WHICH` travel out as a raise no `catch` can name,
                 // and this builds `Outcome::Stopped` instead.
                 let ty = self.types.of(*fiber).clone();
                 let (answers, _) = self.fiber_parts(site, &ty, range)?;
@@ -1021,7 +1021,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 // `split_tagged` is the answer-or-error pair `join` would have
                 // had.
                 //
-                // Whatever the fiber's row: a `which` of `CANCELLED_WHICH`
+                // Whatever the fiber's row: a `which` of `CANCELED_WHICH`
                 // says *this* frame was stopped while it waited, and that
                 // leaves through the same branch.
                 let stopped = self.be.ctx.i32_type().const_int(runtime::STOPPED_WHICH, false);
@@ -1270,7 +1270,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .basic()
                     .expect("a count is a value");
                 self.release_unless_lent(*nursery, handle, &nursery_ty);
-                // **A waiter that was cancelled gets a count back too**: the
+                // **A waiter that was canceled gets a count back too**: the
                 // runtime cancels the children, waits for them and answers
                 // how many failed, as though the round had ended. Taken as
                 // an answer, that ran the caller's tail after the cancel. The

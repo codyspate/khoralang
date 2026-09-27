@@ -474,7 +474,7 @@ fn a_capability_can_be_handed_to_a_fiber() {
 
 /// `Share` is a trusted assertion, so it has to be unforgeable.
 ///
-/// It was not: the compiler recognised any trait spelled `Share`, and any file
+/// It was not: the compiler recognized any trait spelled `Share`, and any file
 /// could implement it for any opaque type. Declare a trait of your own, write
 /// `impl<A> Share for Array<A>`, and an array — which `Array::set` writes —
 /// became something two fibers may hold. It compiled, and it raced.

@@ -4,7 +4,7 @@
 //!
 //! **Overflow traps, in every build.** Swift's answer rather than Rust's: a
 //! program that passes its tests and then wraps in production is the failure
-//! worth spending a branch to prevent, and two behaviours — one for testing,
+//! worth spending a branch to prevent, and two behaviors — one for testing,
 //! one for shipping — put the difference exactly where it is most expensive to
 //! find. `docs/roadmap.md` 6.2.
 //!
@@ -420,7 +420,7 @@ fn main() -> Int {{
 ///
 /// Both the standard library's `///` and the lowering's own comment promised
 /// otherwise. `core.kh` said "clamps to the nearest end, and a `NaN` is zero.
-/// Undefined behaviour is the alternative and is not one"; `num.rs` said the
+/// Undefined behavior is the alternative and is not one"; `num.rs` said the
 /// saturating form "is what this uses". It used `build_float_to_signed_int`.
 /// Two comments agreeing with each other and neither agreeing with the
 /// machine, because nothing had asked the machine. Roadmap 16.

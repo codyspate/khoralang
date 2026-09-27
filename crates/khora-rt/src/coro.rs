@@ -26,7 +26,7 @@
 //! # What a fiber is here
 //!
 //! A stack, a body, and the [`Fiber`] identity that follows it across
-//! switches. Resuming installs that identity, so `khora_cancelled` and
+//! switches. Resuming installs that identity, so `khora_canceled` and
 //! `Shared::update` answer about the fiber rather than about the worker
 //! carrying it — see `crate::current`.
 
@@ -194,7 +194,7 @@ impl Task {
     /// Runs the fiber until it suspends or finishes.
     ///
     /// Installing the identity around the resume is the whole integration with
-    /// [`crate::current`]: inside, `khora_cancelled` reads this fiber's flag
+    /// [`crate::current`]: inside, `khora_canceled` reads this fiber's flag
     /// whichever worker is carrying it. The guard restores the previous one on
     /// the way out, panic included.
     pub(crate) fn resume(&mut self) -> Ran {
@@ -467,7 +467,7 @@ mod tests {
 
     /// The reason `current` landed first. A fiber's identity has to follow it
     /// onto whichever stack is running, or `Shared::update` and
-    /// `khora_cancelled` answer about the worker.
+    /// `khora_canceled` answer about the worker.
     #[test]
     fn the_running_fiber_is_the_task_being_resumed() {
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -516,7 +516,7 @@ mod tests {
         let flag = saw.clone();
         let mut task = Task::new(move || {
             suspend();
-            if crate::current::current(|f| f.is_cancelled()) {
+            if crate::current::current(|f| f.is_canceled()) {
                 flag.store(1, Ordering::SeqCst);
             }
         });

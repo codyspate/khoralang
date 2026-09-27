@@ -147,7 +147,7 @@ fn main() -> Int {
     assert!(err.contains("overflowed"), "what happened is always said: {err}");
     // **The Khora switch, not the Rust one.** Being told to set a variable
     // named after the language the compiler happens to be written in reads as
-    // a leak, and it is one. `RUST_BACKTRACE` is still honoured for anybody
+    // a leak, and it is one. `RUST_BACKTRACE` is still honored for anybody
     // who exports it globally; it is just not what the message asks for.
     assert!(err.contains("KHORA_BACKTRACE=1"), "and how to learn where: {err}");
 }
@@ -155,7 +155,7 @@ fn main() -> Int {
 /// **And `RUST_BACKTRACE` still works**, so a machine that already exports it
 /// for everything is not asked twice.
 #[test]
-fn the_rust_switch_is_still_honoured() {
+fn the_rust_switch_is_still_honored() {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("debug_rust_switch");
     harness::ensure_runtime();
     std::fs::create_dir_all(&dir).expect("a workspace");
@@ -278,10 +278,10 @@ fn main() -> Int {
 ///
 /// **Asserted against the emitted IR, which is weaker than the rest of this
 /// file and is said so deliberately.** Everything above runs a program because
-/// the failure mode was metadata that was perfect and an artefact that could
+/// the failure mode was metadata that was perfect and an artifact that could
 /// not use it. The equivalent here would be driving `lldb`, which is not
 /// something a `cargo test` can rely on finding — so this checks the
-/// `DILocalVariable` records and their types, and the artefact-level check
+/// `DILocalVariable` records and their types, and the artifact-level check
 /// stays the backtrace tests above, which share the same emission path.
 ///
 /// What it does prove is the part that was wrong twice: names, the lines they
@@ -403,7 +403,7 @@ fn running_out_of_stack_says_so() {
     let _ = std::fs::remove_file(&exe);
 
     // Recursion with a live frame under it, so no tail call can flatten it and
-    // no optimiser can prove it finite.
+    // no optimizer can prove it finite.
     let source = "module t;
 fn print(value: Int);
 

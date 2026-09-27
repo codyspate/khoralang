@@ -55,9 +55,9 @@ report 'a note about a previous version of the note' "$selfref"
 # reader arrives to learn how Khora behaves; which release altered it is the
 # changelog's business, and a page written in that voice goes stale the moment
 # the next thing lands. This is the shape it takes in practice: a sentence that
-# describes the repair rather than the behaviour.
+# describes the repair rather than the behavior.
 #
-# `is now`, `no longer` and their neighbours are the tell. They read as facts
+# `is now`, `no longer` and their neighbors are the tell. They read as facts
 # but they are dated claims -- each one silently means "as against a version the
 # reader never used". The phrasings here were all written into published pages
 # by somebody who had just made the change, which is exactly whose voice this
@@ -68,7 +68,7 @@ report 'a note about a previous version of the note' "$selfref"
 # is exactly what an API page should say. The first version of this check flagged
 # it, and a gate that cries wolf on correct prose gets switched off.
 history=$(grep -rniE 'is now correct|now exits|now returns|used to (exit|return|be)|no longer (exits|returns|hangs)|this (is|was) now (fixed|closed)|partly closed' "$pages" --include=*.md || true)
-report 'a page written as a change rather than as a behaviour' "$history"
+report 'a page written as a change rather than as a behavior' "$history"
 
 # A link inside a link. Turning a bare path into a link twice produces
 # `[the note](https://.../[the note](https://.../x.md))`, which renders as

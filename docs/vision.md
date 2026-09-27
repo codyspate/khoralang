@@ -23,7 +23,7 @@ the ideas:
 
 1. **The abstractions are simulated — twice over.** TypeScript has no
    higher-kinded types, so Effect encodes them with `TypeLambda`/`Kind`
-   defunctionalisation; that is the main source of its unreadable types and
+   defunctionalization; that is the main source of its unreadable types and
    hostile error messages. TypeScript also has no effect handlers, so
    `Effect.gen` and `yield*` exist to fake direct-style code. Both are
    workarounds for missing language features, not properties of the model.
@@ -45,7 +45,7 @@ model's** — and that the model is exactly what Rust cannot reach.
 
 | Axis | Effect | Khora |
 | --- | --- | --- |
-| Abstraction | HKT simulated via defunctionalisation | Native `* -> *` and kind inference |
+| Abstraction | HKT simulated via defunctionalization | Native `* -> *` and kind inference |
 | Sequencing | `Effect.gen`/`yield*` faking direct style | Real algebraic effects and handlers |
 | Runtime | GC'd VM | Native static binary, Perceus RC, no tracing GC |
 | Tooling | npm tool sprawl | One static binary: compiler, package manager, fmt, lint, test, LSP |

@@ -191,7 +191,7 @@ impl Show for Lit {
   /// The literal as it would be written back.
   ///
   /// A number keeps its own text, so `1e3` prints as `1e3`. `--print-ast`
-  /// is the only caller, and a round trip that quietly normalised numbers
+  /// is the only caller, and a round trip that quietly normalized numbers
   /// would hide exactly the thing that decision was taken to protect.
   fn show(self) -> String {
     match self {

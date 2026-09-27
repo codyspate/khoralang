@@ -25,7 +25,7 @@ documentation.
 
 ## What the middle layer actually is
 
-**What a transaction does when its fiber is cancelled.** That is the part
+**What a transaction does when its fiber is canceled.** That is the part
 that fails in production and never in testing, the part every package would
 answer differently, and the part that is Khora's to answer rather than an
 engine's — because cancellation semantics belong to the language. A
@@ -40,7 +40,7 @@ below. Everything that speaks a protocol is somebody else's.
 
 `transaction` commits when its body returns and rolls back when it does not
 — including when the body raises, and including when the fiber running it is
-cancelled. **A handler that cannot promise that is a broken handler**, and
+canceled. **A handler that cannot promise that is a broken handler**, and
 the test beside this module is written against the promise rather than
 against any engine.
 
@@ -64,7 +64,7 @@ All three ways out are covered: the rollback is registered with a region
 before `BEGIN` is sent, and a region's finalizers run on every path out,
 a cancellation's included. `transaction`'s own comment has the argument.
 What the runtime owes in return is that a finalizer running *because* of a
-cancellation is not itself cancelled — `khora-rt`'s `cancel::Shielded`.
+cancellation is not itself canceled — `khora-rt`'s `cancel::Shielded`.
 
 ## Types
 
@@ -529,7 +529,7 @@ behind a `Show` the transaction would have to carry.
 
 #### How the third way out is covered
 
-A body can return, it can fail, and its fiber can be **cancelled** — and
+A body can return, it can fail, and its fiber can be **canceled** — and
 the third one does not pass through any `match` written here. A
 cancellation travels the same tagged return an error does, straight out of
 this function, so a version that only inspected `body()`'s answer was
@@ -545,7 +545,7 @@ region. Committing marks the transaction settled, and a settled transaction
 has nothing left to undo — so the finalizer costs a boolean on the ordinary
 path and is the whole contract on the extraordinary one.
 
-**Before `BEGIN`, not after it**, because a fiber can be cancelled while it
+**Before `BEGIN`, not after it**, because a fiber can be canceled while it
 waits for the server to answer `BEGIN`, and by then the server is inside
 the transaction. A rollback registered only once `begin` returns would
 miss that cancel, and the connection would go back to its pool with the
@@ -569,7 +569,7 @@ when the caller did, which is not what a transaction is.
 
 #### Cancellation inside a transaction
 
-A transaction is cancelled like any other code: at a loop, at a blocking
+A transaction is canceled like any other code: at a loop, at a blocking
 `std` call, or at a call to a function that can reach one, whatever the
 body's `raises` row. A cancellation that lands in the body unwinds through
 here, releasing the region and running the rollback. The rollback itself

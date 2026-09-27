@@ -2,7 +2,7 @@
 //!
 //! **It used to be nothing at all.** A `List` past about eight thousand
 //! elements killed the process with no message on either stream: `List` was
-//! walked recursively everywhere in `std` then, so a log analyser that read a
+//! walked recursively everywhere in `std` then, so a log analyzer that read a
 //! hundred and twenty-two thousand lines died while *reporting* on them, and
 //! the only evidence was a shell prompt and an exit status nobody reads.
 //!
@@ -230,7 +230,7 @@ fn install() {
     unsafe extern "C" fn handler(_signal: i32) {
         report();
         // SAFETY: `signal` with `SIG_DFL` is async-signal-safe and is what
-        // restores the behaviour the process had before this was installed.
+        // restores the behavior the process had before this was installed.
         unsafe {
             libc::signal(libc::SIGSEGV, libc::SIG_DFL);
         }

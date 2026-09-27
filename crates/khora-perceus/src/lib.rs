@@ -158,7 +158,7 @@ impl RcPlan {
 /// Which of a call's arguments it only looks at. Indices into the argument
 /// list, receiver first.
 ///
-/// Saying so saves a cancelling `dup`/`drop` pair, and does something that
+/// Saying so saves a canceling `dup`/`drop` pair, and does something that
 /// matters more: a borrowed argument is not a *use*, so a binding passed to
 /// `Region::defer` keeps its reference and its finalizers run when the scope
 /// ends rather than inside `defer`.
@@ -187,7 +187,7 @@ pub fn borrowed_arguments(owner: &str, method: &str) -> &'static [usize] {
         (
             "Fiber",
             "join" | "wait" | "cancel" | "abort" | "cancel_within" | "detach" | "finished"
-            | "cancelled" | "outcome",
+            | "canceled" | "outcome",
         ) => RECEIVER,
         ("Fibers", "adopt" | "wait") => RECEIVER,
 

@@ -1,4 +1,4 @@
-//! The scheme that is correct before anything is optimised.
+//! The scheme that is correct before anything is optimized.
 //!
 //! A local holding a boxed value owns one reference, reading it copies, and a
 //! block releases what it declared on the way out. Parameters are owned by the

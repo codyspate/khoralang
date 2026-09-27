@@ -405,7 +405,7 @@ fn identical_contents_share_one_directory() {
 
 /// A git URL names a repository, and a repository is not a package.
 ///
-/// The one this test is modelled on is Khora's own: `packages/postgres` sits
+/// The one this test is modeled on is Khora's own: `packages/postgres` sits
 /// beside a compiler, three examples and four benchmarks. Without `subdir` the
 /// resolver reads the `khora.toml` at the root -- the wrong package entirely --
 /// and there is no way to say otherwise.

@@ -121,7 +121,7 @@ fn declaration(p: &mut Parser<'_>) {
 ///
 /// **One sentence each, rather than a shared template.** The template written
 /// first produced *"Khora has no `async`: every function may suspend, so there
-/// is no separate colour for one that does, so write `fn`"* -- two `so`s, and
+/// is no separate color for one that does, so write `fn`"* -- two `so`s, and
 /// an instruction that did not follow from the reason. The reason and the
 /// instruction are different shapes for different words, so each writes its
 /// own.
@@ -137,7 +137,7 @@ fn instead_of(written: &str) -> Option<&'static str> {
         }
         "enum" | "union" => {
             "Khora has no `enum`. A variant type uses the same word as a record: \
-             `type Colour = | Red | Green`"
+             `type Color = | Red | Green`"
         }
         "interface" | "protocol" => {
             "Khora has no `interface`. A set of operations a type can implement is a `trait`"
@@ -153,7 +153,7 @@ fn instead_of(written: &str) -> Option<&'static str> {
         }
         "async" => {
             "Khora has no `async`. Every function may suspend, so there is nothing to mark \
-             and no second colour of function to call it from"
+             and no second color of function to call it from"
         }
         _ => return None,
     })
@@ -489,7 +489,7 @@ fn row_decl(p: &mut Parser<'_>) {
         if p.at(L_BRACE) {
             record_type(p);
         } else {
-            p.error("a `row` is a set of labelled capabilities: `row Deps = { db: Db };`");
+            p.error("a `row` is a set of labeled capabilities: `row Deps = { db: Db };`");
         }
     }
     p.expect(SEMICOLON);

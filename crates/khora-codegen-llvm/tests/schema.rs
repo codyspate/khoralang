@@ -487,8 +487,8 @@ fn main() -> Int {{
   print(problems(Schema::decode(min_length(string(), 3), Raw::Text(\"ab\"))));
   print(problems(Schema::decode(one_of(string(), [\"gzip\", \"br\"]), Raw::Text(\"zstd\"))));
   print(problems(Schema::decode(non_empty(list(int())), Raw::Sequence([]))));
-  let colour = Schema::try_map(string(), \"a colour\", fn s => if s == \"red\" {{ Option::Some(1) }} else {{ Option::None }});
-  print(problems(Schema::decode(colour, Raw::Text(\"blue\"))));
+  let color = Schema::try_map(string(), \"a color\", fn s => if s == \"red\" {{ Option::Some(1) }} else {{ Option::None }});
+  print(problems(Schema::decode(color, Raw::Text(\"blue\"))));
   print(problems(Schema::decode(refine(int(), \"even\", fn n => n % 2 == 0), Raw::Number(\"3\"))));
   0
 }}
@@ -502,7 +502,7 @@ fn main() -> Int {{
          the value must be at least 3 characters; \n\
          the value must be one of `gzip`, `br`; \n\
          the value must have at least 1 item; \n\
-         the value should be a colour, and is \"blue\"; \n\
+         the value should be a color, and is \"blue\"; \n\
          the value must be even; \n"
     );
 }
@@ -1020,7 +1020,7 @@ fn said(v: Validated<Level, Rejection>) -> String {
 ";
 
 /// **A value may arrive as one thing and become another.** `refine` narrows a
-/// type to itself; `via` changes it, which is what a timestamp travelling as a
+/// type to itself; `via` changes it, which is what a timestamp traveling as a
 /// string needs and what nothing before this could say.
 ///
 /// Three claims. The conversion runs and the program gets the domain type. A

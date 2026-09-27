@@ -151,7 +151,7 @@ pub(super) fn build(
     // aggregate is passed and returned is a decision the target makes, and
     // `docs/errata.md` 35 is the day that cost when x86-64 Windows disagreed
     // with LLVM about a sixteen-byte one. The widths here come from LLVM's own
-    // data layout, which is the right defence and is untested off one machine.
+    // data layout, which is the right defense and is untested off one machine.
     //
     // Until then it is also what a bisect needs: a miscompile can be put to
     // the representation or to the change that exposed it in one run.
@@ -233,7 +233,7 @@ pub(super) fn build(
     // and a callee that disagree about it is a miscompile, so this is the one
     // place it is decided. Not part of the build cache's key separately: it is
     // a function of the program, which the key already is.
-    let can_stop = super::can_stop::analyse(db, files, mono);
+    let can_stop = super::can_stop::analyze(db, files, mono);
     backend.untagged = can_stop.keeps_a_plain_return();
     backend.lambdas_poll_in = can_stop.calls_through_values();
     backend.poll_at_entry = can_stop.cyclic.union(&backend.lambdas_poll_in).cloned().collect();
@@ -457,7 +457,7 @@ pub(super) fn build(
 /// tagged or can raise, which is where Stage C's saving comes from: a callee
 /// [`super::can_stop`] pruned does not make its caller's bindings pay.
 /// Everything else -- an intrinsic, a foreign call, a call through a function
-/// value, a shape not recognised here -- is answered yes. That over-reports
+/// value, a shape not recognized here -- is answered yes. That over-reports
 /// (`print` cannot stop), and over-reporting costs one release of a null slot.
 fn can_stop_at(
     backend: &Backend<'_>,
@@ -828,7 +828,7 @@ mod tests {
 
     const PLAIN: &str = "module main;\nfn main() -> Int { 0 }\n";
 
-    /// The case the optimisation exists for.
+    /// The case the optimization exists for.
     #[test]
     fn a_main_that_neither_spawns_nor_publishes_may_count_without_atomics() {
         assert!(non_atomic(Entry::Main, &[PLAIN]));
@@ -866,7 +866,7 @@ fn main() -> Int { 0 }
     /// An `extern fn` *without* a body is an import — somebody else's symbol,
     /// which nothing can call back into. Distinguishing the two is the whole of
     /// what `pub extern fn` means, and treating every `extern` as published
-    /// would give up the optimisation for every program that reads a file.
+    /// would give up the optimization for every program that reads a file.
     #[test]
     fn declaring_a_foreign_symbol_is_not_publishing_one() {
         let source = "module main;

@@ -5,7 +5,7 @@ page is `README.md`, which is what the Marketplace and VS Code show.
 
 ## How it works
 
-Everything except the syntax colouring comes from `khora lsp`, a subcommand
+Everything except the syntax coloring comes from `khora lsp`, a subcommand
 of the toolchain. The extension starts it and shows what it says, so a
 diagnostic in the editor is the same one `khora check` gives. The status bar
 shows the sentence `khora toolchain which` prints; the extension never
@@ -172,7 +172,7 @@ There are two lists, and they live in separate repository rules:
 There is a **third** list in the compiler, `RESERVED_WORDS`, and it
 deliberately has no rule here. Those words — `where`, `yield`, `macro`,
 `unsafe`, `unstable` — are refused as identifiers and mean nothing else;
-colouring one as a keyword would tell a reader there is a construct to look
+coloring one as a keyword would tell a reader there is a construct to look
 up, and there is not. `reserved_words.rs` asserts they appear in neither
 `KEYWORDS` nor `CONTEXTUAL_KEYWORDS`, which is what keeps this grammar honest
 about them.
@@ -192,5 +192,5 @@ logo.
 
 The bar in the mark is lifted from `#172033` to `#334867` on the way. The
 favicon is read against the site's dark page, where a near-black upright is a
-quiet counterweight to the chevron; on a 128px gallery tile at that colour it
+quiet counterweight to the chevron; on a 128px gallery tile at that color it
 disappears and the mark reads as a lone `>`.

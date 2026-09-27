@@ -1,7 +1,7 @@
 //! Which functions can reach a cancellation point.
 //!
 //! **What this prevents: paying for a cancellation tag in functions that can
-//! never be cancelled part-way.** Every function that can reach a
+//! never be canceled part-way.** Every function that can reach a
 //! cancellation point returns a tag, so a cancellation has a way out of it,
 //! and every call to one branches on the tag. A function that cannot reach
 //! one has nothing to carry, so its calls keep their plain return and pay
@@ -34,8 +34,8 @@
 //! caller that does not branch on a tag its callee returns, and that reads a
 //! pair as a value -- a miscompile. Tagging a function that did not need it
 //! costs a branch. **So every default here is toward tagging**: a callee
-//! written in a shape this module does not recognise is a call through a
-//! function value, and a bodiless operation it does not recognise is an
+//! written in a shape this module does not recognize is a call through a
+//! function value, and a bodiless operation it does not recognize is an
 //! intrinsic that may stop, until somebody lists it as one that cannot.
 //!
 //! # Foreign calls
@@ -43,7 +43,7 @@
 //! The blocking `std` operations are foreign calls: `clock.sleep` is
 //! `khora_sleep`, `connect_to` is `khora_net_connect`, `accept_on` is
 //! `khora_net_accept`. The runtime makes each of them give up when the fiber
-//! is cancelled, so a function whose only cancellation point is one of them
+//! is canceled, so a function whose only cancellation point is one of them
 //! would, untagged, carry on after a sleep a cancellation cut short.
 //!
 //! **A call to a runtime export counts; a call to any other C does not.**
@@ -254,7 +254,7 @@ fn named(name: &str, is_extern: &impl Fn(&str) -> bool) -> Option<Local> {
 /// Why a call whose callee is `target`, with no Khora body behind it, can
 /// stop.
 ///
-/// **Exhaustive over the callee's shape, and every shape not recognised as
+/// **Exhaustive over the callee's shape, and every shape not recognized as
 /// something stop-free is a call through a function value**: an expression
 /// that produces a function is the one kind of callee this cannot see into.
 fn callee_reason(
@@ -319,7 +319,7 @@ fn callee_reason(
 /// closure being reachable by nothing but the runtime, which calls it once. A
 /// lambda bound to a `let` first is reachable through the binding, and one
 /// handed to `Scope::defer` goes to whatever handler is installed, which may
-/// keep it and call it again. Neither is recognised here, so both keep their
+/// keep it and call it again. Neither is recognized here, so both keep their
 /// entry poll.
 fn finalizer_literal(
     body: &Body,
@@ -554,7 +554,7 @@ fn in_a_cycle(edges: &HashMap<String, Vec<String>>) -> HashSet<String> {
 /// `files` is every file in the program, for the `extern` declarations: a
 /// name declared `extern` in any of them is foreign C, which is the symbol a
 /// call to it reaches whichever module wrote it.
-pub(crate) fn analyse(
+pub(crate) fn analyze(
     db: &dyn khora_db::Db,
     files: &[khora_db::SourceFile],
     mono: &khora_types::mono::Instances,
@@ -597,13 +597,13 @@ mod tests {
     use khora_db::{KhoraDatabase, SourceFile, SourceRoot};
 
     /// The analysis for one single-file program.
-    fn analysed(source: &str) -> CanStop {
+    fn analyzed(source: &str) -> CanStop {
         let db = KhoraDatabase::new();
         let file = SourceFile::new(&db, "main.kh".into(), source.to_string());
         let root = SourceRoot::new(&db, vec![file]);
         let mono = khora_types::mono::program_instances(&db, root);
         assert!(mono.errors.is_empty(), "the fixture should compile: {:?}", mono.errors);
-        analyse(&db, &[file], mono)
+        analyze(&db, &[file], mono)
     }
 
     /// The symbol whose last name segment is `name`: `main$add`, or
@@ -625,7 +625,7 @@ mod tests {
 
     #[test]
     fn a_leaf_with_no_loop_and_no_call_keeps_its_plain_return() {
-        let answer = analysed(
+        let answer = analyzed(
             "module main;
 fn add(a: Int, b: Int) -> Int { a + b }
 fn main() -> Int { add(1, 2) }
@@ -638,7 +638,7 @@ fn main() -> Int { add(1, 2) }
 
     #[test]
     fn a_loop_stops_and_so_does_every_caller_of_it() {
-        let answer = analysed(
+        let answer = analyzed(
             "module main;
 fn spin() -> Int { let mut n = 0; while n < 10 { n = n + 1; } n }
 fn middle() -> Int { spin() + 1 }
@@ -655,7 +655,7 @@ fn main() -> Int { middle() }
     /// Recursion has no back-edge, so a cycle is itself the reason.
     #[test]
     fn a_call_cycle_stops_and_polls_at_entry() {
-        let answer = analysed(
+        let answer = analyzed(
             "module main;
 fn fib(n: Int) -> Int { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }
 fn even(n: Int) -> Bool { if n == 0 { true } else { odd(n - 1) } }
@@ -676,7 +676,7 @@ fn main() -> Int { if even(4) { fib(10) } else { leaf() } }
     /// to be a cancellation point.
     #[test]
     fn a_call_through_a_function_value_stops() {
-        let answer = analysed(
+        let answer = analyzed(
             "module main;
 fn apply(f: (Int) -> Int, x: Int) -> Int { f(x) }
 fn double(x: Int) -> Int { x * 2 }
@@ -693,7 +693,7 @@ fn main() -> Int { apply(double, 3) }
     /// it is used at, and a generic leaf at none.
     #[test]
     fn a_generic_is_decided_per_specialization() {
-        let answer = analysed(
+        let answer = analyzed(
             "module main;
 fn same<A>(x: A) -> A { x }
 fn wait<A>(x: A) -> A { let mut n = 0; while n < 3 { n = n + 1; } x }
@@ -714,7 +714,7 @@ fn main() -> Int { let b = same(true); let s = wait(true); same(1) + wait(2) }
     /// tag.
     #[test]
     fn a_call_to_a_foreign_function_stops() {
-        let answer = analysed(
+        let answer = analyzed(
             "module main;
 extern fn khora_sleep(millis: Int) -> ();
 fn nap() -> () { khora_sleep(10) }
@@ -736,7 +736,7 @@ fn main() -> Int { nap(); 0 }
     /// holding a function value, and counts.
     #[test]
     fn a_bodiless_operation_stops_only_if_it_blocks_or_takes_a_function() {
-        let answer = analysed(
+        let answer = analyzed(
             "module main;
 pub type Fiber<A, 'r>;
 impl<A, 'r> Fiber<A, 'r> { fn spawn(body: () -> A raises 'r) -> Fiber<A, 'r>; fn join(self) -> A raises 'r; }
@@ -762,7 +762,7 @@ fn main() -> Int { 0 }
     /// A method is an ordinary instance, and a method call an ordinary edge.
     #[test]
     fn a_method_is_decided_like_any_function() {
-        let answer = analysed(
+        let answer = analyzed(
             "module main;
 type Counter = { n: Int }
 impl Counter {
@@ -810,7 +810,7 @@ fn spin(x: Int) -> Int { let mut n = x; while n > 0 { n = n - 1; } n }
     /// `Type::Fn`, so nothing else here would count it.
     #[test]
     fn a_shared_fn_call_is_a_call_through_a_function_value() {
-        let answer = analysed(&format!(
+        let answer = analyzed(&format!(
             "module main;
 {SHARED_FN}fn route(h: SharedFn<Int, Int, {{}}>) -> Int {{ SharedFn::call(h, 5) }}
 fn main() -> Int {{ route(SharedFn::of(fn x => spin(x))) }}
@@ -823,7 +823,7 @@ fn main() -> Int {{ route(SharedFn::of(fn x => spin(x))) }}
     /// The same, written as a method.
     #[test]
     fn a_shared_fn_method_call_is_a_call_through_a_function_value() {
-        let answer = analysed(&format!(
+        let answer = analyzed(&format!(
             "module main;
 {SHARED_FN}fn route(h: SharedFn<Int, Int, {{}}>) -> Int {{ h.call(5) }}
 fn main() -> Int {{ route(SharedFn::of(fn x => spin(x))) }}
@@ -838,7 +838,7 @@ fn main() -> Int {{ route(SharedFn::of(fn x => spin(x))) }}
     /// somebody lists it -- here a made-up `Array::fetch_remote`.
     #[test]
     fn an_intrinsic_nobody_listed_is_counted() {
-        let answer = analysed(
+        let answer = analyzed(
             "module main;
 pub type Array<A>;
 impl<A> Array<A> { fn length(self) -> Int; fn with_data(self, f: (Ptr, Int) -> Int) -> Int; }
@@ -859,7 +859,7 @@ fn main() -> Int { 0 }
     /// cancellation points: the module docs say why.
     #[test]
     fn shared_get_and_set_are_not_cancellation_points() {
-        let answer = analysed(
+        let answer = analyzed(
             "module main;
 pub type Shared<A>;
 impl<A> Shared<A> { fn of(value: A) -> Shared<A>; fn get(self) -> A; fn set(self, value: A) -> (); fn update(self, change: (A) -> A) -> A; }
@@ -878,7 +878,7 @@ fn main() -> Int { 0 }
     /// export counts and a call to third-party C does not.
     #[test]
     fn a_runtime_export_counts_and_third_party_c_does_not() {
-        let answer = analysed(
+        let answer = analyzed(
             "module main;
 extern fn khora_sleep(millis: Int) -> ();
 extern fn getpid() -> Int;
@@ -937,7 +937,7 @@ fn main() -> Int { nap(); who() }
         let root = SourceRoot::new(&db, vec![file]);
         let mono = khora_types::mono::program_instances(&db, root);
         assert!(mono.errors.is_empty(), "the fixture should compile: {:?}", mono.errors);
-        let answer = analyse(&db, &[file], mono);
+        let answer = analyze(&db, &[file], mono);
         let owner = symbol(&answer, name);
         let body = khora_hir::body::bodies(&db, file)
             .iter()
@@ -958,7 +958,7 @@ fn main() -> Int { nap(); who() }
     }
 
     /// **Only a lambda written in `Region::defer`'s finalizer argument is
-    /// recognised**, in either spelling. One bound to a `let` first, one
+    /// recognized**, in either spelling. One bound to a `let` first, one
     /// handed to a `Scope`'s `defer`, and one handed to a user type's `defer`
     /// are not: `Backend::lambdas_poll_in` says why each keeps its entry poll.
     #[test]

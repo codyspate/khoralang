@@ -190,8 +190,8 @@ impl<'a> Checker<'a> {
 
     /// A bare name in a pattern that is the name of one of its value's cases.
     ///
-    /// **A bare name binds**, so `Red => "warm"` over a `Colour` matched
-    /// every colour and answered "warm" for green. Where it was not followed
+    /// **A bare name binds**, so `Red => "warm"` over a `Color` matched
+    /// every color and answered "warm" for green. Where it was not followed
     /// by an arm it made unreachable, nothing was reported but that `Red` was
     /// never read -- a warning, on a program that built and gave a wrong
     /// answer, gone as soon as the arm read the name.
@@ -213,18 +213,19 @@ impl<'a> Checker<'a> {
     pub(crate) fn settle_bare_names(
         &mut self,
         declared_elsewhere: &dyn Fn(&khora_hir::ModulePath, &str) -> Vec<crate::VariantInfo>,
+        is_const: &dyn Fn(&str) -> bool,
     ) {
         for (pat, ty) in std::mem::take(&mut self.bare_names) {
             let Pat::Bind(local) = self.body.pat(pat) else { continue };
             let name = self.body.local(*local).name.clone();
             let settled = self.unifier.zonk(&ty);
             let Some(case) = self.case_named(&settled, &name, declared_elsewhere) else {
-                // A2: see `refuse_capitalised_binding`. Deleting this one
+                // A2: see `refuse_capitalized_binding`. Deleting this one
                 // line removes it.
-                self.refuse_capitalised_binding(pat, &name, &settled);
+                self.refuse_capitalized_binding(pat, &name, &settled, declared_elsewhere, is_const);
                 continue;
             };
-            let BareCase { owner, arity, labelled, imported, only } = case;
+            let BareCase { owner, arity, labeled, imported, only } = case;
             // **The type's only case**: a record, or `type UserId = Int`. The
             // binding matched exactly what the case would have, so the answer
             // was right and only what it looked like was wrong. `_`, or a
@@ -245,7 +246,7 @@ impl<'a> Checker<'a> {
             // written: a record type's own case is `Name {}`, a payload takes
             // one `_` per field, and a type's self-named case one segment.
             let head = if owner == name { name.clone() } else { format!("{owner}::{name}") };
-            let written = if owner == name && labelled {
+            let written = if owner == name && labeled {
                 format!("{name} {{}}")
             } else if arity == 0 {
                 head
@@ -274,7 +275,7 @@ impl<'a> Checker<'a> {
     /// The case of `settled` called `name`, if its type declares one.
     ///
     /// **Looks past this file's imports.** A `catch` over `load(n)!` meets a
-    /// `LoadError` nobody here named, and a `match` on `colour(n)` a `Shade`;
+    /// `LoadError` nobody here named, and a `match` on `color(n)` a `Shade`;
     /// checked against the scope, those names are nothing and the binding
     /// swallows in silence. That is not resolving a name the source wrote --
     /// which is why it may look outside the file's scope -- it is asking what
@@ -285,6 +286,25 @@ impl<'a> Checker<'a> {
         name: &str,
         declared_elsewhere: &dyn Fn(&khora_hir::ModulePath, &str) -> Vec<crate::VariantInfo>,
     ) -> Option<BareCase> {
+        let (owner, cases, imported) = self.cases_of(settled, declared_elsewhere)?;
+        let case = cases.iter().find(|v| v.name == name)?;
+        Some(BareCase {
+            arity: case.fields.len(),
+            labeled: case.labels.iter().any(|l| !l.is_empty()),
+            imported,
+            only: cases.len() == 1,
+            owner,
+        })
+    }
+
+    /// The type named by `settled`, its cases, and -- where this file never
+    /// imported it -- the module to import it from. `None` for a value with
+    /// no cases a pattern could name.
+    fn cases_of(
+        &self,
+        settled: &Type,
+        declared_elsewhere: &dyn Fn(&khora_hir::ModulePath, &str) -> Vec<crate::VariantInfo>,
+    ) -> Option<(String, Vec<crate::VariantInfo>, Option<String>)> {
         let Type::Adt { name: owner, home, .. } = settled else { return None };
         let in_scope: Vec<crate::VariantInfo> =
             self.types.variants_of(home.as_ref(), owner).into_iter().cloned().collect();
@@ -295,32 +315,39 @@ impl<'a> Checker<'a> {
             }
             (true, None) => return None,
         };
-        let case = cases.iter().find(|v| v.name == name)?;
-        Some(BareCase {
-            owner: owner.clone(),
-            arity: case.fields.len(),
-            labelled: case.labels.iter().any(|l| !l.is_empty()),
-            imported,
-            only: cases.len() == 1,
-        })
+        Some((owner.clone(), cases, imported))
     }
 
     /// **A2 -- the owner's decision, kept apart so it can be dropped.**
     ///
-    /// A capitalised bare name in a pattern that is no case of its value's
-    /// type. [`Checker::settle_bare_names`] catches `Red` over a `Colour`;
+    /// A capitalized bare name in a pattern that is no case of its value's
+    /// type. [`Checker::settle_bare_names`] catches `Red` over a `Color`;
     /// this catches the two catch-alls it cannot: a typo, `Gren => ..` for
-    /// `Colour::Green`, and a `const`, `FAVOURITE => ..`, which binds a new
+    /// `Color::Green`, and a `const`, `FAVORITE => ..`, which binds a new
     /// name rather than comparing against the constant. Both built with only
     /// an `unused-binding` warning, which the arm reading the name removed.
     ///
+    /// **Worded as an undefined name, not as the binding it is.** The
+    /// earlier text explained that the name bound the value and why that
+    /// was refused; a reader who misspelled a case wants the case. The
+    /// nearest case is offered only when it is near -- at most two edits,
+    /// or a third of the name, whichever is larger -- and only one, so a
+    /// tie offers nothing rather than a coin toss.
+    ///
     /// **Costs** letter case a meaning in patterns, where elsewhere it is a
     /// convention: a lower-case typo (`gren`) still binds, and a program
-    /// that binds with a capitalised name has to rename it.
+    /// that binds with a capitalized name has to rename it.
     ///
     /// To drop A2: delete this function, its call in `settle_bare_names`, and
     /// the `mod a2` block in `khora-types/tests/bare_patterns.rs`.
-    fn refuse_capitalised_binding(&mut self, pat: PatId, name: &str, settled: &Type) {
+    fn refuse_capitalized_binding(
+        &mut self,
+        pat: PatId,
+        name: &str,
+        settled: &Type,
+        declared_elsewhere: &dyn Fn(&khora_hir::ModulePath, &str) -> Vec<crate::VariantInfo>,
+        is_const: &dyn Fn(&str) -> bool,
+    ) {
         if !name.chars().next().is_some_and(char::is_uppercase) {
             return;
         }
@@ -329,14 +356,35 @@ impl<'a> Checker<'a> {
         if matches!(settled, Type::Unknown | Type::Var(_)) {
             return;
         }
-        self.error(
-            format!(
-                "`{name}` binds the value, because it is no case of `{settled}` -- and a \
-                 capitalised name in a pattern reads as a case. Bind it with a lower-case \
-                 name, or write the case it was meant to be in full"
-            ),
-            self.body.pat_range(pat),
-        );
+        const RULE: &str = "A name in a pattern that starts with a capital letter must be a \
+                            case; bind the value with a lower-case name.";
+        let message = match self.cases_of(settled, declared_elsewhere) {
+            Some((owner, cases, _)) => match nearest_case(name, &cases) {
+                Some(case) => {
+                    let fields = case.fields.len();
+                    let written = if fields == 0 {
+                        format!("{owner}::{}", case.name)
+                    } else {
+                        format!("{owner}::{}({})", case.name, vec!["_"; fields].join(", "))
+                    };
+                    format!("`{owner}` has no case `{name}`. Did you mean `{written}`?")
+                }
+                None => format!("`{owner}` has no case `{name}`. {RULE}"),
+            },
+            None => {
+                let mut text = format!("`{name}` is not a case of `{settled}`. {RULE}");
+                if is_const(name) {
+                    // Khora has match guards, so the comparison can stay
+                    // in the arm the reader wrote.
+                    text.push_str(&format!(
+                        " A pattern can't compare against a `const`; use \
+                         `n if n == {name}` or an `if`."
+                    ));
+                }
+                text
+            }
+        };
+        self.error(message, self.body.pat_range(pat));
         self.broken_pats.insert(pat);
     }
 
@@ -559,7 +607,7 @@ struct BareCase {
     /// Payload fields, one `_` each in the suggestion.
     arity: usize,
     /// Named fields: a record type's own case is written `Name {}`.
-    labelled: bool,
+    labeled: bool,
     /// The declaring module, where this file never imported the type.
     imported: Option<String>,
     /// The type has no other case, so the binding matched what the case
@@ -567,3 +615,34 @@ struct BareCase {
     only: bool,
 }
 
+/// The one case `name` was probably meant to be, for A2's message.
+///
+/// **A wrong guess is worse than none**: a reader who applies it gets a
+/// program that compiles and matches the wrong case. So only a case within
+/// two edits, or a third of the name's length where that is more, and only
+/// when no other case is as close. Letter case is ignored in the distance,
+/// as [`khora_hir::did_you_mean`] ignores it.
+fn nearest_case<'v>(name: &str, cases: &'v [crate::VariantInfo]) -> Option<&'v crate::VariantInfo> {
+    let limit = (name.chars().count() / 3).max(2);
+    let wanted = name.to_lowercase();
+    let mut best: Option<(usize, &crate::VariantInfo)> = None;
+    let mut tied = false;
+    for case in cases {
+        let distance = khora_hir::edit_distance(&wanted, &case.name.to_lowercase());
+        if distance > limit {
+            continue;
+        }
+        match best {
+            Some((seen, _)) if distance > seen => {}
+            Some((seen, _)) if distance == seen => tied = true,
+            _ => {
+                best = Some((distance, case));
+                tied = false;
+            }
+        }
+    }
+    match best {
+        Some((_, case)) if !tied => Some(case),
+        _ => None,
+    }
+}

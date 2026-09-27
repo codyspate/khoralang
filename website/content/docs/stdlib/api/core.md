@@ -95,7 +95,7 @@ direction:
   answer that is by not wrapping the secret.
 - *Without* `Encode`, a record holding one does **not** derive `Encode`,
   and the build stops. That is the right place to stop: a type that
-  serialises a secret is a bug, and one that serialises `"<redacted>"` is a
+  serializes a secret is a bug, and one that serializes `"<redacted>"` is a
   payload that fails to round-trip somewhere further away. It still
   derives `Decode`, because a secret arrives from somewhere: it reads, and
   does not write.
@@ -482,7 +482,7 @@ The container to accumulate into. `Array<A>` is fixed at the length it was
 allocated with, so a caller that does not know the count in advance cannot
 use one; `List<A>` grows, but at the front, one allocation and one pointer
 chase per element, and indexing it is a walk. This is contiguous, indexed
-in constant time, appended to in amortised constant time, and — the point
+in constant time, appended to in amortized constant time, and — the point
 of the whole exercise — *a constant number of allocations for any number of
 elements*.
 
@@ -501,7 +501,7 @@ array — at that length and at every other. Allocating per element is
 precisely the property a vector exists to *not* have, and it is the reason
 to reach for one over a `List`. Holding `Array<Option<A>>` would cost a
 `Some` per element and give that property away. The other way out is a
-`new` that takes a seed element, which is C++'s value-initialisation: it
+`new` that takes a seed element, which is C++'s value-initialization: it
 turns "give me somewhere to collect results" into "produce a result first",
 and a type with no cheap value has to fabricate one.
 
@@ -515,7 +515,7 @@ reference count per cell rather than one allocation per cell, and for an
 
 `with_capacity` is the field that falls out of this: it cannot allocate
 when it is called, so it records what was asked for in `wanted` and the
-first `push` honours it. **A capacity is a promise here, not storage** —
+first `push` honors it. **A capacity is a promise here, not storage** —
 `capacity` answers with what is really allocated, so a vector that has been
 asked for a thousand cells and pushed to zero times still reports nought.
 The alternative, reporting the promise, would be a number no memory
@@ -558,7 +558,7 @@ already happened. A `Route` holding one is shareable in the ordinary
 structural way, with nothing special said about routers.
 
 The cost is the wrapper at the mount site, and that is the honest price: the
-alternative is a bit in every function type, which colours every container
+alternative is a bit in every function type, which colors every container
 of a function all the way up.
 
 ### Changed
@@ -688,7 +688,7 @@ children may fail with two unrelated types and the nursery has nowhere to
 put either — `Nursery` says why. What survives the handles is the count, so
 that is what this carries.
 
-A child that a nursery *cancelled* is not a failure and is not counted:
+A child that a nursery *canceled* is not a failure and is not counted:
 cancellation is what a nursery does to its children on the way out, and
 counting it would make every early exit look like a fault.
 
@@ -807,7 +807,7 @@ A marker: no methods, and implementing it asserts rather than provides.
 Nothing has to write it for an ordinary type — a record, a variant, a tuple
 is shareable exactly when everything inside it is, and the compiler can see
 that. This is for the types it *cannot* see inside: one declared with no
-body, whose behaviour lives in the runtime or across the C ABI.
+body, whose behavior lives in the runtime or across the C ABI.
 
 Those default to unshareable, which is the only safe way round. `Array` can
 be written through `Array::set` and `Ptr` points at memory this language
@@ -2107,8 +2107,8 @@ pub fn wait(self) ->() raises 'er
 Waits for the fiber, and does not take its answer.
 
 **`join` is for the answer; this is for the ordering.** They are not the
-same wait, and the difference shows up on a fiber that was *cancelled*: a
-cancelled fiber has no answer, so a `join` has nothing to hand back and
+same wait, and the difference shows up on a fiber that was *canceled*: a
+canceled fiber has no answer, so a `join` has nothing to hand back and
 unwinds the joiner along with it. This one just waits. Reach for it when
 what you needed was "not before that finishes", which is most of the time
 a fiber is spawned for what it does rather than for what it computes.
@@ -2122,7 +2122,7 @@ other, and stops here, whatever either fiber's row says. The row is the
 child's: a waiter over a fallible child writes `!`, and one over a child
 that cannot fail writes nothing.
 
-The child is not cancelled by the waiter giving up. Letting the handle go
+The child is not canceled by the waiter giving up. Letting the handle go
 still waits, which is what keeps it from outliving the binding.
 
 #### finished
@@ -2159,20 +2159,20 @@ A `true` here means `join` has an answer ready and will not block. False
 is a fact about the instant it was asked, so this belongs in a loop that
 sleeps between looks rather than one that spins.
 
-#### cancelled
+#### canceled
 
 ```khora
-pub fn cancelled(self) -> Bool
+pub fn canceled(self) -> Bool
 ```
 
 Whether the fiber was stopped, rather than allowed to finish.
 
 **`finished` says a supervised fiber is gone and cannot say why.** The
-call that would say why is `join`, and on a cancelled fiber a `join`
+call that would say why is `join`, and on a canceled fiber a `join`
 unwinds its caller — at the entry point that ends the program with status
 130, which is not something a supervisor can catch. So the loop that
 notices its listener has stopped has no way to tell a listener that
-returned from one somebody cancelled, and those are the two cases it
+returned from one somebody canceled, and those are the two cases it
 would act on differently.
 
 ```khora
@@ -2180,7 +2180,7 @@ let server = Fiber::spawn(fn () => Router::listen_quietly(router, port)!);
 loop {
   clock.sleep(50);
   if Fiber::finished(server) {
-    if Fiber::cancelled(server) {
+    if Fiber::canceled(server) {
       // Somebody asked it to stop, so this is a shutdown and not a fault.
       break
     };
@@ -2198,7 +2198,7 @@ it says nothing about how far the work got, and there is no way here to
 take a partial answer. For that, have the fiber publish to a `Shared` cell
 and read the cell.
 
-**`join` still ends the program on a cancelled fiber.** This does not
+**`join` still ends the program on a canceled fiber.** This does not
 change that, and asking first does not make the join safe — between the
 question and the join is another instant in which a cancellation can
 arrive. Reach for `Fiber::wait`, which waits without taking the answer.
@@ -2221,7 +2221,7 @@ pub fn outcome(self) -> Outcome<A> raises 'er
 
 What the fiber ended as, waiting for it without unwinding this frame.
 
-**`cancelled` says a fiber was stopped and cannot hand back what it
+**`canceled` says a fiber was stopped and cannot hand back what it
 computed; `join` hands back the answer and, on a stopped fiber, unwinds
 the joiner.** At the entry point that ends the program with status 130,
 which no `catch` can name. So a caller that wants the answer *and*
@@ -2252,20 +2252,20 @@ match Fiber::outcome(worker)! catch {
 }
 ```
 
-**It does not make `join` safe.** `join` on a cancelled fiber ends the
+**It does not make `join` safe.** `join` on a canceled fiber ends the
 program as it always has; this is an alternative to that call and not a
 repair of it. Nor does asking first make a later join safe: between the
 question and the join is another instant in which a cancellation can
 arrive.
 
 **A cancellation reaching *this* frame while it waits still stops it.**
-The fiber asking is cancellable like any other, and that cancellation
+The fiber asking is cancelable like any other, and that cancellation
 travels the `!` rather than becoming an `Outcome::Stopped` — the value
 reports what the *child* ended as, and a frame cannot swallow a
 cancellation aimed at itself.
 
 **A fiber that was stopped after computing something answers `Stopped`,
-and the value is not handed back.** A fiber that was cancelled did not
+and the value is not handed back.** A fiber that was canceled did not
 finish the work its answer stands for, so handing back whatever it had
 computed would be an answer wearing the type of one that was complete.
 For partial progress, have the fiber publish to a `Shared` cell and read
@@ -2294,7 +2294,7 @@ cancel. `Fiber::abort` is the request that does, and `Fiber::cancel_within`
 escalates to it after a deadline the caller chooses.
 
 A fiber whose body is a `nursery` cancels its children with it, so a
-cancelled fan-out stops rather than waiting on workers nobody told.
+canceled fan-out stops rather than waiting on workers nobody told.
 
 `Fiber::detach` is the way out that does not wait.
 
@@ -2551,7 +2551,7 @@ Arithmetic that does not trap, and the bits underneath it.
 
 Ordinary `+`, `-` and `*` **stop the program** when they do not fit: a
 program that passes its tests and then wraps in production is the failure
-worth a branch to prevent. These are how you ask for the other behaviour in
+worth a branch to prevent. These are how you ask for the other behavior in
 the places that genuinely want it — a hash, a checksum, a pseudo-random
 number — by name, so that the trap stays the default without being in the
 way.
@@ -2709,7 +2709,7 @@ is an infinite loop on every string. To step a character at a time, pass
 says what it is doing.
 
 The name is the trap: `next` reads as *after*. It is kept because the
-behaviour is the one a cut wants — rounding an arbitrary offset outward
+behavior is the one a cut wants — rounding an arbitrary offset outward
 to something safe — and because `String::chars_between` and
 `String::chars` are the two loops most callers actually want, and both
 are here already.
@@ -3136,7 +3136,7 @@ does the rounding in binary floating point — so a percentage renders as
 `33.33` on one machine and `33.34` on another, which is the bug
 `std::decimal` exists to prevent, reintroduced by the formatter. The
 runtime rounds the decimal expansion of the double instead, the way C's
-`printf` and Go's `strconv` do, so this and its neighbours agree.
+`printf` and Go's `strconv` do, so this and its neighbors agree.
 
 **Still a `Float`, so it is still a rounding of an approximation.**
 `0.1 + 0.2` to two places is `0.30`, and it is `0.30` because the sum was
@@ -3145,7 +3145,7 @@ near enough, not because it was right. Money is `Decimal` and
 have an `Eq` cannot have an exact one of these either.
 
 `places` is clamped to nought through thirty: a double carries about
-seventeen significant digits, so past that the characters are an artefact
+seventeen significant digits, so past that the characters are an artifact
 of the binary value rather than information.
 
 #### to_int
@@ -3162,7 +3162,7 @@ all mean by it. Rounding is a different question with four defensible
 answers, so it gets a different function when somebody needs one.
 
 A number too large for an `Int` clamps to the nearest end, and a `NaN` is
-zero. Undefined behaviour is the alternative and is not one.
+zero. Undefined behavior is the alternative and is not one.
 
 #### of_string
 
@@ -3389,7 +3389,7 @@ one of these blocks**, so they are argued for here and only named in the
 other six. `+`, `-` and `*` trap on overflow — [The numbers design note](https://github.com/codyspate/khoralang/blob/main/docs/design/numbers.md)
 §"Overflow traps, in every build" argues that at length — and
 `wrapping_add`, `wrapping_sub` and `wrapping_mul` are how a program asks
-for the other behaviour *by name*. That is what a hash, a checksum and a
+for the other behavior *by name*. That is what a hash, a checksum and a
 wire format want, and naming it is what keeps a wrap that was intended
 apart from one that was a bug.
 
@@ -4204,7 +4204,7 @@ pub fn update(self, key: K, step: (Option<V>) -> V) -> Dict<K, V>
 
 The map with `key` set to whatever `step` makes of what was there.
 
-**Counting things into a map is the most common thing a log analyser
+**Counting things into a map is the most common thing a log analyzer
 does**, and without this it is `insert(t, k, unwrap_or(get(t, k), 0) + 1)`
 every time -- which names the map three times, the key twice, and walks
 the tree twice to answer one question.
@@ -4503,7 +4503,7 @@ pub fn grow(self, seed: A) ->()
 Twice the room, or `wanted` if there was none, with `seed` in every cell.
 
 **Doubling, not a fixed increment**, which is the whole reason `push` is
-amortised constant: growing by a constant makes filling a vector
+amortized constant: growing by a constant makes filling a vector
 quadratic in its length, and that is the bug that turns a working program
 into a slow one only once the input gets big. Two rather than the 1.5
 some allocators are tuned for, because reusing the freed blocks needs an
@@ -4760,7 +4760,7 @@ Takes a value out, waiting while the channel is empty.
 `None` only when the channel is closed *and* drained.
 
 **A cancellation point**, for the reason `send` gives. A receive that is
-cancelled is always cancelled empty-handed: the runtime looks at the flag
+canceled is always canceled empty-handed: the runtime looks at the flag
 only once it has established the queue is empty, so a send arriving at
 the same moment still wins and the value is never dropped on the floor.
 
@@ -4938,7 +4938,7 @@ stops once it has finished.
 A nursery holds its children as bare handles and waits for them; it could
 not hand back what they computed even if it kept it, so the answer is
 fixed at `()`. The row stays so a child's failure can still be counted
-and reported as `ChildFailed`. Cancelling the nursery's fiber cancels
+and reported as `ChildFailed`. Canceling the nursery's fiber cancels
 every child, whatever its row.
 
 #### wait
@@ -4960,13 +4960,13 @@ rather than this.
 **A failure cancels the siblings, and *when* is not yet a promise.** A
 nursery is a unit: the block asked for these fibers together, so one of
 them failing means the answer the group was computing is not coming and
-the rest are working on a question nobody will ask. They are cancelled
+the rest are working on a question nobody will ask. They are canceled
 rather than killed, so each stops at its next `!` and runs its finalizers
 on the way out, and every one of them is still waited for.
 
 **What is measured today is weaker than that reads.** A nursery reaps
 handles oldest-first, so a failure is noticed in adoption order: with
-twelve children and a failure at 10 ms, the siblings were cancelled in
+twelve children and a failure at 10 ms, the siblings were canceled in
 2-8 ms when the doomed child was adopted first, in about half of runs at
 all when it was adopted in the middle, and in none of twenty-five runs
 when it was adopted last -- everyone finished and the count came back
@@ -6143,7 +6143,7 @@ pub fn todo<A>() -> A
 A hole where the code is not written yet.
 
 **It answers whatever is wanted, so it fits anywhere.** An unwritten match
-arm has to agree with whatever its neighbours produce, so this is generic in
+arm has to agree with whatever its neighbors produce, so this is generic in
 its result and `todo()` type-checks in a `String` arm and an `Int` arm
 alike, leaving the program compiling while a case is unfinished.
 
@@ -6157,9 +6157,9 @@ that returned a plausible value would let a half-written program answer, and
 a wrong answer is the one outcome worse than a refusal.
 
 ```khora
-match colour {
-  Colour::Red => "red",
-  Colour::Green => todo(),
+match color {
+  Color::Red => "red",
+  Color::Green => todo(),
 }
 ```
 
@@ -6194,7 +6194,7 @@ after the caller has moved on.
 
 **A cancellation does not come out here the way a failure does.** This
 joins, and `Fiber::wait` records what a join does to a fiber that was
-cancelled: a cancelled fiber has no answer, so the join has nothing to hand
+canceled: a canceled fiber has no answer, so the join has nothing to hand
 back and unwinds the joiner along with it. Where the joiner is `main` there
 is nowhere left to unwind to, and the program ends at status 130 naming the
 call that got there. Being ordered is what leaves no other answer: a list
@@ -6326,7 +6326,7 @@ pub fn main() -> Int { scoped(fn () => serve()); 0 }
 
 `scoped` is where the releases run, and they run on **every** way out --
 a return, a raise, or a cancellation. That last one is why this exists
-rather than a close written after the loop: a cancelled fiber never
+rather than a close written after the loop: a canceled fiber never
 reaches the line after the loop.
 
 ### acquire

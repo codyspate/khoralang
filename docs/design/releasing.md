@@ -12,7 +12,7 @@ and because question 1 has a known expiry date — see the note on it.
 
 **The version policy**, in `docs/design/compatibility.md`: semantic versioning,
 with the clarification that a bug fix is not automatically a patch release —
-if a program could reasonably have been written against the old behaviour,
+if a program could reasonably have been written against the old behavior,
 correcting it is major however wrong it was. That document also lists the five
 things a minor release may not do, three of which are Khora-specific.
 
@@ -54,7 +54,7 @@ learn, in exchange for a distinction nothing can currently observe.
 
 So the shape to revisit is not "should members version independently" — it is
 "a registry exists, and now they can". `khora release` refuses a workspace with
-no `[workspace.package] version` rather than inventing per-member behaviour, so
+no `[workspace.package] version` rather than inventing per-member behavior, so
 the day that changes it will be a deliberate change and not a drift.
 
 ## Question 2 — what does the tool actually do?
@@ -64,7 +64,7 @@ pushes and opens the draft".
 
 **Decided: it reports, and on request it writes the version. It never tags and
 never pushes.** There is a test that asserts no tag exists afterwards, because
-that is the behaviour worth being certain about.
+that is the behavior worth being certain about.
 
 That matches the shape `release.yml` already chose deliberately: a person looks
 at the draft before anything is visible. A tool that tags is a tool that can
@@ -84,7 +84,7 @@ $ khora release --since v0.4.0
   version   0.4.0
   next      you choose: --major, --minor or --patch
 
-  Which one is a judgement about observable behaviour, so this does not
+  Which one is a judgment about observable behavior, so this does not
   guess. `docs/design/compatibility.md` has the rule, including that a
   bug fix is not automatically a patch.
 ```
@@ -100,7 +100,7 @@ reasoning in `khora.toml` would be a bad trade for one number.
 ## Question 3 — where do the notes come from?
 
 The pre-1.0 rule is demanding: *every* change that alters what a valid program
-does must be named, with the old behaviour and the new one. That is prose, and
+does must be named, with the old behavior and the new one. That is prose, and
 no tool writes it.
 
 **Decided: the tool drafts a skeleton from commit subjects and refuses to
@@ -109,10 +109,10 @@ pretend it is finished.**
 Commit subjects in this repository are already written to be read — they lead
 with the roadmap item and say what changed. Grouping them under the members
 they touched produces a usable first draft. What the tool must not do is emit
-that draft as if it were the notes: the compatibility rule is about *behaviour
+that draft as if it were the notes: the compatibility rule is about *behavior
 changes described in both directions*, which a subject line does not contain.
 
-`--notes FILE` writes the grouped subjects under a **Behaviour changes**
+`--notes FILE` writes the grouped subjects under a **Behavior changes**
 heading that is left empty, with a comment saying that an empty section means
 the release is not ready rather than that there were none — and that "none" is
 what to write if there were none. An empty required section is the tool saying

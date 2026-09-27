@@ -56,7 +56,7 @@ pub unsafe extern "C" fn khora_unhandled(name: *const u8, len: u64) {
 ///
 /// Overflow traps in every build. A program that passes its tests and then
 /// wraps in production is the failure worth spending a branch to prevent, and
-/// two behaviours — one for testing, one for shipping — put the difference
+/// two behaviors — one for testing, one for shipping — put the difference
 /// exactly where it is most expensive to find. `docs/roadmap.md` 6.2.
 ///
 /// `Int::wrapping_add` and its siblings are how you ask for the other thing,
@@ -110,7 +110,7 @@ pub unsafe extern "C" fn khora_overflow(what: *const u8, len: u64) -> ! {
 /// `todo()` that returned something would let a half-written program run and
 /// answer, which is the outcome every trap in this file exists to prevent: the
 /// refusal is the useful part. `-> !` is what makes it usable in any position,
-/// so an unwritten match arm type-checks against whatever its neighbours
+/// so an unwritten match arm type-checks against whatever its neighbors
 /// produce and still refuses to run.
 #[unsafe(no_mangle)]
 pub extern "C" fn khora_todo() -> ! {
@@ -255,7 +255,7 @@ fn on_which_fiber() -> String {
 /// after a different language reads as a leak of what the compiler happens to
 /// be written in, and it is one.
 ///
-/// So the message names the Khora one, and both are honoured: somebody who
+/// So the message names the Khora one, and both are honored: somebody who
 /// already exports `RUST_BACKTRACE=1` for everything still gets a backtrace
 /// without being asked twice.
 ///
@@ -410,7 +410,7 @@ mod tests {
         assert!(!trimmed.contains("backtrace_rs"), "the runtime's frames are gone");
     }
 
-    /// The one thing this must never do is eat a frame it did not recognise.
+    /// The one thing this must never do is eat a frame it did not recognize.
     #[test]
     fn a_capture_without_the_trap_handler_is_left_alone() {
         let other = "   0: something\n             at elsewhere.rs:1\n";

@@ -1,6 +1,6 @@
 //! Inferring an expression's type, one form at a time.
 //!
-//! `infer` memoises and `infer_uncached` does the work, so every arm below can
+//! `infer` memoizes and `infer_uncached` does the work, so every arm below can
 //! recurse freely without the cost showing up quadratically. What is *not* here
 //! is calls — they are big enough and different enough to be `calls`, and rows
 //! travel with them.

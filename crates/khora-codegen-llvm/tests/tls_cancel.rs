@@ -1,6 +1,6 @@
 #![cfg(feature = "llvm")]
 
-//! What a cancelled fiber lets go of when it was holding a TLS session.
+//! What a canceled fiber lets go of when it was holding a TLS session.
 //!
 //! **This was attempted once and abandoned**, and the reason is the shape of
 //! the test rather than the runtime. A client that connects, is left waiting
@@ -14,12 +14,12 @@
 //!   the handshake has completed, and when it is holding the session. A client
 //!   that sees nothing is then a different failure from a client that sees a
 //!   connection stay open, and the assertions can tell them apart.
-//! - **The handshake happens before anything can be cancelled.** `accept` and
+//! - **The handshake happens before anything can be canceled.** `accept` and
 //!   `secure` run on the main fiber, and only the finished session is handed
-//!   to the fiber that gets cancelled. There is no race between a client
+//!   to the fiber that gets canceled. There is no race between a client
 //!   connecting and a cancellation arriving.
 //!
-//! # Cancelling from outside, which nothing could do before
+//! # Canceling from outside, which nothing could do before
 //!
 //! There is no `Fiber::cancel`. What there is, is a nursery: the first child's
 //! failure cancels its siblings, which is a cancellation arriving from outside
@@ -29,7 +29,7 @@
 //! **Adoption order is load-bearing.** A nursery notices failures in the order
 //! it adopted, so the doomed child is adopted first; with the holder first its
 //! sibling's failure is not looked at until the holder has finished, and
-//! nothing is ever cancelled. `process_cancel.rs` has the same note, and found
+//! nothing is ever canceled. `process_cancel.rs` has the same note, and found
 //! it the same way.
 //!
 //! # What the client proves
@@ -54,7 +54,7 @@ const PORT: u16 = 18847;
 
 /// What the client waits before giving up, in seconds.
 ///
-/// The floor the broken behaviour hits. A released session closes as soon as
+/// The floor the broken behavior hits. A released session closes as soon as
 /// the cancellation lands, so anything near this is a leak.
 const CLIENT_TIMEOUT: u64 = 8;
 
@@ -92,7 +92,7 @@ fn fixture(name: &str) -> String {
     std::fs::read_to_string(&path).expect("the test certificate is in tests/fixtures")
 }
 
-/// The server: everything on the fiber that gets cancelled.
+/// The server: everything on the fiber that gets canceled.
 ///
 /// **The handshake cannot happen anywhere else.** A `TlsConnection` can be
 /// written, so the compiler refuses to let one cross a fiber boundary — two
@@ -182,7 +182,7 @@ fn doomed() -> () raises Oops {{
 
 /// **Adoption order is load-bearing.** A nursery notices failures in the order
 /// it adopted, so with the holder first the doomed child is not looked at
-/// until the holder has finished, and nothing is ever cancelled.
+/// until the holder has finished, and nothing is ever canceled.
 fn both() -> () with {{ nursery: Nursery }} {{
   nursery.adopt(Fiber::spawn(fn () => doomed()!));
   nursery.adopt(Fiber::spawn(fn () => scoped(fn () => hold()!)!));
@@ -294,9 +294,9 @@ fn wait_for(reader: &mut impl BufRead, wanted: &str, seen: &mut Vec<String>) -> 
     }
 }
 
-/// **A cancelled fiber gives back the TLS session it was holding.**
+/// **A canceled fiber gives back the TLS session it was holding.**
 #[test]
-fn a_cancelled_fiber_releases_the_tls_session() {
+fn a_canceled_fiber_releases_the_tls_session() {
     let mut child = start("tls_cancel", &server_program());
     let mut seen: Vec<String> = Vec::new();
     let stdout = child.stdout.take().expect("a piped stdout");
@@ -324,15 +324,15 @@ fn a_cancelled_fiber_releases_the_tls_session() {
     );
     assert!(
         seen.iter().any(|l| l.contains("holding")),
-        "the session was never held by the fiber that gets cancelled: {said}"
+        "the session was never held by the fiber that gets canceled: {said}"
     );
     assert!(
         !seen.iter().any(|l| l.contains("which is wrong")),
-        "the holder was never cancelled, so this proves nothing: {said}"
+        "the holder was never canceled, so this proves nothing: {said}"
     );
     assert!(
         closed,
-        "the client waited {read_seconds:.3}s and the connection never closed: the cancelled \
+        "the client waited {read_seconds:.3}s and the connection never closed: the canceled \
          fiber leaked the session. {said}"
     );
     assert!(

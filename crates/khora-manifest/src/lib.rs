@@ -65,7 +65,7 @@ pub use crate::semver::Version;
 /// `canonicalize` returns a *verbatim* path, which is correct and which no
 /// person wants to read in a diagnostic: `\\?\C:\Users\...\khora.lock` is the
 /// same file as `C:\Users\...\khora.lock` and looks like a mistake. The prefix
-/// only turns off path normalisation these paths do not need, so the stripped
+/// only turns off path normalization these paths do not need, so the stripped
 /// form is safe to keep using and not only to print.
 ///
 /// Here rather than in a utilities crate because there is no utilities crate,

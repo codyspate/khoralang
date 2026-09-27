@@ -6,8 +6,8 @@
 //!
 //! **A bare name is always a binding here**, and a constructor is always
 //! written with a path or a payload. Whether a bare name is *also* the name
-//! of one of its value's cases -- `Red => ..` over a `Colour`, which would
-//! bind every colour -- needs the value's type, which lowering does not have,
+//! of one of its value's cases -- `Red => ..` over a `Color`, which would
+//! bind every color -- needs the value's type, which lowering does not have,
 //! so lowering only records which bindings were written that way
 //! ([`Body::written_binds`]) and the type checker refuses the ones that
 //! collide.
@@ -129,7 +129,7 @@ impl<'a> Ctx<'a> {
     /// Why a constructor path found nothing.
     ///
     /// **`cannot find constructor `Result::Ok`` was the one "not in scope"
-    /// message in this compiler that did not name the fix.** Its neighbours
+    /// message in this compiler that did not name the fix.** Its neighbors
     /// all do — ``derive(Show)` needs `Show` in scope; import it from
     /// `std::core``, ``for` needs `Step` and `Iterator` in scope; import them
     /// from `std::core``, ``JsonError` is not in scope here … add it to an

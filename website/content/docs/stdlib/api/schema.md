@@ -118,7 +118,7 @@ sentence.
 A sentence is what a person reads and a keyword is what a JSON Schema
 carries, and only structure can become both. [`refine`](#refine) takes a sentence
 and keeps it as `Custom`; the named rules -- [`between`](#between), [`min_length`](#min_length)
-and their neighbours -- carry their bounds.
+and their neighbors -- carry their bounds.
 
 ### Problem
 
@@ -276,7 +276,7 @@ A description of an `A`, and how to read one.
 
 Built with the constructors below rather than by hand: the record is public
 so that a package may add a primitive of its own, and everything `std`
-offers goes through [`string`](#string), [`int`](#int) and their neighbours.
+offers goes through [`string`](#string), [`int`](#int) and their neighbors.
 
 ### Fields
 
@@ -420,7 +420,7 @@ is all a source that could not label it ever knew.
 pub fn of_map(text: Map<String, String>) -> Raw
 ```
 
-A record of text nobody labelled: a query string, the path parameters,
+A record of text nobody labeled: a query string, the path parameters,
 the headers.
 
 #### of_arguments

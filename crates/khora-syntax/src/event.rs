@@ -106,7 +106,7 @@ pub(crate) fn build_tree(lexed: &LexedStr<'_>, mut events: Vec<Event>) -> GreenN
                     lexed.kind(next_tok) == kind
                         || (lexed.kind(next_tok) == SyntaxKind::IDENT
                             && kind.is_contextual_keyword()),
-                    "token stream desynchronised at token {next_tok}: lexer said {:?}, parser said {kind:?}",
+                    "token stream desynchronized at token {next_tok}: lexer said {:?}, parser said {kind:?}",
                     lexed.kind(next_tok)
                 );
                 builder.token(rowan_kind(kind), lexed.text(next_tok));

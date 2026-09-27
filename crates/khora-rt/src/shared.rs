@@ -190,7 +190,7 @@ type Change = extern "C" fn(*const u8, *mut u8, u64, *mut u64) -> u32;
 ///
 /// **`change` cannot fail, and nothing inside it stops.** It runs
 /// [`crate::cancel::Pinned`]: no cancellation point in it acts, and a blocking
-/// call in it gives up with its "gave up" answer once the fiber is cancelled.
+/// call in it gives up with its "gave up" answer once the fiber is canceled.
 /// Work that can fail belongs outside: compute it, then `set` the answer.
 ///
 /// **One thing can still come back without an answer: a `Fiber::join`, `wait`

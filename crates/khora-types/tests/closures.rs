@@ -336,7 +336,7 @@ fn an_annotated_closure_parameter_keeps_its_annotation() {
 
 /// `+` on a `String` is concatenation wherever the string arrives from.
 ///
-/// The check ran against the *unzonked* left operand, so it recognised a string
+/// The check ran against the *unzonked* left operand, so it recognized a string
 /// only when one was written literally. A `String` reaching `+` as a solved
 /// inference variable — which is what a closure parameter is — fell through to
 /// the arithmetic path and was reported as `expected Int, found String`.

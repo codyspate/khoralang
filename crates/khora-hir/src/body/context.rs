@@ -19,7 +19,7 @@ impl<'a> Ctx<'a> {
     /// installing its bindings: same `let`s, same labels, same subtraction.
     /// Sorts a path after `with` into the two things it can be.
     ///
-    /// A `context` contributes its labelled bindings. Anything else is a
+    /// A `context` contributes its labeled bindings. Anything else is a
     /// handler value installed by its type, which is not an error to be
     /// resolved here -- `lower_installation` resolves the name the same way
     /// any other mention of it would, and reports it missing if it is.
@@ -101,7 +101,7 @@ impl<'a> Ctx<'a> {
     /// `with { ledger: h } { .. }` — the labels bound over a region.
     ///
     /// `by_type` are paths naming handler *values*: `with MyDatabase { .. }`.
-    /// They are bound first, so an explicitly labelled binding in the same
+    /// They are bound first, so an explicitly labeled binding in the same
     /// `with` shadows one -- the same "later wins" rule the labels follow
     /// among themselves.
     ///

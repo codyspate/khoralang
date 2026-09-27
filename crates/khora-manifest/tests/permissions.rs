@@ -305,7 +305,7 @@ fn a_parent_segment_is_refused_however_wide_the_grant() {
         ("**", "a/../../b", true),
         // Buried, so this is not just a test of the first segment.
         ("./logs/**", "logs/deep/../../secret.txt", false),
-        // Separators are levelled first, so this is the same path again.
+        // Separators are leveled first, so this is the same path again.
         ("./logs/**", "logs\\..\\secret.txt", false),
         // A segment and not a substring: `..config` is a filename.
         ("./logs/**", "logs/..config", true),

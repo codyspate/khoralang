@@ -27,7 +27,7 @@ module khq::eval;
 //! different answers, and a tool that confused them would print nothing at all
 //! for a query with a typo in it and look like it had worked.
 //!
-//! `?` is how a caller asks for the other behaviour, and it is the only place
+//! `?` is how a caller asks for the other behavior, and it is the only place
 //! this module catches. `.name?` over a list of mixed values keeps the objects
 //! and drops the rest.
 //!

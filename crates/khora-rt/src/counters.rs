@@ -3,7 +3,7 @@
 //! Allocations, live objects, and a tick that goes up every time it is read.
 //! None of it is load-bearing: `khora_live_count` returning to zero is how
 //! every leak test in the repository states its claim, and
-//! `docs/design/compatibility.md` says allocation behaviour is not part of the
+//! `docs/design/compatibility.md` says allocation behavior is not part of the
 //! language's promise — so these are the compiler's own instrument rather than
 //! a contract with anybody.
 
@@ -85,7 +85,7 @@ const NOT_COUNTING: usize = usize::MAX;
 /// A counter that goes up by one every time it is read, starting at 1.
 ///
 /// A testing aid, beside the allocation counters and there for the same
-/// reason: some behaviour is only visible over repetition, and a Khora program
+/// reason: some behavior is only visible over repetition, and a Khora program
 /// has no way to remember how many times it has done something. Mutable state
 /// is D11's, and a test should not have to wait for it.
 #[unsafe(no_mangle)]

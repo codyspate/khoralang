@@ -7,7 +7,7 @@
 //! and `cargo fuzz`, which hands over whatever libFuzzer's coverage feedback
 //! decided to try next. A `Strategy` cannot be driven by a fuzzer and a
 //! fuzzer's `Unstructured` cannot be shrunk by `proptest`, so the shared
-//! artefact is the thing underneath both: a cursor over a slice of bytes.
+//! artifact is the thing underneath both: a cursor over a slice of bytes.
 //!
 //! # The rule that makes shrinking work
 //!

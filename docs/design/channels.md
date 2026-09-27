@@ -13,7 +13,7 @@ noticed until `packages/postgres` is what it forbids.
 
 A PostgreSQL connection is *writable* — it buffers the bytes that arrived and
 were not yet a whole message — and it is *strictly serial*: two fibers writing
-one socket interleave their frames and desynchronise the stream. So `std::db`'s
+one socket interleave their frames and desynchronize the stream. So `std::db`'s
 `Db` capability over a connection could not be written at all:
 
 - the handler cannot capture the connection, because `Connection` is not
@@ -24,7 +24,7 @@ one socket interleave their frames and desynchronise the stream. So `std::db`'s
 
 Three doors, all correctly locked. And making `Connection` shareable would not
 have helped: two fibers on one socket corrupt the stream whatever the checker
-says, so the serialisation has to exist somewhere real.
+says, so the serialization has to exist somewhere real.
 
 `sharing.md`'s "what is still open" did not list this. It is listed now.
 

@@ -160,7 +160,7 @@ fn connect_retrying(port: u16) -> std::net::TcpStream {
     panic!("could not connect to the Khora server on {port}");
 }
 
-/// Khora dialling *out*, which nothing could do until phase 13.
+/// Khora dialing *out*, which nothing could do until phase 13.
 ///
 /// Everything else in this module and in `std::net::socket` grew from serving:
 /// `listen_on`, `accept_on`, and nothing that starts a conversation. A database
@@ -234,7 +234,7 @@ fn main() -> Int {{
 
     let ran = std::process::Command::new(&exe).output().expect("the program should run");
     let out = String::from_utf8_lossy(&ran.stdout).replace("\r\n", "\n");
-    assert!(ran.status.success(), "the dialler exited with {:?}: {out}", ran.status.code());
+    assert!(ran.status.success(), "the dialer exited with {:?}: {out}", ran.status.code());
     assert_eq!(out, "5\n4\n", "five bytes out, four back: {out}");
 
     let got = heard.join().expect("the listener");

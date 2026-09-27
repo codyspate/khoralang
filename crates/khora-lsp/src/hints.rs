@@ -209,7 +209,7 @@ fn labels_of(row: &Type) -> Option<String> {
     })
 }
 
-/// One row entry. A capability is `label: Type`; an error is labelled by its
+/// One row entry. A capability is `label: Type`; an error is labeled by its
 /// own type name, so printing both would say the same word twice.
 fn render(label: &str, ty: &Type) -> String {
     let written = ty.to_string();

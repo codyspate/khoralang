@@ -16,7 +16,7 @@ version = "0.1.0"
 version = "0.3.0"
 ```
 
-Tables may appear in any order. A key the compiler does not recognise is a warning rather than an error, so a manifest written for a newer Khora still builds with an older one — you are told what was ignored instead of being stopped.
+Tables may appear in any order. A key the compiler does not recognize is a warning rather than an error, so a manifest written for a newer Khora still builds with an older one — you are told what was ignored instead of being stopped.
 
 ## `[toolchain]` — which Khora builds this
 

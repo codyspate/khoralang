@@ -73,7 +73,7 @@ says what that costs.
 ## There is no `async fn`
 
 Fibers are structured and I/O is direct-style, so a function is not written
-twice. Suspension is something the runtime does, not a second colour of
+twice. Suspension is something the runtime does, not a second color of
 function that divides the library in half.
 
 ## Visibility

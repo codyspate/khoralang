@@ -382,7 +382,7 @@ fn main() -> Int {
 ///
 /// This parsed, type-checked, and then failed in the backend with "needs a
 /// runtime comparison the backend does not generate yet" — accepted through two
-/// phases and refused in the third, which is the one behaviour that was clearly
+/// phases and refused in the third, which is the one behavior that was clearly
 /// wrong. `khora_str_eq` already existed and `==` already compiled.
 #[test]
 fn a_string_literal_pattern_tests_by_equality() {
@@ -943,7 +943,7 @@ fn main() -> Int {
 /// An impl over a constructor is selected by matching the receiver, which is
 /// what tells `impl<A> Holds for Wrapper<A>` what `A` is.
 #[test]
-fn a_parameterised_impl_is_selected_by_the_receiver() {
+fn a_parameterized_impl_is_selected_by_the_receiver() {
     let ran = run(
         "trait_param_impl",
         "module t;
@@ -1321,7 +1321,7 @@ fn main() -> Int {
 
 /// An inherent impl over a constructor learns its parameter from the receiver.
 #[test]
-fn a_parameterised_inherent_impl_runs() {
+fn a_parameterized_inherent_impl_runs() {
     let ran = run(
         "inherent_generic",
         "module t;

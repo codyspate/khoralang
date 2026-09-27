@@ -78,7 +78,7 @@ fn an_ordinary_record_may_not_be_vouched_for() {
     );
 }
 
-/// **The vouch is honoured**, not merely permitted: a value of a vouched type
+/// **The vouch is honored**, not merely permitted: a value of a vouched type
 /// crosses into a fiber.
 ///
 /// Without this the impl would be accepted and then ignored, which is the shape

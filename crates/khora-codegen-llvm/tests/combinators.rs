@@ -193,7 +193,7 @@ pub fn main() -> () {
 /// A pipeline holds a bounded number of objects however long the source is.
 ///
 /// Sampled *during* the fold, on the last element, so it sees what is live
-/// mid-walk rather than after cleanup. A stage that materialised its output
+/// mid-walk rather than after cleanup. A stage that materialized its output
 /// -- the way a `map` that builds a list does -- would grow with `n`; these
 /// hand each element straight to the next stage.
 ///
@@ -202,7 +202,7 @@ pub fn main() -> () {
 /// `Step` and its successor record, and `docs/design/reuse.md` has the
 /// measurement and what removing them needs.
 #[test]
-fn a_pipeline_materialises_nothing() {
+fn a_pipeline_materializes_nothing() {
     let out = run(
         "combinators_live",
         r#"module main;

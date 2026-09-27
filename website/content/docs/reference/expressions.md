@@ -270,7 +270,7 @@ value |> parse! |> validate(config)!
 
 A pipeline introduces no second error model: `!` still marks the exact call
 where a typed failure may leave the function, and `catch` still applies either
-to one stage or to the parenthesised pipeline as a whole.
+to one stage or to the parenthesized pipeline as a whole.
 
 ```khora
 let user = (raw |> parse! |> validate!) catch {

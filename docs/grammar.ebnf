@@ -94,7 +94,7 @@ VariantPayload ::= Field ( "," Field )* ( "," )?       (* named payload       *)
 FunctionDecl   ::= ( "pub" )? ( "extern" )? "fn" Ident ( TypeParams )? ParamList
                    ( "->" Type )? EffectClauses ( Block | ";" ) ;
 
-(* A module-level constant. Its initialiser is evaluated at compile time. *)
+(* A module-level constant. Its initializer is evaluated at compile time. *)
 ConstDecl      ::= ( "pub" )? "const" Ident ( ":" Type )? "=" Expr ";" ;
 ParamList      ::= "(" ( Param ( "," Param )* ( "," )? )? ")" ;
 Param          ::= ( Ident | "_" ) ( ":" Type )? ;
@@ -258,7 +258,7 @@ ContextualKeyword
    These are *not* keywords and appear in no production above. The lexer hands
    each to the parser as an Ident, which is then refused where a name would be
    bound -- so `Ident` above excludes these as well as the keywords, and the
-   editor grammar must not colour them, because there is nothing to colour. *)
+   editor grammar must not color them, because there is nothing to color. *)
 ReservedWord   ::= "where"     (* a bound list; typeclasses.md 7        *)
                  | "yield"     (* generators                            *)
                  | "macro"

@@ -205,7 +205,7 @@ impl Server {
     /// time. A request the batch also cancels is answered with the
     /// protocol's cancellation error rather than computed, which is what
     /// `$/cancelRequest` is for and what a strictly serial loop can never
-    /// honour — the cancel always arrives after the work it wanted to stop.
+    /// honor — the cancel always arrives after the work it wanted to stop.
     /// And a run of edits publishes diagnostics once at the end rather than
     /// once each, because every answer but the last is obsolete before it is
     /// written.
@@ -217,7 +217,7 @@ impl Server {
             );
         }
 
-        let cancelled: Vec<Value> = messages
+        let canceled: Vec<Value> = messages
             .iter()
             .filter(|m| m.get("method").and_then(Value::as_str) == Some("$/cancelRequest"))
             .filter_map(|m| m.pointer("/params/id").cloned())
@@ -235,10 +235,10 @@ impl Server {
         let mut out = Vec::new();
         for (at, message) in messages.iter().enumerate() {
             if let Some(id) = message.get("id") {
-                if cancelled.contains(id) {
-                    // -32800 is `RequestCancelled`. A client that asked us to
+                if canceled.contains(id) {
+                    // -32800 is `RequestCanceled`. A client that asked us to
                     // stop still needs an answer, or it waits for ever.
-                    out.push(error(id.clone(), -32800, "cancelled by the client"));
+                    out.push(error(id.clone(), -32800, "canceled by the client"));
                     continue;
                 }
             }
@@ -419,14 +419,14 @@ impl Server {
                 // **Incremental.** The argument for full sync was that the
                 // parser is fast and the database backdates a reparse that
                 // produces the same tree, so what incremental saves is a few
-                // microseconds against a class of desynchronisation bug. The
+                // microseconds against a class of desynchronization bug. The
                 // half that argument left out is the wire: full sync sends the
                 // *whole file* on every keystroke, so a 4,000-line module
                 // costs about 150 KB of JSON per character typed, encoded by
                 // the client and parsed here. That is the cost that grows with
                 // the file, and it is the one somebody notices.
                 //
-                // The desynchronisation risk is answered by refusing an edit
+                // The desynchronization risk is answered by refusing an edit
                 // rather than guessing at one: a range that is inverted, past
                 // the end, or not on a character boundary is dropped, and the
                 // client's next full-text change puts the document right.
@@ -467,7 +467,7 @@ impl Server {
                                     .collect(),
                             },
                             // Whole-document only. Range and delta are both
-                            // optimisations for a file large enough to notice,
+                            // optimizations for a file large enough to notice,
                             // and neither is worth a second code path until
                             // something measured says so.
                             full: Some(lsp_types::SemanticTokensFullOptions::Bool(true)),
@@ -1008,7 +1008,7 @@ impl Server {
     /// **Relative encoding is the format, not a compression trick.** A token is
     /// `deltaLine, deltaStart, length, type, modifiers`, where `deltaStart` is
     /// relative to the previous token only when they share a line. Getting that
-    /// reset wrong shifts every colour after it by a column, which looks like a
+    /// reset wrong shifts every color after it by a column, which looks like a
     /// highlighting bug and is an arithmetic one.
     fn semantic_tokens(&self, params: &Value) -> Option<Value> {
         let url = url_of(params)?;

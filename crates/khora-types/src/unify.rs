@@ -322,7 +322,7 @@ impl Unifier {
                 let tail = tail.map(|t| self.zonk(&t));
                 // Zonking a tail may reveal more labels, which belong in this
                 // row rather than nested inside it.
-                // Relabelled for the same reason `substitute` relabels: an
+                // Relabeled for the same reason `substitute` relabels: an
                 // error row's label *is* its type's name, and solving the
                 // variable is what gives it one. A row that kept `?` for a
                 // label would satisfy nothing, however well solved.
@@ -528,7 +528,7 @@ impl Unifier {
         t2: Option<&Type>,
     ) -> Result<(), Mismatch> {
         // An error row labels each entry by its type's own name, so an entry
-        // whose type is still a variable is labelled `_`. Relabelling once the
+        // whose type is still a variable is labeled `_`. Relabeling once the
         // variable is solved is not optional: an entry still called `_` does
         // not match the identical entry called `E` on the other side, both rows
         // look short, and a closed row that cannot grow reports a label nobody
@@ -964,7 +964,7 @@ pub fn substitute(ty: &Type, mapping: &HashMap<&str, Type>) -> Type {
                     // name, so the label is a function of the type rather than
                     // data beside it — substituting `E := DbError` has to
                     // relabel, or `raises E` instantiates to a row still
-                    // labelled `E` and matches nothing.
+                    // labeled `E` and matches nothing.
                     //
                     // A capability row labels a *name* against a type, where
                     // the two say different things, and the test tells them

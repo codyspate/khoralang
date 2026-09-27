@@ -69,12 +69,12 @@ and drop the pin.
 
 Use this if trusted publishing is not on your publisher page yet.
 
-1. Create an Azure DevOps organisation at <https://dev.azure.com> with any
+1. Create an Azure DevOps organization at <https://dev.azure.com> with any
    Microsoft account. The name is never shown to anybody; it exists only to own
    the token.
 2. User settings → **Personal access tokens** → **New Token**:
    - **Organization: All accessible organizations.** The single most common
-     mistake, and a token scoped to one organisation fails with an error that
+     mistake, and a token scoped to one organization fails with an error that
      never mentions the reason.
    - **Scopes**: Custom defined → show all scopes → **Marketplace → Manage**.
    - Expiration: a year, or 1 December 2026, whichever comes first.
@@ -91,7 +91,7 @@ connection, a federated credential, and an undocumented `az rest` call against
 `app.vssps.visualstudio.com` to discover the identity's Azure DevOps profile ID,
 because the marketplace keeps its own identity record separate from both the
 ARM resource ID and the Entra object ID. It is designed for Azure Pipelines and
-an organisation with an Azure footprint.
+an organization with an Azure footprint.
 
 For a repository that already has the GitHub identity the marketplace is
 willing to trust, it is the wrong shape. Route A is that same standard with the

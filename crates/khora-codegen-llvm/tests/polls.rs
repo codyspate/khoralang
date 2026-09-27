@@ -4,7 +4,7 @@
 //!
 //! **What this guards: a runtime call on the path every trip of every loop
 //! takes.** A back-edge asks whether the fiber should give its worker back and
-//! whether it has been cancelled, and a `!` asks the second. Both used to be
+//! whether it has been canceled, and a `!` asks the second. Both used to be
 //! calls, made every time, and in a short loop they were most of the loop: a
 //! function with a `raises` row ran its loops ten times slower than the same
 //! function without one, and a program that called `Fiber::spawn` once paid as
@@ -12,10 +12,10 @@
 //! has nothing to do.
 //!
 //! The answer is one relaxed load of `khora_poll`, which the runtime keeps at
-//! zero while nothing is cancelled and no scheduler pool exists, and the calls
+//! zero while nothing is canceled and no scheduler pool exists, and the calls
 //! behind a branch on it. A timing test would be the direct statement of that,
 //! and would be flaky on every shared runner this suite has run on. So this
-//! reads the IR: **every call to `khora_safepoint` or `khora_cancelled` in the
+//! reads the IR: **every call to `khora_safepoint` or `khora_canceled` in the
 //! function must sit in a block that only the poll branch leads to.** That is
 //! the structural fact the speed follows from, and it holds or fails the same
 //! way on every machine.
@@ -36,7 +36,7 @@ fn function_ir(test: &str, source: &str, name: &str) -> String {
     function_ir_as(test, source, name, Profile::Debug)
 }
 
-/// The same, at `profile`. A release build's IR is the optimised module
+/// The same, at `profile`. A release build's IR is the optimized module
 /// (`program.opt.ll`), which is where a hoisted load would show.
 fn function_ir_as(test: &str, source: &str, name: &str, profile: Profile) -> String {
     let ir = module_ir_as(test, source, profile);
@@ -141,11 +141,11 @@ fn a_raising_loop_calls_the_runtime_only_behind_the_poll() {
     );
     let calls = calls_by_block(
         &body,
-        &["khora_safepoint", "khora_cancelled", "khora_back_edge"],
+        &["khora_safepoint", "khora_canceled", "khora_back_edge"],
     );
     assert!(
         calls.iter().any(|(c, _)| *c == "khora_back_edge")
-            && calls.iter().any(|(c, _)| *c == "khora_cancelled"),
+            && calls.iter().any(|(c, _)| *c == "khora_canceled"),
         "one call at the back-edge that asks both questions, and a check at the `!`: {calls:?}\n{body}"
     );
     for (call, block) in &calls {
@@ -166,13 +166,13 @@ fn a_raising_loop_calls_the_runtime_only_behind_the_poll() {
     }
 }
 
-/// **The load has to stay in the loop once the optimiser has run.** The debug
+/// **The load has to stay in the loop once the optimizer has run.** The debug
 /// test above reads IR nothing has touched, and debug is not what anyone
 /// measures. A plain load of a global the loop never writes is one LLVM may
 /// hoist out of the loop, and then the loop never sees a cancellation at all;
 /// only a release build would show it.
 ///
-/// Asserted structurally: in the optimised function some branch, from the
+/// Asserted structurally: in the optimized function some branch, from the
 /// load's block or a block laid out after it, targets the load's block or one
 /// laid out before it -- a back-edge around the load. A hoisted load sits in
 /// the preheader, which nothing branches back to. Layout order stands in for
@@ -202,7 +202,7 @@ fn in_a_release_build_the_poll_is_read_inside_the_loop() {
                 .any(|l| l.contains(" load ") && l.contains("ptr @khora_poll"))
         })
         .collect();
-    assert!(!polled.is_empty(), "no load of the poll word survived optimisation:\n{body}");
+    assert!(!polled.is_empty(), "no load of the poll word survived optimization:\n{body}");
     for &at in &polled {
         let back_edge = blocks[at..].iter().any(|(_, lines)| {
             lines.iter().any(|l| {
@@ -226,7 +226,7 @@ fn in_a_release_build_the_poll_is_read_inside_the_loop() {
 #[test]
 fn an_infallible_loop_in_a_spawning_program_calls_the_runtime_only_behind_the_poll() {
     let body = function_ir("polls_quiet", LOOPS, "quiet");
-    let calls = calls_by_block(&body, &["khora_safepoint", "khora_cancelled", "khora_back_edge"]);
+    let calls = calls_by_block(&body, &["khora_safepoint", "khora_canceled", "khora_back_edge"]);
     assert_eq!(
         calls.iter().map(|(c, _)| *c).collect::<Vec<_>>(),
         vec!["khora_back_edge"],

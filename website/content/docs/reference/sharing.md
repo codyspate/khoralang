@@ -73,7 +73,7 @@ Calling `update` or `modify` recursively on the **same cell** from inside its ow
 **What a cancellation does to a change function.** Nothing inside one stops at a cancellation point -- not a loop, not a call, not even for a fiber stopped with `Fiber::abort` -- because it holds the cell's lock. What a cancellation does instead:
 
 - A blocking call inside it -- a channel `receive`, a `clock.sleep`, a socket read -- gives up at once with its "gave up" answer (`None`, an early return, `-1`), the change function carries on with that answer and returns, and the fiber stops after the `update`.
-- A `Fiber::join`, `wait` or `outcome` inside it that comes back stopped -- because this fiber was cancelled, or because the child was stopped by somebody else -- ends the change function. **The change does not happen**: the cell keeps the value it had, the lock is released, and the caller stops at the `update` as it would at any call to a stopped fiber.
+- A `Fiber::join`, `wait` or `outcome` inside it that comes back stopped -- because this fiber was canceled, or because the child was stopped by somebody else -- ends the change function. **The change does not happen**: the cell keeps the value it had, the lock is released, and the caller stops at the `update` as it would at any call to a stopped fiber.
 - **In cleanup, those three wait.** Inside a `Region::defer` finalizer or `scoped` cleanup, a plain cancel does not end a `join`, `wait` or `outcome` in a change function: it waits for the child with the lock held, the change happens, and the rest of the cleanup runs. Only `Fiber::abort` (or a `cancel_within` deadline running out) ends that wait, and then the cell keeps the value it had.
 - A change function that loops without blocking runs to its end. One that loops for ever holds the lock for ever, and nothing -- not `abort`, not `cancel_within` -- ends it but the process ending.
 
@@ -143,9 +143,9 @@ match Channel::receive(jobs) {
 
 A send to a full channel suspends until space becomes available. A receive from an empty open channel suspends until a value arrives. Suspension gives the scheduler worker back; it is not a busy wait or a blocked worker thread.
 
-Both are cancellation points, and neither takes a `!`: neither raises an error, and a fiber cancelled while parked on one stops there whatever its `raises` row says.
+Both are cancellation points, and neither takes a `!`: neither raises an error, and a fiber canceled while parked on one stops there whatever its `raises` row says.
 
-A cancelled channel operation is always cancelled **empty-handed**. The runtime looks at the cancellation flag only once it has established there is nothing to take and no room to send, so a value arriving at the same moment as the cancellation is still delivered rather than dropped. A send that gives up releases its value, the same as a send to a closed channel.
+A canceled channel operation is always canceled **empty-handed**. The runtime looks at the cancellation flag only once it has established there is nothing to take and no room to send, so a value arriving at the same moment as the cancellation is still delivered rather than dropped. A send that gives up releases its value, the same as a send to a closed channel.
 
 `poll` never waits, so it is not a cancellation point.
 
@@ -223,7 +223,7 @@ pub fn main() -> () {
 }
 ```
 
-`wait` needs no `!` here because neither child can fail. The fiber doing the waiting can itself be cancelled while it is parked, and it stops there whatever its own `raises` row.
+`wait` needs no `!` here because neither child can fail. The fiber doing the waiting can itself be canceled while it is parked, and it stops there whatever its own `raises` row.
 
 **This is what a supervisor is made of**, and what a deadline would be made of: there is no `timeout` or `race` in `std` (see [Concurrency](/docs/reference/concurrency/)), so anything of that shape is written from a handle one fiber holds and another cancels.
 

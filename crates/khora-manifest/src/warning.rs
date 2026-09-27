@@ -19,7 +19,7 @@ pub enum WarningKind {
     /// unknown key may be from a newer toolchain; a removed one is from an
     /// older one. This is neither: it is in the schema, it is on the manifest
     /// reference page describing what it does, and nothing consults it -- so a
-    /// manifest that sets it gets the behaviour of not having set it, silently.
+    /// manifest that sets it gets the behavior of not having set it, silently.
     /// `edition = "1999"` was this and took until `0.1.0` for anybody to
     /// notice; `[build] target` and `plugin` are this now, and the second is a
     /// sandbox boundary. Roadmap 16.

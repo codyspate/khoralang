@@ -205,7 +205,7 @@ fn arg_list(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(L_PAREN);
     // Record literals are always fine inside parentheses; the suppression
-    // applies only to an unparenthesised `match` scrutinee.
+    // applies only to an unparenthesized `match` scrutinee.
     p.with_record_literals(|p| {
         while !p.at(R_PAREN) && !p.at(EOF) {
             if !p.tick() {

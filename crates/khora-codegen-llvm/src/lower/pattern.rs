@@ -210,12 +210,12 @@ impl<'ctx> Lower<'_, 'ctx> {
         let (fallthrough, mut escapes) = match &everything {
             None if total => (
                 self.block("catch.missed"),
-                vec![runtime::CANCELLED_WHICH, runtime::FAILED_WHICH],
+                vec![runtime::CANCELED_WHICH, runtime::FAILED_WHICH],
             ),
             None => (onward, Vec::new()),
             Some(_) => (
                 self.block("catch.rest"),
-                vec![runtime::CANCELLED_WHICH, runtime::FAILED_WHICH],
+                vec![runtime::CANCELED_WHICH, runtime::FAILED_WHICH],
             ),
         };
         let mut cases = cases;
@@ -245,14 +245,14 @@ impl<'ctx> Lower<'_, 'ctx> {
         //
         // **Sealed with a trap, not `unreachable`.** If `can_stop` ever
         // under-counts a frame, a tag does arrive here, and `unreachable`
-        // would make that undefined behaviour the optimizer is free to run
+        // would make that undefined behavior the optimizer is free to run
         // straight through. The trap names the broken rule and stops the
         // program instead. It costs nothing, because the path never runs.
         self.at(onward);
         if self.catches.is_empty() && !self.raises && !self.tagged {
             self.trap(
                 "a cancellation or an error reached a `catch` in a function the compiler \
-                 decided could not be cancelled; this is a compiler bug",
+                 decided could not be canceled; this is a compiler bug",
             );
         } else {
             self.leave_with(which, word);
@@ -779,7 +779,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             // **A literal pattern is an equality test**, which is what D14
             // decided. It parsed, it type-checked, and then it failed here —
             // accepted through two phases and refused in the third, which is
-            // the one behaviour that was clearly wrong. `khora_str_eq` already
+            // the one behavior that was clearly wrong. `khora_str_eq` already
             // existed and `==` already compiled; the decision tree simply had
             // no case for it.
             Pat::Literal(Literal::Str(text)) => {

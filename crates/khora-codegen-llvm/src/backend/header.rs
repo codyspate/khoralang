@@ -49,7 +49,7 @@ pub(crate) fn render(guard: &str, exports: &[(String, Signature)]) -> String {
     let _ = writeln!(out, "void khora_clear_trap(void);");
     out.push('\n');
     let _ = writeln!(out, "/* Diagnostic, not a contract: docs/design/compatibility.md says");
-    let _ = writeln!(out, "   allocation behaviour is not part of the language's promise. Here");
+    let _ = writeln!(out, "   allocation behavior is not part of the language's promise. Here");
     let _ = writeln!(out, "   because a host just told a trap was contained is entitled to");
     let _ = writeln!(out, "   check that the memory came back. */");
     // Counting is off until something asks, and a library has no `main` for

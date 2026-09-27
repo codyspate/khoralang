@@ -60,9 +60,9 @@ that tried, which is the property that decision exists for.
 
 A configuration with three bad keys reports three bad keys. `Validated`
 accumulates; `Result` stops; `Validated::to_result` is one call for a caller
-who wants the other behaviour. This is also why a schema is not a function
+who wants the other behavior. This is also why a schema is not a function
 `(Raw) -> A raises Rejection`: a raise stops at the first problem by
-construction, and stopping is the behaviour not wanted by default. Everything
+construction, and stopping is the behavior not wanted by default. Everything
 else in `std` raises; the exception is that here the accumulated answer *is*
 the value a caller wants to print.
 

@@ -12,7 +12,7 @@ it will behave differently now.
 
 ## Unreleased
 
-Cancellation has its own channel. A cancelled fiber stops at its next
+Cancellation has its own channel. A canceled fiber stops at its next
 cancellation point in every function, whatever the function's `raises` row;
 `raises` means only "can fail with these errors", and `!` marks only that.
 
@@ -28,10 +28,21 @@ pattern of the wrong type, a `catch` that yielded 0, and a `raise` that no
 a `catch` arm could read a generic error's field at the
 wrong type. Two language features are removed: glob imports, and a second
 `with` or `raises` clause. And a function with no `raises` row can be
-cancelled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
+canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 `catch` do for such code.
 
 ### Breaking
+
+- **Names are spelled in US English.** Every public name with a British
+  spelling is renamed, with no alias for the old spelling:
+  - `Fiber::cancelled` → `Fiber::canceled` (`std::core`);
+  - `khora release --notes` writes its section as `## Behavior changes`
+    (was `## Behaviour changes`).
+
+  Diagnostics, documentation and the standard library's doc comments use
+  US spelling throughout: color, behavior, canceled, initialize, recognize,
+  analyze, license. No manifest key, lint name, CLI flag, environment
+  variable or diagnostic code had a British spelling, so none is renamed.
 
 - **`Fiber::abort` runs a finalizer written as a lambda in `Region::defer`**
   when the function around it also calls a function value (see Fixed). A
@@ -74,17 +85,22 @@ cancelled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 
 - **A bare name in a pattern that is the name of one of its value's cases is
   refused**, in `match`, `catch`, `let` and `for`, at any depth, and for
-  cases with a payload as well as without. `Red => ..` over a `Colour` binds
-  every colour; the message names the pattern to write, `Colour::Red`
+  cases with a payload as well as without. `Red => ..` over a `Color` binds
+  every color; the message names the pattern to write, `Color::Red`
   (`FsError::NotFound(_)` for a payload case, and the type's module where
   the file never imported it). A bare name that is a type's *only* case, as
   in `catch { Stop => () }` over a record `Stop`, matched what the case
   would have and is refused too: write `_`. The check is against the value's
   type, so a case added to a type later makes a binding of the same name an
-  error rather than a match. A capitalised bare name that is no case of
-  the value's type is refused as well, because it reads as one: a typo
-  (`Gren => ..` for `Colour::Green`) or a `const` (`FAVOURITE => ..`, which
-  binds rather than compares). Bind with a lower-case name. 0.3.0 built all
+  error rather than a match. A capitalized bare name that is no case of
+  the value's type is refused as well: a name in a pattern that starts with
+  a capital letter must be a case. The message reads like an undefined
+  name and offers the nearest case, "`Color` has no case `Gren`. Did you
+  mean `Color::Green`?", when one is within two edits (or a third of the
+  name, if that is more); the language server offers it as a quick fix. A
+  `const` written as a pattern (`FAVORITE => ..`, which binds rather than
+  compares) is told to use a guard, `n if n == FAVORITE`. Bind with a
+  lower-case name. 0.3.0 built all
   of these with an `unused-binding` warning at most, and gave a wrong answer
   (see Fixed).
 
@@ -141,7 +157,7 @@ cancelled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
     type;
   - two *different* error types that share a name, declared in two modules
     (an `m::a::E` and an `m::b::E`), wherever the same routes put them in
-    one row. An error row is labelled by the type's bare name, so the two
+    one row. An error row is labeled by the type's bare name, so the two
     collide as two instantiations do; a named arm there read one type's
     field as the other's on 0.3.0. The message says they are two types of
     one name.
@@ -150,12 +166,12 @@ cancelled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   arrived. Catch each where it is raised, in a `catch` around each call, or
   with a `_` arm alone.
 
-- **Every function can be cancelled, whatever its `raises` row.** A loop, a
+- **Every function can be canceled, whatever its `raises` row.** A loop, a
   recursive call, a blocking operation or a call to a function that reaches
   one is a cancellation point in a function with no row, as it always was in
   one with a row. On 0.3.0 a fiber with no row ran to its end after a cancel;
   it stops, runs its finalizers, and is reported stopped:
-  `Fiber::cancelled` answers `true` and `Fiber::outcome` answers `Stopped`
+  `Fiber::canceled` answers `true` and `Fiber::outcome` answers `Stopped`
   for such a child, where 0.3.0 answered `false` and `Answered` with whatever
   it had computed so far. A `main` with no row that reaches a cancellation
   point is stopped by the first `SIGTERM` or `SIGINT`, runs its finalizers
@@ -173,7 +189,7 @@ cancelled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   process with status 134. The cancellation passes through, finalizers run,
   and the fiber stops.
 
-- **A fiber cancelled before it starts does not run.** Its body checks for a
+- **A fiber canceled before it starts does not run.** Its body checks for a
   cancellation as it is entered, so none of its statements run.
 
 - **A `Shared::update` or `modify` change function that is stopped leaves the
@@ -281,8 +297,8 @@ cancelled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 ### Fixed
 
 - **A case name written bare in a pattern matched every value.** A bare name
-  in a pattern binds, so `match c { Colour::Blue => "cool", Red => "warm" }`
-  answered `warm` for `Colour::Green`. Unless an arm after it was left
+  in a pattern binds, so `match c { Color::Blue => "cool", Red => "warm" }`
+  answered `warm` for `Color::Green`. Unless an arm after it was left
   unreachable, the only thing said was that `Red` was never read, and that
   went away once the arm read it. A `catch` of the same shape,
   `load(n)! catch { LoadError::Broken(_) => 1, Missing => 2 }`, built a
@@ -339,13 +355,13 @@ cancelled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   caller and anybody queued on it get `Disconnected`.
 
 - **`std::db::transaction` could lose a database write it had acknowledged
-  with `Ok`.** A fiber cancelled just after `transaction` sent `BEGIN` (while
+  with `Ok`.** A fiber canceled just after `transaction` sent `BEGIN` (while
   it waited for the server's answer, or on its way into the body) stopped
   without rolling back, so its connection went back to the `postgres` pool
   inside an open transaction. The next caller to borrow that connection ran
   its statements inside the leftover transaction: an autocommit `insert` was
   answered `Ok`, then rolled back when that transaction ended, and the row
-  was gone. Against a real server, with fibers cancelled 1 to 4 ms into a
+  was gone. Against a real server, with fibers canceled 1 to 4 ms into a
   loop of transactions, 0.3.0 left the connection inside a transaction after
   about half of the cancels, on both fiber backends, and lost acknowledged
   writes in every run. `transaction` registers its rollback before it sends
@@ -393,13 +409,13 @@ cancelled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   finalizers from running.** A fiber whose cleanup was parked (a `receive`
   nobody answers, say) left its worker's release queue open, and every
   release the next fiber on that worker made waited behind it for ever: its
-  own finalizers never ran, a cancelled parent's child was never told to
+  own finalizers never ran, a canceled parent's child was never told to
   stop, and none of it was freed. The fiber still reported that it had
   finished. On the thread backend, a region released inside a finalizer
   waited for that finalizer to return.
 
 - **A `postgres` pool lost a connection when a fiber waiting in `with_db` was
-  cancelled just as a connection reached it.** The connection was handed over,
+  canceled just as a connection reached it.** The connection was handed over,
   and the fiber stopped before its return to the pool was arranged, so nothing
   gave it back. Each such cancel shrank the pool by one for good; once it was
   empty, every `with_db` and `Pool::close` waited for ever. A service whose
@@ -450,7 +466,7 @@ cancelled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   read could fail in the middle of a live stream. The error number is read
   on the thread that made the call, in every build.
 
-- **A cancelled `clock.sleep`, `accept`, `recv` or `send` ran the caller's
+- **A canceled `clock.sleep`, `accept`, `recv` or `send` ran the caller's
   next statements.** The call came back early, as it should, and the code
   after it carried on as though the call had succeeded. The fiber stops at
   the call. `clock.sleep` is woken by a cancellation on the thread backend as
@@ -460,13 +476,13 @@ cancelled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   function.** A cancel that arrived while a nursery was collecting its
   children, or while a blocking call inside `Shared::update` or `modify` was
   waiting, let the fiber run on to its end and report that it had not been
-  cancelled.
+  canceled.
 
-- **A bounded nursery's `adopt`, waiting for room, could not be cancelled.**
+- **A bounded nursery's `adopt`, waiting for room, could not be canceled.**
   The fiber waited until an older child finished, then ran on and reported
-  that it had not been cancelled.
+  that it had not been canceled.
 
-- **A loop whose only way round was `continue` could not be cancelled.** In a
+- **A loop whose only way round was `continue` could not be canceled.** In a
   function with a `raises` row, a `while`, `loop` or `for` that went round
   only by `continue` never checked for a cancellation, and ran to its end.
 
@@ -558,7 +574,7 @@ cancelled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   blocked again. A connection pool is a channel, so with more requests than
   connections, each connection given back woke every waiting request. A send
   wakes one blocked receiver and a receive wakes one blocked sender; `close`
-  still wakes everyone, and a cancelled fiber is still woken at once.
+  still wakes everyone, and a canceled fiber is still woken at once.
   Measured on Linux x86-64, thread backend, the TechEmpower single-query test
   (64 connections, a pool of 16): server CPU per request 368 -> 229 us, 1.6×
   the requests per second. Fibers on the scheduler backend park differently
@@ -629,7 +645,7 @@ cancelled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 
 - **`Fiber::abort(handle)`** stops a fiber at its next cancellation point
   *including inside its cleanup*, and the children of any nursery it holds.
-  Cleanup otherwise runs to completion, and cancelling again does not change
+  Cleanup otherwise runs to completion, and canceling again does not change
   that.
 
 - **`Fiber::cancel_within(handle, millis)`** cancels at once and aborts the
@@ -656,7 +672,7 @@ cancelled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 - The concurrency, sharing, effects, fiber-internals, traps, debugging,
   compatibility, limitations, migration-from-Go, bounded-concurrency,
   timeouts-and-cancellation and HTTP-service pages describe cancellation as
-  it is: every function can be cancelled, the `raises` row on a nursery's
+  it is: every function can be canceled, the `raises` row on a nursery's
   children is for failures only, channel operations take no `!`, a helper
   that only waits needs no row, `abort` and `cancel_within` are how a stuck
   cleanup is ended, and a child's failure cancels the siblings still running
@@ -672,7 +688,7 @@ cancelled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 
 - **The language server starts.** The VS Code extension 0.3.0 launched
   `khora lsp --stdio`, which every released toolchain refuses, so the server
-  exited before it answered and nothing but syntax colouring worked. From
+  exited before it answered and nothing but syntax coloring worked. From
   extension 0.3.2 it launches `khora lsp`, and works with every released
   toolchain.
 

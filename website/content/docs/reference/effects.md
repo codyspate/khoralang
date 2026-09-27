@@ -134,7 +134,7 @@ raises 'er
 
 A `raises` row says how a function can fail, and nothing else. A helper that
 waits on a clock, a channel or a fiber and cannot fail declares no row, and it
-is still a place its fiber can be cancelled — every blocking operation is,
+is still a place its fiber can be canceled — every blocking operation is,
 whatever the row:
 
 ```khora

@@ -6,7 +6,7 @@ sidebar:
 
 Wrap the body: `transaction(fn () => body())`. It commits when the body answers
 `Result::Ok`, rolls back on `Result::Err`, and rolls back during unwinding if
-the body is cancelled. It takes `db` from the capability row, so there is
+the body is canceled. It takes `db` from the capability row, so there is
 nothing to thread through.
 
 Khora keeps the transaction contract in `std::db` while concrete database engines live in packages. Application code depends on the `Db` **capability**, not on a database value threaded through every function call.
@@ -170,7 +170,7 @@ Neither `transfer` nor `transfer_body` knows whether `db` is PostgreSQL, SQLite,
 
 If either `execute` returns `Result::Err`, `transfer_body` returns that error. `transaction` sees the failed result and rolls the transaction back instead of committing it.
 
-If the fiber is cancelled at any point after `transaction` starts, including while it waits for the server to answer `BEGIN` or `COMMIT`, the transaction's internal region finalizer performs the rollback during unwinding, so a pooled connection never goes back to the pool inside an open transaction. A caller does not need a second cancellation-specific transaction API.
+If the fiber is canceled at any point after `transaction` starts, including while it waits for the server to answer `BEGIN` or `COMMIT`, the transaction's internal region finalizer performs the rollback during unwinding, so a pooled connection never goes back to the pool inside an open transaction. A caller does not need a second cancellation-specific transaction API.
 
 If `commit` itself fails, the commit error is returned. The helper does not report success for a transaction the database did not commit. A commit that loses its connection is reported as `DbError::Disconnected` with a message saying it is not known whether the transaction committed: the `COMMIT` may have reached the server, so do not treat that error as "nothing happened" and blindly retry.
 

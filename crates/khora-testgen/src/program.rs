@@ -271,12 +271,12 @@ fn fn_decl(src: &mut Entropy<'_>) -> String {
     format!("{v}fn {name}{params}({}){ret}{clauses} {}\n", args.join(", "), block(src))
 }
 
-/// A return type, parenthesised when it is a function type.
+/// A return type, parenthesized when it is a function type.
 ///
 /// Effect clauses after a function type belong to its arrow, so in
 /// `fn f() -> (A) -> B with 'r with { .. }` both clauses land on the inner
 /// arrow, the second is refused, and the signature's own clause is lost.
-/// Parenthesised, the inner arrow's clauses stay inside.
+/// Parenthesized, the inner arrow's clauses stay inside.
 fn returned(ty: String) -> String {
     if ty.contains("->") { format!("({ty})") } else { ty }
 }
@@ -377,7 +377,7 @@ fn ty(src: &mut Entropy<'_>) -> String {
             // A function type carries its own effect clauses, which is the one
             // place `with` and `raises` appear inside a type rather than after
             // a signature. A return type that is itself a function type is
-            // parenthesised: `(A) -> (B) -> C with 'r` gives the clause to the
+            // parenthesized: `(A) -> (B) -> C with 'r` gives the clause to the
             // inner arrow, so a second clause here would be that arrow's
             // second, which the grammar refuses.
             let mut out = format!("({}) -> {}", ty(&mut src), returned(ty(&mut src)));

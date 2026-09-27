@@ -369,7 +369,7 @@ impl RawManifest {
     }
 }
 
-/// Why `workspace = true` could not be honoured.
+/// Why `workspace = true` could not be honored.
 ///
 /// Two different mistakes, and telling them apart is most of the value: a
 /// missing `[workspace.package]` entry is a one-line fix in a file the reader
@@ -795,7 +795,7 @@ pub fn granted_path(grants: &[String], path: &str) -> bool {
 /// Windows spelled with back ones, and a `.` segment is dropped, so `./data/**`
 /// grants `data/foo.txt` and `data/**` grants `./data/foo.txt`.
 ///
-/// **`..` is neither resolved nor levelled here**; `granted_path` refuses the
+/// **`..` is neither resolved nor leveled here**; `granted_path` refuses the
 /// path outright. Resolving `a/../b` to `b` is only correct where `a` is a real
 /// directory: if it is a symlink then `a/..` is the parent of what `a` points
 /// *at*, so the open lands beside the target while the check approved the `b`
@@ -1262,7 +1262,7 @@ pub struct Dependency {
     /// locked build cannot change under a moved tag.
     #[serde(default)]
     pub rev: Option<String>,
-    /// A tag to take from `git`. Spelt separately from `rev` because that is
+    /// A tag to take from `git`. Spelled separately from `rev` because that is
     /// how people think about it; they mean the same thing here.
     #[serde(default)]
     pub tag: Option<String>,

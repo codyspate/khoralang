@@ -1028,7 +1028,7 @@ fn a_for_loop_over_a_row_carrying_list_compiles() {
 /// from the annotation. Adding the row that fixes the first error is the
 /// obvious move, and it was punished.
 #[test]
-fn a_raises_row_in_a_let_annotation_is_honoured() {
+fn a_raises_row_in_a_let_annotation_is_honored() {
     let (ok, output) = check(
         "let_annotation_raises_row",
         "module m;\n\
@@ -1123,7 +1123,7 @@ fn a_wrong_raises_row_in_a_let_annotation_is_refused_at_the_annotation() {
 /// `khora-types` can do and the reason the echo carries the clause rather than
 /// reading it.
 #[test]
-fn a_with_row_in_a_let_annotation_is_honoured() {
+fn a_with_row_in_a_let_annotation_is_honored() {
     let source = "module m;\n\
          effect Ticks { now: () -> Int }\n\
          row Deps = { ticks: Ticks };\n\
@@ -1188,7 +1188,7 @@ pub fn main() -> Int {
 }
 ";
 
-/// **A `Fiber::wait` needs no `raises` clause.** A waiter cancelled while it
+/// **A `Fiber::wait` needs no `raises` clause.** A waiter canceled while it
 /// is parked leaves on the cancellation's own channel, which every function
 /// that can reach a cancellation point has, so there is nothing to refuse.
 ///

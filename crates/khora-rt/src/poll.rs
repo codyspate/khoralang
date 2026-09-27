@@ -2,22 +2,22 @@
 //!
 //! **What this prevents: a loop paying a function call per trip to learn that
 //! nothing has happened.** A back-edge asks two questions -- has this fiber
-//! been cancelled, and should it give its worker back -- and both used to be
-//! out-of-line calls: `khora_cancelled` through the `#[inline(never)]` read in
+//! been canceled, and should it give its worker back -- and both used to be
+//! out-of-line calls: `khora_canceled` through the `#[inline(never)]` read in
 //! `crate::current`, and `khora_safepoint` through a thread-local. On a loop
 //! whose body is a few instructions, the calls *were* the loop: 10x in a
 //! function with a `raises` row, and as much again in any program that can
 //! spawn, on the thread backend where the safepoint has nothing to do.
 //!
 //! Almost always both answers are "no", and almost always that is true of the
-//! whole process: no fiber anywhere is cancelled, and no scheduler is running.
+//! whole process: no fiber anywhere is canceled, and no scheduler is running.
 //! So generated code reads this word with one relaxed load and branches past
 //! both questions when it is zero, and asks them properly only when it is not.
 //!
 //! # The two halves
 //!
-//! - **Low 32 bits: cancelled fibers still running.** A fiber is counted on its
-//!   first cancellation and uncounted when it finishes or is uncancelled --
+//! - **Low 32 bits: canceled fibers still running.** A fiber is counted on its
+//!   first cancellation and uncounted when it finishes or is uncanceled --
 //!   `crate::current::Fiber` keeps the per-fiber half of that. **A count
 //!   rather than a flag that stays set**: a flag set on the first cancel would
 //!   send every back-edge in a long-running server down the slow path for the
@@ -31,7 +31,7 @@
 //!
 //! Every back-edge pays a load and a branch, and a `!` in a function with a
 //! row pays the same, where they paid a call. While *any* fiber in the process
-//! is cancelled and has not finished, every back-edge in every fiber takes the
+//! is canceled and has not finished, every back-edge in every fiber takes the
 //! slow path: the load, a branch taken, and one call to `khora_back_edge` (or
 //! to whichever of the two questions the back-edge asks). Measured on a
 //! short loop, that is about what the two unconditional calls cost before the
@@ -51,7 +51,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Cancelled fibers still running (low half), and live scheduler pools (high
+/// Canceled fibers still running (low half), and live scheduler pools (high
 /// half). Zero means a back-edge has nothing to ask. See the module.
 ///
 /// Exported under this name because generated code loads it directly.
@@ -59,29 +59,29 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[allow(non_upper_case_globals)]
 pub static khora_poll: AtomicU64 = AtomicU64::new(0);
 
-/// The half of [`khora_poll`] that counts cancelled fibers. Generated code
+/// The half of [`khora_poll`] that counts canceled fibers. Generated code
 /// masks with the same constant at a `!`, where only a cancellation matters.
-pub const POLL_CANCELLED: u64 = 0xffff_ffff;
+pub const POLL_CANCELED: u64 = 0xffff_ffff;
 
 /// One live scheduler pool, in [`khora_poll`]'s high half.
 const POLL_POOL: u64 = 1 << 32;
 
-/// A fiber has become cancelled and has not finished.
-pub(crate) fn count_cancelled(word: &AtomicU64) {
+/// A fiber has become canceled and has not finished.
+pub(crate) fn count_canceled(word: &AtomicU64) {
     word.fetch_add(1, Ordering::Relaxed);
 }
 
-/// A counted fiber finished, or was uncancelled.
+/// A counted fiber finished, or was uncanceled.
 ///
-/// **Must follow the matching [`count_cancelled`] in the word's modification
+/// **Must follow the matching [`count_canceled`] in the word's modification
 /// order**, or the low half borrows from the high one and reads as a pool that
 /// does not exist. `crate::current::Fiber` gets that from the release/acquire
 /// pair on its own state word; this checks it where it is cheap to.
-pub(crate) fn uncount_cancelled(word: &AtomicU64) {
+pub(crate) fn uncount_canceled(word: &AtomicU64) {
     let before = word.fetch_sub(1, Ordering::Relaxed);
     debug_assert!(
-        before & POLL_CANCELLED != 0,
-        "a cancelled fiber was uncounted more often than it was counted"
+        before & POLL_CANCELED != 0,
+        "a canceled fiber was uncounted more often than it was counted"
     );
 }
 
@@ -116,5 +116,5 @@ pub(crate) fn pool_stopped() {
 #[unsafe(no_mangle)]
 pub extern "C" fn khora_back_edge() -> u8 {
     crate::scheduler::khora_safepoint();
-    crate::cancel::khora_cancelled()
+    crate::cancel::khora_canceled()
 }

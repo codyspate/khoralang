@@ -31,7 +31,7 @@ handler, and it is the shape every example in `effects.md` takes. A handler
 that wanted to resume twice, or later, or not at all, would need a way to name
 the continuation. Nothing names it.
 
-So the real question is not which flavour of continuation to capture. It is
+So the real question is not which flavor of continuation to capture. It is
 whether Khora should *grow* one. It should not, yet — §4 — and without one, the
 implementation is far cheaper than the framing suggested.
 
@@ -193,7 +193,7 @@ continuations.
 ## 6. Cancellation points
 
 A5 promises interruption that runs finalizers. With failures implemented as
-tagged returns, cancellation is a return the runtime injects: a cancelled
+tagged returns, cancellation is a return the runtime injects: a canceled
 fiber's next cancellation point returns the cancellation instead of carrying
 on, and every frame between there and the fiber's root runs its drops on the
 way out.
@@ -254,7 +254,7 @@ The points are:
 - a **blocking operation** — channel send/receive (only when it comes back
   empty-handed, so a value is never dropped), `Fiber::wait`/`join`/`outcome`,
   `clock.sleep`, socket accept/read/write. Each gives up when its fiber is
-  cancelled and the call site checks.
+  canceled and the call site checks.
 
 Not points, stated as limits: one foreign call or file-system syscall already
 in progress; `connect_to` and waiting for a child process (the fiber stops
@@ -264,7 +264,7 @@ after they return); `Shared::get`/`set` waiting on a cell's lock.
 
 Finalizers run **shielded**: a cancellation arriving while one runs is
 remembered, not observed, so a `ROLLBACK` can do I/O. `cancel` is idempotent
-— the runtime itself cancels the same fiber more than once — so cancelling
+— the runtime itself cancels the same fiber more than once — so canceling
 again changes nothing. `Fiber::abort` is the separate, explicit operation that
 cuts through the shield (and propagates to nursery children), and
 `Fiber::cancel_within(h, millis)` asks for it after a caller-chosen deadline.
@@ -346,13 +346,13 @@ for a guarantee it does not use. Swift ships atomic counts for a whole language
 and is not thought of as slow, so this is a cost to measure rather than a
 reason to fork the type.
 
-The decisive reason is that a split is **colouring**. `Rc<T>` and `Arc<T>` are
+The decisive reason is that a split is **coloring**. `Rc<T>` and `Arc<T>` are
 different types; the choice propagates into every signature that touches one,
 and a library that guessed wrong is a library you cannot use. Khora's whole
-argument is that the things which usually colour a codebase — async, failure,
+argument is that the things which usually color a codebase — async, failure,
 dependency injection — belong in a *row* on the signature, where they compose
 and can be abstracted over. Putting thread-sharing in the *representation*
-instead would be the one piece of colouring the language has no vocabulary for,
+instead would be the one piece of coloring the language has no vocabulary for,
 and it would be there to save an increment.
 
 ### Where the cost comes back

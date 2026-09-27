@@ -5,7 +5,7 @@ sidebar:
 ---
 
 Wrap an operation in `around(tracer, name, fn () => ...)` and the span is
-started before it and finished when it returns, raises, or is cancelled.
+started before it and finished when it returns, raises, or is canceled.
 
 The vocabulary is in `std::trace`; exporters and vendor protocols live in
 packages, so application code programs against `Tracer` regardless of where
@@ -91,7 +91,7 @@ The application decides which tracer implementation to construct. `around` owns 
 let result = around(tracer, "calculate", fn () => calculate(tracer));
 ```
 
-It starts the span before running `calculate` and registers cleanup so the span is finished when the operation returns, raises, or is cancelled. A caller should not rely on a later `tracer.finish(...)` line running after arbitrary fallible work.
+It starts the span before running `calculate` and registers cleanup so the span is finished when the operation returns, raises, or is canceled. A caller should not rely on a later `tracer.finish(...)` line running after arbitrary fallible work.
 
 ## `start` has to ask what it is inside
 

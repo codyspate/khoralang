@@ -166,7 +166,7 @@ atomicity is unchanged.
 What settled it was not performance. A5 promises fibers running across cores,
 and a spawned fiber shares at least the closure it was handed, so a non-atomic
 count is a data race in the first concurrent program anyone writes. And the
-`Rc`-versus-`Arc` escape hatch is *colouring* — the thing Khora's rows exist to
+`Rc`-versus-`Arc` escape hatch is *coloring* — the thing Khora's rows exist to
 avoid — paid in every library signature to save an increment.
 
 `docs/design/effect-runtime.md` §9 has the decision in full, including where

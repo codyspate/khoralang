@@ -242,7 +242,7 @@ fn formatting_returns_canonical_source() {
 /// project produced two-space output that the project's own `--check` then
 /// rejected. `path` says which package the source belongs to.
 #[test]
-fn formatting_honours_the_packages_own_settings() {
+fn formatting_honors_the_packages_own_settings() {
     let tmp = tempfile::tempdir().expect("a temporary directory");
     let root = tmp.path();
     std::fs::write(

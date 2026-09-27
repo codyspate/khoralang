@@ -94,7 +94,7 @@ fn a_with_clause_naming_a_type_says_so() {
         "which is a type rather than a capability",
     );
     // **`with Ledger` is not the same mistake and is not reported.** A bare
-    // *name* comes out as an entry labelled `Ledger` of type `Ledger`, and
+    // *name* comes out as an entry labeled `Ledger` of type `Ledger`, and
     // `with { Ledger: handler }` supplies exactly that -- unconventional, since
     // capabilities are lowercase by habit, but writable and therefore not
     // broken. Only a label nobody could write is.
@@ -238,7 +238,7 @@ const ASSOC: &str = "module m;\n\
 /// It used to be read as a capability *named* `Self::Effects`, which no `with`
 /// block could write, so it passed a bare declaration and failed the moment a
 /// handler was asked for. Both halves are asserted here, because the first one
-/// alone is what made the old behaviour look correct.
+/// alone is what made the old behavior look correct.
 #[test]
 fn a_trait_can_leave_its_row_to_its_implementations() {
     // Resolved through the impl: the requirement is the impl's row, and the
@@ -778,7 +778,7 @@ fn f() -> Int { run(fn () => raise Oops::Bad) }
     );
 }
 
-/// The widening is not a licence to lose the mark: a call that really can
+/// The widening is not a license to lose the mark: a call that really can
 /// leave still needs its `!`.
 #[test]
 fn widening_does_not_excuse_the_mark() {
@@ -1145,7 +1145,7 @@ fn a_type_where_a_row_belongs_is_told_to_use_braces() {
 /// **This test is the reason the hint was wrong for so long.** The one above
 /// asserted the message said `{ Oops }`, so the message said `{ Oops }`, and
 /// nothing anywhere checked that `{ Oops }` meant what the sentence claimed.
-/// It does not: a row's entries are labelled, so `{ Oops }` parses as a row
+/// It does not: a row's entries are labeled, so `{ Oops }` parses as a row
 /// whose *tail* is `Oops` and prints back as `{ | Oops }` -- following the
 /// advice produced the same error again, word for word, about a different
 /// type. A hint nobody can act on is worse than none, because it costs the
@@ -1381,7 +1381,7 @@ fn two_instantiations_through_a_row_variable_are_refused() {
 }
 
 /// `raises E + F` instantiated at `Gx<Int>` and `Gx<String>`: two entries
-/// labelled by variables at the call, which are only `Gx` once solved.
+/// labeled by variables at the call, which are only `Gx` once solved.
 #[test]
 fn a_sum_row_instantiated_at_two_instantiations_is_refused() {
     assert_reports(
@@ -1463,7 +1463,7 @@ fn one_instantiation_raised_twice_in_a_closure_is_accepted() {
 }
 
 /// **Two different error types that share a name are refused in one row, and
-/// the message says they are two types.** An error row is labelled by the bare
+/// the message says they are two types.** An error row is labeled by the bare
 /// name, so `m::a::E` and `m::b::E` raised in one closure meet under `E` just
 /// as `Gx<Int>` and `Gx<String>` do. A named arm there read one type's field
 /// as the other's on 0.3.0. They are not two instantiations of one type,

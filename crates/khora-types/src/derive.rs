@@ -53,7 +53,7 @@ pub struct DeriveReport {
     ///
     /// Everything a derived impl can be blamed for is blamed at its `derive`
     /// clause (see `khora_hir::derive::DerivedImpl::at`), so the clause's span
-    /// is enough to recognise the expansion's diagnostics and drop them.
+    /// is enough to recognize the expansion's diagnostics and drop them.
     /// `refused` covers the bodies; this covers what `traits::check` says
     /// about the impl's shape.
     pub unresolved: Vec<text_size::TextRange>,

@@ -270,7 +270,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 // then hands back a cancellation tag like any other call.
                 let answer = if self.be.is_tagged(&symbol) {
                     let ret = self.be.signature_of(&symbol).map_or(Type::Bool, |s| s.ret);
-                    self.split_cancelled(raw, &ret)
+                    self.split_canceled(raw, &ret)
                 } else {
                     raw
                 };

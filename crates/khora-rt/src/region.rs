@@ -210,7 +210,7 @@ pub unsafe extern "C" fn khora_region_release(region: *mut u8) {
     let list = unsafe { Box::from_raw(list) };
     let list = list.into_inner().unwrap_or_else(|e| e.into_inner());
 
-    // **Finalizers are not cancellable.** This release may itself be part of a
+    // **Finalizers are not cancelable.** This release may itself be part of a
     // cancellation unwinding, in which case the flag is still set and the
     // first `!` inside a finalizer would stop it half-done — a rollback that
     // never reaches the server, a connection returned to the pool inside an
@@ -256,7 +256,7 @@ pub unsafe extern "C" fn khora_region_release(region: *mut u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cancel::{khora_cancel, khora_cancel_reset, khora_cancelled};
+    use crate::cancel::{khora_cancel, khora_cancel_reset, khora_canceled};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A closure object of type `() -> ()`: one field, holding the code
@@ -278,11 +278,11 @@ mod tests {
 
     extern "C" fn watching(_closure: *mut u8) {
         RAN.fetch_add(1, Ordering::SeqCst);
-        SAW.store(usize::from(khora_cancelled()), Ordering::SeqCst);
+        SAW.store(usize::from(khora_canceled()), Ordering::SeqCst);
     }
 
     /// **The 13.3 property.** A finalizer running as part of a cancellation
-    /// must not itself be cancelled, or a rollback stops at its first `!` and
+    /// must not itself be canceled, or a rollback stops at its first `!` and
     /// the connection goes back to the pool holding locks.
     #[test]
     fn a_finalizer_does_not_see_the_cancellation_that_is_running_it() {
@@ -291,14 +291,14 @@ mod tests {
         unsafe { khora_region_defer(region, closure(watching), None, None) };
 
         khora_cancel();
-        assert_eq!(khora_cancelled(), 1, "the flag is set before the region ends");
+        assert_eq!(khora_canceled(), 1, "the flag is set before the region ends");
 
         // SAFETY: the only reference, as `khora_drop` would have found it.
         unsafe { khora_region_release(region) };
 
         assert_eq!(RAN.load(Ordering::SeqCst), 1, "the finalizer ran");
         assert_eq!(SAW.load(Ordering::SeqCst), 0, "and ran with the cancellation held off");
-        assert_eq!(khora_cancelled(), 1, "which masks the flag rather than clearing it");
+        assert_eq!(khora_canceled(), 1, "which masks the flag rather than clearing it");
 
         khora_cancel_reset();
         // SAFETY: released above, so the fields are already gone.
@@ -309,7 +309,7 @@ mod tests {
 
     extern "C" fn opens_another(_closure: *mut u8) {
         extern "C" fn innermost(_closure: *mut u8) {
-            INNER.store(usize::from(khora_cancelled()), Ordering::SeqCst);
+            INNER.store(usize::from(khora_canceled()), Ordering::SeqCst);
         }
         let region = khora_region_open();
         // SAFETY: as above.
@@ -333,7 +333,7 @@ mod tests {
         unsafe { khora_region_release(region) };
 
         assert_eq!(INNER.load(Ordering::SeqCst), 0, "the inner finalizer is shielded too");
-        assert_eq!(khora_cancelled(), 1, "and the outer one leaves the flag alone");
+        assert_eq!(khora_canceled(), 1, "and the outer one leaves the flag alone");
 
         khora_cancel_reset();
         // SAFETY: released above.
@@ -343,7 +343,7 @@ mod tests {
     /// Nothing is masked once the region has ended, so an ordinary program
     /// pays no attention to any of this.
     #[test]
-    fn an_uncancelled_region_is_unaffected() {
+    fn an_uncanceled_region_is_unaffected() {
         static COUNT: AtomicUsize = AtomicUsize::new(0);
         extern "C" fn counting(_closure: *mut u8) {
             COUNT.fetch_add(1, Ordering::SeqCst);
@@ -358,7 +358,7 @@ mod tests {
             khora_drop(region, None);
         }
         assert_eq!(COUNT.load(Ordering::SeqCst), 2);
-        assert_eq!(khora_cancelled(), 0);
+        assert_eq!(khora_canceled(), 0);
     }
 
     // --- S3: a drain left open across a finalizer ---------------------------

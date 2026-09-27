@@ -372,7 +372,7 @@ fn main() -> Int {{
     );
     assert_eq!(
         ran.stdout, "1\n2\n255\n0\n1000\n",
-        "neighbouring bytes do not overwrite each other, and the untouched ones are the fill"
+        "neighboring bytes do not overwrite each other, and the untouched ones are the fill"
     );
     assert_eq!(ran.code, Some(0));
 }
@@ -422,7 +422,7 @@ fn main() -> Int {{
 /// Every `.kh` file of `std`, plus the program under test.
 ///
 /// The prelude above declares its own `U8` so the tests before this one can
-/// pin the *backend's* behaviour without `std` in the way. This claim is about
+/// pin the *backend's* behavior without `std` in the way. This claim is about
 /// what `std` ships, so it has to compile against `std`.
 fn std_sources(
     db: &KhoraDatabase,

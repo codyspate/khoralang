@@ -26,7 +26,7 @@
 //! a request handler spawns three fibers, and their spans belong to the
 //! request's trace rather than to three traces of their own. `Fiber::spawned`
 //! runs on the spawning side, before the child exists, so the copy it takes is
-//! the parent's own current span with no synchronisation needed.
+//! the parent's own current span with no synchronization needed.
 //!
 //! A child *copies* rather than shares. A span opened inside a child is the
 //! child's business, and pushing it into a slot the parent reads would make

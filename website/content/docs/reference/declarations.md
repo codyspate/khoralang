@@ -148,7 +148,7 @@ The syntax accepts a comma-separated list of trait names and an optional trailin
 
 The trait must be in scope, so `derive(Show)` needs `Show` imported from
 `std::core`. Derive where the implementation follows from the fields, and write
-an `impl` where the behaviour is a domain decision rather than a structural
+an `impl` where the behavior is a domain decision rather than a structural
 consequence of the data.
 
 `derive(Decode)` reads the `///` above the type and above each record field
@@ -163,7 +163,7 @@ impl is sometimes the point:
   derives both, and `Decode`/`Encode` from `std::schema` on the same terms.
 - `Redacted<A>` has `Show` — it prints `<redacted>` — and `Decode`, and
   deliberately no `Encode`. A record holding a secret stays
-  printable and readable, and refuses to serialise, so the build stops rather
+  printable and readable, and refuses to serialize, so the build stops rather
   than the payload leaking. It has no `Eq` either:
   comparing two secrets byte by byte is how a timing side channel gets written
   by somebody who was not writing one.

@@ -5,7 +5,7 @@
 //! `docs/design/flow-operator.md`. `||> a |> b` is sugar for
 //! `fn x => x |> a |> b`, so the claim these have to establish is not that it
 //! works but that it is **the same program**: the same answer, the same
-//! inferred effect row, the same failure row, the same closure behaviour.
+//! inferred effect row, the same failure row, the same closure behavior.
 //!
 //! Several tests therefore run both spellings in one binary and compare their
 //! output rather than asserting on a constant. A test that only checked the

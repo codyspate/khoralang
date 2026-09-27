@@ -16,7 +16,7 @@
 # changes.
 #
 # What it deliberately does *not* do is decide which tests your change affected.
-# That is a judgement, and a script that guesses it wrong is worse than one that
+# That is a judgment, and a script that guesses it wrong is worse than one that
 # is honestly partial: run this while working, run `baseline.sh` before you
 # commit, and never let this one's silence stand in for that one's.
 set -e

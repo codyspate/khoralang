@@ -108,7 +108,7 @@ pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
     // a file full of "cannot find" errors downstream of it.
     all.extend(khora_hir::file_scope(db, file).errors.iter().cloned());
     // What the `derive` clauses asked for, before what they expanded to. A
-    // `derive` that cannot be honoured makes everything after it about the
+    // `derive` that cannot be honored makes everything after it about the
     // impl the compiler wrote rather than the line the reader wrote.
     all.extend(khora_hir::derive::derived(db, file).errors.iter().cloned());
     let derives = derive::derive_report(db, file);
@@ -367,7 +367,7 @@ pub(crate) fn row_fields_must_be_effects(db: &dyn Db, file: SourceFile) -> Vec<H
 ///
 /// When it is a *path* it is not writable by anybody. `with Self::Effects` --
 /// the shape somebody writing a `Stream` reaches for first -- becomes an entry
-/// labelled `Self::Effects`, and no `with` block can name it. The call site
+/// labeled `Self::Effects`, and no `with` block can name it. The call site
 /// says so now (`check.rs`, `Clause::label_is_well_formed`), but only for the
 /// callee; a function declaring one is the mistake itself and is reported here,
 /// against the clause, whether or not anybody calls it.
@@ -384,7 +384,7 @@ pub(crate) fn malformed_with_clause_errors(db: &dyn Db, file: SourceFile) -> Vec
     let mut found = Vec::new();
     for decl in parsed.source_file().decls() {
         // **Every type parameter anywhere in the declaration**, so that
-        // `with S::Effects` is recognised as an associated item rather than a
+        // `with S::Effects` is recognized as an associated item rather than a
         // two-segment path nobody declared. Deliberately an over-approximation,
         // the same one `unresolved_type_errors` makes: a method's `T` counts
         // for its sibling, which can only ever make this report less.
@@ -478,7 +478,7 @@ pub(crate) fn shadowed_name_errors(db: &dyn Db, file: SourceFile) -> Vec<HirErro
         found.push(HirError {
             message: format!(
                 "`{name}` is a name the compiler already means, so this definition would \
-                 be ignored in favour of the built-in one — and the value would still be \
+                 be ignored in favor of the built-in one — and the value would still be \
                  given the built-in's layout, which is memory corruption rather than a \
                  shadowed name. Rename it, or drop the `=` to declare the built-in \
                  instead"

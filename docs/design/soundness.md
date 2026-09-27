@@ -286,10 +286,10 @@ is the same kind of thing and this is where the kind is kept.
 cancellation**: it travels the tagged return under a `which` no error type can
 be assigned, and a `catch` dispatches on error type ids, so it matches no case.
 `lower_catch` keeps the promise deliberately — under a `_` arm it routes
-`CANCELLED_WHICH` and `FAILED_WHICH` back to the propagate path by name.
+`CANCELED_WHICH` and `FAILED_WHICH` back to the propagate path by name.
 
 `attempt` is the *other* total handler, and it did not. It branched on "the tag
-is not zero" and packed whatever it found into `Err`. A cancelled computation
+is not zero" and packed whatever it found into `Err`. A canceled computation
 came back as an ordinary failure, so a retry policy would retry a fiber that
 had been asked to stop — and, worse, a cancellation carries no payload, so the
 `Err` held **a null typed as the body's error**. One `problem.show()` from a
@@ -336,13 +336,13 @@ it.
 **33 `unsafe` blocks had no note; 28 remain**, most of them test helpers
 calling the C API. The five in the code generator are now annotated, and they
 are a *different kind*: `build_in_bounds_gep` is unsafe because an
-out-of-bounds `inbounds` GEP is undefined behaviour **in the program being
+out-of-bounds `inbounds` GEP is undefined behavior **in the program being
 generated**. Nothing a Rust reader sees locally discharges it — what does is a
 `check_index` or a `clamp` emitted a few lines above. Delete the bounds check
 and the compiler still builds, still passes its Rust tests, and starts emitting
 programs that read off the end of a string.
 
-**The scheduler has not been sanitised**, and cannot be until the stack switch
+**The scheduler has not been sanitized**, and cannot be until the stack switch
 is annotated — see the section above. That is the largest remaining gap in this
 document, and it is a tooling problem rather than an unread piece of code.
 
@@ -350,7 +350,7 @@ document, and it is a tooling problem rather than an unread piece of code.
 its own soak asserts. 13.2 is where that belongs.
 
 **A finalizer that hangs cannot be interrupted.** 13.3 made finalizers
-uncancellable — see `cancel::Shielded` — because cleanup caused by a
+uncancelable — see `cancel::Shielded` — because cleanup caused by a
 cancellation must not be cut short by that same cancellation. Everything with
 cancellation pays this price, and the usual answer is a deadline on the cleanup
 itself, which Khora does not have. Nothing is unsound; a program can hang where

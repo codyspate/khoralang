@@ -81,7 +81,7 @@ fn to_interpolation(tree: &SyntaxNode, text: &str, selection: TextRange) -> Opti
             built.push_str(inner);
         } else {
             // A hole holds an expression, and the parser reads to the matching
-            // brace, so nothing here has to be parenthesised.
+            // brace, so nothing here has to be parenthesized.
             built.push_str(&format!("${{{trimmed}}}"));
         }
     }

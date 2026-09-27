@@ -16,7 +16,7 @@
 //! ```
 //!
 //! The first line is the whole point and does not change: no `async`, no
-//! `await`, no `Future`, no coloured functions. `std::net::socket` keeps its
+//! `await`, no `Future`, no colored functions. `std::net::socket` keeps its
 //! blocking shape, and a program that already reads a socket benefits without
 //! being edited.
 //!
@@ -670,13 +670,13 @@ fn ready<T>(fds: &[T], watching: &[Watch], is_ready: impl Fn(&T) -> bool) -> Vec
 /// blocking read this replaced.
 ///
 /// Answers false when the wait ended without readiness — the deadline passed,
-/// or this fiber was cancelled.
+/// or this fiber was canceled.
 pub(crate) fn block_until_ready(
     socket: Socket,
     interest: Interest,
     deadline: Option<std::time::Instant>,
 ) -> bool {
-    // The deadline is honoured by the caller's own loop here rather than by a
+    // The deadline is honored by the caller's own loop here rather than by a
     // reactor that is not running: this is the no-scheduler path.
     let watch = [Watch { socket, interest, fiber: 0, deadline: None }];
     loop {
@@ -684,7 +684,7 @@ pub(crate) fn block_until_ready(
         // The fiber running this loop executes nothing else: `accept` on an
         // idle listener has no `!` and no back-edge above it, so there is no
         // cancellation point for the flag to be observed at. Without this,
-        // cancelling a listener hung the process for ever with no message on
+        // canceling a listener hung the process for ever with no message on
         // any stream — the flag was set on the right fiber and readable from
         // inside this loop, and nothing looked at it.
         //
@@ -1014,7 +1014,7 @@ mod tests {
     /// cannot shorten a timeout already computed, so this is the one
     /// registration on `epoll` that still has to nudge.
     #[test]
-    fn a_deadline_registered_during_a_poll_is_honoured_by_that_poll() {
+    fn a_deadline_registered_during_a_poll_is_honored_by_that_poll() {
         for (name, reactor) in every_backend() {
             let (quiet, _quiet_peer) = a_connected_pair();
             let (woken, took) = register_during_a_poll(name, reactor, || Watch {

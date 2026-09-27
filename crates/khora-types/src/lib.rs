@@ -176,7 +176,7 @@ pub enum Type {
     /// collapses into an ordinary [`Type::Adt`] — so nothing downstream of
     /// instance selection ever sees one.
     Applied { head: Box<Type>, args: Vec<Type> },
-    /// A set of labelled requirements: `{ ledger: Ledger | 'e }`.
+    /// A set of labeled requirements: `{ ledger: Ledger | 'e }`.
     ///
     /// Serves both effect clauses. A capability row labels each field with the
     /// name the caller supplies it under; an error row labels each with the
@@ -256,7 +256,7 @@ impl std::fmt::Display for Type {
                 write!(f, "{head}<{}>", inner.join(", "))
             }
             // `(Int,)` for the one-element case, so it is not read as a
-            // parenthesised `Int` - the same disambiguation Rust and Python use.
+            // parenthesized `Int` - the same disambiguation Rust and Python use.
             Type::Tuple(items) => {
                 let inner: Vec<String> = items.iter().map(Type::to_string).collect();
                 let trailing = if items.len() == 1 { "," } else { "" };
@@ -293,7 +293,7 @@ impl Type {
         Type::Row { fields: Vec::new(), tail: None }
     }
 
-    /// A row from labelled entries, canonically ordered.
+    /// A row from labeled entries, canonically ordered.
     ///
     /// **A second entry under an error row's label is kept if its type
     /// differs.** An error row labels each entry with its type's name, so
@@ -698,7 +698,7 @@ pub const COMPILER_KNOWN: [&str; 13] = [
 /// claims nothing the compiler does not already provide.
 ///
 /// `type Array = { label: String }` is the other thing: a shape the compiler
-/// ignores in favour of the runtime's, on a name it will hand an array's
+/// ignores in favor of the runtime's, on a name it will hand an array's
 /// layout. That is the only case worth refusing.
 ///
 /// So the rule needs no exemption for `std` and no blessed module — which is

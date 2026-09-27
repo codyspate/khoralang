@@ -31,7 +31,7 @@ enum Schema {
     ///
     /// **Kept in the schema and warned about, rather than either removed or
     /// left silent.** Silence is what `edition = "1999"` had, and it is the
-    /// worst of the three: a manifest sets the key, gets the behaviour of not
+    /// worst of the three: a manifest sets the key, gets the behavior of not
     /// setting it, and nothing anywhere says so. Removing the key is right
     /// where the question it answered has moved elsewhere, and wrong where the
     /// feature is still coming -- deleting `[build] plugin` would throw away a

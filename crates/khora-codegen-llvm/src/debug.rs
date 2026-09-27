@@ -415,7 +415,7 @@ impl Lines {
 ///
 /// Absolute paths appear only in debug builds. `--release` drops debug
 /// information entirely and is the profile that promises bit-for-bit
-/// reproducibility, so nothing here reaches a reproducible artefact.
+/// reproducibility, so nothing here reaches a reproducible artifact.
 fn split(path: &Path) -> (String, String) {
     let name = path
         .file_name()

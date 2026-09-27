@@ -56,7 +56,7 @@ on standard error, followed by the platform's stack-overflow exit status rather 
 
 **The message covers the stack the program started on, and not every stack.** Reporting from an exhausted stack needs room set aside before the fault, and the runtime sets it aside at the entry point: an alternate signal stack on Unix, a thread stack guarantee on Windows. A fiber runs on a stack of its own and a spawned thread gets a fresh one, and neither carries that reservation — so an overflow there ends the process with the status above and no message. The status is the same either way; only the sentence is missing.
 
-Khora does not guarantee tail-call optimisation, so a function that recurses once per element of its input uses a frame per element. See [Known limitations](/docs/limitations/) for what that means for `List` in practice, and which operations are unaffected.
+Khora does not guarantee tail-call optimization, so a function that recurses once per element of its input uses a frame per element. See [Known limitations](/docs/limitations/) for what that means for `List` in practice, and which operations are unaffected.
 
 ## Traps are not `raises`
 
@@ -110,7 +110,7 @@ note: re-run with KHORA_BACKTRACE=1 to see where
 KHORA_BACKTRACE=1 khora run .
 ```
 
-`RUST_BACKTRACE=1` is honoured too, because a person who has debugged a Rust
+`RUST_BACKTRACE=1` is honored too, because a person who has debugged a Rust
 program will try it. `KHORA_BACKTRACE` is the name to use and the one the
 runtime's own note gives.
 
@@ -133,7 +133,7 @@ they are told apart from outside by the status:
 
 **130 is the one that surprises people**, because a cancellation is not a
 failure and there is no `catch` for it. The common way to reach it is a `join`
-on a fiber that was cancelled: a cancelled fiber has no answer, so the join
+on a fiber that was canceled: a canceled fiber has no answer, so the join
 unwinds the joiner along with it, and if the joiner is `main` the program ends
 there. `join_all` joins, so it ends the same way. `Fiber::wait` waits without
 asking for an answer and does not do this — reach for it when what you needed
@@ -156,12 +156,12 @@ different outcomes and this is where the difference is visible.
 
 **Read them with `waitpid`, not `$?`, where the difference matters.** 128 + *N*
 is a shell's way of reporting a child *killed by signal N*; a Khora program that
-exits 130 was not signalled, it chose that number. POSIX keeps the two apart --
+exits 130 was not signaled, it chose that number. POSIX keeps the two apart --
 `WIFSIGNALED` is true of a real `SIGINT`, and `WIFEXITED` with status 130 is
 true of this -- but a shell collapses both into one `$?`. So a script cannot
 tell "somebody pressed Ctrl-C" from "a cancellation reached the entry point",
 and a supervisor that cares should read the wait status rather than the shell.
-**A signalled Khora program produces both, in order**: the first `SIGTERM` or
+**A signaled Khora program produces both, in order**: the first `SIGTERM` or
 `SIGINT` becomes a cancellation and the program *exits* 130, and a second one
 restores the default disposition and re-raises, so what a supervisor then sees
 is a genuine `WIFSIGNALED` — not an `exit` imitating one.

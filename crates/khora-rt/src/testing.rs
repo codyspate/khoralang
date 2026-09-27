@@ -391,7 +391,7 @@ pub extern "C" fn khora_test_run() -> i32 {
             // Which way it was matters to the reader and not to the count.
             Ok(outcome) if outcome.which == 0 => "ok",
             Ok(outcome) if outcome.which == FAILED_WHICH => "FAILED",
-            Ok(outcome) if outcome.which == CANCELLED_WHICH => "cancelled",
+            Ok(outcome) if outcome.which == CANCELED_WHICH => "canceled",
             Ok(outcome) => {
                 // The error is nobody's to interpret here, and freeing its
                 // fields would need a drop routine the runtime cannot know.

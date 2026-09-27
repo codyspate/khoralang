@@ -98,8 +98,8 @@ fn run_bounded(name: &str, source: &str) -> Ran {
 /// The same prelude, with the two blocking operations spelled the way
 /// `std::core` spells them: carrying a row, because they are cancellation
 /// points. Kept separate so the tests above go on pinning the runtime
-/// behaviour on its own.
-const CANCELLABLE: &str = "module t;
+/// behavior on its own.
+const CANCELABLE: &str = "module t;
 fn print(value: Int);
 extern fn khora_live_count() -> Int;
 extern fn khora_sleep(millis: Int) -> ();
@@ -180,7 +180,7 @@ fn main() -> Int {{
     assert_eq!(ran.code, Some(0));
 }
 
-/// Cancelling a fiber parked on an empty channel wakes it, and it unwinds.
+/// Canceling a fiber parked on an empty channel wakes it, and it unwinds.
 ///
 /// The receive is a cancellation point, so the match after it never runs: the
 /// fiber leaves through its row rather than coming back with `None` and going
@@ -189,11 +189,11 @@ fn main() -> Int {{
 /// program hung -- while `reference/concurrency.md` said a blocked operation
 /// is made runnable so the fiber can unwind.
 #[test]
-fn cancelling_a_parked_receive_unwinds_it() {
+fn canceling_a_parked_receive_unwinds_it() {
     let ran = run_bounded(
         "channel_cancel_receive",
         &format!(
-            "{CANCELLABLE}
+            "{CANCELABLE}
 fn worker(inbox: Channel<Int>) -> () raises Oops {{
   match Channel::receive(inbox)! {{
     Option::Some(_) => print(1),
@@ -234,11 +234,11 @@ fn main() -> Int {{ go()! catch {{ Oops::Bad => () }}; print(khora_live_count())
 /// which is the precondition this test actually needs. `print` is not a
 /// cancellation point, so the `1` still arrives once the send has returned.
 #[test]
-fn cancelling_a_parked_send_unwinds_it() {
+fn canceling_a_parked_send_unwinds_it() {
     let ran = run_bounded(
         "channel_cancel_send",
         &format!(
-            "{CANCELLABLE}
+            "{CANCELABLE}
 fn worker(pipe: Channel<Int>) -> () raises Oops {{
   Channel::send(pipe, 1)!;
   print(1);

@@ -92,7 +92,7 @@ pub(crate) fn row_of_ref(
         }
         // `raises DbError`, `with Deps`, or a bare `'r`.
         other => {
-            // **A `row` declaration is spliced, not labelled.** `with Deps`
+            // **A `row` declaration is spliced, not labeled.** `with Deps`
             // means the capabilities `Deps` names, so the fields replace the
             // clause outright -- a row is structural and there is nothing to
             // point at. Only for `with`: a row in a `raises` clause would put
@@ -126,7 +126,7 @@ pub(crate) fn row_of_ref(
     }
 }
 
-/// One entry of an error row, labelled by the error type's own name.
+/// One entry of an error row, labeled by the error type's own name.
 pub(crate) fn error_label(resolved: &Type) -> (String, Type) {
     let label = match resolved {
         Type::Adt { name, .. } => name.clone(),
@@ -210,7 +210,7 @@ pub(crate) fn type_of_syntax(ty: Option<&ast::Type>, generics: &[String], homes:
         // meets.** So `Fiber<(), {}>` meant `Fiber<(), ?>` and accepted a fiber
         // that could still fail; `adopt`'s promise was a comment. Errata 59,
         // and the same shape as errata 30 three lines above -- a type the
-        // converter did not recognise became the one that agrees with
+        // converter did not recognize became the one that agrees with
         // everything, so the signature passed by saying nothing.
         ast::Type::Record(_) => row_of_syntax(Some(ty), RowClause::Requires, generics, homes),
         // **Parentheses around a type mean grouping and nothing else.** This
@@ -234,7 +234,7 @@ pub(crate) fn type_of_syntax(ty: Option<&ast::Type>, generics: &[String], homes:
         //
         // **Named rather than a `_`, so the next variant is a compile error.**
         // Errata 30, 59, 60 and 88 are all one story: a shape this converter
-        // did not recognise became the type that agrees with everything, and
+        // did not recognize became the type that agrees with everything, and
         // the signature passed by saying nothing. A catch-all is why each of
         // those was found by a user rather than by the compiler -- adding a
         // variant to `ast::Type` compiled clean and silently switched off the
@@ -312,7 +312,7 @@ pub(crate) fn named_type(
         // message says.
         //
         // **This arm must stay above the `homes.of` arm below.** Its position
-        // is the behaviour, not a formatting choice: `homes.of("'er")` answers
+        // is the behavior, not a formatting choice: `homes.of("'er")` answers
         // `None`, so moving this down sends every row variable into the
         // homeless-`Adt` branch and the misreport comes straight back. A test
         // pins it — `a_row_variable_is_a_parameter_not_a_homeless_adt` in this
@@ -380,17 +380,17 @@ pub fn type_of_ref(
         // `Type::Unknown`, and `undetermined` refuses an ADT holding one.
         //
         // **`Requires` rather than a choice.** A row in type-argument position
-        // has no clause flavour — nothing wrote `with` or `raises` around it —
-        // so one had to be picked, and the flavours differ in exactly one way:
+        // has no clause flavor — nothing wrote `with` or `raises` around it —
+        // so one had to be picked, and the flavors differ in exactly one way:
         // `Requires` is what enables the `homes.row` splice for a named `row`
         // declaration. That splice cannot be reached from here, because it is
         // guarded by `TypeRef::Named` inside the `Union` arm and a bare `Row`
         // never enters it. Verified: output is byte-identical with either
-        // flavour, for a named `row` declaration used as a type argument.
+        // flavor, for a named `row` declaration used as a type argument.
         //
         // So this is safe rather than arbitrary, and it is safe *because of
         // that guard*. Anyone widening the `Union` arm's splice to reach bare
-        // rows makes the flavour observable here and has to choose again.
+        // rows makes the flavor observable here and has to choose again.
         TypeRef::Row { .. } => row_of_ref(ty, RowClause::Requires, generics, homes),
         // A `+` chain in a position that is not a clause. `A + B` has no
         // meaning as a type on its own — only as a row — and `Unknown` is
@@ -408,7 +408,7 @@ mod tests {
     /// A row variable resolves to a parameter, not to a homeless ADT.
     ///
     /// **This pins the order of two arms in `named_type`.** The `'`-prefix arm
-    /// sits above the `homes.of` arm, and that position is the behaviour:
+    /// sits above the `homes.of` arm, and that position is the behavior:
     /// `homes.of("'er")` answers `None`, because a leading `'` cannot begin an
     /// identifier and nothing can declare a type by that name. Move the arm
     /// below and every row variable becomes `Adt { home: None }`, which

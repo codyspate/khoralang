@@ -106,7 +106,7 @@ pub fn main() -> Int {
       let c = with_fold(xs);
       let ct = clock.monotonic_millis() - c0;
 
-      // The sums are printed so that nothing here can be optimised away, and
+      // The sums are printed so that nothing here can be optimized away, and
       // so that a change which made one of them faster by making it wrong
       // would be visible.
       print("for ${at} ms   while ${bt} ms   fold ${ct} ms   (${a} ${b} ${c})");

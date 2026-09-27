@@ -387,10 +387,10 @@ pub type Oops = | Bad;
 fn ok(n: Int) -> Int raises Oops { n }
 ";
 
-/// The whole promise: a cancelled computation stops at the next `!`, and 130
+/// The whole promise: a canceled computation stops at the next `!`, and 130
 /// is what a shell means by interrupted.
 #[test]
-fn a_cancelled_computation_stops_at_the_next_mark() {
+fn a_canceled_computation_stops_at_the_next_mark() {
     let ran = run(
         "cancel_stops",
         &format!(
@@ -443,7 +443,7 @@ fn main() -> Int raises Oops {{ work()!; print(4); ok(5)!; print(6); 0 }}
 /// The exit criterion. A cancellation unwinds by the same path an error does,
 /// so every region between the mark and the root runs its finalizers.
 #[test]
-fn a_cancelled_computation_runs_every_finalizer_in_scope() {
+fn a_canceled_computation_runs_every_finalizer_in_scope() {
     let ran = run(
         "cancel_finalizers",
         &format!(
@@ -474,10 +474,10 @@ fn main() -> Int raises Oops {{ outer()!; 0 }}
 }
 
 /// And leaves nothing behind while doing it. The count is printed by a
-/// finalizer of the root region, because a cancelled program never reaches the
+/// finalizer of the root region, because a canceled program never reaches the
 /// statement after the mark — which is the point.
 #[test]
-fn a_cancelled_computation_leaks_nothing() {
+fn a_canceled_computation_leaks_nothing() {
     let ran = run(
         "cancel_leaks",
         &format!(
@@ -501,7 +501,7 @@ fn main() -> Int raises Oops {{
     assert_eq!(
         ran.stdout,
         "1\n2\n",
-        "the cancelled frame's finalizer, then the root region and the closure reading it"
+        "the canceled frame's finalizer, then the root region and the closure reading it"
     );
     assert_eq!(ran.code, Some(130));
 }
@@ -536,7 +536,7 @@ fn main() -> Int raises Oops {{ work()!; 0 }}
 /// **A record that happens to be called `Region` is not a region.**
 ///
 /// The six types whose release belongs to the runtime -- a region, a fiber, a
-/// nursery, a cell, a channel, an array -- were recognised by their bare name.
+/// nursery, a cell, a channel, an array -- were recognized by their bare name.
 /// So a program declaring `pub type Region = { .. }` had its record released
 /// through `khora_region_release`, which walked two integers as a finalizer
 /// list and recursed until the stack ran out. The program never mentioned

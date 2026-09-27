@@ -11,7 +11,7 @@ shutdown.
 the headline and it should be said first. What follows is what it cost to get
 the program to *stop*.
 
-## Cancelling a fiber inside `Router::listen` aborts the process
+## Canceling a fiber inside `Router::listen` aborts the process
 
 The only shape the documentation leaves for shutting a service down is: run
 `listen` on a fiber and cancel or detach it when a `/shutdown` route sets a
@@ -32,7 +32,7 @@ abort, one bind failure, and one hang that never returned and was killed at
 
 **The trigger is narrow.** Moving the detach to *after* the drain -- close the
 channel, wait the four workers, print the reconciliation, then detach -- is
-6/6 clean at 200 jobs and 4/4 at 800. So it is specifically cancelling the
+6/6 clean at 200 jobs and 4/4 at 800. So it is specifically canceling the
 fiber that is inside `Router::listen` while its accept-loop nursery still has
 live connection children.
 
@@ -42,7 +42,7 @@ silent, it is `abort()`. And `cookbook/http-service.md`, the page somebody
 building a service actually reads, says nothing about how a server ends.
 
 The message is also written for a compiler developer, names neither the fiber
-nor what cancelled it, and points at `docs/design/fibers.md`, which is not on
+nor what canceled it, and points at `docs/design/fibers.md`, which is not on
 the website -- so somebody who installed the toolchain cannot follow it.
 
 ## A fiber that fails is invisible, and the program hangs
@@ -99,7 +99,7 @@ named functions do not. No page says this.
   27 of 200 requests took that path and became 27 correct 503s.
 - The region-and-flag pattern from `taking-work-off-a-queue.md` cost nothing
   and did nothing here: closing the channel is a cleaner way to stop workers
-  than cancelling them, and closing is not a cancellation. The cookbook
+  than canceling them, and closing is not a cancellation. The cookbook
   presents that pattern as *the* way a pool reconciles, and for a
   channel-closed shutdown it is not the one doing the work.
 - The debug binary is 32 MB and the README quotes 3.6 MB for the release

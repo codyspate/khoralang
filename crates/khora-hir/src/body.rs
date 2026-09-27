@@ -362,7 +362,7 @@ pub enum TypeRef {
     /// **Flattened here, because `A + B + C` parses as `(A + B) + C`.** A
     /// reader taking the direct operands sees a nested union and `C`, and the
     /// nested one has no meaning as a row entry — it becomes one entry
-    /// labelled after nothing, so the row carries `C` and a ghost.
+    /// labeled after nothing, so the row carries `C` and a ghost.
     Union(Vec<TypeRef>),
     /// A shape this echo does not carry — a `Variant` or a `Forall`. Checked
     /// as `Unknown`, which is to say not checked, which is what every
@@ -455,7 +455,7 @@ impl TypeRef {
                     .collect(),
             ),
             // **Named rather than a `_`, so the next variant is a compile
-            // error.** A shape this echo does not recognise becomes the type
+            // error.** A shape this echo does not recognize becomes the type
             // that agrees with everything, and the annotation passes by saying
             // nothing — errata 30, 59, 60 and 88 are one story. Listing them
             // asks the author of the next variant what it means here.
@@ -468,7 +468,7 @@ impl TypeRef {
 ///
 /// `A + B + C` parses as `(A + B) + C`, so a reader that takes a union's
 /// direct operands sees a nested union and `C` — and the nested one becomes
-/// one row entry labelled after nothing, so the row carries `C` and a ghost.
+/// one row entry labeled after nothing, so the row carries `C` and a ghost.
 fn union_operands(ty: &ast::Type) -> Vec<ast::Type> {
     let ast::Type::Union(u) = ty else { return vec![ty.clone()] };
     u.operands().flat_map(|operand| union_operands(&operand)).collect()
@@ -521,7 +521,7 @@ pub struct Body {
     /// `{ name }` shorthand, which names a field rather than a case.
     ///
     /// **Without it a case name written bare was a silent catch-all.**
-    /// `Red => "warm"` over a `Colour` binds every colour, so the checker has
+    /// `Red => "warm"` over a `Color` binds every color, so the checker has
     /// to ask each of these whether its name is one of its value's cases, and
     /// only these: a parameter called `Red` is not a pattern anybody misread.
     /// A set rather than a flag on [`Pat::Bind`], which every consumer of a
@@ -1425,7 +1425,7 @@ fn unescape_body(inner: &str) -> String {
 /// `\r\n` in it, four bytes where two were meant, and a client that read the
 /// status line as the whole message.
 ///
-/// The set is the small one every language has, and an unrecognised escape
+/// The set is the small one every language has, and an unrecognized escape
 /// keeps its backslash: `\d` stays `\d`, which is what a regular expression
 /// written in a string wants and what the alternative — silently dropping the
 /// backslash — is worst at.
@@ -1477,7 +1477,7 @@ fn unescape_inner(inner: &str) -> String {
             }
             // Anything else. The parser reports it, so this never runs for a
             // program that compiles; keeping the two characters is what makes
-            // the rest of the string still readable in the error's neighbours.
+            // the rest of the string still readable in the error's neighbors.
             Some(other) => {
                 out.push('\\');
                 out.push(other);

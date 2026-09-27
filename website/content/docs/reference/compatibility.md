@@ -20,7 +20,7 @@ A pin that cannot be satisfied fails loudly. It never silently runs a different 
 **Between releases, nothing is guaranteed** — but nothing breaks silently either:
 
 - Every breaking change is in the [changelog](https://github.com/codyspate/khoralang/blob/main/CHANGELOG.md), under a **Breaking** heading, before anything else.
-- A change that made a program *silently wrong* is listed under Breaking as well as Fixed, because code written around the old behaviour will behave differently now.
+- A change that made a program *silently wrong* is listed under Breaking as well as Fixed, because code written around the old behavior will behave differently now.
 - Where a mechanical fix exists, the entry names it.
 
 ## What counts as breaking
@@ -28,7 +28,7 @@ A pin that cannot be satisfied fails loudly. It never silently runs a different 
 | Surface | Breaking? |
 | --- | --- |
 | Language syntax and semantics | Yes |
-| A `std` signature, type or behaviour | Yes |
+| A `std` signature, type or behavior | Yes |
 | A `std` item's removal or rename | Yes |
 | Lockfile format | Yes |
 | Manifest keys the toolchain requires | Yes |

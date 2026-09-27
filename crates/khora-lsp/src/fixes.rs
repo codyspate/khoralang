@@ -33,7 +33,7 @@
 //! the message. An action that guessed between them would be the thing this
 //! file refuses to do.
 //!
-//! # How a diagnostic is recognised
+//! # How a diagnostic is recognized
 //!
 //! By its lint `code` where it has one, and by exact message otherwise. Exact
 //! matching on prose is a thing that rots, and the two it is used for are both
@@ -122,12 +122,37 @@ pub fn for_diagnostic(
             out.extend(for_missing_field(message, range, source));
             out.extend(for_missing_arms(message, range, at));
             out.extend(for_bare_case(message, range));
+            out.extend(for_near_case(message, range));
             out
         }
     }
 }
 
-/// `` `Red` is a case of `Colour` ... Write `Colour::Red` to match the case ``,
+/// `` `Color` has no case `Gren`. Did you mean `Color::Green`? ``, made an
+/// edit: the suggested case in place of the misspelled name.
+///
+/// Its own function rather than a branch of [`for_misspelling`], which
+/// keys on "cannot find" so that the manifest reader's "did you mean" about
+/// a `khora.toml` key -- whose range is not source -- is never rewritten.
+///
+/// The message without a suggestion names a rule, not an edit, and has no
+/// "Did you mean" to extract.
+fn for_near_case(message: &str, range: TextRange) -> Option<Fix> {
+    if !message.contains("` has no case `") {
+        return None;
+    }
+    let meant = message.rsplit_once(". Did you mean `")?.1.strip_suffix("`?")?;
+    if meant.is_empty() {
+        return None;
+    }
+    Some(Fix {
+        title: format!("Change it to `{meant}`"),
+        range,
+        replacement: meant.to_string(),
+    })
+}
+
+/// `` `Red` is a case of `Color` ... Write `Color::Red` to match the case ``,
 /// made an edit: the qualified name in place of the bare one.
 ///
 /// **Not offered when the message also asks for an import**: that is two
@@ -398,7 +423,7 @@ fn for_missing_try(message: &str, range: TextRange, at: &str) -> Option<Fix> {
 /// is the one outcome worse than an error.
 ///
 /// `std::core::todo` is generic in its result, so the arm type-checks against
-/// whatever its neighbours produce and the file compiles with the hole in it;
+/// whatever its neighbors produce and the file compiles with the hole in it;
 /// running that arm stops the program and says so. Where `todo` is not
 /// imported the result is "cannot find `todo` in this scope", which the
 /// auto-import action already answers -- so the follow-up is one click and the
@@ -434,7 +459,7 @@ fn for_missing_arms(message: &str, range: TextRange, at: &str) -> Option<Fix> {
     // discover that an assist did this to you.
     //
     // So the qualification is copied from the arms already written rather than
-    // guessed: a match whose arms say `Colour::Red` gets `Colour::Green`, and
+    // guessed: a match whose arms say `Color::Red` gets `Color::Green`, and
     // one whose arms are bare -- because the constructors were imported -- gets
     // bare. A match with no arms at all says nothing about which, and is
     // offered nothing.
@@ -455,7 +480,7 @@ fn for_missing_arms(message: &str, range: TextRange, at: &str) -> Option<Fix> {
     })
 }
 
-/// How the arms already written spell a constructor: `Colour::` or nothing.
+/// How the arms already written spell a constructor: `Color::` or nothing.
 ///
 /// `None` when there are no arms to copy from, which is the case where this
 /// cannot be answered and so is not guessed at.
@@ -537,7 +562,7 @@ mod tests {
         assert_eq!(fixes[0].replacement, "const");
     }
 
-    /// **A lint whose fix is a judgement gets no action**, which is the rule
+    /// **A lint whose fix is a judgment gets no action**, which is the rule
     /// this file exists to hold: an action applied by somebody who read four
     /// words of the message must not guess.
     #[test]
@@ -555,12 +580,12 @@ mod tests {
     /// The qualified name the message spells out, in place of the bare one.
     #[test]
     fn a_bare_case_name_is_qualified_in_place() {
-        let message = "`Red` is a case of `Colour`, and a bare name in a pattern binds rather \
-                       than matching one -- this would match every `Colour`. Write `Colour::Red` \
+        let message = "`Red` is a case of `Color`, and a bare name in a pattern binds rather \
+                       than matching one -- this would match every `Color`. Write `Color::Red` \
                        to match the case, or pick another name to bind the value";
         let fixes = for_diagnostic(message, None, range(), "Red", "", None);
         assert_eq!(fixes.len(), 1, "{fixes:?}");
-        assert_eq!(fixes[0].replacement, "Colour::Red");
+        assert_eq!(fixes[0].replacement, "Color::Red");
         assert_eq!(fixes[0].range, range());
     }
 
@@ -574,6 +599,24 @@ mod tests {
                        (with `Shade` imported from `xmod::errs`) to match the case, or pick \
                        another name to bind the value";
         assert!(for_diagnostic(message, None, range(), "Light", "", None).is_empty());
+    }
+
+    /// A2's suggestion, made an edit: the case it was one typo away from.
+    #[test]
+    fn a_misspelled_case_is_replaced_by_the_suggested_case() {
+        let message = "`Color` has no case `Gren`. Did you mean `Color::Green`?";
+        let fixes = for_diagnostic(message, None, range(), "Gren", "", None);
+        assert_eq!(fixes.len(), 1, "{fixes:?}");
+        assert_eq!(fixes[0].replacement, "Color::Green");
+        assert_eq!(fixes[0].range, range());
+    }
+
+    /// With no near case the message names a rule, not an edit.
+    #[test]
+    fn a_capitalized_name_near_no_case_is_offered_nothing() {
+        let message = "`Color` has no case `Other`. A name in a pattern that starts with a \
+                       capital letter must be a case; bind the value with a lower-case name.";
+        assert!(for_diagnostic(message, None, range(), "Other", "", None).is_empty());
     }
 
     /// A signature over one line, with the offsets read out of it rather than

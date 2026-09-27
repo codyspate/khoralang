@@ -414,7 +414,7 @@ pub fn chunk_size() -> Int
 
 How much of a file to read at a time.
 
-64 KiB: large enough that the per-call open is amortised, small enough that
+64 KiB: large enough that the per-call open is amortized, small enough that
 a file of any size costs the same memory. Not configurable, because a
 caller who needs a different number can call `read_at` and have exactly the
 loop they want.

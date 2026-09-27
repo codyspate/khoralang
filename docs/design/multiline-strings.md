@@ -61,7 +61,7 @@ backtick is `` \` ``, and `\$` still escapes a hole.
 The lexer, and one funnel in lowering. A backtick literal is the **same token**
 as a quoted one — `STRING_LIT` — so the parser, the type checker, ownership and
 the backend never learn there were two spellings. `strip_quotes` is where the
-delimiter is recognised, and every consumer already went through it.
+delimiter is recognized, and every consumer already went through it.
 
 **The formatter needed nothing.** A string is one token, and the formatter
 re-indents between tokens, so a literal's interior is untouched by

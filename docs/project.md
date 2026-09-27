@@ -304,7 +304,7 @@ member compiles, so a change inside a *dependency* selects the members that
 reach it and not the ones that do not. A changed file inside no member and
 inside nothing a member depends on — the compiler, the root manifest, a script
 — selects **every** member and says which file did it: a tool that answers
-"nothing was affected" about a file it did not recognise is worse than no tool.
+"nothing was affected" about a file it did not recognize is worse than no tool.
 Untracked files count.
 
 `khora run` compiles the program and starts it, forwarding its exit status and
@@ -320,8 +320,8 @@ them into one executable is not a reading of anything.
 
 `khora release --since <rev>` says which members changed since a revision and
 what the next version would be. It never tags and never pushes, and it does not
-choose the semver level: which one a change is, is a judgement about observable
-behaviour. `docs/design/releasing.md`.
+choose the semver level: which one a change is, is a judgment about observable
+behavior. `docs/design/releasing.md`.
 
 `khora build` reuses an artifact it has already produced from the same inputs,
 where "inputs" includes the compiler and linker binaries and not just the

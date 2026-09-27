@@ -387,7 +387,7 @@ fn paren_or_tuple_type(p: &mut Parser<'_>) -> CompletedMarker {
     p.expect(R_PAREN);
     // `(T)` is a grouping; `(T,)` and `(A, B)` are tuples. A one-element shape
     // like `(Dim)` is written without a comma in the spec, so treat a
-    // parenthesised type in argument position as a 1-tuple at lowering time.
+    // parenthesized type in argument position as a 1-tuple at lowering time.
     if arity == 1 && !trailing_comma {
         m.complete(p, PAREN_TYPE)
     } else {

@@ -61,7 +61,7 @@ ALLOWED = {
     ("Channel", "receive"),
 }
 
-def normalise(sig: str) -> str:
+def normalize(sig: str) -> str:
     """A signature with `pub` gone, bodies gone, and rows spelled `'_`.
 
     A `std` method may carry its body on the same line -- `fn show(self) ->
@@ -82,7 +82,7 @@ def normalise(sig: str) -> str:
     return sig.strip()
 
 def methods(text: str) -> dict:
-    """`{(Type, method): normalised signature}` for every `impl` block."""
+    """`{(Type, method): normalized signature}` for every `impl` block."""
     found = {}
     impl = None
     depth = 0
@@ -100,7 +100,7 @@ def methods(text: str) -> dict:
             continue
         fn = re.match(r"(pub\s+)?fn\s+([a-z_][\w]*)\s*(?:<[^>]*>)?\s*\(", stripped)
         if fn:
-            found[(impl, fn.group(2))] = normalise(stripped)
+            found[(impl, fn.group(2))] = normalize(stripped)
     return found
 
 def defines_own(text: str, ty: str) -> bool:

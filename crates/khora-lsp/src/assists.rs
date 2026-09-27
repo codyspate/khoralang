@@ -297,7 +297,7 @@ fn extract_function(
         // equals it.** `(b + 1)` is a `PAREN_EXPR` in the syntax tree and is
         // just `b + 1` in the HIR -- parentheses are grouping and the HIR has
         // structure instead -- so an exact-range lookup finds nothing for
-        // every parenthesised selection, which is most of the ones worth
+        // every parenthesized selection, which is most of the ones worth
         // extracting. Safe because the syntax side has already insisted the
         // selection is exactly one expression node.
         let Some(root) = body
@@ -441,7 +441,7 @@ fn written_row(entries: &BTreeMap<String, String>) -> Option<String> {
     }
     let written: Vec<String> = entries
         .iter()
-        // An error is labelled by its own type name, so printing both would
+        // An error is labeled by its own type name, so printing both would
         // say the same word twice. `hints.rs` renders a row the same way.
         .map(|(label, ty)| if label == ty { ty.clone() } else { format!("{label}: {ty}") })
         .collect();

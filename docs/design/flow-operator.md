@@ -64,7 +64,7 @@ Deliberately narrow, and the boundaries are the design:
 - A **unary** anonymous pipeline. Nothing else.
 - `_` does **not** become a general placeholder expression.
 - No generalized point-free syntax.
-- No new effect, failure, ownership or runtime behaviour.
+- No new effect, failure, ownership or runtime behavior.
 - `|>` precedence and call-insertion are untouched.
 
 ## How to build it
@@ -72,7 +72,7 @@ Deliberately narrow, and the boundaries are the design:
 Sugar, desugared before it can reach anything semantic:
 
 1. The lexer produces `||>` as one token.
-2. The parser recognises a flow expression beginning with it.
+2. The parser recognizes a flow expression beginning with it.
 3. HIR lowering emits an ordinary unary lambda.
 
 From there, lambda inference, effect rows, failure rows, ownership,

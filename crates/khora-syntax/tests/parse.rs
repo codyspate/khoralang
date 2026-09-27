@@ -537,7 +537,7 @@ fn handler_without_for_still_gets_a_pointed_diagnostic() {
     );
 }
 
-/// Recovery has to resynchronise on a contextual declaration keyword too,
+/// Recovery has to resynchronize on a contextual declaration keyword too,
 /// otherwise a broken declaration swallows the `context` that follows it.
 #[test]
 fn recovery_stops_at_a_contextual_declaration_keyword() {

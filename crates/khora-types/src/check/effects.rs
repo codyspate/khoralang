@@ -293,7 +293,7 @@ impl<'a> Checker<'a> {
     ///
     /// **One entry per error type, unified, not one dropped.** A body that
     /// raises `Gx<Int>` in one branch and `Gx<String>` in another has two
-    /// entries labelled `Gx`, and keeping the first typed the closure as
+    /// entries labeled `Gx`, and keeping the first typed the closure as
     /// raising only that one: a `catch` built for it let the other through,
     /// and the program ended with 130 and no message. See
     /// [`Self::settle_error_row`].
@@ -811,7 +811,7 @@ impl<'a> Checker<'a> {
             match first {
                 Some(first) => {
                     // Two declarations that share a name collide here too,
-                    // because an error row is labelled by the bare name; they
+                    // because an error row is labeled by the bare name; they
                     // are not two instantiations of one type, and the message
                     // should not say they are.
                     let homes = |t: &Type| match t {
@@ -917,7 +917,7 @@ impl<'a> Checker<'a> {
                     }
                 }
                 // Only a *rigid* tail. A unification variable is an
-                // inference artefact that may still turn out to be empty, and
+                // inference artifact that may still turn out to be empty, and
                 // absorbing one would invent a requirement nobody wrote.
                 let tail = match tail.map(|t| *t) {
                     Some(Type::Param(name)) if name.starts_with('\'') => {
@@ -1031,7 +1031,7 @@ impl<'a> Checker<'a> {
             // is only now known to be anything.
             let row = self.unifier.zonk(&row);
             // `raises E + F` at `E = Gx<Int>, F = Gx<String>` is only now two
-            // entries labelled `Gx`: at the call both were variables.
+            // entries labeled `Gx`: at the call both were variables.
             let row = if clause == Clause::Raises { self.settle_error_row(&row, range) } else { row };
             let empty =
                 matches!(&row, Type::Row { fields, tail } if fields.is_empty() && tail.is_none());
@@ -1227,7 +1227,7 @@ fn one_error_type_note(expected: &Type, found: &Type) -> String {
     let (Type::Fn { raises: wanted, .. }, Type::Fn { raises: got, .. }) = (expected, found) else {
         return String::new();
     };
-    // A `raises E` is a row with one entry labelled by the error's own type
+    // A `raises E` is a row with one entry labeled by the error's own type
     // name, so "wants one type" is a *closed row of one* rather than a bare
     // type. An open row can still grow and is not this.
     let Type::Row { fields: wants, tail: None } = &**wanted else { return String::new() };

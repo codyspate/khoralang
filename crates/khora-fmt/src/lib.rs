@@ -115,7 +115,7 @@ pub fn is_formatted(src: &str) -> Result<bool, Vec<ParseError>> {
 ///
 /// Whichever ending appears first decides, because a file that mixes them is
 /// being rewritten by two tools and picking the majority would just pick a
-/// side quietly. Formatting is not the place to normalise line endings — that
+/// side quietly. Formatting is not the place to normalize line endings — that
 /// is what `.gitattributes` is for, and a formatter that did it would show up
 /// as every line changed in a review.
 pub fn line_ending(src: &str) -> &'static str {
@@ -303,7 +303,7 @@ impl Formatter {
 
     /// Resolves the gap before `kind` into a concrete separator.
     fn separator(&self, kind: SyntaxKind, parent: SyntaxKind) -> Sep {
-        // An author's line break is always honoured.
+        // An author's line break is always honored.
         if self.pending >= Sep::Newline {
             // A blank line inside a signature or before a closing brace reads
             // as an accident; collapse it.

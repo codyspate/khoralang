@@ -22,7 +22,7 @@ code --uninstall-extension khora-lang.khora
 
 - **The language server starts.** 0.3.0 and 0.3.1 launched `khora lsp --stdio`, which
   every released toolchain refuses with *unexpected argument '--stdio'*, so
-  the server exited before it answered and nothing but syntax colouring
+  the server exited before it answered and nothing but syntax coloring
   worked. It launches `khora lsp`.
 
 ## Changes in 0.3.1

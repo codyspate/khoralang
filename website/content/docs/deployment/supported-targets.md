@@ -99,7 +99,7 @@ tar xzf "khora-$version-$triple.tar.gz" -C /opt
 
 Windows ships the same layout as a `.zip` rather than a `.tar.gz`.
 The archive unpacks to `khora-<version>-<triple>/` holding `bin/khora`, the
-runtime archive beside it, `std/` as source, and the licences. Nothing needs
+runtime archive beside it, `std/` as source, and the licenses. Nothing needs
 configuring after unpacking: the compiler finds `std/` and the runtime beside
 its own binary, and `KHORA_STD` and `KHORA_RT_LIB` exist only as overrides for
 an unusual layout.
@@ -111,7 +111,7 @@ materials for the toolchain itself, with its own checksum.
 
 WebAssembly is a distinct runtime environment, not Linux with a different object format. A wasm target must use a std/platform surface appropriate to its host and must not expose filesystem or socket APIs the host does not provide.
 
-**No wasm target is advertised**, so none of that has been built. `std` has no Worker-shaped platform surface, there is no no-fibers execution model to test, and no host-provided networking or storage capabilities are modelled. LLVM can emit wasm — the compiler's own tests check that the runtime's symbols resolve there — and that is emission, not a deployment path.
+**No wasm target is advertised**, so none of that has been built. `std` has no Worker-shaped platform surface, there is no no-fibers execution model to test, and no host-provided networking or storage capabilities are modeled. LLVM can emit wasm — the compiler's own tests check that the runtime's symbols resolve there — and that is emission, not a deployment path.
 
 Cloudflare Workers is the motivating first wasm deployment target, and its host-provided networking model and single-threaded isolate mean its runtime contract will differ intentionally from native server targets. [Cloudflare Workers](/docs/deployment/cloudflare/) says what would have to exist, and tells you not to choose it in the meantime.
 

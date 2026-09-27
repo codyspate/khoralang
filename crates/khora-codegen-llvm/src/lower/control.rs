@@ -12,7 +12,7 @@ impl<'ctx> Lower<'_, 'ctx> {
     ///
     /// The target is deliberately **not** lowered as an expression. The plan
     /// records a `dup` for it — its walk sees a local read on the left of an
-    /// `=` and cannot tell it apart from a use — and honouring that would take
+    /// `=` and cannot tell it apart from a use — and honoring that would take
     /// a reference nobody ever releases. What the assignment owes instead is
     /// the *old* value's release, which the plan has no place to record.
     pub(super) fn assign(&mut self, target: ExprId, value: ExprId, range: TextRange) -> Flow<'ctx> {
@@ -414,7 +414,7 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// **A `continue` is a back-edge too.** It goes round the loop without
     /// reaching the end of the body, and the end of the body is where the
     /// cancellation check sat -- so a loop that always went round by
-    /// `continue` never checked, and a cancelled fiber in one ran to its end.
+    /// `continue` never checked, and a canceled fiber in one ran to its end.
     /// The check follows the unwind, for the reason the body's own back-edge
     /// follows its drops: a cancellation leaves from a frame that owes
     /// nothing.

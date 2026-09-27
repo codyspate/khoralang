@@ -10,7 +10,7 @@
 #
 # No `grammar` entry, because Khora has no tree-sitter grammar and Helix takes
 # its highlighting from one. Diagnostics, hover and formatting all work without
-# it; what is missing is colour. Roadmap 14.5 is the answer that does not mean
+# it; what is missing is color. Roadmap 14.5 is the answer that does not mean
 # maintaining a second parser -- semantic tokens from the server the rest of
 # this file already points at.
 

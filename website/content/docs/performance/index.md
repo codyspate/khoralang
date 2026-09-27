@@ -189,7 +189,7 @@ A `/health` route returning a fixed JSON object is the thinnest possible
 request. It isolates the library from the handler, which is the point, and it
 resembles no real workload: nothing here has a body worth parsing, a database
 behind it, or a response worth rendering. Cold start is not measured, and
-neither is behaviour under more connections than the machine has cores.
+neither is behavior under more connections than the machine has cores.
 
 **And every row is a Windows number.** One machine is what makes eight
 runtimes comparable to each other, and it is also the limit of what the table

@@ -162,7 +162,7 @@ enum Tok {
     RBrack,
 }
 
-/// Consumes a `/* ... */` comment, honouring nesting.
+/// Consumes a `/* ... */` comment, honoring nesting.
 fn lex_block_comment(lex: &mut Lexer<Tok>) -> bool {
     let rest = lex.remainder();
     let bytes = rest.as_bytes();
@@ -299,9 +299,9 @@ fn to_kind(tok: Tok, text: &str) -> SyntaxKind {
         // **An `INT_LIT`, deliberately.** The whole point of matching `0xFF`
         // is to say something about it, and the saying happens in the parser
         // -- but the tree the parser builds is checked against the lexer's own
-        // kinds token for token, so inventing a kind here desynchronises them.
+        // kinds token for token, so inventing a kind here desynchronizes them.
         // Lexing it as the thing it was trying to be keeps every later pass
-        // unchanged, and the parser recognises it by its text.
+        // unchanged, and the parser recognizes it by its text.
         Tok::BasedLit => S::INT_LIT,
         Tok::DecimalLit => S::DECIMAL_LIT,
         Tok::StringLit => S::STRING_LIT,

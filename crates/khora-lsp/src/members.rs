@@ -10,7 +10,7 @@
 //! Everything here is text: the signature is copied out of the trait's own
 //! source rather than rendered from a type, so what lands in the impl is what
 //! the trait author wrote, with `Self` swapped and a `todo()` body. A rendered
-//! signature would normalise the spacing, drop the parameter names, and print
+//! signature would normalize the spacing, drop the parameter names, and print
 //! a row in whatever order the checker happens to hold it.
 
 use text_size::{TextRange, TextSize};

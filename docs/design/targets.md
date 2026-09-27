@@ -116,7 +116,7 @@ them cannot use.
 - **Sockets.** `reactor.rs` binds `poll` and `WSAPoll`; `net.rs` binds `recv`,
   `send` and `accept`. WASI preview 2 has sockets; a Cloudflare Worker has
   `fetch` and nothing that looks like a socket. This is where the target
-  flavours stop being interchangeable.
+  flavors stop being interchangeable.
 - **TLS.** `rustls` with `ring`. Partial wasm support, and in an isolate the
   host terminates TLS anyway, so the honest answer may be that
   `std::net::tls` is not available on that target rather than that it is slow.
@@ -216,7 +216,7 @@ that makes it deployable to a host that offers nothing.
 
 ### Three bugs between "an object is emitted" and that
 
-Every one of them produced an artefact that looked right.
+Every one of them produced an artifact that looked right.
 
 **The runtime ABI was the host's word size.** Seven functions took a Rust
 `usize` and were declared `i64` by the code generator — correct on the three

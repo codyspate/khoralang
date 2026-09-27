@@ -11,7 +11,7 @@ not.
 
 Rust's split (panic in debug, wrap in release) is the one this audience knows,
 and it is the one rejected. A program that passes its tests and then wraps in
-production is the failure worth spending a branch on, and two behaviours put
+production is the failure worth spending a branch on, and two behaviors put
 the difference exactly where it is most expensive to find. Swift traps
 everywhere and is not thought of as slow.
 
@@ -356,7 +356,7 @@ staying a value that fits in registers.
 **And the limit is still a limit.** Thirty-eight digits, and going past stops
 the program rather than wrapping or saturating. During the widening the runtime
 briefly clamped a requested scale to thirty-eight, so `divide(x, y, 100,
-HalfEven)` computed to thirty-eight places and labelled the answer as having a
+HalfEven)` computed to thirty-eight places and labeled the answer as having a
 hundred — a wrong number wearing the right hat, which is the exact failure this
 type exists to prevent. It is a trap now, and there is a test.
 

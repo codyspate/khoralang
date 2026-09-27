@@ -605,7 +605,7 @@ problem kind, transform or formatter can quote a password.
 | `Refused(rule)` | `listen.port must be between 1 and 65535`, `at least 1`, `at most 10`, `at least 3 characters`, `at most 80 characters`, `at least 1 item`, `at most 5 items`, `not empty`, `` one of `a`, `b` ``, or the `Custom` text |
 | `Unexpected` | `verbose is not expected` |
 | `Denied` | `password is not granted`; `std::config` says `PASSWORD is not granted -- add it to [permissions] env in khora.toml` |
-| an unknown tag | `` payment.type should be one of `Card`, `Cash`, and is "Cheque" `` |
+| an unknown tag | `` payment.type should be one of `Card`, `Cash`, and is "Check" `` |
 | a payload case given a bare string | `payment should be a record, and is "Card"` |
 | a tag that is not text | `payment.type should be text, and is 7` |
 | a failed `try_map` | `created_at should be an ISO 8601 date, and is "yesterday"` |

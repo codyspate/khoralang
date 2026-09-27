@@ -355,7 +355,7 @@ fn fatal(message: &str) -> ! {
 /// A tagged return: which channel, and the payload.
 ///
 /// Every fallible Khora function returns one. `which` is zero for a value,
-/// [`FAILED_WHICH`] for an error and [`CANCELLED_WHICH`] for a cancellation.
+/// [`FAILED_WHICH`] for an error and [`CANCELED_WHICH`] for a cancellation.
 #[repr(C)]
 pub struct Tagged {
     /// Which channel the payload belongs to.

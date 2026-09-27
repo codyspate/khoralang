@@ -140,8 +140,8 @@ shown through [`Show`](/docs/reference/traits/), so a value whose type has no
 `Show` impl is a compile error naming the type:
 
 ```
-error: `Colour` has no `Show`, so it cannot go in a `${..}` hole. Write
-       `derive(Show)` on it, or `impl Show for Colour`
+error: `Color` has no `Show`, so it cannot go in a `${..}` hole. Write
+       `derive(Show)` on it, or `impl Show for Color`
 ```
 
 `Show` does not have to be imported to interpolate. The hole is the use, and
@@ -171,7 +171,7 @@ one that will not parse.
 
 Interpolation is for text a person will read. Where another program consumes
 the output, reach for a structured encoder such as `std::json` instead — a
-value that renders one way for a human is not a serialisation format.
+value that renders one way for a human is not a serialization format.
 
 ## Backtick strings
 

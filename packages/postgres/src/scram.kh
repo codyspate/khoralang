@@ -61,7 +61,7 @@ pub fn hmac(key: Array<U8>, message: Array<U8>) -> Array<U8> {
 }
 
 /// PBKDF2-HMAC-SHA-256. `Option::None` when the server sent an iteration
-/// count this cannot honour — zero, or one that does not fit.
+/// count this cannot honor — zero, or one that does not fit.
 pub fn pbkdf2(password: Array<U8>, salt: Array<U8>, iterations: Int) -> Option<Array<U8>> {
   let out: Array<U8> = Array::new(digest_length(), 0);
   let ok = Array::with_data(password, fn (p, pn) =>

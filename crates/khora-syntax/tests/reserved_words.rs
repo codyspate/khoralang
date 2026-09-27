@@ -83,7 +83,7 @@ fn the_message_says_the_word_is_held_for_a_later_khora() {
 /// **A reserved word is not a keyword.** It has no kind, no production and no
 /// position, so the lexer must keep handing it to the parser as an `IDENT` —
 /// anything else would put it in `KEYWORDS`, and the editor grammar would
-/// colour a word the language does not have.
+/// color a word the language does not have.
 #[test]
 fn a_reserved_word_is_not_a_keyword() {
     for word in RESERVED_WORDS {

@@ -81,7 +81,7 @@ impl<'a> Parser<'a> {
         //
         // The token is **kept**, not dropped. `event.rs` replays the parser's
         // events against the lexer's own tokens and asserts the two agree one
-        // for one, so removing one here desynchronises the tree builder. What
+        // for one, so removing one here desynchronizes the tree builder. What
         // this does is say something true about the token first; the grammar
         // then does whatever it was going to do, and the honest message is the
         // one at the top.
@@ -243,7 +243,7 @@ impl<'a> Parser<'a> {
 
     /// Refuses a backslash escape the language does not know.
     ///
-    /// **Because the alternative is silence.** An unrecognised escape used to
+    /// **Because the alternative is silence.** An unrecognized escape used to
     /// be kept as the two characters it was written with, so `"\\u{0}"` -- the
     /// spelling Rust, JavaScript and Python all use -- became six literal
     /// characters beginning with a backslash. That compiled, ran, and produced
@@ -268,9 +268,9 @@ impl<'a> Parser<'a> {
                 // A line continuation: the newline and the indentation
                 // after it are not in the string. What a long message in
                 // a deeply indented file is written with, and what every
-                // neighbouring language spells the same way.
+                // neighboring language spells the same way.
                 '\n' | '\r' => {}
-                // `\u{1F600}`, the spelling every neighbouring language uses.
+                // `\u{1F600}`, the spelling every neighboring language uses.
                 'u' => {
                     let bad = TextRange::new(
                         TextSize::from((start + at) as u32),
@@ -607,7 +607,7 @@ fn take_unicode(chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>) -> U
 /// The base a literal was written in, when it is one Khora does not have.
 ///
 /// The lexer matches `0x..`, `0b..` and `0o..` as integer literals so that
-/// nothing downstream has a new kind to handle; this is what recognises them
+/// nothing downstream has a new kind to handle; this is what recognizes them
 /// again. Checked on the text rather than the kind for exactly that reason.
 fn base_of(written: &str) -> Option<&'static str> {
     let mut bytes = written.bytes();

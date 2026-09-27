@@ -166,7 +166,7 @@ running now with one version in it, which is the point.
 ## Content ownership
 
 The pages under `website/content/docs/` are written by hand and are owned by
-whoever changes the behaviour they describe. The pages under
+whoever changes the behavior they describe. The pages under
 `website/content/docs/stdlib/api/` are **generated** by `khora doc` and are
 owned by the `///` comments they came from; `scripts/baseline.sh` fails when
 they are stale, so editing one by hand is a change that gets reverted by the

@@ -355,7 +355,7 @@ fn run_says_which_cwd_is_missing() {
 /// revisions before anybody read it as a rule.** Output landed beside the
 /// source it came from -- `src/main.exe`, `src/main.exe.o`, `src/main.pdb` --
 /// so the first `git status` after a first build listed files nobody
-/// recognised, and the repository grew a pattern per kind of file per tree
+/// recognized, and the repository grew a pattern per kind of file per tree
 /// that gets built to hide them. Errata 61.
 ///
 /// `run` and `build` are both here because they have to agree: they share a

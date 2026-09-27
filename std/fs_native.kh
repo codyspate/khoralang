@@ -328,7 +328,7 @@ fn allow_write(path: String) -> () raises IoError {
 
 /// How much of a file to read at a time.
 ///
-/// 64 KiB: large enough that the per-call open is amortised, small enough that
+/// 64 KiB: large enough that the per-call open is amortized, small enough that
 /// a file of any size costs the same memory. Not configurable, because a
 /// caller who needs a different number can call `read_at` and have exactly the
 /// loop they want.
@@ -671,7 +671,7 @@ extern fn ftell(file: Ptr) -> Int;
 ///
 /// Macros in C, so there is no symbol to bind — but 0, 1 and 2 are what every
 /// C library on every platform Khora targets defines them as, and have been
-/// since before C was standardised.
+/// since before C was standardized.
 fn seek_set() -> I32 { I32::of(0) }
 fn seek_end() -> I32 { I32::of(2) }
 

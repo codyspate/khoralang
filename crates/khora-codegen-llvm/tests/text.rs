@@ -315,7 +315,7 @@ fn program(body: &str) -> String {
 
 /// **`ends_with` beside `starts_with`, `upper` beside `lower`.**
 ///
-/// The asymmetries were the diagnosis rather than a judgement call: a surface
+/// The asymmetries were the diagnosis rather than a judgment call: a surface
 /// with one of each pair is what it looks like when every function was added
 /// by the one caller that needed it.
 #[test]
@@ -675,7 +675,7 @@ fn a_number_survives_the_round_trip_at_both_ends() {
 /// **A list of a hundred thousand elements can be walked.**
 ///
 /// It could not. Every traversal in `List` recursed once per element, so a log
-/// analyser that read a hundred and twenty-two thousand lines died while
+/// analyzer that read a hundred and twenty-two thousand lines died while
 /// *reporting* on them -- exit 253, nothing on stdout, nothing on stderr, and
 /// stack exhaustion in neither `docs/reference/traps.md` nor the output.
 /// Thresholds measured at the time: about eight thousand in debug, twelve in
@@ -826,7 +826,7 @@ fn a_much_larger_list_can_be_sorted() {
 ///
 /// The tiny prelude in `tests/interpolation.rs` pins the rule; this pins that
 /// the rule reaches every `Show` the standard library actually has, including
-/// a derived one and a `List`. It is the table the log analyser was trying to
+/// a derived one and a `List`. It is the table the log analyzer was trying to
 /// print:
 ///
 ///     print("    ${pad_right(row.name, 26)}${Int::to_string(row.count)}...");
@@ -1100,7 +1100,7 @@ fn lists_compare_element_by_element() {
 }
 
 
-/// **Counting things into a map is the most common thing a log analyser
+/// **Counting things into a map is the most common thing a log analyzer
 /// does**, and it used to be
 /// `insert(t, k, unwrap_or(get(t, k), 0) + 1)` — which names the map three
 /// times, the key twice, and walks the tree twice to answer one question.
@@ -1232,7 +1232,7 @@ fn a_float_can_be_written_to_a_fixed_width() {
 /// did not, and `#107` made `khora_drop` iterative on the same grounds.
 ///
 /// The size is the one `a_large_list_can_be_walked_without_running_out_of_stack`
-/// uses, so a regression here fails beside its neighbour rather than instead of
+/// uses, so a regression here fails beside its neighbor rather than instead of
 /// it.
 #[test]
 fn mapping_a_large_list_costs_no_stack() {

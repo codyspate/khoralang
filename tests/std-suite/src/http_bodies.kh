@@ -22,7 +22,7 @@ test "a String handed to Response::json is encoded, not passed through" {
     "the quotes are escaped, so the body is a string: " + rendered);
 }
 
-test "Response::of sends a body that is already serialised, as it is" {
+test "Response::of sends a body that is already serialized, as it is" {
   let hand_built = "{\"code\":\"abc\"}";
   let rendered = Response::rendered(Response::of(200, "application/json", hand_built));
   assert_that(String::contains(rendered, "{\"code\":\"abc\"}"),

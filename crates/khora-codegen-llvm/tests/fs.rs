@@ -69,7 +69,7 @@ extern fn khora_print_int(value: Int);
 extern fn khora_live_count() -> Int;
 ";
 
-/// **A cancelled fiber closes the file it was holding.**
+/// **A canceled fiber closes the file it was holding.**
 ///
 /// Not "does not crash": the assertion is that Windows lets the file be
 /// *deleted* afterwards, which it refuses while a handle is open.
@@ -83,7 +83,7 @@ extern fn khora_live_count() -> Int;
 /// **The cancellation travels out on the row**, as it does in every test in
 /// `db.rs`, rather than being caught: no `catch` sees a cancellation.
 #[test]
-fn a_cancelled_fiber_closes_the_file_it_was_reading() {
+fn a_canceled_fiber_closes_the_file_it_was_reading() {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fs_cancel_closes");
     let ran = run(
         "fs_cancel_closes",
@@ -140,7 +140,7 @@ pub fn main() -> Int {{
     let held = dir.join("held.txt");
     assert!(held.is_file(), "the program should have written it: {}", held.display());
     std::fs::remove_file(&held).unwrap_or_else(|e| {
-        panic!("the file was still open after the fiber was cancelled: {e}")
+        panic!("the file was still open after the fiber was canceled: {e}")
     });
 }
 
@@ -913,7 +913,7 @@ pub fn main() -> Int {{
 /// escapes a grant by reaching outside what it names, and this one names
 /// everything, so there is nothing outside to reach. The spellings that have to go with it are here:
 /// leading, doubled, buried under a directory, and written with Windows
-/// separators, which are levelled before the segments are looked at.
+/// separators, which are leveled before the segments are looked at.
 ///
 /// Refused rather than resolved, because resolving is not sound from the
 /// string alone: if `a` is a symlink then `a/..` is the parent of its target,
@@ -945,7 +945,7 @@ pub fn main() -> Int {{
   say(\"**\", \"a/../../b\");
   // Buried, so this is not just a test of the first segment.
   say(\"./logs/**\", \"logs/deep/../../secret.txt\");
-  // Separators are levelled first, so this is the same path again.
+  // Separators are leveled first, so this is the same path again.
   say(\"./logs/**\", \"logs\\\\..\\\\secret.txt\");
   // A segment and not a substring: `..config` is a filename.
   say(\"./logs/**\", \"logs/..config\");

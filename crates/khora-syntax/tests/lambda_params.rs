@@ -23,7 +23,7 @@ fn round_trips(source: &str) {
 }
 
 #[test]
-fn unparenthesised_parameters_are_one_error_naming_the_brackets() {
+fn unparenthesized_parameters_are_one_error_naming_the_brackets() {
     let source = "module t;\nfn f(xs: List<Int>) -> Int {\n  List::fold(xs, 0, fn acc, row => acc + row)\n}\n";
     round_trips(source);
     let errors = errors(source);
@@ -42,10 +42,10 @@ fn every_extra_parameter_is_absorbed_by_the_one_error() {
     assert!(errors[0].contains("parenthes"), "{errors:?}");
 }
 
-/// The parenthesised form is the one the message recommends, so it has to stay
+/// The parenthesized form is the one the message recommends, so it has to stay
 /// silent — a recovery that fired here would make the advice wrong.
 #[test]
-fn the_parenthesised_form_is_untouched() {
+fn the_parenthesized_form_is_untouched() {
     let source = "module t;\nfn f() -> Int {\n  let g = fn (a, b) => a + b;\n  g(1, 2)\n}\n";
     round_trips(source);
     assert!(errors(source).is_empty(), "{:?}", errors(source));

@@ -162,7 +162,7 @@ fn read_request(socket: &mut TcpStream) -> String {
 /// Everything a client has to get right before it can open a socket, and none
 /// of it needs one.
 #[test]
-fn a_url_is_taken_apart_the_way_a_dialler_needs_it() {
+fn a_url_is_taken_apart_the_way_a_dialer_needs_it() {
     let out = run(
         "client_urls",
         r#"  let shown = fn (text: String) => match parse_url(text) {

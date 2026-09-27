@@ -4,7 +4,7 @@ Official language support for [Khora](https://khoralang.com): errors as you
 type, types on hover, completion, navigation, refactorings, and formatting
 for `.kh` files.
 
-Every feature except syntax colouring comes from the Khora compiler itself,
+Every feature except syntax coloring comes from the Khora compiler itself,
 through its built-in language server. What the editor shows is exactly what
 `khora check` reports, so the two can never disagree.
 
@@ -88,9 +88,9 @@ as `khora fmt`. Formatting options come from your project's `khora.toml`.
 
 ### Semantic highlighting
 
-On top of the usual syntax colouring, the compiler tells the editor what each
+On top of the usual syntax coloring, the compiler tells the editor what each
 name is: a local, a parameter, an imported function, a type, a capability.
-So colour follows meaning, not just spelling.
+So color follows meaning, not just spelling.
 
 ### Also
 
@@ -138,7 +138,7 @@ Open the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`) and type *Khora*:
 open while you installed Khora, restart VS Code so it picks up the new
 `PATH`, or set `khora.server.path` to the full path of the executable.
 
-**No errors or hovers, only colours**: the language server isn't running.
+**No errors or hovers, only colors**: the language server isn't running.
 Run **Khora: Show Language Server Output** to see why.
 
 **Settings in `khora.toml` don't take effect**: a `khora.toml` that fails to
@@ -158,4 +158,4 @@ Protocol: run `khora lsp` over standard input and output. See
 
 Report bugs and ask questions on
 [GitHub](https://github.com/codyspate/khoralang/issues). Khora is released
-under the MIT or Apache-2.0 licence, at your option.
+under the MIT or Apache-2.0 license, at your option.

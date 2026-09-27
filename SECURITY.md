@@ -56,7 +56,7 @@ and a fix lands there.
 
 ## What to expect
 
-An acknowledgement, and then either a fix or an explanation of why the
-behaviour is intended — in which case it gets written into the design document
+An acknowledgment, and then either a fix or an explanation of why the
+behavior is intended — in which case it gets written into the design document
 that should have said so. This is a one-person project; the honest promise is
 attention rather than a service level.

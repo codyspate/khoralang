@@ -74,7 +74,7 @@ fn expand_wildcard(
 
     // The qualification the arms already use. A bare constructor name is a
     // *binding* in a pattern, so writing `Green =>` where the file writes
-    // `Colour::Green =>` produces an arm that matches everything and a
+    // `Color::Green =>` produces an arm that matches everything and a
     // program that compiles and is wrong -- the trap `fixes.rs` records.
     let qualifier =
         if written.contains(&format!("{name}::")) { format!("{name}::") } else { String::new() };

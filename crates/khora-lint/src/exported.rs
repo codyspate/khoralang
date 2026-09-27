@@ -1,7 +1,7 @@
 //! `undocumented-export`: a public item nobody described in one line.
 //!
 //! `khora-doc/tests/std_surface.rs` holds this floor for `std`, as a Rust
-//! test, and its reasoning generalises:
+//! test, and its reasoning generalizes:
 //!
 //! > An item nobody could be bothered to describe in one line is an item
 //! > nobody has decided to promise, and it should not reach 1.0 by default.

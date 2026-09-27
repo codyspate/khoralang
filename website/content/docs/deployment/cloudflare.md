@@ -11,7 +11,7 @@ Khora does **not yet advertise Cloudflare Workers as a supported deployment targ
 means important pieces work and production support is not promised yet, and
 here none of the pieces exist. `std` has no Worker-shaped platform surface,
 there is no no-fibers execution model to test, and no host-provided networking
-or storage capability is modelled. LLVM can emit wasm — that is emission, and
+or storage capability is modeled. LLVM can emit wasm — that is emission, and
 the same page says the website must never describe emission-only support as
 deployable platform support. This page is here to say what the target would
 need, and to be the thing a reader finds instead of guessing.

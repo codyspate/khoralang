@@ -26,8 +26,8 @@ Both halves are deliberate and point in opposite directions. *With* `Show`, a
 record holding a secret still derives `Show`, so the config a service prints at
 start-up stays printable and the password in it does not appear. *Without*
 `ToJson`, a record holding a secret does **not** derive `ToJson`, and the build
-stops — which is the right place to stop, because a type that serialises a
-secret is a bug and one that serialises `"<redacted>"` is a payload that fails
+stops — which is the right place to stop, because a type that serializes a
+secret is a bug and one that serializes `"<redacted>"` is a payload that fails
 to round-trip somewhere further away.
 
 **No `Eq`.** Comparing two secrets is a real thing to want, and a derived `Eq`
@@ -61,7 +61,7 @@ their own names; the instance can arrive later without changing a call site.
 
 ### `List` gained `Show` and `Eq` — `std/core.kh`
 
-Fallout, and the reason generalises past `Validated`: `derive(Show)` walks
+Fallout, and the reason generalizes past `Validated`: `derive(Show)` walks
 fields, so a record holding a `List` could not derive one. The container people
 reach for by default was the one that made a struct unprintable.
 
@@ -178,7 +178,7 @@ concept in between.
 
 Three things wait, and they are not the same wait:
 
-| | waits | takes the answer | on a cancelled child |
+| | waits | takes the answer | on a canceled child |
 | --- | --- | --- | --- |
 | letting the binding go | yes | no | nothing |
 | `Fiber::wait` | yes | no | nothing |
@@ -359,7 +359,7 @@ transaction settled on commit — but that is a boolean threaded by hand, and
 every future `acquire` that must behave differently on the failing path will
 thread its own.
 
-Proposed: an `Outcome` of `Completed | Failed(error) | Cancelled`, a
+Proposed: an `Outcome` of `Completed | Failed(error) | Canceled`, a
 `defer_with`, and an `acquire_with`. `defer` stays as it is, so nothing existing
 changes.
 
@@ -386,9 +386,9 @@ successor-passing form; `Channel` is the bounded queue a `buffer` needs;
 strongest confirmation available: it deleted the seven-parameter `Channel` and
 its bespoke executor, and a v4 channel is now a function from an upstream pull
 to a downstream pull, with pipelining as composition. Three further v4 changes
-land in Khora's favour:
+land in Khora's favor:
 
-- **`Chunk` was dropped** in favour of a plain non-empty array. The rope existed
+- **`Chunk` was dropped** in favor of a plain non-empty array. The rope existed
   to make immutable JS array concatenation cheap; the *chunking* was essential,
   the *representation* was not. Take the batch, use a slice, skip the rope.
 - **The non-empty refinement is load-bearing** — it makes "a pull returned
@@ -415,7 +415,7 @@ Four shapes were tried, checked, and where they checked, run.
 | Trait method with a *concrete* row | Works, and the diagnostic is right |
 | Trait with a **row parameter**, `trait Source<'ef>` | Not solved from the impl: ``'ef` is a type the caller chooses` |
 | Trait with an **associated effect row**, `type Effects` | **Does not work.** `with Self::Effects` is read as a capability *named* `Self::Effects`, so no handler can supply it -- a program inside `with { tick: clock }` is still refused |
-| **A record holding a closure**, parameterised by a row | **Works, compiles and runs** |
+| **A record holding a closure**, parameterized by a row | **Works, compiles and runs** |
 
 The last one is the design, and it is the shape this repository already uses
 twice. `Schema<A>` is a record holding a `read` closure; and Effect v4's channel
@@ -596,7 +596,7 @@ So that nobody surveys this twice.
 | **`Cache` / `ScopedCache`** | Genuinely useful, genuinely portable (`Dict` + `Shared` + a one-shot cell), and genuinely a **package**: there is no middle layer. If someone builds it, copy `ScopedCache`'s **refcounted borrow** — `get` requires a scope, so eviction waits for active borrowers rather than ripping a resource out from under a user. Note also that Effect's TTL is lazy (no sweeper, so expired entries hold capacity until touched) and that it **caches failures** for the TTL, which surprises people |
 | **Durable execution (`@effect/workflow`)** | Alpha, and its own docs name the use case as *"a payment that has to be reconciled with the payment provider"* — `positioning.md`'s target verbatim. It is a distributed-systems product, not a language feature. A package, and it wants `Schema` and `Stream` first |
 | **A `Duration` newtype** | Khora spells time as `Int` milliseconds consistently. A wrapper buys little and needs conversions at every boundary |
-| **`Effect.cached` / `cachedFunction` / `once`** | Memoisation helpers; `cachedFunction` is unbounded with no eviction. Package-level |
+| **`Effect.cached` / `cachedFunction` / `once`** | Memoization helpers; `cachedFunction` is unbounded with no eviction. Package-level |
 
 ---
 
@@ -609,7 +609,7 @@ advantages nobody would otherwise notice.
 - **`Layer` memoization was a footgun Effect had to patch**, and the residual
   reference-identity issue is still documented as a caution. Khora's `let`-bound
   `with` block has none of it by construction.
-- **`Cause` was over-modelled and got flattened** — six variants including a
+- **`Cause` was over-modeled and got flattened** — six variants including a
   recursive tree became three in a flat array. Resist growing the error channel
   past `{ which, payload }` plus a list.
 - **The library tax is visible in their own numbers.** A minimal program went

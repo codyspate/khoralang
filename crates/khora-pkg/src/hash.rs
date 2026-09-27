@@ -18,14 +18,14 @@
 //!   appear in either.** Hashing only file contents lets a rename go unnoticed,
 //!   and concatenating path and contents without a separator lets `ab` + `c`
 //!   collide with `a` + `bc`.
-//! - **Paths are normalised to forward slashes.** Otherwise the same package
+//! - **Paths are normalized to forward slashes.** Otherwise the same package
 //!   hashes differently on Windows, which would mean a lockfile nobody can
 //!   share.
-//! - **Files are sorted by that normalised path**, because directory order is
+//! - **Files are sorted by that normalized path**, because directory order is
 //!   whatever the filesystem feels like.
 //!
 //! Contents are hashed as raw bytes. Khora source is pinned to LF by
-//! `.gitattributes`, so a checkout is byte-identical everywhere; normalising
+//! `.gitattributes`, so a checkout is byte-identical everywhere; normalizing
 //! here as well would hide a genuine difference in a file that is not source.
 
 use std::path::Path;

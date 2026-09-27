@@ -126,8 +126,8 @@ check "three requests on one connection" "200200200" \
         -o /dev/null "$base/health" \
         -o /dev/null "$base/health")"
 
-# The client asking to close, which the server must honour rather than ignore.
-check "Connection: close is honoured" "close" \
+# The client asking to close, which the server must honor rather than ignore.
+check "Connection: close is honored" "close" \
     "$(curl -s -o /dev/null -D - -H 'Connection: close' "$base/health" \
         | tr -d '\r' | grep -i '^connection:' | cut -d' ' -f2)"
 

@@ -160,7 +160,7 @@ no parameters — schema, `BEGIN`, a fixed query. It is the only one that can
 carry several statements separated by semicolons, which is exactly why it must
 never be handed anything a user typed.
 
-Interpolating a value into `run` is the oldest hole there is. The only defence
+Interpolating a value into `run` is the oldest hole there is. The only defense
 a library can offer is to make the safe call the shorter one, and it is.
 
 ## What arrives

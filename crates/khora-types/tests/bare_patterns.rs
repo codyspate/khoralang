@@ -1,7 +1,7 @@
 //! A bare name in a pattern that is the name of one of its value's cases.
 //!
-//! **A bare name in a pattern binds**, so `Red => "warm"` over a `Colour`
-//! matched every colour and answered "warm" for green. The only thing said
+//! **A bare name in a pattern binds**, so `Red => "warm"` over a `Color`
+//! matched every color and answered "warm" for green. The only thing said
 //! was that `Red` was never read -- a warning, gone as soon as the arm used
 //! the name. A `catch` of the same shape built a binary that died with
 //! `Illegal instruction`. Every case here checked clean before the rule.
@@ -31,19 +31,19 @@ fn assert_reports(text: &str, needle: &str) {
     );
 }
 
-const COLOUR: &str = "module m;\npub type Colour = | Red | Green | Blue;\n";
+const COLOR: &str = "module m;\npub type Color = | Red | Green | Blue;\n";
 
 /// The headline: the arm after the bare name is not unreachable, because it
 /// comes first, so nothing about coverage ever looked wrong.
 #[test]
 fn a_bare_case_name_in_a_match_is_refused() {
     let text = format!(
-        "{COLOUR}fn describe(c: Colour) -> String {{ match c {{ Colour::Blue => \"cool\", Red => \"warm\" }} }}\n"
+        "{COLOR}fn describe(c: Color) -> String {{ match c {{ Color::Blue => \"cool\", Red => \"warm\" }} }}\n"
     );
     assert_reports(
         &text,
-        "`Red` is a case of `Colour`, and a bare name in a pattern binds rather than matching \
-         one -- this would match every `Colour`. Write `Colour::Red` to match the case, or pick \
+        "`Red` is a case of `Color`, and a bare name in a pattern binds rather than matching \
+         one -- this would match every `Color`. Write `Color::Red` to match the case, or pick \
          another name to bind the value",
     );
 }
@@ -53,17 +53,17 @@ fn a_bare_case_name_in_a_match_is_refused() {
 #[test]
 fn the_refusal_is_the_only_error() {
     let text = format!(
-        "{COLOUR}fn go(c: Colour) -> Int {{ match c {{ Red => 1, Colour::Green => 2, Colour::Blue => 3 }} }}\n"
+        "{COLOR}fn go(c: Color) -> Int {{ match c {{ Red => 1, Color::Green => 2, Color::Blue => 3 }} }}\n"
     );
     let found = errors(&text);
     assert_eq!(found.len(), 1, "{found:?}");
-    assert!(found[0].contains("is a case of `Colour`"), "{found:?}");
+    assert!(found[0].contains("is a case of `Color`"), "{found:?}");
 }
 
 #[test]
 fn a_bare_case_name_in_a_let_is_refused() {
-    let text = format!("{COLOUR}fn go() -> Int {{ let Red = Colour::Green; 0 }}\n");
-    assert_reports(&text, "`Red` is a case of `Colour`");
+    let text = format!("{COLOR}fn go() -> Int {{ let Red = Color::Green; 0 }}\n");
+    assert_reports(&text, "`Red` is a case of `Color`");
 }
 
 #[test]
@@ -78,18 +78,18 @@ fn a_bare_case_name_in_a_catch_is_refused() {
 #[test]
 fn a_bare_case_name_nested_in_a_tuple_is_refused() {
     let text = format!(
-        "{COLOUR}fn f(pair: (Colour, Int)) -> Int {{ match pair {{ (Colour::Blue, _) => 0, (Red, n) => n }} }}\n"
+        "{COLOR}fn f(pair: (Color, Int)) -> Int {{ match pair {{ (Color::Blue, _) => 0, (Red, n) => n }} }}\n"
     );
-    assert_reports(&text, "`Red` is a case of `Colour`");
+    assert_reports(&text, "`Red` is a case of `Color`");
 }
 
 #[test]
 fn a_bare_case_name_nested_in_a_payload_is_refused() {
     let text = format!(
-        "{COLOUR}pub type Maybe<A> = | Some(v: A) | None;\n\
-         fn g(o: Maybe<Colour>) -> Int {{ match o {{ Maybe::Some(Colour::Blue) => 1, Maybe::Some(Red) => 2, Maybe::None => 3 }} }}\n"
+        "{COLOR}pub type Maybe<A> = | Some(v: A) | None;\n\
+         fn g(o: Maybe<Color>) -> Int {{ match o {{ Maybe::Some(Color::Blue) => 1, Maybe::Some(Red) => 2, Maybe::None => 3 }} }}\n"
     );
-    assert_reports(&text, "`Red` is a case of `Colour`");
+    assert_reports(&text, "`Red` is a case of `Color`");
 }
 
 /// A record pattern's sub-pattern goes through the same lowering as the
@@ -97,10 +97,10 @@ fn a_bare_case_name_nested_in_a_payload_is_refused() {
 #[test]
 fn a_bare_case_name_under_a_record_field_is_refused() {
     let text = format!(
-        "{COLOUR}pub type Pen = {{ colour: Colour, width: Int }};\n\
-         fn f(p: Pen) -> Int {{ match p {{ Pen {{ colour: Red, width }} => width }} }}\n"
+        "{COLOR}pub type Pen = {{ color: Color, width: Int }};\n\
+         fn f(p: Pen) -> Int {{ match p {{ Pen {{ color: Red, width }} => width }} }}\n"
     );
-    assert_reports(&text, "`Red` is a case of `Colour`");
+    assert_reports(&text, "`Red` is a case of `Color`");
 }
 
 /// A `None` after `Option::Some(n)`: the Rust habit, which binds here.
@@ -117,10 +117,10 @@ fn the_rust_habit_is_refused() {
 #[test]
 fn a_bare_case_name_in_an_inferred_lambda_is_refused() {
     let text = format!(
-        "{COLOUR}fn apply(c: Colour, f: (Colour) -> Int) -> Int {{ f(c) }}\n\
-         fn go() -> Int {{ apply(Colour::Green, fn c => match c {{ Colour::Blue => 1, Red => 2 }}) }}\n"
+        "{COLOR}fn apply(c: Color, f: (Color) -> Int) -> Int {{ f(c) }}\n\
+         fn go() -> Int {{ apply(Color::Green, fn c => match c {{ Color::Blue => 1, Red => 2 }}) }}\n"
     );
-    assert_reports(&text, "`Red` is a case of `Colour`");
+    assert_reports(&text, "`Red` is a case of `Color`");
 }
 
 /// Written with its payload the name is a constructor already refused; this
@@ -177,7 +177,7 @@ fn a_case_of_a_type_the_file_never_imports_is_refused() {
         "module errs;\n\
          pub type Shade = | Dark | Light;\n\
          pub type LoadError = | Missing | Broken(String);\n\
-         pub fn colour(n: Int) -> Shade { if n == 0 { Shade::Dark } else { Shade::Light } }\n\
+         pub fn color(n: Int) -> Shade { if n == 0 { Shade::Dark } else { Shade::Light } }\n\
          pub fn load(n: Int) -> Int raises LoadError { if n == 0 { raise LoadError::Missing; } n }\n"
             .to_string(),
     );
@@ -185,8 +185,8 @@ fn a_case_of_a_type_the_file_never_imports_is_refused() {
         &db,
         "app.kh".into(),
         "module app;\n\
-         import errs::{colour, load};\n\
-         fn shade(n: Int) -> Int { match colour(n) { Light => 1 } }\n\
+         import errs::{color, load};\n\
+         fn shade(n: Int) -> Int { match color(n) { Light => 1 } }\n\
          fn go(n: Int) -> Int { load(n)! catch { Missing => 2 } }\n"
             .to_string(),
     );
@@ -211,11 +211,11 @@ fn a_case_of_a_type_the_file_never_imports_is_refused() {
 #[test]
 fn an_ordinary_binding_is_not_refused() {
     assert_clean(&format!(
-        "{COLOUR}pub type Other = | stop | go;\n\
+        "{COLOR}pub type Other = | stop | go;\n\
          pub type Maybe<A> = | Some(v: A) | None;\n\
-         fn a(c: Colour) -> Colour {{ match c {{ Colour::Red => c, stop => stop }} }}\n\
+         fn a(c: Color) -> Color {{ match c {{ Color::Red => c, stop => stop }} }}\n\
          fn b(o: Maybe<Int>) -> Int {{ match o {{ Maybe::Some(n) => n, Maybe::None => 0 }} }}\n\
-         fn c(o: Maybe<Colour>) -> Colour {{ match o {{ Maybe::Some(Colour::Red) => Colour::Red, other => Colour::Blue }} }}\n"
+         fn c(o: Maybe<Color>) -> Color {{ match o {{ Maybe::Some(Color::Red) => Color::Red, other => Color::Blue }} }}\n"
     ));
 }
 
@@ -244,39 +244,106 @@ fn the_suggested_spellings_are_accepted() {
     );
 }
 
-/// **A2, the owner's decision: a capitalised bare name that is no case.**
+/// **A2, the owner's decision: a capitalized bare name that is no case.**
 ///
-/// Kept in its own block so it goes with `refuse_capitalised_binding` if the
+/// Kept in its own block so it goes with `refuse_capitalized_binding` if the
 /// owner drops it. The rule above cannot see either of these: `Gren` is no
-/// case of `Colour`, and `FAVOURITE` binds rather than compares, so both
+/// case of `Color`, and `FAVORITE` binds rather than compares, so both
 /// were catch-alls with at most an `unused-binding` warning.
 mod a2 {
     use super::*;
 
+    /// Read like an undefined name, with the case it was one typo away from.
     #[test]
-    fn a_misspelt_case_is_refused() {
+    fn a_misspelled_case_suggests_the_nearest_case() {
         let text = format!(
-            "{COLOUR}fn describe(c: Colour) -> Int {{ match c {{ Colour::Blue => 1, Colour::Red => 2, Gren => 3 }} }}\n"
+            "{COLOR}fn describe(c: Color) -> Int {{ match c {{ Color::Blue => 1, Color::Red => 2, Gren => 3 }} }}\n"
         );
-        assert_reports(
-            &text,
-            "`Gren` binds the value, because it is no case of `Colour` -- and a capitalised name \
-             in a pattern reads as a case",
+        let found = errors(&text);
+        assert_eq!(
+            found,
+            vec!["`Color` has no case `Gren`. Did you mean `Color::Green`?".to_string()],
+            "{text}"
         );
     }
 
+    /// The suggestion is built to compile as written: a payload case takes
+    /// one `_` per field, as the bare-case message's does.
+    #[test]
+    fn the_suggestion_for_a_payload_case_carries_its_fields() {
+        let text = "module m;\npub type FsError = | NotFound(String) | Denied(String, Int);\n\
+            fn f(e: FsError) -> Int { match e { FsError::Denied(_, n) => n, NotFond => 0 } }\n";
+        assert_reports(text, "`FsError` has no case `NotFond`. Did you mean `FsError::NotFound(_)`?");
+    }
+
+    /// A threshold of a third of the name would give a four-letter name one
+    /// edit; the floor of two is what lets `Rde` find `Red`.
+    #[test]
+    fn two_edits_are_allowed_however_short_the_name() {
+        let text = format!(
+            "{COLOR}fn describe(c: Color) -> Int {{ match c {{ Color::Blue => 1, Color::Green => 2, Rde => 3 }} }}\n"
+        );
+        assert_reports(&text, "`Color` has no case `Rde`. Did you mean `Color::Red`?");
+    }
+
+    /// Nothing near: no guess, and the rule the name broke instead.
+    #[test]
+    fn a_name_near_no_case_is_refused_without_a_suggestion() {
+        let text = format!(
+            "{COLOR}fn describe(c: Color) -> Int {{ match c {{ Color::Blue => 1, Other => 3 }} }}\n"
+        );
+        let found = errors(&text);
+        assert_eq!(
+            found,
+            vec![
+                "`Color` has no case `Other`. A name in a pattern that starts with a capital \
+                 letter must be a case; bind the value with a lower-case name."
+                    .to_string()
+            ],
+            "{text}"
+        );
+    }
+
+    /// A value with no cases to name: the rule, and -- because a `const` of
+    /// that name is in scope -- the guard that compares against it.
     #[test]
     fn a_const_written_as_a_pattern_is_refused() {
-        let text = "module m;\nconst FAVOURITE: Int = 7;\n\
-            fn lucky(n: Int) -> Int { match n { FAVOURITE => 1 } }\n";
-        assert_reports(text, "`FAVOURITE` binds the value, because it is no case of `Int`");
+        let text = "module m;\nconst FAVORITE: Int = 7;\n\
+            fn lucky(n: Int) -> Int { match n { FAVORITE => 1 } }\n";
+        let found = errors(text);
+        assert_eq!(
+            found,
+            vec![
+                "`FAVORITE` is not a case of `Int`. A name in a pattern that starts with a \
+                 capital letter must be a case; bind the value with a lower-case name. A \
+                 pattern can't compare against a `const`; use `n if n == FAVORITE` or an `if`."
+                    .to_string()
+            ],
+            "{text}"
+        );
+    }
+
+    /// No `const` of the name, so nothing about comparing against one.
+    #[test]
+    fn a_capitalized_name_over_an_int_is_refused_without_the_const_advice() {
+        let text = "module m;\nfn lucky(n: Int) -> Int { match n { Seven => 1 } }\n";
+        let found = errors(text);
+        assert_eq!(
+            found,
+            vec![
+                "`Seven` is not a case of `Int`. A name in a pattern that starts with a \
+                 capital letter must be a case; bind the value with a lower-case name."
+                    .to_string()
+            ],
+            "{text}"
+        );
     }
 
     /// A lower-case binding is what binding looks like, and stays clean.
     #[test]
     fn a_lower_case_binding_is_not_refused() {
         assert_clean(&format!(
-            "{COLOUR}fn describe(c: Colour) -> Int {{ match c {{ Colour::Blue => 1, gren => 3 }} }}\n"
+            "{COLOR}fn describe(c: Color) -> Int {{ match c {{ Color::Blue => 1, gren => 3 }} }}\n"
         ));
     }
 }

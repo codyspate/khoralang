@@ -16,7 +16,7 @@
 //!
 //! Each is also chosen to have **no false positives**. A warning people learn
 //! to ignore is worse than no warning, and the way that starts is one that is
-//! wrong about real code — so where a judgement was available, this takes the
+//! wrong about real code — so where a judgment was available, this takes the
 //! quiet side.
 //!
 //! # Levels
@@ -206,7 +206,7 @@ pub fn findings(db: &dyn Db, file: SourceFile) -> Vec<Finding> {
     misplaced_main(db, file, &mut out);
 
     // **Here rather than in each consumer.** The CLI, the language server and
-    // the MCP server all read this, and a suppression one of them honoured and
+    // the MCP server all read this, and a suppression one of them honored and
     // another did not would be the worst kind of inconsistency: the editor
     // says the line is fine and the build does not.
     let text = file.text(db);
@@ -868,7 +868,7 @@ fn unused_capabilities(body: &Body, types: &BodyTypes, out: &mut Vec<Finding>) {
 ///
 /// **Deliberately syntactic, and deliberately narrow.** Only an expression that
 /// *cannot* do anything is reported: no call, no assignment, no `!`, nothing
-/// that could raise. That rules out the interesting judgement calls — a call
+/// that could raise. That rules out the interesting judgment calls — a call
 /// whose result is ignored is often exactly right, and deciding which ones are
 /// not needs to know whether the callee does anything, which is a purity
 /// analysis rather than a lint. This is the subset where being wrong is
@@ -1059,7 +1059,7 @@ fn settles_on_the_outer_tag(module: &str, name: &str) -> bool {
 ///
 /// **No false positives is the harder half.** A lint people learn to ignore is
 /// worse than no lint, and the way that starts is one that is wrong about real
-/// code — so where a judgement was available this takes the quiet side, as the
+/// code — so where a judgment was available this takes the quiet side, as the
 /// other two passes here do.
 fn reference_cycles(body: &Body, types: &BodyTypes, out: &mut Vec<Finding>) {
     let Some(root) = body.root else { return };
@@ -1267,7 +1267,7 @@ fn locals_in(body: &Body, id: khora_hir::body::ExprId, out: &mut BTreeSet<LocalI
         // landed — `packages/postgres`, `c.pending = advance(c.pending, n)`,
         // a function that builds a new array and returns it — was reported
         // twice as a cycle. A lint people learn to ignore is worse than no
-        // lint, and this file's own header says where a judgement is available
+        // lint, and this file's own header says where a judgment is available
         // to take the quiet side. It had not.
         Expr::Call { callee, args } if constructs(body, *callee) => {
             for arg in args {

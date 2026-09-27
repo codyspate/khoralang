@@ -19,8 +19,8 @@ language rule, a supported feature, and unfinished work.
 - [A child's failure is seen late unless it was adopted early](#a-childs-failure-is-seen-late-unless-it-was-adopted-early):
   a failing child cancels its siblings only once every child adopted before it
   has finished.
-- [A cancelled fiber waiting on a child stops only when the child
-  does](#a-cancelled-fiber-waiting-on-a-child-stops-when-the-child-does), if
+- [A canceled fiber waiting on a child stops only when the child
+  does](#a-canceled-fiber-waiting-on-a-child-stops-when-the-child-does), if
   it holds the child's last handle.
 - [The two fiber backends behave differently](#the-two-fiber-backends-are-distinguishable)
   in scheduling order.
@@ -54,7 +54,7 @@ run them, and a `scratch` container image is not an option.
 
 ## Recursion depth and very large lists
 
-Khora does not guarantee tail-call optimisation, so a function that recurses once per element uses one stack frame per element. Running out of stack ends the program; it reports
+Khora does not guarantee tail-call optimization, so a function that recurses once per element uses one stack frame per element. Running out of stack ends the program; it reports
 
 ```
 khora: the stack ran out
@@ -80,7 +80,7 @@ Dependencies can be pinned reproducibly to git revisions, but there is not yet a
 
 **Three packages are maintained in the Khora repository**, and they are what "the ecosystem" means today: [`postgres`](/docs/packages/postgres/), `ai` — the effect a caller names when it wants model inference — and `otlp`, an exporter for `std::trace` over OTLP/HTTP JSON. [Packages](/docs/packages/) lists all three and gives the manifest line each is depended on with. Beyond those there is nothing to install: no registry to search and no third-party publishing.
 
-**One database driver is published: `postgres`.** `std::db` defines `Db`, transaction semantics and cancellation behaviour, and [`packages/postgres`](/docs/packages/postgres/) satisfies that interface — it speaks the wire protocol directly, authenticates with `scram-sha-256`, and supplies the `Db` handler. Depend on it with a git revision and a `subdir`; there is no registry yet. **SQLite and D1 have no driver**, and a program that needs one writes its own handler — `Db` is a record of closures, so that is a day's work and a test double is a few lines — over a native client it links with [`build.link`](/docs/reference/manifest/#build--what-to-produce).
+**One database driver is published: `postgres`.** `std::db` defines `Db`, transaction semantics and cancellation behavior, and [`packages/postgres`](/docs/packages/postgres/) satisfies that interface — it speaks the wire protocol directly, authenticates with `scram-sha-256`, and supplies the `Db` handler. Depend on it with a git revision and a `subdir`; there is no registry yet. **SQLite and D1 have no driver**, and a program that needs one writes its own handler — `Db` is a record of closures, so that is a day's work and a test double is a few lines — over a native client it links with [`build.link`](/docs/reference/manifest/#build--what-to-produce).
 
 **`postgres` does not speak TLS.** It authenticates with `scram-sha-256`, so
 the password itself never crosses the network, but every query and every row
@@ -171,14 +171,14 @@ the off-by-one below, the peak actually observed is 257.
 
 **`[permissions] network` governs outbound connections only.** The grant list is
 consulted in exactly one place in the standard library — inside
-`HttpClient::send`, after the URL is parsed and before anything is dialled — and
+`HttpClient::send`, after the URL is parsed and before anything is dialed — and
 what it decides is whether that host may be reached. Nothing on the server side
 consults it: `Router::listen`, `Router::listen_quietly`, `Router::listen_tls`
 and the `listen_on` under them bind and serve without asking. A program with
 `default = "deny"` and `network = []` opens whatever port it is given and
 answers requests on it.
 
-So do not read a `network` grant as an authorisation to listen, and do not read
+So do not read a `network` grant as an authorization to listen, and do not read
 its absence as a refusal to. `network = ["127.0.0.1:8787"]` written to allow a
 server to bind 8787 does nothing at all — it neither permits the bind, which
 needed no permission, nor restricts it. The mistake is easy to make and leaves
@@ -243,7 +243,7 @@ driven by the reactor would make it one, and it is not built.
 **Waiting for a child process is not a cancellation point.** `process.run`,
 `process.output` and `process.shell` wait for the program they started in one
 blocking call, so a fiber inside one stops only after that program exits. The
-program is not killed when the fiber is cancelled; whether it should be is not
+program is not killed when the fiber is canceled; whether it should be is not
 decided. Put a bound on the program itself (`timeout 10 ...`) where that
 matters.
 
@@ -282,10 +282,10 @@ The two backends are distinguishable under cancellation — see [The two fiber
 backends are distinguishable](#the-two-fiber-backends-are-distinguishable)
 below — so the default cannot change without a breaking-change note.
 
-**A known defect: under load, the scheduler can finish a cancelled fiber
+**A known defect: under load, the scheduler can finish a canceled fiber
 without running its finalizer.** When four or more other fibers are sitting
-in cleanup blocked on a `receive`, a fiber cancelled while parked in
-`Channel::receive` can report `finished` and `cancelled` with its
+in cleanup blocked on a `receive`, a fiber canceled while parked in
+`Channel::receive` can report `finished` and `canceled` with its
 `Region::defer` finalizer never having run. Two such fibers in cleanup do not
 trigger it; the thread backend does not have it. Until it is fixed, do not
 rely on finalizers under `KHORA_FIBERS=scheduler` in a program that keeps
@@ -340,13 +340,13 @@ The practical consequence is that `attempt` handles a body raising exactly one t
 
 [The unions design note](https://github.com/codyspate/khoralang/blob/main/docs/design/unions.md) records what an anonymous union would mean, what it would cost, and why existentials are not part of the same question.
 
-## A cancelled fiber waiting on a child stops when the child does
+## A canceled fiber waiting on a child stops when the child does
 
-`Fiber::wait` and `Fiber::join` are cancellation points: a parent cancelled
+`Fiber::wait` and `Fiber::join` are cancellation points: a parent canceled
 while waiting stops there and does not run the statement after it, whether or
 not the child can fail. **But if the parent holds the last handle on the
 child, it does not finish stopping until the child has**, because the handle
-is released on the way out, and a cancelled fiber releasing the last handle on
+is released on the way out, and a canceled fiber releasing the last handle on
 another passes the cancellation on and waits for it. So that parent's latency
 is the child's: however long the child takes to reach its own next
 cancellation point. A child that reaches one often -- a loop, a call, a sleep
@@ -355,7 +355,7 @@ cancellation point. A child that reaches one often -- a loop, a call, a sleep
 A parent that waits on a child somebody else also holds stops at once: its
 release is not the last, so it does not wait.
 
-Releasing the last handle *without* being cancelled waits for the child and
+Releasing the last handle *without* being canceled waits for the child and
 does not stop it: a `main` that returns while holding a handle on a fiber
 that never ends does not exit. Cancel it first.
 
@@ -385,11 +385,11 @@ fibers still has no way to wait on the *first* of them except through a
 `Channel` the branches send to.
 
 Two smaller things a supervisor meets on the way. `Fiber::wait` tells you
-nothing about how the fiber ended. `Fiber::cancelled` answers whether the fiber
+nothing about how the fiber ended. `Fiber::canceled` answers whether the fiber
 was *stopped*, without waiting and without unwinding the asker, so a supervisor
 can tell a shutdown from a fault; `Fiber::outcome` goes one step further and
 hands back `Answered(value)` or `Stopped`, raising only when the child
-*failed*. A `join` on a cancelled fiber still unwinds its caller, and at the
+*failed*. A `join` on a canceled fiber still unwinds its caller, and at the
 entry point still ends the program at 130, so `outcome` is the call for a
 caller that wants the answer and tolerates a stop. A stopped fiber's partial
 progress is never handed back; to keep it, the child writes a `Shared` cell.
@@ -413,7 +413,7 @@ one.
 
 **A cancellation is excluded from it.** The
 runtime emits that line only for a fiber that ended in a *failure*; a
-cancelled fiber is silent, so a supervisor that cancels children does not
+canceled fiber is silent, so a supervisor that cancels children does not
 print it — it prints it only when a child failed on its own. That is what
 keeps the line worth reading: it is not the ordinary noise of a shutdown, and
 seeing one means a fiber somewhere raised.
@@ -472,10 +472,10 @@ fail is adopted before the siblings it should stop.
 
 A nursery reaps handles oldest-first, so a failure is not seen until every
 child adopted before it has finished; the siblings still running at that point
-are cancelled. Twelve children busy for 400 ms, one raising after 10 ms, on
+are canceled. Twelve children busy for 400 ms, one raising after 10 ms, on
 both fiber backends:
 
-| the failing child was adopted | siblings cancelled, of 11 | `ChildFailed` arrives |
+| the failing child was adopted | siblings canceled, of 11 | `ChildFailed` arrives |
 | --- | --- | --- |
 | first | 11, in every run | about 10 ms after the start |
 | in the middle (6th of 12) | 2 to 6 | after the earlier five finish |

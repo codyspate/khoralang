@@ -15,7 +15,7 @@
 #
 #   - `website/content/docs/reference/environment.md`, the supported knobs;
 #   - INTERNAL below, ours rather than a user's;
-#   - UNDECIDED below, behaviour a user can reach that nobody has yet decided
+#   - UNDECIDED below, behavior a user can reach that nobody has yet decided
 #     should be reachable that way.
 #
 # A name in none of the three fails the check.
@@ -159,7 +159,7 @@ if undeclared:
         print(f"\n          {name}", file=sys.stderr)
         print(f"            read by: {where}", file=sys.stderr)
     print(
-        "\n  A variable that changes behaviour and is written down nowhere is a\n"
+        "\n  A variable that changes behavior and is written down nowhere is a\n"
         "  surface nobody can rely on and nobody can avoid depending on. One of:\n"
         "\n"
         f"    - document it as a knob in {page}, under a\n"
@@ -168,7 +168,7 @@ if undeclared:
         "    - add it to INTERNAL in this script with the reason it is ours and\n"
         "      not a user's; or\n"
         "    - add it to UNDECIDED with what it ought to be instead, if it is\n"
-        "      behaviour that should not have been an environment variable.\n",
+        "      behavior that should not have been an environment variable.\n",
         file=sys.stderr,
     )
     sys.exit(1)

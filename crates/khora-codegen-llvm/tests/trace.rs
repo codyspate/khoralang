@@ -262,17 +262,17 @@ fn a_body_that_raises_still_finishes_its_span() {
     );
 }
 
-/// And a body whose fiber is cancelled, which is the way out that no `match`
+/// And a body whose fiber is canceled, which is the way out that no `match`
 /// written in `around` could ever see.
 #[test]
-fn a_cancelled_body_still_finishes_its_span() {
+fn a_canceled_body_still_finishes_its_span() {
     let out = run_with(
         "trace_around_cancel",
         RECORDING,
         r#"  let tracer = recording();
   let f = Fiber::spawn(fn () => stopped(tracer)!);
   // `wait`, not `join`: this needs the ordering and not the answer, and a
-  // cancelled fiber has no answer to give -- a join would have nothing to
+  // canceled fiber has no answer to give -- a join would have nothing to
   // hand back and would unwind this frame along with it.
   Fiber::wait(f)! catch { Oops::Bad => () };
   print("the parent carried on");"#,

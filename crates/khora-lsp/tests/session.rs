@@ -400,7 +400,7 @@ fn a_manifest_that_does_not_load_is_an_error_in_the_editor() {
 ///
 /// **Driven a batch at a time**, because `serve` reports once per batch and a
 /// test that sends everything at once and then counts reports is asserting a
-/// race rather than a behaviour.
+/// race rather than a behavior.
 #[test]
 fn an_edit_republishes() {
     let w = workspace(&[("src/main.kh", "module app::main;\n")]);
@@ -1468,7 +1468,7 @@ fn a_parameter_a_local_and_a_function_are_told_apart() {
     assert_eq!(parameter.modifiers, 1, "declaration: {parameter:?}");
 
     // Line 5 is `  let total = count;` — `total` is a local, `count` a use of
-    // the parameter, and they must not be the same colour.
+    // the parameter, and they must not be the same color.
     let local = found.iter().find(|t| t.line == 5 && t.column == 6).expect("the local");
     assert_eq!(local.kind, index("variable"), "{local:?}");
     let use_of_parameter =
@@ -1531,9 +1531,9 @@ fn tokens_are_sorted_and_do_not_overlap() {
 }
 
 /// A path's leading segments are modules and its last is what it resolves to,
-/// which is the other thing a grammar guesses at by capitalisation.
+/// which is the other thing a grammar guesses at by capitalization.
 #[test]
-fn a_module_path_is_coloured_by_what_it_resolves_to() {
+fn a_module_path_is_colored_by_what_it_resolves_to() {
     let helper = "module helper;\n\npub fn add(a: Int) -> Int { a }\n";
     let main = "module main;\n\nfn go() -> Int { helper::add(1) }\n";
     let w = workspace(&[("src/helper.kh", helper), ("src/main.kh", main)]);
@@ -1851,7 +1851,7 @@ fn a_second_entry_in_a_with_row_is_still_a_with_row() {
 /// block is what says so, and an entry that answers it has to be spelled the
 /// way it asked.
 #[test]
-fn the_handler_is_labelled_the_way_the_requirement_asked() {
+fn the_handler_is_labeled_the_way_the_requirement_asked() {
     let text = "module main;\n\
                 \n\
                 pub effect Chime {\n\
@@ -2302,20 +2302,20 @@ fn a_catch_is_offered_another_arm() {
 fn a_wildcard_arm_can_be_written_out_as_its_cases() {
     let text = concat!(
         "module main;\n\n",
-        "pub type Colour = | Red | Green | Blue;\n\n",
-        "fn go(c: Colour) -> Int {\n",
+        "pub type Color = | Red | Green | Blue;\n\n",
+        "fn go(c: Color) -> Int {\n",
         "  match c {\n",
-        "    Colour::Red => 1,\n",
+        "    Color::Red => 1,\n",
         "    _ => 0,\n",
         "  }\n",
         "}\n",
     );
-    // Line 7 is the `_` arm; line 6 is `Colour::Red`, which is a different
+    // Line 7 is the `_` arm; line 6 is `Color::Red`, which is a different
     // question and the one this pointed at first.
     let (title, after) = assist_named(text, 7, 4, 4, "the `_` covers");
     assert!(title.contains("2 case"), "Red is already written: {title}");
-    assert!(after.contains("Colour::Green => 0"), "{after}");
-    assert!(after.contains("Colour::Blue => 0"), "{after}");
+    assert!(after.contains("Color::Green => 0"), "{after}");
+    assert!(after.contains("Color::Blue => 0"), "{after}");
     // **Qualified, because a bare constructor name in a pattern is a binding.**
     // `Green => ..` would match everything and compile.
     assert!(!after.contains("\n    Green =>"), "a bare name is a binding: {after}");
@@ -2327,11 +2327,11 @@ fn a_wildcard_arm_can_be_written_out_as_its_cases() {
 fn a_wildcard_covering_nothing_new_is_not_offered_an_expansion() {
     let text = concat!(
         "module main;\n\n",
-        "pub type Colour = | Red | Green;\n\n",
-        "fn go(c: Colour) -> Int {\n",
+        "pub type Color = | Red | Green;\n\n",
+        "fn go(c: Color) -> Int {\n",
         "  match c {\n",
-        "    Colour::Red => 1,\n",
-        "    Colour::Green => 2,\n",
+        "    Color::Red => 1,\n",
+        "    Color::Green => 2,\n",
         "    _ => 0,\n",
         "  }\n",
         "}\n",
@@ -2577,7 +2577,7 @@ fn a_generic_type_is_offered_an_impl_with_its_parameters() {
 /// **A case added to a variant type, with the `|` that introduces it.**
 #[test]
 fn a_variant_type_is_offered_another_case() {
-    let text = concat!("module main;\n\n", "pub type Colour = | Red | Green;\n");
+    let text = concat!("module main;\n\n", "pub type Color = | Red | Green;\n");
     let (_, after) = assist_named(text, 2, 20, 20, "Add a case");
     assert!(after.contains("| Case"), "{after}");
 }
@@ -2962,11 +2962,11 @@ fn a_boolean_match_written_false_first_keeps_its_answers() {
 fn a_match_over_constructors_is_not_offered_an_if() {
     let text = concat!(
         "module main;\n\n",
-        "pub type Colour = | Red | Green;\n\n",
-        "fn go(c: Colour) -> Int {\n",
+        "pub type Color = | Red | Green;\n\n",
+        "fn go(c: Color) -> Int {\n",
         "  match c {\n",
-        "    Colour::Red => 1,\n",
-        "    Colour::Green => 2,\n",
+        "    Color::Red => 1,\n",
+        "    Color::Green => 2,\n",
         "  }\n",
         "}\n",
     );
@@ -2998,11 +2998,11 @@ fn an_if_can_become_a_match() {
 fn an_arm_can_be_added_below_the_cursor() {
     let text = concat!(
         "module main;\n\n",
-        "pub type Colour = | Red | Green;\n\n",
-        "fn go(c: Colour) -> Int {\n",
+        "pub type Color = | Red | Green;\n\n",
+        "fn go(c: Color) -> Int {\n",
         "  match c {\n",
-        "    Colour::Red => 1,\n",
-        "    Colour::Green => 2,\n",
+        "    Color::Red => 1,\n",
+        "    Color::Green => 2,\n",
         "  }\n",
         "}\n",
     );
@@ -3206,7 +3206,7 @@ fn an_unused_mut_can_be_removed() {
 
 /// **And `mut` that something writes to is not.** The control for the test
 /// above: without it, that one passes just as well if the assist never
-/// recognised a `let` at all.
+/// recognized a `let` at all.
 #[test]
 fn a_mut_that_is_written_to_is_kept() {
     let text = concat!(
@@ -3409,7 +3409,7 @@ fn a_block_that_assigns_to_an_outer_binding_is_not_extracted() {
     );
 
     // **The control, and it is not optional.** The assertion above passes just
-    // as well if the block was never recognised at all, which would make it a
+    // as well if the block was never recognized at all, which would make it a
     // test of nothing. The same block with the write removed has to be
     // offered, and the only difference between the two is the assignment.
     let readable = text.replace("{ n = n + 1; n }", "{ let m = n + 1; m }");
@@ -3437,7 +3437,7 @@ fn a_selected_expression_is_offered_a_function() {
 
 /// **The capability row is written from what the calls inside demanded.**
 ///
-/// This is the half a Rust equivalent has no analogue for: the extracted
+/// This is the half a Rust equivalent has no analog for: the extracted
 /// function needs `with { log: Log }` and nothing in the selection says so --
 /// the checker recorded it at the call while it was type-checking, and the
 /// assist reads it back.
@@ -4679,7 +4679,7 @@ fn a_change_with_no_range_replaces_everything() {
     assert_eq!(published(&replies).last().map(|(_, n)| *n), Some(0), "{:?}", published(&replies));
 }
 
-/// **A range the server cannot honour is dropped, not guessed at.** A client
+/// **A range the server cannot honor is dropped, not guessed at.** A client
 /// and a server that disagree about an offset should cost a wrong document
 /// until the next full change, rather than a panic that takes the session with
 /// it.
@@ -4893,24 +4893,24 @@ fn request_at(method: &str, path: &Path, line: u32, character: u32, id: i64) -> 
 const SHAPES: &str = "module p::main;\n\
 import std::core::{Show};\n\
 \n\
-pub type Colour = { red: Int };\n\
+pub type Color = { red: Int };\n\
 \n\
-impl Show for Colour {\n\
-  fn show(self) -> String { \"colour\" }\n\
+impl Show for Color {\n\
+  fn show(self) -> String { \"color\" }\n\
 }\n\
 \n\
-impl Colour {\n\
-  pub fn make() -> Colour { { red: 1 } }\n\
+impl Color {\n\
+  pub fn make() -> Color { { red: 1 } }\n\
 }\n\
 \n\
 pub fn go() -> Int {\n\
-  let mixed = Colour::make();\n\
+  let mixed = Color::make();\n\
   mixed.red\n\
 }\n";
 
 /// **A different question from "where is this declared".** On
-/// `let mixed = Colour::make()`, go-to-definition lands on `make` and this
-/// lands on `Colour`, which is what somebody chasing an unfamiliar return
+/// `let mixed = Color::make()`, go-to-definition lands on `make` and this
+/// lands on `Color`, which is what somebody chasing an unfamiliar return
 /// value wants.
 #[test]
 fn go_to_type_definition_finds_the_type_not_the_function() {
@@ -4947,7 +4947,7 @@ fn go_to_type_definition_finds_the_type_not_the_function() {
 fn go_to_implementation_lists_every_impl_of_a_type() {
     let w = workspace(&[("src/main.kh", SHAPES)]);
     let main = w.root.join("src/main.kh");
-    let column = SHAPES.lines().nth(3).expect("the type").find("Colour").expect("the name") as u32;
+    let column = SHAPES.lines().nth(3).expect("the type").find("Color").expect("the name") as u32;
 
     let replies = session(&[
         initialize(&w.root),
@@ -5223,7 +5223,7 @@ fn every_edit_in_the_run_is_still_applied() {
     assert_eq!(left, Some(0), "`total()` resolves only if every edit landed: {replies:?}");
 }
 
-/// **A cancel that arrives with the request it cancels is honoured.** In a
+/// **A cancel that arrives with the request it cancels is honored.** In a
 /// strictly serial loop it never could be: the cancel is always read after the
 /// work it wanted to stop had already been done.
 ///
@@ -5233,7 +5233,7 @@ fn every_edit_in_the_run_is_still_applied() {
 /// it there asserts a race. It passed nearly always, which is the worse way for
 /// a race to fail.
 #[test]
-fn a_cancelled_request_is_answered_with_the_cancellation_error() {
+fn a_canceled_request_is_answered_with_the_cancellation_error() {
     let source = "module p::main;\npub fn go() -> Int { 1 }\n";
     let w = workspace(&[("src/main.kh", source)]);
     let main = w.root.join("src/main.kh");
@@ -5258,11 +5258,11 @@ fn a_cancelled_request_is_answered_with_the_cancellation_error() {
     assert_eq!(
         reply.pointer("/error/code"),
         Some(&json!(-32800)),
-        "the protocol's RequestCancelled, so the client is not left waiting: {reply}"
+        "the protocol's RequestCanceled, so the client is not left waiting: {reply}"
     );
 }
 
-/// A request nobody cancelled is answered normally, even when a cancel for
+/// A request nobody canceled is answered normally, even when a cancel for
 /// something else arrives in the same batch.
 #[test]
 fn a_cancel_for_another_request_leaves_this_one_alone() {
@@ -5285,7 +5285,7 @@ fn a_cancel_for_another_request_leaves_this_one_alone() {
     ]);
 
     let reply = replies.iter().find(|r| r.get("id") == Some(&json!(12))).expect("an answer");
-    assert!(reply.get("error").is_none(), "this one was not cancelled: {reply}");
+    assert!(reply.get("error").is_none(), "this one was not canceled: {reply}");
 }
 
 // --- the assists the diagnostics already half-write ------------------------
@@ -5352,10 +5352,10 @@ pub fn go() -> Int raises Broke {\n\
 #[test]
 fn missing_arms_are_written_the_way_the_match_writes_them() {
     let text = "module main;\n\
-pub type Colour = | Red | Green | Blue;\n\
-pub fn name(c: Colour) -> String {\n\
+pub type Color = | Red | Green | Blue;\n\
+pub fn name(c: Color) -> String {\n\
   match c {\n\
-    Colour::Red => \"red\",\n\
+    Color::Red => \"red\",\n\
   }\n\
 }\n";
     let w = workspace(&[("src/main.kh", text)]);
@@ -5368,8 +5368,8 @@ pub fn name(c: Colour) -> String {\n\
         .unwrap_or_else(|| panic!("no arms offered: {actions:?}"));
 
     let written = edits_of(offered).join("");
-    assert!(written.contains("Colour::Green =>"), "qualified like its neighbour: {written:?}");
-    assert!(written.contains("Colour::Blue =>"), "and both of them: {written:?}");
+    assert!(written.contains("Color::Green =>"), "qualified like its neighbor: {written:?}");
+    assert!(written.contains("Color::Blue =>"), "and both of them: {written:?}");
     assert!(
         !written.contains("\n  Green"),
         "never bare, which would bind rather than match: {written:?}"
@@ -5381,10 +5381,10 @@ pub fn name(c: Colour) -> String {\n\
 #[test]
 fn every_missing_arm_is_written_at_once() {
     let text = "module main;\n\
-pub type Colour = | Red | Green | Blue;\n\
-pub fn name(c: Colour) -> String {\n\
+pub type Color = | Red | Green | Blue;\n\
+pub fn name(c: Color) -> String {\n\
   match c {\n\
-    Colour::Red => \"red\",\n\
+    Color::Red => \"red\",\n\
   }\n\
 }\n";
     let w = workspace(&[("src/main.kh", text)]);
@@ -5407,10 +5407,10 @@ pub fn name(c: Colour) -> String {\n\
 #[test]
 fn a_written_arm_leaves_a_hole_the_checker_describes() {
     let text = "module main;\n\
-pub type Colour = | Red | Green;\n\
-pub fn name(c: Colour) -> String {\n\
+pub type Color = | Red | Green;\n\
+pub fn name(c: Color) -> String {\n\
   match c {\n\
-    Colour::Red => \"red\",\n\
+    Color::Red => \"red\",\n\
   }\n\
 }\n";
     let w = workspace(&[("src/main.kh", text)]);

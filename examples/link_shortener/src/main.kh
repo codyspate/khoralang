@@ -82,7 +82,7 @@ pub type Store = {
 /// The alphabet a code is drawn from.
 ///
 /// No vowels, so a drawn code cannot spell something the operator has to
-/// apologise for, and no `0`/`O` or `1`/`l`, so one read aloud arrives intact.
+/// apologize for, and no `0`/`O` or `1`/`l`, so one read aloud arrives intact.
 const alphabet = "bcdfghjkmnpqrstvwxyz23456789";
 
 const code_length = 6;

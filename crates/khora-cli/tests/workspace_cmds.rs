@@ -313,7 +313,7 @@ fn graph_of_a_workspace_with_no_edges_says_so() {
 ///
 /// A compiled program goes into `src/` next to the `.kh` it came from, with its
 /// object file and, on Windows, its debug information — so the first
-/// `git status` after a first build is three files nobody recognises. Nothing
+/// `git status` after a first build is three files nobody recognizes. Nothing
 /// documented it and nothing ignored it. This repository has carried the
 /// patterns since somebody hit it here first; a package made with `khora new`
 /// got to work them out again.

@@ -360,11 +360,11 @@ impl<'ctx> Lower<'_, 'ctx> {
         // back a cancellation tag; C, and a callee that cannot, do not.
         if self.be.is_tagged(name) {
             let result = result.expect("a tagged call returns a pair");
-            return Some(self.split_cancelled(result, &signature.ret));
+            return Some(self.split_canceled(result, &signature.ret));
         }
         // **A runtime call that gave up on a cancel is not an ordinary
         // return.** The blocking runtime exports come back early when the
-        // fiber is cancelled, with an answer that looks like a real one: a
+        // fiber is canceled, with an answer that looks like a real one: a
         // sleep that looks finished, a `-1` that looks like a broken peer, a
         // null that looks like a failed handshake. Without a look at the flag
         // the caller's tail runs on it -- counting an I/O error that did not
@@ -400,7 +400,7 @@ pub(super) enum GaveUp {
     Null,
 }
 
-/// The runtime exports that come back early when their fiber is cancelled,
+/// The runtime exports that come back early when their fiber is canceled,
 /// and which of their answers that can be.
 ///
 /// **A list, and deliberately short.** Every other `khora_` export either does

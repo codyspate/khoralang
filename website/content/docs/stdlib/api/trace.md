@@ -49,7 +49,7 @@ no use for.
 **This did not work until it did.** For as long as this paragraph has been
 here, `Span::parent` was written `0` at every call site in the repository:
 a nested `around` began a second trace, and the OTLP exporter carried a
-comment saying so. The claim was the design and not the behaviour.
+comment saying so. The claim was the design and not the behavior.
 
 What is *not* here: OTLP, Datadog's protocol, Prometheus, batching, retry,
 and every sampling policy beyond a head sampler. All of it is a vendor's
@@ -376,14 +376,14 @@ So the finish is registered with a region before the body starts, the same
 way `std::db::transaction` registers its rollback, and for the same reason:
 a region's finalizers run on every path out because every path out already
 releases the binding holding the region. A body that returns marks the span
-`Ok` and settles it; a body that raises or is cancelled leaves the
+`Ok` and settles it; a body that raises or is canceled leaves the
 finalizer to close it, and it closes as `Failed` because that is what
 happened.
 
 `raises 'er` is the other half: it carries the body's own failures out,
 and a body that does no fallible work instantiates the row empty and needs
 no `!` at the call. The row has nothing to do with cancellation — a body is
-cancelled at its loops, blocking calls and calls whatever its row, and the
+canceled at its loops, blocking calls and calls whatever its row, and the
 span closes as `Failed` on the way out.
 
 ### around_result

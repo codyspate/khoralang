@@ -22,7 +22,7 @@
 //!
 //! # What a blocking call is not
 //!
-//! **It is not a cancellation point.** A fiber cancelled while it is waiting
+//! **It is not a cancellation point.** A fiber canceled while it is waiting
 //! for `fread` to come back keeps waiting: the pool cannot interrupt foreign
 //! code, and pretending otherwise would mean returning while a thread still
 //! holds the caller's buffer. The cancellation is observed at the next `!`,
@@ -449,7 +449,7 @@ mod tests {
         assert_eq!(pool.stats().ran, 0, "the pool should not have been touched");
     }
 
-    /// Cancelling a fiber that is inside a blocking call does not cut the call
+    /// Canceling a fiber that is inside a blocking call does not cut the call
     /// short — it cannot, and the value still arrives.
     #[test]
     fn a_blocking_call_is_not_a_cancellation_point() {

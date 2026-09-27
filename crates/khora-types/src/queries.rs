@@ -271,7 +271,23 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
                 };
                 type_map(db, source).variants_of(Some(home), owner).into_iter().cloned().collect()
             };
-        checker.settle_bare_names(&declared_elsewhere);
+        // A2's message adds the guard that compares against a `const`, and
+        // needs to know whether the name is one: declared here, or imported.
+        let is_const = |name: &str| -> bool {
+            let here = khora_hir::item_map(db, file).item(name).map(|item| item.kind);
+            let resolved = match (here, root) {
+                (Some(kind), _) => Some(kind),
+                (None, Some(root)) => {
+                    match khora_hir::resolve_path(db, root, file, &[name.to_string()]) {
+                        Ok(khora_hir::Resolution::Item { kind, .. }) => Some(kind),
+                        Ok(_) | Err(_) => None,
+                    }
+                }
+                (None, None) => None,
+            };
+            resolved == Some(khora_hir::ItemKind::Const)
+        };
+        checker.settle_bare_names(&declared_elsewhere, &is_const);
         // After the projections, so that a scrutinee whose type came through
         // one is settled too.
         checker.settle_coverage();

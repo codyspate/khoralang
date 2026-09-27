@@ -68,7 +68,7 @@ chmod +x /tmp/khora-rt-under-test
 # **Keep what failed.** This loop once said "1 of 15 runs crashed or failed"
 # and sent the output to /dev/null, and the run was not reproducible
 # afterwards. A flaky-failure reporter that discards its evidence turns a race
-# into a rumour, which is the one thing the scheduler's bug list says not to
+# into a rumor, which is the one thing the scheduler's bug list says not to
 # let happen. Core dumps are on for the same reason: instrumenting these has
 # hidden them before, and a dump is the observation that does not perturb.
 ulimit -c unlimited 2>/dev/null || true

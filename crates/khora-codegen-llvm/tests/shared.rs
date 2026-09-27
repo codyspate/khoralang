@@ -688,10 +688,10 @@ pub fn main() -> () raises Stop {
     assert_eq!(out, "7 7\n5 5\nkh kh\n3 3\n9 9\n1 1\n");
 }
 
-// --- a blocking change function, cancelled ----------------------------------
+// --- a blocking change function, canceled ----------------------------------
 
 /// The program: a fiber whose change function waits on a channel nobody sends
-/// on, cancelled from outside.
+/// on, canceled from outside.
 const BLOCKED_CHANGE: &str = "module main;
 import std::core::{print, Fiber, Shared, Channel, Option};
 import std::clock::{Clock};
@@ -727,7 +727,7 @@ fn blocked_change_on(backend: &str) -> (Option<i32>, String) {
     watched("shared_blocked_change", BLOCKED_CHANGE, backend)
         .unwrap_or_else(|| {
             panic!(
-                "`{backend}`: the cancelled fiber never left its change function; \
+                "`{backend}`: the canceled fiber never left its change function; \
                  the cell's lock is held for ever"
             )
         })
@@ -780,12 +780,12 @@ fn watched(name: &str, source: &str, backend: &str) -> Option<(Option<i32>, Stri
 /// cancellation**, on both backends.
 ///
 /// `Channel::receive` inside a change function gives up when its fiber is
-/// cancelled, answers `None`, and the update finishes, so the lock is
+/// canceled, answers `None`, and the update finishes, so the lock is
 /// released and the cell holds what the change function computed from that
 /// `None`. Nothing inside a change function *stops*, so the fiber stops at its
 /// first cancellation point after the update.
 #[test]
-fn a_cancelled_fiber_blocked_inside_update_stops_on_both_backends() {
+fn a_canceled_fiber_blocked_inside_update_stops_on_both_backends() {
     for backend in ["threads", "scheduler"] {
         let (code, out) = blocked_change_on(backend);
         assert_eq!(code, Some(0), "`{backend}`: {out}");
@@ -831,7 +831,7 @@ pub fn main() -> Int {
 /// Cleanup is shielded, so a `receive` in a finalizer ordinarily goes on
 /// waiting after a cancel. Inside a change function it must not: the fiber
 /// holds the cell's lock, and a wait that never ends holds it for ever. So a
-/// cancelled fiber inside a change function gives up the wait whether or not
+/// canceled fiber inside a change function gives up the wait whether or not
 /// it is shielded, and the finalizer finishes with the "gave up" answer.
 #[test]
 fn a_change_function_in_cleanup_gives_up_its_wait_on_both_backends() {

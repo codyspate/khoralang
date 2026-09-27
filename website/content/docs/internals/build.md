@@ -6,13 +6,13 @@ sidebar:
 
 `khora build` takes a package from source to a native executable in one
 process: parsing, name resolution, type inference, exhaustiveness checking,
-whole-program monomorphisation, reference-count planning, LLVM, and a link.
+whole-program monomorphization, reference-count planning, LLVM, and a link.
 
 ## Whole-program, always
 
-Khora monomorphises the entire program. A generic function is compiled once per
+Khora monomorphizes the entire program. A generic function is compiled once per
 concrete set of type arguments, and so is a row variable — `'ef` and `'er`
-specialise at every call site reachable from `main`, for the same reason a type
+specialize at every call site reachable from `main`, for the same reason a type
 variable does.
 
 This is why performing an effect costs a function call rather than a lookup,
@@ -35,7 +35,7 @@ requirement for the same reason.
 
 | | `debug` (default) | `release` |
 | --- | --- | --- |
-| optimisation | none | LLVM's `default<O2>` |
+| optimization | none | LLVM's `default<O2>` |
 | debug information | yes | no |
 | reproducible | no | **bit for bit** |
 

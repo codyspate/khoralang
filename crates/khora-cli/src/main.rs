@@ -334,7 +334,7 @@ enum Command {
         patch: bool,
         /// Draft the release notes into this file.
         ///
-        /// A draft. The pre-1.0 rule wants every behaviour change described in
+        /// A draft. The pre-1.0 rule wants every behavior change described in
         /// both directions, which a commit subject does not contain, so it
         /// leaves that section empty rather than pretending to have written
         /// it.
@@ -405,7 +405,7 @@ fn run() -> ExitCode {
 
 fn main() -> ExitCode {
     // Before anything else, including argument parsing: a project pinning a
-    // version whose flags this build does not recognise must still work.
+    // version whose flags this build does not recognize must still work.
     hand_over_if_pinned();
 
     // On a thread of our own, for the stack. `main`'s is fixed by the loader
@@ -559,7 +559,7 @@ fn dispatch() -> Result<ExitCode> {
 /// Parse and type check.
 ///
 /// **A workspace root fans out over its members**, one at a time, each as its
-/// own package. That is not an optimisation to skip: a member's dependencies
+/// own package. That is not an optimization to skip: a member's dependencies
 /// come from *its* manifest, so checking a whole directory as one compilation
 /// resolves one manifest for several programs and finds neither the
 /// dependency nor the reason it was missing. `scripts/baseline.sh` had that
@@ -637,7 +637,7 @@ fn owned(paths: &[PathBuf], file: &Path) -> bool {
 /// commands, one name, and the difference was a character somebody did or did
 /// not type.
 ///
-/// Normalised here rather than by giving the argument a `default_value`,
+/// Normalized here rather than by giving the argument a `default_value`,
 /// because clap's default would make `paths` non-empty before anything could
 /// tell the two apart -- which is the right answer, and this says why in a
 /// place a reader will find it.
@@ -781,7 +781,7 @@ fn check_one(paths: &[PathBuf]) -> Result<bool> {
             eprintln!("{}", render_hir_errors(path, text, semantic));
             eprintln!();
             // Half of what a lint sees downstream of a type error is an
-            // artefact of it.
+            // artifact of it.
             continue;
         }
 
@@ -1549,7 +1549,7 @@ fn fmt_one(paths: &[PathBuf], check: bool) -> Result<bool> {
             // The formatter works in `\n`; a file written by an editor that
             // uses `\r\n` is not thereby unformatted, and saying it was made
             // `--check` permanently red on Windows for a correctly formatted
-            // tree. Normalising endings is `.gitattributes`' job, not a
+            // tree. Normalizing endings is `.gitattributes`' job, not a
             // formatter's — one that did it would show up as every line
             // changed in a review.
             Ok(out) => {
@@ -2079,7 +2079,7 @@ fn build_one(
 /// **A build's output belongs in a directory of its own, not beside the source
 /// it came from.** `khora build .` wrote `src/main.exe`, `src/main.exe.o` and
 /// `src/main.pdb` into the same directory as `src/main.kh`, so the first
-/// `git status` after a first build listed three files nobody recognised
+/// `git status` after a first build listed three files nobody recognized
 /// sitting among the sources. The proof that this was wrong is that this
 /// repository's own `.gitignore` had grown thirty lines of patterns to hide
 /// them -- `examples/**/src/*.exe`, `bench/**/src/*.pdb`, `**/khora-tests.exe`
@@ -2096,7 +2096,7 @@ fn build_one(
 /// program *is*. The stem is still the fallback for a source with no manifest
 /// above it.
 ///
-/// **A loose file keeps its neighbour.** `khora build scratch.kh` outside any
+/// **A loose file keeps its neighbor.** `khora build scratch.kh` outside any
 /// package writes `scratch.exe` beside it, the way every other compiler
 /// answers that, rather than inventing a `build/` next to somebody's scratch
 /// file. A directory named on the command line counts as a home even without a
@@ -2947,7 +2947,7 @@ fn collect_sources(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     // and a `src/bin` program has no business compiling the package's test
     // files even where they would resolve.
     //
-    // Recognised by holding a `test` block rather than by its filename.
+    // Recognized by holding a `test` block rather than by its filename.
     // `_test.kh` is a convention four files in this repository happen to
     // follow and nothing enforces, so reading the declaration is the rule that
     // does not quietly mean something else for somebody who named the file
@@ -3073,14 +3073,14 @@ fn dependencies_of(root: &Path) -> Result<Vec<(String, PathBuf)>> {
 /// excluding it could only lose something the build needs.
 fn module_belongs_to(module: Option<&str>, package: &str) -> bool {
     let Some(module) = module else { return true };
-    // **Three spellings of one path, normalised to one.** A TOML key cannot
+    // **Three spellings of one path, normalized to one.** A TOML key cannot
     // hold `::`, so a manifest writes `"acme.greet"`; source writes
     // `module acme::greet;`; and `item_map` renders that back with dots.
     // Comparing any two of those raw says no, and said no here: the whole
     // library was dropped and its consumer could not import it.
-    let normalise = |path: &str| path.replace("::", ".");
-    let owner = normalise(package);
-    let module = normalise(module);
+    let normalize = |path: &str| path.replace("::", ".");
+    let owner = normalize(package);
+    let module = normalize(module);
     module == owner || module.starts_with(&format!("{owner}."))
 }
 
@@ -3424,7 +3424,7 @@ fn doc(paths: &[PathBuf], out: &Path, check: bool) -> Result<bool> {
     }
     for (path, page) in &pages {
         let before = std::fs::read_to_string(path).ok();
-        // **Compared with the line endings normalised.** Pages are written
+        // **Compared with the line endings normalized.** Pages are written
         // with `\n`; a checkout on Windows with `core.autocrlf` set hands them
         // back with `\r\n`, and a byte comparison then says every page is
         // stale for ever. Found by the gate failing on all fifteen pages

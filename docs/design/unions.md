@@ -53,7 +53,7 @@ Hindley–Milner: unification decides that two types are *equal*. A union needs
 `A` to be acceptable where `A | B` is wanted, which is subtyping — a different
 relation with different algorithms, and it touches every call site, every
 `let`, and every generic instantiation. This is the expensive part and it is
-not localised.
+not localized.
 
 **Exhaustiveness.** `match` on an `A | B` has to know its arms cover both, and
 `usefulness.rs` reasons about constructors of one type rather than a set of

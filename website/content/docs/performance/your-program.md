@@ -109,7 +109,7 @@ test "counting words allocates a constant number of objects" {
 ```
 
 Khora's own standard-library suite uses exactly this to pin down allocation
-behaviour — see `tests/std-suite/src/vector.kh` for the shape, where it
+behavior — see `tests/std-suite/src/vector.kh` for the shape, where it
 asserts that a vector of numbers allocates a constant number of objects
 however many numbers go in.
 

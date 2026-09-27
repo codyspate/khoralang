@@ -208,7 +208,7 @@ There is no `blocking(body)` in `std` to reach for instead, and the reason is a 
 
 > `body` cannot be handed to another fiber: `() -> A` holds a closure, and what a closure captured is not in its type — so nothing here can tell whether *that* can be written.
 
-Two consequences worth planning for. The cost is a thread and the round trip to start and join one, which is the wrong trade for a call that takes a microsecond: reach for this when the work would hold a thread long enough to matter. And it is **not a cancellation point on the far side** — a cancelled caller stops at the join while the native call runs to its end, because the runtime cannot interrupt foreign code and returning early would mean doing so while a thread still holds the caller's buffer.
+Two consequences worth planning for. The cost is a thread and the round trip to start and join one, which is the wrong trade for a call that takes a microsecond: reach for this when the work would hold a thread long enough to matter. And it is **not a cancellation point on the far side** — a canceled caller stops at the join while the native call runs to its end, because the runtime cannot interrupt foreign code and returning early would mean doing so while a thread still holds the caller's buffer.
 
 Under the M:N coroutine backend — which already ships behind `KHORA_FIBERS=scheduler` — blocking on a fiber occupies a worker, and this shape is what the runtime can route to its blocking pool. A direct call to the native function is not.
 
@@ -233,7 +233,7 @@ foreign API wants a callback with user data, export a `pub extern fn` taking a
 
 **The runtime must already be running.** An exported function may allocate,
 raise, or trap, and all three need the runtime that the library's own
-initialisation starts. Calling an export before the library is loaded is not a
+initialization starts. Calling an export before the library is loaded is not a
 Khora question; calling one *after* it has been unloaded is undefined in the
 same way calling any unloaded symbol is.
 
@@ -242,7 +242,7 @@ another Khora call is already on the stack — a callback invoked from inside a
 foreign function that Khora itself called — is a nested call on the same
 thread and needs nothing special. What it does not do is join the outer call:
 it is a separate exported boundary with its own error handling, so a `raises`
-row is discharged there rather than travelling out through the foreign frames
+row is discharged there rather than traveling out through the foreign frames
 in between, which could not carry it. A trap is process-fatal by default in a
 callback exactly as it is anywhere else; where the host has opted into
 export-boundary containment, the callback is its own boundary and not part of

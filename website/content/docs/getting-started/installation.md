@@ -71,7 +71,7 @@ anybody's workstation.
 
 Each release includes a **bill of materials** as `khora-<version>.cdx.json`, in
 CycloneDX 1.5, listing every Rust crate compiled into the toolchain with its
-version and licence, the pinned LLVM, and the Rust toolchain that built it.
+version and license, the pinned LLVM, and the Rust toolchain that built it.
 Dependency scanners read it directly.
 
 That document is about the *compiler*. For the other question — what does the

@@ -370,11 +370,11 @@ The grants are compiled into the binary rather than read at run time. A file the
 
 **`network` is a list of hosts the program may connect *out* to, and nothing
 else.** It is read in one place — `HttpClient::send`, once the URL is parsed and
-before anything is dialled — and it decides whether that host may be reached.
+before anything is dialed — and it decides whether that host may be reached.
 Binding a port is the other direction and is not covered: `Router::listen`,
 `Router::listen_quietly` and `Router::listen_tls` never consult it, so a program
 with `default = "deny"` and no hosts granted still serves on any port it asks
-for. Write `network = ["127.0.0.1:8787"]` expecting it to authorise a listener
+for. Write `network = ["127.0.0.1:8787"]` expecting it to authorize a listener
 and it will do nothing, in either direction. [Known
 limitations](/docs/limitations/#inbound-connections-are-not-permissioned) has
 the reasoning.

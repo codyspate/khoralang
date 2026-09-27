@@ -160,7 +160,7 @@ fn parentheses_around_a_type_are_still_that_type() {
     );
     assert!(
         found.iter().any(|e| e.contains("`Int` does not match `String`")),
-        "the parenthesised argument is still checked: {found:?}"
+        "the parenthesized argument is still checked: {found:?}"
     );
 }
 
@@ -205,7 +205,7 @@ fn a_union_in_a_raises_clause_is_left_alone() {
 fn a_variant_spelled_out_as_a_type_is_refused() {
     let found = errors(
         "module m;\n\
-         fn colour(x: | Red | Blue) -> Int { 0 }\n",
+         fn color(x: | Red | Blue) -> Int { 0 }\n",
     );
     assert!(
         found.iter().any(|e| e.contains("declared with `type Name = | A | B`")),
@@ -218,8 +218,8 @@ fn a_variant_spelled_out_as_a_type_is_refused() {
 fn a_variant_in_a_declaration_is_left_alone() {
     let found = errors(
         "module m;\n\
-         pub type Colour = | Red | Blue;\n\
-         fn colour(c: Colour) -> Int { 0 }\n",
+         pub type Color = | Red | Blue;\n\
+         fn color(c: Color) -> Int { 0 }\n",
     );
     assert!(found.is_empty(), "a variant where a variant belongs: {found:?}");
 }

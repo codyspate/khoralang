@@ -156,7 +156,7 @@ pub struct ImplDef {
     /// `impl<A: Show, E: Show> Show for Result<A, E>` says a `Result` can be
     /// shown *when its two halves can*, and dropping the condition made
     /// `Result<Int, UserError>` satisfy `Show` for a `UserError` that has
-    /// none. The checker passed and monomorphisation found it, which is the
+    /// none. The checker passed and monomorphization found it, which is the
     /// check/build split roadmap 14.30 exists to close.
     pub bounds: Vec<(String, Vec<String>)>,
     pub methods: Vec<String>,
@@ -217,7 +217,7 @@ impl ImplDef {
     ///
     /// `None` for a home nothing recorded, which is not a name collision but
     /// the absence of information: a type with no home compares equal to
-    /// another with no home, which is the old behaviour and the right default.
+    /// another with no home, which is the old behavior and the right default.
     pub fn target(&self) -> Option<(String, Option<khora_hir::ModulePath>)> {
         Some((self.head()?, home_of(&self.self_type)))
     }
@@ -825,7 +825,7 @@ pub fn method_key(trait_name: &str, head: &str, method: &str) -> String {
 /// `#Dict::insert`, and that is what a reader was shown:
 ///
 /// ```text
-/// error: `Colour` does not implement `Ord`, which `#Dict::insert` requires
+/// error: `Color` does not implement `Ord`, which `#Dict::insert` requires
 /// ```
 ///
 /// The `#` is this module's punctuation and means nothing outside it. A
@@ -1147,7 +1147,7 @@ pub fn check(
         // A `Share` impl *asserts* rather than provides, and everything
         // downstream trusts it without being able to check it. So it may only
         // be written where there is nothing to check: a type declared with no
-        // body, whose behaviour lives in the runtime or across the C ABI.
+        // body, whose behavior lives in the runtime or across the C ABI.
         //
         // **Or one whose only obstacle is a `Ptr`.** A `mut` field is something
         // the compiler can see, so an assertion there overrides knowledge —

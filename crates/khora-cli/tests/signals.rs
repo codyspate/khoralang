@@ -21,7 +21,7 @@
 //!
 //! These programs need `std::core`'s `print`, `scoped` and `nursery`. The
 //! codegen tests compile a bare `module t;` with no std prelude, which is why
-//! an earlier attempt at a runtime-behaviour test there could not be written.
+//! an earlier attempt at a runtime-behavior test there could not be written.
 //!
 //! # What these cost
 //!
@@ -326,7 +326,7 @@ pub fn main() -> Int {
 /// A `SIGTERM` runs the finalizers a cancellation would have run.
 ///
 /// This is the whole promise: `std::db` says a transaction rolls back when its
-/// fiber is cancelled, and before the watcher that promise was not kept on any
+/// fiber is canceled, and before the watcher that promise was not kept on any
 /// deploy, because a deploy is a `SIGTERM`.
 #[test]
 fn a_scoped_finalizer_runs_on_sigterm() {
@@ -356,14 +356,14 @@ fn sigint_behaves_as_sigterm() {
 /// A nursery's children both stop, and both run their finalizers.
 ///
 /// **Transitively is the word that matters.** The signal reaches the root, and
-/// what has to happen next is what cancelling a nursery does — otherwise a
+/// what has to happen next is what canceling a nursery does — otherwise a
 /// server's connections keep their transactions open while `main` unwinds
 /// around them.
 ///
 /// **What this does not assert is the exit status**, because this shape does
 /// not produce 130: the nursery absorbs its children's cancellations, returns
 /// normally, and `main` runs on to its `0`. Measured on both backends. That is
-/// a defect — a supervisor reading the status of a signalled shutdown is told
+/// a defect — a supervisor reading the status of a signaled shutdown is told
 /// it succeeded — but it is a defect about *status* rather than about
 /// unwinding, and pinning the wrong number here would freeze it. The
 /// limitations page records it.

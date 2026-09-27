@@ -14,7 +14,7 @@ _
 
 The wildcard matches a value without binding it. Prefer an explicit arm per
 variant where the cases mean different things: a wildcard earns its place when
-the remaining cases genuinely share a behaviour, and costs something when they
+the remaining cases genuinely share a behavior, and costs something when they
 do not, because it is the one arm a newly added variant will silently fall
 into.
 
@@ -26,15 +26,26 @@ value
 
 **A bare identifier binds the matched value.** `value => ..` matches anything and names it `value`.
 
-**A bare identifier that is the name of one of the value's cases is an error.** Over a `Colour`, `Red => ..` would bind every colour, not match `Colour::Red`, so the compiler refuses it and names the pattern to write. This applies in every pattern (`match`, `catch`, `let`, `for`, and nested inside others) and to cases with a payload as well: `NotFound => ..` over an `FsError` is refused too. **Write a constructor qualified** (`Colour::Red`, `FsError::NotFound(path)`), and bind with a name that is not a case.
+**A bare identifier that is the name of one of the value's cases is an error.** Over a `Color`, `Red => ..` would bind every color, not match `Color::Red`, so the compiler refuses it and names the pattern to write. This applies in every pattern (`match`, `catch`, `let`, `for`, and nested inside others) and to cases with a payload as well: `NotFound => ..` over an `FsError` is refused too. **Write a constructor qualified** (`Color::Red`, `FsError::NotFound(path)`), and bind with a name that is not a case.
 
 The check is against the value's type, not against what the file imports, so it applies to a value whose type the file never names. If a case is added to a type later, a binding that shares its name stops compiling. It does not silently start matching only that case.
 
-**A capitalised bare name is an error too**, when it is no case of the
-value's type. A capitalised name in a pattern reads as a case, so `Gren => ..`
-(a typo for `Colour::Green`) and `FAVOURITE => ..` (a `const`, which a pattern
-binds rather than compares against) would each match every value. Bind with a
-lower-case name.
+**A capitalized bare name is an error too**, when it is no case of the
+value's type. A name in a pattern that starts with a capital letter must be a
+case, so `Gren => ..` over a `Color` is refused, and the message offers the
+nearest case, `Color::Green`, when one is within two edits (or a third of the
+name's length, if that is more). A `const` written as a pattern,
+`FAVORITE => ..`, would bind every value rather than compare against the
+constant; compare with a guard instead:
+
+```khora
+match n {
+  n if n == FAVORITE => "lucky",
+  _ => "ordinary",
+}
+```
+
+Bind with a lower-case name.
 
 ## Literal patterns
 

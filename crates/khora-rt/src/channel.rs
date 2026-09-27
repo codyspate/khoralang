@@ -32,7 +32,7 @@
 //!
 //! A queue, a capacity, and two lists of fibers to wake — one waiting to send
 //! because the queue is full, one waiting to receive because it is empty. The
-//! parking follows `fiber::Done` exactly: enrol the waker **under the same lock
+//! parking follows `fiber::Done` exactly: enroll the waker **under the same lock
 //! that reads the state**, or a value that arrives between the two leaves a
 //! fiber parked for ever on an event that already happened.
 //!
@@ -76,7 +76,7 @@ enum WhenFull {
 impl WhenFull {
     /// The word the compiler passes, which is the discriminant and nothing
     /// cleverer -- an unknown value is `Block`, because the safe reading of a
-    /// number nobody recognises is the one that loses no data.
+    /// number nobody recognizes is the one that loses no data.
     fn of(word: i64) -> WhenFull {
         match word {
             1 => WhenFull::Drop,
@@ -247,14 +247,14 @@ pub(crate) const LOOK_AGAIN: std::time::Duration = std::time::Duration::from_mil
 ///
 /// **Two mechanisms, and both are load-bearing.** Registering that condition
 /// variable with the fiber is what makes cancellation immediate: `cancel`
-/// notifies all of whatever the fiber left there, so a cancelled thread is
+/// notifies all of whatever the fiber left there, so a canceled thread is
 /// woken even though a send or receive would wake only one waiter on it, and
 /// an idle parked fiber costs nothing until somebody actually cancels it.
 ///
 /// The timeout is what makes it *correct*. A cancellation landing between the
 /// caller's flag check and this `wait` would notify a thread that is not
 /// waiting yet, and that wake is lost. Closing that window exactly needs the
-/// canceller to hold this channel's own lock while it notifies -- and it
+/// canceler to hold this channel's own lock while it notifies -- and it
 /// cannot, because a `Channel` is a raw `Box` with no handle a fiber could
 /// keep a reference to. So the registration is the fast path and the timeout
 /// is the bound: an ordinary cancellation is observed at once, and the one
@@ -282,7 +282,7 @@ fn park_until_moved(
 
 /// Whether this fiber should give up a wait: [`crate::current::Fiber::gives_up_waiting`].
 ///
-/// The predicate `khora_cancelled` answers with, plus a change function's
+/// The predicate `khora_canceled` answers with, plus a change function's
 /// case, and deliberately one call rather than the same expression written
 /// twice: a blocking primitive that gives up on a cancellation a cancellation
 /// point would ignore hands back "the channel is closed" for a channel that is
@@ -373,7 +373,7 @@ pub unsafe extern "C" fn khora_channel_send(handle: *mut u8, value: u64) -> bool
             return false;
         }
 
-        // Enrol under the same lock that saw it full, or a receive between the
+        // Enroll under the same lock that saw it full, or a receive between the
         // two leaves this fiber parked on room that already exists.
         match waker_for_current() {
             Some(waker) => {
@@ -426,7 +426,7 @@ pub unsafe extern "C" fn khora_channel_receive(handle: *mut u8, out: *mut u64) -
         // so that a send racing the cancellation still wins: the loop retries
         // the queue first and only reaches this once there is genuinely
         // nothing. That is the invariant the caller's cancellation check
-        // depends on, because it unwinds -- a cancelled receive must never be
+        // depends on, because it unwinds -- a canceled receive must never be
         // holding a value nobody will ever see again.
         if stopping() {
             return false;
@@ -475,7 +475,7 @@ pub unsafe extern "C" fn khora_channel_close(handle: *mut u8) {
 
 /// How many values are waiting to be taken.
 ///
-/// For a pool reporting its depth and for tests. Not a synchronisation
+/// For a pool reporting its depth and for tests. Not a synchronization
 /// primitive: the answer is stale the moment it is given, which is true of
 /// every such count and is why nothing here branches on one.
 ///
@@ -793,12 +793,12 @@ mod tests {
     }
 
     /// **A cancel racing a send does not strand a value.** Waking one thread
-    /// per value rests on the woken thread taking it. A cancelled receiver
+    /// per value rests on the woken thread taking it. A canceled receiver
     /// may be the one notified, or may leave while another is; either way a
     /// value must never sit queued while a live receiver stays blocked, which
     /// only the `LOOK_AGAIN` timeout would rescue, 250 ms later.
     ///
-    /// Each round blocks 8 cancellable receivers, sends 4 values and cancels
+    /// Each round blocks 8 cancelable receivers, sends 4 values and cancels
     /// 0 to 2 of them, sometimes before the sends, sometimes during them, and
     /// sometimes while the receivers are still parking. The oracle is read
     /// 120 ms after the last send: under `LOOK_AGAIN`, so only a lost wake

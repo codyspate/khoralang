@@ -15,7 +15,7 @@ Five things already settled bear on the answer.
 
 - **No garbage collector, and therefore no stack maps** (non-negotiable 5).
   Whatever a fiber is, nothing walks its stack looking for pointers.
-- **Direct style, no colouring.** The argument the whole language rests on is
+- **Direct style, no coloring.** The argument the whole language rests on is
   that async, failure and dependency injection belong in a *row* on the
   signature rather than in a wrapper type that propagates through every
   caller.
@@ -43,7 +43,7 @@ hundreds of thousands is not.
 A fiber is a small stack of its own, switched in user space and multiplexed
 onto a pool of worker threads. This is what Go does, and it is the experience
 Khora wants: a few kilobytes per fiber, a switch in tens of nanoseconds,
-direct style, no colouring.
+direct style, no coloring.
 
 The cost is that it is a real project. Context switching is per-target
 assembly. Stacks that start small and grow need guard pages or segmentation.
@@ -238,16 +238,16 @@ and then waits. One value means both, and nothing has to be told which happened
 This is worth noticing beyond the nursery: **a cleanup that differs between the
 normal and the abnormal path can often be written as an abnormal-path cleanup
 plus a normal-path statement that defuses it.** Handing the reason down is a
-generalisation nobody has needed yet.
+generalization nobody has needed yet.
 
 ## Per-fiber, not per-process
 
 Cancellation is one flag per fiber, and three things follow:
 
-- `khora_cancelled` reads the running fiber's flag. Generated code goes
+- `khora_canceled` reads the running fiber's flag. Generated code goes
   through that call (behind the poll word) and never touches the flag
   directly.
-- Cancelling a nursery cancels its children, transitively. That is the whole
+- Canceling a nursery cancels its children, transitively. That is the whole
   point of the tree.
 - A cancellation that reaches a fiber's root stops *that fiber*, not the
   process. Every thunk returns a tag, whatever its row, so the runtime always
@@ -270,7 +270,7 @@ Cancellation is one flag per fiber, and three things follow:
    The spawned thunk is `() -> A raises 'er`, and it is always called through
    a trampoline that returns a tag: the fallible pair, or the cancellation
    tag an infallible function that can reach a cancellation point carries. So
-   the runtime reads how the fiber ended — done, cancelled, or failed — and a
+   the runtime reads how the fiber ended — done, canceled, or failed — and a
    cancellation stops *that fiber* rather than the program, whatever the
    thunk's row.
 
@@ -312,7 +312,7 @@ Cancellation is one flag per fiber, and three things follow:
    `Fiber<(), {}>` was the first, and it reads better than anything else here:
    an empty row says "settle your failure before you hand this over", which
    turns a line on stderr into a compile error. It was wrong at the time
-   because a cancellation then travelled only on the error row, so a fiber
+   because a cancellation then traveled only on the error row, so a fiber
    with an empty row could not be stopped. That reason is gone — every
    function now carries its own cancellation tag — and whether `adopt` still
    needs `'er` at all is now a question about failures only, left to the
@@ -340,7 +340,7 @@ Cancellation is one flag per fiber, and three things follow:
 
    Three things share the waiting, and they are not the same wait:
 
-   | | waits | takes the answer | on a cancelled child |
+   | | waits | takes the answer | on a canceled child |
    | --- | --- | --- | --- |
    | letting the binding go | yes | no | nothing |
    | `Fiber::wait` | yes | no | nothing |

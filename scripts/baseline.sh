@@ -128,7 +128,7 @@ step 'the native suite'
 # `cargo nextest` when it is installed, and `cargo test` when it is not.
 #
 # **Measured, not assumed: 116s against 271s** for the same 1527 tests on the
-# same machine. `cargo test` runs one test *binary* at a time and parallelises
+# same machine. `cargo test` runs one test *binary* at a time and parallelizes
 # only within it, which is why 271 seconds of wall clock sat on 262 seconds of
 # in-binary time; nextest gives each test its own process and runs many at
 # once. `.config/nextest.toml` is where the tests that cannot take that are
@@ -186,7 +186,7 @@ sh "$root/scripts/check-fixture-signatures.sh"
 step 'the published grammar matches the lexer'
 # `docs/grammar.ebnf` is served to MCP clients and mirrored into the public
 # reference, and at 1.0 language syntax stops changing without a major version
-# -- so it is the artefact people are held to, and nothing checked it. It had
+# -- so it is the artifact people are held to, and nothing checked it. It had
 # named `export` as the visibility keyword, which the lexer does not have.
 sh "$root/scripts/check-grammar.sh"
 

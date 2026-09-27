@@ -28,7 +28,7 @@ The frames below `main` belong to the C runtime that started the process and are
 KHORA_BACKTRACE=1 ./build/myapp
 ```
 
-`RUST_BACKTRACE` is honoured too, so a machine that already exports it for everything is not asked twice.
+`RUST_BACKTRACE` is honored too, so a machine that already exports it for everything is not asked twice.
 
 **A failed assertion is not a trap.** `assert` names the line that failed and
 the run carries on to the end, because a suite that stopped at the first

@@ -17,7 +17,7 @@ loop {
 
 `Channel::receive` has already emptied that slot. The call to `serve` is a cancellation point, and a cancellation that arrived in between is taken *before* the call runs — so the job is in nobody's hands. Not served, not in the queue, gone. Nothing is printed and the fiber unwinds cleanly.
 
-Measured over two hundred cancelled rounds, the loop above took 198 jobs out of the channel and accounted for none of them.
+Measured over two hundred canceled rounds, the loop above took 198 jobs out of the channel and accounted for none of them.
 
 ## The rule
 
@@ -116,7 +116,7 @@ limitations](/docs/limitations/#concurrency-combinators) is easy to misread.
 The runtime prints `khora: a fiber ended with an error nobody was waiting
 for` for a fiber that *failed* — written by that fiber the moment it ends,
 and neither `wait` nor `join` changes whether it appears. A cancellation is
-excluded from the message, so the cancelled worker above is silent. If you
+excluded from the message, so the canceled worker above is silent. If you
 ever do see the line from a supervisor like this one, a child raised on its
 own: investigate it rather than filtering it out, and note that it may be a
 failure the program went on to handle.
@@ -127,7 +127,7 @@ A `!` reads the cancellation flag before the call it marks, so a computation alr
 
 Checking afterwards instead would not remove the problem, only move it: the fiber would then be holding the call's *result* when it unwound. Work in flight across a cancellation boundary is at risk whichever side the boundary is read on, and a region is what makes it recoverable. That is what regions are for.
 
-`Channel::send` and `Channel::receive` are the exception, and are safe: they are cancellation points themselves, and the runtime looks at the flag only once it has established there is nothing to take and no room to send. A cancelled receive is never holding a value. See [Concurrency](/docs/reference/concurrency/).
+`Channel::send` and `Channel::receive` are the exception, and are safe: they are cancellation points themselves, and the runtime looks at the flag only once it has established there is nothing to take and no room to send. A canceled receive is never holding a value. See [Concurrency](/docs/reference/concurrency/).
 
 ## See also
 

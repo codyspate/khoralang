@@ -136,7 +136,7 @@ pub(crate) fn unresolved_type_errors(db: &dyn Db, file: SourceFile) -> Vec<HirEr
 ///
 /// ```text
 /// fn hold(r: Result<Int, A + B>) -> Int    // accepted a Result<Int, C>
-/// fn colour(x: | Red | Blue) -> Int        // `Red` and `Blue` undeclared,
+/// fn color(x: | Red | Blue) -> Int        // `Red` and `Blue` undeclared,
 ///                                          // and nothing said so
 /// ```
 ///

@@ -115,7 +115,7 @@ impl Random {
 
 /// One draw: advance the state, then mix what came out.
 ///
-/// The division of labour is deliberate. `Shared::update` runs its function
+/// The division of labor is deliberate. `Shared::update` runs its function
 /// under the cell's lock, so whatever goes inside it is what every other fiber
 /// waits behind — and what goes inside is one wrapping addition. The mixing,
 /// which is the expensive half, happens out here on a value nobody else can

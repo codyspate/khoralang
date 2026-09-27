@@ -67,7 +67,7 @@ fn run(name: &str, main: &str) -> String {
 /// The walk is the interesting half: it consumes a list nothing else holds and
 /// produces one of the same shape, which is the exact case reuse exists for.
 /// Counters are reset after the list is built so the number is the walk's
-/// alone, and the sum is printed so nothing can be optimised away on the
+/// alone, and the sum is printed so nothing can be optimized away on the
 /// grounds that the result is unused.
 const WALK: &str = "module main;
 import std::core::{List, print};

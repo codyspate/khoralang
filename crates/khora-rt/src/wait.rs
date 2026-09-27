@@ -195,10 +195,10 @@ impl Timers {
 
     /// Forgets a fiber's timer.
     ///
-    /// Linear, and deliberately so at this stage: a cancelled timer is rare and
+    /// Linear, and deliberately so at this stage: a canceled timer is rare and
     /// leaving it to fire harmlessly is also correct — the fiber it names is no
     /// longer waiting, so the wake finds nothing. This exists for the case
-    /// where a hundred thousand cancelled timers would otherwise sit in the
+    /// where a hundred thousand canceled timers would otherwise sit in the
     /// heap holding it open.
     pub(crate) fn forget(&mut self, fiber: usize) {
         let kept: Vec<Reverse<Timer>> =

@@ -819,7 +819,7 @@ impl<'a> Checker<'a> {
 ///
 /// A capability row is `{ reads: FsRead | 'e }` -- the label on the left is the
 /// binding name the callee chose, and the head of the type on the right is the
-/// effect. Matching on the head rather than on equality means a parameterised
+/// effect. Matching on the head rather than on equality means a parameterized
 /// effect still answers.
 fn label_in_row(row: &Type, effect: &str) -> Option<String> {
     let Type::Row { fields, .. } = row else {

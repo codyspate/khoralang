@@ -72,7 +72,7 @@ it is the one under test.
 ## A stat is not a content hash
 
 Hashing two large binaries on every build would cost more than the cache saves,
-so a file's digest is memoised against its size and modification time.
+so a file's digest is memoized against its size and modification time.
 
 The obvious version of that is wrong, and the unit test that says so was
 written to check the claim and failed on the first run. Two writes inside one

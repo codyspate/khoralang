@@ -29,7 +29,7 @@
 //!   because `KHORA_DEBUG` overrides the profile in both directions.
 //!
 //! Hashing two large binaries on every build would cost more than it saves, so
-//! a file's digest is memoised against its size and modification time. The
+//! a file's digest is memoized against its size and modification time. The
 //! first build after a compiler changes pays for the hash; every one after it
 //! pays for a `stat`.
 //!
@@ -77,7 +77,7 @@
 //!
 //! Every read of a freshly written artifact therefore retries for a fraction
 //! of a second before giving up. That is an accommodation for one platform's
-//! behaviour and not a workaround for a race of our own: nothing here writes a
+//! behavior and not a workaround for a race of our own: nothing here writes a
 //! file another part of this process is reading.
 //!
 //! # A cache never fails a build
@@ -276,7 +276,7 @@ impl Cache {
         // **Native libraries by content, for the same reason as the runtime.**
         // A `-l` archive is linked into the artifact, so an archive that
         // changed produces a different program from identical sources -- and a
-        // key that ignored it would serve the previous build's behaviour with
+        // key that ignored it would serve the previous build's behavior with
         // no way to tell. Rebuilding the C library and getting the old answer
         // is the exact failure this prevents.
         for archive in inputs.natives.iter() {
@@ -591,7 +591,7 @@ impl Cache {
         out
     }
 
-    /// Removes every entry, and the memoised digests with them.
+    /// Removes every entry, and the memoized digests with them.
     pub fn clear(&self) -> Result<()> {
         for name in ["build", "ids"] {
             let directory = self.root.join(name);
@@ -707,7 +707,7 @@ fn copy(from: &Path, to: &Path) -> Result<()> {
 
 /// Runs `op` until it stops failing, for about a third of a second.
 ///
-/// For the Windows behaviour the module comment describes. Short enough that a
+/// For the Windows behavior the module comment describes. Short enough that a
 /// genuine failure -- a path that is not there, a directory with no room --
 /// still reports promptly, and long enough to outlast a scanner holding a
 /// freshly linked executable.
@@ -741,7 +741,7 @@ mod tests {
     /// modification time is not the shortcut it looks like, so it is worth a
     /// test rather than a paragraph.
     #[test]
-    fn a_memoised_digest_follows_the_contents_and_not_the_stat() {
+    fn a_memoized_digest_follows_the_contents_and_not_the_stat() {
         let cache = scratch("memo");
         let file = cache.root.join("subject");
         std::fs::write(&file, b"one").expect("a file");

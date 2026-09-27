@@ -38,7 +38,7 @@ pub const FIELD_OFFSET: u64 = KHORA_FIELD_OFFSET as u64;
 /// count up — so no `catch` can name it and none will accidentally match it.
 /// A cancellation is not an error the program declared; it is the runtime
 /// asking the computation to stop, and only the entry point absorbs it.
-pub const CANCELLED_WHICH: u64 = khora_rt::CANCELLED_WHICH as u64;
+pub const CANCELED_WHICH: u64 = khora_rt::CANCELED_WHICH as u64;
 
 /// The `which` a failed assertion travels under. Beside the cancellation, and
 /// outside the range error-type ids come from, so no `catch` can name it.
@@ -46,7 +46,7 @@ pub const FAILED_WHICH: u64 = khora_rt::FAILED_WHICH as u64;
 
 /// The `which` `khora_fiber_outcome` reports a *stopped child* under.
 ///
-/// Distinct from [`CANCELLED_WHICH`], which on that one call means the
+/// Distinct from [`CANCELED_WHICH`], which on that one call means the
 /// *asker* was stopped while parked. The two want opposite handling — the
 /// child's stop becomes `Outcome::Stopped`, the asker's unwinds — and one tag
 /// for both would have `Fiber::outcome` swallow a cancellation aimed at its
@@ -58,17 +58,17 @@ pub const STOPPED_WHICH: u64 = khora_rt::STOPPED_WHICH as u64;
 /// runtime anything. `khora_rt::poll` says what is in it.
 pub const POLL_WORD: &str = "khora_poll";
 
-/// The half of [`POLL_WORD`] a cancellation check reads: cancelled fibers
+/// The half of [`POLL_WORD`] a cancellation check reads: canceled fibers
 /// still running. Taken from the runtime, because two numbers that must agree
 /// are one number.
-pub const POLL_CANCELLED: u64 = khora_rt::poll::POLL_CANCELLED;
+pub const POLL_CANCELED: u64 = khora_rt::poll::POLL_CANCELED;
 
-/// The exit status of a program that was cancelled and never stopped being.
+/// The exit status of a program that was canceled and never stopped being.
 ///
 /// 128 + SIGINT, which is what a shell already means by "interrupted". A
 /// program that raises and does not handle it exits 1; these are different
 /// outcomes and worth telling apart from outside.
-pub const CANCELLED_EXIT: u64 = 130;
+pub const CANCELED_EXIT: u64 = 130;
 
 /// The type name of a fiber handle. Like a region, a handle the runtime owns
 /// — and like a region, releasing it is what makes the structure structured:
@@ -205,14 +205,14 @@ pub struct Runtime<'ctx> {
     pub region_release: FunctionValue<'ctx>,
     /// `void *khora_region_root(void)`
     pub region_root: FunctionValue<'ctx>,
-    /// `uint8_t khora_cancelled(void)`
-    pub cancelled: FunctionValue<'ctx>,
+    /// `uint8_t khora_canceled(void)`
+    pub canceled: FunctionValue<'ctx>,
     /// `uint8_t khora_root_absorbed(void)`
     ///
     /// Asked by the entry point once `main` has returned normally: whether
-    /// the root fiber was cancelled. A cancel that lands after `main`'s last
+    /// the root fiber was canceled. A cancel that lands after `main`'s last
     /// cancellation point lets `main` return its own value, and without this
-    /// a signalled shutdown would exit with it.
+    /// a signaled shutdown would exit with it.
     pub root_absorbed: FunctionValue<'ctx>,
     /// `void *khora_shared_open(uint64_t value, bool boxed, void (*glue)(void *))`
     pub shared_open: FunctionValue<'ctx>,
@@ -266,7 +266,7 @@ pub struct Runtime<'ctx> {
     ///
     /// A join that does not take the answer, for a caller who wanted the
     /// ordering. It is also the only way to wait for a fiber that may have been
-    /// *cancelled* without the cancellation unwinding the waiter.
+    /// *canceled* without the cancellation unwinding the waiter.
     pub fiber_wait: FunctionValue<'ctx>,
     /// `bool khora_fiber_finished(void *fiber)`
     ///
@@ -274,19 +274,19 @@ pub struct Runtime<'ctx> {
     /// the one question a supervisor loop needs and the only one every other
     /// entry point answers by blocking.
     pub fiber_finished: FunctionValue<'ctx>,
-    /// `bool khora_fiber_cancelled(void *fiber)`
+    /// `bool khora_fiber_canceled(void *fiber)`
     ///
     /// Asks whether a fiber was *stopped* rather than allowed to finish. The
     /// call that would otherwise answer is `khora_fiber_join`, which on a
-    /// cancelled fiber unwinds its caller and at the entry point ends the
+    /// canceled fiber unwinds its caller and at the entry point ends the
     /// program.
-    pub fiber_cancelled: FunctionValue<'ctx>,
+    pub fiber_canceled: FunctionValue<'ctx>,
     /// `u32 khora_fiber_outcome(void *fiber, u64 *out)`
     ///
     /// Waits, and answers what the fiber ended as without unwinding the asker.
     /// `join` answers the same shape with one tag fewer: a child that was
     /// stopped comes back as `STOPPED_WHICH` here, where `join` reports
-    /// `CANCELLED_WHICH` and the caller has no row to name it on.
+    /// `CANCELED_WHICH` and the caller has no row to name it on.
     pub fiber_outcome: FunctionValue<'ctx>,
     /// `void khora_fiber_cancel(void *fiber)`
     pub fiber_cancel: FunctionValue<'ctx>,
@@ -321,7 +321,7 @@ pub struct Runtime<'ctx> {
     /// `_Noreturn void khora_overflow(const uint8_t *what, size_t len)`
     pub overflow: FunctionValue<'ctx>,
     /// `void khora_unhandled(const uint8_t *name, size_t len)` — says which
-    /// error left `main`. Returns, unlike its neighbours here: the program is
+    /// error left `main`. Returns, unlike its neighbors here: the program is
     /// ending correctly and this only says why.
     pub unhandled: FunctionValue<'ctx>,
     /// `void khora_assert_failed(uint32_t ordinal, uint32_t line)` — says which
@@ -451,7 +451,7 @@ impl<'ctx> Runtime<'ctx> {
             // goes, and the finalizers run there.
             region_release: declare("khora_region_release", void.fn_type(&[ptr.into()], false)),
             region_root: declare("khora_region_root", ptr.fn_type(&[], false)),
-            cancelled: declare("khora_cancelled", i8t.fn_type(&[], false)),
+            canceled: declare("khora_canceled", i8t.fn_type(&[], false)),
             root_absorbed: declare("khora_root_absorbed", i8t.fn_type(&[], false)),
             shared_open: declare(
                 "khora_shared_open",
@@ -521,8 +521,8 @@ impl<'ctx> Runtime<'ctx> {
                 "khora_fiber_finished",
                 ctx.bool_type().fn_type(&[ptr.into()], false),
             ),
-            fiber_cancelled: declare(
-                "khora_fiber_cancelled",
+            fiber_canceled: declare(
+                "khora_fiber_canceled",
                 ctx.bool_type().fn_type(&[ptr.into()], false),
             ),
             fiber_outcome: declare(
@@ -730,7 +730,7 @@ pub fn element_pointer<'ctx>(
     // SAFETY: **the obligation is the generated program's, not this
     // function's**, which is what makes it different from every other `unsafe`
     // in this repository. An `inbounds` GEP that leaves the object is undefined
-    // behaviour *in the program being compiled*, and nothing a Rust reader can
+    // behavior *in the program being compiled*, and nothing a Rust reader can
     // see here discharges it -- what does is the bounds check emitted before
     // this address is used. Delete that check and this compiler still builds,
     // still passes its own tests, and starts emitting programs that read off

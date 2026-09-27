@@ -429,7 +429,7 @@ fn a_quotient_that_does_not_fit_stops_rather_than_saturating() {
 ///
 /// Asking for a hundred places has no representable answer. The runtime
 /// clamped the scale to thirty-eight for a few minutes during the widening,
-/// which computed to thirty-eight places and labelled the result as having a
+/// which computed to thirty-eight places and labeled the result as having a
 /// hundred: a wrong number wearing the right hat, which is precisely the thing
 /// this module exists to make impossible.
 #[test]

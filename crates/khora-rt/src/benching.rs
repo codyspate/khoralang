@@ -121,7 +121,7 @@ pub extern "C" fn khora_bench_run() -> i32 {
             let elapsed = at.elapsed();
 
             if which != 0 {
-                if which != FAILED_WHICH && which != CANCELLED_WHICH {
+                if which != FAILED_WHICH && which != CANCELED_WHICH {
                     // Not ours to interpret, and freeing its fields would need
                     // a drop routine the runtime cannot know.
                     // SAFETY: a live Khora object, or null.
@@ -129,7 +129,7 @@ pub extern "C" fn khora_bench_run() -> i32 {
                 }
                 broke = Some(match which {
                     w if w == FAILED_WHICH => "FAILED",
-                    w if w == CANCELLED_WHICH => "cancelled",
+                    w if w == CANCELED_WHICH => "canceled",
                     _ => "raised",
                 });
                 break;

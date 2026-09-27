@@ -142,7 +142,7 @@ fn an_escaped_backtick_is_a_backtick() {
 
 /// A literal that opens on the same line as its content has nothing to strip,
 /// because that line's indentation is zero and it is the minimum. That is the
-/// documented behaviour rather than an accident: put the delimiter on its own
+/// documented behavior rather than an accident: put the delimiter on its own
 /// line to get the stripping.
 #[test]
 fn a_literal_that_starts_on_the_same_line_keeps_its_shape() {

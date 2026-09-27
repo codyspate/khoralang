@@ -73,7 +73,7 @@ knows is a stopped process.
 
 ## The instantiation depth of a generic
 
-Monomorphisation gives up after 64 nested instantiations
+Monomorphization gives up after 64 nested instantiations
 (`MAX_DEPTH`, `khora-types`'s `mono.rs`) and reports it. Unlike the stack
 limit, this one is a diagnostic with a span, and it is a limit on purpose:
 a generic that instantiates itself at a larger type has no fixed point, and

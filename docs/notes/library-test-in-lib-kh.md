@@ -20,7 +20,7 @@ khora new csv --lib          # writes module csv + pub fn hello into src/lib.kh
 The consumer's `import csv::{hello}` fails and the diagnostic points at the
 consumer's call site. Nothing mentions tests. A stranger has no reason to
 suspect their *test* broke their *dependency*, and the v033 trial agent only
-found it because it was deliberately bisecting compiler behaviour.
+found it because it was deliberately bisecting compiler behavior.
 
 ## Why
 

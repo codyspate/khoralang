@@ -160,19 +160,19 @@ write. `measure.py` runs them alongside the Khora servers, so the table above
 is one sitting rather than several stitched together.
 
 `--release` made no difference to `std::net::http` when that was last checked:
-1.73M optimised against 1.76M unoptimised under the old rig. Both figures are
+1.73M optimized against 1.76M unoptimized under the old rig. Both figures are
 retired with the rig, but the *equality* between them is a ratio within one
 sitting, which is the one thing that rig could measure, so the conclusion
 stands: for this workload the time is in the kernel rather than in the
 generated code and the profile has nothing to work on. Worth knowing before
-anybody attributes a benchmark result to an optimiser.
+anybody attributes a benchmark result to an optimizer.
 
 ### What these peers are not
 
 Each is the language's *ordinary* server. Node's is single-threaded by design
 and would be several times faster behind `cluster`; Java's JDK server is not
 what a Java service ships on, and Netty or Undertow would be far above it;
-`net/http` is Go's real answer and a specialised library like `fasthttp` is
+`net/http` is Go's real answer and a specialized library like `fasthttp` is
 faster. Read the table as "what you get when you write the obvious thing",
 which is the comparison a team actually faces, not as a ranking of runtimes.
 
@@ -185,7 +185,7 @@ the last of the doubt and let `floor` be measured rather than bounded. Roadmap
 
 ## What these do not measure
 
-Latency distribution, behaviour under more connections than cores, cold start,
+Latency distribution, behavior under more connections than cores, cold start,
 memory, or anything with a body. A `/health` route returning a fixed JSON
 object is the thinnest possible request; it is chosen to isolate the library
 from the handler, not because it resembles a real workload.

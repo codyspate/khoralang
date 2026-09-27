@@ -511,7 +511,7 @@ impl<'ctx> Backend<'ctx> {
 
     /// The id of an error type, assigning one if this is the first sight of it.
     ///
-    /// One per *instantiation*: `ty` is the monomorphised type, arguments and
+    /// One per *instantiation*: `ty` is the monomorphized type, arguments and
     /// all, so `Gx<Int>` and `Gx<Big>` each get their own. A generic body is
     /// lowered once per specialization with its types already substituted,
     /// so a `raise` or a `catch` arm written against `Gx<A>` asks here for the
@@ -613,7 +613,7 @@ impl<'ctx> Backend<'ctx> {
     ///
     /// **Stored whole rather than field by field.** An inline field may itself
     /// be an aggregate, so a store per field at a word apart writes the wide
-    /// ones over their neighbours; LLVM already knows where the parts of the
+    /// ones over their neighbors; LLVM already knows where the parts of the
     /// value go, and one store says so.
     fn spill_to_word(
         &self,
@@ -743,7 +743,7 @@ impl<'ctx> Backend<'ctx> {
     /// allocation on every `Iterator::next`. `()` is an `i64` zero here, as it
     /// is everywhere a `()` has to be a value.
     ///
-    /// `which` is 0 or [`runtime::CANCELLED_WHICH`]; an infallible function
+    /// `which` is 0 or [`runtime::CANCELED_WHICH`]; an infallible function
     /// has no error for it to be.
     pub fn plain_tagged_type(&self, ret: &Type) -> Option<inkwell::types::StructType<'ctx>> {
         let answer: BasicTypeEnum<'ctx> = match ret {

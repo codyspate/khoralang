@@ -35,10 +35,10 @@ fn with_deadline(millis: Int) -> () with { clock: Clock } raises Timeout {
   });
 
   clock.sleep(millis)!;
-  print("  deadline reached; cancelling");
+  print("  deadline reached; canceling");
   Fiber::cancel(hand);
   Fiber::wait(hand)! catch { _ => () };
-  print("  cancelled, and the wait returned");
+  print("  canceled, and the wait returned");
   raise Timeout::TookTooLong
 }
 
@@ -54,8 +54,8 @@ pub fn main() -> Int {
 ```text
 starting work with a 300ms deadline
   worker adopted
-  deadline reached; cancelling
-  cancelled, and the wait returned
+  deadline reached; canceling
+  canceled, and the wait returned
 gave up: took too long
 ```
 
@@ -63,7 +63,7 @@ The whole program takes 308 ms for a 300 ms deadline.
 
 The shape is: put the work in a fiber, sleep for the deadline, cancel the
 handle, `wait` for it, then raise. `wait` rather than `join`, because a
-cancelled fiber has no answer to take.
+canceled fiber has no answer to take.
 
 ### When the work finishing early has to be fast
 
@@ -108,7 +108,7 @@ fast answer, against a deadline that would otherwise cost its whole length.
 
 ## Any work can be interrupted
 
-A cancelled fiber stops at its next cancellation point: a loop going round, a
+A canceled fiber stops at its next cancellation point: a loop going round, a
 call to a function that has one, or a blocking operation such as a sleep, a
 channel receive or a wait. Every function has them, whatever its `raises` row,
 so a lambda with no row is stopped as promptly as a named function:
@@ -120,7 +120,7 @@ nursery.adopt(Fiber::spawn(fn () => {
 }));
 ```
 
-Cancelling the fiber holding that nursery stops this loop at its next trip.
+Canceling the fiber holding that nursery stops this loop at its next trip.
 
 What is not interrupted is a single call into foreign (C) code or a
 file-system call already in progress, and a blocking connect or a wait for a
@@ -128,9 +128,9 @@ child process: the fiber finishes the call and stops at the next cancellation
 point after it. A connect to an unroutable host is the common case, which is
 why the polling recipe above detaches as well as cancels.
 
-## Cancelling a nursery cancels its children
+## Canceling a nursery cancels its children
 
-A fiber whose body is a `nursery` takes its children with it. Cancelling the
+A fiber whose body is a `nursery` takes its children with it. Canceling the
 parent cancels every child it is holding, including the ones it is currently
 waiting on, so a fan-out under a deadline stops rather than waiting for workers
 nobody told.
@@ -138,17 +138,17 @@ nobody told.
 This is what makes the example above work: `with_deadline` cancels one handle,
 and the worker inside the nursery stops.
 
-Cancelling through a nursery costs what cancelling without one costs —
+Canceling through a nursery costs what canceling without one costs —
 measured at 106 ms against 107 ms for the same worker spawned directly.
 
-## What a cancelled fiber does on the way out
+## What a canceled fiber does on the way out
 
 Cancellation is not a kill. The fiber unwinds the way a failure does: `scoped`
 resources are released, `Region` finalizers run, and a nursery in the unwind
 path stops its own children first. [Cancellation-safe
 resources](/docs/cookbook/cancellation-safe-resources/) has the resource rules.
 
-A cancelled fiber's answer is discarded. `Fiber::join` on one unwinds the
+A canceled fiber's answer is discarded. `Fiber::join` on one unwinds the
 joiner along with it, which is why every example here uses `wait`.
 
 ## What this does not give you
@@ -159,9 +159,9 @@ joiner along with it, which is why every example here uses `wait`.
   the whole interval; it does not wake early because the work finished. For a
   deadline that ends as soon as either side does, have the work signal a channel
   and read the channel with its own timeout fiber.
-- **A cancelled fiber is not stopped at an arbitrary instruction.** It stops at
+- **A canceled fiber is not stopped at an arbitrary instruction.** It stops at
   its next cancellation point, which is why a worker that spends 200 ms inside
   one infallible call takes up to 200 ms to notice.
-- **`Router::listen` can be cancelled**, and the process exits when it is. This
+- **`Router::listen` can be canceled**, and the process exits when it is. This
   was a known gap and is fixed; see
   [Concurrency](/docs/reference/concurrency/) — drain first, stop last.

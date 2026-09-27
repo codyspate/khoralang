@@ -5,7 +5,7 @@
 //! asked to write some will produce something that looks right — Khora borrows
 //! enough syntax from Rust and enough ideas from Effect that a plausible guess
 //! is easy — and be wrong in ways it cannot detect. The interesting failures
-//! are the ones with no analogue elsewhere: a capability that has to appear in
+//! are the ones with no analog elsewhere: a capability that has to appear in
 //! a `with` row, an error that has to appear in a `raises` row, `Share` on
 //! anything crossing into a fiber.
 //!

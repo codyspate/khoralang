@@ -219,7 +219,7 @@ fn json_list(items: List<Json>) -> Response {
 /// A single insert does not need a transaction and has one anyway, because
 /// this is the shape a second statement gets added to and the version without
 /// one is the version somebody extends without noticing. `transaction` rolls
-/// back when the body fails, including when the fiber running it is cancelled
+/// back when the body fails, including when the fiber running it is canceled
 /// — which is roadmap 13.3 and the half that is still the server's rather than
 /// Khora's.
 fn create(pool: Pool, tracer: Tracer, request: Request) -> Response {

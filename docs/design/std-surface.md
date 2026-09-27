@@ -125,7 +125,7 @@ decide about" was the wrong frame. Measured three ways:
 
 | | |
 | --- | --- |
-| 92 | called from another file already — public, no judgement needed |
+| 92 | called from another file already — public, no judgment needed |
 | 35 | called only inside the file that declares them — the candidates |
 | 184 | called nowhere in this tree — API waiting for a user, and *not* evidence of anything |
 

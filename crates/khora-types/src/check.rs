@@ -44,7 +44,7 @@ impl Clause {
         match self {
             // A capability is supplied under a label, so both halves matter.
             Clause::Requires => format!("{label}: {ty}"),
-            // An error is labelled by its own type name, and printing
+            // An error is labeled by its own type name, and printing
             // `DbError: DbError` reads as a mistake.
             Clause::Raises => format!("{ty}"),
         }
@@ -52,12 +52,12 @@ impl Clause {
 
     /// Whether an entry of this row could have come from a well-formed clause.
     ///
-    /// **A `with` entry is labelled by the programmer and a `raises` entry is
-    /// labelled after its own type**, so only the first can be malformed --
+    /// **A `with` entry is labeled by the programmer and a `raises` entry is
+    /// labeled after its own type**, so only the first can be malformed --
     /// and it is malformed exactly when the label is not an identifier.
     ///
     /// Not when the label is merely *unusual*: `with Ledger` comes out as an
-    /// entry labelled `Ledger` of type `Ledger`, and `with { Ledger: handler }`
+    /// entry labeled `Ledger` of type `Ledger`, and `with { Ledger: handler }`
     /// supplies it. That is writable, so it is a style to dislike rather than
     /// an error to report. A label carrying `::` or braces is not writable by
     /// anybody, which is the line.
@@ -65,7 +65,7 @@ impl Clause {
     /// `row_of_syntax` shares one fallback arm between the two clauses, and
     /// that arm labels an entry after its own type. For `raises DbError` that
     /// is the intended reading. For `with Self::Effects` it is not: the entry
-    /// comes out labelled `Self::Effects` of type `Self::Effects`, which no
+    /// comes out labeled `Self::Effects` of type `Self::Effects`, which no
     /// handler can supply because no handler can be given that name. The
     /// message said `needs `{ tick: Tick }: { tick: Tick }`` and sent the
     /// reader looking for a capability instead of at their clause.

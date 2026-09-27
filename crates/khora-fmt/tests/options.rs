@@ -23,7 +23,7 @@ fn the_default_is_two_spaces() {
 }
 
 #[test]
-fn a_width_is_honoured() {
+fn a_width_is_honored() {
     let out = format_with(SOURCE, &Options::spaces(4)).expect("it parses");
     assert_eq!(indent_of(&out), "    ");
 }

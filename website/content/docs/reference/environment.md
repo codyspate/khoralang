@@ -124,7 +124,7 @@ Where `khora toolchain install` looks for releases.
 
 **Value:** a GitHub `owner/repository`.
 
-For an organisation publishing its own toolchain builds. Checksums are verified against the release regardless of where it came from.
+For an organization publishing its own toolchain builds. Checksums are verified against the release regardless of where it came from.
 
 ## The build cache
 
@@ -186,7 +186,7 @@ Print a backtrace when a trap kills the program.
 
 **Default:** unset — a trap prints the failure and the source location, and says to re-run with this set.
 
-**Values:** any value. `RUST_BACKTRACE` is honoured identically, so a machine that already exports it for everything is not asked twice.
+**Values:** any value. `RUST_BACKTRACE` is honored identically, so a machine that already exports it for everything is not asked twice.
 
 ```bash
 KHORA_BACKTRACE=1 ./build/myapp
@@ -206,7 +206,7 @@ Which fiber backend the program runs on.
 KHORA_FIBERS=scheduler ./build/myapp
 ```
 
-**This is a supported setting, and it is the one to think hardest about.** A program cannot tell which backend it is on — that is the design, and the operations behave the same — but the two are not equally exercised. Threads are the default because they are faster at the connection counts a service actually runs at, and because they are the better-travelled path. The scheduler's advantage is density: a suspended fiber costs roughly 4 KB against a thread's 33 KB, which matters when tens of thousands of fibers are waiting rather than working.
+**This is a supported setting, and it is the one to think hardest about.** A program cannot tell which backend it is on — that is the design, and the operations behave the same — but the two are not equally exercised. Threads are the default because they are faster at the connection counts a service actually runs at, and because they are the better-traveled path. The scheduler's advantage is density: a suspended fiber costs roughly 4 KB against a thread's 33 KB, which matters when tens of thousands of fibers are waiting rather than working.
 
 **What it costs.** The density figure is measured on Windows. On Linux, `vm.max_map_count` and guard pages splitting mappings mean it has not been reproduced, so on the platform most deployments use, the reason to switch is not established. The scheduler is also the less-exercised path and therefore the likelier home of the next runtime bug. It is a real choice with real evidence on one side of it, not a flag to set for luck. [Concurrency](/docs/reference/concurrency/) has what a fiber is either way.
 

@@ -15,7 +15,7 @@
 //!
 //! What it gets for free is the part that is the same whatever shape the
 //! framework has, and the part that fails in production rather than in testing:
-//! reading until a request is whole, honouring `Content-Length` across packet
+//! reading until a request is whole, honoring `Content-Length` across packet
 //! boundaries, holding what a pipelining client sent early, and refusing one
 //! that will not fit. Before the split those lived inside `Router` and a second
 //! framework would have re-derived them — which is a truncated request, or two

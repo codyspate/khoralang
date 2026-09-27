@@ -172,7 +172,7 @@ impl Raw {
     }
   }
 
-  /// A record of text nobody labelled: a query string, the path parameters,
+  /// A record of text nobody labeled: a query string, the path parameters,
   /// the headers.
   pub fn of_map(text: Map<String, String>) -> Raw {
     let converted = List::fold(Map::entries(text), List::Nil, fn (acc, field) =>
@@ -319,7 +319,7 @@ pub type Segment = | Field(name: String) | Index(at: Int);
 /// A sentence is what a person reads and a keyword is what a JSON Schema
 /// carries, and only structure can become both. [`refine`] takes a sentence
 /// and keeps it as `Custom`; the named rules -- [`between`], [`min_length`]
-/// and their neighbours -- carry their bounds.
+/// and their neighbors -- carry their bounds.
 derive(Show, Eq)
 pub type Rule =
   | Custom(must: String)
@@ -619,7 +619,7 @@ impl Shape {
 ///
 /// Built with the constructors below rather than by hand: the record is public
 /// so that a package may add a primitive of its own, and everything `std`
-/// offers goes through [`string`], [`int`] and their neighbours.
+/// offers goes through [`string`], [`int`] and their neighbors.
 pub type Schema<A> = {
   shape: Shape,
   read: (List<Segment>, Raw) -> Validated<A, Rejection>,

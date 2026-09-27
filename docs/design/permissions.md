@@ -12,7 +12,7 @@ and it has a hole underneath it: `extern fn` reaches the operating system
 without a capability row to be gated on. Closing it needs an allow-list on
 which *packages* may declare one, and packages do not exist until phase 10. So
 what the manifest gives you today is an honest account of what a program's own
-code can reach, and no defence against a dependency that goes around it. The
+code can reach, and no defense against a dependency that goes around it. The
 whole argument is at the end of this file, under "The hole this does not close yet"; it
 is repeated here because a reader should not have to reach the end to find out.
 
@@ -162,7 +162,7 @@ separators, so `DB_*` is one wildcard against one string and `**` would mean
 nothing.
 
 `network` is checked in `perform`, **after the URL is parsed and before
-anything is dialled**. After, because the host is not known until then and a
+anything is dialed**. After, because the host is not known until then and a
 grant is about the host rather than about the text somebody wrote; before,
 because the point of the grant is that no connection is attempted -- a refusal
 that has already resolved a name and opened a socket has already told the

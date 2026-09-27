@@ -28,7 +28,7 @@
 //! depends on — the compiler, `std`, the root manifest, a script — marks
 //! *every* member affected. That is deliberate and it is the rule that makes
 //! the feature safe to trust: a tool that answers "nothing was affected"
-//! because it did not recognise the file is worse than no tool.
+//! because it did not recognize the file is worse than no tool.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};

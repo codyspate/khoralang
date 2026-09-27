@@ -138,7 +138,7 @@ pub(crate) fn restore_drain(drain: Option<Vec<Deferred>>) {
 /// worker's thread-local*. Every last-drop the next fiber made was queued
 /// behind a fiber that might never resume. That included its own region, so
 /// its finalizer never ran, while the fiber reported itself finished and
-/// cancelled. A fiber that did resume, on another worker, went on draining that
+/// canceled. A fiber that did resume, on another worker, went on draining that
 /// worker's queue, which belonged to somebody else. `p/starve` lost the
 /// finalizer with four or more fibers blocked in cleanup, and so did 0.3.0.
 ///

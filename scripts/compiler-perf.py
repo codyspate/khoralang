@@ -20,7 +20,7 @@ number hides which one moved:
 * **Peak memory.** The compiler's own resident set, sampled while it runs. A
   compiler that is fast and needs eight gigabytes is not usable on a laptop.
 * **Monomorphization scaling.** A generated package with N generic
-  instantiations, at several N, so that superlinear behaviour shows up as a
+  instantiations, at several N, so that superlinear behavior shows up as a
   curve rather than as a complaint from somebody with a large program.
 
 `KHORA_TIMINGS=1` splits each build into check, monomorphize, lower, optimize,

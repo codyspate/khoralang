@@ -160,7 +160,7 @@ raises `Gx` at two; catch one of them where it is raised
 
 Put a `catch` around each call, or, directly around the two calls, use a `_` arm alone: `_` reads nothing, so it needs no layout. A `_` beside a `Gx::..` arm, or an arm that binds the failure, is refused like a named arm.
 
-A row is labelled by the failure type's name, so two *different* types of one name -- an `E` declared in `m::a` and another in `m::b` -- meet in a row the same way, and are refused the same way:
+A row is labeled by the failure type's name, so two *different* types of one name -- an `E` declared in `m::a` and another in `m::b` -- meet in a row the same way, and are refused the same way:
 
 ```text
 an error type appears in a `raises` row once, by name, and this raises `E` at

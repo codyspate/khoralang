@@ -51,7 +51,7 @@ are deliberate.
 Every test framework the audience knows — Go's `t.Fatal`, Rust's `assert!`,
 Jest's `expect` — ends the test on a failed assertion without annotating it,
 and `docs/vision.md`'s tie-breaker says to match what a reader already expects
-when the behaviour is the same. An assertion is also the one place a reader of
+when the behavior is the same. An assertion is also the one place a reader of
 a test *already* looks for control leaving, and it is written at every one of
 them, so the mark would be noise rather than information.
 
@@ -74,7 +74,7 @@ fiber has its own cancellation flag, and nothing else is shared but what the
 program itself shares.
 
 A test that ends any way other than "returned" did not pass. Which way it was —
-`FAILED`, `raised`, `cancelled`, `panicked` — is in the report, because it
+`FAILED`, `raised`, `canceled`, `panicked` — is in the report, because it
 tells the reader where to look, and not in the count, because it does not
 change what to do.
 
@@ -128,7 +128,7 @@ second is evidence.
 | The parser never loses a byte | `khora-syntax`, `formatting_never_loses_a_token` and the round-trip cases |
 | Same-shaped declarations stay distinct | `khora-types/tests/identity.rs`, `two_declarations_of_one_shape_do_not_unify` |
 | A mutable value cannot cross into a fiber | `khora-types/tests/vouching.rs`, and `sharing.md` |
-| A scope that is cancelled still runs its finalizers | `khora-codegen-llvm/tests/regions.rs` |
+| A scope that is canceled still runs its finalizers | `khora-codegen-llvm/tests/regions.rs` |
 | Effect requirements subtract through a handler | `khora-codegen-llvm/tests/effects.rs` |
 | `map` over a uniquely-owned list allocates nothing | `khora-codegen-llvm/tests/reuse.rs`, `a_uniquely_owned_walk_allocates_nothing` |
 | The formatter is idempotent | `khora-fmt/tests/format.rs` |
@@ -170,7 +170,7 @@ true* — while a one-character edit re-resolved an importing file.
 function cannot invalidate another file's scope." It had been there, wrong,
 since the query was written.
 
-Two lessons, both of which generalise:
+Two lessons, both of which generalize:
 
 - **A promise worth testing is one where a reasonable person could be wrong
   about the answer.** The version on this list was safe, and being safe is what

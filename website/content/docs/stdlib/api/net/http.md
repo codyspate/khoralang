@@ -284,7 +284,7 @@ One connection, read a request at a time.
 
 **This is the layer between a socket and a router**, and it is public
 because a router is a matter of taste and this is not. Framing a request
-correctly — reading until it is whole, honouring `Content-Length`, holding
+correctly — reading until it is whole, honoring `Content-Length`, holding
 what a pipelined client sent early, refusing one that will not fit — is the
 same work whatever shape the framework above it has, and it is the work that
 fails in production rather than in testing.
@@ -681,7 +681,7 @@ A POST to `path` carrying `body`. For tests, like `get`.
 pub fn of(method: Method, target: String, body: String) -> Request
 ```
 
-The query string is honoured here too, so a hand-built request behaves
+The query string is honored here too, so a hand-built request behaves
 like one off the wire. A test that writes `Request::get("/x?a=1")` and
 finds no `a` would be testing the constructor rather than the code.
 
@@ -747,7 +747,7 @@ pub fn text(status: Int, body: String) -> Response
 pub fn of(status: Int, content_type: String, body: String) -> Response
 ```
 
-A body that is already serialised, with the content type you name.
+A body that is already serialized, with the content type you name.
 
 **For JSON you built yourself, this and not `json`.** `Response::json`
 encodes its argument, and a `String` encodes to a *JSON string* — so
@@ -759,7 +759,7 @@ object.
 Prefer `derive(Encode)` on a record and `json` when you can: it removes
 the hand-written escaping that is the usual reason a body is a `String`
 in the first place. Use this when the bytes come from somewhere that
-already serialised them.
+already serialized them.
 
 #### with_header
 
@@ -1508,6 +1508,6 @@ Reads `https://host:port/path?query`.
 **Only what a client needs to dial and ask.** No fragment, because a
 fragment never leaves the browser; no userinfo, because credentials in a
 URL are deprecated and accepting them would mean deciding how to encode
-them; and no normalisation of the path, because a server may have signed
+them; and no normalization of the path, because a server may have signed
 exactly the bytes it was given.
 

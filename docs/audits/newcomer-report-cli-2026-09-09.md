@@ -1,4 +1,4 @@
-# An agent built a CLI log analyser from the public docs alone
+# An agent built a CLI log analyzer from the public docs alone
 
 Rules: `website/content/docs/**` and `README.md` only. No compiler source, no
 `std` source. It finished — two `khora check` cycles — and the program is
@@ -68,7 +68,7 @@ is the *function passed here* that takes two parameters. Say that.
   which operations live on the type, which come from a trait, and which traits
   must be in scope.
 - **`Dict::update`'s doc says "counting things into a map is the most common
-  thing a log analyser does"** and `stdlib/index.md` does not say whether to
+  thing a log analyzer does"** and `stdlib/index.md` does not say whether to
   reach for `Dict` or `Map` when folding.
 - **No example of reading a positional argument.** `stdlib/api/env.md` only
   shows `variable_or`. Three lines would cover the first thing anyone writes.

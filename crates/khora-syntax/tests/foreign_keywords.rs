@@ -80,7 +80,7 @@ fn var_is_told_about_let_and_const() {
 
 /// **`async` has no Khora spelling at all**, and saying "write `fn`" would
 /// suggest it is a rename. What a reader needs is that the distinction does
-/// not exist here — no marked functions, and no second colour of caller.
+/// not exist here — no marked functions, and no second color of caller.
 #[test]
 fn async_is_told_the_distinction_does_not_exist() {
     let found = declaring("async");

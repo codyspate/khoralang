@@ -67,7 +67,7 @@ mod tests {
     }
 
     /// The length is in bytes. A message whose content is not ASCII is where a
-    /// character count would truncate the body and desynchronise the stream for
+    /// character count would truncate the body and desynchronize the stream for
     /// every message after it.
     #[test]
     fn a_non_ascii_message_survives_the_wire() {

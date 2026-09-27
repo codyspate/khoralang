@@ -106,7 +106,7 @@ manifest is invisible at every line it would have fired on.
 `discarded-result` already has one: `let _ = f();` says "deliberately dropped".
 The roadmap notes this works "by luck rather than by design".
 
-*Against:* it does not generalise. There is no natural expression for "this
+*Against:* it does not generalize. There is no natural expression for "this
 capability is genuinely unused" or "this cycle is intended", and inventing one
 per lint is six small language decisions instead of one.
 

@@ -489,9 +489,9 @@ fn inherent_methods_and_trait_impls_coexist() {
 }
 
 /// An inherent impl over a constructor learns its parameter from the receiver,
-/// the same way a parameterised trait impl does.
+/// the same way a parameterized trait impl does.
 #[test]
-fn a_parameterised_inherent_impl_is_allowed() {
+fn a_parameterized_inherent_impl_is_allowed() {
     assert_clean(
         "module m;\n\
          pub type Wrapper<A> = | Of(value: A);\n\
@@ -730,7 +730,7 @@ fn a_projection_is_the_bound_type_not_a_fresh_one() {
 /// An impl's parameters have to be read off the receiver first, or
 /// `List<Int>::Item` projects to a rigid `A` instead of to `Int`.
 #[test]
-fn a_projection_through_a_parameterised_impl_substitutes_first() {
+fn a_projection_through_a_parameterized_impl_substitutes_first() {
     assert_clean(
         "module m;\n\
          pub type Step<S, A> = | Yield(state: S, item: A) | Done;\n\
@@ -1029,11 +1029,11 @@ fn a_type_with_no_impl_is_still_refused() {
     let found = errors_beside_core(
         "module app;\n\
          import std::core::{ranked};\n\
-         pub type Colour = | Red | Green;\n\
-         fn f() -> Int { ranked(Colour::Red, Colour::Green) }\n",
+         pub type Color = | Red | Green;\n\
+         fn f() -> Int { ranked(Color::Red, Color::Green) }\n",
     );
     assert!(
-        found.iter().any(|e| e.contains("`Colour` does not implement `Ord`")),
+        found.iter().any(|e| e.contains("`Color` does not implement `Ord`")),
         "a missing impl must be caught here, not at lowering: {found:?}"
     );
 }
@@ -1050,8 +1050,8 @@ fn a_bound_message_names_the_function_the_way_it_is_written() {
     let found = errors_beside_core(
         "module app;\n\
          import std::core::{ranked};\n\
-         pub type Colour = | Red | Green;\n\
-         fn f() -> Int { ranked(Colour::Red, Colour::Green) }\n",
+         pub type Color = | Red | Green;\n\
+         fn f() -> Int { ranked(Color::Red, Color::Green) }\n",
     );
     assert!(
         found.iter().all(|e| !e.contains('#')),
@@ -1067,7 +1067,7 @@ fn a_bound_message_names_the_function_the_way_it_is_written() {
 /// 14.30 exists to close. `Traits::find` matched
 /// `impl<A: Show, E: Show> Show for Result<A, E>` on the head name `Result`
 /// and stopped, so `Result<Int, Oops>` satisfied `Show` for an `Oops` that had
-/// none. Monomorphisation found it at the far end and said
+/// none. Monomorphization found it at the far end and said
 /// `Show::show has no body, so there is nothing to call` -- a message about
 /// the trait rather than the type, pointing at no useful line.
 const CONDITIONAL: &str = "module m;

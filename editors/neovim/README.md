@@ -40,7 +40,7 @@ hover, and formatting — all from the compiler, so they agree with
 
 **Highlighting comes from the server**, not from tree-sitter. Khora has no
 tree-sitter grammar — a second parser is a cost rather than a feature, and
-`editors/vscode/README.md` has the argument — so what colours a buffer here is
+`editors/vscode/README.md` has the argument — so what colors a buffer here is
 LSP semantic tokens, which Neovim applies on its own with no configuration.
 It covers what needs resolution: locals, parameters, fields, methods, modules
 and what a path resolves to. Keywords and literals are not in it.

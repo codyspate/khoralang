@@ -1,6 +1,6 @@
 #![cfg(feature = "llvm")]
 
-//! What a cancelled fiber lets go of when it was holding a socket.
+//! What a canceled fiber lets go of when it was holding a socket.
 //!
 //! **Not "does not crash".** `fs.rs` proves its claim by *deleting* the file,
 //! which Windows refuses while a handle is open. A socket has two equivalents
@@ -17,7 +17,7 @@
 //! in *this* file can: `khora_cancel` sets the flag on the running fiber and
 //! these two programs hold no handle to the listener.
 //!
-//! **A handler cancelling itself is a third test.** `Router::serve_connection`
+//! **A handler canceling itself is a third test.** `Router::serve_connection`
 //! catches `_` and has no `raises` row. A cancellation passes through the `_`
 //! arm (no arm can name one) and out on the function's cancellation tag, which
 //! every function that can reach a cancellation point has. The connection's
@@ -34,7 +34,7 @@
 //! that made `shut` wait for the platform's own `FIN_WAIT_2` timeout — 120
 //! seconds, `docs/errata.md` 78. So the last assertion is a clock: the program
 //! must finish with the connection in seconds, against a floor of sixty that
-//! the platform imposes on the old behaviour.
+//! the platform imposes on the old behavior.
 
 use crate::harness;
 
@@ -46,7 +46,7 @@ use khora_db::{KhoraDatabase, SourceFile, SourceRoot};
 /// Not 18732 — `http.rs` binds that, and the two run at once.
 const LISTENER_PORT: u16 = 18961;
 const CONNECTION_PORT: u16 = 18962;
-/// And a third, for the server that keeps running after a cancelled request.
+/// And a third, for the server that keeps running after a canceled request.
 const HANDLER_PORT: u16 = 18963;
 
 /// A test that hangs is worse than one that fails: the failure at least says
@@ -105,24 +105,24 @@ fn wait_for(stdout: &mut impl Read, seen: &mut String, line: &str) -> bool {
     }
 }
 
-/// **A cancelled fiber gives back both a port and a connection.**
+/// **A canceled fiber gives back both a port and a connection.**
 ///
 /// Two claims and one program, because building `std` twice to make two
 /// assertions costs two minutes and proves nothing extra.
 ///
-/// The first half binds a port, is cancelled holding it, and binds again —
+/// The first half binds a port, is canceled holding it, and binds again —
 /// which is the situation `Router::held_open` is in permanently, since its loop
 /// has no exit to hang a close on. `listen_on` sets no `SO_REUSEADDR`, so a
 /// second bind succeeds only if the first listener was closed.
 ///
 /// The second half is what the release is worth to the other end. It accepts a
 /// connection, registers the close the way `Router::served` now does, and is
-/// cancelled with nothing written. **The assertion is a read that returns**,
+/// canceled with nothing written. **The assertion is a read that returns**,
 /// not a read that returns something in particular: a closed socket answers
 /// end-of-file or a reset, and a leaked one answers nothing at all and waits
 /// out the deadline — which is what a client of the unfixed server saw.
 #[test]
-fn a_cancelled_fiber_gives_back_the_socket_it_was_holding() {
+fn a_canceled_fiber_gives_back_the_socket_it_was_holding() {
     let exe = build(
         "net_cancel",
         &format!(
@@ -155,7 +155,7 @@ fn hold() -> () with {{ scope: Scope }} raises Oops {{
 /// raising, before a byte is written -- the exit `serve_connection`'s `catch`
 /// does not cover and only the region does.
 ///
-/// Cancelled with the connection open and nothing written, which a `catch`
+/// Canceled with the connection open and nothing written, which a `catch`
 /// cannot reach and only the region covers.
 fn serve(server: Int) -> () with {{ scope: Scope }} raises Oops {{
   let connection = acquire(accept_on(server), fn c => shut(c));
@@ -168,7 +168,7 @@ fn serve(server: Int) -> () with {{ scope: Scope }} raises Oops {{
   }}
 }}
 
-/// Cancelled holding a listening socket, then the port asked for again.
+/// Canceled holding a listening socket, then the port asked for again.
 fn the_port() -> () {{
   let f = Fiber::spawn(fn () => scoped(fn () => hold()!)!);
   Fiber::wait(f)! catch {{ Oops::Bad => () }};
@@ -254,14 +254,14 @@ pub fn main() -> Int {{
     let took = finishing.elapsed();
 
     assert!(!said.contains("proves nothing"), "nothing was tested: {said}");
-    assert!(!said.contains("which is wrong"), "a cancelled fiber ran on: {said}");
+    assert!(!said.contains("which is wrong"), "a canceled fiber ran on: {said}");
     assert!(
         said.contains("the port was released"),
-        "a cancelled fiber left the port bound: {said}"
+        "a canceled fiber left the port bound: {said}"
     );
     assert!(
         closed,
-        "the cancelled fiber left the connection open; the read waited out its deadline: {said}"
+        "the canceled fiber left the connection open; the read waited out its deadline: {said}"
     );
     assert!(settled, "it never finished with the connection: {said}");
     assert_eq!(ended.code(), Some(0), "{said}");
@@ -281,12 +281,12 @@ pub fn main() -> Int {{
 /// `Router::served` is a function with no `raises` row that catches `_` --
 /// "what a fiber runs, and it does not fail". A cancellation is in no row, so
 /// the `_` arm cannot name it; it leaves on the function's cancellation tag.
-/// The failure this guards against is one cancelled request taking the whole
+/// The failure this guards against is one canceled request taking the whole
 /// server down.
 ///
-/// A handler cancelling itself is the only way a *program* can reach that
+/// A handler canceling itself is the only way a *program* can reach that
 /// frame from inside, and it stands in for every other way of getting there:
-/// the nursery cancelling a sibling, or the listener being asked to stop with
+/// the nursery canceling a sibling, or the listener being asked to stop with
 /// connections in flight.
 ///
 /// **The handler has to be able to raise**, and that is not a detail of the
@@ -299,7 +299,7 @@ pub fn main() -> Int {{
 /// answers before and after; `/stop` does not answer at all, because its fiber
 /// stopped where the cancellation reached it and the region shut the socket on
 /// the way out. The second `/health` is the whole point: it proves the process
-/// that served the cancelled request is still there.
+/// that served the canceled request is still there.
 #[test]
 fn a_handler_that_cancels_itself_stops_its_connection_and_not_the_server() {
     let exe = build(
@@ -357,7 +357,7 @@ pub fn main() -> Int {{
     }
 
     let before = ask(HANDLER_PORT, "/health");
-    let cancelled = ask(HANDLER_PORT, "/stop");
+    let canceled = ask(HANDLER_PORT, "/stop");
     let after = ask(HANDLER_PORT, "/health");
     let alive = child.try_wait().expect("asking after the child").is_none();
     let _ = child.kill();
@@ -365,14 +365,14 @@ pub fn main() -> Int {{
 
     assert!(before.contains("200"), "the server was not answering to begin with: {before:?}");
     assert!(
-        !cancelled.contains("the cancellation was not seen"),
-        "the handler ran past its own cancellation point: {cancelled:?}"
+        !canceled.contains("the cancellation was not seen"),
+        "the handler ran past its own cancellation point: {canceled:?}"
     );
     assert!(
         after.contains("200"),
-        "the server did not survive a cancelled request: {after:?} {said}"
+        "the server did not survive a canceled request: {after:?} {said}"
     );
-    assert!(alive, "the server was gone after the cancelled request: {said}");
+    assert!(alive, "the server was gone after the canceled request: {said}");
 }
 
 /// One HTTP/1.1 GET, spoken by hand.

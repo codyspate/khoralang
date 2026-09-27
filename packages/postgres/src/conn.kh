@@ -25,7 +25,7 @@ extern fn khora_monotonic_millis() -> Int;
 ///   reason it must never be handed anything a user typed.
 ///
 /// **Interpolating a value into `run` is the oldest hole there is**, and the
-/// only defence a library can offer is to make the safe call the shorter one.
+/// only defense a library can offer is to make the safe call the shorter one.
 /// It is: `ask(c, "select * from t where id = $1", cons(Cell::Number(id)))`.
 ///
 /// Parameters are `$1`, `$2` and so on, numbered from one, and the same
@@ -230,7 +230,7 @@ fn error_text(m: Message) -> String {
 /// Opens a connection and completes the handshake.
 ///
 /// **There is no connect timeout, and a fiber blocked here cannot be
-/// cancelled.** The runtime's connect is a blocking call on the worker — it
+/// canceled.** The runtime's connect is a blocking call on the worker — it
 /// resolves the name and waits for the kernel — so a host that is unroutable
 /// rather than refusing takes the operating system's own connect timeout,
 /// which is minutes on Linux. `Fiber::cancel` does not shorten it: the fiber
@@ -238,7 +238,7 @@ fn error_text(m: Message) -> String {
 ///
 /// A deadline around this call reports on time but does not free the fiber, so
 /// a program that has given up must `Fiber::detach` the handle as well as
-/// cancelling it, or its own exit will wait for the connect to finish. Guard a
+/// canceling it, or its own exit will wait for the connect to finish. Guard a
 /// user-supplied address before reaching here if a prompt answer matters.
 pub fn open(
   host: String,
@@ -362,7 +362,7 @@ fn handshake(c: Connection, secret: String) -> Result<Bool, PgError> {
         } else {
           // 'S' ParameterStatus, 'K' BackendKeyData, 'N' NoticeResponse. None
           // of them is needed to run a query, and a driver that refused what
-          // it did not recognise would break on the next server version.
+          // it did not recognize would break on the next server version.
           ()
         }
       },
@@ -721,7 +721,7 @@ fn collect(c: Connection) -> Result<Answer, PgError> {
         if m.kind == 90 {
           // 'Z' ReadyForQuery ends every exchange, including a failed one —
           // which is why the error is remembered rather than returned here:
-          // leaving the stream mid-reply would desynchronise the next query.
+          // leaving the stream mid-reply would desynchronize the next query.
           // Its one byte is the transaction state: 'I' (73) is outside one.
           c.open_transaction = Array::length(m.payload) > 0
           && U8::to_int(Array::get(m.payload, 0)) != 73;

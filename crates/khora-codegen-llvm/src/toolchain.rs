@@ -245,7 +245,7 @@ fn cross_archive() -> &'static str {
 /// and the Rust standard library it carries, out of the published surface.
 ///
 /// The first three are the contract (`docs/design/c-export.md` §8). The
-/// counters are diagnostic — allocation behaviour is not part of the language's
+/// counters are diagnostic — allocation behavior is not part of the language's
 /// promise — and are here because a host just told a trap was contained is
 /// entitled to check that the memory came back.
 ///
@@ -291,7 +291,7 @@ impl Profile {
     ///
     /// An environment variable as well as `--release` because `khora test` and
     /// `khora bench` have profiles too, and a flag on every subcommand is
-    /// three ways to say one thing. Anything unrecognised is the default
+    /// three ways to say one thing. Anything unrecognized is the default
     /// rather than an error: this is read deep inside a build, where there is
     /// no channel to complain on, and a typo that silently optimized would be
     /// worse than one that silently did not.
@@ -358,7 +358,7 @@ pub fn debug_info_wanted() -> bool {
 
 /// Native libraries the root package asked to link against.
 ///
-/// **Only the root package's request is honoured.** A dependency may ship an
+/// **Only the root package's request is honored.** A dependency may ship an
 /// archive and declare `extern fn` against it, but it cannot add a flag to the
 /// link line: a transitive package quietly linking a native library into a
 /// program is a supply-chain hole with no signal at the place that would have

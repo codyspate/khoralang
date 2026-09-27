@@ -77,7 +77,7 @@ below.
   `Array` and `Vector` are buffers a program writes into and neither is
   `Share`, so a literal quietly producing one would be three surprises from one
   pair of brackets. Phase 9.2 also removed the allocation cost of the case a
-  cons list is usually criticised for: walking one and rebuilding it allocates
+  cons list is usually criticized for: walking one and rebuilding it allocates
   nothing when it is uniquely held.
 
   **Desugared rather than typed as itself**, which is why nothing downstream
@@ -118,7 +118,7 @@ below.
   The consequential half is what is *not* observable, and it is why this came
   before Phase 9 rather than before publication: when memory is allocated and
   freed, and how much, is not something a program may depend on. Reuse analysis
-  exists to change exactly that, and optimising first would have made an
+  exists to change exactly that, and optimizing first would have made an
   accident into a promise. Also unobservable: timing, `Map` iteration order,
   hash values across runs, and the text of any diagnostic.
 
@@ -165,7 +165,7 @@ below.
   `docs/design/effect-runtime.md` §9: **atomic, with no way to opt out.** The
   forcing argument is not performance but correctness — a spawned fiber shares
   at least the closure it was handed, so a non-atomic count is a data race in
-  the first concurrent program anyone writes. And a split is colouring: `Rc`
+  the first concurrent program anyone writes. And a split is coloring: `Rc`
   versus `Arc` propagates into every signature that touches one, which is the
   one thing Khora's rows exist to avoid, and it would be there to save an
   increment. The cost comes back in phase 9, where an object that provably does
@@ -373,7 +373,7 @@ allocation is freed; diagnostic snapshots are committed and reviewed.
 
 ## Phase 3 — Generics, HKT and typeclasses
 
-Algorithm W with occurs check and let-generalisation, extended with a kind
+Algorithm W with occurs check and let-generalization, extended with a kind
 system. Const generics as `Type::Const`. Typeclasses with instance resolution
 per D6. Monomorphize in HIR before codegen so abstraction costs nothing at
 runtime.
@@ -645,7 +645,7 @@ Fibers, cancellation that runs finalizers, `Scope`-bound resource lifetimes,
   be read, compared and tested without one is worth having first.
 
 **Exit — met.** A canceled fiber runs every finalizer in scope, verified by
-`a_cancelled_fiber_runs_every_finalizer_and_stops_only_itself` in
+`a_canceled_fiber_runs_every_finalizer_and_stops_only_itself` in
 `crates/khora-codegen-llvm/tests/fibers.rs`, which pins the other half of what
 "stops" has to mean as well: the program carries on. And `khora test` runs
 isolated fibers across cores, pinned by
@@ -688,7 +688,7 @@ argument that settled A6.
   because there are no borrows.
 
   `Shared<A>` — the synchronized thing that *can* cross — waits for phase 7 or
-  8, where there is I/O worth parallelising and a channel may turn out to be the
+  8, where there is I/O worth parallelizing and a channel may turn out to be the
   better primitive. Until then a nursery whose children all write into one
   collection is rejected. That is real friction and it is the honest cost of
   the rule.
@@ -725,7 +725,7 @@ argument that settled A6.
 
   **Overflow traps, in every build.** Swift's answer rather
   than Rust's: a program that passes its tests and then wraps in production is
-  the failure worth spending a branch to prevent, and two behaviours put the
+  the failure worth spending a branch to prevent, and two behaviors put the
   difference where it is most expensive to find. LLVM's `with.overflow`
   intrinsics return the result and the flag together, so the check is a branch
   the optimizer can usually see through, and phase 9 can remove many of them.
@@ -741,7 +741,7 @@ argument that settled A6.
   `Int::wrapping_add` and its siblings are how you ask for the other thing, by
   name, in the places that genuinely want it — a hash, a checksum, a PRNG. The
   bit operations landed with them, which is what let the hash map stop
-  apologising for its hash.
+  apologizing for its hash.
 
   `^`, `&`, `|`, `<<` and `>>` are five new tokens and `>>` has to be told
   apart from the end of two nested type arguments. Not hard, and not what a
@@ -1101,7 +1101,7 @@ consumers of phase 7 and are *not* on this critical path.
   `handler for` literal; a closure that has to be forwarded is wrapped by
   `SharedFn::of`, checked the same way, which is how a `Router` full of
   handlers now crosses. Rejected: a shareability bit in the function type,
-  which colours every container of a function; and a blanket ban on capturing
+  which colors every container of a function; and a blanket ban on capturing
   anything writable, which passed the whole corpus and would still have made
   an ordinary accumulating callback illegal.
 
@@ -1170,7 +1170,7 @@ consumers of phase 7 and are *not* on this critical path.
   and not another could show it. `Dict` was the first. Both read the fields at
   the instantiation now.
 
-- **Errata 46 — `Share` was forgeable.** It was recognised by the bare name, so
+- **Errata 46 — `Share` was forgeable.** It was recognized by the bare name, so
   any file could declare `trait Share {}`, write `impl<A> Share for Array<A>`,
   and hand two fibers an array that `Array::set` writes. Only the module that
   declares a type may assert its shareability now, and an imported impl is
@@ -1260,7 +1260,7 @@ them was in the part anybody was worried about.
   compiler's help, so would everything above it.
 
   It found errata 42 on the way. `Int::to_string` is a written function whose
-  owner the code generator recognises, so the `Int::` intrinsic table ate it and
+  owner the code generator recognizes, so the `Int::` intrinsic table ate it and
   asked a `String` to be an `i64`. The rule now applies once, before every
   intrinsic: **a method somebody wrote wins over one the backend implements.**
   `attempt` had the same bug in phase 5 and was fixed one call site at a time.
@@ -1312,7 +1312,7 @@ each is a claim that would be wrong if made too broadly.
 
 - **`Share` is not yet a safety boundary.** The orphan rule closes the forgery
   that was demonstrated, but `Share`, `Fiber`, `SharedFn` and `Array` are still
-  recognised by their bare names rather than by where they were declared. It is
+  recognized by their bare names rather than by where they were declared. It is
   a real rule with a real hole, and calling it a guarantee needs
   compiler-known identity for the whole set. `docs/design/sharing.md`.
 - **The manifest is not a sandbox.** The compile-time gate is total over Khora
@@ -1332,7 +1332,7 @@ What still stands between here and a program somebody would use, in the order
 they will be missed:
 
 - ~~**A growable list.**~~ Done — `Vector<A>` in `std::core`, contiguous,
-  indexed in constant time and appended to in amortised constant time.
+  indexed in constant time and appended to in amortized constant time.
   Fiber-local, like `Map`: the `mut` fields that make `push` cheap are exactly
   what the sharing rules refuse to a second fiber, and the shareable sequence
   is a `Shared<List<A>>` or a `Shared<Dict<K, V>>`.
@@ -1405,7 +1405,7 @@ they will be missed:
   values, not a lock over a mutable record: nothing unshareable goes in or
   comes out, so the escape question Rust answers with lifetimes does not arise.
   `change` cannot fail, which is what makes the lock safe rather than carefully
-  handled — a function with no error row has no channel to be cancelled on. A
+  handled — a function with no error row has no channel to be canceled on. A
   stateful test double is a `Shared<Int>` the handler captures, and a shared
   table is a `Shared<Dict<K, V>>`.
 - ~~**Evidence parameters for a lambda.**~~ Done —
@@ -1452,7 +1452,7 @@ promise. It does not add another execution model or widen the language.
   lookups code generation keeps of its own.
 
   **The guard stays.** A name the compiler already means still may not be given
-  a definition, because the *backend* recognises `Array`, `Shared`, `Fiber` and
+  a definition, because the *backend* recognizes `Array`, `Shared`, `Fiber` and
   the rest by bare name. That is a smaller, more contained version of the same
   problem, and it goes when those declarations get an identity the code
   generator can ask about rather than when the type system does. Package
@@ -1501,7 +1501,7 @@ promise. It does not add another execution model or widen the language.
   figure measured on a machine that is also running a test suite is not a
   figure.
 
-  Nothing failed that revealed wrong behaviour. Two things found along the way
+  Nothing failed that revealed wrong behavior. Two things found along the way
   were recorded as open questions rather than fixed here: D13 and D14, both
   since closed — see the design questions above.
 
@@ -1783,7 +1783,7 @@ compiler that does not know what it supports.
   host, and `khora-codegen-llvm/tests/portability.rs` generates and *verifies* a
   module for every target — added after a symbol collision that existed only in
   the combination of modules a POSIX build compiles together, which no Windows
-  developer could reproduce. See phase 10.0's neighbours in the log.
+  developer could reproduce. See phase 10.0's neighbors in the log.
 - **9.5.3 An install story that is not a specific tarball — done.**
   `scripts/setup-llvm.sh`, which CI runs too, so a failure there is a failure of
   the documented install rather than of a CI-only path.
@@ -1862,7 +1862,7 @@ under "Allocation accounting", and `khora_print_float` and the process arguments
 under "arrays". A banner nobody can trust is worse than no banner.
 
 Split by **compiler responsibility**, not by size, and as **move-only commits**
-— no behaviour change, no API change, verified by the full suite and
+— no behavior change, no API change, verified by the full suite and
 `scripts/baseline.sh` at each step. The cost worth naming: a pure move breaks
 `git blame` for a codebase whose comments and bug stories are its main asset, so
 a move commit must contain nothing but moves.
@@ -1901,7 +1901,7 @@ step.
 | `khora-hir` body lowering | 84 KB, one file | 6 modules, 24 KB |
 | `khora-perceus` | 53 KB, one file | 5 modules, 16 KB |
 
-**Nothing changed behaviour.** Each split was verified three ways: the function
+**Nothing changed behavior.** Each split was verified three ways: the function
 definitions before and after, the doc-comment lines before and after, and the
 baseline. The doc-line check earned its keep — a patch script failed halfway
 through reuniting a comment with its function, deleting it from one file
@@ -1916,7 +1916,7 @@ second name for one function.
 
 **What the exercise found, beyond navigability.** Section banners had begun to
 disagree with their contents in three of the five files, always in the same
-direction: a section grows, absorbs a neighbour, and nobody renames it. The
+direction: a section grows, absorbs a neighbor, and nobody renames it. The
 worst was `backend.rs`, which had an empty "Drop glue" heading immediately
 followed by "Closures" with the glue filed under the latter. A banner is a
 promise with no compiler behind it, and a module is the same promise the
@@ -1979,7 +1979,7 @@ Ordered by value, not by §6's numbering.
   below is met. `crates/khora-pkg`, and `khora-codegen-llvm/tests/packages.rs`
   is the end-to-end proof.
 
-  **A `git` source was added ahead of the registry.** The manifest modelled
+  **A `git` source was added ahead of the registry.** The manifest modeled
   `path` and `version`, and neither exercises what a package manager is for: a
   path is not fetched, so nothing is hashed, pinned or cached, and `version`
   needs a registry that does not exist. `{ git = "...", rev = "..." }` is the
@@ -2030,7 +2030,7 @@ Ordered by value, not by §6's numbering.
   `std`, all three examples, `packages/` and `bench/service` are clean.
 
   **They are narrow on purpose.** A lint people learn to ignore is worse than
-  no lint, so where a judgement was available each takes the quiet side.
+  no lint, so where a judgment was available each takes the quiet side.
   `dangling-expression` reports only an expression that *cannot* do anything —
   no call, no assignment, nothing that could raise — which leaves out the
   general case of a call whose result is discarded, because deciding *that*
@@ -2082,7 +2082,7 @@ Ordered by value, not by §6's numbering.
   `bench` block parsed, type-checked, and then compiled to nothing and ran
   never — silently, which is the worst way for a promised feature not to work.
   Four places had to learn about it, and the last one is the reason it stayed
-  hidden: without a synthesised signature in `type_map`, no instance is
+  hidden: without a synthesized signature in `type_map`, no instance is
   registered, so `emit_function` declines to declare the body, so the entry
   point's registration loop finds no function to point at. The build succeeds
   and prints `no benchmarks`.
@@ -2094,7 +2094,7 @@ Ordered by value, not by §6's numbering.
   than an interpolation between two that did.
 
   Two limits worth knowing. There is **no `black_box`**: a bench whose body
-  computes something nobody reads may be optimised away and will then report a
+  computes something nobody reads may be optimized away and will then report a
   few nanoseconds very confidently. Adding one means a compiler intrinsic, not
   a library function. And benches run **one at a time**, unlike tests —
   overlapping tests find tests that lie, and overlapping benches contend for
@@ -2173,7 +2173,7 @@ Ordered by value, not by §6's numbering.
   **The premise is that no model has seen Khora.** An agent asked to write some
   produces something plausible — it borrows enough syntax from Rust and enough
   ideas from Effect that a good guess is easy — and is wrong in ways it cannot
-  detect by reading. The failures with no analogue elsewhere are the expensive
+  detect by reading. The failures with no analog elsewhere are the expensive
   ones: a capability that must appear in a `with` row, an error that must
   appear in `raises`, `Share` on anything crossing into a fiber.
 
@@ -2255,7 +2255,7 @@ positioning makes.
 
 It is also what makes the language's concurrency bet pay. Khora has **one**
 concurrency model on purpose: the state-machine transform was rejected outright
-because "can this suspend" colours every call graph, and there is deliberately
+because "can this suspend" colors every call graph, and there is deliberately
 no non-blocking socket API for a framework to build a competing event loop on.
 The upside is that there is no tokio-versus-async-std schism to have and every
 library composes with every other. The downside is that the ceiling is the
@@ -2276,7 +2276,7 @@ runtime's alone to raise, and nobody else can work around it.
 **What it does not change: anything a program can see.** No signature in `std`,
 no line in a reference application, no `async` keyword. `Fiber::spawn`, `join`,
 `cancel` and the nursery mean what they meant. That is the whole reason 5.3 was
-allowed to ship threads, and this phase either honours it or invalidates the
+allowed to ship threads, and this phase either honors it or invalidates the
 decision retroactively.
 
 **Ordering.** After Phase 10 rather than before, and it is a genuine trade: the
@@ -2373,7 +2373,7 @@ the fix if that ever bites, and it is not needed to reach the phase's number.
 Three things found by building it rather than by designing it:
 
 - A yielder installed once per body rather than once per resume is undefined
-  behaviour that *looks* like it works, because every yielder switches back to
+  behavior that *looks* like it works, because every yielder switches back to
   the same worker. It survived a three-fiber interleaving test and became an
   access violation at five hundred fibers across four workers. The regression
   test keeps a value on the fiber's own stack across a suspension, which fails
@@ -2758,7 +2758,7 @@ reported as itself, and cells do not coerce.
 number that has already lost.
 
 **Still open, and it is the half that matters most:** rolling back when the
-fiber is *cancelled* rather than when the body returns an error. That needs
+fiber is *canceled* rather than when the body returns an error. That needs
 `Region`'s `defer` threaded through `transaction`, and the doc comment says so
 where it will go.
 
@@ -2795,7 +2795,7 @@ The original entry:
 
 
 Nothing. `ecosystem.md` decides the shape: the `Db` capability, the row and
-value types, and **what a transaction does when its fiber is cancelled** belong
+value types, and **what a transaction does when its fiber is canceled** belong
 to `std`; the SQLite engine is a first-party package; Postgres is a package.
 The transaction-under-cancellation contract is the middle layer here and the
 only part that fails in production rather than in testing.
@@ -2838,7 +2838,7 @@ with. Arithmetic defaults exactly as it did.
 Regressions in `khora-types/tests/closures.rs` for each, and one in
 `khora-codegen-llvm/tests/shared.rs` that accumulates a log through
 `Shared::update` — compiled and run, because the original symptom was a program
-and not a judgement.
+and not a judgment.
 
 ### A type name that names nothing — **fixed**
 
@@ -3051,7 +3051,7 @@ that only pings a socket.
 leak-on-cancel because an attacker could drive the leak — comparing leaking
 against nothing, when the alternative is the process ending. An attacker who
 can trigger a trap today gets a total outage; leak-containment would give them
-gradual memory growth. That trade favours the defender, and the mutex is the
+gradual memory growth. That trade favors the defender, and the mutex is the
 real objection rather than the leak.
 
 Which makes the falsifiable list four items instead of three: a transactional
@@ -3288,7 +3288,7 @@ that 13.7 means item 7 and nothing has to be translated in conversation.
 **Two things make this phase unlike the ones above it.** Half of it is
 *finishing* work whose hard part is already decided and written down — those
 entries point at the section that owns the detail rather than restating it. The
-other half is work phases 1 to 12 never touched at all: governance, a licence,
+other half is work phases 1 to 12 never touched at all: governance, a license,
 an install story, documentation for somebody who was not here. Nothing in the
 tree so far has any opinion about those, which is itself the finding.
 
@@ -3298,10 +3298,10 @@ tree so far has any opinion about those, which is itself the finding.
 | --- | --- | --- |
 | 13.1 | Scheduler and I/O architecture | **Half.** 11I and 11J landed; the next three steps and the acceptance criterion are written in "What is left, in the order worth trying" above and `scheduler.md` §10a. Threads are still the default — making the scheduler one is a decision, not a flag flip |
 | 13.2 | Concurrency under real load | **Covered, and it found one.** Eight tests in `tests/load.rs` hold the claims `std/core.kh` had only asserted in prose: a bounded nursery bounds, a full channel stops its sender, overload is latency rather than loss, a closed channel drains, a service recovers, and a server serving four answers twenty-four at once. The listening backlog was **16** against a concurrency bound of 256 — the backlog *is* the overload buffer, and it is 511 now |
-| 13.3 | DB cancellation safety | **Done.** `transaction` registers the rollback with a region of its own before the body runs, so it fires on every way out — and the body carries a `raises` row, without which no cancellation could reach it. Finalizers are shielded from the cancellation running them. Proved against a real server: the cancelled insert is gone, the committed one is there |
+| 13.3 | DB cancellation safety | **Done.** `transaction` registers the rollback with a region of its own before the body runs, so it fires on every way out — and the body carries a `raises` row, without which no cancellation could reach it. Finalizers are shielded from the cancellation running them. Proved against a real server: the canceled insert is gone, the committed one is there |
 | 13.4 | Trace propagation | **Designed, not built — but a span now closes.** `observability.md` §Propagation says a span's parent must survive spawn, steal, suspension, wake and cancellation, and that the fiber carries it; the fiber does not carry it yet. What 13.3's region work made possible was the smaller half: `around` and `around_result` register the finish before the body runs, so a span closes on a raise and on a cancellation instead of being left open and read as still running |
 | 13.5 | `Decimal` | **Done.** `0.01d` is built — the language's only literal suffix, desugared to `Decimal::of_parts` during lowering — with the scale-alignment and overflow tests 13.5 asked for. `docs/design/numbers.md` |
-| 13.6 | Runtime soundness audit | **Done, with one gap the tool cannot close.** Three defects found and fixed, one reachable; the FFI boundary and the atomicity decision are enforced by tests; ThreadSanitizer is clean over thirty-eight tests in six modules (`sh scripts/tsan.sh`). It cannot see through a stack switch, so the scheduler is unsanitised — `docs/design/soundness.md` |
+| 13.6 | Runtime soundness audit | **Done, with one gap the tool cannot close.** Three defects found and fixed, one reachable; the FFI boundary and the atomicity decision are enforced by tests; ThreadSanitizer is clean over thirty-eight tests in six modules (`sh scripts/tsan.sh`). It cannot see through a stack switch, so the scheduler is unsanitized — `docs/design/soundness.md` |
 | 13.7 | Deployable cross-compilation | **One target of several.** `targets.md` steps 2 and 3 are done for wasm; aarch64 and musl need a sysroot, and step 4 — fetching a runtime — is untouched |
 | 13.8 | WebAssembly product path | **A module exists and runs.** 1.9 MB, hand-built runtime, no deployment example, no host integration |
 | 13.9 | Debugging ergonomics | **Half.** 12.4 gives line tables and named locals; following a pointer into an object needs `KhoraHeader` and every ADT described in DWARF |
@@ -3327,7 +3327,7 @@ tree so far has any opinion about those, which is itself the finding.
 **13.6, the soundness audit.** `khora-rt` has stackful coroutines, work
 stealing, fiber migration between threads, thread-locals read across stack
 switches, `Send` boundaries around `Task`, an FFI surface, a `longjmp`, and now
-an allocation registry. Phase 11 found three bugs in that neighbourhood by
+an allocation registry. Phase 11 found three bugs in that neighborhood by
 running into them — a cached TLS address, a counter underflow, a livelock — and
 the honest reading is that an inventory would find more. This is the item most
 likely to change the shape of the release rather than just add to it.
@@ -3503,7 +3503,7 @@ alpha without an install story, and no install story without release artifacts.
 This is most of what "releasable" means and none of it is interesting work.
 
 **These are capability gaps somebody meets in their first week.** 13.12's
-missing HTTP client, 13.2's untested behaviour under overload, 13.16's editor
+missing HTTP client, 13.2's untested behavior under overload, 13.16's editor
 extension that nobody can install.
 
 **And these are depth**: 13.9's heap layout in DWARF, 13.23's numbers at scale,
@@ -3692,12 +3692,12 @@ the runtime's own sources and fails if an export takes a pointer, or keeps a
 `glue`, without being `unsafe`. Reverting the array fix makes it fail, which is
 how it was checked.
 
-What was read and found sound is written up rather than summarised here: the
+What was read and found sound is written up rather than summarized here: the
 `Send` claim on a suspended stack, thread-affinity, why trap containment cannot
 span a migration, the reference-counting orderings, unwinding, and the line in
 the blocking pool that quietly guarantees a single-threaded program has no pool
 thread. Two things are recorded as still open — the policy that a fiber may not
-suspend inside an `extern` call, which nothing enforces, and that no sanitiser
+suspend inside an `extern` call, which nothing enforces, and that no sanitizer
 has been run. The second is the larger half of 13.6 and is machine time rather
 than reading time.
 
@@ -3839,7 +3839,7 @@ Four decisions inside it worth keeping:
   invalidating it when the schema changes — a cache, not a slice of protocol.
 
 `run` stays, for statements with no parameters, and the documentation is blunt
-about which to reach for. The only defence a library can offer against
+about which to reach for. The only defense a library can offer against
 interpolation is to make the safe call the shorter one, and it now is.
 
 Tested twice: nine assertions on the bytes, every expected value written out by
@@ -3976,8 +3976,8 @@ to fix and it is an afternoon.
 | 14.1 | ✅ **The extension speaks to the server** | Done. A hundred lines of JavaScript, and `khora-cli/tests/lsp.rs` now covers the path an editor actually takes — `khora lsp` as a subprocess over framed pipes, which no test reached before |
 | 14.2 | ✅ **Format on save** | Done, `textDocument/formatting` only — range formatting has no caller and `khora-fmt` formats whole files. One edit over the document rather than a fake minimal diff, and a file that does not parse comes back untouched |
 | 14.3 | ✅ **Go to definition** | Done, paths and locals. **The index this row asked for turned out not to be needed** — see below |
-| 14.4 | ✅ **Completion** | All four, and the workspace besides: after `.` the receiver's methods, after `Type::` that type's own and its constructors, inside an import list the module's exports, inside a `with { .. }` a whole handler for an effect — every operation, each with a closure of the right arity, labelled the way the outstanding requirement asked — and otherwise what is in scope plus every public name in the workspace, with the `import` that brings it in. The lesson worth keeping is in the module: completion runs on code that does not parse, and the trigger character lands in an `ERROR` node rather than in the path it belongs to — so all of it reads the *token stream* backwards rather than the node tree. `with {` is the sharpest case of it, since the node that would say what the brace belongs to is exactly the node that does not exist yet |
-| 14.5 | ✅ **Semantic tokens** | Done. Locals, parameters, fields, methods, constructors, and every path segment classified by what it resolves to — the things a regex cannot decide. Deliberately *not* keywords or literals: the TextMate grammar already gets those right and a second opinion is only a chance to disagree. Whole-document only; range and delta are optimisations nothing has measured a need for |
+| 14.4 | ✅ **Completion** | All four, and the workspace besides: after `.` the receiver's methods, after `Type::` that type's own and its constructors, inside an import list the module's exports, inside a `with { .. }` a whole handler for an effect — every operation, each with a closure of the right arity, labeled the way the outstanding requirement asked — and otherwise what is in scope plus every public name in the workspace, with the `import` that brings it in. The lesson worth keeping is in the module: completion runs on code that does not parse, and the trigger character lands in an `ERROR` node rather than in the path it belongs to — so all of it reads the *token stream* backwards rather than the node tree. `with {` is the sharpest case of it, since the node that would say what the brace belongs to is exactly the node that does not exist yet |
+| 14.5 | ✅ **Semantic tokens** | Done. Locals, parameters, fields, methods, constructors, and every path segment classified by what it resolves to — the things a regex cannot decide. Deliberately *not* keywords or literals: the TextMate grammar already gets those right and a second opinion is only a chance to disagree. Whole-document only; range and delta are optimizations nothing has measured a need for |
 | 14.6 | ✅ **Inlay hints for rows** | Done, and it did pay twice over. `BodyTypes::call_rows` publishes what each call site asked for — the fact the checker computed for row subtraction and then dropped. The hints read it; 14.27's sharper `unused-capability` and capability-aware completion can now read the same thing rather than deriving it again |
 | 14.7 | ✅ **Quick fixes** | Done for four whose message names one exact edit: `export` → `pub`, a module-level `let` → `const`, a discarded `Result` → `let _ =`, and a missing `with`/`raises` entry → the clause on the enclosing signature. **Deliberately not** `Add the bound, as `T: Ord`` or `unused-capability`: an action is applied by somebody who read four words of the message, so one that guesses is worse than none. The fourth is the only one that edits somewhere other than the squiggle — see below for why it is allowed to |
 | 14.8 | ✅ **References, rename, symbols** | References, document outline and `Ctrl+T` are done. **Rename covers locals and refuses a declaration with a reason** — two specific things are missing and both are named in `khora-lsp/src/references.rs`: an item's *name* has no range (`Item::range` is the whole declaration), and `import m::{foo as bar}` needs the `foo` renamed and the `bar` left alone. A rename that misses one occurrence breaks a build silently in a file nobody was looking at, so it waits for those two rather than guessing |
@@ -4047,7 +4047,7 @@ same one that keeps `T: Ord` out: is there anything to choose? There is not.
 The label and the type are printed in full, exactly one function encloses the
 call, and a row is a set, so where in it the entry lands changes nothing.
 
-The half that is a judgement is what is *not* offered beside it. Propagating a
+The half that is a judgment is what is *not* offered beside it. Propagating a
 requirement outwards is one of two answers — the other is to satisfy it here
 with a `with { db: .. }` block — and only the first is the one the message
 spells out. Offering both would be the lightbulb guessing, which is the thing
@@ -4082,7 +4082,7 @@ it.
 | 14.13 | ✅ **`[workspace]`** | Done. The root `khora.toml` is virtual — no `[package]`, because the root is not one — and `khora check .` and `khora fmt .` fan out over its eight members, each as its own package. Every member runs even after one fails, because the shell loop this replaced stopped at the first. Patterns are a trailing `*` and nothing more: `**` and brace expansion are syntax to document and edge cases to get wrong, for a feature whose whole job is "which directories". Finding the root also exposed a real bug — `khora check <file>` took the *nearest* manifest as the file's package, so once a virtual one existed at the repository root, checking one file compiled the whole monorepo |
 | 14.14 | ✅ **Inherited fields** | Done. `version.workspace = true` for `version`, `authors` and `publish` (and for `edition`, until 0.2.0 removed it), and `workspace = true` for `[lints]`, `[fmt]` and `[permissions]` whole. **Nothing is implicit**: a root value that applied unless overridden would mean a member's manifest tells you what it *adds*, and knowing what it *is* would take two files. Resolved before a `Manifest` exists, so `version` stays a `String` and no reader has to cope with one that has not arrived -- the cost is that `Manifest::parse`, which has text and no path, refuses `workspace = true` and says why. Everything reading a manifest off disk now goes through `Manifest::load`. `name` is not inheritable, and a grant written beside `workspace = true` is an error rather than a silent loss. The three examples had the same `[fmt]` block copied verbatim; there is now one |
 | 14.15 | ✅ **One lock, one version** | Done. One `khora.lock` at the root, and every member seeds the resolution — so building *one* member finds out that *another* wants a different revision of a shared package, which is the whole policy. What comes back is still only what the asking member reaches: the lock covers the workspace, the compilation does not. The cost is stated rather than hidden — resolving any member resolves all of them, so a member with no dependencies pays for a sibling's fetches, and a member whose manifest does not parse breaks the others. A lockfile left in a member is reported, not deleted. Two latent bugs fell out: the upward walk for a workspace used relative paths and so stopped at the working directory (the same member was in a workspace from the repository root and out of one from `examples/`), and a `path` dependency was written into the lock as the walk that found it — `packages/alpha/../../vendor/shared`, which depends on who asked and from where |
-| 14.16 | ✅ **Affected-only** | Done. `khora check . --since main` and the same for `khora fmt`. Exact, and for the reason the section below gives: the resolver already knows which directories each member compiles, so a change inside a *dependency* selects the members that reach it and not the ones that do not. The rule that makes it safe to trust is the fallback — a changed file inside no member and inside nothing a member depends on selects **everything**, and names the file, because a tool that answers "nothing was affected" over a file it did not recognise is worse than no tool. Untracked files count: the change most likely to be the one being tested is the one nobody has `git add`ed. Stops at file granularity rather than module granularity, which is a refinement with the same shape |
+| 14.16 | ✅ **Affected-only** | Done. `khora check . --since main` and the same for `khora fmt`. Exact, and for the reason the section below gives: the resolver already knows which directories each member compiles, so a change inside a *dependency* selects the members that reach it and not the ones that do not. The rule that makes it safe to trust is the fallback — a changed file inside no member and inside nothing a member depends on selects **everything**, and names the file, because a tool that answers "nothing was affected" over a file it did not recognize is worse than no tool. Untracked files count: the change most likely to be the one being tested is the one nobody has `git add`ed. Stops at file granularity rather than module granularity, which is a refinement with the same shape |
 | 14.17 | ✅ **A build cache with a sound key** | Done. `khora build` over inputs it has already built reuses the artifact — 12.1s to 0.4s on `core_demo`. The key holds the source *and the toolchain that turns it into bytes*: the compiler binary hashed rather than its version string (a version is constant across every dev build out of `target/debug`), the linker binary, the runtime archive, the target, the profile, and whether debug information is on — `KHORA_DEBUG` overrides the profile in both directions, so the profile’s name does not determine it. Source paths join the key only when debug information is on, because that is the only thing that puts them in the output. **The reproducibility claim is under test**: a release hit and a `--no-cache` build of the same inputs are compared byte for byte. `khora cache` and `khora cache --clear`; no eviction policy, because a wrong rule evicts the entry somebody was about to hit. `docs/design/cache.md` |
 | 14.18 | ✅ **`[tasks]` gets a runner** | Done. `khora task <name>`, and `khora task` to list — it was `khora run` for a day, until 14.34 wanted that name for the thing every other toolchain calls `run`. `Task` gained a `run` line, which is the field that was missing — the table could only ever have grouped built-ins without it. **Not `build.rs` coming back**: a task runs when somebody types its name in a manifest they are standing in, and a dependency’s `[tasks]` table is never read at all. At a root, a task the root declares runs once there (`ci` means “run the pipeline”); otherwise it runs in every member that has it, in dependency order taken from the resolver rather than guessed. `lint` runs `khora check` and says so, because the lints live there and there is no `khora lint`. `--since` narrows the members the same way 14.16 does. `docs/design/tasks.md` |
 | 14.19 | ✅ **Workspace permissions as policy** | Done, as `[workspace.policy]` — a *different* table from `[workspace.permissions]`, which 14.14 made the inheritable **default**; this is the **cap** a member cannot opt out of. This repository now says only the three examples that answer on a port may reach the network, and `extern = []`: nothing here may declare an `extern fn` or hand that permission to a dependency. Caps *which member may ask*, not what it may ask for — capping values needs a checkable definition of “narrower” for a glob, and getting that subtly wrong gives a cap that looks enforced and is not. Package names rather than paths, and a name matching no member is refused: a typo in a cap fails open, so it has to be loud. Enforced in `Manifest::parse_at`, so it holds for every command rather than the one it was written for |
@@ -4090,7 +4090,7 @@ it.
 | 14.33 | ✅ **The runtime archive changes under a parallel test run** | Fixed. `khora-codegen-llvm`’s harness ran `cargo build -p khora-rt` unconditionally from inside a test, and that build is **not the same build** the enclosing run did — measured at 98,725,916 bytes against 98,490,170, because the two resolve their dependencies’ features differently. So it replaced the archive while fifty other test binaries linked against it, and two `khora build` invocations seconds apart got different runtimes. The staleness question the harness was really asking is "is the archive older than the runtime’s sources", which needs no build to answer: it now skips entirely when the enclosing build already wrote a current one, which is every workspace run. Verified both ways — current archive, 1.0 s and untouched; touch a runtime source, 8.0 s and rebuilt. Found by 14.17’s cache, which was correctly missing the whole time. Errata 51 |
 | 14.20a | ✅ **The formatter reads `[fmt]`** | Done for the half that is a real choice. `khora_fmt::Options` carries the indent; `format_with` takes it; the CLI and the language server both read it from the manifest, because a formatter that answers one way on save and another on the command line is the worst kind. Wiring it exposed a bug that was invisible while nothing could differ: `khora fmt <package>` used `collect_sources`, the *compiler’s* question, so it walked the standard library too and would have rewritten `std` in a member’s style. Formatting needs no dependencies — a file is formatted by itself. **`explicit-semicolons` is still read by nobody, and cannot be anything else**: semicolons are mandatory in the grammar, so the only valid value is `true`. It is a statement of a language rule wearing the clothes of a setting, and the honest fix is to delete the key — a manifest-surface removal, so it is 14.20b rather than done quietly here |
 | 14.20b | ✅ **Delete `[fmt] explicit-semicolons`** | Done. It could not do anything and could not be made to: §14 says every statement must end in a semicolon and the parser agrees, so `false` was never a value a project could choose. Gone from the model, from §4.1 and from this repository’s root manifest. The key stays in the audit schema as `Schema::Removed`, with a sentence — a manifest that still has the line gets “removed key … semicolons are required by the grammar, so this was never a choice. Delete the line” rather than “unrecognized key”, which reads as “your toolchain is too old” and is the opposite of the truth |
-| 14.20 | ✅ **Release tooling** | Done, as `khora release --since <rev>`. It reports which members changed and which did not, and **never tags and never pushes** — there is a test asserting no tag exists afterwards, because `release.yml` puts a person between "built" and "visible" on purpose. `--major`/`--minor`/`--patch` rewrites `[workspace.package] version` textually, refusing unless exactly one match exists, so a manifest full of comments written to be read survives a release. **It does not choose the level**: `docs/design/compatibility.md` says a bug fix is not automatically a patch, which is a judgement about observable behaviour and the one thing a tool cannot see. `--notes` drafts from commit subjects with the required behaviour-changes section left empty and labelled as meaning *not ready*. Change detection is 14.16’s selection unchanged, including that a file no member owns selects everything. Lockstep versions, with per-member deferred until a registry exists to make the distinction observable. `docs/design/releasing.md` |
+| 14.20 | ✅ **Release tooling** | Done, as `khora release --since <rev>`. It reports which members changed and which did not, and **never tags and never pushes** — there is a test asserting no tag exists afterwards, because `release.yml` puts a person between "built" and "visible" on purpose. `--major`/`--minor`/`--patch` rewrites `[workspace.package] version` textually, refusing unless exactly one match exists, so a manifest full of comments written to be read survives a release. **It does not choose the level**: `docs/design/compatibility.md` says a bug fix is not automatically a patch, which is a judgment about observable behavior and the one thing a tool cannot see. `--notes` drafts from commit subjects with the required behavior-changes section left empty and labeled as meaning *not ready*. Change detection is 14.16’s selection unchanged, including that a file no member owns selects everything. Lockstep versions, with per-member deferred until a registry exists to make the distinction observable. `docs/design/releasing.md` |
 | 14.21 | ✅ **`khora new`, `khora why`, `khora graph`** | Done. `new` writes a manifest that fits where it lands — inside a workspace that shares a version it writes `version.workspace = true`, because a scaffold that hard-codes one creates the drift 14.14 exists to prevent — and says so when the root’s `members` will not pick the directory up. `why` prints **every** chain, shortest first: printing one of three reasons is how somebody removes a dependency and finds the package still there. `graph` draws a tree, or Graphviz with `--dot`. Writing `why` found a bug worth the whole item: two members reaching one directory two ways — `../../vendor/shared` and `../shared` — compared as different sources, so a diamond, the most ordinary shape in a monorepo, was an “asked for twice and differently” error |
 
 #### Affected-only is exact here, and that is unusual
@@ -4117,7 +4117,7 @@ toolchain difference nobody hashed.
 Khora can do better, because 12.9 made builds **bit-for-bit reproducible** —
 measured, not assumed, and `KHORA_PROFILE=release` is reproducible including
 the executable as of 13.10. When the same inputs provably produce the same
-bytes, a content-addressed cache is a *proof* rather than an optimisation: key
+bytes, a content-addressed cache is a *proof* rather than an optimization: key
 on the tree content, the toolchain version and the profile, and a hit is the
 artifact the build would have produced.
 
@@ -4127,7 +4127,7 @@ baseline's receipt, which is the same idea one scale down.
 The remote half — a shared cache between a team and CI — is the same key over a
 network, and is worth building only once somebody has a team.
 
-**Built, and one thing this section did not anticipate.** Memoising the
+**Built, and one thing this section did not anticipate.** Memoizing the
 toolchain binaries' digests against their size and modification time is the
 obvious way to keep the key cheap, and it is wrong: two writes inside one
 filesystem timestamp tick are indistinguishable, so the memo can describe
@@ -4189,7 +4189,7 @@ tidy without anybody deciding to tidy it.
 | 14.22 | ✅ **`unused-import`** | Done, and it removed 11 dead names from the corpus. A name counts as used if it is *written* anywhere outside the imports, **or if anything in the file has that type** — the second half cost a corpus-wide revert to find: `import postgres::conn::{Answer}` appears nowhere else and deleting it breaks `answer.rows`, because the field access needs the type in scope and the type is inferred. Both halves are wrong in the quiet direction, which is the only acceptable direction for the lint people meet first. A statement whose names are *all* unused is left alone, because `import_inherent` runs per imported origin rather than per name, so the statement is load-bearing for `value.method()` even when nothing it names is mentioned — that case waits on keying inherent methods to the type, which `import_inherent`’s own comment says is the intent |
 | 14.23 | ✅ **`unused-binding`** | Done, and it found **47 real sites** — 32 in `std/core.kh` alone, nearly all `Option::Some(v) => true` binding a name it ignores. Two escapes: `_` binds nothing, and a *leading* underscore silences it, which is a convention this lint introduces because a parameter often cannot be used and still wants a name for the reader. Assigning counts as using, so “assigned and never read” stays a different lint rather than being caught here by accident. One false-positive class had to go first: a `with { clock: Clock::real() }` block lowers to `let`s, and a capability is used by calling something that requires it rather than by naming it |
 | 14.24 | ✅ **`unreachable-code`** | Done. Statements after a `return`, `raise`, `break` or `continue`. **One finding per block, not one per dead line** — three lines after a `return` are one mistake. Quiet about an `if` whose branches all return, which needs a reachability analysis rather than a look at one node and is worth having as its own thing; a lint that misses a case annoys nobody, and one that reports live code gets switched off. Found nothing in the corpus, which is the answer a cheap lint should give on code that was already reviewed |
-| 14.25 | ✅ **`inconsistent-constructor`** | Done, in two halves, because the doc this cites said the rule “belongs in a style note rather than in the compiler”. **The note is written** — `docs/design/naming.md`, read off the existing surface rather than invented. **And the checkable part is a lint**: an `of` with nothing to convert, and a `new`/`empty`/`root` that takes arguments. Whether a thing *grows* decides `new` against `empty` and no compiler sees that, which is why the note is the primary artefact. Naming a function `make` or `create` reports nothing — the lint only speaks about names that claim the convention, which is what lets it default to `warn`. It found exactly one violation in all of `std`: `Array::new(length, fill)`, where `new` means “an empty one” and an array neither grows nor is empty. Not renamed — that is a compatibility decision about a published signature |
+| 14.25 | ✅ **`inconsistent-constructor`** | Done, in two halves, because the doc this cites said the rule “belongs in a style note rather than in the compiler”. **The note is written** — `docs/design/naming.md`, read off the existing surface rather than invented. **And the checkable part is a lint**: an `of` with nothing to convert, and a `new`/`empty`/`root` that takes arguments. Whether a thing *grows* decides `new` against `empty` and no compiler sees that, which is why the note is the primary artifact. Naming a function `make` or `create` reports nothing — the lint only speaks about names that claim the convention, which is what lets it default to `warn`. It found exactly one violation in all of `std`: `Array::new(length, fill)`, where `new` means “an empty one” and an array neither grows nor is empty. Not renamed — that is a compatibility decision about a published signature |
 | 14.26 | ✅ **`undocumented-export`** | Done. A `pub` function, type, trait, effect or constant with no `///` above it. **Off by default**, for the reason Rust’s `missing_docs` is: forty warnings on a young package’s first build is not a prompt to write forty doc comments. `std` keeps its Rust test, because `std` is found beside the compiler and has no manifest to switch anything on in. Read from the CST, since the HIR drops `///` and `khora_doc::Item` has the text but no range. `main` is exempt — its `pub` is what the language requires of an entry point, not a promise to anybody. Building it also fixed a scoping bug every lint had: `collect_sources` hands a compilation the package, its dependencies **and all of `std`**, so a package’s `[lints]` were being applied to the standard library. Lints now only run on files the command was pointed at |
 | 14.27 | ✅ **Sharpen `unused-capability`** | Done, and it cost nothing: `BodyTypes::call_rows` was already there, added for 14.6 and inlay hints. “Used” is now **read outright, or required by something this body calls**, so a body containing a call is no longer beyond reach — which was almost every real function. It still gives up on a call whose required row is *open*, since a generic row could require anything and a wrong report here costs a caller a signature change. The test that asserted the old restriction is inverted; its own comment had said “proving that needs the callee’s row”, and the row is recorded now |
 
@@ -4423,7 +4423,7 @@ Absent: `split`, `replace`, `ends_with`, `upper`, `is_empty`, `contains`,
 `repeat`, `trim_start`, `trim_end`, `join`.
 
 The asymmetries are the diagnosis. `starts_with` without `ends_with` and
-`lower` without `upper` are not judgement calls about scope — they are what a
+`lower` without `upper` are not judgment calls about scope — they are what a
 surface looks like when each function was added by the one caller that needed
 it. `split` and `replace` are minutes into writing anything.
 
@@ -4490,7 +4490,7 @@ The list the surface audit said it could not produce. Four programs, each by
 somebody meeting the language for the first time, each told to build something
 real and write down every place the language got in the way:
 
-- a **log analyser** — a CLI over two log files, filters, histograms,
+- a **log analyzer** — a CLI over two log files, filters, histograms,
   percentiles, 647 lines
 - a **financial reconciler** — two CSVs matched by identifier, `Decimal` end to
   end, 1,275 lines across six modules
@@ -4557,9 +4557,9 @@ never returns.
     fn ticker() with { clock: Clock } raises Stop { loop { clock.sleep(200); } }
 
 `loop { sleep; work }` is the shape every periodic job in every language is
-written in. In Khora that fiber cannot be cancelled and a nursery that must
+written in. In Khora that fiber cannot be canceled and a nursery that must
 unwind past one waits forever. Narrowed: a straight-line `sleep(5000)`
-cancelled at 500ms runs the whole five seconds *and its post-sleep work*; a
+canceled at 500ms runs the whole five seconds *and its post-sleep work*; a
 loop with any `!` in its body cancels correctly; a fiber blocked on
 `Channel::receive` cancels instantly. So cancellation is observed at `!` sites
 and at a tagged return, and a loop back-edge is not one — which is exactly what
@@ -4572,12 +4572,12 @@ stats lines forever and never reports the error.
 
 **4. Any list past about eight thousand elements kills the process, silently.**
 `List` is the default collection, every traversal in `std` is recursive, and
-there is no tail-call optimisation — `List::fold` is written tail-recursively
+there is no tail-call optimization — `List::fold` is written tail-recursively
 and still overflows. Exit 253, nothing on stdout, nothing on stderr. Debug dies
 past ~8,000, release past ~12,000, `List::sort` first because it stacks
 deepest.
 
-This killed the log analyser on its first realistic input: 122,000 lines read
+This killed the log analyzer on its first realistic input: 122,000 lines read
 fine, and the *report* died sorting 27,000 durations. The workaround was a
 counting histogram, which is a better design, chosen to route around a crash
 rather than on the merits. And `Vector::to_list` then `List::sort` is the only
@@ -4646,7 +4646,7 @@ believed.
   say the same thing.
 - **`#Dict::insert`** leaks an internal `#`-prefixed name into user-facing text.
 - **A failure that escapes `main` prints nothing.** Exit 1, both streams empty,
-  and the payload is right there. The log analyser's first version had `main()
+  and the payload is right there. The log analyzer's first version had `main()
   raises IoError`; run on a missing file it produced no output whatsoever, and
   the author went looking at the `print` calls.
 - **A failing `assert` gives no location and no values.** `test a well formed
@@ -4683,7 +4683,7 @@ imported, the error becomes a type mismatch on a function type — `` `(() -> _
 with { nursery: Nursery, | _ } ...)` has no method `adopt` `` — which is
 genuinely hard to read. `fibers-and-nurseries.md` says `nursery(children)` and
 `nursery(fn () => children())` "are the same thing", which invites exactly the
-generalisation that fails.
+generalization that fails.
 
 **A record literal is not resolved by its expected type.** `Shared::modify`'s
 closure returns `Changed<A, B>`; writing the record gives `no record type has
@@ -4709,7 +4709,7 @@ neither.
 is `arithmetic: expected Int, found Decimal`. Money compares with operators and
 adds with function calls.
 
-**A background fiber must invent an error type to be cancellable.** A fiber
+**A background fiber must invent an error type to be cancelable.** A fiber
 with no error row has no channel to be interrupted on, so three fibers that
 cannot fail were given `raises NotifyError` — an error none of them raises —
 purely to be stoppable. `raises Never` is not spelled anywhere.
@@ -4759,7 +4759,7 @@ The original list:
   float to a fixed number of decimals; two agents wrote the same `percent(part,
   whole)` helper and `examples/risk_analyzer` has a third copy.
 - **`Dict::update(key, (Option<V>) -> V)`** — "count things into a map" is the
-  most common operation in a log analyser and is currently
+  most common operation in a log analyzer and is currently
   `insert(t, k, unwrap_or(get(t, k), 0) + 1)` every time.
 - **`Option::and_then` / `filter`, `Result::map` / `and_then`.** `map_err`
   exists, which makes `map`'s absence odd. Without `and_then`, parsing a record
@@ -4883,7 +4883,7 @@ module conventions between them; `examples/risk_analyzer` said Khora had no
 used `assert` without importing it; `control-flow.md` said Khora has no tuple
 literal, which it has; and a trap told the reader to set `RUST_BACKTRACE`,
 named after the language the compiler happens to be written in. That is
-`KHORA_BACKTRACE` now, with the Rust one still honoured.
+`KHORA_BACKTRACE` now, with the Rust one still honored.
 
 **Left undone, and deliberately**: there is still no guide page for dates,
 `khora doc`'s defaults still point at this repository's paths, build artifacts
@@ -4903,7 +4903,7 @@ The original list:
 - **`data-types.md`'s "Type aliases" is wrong**, per Tier 4.
 - **`capabilities.md`'s permission example is a trap.** `read = ["./data/**"]`
   does not grant a path the program spells `data/foo.txt`: grants are matched
-  as literal strings after only `\` → `/` normalisation, so the `./` is
+  as literal strings after only `\` → `/` normalization, so the `./` is
   significant. Two agents hit this independently. Worse, grants resolve against
   the *process* working directory rather than the package, so the same grant
   that works from the repo root fails after `cd`. For a CLI that takes paths
@@ -5040,7 +5040,7 @@ one is open:
   decrement that does not hit zero.
 - **`Fiber::wait` returning early does not reproduce**, and on inspection was
   never happening. Both lines of the report's own reproducer are correct
-  behaviour, which is worth writing down because the reading that made them
+  behavior, which is worth writing down because the reading that made them
   look wrong is a natural one.
 
   `cancel after 0ms: wait returned in 0ms, child finished=0` — the child's
@@ -5202,7 +5202,7 @@ holding a `bigint` that is itself a heap object with a digit array, so roughly
 fresh one. There is no path there to a flat array at all. That is not the bar
 worth clearing.
 
-**The optimisation that matters is unboxing, not narrowing.** A small record of
+**The optimization that matters is unboxing, not narrowing.** A small record of
 scalars passed in registers and stored inline would make a price book
 contiguous and refcount-free, and it would help `Decimal`, `Pair` and every
 small record at once rather than one type.
@@ -5332,7 +5332,7 @@ green on three platforms and this has been run on one, and layout is exactly
 the kind of question that differs between them — `docs/errata.md` 35 is a
 Windows x86-64 disagreement about how a sixteen-byte aggregate returns, which
 cost a day. The widths here come from LLVM's own data layout rather than from
-arithmetic, which is the right defence, but it is a defence that has not been
+arithmetic, which is the right defense, but it is a defense that has not been
 tested anywhere else.
 
 So the default moved and the escape hatch did not: **`KHORA_UNBOXED=0` stays
@@ -5497,10 +5497,10 @@ at 70% was not the worst offender but one of the better-documented files in the
 tree. What actually needed cutting was concentrated and measurable:
 
   - 117 comment blocks of 15 lines or more that were **not** module
-    documentation, totalling 2,254 lines — 11% of the comment lines, not all of
+    documentation, totaling 2,254 lines — 11% of the comment lines, not all of
     them.
   - 473 paragraphs across 142 files opening with a bolded lede. Individually
-    fine; at that density a tic, and the single most recognisable
+    fine; at that density a tic, and the single most recognizable
     machine-written signature in the tree. Thinned where a paragraph was doing
     ordinary work, kept where it is a genuine warning.
 
@@ -5554,9 +5554,9 @@ what the work would be:
 | 15.3 | **Organization** | Seventeen crates. Does each have one job, and could a newcomer predict which one a change belongs in? The answer for `khora-db`, `khora-syntax` and `khora-rt` is obviously yes; for others it has never been asked |
 | 15.4 | **Function and file size** | `khora-types/src/check/calls.rs` and `khora-codegen-llvm/src/backend/driver.rs` are where the work is; both have grown by accretion. Long functions are where the reviewer's attention runs out |
 | 15.5 | **Performance of the compiler itself** | Not the generated code — 12.7 measured that. Cloning in hot paths, `TypeMap` copied per file, quadratic scans in name resolution. Nothing here has ever been profiled |
-| 15.6 | **Safety** | 13.6 closed the audit and left 28 `unsafe` blocks without notes and the scheduler unsanitised. This is the same list, finished |
+| 15.6 | **Safety** | 13.6 closed the audit and left 28 `unsafe` blocks without notes and the scheduler unsanitized. This is the same list, finished |
 | 15.7 | **Dead code and speculative generality** | Things built for a future that has not arrived. `[tasks]` is parsed and never run; `Halves` and `Chain` are public types that exist for one caller each |
-| 15.8 | **Tests** | Whether they assert behaviour or implementation. A test that pins the current output of a function nobody promised anything about is a brake, not a check |
+| 15.8 | **Tests** | Whether they assert behavior or implementation. A test that pins the current output of a function nobody promised anything about is a brake, not a check |
 
 ### How it is run, and what "passes" means
 
@@ -5582,7 +5582,7 @@ attention, which is the only thing a metric is good for here.
 **Done means**: an experienced reviewer who has never seen Khora can open any
 crate, and every comment they meet earns its space, every file is where they
 would have guessed, and nothing makes them ask "why is it done that way" and
-find no answer. That is a judgement and it should stay one — a rubric that
+find no answer. That is a judgment and it should stay one — a rubric that
 could be automated would be a rubric that could be gamed.
 
 ### Why this is a phase and not a chore
@@ -5845,12 +5845,12 @@ in no workflow or script, so they run only by hand, and only in debug.
 
 | Surface | State |
 | --- | --- |
-| `std` signatures and behaviour | Audited for *coverage* in 13.11 — every item documented. Never audited for *truth*: `print`'s own comment says it should be an effect and is not; `http_native.kh:1485` tells a reader to design around per-fiber trap containment that `traps.md` says does not exist and forbids; `core.kh:5452` states siblings are cancelled on first failure where the limitations page measures that as arbitrarily late. 695 public items, 6,343 lines of `///`, 50 never-compiled code blocks, four falsehoods found by accident. |
+| `std` signatures and behavior | Audited for *coverage* in 13.11 — every item documented. Never audited for *truth*: `print`'s own comment says it should be an effect and is not; `http_native.kh:1485` tells a reader to design around per-fiber trap containment that `traps.md` says does not exist and forbids; `core.kh:5452` states siblings are canceled on first failure where the limitations page measures that as arbitrarily late. 695 public items, 6,343 lines of `///`, 50 never-compiled code blocks, four falsehoods found by accident. |
 | Manifest keys | `[build] target` and `plugin` are documented as working and read by nothing — `target` silently produces a host binary, and `plugin` is `project.md` §4.1's sandbox boundary. This is `edition = "1999"` a second and third time, except documented as functional. `fs` means a `{read, write}` table under `[permissions]` and a list under `[workspace.policy]`, and the reference shows the list form for both. |
 | Language syntax | `docs/grammar.ebnf` — 210 lines, served to MCP clients and mirrored into the public reference — is missing `derive`, `\|\|>`, record update, backtick strings and `extern`. Nothing checks it against the parser. |
 | CLI flags | `khora lex` and `khora parse` are unhidden top-level commands that print `SOURCE_FILE@0..51` / `MODULE_DECL` / `NAME_REF`. The same table freezes CLI meanings and declares compiler internals unstable. |
 | Lockfile format | Versioned, forward-refusing, with a clear message. **The one surface that is ready.** |
-| Environment variables | Not in the table at all. 34 are read. `KHORA_FIBERS` changes observable behaviour by 180x under cancellation and `KHORA_UNBOXED` changes value representation, so two of them are semantics rather than configuration. |
+| Environment variables | Not in the table at all. 34 are read. `KHORA_FIBERS` changes observable behavior by 180x under cancellation and `KHORA_UNBOXED` changes value representation, so two of them are semantics rather than configuration. |
 
 And the freeze has no escape hatch in either direction: there is no
 `unstable`/`preview`/`experimental` marker at any level — keyword, attribute or
@@ -5860,7 +5860,7 @@ today and is impossible afterwards.
 
 ### What structured concurrency actually does, measured
 
-**16.8 Cancelling the fiber inside `Router::listen` aborts the process, and
+**16.8 Canceling the fiber inside `Router::listen` aborts the process, and
 that is the only shutdown the documentation leaves you.** Found by an agent
 building a job service against the public pages, and reproduced here.
 
@@ -5907,7 +5907,7 @@ documentation, and every number below is over 20-25 runs on both backends.
 > `!` that reads it and unwinds. `Channel::receive` is the worked example --
 > `khora_channel_receive` returns `false` when `stopping()`, the Khora side
 > answers `None`, and the `!` on its `raises 'er` row does the unwinding. The
-> park itself is `park_until_moved`, which enrols a condition variable with the
+> park itself is `park_until_moved`, which enrolls a condition variable with the
 > fiber *and* takes a 250 ms `LOOK_AGAIN` timeout to close the race.
 >
 > `Completion::wait` (`fiber.rs:102`, and `Done::wait` at `:308`) does none of
@@ -5918,7 +5918,7 @@ documentation, and every number below is over 20-25 runs on both backends.
 > The two halves are not equally hard. **`Fiber::join` needs no API change** --
 > it is already `raises 'er`, so it already has a `!` to unwind at, and the fix
 > is entirely in `Completion::wait`. What has to be decided is what `join`
-> returns on the cancelled path: `khora_fiber_join` hands back a `which` tag
+> returns on the canceled path: `khora_fiber_join` hands back a `which` tag
 > and a word, and a benign word for a boxed `A` is a null the caller holds
 > until the `!` unwinds -- which needs checking against `khora_drop` rather
 > than assuming.
@@ -5930,7 +5930,7 @@ documentation, and every number below is over 20-25 runs on both backends.
 > `packages/postgres/src/pool.kh:178`, and that one is `Fibers::wait`, a
 > different function.
 
-- **A fiber parked in `Fiber::wait` or `Fiber::join` cannot be cancelled, and
+- **A fiber parked in `Fiber::wait` or `Fiber::join` cannot be canceled, and
   then runs its body to completion anyway.** Cancel at 100 ms against a 2000 ms
   child: the cancel lands after 1952 ms on threads and 1984 ms on the
   scheduler, with the child's body completed, in 20 runs out of 20 on both. The
@@ -5941,8 +5941,8 @@ documentation, and every number below is over 20-25 runs on both backends.
   Any overall-deadline pattern is built on this, and does not work.
 - **"The first failure cancels the siblings" holds only when the doomed child
   was adopted first.** Twelve children, failure at 10 ms: adopted first, 11 of
-  11 siblings cancelled in 2-8 ms; adopted in the middle, 52% of runs cancel
-  nothing at all; adopted last, **0 of 11 cancelled in 25 runs out of 25** --
+  11 siblings canceled in 2-8 ms; adopted in the middle, 52% of runs cancel
+  nothing at all; adopted last, **0 of 11 canceled in 25 runs out of 25** --
   everyone completes and the nursery returns its count 421 ms later. A nursery
   reaps handles oldest-first, so a failure behind a slow sibling is invisible
   until that sibling finishes. The limitations page says "The group does
@@ -5963,7 +5963,7 @@ documentation, and every number below is over 20-25 runs on both backends.
   did not survive being checked, and the check was one `grep` into `std`.
 
 **And one the documentation is wrong about in the safe direction.** The
-channel fan-in serialisation the reference cites as the reason it cannot offer
+channel fan-in serialization the reference cites as the reason it cannot offer
 `race` or `timeout` -- "two 2000 ms fibers take 4.8 seconds that way against
 2.8" -- **does not reproduce**: 2072 ms by channel, 2105 ms by handles, 2122 ms
 by `join_all`. So the combinators are being refused on evidence that has
@@ -6213,7 +6213,7 @@ khora: `HttpError` reached the entry point and nothing handled it
 the same call**: `SO_REUSEADDR` there lets an unrelated process bind a port
 this one is already listening on, which is a hijack rather than a convenience,
 and the option that means what Unix means is `SO_EXCLUSIVEADDRUSE` plus not
-setting `SO_REUSEADDR` at all. Three files, two behaviours, and a note in
+setting `SO_REUSEADDR` at all. Three files, two behaviors, and a note in
 `socket_windows.kh` saying why it differs -- which is the shape of decision
 this page exists to record rather than to have taken quietly.
 
@@ -6340,13 +6340,13 @@ of a *fiber*, and of a *nursery*, and the answers do not agree with each other
 or with `docs/design/fibers.md`. An outside audit called this the highest-risk
 technical area in the project and a release blocker, and the reason is not the
 individual bugs below — it is that `Fiber::cancel`, a nursery, and a fiber's
-root are three mechanisms with three different ideas of what cancelling means.
+root are three mechanisms with three different ideas of what canceling means.
 
 **The test for this phase is one sentence: a user cannot turn ordinary
 structured cancellation into a hang or an abort by composing two supported
 calls.** Three things stand between here and that.
 
-### 17.1 Cancelling a fiber does not reach the children it is waiting on
+### 17.1 Canceling a fiber does not reach the children it is waiting on
 
 `khora_fibers_wait` joins its children with `wait_for`, and the only thing that
 cancels them is a sibling's failure. Nothing asks whether the *waiting* fiber
@@ -6366,9 +6366,9 @@ Fiber::wait(parent);      // never returns
 ```
 
 Two supported calls, and the program waits for ever. `docs/design/fibers.md`
-promises that cancelling a nursery cancels its children transitively;
+promises that canceling a nursery cancels its children transitively;
 `nursery.rs` does not implement it. `khora_fibers_release` — the *drop* path —
-already does exactly the right thing, cancelling every child and then waiting
+already does exactly the right thing, canceling every child and then waiting
 in rounds, so the shape of the answer is written down twice and reached once.
 
 A check was added at the top of each round and **it is not enough, which is the
@@ -6384,16 +6384,16 @@ between the fiber and the crew that is right in both directions. It is a change
 to what a `Fiber` owns. A deadlock here would be worse than the hang it
 replaced, which is why this is a phase and not a patch.
 
-### 17.2 `Fiber<A, {}>::join` cannot report that its fiber was cancelled
+### 17.2 `Fiber<A, {}>::join` cannot report that its fiber was canceled
 
-**Partly closed.** `Fiber::cancelled(self) -> Bool` ships: a supervisor can now
+**Partly closed.** `Fiber::canceled(self) -> Bool` ships: a supervisor can now
 ask whether a fiber was stopped, including the boxed empty-row shape the
 `announce` gate suppresses, because the flag it reads lives on the fiber rather
 than in the tagged return. What is still open is the typed answer — asking
-`join` for a value *and* learning it was cancelled — which is the second step
-and needs a reader allowed to see a stored `CANCELLED_WHICH`.
+`join` for a value *and* learning it was canceled — which is the second step
+and needs a reader allowed to see a stored `CANCELED_WHICH`.
 
-The exit status is closed separately: a signalled program whose root absorbed
+The exit status is closed separately: a signaled program whose root absorbed
 the cancellation now exits 130 rather than its own value, so a supervisor can
 tell a shutdown from a clean finish.
 
@@ -6421,7 +6421,7 @@ not a rule — it is the absence of one.
 ### What this is measured against
 
 `crates/khora-codegen-llvm/tests/tls_cancel.rs`'s
-`a_cancelled_fiber_releases_the_tls_session` fails on Windows and passes on
+`a_canceled_fiber_releases_the_tls_session` fails on Windows and passes on
 Linux, and it is 17.1 wearing a different coat: it drives cancellation *through
 a nursery*, relying on a first child's failure to cancel its siblings. The
 Python client's handshake times out because the server never completes it.
@@ -6450,7 +6450,7 @@ or a documented refusal, and which is the only one of the three that can
 honestly stay open.
 
 **Done when** the nursery probe stops, `tls_cancel` passes on Windows, a
-cancelled fiber's `join` says so whatever its row, and the comment above
+canceled fiber's `join` says so whatever its row, and the comment above
 `khora_cancel_stop` describes every shape that reaches it. That comment has
 been wrong twice — it claimed the gap was confined to the serving path, and it
 claimed three shapes detached cleanly that did not — so the last of those is
@@ -6530,7 +6530,7 @@ obligation `unsafe impl Send for Task` leaves on Rust".
 **No reachable bug is claimed here and none should be**, which is exactly why
 it is on this page rather than in the errata. The problem is that the property
 is currently maintained by whoever remembers it, in the one subsystem where
-being wrong is undefined behaviour rather than a wrong answer — and where the
+being wrong is undefined behavior rather than a wrong answer — and where the
 next change is as likely to be written by an agent as by a person.
 
 The audit's remedy is cheap and right: make every raw suspension point an

@@ -26,7 +26,7 @@
 //! # Adding to this
 //!
 //! Add a `test` block to `CONFORMANCE` and a line to the expected output. A new
-//! construct belongs here the day it exists; a new *behaviour* of `std` belongs
+//! construct belongs here the day it exists; a new *behavior* of `std` belongs
 //! in `std`'s own tests, where it is cheaper and says more when it breaks.
 
 #![cfg(feature = "llvm")]

@@ -131,7 +131,7 @@ test "a partial message after the last whole one is kept" {
   assert(Array::length(c.pending) - c.start == 1);
 }
 
-/// Anything unrecognised is the server's own text, unchanged.
+/// Anything unrecognized is the server's own text, unchanged.
 test "an unknown oid keeps the bytes the server sent" {
   assert(shown(oid_to_cell(25, "hello")) == "Text(hello)");
   assert(shown(oid_to_cell(1114, "2026-09-01 12:00:00")) == "Text(2026-09-01 12:00:00)");

@@ -122,7 +122,7 @@ fn inline(
         return None;
     }
 
-    // Parenthesised unless it is already one thing: `let n = a + b` inlined
+    // Parenthesized unless it is already one thing: `let n = a + b` inlined
     // into `n * 2` is `(a + b) * 2`, and without the brackets it is not.
     let written = if cheap || parts.initializer.kind() == SyntaxKind::PAREN_EXPR {
         held

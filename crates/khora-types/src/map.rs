@@ -1116,7 +1116,7 @@ pub(crate) fn disagreement(outer: (&Type, &Type), inner: (&Type, &Type)) -> Stri
         // to write `{ Oops }`, and `{ Oops }` parses as a row whose *tail* is
         // `Oops` -- printed back as `{ | Oops }` -- so following the advice
         // produced the same error again, word for word, about a different
-        // type. A row's entries are labelled, and for an error row the label
+        // type. A row's entries are labeled, and for an error row the label
         // is the type's own name: `{ Oops: Oops }`.
         //
         // The old message also claimed this was "the way an error row is
@@ -1126,7 +1126,7 @@ pub(crate) fn disagreement(outer: (&Type, &Type), inner: (&Type, &Type)) -> Stri
         (written, Type::Row { .. }) if !matches!(written, Type::Row { .. }) => {
             format!(
                 "; `{written}` is a type and a row belongs here. A row's entries are \
-                 labelled, and an error row labels each type with its own name — write \
+                 labeled, and an error row labels each type with its own name — write \
                  it `{{ {written}: {written} }}`. The bare name is right in a `raises` \
                  clause and only a type argument needs the braces",
             )

@@ -41,7 +41,7 @@ fn machine_of(bytes: &[u8]) -> String {
     } else if bytes.len() > 2 && bytes[0] == 0x64 && bytes[1] == 0x86 {
         "COFF x86-64".to_string()
     } else {
-        format!("unrecognised {:02x?}", &bytes[..4.min(bytes.len())])
+        format!("unrecognized {:02x?}", &bytes[..4.min(bytes.len())])
     }
 }
 
@@ -152,7 +152,7 @@ fn an_unknown_triple_is_refused() {
 /// downloads a target's standard library the first time and takes minutes, and
 /// a test that does that on a cold machine is a test nobody runs. Skipped with
 /// a message instead, which is the honest shape for a check whose input is a
-/// build artefact.
+/// build artifact.
 fn wasm_runtime() -> Option<PathBuf> {
     let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
     let path = workspace

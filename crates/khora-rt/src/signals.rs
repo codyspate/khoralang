@@ -3,7 +3,7 @@
 //! **Without this, every deploy drops every in-flight computation.** A
 //! `SIGTERM` ended the process at its default disposition: no unwinding, no
 //! finalizers, and so no `ROLLBACK` for the transaction `std::db` spent two
-//! pages promising would be rolled back when its fiber is cancelled. The
+//! pages promising would be rolled back when its fiber is canceled. The
 //! promise held for a cancellation the program delivered to itself and not for
 //! the one the platform delivers on every restart, which is the one that
 //! happens.
@@ -62,7 +62,7 @@ use std::sync::OnceLock;
 /// watcher reads this and, when it is false, gets out of the way.
 ///
 /// False until generated code says otherwise, which is the safe direction: a
-/// program whose shape the compiler did not describe keeps the behaviour every
+/// program whose shape the compiler did not describe keeps the behavior every
 /// other program on the machine has.
 #[cfg(unix)]
 static ROOT_CAN_RAISE: AtomicBool = AtomicBool::new(false);
@@ -99,7 +99,7 @@ pub(crate) fn install() {
     // it both ways. Read once, at startup, before any thread exists.
     //
     // **The switch is `cfg(debug_assertions)` because a shipped program must
-    // not honour it.** It reaches every compiled binary otherwise, so a
+    // not honor it.** It reaches every compiled binary otherwise, so a
     // process whose environment happens to carry the name loses graceful
     // shutdown on `SIGTERM` silently and with no way to notice -- measured as
     // exit 143 with no finalizer, against 130 with one. A release build
@@ -117,7 +117,7 @@ pub(crate) fn install() {
         return;
     }
 
-    // SAFETY: `sigemptyset` and `sigaddset` initialise and fill a `sigset_t`
+    // SAFETY: `sigemptyset` and `sigaddset` initialize and fill a `sigset_t`
     // this frame owns, and `pthread_sigmask` reads it and writes nothing
     // (the old mask is discarded through a null pointer, which is the
     // documented way to say "do not tell me"). Called before any thread is
@@ -185,7 +185,7 @@ fn watch(set: libc::sigset_t, id: usize) {
             // returning with nobody in `sigwait` is exactly the state the
             // spawn-failure path above refuses to leave the process in. Undo
             // the block so the default disposition applies again, and say so:
-            // a program that stops honouring SIGTERM has changed its contract
+            // a program that stops honoring SIGTERM has changed its contract
             // with whatever supervises it, and silence there is the worst of
             // the available outcomes.
             //
@@ -204,7 +204,7 @@ fn watch(set: libc::sigset_t, id: usize) {
         }
         seen += 1;
         if seen == 1 && ROOT_CAN_RAISE.load(Ordering::SeqCst) {
-            // Exactly what cancelling a nursery does, and in that order: the
+            // Exactly what canceling a nursery does, and in that order: the
             // children first, so a parent blocked joining one is not left
             // waiting on a child nobody told to stop; then the flag and the
             // wake; then the pool, for a fiber asleep on a deadline or a

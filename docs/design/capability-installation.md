@@ -1,6 +1,6 @@
 # Installing a capability by its type
 
-**Built**, except the two lints and the unlabelled `context`, which are
+**Built**, except the two lints and the unlabeled `context`, which are
 marked below. This was the specification; it now describes what exists.
 
 ## The problem
@@ -190,8 +190,8 @@ pub fn sql_ledger() -> Ledger with { db: Db }
 ```
 
 `postgres_db()` reaches `config` through its **own capability row**, not by
-mentioning a binding called `config`. So in the labelled version the labels
-had to match what these functions call their requirements; in the unlabelled
+mentioning a binding called `config`. So in the labeled version the labels
+had to match what these functions call their requirements; in the unlabeled
 version the types match instead, and the same chain composes:
 `env_config()` satisfies `postgres_db`'s `config`, `postgres_db()!` satisfies
 `sql_ledger`'s `db`.

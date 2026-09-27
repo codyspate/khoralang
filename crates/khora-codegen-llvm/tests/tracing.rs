@@ -222,7 +222,7 @@ fn a_spawned_fiber_stays_in_its_spawners_trace() {
             "type Stop = { why: String };
 
 // `worker` carries a row so the `Fiber::wait` below has a channel to be
-// cancelled on -- `wait` is a cancellation point, and one in a function with
+// canceled on -- `wait` is a cancellation point, and one in a function with
 // no failure channel has nowhere to go. Nothing here actually raises.
 fn worker(tracer: Tracer) -> () raises Stop {
   around(tracer, \"worker\", fn () => ())

@@ -236,7 +236,7 @@ fn an_aliased_import_resolves_under_its_local_name() {
     let app = file(&db, "app.kh", "module app::main;\nimport std::core::{identity as id};\n");
     let root = SourceRoot::new(&db, vec![core, app]);
 
-    assert!(resolve_path(&db, root, app, &path(&["id"])).is_ok(), "alias not honoured");
+    assert!(resolve_path(&db, root, app, &path(&["id"])).is_ok(), "alias not honored");
     assert!(
         resolve_path(&db, root, app, &path(&["identity"])).is_err(),
         "the original name should not also be in scope"

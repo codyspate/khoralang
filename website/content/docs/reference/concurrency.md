@@ -34,7 +34,7 @@ impl<A: Share, 'er> Fiber<A, 'er> {
 `A` must be `Share`: the value is computed on one fiber and read on another.
 
 `wait` waits without taking the answer, which is what you need after `cancel`: a
-cancelled fiber has no answer, so `join` on one unwinds the joiner along with it.
+canceled fiber has no answer, so `join` on one unwinds the joiner along with it.
 
 `join` waits and answers what the body answered. If the body raised, `join` re-raises with the same type, so the caller catches by name:
 
@@ -64,9 +64,9 @@ Releasing the final `Fiber` handle also waits for the child. This means a fiber 
 
 `Fiber::detach` is the exception, and the only one: it stops waiting and asks the fiber to stop. Both halves are asynchronous — `detach` signals and returns at once, so the fiber keeps running until it reaches its next cancellation point rather than stopping where it is. Its answer is discarded when it arrives, and a later failure is silent — the program said it was no longer listening. It cancels as well as detaching, because a detached fiber nobody asked to stop is a leak with a nicer name.
 
-**Cancelling a fiber running `Router::listen` works.** It was a known gap until
+**Canceling a fiber running `Router::listen` works.** It was a known gap until
 the runtime learned to check for cancellation in the poll loop a parked
-`accept` sits in: a cancelled listener now unwinds and the process exits.
+`accept` sits in: a canceled listener now unwinds and the process exits.
 Cancel it, wait for it, and the port is released.
 
 The shape still worth keeping is **drain first, stop last**: stop accepting
@@ -159,9 +159,9 @@ A nursery is a unit: the block asked for these fibers together, so one failing m
 pub type ChildFailed = { children: Int };
 ```
 
-A count rather than the child's own error, because `adopt` binds the row per adoption — two children may fail with two unrelated types and there is no one value to hand back. A child the nursery *cancelled* is not counted: that is what a nursery does to its children, not something that went wrong.
+A count rather than the child's own error, because `adopt` binds the row per adoption — two children may fail with two unrelated types and there is no one value to hand back. A child the nursery *canceled* is not counted: that is what a nursery does to its children, not something that went wrong.
 
-**A failure is seen in adoption order.** A nursery reaps handles oldest-first, so a child's failure is not seen until every child adopted before it has finished, and it cancels only the siblings still running at that moment. A failing child adopted first cancels all its siblings within milliseconds; one adopted in the middle of twelve cancelled between two and six of the eleven in measurement; one adopted last is seen after every sibling has finished and cancels none. Every child is waited for and the failure is always reported. When a sibling's failure has to stop work that is expensive, holds a resource, or has an effect outside the process, adopt the child that can fail first, or have that work check a `Shared` flag itself. [Known limitations](/docs/limitations/#a-childs-failure-is-seen-late-unless-it-was-adopted-early) has the numbers.
+**A failure is seen in adoption order.** A nursery reaps handles oldest-first, so a child's failure is not seen until every child adopted before it has finished, and it cancels only the siblings still running at that moment. A failing child adopted first cancels all its siblings within milliseconds; one adopted in the middle of twelve canceled between two and six of the eleven in measurement; one adopted last is seen after every sibling has finished and cancels none. Every child is waited for and the failure is always reported. When a sibling's failure has to stop work that is expensive, holds a resource, or has an effect outside the process, adopt the child that can fail first, or have that work check a `Shared` flag itself. [Known limitations](/docs/limitations/#a-childs-failure-is-seen-late-unless-it-was-adopted-early) has the numbers.
 
 The body may be a named function or a lambda. A lambda resolves its capabilities where it is written, and as the argument to `nursery` that is inside the row `nursery` installs, so `nursery(fan_out)` and `nursery(fn () => fan_out())` mean the same thing.
 
@@ -199,7 +199,7 @@ fn serve() -> ()
 bounded_nursery(128, serve)
 ```
 
-Adopting past a bounded nursery's limit waits for older work to finish. Use this for work whose arrival rate is controlled externally so overload becomes backpressure instead of unbounded growth. A fiber cancelled while it waits for room passes the cancel to the child it is waiting on, and stops as soon as that child has.
+Adopting past a bounded nursery's limit waits for older work to finish. Use this for work whose arrival rate is controlled externally so overload becomes backpressure instead of unbounded growth. A fiber canceled while it waits for room passes the cancel to the child it is waiting on, and stops as soon as that child has.
 
 Two riders on the number, both measured rather than intended:
 
@@ -219,20 +219,20 @@ Fiber::wait(child)!;
 continue_parent();
 ```
 
-`wait` rather than `join`, because a cancelled fiber has no answer: `join` on
+`wait` rather than `join`, because a canceled fiber has no answer: `join` on
 one unwinds the joiner along with it, and `continue_parent()` would never run.
 `Fiber::outcome` is the third choice, when the answer is wanted if there is
 one: it returns `Outcome::Answered(value)` or `Outcome::Stopped` without
 unwinding the caller.
 
-`wait` is itself a cancellation point: a waiter cancelled while it is parked
+`wait` is itself a cancellation point: a waiter canceled while it is parked
 stops there. It needs no `raises` row for that.
 
-Cancelling a child does not cancel its parent.
+Canceling a child does not cancel its parent.
 
 ### When cleanup does not finish
 
-A cancelled fiber runs its cleanup — its regions' finalizers — to completion,
+A canceled fiber runs its cleanup — its regions' finalizers — to completion,
 and a second `Fiber::cancel` does not cut it short. A finalizer that blocks for
 ever therefore holds its fiber, and anything waiting on it, for ever. Two
 operations end that:
@@ -262,8 +262,8 @@ and `abort` does. [Sharing](/docs/reference/sharing/) has the detail.
 
 **There is no `timeout`, no `race` and no `select`.** A deadline can be built by
 hand — [Timeouts and cancellation](/docs/cookbook/timeouts-and-cancellation/)
-has the shape, and it works because cancelling a fiber cancels the children of
-any nursery it holds. A race is harder: a parent cancelled while it waits stops
+has the shape, and it works because canceling a fiber cancels the children of
+any nursery it holds. A race is harder: a parent canceled while it waits stops
 only once the child it waits on has stopped, so a hand-written race is bounded
 by how quickly the losing branch reaches its next cancellation point.
 [Known limitations](/docs/limitations/#concurrency-combinators) has the
@@ -278,7 +278,7 @@ Cancellation is observed at cancellation points rather than between arbitrary so
 - a **call** to a function that can itself reach a cancellation point; and
 - a **blocking operation**: `Channel::send`, `Channel::receive`,
   `Fiber::wait`, `Fiber::join`, `clock.sleep`, and accepting, reading and
-  writing on a network connection. A cancelled read, write or accept gives up
+  writing on a network connection. A canceled read, write or accept gives up
   and the fiber stops there; it does not come back to the caller as a failed
   read. Opening a connection and waiting for a child process are not
   cancellation points: a fiber stops after the call returns.
@@ -312,7 +312,7 @@ waiting out the wait. A single foreign (C) call or file-system call is not
 interrupted: the fiber finishes it and stops at the next cancellation point
 after it.
 
-The check on the two channel operations comes *after* the call rather than before it, and only when the call comes back **empty-handed**. The runtime looks at the cancellation flag only once it has established there is nothing to take and no room to send, so a value arriving at the same moment as the cancellation is delivered rather than discarded — a cancelled receive is never holding a value nobody will see again. A send that gives up releases its value, the same as a send to a closed channel.
+The check on the two channel operations comes *after* the call rather than before it, and only when the call comes back **empty-handed**. The runtime looks at the cancellation flag only once it has established there is nothing to take and no room to send, so a value arriving at the same moment as the cancellation is delivered rather than discarded — a canceled receive is never holding a value nobody will see again. A send that gives up releases its value, the same as a send to a closed channel.
 
 ### What cancellation costs
 

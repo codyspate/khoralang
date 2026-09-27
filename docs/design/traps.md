@@ -66,7 +66,7 @@ So containment means unwinding, and unwinding here means:
   proposal with uneven support;
 - and unwinding **across a coroutine stack switch**, because a fiber is a
   `corosensei` stack. That is the part with no established recipe, and phase
-  11's bug list is a fair warning about what that neighbourhood costs.
+  11's bug list is a fair warning about what that neighborhood costs.
 
 None of this is impossible. All of it is a phase, not a commit, and it slows
 down every program that never traps to help the ones that do.
@@ -78,7 +78,7 @@ that a trap an input can trigger is a leak an attacker can drive, and **that
 argument was wrong** — it compared leaking against nothing. The alternative is
 not nothing, it is the process ending. An attacker who can trigger a trap today
 gets an immediate and total outage; against leak-containment they get gradual
-memory growth. That trade runs in the defender's favour, and the original
+memory growth. That trade runs in the defender's favor, and the original
 reasoning had the comparison backwards.
 
 It is still rejected, for a reason that is specific to what Khora has rather

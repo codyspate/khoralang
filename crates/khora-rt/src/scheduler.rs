@@ -86,11 +86,11 @@ pub(crate) fn spend_safepoint() -> bool {
 ///
 /// Emitted by code generation at every back-edge of a program that can spawn,
 /// on the slow path of the load of [`crate::poll::khora_poll`]: reached only
-/// while a scheduler pool exists or some fiber is cancelled, because off a
+/// while a scheduler pool exists or some fiber is canceled, because off a
 /// pool there is no budget and this does nothing.
 ///
 /// **A safepoint, not a cancellation point**: it cannot fail, nothing unwinds
-/// through it, and a fiber that yields here is not thereby cancellable. That
+/// through it, and a fiber that yields here is not thereby cancelable. That
 /// distinction is what lets an infallible loop be preempted at all —
 /// `docs/design/scheduler.md` §1.
 ///
@@ -129,7 +129,7 @@ struct Shared {
     /// **Separate from `parked`, and the separation is load-bearing.** A fiber
     /// that has suspended but whose worker has not yet filed it is in `parked`
     /// under neither key, so waking it through that map drops the wake and it
-    /// sleeps for ever — `cancelling_a_sleeping_fiber_wakes_it_to_notice`.
+    /// sleeps for ever — `canceling_a_sleeping_fiber_wakes_it_to_notice`.
     ///
     /// A waker needs the *state* to set `NOTIFIED` on, and that exists from the
     /// moment the fiber does.
@@ -587,7 +587,7 @@ impl Scheduler {
         let Some(state) = state_of(&self.shared, fiber) else { return };
 
         state.stop(stop);
-        // Otherwise a hundred thousand cancelled sleepers hold the heap and
+        // Otherwise a hundred thousand canceled sleepers hold the heap and
         // the watch list open.
         self.shared.timers.lock().expect("the timers").forget(fiber);
         self.shared.reactor.forget(fiber);
@@ -1865,9 +1865,9 @@ mod tests {
     }
 
     /// A fiber asleep on something that will never happen still has to be
-    /// cancellable, or a nursery closing over one waits for ever.
+    /// cancelable, or a nursery closing over one waits for ever.
     #[test]
-    fn cancelling_a_sleeping_fiber_wakes_it_to_notice() {
+    fn canceling_a_sleeping_fiber_wakes_it_to_notice() {
         let noticed = Arc::new(AtomicUsize::new(0));
         let counter = noticed.clone();
         let id = Arc::new(AtomicUsize::new(0));
@@ -1878,7 +1878,7 @@ mod tests {
             mine.store(crate::current::current(|f| f.id()), Ordering::SeqCst);
             // Nothing will ever wake this on its own merits.
             park_current();
-            if crate::current::current(|f| f.is_cancelled()) {
+            if crate::current::current(|f| f.is_canceled()) {
                 counter.fetch_add(1, Ordering::SeqCst);
             }
         }));
@@ -1895,12 +1895,12 @@ mod tests {
         assert_eq!(
             noticed.load(Ordering::SeqCst),
             1,
-            "a cancelled sleeper must wake and see it: {:?}",
+            "a canceled sleeper must wake and see it: {:?}",
             pool.counts()
         );
     }
 
-    /// **The regression test for a hang.** Cancelling a fiber that has not run
+    /// **The regression test for a hang.** Canceling a fiber that has not run
     /// yet, so nobody is holding its task and it is in no queue a waker can
     /// search.
     ///
@@ -1915,7 +1915,7 @@ mod tests {
     /// fiber's first attempt to wait takes it instead of sleeping, and it sees
     /// the cancellation on the other side.
     #[test]
-    fn cancelling_a_fiber_before_anybody_holds_it_is_not_lost() {
+    fn canceling_a_fiber_before_anybody_holds_it_is_not_lost() {
         let noticed = Arc::new(AtomicUsize::new(0));
         let counter = noticed.clone();
 
@@ -1923,7 +1923,7 @@ mod tests {
         let task = Task::new(move || {
             // Nobody will ever wake this on its own merits.
             park_current();
-            if crate::current::current(|f| f.is_cancelled()) {
+            if crate::current::current(|f| f.is_canceled()) {
                 counter.fetch_add(1, Ordering::SeqCst);
             }
         });
@@ -1942,10 +1942,10 @@ mod tests {
         );
     }
 
-    /// A sleeper cancelled before its deadline must not be left in the timer
+    /// A sleeper canceled before its deadline must not be left in the timer
     /// heap: at scale that is a hundred thousand dead entries.
     #[test]
-    fn cancelling_a_sleeper_forgets_its_deadline() {
+    fn canceling_a_sleeper_forgets_its_deadline() {
         let id = Arc::new(AtomicUsize::new(0));
         let mine = id.clone();
 
@@ -2088,9 +2088,9 @@ mod tests {
     }
 
     /// A fiber waiting on a socket that will never be ready still has to be
-    /// cancellable, and its watch must not outlive it.
+    /// cancelable, and its watch must not outlive it.
     #[test]
-    fn cancelling_a_fiber_waiting_on_a_socket_wakes_it() {
+    fn canceling_a_fiber_waiting_on_a_socket_wakes_it() {
         use crate::reactor::{a_connected_pair, socket_of, Interest};
 
         let (client, _peer) = a_connected_pair();
@@ -2105,7 +2105,7 @@ mod tests {
             let _client = client;
             mine.store(crate::current::current(|f| f.id()), Ordering::SeqCst);
             wait_until_ready(socket, Interest::Readable);
-            if crate::current::current(|f| f.is_cancelled()) {
+            if crate::current::current(|f| f.is_canceled()) {
                 counter.fetch_add(1, Ordering::SeqCst);
             }
         }));

@@ -1,7 +1,7 @@
 # How `cargo nextest` should run this suite.
 #
 # nextest gives each test its own process and runs many at once, where
-# `cargo test` runs one binary at a time and parallelises only inside it. That
+# `cargo test` runs one binary at a time and parallelizes only inside it. That
 # is most of the speed-up and it breaks two kinds of test here.
 
 # Tests that start a server and then measure how it behaves need the machine.
@@ -33,7 +33,7 @@ threads-required = 'num-test-threads'
 # test ever got a round it could judge. It is the load guard above again: the
 # test needs the machine, and says so when it doesn't get it.
 [[profile.default.overrides]]
-filter = 'package(khora-rt) & (test(=reactor::tests::a_registration_during_a_poll_is_seen_by_that_poll) | test(=reactor::tests::a_deadline_registered_during_a_poll_is_honoured_by_that_poll))'
+filter = 'package(khora-rt) & (test(=reactor::tests::a_registration_during_a_poll_is_seen_by_that_poll) | test(=reactor::tests::a_deadline_registered_during_a_poll_is_honored_by_that_poll))'
 threads-required = 'num-test-threads'
 
 # A pool that reconnects every few milliseconds for eight seconds, against a
