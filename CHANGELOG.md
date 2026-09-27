@@ -692,6 +692,12 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   extension 0.3.2 it launches `khora lsp`, and works with every released
   toolchain.
 
+- **`khora lsp --stdio` is accepted.** Editor clients that name the stdio
+  transport, `vscode-languageclient` among them, add `--stdio`. `khora lsp`
+  refused the unknown flag and exited before answering, so those editors
+  showed nothing. The flag is accepted and ignored: stdin and stdout are the
+  only transport.
+
 - **The extension's ID is `khora.khora`.** Version 0.3.0 was published as
   `khora-lang.khora`, which VS Code treats as a different extension, so
   remove it first or both will run:

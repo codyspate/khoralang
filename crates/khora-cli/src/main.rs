@@ -100,7 +100,14 @@ enum Command {
     ///
     /// Not for a person to run: an editor starts it. Running it by hand gets a
     /// process waiting for a `Content-Length` header, which is why it says so.
-    Lsp,
+    Lsp {
+        /// Accepted and ignored. stdin and stdout are the only transport, and
+        /// `vscode-languageclient` (among other clients) appends this flag
+        /// whenever a transport is named. Refusing it exited the server
+        /// before it said anything.
+        #[arg(long, hide = true)]
+        stdio: bool,
+    },
     /// Compile and run the program's tests, one fiber each.
     Test {
         /// A `.kh` file, or a directory to walk.
@@ -520,7 +527,7 @@ fn dispatch() -> Result<ExitCode> {
         Command::Install { url, rev, subdir, path } => {
             install(url.as_deref(), &rev, subdir.as_deref(), &path).map(|()| true)
         }
-        Command::Lsp => lsp().map(|()| true),
+        Command::Lsp { stdio: _ } => lsp().map(|()| true),
         Command::Mcp => mcp().map(|()| true),
         Command::Std { command } => std_command(command),
         Command::Toolchain { command } => toolchain(command),

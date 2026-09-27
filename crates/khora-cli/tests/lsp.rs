@@ -24,8 +24,14 @@ struct Server {
 
 impl Server {
     fn start(root: &std::path::Path) -> Server {
+        Server::start_with(root, &[])
+    }
+
+    /// `khora lsp` followed by `extra`, as a client that adds flags runs it.
+    fn start_with(root: &std::path::Path, extra: &[&str]) -> Server {
         let mut child = Command::new(env!("CARGO_BIN_EXE_khora"))
             .arg("lsp")
+            .args(extra)
             .current_dir(root)
             // A toolchain handover would replace this process with another
             // build of the compiler, which is a different thing than the one
@@ -335,4 +341,26 @@ fn exit_ends_the_process() {
 
     let status = server.child.wait().expect("waiting");
     assert!(status.success(), "`khora lsp` should end cleanly on exit: {status}");
+}
+
+/// **`khora lsp --stdio` starts and answers.** `vscode-languageclient`, and
+/// other clients, append `--stdio` whenever a configuration names the stdio
+/// transport. `khora lsp` refused the unknown flag and exited before it said
+/// anything, so such an editor showed no diagnostics and no error. The flag
+/// is accepted and ignored: stdin and stdout are the only transport.
+#[test]
+fn the_stdio_flag_a_client_may_add_is_accepted() {
+    let tmp = project(&[("src/main.kh", "module main;\n")]);
+    let mut server = Server::start_with(tmp.path(), &["--stdio"]);
+    server.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": { "rootUri": url_of(tmp.path()), "capabilities": {} }
+    }));
+    server.send(&serde_json::json!({ "jsonrpc": "2.0", "method": "exit" }));
+    let said = server.drain();
+    assert!(
+        said.iter().any(|m| m.get("id").and_then(serde_json::Value::as_i64) == Some(1)
+            && m.get("result").is_some()),
+        "`khora lsp --stdio` should answer initialize: {said:?}"
+    );
 }
