@@ -1,0 +1,327 @@
+module techempower::main;
+
+import std::core::{ChildFailed, Fibers, List, Option, Result, SharedFn};
+import std::clock::{Clock};
+import std::db::{Cell, Db, DbError, Row};
+import std::env::{Env, EnvError, variable_or};
+import std::net::http::{HttpError, Request, Response, Router};
+import std::random::{Random};
+import std::schema::{Encode};
+import std::time::{Date, DateTime, Time};
+import postgres::db::{Settings};
+import postgres::pool::{Pool, open as open_pool, with_db};
+
+// The four TechEmpower read tests -- JSON serialization, single query,
+// multiple queries, Fortunes -- written the way a Khora service would be:
+// `std::net::http`'s `Router`, `packages/postgres` behind the `Db`
+// capability, a pool of connections shared by every handler.
+//
+// The rules that make the numbers comparable are TechEmpower's, and each one
+// that shapes the code is noted where it does: a new object per request, a
+// new query per row, no cache, the escaping, the headers. The Go, Node and
+// Bun servers beside this one do exactly the same work.
+
+// ---------------------------------------------------------------------------
+// What is sent
+// ---------------------------------------------------------------------------
+
+/// The JSON test's object. **Made per request and serialised per request**:
+/// TechEmpower forbids caching either, and a constant body string would be
+/// measuring a memcpy.
+derive(Encode)
+type Message = {
+  message: String,
+};
+
+/// One `World` row. `randomNumber` is spelled the way the test's JSON spells
+/// it; the verifier is case-sensitive about keys.
+derive(Encode)
+type World = {
+  id: Int,
+  randomNumber: Int,
+};
+
+/// One `Fortune` row, read from the table or added at request time.
+type Fortune = {
+  id: Int,
+  message: String,
+};
+
+// ---------------------------------------------------------------------------
+// The headers every response carries
+// ---------------------------------------------------------------------------
+
+/// `Server` and `Date` on a response. TechEmpower requires both on every test
+/// and `std::net::http` writes neither, so each handler's answer passes
+/// through here.
+///
+/// The date is rendered per request rather than once a second. The rules
+/// allow the once-a-second shortcut; this takes the side of the line that
+/// cannot be accused of caching.
+fn stamped(response: Response) -> Response with { clock: Clock } {
+  response
+    |> Response::with_header(_, "Server", "khora")
+    |> Response::with_header(_, "Date", http_date(clock.unix_millis()))
+}
+
+/// An IMF-fixdate, `Sun, 06 Nov 1994 08:49:37 GMT`, the one form RFC 9110
+/// lets a server send. `std::time` has the calendar arithmetic and no HTTP
+/// formatter, so the names and padding are here.
+fn http_date(millis: Int) -> String {
+  let at = DateTime::of_unix_millis(millis);
+  weekday_name(at.date.weekday()) + ", " + two(at.date.day) + " " + month_name(at.date.month)
+  + " " + Int::to_string(at.date.year) + " " + two(at.time.hour) + ":" + two(at.time.minute)
+  + ":" + two(at.time.second) + " GMT"
+}
+
+fn two(n: Int) -> String {
+  if n < 10 { "0" + Int::to_string(n) } else { Int::to_string(n) }
+}
+
+fn weekday_name(day: Int) -> String {
+  match day {
+    1 => "Mon",
+    2 => "Tue",
+    3 => "Wed",
+    4 => "Thu",
+    5 => "Fri",
+    6 => "Sat",
+    _sunday => "Sun",
+  }
+}
+
+fn month_name(month: Int) -> String {
+  match month {
+    1 => "Jan",
+    2 => "Feb",
+    3 => "Mar",
+    4 => "Apr",
+    5 => "May",
+    6 => "Jun",
+    7 => "Jul",
+    8 => "Aug",
+    9 => "Sep",
+    10 => "Oct",
+    11 => "Nov",
+    _december => "Dec",
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The statements
+// ---------------------------------------------------------------------------
+
+fn world_by_id(id: Int) -> Result<List<Row>, DbError> with { db: Db } {
+  db.query("SELECT id, randomnumber FROM world WHERE id = $1", List::Cons(Cell::Number(id), List::Nil))
+}
+
+/// No `ORDER BY`: the test forbids it, and the added row has to be sorted in
+/// with the others anyway.
+fn all_fortunes() -> Result<List<Row>, DbError> with { db: Db } {
+  db.query("SELECT id, message FROM fortune", List::Nil)
+}
+
+// ---------------------------------------------------------------------------
+// Reading rows
+// ---------------------------------------------------------------------------
+//
+// **A row of the wrong shape is a 500, not a zero.** A `World` served with an
+// id of 0 would pass for data, and the verifier only warns about ids out of
+// range.
+
+fn world_of(row: Row) -> Option<World> {
+  match row.cells {
+    List::Cons(Cell::Number(id), List::Cons(Cell::Number(random), List::Nil)) =>
+      Option::Some({ id: id, randomNumber: random }),
+    _other => Option::None,
+  }
+}
+
+fn fortune_of(row: Row) -> Option<Fortune> {
+  match row.cells {
+    List::Cons(Cell::Number(id), List::Cons(Cell::Text(message), List::Nil)) =>
+      Option::Some({ id: id, message: message }),
+    _other => Option::None,
+  }
+}
+
+/// A random row, by a fresh query. `None` when the database refused or the
+/// row did not have the shape asked for.
+fn random_world(pool: Pool) -> Option<World> with { rng: Random } {
+  let id = rng.in_range(1, 10001);
+  match with_db(pool, fn () => world_by_id(id)) {
+    Result::Err(_) => Option::None,
+    Result::Ok(Result::Err(_)) => Option::None,
+    Result::Ok(Result::Ok(List::Cons(row, List::Nil))) => world_of(row),
+    Result::Ok(Result::Ok(_)) => Option::None,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The four tests
+// ---------------------------------------------------------------------------
+
+fn json(_request: Request) -> Response {
+  let hello: Message = { message: "Hello, World!" };
+  Response::json(200, hello)
+}
+
+fn single(pool: Pool) -> Response with { rng: Random } {
+  match random_world(pool) {
+    Option::Some(world) => Response::json(200, world),
+    Option::None => Response::text(500, "the database did not answer"),
+  }
+}
+
+/// `queries` read by TechEmpower's rule: missing, not a number, or below one
+/// is one; above 500 is 500.
+fn count_of(request: Request) -> Int {
+  match request.query("queries") {
+    Option::None => 1,
+    Option::Some(text) => match Int::of_string(text) {
+      Option::None => 1,
+      Option::Some(n) => if n < 1 { 1 } else if n > 500 { 500 } else { n },
+    },
+  }
+}
+
+/// **One query per row, one after another, each on its own lease.** The test
+/// forbids `IN (...)` and batching into one statement; every server here also
+/// runs them sequentially, so the comparison is not also a comparison of how
+/// much each fans out.
+fn multiple(pool: Pool, request: Request) -> Response with { rng: Random } {
+  let wanted = count_of(request);
+  let mut worlds: List<World> = List::Nil;
+  let mut failed = false;
+  let mut done = 0;
+  while done < wanted && !failed {
+    match random_world(pool) {
+      Option::Some(world) => worlds = List::Cons(world, worlds),
+      Option::None => failed = true,
+    };
+    done = done + 1
+  };
+  if failed {
+    Response::text(500, "the database did not answer")
+  } else {
+    Response::json(200, List::reverse(worlds))
+  }
+}
+
+fn fortunes(pool: Pool) -> Response {
+  match with_db(pool, all_fortunes) {
+    Result::Err(_) => Response::text(500, "the database did not answer"),
+    Result::Ok(Result::Err(_)) => Response::text(500, "the database did not answer"),
+    Result::Ok(Result::Ok(rows)) => match read_fortunes(rows) {
+      Option::None => Response::text(500, "a fortune row had an unexpected shape"),
+      Option::Some(read) => {
+        let added = List::Cons({ id: 0, message: "Additional fortune added at request time." }, read);
+        let sorted = added.sort_by(fn (a, b) => a.message.cmp(b.message));
+        Response::of(200, "text/html; charset=utf-8", render(sorted))
+      },
+    },
+  }
+}
+
+fn read_fortunes(rows: List<Row>) -> Option<List<Fortune>> {
+  match rows {
+    List::Nil => Option::Some(List::Nil),
+    List::Cons(row, rest) => match fortune_of(row) {
+      Option::None => Option::None,
+      Option::Some(fortune) => match read_fortunes(rest) {
+        Option::None => Option::None,
+        Option::Some(others) => Option::Some(List::Cons(fortune, others)),
+      },
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The page
+// ---------------------------------------------------------------------------
+//
+// **Khora's `std` has no template facility and no HTML escaping**, so both
+// are written here. The template is TechEmpower's minimum one with the
+// whitespace removed, which is what their example response is.
+
+fn render(fortunes: List<Fortune>) -> String {
+  let rows = List::map(fortunes, fn f =>
+    "<tr><td>" + Int::to_string(f.id) + "</td><td>" + escape_html(f.message) + "</td></tr>");
+  "<!DOCTYPE html><html><head><title>Fortunes</title></head><body><table>"
+  + "<tr><th>id</th><th>message</th></tr>"
+  + String::join(rows, "")
+  + "</table></body></html>"
+}
+
+/// The message with `&`, `<`, `>`, `"` and `'` replaced by entities.
+///
+/// **The message is untrusted**: one row is a `<script>` tag, and the test
+/// exists to catch a page that runs it. All five are escaped, not just `<`
+/// and `&`, so the text is also safe inside an attribute if the template
+/// ever puts it in one.
+///
+/// Copies runs of ordinary bytes whole rather than a byte at a time. Every
+/// escaped character is ASCII, so a run boundary never splits a multi-byte
+/// character and the Japanese row passes through untouched.
+fn escape_html(text: String) -> String {
+  let length = String::byte_length(text);
+  let mut pieces: List<String> = List::Nil;
+  let mut run = 0;
+  let mut at = 0;
+  while at < length {
+    let entity = match U8::to_int(String::byte(text, at)) {
+      38 => "&amp;",
+      60 => "&lt;",
+      62 => "&gt;",
+      34 => "&quot;",
+      39 => "&apos;",
+      _plain => "",
+    };
+    if String::byte_length(entity) > 0 {
+      pieces = List::Cons(entity, List::Cons(String::slice(text, run, at), pieces));
+      run = at + 1
+    };
+    at = at + 1
+  };
+  if run == 0 {
+    text
+  } else {
+    String::join(List::reverse(List::Cons(String::slice(text, run, length), pieces)), "")
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Starting up
+// ---------------------------------------------------------------------------
+
+fn setting(name: String, fallback: String) -> String with { env: Env } raises EnvError {
+  variable_or(name, fallback)!
+}
+
+fn number_setting(name: String, fallback: Int) -> Int with { env: Env } raises EnvError {
+  match Int::of_string(variable_or(name, Int::to_string(fallback))!) {
+    Option::Some(chosen) => chosen,
+    Option::None => fallback,
+  }
+}
+
+pub fn main() raises HttpError + EnvError + ChildFailed {
+  with { env: Env::real(), clock: Clock::real(), rng: Random::real() } {
+    let settings: Settings = {
+      host: setting("PGHOST", "127.0.0.1")!,
+      port: number_setting("PGPORT", 5432)!,
+      user: setting("PGUSER", "benchmarkdbuser")!,
+      database: setting("PGDATABASE", "hello_world")!,
+      secret: setting("PGPASSWORD", "benchmarkdbpass")!,
+    };
+    let crew = Fibers::open();
+    let pool = open_pool(crew, settings, number_setting("POOL", 16)!);
+
+    Router::new()
+      |> Router::get("/json", SharedFn::of(fn request => stamped(json(request))))
+      |> Router::get("/db", SharedFn::of(fn _request => stamped(single(pool))))
+      |> Router::get("/queries", SharedFn::of(fn request => stamped(multiple(pool, request))))
+      |> Router::get("/fortunes", SharedFn::of(fn _request => stamped(fortunes(pool))))
+      |> Router::listen_quietly(number_setting("PORT", 8080)!)!
+  }
+}

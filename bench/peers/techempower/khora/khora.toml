@@ -1,0 +1,16 @@
+[package]
+name = "techempower"
+version = "0.3.0"
+
+# Not a member of the repository's workspace (whose members are one level
+# under `bench/`), so it carries its own pin.
+[toolchain]
+version = "0.3.0"
+
+# The port it answers on and the database it dials. Nothing else.
+[permissions]
+network = ["0.0.0.0:8080", "127.0.0.1:5432"]
+env = ["PORT", "PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGPASSWORD", "POOL"]
+
+[dependencies]
+postgres = { path = "../../../../packages/postgres" }

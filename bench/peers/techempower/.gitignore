@@ -1,0 +1,5 @@
+# Built or fetched here, never committed.
+/go/techempower
+/node/node_modules/
+/node/package-lock.json
+/results/
