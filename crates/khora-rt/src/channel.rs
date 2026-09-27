@@ -105,8 +105,13 @@ struct Queue {
     /// nobody can start blocking without first seeing the new state.
     threads_sending: usize,
     threads_receiving: usize,
-    /// How many times a blocked thread was woken by a notification rather
-    /// than its timeout. Tests only.
+    /// How many waits in [`park_until_moved`] ended before their timeout.
+    ///
+    /// **Only a floor on the notifications delivered**, which is all
+    /// `every_value_reaches_a_blocked_receiver_by_notification` asks of it: a
+    /// condition variable may also wake a thread nobody notified, and that is
+    /// counted here too. So this can say no wake was lost, and cannot say how
+    /// many wakes were sent -- [`Notified`] says that. Tests only.
     #[cfg(test)]
     woken: usize,
     /// No more values will ever be sent.
@@ -117,13 +122,91 @@ struct Channel {
     state: Mutex<Queue>,
     /// For threads waiting for room. One variable per side, so that a
     /// receive, which can only ever help a sender, never wakes a receiver.
-    room: Arc<Condvar>,
+    room: Notified,
     /// For threads waiting for a value.
-    arrived: Arc<Condvar>,
+    arrived: Notified,
     capacity: usize,
     full: WhenFull,
     boxed: bool,
     glue: Option<extern "C" fn(*mut u8)>,
+}
+
+/// How many of the threads blocked on a condition variable to wake.
+///
+/// Shared with [`crate::current::Fiber::stop`], so that a cancellation's wake
+/// is a value its test can read, like a channel's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Wake {
+    /// One value, or one slot of room, can help one thread.
+    One,
+    /// A close is news to every thread blocked on either side. A cancel is
+    /// news to one thread that cannot be told apart from the others blocked
+    /// with it, so waking one might wake the wrong one.
+    All,
+}
+
+impl Wake {
+    /// The one place a [`Wake`] becomes a call.
+    pub(crate) fn notify(self, moved: &Condvar) {
+        match self {
+            Wake::One => moved.notify_one(),
+            Wake::All => moved.notify_all(),
+        }
+    }
+}
+
+/// One side's condition variable, which under test remembers every decision
+/// to notify it or not.
+///
+/// **What the one-wake tests measure, because what a waiter sees cannot be.**
+/// A condition variable may wake a thread nobody notified, and on Windows it
+/// does: counted at the waiter, 6 blocked senders once showed 50 wakes for one
+/// receive. Counted here, a spurious wakeup is not in the record at all. What
+/// it cannot show is that the operating system delivered the wake it was
+/// asked for, or a notification sent to [`Notified::condvar`] directly --
+/// which [`crate::current::Fiber::stop`] does, and records itself.
+struct Notified {
+    condvar: Arc<Condvar>,
+    #[cfg(test)]
+    notices: Mutex<Vec<Notice>>,
+}
+
+/// One decision: how many threads the channel counted as blocked on that
+/// side, under its lock, and what it woke -- `None` being nobody.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Notice {
+    wake: Option<Wake>,
+    waiting: usize,
+}
+
+impl Notified {
+    fn new() -> Notified {
+        Notified {
+            condvar: Arc::new(Condvar::new()),
+            #[cfg(test)]
+            notices: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Wakes `wake` of the threads blocked here, or nobody. `waiting` is
+    /// only recorded.
+    fn notify(
+        &self,
+        wake: Option<Wake>,
+        #[cfg_attr(not(test), allow(unused_variables))] waiting: usize,
+    ) {
+        #[cfg(test)]
+        self.notices.lock().unwrap_or_else(|e| e.into_inner()).push(Notice { wake, waiting });
+        if let Some(wake) = wake {
+            wake.notify(&self.condvar);
+        }
+    }
+
+    /// The variable itself, to wait on and to register with a fiber.
+    fn condvar(&self) -> &Arc<Condvar> {
+        &self.condvar
+    }
 }
 
 impl Channel {
@@ -135,17 +218,13 @@ impl Channel {
     /// changed the queue, so a thread that blocks later sees the value first
     /// and never waits for this wake.
     fn a_value_arrived(&self, waiting: usize) {
-        if waiting > 0 {
-            self.arrived.notify_one();
-        }
+        self.arrived.notify((waiting > 0).then_some(Wake::One), waiting);
     }
 
     /// Wakes one thread blocked for room, if any is. [`Self::a_value_arrived`]'s
     /// argument, the other way round.
     fn room_appeared(&self, waiting: usize) {
-        if waiting > 0 {
-            self.room.notify_one();
-        }
+        self.room.notify((waiting > 0).then_some(Wake::One), waiting);
     }
 }
 
@@ -214,8 +293,8 @@ pub unsafe extern "C" fn khora_channel_open(
             woken: 0,
             closed: false,
         }),
-        room: Arc::new(Condvar::new()),
-        arrived: Arc::new(Condvar::new()),
+        room: Notified::new(),
+        arrived: Notified::new(),
         capacity: if capacity < 1 { 1 } else { capacity as usize },
         full: WhenFull::of(strategy),
         boxed,
@@ -263,14 +342,14 @@ pub(crate) const LOOK_AGAIN: std::time::Duration = std::time::Duration::from_mil
 /// `waiting` picks the count this thread is in while it blocks, which is what
 /// tells the other side whether there is anybody to notify at all.
 fn park_until_moved(
-    moved: &Arc<Condvar>,
+    moved: &Notified,
     mut state: std::sync::MutexGuard<'_, Queue>,
     waiting: fn(&mut Queue) -> &mut usize,
 ) {
     *waiting(&mut state) += 1;
-    crate::current::current(|fiber| fiber.park_on(moved));
+    crate::current::current(|fiber| fiber.park_on(moved.condvar()));
     let (mut state, _timeout) =
-        moved.wait_timeout(state, LOOK_AGAIN).unwrap_or_else(|e| e.into_inner());
+        moved.condvar().wait_timeout(state, LOOK_AGAIN).unwrap_or_else(|e| e.into_inner());
     *waiting(&mut state) -= 1;
     #[cfg(test)]
     if !_timeout.timed_out() {
@@ -460,14 +539,20 @@ pub unsafe extern "C" fn khora_channel_close(handle: *mut u8) {
     // SAFETY: `handle` is live, which is this function's own documented
     // precondition and the one thing a C caller can get wrong.
     let Some(channel) = (unsafe { channel_of(handle) }) else { return };
-    let (senders, receivers) = {
+    let (senders, receivers, sending, receiving) = {
         let mut state = channel.state.lock().unwrap_or_else(|e| e.into_inner());
         state.closed = true;
-        (std::mem::take(&mut state.senders), std::mem::take(&mut state.receivers))
+        (
+            std::mem::take(&mut state.senders),
+            std::mem::take(&mut state.receivers),
+            state.threads_sending,
+            state.threads_receiving,
+        )
     };
-    // Everyone, on both sides: a closed channel answers every one of them.
-    channel.room.notify_all();
-    channel.arrived.notify_all();
+    // Everyone, on both sides, whatever the counts say: a closed channel
+    // answers every one of them.
+    channel.room.notify(Some(Wake::All), sending);
+    channel.arrived.notify(Some(Wake::All), receiving);
     for waker in senders.into_iter().chain(receivers) {
         waker.wake();
     }
@@ -685,12 +770,25 @@ mod tests {
         unsafe { khora_channel_release(channel as *mut u8) };
     }
 
-    /// The count of blocked threads, and of wakes that were notifications
-    /// rather than timeouts.
-    fn blocked_and_woken(handle: *mut u8) -> (usize, usize) {
+    /// How many threads are blocked in the channel, on either side.
+    fn blocked(handle: *mut u8) -> usize {
         let channel = unsafe { channel_of(handle) }.expect("a live channel");
         let state = channel.state.lock().unwrap();
-        (state.threads_receiving + state.threads_sending, state.woken)
+        state.threads_receiving + state.threads_sending
+    }
+
+    /// How many waits ended before their timeout; see [`Queue::woken`].
+    fn woken(handle: *mut u8) -> usize {
+        let channel = unsafe { channel_of(handle) }.expect("a live channel");
+        let woken = channel.state.lock().unwrap().woken;
+        woken
+    }
+
+    /// Every notification sent so far to one side: `room` or `arrived`.
+    fn notices(handle: *mut u8, side: fn(&Channel) -> &Notified) -> Vec<Notice> {
+        let channel = unsafe { channel_of(handle) }.expect("a live channel");
+        let notices = side(channel).notices.lock().unwrap().clone();
+        notices
     }
 
     fn until(mut done: impl FnMut() -> bool) {
@@ -701,14 +799,34 @@ mod tests {
         }
     }
 
-    /// **At most one extra wake is tolerated, and a broadcast is still far
-    /// outside it.** A wait that is being entered just as a notify lands can
-    /// return without timing out, so it is counted as a notification. That
-    /// can happen to a waiter re-parking after its own `LOOK_AGAIN` timeout,
-    /// for example. That happened in 6 of 200 runs on an idle machine, and
-    /// failed CI twice. A broadcast wakes every waiter, 6 or 8 here, so a
-    /// bound of 2 still fails against one.
-    const WAKE_SLACK: usize = 1;
+    /// Whether a send or receive decided right: one `notify_one` when it
+    /// found threads blocked, and nothing when it found none.
+    ///
+    /// **Read at the notifier, so a spurious wakeup cannot fail it.** This
+    /// was counted at the waiters, and on Windows 6 blocked senders were once
+    /// counted as 50 wakes for one receive: a thread the operating system
+    /// woke for nothing found no room, blocked again and was counted again. A
+    /// broadcast fails it on the first notice.
+    ///
+    /// `waiting` is not pinned to the number of threads started. It is read
+    /// under the lock the waiters block with, and a thread woken spuriously
+    /// just then has left the count until it blocks again; if all of them had,
+    /// waking nobody would be right.
+    fn woke_one_if_any(notice: &Notice) -> bool {
+        match *notice {
+            Notice { wake: Some(Wake::One), waiting } => waiting > 0,
+            Notice { wake: None, waiting } => waiting == 0,
+            Notice { wake: Some(Wake::All), .. } => false,
+        }
+    }
+
+    /// The one notice a single send or receive left on `side`, checked.
+    fn assert_woke_one(notices: &[Notice], what: &str) {
+        match notices {
+            [notice] if woke_one_if_any(notice) => {}
+            other => panic!("{what} should notify one blocked thread, once: {other:?}"),
+        }
+    }
 
     /// **One value wakes one blocked thread.** On the thread backend a pool's
     /// idle channel has a blocked thread per request waiting for a
@@ -721,36 +839,33 @@ mod tests {
         let channel = open(1) as usize;
         let readers: Vec<_> =
             (0..READERS).map(|_| std::thread::spawn(move || take(channel as *mut u8))).collect();
-        until(|| blocked_and_woken(channel as *mut u8).0 == READERS);
+        until(|| blocked(channel as *mut u8) == READERS);
 
         assert!(unsafe { khora_channel_send(channel as *mut u8, 1) });
-        until(|| blocked_and_woken(channel as *mut u8).0 == READERS - 1);
-        // Long enough for every thread a broadcast would have woken to have
-        // run: they are runnable the moment the send returns.
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        let (_, woken) = blocked_and_woken(channel as *mut u8);
+        assert_woke_one(&notices(channel as *mut u8, |c| &c.arrived), "one value");
 
         unsafe { khora_channel_close(channel as *mut u8) };
         let got: Vec<_> = readers.into_iter().filter_map(|r| r.join().unwrap()).collect();
         assert_eq!(got, [1]);
-        assert!(
-            (1..=1 + WAKE_SLACK).contains(&woken),
-            "one value should wake one thread, not every thread waiting: {woken} of {READERS} woke"
-        );
         unsafe { khora_channel_release(channel as *mut u8) };
     }
 
     /// The other half of waking one: **nobody is left waiting for the
-    /// timeout.** Every value must reach a blocked thread by notification; a
-    /// wake that went to nobody would show here as a receiver released by its
-    /// `LOOK_AGAIN` timeout instead.
+    /// timeout.** A send that notified nobody, or a thread nobody, would
+    /// leave a receiver to its `LOOK_AGAIN` timeout, and it would be missing
+    /// from `woken`.
+    ///
+    /// Counted at the waiters, because only they can say a wake arrived. A
+    /// spurious wakeup inflates the count, which can hide a lost wake but
+    /// cannot fail this. The notices say the other half: whenever a send
+    /// found a receiver blocked, it woke one and not all of them.
     #[test]
     fn every_value_reaches_a_blocked_receiver_by_notification() {
         const READERS: usize = 8;
         let channel = open(1) as usize;
         let readers: Vec<_> =
             (0..READERS).map(|_| std::thread::spawn(move || take(channel as *mut u8))).collect();
-        until(|| blocked_and_woken(channel as *mut u8).0 == READERS);
+        until(|| blocked(channel as *mut u8) == READERS);
 
         for value in 0..READERS as u64 {
             assert!(unsafe { khora_channel_send(channel as *mut u8, value) });
@@ -758,8 +873,13 @@ mod tests {
         let mut got: Vec<u64> = readers.into_iter().filter_map(|r| r.join().unwrap()).collect();
         got.sort_unstable();
         assert_eq!(got, (0..READERS as u64).collect::<Vec<_>>());
-        let (_, woken) = blocked_and_woken(channel as *mut u8);
+        let woken = woken(channel as *mut u8);
         assert!(woken >= READERS, "{woken} of {READERS} receivers were woken by a send");
+        let sent = notices(channel as *mut u8, |c| &c.arrived);
+        assert!(
+            sent.len() == READERS && sent.iter().all(woke_one_if_any),
+            "each send should wake one receiver if any was blocked: {sent:?}"
+        );
         unsafe { khora_channel_release(channel as *mut u8) };
     }
 
@@ -772,16 +892,10 @@ mod tests {
         let writers: Vec<_> = (0..WRITERS as u64)
             .map(|w| std::thread::spawn(move || unsafe { khora_channel_send(channel as *mut u8, w) }))
             .collect();
-        until(|| blocked_and_woken(channel as *mut u8).0 == WRITERS);
+        until(|| blocked(channel as *mut u8) == WRITERS);
 
         assert_eq!(take(channel as *mut u8), Some(100));
-        until(|| blocked_and_woken(channel as *mut u8).0 == WRITERS - 1);
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        let (_, woken) = blocked_and_woken(channel as *mut u8);
-        assert!(
-            (1..=1 + WAKE_SLACK).contains(&woken),
-            "one slot of room should wake one sender: {woken} of {WRITERS} woke"
-        );
+        assert_woke_one(&notices(channel as *mut u8, |c| &c.room), "one slot of room");
 
         for _ in 0..WRITERS {
             assert!(take(channel as *mut u8).is_some());
@@ -789,6 +903,67 @@ mod tests {
         for writer in writers {
             assert!(writer.join().unwrap());
         }
+        unsafe { khora_channel_release(channel as *mut u8) };
+    }
+
+    /// **A close wakes everyone, on both sides.** It is news to every thread
+    /// blocked on the channel, and a close that woke one would leave the rest
+    /// to their `LOOK_AGAIN` timeout.
+    #[test]
+    fn closing_wakes_every_blocked_thread_on_both_sides() {
+        const EACH: usize = 3;
+        let full = open(1) as usize;
+        let empty = open(1) as usize;
+        assert!(unsafe { khora_channel_send(full as *mut u8, 100) });
+        let writers: Vec<_> = (0..EACH as u64)
+            .map(|w| std::thread::spawn(move || unsafe { khora_channel_send(full as *mut u8, w) }))
+            .collect();
+        let readers: Vec<_> =
+            (0..EACH).map(|_| std::thread::spawn(move || take(empty as *mut u8))).collect();
+        until(|| blocked(full as *mut u8) == EACH && blocked(empty as *mut u8) == EACH);
+
+        for channel in [full, empty] {
+            unsafe { khora_channel_close(channel as *mut u8) };
+            let sides: [fn(&Channel) -> &Notified; 2] = [|c| &c.room, |c| &c.arrived];
+            for side in sides {
+                let sent: Vec<Option<Wake>> =
+                    notices(channel as *mut u8, side).iter().map(|n| n.wake).collect();
+                assert_eq!(
+                    sent.last(),
+                    Some(&Some(Wake::All)),
+                    "a close should wake every thread on a side"
+                );
+            }
+        }
+        assert!(writers.into_iter().all(|w| !w.join().unwrap()), "a closed channel refuses");
+        assert!(readers.into_iter().all(|r| r.join().unwrap().is_none()));
+        for channel in [full, empty] {
+            unsafe { khora_channel_release(channel as *mut u8) };
+        }
+    }
+
+    /// **A cancel wakes every thread on the variable its fiber is parked on**,
+    /// not one: the canceled thread cannot be singled out from the others
+    /// blocked there, and `notify_one` could wake one of them and leave it to
+    /// its `LOOK_AGAIN` timeout.
+    #[test]
+    fn canceling_a_blocked_receiver_wakes_every_thread_on_its_side() {
+        use crate::current::{enter, Fiber};
+        let channel = open(1) as usize;
+        let fiber = Fiber::spawned();
+        let reader = {
+            let fiber = Arc::clone(&fiber);
+            std::thread::spawn(move || {
+                let _in = enter(fiber);
+                take(channel as *mut u8)
+            })
+        };
+        // Blocked means `park_on` has run: it is under the lock the count is.
+        until(|| blocked(channel as *mut u8) == 1);
+
+        fiber.cancel();
+        assert_eq!(*fiber.stop_wakes.lock().unwrap(), [Wake::All]);
+        assert_eq!(reader.join().unwrap(), None, "a canceled receive gives up");
         unsafe { khora_channel_release(channel as *mut u8) };
     }
 
@@ -832,7 +1007,7 @@ mod tests {
             // Three rounds in four wait until every receiver is blocked; the
             // fourth races the park itself.
             if round % 4 != 3 {
-                until(|| blocked_and_woken(channel as *mut u8).0 == READERS);
+                until(|| blocked(channel as *mut u8) == READERS);
             }
             let cancel_first = round % 2 == 0;
             if cancel_first {

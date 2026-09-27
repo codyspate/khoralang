@@ -126,6 +126,13 @@ pub(crate) struct Fiber {
     /// a raw `Box` with no handle a fiber could hold, so the variable has to
     /// outlive it independently.
     parked_on: Mutex<Option<Arc<Condvar>>>,
+    /// Every wake [`Fiber::stop`] sent to what this fiber was parked on.
+    ///
+    /// For the channel tests, which check that a cancellation wakes every
+    /// thread on the variable -- the canceled one cannot be singled out --
+    /// while a send wakes one. Tests only.
+    #[cfg(test)]
+    pub(crate) stop_wakes: Mutex<Vec<crate::channel::Wake>>,
     /// The span this fiber is inside, for `std::trace`. [`crate::span`].
     ///
     /// Here rather than in thread-local storage for the reason at the top of
@@ -186,6 +193,8 @@ impl Fiber {
             spawned: false,
             wait: crate::wait::Wait::default(),
             parked_on: Mutex::new(None),
+            #[cfg(test)]
+            stop_wakes: Mutex::new(Vec::new()),
             span: Mutex::new(SpanContext::default()),
         }
     }
@@ -221,6 +230,8 @@ impl Fiber {
             spawned: true,
             wait: crate::wait::Wait::default(),
             parked_on: Mutex::new(None),
+            #[cfg(test)]
+            stop_wakes: Mutex::new(Vec::new()),
             span: Mutex::new(inherited),
         })
     }
@@ -320,7 +331,13 @@ impl Fiber {
         self.set_bits(bits);
         let parked = self.parked_on.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(moved) = parked.as_ref() {
-            moved.notify_all();
+            // Every thread on the variable, not one: the others blocked there
+            // look the same to it, and `notify_one` could wake one of them and
+            // leave this fiber for its `LOOK_AGAIN` timeout.
+            let wake = crate::channel::Wake::All;
+            #[cfg(test)]
+            self.stop_wakes.lock().unwrap_or_else(|e| e.into_inner()).push(wake);
+            wake.notify(moved);
         }
     }
 
