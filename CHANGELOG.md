@@ -391,6 +391,18 @@ cancelled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   function with a `raises` row, a `while`, `loop` or `for` that went round
   only by `continue` never checked for a cancellation, and ran to its end.
 
+- **A closure chosen by `if`, `match`, `loop` or `catch` crashed when it was
+  called**, with "the stack ran out", on both fiber backends. In 0.3.0,
+  `let k = if c { k1 } else { k2 }; k(x)` built and died at the call,
+  whatever `k1` and `k2` raised, and whether they were lambdas, named
+  functions or fields of one record. A function whose body ended in such a
+  choice (`fn pick(c: Bool) -> (Int) -> Int { if c { .. } else { .. } }`)
+  was refused as a body that "does not produce" its return type, or, with a
+  `raises` row, built and crashed when called. A choice called on the spot,
+  passed straight to a function or discarded stopped `khora build` itself
+  with an internal error. A closure chosen this way and never called was
+  never freed. The chosen closure is the value of the expression.
+
 - **`Fiber::outcome` could end the process with "refcount is already zero"**
   (status 134) on a fiber that can fail whose answer is held inline and owns
   a counted field -- a small record holding a `List` or a `String`, say. The

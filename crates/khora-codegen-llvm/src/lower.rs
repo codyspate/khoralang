@@ -590,13 +590,11 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// Emits the function's `ret`, and repairs the IR if lowering gave up.
     fn finish(&mut self, value: Flow<'ctx>) {
         // **A body whose value is not of the type it promises is refused in the
-        // tagged and `raises` arms as it is in the plain one.** Both used to
-        // return it anyway: a `match` that mixes a field read of a function
-        // with a named function lowers to the unit placeholder, and a tagged
-        // function packed that into its answer as a null closure. The build
-        // succeeded and the first call crashed ("the stack ran out"). `Unit`
-        // and `Never` have nothing to produce, so for them a zero is the
-        // answer and not a stand-in.
+        // tagged and `raises` arms, as in the plain one**, instead of being
+        // packed into the answer. A body that lowered to the unit placeholder
+        // where a pointer was due gave the caller a null closure, and its first
+        // call crashed. `Unit` and `Never` have nothing to produce, so for them
+        // a zero is the answer and not a stand-in.
         if (self.raises || self.tagged)
             && !self.aborted
             && !matches!(self.ret, Type::Unit | Type::Never)
@@ -669,9 +667,9 @@ impl<'ctx> Lower<'_, 'ctx> {
         self.seal_if_aborted();
     }
 
-    /// Reachable when a body's type is `Unknown` -- a `loop` used as a value,
-    /// say -- or when its tail lowered to no value. The checker accepts
-    /// `Unknown` anywhere, so it cannot have caught either.
+    /// Reachable when a body's type is `Unknown`, or when its tail lowered to
+    /// no value. The checker accepts `Unknown` anywhere, so it cannot have
+    /// caught either.
     fn refuse_a_body_with_no_value(&mut self) {
         let ret = self.ret.clone();
         let range = self.body.root.map(|r| self.body.range(r)).unwrap_or_default();
@@ -908,9 +906,17 @@ impl<'ctx> Lower<'_, 'ctx> {
 
     /// A slot for the value of a branching expression, or `None` when there is
     /// no value worth keeping.
+    ///
+    /// **A closure is a value worth keeping.** `Type::Fn` sat in the `None`
+    /// arm, so an `if`, `match`, `loop` or `catch` choosing between closures
+    /// moved the chosen one out of its variable, stored it nowhere, and
+    /// handed on `unit_value()` as the closure: calling it jumped through a
+    /// null pointer, returning it was refused as a body with no value, and
+    /// leaving it uncalled leaked it. A closure is a pointer like any boxed
+    /// value, so it takes the same slot.
     fn result_slot(&self, ty: &Type) -> Option<PointerValue<'ctx>> {
         match ty {
-            Type::Unit | Type::Never | Type::Unknown | Type::Fn { .. } => None,
+            Type::Unit | Type::Never | Type::Unknown => None,
             other => self.be.llvm_type(other).map(|t| self.entry_slot(t, "result")),
         }
     }

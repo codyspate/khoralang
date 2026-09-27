@@ -1135,19 +1135,22 @@ pub fn main() -> Int {
     }
 }
 
-/// **A tagged body that lowers to no value is refused at build time**, as a
-/// plain one is, instead of returning a null function the caller then calls.
-/// `fetch` is tagged (`Map::get` loops), and its `match` mixes a field read
-/// with a named function, which lowers with no value at the join. It built,
-/// and crashed with "the stack ran out" at the first call.
+/// **A tagged body whose value is a function chosen by a `match` returns
+/// that function.** `fetch` is tagged (`Map::get` loops), and its `match`
+/// mixes a field read with a named function. The join of function type had
+/// no slot, so the body's value was a placeholder: first a null closure the
+/// caller called ("the stack ran out"), then a build error saying the body
+/// "does not produce" its type. Both arms are taken here, so each closure is
+/// called.
 #[test]
-fn a_tagged_body_that_lowers_to_no_value_is_a_build_error() {
+fn a_tagged_body_returning_a_function_chosen_by_match_runs() {
     const SOURCE: &str = "module main;
 import std::core::{print, Map, Option};
 
 type Knot = { t: () -> Int };
 
 fn seven() -> Int { 7 }
+fn nine() -> Int { 9 }
 
 fn fetch(knots: Map<Int, Knot>) -> () -> Int {
   match Map::get(knots, 0) {
@@ -1159,23 +1162,17 @@ fn fetch(knots: Map<Int, Knot>) -> () -> Int {
 pub fn main() -> Int {
   let knots: Map<Int, Knot> = Map::new();
   print(\"${fetch(knots)()}\");
+  let full: Map<Int, Knot> = Map::new();
+  Map::insert(full, 0, { t: nine });
+  print(\"${fetch(full)()}\");
   0
 }
 ";
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cancel_everywhere_no_value");
-    harness::ensure_runtime();
-    std::fs::create_dir_all(&dir).expect("a workspace");
-    let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
-    let db = KhoraDatabase::new();
-    let root = SourceRoot::new(&db, sources(&db, &dir, SOURCE));
-    let Err(errors) = khora_codegen_llvm::compile(&db, root, &exe) else {
-        panic!("a body that produces no value compiled");
-    };
-    let messages: Vec<String> = errors.into_iter().map(|e| e.message).collect();
-    assert!(
-        messages.iter().any(|m| m.contains("does not produce the `() -> Int` its signature promises")),
-        "{messages:?}"
-    );
+    for (backend, ran) in on_both("cancel_everywhere_no_value", SOURCE) {
+        assert!(!ran.hung, "`{backend}`: {}", ran.stdout);
+        assert_eq!(ran.stdout, "7\n9\n", "`{backend}`: {}", ran.stderr);
+        assert_eq!(ran.code, Some(0), "`{backend}`");
+    }
 }
 
 /// **A blocking socket call that gave up on a cancel is not taken for a

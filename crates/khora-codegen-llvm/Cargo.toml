@@ -85,3 +85,8 @@ path = "tests/polls.rs"
 [[test]]
 name = "crossings"
 path = "tests/crossings.rs"
+
+# Sets `KHORA_UNBOXED` to build each program both ways.
+[[test]]
+name = "closure_joins"
+path = "tests/closure_joins.rs"
