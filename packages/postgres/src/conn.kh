@@ -535,7 +535,8 @@ pub fn forsake(c: Connection) -> () {
 /// and any session state it held. They are left where the next exchange
 /// reads them, and it skips them as it always has. Anything else -- the
 /// `ErrorResponse` a server sends before it hangs up, above all -- counts as
-/// broken. A message still arriving is judged by the next statement.
+/// broken, and so does a message whose first bytes are in and whose kind is
+/// anything else.
 ///
 /// What it costs: one non-blocking read per lease, more if the server has
 /// sent something. What it cannot see: a connection that dies between this
@@ -570,23 +571,37 @@ pub fn still_open(c: Connection) -> Bool {
   }
 }
 
-/// Whether every whole message in `bytes` from `from` on is one a server
-/// sends unasked on a healthy connection: `NotificationResponse` ('A'),
+/// Whether every message in `bytes` from `from` on is one a server sends
+/// unasked on a healthy connection: `NotificationResponse` ('A'),
 /// `NoticeResponse` ('N') or `ParameterStatus` ('S').
+///
+/// **A message still arriving is judged by its first byte**, which is all it
+/// takes to know what it is. Left to the next statement, the first bytes of
+/// the `FATAL` a server sends before it hangs up were lent, and the
+/// statement on them read the `FATAL` as its reply and was answered
+/// `Disconnected`, with a healthy connection idle beside it.
 fn only_unasked(bytes: Array<U8>, from: Int) -> Bool {
   let mut at = from;
   let mut fine = true;
   let mut going = true;
   while going && fine {
     match message_at(bytes, at) {
-      Option::None => going = false,
+      Option::None => {
+        if at < Array::length(bytes) { fine = unasked_kind(U8::to_int(Array::get(bytes, at))) };
+        going = false
+      },
       Option::Some(m) => {
-        fine = m.kind == 65 || m.kind == 78 || m.kind == 83;
+        fine = unasked_kind(m.kind);
         at = at + message_width(m)
       },
     }
   };
   fine
+}
+
+/// `NotificationResponse`, `NoticeResponse` or `ParameterStatus`, by kind byte.
+fn unasked_kind(kind: Int) -> Bool {
+  kind == 65 || kind == 78 || kind == 83
 }
 
 /// Whether the server said, in its last `ReadyForQuery`, that a transaction

@@ -2421,6 +2421,8 @@ impl ScriptedState {
                 ("0".to_string(), Then::NotifyOthers)
             } else if sql.trim() == "error others" {
                 ("0".to_string(), Then::ErrorOthers)
+            } else if sql.trim() == "half-error others" {
+                ("0".to_string(), Then::HalfErrorOthers)
             } else if sql.trim() == "conns" {
                 let accepted = self.attempts.lock().expect("the attempts").len();
                 (accepted.to_string(), Then::Nothing)
@@ -2469,6 +2471,34 @@ impl ScriptedState {
                         if *other != id {
                             let _ = stream.write_all(&unasked);
                         }
+                    }
+                }
+                Then::HalfErrorOthers => {
+                    // The first 9 bytes of a `FATAL`: the kind, the length and
+                    // a few bytes of the fields. The rest, and the close, come
+                    // 1.5 s later, long after the check has looked.
+                    let mut error = vec![b'S'];
+                    error.extend_from_slice(&cstring("FATAL"));
+                    error.push(b'M');
+                    error.extend_from_slice(&cstring("terminating connection due to administrator command"));
+                    error.push(0);
+                    let whole = framed(b'E', &error);
+                    let open: Vec<TcpStream> = self
+                        .open
+                        .lock()
+                        .expect("the connections")
+                        .iter()
+                        .filter(|(other, _)| *other != id)
+                        .filter_map(|(_, stream)| stream.try_clone().ok())
+                        .collect();
+                    for mut stream in open {
+                        let _ = stream.write_all(&whole[..9]);
+                        let rest = whole[9..].to_vec();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(1500));
+                            let _ = stream.write_all(&rest);
+                            let _ = stream.shutdown(std::net::Shutdown::Both);
+                        });
                     }
                 }
                 Then::ErrorOthers => {
@@ -2532,6 +2562,9 @@ enum Then {
     /// Every other connection is sent a `FATAL` `ErrorResponse`, unasked, and
     /// left open.
     ErrorOthers,
+    /// Every other connection is sent the first 9 bytes of a `FATAL`, and
+    /// the rest with a hang-up 1.5 s later.
+    HalfErrorOthers,
     /// For `N` ms, every new connection fails its check; then this one hangs up.
     Sour(u64),
     Down(i64),
@@ -2862,12 +2895,190 @@ fn main() -> Int {
     );
 }
 
+/// **The time a connection sat idle is not charged to the fast phase.** A
+/// pool of one on a 2 s fast phase is opened and left unleased for 2.5 s;
+/// then a second pool asks the server to close every other connection, as
+/// a restart or `pg_terminate_backend` does. The next caller must get its
+/// own answer within a few backoff steps, and the pool must be whole.
+///
+/// A failed attempt is judged against when the slot's run of failures
+/// began. Measured from when the slot last started connecting, a connection
+/// that sat open, never lent, for longer than the fast phase found that
+/// phase already over at its first failed check: the slot went straight to
+/// `down`, and every caller was answered `Disconnected` until the slow
+/// retry, although the server was back at once. Only the time since the
+/// connection opened counts.
+#[test]
+fn an_idle_connection_closed_by_the_server_is_retried_on_the_fast_phase() {
+    let body = r#"fn main() -> Int {
+  let settings: Settings = SETTINGS;
+  let plan: Reconnect = {
+    fast: Schedule::UpTo(Schedule::backoff(50, 5000), 2000), slow: Option::Some(30000), handshake: 10000,
+  };
+  let a = open_with(Fibers::open(), settings, 1, plan);
+  let b = open_with(Fibers::open(), settings, 1, plan);
+  print("a: " + until(a, 1, 0, 0, 5000));
+  print("b: " + ask(b, "select 1"));
+  // Longer than the fast phase, with a's connection never lent.
+  hold(2500);
+  print("kill: " + ask(b, "kill others"));
+  hold(100);
+  let t0 = now();
+  let got = ask(a, "select 42");
+  let took = now() - t0;
+  print("never lent: " + got + (if took < 2000 { ", promptly" } else { ", after " + Int::to_string(took) + " ms" }));
+  print("health: " + until(a, 1, 0, 0, 5000));
+  close(a);
+  close(b);
+  print("closed");
+  0
+}
+"#;
+    let runs = run_scripted("pool_stale_idle", body, 60);
+    assert_ran(
+        &runs,
+        "a: 1 live, 0 reconnecting, 0 down\nb: 1\nkill: 0\nnever lent: 42, promptly\n\
+         health: 1 live, 0 reconnecting, 0 down\nclosed\n",
+        "an idle connection's age must not be charged to the fast phase",
+    );
+}
+
+/// **A connection that fails its check straight after it opens counts as a
+/// failed attempt, so the slot backs off.** A pool of one on the default
+/// plan; for 3 s every new connection finishes its handshake and is then
+/// sent a `DataRow` nobody asked for, so the check before its first lease
+/// fails. The server counts the connections it accepts.
+///
+/// The bound comes from the schedule. The default backoff starts at 50 ms
+/// and doubles, each delay drawn at 50-100% of its value, so the delays are
+/// at least 25, 50, 100, 200, 400, 800 and 1600 ms, and their running totals
+/// pass 3 s after the seventh. With the lease that fails the check leading
+/// each attempt, a slot makes at most eight connections in the window and
+/// one more once the server has recovered: nine, with one to spare for
+/// scheduling, ten. A caller asking throughout gets its own answer once the
+/// server recovers.
+///
+/// A failed check marked the connection broken and the slot reconnected at
+/// once: its connect succeeded, so the schedule never counted an attempt,
+/// and one slot opened hundreds of connections a second -- on macOS enough
+/// to exhaust the loopback until `connect` itself failed and the pool shrank
+/// out.
+#[test]
+fn a_connection_that_fails_its_first_check_is_backed_off() {
+    let body = r#"fn asker(pool: Pool, told: Channel<String>) -> () {
+  Channel::send(told, ask(pool, "select 42"));
+  ()
+}
+
+fn main() -> Int {
+  let settings: Settings = SETTINGS;
+  let pool = open(Fibers::open(), settings, 1);
+  print("start: " + until(pool, 1, 0, 0, 5000));
+  let before = ask(pool, "conns");
+  print("sour: " + ask(pool, "sour 3000"));
+  // `sour` hangs up the connection it was asked on; let the `FIN` arrive
+  // first, or the next lease can be lent it before the check can see it.
+  hold(100);
+  let told: Channel<String> = Channel::bounded(1);
+  let f = Fiber::spawn(fn () => asker(pool, told));
+  Fiber::wait(f);
+  print("asked: " + (match Channel::receive(told) { Option::Some(s) => s, Option::None => "nothing" }));
+  let after = ask(pool, "conns");
+  let made = (match Int::of_string(after) { Option::Some(n) => n, Option::None => 0 - 1000 })
+    - (match Int::of_string(before) { Option::Some(n) => n, Option::None => 1000 });
+  print("connections while sour: " + Int::to_string(made));
+  print("health: " + until(pool, 1, 0, 0, 5000));
+  close(pool);
+  print("closed");
+  0
+}
+"#;
+    let runs = run_scripted("pool_sour_backoff", body, 90);
+    for (backend, ran, _) in &runs {
+        assert!(!ran.hung, "{backend} hung: stdout {:?}", ran.stdout);
+        assert_eq!(ran.code, Some(0), "{backend}: stderr {}", ran.stderr);
+        let made: i64 = ran
+            .stdout
+            .lines()
+            .find_map(|l| l.strip_prefix("connections while sour: "))
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(i64::MAX);
+        eprintln!("{backend}: {made} connections while sour");
+        assert!(
+            made <= 10,
+            "{backend}: {made} connections in a 3 s window; the schedule allows at most 10: {:?}",
+            ran.stdout
+        );
+        let rest: Vec<&str> =
+            ran.stdout.lines().filter(|l| !l.starts_with("connections while sour: ")).collect();
+        assert_eq!(
+            rest,
+            ["start: 1 live, 0 reconnecting, 0 down", "sour: 0", "asked: 42",
+             "health: 1 live, 0 reconnecting, 0 down", "closed"],
+            "{backend}: the caller must be answered and the pool whole"
+        );
+    }
+}
+
+/// **A connection whose `ErrorResponse` has only begun to arrive is not
+/// lent.** A pool of two; the server sends the idle connection the first 9
+/// bytes of a `FATAL` -- its kind byte, its length and a few bytes of its
+/// fields -- and the rest, with a hang-up, 1.5 s later. Both connections are
+/// then leased at once, and each must answer its own statement.
+///
+/// The check judged whole messages only, and left a message still arriving
+/// to the next statement: the half-arrived `FATAL` was lent, the statement
+/// on it read the `FATAL` as its reply, and the caller was answered
+/// `Disconnected` although the other connection was healthy. Its first byte
+/// already says what it is.
+#[test]
+fn a_half_arrived_error_fails_the_check() {
+    let body = r#"fn pair(pool: Pool) -> String {
+  let told: Channel<String> = Channel::bounded(2);
+  let a = Fiber::spawn(fn () => { Channel::send(told, ask(pool, "select 7")); () });
+  let b = Fiber::spawn(fn () => { Channel::send(told, ask(pool, "select 8")); () });
+  Fiber::wait(a);
+  Fiber::wait(b);
+  let one = match Channel::receive(told) { Option::Some(x) => x, Option::None => "none" };
+  let two = match Channel::receive(told) { Option::Some(x) => x, Option::None => "none" };
+  if one == "8" && two == "7" { "7 8" } else { one + " " + two }
+}
+
+fn main() -> Int {
+  let settings: Settings = SETTINGS;
+  let pool = open(Fibers::open(), settings, 2);
+  print("start: " + until(pool, 2, 0, 0, 5000));
+  print("half: " + ask(pool, "half-error others"));
+  hold(100);
+  print("answers: " + pair(pool));
+  print("health: " + until(pool, 2, 0, 0, 5000));
+  close(pool);
+  print("closed");
+  0
+}
+"#;
+    let runs = run_scripted("pool_half_error", body, 60);
+    assert_ran(
+        &runs,
+        "start: 2 live, 0 reconnecting, 0 down\nhalf: 0\nanswers: 7 8\n\
+         health: 2 live, 0 reconnecting, 0 down\nclosed\n",
+        "a half-arrived error must fail the check",
+    );
+}
+
 /// **A caller whose every offered connection fails its check waits, and is
 /// answered once one passes.** A pool of one; for eight seconds each new
 /// connection finishes its handshake and is then sent a `DataRow` nobody
 /// asked for, so the check before each lease fails and the slot
 /// reconnects. A caller in a fiber of its own asks throughout, and must get
 /// its own answer, once, after the server recovers.
+///
+/// With failed checks counted toward the backoff, the slot makes a handful
+/// of connections in those eight seconds, not thousands, and the caller is
+/// answered by the first one after the window: at most the window plus one
+/// capped delay (5 s), well inside the 30 s fast phase and this test's 90 s.
+/// What it still shows is that the caller's wait is a loop over offers --
+/// every failed check hands it another -- that never grows its stack.
 ///
 /// `with_db` took the next offer by calling itself, one frame per failed
 /// check, and a slot fails one a few milliseconds after it connects: the
@@ -2885,6 +3096,9 @@ fn main() -> Int {
   let pool = open(Fibers::open(), settings, 1);
   print("start: " + until(pool, 1, 0, 0, 5000));
   print("sour: " + ask(pool, "sour 8000"));
+  // `sour` hangs up the connection it was asked on; let the `FIN` arrive
+  // first, or the next lease can be lent it before the check can see it.
+  hold(100);
   let told: Channel<String> = Channel::bounded(1);
   let f = Fiber::spawn(fn () => asker(pool, told));
   Fiber::wait(f);

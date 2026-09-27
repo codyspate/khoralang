@@ -224,6 +224,12 @@ cancelled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   `abort` left inside a transaction, is closed and reconnected by its own
   serving fiber, with exponential backoff from 50 ms to a 5 s cap, with
   jitter, for up to 30 s. Callers wait for it rather than being lent it. A
+  connection that opens and then fails its check before it is ever lent
+  counts as a failed attempt on the same schedule, so a server that
+  admits connections and spoils each one is retried on the backoff and not
+  as fast as a slot can connect. The 30 s counts time spent reconnecting,
+  not the time a connection sat open: one left idle for longer and then
+  closed by a server restart is retried on the backoff like any other. A
   connection that cannot be reconnected in that time leaves the pool and
   retries every 30 s, and rejoins when it connects. A pool with no
   connection live or reconnecting answers `with_db` at once with

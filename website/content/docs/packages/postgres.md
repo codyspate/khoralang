@@ -60,7 +60,9 @@ A pool reconnects a connection it loses, and never lends one that is down.
   checked before it is lent, so one the server closed between leases is
   caught there rather than by the next query. A notification, a notice or a
   parameter change the server sent to an idle connection does not count: the
-  connection is lent as it is, with its session.
+  connection is lent as it is, with its session. A message of any other kind
+  counts as soon as its first byte is in, so a connection the server is in
+  the middle of ending is not lent.
 - **A stopped caller costs nothing.** A fiber stopped by `cancel`, `abort` or
   `cancel_within` anywhere in `with_db` — waiting for a connection, holding
   one, in the middle of a statement, inside a transaction's `ROLLBACK`, or
@@ -72,7 +74,13 @@ A pool reconnects a connection it loses, and never lends one that is down.
 - **Reconnecting.** The old socket is closed first and nothing more is read
   from it. The new one is tried on a backoff: 50 ms, doubling to 5 s, each
   delay drawn at 50-100% of its value, for up to 30 s. `with_db` waits
-  through it, the same way it waits when every connection is busy.
+  through it, the same way it waits when every connection is busy. A
+  connection that opens and fails its check before it is ever lent counts
+  as a failed attempt on the same backoff, so a server that accepts
+  connections and spoils each one sees the backoff's handful of attempts,
+  not a slot reconnecting as fast as it can. The 30 s counts time spent
+  reconnecting, not the time a connection sat open, so one left idle for
+  longer and then closed by a server restart is retried on the backoff too.
 - **Shrinking.** A connection that has not come back after 30 s leaves the
   pool. It is not lent, and it tries again every 30 s (±20%) until it
   connects, when it rejoins. So a pool that lost its server grows back to

@@ -197,9 +197,12 @@ impl Reconnect {
 /// outside a lease, a detached fiber still holding an old lease's `db` for
 /// one, and its give-back then kept the slot out of `idle` for good.
 pub type Offer =
-  /// A slot, as the request channel for this one lease. Its serving fiber
-  /// makes a fresh one for every lease and reads it until it is closed.
-  | Slot(Channel<Request>)
+  /// A slot, as the request channel for this one lease, and where the
+  /// borrower says the lease's check passed. Its serving fiber makes both
+  /// fresh for every lease, reads the channel until it is closed, and then
+  /// reads the verdict: a connection that never passes a check counts as a
+  /// failed connection attempt.
+  | Slot(Channel<Request>, Shared<Bool>)
   /// There is nothing to lend: no slot is live or reconnecting.
   | Down;
 
@@ -232,6 +235,31 @@ type Phase =
   | Live
   | Reconnecting
   | Down;
+
+/// How far a slot is into its reconnect schedule: when the run of failures
+/// began, how many attempts have failed, and which phase that has put it in.
+///
+/// **Kept across connections, and started again only when a connection has
+/// passed a check.** A server that finishes the handshake and then spoils
+/// every connection before it can be lent -- a backend terminated as soon as
+/// it is admitted, a proxy in front of a server that is down -- let every
+/// connect succeed, and a schedule that started again at each success never
+/// counted one failure: one slot opened hundreds of connections a second,
+/// and on macOS ran the loopback out of ports until `connect` itself failed.
+type Tries = {
+  mut began: Int,
+  mut attempts: Int,
+  mut phase: Phase,
+};
+
+/// How a connection's lending ended.
+type Lent =
+  /// The pool is closing.
+  | Closing
+  /// It broke after at least one lease had passed its check.
+  | Served
+  /// It broke without a lease ever passing its check: a failed attempt.
+  | Spoiled;
 
 /// One try at a lease.
 type Tried<A> =
@@ -345,8 +373,11 @@ fn one_try<A, 'ef, 'er>(
       let lease = Region::open();
       Region::defer(lease, returner(pool.idle, pool.tally, offer));
       match offer {
-        Offer::Slot(requests) => match fitness(requests) {
-          Fitness::Fit => Tried::Done(body()! with { db: over(requests) }),
+        Offer::Slot(requests, passed) => match fitness(requests) {
+          Fitness::Fit => {
+            Shared::set(passed, true);
+            Tried::Done(body()! with { db: over(requests) })
+          },
           Fitness::Unfit => Tried::Again,
           // A lease's channel is closed only by its own give-back, and by
           // `close` while it sits in `idle`; neither can have happened yet.
@@ -424,7 +455,7 @@ fn returner(idle: Channel<Offer>, tally: Shared<Tally>, offer: Offer) -> () -> (
 /// not in it.
 fn give_back(idle: Channel<Offer>, tally: Shared<Tally>, offer: Offer) -> () {
   match offer {
-    Offer::Slot(requests) => Channel::close(requests),
+    Offer::Slot(requests, _) => Channel::close(requests),
     Offer::Down => {
       let t = Shared::get(tally);
       if t.token && !t.closing { Channel::send(idle, Offer::Down); () }
@@ -442,23 +473,48 @@ fn slot(
   tally: Shared<Tally>,
 ) -> () {
   with { clock: Clock::real(), random: Random::real() } {
+    let tries: Tries = { began: clock.monotonic_millis(), attempts: 0, phase: Phase::Reconnecting };
     let mut going = true;
     while going {
-      match reconnect(settings, plan, idle, tally) {
+      match reconnect(settings, plan, idle, tally, tries) {
         Option::None => going = false,
         Option::Some(c) => {
-          going = lend(c, idle, tally);
+          let opened = clock.monotonic_millis();
+          let lent = lend(c, idle, tally);
           // **Closed before anything else is tried**, and never read again:
           // whatever the server was still sending on it goes with it.
           hang_up(c);
-          if going { moved(tally, idle, Phase::Live, Phase::Reconnecting) };
+          match lent {
+            Lent::Closing => going = false,
+            Lent::Served => {
+              moved(tally, idle, Phase::Live, Phase::Reconnecting);
+              tries.began = clock.monotonic_millis();
+              tries.attempts = 0;
+              tries.phase = Phase::Reconnecting
+            },
+            Lent::Spoiled => {
+              // **The time it sat open is not time spent reconnecting.** A
+              // connection nobody leased for longer than the fast phase, then
+              // closed by a server restart, would otherwise find the phase
+              // already over and take its slot straight to `down`.
+              tries.began = tries.began + (clock.monotonic_millis() - opened);
+              moved(tally, idle, Phase::Live, tries.phase);
+              remember(tally, spoiled());
+              if !back_off(plan, idle, tally, tries) { going = false }
+            },
+          }
         },
       }
     };
   }
 }
 
-/// Lends `c` until its connection breaks. `false` when the pool is closing.
+fn spoiled() -> DbError {
+  DbError::Disconnected("the connection failed its check before it could be lent")
+}
+
+/// Lends `c` until its connection breaks or the pool closes, and says which,
+/// and whether any lease on it passed its check.
 ///
 /// **Every lease gets a request channel of its own**, made here and offered
 /// in `idle`, and the lease is over when that channel is closed and drained.
@@ -468,28 +524,38 @@ fn slot(
 /// request of the next lease. The same close is how `close` ends a slot that
 /// is waiting in `idle`, so the two are told apart by `tally.closing`, which
 /// `close` sets before it closes anything.
-fn lend(c: Connection, idle: Channel<Offer>, tally: Shared<Tally>) -> Bool {
-  let mut open = true;
+///
+/// A lease's borrower says, through the offer, whether the lease's check
+/// passed. A connection that breaks before any has is `Spoiled`: it never
+/// did the one thing a connection is for, and counts as a failed attempt.
+/// What it costs: a borrower stopped between the check and saying so makes
+/// a healthy connection's next break count as one failed attempt -- one
+/// backoff delay, judged by the time the slot has spent reconnecting, not
+/// the time the connection spent open.
+fn lend(c: Connection, idle: Channel<Offer>, tally: Shared<Tally>) -> Lent {
+  let mut ended = Lent::Closing;
+  let mut served = false;
   let mut lending = true;
   while lending {
     // Room for one waiting request: a connection answers one at a time, and
     // a lease with more fibers than that makes the rest wait for their turn.
     let requests: Channel<Request> = Channel::bounded(1);
-    if !Channel::send(idle, Offer::Slot(requests)) {
+    let passed = Shared::of(false);
+    if !Channel::send(idle, Offer::Slot(requests, passed)) {
       // `idle` is closed: the pool is closing.
-      open = false;
       lending = false
     } else {
       serve_lease(c, requests);
+      if Shared::get(passed) { served = true };
       if closing(tally) {
-        open = false;
         lending = false
       } else if !usable(c) {
+        ended = if served { Lent::Served } else { Lent::Spoiled };
         lending = false
       }
     }
   };
-  open
+  ended
 }
 
 /// Connects, on the fast schedule and then the slow interval. `None` when the
@@ -499,12 +565,10 @@ fn reconnect(
   plan: Reconnect,
   idle: Channel<Offer>,
   tally: Shared<Tally>,
+  tries: Tries,
 ) -> Option<Connection>
   with { clock: Clock, random: Random }
 {
-  let began = clock.monotonic_millis();
-  let mut attempts = 0;
-  let mut phase = Phase::Reconnecting;
   let mut outcome: Option<Connection> = Option::None;
   let mut going = true;
   while going {
@@ -523,38 +587,51 @@ fn reconnect(
         },
         Result::Err(why) => {
           remember(tally, why);
-          attempts = attempts + 1;
-          let wait = match phase {
-            Phase::Down => slow_wait(plan),
-            // Not reached: a slot only reconnects from `Reconnecting` or
-            // `Down`. Stopping is the answer that cannot loop.
-            Phase::Live => Option::None,
-            Phase::Reconnecting => {
-              let now = clock.monotonic_millis() - began;
-              match Schedule::next_after(plan.fast, attempts, now) {
-                Option::Some(at) => Option::Some(at - now),
-                Option::None => {
-                  phase = Phase::Down;
-                  moved(tally, idle, Phase::Reconnecting, Phase::Down);
-                  slow_wait(plan)
-                },
-              }
-            },
-          };
-          match wait {
-            Option::None => going = false,
-            Option::Some(millis) => if !pause(tally, millis) { going = false },
-          }
+          if !back_off(plan, idle, tally, tries) { going = false }
         },
       }
     }
   };
   match outcome {
     Option::Some(c) => {
-      moved(tally, idle, phase, Phase::Live);
+      moved(tally, idle, tries.phase, Phase::Live);
       Option::Some(c)
     },
     Option::None => Option::None,
+  }
+}
+
+/// Counts one failed attempt and waits as long as the schedule says: the
+/// fast phase's next delay, or, once that has given up, the slow interval
+/// with the slot moved to `down`. `false` when the slot should stop: the
+/// pool closed during the wait, or the shrink is for good.
+///
+/// The one place a failure is counted, for a connect that failed and a
+/// connection that failed its check alike, so the two cannot drift apart.
+fn back_off(plan: Reconnect, idle: Channel<Offer>, tally: Shared<Tally>, tries: Tries) -> Bool
+  with { clock: Clock, random: Random }
+{
+  tries.attempts = tries.attempts + 1;
+  let wait = match tries.phase {
+    Phase::Down => slow_wait(plan),
+    // Not reached: a slot only backs off from `Reconnecting` or `Down`.
+    // Stopping is the answer that cannot loop.
+    Phase::Live => Option::None,
+    Phase::Reconnecting => {
+      let now = clock.monotonic_millis() - tries.began;
+      match Schedule::next_after(plan.fast, tries.attempts, now) {
+        Option::Some(at) => Option::Some(at - now),
+        Option::None => {
+          tries.phase = Phase::Down;
+          moved(tally, idle, Phase::Reconnecting, Phase::Down);
+          slow_wait(plan)
+        },
+      }
+    },
+  };
+  match wait {
+    Option::None => false,
+    Option::Some(millis) => pause(tally, millis),
   }
 }
 
@@ -670,7 +747,7 @@ pub fn close(pool: Pool) -> () {
   while going {
     match Channel::receive(pool.idle) {
       Option::None => going = false,
-      Option::Some(Offer::Slot(requests)) => Channel::close(requests),
+      Option::Some(Offer::Slot(requests, _)) => Channel::close(requests),
       Option::Some(Offer::Down) => (),
     }
   };
