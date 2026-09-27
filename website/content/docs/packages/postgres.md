@@ -33,6 +33,13 @@ with_db(pool, fn () =>
 )
 ```
 
+A `transaction` inside another one on the same lease is a savepoint on that
+connection (`SAVEPOINT khora_sp_1`, `khora_sp_2`, and so on, one per level),
+released when the inner body answers `Ok` and rolled back to when it does
+not. Each connection keeps its own depth, so fibers on different leases nest
+independently. A `COMMIT` that PostgreSQL answers with a rollback, because a
+statement in the transaction failed, is reported as `DbError::RolledBack`.
+
 `with_db` leases a connection, installs it as the `db` capability for the
 duration, and returns it afterwards — including when the body raises, and
 including when the fiber is cancelled, whether in the body or while it is

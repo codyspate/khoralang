@@ -166,9 +166,13 @@ The transaction was rolled back rather than committed.
 pub effect Db {
   query: (String, List<Cell>) -> Result<List<Row>, DbError>,
   execute: (String, List<Cell>) -> Result<Int, DbError>,
+  depth: () -> Int,
   begin: () -> Result<(), DbError>,
   commit: () -> Result<(), DbError>,
   rollback: () -> Result<(), DbError>,
+  savepoint: (Int) -> Result<(), DbError>,
+  release: (Int) -> Result<(), DbError>,
+  rollback_to: (Int) -> Result<(), DbError>,
   broken: () -> (),
 }
 ```
@@ -177,6 +181,26 @@ Somewhere to run statements.
 
 A record of closures, so a Postgres package, a SQLite package, D1 behind a
 Worker and an in-memory double are the same type to everything above.
+
+#### Nesting
+
+**The handler keeps the depth, because the depth is the connection's.**
+Two fibers leasing two connections nest independently, and one `db`
+reached twice from one fiber is one connection with one depth, so a
+counter anywhere but beside the connection would be wrong for one of the
+two. The handler is the one thing there is exactly one of per connection.
+
+**`transaction` names the level; the handler does not guess it.** The
+alternative, a handler that turns `begin` into `SAVEPOINT` when a
+transaction is already open, cannot tell a stray `rollback` from a real
+one: `transaction` registers its undo before anything is sent, so a cancel
+can deliver a `rollback` for an inner level that never opened, and a
+handler guessing the level would roll back the *enclosing* transaction;
+so `transaction` reads [`depth`](#depth) first, and every savepoint operation
+carries the level it belongs to.
+
+What it costs a handler author is four more operations and one counter,
+and one more exchange with the connection per `transaction`.
 
 #### query
 
@@ -194,13 +218,25 @@ execute: (String, List<Cell>) -> Result<Int, DbError>
 
 Runs a statement and gives back how many rows it changed.
 
+#### depth
+
+```khora
+depth: () -> Int
+```
+
+How many transactions are open on this connection: 0 outside one, 1
+inside a transaction, and one more for each savepoint inside that.
+
+**Answers, and does not fail.** A connection that is gone answers 0, and
+the `begin` that follows is what reports it.
+
 #### begin
 
 ```khora
 begin: () -> Result<(), DbError>
 ```
 
-Begins a transaction. Handlers use this to implement `transaction`.
+Begins a transaction, taking the depth from 0 to 1.
 
 #### commit
 
@@ -208,7 +244,12 @@ Begins a transaction. Handlers use this to implement `transaction`.
 commit: () -> Result<(), DbError>
 ```
 
-Commits the transaction in progress.
+Commits the transaction in progress, taking the depth to 0.
+
+**`Ok` means committed, and nothing weaker.** An engine that ends a
+failed transaction with a rollback when asked to commit -- PostgreSQL
+does, without an error -- has not committed, and the handler answers
+`RolledBack`.
 
 #### rollback
 
@@ -223,6 +264,49 @@ then. `transaction` registers its rollback before it sends `BEGIN`, so a
 cancel that lands before the `BEGIN` went out still rolls back, and a
 handler that refused would be told `broken` about a healthy connection.
 PostgreSQL answers a stray `ROLLBACK` with a warning, not an error.
+
+#### savepoint
+
+```khora
+savepoint: (Int) -> Result<(), DbError>
+```
+
+Opens a savepoint at `level`, which is the current depth, taking the
+depth to `level + 1`.
+
+A handler refuses when the depth is not `level`: that means somebody
+else changed it between `transaction` reading it and asking, and a
+savepoint opened at the wrong level would be released by the wrong
+`transaction`.
+
+#### release
+
+```khora
+release: (Int) -> Result<(), DbError>
+```
+
+Keeps what was done since the savepoint at `level` as part of the
+enclosing transaction, taking the depth back to `level`.
+
+**`Ok` means kept.** An engine that refuses the release -- PostgreSQL
+does inside a transaction a failed statement aborted -- leaves the
+savepoint open, and `transaction` then rolls back to it.
+
+#### rollback_to
+
+```khora
+rollback_to: (Int) -> Result<(), DbError>
+```
+
+Undoes everything since the savepoint at `level` and removes it, taking
+the depth back to `level`.
+
+**May be called for a savepoint that was never opened**, when the depth
+is `level` or less, and must answer `Ok` without touching the engine
+then, for the reason [`rollback`](#rollback) gives. PostgreSQL answers a
+`ROLLBACK TO` for a savepoint it does not have with an error that aborts
+the enclosing transaction, so a handler that sent it would undo work
+nobody asked it to.
 
 #### broken
 
@@ -489,8 +573,10 @@ A transaction is cancelled like any other code: at a loop, at a blocking
 `std` call, or at a call to a function that can reach one, whatever the
 body's `raises` row. A cancellation that lands in the body unwinds through
 here, releasing the region and running the rollback. The rollback itself
-runs as cleanup, so a plain cancel does not interrupt it; only `abort`
-does. A body that reaches no cancellation point runs to its commit.
+runs as cleanup, so a plain cancel does not interrupt it. `abort` runs it
+too, and can stop it only at a cancellation point inside the handler's
+`rollback`, such as the wait for the engine's reply. A body that reaches
+no cancellation point runs to its commit.
 
 `raises 'er` is there for the body's own failures. The row is the
 *caller's*, deliberately. A transaction over a body that can
@@ -522,6 +608,27 @@ There is no connection parameter. `with { db: Db }` is the function's
 authority to run statements, and the caller supplies it at a boundary --
 which is what keeps a transaction from turning the capability back into
 plumbing threaded through every signature.
+
+#### A transaction inside a transaction
+
+**Nested for real, with a savepoint.** A `transaction` whose `db` is
+already inside one, however deep, opens a savepoint instead of a
+transaction. Its `Ok` releases the savepoint, so its writes commit or roll
+back with the enclosing transaction; its `Err`, a raise or a cancel rolls
+back to the savepoint, which undoes only its own writes, and the enclosing
+body is told `RolledBack` and can carry on. Nothing commits until the
+outermost `transaction` does.
+
+What this prevents is an inner `COMMIT` or `ROLLBACK` ending the enclosing
+transaction, which an engine does to a second `BEGIN` sent inside one: the
+caller is then told one thing and something else is committed.
+
+**Fibers sharing one lease must not run `transaction` at the same time.**
+The depth is the connection's, so two fibers nesting on one connection
+would each release or roll back the other's savepoint. A handler that
+refuses an operation for a level its connection is not at, as the
+`postgres` package's does, turns that into an `Err` for one of them, and
+nothing that one wrote is kept; it does not make both work.
 
 #### A refusal nested inside `Ok` commits
 

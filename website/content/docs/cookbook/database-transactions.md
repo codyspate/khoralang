@@ -37,10 +37,14 @@ This complete module transfers money between two accounts. Both application func
 ```khora
 module main;
 
-import std::core::{List, Result, Show, print};
+import std::core::{List, Result, Shared, Show, print};
 import std::db::{Cell, Db, DbError, Row, transaction};
 
 fn demo_db() -> Db {
+  // The handler keeps the depth: how many transactions are open on its
+  // connection. `transaction` asks for it to choose between `BEGIN` and a
+  // savepoint.
+  let depth = Shared::of(0);
   handler for Db {
     query: fn (_sql, _params) =>
       Result::Ok(List::Nil),
@@ -50,18 +54,45 @@ fn demo_db() -> Db {
       Result::Ok(1)
     },
 
+    depth: fn () => Shared::get(depth),
+
     begin: fn () => {
       print("BEGIN");
+      Shared::set(depth, 1);
       Result::Ok(())
     },
 
     commit: fn () => {
       print("COMMIT");
+      Shared::set(depth, 0);
       Result::Ok(())
     },
 
     rollback: fn () => {
       print("ROLLBACK");
+      Shared::set(depth, 0);
+      Result::Ok(())
+    },
+
+    savepoint: fn level => {
+      print("SAVEPOINT sp_${level}");
+      Shared::set(depth, level + 1);
+      Result::Ok(())
+    },
+
+    release: fn level => {
+      print("RELEASE SAVEPOINT sp_${level}");
+      Shared::set(depth, level);
+      Result::Ok(())
+    },
+
+    // Called for a savepoint that was never opened when a cancel lands
+    // before it was; that must change nothing.
+    rollback_to: fn level => {
+      if Shared::get(depth) > level {
+        print("ROLLBACK TO SAVEPOINT sp_${level}");
+        Shared::set(depth, level);
+      };
       Result::Ok(())
     },
 
@@ -142,6 +173,42 @@ If either `execute` returns `Result::Err`, `transfer_body` returns that error. `
 If the fiber is cancelled at any point after `transaction` starts, including while it waits for the server to answer `BEGIN` or `COMMIT`, the transaction's internal region finalizer performs the rollback during unwinding, so a pooled connection never goes back to the pool inside an open transaction. A caller does not need a second cancellation-specific transaction API.
 
 If `commit` itself fails, the commit error is returned. The helper does not report success for a transaction the database did not commit. A commit that loses its connection is reported as `DbError::Disconnected` with a message saying it is not known whether the transaction committed: the `COMMIT` may have reached the server, so do not treat that error as "nothing happened" and blindly retry.
+
+A body that ignores a failed statement and returns `Result::Ok` anyway is told `DbError::RolledBack`. PostgreSQL ends such a transaction with a rollback when it is asked to commit, and the PostgreSQL package reports that as the rollback it is.
+
+## Nesting
+
+A `transaction` inside another `transaction` on the same `db` is nested for real, with a savepoint:
+
+- the inner one opens a savepoint instead of a transaction;
+- its `Result::Ok` releases the savepoint, so its writes become part of the enclosing transaction and commit or roll back with it;
+- its `Result::Err`, a raise, or a cancellation rolls back to the savepoint, which undoes only the inner writes. The enclosing body is told `DbError::RolledBack` and can carry on and commit its own.
+
+```khora
+fn record_transfer(from_account: Int, to_account: Int, amount: Int)
+  -> Result<Int, DbError>
+  with { db: Db }
+{
+  transaction(fn () => {
+    // If the transfer fails, only its own writes are undone; the audit row
+    // below is still written and committed.
+    let moved = transaction(fn () =>
+      transfer_body(from_account, to_account, amount));
+    db.execute(
+      "insert into audit (outcome) values (?)",
+      [Cell::Text(match moved { Result::Ok(_) => "moved", Result::Err(e) => e.show() })],
+    )
+  })
+}
+```
+
+Nothing is committed until the outermost `transaction` commits: an inner `Result::Ok` inside an outer failure is rolled back with the rest. Nesting goes as deep as the calls do, and each level is undone on its own.
+
+The depth belongs to the connection, which is why a handler keeps it rather than `transaction`: two fibers leasing two connections from a pool nest independently, and one `db` used twice from one fiber is one connection at one depth. A cancellation inside an inner body rolls back the inner savepoint first and then the enclosing transaction, so nothing either body wrote survives.
+
+Fibers that share one lease must not run `transaction` at the same time. Their levels are one connection's, so each would release or roll back the other's savepoint; the PostgreSQL package refuses an operation for a level the connection is not at, so one of the two is answered `Err` and nothing it wrote is kept.
+
+A handler implements nesting with four operations beside `begin`, `commit` and `rollback`: `depth` says how many transactions are open, and `savepoint`, `release` and `rollback_to` take the level a savepoint was opened at. `rollback_to` is called for a savepoint that was never opened when a cancellation lands before it was, and must answer `Result::Ok` without undoing anything then, exactly as `rollback` must when no transaction is open. A handler that does not support nesting still answers `depth` truthfully (1 between `begin` and its `commit` or `rollback`, 0 otherwise) and refuses `savepoint`; a nested `transaction` is then answered with that refusal instead of opening a second transaction.
 
 ## Install a real database at the boundary
 

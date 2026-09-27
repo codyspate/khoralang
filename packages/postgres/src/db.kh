@@ -59,6 +59,16 @@ pub type Work =
   | Begin
   | Commit
   | Rollback
+  /// How many transactions are open on the connection, answered as a
+  /// count. See `std::db::Db`'s `depth`.
+  | Depth
+  /// `SAVEPOINT` at this depth.
+  | Savepoint(level: Int)
+  /// `RELEASE SAVEPOINT` for the savepoint opened at this depth.
+  | Release(level: Int)
+  /// `ROLLBACK TO SAVEPOINT` and `RELEASE` for the savepoint opened at this
+  /// depth, or nothing if it is not open.
+  | RollbackTo(level: Int)
   /// The connection cannot be trusted with another statement: `std::db` asks
   /// this when a `ROLLBACK` did not arrive. Answered at once; every statement
   /// after it on this connection is refused without touching the socket.
@@ -175,6 +185,10 @@ fn apology(work: Work, why: DbError) -> Reply {
     Work::Begin => Reply::Finished(Result::Err(why)),
     Work::Commit => Reply::Finished(Result::Err(why)),
     Work::Rollback => Reply::Finished(Result::Err(why)),
+    Work::Depth => Reply::Counted(Result::Ok(0)),
+    Work::Savepoint(_) => Reply::Finished(Result::Err(why)),
+    Work::Release(_) => Reply::Finished(Result::Err(why)),
+    Work::RollbackTo(_) => Reply::Finished(Result::Err(why)),
     Work::Break => Reply::Finished(Result::Ok(())),
     Work::Check => Reply::Finished(Result::Err(why)),
   }
@@ -187,9 +201,77 @@ fn answer(c: Connection, work: Work) -> Reply {
     // The transaction verbs take no parameters, so they are simple queries.
     // `run` is the right call and not a shortcut: `BEGIN` through the extended
     // protocol would be five frames for a statement with nothing to bind.
-    Work::Begin => Reply::Finished(statement(c, "BEGIN")),
-    Work::Commit => Reply::Finished(statement(c, "COMMIT")),
+    //
+    // **The depth guards below are exact, because two fibers can share one
+    // lease.** Each `transaction` asks for the depth and then acts on it, and
+    // a second fiber on the same connection can move it in between. An
+    // operation for a level the connection is not at would act on the other
+    // fiber's savepoint: `RELEASE` of level 1 also releases level 2, and
+    // `COMMIT` keeps any savepoint still open. So each one is refused unless
+    // the connection is exactly where its caller thinks. What that costs is an
+    // `Err` for one of two fibers that nest at once; it does not make that
+    // work, and `std::db::transaction` says not to do it.
+    Work::Begin =>
+      if c.depth != 0 || c.open_transaction {
+        Reply::Finished(Result::Err(out_of_turn("BEGIN", 0, c.depth)))
+      } else {
+        Reply::Finished(opened(c, statement(c, "BEGIN"), 1))
+      },
+    // **A `COMMIT` with a savepoint still open ends the transaction with a
+    // `ROLLBACK` instead.** Only another fiber's `transaction` can have left
+    // one open, since one fiber releases or rolls back its own inner levels
+    // before its commit, and committing would keep that fiber's writes
+    // whatever it is later told. Refusing without sending does not work
+    // either: `std::db` settles a transaction on any answer from `commit`, so
+    // no rollback would follow, and the connection would stay inside the
+    // transaction for the other fiber to release into and be told `Ok` for
+    // writes that are never committed. After the `ROLLBACK` the server is
+    // outside a transaction and `collect` puts the depth back to 0, so the
+    // other fiber's `release` is refused and its `rollback_to` finds nothing
+    // left to undo, which is the truth.
+    Work::Commit =>
+      if c.depth > 1 {
+        match statement(c, "ROLLBACK") {
+          Result::Ok(_) => Reply::Finished(Result::Err(DbError::RolledBack(
+                "the transaction was rolled back instead of committed, because a savepoint another fiber opened on this connection was still open"
+              ))),
+          Result::Err(why) => Reply::Finished(Result::Err(why)),
+        }
+      } else {
+        Reply::Finished(commit(c))
+      },
     Work::Rollback => Reply::Finished(statement(c, "ROLLBACK")),
+    Work::Depth => Reply::Counted(Result::Ok(depth(c))),
+    Work::Savepoint(level) =>
+      if c.depth != level {
+        Reply::Finished(Result::Err(out_of_turn("SAVEPOINT", level, c.depth)))
+      } else {
+        Reply::Finished(opened(c, statement(c, "SAVEPOINT " + savepoint_name(level)), level + 1))
+      },
+    Work::Release(level) =>
+      if c.depth != level + 1 {
+        Reply::Finished(Result::Err(out_of_turn("RELEASE", level, c.depth)))
+      } else {
+        Reply::Finished(opened(c, statement(c, "RELEASE SAVEPOINT " + savepoint_name(level)), level))
+      },
+    // **A savepoint that was never opened is not rolled back to.** The undo
+    // is registered before `SAVEPOINT` is sent, so a cancel can bring it
+    // here for one that does not exist, and PostgreSQL answers that with an
+    // error that aborts the whole enclosing transaction.
+    //
+    // `Ok` for sending nothing is true with two fibers on the lease as well:
+    // a depth at or below `level` means this savepoint is gone, and the ways
+    // it can go without its own release -- a `ROLLBACK TO` a lower level, a
+    // `ROLLBACK`, a `COMMIT` turned into one above -- all undo its work. The
+    // exact `Release` guard is what keeps a lower level's release from taking
+    // this one with it, which would keep the work.
+    Work::RollbackTo(level) =>
+      if c.depth <= level {
+        Reply::Finished(Result::Ok(()))
+      } else {
+        let name = savepoint_name(level);
+        Reply::Finished(opened(c, statement(c, "ROLLBACK TO SAVEPOINT " + name + "; RELEASE SAVEPOINT " + name), level))
+      },
     Work::Break => {
       forsake(c);
       Reply::Finished(Result::Ok(()))
@@ -241,6 +323,13 @@ pub fn over(requests: Channel<Request>) -> Db {
     begin: fn () => ask_done(requests, Work::Begin),
     commit: fn () => ask_done(requests, Work::Commit),
     rollback: fn () => ask_done(requests, Work::Rollback),
+    depth: fn () => match ask_count(requests, Work::Depth) {
+      Result::Ok(level) => level,
+      Result::Err(_) => 0,
+    },
+    savepoint: fn level => ask_done(requests, Work::Savepoint(level)),
+    release: fn level => ask_done(requests, Work::Release(level)),
+    rollback_to: fn level => ask_done(requests, Work::RollbackTo(level)),
     // **Telling the serving fiber is the whole of it.**
     //
     // `std::db` calls this when a `ROLLBACK` did not arrive, which leaves a
@@ -365,6 +454,65 @@ fn statement(c: Connection, sql: String) -> Result<(), DbError> {
     Result::Ok(_) => Result::Ok(()),
     Result::Err(why) => Result::Err(PgError::to_db(why)),
   }
+}
+
+/// `COMMIT`, answered `Ok` only when the server says it committed.
+///
+/// **What this prevents: `Ok` for a transaction that was rolled back.**
+/// PostgreSQL answers `COMMIT` in a transaction a failed statement aborted
+/// with no error at all, only a `CommandComplete` whose tag is `ROLLBACK`, so
+/// a body that ignored a failed statement and returned `Ok` was told its
+/// transaction committed when nothing had.
+fn commit(c: Connection) -> Result<(), DbError> {
+  match run(c, "COMMIT") {
+    Result::Ok(answer) =>
+      if answer.tag == "COMMIT" {
+        Result::Ok(())
+      } else {
+        Result::Err(DbError::RolledBack(
+            "the server ended the transaction with " + answer.tag
+            + " instead of committing it, because a statement in it failed"
+          ))
+      },
+    Result::Err(why) => Result::Err(PgError::to_db(why)),
+  }
+}
+
+/// Sets the connection's depth to `after` once `done` succeeded.
+fn opened(c: Connection, done: Result<(), DbError>, after: Int) -> Result<(), DbError> {
+  match done {
+    Result::Ok(_) => {
+      c.depth = after;
+      Result::Ok(())
+    },
+    Result::Err(why) => Result::Err(why),
+  }
+}
+
+/// The depth `std::db` is told.
+///
+/// A transaction somebody opened with a bare `BEGIN` through `execute` is
+/// still a transaction, so a `transaction` inside it nests in a savepoint
+/// rather than sending a second `BEGIN` its `COMMIT` would end both of.
+fn depth(c: Connection) -> Int {
+  if c.open_transaction && c.depth == 0 { c.depth = 1 };
+  c.depth
+}
+
+/// The name of the savepoint opened at `level`: made here and never taken
+/// from a caller, so it needs no quoting, and one per depth, so a savepoint
+/// never shadows one still open below it.
+fn savepoint_name(level: Int) -> String {
+  "khora_sp_" + Int::to_string(level)
+}
+
+/// A savepoint operation for a level the connection is not at.
+///
+/// Reachable only by a handler used out of order, since `std::db` asks for
+/// the depth first; refused rather than sent, because a savepoint at the
+/// wrong level would be released or rolled back by the wrong `transaction`.
+fn out_of_turn(verb: String, level: Int, at: Int) -> DbError {
+  DbError::Rejected(verb + " for depth " + Int::to_string(level) + " on a connection at depth " + Int::to_string(at))
 }
 
 /// How many rows a `CommandComplete` tag says were affected.

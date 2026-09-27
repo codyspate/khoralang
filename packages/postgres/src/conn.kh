@@ -120,6 +120,15 @@ pub type Connection = {
   /// Whether the last `ReadyForQuery` said a transaction is open. See
   /// `in_transaction`.
   mut open_transaction: Bool,
+  /// How many transactions are open: 0 outside one, 1 inside one, and one
+  /// more per savepoint `postgres::db` opened inside it.
+  ///
+  /// **Kept beside the connection because it is the connection's**: two
+  /// leases never share it, and every lease of one connection does. A
+  /// `ReadyForQuery` that says the connection is outside a transaction sets
+  /// it back to 0, so a `ROLLBACK`, a `COMMIT` or a failed `BEGIN` cannot
+  /// leave it counting savepoints the server has already dropped.
+  mut depth: Int,
 };
 
 /// What a column is called and what type the server says it is.
@@ -277,7 +286,7 @@ pub fn open_within(
       let empty: Array<U8> = Array::new(0, 0);
       let c: Connection = {
         handle: handle, pending: empty, start: 0, scram: Option::None, broken: false,
-        open_transaction: false,
+        open_transaction: false, depth: 0,
       };
       let hello = startup(user, database);
       let began = khora_monotonic_millis();
@@ -701,6 +710,7 @@ fn collect(c: Connection) -> Result<Answer, PgError> {
           // Its one byte is the transaction state: 'I' (73) is outside one.
           c.open_transaction = Array::length(m.payload) > 0
           && U8::to_int(Array::get(m.payload, 0)) != 73;
+          if !c.open_transaction { c.depth = 0 };
           going = false
         } else if m.kind == 84 {
           columns = describe(m)

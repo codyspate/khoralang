@@ -51,22 +51,46 @@ import std::schema::{{Decode, Raw, Rejection, list}};
 /// `commit` did not — is visible in the transcript rather than decoded from a
 /// number.
 fn recording(fails: Bool) -> Db {{
+  let depth = Shared::of(0);
   handler for Db {{
     query: fn (_sql, _binds) => Result::Ok(List::Nil),
     execute: fn (_sql, _binds) => {{
       print("execute");
       Result::Ok(1)
     }},
+    depth: fn () => Shared::get(depth),
     begin: fn () => {{
       print("begin");
+      Shared::set(depth, 1);
       Result::Ok(())
     }},
     commit: fn () => {{
       print("commit");
+      Shared::set(depth, 0);
       if fails {{ Result::Err(DbError::Rejected("no")) }} else {{ Result::Ok(()) }}
     }},
     rollback: fn () => {{
       print("rollback");
+      Shared::set(depth, 0);
+      Result::Ok(())
+    }},
+    savepoint: fn level => {{
+      print("savepoint " + Int::to_string(level));
+      Shared::set(depth, level + 1);
+      Result::Ok(())
+    }},
+    release: fn level => {{
+      print("release " + Int::to_string(level));
+      Shared::set(depth, level);
+      Result::Ok(())
+    }},
+    rollback_to: fn level => {{
+      if Shared::get(depth) <= level {{
+        print("rollback to " + Int::to_string(level) + ", never opened")
+      }} else {{
+        print("rollback to " + Int::to_string(level));
+        Shared::set(depth, level)
+      }};
       Result::Ok(())
     }},
     broken: fn () => print("broken"),
@@ -308,6 +332,10 @@ fn brittle() -> Db {
       Result::Err(DbError::Rejected("the rollback failed too"))
     },
     broken: fn () => print("broken"),
+    depth: fn () => 0,
+    savepoint: fn _level => Result::Err(DbError::Rejected("one level only")),
+    release: fn _level => Result::Err(DbError::Rejected("one level only")),
+    rollback_to: fn _level => Result::Ok(()),
   }
 }
 "#;
@@ -514,6 +542,10 @@ fn talkative() -> Db {{
       Result::Ok(())
     }},
     broken: fn () => print("broken"),
+    depth: fn () => 0,
+    savepoint: fn _level => Result::Err(DbError::Rejected("one level only")),
+    release: fn _level => Result::Err(DbError::Rejected("one level only")),
+    rollback_to: fn _level => Result::Ok(()),
   }}
 }}
 
@@ -657,6 +689,10 @@ fn dying(where_it_dies: String) -> Db {
         Result::Ok(())
       },
     broken: fn () => print("the handler was told the connection is broken"),
+    depth: fn () => 0,
+    savepoint: fn _level => Result::Err(DbError::Rejected("one level only")),
+    release: fn _level => Result::Err(DbError::Rejected("one level only")),
+    rollback_to: fn _level => Result::Ok(()),
   }
 }
 "#;
@@ -850,6 +886,10 @@ fn cancelled_in(at: String) -> Db {
       Result::Ok(())
     },
     broken: fn () => print("broken"),
+    depth: fn () => 0,
+    savepoint: fn _level => Result::Err(DbError::Rejected("one level only")),
+    release: fn _level => Result::Err(DbError::Rejected("one level only")),
+    rollback_to: fn _level => Result::Ok(()),
   }
 }
 
@@ -938,5 +978,266 @@ fn worker() -> () {{
     assert!(
         out.contains("disconnected: the connection was lost during the commit, so it is not known whether the transaction committed: the server went away"),
         "the caller must be told the commit's outcome is unknown, got: {out:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A transaction inside a transaction
+// ---------------------------------------------------------------------------
+//
+// **What these prevent: an inner transaction committing or rolling back the
+// enclosing one.** An inner `BEGIN` is only a warning to PostgreSQL, so the
+// inner `COMMIT` committed the outer body's writes and the inner `ROLLBACK`
+// undid them: the caller was told `Err` with every row committed, or `Ok`
+// with only some. The transcript is the assertion: which level each verb
+// was sent for, in order.
+
+/// A body run at one level inside another, for the nesting tests.
+const NESTED: &str = r#"extern fn khora_cancel();
+
+pub type Oops = | Bad;
+
+fn mark() -> Int raises Oops { 1 }
+
+fn told(r: Result<Int, DbError>) -> String {
+  match r { Result::Ok(n) => "Ok " + Int::to_string(n), Result::Err(p) => "Err " + p.show() }
+}
+
+fn inner(fails: Bool) -> Result<Int, DbError> with { db: Db } {
+  transaction(fn () => {
+    db.execute("inner", List::Nil);
+    if fails { Result::Err(DbError::Rejected("inner")) } else { Result::Ok(2) }
+  })
+}
+
+fn outer(inner_fails: Bool, outer_fails: Bool) -> Result<Int, DbError> with { db: Db } {
+  transaction(fn () => {
+    db.execute("outer", List::Nil);
+    print("inner said " + told(inner(inner_fails)));
+    if outer_fails { Result::Err(DbError::Rejected("outer")) } else { Result::Ok(1) }
+  })
+}
+"#;
+
+fn nested(name: &str, inner_fails: bool, outer_fails: bool) -> String {
+    run_with(
+        name,
+        NESTED,
+        &format!(
+            "  with {{ db: recording(false) }} {{\n    print(\"outer said \" + told(outer({inner_fails}, {outer_fails})));\n  }}"
+        ),
+    )
+}
+
+/// **An inner `Ok` keeps its writes for the enclosing transaction to commit**,
+/// and commits nothing itself.
+#[test]
+fn an_inner_transaction_that_succeeds_is_released_not_committed() {
+    assert_eq!(
+        nested("db_nested_ok_ok", false, false),
+        "begin\nexecute\nsavepoint 1\nexecute\nrelease 1\ninner said Ok 2\ncommit\nouter said Ok 1\n"
+    );
+}
+
+/// **An inner `Err` undoes only the inner writes**, and the enclosing body
+/// carries on and commits its own.
+#[test]
+fn an_inner_transaction_that_fails_undoes_only_itself() {
+    assert_eq!(
+        nested("db_nested_err_ok", true, false),
+        "begin\nexecute\nsavepoint 1\nexecute\nrollback to 1\ninner said Err rolled back: rejected: inner\ncommit\nouter said Ok 1\n"
+    );
+}
+
+/// **An enclosing failure takes the released inner writes with it**: the
+/// only commit is the outermost one, and it is never sent.
+#[test]
+fn an_outer_failure_rolls_back_an_inner_success() {
+    assert_eq!(
+        nested("db_nested_ok_err", false, true),
+        "begin\nexecute\nsavepoint 1\nexecute\nrelease 1\ninner said Ok 2\nrollback\nouter said Err rolled back: rejected: outer\n"
+    );
+}
+
+/// **Each level is named by its depth**, so the middle of three undoes its own
+/// savepoint, which holds the innermost one's released writes, and nothing
+/// of the outermost.
+#[test]
+fn the_middle_of_three_levels_undoes_itself_and_what_it_holds() {
+    let out = run_with(
+        "db_nested_three",
+        NESTED,
+        r#"  with { db: recording(false) } {
+    let answer = transaction(fn () => {
+      let middle: Result<Int, DbError> = transaction(fn () => {
+        print("innermost said " + told(inner(false)));
+        Result::Err(DbError::Rejected("middle"))
+      });
+      print("middle said " + told(middle));
+      Result::Ok(1)
+    });
+    print("outermost said " + told(answer));
+  }"#,
+    );
+    assert_eq!(
+        out,
+        "begin\nsavepoint 1\nsavepoint 2\nexecute\nrelease 2\ninnermost said Ok 2\n\
+         rollback to 1\nmiddle said Err rolled back: rejected: middle\ncommit\noutermost said Ok 1\n"
+    );
+}
+
+/// **A cancel in an inner body undoes the inner savepoint, then the enclosing
+/// transaction, in that order.** Inner regions end first, so no acknowledged
+/// write survives a rollback it belonged to.
+#[test]
+fn a_cancel_in_an_inner_body_undoes_inner_then_outer() {
+    let out = run_with(
+        "db_nested_cancel",
+        NESTED,
+        r#"  let f = Fiber::spawn(fn () => {
+    with { db: recording(false) } {
+      transaction(fn () => {
+        db.execute("outer", List::Nil);
+        transaction(fn () => {
+          db.execute("inner", List::Nil);
+          khora_cancel();
+          mark()!;
+          print("the inner body carried on, which is wrong");
+          Result::Ok(2)
+        })!;
+        print("the outer body carried on, which is wrong");
+        Result::Ok(1)
+      })!;
+      ()
+    }
+  });
+  Fiber::wait(f)! catch { Oops::Bad => () };
+  print("the parent carried on");"#,
+    );
+    assert_eq!(
+        out,
+        "begin\nexecute\nsavepoint 1\nexecute\nrollback to 1\nrollback\nthe parent carried on\n"
+    );
+}
+
+/// **A cancel while `SAVEPOINT` waits for its reply rolls back the enclosing
+/// transaction and sends nothing for the savepoint that was never opened.**
+/// The inner undo is registered before `SAVEPOINT` goes out, so it runs for a
+/// level the connection never reached, and PostgreSQL answers a
+/// `ROLLBACK TO` for an unknown savepoint with an error that aborts the
+/// enclosing transaction.
+#[test]
+fn a_cancel_before_the_savepoint_opened_is_harmless() {
+    let out = run_with(
+        "db_nested_cancel_in_savepoint",
+        r#"extern fn khora_cancel();
+
+fn turn() -> () {
+  let mut i = 0;
+  while i < 2 { i = i + 1 };
+}
+
+fn stalls() -> Db {
+  let depth = Shared::of(0);
+  let base = recording(false);
+  handler for Db {
+    query: fn (sql, binds) => base.query(sql, binds),
+    execute: fn (sql, binds) => base.execute(sql, binds),
+    depth: fn () => Shared::get(depth),
+    begin: fn () => { Shared::set(depth, 1); base.begin() },
+    commit: fn () => { Shared::set(depth, 0); base.commit() },
+    rollback: fn () => { Shared::set(depth, 0); base.rollback() },
+    savepoint: fn level => {
+      print("savepoint " + Int::to_string(level) + " sent");
+      khora_cancel();
+      turn();
+      Shared::set(depth, level + 1);
+      Result::Ok(())
+    },
+    release: fn level => { Shared::set(depth, level); base.release(level) },
+    rollback_to: fn level =>
+      if Shared::get(depth) <= level {
+        print("rollback to " + Int::to_string(level) + ", never opened");
+        Result::Ok(())
+      } else {
+        Shared::set(depth, level);
+        print("rollback to " + Int::to_string(level));
+        Result::Ok(())
+      },
+    broken: fn () => base.broken(),
+  }
+}
+
+fn worker() -> () {
+  with { db: stalls() } {
+    let _answer: Result<Int, DbError> = transaction(fn () => {
+      db.execute("outer", List::Nil);
+      let _inner: Result<Int, DbError> = transaction(fn () => Result::Ok(2));
+      Result::Ok(1)
+    });
+    ()
+  }
+}
+"#,
+        r#"  let f = Fiber::spawn(fn () => worker());
+  Fiber::wait(f);
+  print("the parent carried on");"#,
+    );
+    assert_eq!(
+        out,
+        "begin\nexecute\nsavepoint 1 sent\nrollback to 1, never opened\nrollback\nthe parent carried on\n"
+    );
+}
+
+/// **A handler that does not support nesting refuses it; it never opens a
+/// second transaction.** What this prevents: the migration a handler author
+/// reaches for first, answering `depth` with 0 always, which makes a nested
+/// `transaction` send a second `BEGIN`. On PostgreSQL that is only a warning,
+/// so the inner `ROLLBACK` ends the outer transaction, the outer body's
+/// earlier writes are lost and its later ones autocommit, and the caller is
+/// told `Ok`. Answering `depth` truthfully and refusing `savepoint` turns the
+/// nested `transaction` into that refusal, and the outer one carries on.
+#[test]
+fn a_handler_without_nesting_refuses_it_instead_of_beginning_twice() {
+    let out = run_with(
+        "db_flat_handler",
+        r#"/// Supports one level only, and says so.
+fn flat() -> Db {
+  let depth = Shared::of(0);
+  handler for Db {
+    query: fn (_sql, _binds) => Result::Ok(List::Nil),
+    execute: fn (sql, _binds) => { print("execute " + sql); Result::Ok(1) },
+    depth: fn () => Shared::get(depth),
+    begin: fn () => { print("begin"); Shared::set(depth, 1); Result::Ok(()) },
+    commit: fn () => { print("commit"); Shared::set(depth, 0); Result::Ok(()) },
+    rollback: fn () => { print("rollback"); Shared::set(depth, 0); Result::Ok(()) },
+    savepoint: fn _level => Result::Err(DbError::Rejected("this handler does not nest")),
+    release: fn _level => Result::Err(DbError::Rejected("this handler does not nest")),
+    rollback_to: fn _level => Result::Ok(()),
+    broken: fn () => print("broken"),
+  }
+}
+
+fn told(r: Result<Int, DbError>) -> String {
+  match r { Result::Ok(n) => "Ok " + Int::to_string(n), Result::Err(p) => "Err " + p.show() }
+}"#,
+        r#"  with { db: flat() } {
+    let outer = transaction(fn () => {
+      db.execute("1", List::Nil);
+      let inner: Result<Int, DbError> = transaction(fn () => {
+        db.execute("2", List::Nil);
+        Result::Ok(2)
+      });
+      print("inner said " + told(inner));
+      db.execute("3", List::Nil);
+      Result::Ok(1)
+    });
+    print("outer said " + told(outer));
+  }"#,
+    );
+    assert_eq!(
+        out,
+        "begin\nexecute 1\ninner said Err rejected: this handler does not nest\nexecute 3\ncommit\nouter said Ok 1\n",
+        "the nested transaction must be refused, with one `begin` and no second one"
     );
 }

@@ -90,6 +90,13 @@ connections that are live, reconnecting and down. The
 [package page](https://khoralang.com/docs/packages/postgres/) has the
 numbers and the limits.
 
+A `transaction` inside another on the same lease is a savepoint on that
+connection, named `khora_sp_<depth>`: released when the inner body answers
+`Ok`, rolled back to when it does not. The depth is kept per connection. A
+`COMMIT` the server answers with a `ROLLBACK` tag, because a statement in the
+transaction failed, is reported as `RolledBack`, and so is an inner body whose
+`RELEASE` the server refuses for the same reason.
+
 ## Using a connection directly
 
 The lower-level connection API is available when writing database

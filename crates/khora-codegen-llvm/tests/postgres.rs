@@ -3614,3 +3614,888 @@ fn main() -> Int {
         );
     }
 }
+
+// --- a transaction inside a transaction, against the real server ----------
+
+/// **Nested `transaction`s are savepoints, and the caller's answer matches
+/// what is committed.** What this prevents: an inner `BEGIN` that PostgreSQL
+/// only warns about, so the inner `COMMIT` committed the outer body's writes
+/// and the inner `ROLLBACK` undid them. The caller was told `Err` with every
+/// row committed, and `Ok` with only the last.
+///
+/// Every case prints what each level was told, then the rows really there
+/// (read through a fresh lease) and whether the connection came back outside
+/// a transaction. The first case has a second connection look at the table
+/// between the inner `Ok` and the outer commit: an inner transaction commits
+/// nothing. Two cases are F1, a `COMMIT` PostgreSQL answers with a
+/// `ROLLBACK` tag and no error because a statement in the transaction failed,
+/// and the same inside an inner body, whose `RELEASE` the server refuses:
+/// the inner body is told `RolledBack` and the outer carries on. The stray
+/// case sends the `rollback_to` a cancel delivers for a savepoint that never
+/// opened: PostgreSQL would abort the enclosing transaction over it, so the
+/// driver must not send it. The two connections case has one fiber's inner
+/// transaction fail while the other's,
+/// on the other connection, succeeds: each nests on its own.
+#[test]
+fn nested_transactions_against_a_real_server() {
+    if std::env::var_os("KHORA_POSTGRES").is_none() {
+        eprintln!("skipping: set KHORA_POSTGRES=1 and bring up packages/postgres/docker-compose.yml to run this");
+        return;
+    }
+    let exe = build("postgres_nested", NESTED_PROGRAM);
+    for backend in ["threads", "scheduler"] {
+        let ran = run_watched(&exe, backend, std::time::Duration::from_secs(120));
+        assert!(!ran.hung, "{backend}: the program hung: stdout {:?}", ran.stdout);
+        assert_eq!(ran.code, Some(0), "{backend}: stderr {}", ran.stderr);
+        assert_eq!(ran.stdout, "inner Ok, outer Ok\n  inner Ok(1)\n  another connection sees []\n  outer Ok(1), rows [1,2,3], connection clean\ninner Err, outer Ok\n  inner Err(rolled back: rejected: inner body failed)\n  outer Ok(1), rows [1,3], connection clean\ninner Ok, outer Err\n  inner Ok(1)\n  outer Err(rolled back: rejected: outer body failed), rows [], connection clean\nthree levels, the middle fails\n  innermost Ok(1)\n  middle Err(rolled back: rejected: middle body failed)\n  outer Ok(1), rows [1,5], connection clean\na failure ignored in the body\n  outer Err(rolled back: the server ended the transaction with ROLLBACK instead of committing it, because a statement in it failed), rows [], connection clean\na failure ignored in the inner body\n  inner Err(rolled back: current transaction is aborted, commands ignored until end of transaction block [25P02])\n  outer Ok(1), rows [1,3], connection clean\na stray rollback_to\n  depth 1, stray rollback_to Ok\n  outer Ok(1), rows [1,2], connection clean\ntwo connections\n  rows [100,102,200,201,202]\n", "{backend}");
+    }
+}
+
+const NESTED_PROGRAM: &str = r##"module demo::main;
+
+import std::core::{Channel, Fiber, Fibers, List, Option, Result, Shared, Show, print};
+import std::db::{Cell, Db, DbError, Row, transaction};
+import postgres::db::{Settings};
+import postgres::pool::{Pool, close as close_pool, open as open_pool, with_db};
+
+fn settings() -> Settings {
+  { host: "127.0.0.1", port: 5433, user: "khora", database: "khora", secret: "khora" }
+}
+
+fn put(n: Int) -> Result<Int, DbError> with { db: Db } {
+  db.execute("insert into khora_nested (n) values ($1)", List::Cons(Cell::Number(n), List::Nil))
+}
+
+fn fresh() -> () with { db: Db } {
+  let _ = db.execute("drop table if exists khora_nested", List::Nil);
+  let _ = db.execute("create table khora_nested (n int4)", List::Nil);
+}
+
+fn rows() -> String with { db: Db } {
+  match db.query("select coalesce(string_agg(n::text, ',' order by n), '') from khora_nested", List::Nil) {
+    Result::Ok(List::Cons(row, _)) => match row.cells {
+      List::Cons(Cell::Text(t), _) => "[" + t + "]",
+      _ => "[?]",
+    },
+    Result::Ok(_) => "[none]",
+    Result::Err(problem) => "[error " + problem.show() + "]",
+  }
+}
+
+/// Whether the connection is outside a transaction: `SAVEPOINT` is accepted
+/// only inside a transaction block, so an accepted one means the connection
+/// came back inside a transaction (which is then rolled back here).
+fn idle() -> String with { db: Db } {
+  match db.execute("savepoint khora_probe_idle", List::Nil) {
+    Result::Ok(_) => { let _ = db.rollback(); "left inside a transaction" },
+    Result::Err(_) => "clean",
+  }
+}
+
+fn told(r: Result<Int, DbError>) -> String {
+  match r { Result::Ok(n) => "Ok(" + Int::to_string(n) + ")", Result::Err(p) => "Err(" + p.show() + ")" }
+}
+
+/// `pool` has a second connection, which looks at the table between the
+/// inner commit and the outer one: nothing is committed until the outer is.
+fn inner_ok(pool: Pool) -> Result<Int, DbError> with { db: Db } {
+  transaction(fn () => {
+    let _ = put(1);
+    print("  inner " + told(transaction(fn () => put(2))));
+    let seen = match with_db(pool, rows) { Result::Ok(s) => s, Result::Err(p) => "lease " + p.show() };
+    print("  another connection sees " + seen);
+    put(3)
+  })
+}
+
+fn inner_err() -> Result<Int, DbError> with { db: Db } {
+  transaction(fn () => {
+    let _ = put(1);
+    let inner: Result<Int, DbError> = transaction(fn () => { let _ = put(2); Result::Err(DbError::Rejected("inner body failed")) });
+    print("  inner " + told(inner));
+    put(3)
+  })
+}
+
+fn outer_err() -> Result<Int, DbError> with { db: Db } {
+  transaction(fn () => {
+    let _ = put(1);
+    print("  inner " + told(transaction(fn () => put(2))));
+    let _ = put(3);
+    Result::Err(DbError::Rejected("outer body failed"))
+  })
+}
+
+fn three_levels() -> Result<Int, DbError> with { db: Db } {
+  transaction(fn () => {
+    let _ = put(1);
+    let middle: Result<Int, DbError> = transaction(fn () => {
+      let _ = put(2);
+      print("  innermost " + told(transaction(fn () => put(3))));
+      let _ = put(4);
+      Result::Err(DbError::Rejected("middle body failed"))
+    });
+    print("  middle " + told(middle));
+    put(5)
+  })
+}
+
+fn ignored_failure() -> Result<Int, DbError> with { db: Db } {
+  transaction(fn () => {
+    let _ = put(1);
+    let _ = db.execute("select 1/0", List::Nil);
+    Result::Ok(7)
+  })
+}
+
+fn ignored_failure_inside() -> Result<Int, DbError> with { db: Db } {
+  transaction(fn () => {
+    let _ = put(1);
+    let inner = transaction(fn () => {
+      let _ = put(2);
+      let _ = db.execute("select 1/0", List::Nil);
+      Result::Ok(7)
+    });
+    print("  inner " + told(inner));
+    put(3)
+  })
+}
+
+/// A `rollback_to` for a level whose savepoint was never opened, as a cancel
+/// landing before `SAVEPOINT` went out delivers it: it must leave the
+/// enclosing transaction alone, so the outer row commits.
+fn stray_rollback_to() -> Result<Int, DbError> with { db: Db } {
+  transaction(fn () => {
+    let _ = put(1);
+    let level = db.depth();
+    let stray = match db.rollback_to(level) { Result::Ok(_) => "Ok", Result::Err(p) => "Err(" + p.show() + ")" };
+    print("  depth " + Int::to_string(level) + ", stray rollback_to " + stray);
+    put(2)
+  })
+}
+
+fn run(pool: Pool, name: String, case: () -> Result<Int, DbError> with { db: Db }) -> () {
+  let _ = with_db(pool, fresh);
+  print(name);
+  let r = match with_db(pool, case) { Result::Ok(x) => told(x), Result::Err(p) => "lease " + p.show() };
+  let there = match with_db(pool, rows) { Result::Ok(s) => s, Result::Err(p) => "lease " + p.show() };
+  let after = match with_db(pool, idle) { Result::Ok(s) => s, Result::Err(p) => "lease " + p.show() };
+  print("  outer " + r + ", rows " + there + ", connection " + after);
+}
+
+/// One side of the two-connection case: `first` opens its transaction and
+/// says so before `second` opens its own, so each is inside a transaction on
+/// its own connection while the other nests.
+fn side(pool: Pool, base: Int, fails: Bool, ready: Channel<Int>, go: Channel<Int>) -> () {
+  let _ = with_db(pool, fn () => transaction(fn () => {
+    let _ = put(base);
+    let _ = Channel::send(ready, base);
+    let _ = Channel::receive(go);
+    let inner: Result<Int, DbError> = transaction(fn () => {
+      let _ = put(base + 1);
+      if fails { Result::Err(DbError::Rejected("no")) } else { Result::Ok(1) }
+    });
+    let _ = Channel::send(ready, match inner { Result::Ok(_) => base + 1, Result::Err(_) => 0 - base });
+    put(base + 2)
+  }));
+}
+
+fn two_connections(pool: Pool) -> () {
+  let _ = with_db(pool, fresh);
+  print("two connections");
+  let ready: Channel<Int> = Channel::bounded(4);
+  let go_a: Channel<Int> = Channel::bounded(1);
+  let go_b: Channel<Int> = Channel::bounded(1);
+  let a = Fiber::spawn(fn () => side(pool, 100, true, ready, go_a));
+  let _ = Channel::receive(ready);
+  let b = Fiber::spawn(fn () => side(pool, 200, false, ready, go_b));
+  let _ = Channel::receive(ready);
+  let _ = Channel::send(go_a, 1);
+  let _ = Channel::receive(ready);
+  let _ = Channel::send(go_b, 1);
+  let _ = Channel::receive(ready);
+  Fiber::wait(a);
+  Fiber::wait(b);
+  let there = match with_db(pool, rows) { Result::Ok(s) => s, Result::Err(p) => "lease " + p.show() };
+  print("  rows " + there);
+}
+
+fn main() -> () {
+  let crew = Fibers::open();
+  let pool = open_pool(crew, settings(), 2);
+  run(pool, "inner Ok, outer Ok", fn () => inner_ok(pool));
+  run(pool, "inner Err, outer Ok", inner_err);
+  run(pool, "inner Ok, outer Err", outer_err);
+  run(pool, "three levels, the middle fails", three_levels);
+  run(pool, "a failure ignored in the body", ignored_failure);
+  run(pool, "a failure ignored in the inner body", ignored_failure_inside);
+  run(pool, "a stray rollback_to", stray_rollback_to);
+  close_pool(pool);
+  let crew2 = Fibers::open();
+  let two = open_pool(crew2, settings(), 2);
+  two_connections(two);
+  close_pool(two);
+}
+"##;
+
+/// **A cancel inside a nested transaction leaves nothing behind**, over 200
+/// trials. Odd trials are cancelled inside the inner body, even ones after
+/// it answered `Ok`: its writes are then part of an outer transaction that
+/// never commits. A quarter of them cancel without waiting for either, so
+/// the cancel can land anywhere from reading the depth onward. What this
+/// prevents: an inner transaction that committed the outer one, so a row
+/// survived a cancel (100 of 200 did), an undo that rolled back the wrong
+/// level, or a connection handed back inside a transaction. A `ROLLBACK TO`
+/// for a savepoint that was never opened would abort the outer transaction. A
+/// handler told `broken` about a healthy connection has it closed and
+/// reconnected, so the backend's pid is watched across every trial.
+#[test]
+fn a_cancel_storm_inside_a_nested_transaction_against_a_real_server() {
+    if std::env::var_os("KHORA_POSTGRES").is_none() {
+        eprintln!("skipping: set KHORA_POSTGRES=1 and bring up packages/postgres/docker-compose.yml to run this");
+        return;
+    }
+    let exe = build("postgres_nested_storm", NESTED_STORM_PROGRAM);
+    for backend in ["threads", "scheduler"] {
+        let ran = run_watched(&exe, backend, std::time::Duration::from_secs(300));
+        assert!(!ran.hung, "{backend}: the program hung: stdout {:?}", ran.stdout);
+        assert_eq!(ran.code, Some(0), "{backend}: stderr {}", ran.stderr);
+        assert_eq!(
+            ran.stdout,
+            "trials 200, left inside a transaction 0, errors 0, connection replaced 0, rows surviving 0, other connections idle in a transaction 0\n",
+            "{backend}"
+        );
+    }
+}
+
+const NESTED_STORM_PROGRAM: &str = r##"module demo::main;
+
+//! A 200-trial cancel storm inside an inner transaction, real server 5433.
+//!
+//! Each trial: a fiber opens a transaction, writes a row, opens an inner
+//! transaction, writes a row, says it is in, and spins until cancelled. The
+//! parent waits for that evidence, then a varying delay, then cancels. Before
+//! the evidence, the cancel can land anywhere from `depth` to the inner write.
+//! After each cancel the same (only) connection is asked whether it is inside
+//! a transaction; at the end another connection counts rows and open
+//! transactions.
+
+import std::core::{Fiber, Fibers, List, Result, Shared, Show, print};
+import std::db::{Cell, Db, DbError, Row, transaction};
+import postgres::db::{Settings};
+import postgres::pool::{Pool, close, open, with_db};
+
+extern fn khora_monotonic_millis() -> Int;
+extern fn khora_sleep(millis: Int) -> ();
+
+fn settings() -> Settings {
+  { host: "127.0.0.1", port: 5433, user: "khora", database: "khora", secret: "khora" }
+}
+
+fn put(n: Int) -> Result<Int, DbError> with { db: Db } {
+  db.execute("insert into khora_nstorm (n) values ($1)", List::Cons(Cell::Number(n), List::Nil))
+}
+
+fn spin(turns: Int) -> Int {
+  let mut i = 0;
+  let mut acc = 0;
+  while i < turns { acc = acc + i % 7; i = i + 1 };
+  acc
+}
+
+/// Odd trials spin inside the inner body; even ones after the inner body
+/// answered `Ok`, where a cancel must still undo the inner writes, because
+/// they belong to the outer transaction that never committed.
+fn nested(trial: Int, inside: Shared<Int>) -> Result<Int, DbError> with { db: Db } {
+  transaction(fn () => {
+    let _ = put(trial * 2);
+    let _ = transaction(fn () => {
+      let _ = put(trial * 2 + 1);
+      if trial % 2 == 1 {
+        Shared::set(inside, 1);
+        let mut going = true;
+        while going { let _ = spin(1000); () };
+      };
+      Result::Ok(1)
+    });
+    Shared::set(inside, 1);
+    let mut going = true;
+    while going { let _ = spin(1000); () };
+    Result::Ok(1)
+  })
+}
+
+fn trial_run(pool: Pool, trial: Int) -> () {
+  let inside = Shared::of(0);
+  let f = Fiber::spawn(fn () => { let _ = with_db(pool, fn () => nested(trial, inside)); () });
+  if trial % 4 != 0 {
+    let started = khora_monotonic_millis();
+    while Shared::get(inside) < 1 && khora_monotonic_millis() - started < 5000 { khora_sleep(0) };
+  } else {
+    let _ = spin((trial * 7919) % 200000);
+    ()
+  };
+  let _ = spin((trial * 104729) % 20000);
+  Fiber::cancel(f);
+  Fiber::wait(f);
+}
+
+fn left_open() -> Int with { db: Db } {
+  match db.execute("savepoint khora_nstorm_probe", List::Nil) {
+    Result::Ok(_) => { let _ = db.rollback(); 1 },
+    Result::Err(DbError::Rejected(_)) => 0,
+    Result::Err(problem) => { print("left_open error: " + problem.show()); 0 - 1 },
+  }
+}
+
+fn fresh() -> () with { db: Db } {
+  let _ = db.execute("drop table if exists khora_nstorm", List::Nil);
+  let _ = db.execute("create table khora_nstorm (n int4)", List::Nil);
+}
+
+fn one_number(sql: String) -> Int with { db: Db } {
+  match db.query(sql, List::Nil) {
+    Result::Ok(List::Cons(row, _)) => match row.cells {
+      List::Cons(Cell::Number(n), _) => n,
+      _ => 0 - 1,
+    },
+    _ => 0 - 1,
+  }
+}
+
+fn main() -> () {
+  let crew = Fibers::open();
+  let pool = open(crew, settings(), 1);
+  let _ = with_db(pool, fresh);
+  let n = 200;
+  let mut trial = 0;
+  let mut open_after = 0;
+  let mut errors = 0;
+  // A connection marked broken is closed and reconnected, which a harmless
+  // undo never causes: count how often the server-side backend changed.
+  let pid_sql = "select pg_backend_pid()::int4";
+  let mut pid = match with_db(pool, fn () => one_number(pid_sql)) { Result::Ok(p) => p, Result::Err(_) => 0 - 2 };
+  let mut replaced = 0;
+  while trial < n {
+    trial_run(pool, trial);
+    match with_db(pool, left_open) {
+      Result::Ok(0) => (),
+      Result::Ok(1) => open_after = open_after + 1,
+      Result::Ok(_) => errors = errors + 1,
+      Result::Err(problem) => { errors = errors + 1; print("lease error: " + problem.show()) },
+    };
+    let now = match with_db(pool, fn () => one_number(pid_sql)) { Result::Ok(p) => p, Result::Err(_) => 0 - 2 };
+    if now != pid { replaced = replaced + 1; pid = now };
+    trial = trial + 1
+  };
+  close(pool);
+
+  let crew2 = Fibers::open();
+  let again = open(crew2, settings(), 1);
+  let rows = match with_db(again, fn () => one_number("select count(*)::int4 from khora_nstorm")) { Result::Ok(c) => c, Result::Err(_) => 0 - 2 };
+  let idle_in = match with_db(again, fn () => one_number(
+    "select count(*)::int4 from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid() and state like 'idle in transaction%' and query like '%khora_nstorm%'"
+  )) { Result::Ok(c) => c, Result::Err(_) => 0 - 2 };
+  close(again);
+  print("trials " + Int::to_string(n) + ", left inside a transaction " + Int::to_string(open_after)
+    + ", errors " + Int::to_string(errors) + ", connection replaced " + Int::to_string(replaced)
+    + ", rows surviving " + Int::to_string(rows)
+    + ", other connections idle in a transaction " + Int::to_string(idle_in));
+}
+"##;
+
+
+// --- two fibers sharing one lease ---------------------------------------------
+
+/// A server that keeps PostgreSQL's transaction and savepoint semantics for
+/// one table of integers, on every connection it is given.
+///
+/// **Just the part that decides the answer to two fibers on one lease**:
+/// `RELEASE` of a savepoint also releases every one opened after it, `ROLLBACK
+/// TO` undoes them, `COMMIT` keeps every savepoint still open, and `SAVEPOINT`
+/// outside a transaction is an error. That is what lets a test CI runs show
+/// a row committed for a `transaction` that answered `Err`, without a real
+/// server. Committed rows are shared between connections, as a table is.
+fn tx_server(committed: std::sync::Arc<std::sync::Mutex<Vec<i64>>>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
+    let port = listener.local_addr().expect("an address").port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { break };
+            let committed = committed.clone();
+            std::thread::spawn(move || tx_connection(stream, &committed));
+        }
+    });
+    format!("{{ host: \"127.0.0.1\", port: {port}, user: \"khora\", database: \"khora\", secret: \"khora\" }}")
+}
+
+/// One savepoint (or the transaction itself, unnamed) and the rows written
+/// since it was opened.
+struct Frame {
+    name: Option<String>,
+    rows: Vec<i64>,
+}
+
+fn error_frame(code: &str, message: &str) -> Vec<u8> {
+    let mut fields = Vec::new();
+    fields.push(b'S');
+    fields.extend_from_slice(&cstring("ERROR"));
+    fields.push(b'C');
+    fields.extend_from_slice(&cstring(code));
+    fields.push(b'M');
+    fields.extend_from_slice(&cstring(message));
+    fields.push(0);
+    framed(b'E', &fields)
+}
+
+/// Runs one statement against `frames` (empty outside a transaction),
+/// answering its `CommandComplete` tag and any rows, or an error.
+fn tx_statement(
+    sql: &str,
+    param: Option<i64>,
+    frames: &mut Vec<Frame>,
+    committed: &std::sync::Mutex<Vec<i64>>,
+) -> Result<(String, Option<i64>), Vec<u8>> {
+    let sql = sql.trim();
+    let lower = sql.to_ascii_lowercase();
+    let word = |i: usize| lower.split_whitespace().nth(i).unwrap_or("").to_string();
+    if lower == "begin" {
+        if frames.is_empty() {
+            frames.push(Frame { name: None, rows: Vec::new() });
+        }
+        Ok(("BEGIN".into(), None))
+    } else if lower == "commit" {
+        let all: Vec<i64> = frames.drain(..).flat_map(|f| f.rows).collect();
+        committed.lock().expect("the table").extend(all);
+        Ok(("COMMIT".into(), None))
+    } else if lower == "rollback" {
+        frames.clear();
+        Ok(("ROLLBACK".into(), None))
+    } else if lower.starts_with("savepoint ") {
+        if frames.is_empty() {
+            return Err(error_frame("25P01", "SAVEPOINT can only be used in transaction blocks"));
+        }
+        frames.push(Frame { name: Some(word(1)), rows: Vec::new() });
+        Ok(("SAVEPOINT".into(), None))
+    } else if lower.starts_with("release savepoint ") || lower.starts_with("rollback to savepoint ") {
+        let releasing = lower.starts_with("release");
+        let name = word(if releasing { 2 } else { 3 });
+        let Some(at) = frames.iter().rposition(|f| f.name.as_deref() == Some(name.as_str())) else {
+            return Err(error_frame("3B001", &format!("savepoint \"{name}\" does not exist")));
+        };
+        if releasing {
+            // The savepoint and every one opened after it go; their rows
+            // become the enclosing level's.
+            let rows: Vec<i64> = frames.drain(at..).flat_map(|f| f.rows).collect();
+            frames.last_mut().expect("a transaction").rows.extend(rows);
+            Ok(("RELEASE".into(), None))
+        } else {
+            frames.truncate(at + 1);
+            frames[at].rows.clear();
+            Ok(("ROLLBACK".into(), None))
+        }
+    } else if lower.starts_with("insert ") {
+        let n = param.expect("a bound value");
+        match frames.last_mut() {
+            Some(top) => top.rows.push(n),
+            None => committed.lock().expect("the table").push(n),
+        }
+        Ok(("INSERT 0 1".into(), None))
+    } else if lower.starts_with("select count(*)") {
+        let n = param.expect("a bound value");
+        let count = committed.lock().expect("the table").iter().filter(|r| **r == n).count();
+        Ok(("SELECT 1".into(), Some(count as i64)))
+    } else if lower.starts_with("drop ") || lower.starts_with("create ") {
+        committed.lock().expect("the table").clear();
+        Ok(("CREATE TABLE".into(), None))
+    } else {
+        Err(error_frame("42601", &format!("the scripted server does not know `{sql}`")))
+    }
+}
+
+fn tx_connection(mut stream: TcpStream, committed: &std::sync::Mutex<Vec<i64>>) {
+    let _ = stream.set_nodelay(true);
+    let mut length = [0u8; 4];
+    if stream.read_exact(&mut length).is_err() {
+        return;
+    }
+    let mut startup = vec![0u8; (i32::from_be_bytes(length) as usize).saturating_sub(4)];
+    if stream.read_exact(&mut startup).is_err() {
+        return;
+    }
+    let mut hello = framed(b'R', &0i32.to_be_bytes());
+    hello.extend(framed(b'Z', b"I"));
+    if stream.write_all(&hello).is_err() {
+        return;
+    }
+    let mut frames: Vec<Frame> = Vec::new();
+    loop {
+        // One request: a simple `Query`, or the extended protocol's frames up
+        // to `Sync`, whose one parameter (if any) is an integer in text.
+        let mut simple = None;
+        let mut sql = String::new();
+        let mut param = None;
+        loop {
+            let Some((kind, payload)) = next_frame(&mut stream) else { return };
+            match kind {
+                b'X' => return,
+                b'Q' => {
+                    let end = payload.iter().position(|b| *b == 0).unwrap_or(payload.len());
+                    simple = Some(String::from_utf8_lossy(&payload[..end]).into_owned());
+                    break;
+                }
+                b'P' => {
+                    let parts: Vec<&[u8]> = payload.split(|b| *b == 0).collect();
+                    sql = String::from_utf8_lossy(parts.get(1).copied().unwrap_or(&[])).into_owned();
+                }
+                b'B' => param = bound_integer(&payload),
+                b'S' => break,
+                _ => {}
+            }
+        }
+        let mut reply = Vec::new();
+        let statements: Vec<String> = match &simple {
+            Some(text) => text.split(';').map(str::to_string).filter(|s| !s.trim().is_empty()).collect(),
+            None => {
+                reply.extend(framed(b'1', &[]));
+                reply.extend(framed(b'2', &[]));
+                vec![sql.clone()]
+            }
+        };
+        for statement in statements {
+            match tx_statement(&statement, param, &mut frames, committed) {
+                Ok((tag, row)) => {
+                    if let Some(value) = row {
+                        let mut description = 1i16.to_be_bytes().to_vec();
+                        description.extend_from_slice(&cstring("count"));
+                        description.extend_from_slice(&0i32.to_be_bytes());
+                        description.extend_from_slice(&0i16.to_be_bytes());
+                        description.extend_from_slice(&23i32.to_be_bytes());
+                        description.extend_from_slice(&4i16.to_be_bytes());
+                        description.extend_from_slice(&(-1i32).to_be_bytes());
+                        description.extend_from_slice(&0i16.to_be_bytes());
+                        let text = value.to_string();
+                        let mut data = 1i16.to_be_bytes().to_vec();
+                        data.extend_from_slice(&(text.len() as i32).to_be_bytes());
+                        data.extend_from_slice(text.as_bytes());
+                        reply.extend(framed(b'T', &description));
+                        reply.extend(framed(b'D', &data));
+                    }
+                    reply.extend(framed(b'C', &cstring(&tag)));
+                }
+                Err(error) => {
+                    reply.extend(error);
+                    break;
+                }
+            }
+        }
+        reply.extend(framed(b'Z', if frames.is_empty() { b"I" } else { b"T" }));
+        if stream.write_all(&reply).is_err() {
+            return;
+        }
+    }
+}
+
+/// The first parameter of a `Bind`, read as an integer in text.
+fn bound_integer(payload: &[u8]) -> Option<i64> {
+    let mut at = 0;
+    for _ in 0..2 {
+        at += payload[at..].iter().position(|b| *b == 0)? + 1;
+    }
+    let formats = i16::from_be_bytes(payload.get(at..at + 2)?.try_into().ok()?) as usize;
+    at += 2 + 2 * formats;
+    let count = i16::from_be_bytes(payload.get(at..at + 2)?.try_into().ok()?);
+    at += 2;
+    if count < 1 {
+        return None;
+    }
+    let len = i32::from_be_bytes(payload.get(at..at + 4)?.try_into().ok()?);
+    at += 4;
+    if len < 0 {
+        return None;
+    }
+    std::str::from_utf8(payload.get(at..at + len as usize)?).ok()?.parse().ok()
+}
+
+/// What each case of the two-fibers program must print: every answer agrees
+/// with the rows, and the next lease gets a connection outside a transaction.
+const TWO_FIBERS_EXPECTED: &str = "A: two fibers nest inside one lease's transaction\n  \
+     told: B Err, C Err, outer Ok\n  agree; next lease clean\n\
+     B: two fibers on one lease, no outer transaction\n  \
+     told: B Err, C Err\n  agree; next lease clean\n\
+     C: two fibers on one lease both read depth 0, then both begin\n  \
+     told: B Ok, C Err\n  agree; next lease clean\n";
+
+/// **Two fibers sharing one lease never get an answer the rows disagree
+/// with.** What this prevents: a row committed for a `transaction` that
+/// answered `Err`. With loose depth guards, fiber B's `RELEASE` of level 1
+/// also released fiber C's level 2 on top of it (case A), and B's `COMMIT`
+/// kept C's open savepoint (case B), so C's failure undid nothing. In case
+/// C both fibers read depth 0 before either begins, and C's `BEGIN`, a
+/// warning to PostgreSQL inside B's transaction, let C's `ROLLBACK` end B's
+/// transaction and C's write be kept. The guards refuse an operation for a
+/// level the connection is not exactly at, and turn a `COMMIT` with another
+/// fiber's savepoint open into a `ROLLBACK`: in A and B both fibers are told
+/// `Err` and neither row is kept, and in C, C's `BEGIN` is refused, so its
+/// body never runs and B commits alone. Against a scripted server that keeps
+/// PostgreSQL's savepoint rules, so CI runs it.
+#[test]
+fn two_fibers_on_one_lease_get_answers_that_agree_with_the_rows() {
+    let committed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let settings = tx_server(committed);
+    let main = TWO_FIBERS_PROGRAM.replace(
+        "{ host: \"127.0.0.1\", port: 5433, user: \"khora\", database: \"khora\", secret: \"khora\" }",
+        &settings,
+    );
+    assert_ne!(main, TWO_FIBERS_PROGRAM, "the settings should have been replaced");
+    let exe = build("postgres_two_fibers_scripted", &main);
+    for backend in ["threads", "scheduler"] {
+        let ran = run_watched(&exe, backend, std::time::Duration::from_secs(60));
+        assert!(!ran.hung, "{backend}: the program hung: stdout {:?}", ran.stdout);
+        assert_eq!(ran.code, Some(0), "{backend}: stderr {}", ran.stderr);
+        assert_eq!(ran.stdout, TWO_FIBERS_EXPECTED, "{backend}");
+    }
+}
+
+/// The same program against the real server, whose savepoint rules are the
+/// ones the scripted server copies.
+#[test]
+fn two_fibers_on_one_lease_against_a_real_server() {
+    if std::env::var_os("KHORA_POSTGRES").is_none() {
+        eprintln!("skipping: set KHORA_POSTGRES=1 and bring up packages/postgres/docker-compose.yml to run this");
+        return;
+    }
+    let exe = build("postgres_two_fibers", TWO_FIBERS_PROGRAM);
+    for backend in ["threads", "scheduler"] {
+        let ran = run_watched(&exe, backend, std::time::Duration::from_secs(60));
+        assert!(!ran.hung, "{backend}: the program hung: stdout {:?}", ran.stdout);
+        assert_eq!(ran.code, Some(0), "{backend}: stderr {}", ran.stderr);
+        assert_eq!(ran.stdout, TWO_FIBERS_EXPECTED, "{backend}");
+    }
+}
+
+const TWO_FIBERS_PROGRAM: &str = r##"module demo::main;
+
+//! Two fibers on one lease, each running a `transaction`, interleaved
+//! deterministically with channels (the reviewer's `probes/twofib`).
+//!
+//! Case A (siblings inside the lease's outer transaction): B opens its
+//! savepoint, C opens its own on top, B answers `Ok` and releases, then C
+//! fails. Case B (no outer transaction): B begins, C nests on B's
+//! transaction, B commits, then C fails.
+//!
+//! The oracle: every row is present exactly when every `transaction` that
+//! wrote it was told `Ok` (and, in case A, the outer one too). Each case
+//! prints `agree` or the rows that disagree, then whether the next lease
+//! gets a connection outside a transaction.
+
+import std::core::{Channel, Fiber, List, Option, Result, Shared, Show, print};
+import std::core::{Fibers};
+import std::db::{Cell, Db, DbError, Row, transaction};
+import postgres::db::{Settings};
+import postgres::pool::{Pool, close as close_pool, open as open_pool, with_db};
+
+fn settings() -> Settings {
+  { host: "127.0.0.1", port: 5433, user: "khora", database: "khora", secret: "khora" }
+}
+
+fn put(n: Int) -> Result<Int, DbError> with { db: Db } {
+  db.execute("insert into khora_twofib (n) values ($1)", List::Cons(Cell::Number(n), List::Nil))
+}
+
+fn fresh() -> () with { db: Db } {
+  let _ = db.execute("drop table if exists khora_twofib", List::Nil);
+  let _ = db.execute("create table khora_twofib (n int4)", List::Nil);
+}
+
+fn present(n: Int) -> Bool with { db: Db } {
+  match db.query("select count(*)::int4 from khora_twofib where n = $1", List::Cons(Cell::Number(n), List::Nil)) {
+    Result::Ok(List::Cons(row, _)) => match row.cells {
+      List::Cons(Cell::Number(k), _) => k > 0,
+      _ => false,
+    },
+    _ => false,
+  }
+}
+
+fn idle() -> String with { db: Db } {
+  match db.execute("savepoint khora_probe_idle", List::Nil) {
+    Result::Ok(_) => { let _ = db.rollback(); "left inside a transaction" },
+    Result::Err(_) => "clean",
+  }
+}
+
+fn ok(r: Result<Int, DbError>) -> Bool {
+  match r { Result::Ok(_) => true, Result::Err(_) => false }
+}
+
+fn fiber_b(b_ok: Shared<Bool>, b_open: Channel<Int>, c_open: Channel<Int>, b_done: Channel<Int>) -> () with { db: Db } {
+  let r = transaction(fn () => {
+    let _ = put(10);
+    let _ = Channel::send(b_open, 1);
+    let _ = Channel::receive(c_open);
+    Result::Ok(10)
+  });
+  Shared::set(b_ok, ok(r));
+  let _ = Channel::send(b_done, 1);
+}
+
+fn fiber_c(c_ok: Shared<Bool>, b_open: Channel<Int>, c_open: Channel<Int>, b_done: Channel<Int>) -> () with { db: Db } {
+  let _ = Channel::receive(b_open);
+  let r: Result<Int, DbError> = transaction(fn () => {
+    let _ = put(20);
+    let _ = Channel::send(c_open, 1);
+    let _ = Channel::receive(b_done);
+    Result::Err(DbError::Rejected("C fails"))
+  });
+  Shared::set(c_ok, ok(r));
+}
+
+fn both(b_ok: Shared<Bool>, c_ok: Shared<Bool>) -> () with { db: Db } {
+  let b_open: Channel<Int> = Channel::bounded(1);
+  let c_open: Channel<Int> = Channel::bounded(1);
+  let b_done: Channel<Int> = Channel::bounded(1);
+  let b = Fiber::spawn(fn () => fiber_b(b_ok, b_open, c_open, b_done));
+  let c = Fiber::spawn(fn () => fiber_c(c_ok, b_open, c_open, b_done));
+  Fiber::wait(b);
+  Fiber::wait(c);
+}
+
+/// What was told, as a line, and whether each row agrees with it.
+fn verdict(pool: Pool, outer_ok: Bool, b_ok: Bool, c_ok: Bool, outer_rows: List<Int>) -> () {
+  let mut wrong = "";
+  let mut rest = outer_rows;
+  let mut going = true;
+  while going {
+    match rest {
+      List::Nil => going = false,
+      List::Cons(n, more) => {
+        let there = match with_db(pool, fn () => present(n)) { Result::Ok(p) => p, Result::Err(_) => false };
+        if there != outer_ok { wrong = wrong + " row " + Int::to_string(n) };
+        rest = more
+      },
+    }
+  };
+  let b_there = match with_db(pool, fn () => present(10)) { Result::Ok(p) => p, Result::Err(_) => false };
+  let c_there = match with_db(pool, fn () => present(20)) { Result::Ok(p) => p, Result::Err(_) => false };
+  if b_there != (b_ok && outer_ok) { wrong = wrong + " row 10 (B)" };
+  if c_there != (c_ok && outer_ok) { wrong = wrong + " row 20 (C)" };
+  let after = match with_db(pool, idle) { Result::Ok(s) => s, Result::Err(p) => "lease " + p.show() };
+  print("  told: B " + (if b_ok { "Ok" } else { "Err" }) + ", C " + (if c_ok { "Ok" } else { "Err" })
+    + (if outer_rows == List::Nil { "" } else if outer_ok { ", outer Ok" } else { ", outer Err" }));
+  print("  " + (if wrong == "" { "agree" } else { "DISAGREE:" + wrong }) + "; next lease " + after);
+}
+
+fn case_a(pool: Pool) -> () {
+  let _ = with_db(pool, fresh);
+  print("A: two fibers nest inside one lease's transaction");
+  let b_ok = Shared::of(false);
+  let c_ok = Shared::of(false);
+  let outer = with_db(pool, fn () => transaction(fn () => {
+    let _ = put(1);
+    both(b_ok, c_ok);
+    put(3)
+  }));
+  let outer_ok = match outer { Result::Ok(Result::Ok(_)) => true, _ => false };
+  verdict(pool, outer_ok, Shared::get(b_ok), Shared::get(c_ok), List::Cons(1, List::Cons(3, List::Nil)));
+}
+
+fn case_b(pool: Pool) -> () {
+  let _ = with_db(pool, fresh);
+  print("B: two fibers on one lease, no outer transaction");
+  let b_ok = Shared::of(false);
+  let c_ok = Shared::of(false);
+  let _ = with_db(pool, fn () => both(b_ok, c_ok));
+  verdict(pool, true, Shared::get(b_ok), Shared::get(c_ok), List::Nil);
+}
+
+/// The lease's handler, stopping after each `depth` answer until it is let
+/// go: this is what lets case C have both fibers read the depth before
+/// either begins.
+fn paused(base: Db, read: Channel<Int>, go: Channel<Int>) -> Db {
+  handler for Db {
+    query: fn (sql, binds) => base.query(sql, binds),
+    execute: fn (sql, binds) => base.execute(sql, binds),
+    depth: fn () => {
+      let d = base.depth();
+      let _ = Channel::send(read, d);
+      let _ = Channel::receive(go);
+      d
+    },
+    begin: fn () => base.begin(),
+    commit: fn () => base.commit(),
+    rollback: fn () => base.rollback(),
+    savepoint: fn level => base.savepoint(level),
+    release: fn level => base.release(level),
+    rollback_to: fn level => base.rollback_to(level),
+    broken: fn () => base.broken(),
+  }
+}
+
+fn lease() -> Db with { db: Db } {
+  db
+}
+
+/// One side of case C: a transaction on `on` that writes `n`, then waits
+/// for `hold` before answering (`Ok` if `succeeds`). It sends on `wrote`
+/// once its body has written, or once `transaction` answers without running
+/// the body, so either way the caller hears from it.
+fn side(on: Db, n: Int, succeeds: Bool, wrote: Channel<Int>, hold: Channel<Int>, told: Shared<Bool>) -> () {
+  with { db: on } {
+    let ran = Shared::of(false);
+    let r: Result<Int, DbError> = transaction(fn () => {
+      Shared::set(ran, true);
+      let _ = put(n);
+      let _ = Channel::send(wrote, n);
+      let _ = Channel::receive(hold);
+      if succeeds { Result::Ok(n) } else { Result::Err(DbError::Rejected("C fails")) }
+    });
+    if !Shared::get(ran) { let _ = Channel::send(wrote, 0 - n); () };
+    Shared::set(told, ok(r));
+  }
+}
+
+fn both_at_zero(b_ok: Shared<Bool>, c_ok: Shared<Bool>) -> () with { db: Db } {
+  let read: Channel<Int> = Channel::bounded(2);
+  let go_b: Channel<Int> = Channel::bounded(1);
+  let go_c: Channel<Int> = Channel::bounded(1);
+  let wrote: Channel<Int> = Channel::bounded(2);
+  let hold_b: Channel<Int> = Channel::bounded(1);
+  let hold_c: Channel<Int> = Channel::bounded(1);
+  // Two views of the one lease, so each fiber can be let go on its own.
+  let b = Fiber::spawn(fn () => side(paused(lease(), read, go_b), 10, true, wrote, hold_b, b_ok));
+  let c = Fiber::spawn(fn () => side(paused(lease(), read, go_c), 20, false, wrote, hold_c, c_ok));
+  // Both have read the depth, and neither has begun.
+  let _ = Channel::receive(read);
+  let _ = Channel::receive(read);
+  // B begins and writes; then C, which read the same depth 0, begins, and
+  // either writes inside B's transaction or is refused.
+  let _ = Channel::send(go_b, 1);
+  let _ = Channel::receive(wrote);
+  let _ = Channel::send(go_c, 1);
+  let _ = Channel::receive(wrote);
+  // B answers `Ok`, then C fails if its body ran at all.
+  let _ = Channel::send(hold_b, 1);
+  Fiber::wait(b);
+  let _ = Channel::send(hold_c, 1);
+  Fiber::wait(c);
+}
+
+fn case_c(pool: Pool) -> () {
+  let _ = with_db(pool, fresh);
+  print("C: two fibers on one lease both read depth 0, then both begin");
+  let b_ok = Shared::of(false);
+  let c_ok = Shared::of(false);
+  let _ = with_db(pool, fn () => both_at_zero(b_ok, c_ok));
+  verdict(pool, true, Shared::get(b_ok), Shared::get(c_ok), List::Nil);
+}
+
+fn main() -> () {
+  let crew = Fibers::open();
+  let pool = open_pool(crew, settings(), 1);
+  case_a(pool);
+  case_b(pool);
+  case_c(pool);
+  close_pool(pool);
+}
+"##;

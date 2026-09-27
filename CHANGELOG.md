@@ -16,10 +16,13 @@ Cancellation has its own channel. A cancelled fiber stops at its next
 cancellation point in every function, whatever the function's `raises` row;
 `raises` means only "can fail with these errors", and `!` marks only that.
 
-Read these first. Four fixes are for programs that gave a wrong answer with
+Read these first. Six fixes are for programs that gave a wrong answer with
 nothing to say so, so code that ran on 0.3.0 may behave differently: a
 `postgres` query could return another caller's rows; `std::db::transaction`
-could lose writes it had answered `Ok`; the type checker let through a
+could lose writes it had answered `Ok`, a `transaction` inside another one
+committed or rolled back the outer one, and a `postgres` transaction whose
+body ignored a failed statement was answered `Ok` with nothing committed;
+the type checker let through a
 pattern of the wrong type, a `catch` that yielded 0, and a `raise` that no
 `catch` saw; and a `catch` arm could read a generic error's field at the
 wrong type. Two language features are removed: glob imports, and a second
@@ -33,6 +36,23 @@ cancelled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   when the function around it also calls a function value (see Fixed). A
   program aborted there skipped that cleanup entirely on 0.3.0; it runs, and
   `abort` can stop it only at a cancellation point inside it.
+
+- **A `transaction` inside a `transaction` committed or rolled back the
+  enclosing one** (see Fixed), and a `std::db::Db` handler has four more
+  operations: `depth`, `savepoint`, `release` and `rollback_to`. A handler
+  keeps how many transactions are open on its connection and answers
+  `depth` with it; `transaction` opens a savepoint instead of a transaction
+  when it is above 0. `rollback_to` is called for a savepoint that was never
+  opened when a cancel lands before `SAVEPOINT` went out, and must answer
+  `Ok` without undoing anything then. A handler written for 0.3.0 does not
+  compile until it has them. A handler that does not support nesting still
+  answers `depth` truthfully (1 between `begin` and its `commit` or
+  `rollback`, 0 otherwise) and refuses `savepoint`; a nested `transaction`
+  is then answered with that refusal instead of opening a second
+  transaction.
+
+- **A `postgres` transaction whose body ignored a failed statement was
+  answered `Ok`** (see Fixed). It is answered `DbError::RolledBack`.
 
 - **A `postgres` query could return another caller's rows** (see Fixed). A
   program that ran with a receive deadline, or on a network that dropped
@@ -247,6 +267,33 @@ cancelled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   finalizer bound to a `let` first, or registered through `Scope::defer` or
   `acquire`, can still be skipped by `abort`, and so can one whose first step
   is a call to a function that itself calls a function value.
+  `std::db::transaction`'s rollback is written the first way, so `abort` in a
+  transaction's body runs its rollback, at every level of nesting.
+
+- **A `transaction` inside a `transaction` gave answers that disagreed with
+  what was committed.** Both sent `BEGIN`, which PostgreSQL only warns about
+  inside a transaction, so the inner `COMMIT` committed the outer body's
+  writes and the inner `ROLLBACK` undid them. An outer body that failed after
+  an inner one succeeded was answered `Err` with every row committed; an
+  outer body that carried on after an inner one failed was answered `Ok`
+  with its own earlier writes gone. An inner `transaction` is a savepoint: its
+  `Ok` keeps its writes for the enclosing transaction to commit, and its
+  `Err`, a raise or a cancel undoes only its own writes, after which the
+  enclosing body can carry on and commit. A cancel in an inner body undoes
+  the inner savepoint and then the enclosing transaction, and so does
+  `Fiber::abort`. Two fibers sharing one `postgres` lease that run
+  `transaction` at the same time could have a row committed for a
+  `transaction` that answered `Err`; the driver refuses an operation for a
+  level its connection is not at, so one of them is answered `Err` and
+  nothing it wrote is kept. Fibers sharing a lease should not do this.
+
+- **A `postgres` transaction was answered `Ok` when nothing had been
+  committed.** A body that ran a statement which failed, ignored the
+  failure and returned `Ok` had its `COMMIT` answered by PostgreSQL with a
+  rollback and no error, and the driver reported that as a commit. The
+  caller is told `RolledBack`. Inside an inner `transaction`, PostgreSQL
+  refuses the savepoint's release instead; the inner body is told
+  `RolledBack`, its writes are undone, and the enclosing body carries on.
 
 - **A `postgres` query could return another caller's rows.** When a read
   failed partway through a reply, the caller was told `Disconnected`, but the

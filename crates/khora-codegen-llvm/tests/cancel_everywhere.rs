@@ -1861,3 +1861,121 @@ fn abort_still_skips_a_let_bound_finalizer_next_to_a_call_through_a_function_val
         assert_eq!(ran.code, Some(0), "`{backend}`");
     }
 }
+
+/// `std::db::transaction` under `Fiber::abort`, with a handler that counts.
+///
+/// Each child says it has started from inside the innermost body, after
+/// every level's rollback is registered and its `BEGIN` or `SAVEPOINT` has
+/// been answered, and then spins until it is stopped, so the abort is the
+/// only way out. The handler records every verb in `log`, which `main`
+/// reads once all 20 trials are over.
+const ABORTED_TRANSACTION: &str = "module main;
+import std::core::{print, Fiber, Channel, List, Result, Shared};
+import std::db::{Db, DbError, transaction};
+
+fn note(log: Shared<List<String>>, what: String) -> () {
+  Shared::set(log, List::Cons(what, Shared::get(log)));
+}
+
+fn counting(log: Shared<List<String>>) -> Db {
+  let depth = Shared::of(0);
+  handler for Db {
+    query: fn (_sql, _binds) => Result::Ok(List::Nil),
+    execute: fn (_sql, _binds) => Result::Ok(1),
+    depth: fn () => Shared::get(depth),
+    begin: fn () => { Shared::set(depth, 1); Result::Ok(()) },
+    commit: fn () => { Shared::set(depth, 0); note(log, \"commit\"); Result::Ok(()) },
+    rollback: fn () => { Shared::set(depth, 0); note(log, \"rollback\"); Result::Ok(()) },
+    savepoint: fn level => { Shared::set(depth, level + 1); Result::Ok(()) },
+    release: fn level => { Shared::set(depth, level); note(log, \"release\"); Result::Ok(()) },
+    rollback_to: fn level => {
+      if Shared::get(depth) > level {
+        Shared::set(depth, level);
+        note(log, \"rollback to\")
+      };
+      Result::Ok(())
+    },
+    broken: fn () => note(log, \"broken\"),
+  }
+}
+
+fn spin(started: Channel<Int>) -> Result<Int, DbError> {
+  Channel::send(started, 1);
+  let mut n = 0;
+  loop { n = n + 1; }
+}
+
+fn worker(log: Shared<List<String>>, started: Channel<Int>) -> () {
+  with { db: counting(log) } {
+    let _ = BODY;
+    ()
+  }
+}
+
+/// The log, oldest first.
+fn shown(log: List<String>) -> String {
+  let mut out = \"\";
+  let mut rest = log;
+  let mut going = true;
+  while going {
+    match rest {
+      List::Nil => going = false,
+      List::Cons(what, more) => { out = what + \"; \" + out; rest = more },
+    }
+  };
+  out
+}
+
+pub fn main() -> Int {
+  let log: Shared<List<String>> = Shared::of(List::Nil);
+  let mut trial = 0;
+  while trial < 20 {
+    let started: Channel<Int> = Channel::bounded(1);
+    let f = Fiber::spawn(fn () => worker(log, started));
+    let _ = Channel::receive(started);
+    Fiber::abort(f);
+    Fiber::wait(f);
+    note(log, \"|\");
+    trial = trial + 1;
+  }
+  print(shown(Shared::get(log)));
+  0
+}
+";
+
+/// The expected log: `per_trial` for each of 20 trials.
+fn twenty(per_trial: &str) -> String {
+    format!("{}\n", per_trial.repeat(20))
+}
+
+/// **`Fiber::abort` in a transaction's body runs its rollback, 20 times in
+/// 20.** What this prevents: a connection handed back to a pool inside an
+/// open transaction because the rollback was skipped whole. `transaction`
+/// calls `body()`, so a finalizer that first called a helper stopped at the
+/// helper's entry poll, before reading whether the transaction had settled,
+/// and rolled back 0 times in 20 on both backends.
+#[test]
+fn abort_rolls_back_a_transaction() {
+    let source = ABORTED_TRANSACTION.replace("BODY", "transaction(fn () => spin(started))");
+    for (backend, ran) in on_both("cancel_everywhere_abort_transaction", &source) {
+        assert!(!ran.hung, "`{backend}`: {}", ran.stdout);
+        assert_eq!(ran.stdout, twenty("rollback; |; "), "`{backend}`: {}", ran.stderr);
+        assert_eq!(ran.code, Some(0), "`{backend}`");
+    }
+}
+
+/// **`Fiber::abort` inside a nested transaction undoes the inner savepoint,
+/// then the enclosing transaction, in that order, 20 times in 20.** The order
+/// is the region order: the inner `transaction`'s region ends first. An
+/// enclosing rollback that ran first would leave the inner `ROLLBACK TO`
+/// naming a savepoint the server had already dropped.
+#[test]
+fn abort_in_a_nested_transaction_undoes_inner_then_outer() {
+    let source = ABORTED_TRANSACTION
+        .replace("BODY", "transaction(fn () => transaction(fn () => spin(started)))");
+    for (backend, ran) in on_both("cancel_everywhere_abort_nested_transaction", &source) {
+        assert!(!ran.hung, "`{backend}`: {}", ran.stdout);
+        assert_eq!(ran.stdout, twenty("rollback to; rollback; |; "), "`{backend}`: {}", ran.stderr);
+        assert_eq!(ran.code, Some(0), "`{backend}`");
+    }
+}

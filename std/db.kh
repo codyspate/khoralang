@@ -123,14 +123,45 @@ pub type DbError =
 ///
 /// A record of closures, so a Postgres package, a SQLite package, D1 behind a
 /// Worker and an in-memory double are the same type to everything above.
+///
+/// # Nesting
+///
+/// **The handler keeps the depth, because the depth is the connection's.**
+/// Two fibers leasing two connections nest independently, and one `db`
+/// reached twice from one fiber is one connection with one depth, so a
+/// counter anywhere but beside the connection would be wrong for one of the
+/// two. The handler is the one thing there is exactly one of per connection.
+///
+/// **`transaction` names the level; the handler does not guess it.** The
+/// alternative, a handler that turns `begin` into `SAVEPOINT` when a
+/// transaction is already open, cannot tell a stray `rollback` from a real
+/// one: `transaction` registers its undo before anything is sent, so a cancel
+/// can deliver a `rollback` for an inner level that never opened, and a
+/// handler guessing the level would roll back the *enclosing* transaction;
+/// so `transaction` reads [`depth`] first, and every savepoint operation
+/// carries the level it belongs to.
+///
+/// What it costs a handler author is four more operations and one counter,
+/// and one more exchange with the connection per `transaction`.
 pub effect Db {
   /// Runs a query and gives back every row.
   query: (String, List<Cell>) -> Result<List<Row>, DbError>,
   /// Runs a statement and gives back how many rows it changed.
   execute: (String, List<Cell>) -> Result<Int, DbError>,
-  /// Begins a transaction. Handlers use this to implement `transaction`.
+  /// How many transactions are open on this connection: 0 outside one, 1
+  /// inside a transaction, and one more for each savepoint inside that.
+  ///
+  /// **Answers, and does not fail.** A connection that is gone answers 0, and
+  /// the `begin` that follows is what reports it.
+  depth: () -> Int,
+  /// Begins a transaction, taking the depth from 0 to 1.
   begin: () -> Result<(), DbError>,
-  /// Commits the transaction in progress.
+  /// Commits the transaction in progress, taking the depth to 0.
+  ///
+  /// **`Ok` means committed, and nothing weaker.** An engine that ends a
+  /// failed transaction with a rollback when asked to commit -- PostgreSQL
+  /// does, without an error -- has not committed, and the handler answers
+  /// `RolledBack`.
   commit: () -> Result<(), DbError>,
   /// Rolls the transaction in progress back.
   ///
@@ -140,6 +171,31 @@ pub effect Db {
   /// handler that refused would be told `broken` about a healthy connection.
   /// PostgreSQL answers a stray `ROLLBACK` with a warning, not an error.
   rollback: () -> Result<(), DbError>,
+  /// Opens a savepoint at `level`, which is the current depth, taking the
+  /// depth to `level + 1`.
+  ///
+  /// A handler refuses when the depth is not `level`: that means somebody
+  /// else changed it between `transaction` reading it and asking, and a
+  /// savepoint opened at the wrong level would be released by the wrong
+  /// `transaction`.
+  savepoint: (Int) -> Result<(), DbError>,
+  /// Keeps what was done since the savepoint at `level` as part of the
+  /// enclosing transaction, taking the depth back to `level`.
+  ///
+  /// **`Ok` means kept.** An engine that refuses the release -- PostgreSQL
+  /// does inside a transaction a failed statement aborted -- leaves the
+  /// savepoint open, and `transaction` then rolls back to it.
+  release: (Int) -> Result<(), DbError>,
+  /// Undoes everything since the savepoint at `level` and removes it, taking
+  /// the depth back to `level`.
+  ///
+  /// **May be called for a savepoint that was never opened**, when the depth
+  /// is `level` or less, and must answer `Ok` without touching the engine
+  /// then, for the reason [`rollback`] gives. PostgreSQL answers a
+  /// `ROLLBACK TO` for a savepoint it does not have with an error that aborts
+  /// the enclosing transaction, so a handler that sent it would undo work
+  /// nobody asked it to.
+  rollback_to: (Int) -> Result<(), DbError>,
   /// Says this connection's state is no longer known.
   ///
   /// **Called when a rollback fails**, and when a `BEGIN` or a `COMMIT` comes
@@ -233,8 +289,10 @@ pub effect Db {
 /// `std` call, or at a call to a function that can reach one, whatever the
 /// body's `raises` row. A cancellation that lands in the body unwinds through
 /// here, releasing the region and running the rollback. The rollback itself
-/// runs as cleanup, so a plain cancel does not interrupt it; only `abort`
-/// does. A body that reaches no cancellation point runs to its commit.
+/// runs as cleanup, so a plain cancel does not interrupt it. `abort` runs it
+/// too, and can stop it only at a cancellation point inside the handler's
+/// `rollback`, such as the wait for the engine's reply. A body that reaches
+/// no cancellation point runs to its commit.
 ///
 /// `raises 'er` is there for the body's own failures. The row is the
 /// *caller's*, deliberately. A transaction over a body that can
@@ -266,6 +324,27 @@ pub effect Db {
 /// authority to run statements, and the caller supplies it at a boundary --
 /// which is what keeps a transaction from turning the capability back into
 /// plumbing threaded through every signature.
+///
+/// # A transaction inside a transaction
+///
+/// **Nested for real, with a savepoint.** A `transaction` whose `db` is
+/// already inside one, however deep, opens a savepoint instead of a
+/// transaction. Its `Ok` releases the savepoint, so its writes commit or roll
+/// back with the enclosing transaction; its `Err`, a raise or a cancel rolls
+/// back to the savepoint, which undoes only its own writes, and the enclosing
+/// body is told `RolledBack` and can carry on. Nothing commits until the
+/// outermost `transaction` does.
+///
+/// What this prevents is an inner `COMMIT` or `ROLLBACK` ending the enclosing
+/// transaction, which an engine does to a second `BEGIN` sent inside one: the
+/// caller is then told one thing and something else is committed.
+///
+/// **Fibers sharing one lease must not run `transaction` at the same time.**
+/// The depth is the connection's, so two fibers nesting on one connection
+/// would each release or roll back the other's savepoint. A handler that
+/// refuses an operation for a level its connection is not at, as the
+/// `postgres` package's does, turns that into an `Err` for one of them, and
+/// nothing that one wrote is kept; it does not make both work.
 ///
 /// # A refusal nested inside `Ok` commits
 ///
@@ -319,14 +398,53 @@ pub fn transaction<A, 'ef, 'er>(
   //
   // `Region::open` and `Region::defer` are not cancellation points, so
   // nothing lies between here and the registration.
+  //
+  // **The depth is read before the registration, and that is safe**: a
+  // cancel during `depth()` stops the fiber before anything was opened on
+  // the connection, so there is nothing yet to undo. The level it answers is
+  // what the undo is registered for, which is what keeps a stray undo for an
+  // inner level from ever reaching the enclosing transaction.
+  let level = db.depth();
   let settled = { done: false };
   let region = Region::open();
-  Region::defer(region, fn () => undo(settled));
-  match db.begin() {
+  // **The undo is written here, in `Region::defer`'s argument, and calls no
+  // function of this module on its way to the rollback.** What that
+  // prevents: `Fiber::abort` skipping the rollback whole. `transaction`
+  // calls `body()`, a function value, so every lambda written in it polls
+  // when entered, except one written directly as a `Region::defer`
+  // finalizer. A finalizer that first called a helper stopped at the
+  // helper's own entry poll instead, since a helper that calls
+  // `db.rollback()` calls a function value too, and an aborted fiber stops
+  // at every cancellation point, cleanup included. So the helper's body is
+  // here, and the first thing that can stop an `abort` is the handler's
+  // rollback itself.
+  //
+  // It is reached on every way out that has not settled the transaction: a
+  // failed body, a raise, and a cancellation that never touched a line of
+  // `transaction`. `level` is the depth this call found: 0 rolls back the
+  // whole transaction, anything more only this call's savepoint. Inner
+  // regions end before outer ones, so a cancel in an inner body undoes the
+  // inner savepoint first and then the enclosing transaction.
+  Region::defer(region, fn () =>
+    if settled.done {
+      ()
+    } else {
+      let undone = if level == 0 { db.rollback() } else { db.rollback_to(level) };
+      match undone {
+        Result::Ok(_) => (),
+        // **The path with nobody to tell.** A cancelled fiber has no caller
+        // waiting for an answer, so this is the only place the failure can
+        // go -- and going nowhere is what let a connection return to a pool
+        // having neither committed nor, as far as anything knew, rolled back.
+        Result::Err(_why) => db.broken(),
+      }
+    });
+  let opened = if level == 0 { db.begin() } else { db.savepoint(level) };
+  match opened {
     // A `BEGIN` that could not be sent because the connection is gone leaves
     // an unusable connection, exactly as a lost commit does. A `BEGIN` the
     // engine refused does not. Either way no transaction was opened, so
-    // there is nothing to roll back.
+    // there is nothing to roll back. The same holds for a `SAVEPOINT`.
     Result::Err(problem) => {
       settled.done = true;
       told_if_disconnected(problem);
@@ -337,38 +455,76 @@ pub fn transaction<A, 'ef, 'er>(
     // it waits for its reply does not cut it short. The caller is told
     // `RolledBack` with the body's reason whatever the rollback's own answer
     // was; the engine's complaint about the rollback is a worse thing to
-    // report than the reason it was needed, and `undo` tells the handler.
+    // report than the reason it was needed, and the finalizer tells the
+    // handler.
     Result::Ok(_) => match body()! {
       Result::Err(problem) => Result::Err(DbError::RolledBack(problem.show())),
-      Result::Ok(answer) => {
-        let committed = db.commit();
-        // Settled only once the commit has answered. A cancel that lands
-        // while `COMMIT` is on its way leaves the transaction's fate unknown,
-        // and the rollback the region then sends is right either way: after
-        // a `COMMIT` that ran, it is a warning and changes nothing; after one
-        // that did not, it ends the transaction.
-        settled.done = true;
-        match committed {
-          // **A refused commit and a lost connection are not the same
-          // failure.** An engine that *refuses* a commit -- a deferred
-          // constraint, a serialization failure -- has answered: the
-          // transaction is over and the connection is fine. A connection that
-          // *died* during the commit has answered nothing, so whether the
-          // transaction committed is unknown, and the caller is told that in
-          // so many words. A bare "disconnected" reads as "it did not
-          // happen", and a caller who retries on it can apply a committed
-          // transaction twice.
-          Result::Err(DbError::Disconnected(why)) => {
-            db.broken();
-            let unknown = "the connection was lost during the commit, so it is not known whether the transaction committed: ";
-            Result::Err(DbError::Disconnected(unknown + why))
-          },
-          Result::Err(DbError::Rejected(why)) => Result::Err(DbError::Rejected(why)),
-          Result::Err(DbError::RolledBack(why)) => Result::Err(DbError::RolledBack(why)),
-          Result::Ok(_) => Result::Ok(answer),
-        }
-      },
+      Result::Ok(answer) => if level == 0 { committed(settled, answer) } else { released(settled, level, answer) },
     },
+  }
+}
+
+/// Commits an outermost transaction whose body answered `answer`.
+fn committed<A>(settled: Settled, answer: A) -> Result<A, DbError> with { db: Db } {
+  let committed = db.commit();
+  // Settled only once the commit has answered. A cancel that lands
+  // while `COMMIT` is on its way leaves the transaction's fate unknown,
+  // and the rollback the region then sends is right either way: after
+  // a `COMMIT` that ran, it is a warning and changes nothing; after one
+  // that did not, it ends the transaction.
+  settled.done = true;
+  match committed {
+    // **A refused commit and a lost connection are not the same
+    // failure.** An engine that *refuses* a commit -- a deferred
+    // constraint, a serialization failure -- has answered: the
+    // transaction is over and the connection is fine. A connection that
+    // *died* during the commit has answered nothing, so whether the
+    // transaction committed is unknown, and the caller is told that in
+    // so many words. A bare "disconnected" reads as "it did not
+    // happen", and a caller who retries on it can apply a committed
+    // transaction twice.
+    Result::Err(DbError::Disconnected(why)) => {
+      db.broken();
+      let unknown = "the connection was lost during the commit, so it is not known whether the transaction committed: ";
+      Result::Err(DbError::Disconnected(unknown + why))
+    },
+    Result::Err(DbError::Rejected(why)) => Result::Err(DbError::Rejected(why)),
+    Result::Err(DbError::RolledBack(why)) => Result::Err(DbError::RolledBack(why)),
+    Result::Ok(_) => Result::Ok(answer),
+  }
+}
+
+/// Releases the savepoint of an inner transaction whose body answered
+/// `answer`.
+///
+/// **What this prevents: an inner `Ok` for writes that are not there.** A
+/// release the engine refuses leaves the savepoint open, and PostgreSQL
+/// refuses one exactly when a statement inside it failed and the body carried
+/// on regardless: the enclosing transaction is then aborted, and its commit
+/// would roll everything back. So a refused release is left unsettled, the
+/// region rolls back to the savepoint on the way out, which clears the
+/// failure, and the enclosing body is told `RolledBack` and can carry on.
+///
+/// A release cut off by a cancel is left unsettled too. If it ran, the
+/// handler's depth is back to `level` and the rollback is the stray one
+/// [`Db`] says must change nothing; if it did not, the rollback undoes the
+/// inner writes. The cancel then reaches the enclosing transaction, which
+/// rolls back the rest.
+fn released<A>(settled: Settled, level: Int, answer: A) -> Result<A, DbError> with { db: Db } {
+  match db.release(level) {
+    Result::Ok(_) => {
+      settled.done = true;
+      Result::Ok(answer)
+    },
+    // Nothing more can be sent on it, so the region's rollback would only
+    // fail and say `broken` a second time.
+    Result::Err(DbError::Disconnected(why)) => {
+      settled.done = true;
+      db.broken();
+      Result::Err(DbError::Disconnected(why))
+    },
+    Result::Err(DbError::Rejected(why)) => Result::Err(DbError::RolledBack(why)),
+    Result::Err(DbError::RolledBack(why)) => Result::Err(DbError::RolledBack(why)),
   }
 }
 
@@ -392,26 +548,6 @@ fn told_if_disconnected(problem: DbError) -> () with { db: Db } {
     DbError::Disconnected(_) => db.broken(),
     DbError::Rejected(_) => (),
     DbError::RolledBack(_) => (),
-  }
-}
-
-/// Rolls back, unless the transaction has already ended.
-///
-/// Reached on the way out of the region, which is every way out that has not
-/// settled the transaction: a failed body, a raise, and a cancellation that
-/// never touched a line of `transaction`.
-fn undo(settled: Settled) -> () with { db: Db } {
-  if settled.done {
-    ()
-  } else {
-    match db.rollback() {
-      Result::Ok(_) => (),
-      // **The path with nobody to tell.** A cancelled fiber has no caller
-      // waiting for an answer, so this is the only place the failure can go --
-      // and going nowhere is what let a connection return to a pool having
-      // neither committed nor, as far as anything knew, rolled back.
-      Result::Err(_why) => db.broken(),
-    }
   }
 }
 
