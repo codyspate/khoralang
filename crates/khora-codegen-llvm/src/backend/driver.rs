@@ -237,6 +237,7 @@ pub(super) fn build(
     backend.untagged = can_stop.keeps_a_plain_return();
     backend.lambdas_poll_in = can_stop.calls_through_values();
     backend.poll_at_entry = can_stop.cyclic.union(&backend.lambdas_poll_in).cloned().collect();
+    backend.finalizer_literals = can_stop.finalizers;
 
     // Declare every definition before lowering any of them: a call site does
     // not know whether its callee has been emitted yet, and mutual recursion

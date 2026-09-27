@@ -1731,3 +1731,79 @@ pub fn main() -> Int {
         assert_eq!(ran.code, Some(0), "`{backend}`");
     }
 }
+
+/// A function that calls through a function value and defers a cleanup,
+/// run under `Fiber::abort` `TRIALS` times. `DEFERRED` is the `Region::defer`
+/// statement, so the two tests below differ only in how the finalizer is
+/// written.
+///
+/// Each child says it has started only after the finalizer is registered, and
+/// then spins in `body()` until it is stopped, so the abort is the only way
+/// out and always lands after the registration.
+const ABORTED_NEXT_TO_A_CALL: &str = "module main;
+import std::core::{print, Fiber, Channel, Region, Shared};
+
+fn guarded(ran: Shared<Int>, started: Channel<Int>, body: () -> ()) -> () {
+  let region = Region::open();
+  DEFERRED
+  Channel::send(started, 1);
+  body()
+}
+
+fn spin() -> () {
+  let mut n = 0;
+  loop { n = n + 1; }
+}
+
+pub fn main() -> Int {
+  let ran = Shared::of(0);
+  let mut trial = 0;
+  while trial < 20 {
+    let started: Channel<Int> = Channel::bounded(1);
+    let f = Fiber::spawn(fn () => guarded(ran, started, spin));
+    let _ = Channel::receive(started);
+    Fiber::abort(f);
+    Fiber::wait(f);
+    trial = trial + 1;
+  }
+  print(\"finalizer ran ${Shared::get(ran)} of 20\");
+  0
+}
+";
+
+/// **`abort` does not skip a finalizer that has not started.** The finalizer
+/// is a lambda written in `Region::defer`'s argument, inside a function that
+/// calls `body()`. Such a function's lambdas poll when entered, and a forced
+/// stop fired at that poll, before the finalizer's first line, so it ran 0
+/// times in 20 on both backends: the shape of `transaction`'s rollback and a
+/// pool's give-back.
+#[test]
+fn abort_runs_a_finalizer_written_next_to_a_call_through_a_function_value() {
+    let source = ABORTED_NEXT_TO_A_CALL
+        .replace("DEFERRED", "Region::defer(region, fn () => Shared::set(ran, Shared::get(ran) + 1));");
+    for (backend, ran) in on_both("cancel_everywhere_abort_literal_finalizer", &source) {
+        assert!(!ran.hung, "`{backend}`: {}", ran.stdout);
+        assert_eq!(ran.stdout, "finalizer ran 20 of 20\n", "`{backend}`: {}", ran.stderr);
+        assert_eq!(ran.code, Some(0), "`{backend}`");
+    }
+}
+
+/// **A finalizer bound to a `let` first keeps its entry poll, and `abort`
+/// still skips it.** Pinned, because it is a decision rather than an
+/// accident: a lambda with a binding can be called through it, by itself
+/// among others, so it may be the far end of a cycle that polls nowhere else.
+/// Only a lambda written in the argument is exempt. If this starts running
+/// the finalizer, the exemption has widened, and the argument on
+/// `Backend::lambdas_poll_in` has to be made again for the new shape.
+#[test]
+fn abort_still_skips_a_let_bound_finalizer_next_to_a_call_through_a_function_value() {
+    let source = ABORTED_NEXT_TO_A_CALL.replace(
+        "DEFERRED",
+        "let finalizer = fn () => Shared::set(ran, Shared::get(ran) + 1);\n  Region::defer(region, finalizer);",
+    );
+    for (backend, ran) in on_both("cancel_everywhere_abort_bound_finalizer", &source) {
+        assert!(!ran.hung, "`{backend}`: {}", ran.stdout);
+        assert_eq!(ran.stdout, "finalizer ran 0 of 20\n", "`{backend}`: {}", ran.stderr);
+        assert_eq!(ran.code, Some(0), "`{backend}`");
+    }
+}

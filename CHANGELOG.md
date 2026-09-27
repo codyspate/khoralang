@@ -29,6 +29,11 @@ cancelled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 
 ### Breaking
 
+- **`Fiber::abort` runs a finalizer written as a lambda in `Region::defer`**
+  when the function around it also calls a function value (see Fixed). A
+  program aborted there skipped that cleanup entirely on 0.3.0; it runs, and
+  `abort` can stop it only at a cancellation point inside it.
+
 - **A `postgres` query could return another caller's rows** (see Fixed). A
   program that ran with a receive deadline, or on a network that dropped
   reads, may have acted on answers that belonged to other queries. The
@@ -231,6 +236,17 @@ cancelled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   unaffected.
 
 ### Fixed
+
+- **`Fiber::abort` skipped a cleanup written next to a call through a
+  function value.** In a function that also calls a function value (a
+  `body()` it was handed, a handler's operation), a finalizer written as
+  `Region::defer(region, fn () => ..)` did not run at all when the fiber was
+  aborted: the stop landed before its first line. It runs, and `abort` stops
+  it only at a cancellation point inside it, like any other cleanup. This
+  holds for a lambda written directly in `Region::defer`'s argument. A
+  finalizer bound to a `let` first, or registered through `Scope::defer` or
+  `acquire`, can still be skipped by `abort`, and so can one whose first step
+  is a call to a function that itself calls a function value.
 
 - **A `postgres` query could return another caller's rows.** When a read
   failed partway through a reply, the caller was told `Disconnected`, but the

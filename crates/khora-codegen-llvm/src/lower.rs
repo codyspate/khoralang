@@ -143,8 +143,10 @@ pub(crate) fn emit_closure<'ctx>(
     let unboxed = be.unboxed.clone();
     // A lambda lifted out of a body that calls through a function value may
     // be the far end of that call -- `let f = fn n => .. f(n - 1)` -- so it
-    // polls when entered. `Backend::poll_at_entry`.
-    let entry_poll = be.lambdas_poll_in.contains(&site.owner);
+    // polls when entered, unless it is a `Region::defer` finalizer written
+    // in place. `Backend::lambdas_poll_in`.
+    let entry_poll = be.lambdas_poll_in.contains(&site.owner)
+        && !be.finalizer_literals.contains(&(site.owner.clone(), site.expr));
 
     let entry = be.ctx.append_basic_block(function, "entry");
     be.builder.position_at_end(entry);

@@ -291,7 +291,36 @@ pub(crate) struct Backend<'ctx> {
     /// value. A lambda lifted out of one of these polls when it is entered,
     /// for the reason [`Self::poll_at_entry`] gives: a lambda that calls
     /// itself through its own binding is the same invisible cycle.
+    ///
+    /// **Except a lambda written as the finalizer argument of
+    /// `Region::defer`** ([`Self::finalizer_literals`]). A finalizer runs
+    /// shielded, so a plain cancel never stops at its entry poll; the one
+    /// thing that poll ever did was let `abort` skip the whole finalizer
+    /// before its first line. Written next to a `body()` call, that skipped
+    /// `transaction`'s rollback and a pool's give-back, and any user cleanup of
+    /// the same shape. What `abort` owes cleanup is to cut it short once it
+    /// has started, at its first cancellation point, not to skip it.
+    ///
+    /// Sound without a poll anywhere in its place, because such a lambda
+    /// cannot be the far end of a call through a value on a cycle that polls
+    /// nowhere else. It has no binding, so it cannot name itself. Its closure
+    /// is handed straight to the runtime, which holds the only reference and
+    /// calls it once. So every trip of a cycle through it builds a new
+    /// closure, by evaluating the lambda in the body it is written in; that
+    /// body is either this function, which polls at entry, or a lambda of it
+    /// that polls at entry or is itself such a finalizer, and so on outward.
+    /// A loop in between has its own back-edge poll.
+    ///
+    /// What is not exempt, and why: a lambda bound to a `let` and then
+    /// deferred is reachable through the binding; one handed to
+    /// `Scope::defer` (and so to `acquire`) goes to whatever handler is
+    /// installed, which may keep it and call it again. Those keep the entry
+    /// poll, and `abort` can still skip them.
     pub(crate) lambdas_poll_in: HashSet<String>,
+    /// `(owner, lambda)` for every lambda written as the finalizer argument
+    /// of `Region::defer`. [`Self::lambdas_poll_in`] says why these do not
+    /// poll when entered.
+    pub(crate) finalizer_literals: HashSet<(String, khora_hir::body::ExprId)>,
     /// Which types are held inline rather than behind a header.
     ///
     /// Whole-program, because it is a property of a type's declaration and
@@ -488,6 +517,7 @@ impl<'ctx> Backend<'ctx> {
             untagged: HashSet::new(),
             poll_at_entry: HashSet::new(),
             lambdas_poll_in: HashSet::new(),
+            finalizer_literals: HashSet::new(),
             unboxed: std::rc::Rc::new(khora_types::unboxed::Unboxed::default()),
             ctx,
             module,

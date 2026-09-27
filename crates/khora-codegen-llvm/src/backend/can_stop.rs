@@ -111,6 +111,9 @@ pub(crate) struct CanStop {
     pub cyclic: HashSet<String>,
     /// Each function's own reasons, before its callees are counted.
     pub local: HashMap<String, HashSet<Local>>,
+    /// Lambdas written as the finalizer argument of `Region::defer`, by the
+    /// symbol they are written in. See [`finalizer_literals`].
+    pub finalizers: HashSet<(String, khora_hir::body::ExprId)>,
 }
 
 impl CanStop {
@@ -308,7 +311,47 @@ fn callee_reason(
     }
 }
 
-/// One function's own reasons to stop, and the Khora functions it mentions.
+/// The lambda written as the finalizer of this call, if the call is
+/// `Region::defer(region, fn () => ..)` or `region.defer(fn () => ..)`.
+///
+/// **Only a lambda written in that argument, and only `Region::defer`.** The
+/// exemption in [`crate::backend::Backend::lambdas_poll_in`] rests on the
+/// closure being reachable by nothing but the runtime, which calls it once. A
+/// lambda bound to a `let` first is reachable through the binding, and one
+/// handed to `Scope::defer` goes to whatever handler is installed, which may
+/// keep it and call it again. Neither is recognised here, so both keep their
+/// entry poll.
+fn finalizer_literal(
+    body: &Body,
+    types: &BodyTypes,
+    target: &Expr,
+    args: &[khora_hir::body::ExprId],
+) -> Option<khora_hir::body::ExprId> {
+    let finalizer = match target {
+        Expr::Path(Resolution::TraitItem { owner, name })
+            if owner == crate::runtime::REGION_TYPE && name == "defer" =>
+        {
+            match args {
+                [_, finalizer] => *finalizer,
+                _ => return None,
+            }
+        }
+        Expr::Field { base, name }
+            if name == "defer"
+                && receiver_owner(types.of(*base)).as_deref() == Some(crate::runtime::REGION_TYPE) =>
+        {
+            match args {
+                [finalizer] => *finalizer,
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    matches!(body.expr(finalizer), Expr::Lambda { .. }).then_some(finalizer)
+}
+
+/// One function's own reasons to stop, the Khora functions it mentions, and
+/// the lambdas it writes as a `Region::defer` finalizer.
 fn scan(
     symbol: &str,
     body: &Body,
@@ -316,9 +359,10 @@ fn scan(
     mono: &khora_types::mono::Instances,
     is_defined: &impl Fn(&str) -> bool,
     is_extern: &impl Fn(&str) -> bool,
-) -> (HashSet<Local>, Vec<String>) {
+) -> (HashSet<Local>, Vec<String>, Vec<khora_hir::body::ExprId>) {
     let mut local = HashSet::new();
     let mut out = Vec::new();
+    let mut finalizers = Vec::new();
     for (id, expr) in body.exprs() {
         // A mention is an edge, called or not: a function passed as a value is
         // called by whoever receives it. This is also how an operator or a
@@ -346,6 +390,9 @@ fn scan(
                     continue;
                 }
                 let target = body.expr(*callee);
+                if let Some(literal) = finalizer_literal(body, types, target, args) {
+                    finalizers.push(literal);
+                }
                 if let Some(reason) = callee_reason(target, resolved.as_deref(), types, is_extern) {
                     local.insert(reason);
                 }
@@ -381,7 +428,7 @@ fn scan(
             | Expr::Unit => {}
         }
     }
-    (local, out)
+    (local, out, finalizers)
 }
 
 /// Decides, for every instance, whether it can stop.
@@ -398,8 +445,10 @@ pub(crate) fn decide<'a>(
 ) -> CanStop {
     let mut edges: HashMap<String, Vec<String>> = HashMap::new();
     let mut local: HashMap<String, HashSet<Local>> = HashMap::new();
+    let mut finalizers = HashSet::new();
     for (symbol, body, types) in instances {
-        let (reasons, out) = scan(&symbol, body, types, mono, &is_defined, &is_extern);
+        let (reasons, out, written) = scan(&symbol, body, types, mono, &is_defined, &is_extern);
+        finalizers.extend(written.into_iter().map(|lambda| (symbol.clone(), lambda)));
         local.insert(symbol.clone(), reasons);
         edges.insert(symbol, out);
     }
@@ -424,7 +473,7 @@ pub(crate) fn decide<'a>(
         }
     }
 
-    CanStop { stops, cyclic, local }
+    CanStop { stops, cyclic, local, finalizers }
 }
 
 /// Every symbol that can reach itself: a member of a strongly connected
@@ -872,11 +921,71 @@ fn main() -> Int { nap(); who() }
                     .map(|(_, t)| t)
                     .expect("a checked body");
                 let mono = khora_types::mono::Instances::default();
-                let (reasons, _) = scan(name, body, body_types, &mono, &|_| false, &is_extern);
+                let (reasons, _, _) = scan(name, body, body_types, &mono, &|_| false, &is_extern);
                 assert!(reasons.contains(&Local::Foreign), "{file} {name}: {reasons:?}");
                 seen.push(format!("{file} {name}"));
             }
         }
         assert_eq!(seen.len(), 7, "accept_on and connect_to on three platforms, and real: {seen:?}");
+    }
+
+    /// The lambdas a symbol writes as a `Region::defer` finalizer, by the
+    /// lambda's own source text.
+    fn finalizers_in(source: &str, name: &str) -> Vec<String> {
+        let db = KhoraDatabase::new();
+        let file = SourceFile::new(&db, "main.kh".into(), source.to_string());
+        let root = SourceRoot::new(&db, vec![file]);
+        let mono = khora_types::mono::program_instances(&db, root);
+        assert!(mono.errors.is_empty(), "the fixture should compile: {:?}", mono.errors);
+        let answer = analyse(&db, &[file], mono);
+        let owner = symbol(&answer, name);
+        let body = khora_hir::body::bodies(&db, file)
+            .iter()
+            .find(|(n, _)| owner.ends_with(n.as_str()))
+            .map(|(_, b)| b)
+            .expect("a body");
+        let mut found: Vec<String> = answer
+            .finalizers
+            .iter()
+            .filter(|(o, _)| *o == owner)
+            .map(|(_, lambda)| {
+                let range = body.range(*lambda);
+                source[usize::from(range.start())..usize::from(range.end())].to_string()
+            })
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// **Only a lambda written in `Region::defer`'s finalizer argument is
+    /// recognised**, in either spelling. One bound to a `let` first, one
+    /// handed to a `Scope`'s `defer`, and one handed to a user type's `defer`
+    /// are not: `Backend::lambdas_poll_in` says why each keeps its entry poll.
+    #[test]
+    fn only_a_lambda_written_in_region_defer_is_a_finalizer_literal() {
+        let source = "module main;
+pub type Region;
+impl Region { fn open() -> Region; fn defer(self, finalizer: () -> ()) -> (); }
+pub effect Scope { defer: (() -> ()) -> (), }
+type Mine = { n: Int }
+impl Mine { fn defer(self, f: () -> ()) -> () { f() } }
+fn noop() -> () { () }
+fn guarded(body: () -> ()) -> () with { scope: Scope } {
+  let r = Region::open();
+  Region::defer(r, fn () => noop());
+  r.defer(fn () => { noop(); noop() });
+  let bound = fn () => noop();
+  Region::defer(r, bound);
+  scope.defer(fn () => noop());
+  let m = { n: 1 };
+  m.defer(fn () => ());
+  body()
+}
+fn main() -> Int {
+  with { scope: handler for Scope { defer: fn f => f() } } { guarded(noop) };
+  0
+}
+";
+        assert_eq!(finalizers_in(source, "guarded"), ["fn () => noop()", "fn () => { noop(); noop() }"]);
     }
 }
