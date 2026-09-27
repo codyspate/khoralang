@@ -234,6 +234,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             projections: Vec::new(),
             coverage: Vec::new(),
             broken_pats: HashSet::new(),
+            bare_names: Vec::new(),
             enclosing_lambdas: Vec::new(),
             lambda_captures: HashMap::new(),
             call_rows: HashMap::new(),
@@ -258,6 +259,19 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
         checker.close_open_rows();
         checker.check_bounds();
         checker.settle_projections();
+        // Before coverage: a bare case name is reported as what it is, and
+        // the pattern it sits in is then not asked about coverage. After the
+        // projections, for the same reason coverage is.
+        let root = khora_db::source_root(db);
+        let declared_elsewhere =
+            |home: &khora_hir::ModulePath, owner: &str| -> Vec<crate::VariantInfo> {
+                let Some(root) = root else { return Vec::new() };
+                let Some(source) = khora_hir::module_graph(db, root).file(home) else {
+                    return Vec::new();
+                };
+                type_map(db, source).variants_of(Some(home), owner).into_iter().cloned().collect()
+            };
+        checker.settle_bare_names(&declared_elsewhere);
         // After the projections, so that a scrutinee whose type came through
         // one is settled too.
         checker.settle_coverage();

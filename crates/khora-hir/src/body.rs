@@ -515,6 +515,18 @@ pub struct Body {
     /// refused later, by the code generator, against a line with nothing wrong
     /// with it. Saying so needs somewhere to say it.
     pat_ranges: Vec<TextRange>,
+    /// The bindings somebody wrote as a bare name in a pattern -- `x` in
+    /// `Option::Some(x)`, `Red` in `Red => ..` -- and not the ones lowering
+    /// made: parameters, capabilities, a `for`'s state, or a record pattern's
+    /// `{ name }` shorthand, which names a field rather than a case.
+    ///
+    /// **Without it a case name written bare was a silent catch-all.**
+    /// `Red => "warm"` over a `Colour` binds every colour, so the checker has
+    /// to ask each of these whether its name is one of its value's cases, and
+    /// only these: a parameter called `Red` is not a pattern anybody misread.
+    /// A set rather than a flag on [`Pat::Bind`], which every consumer of a
+    /// binding would have had to spell out and none but the checker reads.
+    pub written_binds: std::collections::HashSet<PatId>,
     pub params: Vec<PatId>,
     /// The capabilities this function requires, by the label the body calls
     /// them and the binding that holds them.

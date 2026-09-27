@@ -24,9 +24,17 @@ into.
 value
 ```
 
-**A bare identifier always binds the matched value, even when a nullary constructor has the same name.** `Ready => 1` binds every value to a new variable called `Ready`; it does not match the `Ready` case. **Qualify a constructor pattern** — `Status::Ready => 1` — and it matches the case.
+**A bare identifier binds the matched value.** `value => ..` matches anything and names it `value`.
 
-The compiler catches the common shape of this mistake: a bare name before other arms makes those arms unreachable, and that is an error naming the fix. It cannot catch every shape. A bare name as the *only* arm, or as the last one, leaves nothing unreachable, so the match compiles and silently binds everything — with a `` `Ready` is bound and never read `` warning as the one signal. **Treat that warning as an error in a `match` over a variant type.**
+**A bare identifier that is the name of one of the value's cases is an error.** Over a `Colour`, `Red => ..` would bind every colour, not match `Colour::Red`, so the compiler refuses it and names the pattern to write. This applies in every pattern (`match`, `catch`, `let`, `for`, and nested inside others) and to cases with a payload as well: `NotFound => ..` over an `FsError` is refused too. **Write a constructor qualified** (`Colour::Red`, `FsError::NotFound(path)`), and bind with a name that is not a case.
+
+The check is against the value's type, not against what the file imports, so it applies to a value whose type the file never names. If a case is added to a type later, a binding that shares its name stops compiling. It does not silently start matching only that case.
+
+**A capitalised bare name is an error too**, when it is no case of the
+value's type. A capitalised name in a pattern reads as a case, so `Gren => ..`
+(a typo for `Colour::Green`) and `FAVOURITE => ..` (a `const`, which a pattern
+binds rather than compares against) would each match every value. Bind with a
+lower-case name.
 
 ## Literal patterns
 

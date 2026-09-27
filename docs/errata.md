@@ -4014,3 +4014,36 @@ first. Anything else is a syntax error that names the fix: one row
 (`with { a: A, b: B }`) or one union (`raises A + B`). Nothing in `std`,
 `packages/`, `examples/`, `tests/` or `bench/` wrote another shape.
 
+
+## 97. A bare name in a pattern could be a case
+
+In 0.3.0. A bare name in a pattern is a binding, and nothing asked whether
+it was also the name of one of its value's cases. So
+`match c { Colour::Blue => "cool", Red => "warm" }` built, and answered
+`warm` for `Colour::Green`: `Red` bound every colour. The one thing said was
+`` `Red` is bound and never read ``, which the arm reading the name removed.
+A `catch` of the same shape,
+`load(n)! catch { LoadError::Broken(_) => 1, Missing => 2 }`, built a binary
+that died with `Illegal instruction`. `report_match_coverage` did name the
+mistake, but only where it left a later arm unreachable, and it said so
+against that later arm, which was the one written correctly.
+
+Lowering records which bindings were written as a bare name in a pattern
+(`Body::written_binds`), as against parameters, a `for`'s state and the
+`{ name }` shorthand. The checker records each with the type it bound, and
+`settle_bare_names` asks, after the body and before coverage, whether that
+type declares a case of that name, looking in the declaring module when the
+file never imported the type. A hit is refused, naming the pattern to write
+(`Colour::Red`, `FsError::NotFound(_)`), and goes into `broken_pats`, so the
+same `match` is not also reported as having an unreachable arm. The narrower
+message in `report_match_coverage` is gone. A type's only case (a record
+type's own name in a `catch`) is refused with `_` as the fix, since the
+binding matched what the case would have.
+
+Resolving the name to the case instead was rejected: it makes what a name
+means depend on a type another file may change, so a case added upstream
+would turn a working binding into a case match in a program nobody edited.
+Refused, the same addition is an error in the file that has to change.
+
+The general shape: **a warning that goes away when the code uses the name is
+not a guard against a name meaning the wrong thing.**

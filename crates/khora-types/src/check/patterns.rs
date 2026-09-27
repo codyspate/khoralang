@@ -12,6 +12,9 @@ impl<'a> Checker<'a> {
     pub(super) fn bind_pattern(&mut self, pat: PatId, ty: &Type) {
         match self.body.pat(pat).clone() {
             Pat::Bind(local) => {
+                if self.body.written_binds.contains(&pat) {
+                    self.bare_names.push((pat, ty.clone()));
+                }
                 self.locals.insert(local, ty.clone());
             }
             Pat::TupleStruct { resolution, fields } => {
@@ -185,6 +188,158 @@ impl<'a> Checker<'a> {
         false
     }
 
+    /// A bare name in a pattern that is the name of one of its value's cases.
+    ///
+    /// **A bare name binds**, so `Red => "warm"` over a `Colour` matched
+    /// every colour and answered "warm" for green. Where it was not followed
+    /// by an arm it made unreachable, nothing was reported but that `Red` was
+    /// never read -- a warning, on a program that built and gave a wrong
+    /// answer, gone as soon as the arm read the name.
+    ///
+    /// Refused rather than resolved to the case. Resolving it would make what
+    /// a name means depend on the type of the value it meets, so a case added
+    /// to an upstream type would turn a working binding into a case in a
+    /// program nobody edited. Refusing makes the same addition an error.
+    ///
+    /// Asked after the body, for `settle_coverage`'s reason: the value's type
+    /// may be a variable when the pattern is bound. A type still unknown then
+    /// is not asked about -- `check_unknowns` speaks for it. Nullary and
+    /// payload cases alike, since `NotFound => ..` swallows a `NotFound(p)`
+    /// the same way.
+    ///
+    /// **Costs** one lookup per written binding whose value is a named type,
+    /// and for a type this file never imported, a `type_map` of the module
+    /// that declares it -- a query, so paid once per module, not per binding.
+    pub(crate) fn settle_bare_names(
+        &mut self,
+        declared_elsewhere: &dyn Fn(&khora_hir::ModulePath, &str) -> Vec<crate::VariantInfo>,
+    ) {
+        for (pat, ty) in std::mem::take(&mut self.bare_names) {
+            let Pat::Bind(local) = self.body.pat(pat) else { continue };
+            let name = self.body.local(*local).name.clone();
+            let settled = self.unifier.zonk(&ty);
+            let Some(case) = self.case_named(&settled, &name, declared_elsewhere) else {
+                // A2: see `refuse_capitalised_binding`. Deleting this one
+                // line removes it.
+                self.refuse_capitalised_binding(pat, &name, &settled);
+                continue;
+            };
+            let BareCase { owner, arity, labelled, imported, only } = case;
+            // **The type's only case**: a record, or `type UserId = Int`. The
+            // binding matched exactly what the case would have, so the answer
+            // was right and only what it looked like was wrong. `_`, or a
+            // lower-case name, says the same thing without looking like a case.
+            if only {
+                self.error(
+                    format!(
+                        "`{name}` is the name of `{owner}`'s only case, and a bare name in a \
+                         pattern binds rather than matching it. Write `_` to match any \
+                         `{owner}`, or a lower-case name to bind it"
+                    ),
+                    self.body.pat_range(pat),
+                );
+                self.broken_pats.insert(pat);
+                continue;
+            }
+            // The pattern that matches the case, spelled so it compiles as
+            // written: a record type's own case is `Name {}`, a payload takes
+            // one `_` per field, and a type's self-named case one segment.
+            let head = if owner == name { name.clone() } else { format!("{owner}::{name}") };
+            let written = if owner == name && labelled {
+                format!("{name} {{}}")
+            } else if arity == 0 {
+                head
+            } else {
+                format!("{head}({})", vec!["_"; arity].join(", "))
+            };
+            // Qualifying needs the type in scope, and this file may never
+            // have named it -- the value arrived from a call.
+            let import = match imported {
+                Some(home) => format!(" (with `{owner}` imported from `{home}`)"),
+                None => String::new(),
+            };
+            self.error(
+                format!(
+                    "`{name}` is a case of `{owner}`, and a bare name in a pattern binds \
+                     rather than matching one -- this would match every `{owner}`. Write \
+                     `{written}`{import} to match the case, or pick another name to bind \
+                     the value"
+                ),
+                self.body.pat_range(pat),
+            );
+            self.broken_pats.insert(pat);
+        }
+    }
+
+    /// The case of `settled` called `name`, if its type declares one.
+    ///
+    /// **Looks past this file's imports.** A `catch` over `load(n)!` meets a
+    /// `LoadError` nobody here named, and a `match` on `colour(n)` a `Shade`;
+    /// checked against the scope, those names are nothing and the binding
+    /// swallows in silence. That is not resolving a name the source wrote --
+    /// which is why it may look outside the file's scope -- it is asking what
+    /// the value holds, and the declaring module is the one that knows.
+    fn case_named(
+        &self,
+        settled: &Type,
+        name: &str,
+        declared_elsewhere: &dyn Fn(&khora_hir::ModulePath, &str) -> Vec<crate::VariantInfo>,
+    ) -> Option<BareCase> {
+        let Type::Adt { name: owner, home, .. } = settled else { return None };
+        let in_scope: Vec<crate::VariantInfo> =
+            self.types.variants_of(home.as_ref(), owner).into_iter().cloned().collect();
+        let (cases, imported) = match (in_scope.is_empty(), home) {
+            (false, _) => (in_scope, None),
+            (true, Some(home)) => {
+                (declared_elsewhere(home, owner), Some(home.segments().join("::")))
+            }
+            (true, None) => return None,
+        };
+        let case = cases.iter().find(|v| v.name == name)?;
+        Some(BareCase {
+            owner: owner.clone(),
+            arity: case.fields.len(),
+            labelled: case.labels.iter().any(|l| !l.is_empty()),
+            imported,
+            only: cases.len() == 1,
+        })
+    }
+
+    /// **A2 -- the owner's decision, kept apart so it can be dropped.**
+    ///
+    /// A capitalised bare name in a pattern that is no case of its value's
+    /// type. [`Checker::settle_bare_names`] catches `Red` over a `Colour`;
+    /// this catches the two catch-alls it cannot: a typo, `Gren => ..` for
+    /// `Colour::Green`, and a `const`, `FAVOURITE => ..`, which binds a new
+    /// name rather than comparing against the constant. Both built with only
+    /// an `unused-binding` warning, which the arm reading the name removed.
+    ///
+    /// **Costs** letter case a meaning in patterns, where elsewhere it is a
+    /// convention: a lower-case typo (`gren`) still binds, and a program
+    /// that binds with a capitalised name has to rename it.
+    ///
+    /// To drop A2: delete this function, its call in `settle_bare_names`, and
+    /// the `mod a2` block in `khora-types/tests/bare_patterns.rs`.
+    fn refuse_capitalised_binding(&mut self, pat: PatId, name: &str, settled: &Type) {
+        if !name.chars().next().is_some_and(char::is_uppercase) {
+            return;
+        }
+        // An unsettled type is `check_unknowns`' to report, and the message
+        // below has to name one.
+        if matches!(settled, Type::Unknown | Type::Var(_)) {
+            return;
+        }
+        self.error(
+            format!(
+                "`{name}` binds the value, because it is no case of `{settled}` -- and a \
+                 capitalised name in a pattern reads as a case. Bind it with a lower-case \
+                 name, or write the case it was meant to be in full"
+            ),
+            self.body.pat_range(pat),
+        );
+        self.broken_pats.insert(pat);
+    }
+
     /// Remembers a `match` to check once the types have settled.
     ///
     /// **Not checked here**, because the scrutinee's type is still being
@@ -318,43 +473,10 @@ impl<'a> Checker<'a> {
 
         for index in usefulness::unreachable_arms(&patterns, &column, &resolve) {
             let Some(arm) = unguarded.get(index) else { continue };
-            // **Say why, when the why is the trap.** A bare name in a pattern
-            // is a *binding*, so `Red => ..` where `Colour::Red` was meant
-            // matches every colour and the arm after it is unreachable. The
-            // program compiles and answers `Red`'s body for green, which is
-            // the worst shape a mistake can have -- and reporting only the
-            // symptom points at the arm that is right.
-            //
-            // Looked for among the arms *before* this one, since only those
-            // can be what swallowed it, and only where the name is one the
-            // scrutinee's own type declares: a binding called `n` is somebody
-            // capturing the value and means nothing is wrong.
-            let swallowed = unguarded[..index].iter().find_map(|earlier| {
-                let Pat::Bind(local) = self.body.pat(earlier.pat) else { return None };
-                let name = &self.body.local(*local).name;
-                let ColumnType::Finite(ctors) = &column else { return None };
-                ctors
-                    .iter()
-                    .any(|ctor| matches!(ctor, Ctor::Variant { name: case, .. } if case == name))
-                    .then(|| name.clone())
-            });
-            // The scrutinee's own type, so the suggestion is a line somebody
-            // can type rather than a shape to fill in.
-            let owner = match scrutinee_ty {
-                Type::Adt { name, .. } => name.clone(),
-                other => other.to_string(),
-            };
-            match swallowed {
-                Some(name) => self.error(
-                    format!(
-                        "this arm is unreachable: an earlier arm is the bare name `{name}`, \
-                         which binds every value rather than matching the case -- write it \
-                         qualified, as `{owner}::{name}`"
-                    ),
-                    self.body.range(arm.body),
-                ),
-                None => self.error("this arm is unreachable", self.body.range(arm.body)),
-            }
+            // A bare case name before this arm is not what made it
+            // unreachable: `settle_bare_names` refused that name and marked
+            // it broken, and a broken pattern skips this check above.
+            self.error("this arm is unreachable", self.body.range(arm.body));
         }
     }
 
@@ -428,5 +550,20 @@ impl<'a> Checker<'a> {
 /// a machine wrote it, which is the impression this whole file works against.
 fn pieces(count: usize) -> String {
     if count == 1 { "1 piece".to_string() } else { format!("{count} pieces") }
+}
+
+/// What [`Checker::settle_bare_names`] needs to write the pattern that
+/// matches a case, so that the suggestion compiles as written.
+struct BareCase {
+    owner: String,
+    /// Payload fields, one `_` each in the suggestion.
+    arity: usize,
+    /// Named fields: a record type's own case is written `Name {}`.
+    labelled: bool,
+    /// The declaring module, where this file never imported the type.
+    imported: Option<String>,
+    /// The type has no other case, so the binding matched what the case
+    /// would have and only its spelling misleads.
+    only: bool,
 }
 

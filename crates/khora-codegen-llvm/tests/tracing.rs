@@ -233,7 +233,7 @@ pub fn main() -> Int {
   let tracer = recording(counter);
   around(tracer, \"request\", fn () => {
     let child = Fiber::spawn(fn () => worker(tracer)!);
-    Fiber::wait(child)! catch { Stop => () };
+    Fiber::wait(child)! catch { _ => () };
   });
   0
 }",

@@ -195,3 +195,50 @@ fn patterns_of_the_right_type_still_run() {
     assert_eq!(ran.stdout, "4\n4\n30\n0\n", "stderr: {}", ran.stderr);
     assert_eq!(ran.code, Some(0));
 }
+
+/// **A case name written bare is refused, and nothing is built.** It bound
+/// every value: this program printed `3` (the `Red` arm) for
+/// `Colour::Green`, and the `catch` one built a binary that died with
+/// `Illegal instruction`.
+#[test]
+fn a_bare_case_name_is_refused_and_nothing_is_built() {
+    let colour = "pub type Colour = | Red | Green | Blue;\n\
+        fn describe(c: Colour) -> Int { match c { Colour::Blue => 1, Red => 3 } }\n";
+    let found = refused(
+        "bare_case_match",
+        &format!("{PRELUDE}{colour}fn main() -> Int {{ print(describe(Colour::Green)); 0 }}\n"),
+    );
+    assert!(
+        found.iter().any(|e| e.contains("`Red` is a case of `Colour`") && e.contains("`Colour::Red`")),
+        "{found:?}"
+    );
+    let exe = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("bare_case_match").join(
+        if cfg!(windows) { "program.exe" } else { "program" },
+    );
+    assert!(!exe.exists(), "a refused program left a binary at {}", exe.display());
+
+    let found = refused(
+        "bare_case_catch",
+        &format!(
+            "{PRELUDE}pub type LoadError = | Missing | Broken(String);\n\
+             fn load(n: Int) -> Int raises LoadError {{ if n == 0 {{ raise LoadError::Missing; }} n }}\n\
+             fn main() -> Int {{ print(load(0)! catch {{ LoadError::Broken(_) => 1, Missing => 2 }}); 0 }}\n"
+        ),
+    );
+    assert!(found.iter().any(|e| e.contains("`Missing` is a case of `LoadError`")), "{found:?}");
+}
+
+/// The qualified spelling the message asks for builds and answers right.
+#[test]
+fn the_qualified_case_runs() {
+    let ran = run_both(
+        "qualified_case",
+        &format!(
+            "{PRELUDE}pub type Colour = | Red | Green | Blue;\n\
+             fn describe(c: Colour) -> Int {{ match c {{ Colour::Blue => 1, Colour::Red => 3, other => 7 }} }}\n\
+             fn main() -> Int {{ print(describe(Colour::Green)); print(describe(Colour::Red)); 0 }}\n"
+        ),
+    );
+    assert_eq!(ran.stdout, "7\n3\n", "stderr: {}", ran.stderr);
+    assert_eq!(ran.code, Some(0));
+}

@@ -706,3 +706,24 @@ fn a_constructor_on_an_effect_is_not_that_mistake() {
     );
     assert!(found.is_empty(), "a constructor on an effect is an ordinary call: {found:?}");
 }
+
+/// **A case name written bare in a `for` is refused**, the element pattern
+/// and one nested in it alike. Here because a `for` needs `std::core`'s
+/// `Step` and `Iterator`; the rest of the bare-name rule is tested in
+/// `bare_patterns.rs` without `std`. 0.3.0 ran the first loop's body for
+/// every colour, with `Red` bound to each.
+#[test]
+fn a_bare_case_name_in_a_for_is_refused() {
+    let found = errors_with_std(
+        "module program;\n\
+         import std::core::{print, List, Step, Iterator};\n\
+         type Colour = | Red | Green | Blue;\n\
+         pub fn main() -> Int {\n\
+           for Red in [Colour::Green, Colour::Blue] { print(\"red?\"); }\n\
+           for (Blue, n) in [(Colour::Green, 1)] { print(\"${n}\"); }\n\
+           0\n\
+         }\n",
+    );
+    assert!(found.iter().any(|e| e.contains("`Red` is a case of `Colour`")), "{found:?}");
+    assert!(found.iter().any(|e| e.contains("`Blue` is a case of `Colour`")), "{found:?}");
+}

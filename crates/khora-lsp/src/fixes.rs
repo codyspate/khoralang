@@ -121,9 +121,37 @@ pub fn for_diagnostic(
             out.extend(for_misspelling(message, range));
             out.extend(for_missing_field(message, range, source));
             out.extend(for_missing_arms(message, range, at));
+            out.extend(for_bare_case(message, range));
             out
         }
     }
+}
+
+/// `` `Red` is a case of `Colour` ... Write `Colour::Red` to match the case ``,
+/// made an edit: the qualified name in place of the bare one.
+///
+/// **Not offered when the message also asks for an import**: that is two
+/// edits, one elsewhere in the file, and applying the first alone leaves a
+/// name that does not resolve. Refused twice over, on purpose: by the
+/// explicit check, and because the import clause sits between the name and
+/// "to match the case", so the extraction finds nothing either. Nor for the
+/// only-case message, which names two answers (`_`, or a lower-case name)
+/// and so has a choice in it -- its text has no "is a case of" in it, which
+/// is what keeps it out. Renaming the binding, the other way out, is not
+/// spelled out by the message and so is not offered either.
+fn for_bare_case(message: &str, range: TextRange) -> Option<Fix> {
+    if !message.contains("` is a case of `") || message.contains(" imported from `") {
+        return None;
+    }
+    let written = message.split_once(". Write `")?.1.split_once("` to match the case")?.0;
+    if written.is_empty() {
+        return None;
+    }
+    Some(Fix {
+        title: format!("Match the case: `{written}`"),
+        range,
+        replacement: written.to_string(),
+    })
 }
 
 /// `` `f` needs `db: Db`, which this function does not require ``, made an edit.
@@ -522,6 +550,30 @@ mod tests {
     fn an_ordinary_type_error_is_offered_nothing() {
         assert!(for_diagnostic("expected `Int`, found `String`", None, range(), "x", "", None)
             .is_empty());
+    }
+
+    /// The qualified name the message spells out, in place of the bare one.
+    #[test]
+    fn a_bare_case_name_is_qualified_in_place() {
+        let message = "`Red` is a case of `Colour`, and a bare name in a pattern binds rather \
+                       than matching one -- this would match every `Colour`. Write `Colour::Red` \
+                       to match the case, or pick another name to bind the value";
+        let fixes = for_diagnostic(message, None, range(), "Red", "", None);
+        assert_eq!(fixes.len(), 1, "{fixes:?}");
+        assert_eq!(fixes[0].replacement, "Colour::Red");
+        assert_eq!(fixes[0].range, range());
+    }
+
+    /// **Not when the type also has to be imported**: that is two edits, one
+    /// of them elsewhere in the file, and applying half of it leaves a name
+    /// that does not resolve.
+    #[test]
+    fn a_bare_case_name_whose_type_needs_importing_is_offered_nothing() {
+        let message = "`Light` is a case of `Shade`, and a bare name in a pattern binds rather \
+                       than matching one -- this would match every `Shade`. Write `Shade::Light` \
+                       (with `Shade` imported from `xmod::errs`) to match the case, or pick \
+                       another name to bind the value";
+        assert!(for_diagnostic(message, None, range(), "Light", "", None).is_empty());
     }
 
     /// A signature over one line, with the offsets read out of it rather than

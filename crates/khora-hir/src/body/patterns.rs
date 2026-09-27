@@ -2,9 +2,15 @@
 //!
 //! A pattern binds names into the enclosing scope, so lowering one is as much
 //! about the scope stack as about the tree. Resolving a constructor path is
-//! here too, because a pattern is the one place a bare name might be a
-//! constructor rather than a binding — and getting that backwards silently
-//! turns a typo into a catch-all.
+//! here too.
+//!
+//! **A bare name is always a binding here**, and a constructor is always
+//! written with a path or a payload. Whether a bare name is *also* the name
+//! of one of its value's cases -- `Red => ..` over a `Colour`, which would
+//! bind every colour -- needs the value's type, which lowering does not have,
+//! so lowering only records which bindings were written that way
+//! ([`Body::written_binds`]) and the type checker refuses the ones that
+//! collide.
 
 use super::*;
 
@@ -16,7 +22,9 @@ impl<'a> Ctx<'a> {
             ast::Pat::Ident(p) => match p.name().and_then(|n| n.ident()) {
                 Some(name) => {
                     let local = self.declare(name, is_mut, range);
-                    self.add_pat(Pat::Bind(local), range)
+                    let pat = self.add_pat(Pat::Bind(local), range);
+                    self.body.written_binds.insert(pat);
+                    pat
                 }
                 None => self.add_pat(Pat::Missing, range),
             },

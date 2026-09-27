@@ -972,18 +972,17 @@ fn a_separated_literal_is_measured_without_its_underscores() {
     assert_clean("module m;\nfn go() -> Int { 9_223_372_036_854_775_807 }\n");
 }
 
-/// **The unreachable arm names its cause, when the cause is the trap.**
+/// **A bare name that is a case of the value's type is refused, at the name.**
 ///
 /// A bare name in a pattern is a *binding*, so `Red => ..` where `Colour::Red`
-/// was meant matches every colour and the arm after it is dead. The program
-/// compiles and answers `Red`'s body for green, which is the worst shape a
-/// mistake can have — and the old message reported only the symptom, pointing
-/// at the arm that was written correctly.
+/// was meant matches every colour. 0.3.0 said so only when an arm after it
+/// was unreachable, and against that arm, which was the one written
+/// correctly. The rule is about the name, wherever it stands.
 #[test]
 fn a_bare_constructor_name_says_it_is_a_binding() {
     assert_reports(
         "module m;\npub type Colour = | Red | Green;\nfn go(c: Colour) -> Int { match c { Red => 1, Green => 2 } }\n",
-        "binds every value",
+        "a bare name in a pattern binds rather than matching one",
     );
 }
 
@@ -1014,7 +1013,7 @@ fn an_ordinary_binding_is_not_blamed_for_being_a_constructor() {
         "the second arm is still dead: {found:?}"
     );
     assert!(
-        !found.iter().any(|e| e.contains("binds every value")),
+        !found.iter().any(|e| e.contains("is a case of")),
         "`n` is a capture, not a mistyped constructor: {found:?}"
     );
 }

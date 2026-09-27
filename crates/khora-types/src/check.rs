@@ -148,6 +148,9 @@ pub(crate) struct Checker<'a> {
     /// `lower_for`'s expansion. The second error is the first one seen from
     /// the other end, so the first one suppresses it.
     pub(crate) broken_pats: HashSet<PatId>,
+    /// Every bare name a pattern bound, with the type it bound at, asked
+    /// about once the types are settled -- see [`Checker::settle_bare_names`].
+    pub(crate) bare_names: Vec<(PatId, Type)>,
     /// The lambdas currently being inferred, innermost last, each with the
     /// bindings it has been found to use implicitly.
     pub(crate) enclosing_lambdas: Vec<(ExprId, Vec<khora_hir::body::LocalId>)>,

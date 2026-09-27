@@ -37,7 +37,7 @@ fn with_deadline(millis: Int) -> () with { clock: Clock } raises Timeout {
   clock.sleep(millis)!;
   print("  deadline reached; cancelling");
   Fiber::cancel(hand);
-  Fiber::wait(hand)! catch { ChildFailed => () };
+  Fiber::wait(hand)! catch { _ => () };
   print("  cancelled, and the wait returned");
   raise Timeout::TookTooLong
 }

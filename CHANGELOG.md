@@ -24,7 +24,8 @@ committed or rolled back the outer one, and a `postgres` transaction whose
 body ignored a failed statement was answered `Ok` with nothing committed;
 the type checker let through a
 pattern of the wrong type, a `catch` that yielded 0, and a `raise` that no
-`catch` saw; and a `catch` arm could read a generic error's field at the
+`catch` saw; a case name written bare in a pattern matched every value; and
+a `catch` arm could read a generic error's field at the
 wrong type. Two language features are removed: glob imports, and a second
 `with` or `raises` clause. And a function with no `raises` row can be
 cancelled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
@@ -70,6 +71,22 @@ cancelled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   `ROLLBACK` with a warning, which the `postgres` package reads as `Ok`. The
   rollback of a body that failed runs as cleanup, which a plain cancel does
   not interrupt, so a handler whose rollback blocks is waited for.
+
+- **A bare name in a pattern that is the name of one of its value's cases is
+  refused**, in `match`, `catch`, `let` and `for`, at any depth, and for
+  cases with a payload as well as without. `Red => ..` over a `Colour` binds
+  every colour; the message names the pattern to write, `Colour::Red`
+  (`FsError::NotFound(_)` for a payload case, and the type's module where
+  the file never imported it). A bare name that is a type's *only* case, as
+  in `catch { Stop => () }` over a record `Stop`, matched what the case
+  would have and is refused too: write `_`. The check is against the value's
+  type, so a case added to a type later makes a binding of the same name an
+  error rather than a match. A capitalised bare name that is no case of
+  the value's type is refused as well, because it reads as one: a typo
+  (`Gren => ..` for `Colour::Green`) or a `const` (`FAVOURITE => ..`, which
+  binds rather than compares). Bind with a lower-case name. 0.3.0 built all
+  of these with an `unused-binding` warning at most, and gave a wrong answer
+  (see Fixed).
 
 - **A constructor pattern of one type, matched against a value of another,
   is refused**, at any depth, in `match`, `catch`, `let` and a pattern inside
@@ -262,6 +279,15 @@ cancelled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   unaffected.
 
 ### Fixed
+
+- **A case name written bare in a pattern matched every value.** A bare name
+  in a pattern binds, so `match c { Colour::Blue => "cool", Red => "warm" }`
+  answered `warm` for `Colour::Green`. Unless an arm after it was left
+  unreachable, the only thing said was that `Red` was never read, and that
+  went away once the arm read it. A `catch` of the same shape,
+  `load(n)! catch { LoadError::Broken(_) => 1, Missing => 2 }`, built a
+  binary that died with `Illegal instruction`. Both are refused at the name
+  (see Breaking).
 
 - **`Fiber::abort` skipped a cleanup written next to a call through a
   function value.** In a function that also calls a function value (a
