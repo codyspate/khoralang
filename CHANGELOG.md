@@ -643,6 +643,35 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 
 ### Added
 
+- **Labeled arguments.** At a call to a named function an argument may be
+  written `name: value`, where `name` is the name the declaration gives the
+  parameter at that position: `reply(connection, "ok", keep_alive: false)`.
+  The compiler checks the label and nothing else changes: arguments are
+  still matched by position and evaluated in the order written, so a label
+  that names a different parameter is refused, as are an unknown label, a
+  duplicate, `_:` and `self:`. A trait method is labeled by the trait's
+  parameter names however it is called, and an impl's own names stay local
+  to its body. A case with a named payload takes labels; a call through a
+  function value, a closure or an effect operation takes none, because a
+  function type has no parameter names. Labeled arguments are not named
+  arguments in the Python or Kotlin sense: there are no default values, and
+  a label cannot reorder or skip an argument. Defaults are a separate design
+  question. A public function's parameter names are part of its interface:
+  renaming one breaks any caller that labeled it, and
+  `reference/compatibility` lists it as breaking. The editor offers the
+  label for the parameter at the cursor, signature help shows the names
+  a call may use, `extern fn` included, and renaming a parameter renames
+  the labels written against it in every file. A rename to something that is
+  not a usable name, or onto a name already bound in the same function, is
+  refused and changes no file.
+
+- **`unlabeled-flag`**, a lint in the `idiomatic` group and off by default:
+  a `true` or `false` passed without a label to a parameter declared `Bool`
+  that is not the first. `reply(c, "ok", false)` is reported, and the message
+  names `keep_alive: false` as the edit. A parameter whose type is a type variable
+  (`fold(true, step)`) and a first parameter (`assert_that(false, "..")`)
+  are not reported.
+
 - **`Fiber::abort(handle)`** stops a fiber at its next cancellation point
   *including inside its cleanup*, and the children of any nursery it holds.
   Cleanup otherwise runs to completion, and canceling again does not change

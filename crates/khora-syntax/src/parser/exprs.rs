@@ -211,7 +211,30 @@ fn arg_list(p: &mut Parser<'_>) {
             if !p.tick() {
                 break;
             }
-            if expr(p).is_none() {
+            // `name: value`. Two tokens of lookahead, the same the record
+            // literal test uses; no expression starts with `IDENT :`, so this
+            // takes nothing that parsed before.
+            //
+            // `_:` gets its own error. The generic path reads `_` as the pipe
+            // placeholder, stops at the `:`, and reports `expected )` there
+            // and a cascade after it, none of which says what was wrong.
+            if p.at(UNDERSCORE) && p.nth_at(1, COLON) {
+                let l = p.start();
+                p.err_and_bump("`_` is not a label: a label is the name of the parameter it is written against");
+                p.bump(COLON);
+                if expr(p).is_none() {
+                    p.error("expected an argument after the label");
+                }
+                l.complete(p, LABELED_ARG);
+            } else if p.at(IDENT) && p.nth_at(1, COLON) {
+                let l = p.start();
+                name(p);
+                p.bump(COLON);
+                if expr(p).is_none() {
+                    p.error("expected an argument after the label");
+                }
+                l.complete(p, LABELED_ARG);
+            } else if expr(p).is_none() {
                 p.err_and_bump("expected an argument");
             }
             if !p.eat(COMMA) {

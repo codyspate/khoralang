@@ -212,6 +212,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             raises: Type::empty_row(),
             params: Vec::new(),
             ret: Type::Unknown,
+            names: Vec::new(),
         });
         let mut unifier = Unifier::new().with_assoc(types.traits.assoc_bindings());
         // A test's error row is open: an error escaping a test is a *failing

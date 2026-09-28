@@ -126,6 +126,21 @@ import std::net::tls::{transmit as tls_transmit, secure};
     );
 }
 
+/// **A labeled argument is spelled like a record field**: nothing before the
+/// `:`, one space after. The formatter's existing rule for `:` gives that, so
+/// labels needed no formatter change -- this pins that it stays so, and that
+/// a labeled call round-trips to itself.
+#[test]
+fn a_labeled_argument_is_normalized_and_round_trips() {
+    let src = "module m;\nfn f() {\n  g(a, flag:true);\n  g(a, b : 2);\n  g(a, flag:   false);\n}\n";
+    let out = format(src).expect("this parses");
+    assert!(out.contains("g(a, flag: true);"), "{out}");
+    assert!(out.contains("g(a, b: 2);"), "{out}");
+    assert!(out.contains("g(a, flag: false);"), "{out}");
+    assert_eq!(format(&out).expect("the output parses"), out, "not idempotent");
+    assert_eq!(is_formatted(&out), Ok(true));
+}
+
 #[test]
 fn imports_are_sorted_and_deduplicated() {
     let src = "module m;\nimport std::core::{Scope, Option, Scope, Never};\n";

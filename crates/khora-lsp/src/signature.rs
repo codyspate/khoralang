@@ -76,13 +76,16 @@ pub fn at(db: &dyn Db, root: SourceRoot, file: SourceFile, offset: TextSize) -> 
     // written at the call.
     let (signature, home) = signature_of(db, root, file, &name)?;
 
-    // **Names where they can be had, types where they cannot.** `Signature`
-    // records `Vec<Type>` and nothing else -- the checker never needed the
-    // names -- but the callee's `Body` has them, one `Pat::Bind` per
-    // parameter. `charge(account: Account, amount: Decimal)` is worth the
-    // lookup over `charge(Account, Decimal)`, which says nothing a reader
-    // could not already see.
-    let names = parameter_names(db, home, name.last()?);
+    // **The names are the labels a call may write**, so they come from the
+    // signature the checker holds the labels to -- not from the callee's
+    // body, which an `extern fn` does not have, and which showed it as
+    // `abs(Int)` when `abs(value: 3)` is what the checker accepts. The body
+    // is the fallback for a signature the compiler made up without names.
+    let names: Vec<String> = if signature.names.len() == signature.params.len() {
+        signature.names.iter().map(|n| n.clone().unwrap_or_else(|| "_".to_string())).collect()
+    } else {
+        parameter_names(db, home, name.last()?)
+    };
     let parameters = signature
         .params
         .iter()
@@ -103,9 +106,9 @@ pub fn at(db: &dyn Db, root: SourceRoot, file: SourceFile, offset: TextSize) -> 
 
 /// The callee's signature, and the file that declares it.
 ///
-/// The file comes back too because the parameter *names* are in that file's
-/// bodies, not in the signature.
-fn signature_of(
+/// The file comes back too because a signature the compiler made up has no
+/// names, and the declaring file's bodies may.
+pub(crate) fn signature_of(
     db: &dyn Db,
     root: SourceRoot,
     file: SourceFile,
@@ -162,7 +165,7 @@ fn parameter_names(db: &dyn Db, file: SourceFile, function: &str) -> Vec<String>
 /// **Depth, not the first paren.** `outer(inner(a, b), ` closes `inner`'s
 /// paren on the way back, so the unmatched one is `outer`'s — which is the
 /// call the cursor is actually in.
-fn enclosing_call(from: &SyntaxToken) -> Option<(SyntaxToken, usize)> {
+pub(crate) fn enclosing_call(from: &SyntaxToken) -> Option<(SyntaxToken, usize)> {
     let mut depth = 0i32;
     let mut commas = 0usize;
     let mut at = Some(from.clone());
@@ -187,7 +190,7 @@ fn enclosing_call(from: &SyntaxToken) -> Option<(SyntaxToken, usize)> {
 }
 
 /// The path immediately before an opening paren.
-fn callee_of(open: &SyntaxToken) -> Option<Vec<String>> {
+pub(crate) fn callee_of(open: &SyntaxToken) -> Option<Vec<String>> {
     let mut segments = Vec::new();
     let mut at = previous(open);
     while let Some(token) = at {

@@ -181,11 +181,73 @@ pub fn at(
             in_scope_of_import(db, root, file, anchor.as_ref()).unwrap_or_default()
         }
         _ => {
-            let mut out = in_scope(db, file, offset);
+            let mut out: Vec<Candidate> = label_here(db, root, file, anchor.as_ref()).into_iter().collect();
+            out.extend(in_scope(db, file, offset));
             out.extend(from_elsewhere(db, file, known, &tree, &out));
             out
         }
     }
+}
+
+/// Whether the path before this `(` follows a `.`.
+fn is_method_call(open: &SyntaxToken) -> bool {
+    let mut at = skip_back_over_trivia_from(open);
+    while let Some(token) = at {
+        match token.kind() {
+            SyntaxKind::IDENT | SyntaxKind::COLON_COLON => at = skip_back_over_trivia_from(&token),
+            SyntaxKind::DOT => return true,
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// The token before `from` that is not whitespace or a comment.
+fn skip_back_over_trivia_from(from: &SyntaxToken) -> Option<SyntaxToken> {
+    skip_back_over_trivia(from.prev_token()?)
+}
+
+/// `name: ` for the parameter at the cursor, when the cursor starts an
+/// argument of a call to a named function.
+///
+/// **Only that one parameter.** A label is checked against the parameter at
+/// its position and never moves an argument, so offering any other name
+/// would be offering an error. Counted by commas, the way signature help
+/// counts them; a label does not change which parameter a comma leads to.
+fn label_here(
+    db: &dyn Db,
+    root: SourceRoot,
+    file: SourceFile,
+    anchor: Option<&SyntaxToken>,
+) -> Option<Candidate> {
+    let mut anchor = anchor?.clone();
+    // At the start of an argument, or on the one word typed there, which the
+    // editor filters the list by: `f(1, kee` is how `keep_alive:` gets typed.
+    // Anywhere else -- after `f(1 + ` or `f("ok" ` -- the reader is writing an
+    // expression, and a label there would be a syntax error.
+    if anchor.kind() == SyntaxKind::IDENT {
+        anchor = skip_back_over_trivia_from(&anchor)?;
+    }
+    if !matches!(anchor.kind(), SyntaxKind::L_PAREN | SyntaxKind::COMMA) {
+        return None;
+    }
+    let anchor = &anchor;
+    let (open, active) = crate::signature::enclosing_call(anchor)?;
+    // `x.f(`: the receiver is parameter 1 and the name alone may find a
+    // different, free `f`, so a count from here would name the wrong
+    // parameter. Nothing is offered rather than something wrong.
+    if is_method_call(&open) {
+        return None;
+    }
+    let callee = crate::signature::callee_of(&open)?;
+    let (signature, _) = crate::signature::signature_of(db, root, file, &callee)?;
+    let name = signature.names.get(active)?.clone()?;
+    let ty = signature.params.get(active)?;
+    let mut candidate =
+        Candidate::plain(format!("{name}:"), CompletionItemKind::FIELD, Some(ty.to_string()));
+    candidate.insert = Some(format!("{name}: "));
+    candidate.wanted = true;
+    Some(candidate)
 }
 
 /// Every public name in the workspace that this file has not got.

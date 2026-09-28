@@ -9,3 +9,4 @@ name = "idiomatic"
 description = "One way to write Khora."
 
 [group.lints]
+unlabeled-flag = "warn"

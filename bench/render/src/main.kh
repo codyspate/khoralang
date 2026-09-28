@@ -18,7 +18,7 @@ fn serve(connection: Int) -> () {
       going = false;
     } else {
       let answer = Response::json(200, "{\"status\":\"ok\"}");
-      transmit(connection, Response::rendered_keeping(answer, true));
+      transmit(connection, Response::rendered_keeping(answer, keep: true));
     }
   };
   shut(connection)

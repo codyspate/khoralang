@@ -72,6 +72,18 @@ impl<'a> Checker<'a> {
                         let expected = unify::substitute(declared, &borrowed);
                         self.expect(*arg, &expected, "this argument");
                     }
+                    // A named payload labels its constructor exactly as a
+                    // function's parameters label it; a positional one has
+                    // nothing to label with.
+                    let names: Vec<Option<String>> =
+                        if variant.labels.len() == variant.fields.len() {
+                            variant.labels.iter().cloned().map(Some).collect()
+                        } else {
+                            Vec::new()
+                        };
+                    let what = format!("`{}::{}`", variant.type_name, variant.name);
+                    let unnamed = format!("{what}'s payload is positional and its fields have no names");
+                    self.check_labels(callee, &names, 0, &what, &unnamed);
                     return result;
                 }
             }
@@ -127,6 +139,92 @@ impl<'a> Checker<'a> {
             ),
             _ => format!("`{zonked}` is not a function, so it cannot be called"),
         }
+    }
+
+    /// Checks the labels written at a direct call against the names the
+    /// callee declares.
+    ///
+    /// **A label is a check, never a reordering.** `f(1, verbose: true)` is
+    /// `f(1, true)` plus the claim that the second parameter is called
+    /// `verbose`, and the claim is compared with the declaration at that
+    /// position. Nothing moves, so arguments run in the order written because
+    /// there is no other order they could run in, and no pass after this one
+    /// has anything to read.
+    ///
+    /// `names` is empty for a callee whose parameter names are not known --
+    /// a function value, a closure, anything reached through a type rather
+    /// than a declaration -- and every label there is refused, because a
+    /// function type has no names to check against.
+    ///
+    /// **`self:` is refused wherever it is written.** `self` is the name of a
+    /// method's first parameter, so `Conn::reply(self: c, ..)` would pass the
+    /// check below, and the receiver would have a third spelling beside
+    /// `c.reply(..)` and `Conn::reply(c, ..)` that says nothing either of
+    /// them does not.
+    pub(super) fn check_labels(
+        &mut self,
+        callee: ExprId,
+        names: &[Option<String>],
+        skip: usize,
+        what: &str,
+        unnamed: &str,
+    ) {
+        let Some(labels) = self.body.labels.get(&callee).cloned() else { return };
+        if names.is_empty() {
+            for (_, label, at) in labels {
+                self.error(format!("`{label}:` labels an argument, but {unnamed}; drop the label"), at);
+            }
+            return;
+        }
+        for (position, label, at) in labels {
+            if label == "self" {
+                self.error(
+                    "`self:` cannot label the receiver: write `x.method(..)` or \
+                     `Type::method(x, ..)` with the receiver unlabeled"
+                        .to_string(),
+                    at,
+                );
+                continue;
+            }
+            let index = position + skip;
+            match names.get(index) {
+                Some(Some(name)) if *name == label => {}
+                Some(Some(name)) => {
+                    let elsewhere = names.iter().position(|n| n.as_deref() == Some(label.as_str()));
+                    let hint = match elsewhere {
+                        Some(i) => format!(
+                            "; `{label}` is parameter {}, and a label does not move an argument",
+                            i + 1
+                        ),
+                        None => String::new(),
+                    };
+                    self.error(
+                        format!(
+                            "`{label}:` does not name this argument: parameter {} of {what} is `{name}`{hint}",
+                            index + 1
+                        ),
+                        at,
+                    );
+                }
+                Some(None) => self.error(
+                    format!("parameter {} of {what} is `_`, which has no name to label it with", index + 1),
+                    at,
+                ),
+                // Past the end: the arity check has already said so.
+                None => {}
+            }
+        }
+    }
+
+    /// The parameter names of whatever `callee` resolved to, read from the
+    /// signature the checker instantiated for it. Empty for a value.
+    ///
+    /// A trait impl's signature already carries the *trait's* names -- see
+    /// `map::trait_names_on_impls` -- so `Show::show(x)`, `Int::show(x)` and
+    /// `x.show()` are labeled alike however the impl named its parameters.
+    pub(super) fn names_of_callee(&self, callee: ExprId) -> Vec<Option<String>> {
+        let Some((key, _)) = self.instantiations.get(&callee) else { return Vec::new() };
+        self.types.signatures.get(key.as_str()).map(|s| s.names.clone()).unwrap_or_default()
     }
 
     /// Checks a call whose callee is an ordinary value of function type.
@@ -186,6 +284,14 @@ impl<'a> Checker<'a> {
             self.expect(*arg, expected, "this argument");
         }
 
+        if let Some(callee) = callee {
+            let names = self.names_of_callee(callee);
+            let what = format!("`{}`", self.callee_label(callee));
+            let unnamed = format!(
+                "{what} is a value, and a function type has no parameter names to check a label against"
+            );
+            self.check_labels(callee, &names, 0, &what, &unnamed);
+        }
         let label = callee.map(|c| self.callee_label(c)).unwrap_or_else(|| "this call".into());
         self.demand_rows(&requires, &raises, &label, callee, range);
         *ret
@@ -556,6 +662,11 @@ impl<'a> Checker<'a> {
         for (arg, want) in args.iter().zip(expected) {
             self.expect(*arg, want, "this argument");
         }
+        // The receiver is parameter 1 and is never written in the list, so
+        // the written arguments' labels start at parameter 2.
+        let names = self.names_of_callee(callee);
+        let what = format!("`{}`", traits::readable_key(key));
+        self.check_labels(callee, &names, 1, &what, "this method's parameters have no names");
         *ret
     }
 

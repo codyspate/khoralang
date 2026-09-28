@@ -443,9 +443,22 @@ pub struct Signature {
     pub bounds: Vec<Vec<Bound>>,
     pub params: Vec<Type>,
     pub ret: Type,
+    /// Each parameter's name, which is its label at a direct call; `None` for
+    /// `_`. Empty where the compiler made the signature up, which refuses
+    /// every label rather than guessing one.
+    ///
+    /// Not part of [`Signature::as_fn`]: a function *type* has no labels, so a
+    /// call through a value is positional and a rename is invisible to it.
+    pub names: Vec<Option<String>>,
 }
 
 impl Signature {
+    /// The labels a declaration's parameters give it, in order.
+    pub fn names_of(f: &khora_syntax::ast::FnDecl) -> Vec<Option<String>> {
+        f.params()
+            .map(|list| list.params().map(|p| p.name().and_then(|n| n.ident())).collect())
+            .unwrap_or_default()
+    }
     /// The signature as a function type, with its parameters still rigid.
     pub fn as_fn(&self) -> Type {
         Type::Fn {

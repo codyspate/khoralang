@@ -69,6 +69,7 @@ impl<'ctx> Backend<'ctx> {
                 raises: raises.clone(),
                 params: params.clone(),
                 ret: ret.clone(),
+                names: Vec::new(),
             },
         );
 

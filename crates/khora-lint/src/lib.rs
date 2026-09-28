@@ -40,9 +40,11 @@ use std::collections::{BTreeMap, BTreeSet};
 mod allow;
 mod exported;
 pub mod groups;
+mod unlabeled_flag;
 
 pub use crate::allow::MARKER;
 pub use crate::groups::{level, Levels};
+pub use crate::unlabeled_flag::UNLABELED_FLAG;
 
 use khora_db::{Db, SourceFile};
 use khora_types::{BodyTypes, Type};
@@ -71,6 +73,7 @@ pub const LINTS: &[&str] = &[
     REFERENCE_CYCLE,
     UNDOCUMENTED_EXPORT,
     UNKNOWN_ALLOW,
+    UNLABELED_FLAG,
     UNREACHABLE_CODE,
     UNUSED_BINDING,
     UNUSED_CAPABILITY,
@@ -147,11 +150,12 @@ pub const USELESS_ALLOW: &str = "useless-allow";
 /// How loud a lint is when neither the manifest nor an enabled group says:
 /// step 5 of the precedence in [`groups`].
 ///
-/// Warn for everything except [`USELESS_ALLOW`], for the reason on it. Ask
-/// [`level`] rather than this for a lint about to be reported; this is only
-/// the last step of that answer.
+/// Warn for everything except [`USELESS_ALLOW`], [`UNDOCUMENTED_EXPORT`] and
+/// [`UNLABELED_FLAG`], for the reasons on them. Ask [`level`] rather than
+/// this for a lint about to be reported; this is only the last step of that
+/// answer.
 pub fn default_level(lint: &str) -> khora_manifest::LintLevel {
-    if lint == USELESS_ALLOW || lint == UNDOCUMENTED_EXPORT {
+    if lint == USELESS_ALLOW || lint == UNDOCUMENTED_EXPORT || lint == UNLABELED_FLAG {
         khora_manifest::LintLevel::Allow
     } else {
         khora_manifest::LintLevel::Warn
@@ -198,6 +202,7 @@ pub fn findings(db: &dyn Db, file: SourceFile) -> Vec<Finding> {
             reference_cycles(body, types, &mut out);
             discarded_results(body, types, &mut out);
             nested_verdicts(body, types, &mut out);
+            unlabeled_flag::unlabeled_flags(db, file, body, types, &mut out);
         }
     }
 

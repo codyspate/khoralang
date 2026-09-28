@@ -61,7 +61,7 @@ pub fn granted(grants: List<String>, path: String) -> Bool {
     false
   } else {
     List::fold(grants, false, fn (found, grant) =>
-      found || matches(normalized(grant), wanted, true))
+      found || matches(normalized(grant), wanted, segmented: true))
   }
 }
 
@@ -91,7 +91,7 @@ fn unrestricted(grants: List<String>) -> Bool {
 /// `granted_name` in `khora-manifest` answers the same question for the
 /// compiler, and the two are tested against one table.
 pub fn granted_name(grants: List<String>, name: String) -> Bool {
-  List::fold(grants, false, fn (found, grant) => found || matches(grant, name, false))
+  List::fold(grants, false, fn (found, grant) => found || matches(grant, name, segmented: false))
 }
 
 /// Whether any grant covers `host`, which is `name` or `name:port`.
@@ -116,7 +116,7 @@ fn host_matches(grant: String, asked: Split) -> Bool {
     String::byte_length(allowed.rest) == 0
     || allowed.rest == "*"
     || allowed.rest == asked.rest;
-  port_ok && matches(allowed.head, asked.head, false)
+  port_ok && matches(allowed.head, asked.head, segmented: false)
 }
 
 /// `name:port` split at the **last** colon, with an empty `rest` for no port.

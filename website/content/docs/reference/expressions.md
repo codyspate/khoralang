@@ -41,6 +41,53 @@ connect(host, port)
 
 Arguments are positional and may have a trailing comma.
 
+### Labeled arguments
+
+At a call to a named function, an argument may be written `name: value`, where
+`name` is the name the function's declaration gives that parameter. The label
+is checked and changes nothing else: arguments are still matched to parameters
+by position, and still evaluated left to right in the order written.
+
+```khora
+fn reply(connection: Connection, response: String, keep_alive: Bool) -> String {
+  response
+}
+
+reply(connection, "ok", keep_alive: false)
+reply(connection: c, response: "ok", keep_alive: true)
+```
+
+- **Any argument may be labeled, or none.** Labeled and unlabeled arguments
+  mix freely in any combination, because a label never moves anything. A
+  label is never required.
+- **A label must name the parameter at its position.**
+  `reply(c, keep_alive: true, response: "ok")` is refused even though both
+  names exist, and the error says which position each name has.
+- A label naming no parameter is refused. So is a label written twice, since
+  it cannot match both positions, and a label on a parameter declared `_`.
+  `_:` is not a label.
+- **Methods.** In `x.f(a)` the receiver is parameter 1 and is not labeled; `a`
+  is parameter 2. In `Type::f(x, a)` both are written, and `a` may be labeled.
+  `self:` is refused: the receiver is written one way.
+- **Pipes.** `x |> f(b: 1)` puts `x` in parameter 1, or in the `_` slot, and
+  `b:` is checked against the parameter it lands in.
+- **Traits.** A trait method's labels are the trait's parameter names, however
+  the method is reached: `x.m(..)`, `Trait::m(x, ..)` or `Type::m(x, ..)`. An
+  `impl` may name its parameters differently; those names are local to its
+  body.
+- **Constructors.** A case with a named payload, `| A(v: Int, w: Bool)`, takes
+  labels exactly as a function does. A positional payload, `| B(Int)`, takes
+  none. Patterns are unchanged.
+- **Calls through a value take no labels.** A function type such as
+  `(Int, Bool) -> ()` names no parameters, so a label at a call through a
+  local, a parameter, a field, a closure or an effect operation is refused.
+- `extern fn` declarations are labeled by their declared names. Labels do not
+  reach C.
+
+There are no default arguments, and a label cannot skip or reorder one. A
+parameter's name is part of a public function's interface once any caller
+labels it: see [Compatibility](./compatibility/).
+
 ## Runtime field projection and methods
 
 ```khora

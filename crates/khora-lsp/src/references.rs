@@ -7,6 +7,7 @@
 //! | | references | rename |
 //! | --- | --- | --- |
 //! | a local | yes | yes |
+//! | a function's parameter | yes, in its body | yes, with every label written against it -- see `parameter` |
 //! | an item | yes | yes, across the workspace |
 //! | a trait member | yes | **refused, with a reason** |
 //! | a constructor | yes | **refused, with a reason** |
@@ -47,6 +48,9 @@
 //! - **A constructor.** `khora_hir::Variant` records a name and a type and no
 //!   range, so there is nothing to edit.
 //!
+//! And whatever is renamed, a new name that is not one, or that the function
+//! already binds, is refused before any edit: see [`new_name_refused`].
+//!
 
 use khora_db::{Db, SourceFile, SourceRoot};
 use khora_hir::Resolution;
@@ -54,6 +58,8 @@ use khora_syntax::ast::{AstNode, Path};
 use text_size::{TextRange, TextSize};
 
 use crate::definition;
+
+mod parameter;
 
 /// Everywhere one thing is named.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -226,8 +232,98 @@ pub enum Renameable {
     Nothing,
 }
 
+/// Why `new_name` may not replace what is at `offset`, or `None` when it
+/// may.
+///
+/// **Every rename goes through here, local or declaration.** A rename that
+/// writes whatever it was handed has two ways to be wrong, and one of them is
+/// silent:
+///
+/// - the new text is not a name -- a keyword, a reserved word, `_`, `self`,
+///   two words -- and the edit leaves files that do not parse, or labels the
+///   checker refuses at every caller;
+/// - the new name is already bound in the function, and the rename *captures*
+///   it: `keep || open` renamed `keep` to `open` reads `open || open`, which
+///   compiles and answers differently.
+///
+/// What it costs: the capture check is over the whole function, not the
+/// renamed binding's scope. A name bound only in a sibling `match` arm is
+/// refused though it could not have been captured. The refusal says which
+/// name, and choosing another is the whole remedy. A local that would shadow
+/// an *item* the body calls by the same name is not checked.
+pub fn new_name_refused(
+    db: &dyn Db,
+    file: SourceFile,
+    offset: TextSize,
+    renaming: &Renameable,
+    new_name: &str,
+) -> Option<String> {
+    if let Some(why) = not_a_name(new_name) {
+        return Some(why);
+    }
+    let current = match renaming {
+        Renameable::Local { name, .. } => name,
+        // A declaration's parameter is renamed as an item, and is a binding
+        // in its function as much as a local is; any other item is not.
+        Renameable::Item { name, .. } if parameter::siblings_at(db, file, offset).is_some() => name,
+        Renameable::Item { .. } | Renameable::Refused(_) | Renameable::Nothing => return None,
+    };
+    if current == new_name {
+        return None;
+    }
+    if let Some((_, others)) = parameter::siblings_at(db, file, offset) {
+        if others.iter().any(|other| other == new_name) {
+            return Some(format!(
+                "`{new_name}` is already a parameter of this function, and two parameters cannot share a name. \
+                 Choose a name the function does not use."
+            ));
+        }
+    }
+    let binding = definition::local_use_at(db, file, offset)
+        .or_else(|| definition::local_binding_at(db, file, offset))?;
+    for (_, body) in khora_hir::body::bodies(db, file) {
+        let Some((own, _)) = body.locals().find(|(_, local)| local.range == binding.binding) else {
+            continue;
+        };
+        if body.locals().any(|(id, local)| id != own && local.name == new_name) {
+            return Some(format!(
+                "`{new_name}` is already bound in this function, so the renamed uses could read that binding \
+                 instead and the program would still compile. Choose a name the function does not use."
+            ));
+        }
+        break;
+    }
+    None
+}
+
+/// Why `text` cannot be written where a binding's name goes, or `None` when
+/// it can.
+fn not_a_name(text: &str) -> Option<String> {
+    let lexed = khora_syntax::LexedStr::new(text);
+    let one_ident = lexed.len() == 1 && lexed.kind(0) == khora_syntax::SyntaxKind::IDENT && lexed.text(0) == text;
+    if !one_ident {
+        return Some(format!("`{text}` is not a name: a rename needs one identifier, and not a keyword."));
+    }
+    // `self` lexes as an `IDENT` and cannot be a binding's name: it is the
+    // receiver, and a `self:` label is refused. (`_` is its own token, and
+    // was refused above.)
+    if text == "self" {
+        return Some(format!("`{text}` cannot be the name of a binding or a label: it is the receiver."));
+    }
+    if khora_syntax::is_reserved_word(text) {
+        return Some(format!("`{text}` is a reserved word, held for a future feature, and cannot be a name."));
+    }
+    None
+}
+
 /// Whether the thing at `offset` can be renamed.
 pub fn renameable(db: &dyn Db, root: SourceRoot, file: SourceFile, offset: TextSize) -> Renameable {
+    // A function's parameter before any other local: its name is also a label
+    // at every call that wrote one, in any file, and a local rename cannot see
+    // those.
+    if let Some(parameter) = parameter::at(db, root, file, offset) {
+        return parameter;
+    }
     if let Some(local) = definition::local_use_at(db, file, offset) {
         return Renameable::Local { name: local.name.clone(), ranges: local.everywhere() };
     }

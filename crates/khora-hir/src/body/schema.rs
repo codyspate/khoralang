@@ -70,6 +70,19 @@ impl<'a> Ctx<'a> {
 
     /// `struct({ l0: e0, .. })` as the expression it stands for.
     pub(super) fn lower_struct_call(&mut self, call: &ast::CallExpr, range: TextRange) -> ExprId {
+        // **A label here would be dropped without a word.** This rewrite reads
+        // the record literal and nothing else, and `struct` is not called, so
+        // no checker ever compares the label with a parameter name.
+        let labeled = call
+            .args()
+            .and_then(|list| list.items().find_map(|(label, _)| label))
+            .map(|label| label.syntax().text_range());
+        if let Some(at) = labeled {
+            return self.refuse_struct(
+                "`struct` takes no labels: its one argument is the record literal, written bare",
+                at,
+            );
+        }
         let written: Vec<ast::Expr> =
             call.args().map(|list| list.args().collect()).unwrap_or_default();
         let [argument] = written.as_slice() else {

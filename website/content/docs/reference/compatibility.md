@@ -30,6 +30,7 @@ A pin that cannot be satisfied fails loudly. It never silently runs a different 
 | Language syntax and semantics | Yes |
 | A `std` signature, type or behavior | Yes |
 | A `std` item's removal or rename | Yes |
+| Renaming a parameter of a public function, in `std` or a package | Yes. A caller may have [labeled the argument](./expressions/#labeled-arguments) with the name |
 | Lockfile format | Yes |
 | Manifest keys the toolchain requires | Yes |
 | CLI flags and their meanings | Yes |

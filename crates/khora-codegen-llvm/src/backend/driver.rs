@@ -734,6 +734,7 @@ fn specialized_signature(
         bounds: Vec::new(),
         params: signature.params.iter().map(&settle).collect(),
         ret: settle(&signature.ret),
+        names: signature.names.clone(),
     })
 }
 

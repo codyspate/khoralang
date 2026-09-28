@@ -496,6 +496,7 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
                         raises: Type::row(vec![(FAILED.to_string(), Type::adt(FAILED))], None),
                         params: Vec::new(),
                         ret: Type::Unit,
+                        names: Vec::new(),
                     },
                 );
             }
@@ -536,6 +537,7 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
                         raises,
                         params,
                         ret,
+                        names: Signature::names_of(&f),
                     },
                 );
             }
@@ -704,9 +706,46 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
     // is a *false pass* — strictly worse than the unresolved-name error it
     // replaced.
     import_types(db, file, &mut map, &mut consts);
+    trait_names_on_impls(&mut map);
 
     map.kinds = traits::kinds(&map.adts, &consts);
     map
+}
+
+/// Gives each trait impl's methods the *trait's* parameter names.
+///
+/// **An impl's parameter names are local to its body**, and the labels a
+/// caller writes are the trait's -- otherwise `x.greet(loud: true)` and
+/// `Conn::greet(x, shout: true)` could both be accepted for one function. The
+/// checker cannot settle that at the call: `Conn::greet(c, ..)` reaches the
+/// impl through the type alone, and a file that imported only `Conn` has no
+/// `Greeter::greet` to read the names from. So they are settled here, in the
+/// file that writes the impl, where the trait has to be in scope for the
+/// `impl` to resolve at all; the signature carries them from then on, and
+/// every import copies it whole.
+///
+/// A trait this file cannot see leaves the impl's own names. That impl is
+/// already refused for naming an unknown trait, so its labels do not matter.
+fn trait_names_on_impls(map: &mut TypeMap) {
+    let settled: Vec<(String, Vec<Option<String>>)> = map
+        .signatures
+        .keys()
+        .filter_map(|key| {
+            let (trait_key, rest) = key.split_once('#')?;
+            if trait_key.is_empty() {
+                return None;
+            }
+            let trait_name = trait_key.split('<').next().unwrap_or(trait_key);
+            let method = rest.rsplit("::").next().unwrap_or(rest);
+            let declared = map.signatures.get(&format!("{trait_name}::{method}"))?;
+            Some((key.clone(), declared.names.clone()))
+        })
+        .collect();
+    for (key, names) in settled {
+        if let Some(signature) = map.signatures.get_mut(&key) {
+            signature.names = names;
+        }
+    }
 }
 
 /// Whether `head` names a type a program can write without importing it.

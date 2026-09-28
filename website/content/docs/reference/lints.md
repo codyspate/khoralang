@@ -4,7 +4,7 @@ sidebar:
   order: 21
 ---
 
-`khora check` runs twelve lints alongside type checking. They are part of the compiler rather than a separate tool, so the editor underlines what the command line reports and there is no second configuration to keep in step.
+`khora check` runs fourteen lints alongside type checking. They are part of the compiler rather than a separate tool, so the editor underlines what the command line reports and there is no second configuration to keep in step.
 
 ## The lints
 
@@ -17,6 +17,7 @@ sidebar:
 | `reference-cycle` | `warn` | A cycle that reference counting cannot collect. |
 | `undocumented-export` | `allow` | A `pub` item nobody described in one line. |
 | `unknown-allow` | `warn` | A `// @klint allow` naming something that is not a lint. |
+| `unlabeled-flag` | `allow` | A `true` or `false` passed without a label to a parameter declared `Bool` that is not the first. In the `idiomatic` group. |
 | `unreachable-code` | `warn` | A statement that cannot run, because the one before it left the block. |
 | `unused-binding` | `warn` | A binding nothing reads — locals, parameters, and the names a pattern binds. |
 | `unused-capability` | `warn` | A capability a signature asks for that its body cannot be using. |
@@ -154,15 +155,17 @@ Both kinds are used the same way. The rules for both:
 
 | Group | What it holds |
 | --- | --- |
-| `idiomatic` | One way to write Khora. It holds no lints in this release, so switching it on changes no level. |
+| `idiomatic` | One way to write Khora. It holds `unlabeled-flag`, at `warn`. |
 
 A `// @klint allow` names one lint. Naming a group there is reported by `unknown-allow`, which says it is a group and lists its lints.
 
-## The two that are off
+## The lints that are off
 
 **`undocumented-export`** is off for the reason Rust's `missing_docs` is: a young package gets forty warnings on its first build, and the answer to forty warnings is not forty doc comments. Switch it on when a package decides its surface is a promise. This repository sets it to `deny`, because `khora doc` regenerates the reference from `///` comments and the gate fails on a stale page — so a *documented* export cannot drift, and nothing else checked that an export was documented at all.
 
 **`useless-allow`** is off because it fires on exactly the lines somebody is already editing to satisfy a new lint, so turning it on while lints are still being added produces churn in the files under the most pressure. Turn it on once they have settled; a stale suppression hides the next finding on that line.
+
+**`unlabeled-flag`** is off because the call it reports is correct. `reply(connection, "ok", false)` compiles, and a reader cannot tell what `false` switches off without opening `reply`; the lint asks for `reply(connection, "ok", keep_alive: false)`, a [labeled argument](./expressions/#labeled-arguments) the compiler checks against the declaration. It reports only a parameter *declared* `Bool` that is not the first: `fold(true, step)` passes a value of a type variable, not a switch, and `assert_that(false, "unreachable")` is about its first argument, which a label would not explain. A call through a function value is never reported, because a function type has no parameter names to write. Switch it on with the `idiomatic` group or on its own.
 
 ## Suppressing one line
 

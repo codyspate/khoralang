@@ -523,7 +523,7 @@ fn expr(src: &mut Entropy<'_>, records: Records) -> String {
             expr(&mut src, records)
         ),
         8 => format!("{}{}", ["-", "!"][src.choice(2)], expr(&mut src, records)),
-        9 => format!("{}({})", lower(&mut src), args(&mut src)),
+        9 => format!("{}({})", lower(&mut src), call_args(&mut src)),
         10 => format!("{}.{}", expr(&mut src, Records::Forbidden), lower(&mut src)),
         11 => {
             format!("({}, {})", expr(&mut src, Records::Allowed), expr(&mut src, Records::Allowed))
@@ -534,16 +534,16 @@ fn expr(src: &mut Entropy<'_>, records: Records) -> String {
             "{} |> {}({})",
             expr(&mut src, Records::Forbidden),
             lower(&mut src),
-            args(&mut src)
+            call_args(&mut src)
         ),
         // The flow operator only ever starts a unary expression, so it is
         // written inside parentheses rather than after anything.
         15 => format!(
             "(||> {}({}) |> {}({}))",
             lower(&mut src),
-            args(&mut src),
+            call_args(&mut src),
             lower(&mut src),
-            args(&mut src)
+            call_args(&mut src)
         ),
         16 => format!(
             "fn ({}) => {}",
@@ -585,9 +585,9 @@ fn record_lit(src: &mut Entropy<'_>) -> String {
 /// things at once.
 fn effectful(src: &mut Entropy<'_>) -> String {
     match src.choice(5) {
-        0 => format!("{}({})!", lower(src), args(src)),
-        1 => format!("raise {}::{}({})", upper(src), upper(src), args(src)),
-        2 => format!("{}({}) catch {{{}\n}}", lower(src), args(src), arms(src)),
+        0 => format!("{}({})!", lower(src), call_args(src)),
+        1 => format!("raise {}::{}({})", upper(src), upper(src), call_args(src)),
+        2 => format!("{}({}) catch {{{}\n}}", lower(src), call_args(src), arms(src)),
         // Only the record form of `with`; see the module header for why the
         // named form is left alone.
         3 => format!("with {{ {}: {} }} {}", lower(src), expr(src, Records::Allowed), block(src)),
@@ -624,6 +624,22 @@ fn args(src: &mut Entropy<'_>) -> String {
     let mut out = Vec::new();
     for _ in 0..src.count(3) {
         out.push(expr(src, Records::Allowed));
+    }
+    out.join(", ")
+}
+
+/// A call's arguments, some of them labeled `name: value`.
+///
+/// Separate from [`args`] because an array literal takes no labels, and
+/// generating one there would be a program the grammar refuses. A label is
+/// `IDENT ":"` in front of an expression, which is exactly the prefix a
+/// record field has, so this is the generator that would find the parser
+/// confusing the two.
+fn call_args(src: &mut Entropy<'_>) -> String {
+    let mut out = Vec::new();
+    for _ in 0..src.count(3) {
+        let label = if src.chance(64) { format!("{}: ", lower(src)) } else { String::new() };
+        out.push(format!("{label}{}", expr(src, Records::Allowed)));
     }
     out.join(", ")
 }

@@ -107,11 +107,27 @@ impl<'a> Ctx<'a> {
                     Some(c) => self.lower_expr(&c),
                     None => self.add_expr(Expr::Missing, range),
                 };
-                let args = e
-                    .args()
-                    .map(|list| list.args().map(|a| self.lower_expr(&a)).collect())
-                    .unwrap_or_default();
-                self.add_call(Expr::Call { callee, args }, range)
+                let items: Vec<_> =
+                    e.args().map(|list| list.items().collect()).unwrap_or_default();
+                let mut args = Vec::with_capacity(items.len());
+                let mut labels = Vec::new();
+                for (index, (label, value)) in items.iter().enumerate() {
+                    if let Some(l) = label {
+                        if let Some(name) = l.name().and_then(|n| n.ident()) {
+                            let at = self.shifted(l.syntax().text_range());
+                            labels.push((index, name, at));
+                        }
+                    }
+                    args.push(match value {
+                        Some(v) => self.lower_expr(v),
+                        None => self.add_expr(Expr::Missing, range),
+                    });
+                }
+                let call = self.add_call(Expr::Call { callee, args }, range);
+                if !labels.is_empty() {
+                    self.body.labels.insert(callee, labels);
+                }
+                call
             }
             ast::Expr::Pipe(e) => self.lower_pipe(e, range),
             ast::Expr::Flow(e) => self.lower_flow(e, range),
@@ -777,6 +793,22 @@ impl<'a> Ctx<'a> {
 
                 let written: Vec<ast::Expr> =
                     call.args().map(|l| l.args().collect()).unwrap_or_default();
+                // Labels by position *in the finished call*: the piped value
+                // takes slot 0, or the placeholder's slot.
+                let written_labels: Vec<Option<(String, TextRange)>> = call
+                    .args()
+                    .map(|l| {
+                        l.items()
+                            .filter(|(_, v)| v.is_some())
+                            .map(|(label, _)| {
+                                label.and_then(|l| {
+                                    let name = l.name().and_then(|n| n.ident())?;
+                                    Some((name, self.shifted(l.syntax().text_range())))
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let placeholders: Vec<usize> = written
                     .iter()
                     .enumerate()
@@ -808,6 +840,15 @@ impl<'a> Ctx<'a> {
                             args.push(id);
                         }
                     }
+                }
+                let shift = usize::from(placeholders.is_empty());
+                let labels: Vec<(usize, String, TextRange)> = written_labels
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(i, l)| l.map(|(name, at)| (i + shift, name, at)))
+                    .collect();
+                if !labels.is_empty() {
+                    self.body.labels.insert(callee, labels);
                 }
                 let call = self.add_call(Expr::Call { callee, args }, range);
                 mark(self, call)

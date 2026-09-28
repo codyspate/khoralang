@@ -661,6 +661,7 @@ fn method_def(
             raises,
             params,
             ret,
+            names: Signature::names_of(f),
         },
         has_default: f.body().is_some(),
         range: f.syntax().text_range(),
@@ -926,6 +927,7 @@ pub fn impl_signatures(
                         .map(|p| crate::unify::substitute(p, &mapping))
                         .collect(),
                     ret: crate::unify::substitute(&def.signature.ret, &mapping),
+                    names: def.signature.names.clone(),
                 },
             );
         }
@@ -978,6 +980,7 @@ pub fn impl_signatures(
                     .map(|p| crate::unify::substitute(p, &mapping))
                     .collect(),
                 ret: crate::unify::substitute(&def.signature.ret, &mapping),
+                names: def.signature.names.clone(),
             };
             out.insert(method_key(&trait_key, &head, &def.name), signature);
         }

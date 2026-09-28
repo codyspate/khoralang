@@ -196,6 +196,7 @@ ast_node!(MatchArm, MATCH_ARM);
 ast_node!(MatchGuard, MATCH_GUARD);
 ast_node!(CallExpr, CALL_EXPR);
 ast_node!(ArgList, ARG_LIST);
+ast_node!(LabeledArg, LABELED_ARG);
 ast_node!(FieldExpr, FIELD_EXPR);
 ast_node!(PipeExpr, PIPE_EXPR);
 ast_node!(FlowExpr, FLOW_EXPR);
@@ -798,8 +799,20 @@ impl CallExpr {
 }
 
 impl ArgList {
+    /// Every argument's value, in the order written, labeled or not.
     pub fn args(&self) -> impl Iterator<Item = Expr> {
-        children(&self.0)
+        self.items().filter_map(|(_, value)| value)
+    }
+    /// Each argument with its label, if it was written with one. A labeled
+    /// argument whose value is missing still counts, so positions line up.
+    pub fn items(&self) -> impl Iterator<Item = (Option<LabeledArg>, Option<Expr>)> {
+        self.0.children().filter_map(|n| {
+            if let Some(l) = LabeledArg::cast(n.clone()) {
+                let value = l.value();
+                return Some((Some(l), value));
+            }
+            Expr::cast(n).map(|e| (None, Some(e)))
+        })
     }
     /// True when any argument is the `_` pipe placeholder.
     pub fn has_placeholder(&self) -> bool {
@@ -1062,6 +1075,19 @@ impl RecordPatField {
     /// The sub-pattern in `name: Pattern`, absent in the `{ name }`
     /// shorthand -- which binds `name` itself.
     pub fn pat(&self) -> Option<Pat> {
+        child(&self.0)
+    }
+}
+
+impl LabeledArg {
+    /// The label: the name the callee's declaration gives the parameter
+    /// this argument is written against.
+    pub fn name(&self) -> Option<Name> {
+        child(&self.0)
+    }
+    /// The argument itself. `None` for `f(a, verbose:)`, which the parser has
+    /// already reported; the argument still holds its position.
+    pub fn value(&self) -> Option<Expr> {
         child(&self.0)
     }
 }

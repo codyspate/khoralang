@@ -277,7 +277,7 @@ impl Response {
   }
 
   /// The response, as bytes on the wire.
-  pub fn rendered(self) -> String { Response::rendered_keeping(self, false) }
+  pub fn rendered(self) -> String { Response::rendered_keeping(self, keep: false) }
 
   /// The same, saying whether the connection is staying open.
   ///
@@ -1805,7 +1805,7 @@ impl Router {
       match Connection::next(connection) {
         Incoming::Ended => going = false,
         Incoming::Rejected(response) => {
-          Connection::reply(connection, response, false);
+          Connection::reply(connection, response, keep: false);
           going = false
         },
         Incoming::Arrived(request, keep) => {

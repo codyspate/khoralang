@@ -1562,7 +1562,13 @@ impl Server {
         let index = self.lines.get(&url).ok_or_else(|| "that file is not open".to_string())?;
         let _ = file;
 
-        match references::renameable(&self.db, root, file, offset) {
+        let renaming = references::renameable(&self.db, root, file, offset);
+        // Refused as an error, so the editor shows the sentence and edits
+        // nothing: see `new_name_refused` for what a bad name would do.
+        if let Some(why) = references::new_name_refused(&self.db, file, offset, &renaming, new_name) {
+            return Err(why);
+        }
+        match renaming {
             references::Renameable::Local { ranges, .. } => {
                 let edits: Vec<Value> = ranges
                     .iter()

@@ -144,7 +144,12 @@ PostfixExpr    ::= PrimaryExpr ( ArgList
                               | "!"                        (* may abort here  *)
                               | "catch" "{" ( MatchArm )+ "}"
                               | "with" ContextRow )* ;
-ArgList        ::= "(" ( Expr ( "," Expr )* ( "," )? )? ")" ;
+(* A label is the name the callee's declaration gives the parameter at that
+   position. It is checked, and moves nothing: arguments bind and evaluate in
+   the order written. A function *type* has no names, so a call through a
+   value takes no labels, and `_` and `self` are not labels. *)
+ArgList        ::= "(" ( Arg ( "," Arg )* ( "," )? )? ")" ;
+Arg            ::= ( Ident ":" )? Expr ;
 
 PrimaryExpr    ::= Literal
                  | Path                                 (* `::` path or name  *)

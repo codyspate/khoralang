@@ -136,6 +136,7 @@ mod tests {
             raises: Type::row(Vec::new(), None),
             params,
             ret,
+            names: Vec::new(),
         }
     }
 

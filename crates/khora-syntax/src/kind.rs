@@ -225,6 +225,8 @@ pub enum SyntaxKind {
     MATCH_GUARD,
     CALL_EXPR,
     ARG_LIST,
+    /// `verbose: true` inside an argument list.
+    LABELED_ARG,
     FIELD_EXPR,
     PIPE_EXPR,
     /// `||> a |> b` -- the flow operator's anonymous pipeline. Its children are

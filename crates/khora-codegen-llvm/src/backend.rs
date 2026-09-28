@@ -489,6 +489,7 @@ impl ClosureSite {
             raises: Type::empty_row(),
             params: Vec::new(),
             ret: Type::Unit,
+            names: Vec::new(),
         }
     }
 }

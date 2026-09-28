@@ -968,6 +968,376 @@ fn renaming_a_declaration_edits_every_file_that_names_it() {
     );
 }
 
+// --- renaming a parameter renames its labels ---------------------------------
+
+/// Every edit a rename answered with, as `(file name, line, the text it
+/// replaces)`, so a test can say what was touched in words.
+fn rename_edits(replies: &[Value], id: i64, sources: &[(&str, &str)]) -> Vec<(String, u64, String)> {
+    let changes = result_of(replies, id).pointer("/changes").and_then(Value::as_object).cloned();
+    let mut out = Vec::new();
+    for (uri, edits) in changes.unwrap_or_default() {
+        let (short, text) = sources
+            .iter()
+            .find(|(name, _)| uri.ends_with(name))
+            .map(|(name, text)| (name.to_string(), *text))
+            .unwrap_or_else(|| (uri.clone(), ""));
+        for edit in edits.as_array().cloned().unwrap_or_default() {
+            let line = edit.pointer("/range/start/line").and_then(Value::as_u64).unwrap_or(0);
+            let from = edit.pointer("/range/start/character").and_then(Value::as_u64).unwrap_or(0);
+            let to = edit.pointer("/range/end/character").and_then(Value::as_u64).unwrap_or(0);
+            let row = text.lines().nth(line as usize).unwrap_or("");
+            let written = row.get(from as usize..to as usize).unwrap_or("?").to_string();
+            out.push((short.clone(), line, written));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The zero-based column just inside the `nth` occurrence of `word` on `line`.
+fn column_of(text: &str, line: usize, word: &str, nth: usize) -> u32 {
+    let row = text.lines().nth(line).expect("a line");
+    let found = row.match_indices(word).nth(nth).map(|(i, _)| i).expect("the word");
+    found as u32 + 1
+}
+
+const SEND: &str = "module net;\n\npub fn send(to: Int, body: String, keep: Bool) -> String {\n  if keep { body } else { \"closed\" }\n}\n\npub fn other(keep: Bool) -> Bool { keep }\n";
+
+/// **A label is the parameter's name at the call**, so a rename that edits
+/// the parameter and not the labels leaves every labeled caller refused. The
+/// caller in another file is edited; the declaration's own uses are edited.
+#[test]
+fn renaming_a_parameter_renames_its_labels_in_another_file() {
+    let main = "module main;\n\nimport net::{send};\n\nfn go() -> String { send(1, \"x\", keep: true) }\n";
+    let w = workspace(&[("src/net.kh", SEND), ("src/main.kh", main)]);
+    let file = w.root.join("src/net.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, SEND),
+        rename(&file, 2, column_of(SEND, 2, "keep", 0), "keep_alive", 2),
+        exit(),
+    ]);
+
+    let found = rename_edits(&replies, 2, &[("net.kh", SEND), ("main.kh", main)]);
+    assert_eq!(
+        found,
+        vec![
+            ("main.kh".to_string(), 4, "keep".to_string()),
+            ("net.kh".to_string(), 2, "keep".to_string()),
+            ("net.kh".to_string(), 3, "keep".to_string()),
+        ],
+        "the label, the parameter and its use -- and nothing of `other`'s `keep`"
+    );
+}
+
+/// **An alias is the importing file's word for the function, not a
+/// different function.** A call through `import net::{send as post}` is
+/// labeled against `send`'s parameters, so its label is renamed with them --
+/// otherwise the caller is left writing a label the checker refuses.
+#[test]
+fn renaming_a_parameter_renames_its_labels_through_an_import_alias() {
+    let main = "module main;\n\nimport net::{send as post};\n\nfn go() -> String { post(1, \"x\", keep: true) }\n";
+    let w = workspace(&[("src/net.kh", SEND), ("src/main.kh", main)]);
+    let file = w.root.join("src/net.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, SEND),
+        rename(&file, 2, column_of(SEND, 2, "keep", 0), "keep_alive", 2),
+        exit(),
+    ]);
+
+    let found = rename_edits(&replies, 2, &[("net.kh", SEND), ("main.kh", main)]);
+    assert_eq!(
+        found,
+        vec![
+            ("main.kh".to_string(), 4, "keep".to_string()),
+            ("net.kh".to_string(), 2, "keep".to_string()),
+            ("net.kh".to_string(), 3, "keep".to_string()),
+        ],
+        "the aliased caller's label, the parameter and its use"
+    );
+}
+
+/// Renames `line`'s `nth` `word` in `path` to `to`, and returns the refusal.
+/// A refusal is an error and no edit, so the editor shows the sentence and
+/// changes no file.
+fn refused_rename(files: &[(&str, &str)], path: &str, line: usize, word: &str, nth: usize, to: &str) -> String {
+    let w = workspace(files);
+    let file = w.root.join(path);
+    let text = files.iter().find(|(p, _)| *p == path).map(|(_, t)| *t).expect("the file");
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, text),
+        rename(&file, line as u32, column_of(text, line, word, nth), to, 2),
+        exit(),
+    ]);
+    let edits = result_of(&replies, 2);
+    assert!(edits.is_null(), "renaming `{word}` to `{to}` should edit nothing: {edits}");
+    error_of(&replies, 2).unwrap_or_else(|| panic!("renaming `{word}` to `{to}` was not refused"))
+}
+
+const SEND_CALLER: &str = "module main;\n\nimport net::{send};\n\nfn go() -> String { send(1, \"x\", keep: true) }\n";
+
+/// **A rename onto a name the body already binds changes what the body
+/// reads**, and compiles: `keep || open` becomes `open || open`, which reads
+/// the `let`, and `send(1, keep: true)` answers `false`.
+#[test]
+fn renaming_a_parameter_onto_a_let_in_its_body_is_refused() {
+    let net = "module net;\n\npub fn send(to: Int, keep: Bool) -> Bool {\n  let open = false;\n  keep || open\n}\n";
+    let main = "module main;\n\nimport net::{send};\n\nfn go() -> Bool { send(1, keep: true) }\n";
+    let why = refused_rename(&[("src/net.kh", net), ("src/main.kh", main)], "src/net.kh", 2, "keep", 0, "open");
+    assert!(why.contains("`open`"), "{why}");
+}
+
+/// Two parameters of one name is a declaration the checker refuses only
+/// indirectly, through whatever the body then gets wrong.
+#[test]
+fn renaming_a_parameter_onto_another_parameter_is_refused() {
+    let why = refused_rename(&[("src/net.kh", SEND), ("src/main.kh", SEND_CALLER)], "src/net.kh", 2, "keep", 0, "body");
+    assert!(why.contains("`body`"), "{why}");
+}
+
+/// `_` binds nothing, and as a label it is refused: the callers' labels
+/// would be rewritten into an error.
+#[test]
+fn renaming_a_parameter_to_underscore_is_refused() {
+    refused_rename(&[("src/net.kh", SEND), ("src/main.kh", SEND_CALLER)], "src/net.kh", 2, "keep", 0, "_");
+}
+
+/// `self` names the receiver; a parameter spelled `self` is one, and a
+/// `self:` label is refused at every caller.
+#[test]
+fn renaming_a_parameter_to_self_is_refused() {
+    refused_rename(&[("src/net.kh", SEND), ("src/main.kh", SEND_CALLER)], "src/net.kh", 2, "keep", 0, "self");
+}
+
+/// A keyword, a reserved word, or text that is not one name would each
+/// leave a file that does not parse.
+#[test]
+fn renaming_to_something_that_is_not_a_name_is_refused() {
+    for to in ["fn", "where", "keep alive", "1keep", "", "keep:"] {
+        refused_rename(&[("src/net.kh", SEND), ("src/main.kh", SEND_CALLER)], "src/net.kh", 2, "keep", 0, to);
+    }
+}
+
+/// The same capture through a plain local: two `let`s, and the first renamed
+/// onto the second makes `keep || open` read `open || open`.
+#[test]
+fn renaming_a_local_onto_another_local_is_refused() {
+    let main = "module main;\n\npub fn f() -> Bool {\n  let keep = true;\n  let open = false;\n  keep || open\n}\n";
+    let why = refused_rename(&[("src/main.kh", main)], "src/main.kh", 3, "keep", 0, "open");
+    assert!(why.contains("`open`"), "{why}");
+}
+
+/// A lambda's parameter is a binding in the body like any other: renaming
+/// `keep` onto it would make the lambda's `x` read the outer one's name.
+#[test]
+fn renaming_a_local_onto_a_lambda_parameter_is_refused() {
+    let main = "module main;\n\npub fn f() -> Int {\n  let keep = 1;\n  let g = fn (x: Int) => x + keep;\n  g(2)\n}\n";
+    let why = refused_rename(&[("src/main.kh", main)], "src/main.kh", 3, "keep", 0, "x");
+    assert!(why.contains("`x`"), "{why}");
+}
+
+/// A trait's declared method has no body, so no local stands for its
+/// parameters, and a rename onto a sibling is caught from the declaration.
+#[test]
+fn renaming_a_trait_parameter_onto_another_parameter_is_refused() {
+    let tr = "module greet;\n\npub trait Greeter {\n  fn greet(self, loud: Bool, twice: Bool) -> String;\n}\n";
+    let why = refused_rename(&[("src/greet.kh", tr)], "src/greet.kh", 3, "loud", 0, "twice");
+    assert!(why.contains("`twice`"), "{why}");
+}
+
+/// A fresh name still renames: the refusals are about the new name, not
+/// about locals and parameters in general.
+#[test]
+fn renaming_a_local_to_a_fresh_name_still_renames() {
+    let main = "module main;\n\npub fn f() -> Bool {\n  let keep = true;\n  let open = false;\n  keep || open\n}\n";
+    let w = workspace(&[("src/main.kh", main)]);
+    let file = w.root.join("src/main.kh");
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, main),
+        rename(&file, 3, column_of(main, 3, "keep", 0), "kept", 2),
+        exit(),
+    ]);
+    assert!(error_of(&replies, 2).is_none(), "{replies:?}");
+    let found = rename_edits(&replies, 2, &[("main.kh", main)]);
+    assert_eq!(found.len(), 2, "{found:?}");
+}
+
+/// An unlabeled call has nothing spelled with the name, and a call labeling
+/// a *different* function's `keep` is that function's business.
+#[test]
+fn renaming_a_parameter_leaves_unlabeled_calls_and_other_functions_alone() {
+    let main = "module main;\n\nimport net::{other, send};\n\nfn go() -> String { send(1, \"x\", true) }\nfn go2() -> Bool { other(keep: true) }\n";
+    let w = workspace(&[("src/net.kh", SEND), ("src/main.kh", main)]);
+    let file = w.root.join("src/net.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, SEND),
+        rename(&file, 2, column_of(SEND, 2, "keep", 0), "keep_alive", 2),
+        exit(),
+    ]);
+
+    let found = rename_edits(&replies, 2, &[("net.kh", SEND), ("main.kh", main)]);
+    assert!(found.iter().all(|(file, _, _)| file == "net.kh"), "{found:?}");
+    assert_eq!(found.len(), 2, "{found:?}");
+}
+
+/// A label the checker already refuses -- another name at this position, or
+/// this name at another -- is the caller's mistake, and a rename that
+/// rewrote it would silently turn one wrong program into a different one.
+#[test]
+fn renaming_a_parameter_leaves_a_mislabeled_call_as_written() {
+    let main = "module main;\n\nimport net::{send};\n\nfn go() -> String { send(1, \"x\", kept: true) }\nfn go2() -> String { send(keep: 1, \"x\", true) }\n";
+    let w = workspace(&[("src/net.kh", SEND), ("src/main.kh", main)]);
+    let file = w.root.join("src/net.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, SEND),
+        rename(&file, 2, column_of(SEND, 2, "keep", 0), "keep_alive", 2),
+        exit(),
+    ]);
+    let found = rename_edits(&replies, 2, &[("net.kh", SEND), ("main.kh", main)]);
+    assert!(found.iter().all(|(file, _, _)| file == "net.kh"), "{found:?}");
+}
+
+/// **The edit is the name, not the parameter.** A parameter's local is
+/// recorded with the range of `name: Type`, and renaming through that range
+/// replaced the annotation along with the name.
+#[test]
+fn renaming_a_parameter_keeps_its_type() {
+    let w = workspace(&[("src/net.kh", SEND)]);
+    let file = w.root.join("src/net.kh");
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, SEND),
+        rename(&file, 3, column_of(SEND, 3, "keep", 0), "keep_alive", 2),
+        exit(),
+    ]);
+    let found = rename_edits(&replies, 2, &[("net.kh", SEND)]);
+    assert!(found.iter().all(|(_, _, text)| text == "keep"), "{found:?}");
+}
+
+/// Asked from a use inside the body, the answer is the same.
+#[test]
+fn renaming_a_parameter_from_a_use_renames_its_labels() {
+    let main = "module main;\n\nimport net::{send};\n\nfn go() -> String { send(1, \"x\", keep: true) }\n";
+    let w = workspace(&[("src/net.kh", SEND), ("src/main.kh", main)]);
+    let file = w.root.join("src/net.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, SEND),
+        rename(&file, 3, column_of(SEND, 3, "keep", 0), "keep_alive", 2),
+        exit(),
+    ]);
+    let found = rename_edits(&replies, 2, &[("net.kh", SEND), ("main.kh", main)]);
+    assert!(found.contains(&("main.kh".to_string(), 4, "keep".to_string())), "{found:?}");
+}
+
+const GREETER: &str = "module greet;\n\npub type Conn = { id: Int };\n\npub trait Greeter {\n  fn greet(self, loud: Bool) -> String;\n}\n\nimpl Greeter for Conn {\n  fn greet(self, shout: Bool) -> String { if shout { \"HI\" } else { \"hi\" } }\n}\n";
+const GREET_MAIN: &str = "module main;\n\nimport greet::{Conn, Greeter};\n\nfn go(c: Conn) -> String { c.greet(loud: true) }\nfn go2(c: Conn) -> String { Greeter::greet(c, loud: false) }\nfn go3(c: Conn) -> String { Conn::greet(c, loud: true) }\n";
+
+/// A trait method's labels are the trait's names, so renaming the parameter
+/// in the trait declaration renames them at every call, however reached.
+#[test]
+fn renaming_a_trait_parameter_renames_its_labels() {
+    let w = workspace(&[("src/greet.kh", GREETER), ("src/main.kh", GREET_MAIN)]);
+    let file = w.root.join("src/greet.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, GREETER),
+        prepare_rename(&file, 5, column_of(GREETER, 5, "loud", 0), 2),
+        rename(&file, 5, column_of(GREETER, 5, "loud", 0), "shouting", 3),
+        exit(),
+    ]);
+
+    assert_eq!(result_of(&replies, 2).get("placeholder"), Some(&json!("loud")), "{:?}", result_of(&replies, 2));
+    let found = rename_edits(&replies, 3, &[("greet.kh", GREETER), ("main.kh", GREET_MAIN)]);
+    assert_eq!(
+        found,
+        vec![
+            ("greet.kh".to_string(), 5, "loud".to_string()),
+            ("main.kh".to_string(), 4, "loud".to_string()),
+            ("main.kh".to_string(), 5, "loud".to_string()),
+            ("main.kh".to_string(), 6, "loud".to_string()),
+        ],
+        "the trait's parameter and all three labels, however the call is \
+         written; the impl's `shout` is its own"
+    );
+}
+
+/// **The case the exclusion is for:** an impl that uses the trait's own
+/// name. Renaming the impl's parameter must not follow the name out to the
+/// callers, whose labels belong to the trait and would then be refused.
+#[test]
+fn renaming_an_impl_parameter_that_shares_the_traits_name_leaves_callers_alone() {
+    let greeter = GREETER.replace("shout", "loud");
+    let w = workspace(&[("src/greet.kh", &greeter), ("src/main.kh", GREET_MAIN)]);
+    let file = w.root.join("src/greet.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, &greeter),
+        rename(&file, 9, column_of(&greeter, 9, "loud", 0), "quiet", 2),
+        exit(),
+    ]);
+    let found = rename_edits(&replies, 2, &[("greet.kh", &greeter), ("main.kh", GREET_MAIN)]);
+    assert!(found.iter().all(|(file, line, _)| file == "greet.kh" && *line == 9), "{found:?}");
+    assert_eq!(found.len(), 2, "the impl's binding and its use: {found:?}");
+}
+
+/// An impl's parameter names are local to its body. Renaming one changes
+/// the body and nothing a caller wrote.
+#[test]
+fn renaming_an_impl_parameter_leaves_the_traits_callers_alone() {
+    let w = workspace(&[("src/greet.kh", GREETER), ("src/main.kh", GREET_MAIN)]);
+    let file = w.root.join("src/greet.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, GREETER),
+        rename(&file, 9, column_of(GREETER, 9, "shout", 0), "loud", 2),
+        exit(),
+    ]);
+    let found = rename_edits(&replies, 2, &[("greet.kh", GREETER), ("main.kh", GREET_MAIN)]);
+    assert_eq!(
+        found,
+        vec![
+            ("greet.kh".to_string(), 9, "shout".to_string()),
+            ("greet.kh".to_string(), 9, "shout".to_string()),
+        ],
+        "the impl's binding and its use, and no caller: {found:?}"
+    );
+}
+
+const CONN: &str = "module conn;\n\npub type Conn = { id: Int };\n\nimpl Conn {\n  pub fn reply(self, body: String, keep: Bool) -> String { if keep { body } else { \"\" } }\n}\n";
+
+/// An inherent method, called both ways.
+#[test]
+fn renaming_an_inherent_method_parameter_renames_its_labels() {
+    let main = "module main;\n\nimport conn::{Conn};\n\nfn go(c: Conn) -> String { c.reply(\"x\", keep: true) }\nfn go2(c: Conn) -> String { Conn::reply(c, \"x\", keep: false) }\n";
+    let w = workspace(&[("src/conn.kh", CONN), ("src/main.kh", main)]);
+    let file = w.root.join("src/conn.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, CONN),
+        rename(&file, 5, column_of(CONN, 5, "keep", 0), "keep_alive", 2),
+        exit(),
+    ]);
+    let found = rename_edits(&replies, 2, &[("conn.kh", CONN), ("main.kh", main)]);
+    let in_main: Vec<_> = found.iter().filter(|(f, _, _)| f == "main.kh").collect();
+    assert_eq!(in_main.len(), 2, "{found:?}");
+    assert!(in_main.iter().all(|(_, _, text)| text == "keep"), "{found:?}");
+}
+
 /// `import m::{foo as bar}` renames the `foo` and leaves the `bar`, because
 /// the alias is this file's own word for it.
 #[test]
@@ -3920,6 +4290,162 @@ fn a_nested_call_reports_the_outer_one() {
     let label = help.pointer("/signatures/0/label").and_then(Value::as_str).unwrap_or_default();
     assert!(label.starts_with("outer("), "the outer call: {help}");
     assert_eq!(help.get("activeParameter"), Some(&json!(1)), "{help}");
+}
+
+/// **The labels a call may write**, which for an `extern fn` come from its
+/// declaration: it has no body to read names from, and showed `abs(Int)`
+/// while the checker accepted `abs(value: 3)`.
+#[test]
+fn signature_help_shows_an_extern_functions_labels() {
+    let text = "module main;\n\nextern fn abs(value: Int) -> Int;\n\nfn go() -> Int { abs(\n}\n";
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, text),
+        signature_help(&file, 4, 21, 2),
+        exit(),
+    ]);
+
+    let help = result_of(&replies, 2);
+    let label = help.pointer("/signatures/0/label").and_then(Value::as_str).unwrap_or_default();
+    assert!(label.contains("value: Int"), "the label, not just the type: {help}");
+}
+
+/// A labeled argument moves nothing, so the comma count is still the
+/// parameter the cursor is in.
+#[test]
+fn a_label_does_not_move_the_active_parameter() {
+    let text = "module main;\n\nfn charge(account: Int, amount: Int) -> Int { account + amount }\n\nfn go() -> Int { charge(account: 1, \n}\n";
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, text),
+        signature_help(&file, 4, 36, 2),
+        exit(),
+    ]);
+    assert_eq!(result_of(&replies, 2).get("activeParameter"), Some(&json!(1)), "{:?}", result_of(&replies, 2));
+}
+
+// --- labeled-argument completion ---------------------------------------------
+
+const REPLY: &str = "module main;\n\nfn reply(connection: Int, response: String, keep_alive: Bool) -> String { response }\n\n";
+
+/// At the start of an argument, the label for *that* position is offered,
+/// first. Any other parameter's name would be a label the checker refuses.
+#[test]
+fn completion_offers_the_label_at_the_argument_position() {
+    let text = format!("{REPLY}fn go() -> String {{ reply(1, \"ok\", \n}}\n");
+    let w = workspace(&[("src/main.kh", &text)]);
+    let file = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, &text),
+        completion(&file, 4, 36, 2),
+        exit(),
+    ]);
+
+    let offered = labels(&replies, 2);
+    assert!(offered.iter().any(|l| l == "keep_alive:"), "{offered:?}");
+    assert!(!offered.iter().any(|l| l == "response:" || l == "connection:"), "{offered:?}");
+    let item = result_of(&replies, 2)
+        .as_array()
+        .and_then(|items| items.iter().find(|i| i.get("label") == Some(&json!("keep_alive:"))).cloned())
+        .expect("the label item");
+    assert_eq!(item.get("insertText"), Some(&json!("keep_alive: ")), "{item}");
+}
+
+#[test]
+fn completion_offers_the_first_label_after_the_paren() {
+    let text = format!("{REPLY}fn go() -> String {{ reply(\n}}\n");
+    let w = workspace(&[("src/main.kh", &text)]);
+    let file = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, &text),
+        completion(&file, 4, 26, 2),
+        exit(),
+    ]);
+
+    let offered = labels(&replies, 2);
+    assert!(offered.iter().any(|l| l == "connection:"), "{offered:?}");
+    assert!(!offered.iter().any(|l| l == "keep_alive:"), "{offered:?}");
+}
+
+/// On the word being typed at the start of an argument, the label is still
+/// offered: the editor filters by that word, so `kee` finds `keep_alive:`.
+#[test]
+fn completion_offers_the_label_while_its_name_is_typed() {
+    let text = format!("{REPLY}fn go() -> String {{ reply(1, \"ok\", kee\n}}\n");
+    let w = workspace(&[("src/main.kh", &text)]);
+    let file = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, &text),
+        completion(&file, 4, 39, 2),
+        exit(),
+    ]);
+    let offered = labels(&replies, 2);
+    assert!(offered.iter().any(|l| l == "keep_alive:"), "{offered:?}");
+}
+
+/// Inside an expression the reader is not starting an argument, and a label
+/// there would not parse.
+#[test]
+fn completion_offers_no_label_inside_an_expression() {
+    let text = format!("{REPLY}fn go() -> String {{ reply(1 + \n}}\n");
+    let w = workspace(&[("src/main.kh", &text)]);
+    let file = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, &text),
+        completion(&file, 4, 30, 2),
+        exit(),
+    ]);
+    let offered = labels(&replies, 2);
+    assert!(!offered.iter().any(|l| l.ends_with(':')), "{offered:?}");
+}
+
+/// Past the end of the parameter list there is no label to write.
+#[test]
+fn completion_offers_no_label_past_the_last_parameter() {
+    let text = format!("{REPLY}fn go() -> String {{ reply(1, \"ok\", true, \n}}\n");
+    let w = workspace(&[("src/main.kh", &text)]);
+    let file = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, &text),
+        completion(&file, 4, 42, 2),
+        exit(),
+    ]);
+    let offered = labels(&replies, 2);
+    assert!(!offered.iter().any(|l| l.ends_with(':')), "{offered:?}");
+}
+
+/// In `x.f(`, counting commas from the paren would be off by the receiver,
+/// and `f` alone may name a different, free function.
+#[test]
+fn completion_offers_no_label_in_a_method_call() {
+    let text = "module main;\n\npub type Conn = { id: Int };\n\nimpl Conn {\n  pub fn reply(self, response: String, keep_alive: Bool) -> String { response }\n}\n\nfn reply(connection: Int, response: String, keep_alive: Bool) -> String { response }\n\nfn go(c: Conn) -> String { c.reply(\n}\n";
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, text),
+        completion(&file, 10, 35, 2),
+        exit(),
+    ]);
+    let offered = labels(&replies, 2);
+    assert!(!offered.iter().any(|l| l.ends_with(':')), "{offered:?}");
 }
 
 // --- run lenses -------------------------------------------------------------

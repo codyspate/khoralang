@@ -544,6 +544,15 @@ pub struct Body {
     /// inside the block is discharged by it rather than by the signature. This
     /// is row subtraction, kept where it can still be read.
     pub installs: std::collections::HashMap<ExprId, Vec<String>>,
+    /// The labels written at each call, filed under the call's *callee* (the
+    /// checker has the callee in hand, as it does for `capabilities`): which
+    /// argument position carries which label, and where it was written.
+    ///
+    /// Positions are in the lowered argument list, so a pipe's piped value
+    /// already occupies its slot. Labels never reorder anything -- the
+    /// checker compares each one with the parameter at its position -- so
+    /// nothing after the checker needs to read this.
+    pub labels: std::collections::HashMap<ExprId, Vec<(usize, String, TextRange)>>,
     /// How many locals existed when each lambda started.
     ///
     /// A local below the mark was declared outside the lambda, which is what
