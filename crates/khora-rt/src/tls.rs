@@ -245,6 +245,7 @@ pub unsafe extern "C" fn khora_tls_server_open(
 /// `server` must be null or have come from [`khora_tls_server_open`], and must
 /// not be used afterwards.
 #[unsafe(no_mangle)]
+// SHARE: a runtime-owned TLS object, not a Khora value.
 pub unsafe extern "C" fn khora_tls_server_close(server: *mut u8) {
     if server.is_null() {
         return;
@@ -268,6 +269,7 @@ pub unsafe extern "C" fn khora_tls_server_close(server: *mut u8) {
 /// `server` must have come from [`khora_tls_server_open`], and `socket` must be
 /// an accepted socket that nothing else will close.
 #[unsafe(no_mangle)]
+// SHARE: a runtime-owned TLS object, not a Khora value.
 pub unsafe extern "C" fn khora_tls_accept(server: *mut u8, socket: i64) -> *mut u8 {
     if server.is_null() {
         return std::ptr::null_mut();
@@ -343,6 +345,7 @@ pub unsafe extern "C" fn khora_tls_client_open(extra: *const u8, extra_len: usiz
 /// `client` must be null or have come from [`khora_tls_client_open`], and must
 /// not be used afterwards.
 #[unsafe(no_mangle)]
+// SHARE: a runtime-owned TLS object, not a Khora value.
 pub unsafe extern "C" fn khora_tls_client_close(client: *mut u8) {
     if client.is_null() {
         return;
@@ -369,6 +372,7 @@ pub unsafe extern "C" fn khora_tls_client_close(client: *mut u8) {
 /// `client` must have come from [`khora_tls_client_open`], and `host` must
 /// address `host_len` readable bytes.
 #[unsafe(no_mangle)]
+// SHARE: a runtime-owned TLS object, not a Khora value.
 pub unsafe extern "C" fn khora_tls_connect(
     client: *mut u8,
     host: *const u8,
@@ -428,6 +432,7 @@ pub unsafe extern "C" fn khora_tls_connect(
 /// `connection` must be null or have come from [`khora_tls_accept`] or
 /// [`khora_tls_connect`].
 #[unsafe(no_mangle)]
+// SHARE: a runtime-owned TLS object, not a Khora value.
 pub unsafe extern "C" fn khora_tls_set_timeout(connection: *mut u8, millis: i64) -> i32 {
     if connection.is_null() {
         return -1;
@@ -447,6 +452,7 @@ pub unsafe extern "C" fn khora_tls_set_timeout(connection: *mut u8, millis: i64)
 /// `connection` must have come from [`khora_tls_accept`], and `into` must
 /// address `len` writable bytes.
 #[unsafe(no_mangle)]
+// SHARE: a runtime-owned TLS object, not a Khora value.
 pub unsafe extern "C" fn khora_tls_read(
     connection: *mut u8,
     into: *mut u8,
@@ -476,6 +482,7 @@ pub unsafe extern "C" fn khora_tls_read(
 /// `connection` must have come from [`khora_tls_accept`], and `from` must
 /// address `len` readable bytes.
 #[unsafe(no_mangle)]
+// SHARE: a runtime-owned TLS object, not a Khora value.
 pub unsafe extern "C" fn khora_tls_write(
     connection: *mut u8,
     from: *const u8,
@@ -504,6 +511,7 @@ pub unsafe extern "C" fn khora_tls_write(
 /// `connection` must be null or have come from [`khora_tls_accept`], and must
 /// not be used afterwards.
 #[unsafe(no_mangle)]
+// SHARE: a runtime-owned TLS object, not a Khora value.
 pub unsafe extern "C" fn khora_tls_close(connection: *mut u8) {
     if connection.is_null() {
         return;

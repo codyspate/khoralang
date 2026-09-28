@@ -278,6 +278,7 @@ pub(crate) fn disarm() {
 ///
 /// `body` must be a valid function pointer and `ctx` whatever it expects.
 #[unsafe(no_mangle)]
+// SHARE: runs `body` on the calling thread; `ctx` never leaves it.
 pub unsafe extern "C" fn khora_export_call(
     body: extern "C" fn(*mut u8) -> u64,
     ctx: *mut u8,

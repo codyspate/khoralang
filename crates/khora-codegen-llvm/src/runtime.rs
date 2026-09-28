@@ -158,6 +158,12 @@ pub struct Runtime<'ctx> {
     /// the compiler counted references non-atomically, so that a spawn is an
     /// abort rather than a race.
     pub single_threaded: FunctionValue<'ctx>,
+    /// `void khora_rc_check_owners(void)`: a debug build's `main` switches
+    /// the owner check on. See [`Backend::check_owners`](crate::backend::Backend::check_owners).
+    pub rc_check_owners: FunctionValue<'ctx>,
+    /// `void khora_rc_check(uint64_t word)`: the owner check, called beside a
+    /// debug build's count with the word the count found.
+    pub rc_check: FunctionValue<'ctx>,
     /// `void khora_enable_counters(void)`
     pub enable_counters: FunctionValue<'ctx>,
     /// `void khora_root_can_raise(void)` — told to the runtime by the entry
@@ -408,6 +414,8 @@ impl<'ctx> Runtime<'ctx> {
                 i64t.fn_type(&[ptr.into(), ptr.into()], false),
             ),
             single_threaded: declare("khora_single_threaded", void.fn_type(&[], false)),
+            rc_check_owners: declare("khora_rc_check_owners", void.fn_type(&[], false)),
+            rc_check: declare("khora_rc_check", void.fn_type(&[i64t.into()], false)),
             enable_counters: declare("khora_enable_counters", void.fn_type(&[], false)),
             root_can_raise: declare("khora_root_can_raise", void.fn_type(&[], false)),
             drop_last: declare(

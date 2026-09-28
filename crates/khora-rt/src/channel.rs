@@ -282,6 +282,7 @@ pub unsafe extern "C" fn khora_channel_open(
     glue: Option<extern "C" fn(*mut u8)>,
 ) -> *mut u8 {
     let object = khora_alloc(std::mem::size_of::<*mut Channel>() as u64, CHANNEL_TAG);
+    crate::share::born_shared(object);
     let channel: Box<Channel> = Box::new(Channel {
         state: Mutex::new(Queue {
             items: VecDeque::new(),
@@ -388,6 +389,14 @@ pub unsafe extern "C" fn khora_channel_send(handle: *mut u8, value: u64) -> bool
     let Some(channel) = (unsafe { channel_of(handle) }) else {
         fatal("sending on a channel that has already been released");
     };
+    // Whoever receives it is another fiber, so it is marked before the queue's
+    // lock publishes it. Even a send that finds the channel closed marks it:
+    // the value is then released here, which a shared value survives.
+    if channel.boxed {
+        // SAFETY: the caller owns `value`, a live object, and `glue` is how
+        // the channel was told to release one.
+        unsafe { crate::share::khora_share(value as *mut u8, channel.glue) };
+    }
 
     loop {
         let mut state = channel.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -476,6 +485,7 @@ pub unsafe extern "C" fn khora_channel_send(handle: *mut u8, value: u64) -> bool
 ///
 /// `handle` must be live and `out` a writable word.
 #[unsafe(no_mangle)]
+// SHARE: hands out a value the entry that stored it already marked; stores nothing.
 pub unsafe extern "C" fn khora_channel_receive(handle: *mut u8, out: *mut u64) -> bool {
     // SAFETY: `handle` is live, which is this function's own documented
     // precondition and the one thing a C caller can get wrong.
@@ -535,6 +545,7 @@ pub unsafe extern "C" fn khora_channel_receive(handle: *mut u8, out: *mut u64) -
 ///
 /// `handle` must be a live object from [`khora_channel_open`].
 #[unsafe(no_mangle)]
+// SHARE: acts on a handle, which is born shared; stores nothing another fiber can reach.
 pub unsafe extern "C" fn khora_channel_close(handle: *mut u8) {
     // SAFETY: `handle` is live, which is this function's own documented
     // precondition and the one thing a C caller can get wrong.
@@ -577,6 +588,7 @@ pub unsafe extern "C" fn khora_channel_close(handle: *mut u8) {
 ///
 /// `handle` must be live and `out` a writable word.
 #[unsafe(no_mangle)]
+// SHARE: hands out a value the entry that stored it already marked; stores nothing.
 pub unsafe extern "C" fn khora_channel_poll(handle: *mut u8, out: *mut u64) -> bool {
     // SAFETY: `handle` is live, which is this function's own documented
     // precondition and the one thing a C caller can get wrong.
@@ -606,6 +618,7 @@ pub unsafe extern "C" fn khora_channel_poll(handle: *mut u8, out: *mut u64) -> b
 ///
 /// `handle` must be a live object from [`khora_channel_open`].
 #[unsafe(no_mangle)]
+// SHARE: acts on a handle, which is born shared; stores nothing another fiber can reach.
 pub unsafe extern "C" fn khora_channel_depth(handle: *mut u8) -> i64 {
     // SAFETY: `handle` is live, which is this function's own documented
     // precondition and the one thing a C caller can get wrong.
@@ -622,6 +635,7 @@ pub unsafe extern "C" fn khora_channel_depth(handle: *mut u8) -> i64 {
 /// `handle` must be a live object from [`khora_channel_open`], and nothing may
 /// use it afterwards.
 #[unsafe(no_mangle)]
+// SHARE: releases; publishes nothing.
 pub unsafe extern "C" fn khora_channel_release(handle: *mut u8) {
     if handle.is_null() {
         return;

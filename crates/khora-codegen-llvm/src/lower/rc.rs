@@ -99,13 +99,30 @@ impl<'ctx> Lower<'_, 'ctx> {
         // Zero goes to the slow path too, which is where the already-zero abort
         // lives: a second branch here would be paid by every drop in the
         // program to catch something that must never happen.
+        //
+        // **On the count bits alone.** The word also carries the shared bit
+        // and a debug build's owner, and either makes the whole word huge: a
+        // compare on it would call every last reference "survives", and leak.
+        //
+        // **The low 32 bits, not all 40.** One `test` of the low word against
+        // `!1`, where the base had one compare, so each drop is two bytes
+        // longer than before Stage 1, not nine: `bench/service`'s release text
+        // grows 3.4% instead of the 8.8% that isolating all 40 count bits
+        // cost. A count of 2^32 or more whose low word is 0 or 1 reads here as
+        // a last reference, and `khora_drop_last` rechecks the whole count and
+        // answers "survives" for it.
+        let count = self
+            .be
+            .builder
+            .build_int_truncate(previous, self.be.ctx.i32_type(), "drop.count")
+            .expect("isolating a refcount");
         let survives = self
             .be
             .builder
             .build_int_compare(
                 IntPredicate::UGT,
-                previous,
-                self.be.ctx.i64_type().const_int(1, false),
+                count,
+                self.be.ctx.i32_type().const_int(1, false),
                 "drop.survives",
             )
             .expect("comparing a refcount");
@@ -151,8 +168,17 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// The cost is a relaxed load, a compare and a branch in front of every
     /// count operation, inline. The load is of the line the add needs anyway.
     /// It is inline rather than a call because a call is what `dup` stopped
-    /// paying (`docs/design/reuse.md` §3). The compare is on the whole word,
-    /// so there is no mask.
+    /// paying (`docs/design/reuse.md` §3). The test is a mask of bit 62, not
+    /// `>= KHORA_IMMORTAL`, because bit 63 is the shared bit and a shared
+    /// object is counted.
+    ///
+    /// A static answers 2 as "previous", the smallest count that `drop`'s
+    /// test reads as "survives". Its own word would not do: 2^40 has no bits
+    /// in the count, which reads as the last reference.
+    ///
+    /// **Every count here is atomic whatever the shared bit says**, and in a
+    /// debug build the owner check is called beside it (see
+    /// `Backend::check_owners`).
     pub(super) fn adjust_count(&mut self, object: PointerValue<'ctx>, by: i64) -> IntValue<'ctx> {
         let i64t = self.be.ctx.i64_type();
         let one = i64t.const_int(1, false);
@@ -170,15 +196,15 @@ impl<'ctx> Lower<'_, 'ctx> {
             load.set_alignment(8).expect("a count word is 8-aligned");
             load.set_atomic_ordering(AtomicOrdering::Monotonic).expect("a relaxed load");
         }
+        let flag = self
+            .be
+            .builder
+            .build_and(previous, i64t.const_int(khora_rt::KHORA_IMMORTAL, false), "rc.flag")
+            .expect("reading the immortal bit");
         let immortal = self
             .be
             .builder
-            .build_int_compare(
-                IntPredicate::UGE,
-                previous,
-                i64t.const_int(khora_rt::KHORA_IMMORTAL, false),
-                "rc.immortal",
-            )
+            .build_int_compare(IntPredicate::NE, flag, i64t.const_zero(), "rc.immortal")
             .expect("testing for a static");
         let entry = self.be.builder.get_insert_block().expect("inside a block");
         let count = self.block("rc.count");
@@ -189,6 +215,13 @@ impl<'ctx> Lower<'_, 'ctx> {
             .expect("skipping a static's count");
 
         self.at(count);
+        if self.be.check_owners && !plain {
+            let check = self.be.rt.rc_check;
+            self.be
+                .builder
+                .build_call(check, &[previous.into()], "")
+                .expect("checking who is counting");
+        }
         let counted = if plain {
             let next = if by > 0 {
                 self.be.builder.build_int_add(previous, one, "rc.up")
@@ -214,7 +247,8 @@ impl<'ctx> Lower<'_, 'ctx> {
 
         self.at(joined);
         let phi = self.be.builder.build_phi(i64t, "rc.previous").expect("joining a count");
-        phi.add_incoming(&[(&previous, entry), (&counted, counted_end)]);
+        let static_count = i64t.const_int(2, false);
+        phi.add_incoming(&[(&static_count, entry), (&counted, counted_end)]);
         phi.as_basic_value().into_int_value()
     }
 

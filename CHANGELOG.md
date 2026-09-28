@@ -568,6 +568,18 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 
 ### Changed
 
+- **The header's count word carries a shared flag, and debug builds trap on an
+  unmarked crossing.** Bit 63 of an object's count word marks it as reachable
+  from more than one fiber. The runtime sets it on everything a spawn
+  captures, a fiber answers or raises, a channel carries, a `Shared` holds and
+  a `Region` defers, before handing it over. A debug build records the fiber
+  that made each object and stops with `khora: object made on fiber N was
+  counted on fiber M without being shared -- a runtime entry published it
+  without marking it` if another fiber counts it unmarked. Counting is atomic
+  for every object either way, and no program's behavior is otherwise
+  different. A C caller reading the count word directly has to mask it;
+  `khora_refcount` answers the count alone.
+
 - **A channel send wakes one blocked receiver, not every one.** On the
   default thread backend every fiber is a thread, and a send woke every
   thread blocked on the channel, all but one of which found nothing and

@@ -84,6 +84,7 @@ fn array_word(array: *const u8, index: usize) -> usize {
 /// The same obligation `khora_shared_open` and `khora_channel_open` state.
 /// This one did not, until the phase 13 soundness audit.
 #[unsafe(no_mangle)]
+// SHARE: an `Array` is not `Share`, so it and what it is filled with stay on the calling fiber.
 pub unsafe extern "C" fn khora_array_new(
     len: i64,
     fill: u64,
@@ -177,6 +178,7 @@ pub unsafe extern "C" fn khora_array_new(
 /// `array` must be a live object from [`khora_array_new`] whose refcount has
 /// reached zero.
 #[unsafe(no_mangle)]
+// SHARE: releases; publishes nothing.
 pub unsafe extern "C" fn khora_array_release(array: *mut u8) {
     if array.is_null() {
         return;

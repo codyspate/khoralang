@@ -108,6 +108,9 @@ extern "C" fn release_shim(region: *mut u8) {
 #[unsafe(no_mangle)]
 pub extern "C" fn khora_region_open() -> *mut u8 {
     let object = khora_alloc(std::mem::size_of::<*mut Finalizers>() as u64, REGION_TAG);
+    // Every region handle is born shared, and that covers the root region:
+    // the one runtime-held object every fiber can reach.
+    crate::share::born_shared(object);
     let list: Box<Finalizers> = Box::default();
     // SAFETY: `khora_alloc` returned an object with one field's worth of
     // space, zeroed and aligned, and nothing else holds this pointer yet.
@@ -151,6 +154,13 @@ pub unsafe extern "C" fn khora_region_defer(
     if list.is_null() {
         fatal("deferring a finalizer to a region that has already been released");
     }
+    // **Not marked here, though the closure may cross.** A finalizer's
+    // captures need not be `Share`, so the deferring fiber may go on writing
+    // them: a `mut` field, a `Map`. Whatever it stores after this point is
+    // made on this fiber, and a mark taken now would not reach it. The mark
+    // is taken when the region runs the finalizer, in `khora_region_release`.
+    // SHARE: stores the closure under the region's lock; it is marked when
+    // `khora_region_release` runs it.
     // Locked, because a region is shareable and so two fibers may defer to one
     // at the same moment: a fiber that acquires a connection wants it released
     // by the scope that outlives it, which is the whole point of handing a
@@ -218,6 +228,17 @@ pub unsafe extern "C" fn khora_region_release(region: *mut u8) {
     let _shield = crate::cancel::Shielded::new();
 
     for finalizer in list.into_iter().rev() {
+        // **The crossing a deferred finalizer makes, marked where it
+        // happens.** The region is `Share`, so the fiber releasing it last,
+        // which runs and releases this closure, need not be the one that
+        // deferred it. The mark is here and not at the defer because the
+        // captures may be `mut` and written after it. Here every write the
+        // deferring fiber made is ordered before this point, through the
+        // region's count and the list's lock, and nothing writes them again.
+        // One walk per finalizer per release, next to running the finalizer.
+        // SAFETY: the list owns a reference to a live closure whose release is
+        // `glue`.
+        unsafe { crate::share::khora_share(finalizer.closure, finalizer.glue) };
         // SAFETY: a closure's first field is its code pointer, and a `() -> ()`
         // closure is called with its own object as the only argument. Through
         // the trampoline `khora_region_defer` was handed when there is one,

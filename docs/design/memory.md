@@ -178,7 +178,7 @@ not escape their fiber, chosen by the compiler and invisible in every type.
 String literals and field-less constructors are static objects, one per
 distinct value for the whole program (`backend/statics.rs`). Their count word
 is `KHORA_IMMORTAL` (bit 62) plus 2^40, and they are emitted as read-only
-globals. Every writer of the count word tests `word >= KHORA_IMMORTAL` and
+globals. Every writer of the count word tests `word & KHORA_IMMORTAL` and
 skips the write:
 - the inline `dup`/`drop` in `lower/rc.rs` (`adjust_count`);
 - `khora_dup`, `khora_drop` and `khora_drop_reuse` in `heap.rs`.
@@ -194,14 +194,104 @@ static is never freed, so its count never had to
 be right. Skipping it is sound under every threading model and needs no
 analysis.
 
-What it costs: a relaxed load, an unsigned compare and a branch in front of
+What it costs: a relaxed load, a mask, a compare and a branch in front of
 every inline count operation, and the code for them. The load is of the line
-the add then writes, so it adds no cache miss. The compare is on the whole
-word, not a mask, so it also treats bit 63 as immortal. A later flag in the
-word has to change the test.
+the add then writes, so it adds no cache miss. The test is a mask of bit 62
+alone, because bit 63 is the shared bit below and a shared object is counted.
 
 A write that skipped the test would fault in read-only memory. Before this
 change it would have written a literal's count silently.
+
+### The shared bit, and the debug owner check
+
+The rest of the count word:
+
+| bits | meaning | who writes it |
+| --- | --- | --- |
+| 63 | shared (`KHORA_SHARED`) | `khora_share`, and runtime handles at birth |
+| 62 | immortal (`KHORA_IMMORTAL`) | the static initializer |
+| 61..40 | owner fiber, debug builds only (`KHORA_OWNER_MASK`) | `khora_alloc`, `khora_alloc_reuse` |
+| 39..0 | the count (`KHORA_COUNT_MASK`) | every `dup` and `drop` |
+
+**Every object starts local to the fiber that made it.** It becomes shared when
+a runtime entry makes it reachable from another fiber, and that entry calls
+`khora_share` on it first, before the lock or hand-off that publishes it. The
+entries that do:
+
+- `khora_fiber_spawn`: the body closure, and through its glue every capture;
+- the spawned fiber itself: its answer or raised error, before it is stored
+  where a joiner reads it;
+- `khora_channel_send`: the value, before it is enqueued;
+- `khora_shared_open`, `_set`, `_update`, `_modify`: the value stored,
+  including what the change function returned;
+- `khora_region_release`: each finalizer closure, just before it runs. The
+  region's last holder runs and releases it, on whichever fiber that is.
+  The mark is taken here, not when the finalizer is deferred, for the reason
+  in the next paragraph;
+- `khora_fibers_adopt`: the handle;
+- the test runner: an error a `test` block raises, before the runner, on
+  another fiber, releases it.
+
+Channel, cell, fiber, nursery and region handles are born shared. That
+covers the root region, the one runtime-held object every fiber can reach.
+Test and bench registration hand the runtime a function pointer, not a
+closure, so nothing crosses there.
+
+**The walk is `khora_share`, and it reuses the drop glue.** While a thread is
+walking, `khora_drop` on that thread queues the child on the walk's work list
+instead of releasing it, so a type's `drop_fields` is also its visit-fields
+routine and the two cannot disagree about which fields hold a reference. The
+walk is iterative (a list of a million cells costs no stack) and stops at an
+object that is already shared or immortal, which makes re-sending a structure
+one load. That rests on an invariant: a shared object points only at shared or
+immortal objects. The walk establishes it. Afterwards, a `Share` value has no
+mutable field, and the two containers written after publication (`Shared`,
+`Channel`) mark what is stored into them. **A deferred finalizer is the one
+route a non-`Share` value has across fibers.** `Region::defer` does not
+require `Share` captures, so a finalizer may capture a record with `mut`
+fields, or a `Map`, and the fiber that deferred it may go on writing them. A
+mark taken at the defer would not reach what is stored afterwards. So a
+finalizer is marked when the region runs it. By then every write the deferring
+fiber made is ordered before the release, through the region's count and the
+list's lock, and nothing writes the captures again. The cost is one walk per
+finalizer per release.
+
+**Reuse makes a cell local again.** `khora_alloc_reuse` writes a fresh header
+with the bit clear, and that is true, not merely allowed: a token exists only
+where the count went from 1 to 0, after the acquire fence, so the one fiber
+that held the cell is still the only one that holds it.
+
+**Fiber migration is not a crossing.** A fiber moves between workers only
+through the scheduler's queues, which are mutexes, so the old worker's unlock
+happens before the new worker's lock and every count written on one is
+visible on the other, with the two never concurrent.
+
+**Counting is atomic for every object, whatever the bit says.** The bit changes
+no count yet. What reads it today is the debug owner check: a debug build's
+`main` turns it on, `khora_alloc` then writes the running fiber's id into bits
+61..40, and every count of an object that is neither shared nor immortal
+compares that id with the counting fiber's. A mismatch is a crossing that no
+entry marked:
+
+    khora: object made on fiber 7 was counted on fiber 12 without being shared -- a runtime entry published it without marking it
+
+Release builds write zero there and check nothing, and zero is "not recorded",
+so the header is the same 16 bytes in both. The costs:
+- counts are limited to 2^40;
+- fiber ids are compared modulo 2^22, so a collision can hide a missed mark
+  but never invent one;
+- a debug build makes a call per count of a local object, about a quarter
+  more wall time on a program whose work is counting;
+- in every profile, each drop reads the count bits before its last-reference
+  test instead of comparing the whole word. That is two instructions where
+  there was one, and 8.8% more generated text in a release build of
+  `bench/service` (0.4% of the linked binary). CPU per request on the service
+  benchmarks measured 1-3% higher, on a loaded machine.
+
+`scripts/check-share.sh` keeps the list of entries honest. Every
+`extern "C" fn` in `khora-rt` that takes a Khora value either calls
+`khora_share` or carries `// SHARE: <why this does not publish>`, so a new
+entry is asked the question when it is written.
 
 ## 5a. What may cross a fiber
 

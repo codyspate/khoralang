@@ -89,6 +89,19 @@ unsafe fn held_of<'a>(cell: *mut u8) -> Option<&'a Held> {
     unsafe { (*cell.add(KHORA_FIELD_OFFSET).cast::<*mut Held>()).as_ref() }
 }
 
+/// Marks a cell's word shared, when the word is a counted object.
+///
+/// # Safety
+///
+/// When `boxed`, `value` must be null or a live object the caller holds and
+/// `glue` its release routine.
+unsafe fn share_word(value: u64, boxed: bool, glue: Option<extern "C" fn(*mut u8)>) {
+    if boxed {
+        // SAFETY: per this function's contract.
+        unsafe { crate::share::khora_share(value as *mut u8, glue) };
+    }
+}
+
 /// Opens a cell holding `value`.
 ///
 /// Takes ownership of the value: the cell releases it when the cell goes.
@@ -104,6 +117,11 @@ pub unsafe extern "C" fn khora_shared_open(
     glue: Option<extern "C" fn(*mut u8)>,
 ) -> *mut u8 {
     let object = khora_alloc(std::mem::size_of::<*mut Held>() as u64, SHARED_TAG);
+    crate::share::born_shared(object);
+    // A cell is `Share`, so what it holds is reachable from every fiber the
+    // cell reaches.
+    // SAFETY: the caller hands over a live value whose release is `glue`.
+    unsafe { share_word(value, boxed, glue) };
     let held: Box<Held> = Box::new(Held {
         holder: AtomicUsize::new(0),
         cell: Mutex::new(Cell { value, boxed, glue }),
@@ -126,6 +144,7 @@ pub unsafe extern "C" fn khora_shared_open(
 ///
 /// `cell` must be a live object from [`khora_shared_open`].
 #[unsafe(no_mangle)]
+// SHARE: hands out a value the entry that stored it already marked; stores nothing.
 pub unsafe extern "C" fn khora_shared_get(cell: *mut u8) -> u64 {
     // SAFETY: `cell` is live, which is this function's own documented
     // precondition and the one thing a C caller can get wrong.
@@ -160,6 +179,9 @@ pub unsafe extern "C" fn khora_shared_set(cell: *mut u8, value: u64) {
     deny_reentry(held, "write");
     let (old, boxed, glue) = {
         let mut cell = held.cell.lock().unwrap_or_else(|e| e.into_inner());
+        // Marked under the lock, before the store that publishes it.
+        // SAFETY: the caller owns `value`, and the cell's glue releases one.
+        unsafe { share_word(value, cell.boxed, cell.glue) };
         let old = std::mem::replace(&mut cell.value, value);
         (old, cell.boxed, cell.glue)
     };
@@ -253,6 +275,10 @@ pub unsafe extern "C" fn khora_shared_update(
         return which;
     }
 
+    // What `change` returned was made on this fiber and is about to be the
+    // cell's. Marked before the store, under the lock.
+    // SAFETY: the change function handed over a live value of the cell's type.
+    unsafe { share_word(produced, boxed, glue) };
     let old = std::mem::replace(&mut cell.value, produced);
     if boxed {
         // SAFETY: still under the lock, so nothing can have taken this. The
@@ -332,6 +358,9 @@ pub unsafe extern "C" fn khora_shared_modify(
         return which;
     }
 
+    // As in `khora_shared_update`. The answer is not stored, so it stays local.
+    // SAFETY: the change function handed over a live value of the cell's type.
+    unsafe { share_word(produced, boxed, glue) };
     let old = std::mem::replace(&mut cell.value, produced);
     held.holder.store(0, COUNTER_ORDER);
     drop(cell);
@@ -354,6 +383,7 @@ pub unsafe extern "C" fn khora_shared_modify(
 /// `cell` must be a live object from [`khora_shared_open`] whose refcount has
 /// reached zero.
 #[unsafe(no_mangle)]
+// SHARE: releases; publishes nothing.
 pub unsafe extern "C" fn khora_shared_release(cell: *mut u8) {
     if cell.is_null() {
         return;

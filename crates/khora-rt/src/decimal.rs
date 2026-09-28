@@ -425,6 +425,7 @@ pub extern "C" fn khora_decimal_divide(
 /// `into` must address `capacity` writable bytes, or be null with a zero
 /// `capacity`.
 #[unsafe(no_mangle)]
+// SHARE: writes bytes into a buffer; takes no Khora object.
 pub unsafe extern "C" fn khora_decimal_digits(
     hi: i64,
     lo: i64,

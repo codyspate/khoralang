@@ -19,7 +19,7 @@
 //!
 //! | Offset | Size | Field | Who reads it |
 //! | --- | --- | --- | --- |
-//! | 0 | 8 | `refcount: u64` (bit 62: immortal) | runtime (`khora_dup`, `khora_drop`) and generated code |
+//! | 0 | 8 | `refcount: u64` (bit 63: shared, 62: immortal, 61..40: debug owner, 39..0: count) | runtime (`khora_dup`, `khora_drop`) and generated code |
 //! | 8 | 4 | `tag: u32` | generated code, to switch on an ADT variant |
 //! | 12 | 4 | `field_bytes: u32` | runtime, to rebuild the allocation layout |
 //! | 16 | *n* | the object's fields | generated code |
@@ -27,10 +27,14 @@
 //! **Bit 62 of the count word marks an immortal object**: a string literal or
 //! a field-less constructor, which the code generator emits as a static with
 //! the word set to [`KHORA_IMMORTAL`] plus 2^40. Nothing counts one or frees
-//! one, and every writer of the word tests `count >= KHORA_IMMORTAL` first,
-//! so a static can live in read-only memory. The test is a compare rather
-//! than a mask, so it treats bit 63 as immortal too: a later flag in the word
-//! has to change the test with it.
+//! one, and every writer of the word tests bit 62 first, so a static can live
+//! in read-only memory. The test is a mask of that one bit, not a compare,
+//! because bit 63 is [`KHORA_SHARED`] and a shared object is counted.
+//!
+//! Bits 61..40 are [`KHORA_OWNER_MASK`], the fiber that made a local object,
+//! written only in a debug build. Bits 39..0 are the count
+//! ([`KHORA_COUNT_MASK`]), and anything that wants a count masks the word
+//! with it first.
 //!
 //! So [`KHORA_HEADER_SIZE`] is 16, [`KHORA_HEADER_ALIGN`] is 8, and **fields
 //! begin at offset [`KHORA_FIELD_OFFSET`] = 16 from the pointer `khora_alloc`
@@ -188,6 +192,7 @@ mod reactor;
 mod region;
 #[cfg(not(target_family = "wasm"))]
 mod scheduler;
+mod share;
 mod shared;
 mod signals;
 #[cfg(not(target_family = "wasm"))]
@@ -226,6 +231,7 @@ pub use print::*;
 pub use random::*;
 #[cfg(not(target_family = "wasm"))]
 pub use region::*;
+pub use share::*;
 pub use shared::*;
 #[cfg(not(target_family = "wasm"))]
 pub use testing::*;
@@ -287,6 +293,40 @@ pub struct KhoraHeader {
 /// statics are in read-only memory, so a write faults at the instruction that
 /// made it rather than corrupting a literal.
 pub const KHORA_IMMORTAL: u64 = 1 << 62;
+
+/// The count-word bit of an object another fiber may be holding.
+///
+/// **What it prevents, once counting is split: a plain count on an object
+/// two threads hold.** Set by [`khora_share`] on everything reachable from a
+/// value the runtime publishes (a spawn's closure, a channel send, a cell's
+/// contents, a fiber's answer, a deferred finalizer), and born set on the
+/// runtime's own handles. Counting stays atomic for every object whatever
+/// this bit says; for now it feeds the debug owner check, which traps on a
+/// local object counted by a fiber that did not make it.
+///
+/// Bit 63, so a set bit makes the word negative as an `i64`.
+pub const KHORA_SHARED: u64 = 1 << 63;
+
+/// The count-word bits that record, in debug builds, which fiber made a local
+/// object: bits 61..40.
+///
+/// **Zero in release, and zero means "nobody recorded"**, so the owner check
+/// has nothing to compare and says nothing. Twenty-two bits hold fiber ids
+/// modulo 2^22. Two fibers whose ids agree there look like one fiber, which
+/// can hide a missed crossing and can never report one that did not happen.
+pub const KHORA_OWNER_MASK: u64 = ((1 << 22) - 1) << KHORA_OWNER_SHIFT;
+
+/// Where [`KHORA_OWNER_MASK`] starts.
+pub const KHORA_OWNER_SHIFT: u32 = 40;
+
+/// The count-word bits that are the count: bits 39..0.
+///
+/// **Every reader that wants a count masks with this.** The word also
+/// carries [`KHORA_SHARED`], [`KHORA_IMMORTAL`] and the debug owner, and a
+/// test like `previous > 1` on the whole word reads a shared object's last
+/// reference as "somebody else still holds it" and leaks it. The cost is a
+/// limit of 2^40 references to one object, and each costs 8 bytes.
+pub const KHORA_COUNT_MASK: u64 = (1 << KHORA_OWNER_SHIFT) - 1;
 
 /// Size of [`KhoraHeader`] in bytes: 16 on a 64-bit target.
 pub const KHORA_HEADER_SIZE: usize = std::mem::size_of::<KhoraHeader>();

@@ -265,6 +265,15 @@ pub(crate) struct Backend<'ctx> {
     /// its cause, so it is worth one branch on a call that starts a thread to
     /// turn it into a message. `docs/design/reuse.md` §4.
     pub single_threaded: bool,
+    /// Whether every count of a local object also calls the owner check.
+    ///
+    /// **What this finds: a runtime entry that published a value without
+    /// marking it shared.** The object then reaches a second fiber with its
+    /// maker's id still in the count word, and the first count there traps
+    /// naming both fibers. Debug builds of a program with threads only. The
+    /// count itself is atomic whether or not this is set; the check runs
+    /// beside it. It costs a call per count, which is why release has none.
+    pub check_owners: bool,
     /// Khora functions that keep their plain return, because
     /// [`can_stop`] found no cancellation point they can reach.
     ///
@@ -515,6 +524,7 @@ impl<'ctx> Backend<'ctx> {
             // Set by `build` once the reachable set is known. Assuming threads
             // until told otherwise is the safe direction.
             single_threaded: false,
+            check_owners: false,
             untagged: HashSet::new(),
             poll_at_entry: HashSet::new(),
             lambdas_poll_in: HashSet::new(),

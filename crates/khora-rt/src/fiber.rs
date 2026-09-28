@@ -278,6 +278,33 @@ impl Legacy {
         }
     }
 
+    /// Marks an answer shared, in the child, before it is stored.
+    ///
+    /// **A crossing: the answer is read by whoever joins**, on another fiber,
+    /// and every joiner takes a reference to it. Marked here rather than at
+    /// the join so that the mark happens before the `outcome` lock is let go,
+    /// which is the release a joiner's acquire pairs with. A raised error
+    /// travels in the same slot and is marked through the routine that would
+    /// release it.
+    fn share(&self, outcome: &Tagged) {
+        if !self.points_at_an_object(outcome) {
+            return;
+        }
+        match (outcome.which, self.error_glue) {
+            // SAFETY: the child holds this answer's only reference so far,
+            // and `glue` is its release routine.
+            (0, _) => unsafe { crate::share::khora_share(outcome.payload as *mut u8, self.glue) },
+            // SAFETY: the error is live and held, and `release` is the
+            // compiler's releaser for every error id.
+            (which, Some(release)) => unsafe {
+                crate::share::share_error(which, outcome.payload, release)
+            },
+            // SAFETY: as the first arm. With no routine only the object
+            // itself is marked, which is also all `discard` would release.
+            (_, None) => unsafe { crate::share::khora_share(outcome.payload as *mut u8, None) },
+        }
+    }
+
     /// Whether the stored word is a Khora object this state has a reference to.
     fn points_at_an_object(&self, outcome: &Tagged) -> bool {
         if outcome.payload == 0 || outcome.which == CANCELED_WHICH {
@@ -595,6 +622,10 @@ pub unsafe extern "C" fn khora_fiber_spawn(
     // is the safe direction; freeing under a running fiber is not.
     // `crate::contain`.
     crate::contain::disarm();
+    // The closure, and through it every capture, is what the child runs on.
+    // Marked before the thread or task that runs it exists.
+    // SAFETY: the caller hands over a live closure whose release is `glue`.
+    unsafe { crate::share::khora_share(body, glue) };
     let fiber = Fiber::spawned();
     let handed = Handed(body);
     let done = Arc::new(Done::default());
@@ -648,6 +679,7 @@ pub unsafe extern "C" fn khora_fiber_spawn(
             // runs every back-edge in the process pays for this fiber's
             // cancellation. `Fiber::retire`.
             stopping.retire();
+            answers.share(&outcome);
             // **Stored before the closure is released**, because releasing it
             // may run arbitrary drop routines and a joiner woken in the middle
             // of that must find the answer already there.
@@ -702,6 +734,7 @@ pub unsafe extern "C" fn khora_fiber_spawn(
     };
 
     let object = khora_alloc(std::mem::size_of::<*mut FiberState>() as u64, FIBER_TAG);
+    crate::share::born_shared(object);
     let state: Box<FiberState> = Box::new(FiberState {
         completion,
         fiber,
@@ -747,6 +780,7 @@ pub(crate) unsafe fn fiber_state<'a>(fiber: *mut u8) -> Option<&'a FiberState> {
 /// `fiber` must be a live object from [`khora_fiber_spawn`], and `out` a
 /// writable word.
 #[unsafe(no_mangle)]
+// SHARE: hands out a value the entry that stored it already marked; stores nothing.
 pub unsafe extern "C" fn khora_fiber_join(fiber: *mut u8, out: *mut u64) -> u32 {
     // SAFETY: the caller guarantees a live handle.
     let Some(state) = (unsafe { fiber_state(fiber) }) else {
@@ -899,6 +933,7 @@ pub(crate) unsafe fn failed_and_reported(fiber: *mut u8) -> bool {
 ///
 /// `fiber` must be a live object from [`khora_fiber_spawn`].
 #[unsafe(no_mangle)]
+// SHARE: acts on a handle, which is born shared; stores nothing another fiber can reach.
 pub unsafe extern "C" fn khora_fiber_finished(fiber: *mut u8) -> bool {
     // SAFETY: the caller guarantees a live handle.
     let Some(state) = (unsafe { fiber_state(fiber) }) else {
@@ -936,6 +971,7 @@ pub unsafe extern "C" fn khora_fiber_finished(fiber: *mut u8) -> bool {
 ///
 /// `fiber` must be a live object from [`khora_fiber_spawn`].
 #[unsafe(no_mangle)]
+// SHARE: acts on a handle, which is born shared; stores nothing another fiber can reach.
 pub unsafe extern "C" fn khora_fiber_canceled(fiber: *mut u8) -> bool {
     // SAFETY: the caller guarantees a live handle.
     let Some(state) = (unsafe { fiber_state(fiber) }) else {
@@ -982,6 +1018,7 @@ pub unsafe extern "C" fn khora_fiber_canceled(fiber: *mut u8) -> bool {
 /// `fiber` must be a live object from [`khora_fiber_spawn`], and `out` a
 /// writable word.
 #[unsafe(no_mangle)]
+// SHARE: hands out a value the entry that stored it already marked; stores nothing.
 pub unsafe extern "C" fn khora_fiber_outcome(fiber: *mut u8, out: *mut u64) -> u32 {
     // SAFETY: the caller promised a writable word. Written first, so every
     // early exit below leaves it defined rather than each remembering to.
@@ -1031,6 +1068,7 @@ pub unsafe extern "C" fn khora_fiber_outcome(fiber: *mut u8, out: *mut u64) -> u
 ///
 /// `fiber` must be a live object from [`khora_fiber_spawn`].
 #[unsafe(no_mangle)]
+// SHARE: acts on a handle, which is born shared; stores nothing another fiber can reach.
 pub unsafe extern "C" fn khora_fiber_wait(fiber: *mut u8) -> u32 {
     // SAFETY: the caller guarantees a live handle.
     if unsafe { wait_or_cancel_for(fiber) } { CANCELED_WHICH } else { 0 }
@@ -1060,6 +1098,7 @@ pub unsafe extern "C" fn khora_fiber_wait(fiber: *mut u8) -> u32 {
 ///
 /// `fiber` must be a live object from [`khora_fiber_spawn`].
 #[unsafe(no_mangle)]
+// SHARE: acts on a handle, which is born shared; stores nothing another fiber can reach.
 pub unsafe extern "C" fn khora_fiber_detach(fiber: *mut u8) {
     if fiber.is_null() {
         return;
@@ -1116,6 +1155,7 @@ pub(crate) fn cancel_by_id(id: usize) {
 ///
 /// `fiber` must be a live object from [`khora_fiber_spawn`].
 #[unsafe(no_mangle)]
+// SHARE: acts on a handle, which is born shared; stores nothing another fiber can reach.
 pub unsafe extern "C" fn khora_fiber_cancel(fiber: *mut u8) {
     // SAFETY: the caller guarantees a live handle.
     unsafe { deliver(fiber, Stop::Cancel) }
@@ -1141,6 +1181,7 @@ pub unsafe extern "C" fn khora_fiber_cancel(fiber: *mut u8) {
 ///
 /// `fiber` must be a live object from [`khora_fiber_spawn`].
 #[unsafe(no_mangle)]
+// SHARE: acts on a handle, which is born shared; stores nothing another fiber can reach.
 pub unsafe extern "C" fn khora_fiber_force(fiber: *mut u8) {
     // SAFETY: the caller guarantees a live handle.
     unsafe { deliver(fiber, Stop::Force) }
@@ -1172,6 +1213,7 @@ pub unsafe extern "C" fn khora_fiber_force(fiber: *mut u8) {
 ///
 /// `fiber` must be a live object from [`khora_fiber_spawn`].
 #[unsafe(no_mangle)]
+// SHARE: acts on a handle, which is born shared; stores nothing another fiber can reach.
 pub unsafe extern "C" fn khora_fiber_cancel_within(fiber: *mut u8, millis: i64) {
     // SAFETY: the caller guarantees a live handle.
     let Some(state) = (unsafe { fiber_state(fiber) }) else { return };
@@ -1421,6 +1463,7 @@ pub(crate) fn deliver_to_fiber(fiber: &std::sync::Arc<crate::current::Fiber>, st
 /// `fiber` must be a live object from [`khora_fiber_spawn`] whose refcount has
 /// reached zero.
 #[unsafe(no_mangle)]
+// SHARE: releases; publishes nothing.
 pub unsafe extern "C" fn khora_fiber_release(fiber: *mut u8) {
     if fiber.is_null() {
         return;

@@ -275,6 +275,7 @@ pub extern "C" fn khora_net_forget(socket: Socket) {
 ///
 /// `into` must address `length` writable bytes.
 #[unsafe(no_mangle)]
+// SHARE: writes bytes into a buffer; takes no Khora object.
 pub unsafe extern "C" fn khora_net_recv_now(
     socket: Socket,
     into: *mut u8,
@@ -300,6 +301,7 @@ pub unsafe extern "C" fn khora_net_recv_now(
 ///
 /// `into` must point at `length` writable bytes.
 #[unsafe(no_mangle)]
+// SHARE: writes bytes into a buffer; takes no Khora object.
 pub unsafe extern "C" fn khora_net_recv(socket: Socket, into: *mut u8, length: isize) -> isize {
     // Absolute, and taken once: a read that goes round this loop several times
     // because of a spurious wake must not be granted the whole timeout again.
@@ -391,6 +393,7 @@ pub unsafe extern "C" fn khora_net_send(socket: Socket, from: *const u8, length:
 /// `address` and `length` must be null, or a valid `sockaddr` buffer and the
 /// live `socklen_t` describing it.
 #[unsafe(no_mangle)]
+// SHARE: writes bytes into a buffer; takes no Khora object.
 pub unsafe extern "C" fn khora_net_accept(
     socket: Socket,
     address: *mut u8,

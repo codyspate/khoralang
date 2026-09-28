@@ -246,8 +246,11 @@ pub extern "C" fn khora_alloc(size: u64, tag: u32) -> *mut u8 {
     // writing one `KhoraHeader`. Nothing else refers to it yet, so the write
     // cannot race and cannot clobber an initialized field.
     unsafe {
-        ptr.cast::<KhoraHeader>()
-            .write(KhoraHeader { refcount: AtomicU64::new(1), tag, field_bytes });
+        ptr.cast::<KhoraHeader>().write(KhoraHeader {
+            refcount: AtomicU64::new(1 | crate::share::owner_bits()),
+            tag,
+            field_bytes,
+        });
     }
 
     if crate::counters::counting() {
@@ -269,6 +272,7 @@ pub extern "C" fn khora_alloc(size: u64, tag: u32) -> *mut u8 {
 /// must own a reference to it — that is what makes it live for the duration of
 /// the call.
 #[unsafe(no_mangle)]
+// SHARE: counts or frees on the calling fiber; publishes nothing.
 pub unsafe extern "C" fn khora_dup(ptr: *mut u8) {
     if ptr.is_null() {
         return;
@@ -294,9 +298,23 @@ pub unsafe extern "C" fn khora_dup(ptr: *mut u8) {
 ///
 /// Relaxed is enough. The bit is in the initializer and never changes, so
 /// any load at all sees it.
+///
+/// **A mask of bit 62, not `>= KHORA_IMMORTAL`.** Bit 63 is
+/// [`KHORA_SHARED`], and the compare would read every shared object as a
+/// static: never counted, so never freed.
+///
+/// In a debug build this is also where the owner check runs, since every
+/// runtime count loads the word here first.
 #[inline(always)]
 fn is_immortal(count: &AtomicU64) -> bool {
-    count.load(Ordering::Relaxed) >= KHORA_IMMORTAL
+    let word = count.load(Ordering::Relaxed);
+    if word & KHORA_IMMORTAL != 0 {
+        return true;
+    }
+    if crate::share::checking() {
+        crate::share::khora_rc_check(word);
+    }
+    false
 }
 
 /// Decrements an object's refcount, freeing it when the count reaches zero.
@@ -329,8 +347,14 @@ fn is_immortal(count: &AtomicU64) -> bool {
 /// actual field layout — the runtime cannot check that, since it does not know
 /// what the fields mean.
 #[unsafe(no_mangle)]
+// SHARE: counts or frees on the calling fiber; publishes nothing.
 pub unsafe extern "C" fn khora_drop(ptr: *mut u8, drop_fields: Option<extern "C" fn(*mut u8)>) {
     if ptr.is_null() {
+        return;
+    }
+    // Inside a `khora_share` walk the drop glue is being run to *find* the
+    // children, not to release them. See `crate::share`.
+    if crate::share::walked(ptr, drop_fields) {
         return;
     }
     let header = ptr.cast::<KhoraHeader>();
@@ -348,7 +372,11 @@ pub unsafe extern "C" fn khora_drop(ptr: *mut u8, drop_fields: Option<extern "C"
     //
     // SAFETY: `ptr` points at a live object per the contract above, so its
     // header is initialized and valid to read and write.
-    let refcount = unsafe { (*header).refcount.fetch_sub(1, Ordering::Release) };
+    let refcount =
+        unsafe { (*header).refcount.fetch_sub(1, Ordering::Release) } & KHORA_COUNT_MASK;
+    // A decrement from a count of zero borrows from the bits above the
+    // count, leaving the debug owner or a flag one less. That word is never
+    // read again: the abort below is next.
     if refcount == 0 {
         fatal("drop of an object whose refcount is already zero (double free, or a missing dup)");
     }
@@ -395,6 +423,7 @@ pub unsafe extern "C" fn khora_drop(ptr: *mut u8, drop_fields: Option<extern "C"
 /// As [`khora_drop`]: `ptr` must be null or live, the caller must own the
 /// reference being released, and `drop_fields` must match the layout.
 #[unsafe(no_mangle)]
+// SHARE: counts or frees on the calling fiber; publishes nothing.
 pub unsafe extern "C" fn khora_drop_reuse(
     ptr: *mut u8,
     drop_fields: Option<extern "C" fn(*mut u8)>,
@@ -415,7 +444,8 @@ pub unsafe extern "C" fn khora_drop_reuse(
     }
 
     // SAFETY: live per the contract, so the header is initialized.
-    let refcount = unsafe { (*header).refcount.fetch_sub(1, Ordering::Release) };
+    let refcount =
+        unsafe { (*header).refcount.fetch_sub(1, Ordering::Release) } & KHORA_COUNT_MASK;
     if refcount == 0 {
         fatal("drop of an object whose refcount is already zero (double free, or a missing dup)");
     }
@@ -469,6 +499,7 @@ pub unsafe extern "C" fn khora_drop_reuse(
 /// `token` must be null or memory from [`khora_drop_reuse`] that has not been
 /// spent, and `size` must not exceed [`MAX_FIELD_BYTES`].
 #[unsafe(no_mangle)]
+// SHARE: counts or frees on the calling fiber; publishes nothing.
 pub unsafe extern "C" fn khora_alloc_reuse(token: *mut u8, size: u64, tag: u32) -> *mut u8 {
     if token.is_null() {
         return khora_alloc(size, tag);
@@ -488,6 +519,15 @@ pub unsafe extern "C" fn khora_alloc_reuse(token: *mut u8, size: u64, tag: u32) 
         return khora_alloc(size, tag);
     }
 
+    // **The fresh header is local, with this fiber as its owner.** A token
+    // exists only where `khora_drop_reuse` took the count from 1 to 0, so the
+    // caller held the one reference there was, after the acquire fence: no
+    // other fiber can reach the cell. So a cell that had crossed and came back
+    // unique is local again, and that is true, not merely allowed. Keeping
+    // the shared bit would send a local object down the shared path for the
+    // rest of its life; keeping the old owner would make the owner check trap
+    // on the fiber that now rightly holds it.
+    //
     // SAFETY: as above. The fields are about to be written by the caller, which
     // is the same contract `khora_alloc` leaves them under — except that they
     // are not zeroed here, because the caller writes every one of them before
@@ -495,9 +535,11 @@ pub unsafe extern "C" fn khora_alloc_reuse(token: *mut u8, size: u64, tag: u32) 
     // between allocation and the first store, and a reused cell's window is
     // covered by `drop_fields` having already run.
     unsafe {
-        token
-            .cast::<KhoraHeader>()
-            .write(KhoraHeader { refcount: AtomicU64::new(1), tag, field_bytes });
+        token.cast::<KhoraHeader>().write(KhoraHeader {
+            refcount: AtomicU64::new(1 | crate::share::owner_bits()),
+            tag,
+            field_bytes,
+        });
     }
     if crate::counters::counting() {
         LIVE_COUNT.fetch_add(1, COUNTER_ORDER);
@@ -537,16 +579,24 @@ pub extern "C" fn khora_single_threaded() {
 /// # Safety
 ///
 /// `ptr` must be a live object whose refcount the caller has just decremented
-/// with [`Ordering::Release`], `previous` must be what that decrement returned,
-/// and `drop_fields` must match the object's layout.
+/// with [`Ordering::Release`], `previous` must be what that decrement returned
+/// (flags and all, or masked to the count: both read the same here), and
+/// `drop_fields` must match the object's layout.
 #[unsafe(no_mangle)]
+// SHARE: counts or frees on the calling fiber; publishes nothing.
 pub unsafe extern "C" fn khora_drop_last(
     ptr: *mut u8,
     drop_fields: Option<extern "C" fn(*mut u8)>,
     previous: u64,
 ) {
-    if previous == 0 {
+    if previous & KHORA_COUNT_MASK == 0 {
         fatal("drop of an object whose refcount is already zero (double free, or a missing dup)");
+    }
+    // Generated code tests only the low 32 bits of the count, so a count of
+    // 2^32 or more whose low word is 0 or 1 arrives here although other
+    // references remain. The whole count answers it.
+    if previous & KHORA_COUNT_MASK > 1 {
+        return;
     }
 
     // Acquire, pairing with every other thread's release, so their writes are
@@ -577,6 +627,7 @@ pub unsafe extern "C" fn khora_drop_last(
 ///
 /// `token` must be null or unspent memory from [`khora_drop_reuse`].
 #[unsafe(no_mangle)]
+// SHARE: counts or frees on the calling fiber; publishes nothing.
 pub unsafe extern "C" fn khora_free_reuse(token: *mut u8) {
     if token.is_null() {
         return;
@@ -595,7 +646,8 @@ pub unsafe extern "C" fn khora_free_reuse(token: *mut u8) {
 /// that cannot see the count can only assert that nothing crashed.
 ///
 /// A static answers 2^40, without its immortal bit: the answer is a count,
-/// and the flag is not part of one.
+/// and the flag is not part of one. Any other object answers its count
+/// without the shared bit or the debug owner, for the same reason.
 ///
 /// # Safety
 ///
@@ -608,7 +660,30 @@ pub unsafe extern "C" fn khora_refcount(ptr: *const u8) -> u64 {
     // SAFETY: `ptr` points at a live object per the contract above, so its
     // header is initialized and valid to read.
     let word = unsafe { (*ptr.cast::<KhoraHeader>()).refcount.load(Ordering::Relaxed) };
-    word & !KHORA_IMMORTAL
+    if word & KHORA_IMMORTAL != 0 {
+        return word & !KHORA_IMMORTAL;
+    }
+    word & KHORA_COUNT_MASK
+}
+
+/// Whether an object's shared bit is set. Null reads as false.
+///
+/// Exists for tests, as [`khora_refcount`] does: a test that cannot see the
+/// bit can show that a missing mark crashed, but not that a present one is
+/// there.
+///
+/// # Safety
+///
+/// `ptr` must be null or a live object from [`khora_alloc`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_is_shared(ptr: *const u8) -> bool {
+    if ptr.is_null() {
+        return false;
+    }
+    // SAFETY: `ptr` points at a live object per the contract above, so its
+    // header is initialized and valid to read.
+    let word = unsafe { (*ptr.cast::<KhoraHeader>()).refcount.load(Ordering::Relaxed) };
+    word & KHORA_SHARED != 0
 }
 
 /// Frees an object without touching its reference count or its children.

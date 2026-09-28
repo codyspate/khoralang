@@ -90,6 +90,7 @@ mod reuse;
 mod schedules;
 mod schema;
 mod shared;
+mod sharing;
 mod sleeping;
 mod sockets;
 mod spike;

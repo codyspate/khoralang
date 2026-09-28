@@ -371,7 +371,15 @@ the one thing here that had to be retracted rather than refined.
 
 Both inline operations now load the count first and skip a static: string
 literals and field-less constructors carry an immortal bit and live in
-read-only memory. `memory.md` §5 has the layout and why.
+read-only memory. `memory.md` §5 has the layout and why. The word also carries
+a shared bit and, in debug builds, the owning fiber, so the last-reference test
+reads only the previous value's count bits before comparing it with 1 (a
+shift that moves them to the top of the word, which is smaller code than an
+`and` with the 40-bit mask); `memory.md` §5 has that too.
+
+**A reused cell comes back local.** `khora_alloc_reuse` writes a header with
+the shared bit clear, since the token proves the caller held the only
+reference.
 
 **How the measurement nearly went wrong.** The first attempt at an envelope was
 a throwaway runtime with `khora_dup` and `khora_drop` returning immediately. It

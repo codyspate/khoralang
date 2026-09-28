@@ -220,6 +220,7 @@ pub extern "C" fn khora_fibers_open() -> *mut u8 {
 pub extern "C" fn khora_fibers_open_bounded(limit: i64) -> *mut u8 {
     let limit = if limit > 0 { limit as usize } else { 0 };
     let object = khora_alloc(std::mem::size_of::<*mut Crew>() as u64, FIBERS_TAG);
+    crate::share::born_shared(object);
     // **`Arc`, so `OPEN` can hold one too.** A cancellation reaches this crew
     // through the registry while the fiber that opened it is blocked in a join,
     // so the two references have to be able to outlive each other either way.
@@ -283,6 +284,14 @@ pub unsafe extern "C" fn khora_fibers_adopt(fibers: *mut u8, fiber: *mut u8) {
     let Some(list) = (unsafe { crew(fibers) }) else {
         fatal("adopting a fiber into a nursery that has already ended");
     };
+    // **A crossing: a child may adopt a handle it made into a parent's
+    // nursery**, and the parent then releases it. A handle is born shared, so
+    // this finds the bit set and returns; it is here so that the entry does
+    // not depend on how its argument was made.
+    // SAFETY: the caller hands over a live fiber handle. No routine is given:
+    // a handle's release joins the fiber, and what the fiber holds is marked
+    // by the spawn and by the child itself.
+    unsafe { crate::share::khora_share(fiber, None) };
 
     // Until there is room. Each turn sweeps what has finished and, if that was
     // not enough, takes the oldest child out to be waited for — outside the
@@ -445,6 +454,7 @@ fn record_failures(list: &Crew, count: i64) {
 ///
 /// `fibers` must be a live object from [`khora_fibers_open`].
 #[unsafe(no_mangle)]
+// SHARE: acts on a handle, which is born shared; stores nothing another fiber can reach.
 pub unsafe extern "C" fn khora_fibers_wait(fibers: *mut u8) -> i64 {
     // SAFETY: the caller guarantees a live nursery.
     let Some(list) = (unsafe { crew(fibers) }) else { return 0 };
@@ -539,6 +549,7 @@ pub unsafe extern "C" fn khora_fibers_wait(fibers: *mut u8) -> i64 {
 /// `fibers` must be a live object from [`khora_fibers_open`] whose refcount has
 /// reached zero.
 #[unsafe(no_mangle)]
+// SHARE: releases; publishes nothing.
 pub unsafe extern "C" fn khora_fibers_release(fibers: *mut u8) {
     if fibers.is_null() {
         return;

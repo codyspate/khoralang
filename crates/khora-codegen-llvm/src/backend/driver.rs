@@ -206,6 +206,8 @@ pub(super) fn build(
     // corruption long afterwards, which is why both are conditions here rather
     // than notes somewhere.
     backend.single_threaded = counts_non_atomically(db, files, mono, entry_point);
+    // A single-threaded program has one fiber, so there is nothing to check.
+    backend.check_owners = profile == Profile::Debug && !backend.single_threaded;
 
     // One emitted function per *specialization*, not per source function: a
     // generic body has no machine representation until its type arguments are

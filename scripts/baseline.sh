@@ -105,6 +105,7 @@ sh "$root/scripts/check-backend-rules.sh"
 sh "$root/scripts/check-cited-tests.sh"
 sh "$root/scripts/check-pin.sh"
 sh "$root/scripts/no-bare-unsafe.sh"
+sh "$root/scripts/check-share.sh"
 sh "$root/scripts/check-readiness.sh"
 sh "$root/scripts/check-claims.sh"
 

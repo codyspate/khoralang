@@ -110,6 +110,13 @@ impl<'ctx> Backend<'ctx> {
     pub(super) fn begin(&mut self) {
         let begin = self.rt.begin;
         self.builder.build_call(begin, &[], "").expect("starting the runtime");
+        // Before anything is allocated, so every object a debug build makes
+        // carries its fiber. See `Backend::check_owners`.
+        if self.check_owners {
+            self.builder
+                .build_call(self.rt.rc_check_owners, &[], "")
+                .expect("switching the owner check on");
+        }
     }
 
     /// Hands `argc` and `argv` to the runtime before anything else runs.

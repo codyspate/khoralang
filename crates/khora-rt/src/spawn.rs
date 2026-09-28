@@ -161,6 +161,7 @@ pub unsafe extern "C" fn khora_spawn_capture(
 /// `into` must point at `len` writable bytes, and `len` must be the size the
 /// capture answered.
 #[unsafe(no_mangle)]
+// SHARE: writes bytes into a buffer; takes no Khora object.
 pub unsafe extern "C" fn khora_spawn_take(into: *mut u8, len: i64) {
     let taken = HELD.with(|held| held.borrow_mut().take());
     let Some(finished) = taken else { return };

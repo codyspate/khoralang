@@ -193,6 +193,7 @@ unsafe fn is_a_directory(_file: *mut c_void) -> bool {
 /// handle from [`khora_fs_open`]. Both stay valid for the call because their
 /// owner is suspended.
 #[unsafe(no_mangle)]
+// SHARE: writes bytes into a buffer; takes no Khora object.
 pub unsafe extern "C" fn khora_fs_read(
     into: *mut u8,
     size: usize,
@@ -214,6 +215,7 @@ pub unsafe extern "C" fn khora_fs_read(
 /// `from` must be readable for `size * count` bytes and `file` must be a live
 /// handle from [`khora_fs_open`].
 #[unsafe(no_mangle)]
+// SHARE: a C `FILE *` or `DIR *` and byte buffers; takes no Khora object.
 pub unsafe extern "C" fn khora_fs_write(
     from: *const u8,
     size: usize,
@@ -238,6 +240,7 @@ pub unsafe extern "C" fn khora_fs_write(
 /// `file` must be a live handle from [`khora_fs_open`], and must not be closed
 /// twice.
 #[unsafe(no_mangle)]
+// SHARE: a C `FILE *` or `DIR *` and byte buffers; takes no Khora object.
 pub unsafe extern "C" fn khora_fs_close(file: *mut c_void) -> i32 {
     let file = file as usize;
     // SAFETY: the handle belongs to a suspended fiber and is not closed twice
@@ -296,6 +299,7 @@ pub unsafe extern "C" fn khora_fs_rename(from: *const u8, to: *const u8) -> i32 
 /// `path` must be NUL-terminated, `into` writable for `size` bytes, and both
 /// valid for the call -- which they are, their owner being suspended.
 #[unsafe(no_mangle)]
+// SHARE: writes bytes into a buffer; takes no Khora object.
 pub unsafe extern "C" fn khora_fs_read_at(
     path: *const u8,
     offset: i64,
@@ -488,6 +492,7 @@ pub unsafe extern "C" fn khora_fs_dir_open_why(path: *const u8, why: *mut i64) -
 /// `dir` must be a live handle from [`khora_fs_dir_open`], and `into` writable
 /// for `cap` bytes. Both belong to the suspended fiber for the call.
 #[unsafe(no_mangle)]
+// SHARE: writes bytes into a buffer; takes no Khora object.
 pub unsafe extern "C" fn khora_fs_dir_next(dir: *mut c_void, into: *mut u8, cap: usize) -> isize {
     if dir.is_null() || into.is_null() {
         return -1;
@@ -519,6 +524,7 @@ pub unsafe extern "C" fn khora_fs_dir_next(dir: *mut c_void, into: *mut u8, cap:
 /// `dir` must be a live handle from [`khora_fs_dir_open`], and must not be
 /// closed twice.
 #[unsafe(no_mangle)]
+// SHARE: a C `FILE *` or `DIR *` and byte buffers; takes no Khora object.
 pub unsafe extern "C" fn khora_fs_dir_close(dir: *mut c_void) {
     if dir.is_null() {
         return;

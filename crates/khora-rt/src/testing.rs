@@ -349,6 +349,16 @@ pub extern "C" fn khora_test_run() -> i32 {
             let _entered = enter(Fiber::spawned());
             let mut payload: u64 = 0;
             let which = (call)(code.0, &raw mut payload);
+            // **A crossing: an error escaping the block is released by the
+            // runner**, on its own thread and fiber, below. So it is marked
+            // here, before the join publishes it. The runner releases it with
+            // no drop routine, so only the object itself is counted there, and
+            // only it is marked.
+            if which != 0 && which != FAILED_WHICH && which != CANCELED_WHICH {
+                // SAFETY: a raised error is a live Khora object, or null, and
+                // this thread holds the only reference.
+                unsafe { crate::share::khora_share(payload as *mut u8, None) };
+            }
             Tagged { which, payload }
         })
     };

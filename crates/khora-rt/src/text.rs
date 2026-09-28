@@ -167,6 +167,7 @@ pub unsafe extern "C" fn khora_str_eq(
 /// `into` must address `capacity` writable bytes, or be null with a zero
 /// `capacity`.
 #[unsafe(no_mangle)]
+// SHARE: writes bytes into a buffer; takes no Khora object.
 pub unsafe extern "C" fn khora_float_text(value: f64, into: *mut u8, capacity: i64) -> i64 {
     let text = format!("{value}");
     let bytes = text.as_bytes();
@@ -207,6 +208,7 @@ pub unsafe extern "C" fn khora_float_text(value: f64, into: *mut u8, capacity: i
 /// `into` must address `capacity` writable bytes, or be null with a zero
 /// `capacity`.
 #[unsafe(no_mangle)]
+// SHARE: writes bytes into a buffer; takes no Khora object.
 pub unsafe extern "C" fn khora_float_fixed(
     value: f64,
     places: i64,

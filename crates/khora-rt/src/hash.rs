@@ -38,6 +38,7 @@ pub extern "C" fn khora_hash_sha256_length() -> i64 {
 /// `input` must be valid for `length` bytes and `out` for at least
 /// [`khora_hash_sha256_length`] bytes. Both are caller-owned.
 #[unsafe(no_mangle)]
+// SHARE: writes bytes into a buffer; takes no Khora object.
 pub unsafe extern "C" fn khora_hash_sha256(input: *const u8, length: i64, out: *mut u8) {
     if length < 0 || out.is_null() || (input.is_null() && length != 0) {
         return;
@@ -65,6 +66,7 @@ pub unsafe extern "C" fn khora_hash_sha256(input: *const u8, length: i64, out: *
 /// `key` must be valid for `key_length` bytes, `message` for
 /// `message_length`, and `out` for at least [`khora_hash_sha256_length`].
 #[unsafe(no_mangle)]
+// SHARE: writes bytes into a buffer; takes no Khora object.
 pub unsafe extern "C" fn khora_hash_hmac_sha256(
     key: *const u8,
     key_length: i64,
@@ -113,6 +115,7 @@ pub unsafe extern "C" fn khora_hash_hmac_sha256(
 /// `password` must be valid for `password_length` bytes, `salt` for
 /// `salt_length`, and `out` for `out_length`.
 #[unsafe(no_mangle)]
+// SHARE: writes bytes into a buffer; takes no Khora object.
 pub unsafe extern "C" fn khora_hash_pbkdf2_sha256(
     password: *const u8,
     password_length: i64,
