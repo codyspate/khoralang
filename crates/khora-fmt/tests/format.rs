@@ -49,17 +49,43 @@ fn formatting_is_idempotent() {
     }
 }
 
+/// The non-trivia tokens, leaving out a comma that ends a list before its
+/// closing bracket -- the one token the formatter adds. Read from the tree,
+/// because only the tree knows a list's comma from a tuple's, and a tuple's is
+/// never left out.
+fn tokens_but_trailing_list_commas(src: &str) -> Vec<(String, String)> {
+    use khora_syntax::{SyntaxElement, SyntaxKind::*};
+    let tree = khora_syntax::parse(src).syntax();
+    tree.descendants_with_tokens()
+        .filter_map(SyntaxElement::into_token)
+        .filter(|t| !t.kind().is_trivia())
+        .filter(|t| {
+            let list = t.parent().is_some_and(|p| {
+                matches!(p.kind(), PARAM_LIST | ARG_LIST | LIST_EXPR | RECORD_EXPR | RECORD_TYPE | TYPE_ARGS | TYPE_PARAMS)
+            });
+            let mut next = t.next_sibling_or_token();
+            while next.as_ref().is_some_and(|n| n.kind().is_trivia()) {
+                next = next.and_then(|n| n.next_sibling_or_token());
+            }
+            let closes = next.is_some_and(|n| matches!(n.kind(), R_PAREN | R_BRACK | R_BRACE | GT));
+            !(t.kind() == COMMA && list && closes)
+        })
+        .map(|t| (format!("{:?}", t.kind()), t.text().to_string()))
+        .collect()
+}
+
 /// Import lists are reordered by design, so this compares the token multiset
 /// rather than the sequence. `preserves_the_token_sequence` covers order on
-/// input that has no imports.
+/// input that has no imports. The one token added, a list's trailing comma,
+/// is left out on both sides.
 #[test]
 fn formatting_never_loses_a_token() {
     for file in corpus() {
         let src = std::fs::read_to_string(&file).unwrap();
         let out = format(&src).expect("corpus should parse");
 
-        let mut before = tokens(&src);
-        let mut after = tokens(&out);
+        let mut before = tokens_but_trailing_list_commas(&src);
+        let mut after = tokens_but_trailing_list_commas(&out);
         before.sort();
         after.sort();
         assert_eq!(before, after, "{} lost or gained tokens", file.display());
@@ -516,4 +542,100 @@ fn a_value_beginning_on_the_same_line_is_not_indented_again() {
 
     // The inner arms sit one level in from the `match` that owns them, not two.
     assert!(out.contains("    1 => match b {\n      1 => 2,"), "{out}");
+}
+
+// --- trailing commas ---------------------------------------------------------
+
+/// Formats `src`, asserting the output parses and formats to itself.
+fn round_trip(src: &str) -> String {
+    let once = format(src).expect("should parse");
+    let twice = format(&once).expect("formatted output should parse");
+    assert_eq!(once, twice, "not stable under a second pass:\n{once}");
+    once
+}
+
+/// **A list broken across lines ends in a comma, whatever kind of list.**
+/// Adding an element is then a one-line diff, which is the whole reason.
+#[test]
+fn a_broken_list_gets_a_trailing_comma() {
+    let cases = [
+        // parameter list, argument list
+        ("module m;\nfn f(\n  a: Int,\n  b: Int\n) -> Int {\n  g(\n    a,\n    b\n  )\n}\n", ["  b: Int,\n)", "    b,\n  )"].as_slice()),
+        // list
+        ("module m;\nfn f() -> Int {\n  let xs = [\n    1,\n    2\n  ];\n  0\n}\n", &["    2,\n  ]"]),
+        // record literal and record type
+        (
+            "module m;\ntype P = {\n  x: Int,\n  y: Int\n};\nfn f() -> P {\n  {\n    x: 1,\n    y: 2\n  }\n}\n",
+            &["  y: Int,\n}", "    y: 2,\n  }"],
+        ),
+        // type arguments and type parameters
+        ("module m;\ntype Pair<\n  A,\n  B\n> = {\n  a: A,\n};\nfn f(p: Pair<\n  Int,\n  Int\n>) -> Int { 0 }\n", &["B,\n>", "Int,\n"]),
+    ];
+    for (src, expected) in cases {
+        let out = round_trip(src);
+        for want in expected {
+            assert!(out.contains(want), "expected {want:?} in:\n{out}");
+        }
+    }
+}
+
+/// On one line there is nothing to diff, and `f(a, b,)` is noise.
+#[test]
+fn a_list_on_one_line_gets_no_comma() {
+    let src = "module m;\nfn f(a: Int, b: Int) -> Int { g([a, b], { x: a }) }\n";
+    assert_eq!(round_trip(src), src);
+}
+
+/// **`(e,)` is a one-tuple and `(e)` is not**, so a parenthesized expression
+/// broken across lines keeps exactly its tokens, and so does a tuple.
+#[test]
+fn a_parenthesized_group_or_tuple_is_never_given_a_comma() {
+    for src in [
+        "module m;\nfn f(a: Int) -> Int {\n  (\n    a\n  )\n}\n",
+        "module m;\nfn f(a: Int) -> (Int, Int) {\n  (\n    a,\n    a\n  )\n}\n",
+    ] {
+        let out = round_trip(src);
+        assert_eq!(tokens(src), tokens(&out), "the tokens changed:\n{out}");
+    }
+}
+
+/// A row that ends in a tail, `| 'r`, has no last element to follow, and
+/// `| 'r,` does not parse.
+#[test]
+fn a_row_tail_is_never_given_a_comma() {
+    let src = "module m;\nfn f<'r>(x: {\n  a: Int\n  | 'r\n}) -> Int { 0 }\n";
+    let out = round_trip(src);
+    assert_eq!(tokens(src), tokens(&out), "{out}");
+}
+
+/// A comma written after a line comment would be inside the comment, so a
+/// list whose last element has a comment after it is left alone.
+#[test]
+fn a_comment_after_the_last_element_keeps_the_list_as_written() {
+    let src = "module m;\nfn f() -> Int {\n  let xs = [\n    1,\n    2 // two\n  ];\n  0\n}\n";
+    let out = round_trip(src);
+    assert_eq!(tokens(src), tokens(&out), "{out}");
+    assert!(out.contains("2 // two\n"), "{out}");
+}
+
+/// **The only tokens the formatter adds are these commas.** What it writes
+/// is the input's tokens with a comma before some closing brackets, and
+/// nothing else.
+#[test]
+fn trailing_commas_are_the_only_tokens_added() {
+    let src = "module m;\nfn f(\n  a: Int\n) -> List<Int> {\n  [\n    a,\n    (\n      a\n    )\n  ]\n}\n";
+    let out = round_trip(src);
+    let without = |src: &str| {
+        let all = tokens(src);
+        let mut kept = Vec::new();
+        for (i, token) in all.iter().enumerate() {
+            let closes = all.get(i + 1).is_some_and(|next| matches!(next.1.as_str(), ")" | "]" | "}" | ">"));
+            if !(token.1 == "," && closes) {
+                kept.push(token.clone());
+            }
+        }
+        kept
+    };
+    assert_eq!(without(src), without(&out), "{out}");
+    assert_eq!(tokens(&out).len(), tokens(src).len() + 2, "a comma for the parameters and for the list:\n{out}");
 }

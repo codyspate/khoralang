@@ -99,6 +99,8 @@ fn report_call(
                 khora_types::traits::readable_key(key)
             ),
             range: body.range(*arg),
+            // No edit in this change: the message names the label to write.
+            fix: None,
         });
     }
 }

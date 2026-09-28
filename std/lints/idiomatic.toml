@@ -3,10 +3,20 @@
 # Switched on in a project's khora.toml with `[lints.idiomatic]`. Each lint
 # below runs at the level written beside it; `level = "..."` in that table
 # sets all of them at once.
+#
+# Every member is at `warn`: none of them is a mistake, so none stops a build
+# unless the project writes `level = "deny"`. `khora check --fix` rewrites what
+# they report.
 
 [group]
 name = "idiomatic"
 description = "One way to write Khora."
 
 [group.lints]
+bool-comparison = "warn"
+concatenated-string = "warn"
+module-path = "warn"
+needless-return = "warn"
+parenthesized-parameter = "warn"
+subtraction-from-zero = "warn"
 unlabeled-flag = "warn"

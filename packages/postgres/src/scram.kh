@@ -31,13 +31,13 @@ import std::core::{Array, Int, List, Option, Result, String, U8, Vector};
 extern fn khora_hash_sha256_length() -> Int;
 extern fn khora_hash_sha256(input: Ptr, length: Int, out: Ptr) -> ();
 extern fn khora_hash_hmac_sha256(
-  key: Ptr, key_length: Int, message: Ptr, message_length: Int, out: Ptr
+  key: Ptr, key_length: Int, message: Ptr, message_length: Int, out: Ptr,
 ) -> ();
 extern fn khora_hash_pbkdf2_sha256(
   password: Ptr, password_length: Int,
   salt: Ptr, salt_length: Int,
   iterations: Int,
-  out: Ptr, out_length: Int
+  out: Ptr, out_length: Int,
 ) -> U8;
 
 /// How wide every digest in this exchange is.
@@ -214,7 +214,7 @@ pub type ScramError = | Malformed(String) | Rejected(String);
 pub fn finish(
   session: Session,
   server_first: String,
-  password: String
+  password: String,
 ) -> Result<String, ScramError> {
   match field(server_first, "r") {
     Option::None => Result::Err(ScramError::Malformed("the server sent no nonce")),

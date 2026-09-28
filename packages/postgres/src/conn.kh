@@ -190,7 +190,7 @@ pub fn next_message(c: Connection) -> Result<Message, PgError> {
         if read <= 0 {
           c.broken = true;
           answer = Result::Err(PgError::Closed(
-              "the server closed the connection while a reply was expected"
+              "the server closed the connection while a reply was expected",
             ));
           going = false
         } else {
@@ -280,7 +280,7 @@ pub fn open_within(
     let handle = connect_to(host, port);
     if handle == invalid_handle() {
       Result::Err(PgError::Unreachable(
-          "could not reach " + host + ":" + Int::to_string(port)
+          "could not reach " + host + ":" + Int::to_string(port),
         ))
     } else {
       let empty: Array<U8> = Array::new(0, 0);
@@ -321,7 +321,7 @@ fn unanswered(why: PgError, millis: Int, took: Int) -> PgError {
   match why {
     PgError::Closed(said) => if took >= millis {
       PgError::Closed(
-        "the server did not finish the handshake within " + Int::to_string(millis) + " ms"
+        "the server did not finish the handshake within " + Int::to_string(millis) + " ms",
       )
     } else {
       PgError::Closed(said)
@@ -418,7 +418,7 @@ fn authenticate(c: Connection, m: Message, secret: String) -> Result<Bool, PgErr
         "the server asked for MD5 authentication, which this driver does not \
        compute: `ring` does not carry MD5, deliberately. Set this role's \
        password_encryption to `scram-sha-256` and reset its password — that is \
-       the default from PostgreSQL 14 and this driver speaks it"
+       the default from PostgreSQL 14 and this driver speaks it",
       ))
   } else if method == 10 {
     // AuthenticationSASL. The payload lists the mechanisms the server will
@@ -480,7 +480,7 @@ fn authenticate(c: Connection, m: Message, secret: String) -> Result<Bool, PgErr
   } else {
     Result::Err(PgError::Unsupported(
         "the server asked for authentication method " + Int::to_string(method)
-        + ", which this driver does not know"
+        + ", which this driver does not know",
       ))
   }
 }
@@ -618,7 +618,7 @@ pub fn in_transaction(c: Connection) -> Bool {
 /// The answer to any statement on a broken connection.
 fn out_of_step() -> Result<Answer, PgError> {
   Result::Err(PgError::Closed(
-      "an earlier reply on this connection was cut off, so it cannot be used again"
+      "an earlier reply on this connection was cut off, so it cannot be used again",
     ))
 }
 

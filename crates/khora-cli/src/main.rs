@@ -53,6 +53,13 @@ enum Command {
         /// file did it. Only at a workspace root. `docs/roadmap.md` 14.16.
         #[arg(long, value_name = "REV")]
         since: Option<String>,
+        /// Rewrite each finding that carries a fix, then check again.
+        ///
+        /// Only lints the manifest has at `warn` or `deny`, so what is fixed
+        /// is exactly what `khora check` would have reported. Files are
+        /// written in place.
+        #[arg(long)]
+        fix: bool,
     },
     /// Print the token stream.
     Lex { path: PathBuf },
@@ -490,7 +497,7 @@ enum ToolchainCommand {
 fn dispatch() -> Result<ExitCode> {
     let cli = Cli::parse();
     let worked = match cli.command {
-        Command::Check { paths, since } => check(&paths, since.as_deref()),
+        Command::Check { paths, since, fix } => check(&paths, since.as_deref(), fix),
         Command::Fmt { paths, check, since } => fmt(&paths, check, since.as_deref()),
         Command::Lex { path } => lex(&path).map(|()| true),
         Command::Parse { path, no_trivia } => parse_cmd(&path, no_trivia),
@@ -571,12 +578,16 @@ fn dispatch() -> Result<ExitCode> {
 /// resolves one manifest for several programs and finds neither the
 /// dependency nor the reason it was missing. `scripts/baseline.sh` had that
 /// loop written in shell, with a comment explaining the workaround.
-fn check(paths: &[PathBuf], since: Option<&str>) -> Result<bool> {
+fn check(paths: &[PathBuf], since: Option<&str>, fix: bool) -> Result<bool> {
     let paths = &here_if_empty(paths);
     if let Some(members) = workspace_members(paths) {
         let members = narrow(paths, &members, since)?;
         return over_members(&members, "check", |directory| {
-            check_one(std::slice::from_ref(directory))
+            let directory = std::slice::from_ref(directory);
+            if fix {
+                fix_all(directory)?;
+            }
+            check_one(directory)
         });
     }
     if since.is_some() {
@@ -585,7 +596,185 @@ fn check(paths: &[PathBuf], since: Option<&str>) -> Result<bool> {
              Run it where the `[workspace]` table is"
         );
     }
+    if fix {
+        fix_all(paths)?;
+    }
     check_one(paths)
+}
+
+/// Writes every file of a pass, or, on an error before the last rename, none.
+///
+/// **The failure it prevents: a source file cut short.** Writing in place
+/// truncates first, so a full disk or a quota partway through the write
+/// leaves the first part of the file and loses the rest. Here each new text
+/// goes to a temporary file beside its target, which is flushed to disk, and
+/// only when every one is written are they renamed over their targets. A
+/// rename within one directory replaces the file whole or not at all.
+///
+/// A target this process may not write is refused before anything is
+/// written, by opening it for writing (without truncating): a rename would
+/// replace it regardless, since renaming needs only the directory's
+/// permission. The mode bits alone are not the question -- `0464` has write
+/// bits and its owner still may not write it. A symbolic link is resolved, so
+/// its target is replaced and the link kept.
+///
+/// What it costs, and what it does not deliver: the new file gets the old
+/// one's permission bits, not its owner or other metadata. A file with a
+/// second hard link is split: the name `--fix` wrote gets the new text, and
+/// the other name keeps the old. A process killed while staging (Ctrl-C, out
+/// of memory) leaves a `.<name>.khora-fix-<pid>` file beside the target;
+/// its sources are untouched, and the leftover is not a `.kh` file, so it is
+/// never read as source. And the renames are not one step across files: if
+/// one fails after others succeeded, the error names exactly which files
+/// were written and which were not.
+fn write_pass(changed: &[khora_lint::fixing::Changed]) -> std::result::Result<(), String> {
+    let nothing = |cause: String| format!("nothing was written: {cause}");
+    let mut targets = Vec::with_capacity(changed.len());
+    for file in changed {
+        let target = std::fs::canonicalize(&file.path)
+            .map_err(|e| nothing(format!("{}: {e}", file.path.display())))?;
+        let permissions = std::fs::metadata(&target)
+            .map_err(|e| nothing(format!("{}: {e}", file.path.display())))?
+            .permissions();
+        if std::fs::OpenOptions::new().write(true).open(&target).is_err() {
+            return Err(nothing(format!("{} is read-only", file.path.display())));
+        }
+        let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        // Not ending in `.kh`, so one left by a crash is never read as source.
+        let temporary = target.with_file_name(format!(".{name}.khora-fix-{}", std::process::id()));
+        targets.push((file, target, temporary, permissions));
+    }
+
+    let mut written: Vec<&PathBuf> = Vec::new();
+    let staged = targets.iter().try_for_each(|(file, _, temporary, permissions)| {
+        use std::io::Write;
+        written.push(temporary);
+        let stage = || -> std::io::Result<()> {
+            let mut out = std::fs::File::create(temporary)?;
+            out.write_all(file.text.as_bytes())?;
+            out.sync_all()?;
+            std::fs::set_permissions(temporary, permissions.clone())
+        };
+        stage().map_err(|e| format!("{}: {e}", file.path.display()))
+    });
+    if let Err(e) = staged {
+        for temporary in written {
+            let _ = std::fs::remove_file(temporary);
+        }
+        return Err(nothing(e));
+    }
+
+    for (at, (file, target, temporary, _)) in targets.iter().enumerate() {
+        if let Err(e) = std::fs::rename(temporary, target) {
+            for (_, _, rest, _) in &targets[at..] {
+                let _ = std::fs::remove_file(rest);
+            }
+            let done: Vec<String> = targets[..at].iter().map(|(f, ..)| f.path.display().to_string()).collect();
+            let not: Vec<String> = targets[at..].iter().map(|(f, ..)| f.path.display().to_string()).collect();
+            return Err(format!(
+                "writing {} failed ({e}); written: {}; not written: {}",
+                file.path.display(),
+                if done.is_empty() { "none".to_string() } else { done.join(", ") },
+                not.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `khora check --fix`: applies every fix a reported finding carries, then
+/// leaves the checking to [`check_one`], which runs next.
+///
+/// **What is fixed is what `khora check` reports**: the findings come from
+/// [`khora_lint::reported`] under the manifest's levels, so a lint at `allow`
+/// -- the whole `idiomatic` group, unless the project switched it on -- is
+/// never rewritten, and neither is a line a pragma allows.
+///
+/// Only files this command owns, as for lints; `std` and dependencies are
+/// never written. A file with a parse or type error is skipped, because a
+/// fix's safety argument is about a program that compiles.
+///
+/// **In passes, until one changes nothing.** Two fixes on nested ranges are
+/// never applied together (see [`khora_lint::idiomatic::apply`]), so the
+/// inner one waits for the next pass. Bounded, because a fix that undid
+/// another would otherwise loop; a program where that happens is left as the
+/// last pass wrote it, and the check that follows reports what is left.
+///
+/// **Each pass is verified before anything is written**, by
+/// [`khora_lint::fixing::pass`]: a file whose fixed text would not parse, or
+/// a fix that leaves an error anywhere in the compilation, is not written,
+/// and is named here as `not fixed`.
+///
+/// **A file that does not parse stops it**, before any pass: the check behind
+/// each fix counts a file's parse errors and cannot see what a fix does to
+/// the rest of it.
+///
+/// **A pass is written whole or not at all** ([`write_pass`]), because it was
+/// verified as a set: a fix in one file can depend on one in another.
+fn fix_all(paths: &[PathBuf]) -> Result<()> {
+    const PASSES: usize = 8;
+    let files = check_files(paths)?;
+    let levels = lint_levels(paths.first().map(PathBuf::as_path))?;
+    let mut fixed: Vec<(PathBuf, usize)> = Vec::new();
+    let mut refused: Vec<khora_lint::fixing::Refused> = Vec::new();
+    for _ in 0..PASSES {
+        let mut db = KhoraDatabase::new();
+        let mut inputs = Vec::with_capacity(files.len());
+        for path in &files {
+            inputs.push(SourceFile::new(&db, path.clone(), read(path)?));
+        }
+        SourceRoot::new(&db, inputs.clone());
+        let unparsed: Vec<String> = inputs
+            .iter()
+            .filter(|file| !khora_db::parse(&db, **file).errors().is_empty())
+            .map(|file| file.path(&db).display().to_string())
+            .collect();
+        if !unparsed.is_empty() {
+            println!("not fixed: {} does not parse; fix the parse errors first", unparsed.join(", "));
+            break;
+        }
+
+        let offer = |db: &KhoraDatabase, file: SourceFile| {
+            khora_lint::reported(db, file, &levels)
+                .into_iter()
+                .filter_map(|(finding, _)| finding.fix.map(|fix| (finding.lint, fix)))
+                .collect()
+        };
+        let pass = khora_lint::fixing::pass(&mut db, &inputs, &|path| owned(paths, path), &offer);
+        for why in pass.refused {
+            if !refused.iter().any(|seen| seen.path == why.path && seen.lints == why.lints) {
+                refused.push(why);
+            }
+        }
+        if pass.changed.is_empty() {
+            break;
+        }
+        if let Err(failed) = write_pass(&pass.changed) {
+            let earlier = if fixed.is_empty() {
+                String::new()
+            } else {
+                let names: Vec<String> = fixed.iter().map(|(path, _)| path.display().to_string()).collect();
+                format!(" (an earlier pass wrote {})", names.join(", "))
+            };
+            anyhow::bail!("{failed}{earlier}");
+        }
+        for changed in pass.changed {
+            match fixed.iter_mut().find(|(seen, _)| *seen == changed.path) {
+                Some((_, count)) => *count += changed.fixes.len(),
+                None => fixed.push((changed.path, changed.fixes.len())),
+            }
+        }
+    }
+    if fixed.is_empty() {
+        println!("nothing to fix");
+    }
+    for (path, count) in &fixed {
+        println!("fixed {}: {count} fix(es)", path.display());
+    }
+    for why in &refused {
+        println!("not fixed {} ({}): {}", why.path.display(), why.lints.join(", "), why.why);
+    }
+    Ok(())
 }
 
 /// The members a `--since` diff can reach, reporting what it left out.
@@ -720,9 +909,10 @@ fn over_members(
     Ok(all_clean)
 }
 
-fn check_one(paths: &[PathBuf]) -> Result<bool> {
-    report_manifest_warnings(paths.first().map(PathBuf::as_path))?;
-
+/// The files `khora check` compiles: the sources, and the programs in
+/// `src/bin`. One function, so `--fix` rewrites exactly the files the check
+/// that follows it reads.
+fn check_files(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut files = collect_sources(paths)?;
 
     // **And the programs in `src/bin`, which the walk leaves out.**
@@ -750,6 +940,13 @@ fn check_one(paths: &[PathBuf]) -> Result<bool> {
     if files.is_empty() {
         anyhow::bail!("no `.kh` files found");
     }
+    Ok(files)
+}
+
+fn check_one(paths: &[PathBuf]) -> Result<bool> {
+    report_manifest_warnings(paths.first().map(PathBuf::as_path))?;
+
+    let files = check_files(paths)?;
 
     // Through the query database even for a one-shot run, so there is no
     // second code path to drift from the one the language server uses.

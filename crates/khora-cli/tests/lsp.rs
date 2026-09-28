@@ -189,7 +189,7 @@ fn it_advertises_what_the_extension_relies_on() {
     // thrown away.
     assert_eq!(
         caps.pointer("/codeActionProvider/codeActionKinds"),
-        Some(&serde_json::json!(["quickfix", "refactor.rewrite", "refactor.extract"])),
+        Some(&serde_json::json!(["quickfix", "refactor.rewrite", "refactor.extract", "source.fixAll.khora"])),
         "{caps}"
     );
     assert!(caps.get("signatureHelpProvider").is_some(), "{caps}");
@@ -244,7 +244,7 @@ fn the_interpolation_assist_writes_a_program_that_prints_the_same() {
     for (chain, why) in chains {
         let before = format!(
             "module main;\nimport std::core::{{print}};\n\n\
-             pub fn main() -> Int {{\n  let a = \"A\";\n  print({chain});\n  0\n}}\n"
+             pub fn main() -> Int {{\n  let a: String = \"A\";\n  print({chain});\n  0\n}}\n"
         );
         let tmp = project(&[("src/main.kh", &before)]);
         let file = tmp.path().join("src/main.kh");

@@ -114,7 +114,7 @@ fn initialize_answers_with_what_the_server_can_do() {
     // assists are then computed and thrown away.
     assert_eq!(
         result.pointer("/capabilities/codeActionProvider/codeActionKinds"),
-        Some(&json!(["quickfix", "refactor.rewrite", "refactor.extract"])),
+        Some(&json!(["quickfix", "refactor.rewrite", "refactor.extract", "source.fixAll.khora"])),
         "{result}"
     );
 }
@@ -3102,6 +3102,32 @@ fn a_dollar_that_meets_a_brace_across_a_join_is_escaped() {
     // gains one too; the last is a dollar before a real hole, left alone.
     assert!(after.contains(r#""\${a}\\\${b}$${a}""#), "{after}");
     assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// **Not offered where `khora check --fix` refuses the same rewrite.** In
+/// `t + "!"` with `t` an untyped `let`, or `make() + "!"` with a generic
+/// `make`, the `+` may be the only thing that makes the piece a `String`;
+/// `"${t}!"` does not, and where nothing else decides it the program checks
+/// and does not build. The rule is `khora-lint`'s, shared.
+#[test]
+fn the_interpolation_assist_is_not_offered_where_fix_refuses() {
+    for (body, column) in [
+        ("fn go(s: String) -> Int {\n  let shout = fn s => {\n    let t = s;\n    t + \"!\"\n  };\n  0\n}\n", 6),
+        ("fn make<A>() -> A { make() }\n\nfn go() -> Int {\n  if false { make() + \"!\"; }\n  0\n}\n", 17),
+    ] {
+        let text = format!("module main;\n\n{body}");
+        let line = text.lines().position(|l| l.contains("+ \"!\"")).expect("the chain") as u32;
+        let offered = assists_for(&text, line, column, column);
+        assert!(
+            !offered.iter().any(|(title, _)| title.contains("interpolated")),
+            "{text}\n{offered:?}"
+        );
+    }
+    // The same place with the type written is offered, so the cursor above is
+    // on the chain and the refusal is what removed it.
+    let typed = "module main;\n\nfn go(s: String) -> Int {\n  let shout = fn s => {\n    let t: String = s;\n    t + \"!\"\n  };\n  0\n}\n";
+    let offered = assists_for(typed, 5, 6, 6);
+    assert!(offered.iter().any(|(title, _)| title.contains("interpolated")), "{offered:?}");
 }
 
 /// **Arithmetic is not a message.** A `+` chain with no string literal in it is
@@ -6323,4 +6349,155 @@ fn a_pinned_project_is_not_told_anything() {
             .any(|reply| reply.get("method").and_then(Value::as_str) == Some("window/showMessage")),
         "{replies:?}"
     );
+}
+
+// --- source.fixAll ---------------------------------------------------------
+
+/// A `source.fixAll.khora` request, the one an editor sends on save.
+fn fix_all(path: &Path, id: i64) -> Value {
+    json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/codeAction",
+        "params": {
+            "textDocument": { "uri": url_of(path) },
+            "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 0 } },
+            "context": { "diagnostics": [], "only": ["source.fixAll"] }
+        }
+    })
+}
+
+/// `text` with the edits of the one action in `actions` applied.
+fn with_edits(text: &str, action: &Value) -> String {
+    let edits = action
+        .pointer("/edit/changes")
+        .and_then(Value::as_object)
+        .and_then(|c| c.values().next())
+        .and_then(Value::as_array)
+        .expect("edits")
+        .clone();
+    let offset = |pos: &Value| {
+        let line = pos.get("line").and_then(Value::as_u64).unwrap() as usize;
+        let character = pos.get("character").and_then(Value::as_u64).unwrap() as usize;
+        text.split_inclusive('\n').take(line).map(str::len).sum::<usize>() + character
+    };
+    let mut spans: Vec<(usize, usize, String)> = edits
+        .iter()
+        .map(|e| {
+            (
+                offset(e.pointer("/range/start").unwrap()),
+                offset(e.pointer("/range/end").unwrap()),
+                e.get("newText").and_then(Value::as_str).unwrap().to_string(),
+            )
+        })
+        .collect();
+    spans.sort_by_key(|span| std::cmp::Reverse(span.0));
+    let mut out = text.to_string();
+    for (start, end, new) in spans {
+        out.replace_range(start..end, &new);
+    }
+    out
+}
+
+const IDIOMS: &str = "module app::main;\n\nfn f(x: String, b: Bool) -> String {\n  let y = \"a \" + x + \"!\";\n  let n = 0 - 1;\n  if b == false { y } else { \"${n}\" }\n}\n";
+
+/// **"Apply idiomatic fixes", under the manifest's levels.** With the group
+/// on, one action rewrites every finding; with it off, there is nothing to
+/// offer; and a lint the manifest allows is left as written.
+#[test]
+fn fix_all_applies_what_the_manifest_reports() {
+    for (lints, expected) in [
+        ("[lints.idiomatic]\n", Some("  let y = \"a ${x}!\";\n  let n = -1;\n  if !b {")),
+        ("", None),
+        ("[lints]\nconcatenated-string = \"allow\"\n\n[lints.idiomatic]\n", Some("  let y = \"a \" + x + \"!\";\n  let n = -1;\n  if !b {")),
+    ] {
+        let w = workspace(&[
+            ("khora.toml", &format!("[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n{lints}")),
+            ("src/main.kh", IDIOMS),
+        ]);
+        let file = w.root.join("src/main.kh");
+        let replies = session(&[initialize(&w.root), did_open(&file, IDIOMS), fix_all(&file, 2), exit()]);
+        let actions = result_of(&replies, 2);
+        let list = actions.as_array().expect("a list");
+        match expected {
+            Some(expected) => {
+                assert_eq!(list.len(), 1, "{lints}: {actions}");
+                assert_eq!(list[0].get("kind"), Some(&json!("source.fixAll.khora")), "{actions}");
+                assert_eq!(list[0].get("title"), Some(&json!("Apply idiomatic fixes")), "{actions}");
+                let out = with_edits(IDIOMS, &list[0]);
+                assert!(out.contains(expected), "{lints}:\n{out}");
+            }
+            None => assert!(list.is_empty(), "{lints}: nothing is reported, so nothing is fixed: {actions}"),
+        }
+    }
+}
+
+/// A request with no `only` is the lightbulb at the cursor, and a file-wide
+/// rewrite is not offered there.
+#[test]
+fn fix_all_is_not_offered_unasked() {
+    let w = workspace(&[
+        ("khora.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[lints.idiomatic]\n"),
+        ("src/main.kh", IDIOMS),
+    ]);
+    let file = w.root.join("src/main.kh");
+    let replies = session(&[initialize(&w.root), did_open(&file, IDIOMS), code_action(&file, vec![], 2), exit()]);
+    let actions = result_of(&replies, 2);
+    assert!(
+        !actions.as_array().expect("a list").iter().any(|a| a.get("kind") == Some(&json!("source.fixAll.khora"))),
+        "{actions}"
+    );
+}
+
+/// **A fix that would break another file is not offered.** `src/main.kh`'s
+/// `module main;` has a `module-path` fix, and `src/main_test.kh` imports
+/// `main`: renaming it would leave the test file failing to compile. The
+/// header is left alone, and the action still makes the file's other fix.
+#[test]
+fn fix_all_does_not_break_a_file_that_imports_this_one() {
+    let main = "module main;\n\npub fn helper() -> Int { 0 - 1 }\n";
+    let importer = "module app::main_test;\n\nimport main::{helper};\n\nfn g() -> Int { helper() }\n";
+    let w = workspace(&[
+        ("khora.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[lints.idiomatic]\n"),
+        ("src/main.kh", main),
+        ("src/main_test.kh", importer),
+    ]);
+    let file = w.root.join("src/main.kh");
+    let other = w.root.join("src/main_test.kh");
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&other, importer),
+        did_open(&file, main),
+        fix_all(&file, 2),
+        exit(),
+    ]);
+    let actions = result_of(&replies, 2);
+    let list = actions.as_array().expect("a list");
+    assert_eq!(list.len(), 1, "{actions}");
+    let out = with_edits(main, &list[0]);
+    assert!(out.starts_with("module main;"), "the importer would break:\n{out}");
+    assert!(out.contains("{ -1 }"), "the other fix is still made:\n{out}");
+}
+
+/// **Nothing is offered while any open buffer does not parse**, as `khora
+/// check --fix` refuses the pass: the check behind each fix cannot see what a
+/// fix does to a file it cannot parse.
+#[test]
+fn fix_all_waits_while_another_buffer_does_not_parse() {
+    let main = "module app::main;\n\npub fn f() -> Int { 0 - 1 }\n";
+    let broken = "module app::broken;\n\npub fn g( -> Int { 1 }\n";
+    let w = workspace(&[
+        ("khora.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[lints.idiomatic]\n"),
+        ("src/main.kh", main),
+        ("src/broken.kh", broken),
+    ]);
+    let file = w.root.join("src/main.kh");
+    let other = w.root.join("src/broken.kh");
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&other, broken),
+        did_open(&file, main),
+        fix_all(&file, 2),
+        exit(),
+    ]);
+    let actions = result_of(&replies, 2);
+    assert!(actions.as_array().expect("a list").is_empty(), "{actions}");
 }

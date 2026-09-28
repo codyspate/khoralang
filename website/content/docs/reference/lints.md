@@ -4,17 +4,24 @@ sidebar:
   order: 21
 ---
 
-`khora check` runs fourteen lints alongside type checking. They are part of the compiler rather than a separate tool, so the editor underlines what the command line reports and there is no second configuration to keep in step.
+`khora check` runs twenty lints alongside type checking. They are part of the compiler rather than a separate tool, so the editor underlines what the command line reports and there is no second configuration to keep in step.
 
 ## The lints
 
 | Name | Default | What it finds |
 | --- | --- | --- |
+| `bool-comparison` | `allow` | `b == true` or `b == false`, which are `b` and `!b`. In the `idiomatic` group. |
+| `concatenated-string` | `allow` | `"a " + x + "!"`, which is `"a ${x}!"`. In the `idiomatic` group. |
 | `dangling-expression` | `warn` | A statement that computes something and does nothing with it. |
 | `discarded-result` | `warn` | A statement that produces a `Result` and drops it on the floor. |
 | `inconsistent-constructor` | `warn` | A constructor whose name disagrees with what it takes — `new`, `empty`, `root` and `of` follow a rule `std` keeps. |
 | `misplaced-main` | `warn` | A `main` in a file that is not an entry point. |
+| `module-path` | `allow` | `module main;` in a package, where `khora new` writes `module <package>::main;`. In the `idiomatic` group. |
+| `needless-return` | `allow` | `return e;` as a function's last statement, where the tail `e` says it. In the `idiomatic` group. |
+| `nested-verdict` | `warn` | A `Result` handed to something that decides on the outer tag alone, so the inner one's failure passes as success. |
+| `parenthesized-parameter` | `allow` | `fn (x) =>` with one untyped parameter, which is `fn x =>`. In the `idiomatic` group. |
 | `reference-cycle` | `warn` | A cycle that reference counting cannot collect. |
+| `subtraction-from-zero` | `allow` | `0 - 1` on `Int` literals, which is `-1`. In the `idiomatic` group. |
 | `undocumented-export` | `allow` | A `pub` item nobody described in one line. |
 | `unknown-allow` | `warn` | A `// @klint allow` naming something that is not a lint. |
 | `unlabeled-flag` | `allow` | A `true` or `false` passed without a label to a parameter declared `Bool` that is not the first. In the `idiomatic` group. |
@@ -155,11 +162,15 @@ Both kinds are used the same way. The rules for both:
 
 | Group | What it holds |
 | --- | --- |
-| `idiomatic` | One way to write Khora. It holds `unlabeled-flag`, at `warn`. |
+| `idiomatic` | One way to write Khora: `bool-comparison`, `concatenated-string`, `module-path`, `needless-return`, `parenthesized-parameter`, `subtraction-from-zero` and `unlabeled-flag`, each at `warn`. |
+
+None of the `idiomatic` lints finds a mistake. Each finds correct code written in a second form where Khora has a first one, so each is `allow` until the group is switched on. `level = "deny"` makes the first form the only one a build accepts, and `khora check --fix` rewrites the rest, except `unlabeled-flag`, which is reported with no fix: which label to write is the reader's call.
 
 A `// @klint allow` names one lint. Naming a group there is reported by `unknown-allow`, which says it is a group and lists its lints.
 
 ## The lints that are off
+
+Two lints are off by default for reasons of their own, below. The seven `idiomatic` lints are off too, until the group is switched on; see [Groups](#groups). `unlabeled-flag` is one of them, and why it is off is below as well.
 
 **`undocumented-export`** is off for the reason Rust's `missing_docs` is: a young package gets forty warnings on its first build, and the answer to forty warnings is not forty doc comments. Switch it on when a package decides its surface is a promise. This repository sets it to `deny`, because `khora doc` regenerates the reference from `///` comments and the gate fails on a stale page — so a *documented* export cannot drift, and nothing else checked that an export was documented at all.
 
@@ -189,6 +200,33 @@ impl Codec for IntCodec {
   fn encode(self, value: Int) -> String { Int::to_string(value) }
 }
 ```
+
+## Fixing what they find
+
+```sh
+khora check --fix
+```
+
+rewrites every finding that carries a fix, in place, then checks again. It prints each file it changed and how many fixes it made, or `nothing to fix`.
+
+It fixes exactly what `khora check` reports: only lints at `warn` or `deny` under the manifest, never a line a `// @klint allow` covers, and only the package's own files, never the standard library or a dependency. A file with a parse or type error is left alone. Two fixes where one sits inside the other are made one after the other, so `--fix` runs until nothing is left to fix.
+
+Before it writes anything, `--fix` checks the fixed program: a fix that would leave a file that does not parse, or an error anywhere in the package, is not made. It prints each one as `not fixed`, with the lint and the file it would have broken, and the finding stays for you to rewrite by hand. If any file in the package does not parse, nothing is fixed until it does: `--fix` says which file, and to fix the parse errors first.
+
+Each pass is written whole or not at all. The new text of every file goes to a temporary file beside it, and only when all of them are written are they moved into place, so a full disk or a file you may not write leaves every file as it was, and `--fix` says that nothing was written. A file with a second hard link is split: the name `--fix` wrote gets the new text, and the other name keeps the old. If `--fix` is killed while it writes, your sources are untouched, and a `.<name>.khora-fix-<number>` file may be left beside one of them; it is not read as source, and can be deleted.
+
+The lints with a fix are the `idiomatic` group's. Each is made only where the rewritten program means the same thing, and where it would not, the finding is not made or is made without a fix:
+
+| Lint | Rewrite | Left alone |
+| --- | --- | --- |
+| `concatenated-string` | `"a " + x + "!"` becomes `"a ${x}!"`. A `$` that meets a `{` across a join is written `\$`, so `"$" + "{a}"` still prints `${a}`. | A chain across lines; a piece that is already interpolated; a backtick string; a character literal inside a piece; a piece holding an interpolated string; a comment inside the chain. Reported with no fix when a piece holds a call, or uses a local with no type written on it -- a `let` without `: T`, a binding in a `match`, `for` or `catch` pattern, a lambda parameter -- because `s + "!"` may be what makes `s` a `String`, and `todo() + "!"` what makes `todo()` one. |
+| `needless-return` | `return e;` in last place becomes `e`; a last `return;` is deleted. | A `return` inside a lambda or a nested block, which is an early exit. Reported with no fix when the statement before it has no `;`, when `e` starts with `{`, or when there is a comment in the statement. |
+| `subtraction-from-zero` | `0 - 1` becomes `-1`. | `Float`, because `0.0 - 0.0` is `+0.0` and `-0.0` is not; the fixed-width integers; `0 - x`, which differs from `-x` when `x` is the smallest `Int`. Reported with no fix on a line that starts right after a `}` with no `;`, because `-1` there subtracts from the value before it. |
+| `parenthesized-parameter` | `fn (x) =>` becomes `fn x =>`. | A typed parameter, which needs its brackets; more than one parameter. |
+| `bool-comparison` | `b == true` becomes `b`; `b == false` becomes `!b`, or `!(a < c)` for an operator. | `!=`. `b == true` is reported with no fix when `b` holds a call or uses a local with no type written on it, because the `==` may be what makes it a `Bool`; `b == false` is still fixed there, because `!b` says the same. Reported with no fix when the result would start with `(` on a line right after a `}` with no `;`, because `(c)` there calls the value before it. |
+| `module-path` | `module main;` becomes `module <package>::main;` in `src/main.kh`, and `module <package>::<name>;` in `src/bin/<name>.kh`. | Any other file is reported without a fix, because renaming a module breaks every file that imports it; so is an entry file that another file imports, such as a test file with `import main::{helper}`. |
+
+The language server offers the same fixes as one code action, "Apply idiomatic fixes", of kind `source.fixAll.khora`. An editor runs it on save when asked for `source.fixAll`; it is not offered in the lightbulb menu. It fixes what `khora check --fix` would, one pass at a time.
 
 ## Where they run
 

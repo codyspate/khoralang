@@ -41,6 +41,13 @@ pub fn assists(tree: &SyntaxNode, text: &str, selection: TextRange) -> Vec<Assis
 /// Refused when a piece is itself a string containing `${`, because the result
 /// would nest a hole inside a hole and this is not the thing to decide that.
 ///
+/// **Refused where `khora check --fix` refuses the same rewrite**: a piece that
+/// holds a call or a local nobody wrote a type for
+/// ([`khora_lint::idiomatic::uses_an_untyped_local`]). There the `+` may be
+/// the only thing that makes the piece a `String`, and `"${t}!"` does not, so
+/// in a closure nobody calls the rewritten program checks and does not build.
+/// One rule in one place, so the assist and the lint cannot disagree.
+///
 /// **A `$` that meets a `{` across a join is escaped.** `"$" + "{a}"` prints
 /// `${a}`, because neither literal holds a hole; written back as one literal
 /// with nothing done, it is `"${a}"`, which prints the value of `a`. So a
@@ -80,6 +87,9 @@ fn to_interpolation(tree: &SyntaxNode, text: &str, selection: TextRange) -> Opti
             }
             built.push_str(inner);
         } else {
+            if khora_lint::idiomatic::uses_an_untyped_local(piece) {
+                return None;
+            }
             // A hole holds an expression, and the parser reads to the matching
             // brace, so nothing here has to be parenthesized.
             built.push_str(&format!("${{{trimmed}}}"));

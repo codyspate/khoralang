@@ -106,6 +106,8 @@ Khora has one canonical formatter:
 khora fmt .
 ```
 
+It keeps the line breaks you chose and normalizes everything else: indentation, spacing, sorted import lists, and a comma after the last element of any list broken across lines, so adding an element changes one line. A tuple or a parenthesized expression never gets one, because `(e,)` is a one-tuple. The formatter changes no other token.
+
 In CI, check formatting without changing files:
 
 ```bash

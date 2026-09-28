@@ -1272,7 +1272,7 @@ impl Router {
     router: Router<'er>,
     method: Method,
     route: String,
-    handler: SharedFn<Request, Response, 'er>
+    handler: SharedFn<Request, Response, 'er>,
   ) -> Router<'er> {
     {
       routes: List::Cons({ method: method, pattern: route, handler: handler }, router.routes),
@@ -1284,7 +1284,7 @@ impl Router {
   pub fn get<'er>(
     router: Router<'er>,
     route: String,
-    handler: SharedFn<Request, Response, 'er>
+    handler: SharedFn<Request, Response, 'er>,
   ) -> Router<'er> {
     Router::on(router, Method::Get, route, handler)
   }
@@ -1293,7 +1293,7 @@ impl Router {
   pub fn post<'er>(
     router: Router<'er>,
     route: String,
-    handler: SharedFn<Request, Response, 'er>
+    handler: SharedFn<Request, Response, 'er>,
   ) -> Router<'er> {
     Router::on(router, Method::Post, route, handler)
   }
@@ -1302,7 +1302,7 @@ impl Router {
   pub fn put<'er>(
     router: Router<'er>,
     route: String,
-    handler: SharedFn<Request, Response, 'er>
+    handler: SharedFn<Request, Response, 'er>,
   ) -> Router<'er> {
     Router::on(router, Method::Put, route, handler)
   }
@@ -1311,7 +1311,7 @@ impl Router {
   pub fn patch<'er>(
     router: Router<'er>,
     route: String,
-    handler: SharedFn<Request, Response, 'er>
+    handler: SharedFn<Request, Response, 'er>,
   ) -> Router<'er> {
     Router::on(router, Method::Patch, route, handler)
   }
@@ -1323,7 +1323,7 @@ impl Router {
   pub fn delete<'er>(
     router: Router<'er>,
     route: String,
-    handler: SharedFn<Request, Response, 'er>
+    handler: SharedFn<Request, Response, 'er>,
   ) -> Router<'er> {
     Router::on(router, Method::Delete, route, handler)
   }
@@ -1343,7 +1343,7 @@ impl Router {
   pub fn head<'er>(
     router: Router<'er>,
     route: String,
-    handler: SharedFn<Request, Response, 'er>
+    handler: SharedFn<Request, Response, 'er>,
   ) -> Router<'er> {
     Router::on(router, Method::Head, route, handler)
   }
@@ -1363,7 +1363,7 @@ impl Router {
   pub fn options<'er>(
     router: Router<'er>,
     route: String,
-    handler: SharedFn<Request, Response, 'er>
+    handler: SharedFn<Request, Response, 'er>,
   ) -> Router<'er> {
     Router::on(router, Method::Options, route, handler)
   }
@@ -2219,7 +2219,7 @@ fn tls_reason(why: TlsError) -> String {
 
 /// Write the request, read the answer.
 fn converse(
-  transport: Transport, call: Call, url: Url, limit: Int
+  transport: Transport, call: Call, url: Url, limit: Int,
 ) -> Result<Answer, CallError> {
   if transport.transmit(render(call, url)) < 0 {
     Result::Err(CallError::Closed("the request could not be sent"))

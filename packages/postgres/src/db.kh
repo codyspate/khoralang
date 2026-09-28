@@ -233,7 +233,7 @@ fn answer(c: Connection, work: Work) -> Reply {
       if c.depth > 1 {
         match statement(c, "ROLLBACK") {
           Result::Ok(_) => Reply::Finished(Result::Err(DbError::RolledBack(
-                "the transaction was rolled back instead of committed, because a savepoint another fiber opened on this connection was still open"
+                "the transaction was rolled back instead of committed, because a savepoint another fiber opened on this connection was still open",
               ))),
           Result::Err(why) => Reply::Finished(Result::Err(why)),
         }
@@ -471,7 +471,7 @@ fn commit(c: Connection) -> Result<(), DbError> {
       } else {
         Result::Err(DbError::RolledBack(
             "the server ended the transaction with " + answer.tag
-            + " instead of committing it, because a statement in it failed"
+            + " instead of committing it, because a statement in it failed",
           ))
       },
     Result::Err(why) => Result::Err(PgError::to_db(why)),

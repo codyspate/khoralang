@@ -488,6 +488,7 @@ impl Server {
                             lsp_types::CodeActionKind::QUICKFIX,
                             lsp_types::CodeActionKind::REFACTOR_REWRITE,
                             lsp_types::CodeActionKind::REFACTOR_EXTRACT,
+                            lsp_types::CodeActionKind::new(FIX_ALL),
                         ]),
                         resolve_provider: Some(false),
                         ..Default::default()
@@ -1186,6 +1187,15 @@ impl Server {
                 }
             }
         }
+        // **Only when asked for by name.** A source action applies to the whole
+        // file, and an editor that sent no `only` is filling the lightbulb at
+        // the cursor, where a file-wide rewrite is not what anybody reached
+        // for. Editors ask for it on save, as `source.fixAll`.
+        if wanted.is_some() && asked_for(FIX_ALL) {
+            if let Some(action) = self.fix_all(file, &url, index) {
+                out.push(action);
+            }
+        }
         if !asked_for("quickfix") {
             return Some(Value::Array(out));
         }
@@ -1238,6 +1248,71 @@ impl Server {
             }
         }
         Some(Value::Array(out))
+    }
+
+    /// "Apply idiomatic fixes": every fix a reported finding in `file` carries,
+    /// as one edit, or `None` when there is nothing to fix.
+    ///
+    /// **The same findings `khora check --fix` applies**, from
+    /// [`khora_lint::reported`] under this package's levels, so a lint at
+    /// `allow` is never rewritten in the editor either. A file with a parse or
+    /// type error gets nothing, as it does there, and neither does any file
+    /// while another open buffer does not parse: the check behind each fix
+    /// cannot see what a fix does to a file it cannot parse.
+    ///
+    /// **Verified the way `khora check --fix` verifies**, by
+    /// [`khora_lint::fixing::pass`]: a fix that would leave the file
+    /// unparseable, or an error anywhere in the open compilation, is not
+    /// offered.
+    ///
+    /// What it costs: one pass, so a fix that overlapped one applied here
+    /// waits for the next save. And the pass runs on a fresh copy of every
+    /// open file, `std` included, type-checked twice -- a second or so on a
+    /// package, paid only when the editor asks, which is on save.
+    fn fix_all(&self, file: SourceFile, url: &Url, index: &LineIndex) -> Option<Value> {
+        if !khora_db::parse(&self.db, file).errors().is_empty()
+            || !khora_types::diagnostics(&self.db, file).is_empty()
+        {
+            return None;
+        }
+        let mut copy = KhoraDatabase::new();
+        let files: Vec<SourceFile> = self
+            .files
+            .iter()
+            .map(|(path, open)| SourceFile::new(&copy, path.clone(), open.text(&self.db).to_string()))
+            .collect();
+        SourceRoot::new(&copy, files.clone());
+        if files.iter().any(|open| !khora_db::parse(&copy, *open).errors().is_empty()) {
+            return None;
+        }
+        let this = file.path(&self.db).clone();
+        let offer = |db: &KhoraDatabase, file: SourceFile| {
+            khora_lint::reported(db, file, &self.levels)
+                .into_iter()
+                .filter_map(|(finding, _)| finding.fix.map(|fix| (finding.lint, fix)))
+                .collect()
+        };
+        let pass = khora_lint::fixing::pass(&mut copy, &files, &|path| path == this, &offer);
+        let changed = pass.changed.into_iter().find(|changed| changed.path == this)?;
+        let edits: Vec<Value> = changed
+            .fixes
+            .iter()
+            .flat_map(|fix| fix.edits.iter())
+            .map(|edit| {
+                json!({
+                    "range": Range {
+                        start: index.position(edit.range.start(), self.encoding),
+                        end: index.position(edit.range.end(), self.encoding),
+                    },
+                    "newText": edit.replacement,
+                })
+            })
+            .collect();
+        Some(json!({
+            "title": "Apply idiomatic fixes",
+            "kind": FIX_ALL,
+            "edit": { "changes": { url.as_str(): edits } },
+        }))
     }
 
     /// The imports that would bring a diagnostic's unresolved names into scope.
@@ -1843,6 +1918,10 @@ fn fmt_options(parsed: &khora_manifest::Parsed) -> khora_fmt::Options {
         },
     }
 }
+
+/// The code action kind of "Apply idiomatic fixes": `source.fixAll`, which
+/// editors run on save, with the language's name after it as the LSP asks.
+const FIX_ALL: &str = "source.fixAll.khora";
 
 /// The lint levels for a loaded manifest, or for none.
 fn lint_levels(

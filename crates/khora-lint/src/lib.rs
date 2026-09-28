@@ -39,11 +39,17 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod allow;
 mod exported;
+pub mod fixing;
 pub mod groups;
 mod unlabeled_flag;
+pub mod idiomatic;
 
 pub use crate::allow::MARKER;
 pub use crate::groups::{level, Levels};
+pub use crate::idiomatic::{
+    BOOL_COMPARISON, CONCATENATED_STRING, MODULE_PATH, NEEDLESS_RETURN, PARENTHESIZED_PARAMETER,
+    SUBTRACTION_FROM_ZERO,
+};
 pub use crate::unlabeled_flag::UNLABELED_FLAG;
 
 use khora_db::{Db, SourceFile};
@@ -60,17 +66,29 @@ pub struct Finding {
     pub message: String,
     /// Where in the file to point.
     pub range: TextRange,
+    /// The edit that writes it the other way, where there is exactly one.
+    ///
+    /// `None` for every lint outside the `idiomatic` group: each of those
+    /// flags something that may be a mistake, and which way to resolve it is
+    /// the reader's call.
+    pub fix: Option<idiomatic::Fix>,
 }
 
 /// Every lint's name, so that a manifest naming one that does not exist can be
 /// told what does.
 pub const LINTS: &[&str] = &[
+    BOOL_COMPARISON,
+    CONCATENATED_STRING,
     DANGLING_EXPRESSION,
     DISCARDED_RESULT,
     INCONSISTENT_CONSTRUCTOR,
     MISPLACED_MAIN,
+    MODULE_PATH,
+    NEEDLESS_RETURN,
     NESTED_VERDICT,
+    PARENTHESIZED_PARAMETER,
     REFERENCE_CYCLE,
+    SUBTRACTION_FROM_ZERO,
     UNDOCUMENTED_EXPORT,
     UNKNOWN_ALLOW,
     UNLABELED_FLAG,
@@ -150,12 +168,14 @@ pub const USELESS_ALLOW: &str = "useless-allow";
 /// How loud a lint is when neither the manifest nor an enabled group says:
 /// step 5 of the precedence in [`groups`].
 ///
-/// Warn for everything except [`USELESS_ALLOW`], [`UNDOCUMENTED_EXPORT`] and
-/// [`UNLABELED_FLAG`], for the reasons on them. Ask [`level`] rather than
-/// this for a lint about to be reported; this is only the last step of that
-/// answer.
+/// Warn for everything except [`USELESS_ALLOW`] and [`UNDOCUMENTED_EXPORT`],
+/// for the reasons on them, and the `idiomatic` group's lints. Those flag code
+/// that is correct, so they say nothing until a project switches the group on;
+/// their level inside it is in `std/lints/idiomatic.toml`. Ask [`level`]
+/// rather than this for a lint about to be reported; this is only the last
+/// step of that answer.
 pub fn default_level(lint: &str) -> khora_manifest::LintLevel {
-    if lint == USELESS_ALLOW || lint == UNDOCUMENTED_EXPORT || lint == UNLABELED_FLAG {
+    if lint == USELESS_ALLOW || lint == UNDOCUMENTED_EXPORT || idiomatic::ALL.contains(&lint) {
         khora_manifest::LintLevel::Allow
     } else {
         khora_manifest::LintLevel::Warn
@@ -189,7 +209,9 @@ pub const NESTED_VERDICT: &str = "nested-verdict";
 pub fn findings(db: &dyn Db, file: SourceFile) -> Vec<Finding> {
     let mut out = Vec::new();
     let checked = khora_types::checked(db, file);
-    for (name, body) in khora_hir::body::bodies(db, file) {
+    let bodies = khora_hir::body::bodies(db, file);
+    let mut typed = Vec::new();
+    for (name, body) in bodies {
         dangling_expressions(body, &mut out);
         // Paired by name, which is how `Checked` keys them. A body with no
         // types — one whose `derive` was refused, say — is skipped rather than
@@ -203,8 +225,10 @@ pub fn findings(db: &dyn Db, file: SourceFile) -> Vec<Finding> {
             discarded_results(body, types, &mut out);
             nested_verdicts(body, types, &mut out);
             unlabeled_flag::unlabeled_flags(db, file, body, types, &mut out);
+            typed.push((body, types));
         }
     }
+    idiomatic::findings(db, file, &typed, &mut out);
 
     unused_imports(db, file, checked, &mut out);
     undocumented_exports(db, file, &mut out);
@@ -251,12 +275,14 @@ fn suppress(text: &str, found: Vec<Finding>) -> Vec<Finding> {
                     LINTS.join(", ")
                 ),
                 range: allow.range,
+                fix: None,
             });
         } else if !allow.used {
             kept.push(Finding {
                 lint: USELESS_ALLOW,
                 message: format!("nothing here reports `{}`, so this allows nothing", allow.lint),
                 range: allow.range,
+                fix: None,
             });
         }
     }
@@ -368,6 +394,7 @@ fn misplaced_main(db: &dyn Db, file: SourceFile, out: &mut Vec<Finding>) {
                       A package's other programs go one per file in `src/bin/`"
                 .to_string(),
             range: found,
+            fix: None,
         });
     }
 }
@@ -386,6 +413,7 @@ fn undocumented_exports(db: &dyn Db, file: SourceFile, out: &mut Vec<Finding>) {
             lint: INCONSISTENT_CONSTRUCTOR,
             message: bad.message,
             range: bad.range,
+            fix: None,
         });
     }
 
@@ -400,6 +428,7 @@ fn undocumented_exports(db: &dyn Db, file: SourceFile, out: &mut Vec<Finding>) {
                 "{named} is exported and has no `///` line. Describe what it is for, or stop exporting it"
             ),
             range: export.range,
+            fix: None,
         });
     }
 }
@@ -611,6 +640,7 @@ fn unused_imports(
                 lint: UNUSED_IMPORT,
                 message: format!("`{}` is imported and never used", name.alias),
                 range: name.range,
+                fix: None,
             });
         }
     }
@@ -712,6 +742,7 @@ fn unused_bindings(body: &Body, out: &mut Vec<Finding>) {
                 local.name, local.name
             ),
             range: local.range,
+            fix: None,
         });
     }
 }
@@ -760,6 +791,7 @@ fn unreachable_code(body: &Body, out: &mut Vec<Finding>) {
                 "this cannot run: the `{how}` above it always leaves the block first"
             ),
             range: body.range(dead),
+            fix: None,
         });
     }
 }
@@ -865,6 +897,7 @@ fn unused_capabilities(body: &Body, types: &BodyTypes, out: &mut Vec<Finding>) {
                  buys nothing"
             ),
             range: body.local(*local).range,
+            fix: None,
         });
     }
 }
@@ -898,6 +931,7 @@ fn dangling_expressions(body: &Body, out: &mut Vec<Finding>) {
                           nothing. Bind it with `let`, return it, or delete it"
                     .to_string(),
                 range: body.range(*id),
+                fix: None,
             });
         }
     }
@@ -961,6 +995,7 @@ fn discarded_results(body: &Body, types: &BodyTypes, out: &mut Vec<Finding>) {
                 message: "this produces a `Result` and nothing looks at it, so a failure here is silent. `match` it, mark it with `!` in a function that can raise, or write `let _ =` to say the answer was considered"
                     .to_string(),
                 range: body.range(*id),
+                fix: None,
             });
         }
     }
@@ -1022,6 +1057,7 @@ fn nested_verdicts(body: &Body, types: &BodyTypes, out: &mut Vec<Finding>) {
                  `// @klint allow nested-verdict` to say so"
             ),
             range: body.range(id),
+            fix: None,
         });
     }
 }
@@ -1217,6 +1253,7 @@ impl Cycles<'_> {
                     field_of(self.body, base, &name)
                 ),
                 range: self.body.range(target),
+                fix: None,
             });
         }
 

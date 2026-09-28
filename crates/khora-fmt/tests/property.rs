@@ -27,28 +27,14 @@
 //! no comments and no blank lines.
 
 use khora_fmt::{format, is_formatted};
-use khora_syntax::{LexedStr, SyntaxKind};
+use khora_syntax::SyntaxKind;
 use khora_testgen::{program, Entropy};
 use proptest::prelude::*;
 
-/// The non-trivia token stream — what must survive formatting.
-///
-/// The same function as `format.rs`'s, deliberately: if the definition of
-/// "the same tokens" drifts between the two files, one of them stops meaning
-/// what its name says.
-///
 /// One token: its kind and its spelling. Both, because the kind alone loses
 /// which identifier it was and the text alone loses `1` the integer from `1`
 /// the something-else.
 type Token = (SyntaxKind, String);
-
-fn tokens(src: &str) -> Vec<Token> {
-    let lexed = LexedStr::new(src);
-    (0..lexed.len())
-        .filter(|i| !lexed.kind(*i).is_trivia())
-        .map(|i| (lexed.kind(i), lexed.text(i).to_string()))
-        .collect()
-}
 
 /// The generated program, and the formatter's output for it.
 ///
@@ -106,6 +92,12 @@ proptest! {
     /// `import` is compared in order, and the import declarations themselves
     /// are compared as a multiset.
     ///
+    /// **The one other exception is a list's trailing comma**, which the
+    /// formatter adds to a list broken across lines. It is left out of both
+    /// sides, and only where the tree says the comma ends a list: a tuple's
+    /// comma is compared like any other token, so `(e)` becoming `(e,)` fails
+    /// here.
+    ///
     /// A formatter that drops a token is the failure this is for. The alias
     /// bug in `format.rs` was exactly that — four aliases became `{as, as, as,
     /// as}` and the file stopped parsing — and it survived until `std` grew an
@@ -116,8 +108,8 @@ proptest! {
         let text = program(&mut src);
         let out = formatted(&text);
 
-        let (before_imports, before_rest) = split_at_imports(&tokens(&text));
-        let (after_imports, after_rest) = split_at_imports(&tokens(&out));
+        let (before_imports, before_rest) = split_at_imports(&tokens_but_trailing_list_commas(&text));
+        let (after_imports, after_rest) = split_at_imports(&tokens_but_trailing_list_commas(&out));
 
         prop_assert_eq!(
             before_imports,
@@ -152,6 +144,34 @@ proptest! {
             out
         );
     }
+}
+
+/// The non-trivia token stream -- what must survive formatting -- leaving
+/// out a comma that ends a list before its closing bracket, the one token the
+/// formatter adds. Read from the tree, because only the tree knows a list's
+/// comma from a tuple's.
+///
+/// The same definition as `format.rs`'s, deliberately: if "the same tokens"
+/// drifts between the two files, one of them stops meaning what its name says.
+fn tokens_but_trailing_list_commas(src: &str) -> Vec<Token> {
+    use khora_syntax::{SyntaxElement, SyntaxKind::*};
+    let tree = khora_syntax::parse(src).syntax();
+    tree.descendants_with_tokens()
+        .filter_map(SyntaxElement::into_token)
+        .filter(|t| !t.kind().is_trivia())
+        .filter(|t| {
+            let list = t.parent().is_some_and(|p| {
+                matches!(p.kind(), PARAM_LIST | ARG_LIST | LIST_EXPR | RECORD_EXPR | RECORD_TYPE | TYPE_ARGS | TYPE_PARAMS)
+            });
+            let mut next = t.next_sibling_or_token();
+            while next.as_ref().is_some_and(|n| n.kind().is_trivia()) {
+                next = next.and_then(|n| n.next_sibling_or_token());
+            }
+            let closes = next.is_some_and(|n| matches!(n.kind(), R_PAREN | R_BRACK | R_BRACE | GT));
+            !(t.kind() == COMMA && list && closes)
+        })
+        .map(|t| (t.kind(), t.text().to_string()))
+        .collect()
 }
 
 /// Splits a token stream into (the tokens of every import declaration, sorted)

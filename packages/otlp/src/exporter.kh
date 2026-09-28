@@ -126,7 +126,7 @@ impl Exporter {
     endpoint: String,
     clock: Clock,
     random: Random,
-    body: (Tracer) -> A with { 'ef | nursery: Nursery } raises 'er
+    body: (Tracer) -> A with { 'ef | nursery: Nursery } raises 'er,
   ) -> A
     with { 'ef | client: HttpClient, nursery: Nursery }
     raises 'er
@@ -208,7 +208,7 @@ impl Exporter {
     endpoint: String,
     reports: Channel<Report>,
     held: List<Finished>,
-    begun: Map<Int, Int>
+    begun: Map<Int, Int>,
   ) -> ()
     with { client: HttpClient }
   {

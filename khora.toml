@@ -81,7 +81,8 @@ extern = []
 
 # The two lints that are off by default, on for this repository.
 #
-# `khora_lint::default_level` warns for everything except these, and each has a
+# `khora_lint::default_level` warns for everything except these and the six
+# `idiomatic` lints, which are off until the group is switched on. Each of the two has a
 # reason that is about the language's users rather than about this checkout.
 # Neither reason survives contact with the project's own standard.
 #

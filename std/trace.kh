@@ -195,7 +195,7 @@ impl Tracer {
 /// canceled at its loops, blocking calls and calls whatever its row, and the
 /// span closes as `Failed` on the way out.
 pub fn around<A, 'ef, 'er>(
-  tracer: Tracer, name: String, body: () -> A with 'ef raises 'er
+  tracer: Tracer, name: String, body: () -> A with 'ef raises 'er,
 ) -> A with 'ef raises 'er {
   scoped(fn () => spanned(tracer, name, body))!
 }
@@ -213,7 +213,7 @@ type Ended = { mut done: Bool };
 /// callers should not have to have one — the same split `postgres::pool`'s
 /// `held` makes for the same reason.
 fn spanned<A, 'ef, 'er>(
-  tracer: Tracer, name: String, body: () -> A with 'ef raises 'er
+  tracer: Tracer, name: String, body: () -> A with 'ef raises 'er,
 ) -> A
   with { 'ef | scope: Scope }
   raises 'er
@@ -255,14 +255,14 @@ fn leaving(tracer: Tracer, span: Span, outer: Option<Context>, ended: Ended) -> 
 /// say that the body did not return. Reach for this when the failure has
 /// something to say, which is most of the time.
 pub fn around_result<A, E: Show, 'ef, 'er>(
-  tracer: Tracer, name: String, body: () -> Result<A, E> with 'ef raises 'er
+  tracer: Tracer, name: String, body: () -> Result<A, E> with 'ef raises 'er,
 ) -> Result<A, E> with 'ef raises 'er {
   scoped(fn () => reported(tracer, name, body))!
 }
 
 /// `around_result`'s body, with the finish registered before it starts.
 fn reported<A, E: Show, 'ef, 'er>(
-  tracer: Tracer, name: String, body: () -> Result<A, E> with 'ef raises 'er
+  tracer: Tracer, name: String, body: () -> Result<A, E> with 'ef raises 'er,
 ) -> Result<A, E>
   with { 'ef | scope: Scope }
   raises 'er

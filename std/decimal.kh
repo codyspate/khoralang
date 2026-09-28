@@ -459,18 +459,18 @@ fn padded(text: String, width: Int) -> String {
 // fit — including in the alignment, which is where sixty-four bits ran out.
 extern fn khora_decimal_add(
   left_hi: Int, left_lo: Int, left_scale: Int,
-  right_hi: Int, right_lo: Int, right_scale: Int
+  right_hi: Int, right_lo: Int, right_scale: Int,
 ) -> Int;
 
 // The difference, at the larger of the two scales.
 extern fn khora_decimal_sub(
   left_hi: Int, left_lo: Int, left_scale: Int,
-  right_hi: Int, right_lo: Int, right_scale: Int
+  right_hi: Int, right_lo: Int, right_scale: Int,
 ) -> Int;
 
 // The product. The scales add, which the caller works out for itself.
 extern fn khora_decimal_mul(
-  left_hi: Int, left_lo: Int, right_hi: Int, right_lo: Int
+  left_hi: Int, left_lo: Int, right_hi: Int, right_lo: Int,
 ) -> Int;
 
 // The same number at a larger scale, exactly.
@@ -487,7 +487,7 @@ extern fn khora_decimal_rescale(hi: Int, lo: Int, from: Int, to: Int) -> Int;
 extern fn khora_decimal_divide(
   left_hi: Int, left_lo: Int, left_scale: Int,
   right_hi: Int, right_lo: Int, right_scale: Int,
-  scale: Int, mode: Int
+  scale: Int, mode: Int,
 ) -> Int;
 
 // Where the left sits relative to the right: -1, 0 or 1.
@@ -500,7 +500,7 @@ extern fn khora_decimal_divide(
 // on two legal numbers.
 extern fn khora_decimal_cmp(
   left_hi: Int, left_lo: Int, left_scale: Int,
-  right_hi: Int, right_lo: Int, right_scale: Int
+  right_hi: Int, right_lo: Int, right_scale: Int,
 ) -> Int;
 
 // The whole part, towards zero. Stops the program if it is wider than an `Int`.

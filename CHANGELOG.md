@@ -580,6 +580,13 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   different. A C caller reading the count word directly has to mask it;
   `khora_refcount` answers the count alone.
 
+- **`khora fmt` ends a list broken across lines with a comma**: a parameter
+  or argument list, a list, a record literal or type, and type arguments and
+  parameters, so adding an element changes one line. Never a tuple or a
+  parenthesized expression, where `(e,)` is a one-tuple, and never after a
+  comment or a row tail. A file `khora fmt --check` accepted before may need
+  formatting again; `std` and the `postgres` and `otlp` packages have been.
+
 - **A channel send wakes one blocked receiver, not every one.** On the
   default thread backend every fiber is a thread, and a send woke every
   thread blocked on the channel, all but one of which found nothing and
@@ -708,14 +715,42 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   own `[lints]` entry beats the group, whatever order the tables are in. One
   group's `level` also decides a lint that another enabled group holds, and
   two enabled groups that disagree at the same step are an error naming
-  both. The toolchain ships `idiomatic`, which holds no lints in this
-  release. A project declares its own groups by path under `[lint-groups]`,
+  both. The toolchain ships `idiomatic` (below). A project declares its own groups by path under `[lint-groups]`,
   and a workspace member with `lints.workspace = true` takes the root's
   `[workspace.lint-groups]` with its lints. A group file that is missing, does
   not parse or names something that is not a lint stops `check` and `build`
   with the file and the key. The editor applies groups at the same levels.
   `// @klint allow <group>` is reported by `unknown-allow` as naming a group,
   with the group's lints listed.
+
+- **Six lints in the `idiomatic` group**, each flagging correct code written
+  in a second form where Khora has a first one: `concatenated-string`
+  (`"a " + x` for `"a ${x}"`), `needless-return` (a last `return e;` for the
+  tail `e`), `subtraction-from-zero` (`0 - 1` for `-1`, `Int` literals only),
+  `parenthesized-parameter` (`fn (x) =>` for `fn x =>`), `bool-comparison`
+  (`b == true` and `b == false` for `b` and `!b`) and `module-path`
+  (`module main;` in a package for `module <package>::main;`). Each is
+  `allow` unless `[lints.idiomatic]` is in the manifest, and `warn` in the
+  group, which also holds `unlabeled-flag` (above).
+
+- **`khora check --fix`** rewrites what those lints report, in place, and
+  checks again. It fixes only lints at `warn` or `deny` under the manifest,
+  never a line a `// @klint allow` covers, and only the package's own files.
+  Each fix is made only where the rewritten program means the same thing:
+  a `$` that meets a `{` across a join is escaped, `0.0 - x` and `0 - x` are
+  left alone, `module-path` is fixed only in `src/main.kh` and
+  `src/bin/*.kh` and only when no other file imports them, and no fix is
+  made where its first token would continue the statement before it. The
+  fixed package is checked before anything is written, and a fix that would
+  leave it failing to parse or type-check is not made and is printed as
+  `not fixed`. A fix is not made where it would remove the only thing that
+  gives a local with no written type, or a call's result, its type. Nothing is fixed while a file
+  in the package does not parse. Each pass is written whole or not at all,
+  through temporary files renamed into place.
+
+- **"Apply idiomatic fixes" in the editor**, a `source.fixAll.khora` code
+  action, makes the same fixes. Editors run it on save when configured to run
+  `source.fixAll`; it is not offered in the lightbulb menu.
 
 ### Documentation
 

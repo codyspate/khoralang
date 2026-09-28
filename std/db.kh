@@ -379,7 +379,7 @@ pub effect Db {
 /// which must undo the transaction leaves the body as a raise or as
 /// `Result::Err(DbError)`; `Ok` means commit, whatever is inside it.
 pub fn transaction<A, 'ef, 'er>(
-  body: () -> Result<A, DbError> with 'ef raises 'er
+  body: () -> Result<A, DbError> with 'ef raises 'er,
 ) -> Result<A, DbError>
   with { 'ef | db: Db }
   raises 'er

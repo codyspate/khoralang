@@ -20,8 +20,9 @@
 //! - **Idempotence.** Formatting twice equals formatting once, because the
 //!   output's line structure is the input's.
 //! - **Token preservation.** Tokens are emitted in the order the parser saw
-//!   them, so no code can be lost or reordered. Import lists are the single
-//!   deliberate exception.
+//!   them, so no code can be lost or reordered. There are two deliberate
+//!   exceptions: import lists are sorted, and a list broken across lines
+//!   gains a comma after its last element (see [`takes_a_trailing_comma`]).
 //!
 //! # Broken input
 //!
@@ -227,6 +228,14 @@ impl Formatter {
                     }
                 }
                 SyntaxElement::Token(t) => {
+                    if self.pending >= Sep::Newline && needs_a_trailing_comma(node, &t) {
+                        // Written where the last element ended, not on the
+                        // closing bracket's line: the break stays pending.
+                        let pending = self.pending;
+                        self.pending = Sep::None;
+                        self.write(COMMA, ",", node.kind(), false);
+                        self.pending = pending;
+                    }
                     if matches!(t.kind(), EQ | FAT_ARROW) {
                         past_the_marker = true;
                     }
@@ -501,6 +510,51 @@ fn introduces_a_continuation(token: &SyntaxToken) -> bool {
                 let parent = t.parent().map_or(ERROR, |p| p.kind());
                 return is_continuation(kind, parent);
             }
+        }
+    }
+    false
+}
+
+/// The lists that end in a comma when they are broken across lines.
+///
+/// **So that adding an element is a one-line diff.** Without it, the line
+/// above the new one changes too, to gain its comma, and a review shows two
+/// changed lines for one added.
+///
+/// **Never a tuple or a parenthesized expression**: `(e,)` is a one-tuple and
+/// `(e)` is not, so there a comma changes the type. Nor a variant's payload,
+/// which is not in the list the rule was decided for. What it costs: the
+/// formatter no longer preserves tokens exactly, and the property test that
+/// says it does carries this one exception, as it carries import sorting.
+fn takes_a_trailing_comma(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        PARAM_LIST | ARG_LIST | LIST_EXPR | RECORD_EXPR | RECORD_TYPE | TYPE_ARGS | TYPE_PARAMS
+    )
+}
+
+/// Whether `close` is the closing bracket of a list in `node` that is broken
+/// before it and whose last element has no comma yet.
+///
+/// The caller has already seen that a line break comes before `close`. Left
+/// alone: an empty list; a record type ending in a row tail (`| 'r,` does
+/// not parse); and a list with a comment after its last element, where the
+/// comma would land after the comment -- inside it, for a `//` comment.
+fn needs_a_trailing_comma(node: &SyntaxNode, close: &SyntaxToken) -> bool {
+    if !takes_a_trailing_comma(node.kind()) || !matches!(close.kind(), R_PAREN | R_BRACK | R_BRACE | GT) {
+        return false;
+    }
+    // The bracket that closes the node is its last token; a `>` or `}` inside
+    // an element is a child node's.
+    if node.last_token().as_ref() != Some(close) {
+        return false;
+    }
+    let mut before = close.prev_sibling_or_token();
+    while let Some(element) = before {
+        match element.kind() {
+            WHITESPACE => before = element.prev_sibling_or_token(),
+            LINE_COMMENT | BLOCK_COMMENT | COMMA | L_PAREN | L_BRACK | L_BRACE | LT => return false,
+            _ => return !node.children_with_tokens().any(|e| e.kind() == PIPE),
         }
     }
     false

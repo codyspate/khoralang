@@ -818,7 +818,7 @@ impl<A, E> Validated<A, E> {
   /// through a chain of pairs: that version works and reads `p.key.key.value`
   /// by the time it reaches five.
   pub fn map3<B, C, D>(
-    self, b: Validated<B, E>, c: Validated<C, E>, f: (A, B, C) -> D
+    self, b: Validated<B, E>, c: Validated<C, E>, f: (A, B, C) -> D,
   ) -> Validated<D, E> {
     match self {
       Validated::Valid(x) => match b {
@@ -835,7 +835,7 @@ impl<A, E> Validated<A, E> {
 
   /// Four together, keeping every side's failures.
   pub fn map4<B, C, D, F>(
-    self, b: Validated<B, E>, c: Validated<C, E>, d: Validated<D, E>, f: (A, B, C, D) -> F
+    self, b: Validated<B, E>, c: Validated<C, E>, d: Validated<D, E>, f: (A, B, C, D) -> F,
   ) -> Validated<F, E> {
     match self {
       Validated::Valid(w) => match b {
@@ -2719,7 +2719,7 @@ impl<A> Array<A> {
     lo: Int,
     mid: Int,
     hi: Int,
-    order: (A, A) -> Ordering
+    order: (A, A) -> Ordering,
   ) -> () {
     let mut left = lo;
     let mut right = mid;
@@ -3303,7 +3303,7 @@ impl String {
         // Two or more. Give every piece but the first its separator, then
         // squash what that leaves.
         List::Cons(_h, _t) => String::squash(
-          List::reverse(String::separated_onto(tail, separator, List::Cons(head, List::Nil)))
+          List::reverse(String::separated_onto(tail, separator, List::Cons(head, List::Nil))),
         ),
       },
     }
@@ -3354,7 +3354,7 @@ impl String {
           // of the round be written without naming `level` again.
           List::Cons(second, beyond) => {
             level = List::reverse(
-              String::paired_onto(beyond, List::Cons(first + second, List::Nil))
+              String::paired_onto(beyond, List::Cons(first + second, List::Nil)),
             );
           },
         },
@@ -4831,7 +4831,7 @@ impl<K: Hash, V> Map<K, V> {
       Option::Some(had) => Array::set(
         self.buckets,
         at,
-        Chain::Node(key, step(Option::Some(had)), Chain::without(bucket, key))
+        Chain::Node(key, step(Option::Some(had)), Chain::without(bucket, key)),
       ),
       Option::None => {
         Array::set(self.buckets, at, Chain::Node(key, step(Option::None), bucket));
@@ -5887,7 +5887,7 @@ pub fn nursery<A, 'ef, 'er>(body: () -> A with { 'ef | nursery: Nursery } raises
 /// blocks; subtract one where it stands for a real resource.
 pub fn bounded_nursery<A, 'ef, 'er>(
   limit: Int,
-  body: () -> A with { 'ef | nursery: Nursery } raises 'er
+  body: () -> A with { 'ef | nursery: Nursery } raises 'er,
 ) -> A
   with 'ef
   raises 'er + ChildFailed

@@ -63,6 +63,14 @@ fn extracted(id: Int) -> Row with { db: Db } raises DbError {
 
 with the call site given its `!`. Nothing about the selection said `Db` — the checker recorded what each call needed while it was type-checking, and the assist reads it back rather than working it out again. It refuses a selection containing a `with` block or a `catch`, because those *answer* a row and the signature would then over-state what escapes; and a block that assigns to a binding it did not declare, because a parameter is a value and the write would land on a copy.
 
+"Apply idiomatic fixes" (`source.fixAll.khora`) rewrites everything the `idiomatic` lint group reports in the file, exactly as `khora check --fix` does, and only when the project has switched the group on. It is a source action, so an editor runs it on save when asked to, and it is not offered in the lightbulb menu. In VS Code:
+
+```json
+"editor.codeActionsOnSave": { "source.fixAll": "explicit" }
+```
+
+The rewrites are listed in [Lints](/docs/reference/lints/#fixing-what-they-find).
+
 A code lens marks what a function absorbs rather than passes on: `installs { db } · catches DbError` above a function whose signature mentions neither. Rows are transitive, so a lens repeating a signature would be noise; a `with` block and a `catch` are the two places that stops being true, and they are what the type system deliberately hides.
 
 Rename edits the declaration, every use, and the import that brings the name into each file. Where a file imports under an alias, the import's original name is renamed and the alias is left alone, because the alias is that file's own word for it. Renaming a function's parameter also renames every [labeled argument](/docs/reference/expressions/#labeled-arguments) written against it, in every file; for a trait method that happens when the parameter is renamed in the trait's declaration, and a parameter renamed in an `impl` changes only that body, because callers label with the trait's names. A rename whose new name is not an identifier, is `_`, `self` or a reserved word, or is already bound in the same function is refused with a message saying which, and no file is changed: a name already bound there would be captured, so the renamed uses would read the other binding and the program would still compile. A trait member and a constructor are still refused, each with a sentence saying why: a trait member's name belongs to the trait and to every impl of it, and a constructor has no recorded range to edit.

@@ -5,8 +5,8 @@
 //! configured and switched nothing on, so every one asserts the message names
 //! the file and the key -- the two things a reader needs to fix it.
 //!
-//! The built-in `idiomatic` group has no members yet, so the tests use groups
-//! of their own, built from real lints, in scratch directories.
+//! Most tests use groups of their own, built from real lints, in scratch
+//! directories, so a change to what `idiomatic` holds does not move them.
 
 use std::path::{Path, PathBuf};
 
@@ -463,6 +463,27 @@ fn the_built_in_groups_are_the_files_beside_std() {
     let path = package("built_in_used", "[lints.tidy]\n", &[]);
     let levels = levels_with(&path, groups::built_in(Some(&std)).unwrap()).unwrap();
     assert_eq!(khora_lint::level(&levels, UNUSED_IMPORT), LintLevel::Deny);
+}
+
+/// The shipped `idiomatic` group holds its seven lints, each at `warn`, and
+/// switching it on is what takes them from `allow` to `warn`.
+#[test]
+fn the_idiomatic_group_holds_its_lints_at_warn() {
+    let shipped = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../std");
+    let found = groups::built_in(Some(&shipped)).expect("the shipped groups load");
+    let idiomatic = found.iter().find(|g| g.name == "idiomatic").expect("`idiomatic` ships");
+    let members: Vec<&str> = idiomatic.members.keys().map(String::as_str).collect();
+    assert_eq!(members, khora_lint::idiomatic::ALL, "the group's members");
+    assert!(idiomatic.members.values().all(|level| *level == LintLevel::Warn), "{:?}", idiomatic.members);
+
+    let off = package("idiomatic_off", "", &[]);
+    let on = package("idiomatic_on", "[lints.idiomatic]\n", &[]);
+    let off = levels_with(&off, found.clone()).unwrap();
+    let on = levels_with(&on, found).unwrap();
+    for lint in khora_lint::idiomatic::ALL {
+        assert_eq!(khora_lint::level(&off, lint), LintLevel::Allow, "{lint} with the group off");
+        assert_eq!(khora_lint::level(&on, lint), LintLevel::Warn, "{lint} with the group on");
+    }
 }
 
 // ---- unknown-allow ---------------------------------------------------------------
