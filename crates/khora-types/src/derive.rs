@@ -145,6 +145,61 @@ pub fn derive_report(db: &dyn Db, file: SourceFile) -> DeriveReport {
         }
         let def = known.expect("checked just above");
 
+        // **`derive(Decode)` on a `pub` type with a private field is refused.**
+        // The derive writes a literal inside the declaring module, where every
+        // field is visible, so it would build from input any value the type's
+        // own constructor refuses: a `Checked` that `Checked::of` would not
+        // make, arriving from a request body. A private field is the author
+        // saying construction goes through a function; decoding has to as well,
+        // and `impl Decode` over `Schema::try_map` is how it does.
+        //
+        // Only for a `pub` type. A private type's fields protect nothing its
+        // own module cannot already write, and no other module can name it.
+        // What this costs is the plain DTO, which has to say `pub` on every
+        // field to keep its derive -- the price of the default being private.
+        let exported = khora_hir::item_map(db, file)
+            .items
+            .iter()
+            .any(|i| i.name == derived.type_name && i.is_public);
+        if name == "Decode" && exported {
+            let hidden = types
+                .variants
+                .iter()
+                .filter(|v| v.type_name == derived.type_name && v.home == types.module)
+                .find_map(|v| {
+                    let hidden = v.hidden_from(None);
+                    (!hidden.is_empty()).then(|| {
+                        let names: Vec<String> =
+                            hidden.iter().filter_map(|i| v.labels.get(*i)).map(|l| format!("`{l}`")).collect();
+                        names
+                    })
+                });
+            if let Some(names) = hidden {
+                let ty = &derived.type_name;
+                let what = match names.as_slice() {
+                    [] => format!("`{ty}`'s value is private"),
+                    [one] => format!("{one} is private"),
+                    [rest @ .., last] => format!("{} and {last} are private", rest.join(", ")),
+                };
+                let open = if names.is_empty() {
+                    format!("declare it `type {ty} = pub ..`")
+                } else {
+                    "mark every field `pub`".to_string()
+                };
+                out.errors.push(HirError {
+                    message: format!(
+                        "`derive(Decode)` would build `{ty}` without calling any of its \
+                         functions, and {what}, so input could skip whatever they check. \
+                         Write `impl Decode for {ty}` with `Schema::try_map` over the function \
+                         that checks, or {open} if nothing needs checking"
+                    ),
+                    range: derived.at,
+                });
+                out.refused.push(derived.body_key());
+                continue;
+            }
+        }
+
         // `trait Ord: Eq` and `trait Hash: Eq` are not decoration. A `Map`
         // finds a key by hashing it and then comparing, so a type that hashes
         // and cannot compare is a key that can be inserted and never found.

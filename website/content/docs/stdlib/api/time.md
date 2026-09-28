@@ -52,9 +52,12 @@ pub type Date = {
 
 A date on the proleptic Gregorian calendar.
 
-`month` is 1 to 12 and `day` is 1 to the length of that month. Construct
-through `Date::of`, which checks; the fields are public because a date is
-its three numbers and hiding them would only mean writing three accessors.
+`month` is 1 to 12 and `day` is 1 to the length of that month.
+
+**The fields are private, so `Date::of` is the only way to make one**, and
+the thirty-first of February cannot be written as a literal from outside
+this module. Reading loses nothing: `year()`, `month()` and `day()` answer
+with the same numbers.
 
 ### Time
 
@@ -74,12 +77,15 @@ here as it is in every database and every wire format worth naming. A
 calendar that admitted 23:59:60 would push that into every comparison and
 every subtraction to be correct about something almost nothing observes.
 
+The fields are private, so `Time::of`, which checks each range, is the only
+way to make one. `hour()`, `minute()`, `second()` and `milli()` read them.
+
 ### DateTime
 
 ```khora
 pub type DateTime = {
-  date: Date,
-  time: Time,
+  pub date: Date,
+  pub time: Time,
 };
 ```
 
@@ -108,6 +114,9 @@ applies on a given date, and that rule is a dataset this module refuses to
 carry. A caller gets one of these from a package or from the host and hands
 it here.
 
+The field is private, so `Offset::of_minutes`, which refuses a day or more
+either way, is the only way to make one. `minutes()` reads it.
+
 ## Methods
 
 ### Date
@@ -115,6 +124,30 @@ it here.
 ```khora
 impl Date
 ```
+
+#### year
+
+```khora
+pub fn year(self) -> Int
+```
+
+The year: negative before 1, and 0 is 1 BC, as ISO 8601 has it.
+
+#### month
+
+```khora
+pub fn month(self) -> Int
+```
+
+1 to 12.
+
+#### day
+
+```khora
+pub fn day(self) -> Int
+```
+
+1 to the length of the month.
 
 #### of
 
@@ -204,6 +237,38 @@ on 1 is three.
 impl Time
 ```
 
+#### hour
+
+```khora
+pub fn hour(self) -> Int
+```
+
+0 to 23.
+
+#### minute
+
+```khora
+pub fn minute(self) -> Int
+```
+
+0 to 59.
+
+#### second
+
+```khora
+pub fn second(self) -> Int
+```
+
+0 to 59: there are no leap seconds here.
+
+#### milli
+
+```khora
+pub fn milli(self) -> Int
+```
+
+0 to 999.
+
 #### of
 
 ```khora
@@ -268,6 +333,14 @@ travel into a `DateTime` with nothing there to notice it.
 ```khora
 impl Offset
 ```
+
+#### minutes
+
+```khora
+pub fn minutes(self) -> Int
+```
+
+Minutes east of UTC, less than a day either way.
 
 #### utc
 

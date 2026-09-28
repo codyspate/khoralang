@@ -1,0 +1,30 @@
+module std_suite::checked;
+
+//! A type whose fields are private, and the `Decode` that keeps them honest.
+//!
+//! `derive(Decode)` is refused on `Checked`, because a derived decoder writes
+//! a literal inside this module and would build from input a value `of`
+//! refuses. The hand-written one below goes through `of`, and
+//! `std_suite::decoding` checks from outside that invalid input is refused.
+
+import std::core::{Option, String};
+import std::schema::{Decode, Schema, string};
+
+/// A name that is not empty. `of` is the only way to make one.
+pub type Checked = { text: String };
+
+impl Checked {
+  /// `None` for the empty string.
+  pub fn of(text: String) -> Option<Checked> {
+    if text == "" { Option::None } else { Option::Some({ text: text }) }
+  }
+
+  /// The name.
+  pub fn text(self) -> String { self.text }
+}
+
+impl Decode for Checked {
+  fn schema() -> Schema<Checked> {
+    string().try_map("a non-empty name", fn s => Checked::of(s))
+  }
+}

@@ -729,7 +729,7 @@ impl Encode for Port {
 }
 
 derive(Show, Decode, Encode)
-pub type Listen = { host: String, port: Port };
+pub type Listen = { pub host: String, pub port: Port };
 
 derive(Show, Decode, Encode)
 pub type Mode = | Local | Remote(url: String);
@@ -739,29 +739,29 @@ pub type Level = | Debug | Info;
 
 derive(Show, Decode)
 pub type Settings = {
-  listen: Listen,
-  password: Redacted<String>,
-  debug: Option<Bool>,
-  rate: Decimal,
-  tags: List<String>,
-  mode: Mode,
-  level: Level,
+  pub listen: Listen,
+  pub password: Redacted<String>,
+  pub debug: Option<Bool>,
+  pub rate: Decimal,
+  pub tags: List<String>,
+  pub mode: Mode,
+  pub level: Level,
 };
 
 derive(Show, Decode, Encode)
-pub type UserId = Int;
+pub type UserId = pub Int;
 
 derive(Show, Decode, Encode)
-pub type Wrapper<A> = { value: A, count: Int };
+pub type Wrapper<A> = { pub value: A, pub count: Int };
 
 derive(Show, Decode, Encode)
-pub type Tree = { label: String, children: List<Tree> };
+pub type Tree = { pub label: String, pub children: List<Tree> };
 
 derive(Decode)
-pub type Branch = { leaves: List<Leaf> };
+pub type Branch = { pub leaves: List<Leaf> };
 
 derive(Decode)
-pub type Leaf = { back: Option<Branch>, name: String };
+pub type Leaf = { pub back: Option<Branch>, pub name: String };
 
 fn leaves(b: Branch) -> Int { List::length(b.leaves) }
 
@@ -928,9 +928,9 @@ fn a_documented_type_describes_itself() {
 derive(Decode)
 pub type Where = {{
   /// The host name, or an address.
-  host: String,
+  pub host: String,
   /// A port, as the OS numbers them.
-  port: Int,
+  pub port: Int,
 }};
 
 fn main() -> Int {{

@@ -24,7 +24,7 @@ import std::schema::{Decode, Encode, Raw};
 
 derive(Decode)
 pub type CreateUser = {
-  name: String,
+  pub name: String,
 };
 
 derive(Encode)
@@ -104,7 +104,7 @@ These declarations:
 ```khora
 derive(Decode)
 pub type CreateUser = {
-  name: String,
+  pub name: String,
 };
 ```
 

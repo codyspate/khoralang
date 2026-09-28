@@ -55,9 +55,22 @@ fn declaration(tree: &SyntaxNode, selection: TextRange) -> Option<SyntaxNode> {
         .min_by_key(|node| node.text_range().len())
 }
 
+/// The `pub` that exports a declaration, if it has one.
+///
+/// Only one before the keyword: `type Port = pub Int;` has a second `pub`,
+/// after `=`, which opens the newtype's value. Taking that one for the
+/// export hid "Export it" from a private type and offered "Stop exporting
+/// it" as an edit that closed the newtype instead.
+fn export_keyword(node: &SyntaxNode) -> Option<khora_syntax::SyntaxToken> {
+    node.children_with_tokens()
+        .filter_map(|e| e.into_token())
+        .take_while(|t| t.kind() != SyntaxKind::TYPE_KW)
+        .find(|t| t.kind() == SyntaxKind::PUB_KW)
+}
+
 /// Whether a declaration already says `pub`.
 fn is_public(node: &SyntaxNode) -> bool {
-    node.children_with_tokens().any(|e| e.kind() == SyntaxKind::PUB_KW)
+    export_keyword(node).is_some()
 }
 
 /// **`pub` added, and the title says what that costs.**
@@ -86,10 +99,7 @@ fn export(tree: &SyntaxNode, text: &str, selection: TextRange) -> Option<Assist>
 /// relying on it.
 fn unexport(tree: &SyntaxNode, text: &str, selection: TextRange) -> Option<Assist> {
     let node = declaration(tree, selection)?;
-    let keyword = node
-        .children_with_tokens()
-        .filter_map(|e| e.into_token())
-        .find(|t| t.kind() == SyntaxKind::PUB_KW)?;
+    let keyword = export_keyword(&node)?;
     let _ = text;
     Some(Assist {
         title: "Stop exporting it".to_string(),

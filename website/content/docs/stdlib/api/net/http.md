@@ -81,7 +81,7 @@ cannot be called from a browser on another origin at all.
 
 ```khora
 pub type Params = {
-  bound: Map<String, String>,
+  pub bound: Map<String, String>,
 };
 ```
 
@@ -92,12 +92,12 @@ The path parameters a route matched: `/analyze/:account_id` against
 
 ```khora
 pub type Request = {
-  method: Method,
-  path: String,
-  params: Params,
-  queries: Map<String, String>,
-  headers: Map<String, String>,
-  body: String,
+  pub method: Method,
+  pub path: String,
+  pub params: Params,
+  pub queries: Map<String, String>,
+  pub headers: Map<String, String>,
+  pub body: String,
 };
 ```
 
@@ -111,7 +111,7 @@ already built, and the header names are already lowercased.
 #### path
 
 ```khora
-path: String
+pub path: String
 ```
 
 The path with the query string taken off: `/analyze/acc_1?deep=true` has
@@ -122,7 +122,7 @@ parameter.
 #### queries
 
 ```khora
-queries: Map<String, String>
+pub queries: Map<String, String>
 ```
 
 Decoded once, when the request arrives, rather than on every lookup — a
@@ -132,7 +132,7 @@ times.
 #### headers
 
 ```khora
-headers: Map<String, String>
+pub headers: Map<String, String>
 ```
 
 Keyed by the **lowercased** name, because HTTP header names are
@@ -144,8 +144,8 @@ which is the correct reading: they are the same header.
 
 ```khora
 pub type Header = {
-  name: String,
-  value: String,
+  pub name: String,
+  pub value: String,
 };
 ```
 
@@ -155,10 +155,10 @@ One header on the way out.
 
 ```khora
 pub type Response = {
-  status: Int,
-  body: String,
-  content_type: String,
-  headers: List<Header>,
+  pub status: Int,
+  pub body: String,
+  pub content_type: String,
+  pub headers: List<Header>,
 };
 ```
 
@@ -171,7 +171,7 @@ and returns a new response rather than changing the one it was given.
 #### headers
 
 ```khora
-headers: List<Header>
+pub headers: List<Header>
 ```
 
 Anything beyond the three a response always carries. A list rather than a
@@ -198,8 +198,8 @@ be read at all.
 
 ```khora
 pub type RequestLine = {
-  method: Method,
-  target: String,
+  pub method: Method,
+  pub target: String,
 };
 ```
 
@@ -211,7 +211,7 @@ target as the client wrote it; `Request` carries the split version.
 #### target
 
 ```khora
-target: String
+pub target: String
 ```
 
 The request target as written, query string and all. `parse` splits it;
@@ -222,9 +222,9 @@ reasons gets what the client actually sent.
 
 ```khora
 pub type Transport = {
-  receive: (Array<U8>) -> Int,
-  transmit: (String) -> Int,
-  shut: () -> (),
+  pub receive: (Array<U8>) -> Int,
+  pub transmit: (String) -> Int,
+  pub shut: () -> (),
 };
 ```
 
@@ -249,7 +249,7 @@ one of them.
 #### receive
 
 ```khora
-receive: (Array<U8>) -> Int
+pub receive: (Array<U8>) -> Int
 ```
 
 Bytes into the buffer: how many, 0 when the peer closed, or -1.
@@ -257,7 +257,7 @@ Bytes into the buffer: how many, 0 when the peer closed, or -1.
 #### transmit
 
 ```khora
-transmit: (String) -> Int
+pub transmit: (String) -> Int
 ```
 
 The text, all of it, or -1.
@@ -265,7 +265,7 @@ The text, all of it, or -1.
 #### shut
 
 ```khora
-shut: () ->()
+pub shut: () ->()
 ```
 
 Ends the conversation and releases whatever is underneath.
@@ -356,9 +356,9 @@ next request begins, so the connection cannot be reused whatever the
 
 ```khora
 pub type Route<'er> = {
-  method: Method,
-  pattern: String,
-  handler: SharedFn<Request, Response, 'er>,
+  pub method: Method,
+  pub pattern: String,
+  pub handler: SharedFn<Request, Response, 'er>,
 };
 ```
 
@@ -378,8 +378,8 @@ to carry — `Router<'er>` says only how its handlers can fail.
 
 ```khora
 pub type Router<'er> = {
-  routes: List<Route<'er>>,
-  limit: Int,
+  pub routes: List<Route<'er>>,
+  pub limit: Int,
 };
 ```
 
@@ -398,7 +398,7 @@ refuse inside the handler.
 #### limit
 
 ```khora
-limit: Int
+pub limit: Int
 ```
 
 The most bytes one request may occupy, headers and body together.
@@ -412,10 +412,10 @@ is how it is set.
 
 ```khora
 pub type Url = {
-  secure: Bool,
-  host: String,
-  port: Int,
-  target: String,
+  pub secure: Bool,
+  pub host: String,
+  pub port: Int,
+  pub target: String,
 };
 ```
 
@@ -424,7 +424,7 @@ Where a call is going.
 #### secure
 
 ```khora
-secure: Bool
+pub secure: Bool
 ```
 
 Whether to put TLS in front of the socket.
@@ -432,7 +432,7 @@ Whether to put TLS in front of the socket.
 #### target
 
 ```khora
-target: String
+pub target: String
 ```
 
 Path and query, together, beginning with `/`. What goes on the request
@@ -443,10 +443,10 @@ that breaks somebody's signed URL.
 
 ```khora
 pub type Call = {
-  method: Method,
-  url: String,
-  headers: List<Header>,
-  body: String,
+  pub method: Method,
+  pub url: String,
+  pub headers: List<Header>,
+  pub body: String,
 };
 ```
 
@@ -455,7 +455,7 @@ A request this program is making.
 #### headers
 
 ```khora
-headers: List<Header>
+pub headers: List<Header>
 ```
 
 A list rather than a map, matching `Response`: two headers of the same
@@ -465,9 +465,9 @@ name are legal on the way out and a map would keep one.
 
 ```khora
 pub type Answer = {
-  status: Int,
-  headers: Map<String, String>,
-  body: String,
+  pub status: Int,
+  pub headers: Map<String, String>,
+  pub body: String,
 };
 ```
 

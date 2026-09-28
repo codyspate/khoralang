@@ -162,6 +162,16 @@ The base comes first and appears once. A field named twice is an error rather
 than last-one-wins, so is a field the base's type does not have, and so is a
 base that is not a record. `{ ..base }` with nothing after it is `base`.
 
+**The base's type has to be a record the checker can name.** A type
+parameter is not one, whatever a caller instantiates it at, so `fn f<A>(x: A)
+-> A { { ..x, n: 1 } }` is refused. A lambda's parameter can be the base
+without an annotation when a call fixes its type: `let g = fn c => { ..c,
+created: 0 };` followed by `g(counts)` is checked as an update of `Counts`.
+When nothing ever fixes it, the update asks for an annotation, because there
+is no record to check the fields against. From outside a record's module,
+an update is subject to [field visibility](./types/#field-visibility) like
+any other way of building one.
+
 A [`mut` field](./types/#record-types) is the other way to do this. The update
 produces a new value; assigning a `mut` field changes the one already held.
 Reach for the update where the old value still matters, and for `mut` where it

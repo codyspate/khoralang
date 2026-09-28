@@ -71,39 +71,39 @@ fn said<A>(answer: Validated<A, Rejection>, shown: (A) -> String) -> String {
 }
 
 derive(Show, Decode)
-pub type Listen = { host: String, port: Int };
+pub type Listen = { pub host: String, pub port: Int };
 
 derive(Show, Decode)
 pub type Mode = | Local | Remote(url: String);
 
 derive(Show, Decode)
 pub type Settings = {
-  listen: Listen,
-  password: Redacted<String>,
-  debug: Option<Bool>,
-  region: String,
-  workers: Int,
-  tags: List<String>,
-  mode: Mode,
+  pub listen: Listen,
+  pub password: Redacted<String>,
+  pub debug: Option<Bool>,
+  pub region: String,
+  pub workers: Int,
+  pub tags: List<String>,
+  pub mode: Mode,
 };
 
 derive(Show, Decode)
-pub type Flags = { a: Bool, b: Bool, c: Bool };
+pub type Flags = { pub a: Bool, pub b: Bool, pub c: Bool };
 
 derive(Show, Decode)
-pub type Money = { rate: Decimal, fee_cap: Decimal, minimum: Decimal };
+pub type Money = { pub rate: Decimal, pub fee_cap: Decimal, pub minimum: Decimal };
 
 derive(Show, Decode)
-pub type Spread = { spread: Decimal };
+pub type Spread = { pub spread: Decimal };
 
 derive(Show, Decode)
-pub type Keys = { secret_key: String };
+pub type Keys = { pub secret_key: String };
 
 derive(Show, Decode)
-pub type Password = { db_password: Redacted<String> };
+pub type Password = { pub db_password: Redacted<String> };
 
 derive(Show, Decode)
-pub type Nested = { primary: Listen, backup: Option<Listen> };
+pub type Nested = { pub primary: Listen, pub backup: Option<Listen> };
 
 fn shown_settings(s: Settings) -> String {
   "${s.listen.host}:${s.listen.port} ${s.password} ${s.debug} ${s.region} x${s.workers} ${s.tags} ${s.mode}"
@@ -335,7 +335,7 @@ fn a_decimal_setting_refuses_what_is_not_one() {
     let out = run(
         "config_decimal_bad",
         r#"derive(Show, Decode)
-pub type Bad = { rate: Decimal, cap: Decimal, huge: Decimal };
+pub type Bad = { pub rate: Decimal, pub cap: Decimal, pub huge: Decimal };
 
 fn main() -> () {
   let set = List::Cons(("RATE", "1e-3"),

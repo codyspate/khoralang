@@ -104,8 +104,8 @@ that has types keeps them.
 
 ```khora
 pub type Attribute = {
-  name: String,
-  value: Value,
+  pub name: String,
+  pub value: Value,
 };
 ```
 
@@ -145,10 +145,10 @@ where it was raised; this is its rendering.
 
 ```khora
 pub type Context = {
-  trace_high: Int,
-  trace_low: Int,
-  span: Int,
-  sampled: Bool,
+  pub trace_high: Int,
+  pub trace_low: Int,
+  pub span: Int,
+  pub sampled: Bool,
 };
 ```
 
@@ -161,7 +161,7 @@ parsed at every hop.
 #### sampled
 
 ```khora
-sampled: Bool
+pub sampled: Bool
 ```
 
 Whether this trace is being recorded. Decided once, at the root, and
@@ -171,9 +171,9 @@ carried unchanged — a trace that is half sampled is not a trace.
 
 ```khora
 pub type Span = {
-  context: Context,
-  parent: Int,
-  name: String,
+  pub context: Context,
+  pub parent: Int,
+  pub name: String,
 };
 ```
 
@@ -182,7 +182,7 @@ A span in progress.
 #### parent
 
 ```khora
-parent: Int
+pub parent: Int
 ```
 
 The span this one is inside, or zero at the root.

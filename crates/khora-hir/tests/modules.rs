@@ -322,7 +322,7 @@ fn a_method_arrives_on_a_type_that_was_never_imported() {
             "module net;\n\
              pub type Params = | Of(one: String);\n\
              impl Params { pub fn one(self) -> String { match self { Params::Of(s) => s } } }\n\
-             pub type Request = { params: Params };\n",
+             pub type Request = { pub params: Params };\n",
         ),
         (
             "app.kh",

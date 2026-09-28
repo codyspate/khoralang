@@ -69,6 +69,14 @@ pub(crate) struct Parser<'a> {
     /// that the rule for it knows `=>` may follow its head. See
     /// `exprs::list_element`.
     pub(crate) element_head: Option<usize>,
+    /// Set by a `type` declaration just before its `{`, and taken by the
+    /// record type that opens there.
+    ///
+    /// A record type and a row are one production, and only a declared
+    /// record's fields may be `pub`. Without this, `pub` in a `with { .. }`
+    /// parsed and meant nothing, which tells a reader who wrote it to open or
+    /// hide something that it worked.
+    pub(crate) declaring_record: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -131,6 +139,7 @@ impl<'a> Parser<'a> {
             errors,
             record_literals_allowed: true,
             element_head: None,
+            declaring_record: false,
         }
     }
 

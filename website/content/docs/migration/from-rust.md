@@ -78,18 +78,23 @@ function that divides the library in half.
 
 ## Visibility
 
-`pub` works the way it does in Rust, in both of the places you would expect it.
-A declaration without it belongs to its module, and a method without it belongs
-to the module that declares the type:
+`pub` works the way it does in Rust, in the three places you would expect it.
+A declaration without it belongs to its module, a method without it belongs to
+the module that declares the type, and so does a field:
 
 ```khora
-pub type Counter = { n: Int };
+pub type Counter = { n: Int, pub label: String };
 
 impl Counter {
   pub fn doubled(self) -> Int { Counter::secret(self) }
   fn secret(self) -> Int { self.n * 2 }
 }
 ```
+
+The unit is the module, not the crate: Khora has no `pub(crate)`, so a sibling
+module in the same package is outside, and a separate `_test` module is too.
+A tuple struct's field is `type Port = pub Int;` rather than `struct
+Port(pub u16)`.
 
 As in Rust, a method of a *trait* implementation takes no `pub` — what makes it
 reachable is the trait, not the impl. Writing the keyword on one method of an

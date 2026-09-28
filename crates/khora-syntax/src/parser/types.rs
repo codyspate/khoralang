@@ -299,6 +299,13 @@ fn type_param(p: &mut Parser<'_>) {
 /// empty row `{}`.
 pub(super) fn record_type(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
+    // Taken, not read: a brace nested inside this one's field types is a row
+    // again, whatever declared the outer one.
+    let owner = if std::mem::replace(&mut p.declaring_record, false) {
+        FieldOwner::Record
+    } else {
+        FieldOwner::Row
+    };
     let brace = p.open(L_BRACE);
     loop {
         if p.at(R_BRACE) || p.at(EOF) || !p.tick() {
@@ -309,10 +316,17 @@ pub(super) fn record_type(p: &mut Parser<'_>) -> CompletedMarker {
             row_tail(p);
             break;
         }
-        // A record type's field may be `mut`; a row's entry may not, which is
-        // why only this one of the two field loops looks for the keyword.
-        if (p.at(IDENT) && p.nth_at(1, COLON)) || (p.at(MUT_KW) && p.nth_at(2, COLON)) {
-            field(p);
+        // A record type's field may be `pub` and `mut`; a row's entry may be
+        // neither. Both are looked for in both shapes of brace, because this
+        // function cannot tell them apart by their tokens: `field` decides
+        // whether each is allowed, so a row that writes one hears why rather
+        // than getting a parse error about a type.
+        if (p.at(IDENT) && p.nth_at(1, COLON))
+            || (p.at(MUT_KW) && p.nth_at(2, COLON))
+            || (p.at(PUB_KW) && p.nth_at(2, COLON))
+            || (p.at(PUB_KW) && p.nth_at(1, MUT_KW) && p.nth_at(3, COLON))
+        {
+            field(p, owner);
             if !p.eat(COMMA) {
                 if p.at(PIPE) {
                     p.bump(PIPE);
@@ -339,8 +353,10 @@ fn row_tail(p: &mut Parser<'_>) {
         if !p.tick() {
             break;
         }
-        if p.at(IDENT) && p.nth_at(1, COLON) {
-            field(p);
+        if (p.at(IDENT) && p.nth_at(1, COLON))
+            || ((p.at(PUB_KW) || p.at(MUT_KW)) && p.nth_at(2, COLON))
+        {
+            field(p, FieldOwner::Row);
         } else {
             type_(p);
         }
@@ -351,12 +367,69 @@ fn row_tail(p: &mut Parser<'_>) {
     m.complete(p, ROW_TAIL);
 }
 
-pub(super) fn field(p: &mut Parser<'_>) {
+/// What a `name: Type` inside braces or parentheses belongs to, which decides
+/// whether `pub` means anything on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FieldOwner {
+    /// The record a `type` declaration defines: the one place a field can be
+    /// private, so the one place `pub` is read.
+    Record,
+    /// A `with { .. }` clause, a `row` declaration, or a brace in any other
+    /// type position. Its entries belong to no declared type, so neither
+    /// `pub` nor `mut` means anything on one.
+    Row,
+    /// A variant case's named payload, `Some(value: A)`.
+    Payload,
+    /// An `effect`'s operation.
+    Operation,
+}
+
+pub(super) fn field(p: &mut Parser<'_>, owner: FieldOwner) {
     let m = p.start();
-    // `mut count: Int`. Only meaningful on a record type's field; a row's
-    // entries are a *name against a type* and there is nothing there to write
-    // to, so one written there is read by nobody and reported by the checker.
-    p.eat(MUT_KW);
+    // `pub count: Int`, visibility first, as `pub fn` has it. Anywhere but a
+    // declared record, a `pub` would be parsed and then read by nobody, so a
+    // reader who wrote one to hide or open something would be told nothing;
+    // it is reported where it stands instead.
+    if p.at(PUB_KW) {
+        let refusal = match owner {
+            FieldOwner::Record => None,
+            FieldOwner::Row => Some(
+                "`pub` marks a field of a `type` declaration, and this is a row: its \
+                 entries belong to no type, so there is nothing to hide or open. Delete \
+                 the `pub`",
+            ),
+            FieldOwner::Payload => Some(
+                "a case's payload is always public, because matching on it is how a \
+                 variant is used. Delete the `pub`; to hide a variant's shape, wrap the \
+                 type in a newtype, which is private by default",
+            ),
+            FieldOwner::Operation => Some(
+                "an effect's operations are public to whoever holds the capability, so \
+                 `pub` changes nothing here. Delete it",
+            ),
+        };
+        match refusal {
+            Some(message) => p.err_and_bump(message),
+            None => p.bump(PUB_KW),
+        }
+    }
+    // `mut count: Int`. A row's entries are a *name against a type*, with no
+    // place behind them to write to, so a `mut` there would be read by nobody
+    // and tell its writer that something is assignable when nothing is. It is
+    // reported where it stands, as `pub` is above. A record's field is where
+    // it means something; a payload and an operation are left as they were.
+    if p.at(MUT_KW) {
+        match owner {
+            FieldOwner::Row => p.err_and_bump(
+                "`mut` marks a field of a `type` declaration, and this is a row: its \
+                 entries belong to no value, so there is nothing to assign. Delete \
+                 the `mut`",
+            ),
+            FieldOwner::Record | FieldOwner::Payload | FieldOwner::Operation => {
+                p.bump(MUT_KW)
+            }
+        }
+    }
     name(p);
     p.expect(COLON);
     type_(p);
@@ -413,14 +486,14 @@ fn variant_case(p: &mut Parser<'_>) {
     name(p);
     if p.at(L_PAREN) {
         // A case payload is either named (`Some(value: T)`) or positional.
-        if p.nth_at(1, IDENT) && p.nth_at(2, COLON) {
+        if (p.nth_at(1, IDENT) && p.nth_at(2, COLON)) || (p.nth_at(1, PUB_KW) && p.nth_at(3, COLON)) {
             let fields = p.start();
             p.bump(L_PAREN);
             while !p.at(R_PAREN) && !p.at(EOF) {
                 if !p.tick() {
                     break;
                 }
-                field(p);
+                field(p, FieldOwner::Payload);
                 if !p.eat(COMMA) {
                     break;
                 }

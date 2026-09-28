@@ -191,8 +191,8 @@ and needs `List` in scope, exactly as `0.01d` needs `Decimal`.
 
 ```khora
 pub type Halves<A> = {
-  left: List<A>,
-  right: List<A>,
+  pub left: List<A>,
+  pub right: List<A>,
 };
 ```
 
@@ -202,8 +202,8 @@ A list split down the middle, for `sort`.
 
 ```khora
 pub type Parts<A> = {
-  kept: List<A>,
-  rest: List<A>,
+  pub kept: List<A>,
+  pub rest: List<A>,
 };
 ```
 
@@ -356,8 +356,8 @@ which need the length at run time.
 
 ```khora
 pub type Split = {
-  head: String,
-  rest: String,
+  pub head: String,
+  pub rest: String,
 };
 ```
 
@@ -401,8 +401,8 @@ the price, and it is the shape the language is actually good at.
 
 ```khora
 pub type Pair<K, V> = {
-  key: K,
-  value: V,
+  pub key: K,
+  pub value: V,
 };
 ```
 
@@ -565,8 +565,8 @@ of a function all the way up.
 
 ```khora
 pub type Changed<A, B> = {
-  state: A,
-  result: B,
+  pub state: A,
+  pub result: B,
 };
 ```
 
@@ -677,7 +677,7 @@ left to stop.
 ### ChildFailed
 
 ```khora
-pub type ChildFailed = { children: Int };
+pub type ChildFailed = { pub children: Int };
 ```
 
 Raised by a nursery when one or more of its children ended with an error.

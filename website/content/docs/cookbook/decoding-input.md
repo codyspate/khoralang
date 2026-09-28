@@ -11,11 +11,11 @@ knowing which.
 ```khora
 derive(Show, Decode)
 pub type Settings = {
-  listen: Listen,
-  password: Redacted<String>,
-  rate: Decimal,
-  debug: Option<Bool>,
-  mode: Mode,
+  pub listen: Listen,
+  pub password: Redacted<String>,
+  pub rate: Decimal,
+  pub debug: Option<Bool>,
+  pub mode: Mode,
 };
 
 let settings = Settings::schema().decode(Raw::of_json(document));
@@ -85,7 +85,9 @@ impl Decode for Port {
 ```
 
 A `Port` that came through the schema passed the rule, and `Settings` picks
-the impl up through `Listen` without being told. A variant derives to a bare
+the impl up through `Listen` without being told. `= Int` rather than
+`= pub Int` is what makes that true everywhere: another module cannot write
+`Port(99999)`, so every `Port` is one this module made. A variant derives to a bare
 string for a payload-free case and an object tagged with `type` for the rest,
 so `"mode": "Local"` and `"mode": { "type": "Remote", "url": ".." }` are the
 two forms.
@@ -206,11 +208,11 @@ pub type Mode = | Local | Remote(url: String);
 /// What the service needs, written once. The declaration is the schema.
 derive(Show, Decode)
 pub type Settings = {
-  listen: Listen,
-  password: Redacted<String>,
-  rate: Decimal,
-  debug: Option<Bool>,
-  mode: Mode,
+  pub listen: Listen,
+  pub password: Redacted<String>,
+  pub rate: Decimal,
+  pub debug: Option<Bool>,
+  pub mode: Mode,
 };
 
 fn report(text: String) -> String {

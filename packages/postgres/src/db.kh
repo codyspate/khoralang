@@ -48,7 +48,7 @@ module postgres::db;
 
 import std::core::{Channel, List, Option, Result};
 import std::db::{Cell, Db, DbError, Row};
-import postgres::conn::{Answer, Connection, PgError, ask, close, forsake, in_transaction, open, open_within, run, still_open, usable};
+import postgres::conn::{Answer, Connection, PgError, ask, close, forsake, in_transaction, open, open_within, run, set_transaction_depth, still_open, transaction_depth, usable};
 
 /// What a caller wants done.
 pub type Work =
@@ -103,11 +103,11 @@ pub type Request = {
 /// A record rather than five arguments because it crosses into the serving
 /// fiber, and one shareable value is easier to reason about than five.
 pub type Settings = {
-  host: String,
-  port: Int,
-  user: String,
-  database: String,
-  secret: String,
+  pub host: String,
+  pub port: Int,
+  pub user: String,
+  pub database: String,
+  pub secret: String,
 };
 
 /// Opens a connection, serves requests on it until the channel closes, and
@@ -212,8 +212,8 @@ fn answer(c: Connection, work: Work) -> Reply {
     // `Err` for one of two fibers that nest at once; it does not make that
     // work, and `std::db::transaction` says not to do it.
     Work::Begin =>
-      if c.depth != 0 || c.open_transaction {
-        Reply::Finished(Result::Err(out_of_turn("BEGIN", 0, c.depth)))
+      if transaction_depth(c) != 0 || in_transaction(c) {
+        Reply::Finished(Result::Err(out_of_turn("BEGIN", 0, transaction_depth(c))))
       } else {
         Reply::Finished(opened(c, statement(c, "BEGIN"), 1))
       },
@@ -230,7 +230,7 @@ fn answer(c: Connection, work: Work) -> Reply {
     // other fiber's `release` is refused and its `rollback_to` finds nothing
     // left to undo, which is the truth.
     Work::Commit =>
-      if c.depth > 1 {
+      if transaction_depth(c) > 1 {
         match statement(c, "ROLLBACK") {
           Result::Ok(_) => Reply::Finished(Result::Err(DbError::RolledBack(
                 "the transaction was rolled back instead of committed, because a savepoint another fiber opened on this connection was still open",
@@ -243,14 +243,14 @@ fn answer(c: Connection, work: Work) -> Reply {
     Work::Rollback => Reply::Finished(statement(c, "ROLLBACK")),
     Work::Depth => Reply::Counted(Result::Ok(depth(c))),
     Work::Savepoint(level) =>
-      if c.depth != level {
-        Reply::Finished(Result::Err(out_of_turn("SAVEPOINT", level, c.depth)))
+      if transaction_depth(c) != level {
+        Reply::Finished(Result::Err(out_of_turn("SAVEPOINT", level, transaction_depth(c))))
       } else {
         Reply::Finished(opened(c, statement(c, "SAVEPOINT " + savepoint_name(level)), level + 1))
       },
     Work::Release(level) =>
-      if c.depth != level + 1 {
-        Reply::Finished(Result::Err(out_of_turn("RELEASE", level, c.depth)))
+      if transaction_depth(c) != level + 1 {
+        Reply::Finished(Result::Err(out_of_turn("RELEASE", level, transaction_depth(c))))
       } else {
         Reply::Finished(opened(c, statement(c, "RELEASE SAVEPOINT " + savepoint_name(level)), level))
       },
@@ -266,7 +266,7 @@ fn answer(c: Connection, work: Work) -> Reply {
     // exact `Release` guard is what keeps a lower level's release from taking
     // this one with it, which would keep the work.
     Work::RollbackTo(level) =>
-      if c.depth <= level {
+      if transaction_depth(c) <= level {
         Reply::Finished(Result::Ok(()))
       } else {
         let name = savepoint_name(level);
@@ -482,7 +482,7 @@ fn commit(c: Connection) -> Result<(), DbError> {
 fn opened(c: Connection, done: Result<(), DbError>, after: Int) -> Result<(), DbError> {
   match done {
     Result::Ok(_) => {
-      c.depth = after;
+      set_transaction_depth(c, after);
       Result::Ok(())
     },
     Result::Err(why) => Result::Err(why),
@@ -495,8 +495,8 @@ fn opened(c: Connection, done: Result<(), DbError>, after: Int) -> Result<(), Db
 /// still a transaction, so a `transaction` inside it nests in a savepoint
 /// rather than sending a second `BEGIN` its `COMMIT` would end both of.
 fn depth(c: Connection) -> Int {
-  if c.open_transaction && c.depth == 0 { c.depth = 1 };
-  c.depth
+  if in_transaction(c) && transaction_depth(c) == 0 { set_transaction_depth(c, 1) };
+  transaction_depth(c)
 }
 
 /// The name of the savepoint opened at `level`: made here and never taken

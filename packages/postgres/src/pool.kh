@@ -133,19 +133,22 @@ pub type Pool = {
 };
 
 /// How a pool reconnects a connection it has lost.
+///
+/// Every field `pub`: this is configuration a caller writes and hands to
+/// `open_with`, and `default` and `never` are two starting points for it.
 pub type Reconnect = {
   /// The fast phase: when to try again after a failure, and when to give up.
   /// A slot whose schedule gives up shrinks out of the pool.
-  fast: Schedule,
+  pub fast: Schedule,
   /// The slow phase: how often, in milliseconds, a slot that shrank out
   /// tries again, with 80-120% jitter. `None` makes the shrink permanent.
-  slow: Option<Int>,
+  pub slow: Option<Int>,
   /// How long, in milliseconds, a connection attempt waits for the server to
   /// finish its handshake before it counts as failed and the schedule goes
   /// on. Without it, a server that accepts and never answers held the slot,
   /// its waiting callers, and `close` for ever. The TCP connect before the
   /// handshake is not covered: see "What it cannot cut short" on `close`.
-  handshake: Int,
+  pub handshake: Int,
 };
 
 impl Reconnect {
@@ -207,15 +210,18 @@ pub type Offer =
   | Down;
 
 /// How many slots are in each state. See `health`.
+///
+/// Every field `pub`: this is a report, read by whoever asked `health`, and
+/// building one proves nothing about any pool.
 pub type Health = {
   /// Connected: idle, or lent to somebody.
-  live: Int,
+  pub live: Int,
   /// Lost, and being reconnected on the fast schedule. Callers wait for
   /// these.
-  reconnecting: Int,
+  pub reconnecting: Int,
   /// Shrunk out: the fast schedule gave up. Retrying on the slow interval,
   /// if there is one, and never lent until a retry succeeds.
-  down: Int,
+  pub down: Int,
 };
 
 /// The pool's shared bookkeeping, changed only under its lock.
@@ -307,6 +313,75 @@ pub fn open_with(crew: Fibers, settings: Settings, count: Int, plan: Reconnect) 
 pub fn health(pool: Pool) -> Health {
   let t = Shared::get(pool.tally);
   { live: t.live, reconnecting: t.reconnecting, down: t.down }
+}
+
+/// How many offers are waiting to be taken: connected slots nobody has
+/// borrowed, plus the down token if it is out.
+///
+/// Stale the moment it is given, as every such count is. For tests and
+/// health checks, which wait for it to reach a number; nothing should
+/// branch on it.
+pub fn idle_count(pool: Pool) -> Int {
+  Channel::depth(pool.idle)
+}
+
+/// An offer taken by hand with `take_offer`, to be given back once with
+/// `give_offer_back`.
+///
+/// **Only `take_offer` can make one, and it goes back only where it came
+/// from.** That is what keeps the pool's two rules out of a caller's reach:
+/// every slot in `idle` is one this pool's serving fibers made, and there is
+/// never more than one down token. An `Offer` put into some other `idle` --
+/// forged, or taken from a second pool -- breaks both: that pool lends a slot
+/// its own fibers do not serve, and its `idle`, which has room for exactly
+/// its own slots and one token, fills, so that `give_back`'s send of the
+/// token waits for ever. The pool the offer was taken from loses the slot
+/// the same way.
+pub type HeldOffer = {
+  offer: Offer,
+  /// The `idle` it was taken from, which is the only place it goes back to.
+  home: Channel<Offer>,
+  /// Whether this has been given back, so a second give-back of the same
+  /// value puts nothing in `idle`.
+  returned: Shared<Bool>,
+};
+
+/// Takes the next offer out of `idle`, waiting while there is none, and
+/// **does not start a lease**: no check is run, and nothing is lent until it
+/// comes back through `give_offer_back`. `None` once the pool is closed.
+///
+/// For tests of the lending protocol, which hold a slot to make a caller
+/// wait. What it costs is what `with_db` with a body that never returns
+/// costs: a slot never given back is out of the pool for good, and the down
+/// token never given back leaves every later `with_db` waiting, because no
+/// second token is ever made. `with_db` is the way to borrow.
+pub fn take_offer(pool: Pool) -> Option<HeldOffer> {
+  match Channel::receive(pool.idle) {
+    Option::None => Option::None,
+    Option::Some(offer) =>
+      Option::Some({ offer: offer, home: pool.idle, returned: Shared::of(false) }),
+  }
+}
+
+/// Puts an offer taken with `take_offer` back into the pool it was taken
+/// from, **once**: a second call with the same `HeldOffer` does nothing.
+///
+/// **It takes no pool**, so there is no other pool to hand it to. The one it
+/// goes back to was recorded when it was taken.
+///
+/// The send cannot wait: that `idle` has room for every one of its slots and
+/// one token, this offer is one of them, and it is not in there. Into a pool
+/// that has been closed it is ended the way `close` ends one it drains: a
+/// slot's request channel is closed, which is what its serving fiber is
+/// waiting for, and `close` is waiting for that fiber. A token is dropped.
+pub fn give_offer_back(taken: HeldOffer) -> () {
+  let first = Shared::modify(taken.returned, fn done => { state: true, result: !done });
+  if first && !Channel::send(taken.home, taken.offer) {
+    match taken.offer {
+      Offer::Slot(requests, _) => Channel::close(requests),
+      Offer::Down => (),
+    }
+  }
 }
 
 /// Runs `body` with a leased connection installed as the `db: Db` capability.

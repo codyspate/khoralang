@@ -44,11 +44,11 @@ import postgres::pool::{Pool, open as open_pool, with_db};
 /// of matching cells by position and dropping the row that did not fit.
 derive(Show, Decode)
 pub type Entry = {
-  id: Int,
-  account: String,
+  pub id: Int,
+  pub account: String,
   /// Minor units. See the note at the head of this file.
-  amount: Int,
-  memo: String,
+  pub amount: Int,
+  pub memo: String,
 };
 
 impl Entry {

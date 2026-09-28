@@ -965,8 +965,8 @@ pub type List<A> =
 
 /// A list split down the middle, for `sort`.
 pub type Halves<A> = {
-  left: List<A>,
-  right: List<A>,
+  pub left: List<A>,
+  pub right: List<A>,
 };
 
 /// A list split by a question, for `partition`.
@@ -976,8 +976,8 @@ pub type Halves<A> = {
 /// `.kept` and knows which side answered yes; reading `.left` they would have
 /// to go and look.
 pub type Parts<A> = {
-  kept: List<A>,
-  rest: List<A>,
+  pub kept: List<A>,
+  pub rest: List<A>,
 };
 
 impl<A: Ord> List<A> {
@@ -2839,8 +2839,8 @@ impl Int {
 /// What `split_once` found: the text before the separator, and everything
 /// after it.
 pub type Split = {
-  head: String,
-  rest: String,
+  pub head: String,
+  pub rest: String,
 };
 //
 // All of it written in Khora, over `String::byte`, `Array<U8>` and
@@ -4411,8 +4411,8 @@ impl<K: Hash, V> Chain<K, V> {
 
 /// One key and the value under it.
 pub type Pair<K, V> = {
-  key: K,
-  value: V,
+  pub key: K,
+  pub value: V,
 };
 
 impl<K: Show, V: Show> Show for Pair<K, V> {
@@ -5416,8 +5416,8 @@ impl<A, B, 'er> SharedFn<A, B, 'er> {
 /// because named halves read better than positional ones at the call, and the
 /// two halves here are the two things a caller is most likely to swap.
 pub type Changed<A, B> = {
-  state: A,
-  result: B,
+  pub state: A,
+  pub result: B,
 };
 
 /// A bounded queue one fiber puts values into and another takes them out of.
@@ -5719,7 +5719,7 @@ impl Fibers {
 ///   Result::Err(failure) => retry_smaller(failure.children)!,
 /// }
 /// ```
-pub type ChildFailed = { children: Int };
+pub type ChildFailed = { pub children: Int };
 
 /// Every fiber's answer, in the order the handles were given.
 ///

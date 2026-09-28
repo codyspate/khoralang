@@ -79,11 +79,12 @@ sixty-four bits of a signed hundred-and-twenty-eight bit significand. They
 are two fields because only scalars cross into the runtime — see
 [The ffi design note](https://github.com/codyspate/khoralang/blob/main/docs/design/ffi.md) — and they are never taken apart anywhere else.
 
-The fields are public because a decimal is its representation and hiding it
-would only mean writing accessors for all three. `scale` is never negative:
-the constructors clamp it, because a negative scale is a large number
+**The fields are private, and that is what makes `scale` never negative.**
+The constructors clamp it, because a negative scale is a large number
 spelled confusingly and every caller who wants one means a larger
-significand.
+significand; a literal from outside this module could skip the clamp, and
+is refused. `scale()` reads the scale, and `hi` and `lo` are the runtime's
+business.
 
 **It is not bounded above, and nothing here pretends otherwise.**
 `Decimal::scaled(1, 20000)` is a legitimate value: the significand is one
@@ -142,6 +143,14 @@ Towards zero, always. What a truncation is.
 ```khora
 impl Decimal
 ```
+
+#### scale
+
+```khora
+pub fn scale(self) -> Int
+```
+
+How many places follow the point. Never negative.
 
 #### of_parts
 

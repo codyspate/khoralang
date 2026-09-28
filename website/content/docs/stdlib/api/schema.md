@@ -150,7 +150,7 @@ is in `khora.toml` and not in the deployment.
 
 ```khora
 derive(Show)
-pub type Rejection = { path: List<Segment>, secret: Bool, problem: Problem };
+pub type Rejection = { pub path: List<Segment>, pub secret: Bool, pub problem: Problem };
 ```
 
 A problem, and where it was.
@@ -245,7 +245,7 @@ send that and not the domain type; the name goes out as JSON Schema's
 
 ```khora
 derive(Show)
-pub type Named = { name: String, shape: Shape };
+pub type Named = { pub name: String, pub shape: Shape };
 ```
 
 One named field of a [`Shape::Struct`](#shape).
@@ -258,7 +258,7 @@ wire is the same unless the shape inside is [`Shape::Keyed`](#shape), which
 
 ```khora
 derive(Show)
-pub type Alternative = { name: String, fields: List<Named> };
+pub type Alternative = { pub name: String, pub fields: List<Named> };
 ```
 
 One case of a [`Shape::Cases`](#shape): its tag, and the fields of its payload.
@@ -267,8 +267,8 @@ One case of a [`Shape::Cases`](#shape): its tag, and the fields of its payload.
 
 ```khora
 pub type Schema<A> = {
-  shape: Shape,
-  read: (List<Segment>, Raw) -> Validated<A, Rejection>,
+  pub shape: Shape,
+  pub read: (List<Segment>, Raw) -> Validated<A, Rejection>,
 };
 ```
 
@@ -282,8 +282,8 @@ offers goes through [`string`](#string), [`int`](#int) and their neighbors.
 
 ```khora
 pub type Fields<A> = {
-  fields: List<Named>,
-  read: (List<Segment>, Raw) -> Validated<A, Rejection>,
+  pub fields: List<Named>,
+  pub read: (List<Segment>, Raw) -> Validated<A, Rejection>,
 };
 ```
 
@@ -299,9 +299,9 @@ source -- a database catalog, say.
 
 ```khora
 pub type Case<A> = {
-  name: String,
-  fields: List<Named>,
-  read: (List<Segment>, Raw) -> Validated<A, Rejection>,
+  pub name: String,
+  pub fields: List<Named>,
+  pub read: (List<Segment>, Raw) -> Validated<A, Rejection>,
 };
 ```
 

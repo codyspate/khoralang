@@ -103,8 +103,8 @@ a PostgreSQL server returns. Read those through [`Cell::text`](#text).
 
 ```khora
 pub type Row = {
-  columns: List<String>,
-  cells: List<Cell>,
+  pub columns: List<String>,
+  pub cells: List<Cell>,
 };
 ```
 

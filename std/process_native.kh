@@ -97,11 +97,11 @@ pub type ProcessError =
 /// the status — is a caller running the command twice.
 pub type Completed = {
   /// What the command exited with. Zero is the universal "it worked".
-  status: Int,
+  pub status: Int,
   /// Everything it wrote to its standard output. Its standard *error* is not
   /// captured; it goes wherever this process's does, and a caller who wants it
   /// folded in writes `2>&1` on the end of the command themselves.
-  text: String,
+  pub text: String,
 };
 
 /// Permission to start another program.

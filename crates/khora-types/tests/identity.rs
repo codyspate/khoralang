@@ -116,7 +116,7 @@ fn an_ordinary_name_is_left_alone() {
 fn two_modules_may_declare_one_name() {
     let found = errors_in_user(
         "module library;
-         pub type Point = { label: String };
+         pub type Point = { pub label: String };
          pub fn make() -> Point { { label: \"theirs\" } }
 ",
         "module app;

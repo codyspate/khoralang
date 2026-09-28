@@ -408,7 +408,7 @@ pub type Problem =
 /// };
 /// ```
 derive(Show)
-pub type Rejection = { path: List<Segment>, secret: Bool, problem: Problem };
+pub type Rejection = { pub path: List<Segment>, pub secret: Bool, pub problem: Problem };
 
 impl Segment {
   /// The step as it appears in a path: `.name` or `[3]`.
@@ -538,11 +538,11 @@ pub type Shape =
 /// wire is the same unless the shape inside is [`Shape::Keyed`], which
 /// [`Shape::keys`] looks through.
 derive(Show)
-pub type Named = { name: String, shape: Shape };
+pub type Named = { pub name: String, pub shape: Shape };
 
 /// One case of a [`Shape::Cases`]: its tag, and the fields of its payload.
 derive(Show)
-pub type Alternative = { name: String, fields: List<Named> };
+pub type Alternative = { pub name: String, pub fields: List<Named> };
 
 impl Show for Shape {
   fn show(self) -> String {
@@ -621,8 +621,8 @@ impl Shape {
 /// so that a package may add a primitive of its own, and everything `std`
 /// offers goes through [`string`], [`int`] and their neighbors.
 pub type Schema<A> = {
-  shape: Shape,
-  read: (List<Segment>, Raw) -> Validated<A, Rejection>,
+  pub shape: Shape,
+  pub read: (List<Segment>, Raw) -> Validated<A, Rejection>,
 };
 
 /// The fields of a record, decoding to an `A`.
@@ -633,16 +633,16 @@ pub type Schema<A> = {
 /// package may want to build a record schema from something that is not
 /// source -- a database catalog, say.
 pub type Fields<A> = {
-  fields: List<Named>,
-  read: (List<Segment>, Raw) -> Validated<A, Rejection>,
+  pub fields: List<Named>,
+  pub read: (List<Segment>, Raw) -> Validated<A, Rejection>,
 };
 
 /// One case of a variant: its tag on the wire, the fields of its payload, and
 /// how the payload becomes the value. Built by [`Schema::case`].
 pub type Case<A> = {
-  name: String,
-  fields: List<Named>,
-  read: (List<Segment>, Raw) -> Validated<A, Rejection>,
+  pub name: String,
+  pub fields: List<Named>,
+  pub read: (List<Segment>, Raw) -> Validated<A, Rejection>,
 };
 
 impl<A> Schema<A> {

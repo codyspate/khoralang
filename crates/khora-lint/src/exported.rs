@@ -82,9 +82,14 @@ fn declaration(kind: SyntaxKind) -> Option<&'static str> {
 }
 
 /// Whether the declaration is exported.
+///
+/// Only a `pub` before the keyword counts. `type Port = pub Int;` has one
+/// after `=` that opens the newtype's value, and reading that one would
+/// demand documentation of a type nobody outside can name.
 fn is_public(node: &SyntaxNode) -> bool {
     node.children_with_tokens()
         .filter_map(|it| it.into_token())
+        .take_while(|token| token.kind() != SyntaxKind::TYPE_KW)
         .any(|token| token.kind() == SyntaxKind::PUB_KW)
 }
 

@@ -113,7 +113,7 @@ impl Method {
 /// The path parameters a route matched: `/analyze/:account_id` against
 /// `/analyze/acc_9921` binds `account_id`.
 pub type Params = {
-  bound: Map<String, String>,
+  pub bound: Map<String, String>,
 };
 
 impl Params {
@@ -134,23 +134,23 @@ impl Params {
 /// parameters and two headers does no parsing at all — the maps below are
 /// already built, and the header names are already lowercased.
 pub type Request = {
-  method: Method,
+  pub method: Method,
   /// The path with the query string taken off: `/analyze/acc_1?deep=true` has
   /// a path of `/analyze/acc_1`. Routes match against this, so mounting
   /// `/analyze/:id` does not stop working the moment a client adds a
   /// parameter.
-  path: String,
-  params: Params,
+  pub path: String,
+  pub params: Params,
   /// Decoded once, when the request arrives, rather than on every lookup — a
   /// handler that reads three parameters should not decode the query three
   /// times.
-  queries: Map<String, String>,
+  pub queries: Map<String, String>,
   /// Keyed by the **lowercased** name, because HTTP header names are
   /// case-insensitive and a map is not. Folding the case here rather than in
   /// `header` means two headers differing only in case collide on arrival,
   /// which is the correct reading: they are the same header.
-  headers: Map<String, String>,
-  body: String,
+  pub headers: Map<String, String>,
+  pub body: String,
 };
 
 impl Request {
@@ -200,8 +200,8 @@ impl Request {
 
 /// One header on the way out.
 pub type Header = {
-  name: String,
-  value: String,
+  pub name: String,
+  pub value: String,
 };
 
 /// What a handler answers with: a status, a body, its type, and any extra
@@ -210,13 +210,13 @@ pub type Header = {
 /// `json` and `text` build the two common ones. `with_header` adds to either,
 /// and returns a new response rather than changing the one it was given.
 pub type Response = {
-  status: Int,
-  body: String,
-  content_type: String,
+  pub status: Int,
+  pub body: String,
+  pub content_type: String,
   /// Anything beyond the three a response always carries. A list rather than a
   /// map, because `Set-Cookie` may legitimately appear more than once and a
   /// map would silently keep only the last.
-  headers: List<Header>,
+  pub headers: List<Header>,
 };
 
 impl Response {
@@ -590,11 +590,11 @@ pub fn parse(text: String) -> Option<Request> {
 /// Public because a caller parsing a request for its own reasons wants the
 /// target as the client wrote it; `Request` carries the split version.
 pub type RequestLine = {
-  method: Method,
+  pub method: Method,
   /// The request target as written, query string and all. `parse` splits it;
   /// keeping it whole here means a caller reading a request line for its own
   /// reasons gets what the client actually sent.
-  target: String,
+  pub target: String,
 };
 
 fn parse_request_line(line: String) -> Option<RequestLine> {
@@ -774,11 +774,11 @@ fn chunk() -> Int { 4096 }
 /// one of them.
 pub type Transport = {
   /// Bytes into the buffer: how many, 0 when the peer closed, or -1.
-  receive: (Array<U8>) -> Int,
+  pub receive: (Array<U8>) -> Int,
   /// The text, all of it, or -1.
-  transmit: (String) -> Int,
+  pub transmit: (String) -> Int,
   /// Ends the conversation and releases whatever is underneath.
-  shut: () -> (),
+  pub shut: () -> (),
 };
 
 /// A transport over a plain socket.
@@ -1190,9 +1190,9 @@ fn segment(text: String) -> Split {
 /// over what it needs at the mount site, so there is no `'r` left for a `Route`
 /// to carry — `Router<'er>` says only how its handlers can fail.
 pub type Route<'er> = {
-  method: Method,
-  pattern: String,
-  handler: SharedFn<Request, Response, 'er>,
+  pub method: Method,
+  pub pattern: String,
+  pub handler: SharedFn<Request, Response, 'er>,
 };
 
 /// A router carries its handlers' failures, so mounting a route that can fail
@@ -1207,14 +1207,14 @@ pub type Route<'er> = {
 /// has to answer JSON for a method it does not want must mount that method and
 /// refuse inside the handler.
 pub type Router<'er> = {
-  routes: List<Route<'er>>,
+  pub routes: List<Route<'er>>,
   /// The most bytes one request may occupy, headers and body together.
   ///
   /// On the router because that is the only thing a caller holds: the limit
   /// belongs to `Connection`, and every path from `listen` to it goes through
   /// five functions that had no reason to carry a number. `Router::holding`
   /// is how it is set.
-  limit: Int,
+  pub limit: Int,
 };
 
 /// Mounting is written `router |> Router::post(..)`, so the router is the
@@ -1953,23 +1953,23 @@ fn print(value: String);
 /// Where a call is going.
 pub type Url = {
   /// Whether to put TLS in front of the socket.
-  secure: Bool,
-  host: String,
-  port: Int,
+  pub secure: Bool,
+  pub host: String,
+  pub port: Int,
   /// Path and query, together, beginning with `/`. What goes on the request
   /// line unchanged — a client that re-encodes what it was given is a client
   /// that breaks somebody's signed URL.
-  target: String,
+  pub target: String,
 };
 
 /// A request this program is making.
 pub type Call = {
-  method: Method,
-  url: String,
+  pub method: Method,
+  pub url: String,
   /// A list rather than a map, matching `Response`: two headers of the same
   /// name are legal on the way out and a map would keep one.
-  headers: List<Header>,
-  body: String,
+  pub headers: List<Header>,
+  pub body: String,
 };
 
 /// What came back.
@@ -1977,9 +1977,9 @@ pub type Call = {
 /// Headers keyed by the **lowercased** name, as `Request`'s are and for the
 /// same reason: HTTP header names are case-insensitive and a map is not.
 pub type Answer = {
-  status: Int,
-  headers: Map<String, String>,
-  body: String,
+  pub status: Int,
+  pub headers: Map<String, String>,
+  pub body: String,
 };
 
 /// What can go wrong reaching somebody else.

@@ -15,7 +15,7 @@ module Path ;
 import Path::{...} ;
 
 pub? const Pattern (: Type)? = Expr ;
-derive(...)? pub? type Name<TypeParams>? (= TypeDef)? ;
+derive(...)? pub? type Name<TypeParams>? (= pub? TypeDef)? ;
 pub? fn Name<TypeParams>? (Params) (-> Type)? (with Row)? (raises Type)? (Block | ;)
 pub? effect Name<TypeParams>? { Field, ... }
 pub? context Name { name: Expr, ... }
@@ -27,7 +27,9 @@ bench "name" Block
 extern fn name(Params) (-> Type)? (with Row)? ;
 ```
 
-Current public visibility is spelled `pub`.
+Current public visibility is spelled `pub`. A record field takes it too,
+before `mut`: `{ pub name: String, pub mut count: Int }`. A field without it is
+private to the declaring module; see [Field visibility](./types/#field-visibility).
 
 ## Paths and fields
 

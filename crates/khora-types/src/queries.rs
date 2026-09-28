@@ -251,9 +251,14 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             pending_raises: Vec::new(),
             derived_tails: Vec::new(),
             owner_rows: Vec::new(),
+            pending_updates: Vec::new(),
             errors: Vec::new(),
         };
         checker.check_function();
+        // First after the body: checking an update's fields constrains their
+        // values, and the raises, rows and projections settled below may
+        // depend on those.
+        checker.settle_updates();
         // Before the rows are closed: what a raise not yet typed leaves over
         // is a tail of its own, and closing it is what says it left nothing.
         checker.settle_raises();

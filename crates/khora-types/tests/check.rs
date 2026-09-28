@@ -1193,24 +1193,32 @@ fn implementing_an_imported_trait_once_is_fine() {
     assert!(found.is_empty(), "nothing is wrong with this: {found:?}");
 }
 
-/// **A wrapper type is constructed by name from anywhere it is imported.**
+/// **An open wrapper type is constructed by its bare name from anywhere it is
+/// imported.**
 ///
-/// `type Money = Int;` declares one constructor, `Money`, and
+/// `type Money = pub Int;` declares one constructor, `Money`, and
 /// `reference/types` teaches `Money(499)` as the way to build one -- singling
 /// out `Money::Money(499)` as *not* the form. Outside the declaring module the
 /// taught spelling was the one that did not work: the bare name resolved
 /// against this file's own declarations only, so an imported wrapper never
 /// matched, fell through to the item table as a *type*, and left an inference
-/// variable for the "never worked out" audit to report. The advice that error
-/// gives -- add an annotation -- did not help either, because the constructor
-/// still did not resolve.
+/// variable for the "never worked out" audit to report.
+///
+/// **The wrapper is `= pub Int` because newtypes became private by default.**
+/// This test used `type Money = Int;`, which is now a wrapper only its own
+/// module can build: a newtype is a record with one unnamed field, fields are
+/// private unless marked `pub`, and a refinement like `Port` is only a
+/// refinement if outside code cannot write `Port(99999)`. What this pins --
+/// that an imported constructor resolves by its bare name -- is unchanged, and
+/// it needs an open newtype to be visible from `app` at all. The closed case,
+/// refused with a message naming `= pub`, is in `field_privacy.rs`.
 #[test]
 fn an_imported_wrapper_is_constructed_by_its_bare_name() {
     let db = KhoraDatabase::new();
     let declaring = SourceFile::new(
         &db,
         "money.kh".into(),
-        "module money;\n\npub type Money = Int;\n".to_string(),
+        "module money;\n\npub type Money = pub Int;\n".to_string(),
     );
     let using = SourceFile::new(
         &db,

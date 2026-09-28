@@ -99,13 +99,17 @@ default — and for `let` for a value computed while a function runs.
 Named definition over an existing type, and record definition:
 
 ```khora
-pub type UserId = Int;
+pub type UserId = pub Int;
 
 pub type User = {
-  id: UserId,
-  name: String,
+  pub id: UserId,
+  pub name: String,
 };
 ```
+
+A field is private to the declaring module unless it is marked `pub`, and a
+wrapper's value is private unless the declaration writes `= pub`. [Field
+visibility](./types/#field-visibility) has the whole rule.
 
 Variant type:
 
@@ -115,7 +119,7 @@ pub type Result<A, E> =
   | Err(error: E);
 ```
 
-**`pub type UserId = Int;` is a new type, not another spelling of `Int`.**
+**`pub type UserId = pub Int;` is a new type, not another spelling of `Int`.**
 Khora has [no transparent alias](./types/#wrappers-and-named-data): an `Int` is not
 accepted where a `UserId` is wanted, and `takes(5)` on `fn takes(u: UserId)`
 reports `expected `UserId`, found `Int``.
@@ -129,8 +133,13 @@ pub type Handle;
 General form:
 
 ```text
-derive(...)? pub? type Name<TypeParams>? (= TypeDefinition)? ;
+derive(...)? pub? type Name<TypeParams>? (= pub? TypeDefinition)? ;
 ```
+
+The `pub` before `type` exports the declaration. The one after `=` opens a
+wrapper's value to other modules, and is refused before a record or a variant:
+a record opens its fields one at a time, and a case's payload is always
+public.
 
 ## `derive(...)`
 
@@ -139,8 +148,8 @@ A derive clause appears immediately before the type it applies to:
 ```khora
 derive(Eq, Ord, Show, Hash)
 pub type Point = {
-  x: Int,
-  y: Int,
+  pub x: Int,
+  pub y: Int,
 };
 ```
 

@@ -494,9 +494,42 @@ pub struct VariantInfo {
     /// Empty for a variant declared before this mattered, which reads as "none
     /// of them" — the safe answer, and the one every constructor wants.
     pub mutable: Vec<bool>,
+    /// Which fields are `pub`, positionally: the ones code outside `home` may
+    /// read, bind, assign or name in a literal.
+    ///
+    /// **Empty means every field is public**, and that is the answer for
+    /// everything that is not a declared record or newtype: an effect's
+    /// operations (whoever supplies a handler builds one), a variant case's
+    /// payload (matching on it is what the type is for), and the compiler's
+    /// own tuples. A record *with* fields fills this in even when none is
+    /// `pub`, which is what makes all-`false` mean "all private" rather than
+    /// "not recorded".
+    pub public: Vec<bool>,
 }
 
 impl VariantInfo {
+    /// Whether field `index` may be named by code in `module`.
+    ///
+    /// **The unit is the module, not the package**, because the module is
+    /// the only unit the checker can tell apart unforgeably: a package's
+    /// modules share a path prefix, and any package may declare
+    /// `module std::anything;`. Inside the declaring module every field is
+    /// visible, so a type's own functions are unaffected.
+    pub fn field_visible_from(&self, index: usize, module: Option<&khora_hir::ModulePath>) -> bool {
+        if self.home.is_none() || self.home.as_ref() == module {
+            return true;
+        }
+        self.public.is_empty() || self.public.get(index).copied().unwrap_or(false)
+    }
+
+    /// Every field `module` cannot see, in declared order.
+    ///
+    /// All of them rather than the first: a message naming one private field
+    /// sends the reader to open it and come back to be told about the next.
+    pub fn hidden_from(&self, module: Option<&khora_hir::ModulePath>) -> Vec<usize> {
+        (0..self.fields.len()).filter(|i| !self.field_visible_from(*i, module)).collect()
+    }
+
     /// The position and type of a named field.
     pub fn field(&self, label: &str) -> Option<(usize, &Type)> {
         let index = self.labels.iter().position(|l| l == label)?;

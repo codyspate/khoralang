@@ -232,12 +232,12 @@ pub type Mode = | Local | Remote(url: String);
 
 derive(Show, Decode)
 pub type Settings = {
-  listen: Listen,
-  password: Redacted<String>,
-  debug: Option<Bool>,
-  rate: Decimal,
-  tags: List<String>,
-  mode: Mode,
+  pub listen: Listen,
+  pub password: Redacted<String>,
+  pub debug: Option<Bool>,
+  pub rate: Decimal,
+  pub tags: List<String>,
+  pub mode: Mode,
 };
 ```
 

@@ -1,0 +1,58 @@
+module std_suite::decoding;
+
+//! Decoding into a type with private fields, from outside its module.
+//!
+//! **What this guards is that input cannot skip a constructor.** `Checked`'s
+//! field is private, so the only `Decode` it can have is one that goes
+//! through `Checked::of`. A document that `of` would refuse is refused by the
+//! decoder, and a type holding a `Checked` -- here with a derived decoder of
+//! its own -- is refused the same way, because its derive calls `Checked`'s
+//! impl rather than building one.
+
+import std::core::{Result, String, Validated, assert_that};
+import std::json::{parse};
+import std::schema::{Decode, Raw};
+import std_suite::checked::{Checked};
+
+/// All `pub`, so its derive is allowed: it builds a `Holder` and asks
+/// `Checked::schema()` for the field.
+derive(Decode)
+pub type Holder = { pub name: Checked };
+
+/// The decoded name, or `refused`.
+fn checked(text: String) -> String {
+  match parse(text) {
+    Result::Err(_why) => "not JSON",
+    Result::Ok(document) =>
+      match Checked::schema().decode(Raw::of_json(document)) {
+        Validated::Valid(c) => c.text(),
+        Validated::Invalid(_problems) => "refused",
+      },
+  }
+}
+
+/// The same, through a record that holds one.
+fn held(text: String) -> String {
+  match parse(text) {
+    Result::Err(_why) => "not JSON",
+    Result::Ok(document) =>
+      match Holder::schema().decode(Raw::of_json(document)) {
+        Validated::Valid(h) => h.name.text(),
+        Validated::Invalid(_problems) => "refused",
+      },
+  }
+}
+
+test "a hand-written decode over try_map refuses what the constructor refuses" {
+  let good = checked("\"ada\"");
+  assert_that(good == "ada", "a valid name decoded as ${good}");
+  let bad = checked("\"\"");
+  assert_that(bad == "refused", "an empty name decoded as ${bad}");
+}
+
+test "a derived decode of a holder goes through the held type's impl" {
+  let good = held("{\"name\":\"ada\"}");
+  assert_that(good == "ada", "a valid holder decoded as ${good}");
+  let bad = held("{\"name\":\"\"}");
+  assert_that(bad == "refused", "a holder with an empty name decoded as ${bad}");
+}

@@ -63,8 +63,8 @@ this keeps every digit it arrived with.
 
 ```khora
 pub type JsonError = {
-  at: Int,
-  expected: String,
+  pub at: Int,
+  pub expected: String,
 };
 ```
 
@@ -79,8 +79,8 @@ caller can slice with.
 
 ```khora
 pub type Field = {
-  name: String,
-  value: Json,
+  pub name: String,
+  pub value: Json,
 };
 ```
 

@@ -45,6 +45,15 @@ impl<'a> Checker<'a> {
             if let Some((home, owner, case)) = variant_case(&resolution) {
                 if let Some(variant) = self.types.variant_of(home.as_ref(), &owner, &case).cloned()
                 {
+                    // `Port(5)` outside `Port`'s module, when it is not
+                    // `= pub Int`. The arguments are still inferred, so an
+                    // error inside one is not lost behind this one.
+                    if self.refuse_hidden_construction(&variant, range) {
+                        for arg in args {
+                            self.infer(*arg);
+                        }
+                        return self.instantiate_adt(&variant.type_name).0;
+                    }
                     if args.len() != variant.fields.len() {
                         self.error(
                             format!(
@@ -96,7 +105,18 @@ impl<'a> Checker<'a> {
             // type, and the field is the more specific of the two.
             let owner = self.infer(base);
             let owner = self.unifier.shallow(&owner);
-            if self.record_field(&owner, &name).is_some() {
+            // **A field this module cannot see is not a candidate.** D2 lets
+            // a field shadow a method, and that is right while both are
+            // reachable; with the field private it would make `d.year()`
+            // outside `std::time` a refused read of `year` instead of a call
+            // to `Date::year`, which is exactly the getter the privacy asks
+            // the caller to use.
+            let visible = self.record_field(&owner, &name).is_some_and(|(index, _)| {
+                self.types
+                    .record_of(&owner)
+                    .is_none_or(|r| r.field_visible_from(index, self.types.module.as_ref()))
+            });
+            if visible {
                 return self.apply(Some(callee), args, hint, range);
             }
             if let Some(ty) = self.infer_method_call(callee, base, &name, args, range) {

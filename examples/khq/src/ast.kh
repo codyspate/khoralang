@@ -69,9 +69,9 @@ pub type Filter =
 /// having and because `{ "a": 1 }` and `{ a: 1 }` then need no separate case.
 pub type Entry = {
   /// What the key is.
-  key: Filter,
+  pub key: Filter,
   /// What the value is.
-  value: Filter,
+  pub value: Filter,
 };
 
 /// A literal value written in the query.

@@ -28,6 +28,9 @@ A pin that cannot be satisfied fails loudly. It never silently runs a different 
 | Surface | Breaking? |
 | --- | --- |
 | Language syntax and semantics | Yes |
+| Making a `pub` field of a `pub` type private, or closing an open wrapper (`= pub T` to `= T`) | Yes |
+| Adding a private field to a type that already has one | No: nothing outside the module could build it before either |
+| Adding any field to a type whose fields are all `pub` | Yes: literals outside the module stop compiling |
 | A `std` signature, type or behavior | Yes |
 | A `std` item's removal or rename | Yes |
 | Renaming a parameter of a public function, in `std` or a package | Yes. A caller may have [labeled the argument](./expressions/#labeled-arguments) with the name |

@@ -20,7 +20,7 @@
 //!
 //! | after | offers |
 //! | --- | --- |
-//! | `.` | the methods of the receiver's type |
+//! | `.` | the fields of the receiver this module may name, and the methods of its type |
 //! | `Type::` | that type's own methods and constructors |
 //! | `import m::{` | what `m` exports |
 //! | anything else | locals, this file's declarations and imports, and every public name in the workspace |
@@ -467,8 +467,35 @@ fn after_dot(db: &dyn Db, file: SourceFile, dot: &SyntaxToken) -> Option<Vec<Can
         }
     }
 
-    let head = head_of(&receiver_type?)?;
-    Some(methods_on(db, file, &head))
+    let receiver_type = receiver_type?;
+    let head = head_of(&receiver_type)?;
+    let mut out = fields_on(db, file, &receiver_type);
+    out.extend(methods_on(db, file, &head));
+    Some(out)
+}
+
+/// The fields of a record receiver that this file may name.
+///
+/// **A private field is not offered outside the module that declares it.**
+/// Offering it would complete to a read the checker refuses, which is the
+/// editor suggesting the error. Inside the declaring module every field is
+/// offered, because every field can be read there.
+fn fields_on(db: &dyn Db, file: SourceFile, ty: &khora_types::Type) -> Vec<Candidate> {
+    let map = khora_types::type_map(db, file);
+    let Some(record) = map.record_of(ty) else { return Vec::new() };
+    record
+        .labels
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| record.field_visible_from(*i, map.module.as_ref()))
+        .map(|(i, label)| {
+            Candidate::plain(
+                label.clone(),
+                CompletionItemKind::FIELD,
+                record.fields.get(i).map(|t| t.to_string()),
+            )
+        })
+        .collect()
 }
 
 /// What follows `Type::`: that type's methods and its constructors.

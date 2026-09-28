@@ -120,6 +120,85 @@ A record with a `mut` field cannot cross into a fiber. Two fibers writing one
 record is a data race, and the type says so; [Sharing](./sharing/) is what does
 cross.
 
+### Field visibility
+
+A field of a declared record is private to the module that declares the type,
+unless it is marked `pub`:
+
+```khora
+pub type Pair<K, V> = { pub key: K, pub value: V };
+pub type Tally = { pub name: String, pub mut count: Int };
+pub type Email = { text: String };
+```
+
+`pub` comes before `mut`, as it comes before `fn`.
+
+**Inside the declaring module nothing changes.** Everywhere else, a private
+field cannot be read (`e.text`), assigned (`e.text = ..`), named in a literal
+(`{ text: .. }`) or an update (`{ ..e, text: .. }`), or bound in a pattern
+(`Email { text }`, `let Email { text } = e`).
+
+**A value with any private field can only be built by its own module.** A
+literal or an update from outside is refused even when it names only `pub`
+fields, because the private ones are what the module's functions keep true.
+That is what makes a checking constructor the only way to get a value:
+
+```khora
+module email::address;
+
+import std::core::{Option, String};
+
+/// An address that was checked once, here, and never again.
+pub type Email = { text: String };
+
+impl Email {
+  pub fn parse(text: String) -> Option<Email> {
+    match String::index_of(text, "@") {
+      Option::None => Option::None,
+      Option::Some(_) => Option::Some({ text: text }),
+    }
+  }
+  pub fn text(self) -> String { self.text }
+}
+```
+
+Another module calls `Email::parse` and reads `e.text()`. Writing
+`{ text: "nope" }` there is refused:
+
+```text
+error: cannot build `Email` here: `text` is private to `email::address`, so only `email::address` can make one. Call one of its functions that returns `Email`, or, if `email::address` is yours, mark every field `pub`
+```
+
+**A private field does not hide a method.** `e.text()` calls `Email::text`
+from outside even though `Email` has a private field of the same name.
+
+**A case's payload is not a field and is always public**, because matching on
+it is how a variant is used. To hide a variant's shape, wrap it in a newtype,
+which is private by default (see [Wrappers and named data](#wrappers-and-named-data)).
+
+**`derive`** writes code inside the declaring module, so a derived `Show`,
+`Eq`, `Ord`, `Hash` or `Encode` reads private fields. `derive(Decode)` is
+refused on a `pub` type with a private field, because it would build one from
+input without calling anything that checks. Write `impl Decode` with
+`Schema::try_map` over the function that checks, or mark every field `pub` if
+nothing needs checking:
+
+```khora
+impl Decode for Email {
+  fn schema() -> Schema<Email> {
+    string().try_map("an email address", fn s => Email::parse(s))
+  }
+}
+```
+
+**Tests:** a `test` block is inside the module it is written in. A separate
+`module email::address_test;` is outside `email::address`, as it is for that
+module's private functions.
+
+`pub` means something only on a field of a `type` declaration. In a row, on a
+case's payload and on an effect's operation it is refused. `mut` is refused in
+a row too: a row's entries belong to no value, so there is nothing to assign.
+
 ## Variant types
 
 A value that is exactly one of several named cases. Other languages call this a **discriminated union**, a **tagged union**, or a **sum type**; Rust and Swift spell it `enum`. A `match` on one is checked for exhaustiveness, so a case you forget is a compile error rather than a surprise.
@@ -361,8 +440,8 @@ A type declaration over an existing type gives a domain name to a value, and
 gives it a type of its own:
 
 ```khora
-pub type UserId = Int;
-pub type OrderId = Int;
+pub type UserId = pub Int;
+pub type OrderId = pub Int;
 ```
 
 **These are distinct types, not other spellings of `Int`.** A `UserId` is not
@@ -384,26 +463,53 @@ fn number(id: UserId) -> Int {
 }
 ```
 
+**The value inside is private unless the declaration says `pub`**, the same
+rule a record's fields follow: a wrapper is a record with one unnamed field.
+`type UserId = pub Int;` is an identifier anyone may make and open, and
+`UserId(1)` is then the spelling everywhere, including modules that import the
+type rather than declare it. The qualified `UserId::UserId(1)` also resolves.
+
+Without the `pub`, only the declaring module can call `Port(..)` or match
+`Port(n)`. That is what a refinement needs: a `Port` built only by a function
+that checks the range is a port every other function can trust.
+
+```khora
+module net::port;
+
+import std::core::{Option};
+
+/// A TCP port, 1 to 65535. `Port::of` is the only way to get one.
+pub type Port = Int;
+
+impl Port {
+  pub fn of(n: Int) -> Option<Port> {
+    if n < 1 || n > 65535 { Option::None } else { Option::Some(Port(n)) }
+  }
+}
+```
+
+From another module, `Port(99999)` is refused:
+
+```text
+error: cannot build `Port` here: its value is private to `net::port`, so only `net::port` can make one. Call one of its functions that returns `Port`, or, if `net::port` is yours, declare it `type Port = pub ..`
+```
+
 `derive` applies as it does to anything else, and is usually wanted: without
 `Eq` and `Ord` a `UserId` cannot be a `Dict` key, and without `Show` it cannot
 go in a `${..}` hole.
 
 ```khora
 derive(Eq, Ord, Show)
-pub type UserId = Int;
+pub type UserId = pub Int;
 ```
 
 `Show` prints `UserId(1)`, not `UserId::UserId(1)` — the one case is the type.
-
-`UserId(1)` is the spelling everywhere, including modules that import the type
-rather than declare it. The qualified `UserId::UserId(1)` also resolves, and
-matching works bare across modules too: `match id { UserId(value) => value }`.
 
 The underlying type may be anything, a generic one included, which is how a
 long type gets a short name:
 
 ```khora
-pub type Books = Dict<Currency, Bucket>;
+pub type Books = pub Dict<Currency, Bucket>;
 ```
 
 Khora has **no transparent alias**: no form meaning "another spelling of the
@@ -414,8 +520,8 @@ The other two ways a declaration names data, for comparison — a record:
 
 ```khora
 pub type User = {
-  id: UserId,
-  name: String,
+  pub id: UserId,
+  pub name: String,
 };
 ```
 

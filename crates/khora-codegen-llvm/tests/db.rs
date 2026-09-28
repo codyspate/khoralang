@@ -584,7 +584,7 @@ fn a_row_reads_through_its_column_names() {
     let out = run_with(
         "db_row_schema",
         r#"derive(Show, Decode)
-pub type Entry = { id: Int, memo: String, amount: Decimal, paid: Bool };
+pub type Entry = { pub id: Int, pub memo: String, pub amount: Decimal, pub paid: Bool };
 
 fn money(text: String) -> Cell {
   match Decimal::of_string(text) {

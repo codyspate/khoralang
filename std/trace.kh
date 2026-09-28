@@ -92,8 +92,8 @@ pub type Value =
 
 /// A named value on a span.
 pub type Attribute = {
-  name: String,
-  value: Value,
+  pub name: String,
+  pub value: Value,
 };
 
 /// How a span ended.
@@ -113,20 +113,20 @@ pub type Status =
 /// integer is 64. Naming the halves is better than a string that has to be
 /// parsed at every hop.
 pub type Context = {
-  trace_high: Int,
-  trace_low: Int,
-  span: Int,
+  pub trace_high: Int,
+  pub trace_low: Int,
+  pub span: Int,
   /// Whether this trace is being recorded. Decided once, at the root, and
   /// carried unchanged — a trace that is half sampled is not a trace.
-  sampled: Bool,
+  pub sampled: Bool,
 };
 
 /// A span in progress.
 pub type Span = {
-  context: Context,
+  pub context: Context,
   /// The span this one is inside, or zero at the root.
-  parent: Int,
-  name: String,
+  pub parent: Int,
+  pub name: String,
 };
 
 /// Starting, ending and annotating spans.

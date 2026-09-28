@@ -354,8 +354,30 @@ impl NameRef {
 }
 
 impl TypeDecl {
+    /// `pub` before `type`, and only that one.
+    ///
+    /// **`type Port = pub Int;` has a `pub` too, and it is not this.** It
+    /// opens the newtype's value and says nothing about the type, so a search
+    /// of the whole declaration would export every open newtype -- a private
+    /// declaration made public by the word that means something else.
     pub fn is_exported(&self) -> bool {
-        token(&self.0, PUB_KW).is_some()
+        self.0
+            .children_with_tokens()
+            .filter_map(|it| it.into_token())
+            .take_while(|t| t.kind() != TYPE_KW)
+            .any(|t| t.kind() == PUB_KW)
+    }
+    /// Whether a newtype's value may be built and matched outside its module:
+    /// `type UserId = pub Int;`.
+    ///
+    /// False for a record and a variant, whose `pub` belongs to each field or
+    /// is refused by the parser.
+    pub fn is_open_newtype(&self) -> bool {
+        self.0
+            .children_with_tokens()
+            .filter_map(|it| it.into_token())
+            .skip_while(|t| t.kind() != EQ)
+            .any(|t| t.kind() == PUB_KW)
     }
     pub fn name(&self) -> Option<Name> {
         child(&self.0)
@@ -703,6 +725,12 @@ impl Field {
     /// `mut count: Int` — the field may be written after the record is built.
     pub fn is_mut(&self) -> bool {
         token(&self.0, MUT_KW).is_some()
+    }
+    /// `pub label: T`: readable, bindable and buildable outside the module
+    /// that declares the record. Only a `type` declaration's record keeps it;
+    /// the parser refuses it everywhere else.
+    pub fn is_pub(&self) -> bool {
+        token(&self.0, PUB_KW).is_some()
     }
 }
 

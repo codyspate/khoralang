@@ -37,9 +37,12 @@ import std::core::{Eq, Option, Ord, Ordering, Show};
 
 /// A date on the proleptic Gregorian calendar.
 ///
-/// `month` is 1 to 12 and `day` is 1 to the length of that month. Construct
-/// through `Date::of`, which checks; the fields are public because a date is
-/// its three numbers and hiding them would only mean writing three accessors.
+/// `month` is 1 to 12 and `day` is 1 to the length of that month.
+///
+/// **The fields are private, so `Date::of` is the only way to make one**, and
+/// the thirty-first of February cannot be written as a literal from outside
+/// this module. Reading loses nothing: `year()`, `month()` and `day()` answer
+/// with the same numbers.
 pub type Date = {
   year: Int,
   month: Int,
@@ -52,6 +55,9 @@ pub type Date = {
 /// here as it is in every database and every wire format worth naming. A
 /// calendar that admitted 23:59:60 would push that into every comparison and
 /// every subtraction to be correct about something almost nothing observes.
+///
+/// The fields are private, so `Time::of`, which checks each range, is the only
+/// way to make one. `hour()`, `minute()`, `second()` and `milli()` read them.
 pub type Time = {
   hour: Int,
   minute: Int,
@@ -68,8 +74,8 @@ pub type Time = {
 /// silently treating local wall time as UTC — the mistake that puts a
 /// midnight-boundary report a day out twice a year.
 pub type DateTime = {
-  date: Date,
-  time: Time,
+  pub date: Date,
+  pub time: Time,
 };
 
 /// Minutes east of UTC.
@@ -79,6 +85,9 @@ pub type DateTime = {
 /// applies on a given date, and that rule is a dataset this module refuses to
 /// carry. A caller gets one of these from a package or from the host and hands
 /// it here.
+///
+/// The field is private, so `Offset::of_minutes`, which refuses a day or more
+/// either way, is the only way to make one. `minutes()` reads it.
 pub type Offset = {
   minutes: Int,
 };
@@ -115,6 +124,15 @@ pub fn is_leap(year: Int) -> Bool {
 }
 
 impl Date {
+  /// The year: negative before 1, and 0 is 1 BC, as ISO 8601 has it.
+  pub fn year(self) -> Int { self.year }
+
+  /// 1 to 12.
+  pub fn month(self) -> Int { self.month }
+
+  /// 1 to the length of the month.
+  pub fn day(self) -> Int { self.day }
+
   /// A date, or `None` if there is no such day.
   ///
   /// The thirty-first of February is refused rather than rolled forward into
@@ -232,6 +250,18 @@ fn time_after_midnight(millis: Int) -> Time {
 }
 
 impl Time {
+  /// 0 to 23.
+  pub fn hour(self) -> Int { self.hour }
+
+  /// 0 to 59.
+  pub fn minute(self) -> Int { self.minute }
+
+  /// 0 to 59: there are no leap seconds here.
+  pub fn second(self) -> Int { self.second }
+
+  /// 0 to 999.
+  pub fn milli(self) -> Int { self.milli }
+
   /// A time of day, or `None` if there is no such moment.
   pub fn of(hour: Int, minute: Int, second: Int, milli: Int) -> Option<Time> {
     if hour < 0 || hour > 23 || minute < 0 || minute > 59
@@ -305,6 +335,9 @@ impl Time {
 }
 
 impl Offset {
+  /// Minutes east of UTC, less than a day either way.
+  pub fn minutes(self) -> Int { self.minutes }
+
   /// No offset at all.
   pub fn utc() -> Offset { { minutes: 0 } }
 

@@ -61,28 +61,6 @@ test "a server nonce that does not extend the client's is refused" {
   };
 }
 
-test "a server that cannot prove it holds the password is refused" {
-  let opening = begin("rOprNGfwEbeRWgbNEkqO");
-  let server_first =
-    "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096";
-  match finish(opening.session, server_first, "pencil") {
-    Result::Err(_) => assert(false),
-    Result::Ok(_) => {
-      // A peer that answered the proof without knowing the password can only
-      // guess here, and a guess must not be accepted.
-      match verify(opening.session, "v=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=") {
-        Result::Ok(_) => assert(false),
-        Result::Err(_) => assert(true),
-      };
-      // The signature this client computed is the one a real server sends.
-      match verify(opening.session, "v=" + opening.session.expected_signature) {
-        Result::Ok(_) => assert(true),
-        Result::Err(_) => assert(false),
-      };
-    },
-  };
-}
-
 test "a server error in place of a signature is reported as the server's words" {
   let opening = begin("rOprNGfwEbeRWgbNEkqO");
   match verify(opening.session, "e=invalid-proof") {

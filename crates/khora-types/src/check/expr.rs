@@ -50,26 +50,25 @@ impl<'a> Checker<'a> {
             },
             Expr::Local(local) => self.locals.get(&local).cloned().unwrap_or(Type::Unknown),
             Expr::Path(resolution) => self.type_of_resolution(id, &resolution),
-            Expr::Field { base, name } => {
-                let owner = self.infer(base);
-                let owner = self.unifier.shallow(&owner);
-                let Some((_, field)) = self.record_field(&owner, &name) else {
-                    // Silent for a type that is not known yet: `Unknown` is
-                    // downstream of an error already reported.
-                    if !matches!(owner, Type::Unknown | Type::Var(_) | Type::Never) {
-                        self.error(self.why_no_field(&owner, &name), range);
-                    }
-                    return Type::Unknown;
-                };
-                field
-            }
+            Expr::Field { base, name } => self.infer_field(base, &name, range, "read"),
             Expr::Unary { op, operand } => match op {
                 UnOp::Neg => self.infer_negation(operand, hint, range),
                 UnOp::Not => self.expect(operand, &Type::Bool, "`!`"),
             },
             Expr::Binary { op, lhs, rhs } => self.infer_binary(id, op, lhs, rhs, hint),
             Expr::Assign { target, value } => {
-                let target_ty = self.infer(target);
+                // Only the outermost projection is the write: `a.b.c = x`
+                // reads `a.b` and assigns `c`, and a private `b` is refused
+                // as a read.
+                let target_ty = match self.body.expr(target).clone() {
+                    Expr::Field { base, name } => {
+                        let at = self.body.range(target);
+                        let ty = self.infer_field(base, &name, at, "assign to");
+                        self.exprs.insert(target, ty.clone());
+                        ty
+                    }
+                    _ => self.infer(target),
+                };
                 self.check_writable(target, range);
                 self.expect(value, &target_ty, "this assignment");
                 Type::Unit
@@ -871,7 +870,7 @@ impl<'a> Checker<'a> {
                 if let Some(name) = traits::head_of(&expected) {
                     let known = self.types.bodies_of(&name).find(|v| v.name == name).cloned();
                     if let Some(record) = known {
-                        return self.check_record_fields(&record, &expected, fields);
+                        return self.check_record_fields(&record, &expected, fields, range);
                     }
                 }
             }
@@ -976,6 +975,12 @@ impl<'a> Checker<'a> {
         // Field types are declared against the record's own parameters, so the
         // literal decides them: `{ value: 1 }` for `Wrapper<A>` is `Wrapper<Int>`.
         let (whole, mapping) = self.instantiate_adt(&record.type_name);
+        if self.refuse_hidden_construction(&record, range) {
+            for (_, value) in fields {
+                self.infer(*value);
+            }
+            return whole;
+        }
         let borrowed: HashMap<&str, Type> =
             mapping.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
 
@@ -1019,17 +1024,28 @@ impl<'a> Checker<'a> {
     /// what was expected of it. The instantiation is passed in because those
     /// two know it differently — the label search builds a fresh one, and an
     /// expected type arrives already solved.
+    ///
+    /// `range` is the literal's, and is where a refusal goes when there is no
+    /// field to put it on: `{}` builds a record as much as any literal does.
     fn check_record_fields(
         &mut self,
         record: &VariantInfo,
         whole: &Type,
         fields: &[(String, ExprId)],
+        range: TextRange,
     ) -> Type {
         let arguments = match whole {
             Type::Adt { args, .. } => args.clone(),
             _ => Vec::new(),
         };
         let parameters = self.types.params_of_public(&record.type_name);
+        let at = fields.first().map_or(range, |(_, v)| self.body.range(*v));
+        if self.refuse_hidden_construction(record, at) {
+            for (_, value) in fields {
+                self.infer(*value);
+            }
+            return whole.clone();
+        }
         let borrowed: HashMap<&str, Type> = parameters
             .iter()
             .zip(&arguments)
@@ -1085,46 +1101,110 @@ impl<'a> Checker<'a> {
     ) -> Type {
         let whole = self.infer(base);
         let settled = self.unifier.zonk(&whole);
+        let _ = written;
 
-        // Not settled yet, or already reported. Check the values so they are
-        // not left uninferred, and let the `Unknown` audit have the last word.
-        let Some(name) = traits::head_of(&settled) else {
-            for (_, value) in fields {
-                self.infer(*value);
+        match update_base(&settled) {
+            UpdateBase::Named(name) => {
+                let Some(record) = self.update_record(&name, &settled, base) else {
+                    for (_, value) in fields {
+                        self.infer(*value);
+                    }
+                    return Type::Unknown;
+                };
+                self.check_update_fields(&record, &settled, fields, range, Values::Unchecked);
             }
-            return settled;
-        };
+            // **Not known yet is not "nothing to check".** Skipping here was
+            // the hole: an unannotated lambda parameter is solved by the call
+            // after the lambda's body has been checked, so `fn d => { ..d,
+            // scale: 0 - 4 }` built a `Decimal` with a negative scale from
+            // outside `std`, with no field of it checked at all -- not
+            // privacy, not that `scale` exists, not that it is an `Int`. The
+            // values are inferred now, with nothing to expect them against,
+            // and the whole check runs again once the base is solved; see
+            // `settle_updates`. What that costs: a value that needed the
+            // field's type as a hint -- an integer literal for a `U8` field --
+            // is an `Int` by then, and is refused as one.
+            UpdateBase::Later => {
+                for (_, value) in fields {
+                    self.infer(*value);
+                }
+                self.pending_updates.push(PendingUpdate {
+                    base,
+                    ty: settled.clone(),
+                    fields: fields.to_vec(),
+                    range,
+                });
+            }
+            UpdateBase::NotARecord => {
+                for (_, value) in fields {
+                    self.infer(*value);
+                }
+                self.refuse_non_record_base(&settled, base);
+            }
+            UpdateBase::Reported => {
+                for (_, value) in fields {
+                    self.infer(*value);
+                }
+            }
+        }
+        settled
+    }
 
-        let Some(record) = self
+    /// The record `name` names, for an update of a base of type `settled`.
+    /// `None`, after saying so, when it names a type that is not a record.
+    fn update_record(&mut self, name: &str, settled: &Type, base: ExprId) -> Option<VariantInfo> {
+        let found = self
             .types
             .variants
             .iter()
             .find(|v| v.type_name == name && v.name == name)
-            .cloned()
-        else {
-            for (_, value) in fields {
-                self.infer(*value);
-            }
-            if !matches!(settled, Type::Unknown | Type::Var(_) | Type::Never) {
-                self.error(
-                    format!(
-                        "`{settled}` is not a record, so there is nothing to take fields \
-                         from with `..`"
-                    ),
-                    self.body.range(base),
-                );
-            }
-            return Type::Unknown;
-        };
+            .cloned();
+        if found.is_none() {
+            self.refuse_non_record_base(settled, base);
+        }
+        found
+    }
 
-        // The base's own type arguments decide the field types, which is what
-        // makes `{ ..pair, key: 2 }` keep the value's type rather than solving
-        // it again.
-        let arguments = match &settled {
+    fn refuse_non_record_base(&mut self, settled: &Type, base: ExprId) {
+        self.error(
+            format!("`{settled}` is not a record, so there is nothing to take fields from with `..`"),
+            self.body.range(base),
+        );
+    }
+
+    /// Checks an update's fields against `record`, at the base's own
+    /// instantiation: that the module may build one, that each field exists,
+    /// and that each value fits it.
+    ///
+    /// The base's type arguments decide the field types, which is what makes
+    /// `{ ..pair, key: 2 }` keep the value's type rather than solving it
+    /// again. `values` says whether the values have been inferred yet: one
+    /// checked late already has a type, and inferring it again would record
+    /// its constraints twice.
+    fn check_update_fields(
+        &mut self,
+        record: &VariantInfo,
+        settled: &Type,
+        fields: &[(String, ExprId)],
+        range: TextRange,
+        values: Values,
+    ) {
+        if self.refuse_hidden_construction(record, range) {
+            match values {
+                Values::Unchecked => {
+                    for (_, value) in fields {
+                        self.infer(*value);
+                    }
+                }
+                Values::Inferred => {}
+            }
+            return;
+        }
+        let arguments = match settled {
             Type::Adt { args, .. } => args.clone(),
             _ => Vec::new(),
         };
-        let parameters = self.types.adts.get(&name).cloned().unwrap_or_default();
+        let parameters = self.types.adts.get(&record.type_name).cloned().unwrap_or_default();
         let borrowed: HashMap<&str, Type> = parameters
             .iter()
             .zip(&arguments)
@@ -1132,21 +1212,226 @@ impl<'a> Checker<'a> {
             .collect();
 
         for (label, value) in fields {
-            match record.field(label) {
-                Some((_, declared)) => {
+            let context = format!("field `{label}`");
+            match (record.field(label), values) {
+                (Some((_, declared)), Values::Unchecked) => {
                     let declared = unify::substitute(declared, &borrowed);
-                    self.expect(*value, &declared, &format!("field `{label}`"));
+                    self.expect(*value, &declared, &context);
                 }
-                None => {
-                    self.infer(*value);
+                (Some((_, declared)), Values::Inferred) => {
+                    let declared = unify::substitute(declared, &borrowed);
+                    let found = self.exprs.get(value).cloned().unwrap_or(Type::Unknown);
                     let at = self.body.range(*value);
-                    self.error(format!("`{name}` has no field `{label}`"), at);
+                    self.require(&declared, &found, &context, at);
+                }
+                (None, values) => {
+                    match values {
+                        Values::Unchecked => {
+                            self.infer(*value);
+                        }
+                        Values::Inferred => {}
+                    }
+                    let at = self.body.range(*value);
+                    self.error(format!("`{}` has no field `{label}`", record.type_name), at);
                 }
             }
         }
-        let _ = (written, range);
+    }
 
-        settled
+    /// Checks the updates whose base was not known when they were reached,
+    /// now that the body has been inferred.
+    ///
+    /// **What this guards is that an update is checked at all.** Each is
+    /// checked exactly as it would have been with its base annotated. A base
+    /// that is still not known after every other update has been given its
+    /// chance -- checking one can solve another's, so they are retried until
+    /// none moves -- is refused and asked for an annotation, because there is
+    /// no record to check the fields against, and passing it would build
+    /// whatever the fields said.
+    pub(crate) fn settle_updates(&mut self) {
+        let mut waiting = std::mem::take(&mut self.pending_updates);
+        loop {
+            let before = waiting.len();
+            let mut still = Vec::new();
+            for update in waiting {
+                let settled = self.unifier.zonk(&update.ty);
+                match update_base(&settled) {
+                    UpdateBase::Named(name) => {
+                        if let Some(record) = self.update_record(&name, &settled, update.base) {
+                            self.check_update_fields(
+                                &record,
+                                &settled,
+                                &update.fields,
+                                update.range,
+                                Values::Inferred,
+                            );
+                        }
+                    }
+                    UpdateBase::Later => still.push(update),
+                    UpdateBase::NotARecord => self.refuse_non_record_base(&settled, update.base),
+                    UpdateBase::Reported => {}
+                }
+            }
+            let moved = still.len() < before;
+            waiting = still;
+            if !moved || waiting.is_empty() {
+                break;
+            }
+        }
+        for update in waiting {
+            let written = match self.body.expr(update.base) {
+                Expr::Local(local) => format!("`..{}`", self.body.local(*local).name),
+                _ => "the value after `..`".to_string(),
+            };
+            let fix = match self.body.expr(update.base) {
+                Expr::Local(local) => {
+                    format!("annotate `{}` where it is bound", self.body.local(*local).name)
+                }
+                _ => "annotate it".to_string(),
+            };
+            self.error(
+                format!(
+                    "the type of {written} has to be known here to check the fields given with \
+                     it; {fix}"
+                ),
+                self.body.range(update.base),
+            );
+        }
+    }
+
+    /// Refuses building `record` here when it has a field this module cannot
+    /// see, and says so once. `true` when it refused.
+    ///
+    /// **This is the rule that makes a constructor mean something.** A literal,
+    /// an update or a newtype call from outside the declaring module could
+    /// otherwise make a `Decimal` with a negative scale, or a `Vector` whose
+    /// `len` runs past its array, without going through the function that
+    /// keeps those true. An update is construction too, even when it names
+    /// only `pub` fields: the result carries the private ones the module's
+    /// functions last wrote, next to a public one they never saw.
+    ///
+    /// The caller stops checking the fields once this has spoken. Each of
+    /// them would otherwise add "this `Decimal` is missing `scale`", which
+    /// is advice to name a field the reader cannot name.
+    pub(super) fn refuse_hidden_construction(&mut self, record: &VariantInfo, at: TextRange) -> bool {
+        let hidden = record.hidden_from(self.types.module.as_ref());
+        if hidden.is_empty() {
+            return false;
+        }
+        let ty = &record.type_name;
+        let home = home_of(record);
+        let yours = !is_std(&home);
+        let message = if record.labels.is_empty() {
+            let fix = if yours {
+                format!(", or, if `{home}` is yours, declare it `type {ty} = pub ..`")
+            } else {
+                String::new()
+            };
+            format!(
+                "cannot build `{ty}` here: its value is private to `{home}`, so only \
+                 `{home}` can make one. Call one of its functions that returns `{ty}`{fix}"
+            )
+        } else {
+            let names: Vec<String> = hidden
+                .iter()
+                .filter_map(|i| record.labels.get(*i))
+                .map(|l| format!("`{l}`"))
+                .collect();
+            let (list, verb) = match names.as_slice() {
+                [one] => (one.clone(), "is"),
+                [rest @ .., last] => (format!("{} and {last}", rest.join(", ")), "are"),
+                [] => (String::new(), "is"),
+            };
+            let fix = if yours {
+                format!(", or, if `{home}` is yours, mark every field `pub`")
+            } else {
+                String::new()
+            };
+            format!(
+                "cannot build `{ty}` here: {list} {verb} private to `{home}`, so only `{home}` \
+                 can make one. Call one of its functions that returns `{ty}`{fix}"
+            )
+        };
+        self.error(message, at);
+        true
+    }
+
+    /// Refuses naming field `index` of `owner` from a module that cannot see
+    /// it. `verb` is what the program tried: "read" or "assign to".
+    pub(super) fn refuse_hidden_field(
+        &mut self,
+        owner: &Type,
+        index: usize,
+        name: &str,
+        verb: &str,
+        range: TextRange,
+    ) {
+        let Some(record) = self.types.record_of(owner).cloned() else { return };
+        if record.field_visible_from(index, self.types.module.as_ref()) {
+            return;
+        }
+        let message = self.hidden_field_message(&record, name, verb);
+        self.error(message, range);
+    }
+
+    /// The sentence for a field this module cannot see, naming the way round
+    /// it that exists.
+    ///
+    /// A getter of the same name comes first, because it is the fix that
+    /// needs no edit anywhere else. `std` is never told "if it is yours":
+    /// nobody's program owns `std::core`, and offering to edit it sends the
+    /// reader into a file they cannot change.
+    pub(super) fn hidden_field_message(&self, record: &VariantInfo, name: &str, verb: &str) -> String {
+        let ty = &record.type_name;
+        let home = home_of(record);
+        let yours = !is_std(&home);
+        if record.labels.is_empty() {
+            let fix = if yours {
+                format!(", or, if `{home}` is yours, declare it `type {ty} = pub ..`")
+            } else {
+                String::new()
+            };
+            return format!(
+                "cannot {verb} `{ty}`'s value: it is private to `{home}`. Use the functions \
+                 `{home}` offers for `{ty}`{fix}"
+            );
+        }
+        let getter = format!("#{ty}::{name}");
+        let fix = if verb == "read" || verb == "bind" {
+            self.types
+                .signatures
+                .contains_key(&getter)
+                .then(|| format!("Call `.{name}()` instead, which `{ty}` offers publicly"))
+        } else {
+            None
+        };
+        let fix = fix.unwrap_or_else(|| {
+            if yours {
+                format!(
+                    "Use the functions `{home}` offers for `{ty}`, or, if `{home}` is yours, \
+                     write `pub {name}` in its declaration"
+                )
+            } else {
+                format!("Use the functions `{home}` offers for `{ty}`")
+            }
+        });
+        format!("cannot {verb} `{name}`: it is private to `{home}`, which declares `{ty}`. {fix}")
+    }
+    /// `base.name`, where `verb` says what the program is doing with it:
+    /// "read" or "assign to".
+    fn infer_field(&mut self, base: ExprId, name: &str, range: TextRange, verb: &str) -> Type {
+        let owner = self.infer(base);
+        let owner = self.unifier.shallow(&owner);
+        let Some((index, field)) = self.record_field(&owner, name) else {
+            // Silent for a type that is not known yet: `Unknown` is
+            // downstream of an error already reported.
+            if !matches!(owner, Type::Unknown | Type::Var(_) | Type::Never) {
+                self.error(self.why_no_field(&owner, name), range);
+            }
+            return Type::Unknown;
+        };
+        self.refuse_hidden_field(&owner, index, name, verb, range);
+        field
     }
 
     /// The position and type of `label` on a record, at this instantiation.
@@ -1702,3 +1987,78 @@ impl<'a> Checker<'a> {
     }
 }
 
+
+/// What an update's base is, as far as taking fields from it goes.
+enum UpdateBase {
+    /// A type with a name, which may or may not be a record.
+    Named(String),
+    /// A variable inference has not solved yet.
+    Later,
+    /// Something that can never be a record, whatever it is instantiated at.
+    NotARecord,
+    /// Already reported, or never produces a value.
+    Reported,
+}
+
+/// Which of [`UpdateBase`] `settled` is.
+///
+/// Exhaustive on purpose. The early return this replaces sent every type
+/// without a name -- a rigid `A` among them -- down one path that checked
+/// nothing, and a new `Type` form must be sorted into one of these by
+/// whoever adds it, not land there by default.
+fn update_base(settled: &Type) -> UpdateBase {
+    match settled {
+        Type::Adt { name, .. } => UpdateBase::Named(name.clone()),
+        Type::Var(_) => UpdateBase::Later,
+        // A projection whose owner is still being inferred may resolve to a
+        // record once it is; the unifier normalizes one it can, so what
+        // reaches here with a settled owner never will.
+        Type::Assoc { owner, .. } => match owner.as_ref() {
+            Type::Var(_) => UpdateBase::Later,
+            _ => UpdateBase::NotARecord,
+        },
+        Type::Applied { head, .. } => match head.as_ref() {
+            Type::Var(_) => UpdateBase::Later,
+            _ => match traits::head_of(head) {
+                Some(name) => UpdateBase::Named(name),
+                None => UpdateBase::NotARecord,
+            },
+        },
+        // **A type parameter is rigid**: the body cannot know what its caller
+        // chose, so there are no fields to take from it, and a record passed
+        // in as `A` is not a record here.
+        Type::Param(_) => UpdateBase::NotARecord,
+        Type::Int
+        | Type::Fixed(_)
+        | Type::Float
+        | Type::Bool
+        | Type::Str
+        | Type::Unit
+        | Type::Ptr
+        | Type::Char
+        | Type::Fn { .. }
+        | Type::Row { .. }
+        | Type::Tuple(_)
+        | Type::Const(_) => UpdateBase::NotARecord,
+        Type::Unknown | Type::Never => UpdateBase::Reported,
+    }
+}
+
+/// Whether an update's values have been inferred yet.
+#[derive(Clone, Copy)]
+enum Values {
+    /// Not yet: infer each against its field's type.
+    Unchecked,
+    /// Already, when the base was not known: compare the type each got.
+    Inferred,
+}
+
+/// The module that declares `record`, as a program spells it: `std::core`.
+fn home_of(record: &VariantInfo) -> String {
+    record.home.as_ref().map(|h| h.segments().join("::")).unwrap_or_default()
+}
+
+/// Whether `home` is the standard library's, which no program can edit.
+fn is_std(home: &str) -> bool {
+    home == "std" || home.starts_with("std::")
+}

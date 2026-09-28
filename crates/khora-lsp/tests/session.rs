@@ -1648,6 +1648,46 @@ fn after_a_dot_the_methods_of_the_receiver() {
     );
 }
 
+/// **A private field is not offered outside its module**, because completing
+/// to it writes a read the checker refuses. The `pub` one is offered, and so
+/// is the getter that stands in for the private one.
+#[test]
+fn after_a_dot_a_private_field_is_offered_only_in_its_module() {
+    let library = "module library;\n\npub type Email = { text: String, pub label: String };\n\n\
+                   impl Email {\n  pub fn text(self) -> String { self.text }\n}\n\n\
+                   fn inside(e: Email) -> String {\n  e.\n}\n";
+    let main = "module main;\n\nimport library::{Email};\n\nfn go(e: Email) -> String {\n  e.\n}\n";
+    let w = workspace(&[("src/library.kh", library), ("src/main.kh", main)]);
+
+    // Line 5 of `main` is `  e.`; the cursor sits after the dot.
+    let file = w.root.join("src/main.kh");
+    let replies =
+        session(&[initialize(&w.root), did_open(&file, main), completion(&file, 5, 4, 2), exit()]);
+    let outside = labels(&replies, 2);
+    assert!(outside.iter().any(|l| l == "label"), "the `pub` field: {outside:?}");
+    assert!(outside.iter().any(|l| l == "text"), "the getter `text()`: {outside:?}");
+    assert_eq!(
+        outside.iter().filter(|l| *l == "text").count(),
+        1,
+        "`text` once, as the method, and not again as the private field: {outside:?}"
+    );
+
+    // Line 9 of `library` is `  e.`, inside the declaring module.
+    let file = w.root.join("src/library.kh");
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, library),
+        completion(&file, 9, 4, 2),
+        exit(),
+    ]);
+    let inside = labels(&replies, 2);
+    assert_eq!(
+        inside.iter().filter(|l| *l == "text").count(),
+        2,
+        "inside, both the field and the method: {inside:?}"
+    );
+}
+
 /// After `Type::`, that type's constructors.
 #[test]
 fn after_a_type_and_colons_the_constructors() {
@@ -3190,6 +3230,22 @@ fn an_exported_declaration_can_stop_being_one() {
     let (_, after) = assist_named(text, 2, 7, 7, "Stop exporting");
     assert!(after.contains("fn go()") && !after.contains("pub fn"), "{after}");
     assert!(complaints(&after).is_empty(), "{after}\n{:?}", complaints(&after));
+}
+
+/// **An open wrapper that is not exported is still offered `pub`, and
+/// "Stop exporting" is not offered.** `type Port = pub Int;` has a `pub`
+/// after `=`, which opens the value and exports nothing; taking it for the
+/// export would offer an edit that closed the wrapper instead.
+#[test]
+fn an_open_wrapper_is_exported_by_the_pub_before_type() {
+    let text = concat!("module main;\n\n", "type Port = pub Int;\n");
+    let (_, after) = assist_named(text, 2, 6, 6, "Export it");
+    assert!(after.contains("pub type Port = pub Int;"), "{after}");
+    let offered = assists_for(text, 2, 6, 6);
+    assert!(
+        !offered.iter().any(|(title, _)| title.contains("Stop exporting")),
+        "it is not exported: {offered:?}"
+    );
 }
 
 /// A declaration already public is not offered `pub` again.

@@ -77,6 +77,10 @@ pub struct TypeMap {
     /// is shareable instead, paid for by a check where each handler is
     /// *written*. `docs/design/sharing.md`.
     pub effects: HashSet<String>,
+    /// The module this file declares, which is "here" when a field's
+    /// privacy is asked: a private field is visible exactly when this equals
+    /// the field's `VariantInfo::home`.
+    pub module: Option<khora_hir::ModulePath>,
 }
 
 impl TypeMap {
@@ -471,7 +475,7 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
     // Everything this file declares is declared here, which is the home every
     // `VariantInfo` below is recorded under.
     let here = khora_hir::item_map(db, file).module.clone();
-    let mut map = TypeMap { homes: homes.clone(), ..TypeMap::default() };
+    let mut map = TypeMap { homes: homes.clone(), module: here.clone(), ..TypeMap::default() };
     // Which of each type's parameters are const, so `Matrix<const R, const C>`
     // gets the kind `Int -> Int -> *` rather than `* -> * -> *`.
     let mut consts: HashMap<String, Vec<bool>> = HashMap::new();
@@ -572,6 +576,8 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
                     // An effect's operations are a handler's fields, and a
                     // handler is built once and read.
                     mutable: Vec::new(),
+                    // Whoever supplies a handler builds one, from anywhere.
+                    public: Vec::new(),
                 });
             }
             ast::Decl::Type(t) => {
@@ -591,6 +597,9 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
                 if let Some(ast::Type::Record(r)) = t.definition() {
                     let (labels, fields) = record_fields(&r, &generics, homes);
                     let mutable = r.fields().map(|f| f.is_mut()).collect();
+                    // Which fields are `pub`. A record with no fields gets
+                    // `[]`, "all public", and has nothing to hide.
+                    let public: Vec<bool> = r.fields().map(|f| f.is_pub()).collect();
                     map.variants.push(VariantInfo {
                         type_name: type_name.clone(),
                         home: here.clone(),
@@ -598,6 +607,7 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
                         fields,
                         labels,
                         mutable,
+                        public,
                     });
                 }
                 // **`type UserId = Int;` is a type of its own, and now has a
@@ -631,6 +641,7 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
                             fields: vec![inner],
                             labels: Vec::new(),
                             mutable: vec![false],
+                            public: vec![t.is_open_newtype()],
                         });
                     }
                 }
@@ -671,6 +682,10 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
                             fields,
                             labels,
                             mutable,
+                            // A case's payload is public: matching on it is
+                            // what a variant is for. A newtype over the
+                            // variant is how its shape is hidden.
+                            public: Vec::new(),
                         });
                     }
                 }

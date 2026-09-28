@@ -33,9 +33,9 @@ import khq::diag::{Problem, Span, at, problem, quoted};
 /// One token, and where it was.
 pub type Token = {
   /// What it is.
-  kind: Kind,
+  pub kind: Kind,
   /// Where it was written.
-  span: Span,
+  pub span: Span,
 };
 
 /// What a token is.

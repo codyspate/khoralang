@@ -99,8 +99,8 @@ pub type Cell =
 /// (a bare `SELECT` with no description) leaves them empty, and
 /// [`Row::to_raw`] then hands over a sequence rather than a record.
 pub type Row = {
-  columns: List<String>,
-  cells: List<Cell>,
+  pub columns: List<String>,
+  pub cells: List<Cell>,
 };
 
 /// What went wrong, as far as `std` is willing to say.

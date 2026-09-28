@@ -45,13 +45,13 @@ import std::trace::{Attribute, Context, Span, Status, Value};
 /// when it happened, because `std::trace` deliberately has no clock in it. The
 /// exporter reads one and puts the readings here.
 pub type Finished = {
-  span: Span,
-  status: Status,
+  pub span: Span,
+  pub status: Status,
   /// Nanoseconds since 1970 when the span began.
-  started: Int,
+  pub started: Int,
   /// Nanoseconds since 1970 when it ended.
-  ended: Int,
-  attributes: List<Attribute>,
+  pub ended: Int,
+  pub attributes: List<Attribute>,
 };
 
 /// The whole request body for a batch of spans.

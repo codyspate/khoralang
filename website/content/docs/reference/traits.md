@@ -305,8 +305,8 @@ what this is.
 ```khora
 derive(Eq, Ord, Show, Hash, Decode, Encode)
 pub type User = {
-  id: Int,
-  name: String,
+  pub id: Int,
+  pub name: String,
 };
 ```
 

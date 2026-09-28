@@ -24,7 +24,7 @@ module postgres::scram;
 //! message formats, the base64, and the exact byte strings the RFC says to
 //! sign.
 
-import std::core::{Array, Int, List, Option, Result, String, U8, Vector};
+import std::core::{Array, Int, List, Option, Result, String, U8, Vector, assert};
 
 // --- the runtime's hashes ---------------------------------------------------
 
@@ -168,9 +168,12 @@ pub type Session = {
 };
 
 /// The client's opening message, paired with the state needed to finish.
+///
+/// Both `pub`: the connection sends the one and keeps the other, and neither
+/// has an invariant a caller could break. `Session` itself stays closed.
 pub type Opening = {
-  message: String,
-  session: Session,
+  pub message: String,
+  pub session: Session,
 };
 
 /// The client's opening message, and the state needed to finish.
@@ -301,4 +304,33 @@ fn xor(left: Array<U8>, right: Array<U8>) -> Array<U8> {
     at = at + 1;
   };
   out
+}
+
+// --- mutual authentication, from inside -------------------------------------
+//
+// Here rather than in `scram_test` because it compares against the signature
+// a `Session` keeps, and `Session`'s fields are private to this module: the
+// signature is the client's secret half of the exchange, and nothing outside
+// has a reason to read it.
+
+test "a server that cannot prove it holds the password is refused" {
+  let opening = begin("rOprNGfwEbeRWgbNEkqO");
+  let server_first =
+    "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096";
+  match finish(opening.session, server_first, "pencil") {
+    Result::Err(_) => assert(false),
+    Result::Ok(_) => {
+      // A peer that answered the proof without knowing the password can only
+      // guess here, and a guess must not be accepted.
+      match verify(opening.session, "v=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=") {
+        Result::Ok(_) => assert(false),
+        Result::Err(_) => assert(true),
+      };
+      // The signature this client computed is the one a real server sends.
+      match verify(opening.session, "v=" + opening.session.expected_signature) {
+        Result::Ok(_) => assert(true),
+        Result::Err(_) => assert(false),
+      };
+    },
+  };
 }

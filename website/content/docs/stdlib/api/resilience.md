@@ -188,8 +188,8 @@ person means by "give up after a minute".
 
 ```khora
 pub type Tried<A, E> = {
-  outcome: Result<A, E>,
-  attempts: Int,
+  pub outcome: Result<A, E>,
+  pub attempts: Int,
 };
 ```
 
@@ -205,7 +205,7 @@ count to three.
 #### outcome
 
 ```khora
-outcome: Result<A, E>
+pub outcome: Result<A, E>
 ```
 
 What happened in the end: the value, or the failure that stopped it.
@@ -213,7 +213,7 @@ What happened in the end: the value, or the failure that stopped it.
 #### attempts
 
 ```khora
-attempts: Int
+pub attempts: Int
 ```
 
 How many times `body` ran. One when it succeeded first go, and never

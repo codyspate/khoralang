@@ -28,6 +28,14 @@ impl<'a> Checker<'a> {
                         }
                         return;
                     }
+                    // `match port { Port(n) => .. }` outside the declaring
+                    // module opens a private newtype, which is a read of its
+                    // value. A case's payload records no privacy (`public`
+                    // is empty), so only a newtype can reach this.
+                    if !fields.is_empty() && !v.hidden_from(self.types.module.as_ref()).is_empty() {
+                        let message = self.hidden_field_message(v, "", "match on");
+                        self.error(message, self.body.pat_range(pat));
+                    }
                 }
                 // Field types are declared against the type's own parameters,
                 // so they have to be read at the scrutinee's instantiation:
@@ -72,6 +80,16 @@ impl<'a> Checker<'a> {
                     mapping.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
 
                 for (label, field) in fields.iter() {
+                    // Binding a private field is reading it, so `let Email {
+                    // text } = e` is refused where `e.text` would be.
+                    if let Some(v) = variant.as_ref() {
+                        if let Some(i) = v.labels.iter().position(|l| l == label) {
+                            if !v.field_visible_from(i, self.types.module.as_ref()) {
+                                let message = self.hidden_field_message(v, label, "bind");
+                                self.error(message, self.body.pat_range(*field));
+                            }
+                        }
+                    }
                     let declared = variant.as_ref().and_then(|v| {
                         v.labels.iter().position(|l| l == label).and_then(|i| v.fields.get(i))
                     });

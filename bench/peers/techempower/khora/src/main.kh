@@ -69,9 +69,9 @@ fn stamped(response: Response) -> Response with { clock: Clock } {
 /// formatter, so the names and padding are here.
 fn http_date(millis: Int) -> String {
   let at = DateTime::of_unix_millis(millis);
-  weekday_name(at.date.weekday()) + ", " + two(at.date.day) + " " + month_name(at.date.month)
-  + " " + Int::to_string(at.date.year) + " " + two(at.time.hour) + ":" + two(at.time.minute)
-  + ":" + two(at.time.second) + " GMT"
+  weekday_name(at.date.weekday()) + ", " + two(at.date.day()) + " " + month_name(at.date.month())
+  + " " + Int::to_string(at.date.year()) + " " + two(at.time.hour()) + ":" + two(at.time.minute())
+  + ":" + two(at.time.second()) + " GMT"
 }
 
 fn two(n: Int) -> String {

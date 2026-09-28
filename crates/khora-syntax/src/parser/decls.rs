@@ -4,7 +4,7 @@ use super::exprs::{block, expr};
 use super::patterns::pattern;
 use super::types::{
     bounds, effect_clauses, field, name, name_ref, path, record_type, type_, type_params,
-    variant_type,
+    variant_type, FieldOwner,
 };
 use super::Parser;
 use crate::kind::SyntaxKind::*;
@@ -262,10 +262,28 @@ fn type_decl(p: &mut Parser<'_>) {
         type_params(p);
     }
     if p.eat(EQ) {
+        // `type Port = pub Int;` opens a newtype's one field to other modules.
+        // A record opens its fields one at a time and a variant's payloads are
+        // always public, so on either of those the word would do nothing.
+        if p.at(PUB_KW) && p.nth_at(1, L_BRACE) {
+            p.err_and_bump(
+                "a record's fields are opened one at a time: write `pub` before each \
+                 field that other modules may use, as in `{ pub x: Int }`",
+            );
+        } else if p.at(PUB_KW) && p.nth_at(1, PIPE) {
+            p.err_and_bump(
+                "a case's payload is always public, because matching on it is how a \
+                 variant is used. Delete the `pub`",
+            );
+        } else {
+            p.eat(PUB_KW);
+        }
         if p.at(PIPE) {
             variant_type(p);
         } else {
+            p.declaring_record = p.at(L_BRACE);
             type_(p);
+            p.declaring_record = false;
         }
     }
     p.expect(SEMICOLON);
@@ -421,7 +439,7 @@ fn effect_decl(p: &mut Parser<'_>) {
             if !p.tick() {
                 break;
             }
-            field(p);
+            field(p, FieldOwner::Operation);
             if !p.eat(COMMA) {
                 break;
             }

@@ -352,24 +352,24 @@ fn a_schema_derives_from_the_declaration() {
          fn field(key: String) -> String { key }\n\
          fn schema() -> Int { 1 }\n\
          derive(Decode, Encode)\n\
-         pub type Listen = { host: String, port: Int };\n\
+         pub type Listen = { pub host: String, pub port: Int };\n\
          derive(Decode, Encode)\n\
          pub type Mode = | Local | Remote(url: String);\n\
          derive(Decode, Encode)\n\
          pub type Level = | Debug | Info;\n\
          derive(Decode)\n\
-         pub type Settings = { listen: Listen, password: Redacted<String>, debug: Option<Bool>, \
-         rate: Decimal, tags: List<String>, mode: Mode };\n\
+         pub type Settings = { pub listen: Listen, pub password: Redacted<String>, \
+         pub debug: Option<Bool>, pub rate: Decimal, pub tags: List<String>, pub mode: Mode };\n\
          derive(Decode, Encode)\n\
-         pub type UserId = Int;\n\
+         pub type UserId = pub Int;\n\
          derive(Decode, Encode)\n\
-         pub type Wrapper<A> = { value: A, count: Int };\n\
+         pub type Wrapper<A> = { pub value: A, pub count: Int };\n\
          derive(Decode, Encode)\n\
-         pub type Tree = { label: String, children: List<Tree> };\n\
+         pub type Tree = { pub label: String, pub children: List<Tree> };\n\
          derive(Decode)\n\
-         pub type Branch = { leaves: List<Leaf> };\n\
+         pub type Branch = { pub leaves: List<Leaf> };\n\
          derive(Decode)\n\
-         pub type Leaf = { back: Option<Branch>, name: String };\n\
+         pub type Leaf = { pub back: Option<Branch>, pub name: String };\n\
          pub fn main() -> Int { 0 }\n",
     );
     assert!(found.is_empty(), "{found:?}");
@@ -386,7 +386,7 @@ fn a_secret_derives_decode_and_refuses_encode() {
          import std::core::{Redacted};\n\
          import std::schema::{Decode, Encode};\n\
          derive(Decode, Encode)\n\
-         pub type Leak = { password: Redacted<String> };\n\
+         pub type Leak = { pub password: Redacted<String> };\n\
          pub fn main() -> Int { 0 }\n",
     );
     assert!(

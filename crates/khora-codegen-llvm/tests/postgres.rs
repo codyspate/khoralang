@@ -761,7 +761,7 @@ fn a_pool_against_a_real_server() {
 import std::core::{Channel, Fibers, List, Result, print};
 import std::db::{Cell, Db, DbError, Row};
 import postgres::db::{Settings};
-import postgres::pool::{Pool, close, open, with_db};
+import postgres::pool::{Pool, close, open, with_db, idle_count};
 
 extern fn khora_sleep(millis: Int) -> ();
 extern fn khora_monotonic_millis() -> Int;
@@ -837,8 +837,8 @@ fn main() -> Int {
   // A lease ends when its serving fiber reads the give-back, just after
   // `with_db` returns, so the count is read once it has settled.
   let deadline = khora_monotonic_millis() + 5000;
-  while Channel::depth(pool.idle) != 2 && khora_monotonic_millis() < deadline { khora_sleep(5) };
-  print(Int::to_string(Channel::depth(pool.idle)));
+  while idle_count(pool) != 2 && khora_monotonic_millis() < deadline { khora_sleep(5) };
+  print(Int::to_string(idle_count(pool)));
   close(pool);
   let _stopped = Fibers::wait(crew);
   0
@@ -1089,7 +1089,7 @@ fn handover_program(settings: &str, leased: &str) -> String {
 import std::core::{{Channel, Fiber, Fibers, List, Option, Result, print}};
 import std::db::{{Db, DbError, Row}};
 import postgres::db::{{Settings}};
-import postgres::pool::{{Pool, close, open, with_db}};
+import postgres::pool::{{Pool, close, open, with_db, idle_count, take_offer, give_offer_back}};
 
 extern fn khora_sleep(millis: Int) -> ();
 
@@ -1104,11 +1104,11 @@ fn leased() -> Int
 /// the give-back, which is after `with_db` has returned.
 fn settled(pool: Pool, want: Int) -> Int {{
   let mut left = 5000;
-  while Channel::depth(pool.idle) != want && left > 0 {{
+  while idle_count(pool) != want && left > 0 {{
     khora_sleep(1);
     left = left - 1
   }};
-  Channel::depth(pool.idle)
+  idle_count(pool)
 }}
 
 fn lease(pool: Pool) -> () {{
@@ -1123,12 +1123,12 @@ fn main() -> Int {{
   let mut trial = 0;
   let mut lost = 0 - 1;
   while trial < 200 && lost < 0 {{
-    match Channel::receive(pool.idle) {{
+    match take_offer(pool) {{
       Option::None => (),
       Option::Some(held) => {{
         let waiter = Fiber::spawn(fn () => lease(pool));
         khora_sleep(1 + trial % 3);
-        Channel::send(pool.idle, held);
+        give_offer_back(held);
         Fiber::cancel(waiter);
         Fiber::wait(waiter);
       }},
@@ -1228,7 +1228,7 @@ fn a_pool_gives_every_lease_back_however_the_body_ends() {
 import std::core::{{Channel, Fiber, Fibers, Option, Result, print}};
 import std::db::{{Db}};
 import postgres::db::{{Settings}};
-import postgres::pool::{{Offer, Pool, close, open, with_db}};
+import postgres::pool::{{Pool, close, open, with_db, idle_count, take_offer, give_offer_back, HeldOffer}};
 
 extern fn khora_sleep(millis: Int) -> ();
 
@@ -1256,11 +1256,11 @@ fn stuck(entered: Channel<Int>, never: Channel<Int>) -> Int with {{ db: Db }} {{
 /// the give-back, which is after `with_db` has returned.
 fn settled(pool: Pool, want: Int) -> Int {{
   let mut left = 5000;
-  while Channel::depth(pool.idle) != want && left > 0 {{
+  while idle_count(pool) != want && left > 0 {{
     khora_sleep(1);
     left = left - 1
   }};
-  Channel::depth(pool.idle)
+  idle_count(pool)
 }}
 
 fn idle(pool: Pool) -> String {{ \"idle \" + Int::to_string(settled(pool, 2)) }}
@@ -1293,16 +1293,16 @@ fn canceled_inside(pool: Pool) -> () {{
   print(\"canceled while leased: \" + idle(pool));
 }}
 
-fn put_back(pool: Pool, taken: Option<Offer>) -> () {{
+fn put_back(pool: Pool, taken: Option<HeldOffer>) -> () {{
   match taken {{
     Option::None => print(\"nothing to put back, which is wrong\"),
-    Option::Some(offer) => {{ Channel::send(pool.idle, offer); () }},
+    Option::Some(offer) => give_offer_back(offer),
   }}
 }}
 
 fn canceled_waiting(pool: Pool) -> () {{
-  let a = Channel::receive(pool.idle);
-  let b = Channel::receive(pool.idle);
+  let a = take_offer(pool);
+  let b = take_offer(pool);
   let f = Fiber::spawn(fn () => {{
     let _ = with_db(pool, served_wrongly);
     ()
@@ -1373,6 +1373,107 @@ fn main() -> Int {{
              canceled while waiting: idle 2\n\
              served 200 of 200: idle 2\n\
              closed\n",
+            "{backend}"
+        );
+    }
+}
+
+// --- an offer taken by hand goes back only where it came from ---------------
+
+/// A program over two pools of one slot each, against a quiet server: takes
+/// `a`'s offer, runs `step`, and prints what each pool then holds.
+fn held_offer_program(settings: &str, step: &str) -> String {
+    format!(
+        "module demo::main;
+import std::core::{{Channel, Fiber, Fibers, Option, print}};
+import postgres::db::{{Settings}};
+import postgres::pool::{{Pool, close, open, idle_count, take_offer, give_offer_back}};
+
+extern fn khora_sleep(millis: Int) -> ();
+
+/// How many offers are idle once the pool has settled at `want`, or what it
+/// settled at after five seconds.
+fn settled(pool: Pool, want: Int) -> Int {{
+  let mut left = 5000;
+  while idle_count(pool) != want && left > 0 {{
+    khora_sleep(1);
+    left = left - 1
+  }};
+  idle_count(pool)
+}}
+
+fn main() -> Int {{
+  let settings: Settings = {settings};
+  // A crew each: `close` waits for every fiber of its pool's crew, and one
+  // shared crew would make closing `a` wait for `b`'s fibers too.
+  let a = open(Fibers::open(), settings, 1);
+  let b = open(Fibers::open(), settings, 1);
+  print(\"before: a \" + Int::to_string(settled(a, 1)) + \", b \" + Int::to_string(settled(b, 1)));
+  let held = take_offer(a);
+  {step}
+  0
+}}
+"
+    )
+}
+
+/// **A `HeldOffer` goes back to the pool it was taken from, and to no
+/// other.** It used to go to whichever pool `give_offer_back` was handed:
+/// the pool it came from lost its only slot for good, and the other lent a
+/// slot none of its fibers served, in an `idle` that then had no room for its
+/// own down token. `give_offer_back` takes no pool now, so this is the only
+/// call there is; what it pins is that the offer lands back in `a` and `b`
+/// is untouched.
+#[test]
+fn an_offer_taken_from_one_pool_goes_back_to_that_pool() {
+    let step = "match held {
+    Option::Some(h) => give_offer_back(h),
+    Option::None => print(\"no offer\"),
+  };
+  print(\"after: a \" + Int::to_string(settled(a, 1)) + \", b \" + Int::to_string(idle_count(b)));
+  close(a);
+  close(b);
+  print(\"closed\");";
+    let exe = build("pool_held_offer_home", &held_offer_program(&a_quiet_server(), step));
+    for backend in ["threads", "scheduler"] {
+        let ran = run_watched(&exe, backend, std::time::Duration::from_secs(60));
+        assert!(!ran.hung, "{backend}: the program hung: stdout {:?}", ran.stdout);
+        assert_eq!(ran.code, Some(0), "{backend}: stderr {}", ran.stderr);
+        assert_eq!(ran.stdout, "before: a 1, b 1\nafter: a 1, b 1\nclosed\n", "{backend}");
+    }
+}
+
+/// **An offer given back after its pool was closed ends its lease, so
+/// `close` returns.** `close` waits for every serving fiber, and a slot's
+/// fiber waits for its request channel to close. A give-back into a closed
+/// `idle` used to drop the offer with the channel still open, and `close`
+/// then waited for ever -- the same wait a `with_db` lease ending after
+/// `close` does not cause, because its give-back closes the channel.
+#[test]
+fn an_offer_given_back_after_close_lets_close_return() {
+    let step = "let done: Channel<Int> = Channel::bounded(1);
+  let closer = Fiber::spawn(fn () => {
+    close(a);
+    Channel::send(done, 1);
+    ()
+  });
+  khora_sleep(100);
+  print(\"closed while the offer is held: \" + (if Channel::depth(done) == 1 { \"yes\" } else { \"no\" }));
+  match held {
+    Option::Some(h) => give_offer_back(h),
+    Option::None => print(\"no offer\"),
+  };
+  Fiber::wait(closer);
+  print(\"closed after the give-back\");
+  close(b);";
+    let exe = build("pool_held_offer_close", &held_offer_program(&a_quiet_server(), step));
+    for backend in ["threads", "scheduler"] {
+        let ran = run_watched(&exe, backend, std::time::Duration::from_secs(60));
+        assert!(!ran.hung, "{backend}: `close` never returned: stdout {:?}", ran.stdout);
+        assert_eq!(ran.code, Some(0), "{backend}: stderr {}", ran.stderr);
+        assert_eq!(
+            ran.stdout,
+            "before: a 1, b 1\nclosed while the offer is held: no\nclosed after the give-back\n",
             "{backend}"
         );
     }
@@ -2651,7 +2752,7 @@ import std::core::{Channel, Fiber, Fibers, List, Option, Result, print};
 import std::db::{Cell, Db, DbError, Row};
 import std::resilience::{Schedule};
 import postgres::db::{Settings};
-import postgres::pool::{Health, Pool, Reconnect, close, health, open, open_with, with_db};
+import postgres::pool::{Health, Pool, Reconnect, close, health, open, open_with, with_db, idle_count};
 
 extern fn khora_sleep(millis: Int) -> ();
 extern fn khora_monotonic_millis() -> Int;
@@ -2706,10 +2807,10 @@ fn hold(ms: Int) -> () {
 /// Waits up to five seconds for `want` connections to be idle.
 fn settled(pool: Pool, want: Int) -> Int {
   let deadline = now() + 5000;
-  while Channel::depth(pool.idle) != want && now() < deadline {
+  while idle_count(pool) != want && now() < deadline {
     khora_sleep(5)
   };
-  Channel::depth(pool.idle)
+  idle_count(pool)
 }
 ";
 
@@ -2817,7 +2918,7 @@ fn whole(pool: Pool) -> Bool {
   let deadline = now() + 3000;
   let mut ok = false;
   while !ok && now() < deadline {
-    ok = is(health(pool), 1, 0, 0) && Channel::depth(pool.idle) == 1;
+    ok = is(health(pool), 1, 0, 0) && idle_count(pool) == 1;
     if !ok { khora_sleep(2) }
   };
   ok
@@ -2854,7 +2955,7 @@ fn storm(pool: Pool, handover: Bool) -> Int {
 fn report(point: String, lost: Int, pool: Pool) -> () {
   if lost < 0 { print(point + ": whole after 200 aborts") } else {
     print(point + ": lost at trial " + Int::to_string(lost) + ": " + said(health(pool)) + ", idle "
-      + Int::to_string(Channel::depth(pool.idle)))
+      + Int::to_string(idle_count(pool)))
   }
 }
 

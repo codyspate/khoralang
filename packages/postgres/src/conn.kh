@@ -1,10 +1,10 @@
 module postgres::conn;
 
-import std::core::{Array, List, Option, Result, Vector};
+import std::core::{Array, List, Option, Result, Vector, assert};
 import std::db::{Cell, DbError, Row};
 import std::decimal::{Decimal};
 import std::net::socket::{connect_to, invalid_handle, nothing_yet, receive, receive_now, set_receive_timeout, shut, start, transmit_bytes};
-import postgres::wire::{Message, Reader, extended, message_at, message_width, password, query, sasl_initial, sasl_response, startup, terminate};
+import postgres::wire::{Message, Reader, Writer, extended, framed, message_at, message_width, password, query, sasl_initial, sasl_response, startup, terminate};
 import postgres::scram::{Opening, ScramError, Session, begin, encode64, finish, verify};
 
 extern fn khora_random_seed() -> Int;
@@ -133,17 +133,17 @@ pub type Connection = {
 
 /// What a column is called and what type the server says it is.
 pub type Column = {
-  name: String,
+  pub name: String,
   /// The type's OID. Text is 25, `int4` is 23, and so on — see `oid_to_cell`.
-  oid: Int,
+  pub oid: Int,
 };
 
 /// A query's answer.
 pub type Answer = {
-  columns: List<Column>,
-  rows: List<Row>,
+  pub columns: List<Column>,
+  pub rows: List<Row>,
   /// What `CommandComplete` said: `SELECT 3`, `INSERT 0 1`.
-  tag: String,
+  pub tag: String,
 };
 
 // --- reading messages ------------------------------------------------------
@@ -615,6 +615,25 @@ pub fn in_transaction(c: Connection) -> Bool {
   c.open_transaction
 }
 
+/// How many transactions `postgres::db` has open on this connection: 0
+/// outside one, 1 inside one, and one more per savepoint.
+///
+/// **A function rather than a `pub` field, because the field's only other
+/// reader is a sibling module.** `Connection`'s fields are socket plumbing and
+/// stay private, so that a caller holding one cannot build one around a
+/// foreign handle or put `start` past `pending`. The depth is the one piece of
+/// state `postgres::db` keeps here, and these two are all it needs.
+pub fn transaction_depth(c: Connection) -> Int {
+  c.depth
+}
+
+/// Records that `postgres::db` has `depth` transactions open. See
+/// `transaction_depth`; a `ReadyForQuery` outside a transaction still puts it
+/// back to 0.
+pub fn set_transaction_depth(c: Connection, depth: Int) -> () {
+  c.depth = depth
+}
+
 /// The answer to any statement on a broken connection.
 fn out_of_step() -> Result<Answer, PgError> {
   Result::Err(PgError::Closed(
@@ -884,4 +903,57 @@ fn to_list<A>(v: Vector<A>) -> List<A> {
     i = i - 1
   };
   out
+}
+
+// --- the buffer, from inside ------------------------------------------------
+//
+// Here rather than in `conn_test` because they build a `Connection` around a
+// buffer and read `pending` and `start` afterwards. Those fields are private
+// to this module, and a test in a separate module is outside it.
+
+/// A connection whose buffer already holds `bytes`, so `next_message` answers
+/// from it without reading the socket.
+fn holding(bytes: Array<U8>) -> Connection {
+  { handle: invalid_handle(), pending: bytes, start: 0, scram: Option::None, broken: false, open_transaction: false, depth: 0 }
+}
+
+/// **An idle connection holds no buffer from its last reply.** Taking a
+/// message moves an offset rather than copying, so without letting go of a
+/// drained buffer a pooled connection that once answered a 1 MB row would
+/// keep that megabyte until its next query. The last message of a reply is
+/// `ReadyForQuery`, which usually ends a read, so this is the ordinary case.
+test "taking the last buffered message lets the buffer go" {
+  let bytes = Writer::new();
+  Writer::raw(bytes, framed(68, Array::new(3000, 120)));
+  Writer::raw(bytes, framed(90, Array::new(1, 73)));
+  let c = holding(Writer::finish(bytes));
+
+  match next_message(c) {
+    Result::Ok(m) => assert(m.kind == 68 && Array::length(m.payload) == 3000),
+    Result::Err(_) => assert(false),
+  };
+  // One message still waiting, so the buffer is still needed.
+  assert(Array::length(c.pending) == 3000 + 5 + 6);
+
+  match next_message(c) {
+    Result::Ok(m) => assert(m.kind == 90),
+    Result::Err(_) => assert(false),
+  };
+  assert(Array::length(c.pending) == 0);
+  assert(c.start == 0);
+}
+
+/// A buffer holding the start of the next message is kept: dropping it would
+/// lose those bytes, and the reply would be read out of step.
+test "a partial message after the last whole one is kept" {
+  let bytes = Writer::new();
+  Writer::raw(bytes, framed(90, Array::new(1, 73)));
+  Writer::u8(bytes, 68);
+  let c = holding(Writer::finish(bytes));
+
+  match next_message(c) {
+    Result::Ok(m) => assert(m.kind == 90),
+    Result::Err(_) => assert(false),
+  };
+  assert(Array::length(c.pending) - c.start == 1);
 }

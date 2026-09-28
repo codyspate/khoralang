@@ -567,3 +567,18 @@ fn a_discarded_unit_is_not_reported() {
     );
     assert!(found.is_empty(), "{found:?}");
 }
+
+/// **`type Port = pub Int;` is not an export.** The `pub` after `=` opens the
+/// wrapper's value; only the one before `type` exports it. Reading the second
+/// as the first asked for documentation of a type nobody outside can name.
+#[test]
+fn an_open_wrapper_that_is_not_exported_needs_no_documentation() {
+    let db = KhoraDatabase::new();
+    let file = SourceFile::new(&db, "a.kh".into(), "module m;\ntype Port = pub Int;\n".to_string());
+    let found: Vec<&str> = findings(&db, file).iter().map(|f| f.lint).collect();
+    assert!(!found.contains(&khora_lint::UNDOCUMENTED_EXPORT), "{found:?}");
+    // And the same wrapper exported is asked for one, so the check is live.
+    let file = SourceFile::new(&db, "b.kh".into(), "module m;\npub type Port = pub Int;\n".to_string());
+    let found: Vec<&str> = findings(&db, file).iter().map(|f| f.lint).collect();
+    assert!(found.contains(&khora_lint::UNDOCUMENTED_EXPORT), "{found:?}");
+}

@@ -33,6 +33,58 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 
 ### Breaking
 
+- **A record field is private to the module that declares its type, unless
+  it is marked `pub`.** Outside that module a private field cannot be read,
+  assigned, named in a literal or an update, or bound in a pattern, and a
+  value with any private field can only be built by its own module. A
+  wrapper's value follows the same rule: `type Port = Int;` can be built with
+  `Port(n)` and opened with `match p { Port(n) => .. }` only in its module,
+  and `type UserId = pub Int;` opens one to everybody. A case's payload is
+  always public. `derive(Decode)` is refused on a `pub` type with a private
+  field, because it would build one from input without calling anything that
+  checks. `pub` written in a row, on a case's payload or on an effect's
+  operation is a syntax error, and so is `mut` written in a row, which was
+  accepted and ignored.
+
+  **The migration.** For each error `khora check` reports:
+  - a record other modules read or build, with nothing to keep true (a
+    request body, a report, a settings record): write `pub` before each
+    field other modules use, as in `pub type Point = { pub x: Int, pub y:
+    Int };`. Its `derive(Decode)` then compiles unchanged;
+  - a record whose constructor checks something: keep the fields private and
+    call the constructor and getters from outside. For a `derive(Decode)` on
+    one, write `impl Decode for T` with `Schema::try_map` over the checking
+    function;
+  - an identifier wrapper built from other modules: `type UserId = pub Int;`;
+  - a test in a separate `module foo_test;` that reads `foo`'s private
+    fields: move it into `foo` as a `test` block, which is inside the module,
+    or test through `foo`'s functions.
+
+  In `std`, `Decimal`, `Map`, `Vector`, `Date`, `Time`, `Offset`,
+  `std::net::http::Connection`, the iterator adapters `Mapped`, `Filtered`
+  and `Taken`, the TLS handles and `Dict`'s `Least` keep their fields
+  private. `Date::year`, `month` and `day`, `Time::hour`, `minute`, `second`
+  and `milli`, `Offset::minutes` and `Decimal::scale` read them. Every field
+  of `std`'s other public records is `pub`. In `postgres`, `Connection`'s
+  fields are private; `transaction_depth` and `set_transaction_depth` in
+  `postgres::conn` read and write the one piece of state `postgres::db`
+  keeps there. `postgres::pool`'s `Pool` keeps its fields private; its
+  `Health` and `Reconnect` records have every field `pub`, and
+  `idle_count`, `take_offer` and `give_offer_back` count the idle offers,
+  and take one out and put it back into the pool it came from, without
+  exposing the channel they are in.
+
+  A record update, `{ ..base, field: value }`, whose base is a type
+  parameter is refused: a type parameter is not a record, whatever it is
+  instantiated at. One whose base is an unannotated lambda parameter is
+  checked once the parameter's type is known, with the same rules as any
+  other update, and one whose base's type is never known asks for an
+  annotation. A value there that needs the field's type to be typed -- an
+  integer literal for a `U8` field -- needs an annotation, because the
+  field's type is not known yet when the value is. Both kinds type-checked
+  with none of their fields checked, so a field that did not exist, or a
+  value of the wrong type, compiled.
+
 - **Names are spelled in US English.** Every public name with a British
   spelling is renamed, with no alias for the old spelling:
   - `Fiber::cancelled` → `Fiber::canceled` (`std::core`);

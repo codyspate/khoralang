@@ -332,10 +332,10 @@ pub fn retry<A, E, 'ef>(schedule: Schedule, body: () -> A with 'ef raises E) -> 
 /// count to three.
 pub type Tried<A, E> = {
   /// What happened in the end: the value, or the failure that stopped it.
-  outcome: Result<A, E>,
+  pub outcome: Result<A, E>,
   /// How many times `body` ran. One when it succeeded first go, and never
   /// zero -- the first attempt is unconditional.
-  attempts: Int,
+  pub attempts: Int,
 };
 
 /// `retry`, for a caller that can tell a retryable failure from a permanent one.

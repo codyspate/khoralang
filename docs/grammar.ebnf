@@ -39,7 +39,10 @@ ImplDecl       ::= "impl" ( TypeParams )? Type ( "for" Type )?
 TraitItem      ::= AssocTypeDecl | FunctionDecl ;
 AssocTypeDecl  ::= "type" Ident ( ":" TypeBounds )? ( "=" Type )? ";" ;
 TypeBounds     ::= Type ( "+" Type )* ;
-TypeDef        ::= VariantType | Type ;
+(* `type Port = pub Int;` opens a newtype's value to other modules; without
+   the `pub` only the declaring module can build or match one. The `pub` that
+   exports the declaration is the one before `type`. *)
+TypeDef        ::= VariantType | ( "pub" )? Type ;
 
 (* An effect is a named set of operations, shaped like a record of functions —
    which is what a capability already was. docs/design/effects.md. *)
@@ -77,7 +80,12 @@ TupleType      ::= "(" ")"                             (* unit                *)
 RecordType     ::= "{" ( Field ( "," Field )* ( "," )? )? ( "|" RowTail )? "}" ;
 RowTail        ::= RowElem ( ( "|" | "," ) RowElem )* ;
 RowElem        ::= Field | Type ;
-Field          ::= Ident ":" Type ;
+(* `pub` and `mut` are read only on a field of the record a `type`
+   declaration defines: `pub` makes it visible outside the declaring module,
+   and `mut` lets it be assigned. On a row entry, a case's payload or an
+   effect's operation, `pub` is a syntax error that says why, and so is
+   `mut` on a row entry. *)
+Field          ::= ( "pub" )? ( "mut" )? Ident ":" Type ;
 
 VariantType    ::= ( "|" Ident ( "(" VariantPayload ")" )? )+ ;
 VariantPayload ::= Field ( "," Field )* ( "," )?       (* named payload       *)

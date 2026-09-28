@@ -475,12 +475,15 @@ impl Reader {
 }
 
 /// One message read off the wire, before anything is made of it.
+///
+/// Both fields `pub`: the connection dispatches on `kind` and parses
+/// `payload`, and a message is what the bytes said, with nothing to keep true.
 pub type Message = {
   /// The type byte: `R` for authentication, `T` for a row description, and so
   /// on. Kept as a number because that is what the wire carries and a name
   /// here would be a second vocabulary to keep in step.
-  kind: Int,
-  payload: Array<U8>,
+  pub kind: Int,
+  pub payload: Array<U8>,
 };
 
 /// Reads one message from `bytes` starting at `from`, if a whole one is there.

@@ -20,7 +20,7 @@ fn errors_in_user(library: &str, user: &str) -> Vec<String> {
 
 const LIBRARY: &str = "module library;\n\
                        pub trait Eq { fn eq(self, other: Self) -> Bool; }\n\
-                       pub type Point = { x: Int };\n\
+                       pub type Point = { pub x: Int };\n\
                        impl Eq for Point { fn eq(self, other: Point) -> Bool { self.x == other.x } }\n";
 
 /// An impl written beside its type is visible wherever that type is.
@@ -345,7 +345,7 @@ fn a_mismatch_between_two_same_named_types_qualifies_both() {
 #[test]
 fn an_ordinary_mismatch_is_not_qualified() {
     let found = errors_in_user(
-        "module library;\npub type Point = { x: Int };\n",
+        "module library;\npub type Point = { pub x: Int };\n",
         "module user;\n\
          import library::{Point};\n\
          fn take(n: Int) -> Int { n }\n\

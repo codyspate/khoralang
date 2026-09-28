@@ -29,9 +29,9 @@ pub type RiskLevel =
 /// JSON it is.
 derive(Decode, Encode)
 pub type AnalysisReport = {
-  account_id: String,
-  risk: RiskLevel,
-  confidence: Float,
+  pub account_id: String,
+  pub risk: RiskLevel,
+  pub confidence: Float,
 };
 
 /// The report as a line of text, for a log.

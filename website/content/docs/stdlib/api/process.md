@@ -104,8 +104,8 @@ that any subprocess can walk around is not a grant.
 
 ```khora
 pub type Completed = {
-  status: Int,
-  text: String,
+  pub status: Int,
+  pub text: String,
 };
 ```
 
@@ -118,7 +118,7 @@ the status — is a caller running the command twice.
 #### status
 
 ```khora
-status: Int
+pub status: Int
 ```
 
 What the command exited with. Zero is the universal "it worked".
@@ -126,7 +126,7 @@ What the command exited with. Zero is the universal "it worked".
 #### text
 
 ```khora
-text: String
+pub text: String
 ```
 
 Everything it wrote to its standard output. Its standard *error* is not

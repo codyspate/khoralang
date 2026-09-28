@@ -56,15 +56,15 @@ pub type Json =
 /// offset is in **bytes**, which is what `String::byte` counts and what a
 /// caller can slice with.
 pub type JsonError = {
-  at: Int,
-  expected: String,
+  pub at: Int,
+  pub expected: String,
 };
 
 /// One field of an object. `entries` reports them sorted by name, which is
 /// the same order every time and is not the order the document wrote them in.
 pub type Field = {
-  name: String,
-  value: Json,
+  pub name: String,
+  pub value: Json,
 };
 
 /// One object member. Chiefly useful to generated encoders, and preferable to

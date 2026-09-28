@@ -177,6 +177,7 @@ impl<'ctx> Backend<'ctx> {
                 fields: items.clone(),
                 labels: (0..items.len()).map(|i| i.to_string()).collect(),
                 mutable: vec![false; items.len()],
+                public: Vec::new(),
             }];
         }
         let Type::Adt { name, args, home } = ty else { return Vec::new() };

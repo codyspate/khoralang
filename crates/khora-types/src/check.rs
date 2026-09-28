@@ -254,7 +254,22 @@ pub(crate) struct Checker<'a> {
     /// the row said it carried when it was built. See
     /// [`Checker::settle_raises`] for why a closed tail is not the whole row.
     pub(crate) owner_rows: Vec<(Type, Vec<(String, Type)>)>,
+    /// Record updates whose base was a variable when they were reached. See
+    /// [`Checker::settle_updates`].
+    pub(crate) pending_updates: Vec<PendingUpdate>,
     pub(crate) errors: Vec<HirError>,
+}
+
+/// A record update, `{ ..base, field: value }`, whose base's type was not
+/// known when it was checked: an unannotated lambda parameter is solved by
+/// the call after the lambda.
+pub(crate) struct PendingUpdate {
+    pub(crate) base: ExprId,
+    /// The base's type, a variable when recorded.
+    pub(crate) ty: Type,
+    pub(crate) fields: Vec<(String, ExprId)>,
+    /// The whole update, where a privacy refusal goes.
+    pub(crate) range: TextRange,
 }
 
 /// A `raise` of a value whose type was not known yet.
