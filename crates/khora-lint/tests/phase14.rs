@@ -226,6 +226,24 @@ fn a_type_reached_only_through_a_value_is_used() {
     assert!(found.is_empty(), "`Answer` is what makes `a.rows` work: {found:?}");
 }
 
+/// **A `for` inside `[..]` uses `Step` and `Iterator`**, exactly as a `for`
+/// statement does: it expands to the same `next` loop. Neither name is
+/// written, so a lint that looked only for `for` statements told the reader to
+/// delete the two imports that made the literal compile.
+#[test]
+fn a_for_element_uses_step_and_iterator() {
+    let lib = "module lib;\n\n\
+               pub type Step<S, A> = | Yield(S, A) | Done;\n\n\
+               pub trait Iterator { fn next(self) -> Int; }\n\n\
+               pub fn rows() -> Int { 1 }\n";
+    let found = two(
+        lib,
+        "module u;\n\nimport lib::{Iterator, Step, rows};\n\n\
+         pub fn main() -> Int {\n  let xs = [for r in rows() => r];\n  0\n}\n",
+    );
+    assert!(found.is_empty(), "the `for` element needs both: {found:?}");
+}
+
 /// **A name used only inside a `${..}` hole is used.**
 ///
 /// The mention walk is over the token stream, and a hole's contents live

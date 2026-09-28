@@ -207,34 +207,32 @@ impl<'a> Ctx<'a> {
                     Some(c) => self.lower_expr(&c),
                     None => self.add_expr(Expr::Missing, range),
                 };
-                self.loop_depth += 1;
+                let outer = self.loop_depth;
+                self.loop_depth = LoopDepth::Loops(outer.loops() + 1);
                 let body = match e.body() {
                     Some(b) => self.lower_block(&b),
                     None => self.add_expr(Expr::Missing, range),
                 };
-                self.loop_depth -= 1;
+                self.loop_depth = outer;
                 self.add_expr(Expr::While { condition, body }, range)
             }
             ast::Expr::Loop(e) => {
-                self.loop_depth += 1;
+                let outer = self.loop_depth;
+                self.loop_depth = LoopDepth::Loops(outer.loops() + 1);
                 let body = match e.body() {
                     Some(b) => self.lower_block(&b),
                     None => self.add_expr(Expr::Missing, range),
                 };
-                self.loop_depth -= 1;
+                self.loop_depth = outer;
                 self.add_expr(Expr::Loop { body }, range)
             }
             ast::Expr::Break(e) => {
-                if self.loop_depth == 0 {
-                    self.error("`break` outside a loop", range);
-                }
+                self.check_leaves_a_loop("break", range);
                 let value = e.value().map(|v| self.lower_expr(&v));
                 self.add_expr(Expr::Break(value), range)
             }
             ast::Expr::Continue(_) => {
-                if self.loop_depth == 0 {
-                    self.error("`continue` outside a loop", range);
-                }
+                self.check_leaves_a_loop("continue", range);
                 self.add_expr(Expr::Continue, range)
             }
             ast::Expr::Return(e) => {
@@ -242,8 +240,12 @@ impl<'a> Ctx<'a> {
                 self.add_expr(Expr::Return(value), range)
             }
             ast::Expr::List(e) => {
+                if e.has_element_forms() {
+                    return self.lower_list_with_forms(e, range);
+                }
                 let items = e.syntax().children().filter_map(ast::Expr::cast).collect::<Vec<_>>();
                 let ids: Vec<ExprId> = items.iter().map(|i| self.lower_expr(i)).collect();
+                self.note_element_ifs(&ids);
                 self.lower_list(ids, range)
             }
             ast::Expr::Tuple(e) => {
@@ -443,7 +445,32 @@ impl<'a> Ctx<'a> {
         self.add_expr(Expr::Local(local), range)
     }
 
-    fn lower_segments(&mut self, segments: Vec<String>, range: TextRange) -> ExprId {
+    /// Records which of a literal's elements are `if` expressions. See
+    /// [`Body::element_ifs`].
+    pub(super) fn note_element_ifs(&mut self, elements: &[ExprId]) {
+        for &id in elements {
+            if matches!(self.body.expr(id), Expr::If { .. }) {
+                self.body.element_ifs.insert(id);
+            }
+        }
+    }
+
+    /// Reports a `break` or `continue` with no loop of its own to leave.
+    fn check_leaves_a_loop(&mut self, keyword: &str, range: TextRange) {
+        match self.loop_depth {
+            LoopDepth::Loops(0) => self.error(format!("`{keyword}` outside a loop"), range),
+            LoopDepth::Loops(_) => {}
+            LoopDepth::InElement => self.error(
+                format!(
+                    "`{keyword}`: a `for` inside `[..]` makes elements and cannot be left early; \
+                     filter with `if` or use a `for` statement"
+                ),
+                range,
+            ),
+        }
+    }
+
+    pub(super) fn lower_segments(&mut self, segments: Vec<String>, range: TextRange) -> ExprId {
         // A bare name is a local first — shadowing is what people expect.
         if let [only] = segments.as_slice() {
             if let Some(local) = self.lookup(only) {

@@ -196,6 +196,12 @@ pub enum SyntaxKind {
     TUPLE_EXPR,
     /// `[a, b, c]`
     LIST_EXPR,
+    /// `if c => x` inside `[..]`: `x` when `c` holds, nothing otherwise.
+    LIST_IF,
+    /// `for p in xs => e` inside `[..]`: one `e` per item of `xs`.
+    LIST_FOR,
+    /// `..xs` inside `[..]`: every element of the list `xs`.
+    LIST_SPREAD,
     UNIT_EXPR,
     PAREN_EXPR,
     LAMBDA_EXPR,

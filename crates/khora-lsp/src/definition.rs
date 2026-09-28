@@ -102,16 +102,35 @@ impl LocalBinding {
 
 /// A local named by a *use* at `offset`.
 ///
-/// The narrow half, and the one that runs before paths: an `Expr::Local`'s
-/// range is a single name, so a hit here is unambiguous.
+/// The narrow half, and the one that runs before paths: a written
+/// `Expr::Local`'s range is a single name.
+///
+/// **The narrowest use, not the first.** A desugaring names its own locals
+/// over the whole construct it expands -- a `for`'s iterator state spans the
+/// loop, a list literal's accumulator spans the literal -- so a cursor on `r`
+/// in `for r in rows { r + 1 }` is inside a use of the state as well, and
+/// lowering order put that one first. Definition went to the `for` keyword.
+///
+/// **And never one of those made-up locals.** Narrowest is not enough where
+/// the made-up local is the *only* one under the cursor -- a field name, an
+/// operator -- and a rename there replaced the whole `for` or the whole
+/// literal with the new name. Each is named with a character no identifier
+/// can hold (`$iter`, `list so far`), which is what tells them apart.
 pub fn local_use_at(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option<LocalBinding> {
     for (_, body) in khora_hir::body::bodies(db, file) {
-        let found = body.exprs().find_map(|(id, expr)| match expr {
-            khora_hir::body::Expr::Local(local) if body.range(id).contains_inclusive(offset) => {
-                Some(*local)
-            }
-            _ => None,
-        });
+        let found = body
+            .exprs()
+            .filter_map(|(id, expr)| match expr {
+                khora_hir::body::Expr::Local(local)
+                    if body.range(id).contains_inclusive(offset)
+                        && is_writable_name(&body.local(*local).name) =>
+                {
+                    Some((body.range(id).len(), *local))
+                }
+                _ => None,
+            })
+            .min_by_key(|(len, _)| *len)
+            .map(|(_, local)| local);
         if let Some(local) = found {
             return Some(gather(body, local));
         }
@@ -125,13 +144,18 @@ pub fn local_use_at(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option<L
 /// whole pattern including its annotation, so `p: shapes::Point` answers to a
 /// cursor anywhere in it — including on `Point`, which is a different question
 /// with an answer in another file.
+///
+/// A desugaring's own locals are skipped here too, for the reason
+/// [`local_use_at`] skips them: their binding is the whole construct.
 pub fn local_binding_at(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option<LocalBinding> {
     for (_, body) in khora_hir::body::bodies(db, file) {
         // The narrowest, so an annotation mentioning a type does not beat a
         // binding written inside it.
         let found = body
             .locals()
-            .filter(|(_, local)| local.range.contains_inclusive(offset))
+            .filter(|(_, local)| {
+                local.range.contains_inclusive(offset) && is_writable_name(&local.name)
+            })
             .min_by_key(|(_, local)| local.range.len())
             .map(|(id, _)| id);
         if let Some(local) = found {
@@ -139,6 +163,12 @@ pub fn local_binding_at(db: &dyn Db, file: SourceFile, offset: TextSize) -> Opti
         }
     }
     None
+}
+
+/// Whether a source file could have declared a local called `name`: false
+/// for the ones a desugaring invents.
+fn is_writable_name(name: &str) -> bool {
+    name.chars().all(|c| c == '_' || c.is_alphanumeric())
 }
 
 /// The binding and every use of one local.

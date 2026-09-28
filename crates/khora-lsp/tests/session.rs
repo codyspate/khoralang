@@ -5406,6 +5406,164 @@ pub fn go() -> Int {\n\
 
 // --- go to the type, and go to the implementations -------------------------
 
+// --- list elements ---------------------------------------------------------
+
+/// A `for` element's item is bound inside a desugaring the editor never
+/// sees, and `x` in `[if c => x]` runs only when `c` holds.
+const ELEMENTS: &str = "module main;\n\n\
+                        import std::core::{Iterator, List, Step};\n\n\
+                        fn go(rows: List<Int>, c: Bool, x: Int) -> List<Int> {\n  \
+                        [for r in rows => r + 1, if c => x * 2]\n\
+                        }\n";
+
+/// Column of the `nth` occurrence of `needle` on line 5 of `ELEMENTS`.
+fn elements_column(needle: &str, nth: usize) -> u32 {
+    let line = ELEMENTS.lines().nth(5).expect("a sixth line");
+    line.match_indices(needle).nth(nth).expect("the needle").0 as u32
+}
+
+/// **Hovering the item inside a `for` element's body names its type.**
+#[test]
+fn hovering_inside_a_for_element_shows_the_item_type() {
+    let w = workspace(&[("src/main.kh", ELEMENTS)]);
+    let path = w.root.join("src/main.kh");
+    // The `r` of `r + 1`, not the binding.
+    let column = elements_column("r + 1", 0);
+    let replies =
+        session(&[initialize(&w.root), did_open(&path, ELEMENTS), hover(&path, 5, column), exit()]);
+    let reply = replies.iter().find(|r| r.get("id") == Some(&json!(42))).expect("a reply");
+    let shown = reply.pointer("/result/contents/value").and_then(Value::as_str).unwrap_or_default();
+    assert_eq!(shown, "```khora\nInt\n```", "hovering `r` should say Int, said {reply}");
+}
+
+/// **Go to definition on the item lands on the pattern that binds it**, in
+/// the element's head, rather than nowhere or on the desugaring's state.
+#[test]
+fn a_for_element_item_goes_to_its_binding() {
+    let w = workspace(&[("src/main.kh", ELEMENTS)]);
+    let path = w.root.join("src/main.kh");
+    let use_at = elements_column("r + 1", 0);
+    let binding = elements_column("r in", 0);
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&path, ELEMENTS),
+        definition(&path, 5, use_at, 2),
+        exit(),
+    ]);
+    let found = result_of(&replies, 2);
+    assert_eq!(found.pointer("/range/start/line"), Some(&json!(5)), "{found}");
+    assert_eq!(found.pointer("/range/start/character"), Some(&json!(binding)), "{found}");
+}
+
+/// The same for a `for` statement, whose item sits inside the same
+/// expansion: the loop's own state is named over the whole loop's range.
+#[test]
+fn a_for_statement_item_goes_to_its_binding() {
+    let text = "module main;\n\nimport std::core::{Iterator, List, Step};\n\n\
+                fn go(rows: List<Int>) -> Int {\n  let mut t = 0; for r in rows { t = r + 1; }; t\n}\n";
+    let w = workspace(&[("src/main.kh", text)]);
+    let path = w.root.join("src/main.kh");
+    let line = text.lines().nth(5).expect("a sixth line");
+    let use_at = line.find("r + 1").expect("the use") as u32;
+    let binding = line.find("r in").expect("the binding") as u32;
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&path, text),
+        definition(&path, 5, use_at, 2),
+        exit(),
+    ]);
+    let found = result_of(&replies, 2);
+    assert_eq!(found.pointer("/range/start/character"), Some(&json!(binding)), "{found}");
+}
+
+/// A field and a statement `for` over records, and a literal with forms.
+const FIELDS: &str = "module main;\n\n\
+                      import std::core::{Iterator, List, Step};\n\n\
+                      pub type Row = { n: Int };\n\n\
+                      fn go(rows: List<Row>) -> Int {\n  \
+                      let mut t = 0; for r in rows { t = t + r.n; }; t\n\
+                      }\n\n\
+                      fn lit(rows: List<Row>) -> List<Int> {\n  \
+                      [0, for r in rows => r.n]\n\
+                      }\n";
+
+/// `prepareRename` and `rename` with the cursor on the `n` of `r.n` at
+/// `line`: neither may answer with a local the desugaring made up, and no
+/// edit may be wider than the name under the cursor.
+fn rename_on_a_field(line: u32) {
+    let w = workspace(&[("src/main.kh", FIELDS)]);
+    let file = w.root.join("src/main.kh");
+    let column = FIELDS.lines().nth(line as usize).expect("the line").find("r.n").expect("r.n") as u32 + 2;
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, FIELDS),
+        prepare_rename(&file, line, column, 2),
+        rename(&file, line, column, "zz", 3),
+        exit(),
+    ]);
+    let prepared = result_of(&replies, 2);
+    let placeholder = prepared.get("placeholder").and_then(Value::as_str).unwrap_or_default();
+    assert!(
+        placeholder.chars().all(|c| c == '_' || c.is_alphanumeric()),
+        "prepareRename offered a name no source can write: {prepared}"
+    );
+    let renamed = result_of(&replies, 3);
+    let edits: Vec<Value> = renamed
+        .pointer("/changes")
+        .and_then(Value::as_object)
+        .map(|c| c.values().filter_map(Value::as_array).flatten().cloned().collect())
+        .unwrap_or_default();
+    for edit in &edits {
+        let (sl, sc) = (edit.pointer("/range/start/line"), edit.pointer("/range/start/character"));
+        let (el, ec) = (edit.pointer("/range/end/line"), edit.pointer("/range/end/character"));
+        let width = ec.and_then(Value::as_i64).unwrap_or(0) - sc.and_then(Value::as_i64).unwrap_or(0);
+        assert!(sl == el && width == 1, "an edit wider than `n`: {edit}\n{renamed}");
+    }
+}
+
+/// **A rename on a field inside a `for` element does not rewrite the
+/// literal.** The literal's accumulator is a local named over the whole
+/// literal, and the only local under a field name is that one.
+#[test]
+fn a_rename_on_a_field_in_a_for_element_stays_on_the_field() {
+    rename_on_a_field(11);
+}
+
+/// The same inside a `for` statement, whose iterator state is named over the
+/// whole statement.
+#[test]
+fn a_rename_on_a_field_in_a_for_statement_stays_on_the_field() {
+    rename_on_a_field(7);
+}
+
+/// **Extract into a `let` is not offered for the value of `[if c => x]`.**
+/// Lifted above the statement, `x * 2` would run whether or not `c` holds,
+/// which is a different program when it can fail or has an effect.
+#[test]
+fn a_conditional_element_is_not_offered_an_extraction() {
+    let from = elements_column("x * 2", 0);
+    let offered = assists_for(ELEMENTS, 5, from, from + 5);
+    assert!(
+        !offered.iter().any(|(title, _)| title.contains("Extract into a `let`")),
+        "the element's value runs only when its condition holds: {offered:?}"
+    );
+    let from = elements_column("r + 1", 0);
+    let offered = assists_for(ELEMENTS, 5, from, from + 5);
+    assert!(
+        !offered.iter().any(|(title, _)| title.contains("Extract into a `let`")),
+        "the element's value runs once per item: {offered:?}"
+    );
+    // The control: the same value as a plain element is offered, so the
+    // refusals above are the element forms' and not the selection's.
+    let plain = ELEMENTS.replace("if c => x * 2", "x * 2");
+    let from = plain.lines().nth(5).expect("a sixth line").find("x * 2").expect("x") as u32;
+    let offered = assists_for(&plain, 5, from, from + 5);
+    assert!(
+        offered.iter().any(|(title, _)| title.contains("Extract into a `let`")),
+        "a plain element is extractable: {offered:?}"
+    );
+}
+
 fn request_at(method: &str, path: &Path, line: u32, character: u32, id: i64) -> Value {
     json!({
         "jsonrpc": "2.0", "id": id, "method": method,

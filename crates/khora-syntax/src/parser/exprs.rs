@@ -354,7 +354,7 @@ fn list_expr(p: &mut Parser<'_>) -> CompletedMarker {
             if !p.tick() {
                 break;
             }
-            if expr(p).is_none() {
+            if list_element(p).is_none() {
                 p.err_and_bump("expected a list element");
             }
             if !p.eat(COMMA) {
@@ -364,6 +364,60 @@ fn list_expr(p: &mut Parser<'_>) -> CompletedMarker {
     });
     p.expect(R_BRACK);
     m.complete(p, LIST_EXPR)
+}
+
+/// One element of `[..]`: an expression, or one of the three forms that
+/// stand for any number of elements -- `if c => x`, `for x in xs => e` and
+/// `..xs`.
+///
+/// **The arrow is what tells them apart from the expressions**, and it has to
+/// be something other than a block: `[if c { log() }]` and
+/// `[for x in xs { () }]` are one-element `List<()>`s, and a block-bodied
+/// element form would give both programs a different length without a word.
+/// `=>` is the arm's and the lambda's "and then this value", and after an
+/// `if` or `for` head it is a parse error everywhere else, so no program that
+/// parsed without the element forms means anything new with them.
+///
+/// `if` and `for` go through their ordinary rules; `element_head` is how those
+/// rules learn that this is the one position where `=>` may follow the head.
+/// It holds a token position rather than a flag, so an `if` nested anywhere
+/// inside the head or the value -- `[f(if c => 1)]` -- is not mistaken for
+/// the element.
+fn list_element(p: &mut Parser<'_>) -> Option<CompletedMarker> {
+    if p.at(DOT_DOT) {
+        let m = p.start();
+        p.bump(DOT_DOT);
+        // `...xs` is Dart's and JavaScript's spelling, and the one people will
+        // type. Said once, and read as `..xs` so nothing cascades from it.
+        if p.at(DOT) {
+            p.error("Khora spreads with two dots, as `{ ..base }` does: write `..xs`");
+            p.bump(DOT);
+        }
+        if expr(p).is_none() {
+            p.error("expected the list to spread after `..`");
+        }
+        return Some(m.complete(p, LIST_SPREAD));
+    }
+    if p.at(IF_KW) || p.at(FOR_KW) {
+        let saved = p.element_head.replace(p.pos);
+        let parsed = expr(p);
+        p.element_head = saved;
+        return parsed;
+    }
+    expr(p)
+}
+
+/// The element after `=>` or `else` in an element form.
+fn element_body(p: &mut Parser<'_>) {
+    if list_element(p).is_none() {
+        p.error("expected a list element");
+    }
+}
+
+/// At the `=>` of `if c =>` or `for x in xs =>`, whose head began at `start`.
+/// True only when that head is a list element.
+fn at_element_arrow(p: &Parser<'_>, start: usize) -> bool {
+    p.at(FAT_ARROW) && p.element_head == Some(start)
 }
 
 fn paren_or_tuple_expr(p: &mut Parser<'_>) -> CompletedMarker {
@@ -514,6 +568,7 @@ fn at_expr_end(p: &Parser<'_>) -> bool {
 /// of a record.
 fn for_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
+    let head = p.pos;
     p.bump(FOR_KW);
     pattern(p);
     if p.at_contextual(IN_KW) {
@@ -526,8 +581,23 @@ fn for_expr(p: &mut Parser<'_>) -> CompletedMarker {
             p.error("expected something to iterate over");
         }
     });
+    // `for x in xs => e`, the list element. See `list_element`.
+    if at_element_arrow(p, head) {
+        p.bump(FAT_ARROW);
+        element_body(p);
+        return m.complete(p, LIST_FOR);
+    }
     if p.at(L_BRACE) {
         block(p);
+    } else if p.at(FAT_ARROW) {
+        // Consumed with its value, so the one mistake is one error rather
+        // than three about the tokens after it.
+        p.error(
+            "`for x in xs => e` is a list element and means something only inside `[..]`; \
+             here write `for x in xs { .. }`",
+        );
+        p.bump(FAT_ARROW);
+        expr(p);
     } else {
         p.error("expected `{` with the loop body");
     }
@@ -639,6 +709,7 @@ fn with_block(p: &mut Parser<'_>) -> CompletedMarker {
 /// as a `match` scrutinee: the `{` that follows opens the branch, not a record.
 fn if_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
+    let head = p.pos;
     p.bump(IF_KW);
     p.without_record_literals(|p| {
         if expr(p).is_none() {
@@ -646,8 +717,26 @@ fn if_expr(p: &mut Parser<'_>) -> CompletedMarker {
         }
     });
 
+    // `if c => x`, the list element. See `list_element`. The `else` binds to
+    // the nearest `if`, so `[if a => if b => x else y]` gives `y` to `b`.
+    if at_element_arrow(p, head) {
+        p.bump(FAT_ARROW);
+        element_body(p);
+        if p.eat(ELSE_KW) {
+            element_body(p);
+        }
+        return m.complete(p, LIST_IF);
+    }
+
     if p.at(L_BRACE) {
         block(p);
+    } else if p.at(FAT_ARROW) {
+        p.error(
+            "`if c => x` is a list element and means something only inside `[..]`; \
+             here write `if c { x }`",
+        );
+        p.bump(FAT_ARROW);
+        expr(p);
     } else {
         p.error("expected `{` after the condition");
     }

@@ -527,6 +527,16 @@ pub struct Body {
     /// A set rather than a flag on [`Pat::Bind`], which every consumer of a
     /// binding would have had to spell out and none but the checker reads.
     pub written_binds: std::collections::HashSet<PatId>,
+    /// The `if` expressions written directly as an element of `[..]`.
+    ///
+    /// `[if debug { trace }]` is the first thing anybody writes, because it is
+    /// the Khora `if`, and it is a one-element list holding an `if` with no
+    /// `else` -- a type error unless `trace` is `()`. The checker's message
+    /// for that is right and says nothing about `if c => x`, which is what the
+    /// reader was reaching for. Only a literal knows its elements, so this is
+    /// recorded while lowering one, and the checker adds the spelling to that
+    /// message for these and no others.
+    pub element_ifs: std::collections::HashSet<ExprId>,
     pub params: Vec<PatId>,
     /// The capabilities this function requires, by the label the body calls
     /// them and the binding that holds them.
@@ -784,7 +794,7 @@ fn lower_test(
         constants,
         expanding: Vec::new(),
         generics: vec!["Self".to_string()],
-        loop_depth: 0,
+        loop_depth: LoopDepth::Loops(0),
         in_scope: Vec::new(),
         lambdas: Vec::new(),
         lambda_names: Vec::new(),
@@ -890,7 +900,7 @@ fn lower_function(
         constants,
         expanding: Vec::new(),
         generics,
-        loop_depth: 0,
+        loop_depth: LoopDepth::Loops(0),
         in_scope: Vec::new(),
         lambdas: Vec::new(),
         lambda_names: Vec::new(),
@@ -1030,7 +1040,8 @@ struct Ctx<'a> {
     /// a trait or impl. A path whose first segment is one of these names a
     /// trait function reached through that parameter.
     generics: Vec<String>,
-    loop_depth: u32,
+    /// What a `break` or `continue` here would leave.
+    loop_depth: LoopDepth,
     /// One entry per lambda currently being lowered, holding the number of
     /// locals that existed when it started. A local below the innermost mark
     /// belongs to an enclosing scope, which is exactly what "captured" means.
@@ -1045,6 +1056,52 @@ struct Ctx<'a> {
     /// The capability labels each open lambda has named and could not resolve,
     /// one list per lambda on the stack. See `Expr::Lambda`'s `evidence`.
     lambda_evidence: Vec<Vec<(String, PatId)>>,
+}
+
+/// What a `break` or `continue` at the current point would leave.
+///
+/// **Not a count alone**, because inside a `for` element the answer is
+/// neither "a loop" nor "nothing": the element expands to a loop, and a
+/// `break` attached to it would end the literal early without the reader
+/// seeing a loop to end. A count of zero there said "`break` outside a loop"
+/// to somebody looking at a `for`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopDepth {
+    /// This many loops somebody wrote enclose this point.
+    Loops(u32),
+    /// Directly inside a list element's `for`, which nobody wrote as a loop.
+    InElement,
+}
+
+impl Default for LoopDepth {
+    /// A function body, and a lambda's: no loop to leave.
+    fn default() -> LoopDepth {
+        LoopDepth::Loops(0)
+    }
+}
+
+impl LoopDepth {
+    /// The loops somebody wrote. Inside an element this is zero, because a
+    /// loop written inside the element's value starts counting afresh.
+    fn loops(self) -> u32 {
+        match self {
+            LoopDepth::Loops(n) => n,
+            LoopDepth::InElement => 0,
+        }
+    }
+}
+
+/// Whether a `for` being lowered is one somebody wrote or a list element's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Loop {
+    Written,
+    Element,
+}
+
+/// What a list element's pushes need: the accumulator and `List::Cons`.
+struct Pushes {
+    acc: LocalId,
+    cons: crate::Resolution,
 }
 
 // One module per lowering responsibility. Rust lets an inherent impl be split

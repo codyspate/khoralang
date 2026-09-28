@@ -184,6 +184,29 @@ fn runs_of_blank_lines_collapse_to_one() {
     assert!(out.contains("\n\nfn f()"), "blank line removed entirely:\n{out}");
 }
 
+/// **A literal with element forms that its author broke across lines is
+/// re-indented one element per line**, with a value that continues after
+/// `=>` indented under its element, and formatting the result again changes
+/// nothing. The formatter keeps the author's line breaks and never adds one,
+/// so a long literal written on one line stays on one line.
+#[test]
+fn a_broken_literal_with_element_forms_indents_one_element_per_line() {
+    let written = "module m;\nfn f() {\n  let b = [\n  0,\n      if debug => 7 else 8,\n  for r in rows =>\n  r * 10,\n    ..rows,\n  ];\n}\n";
+    let expected = "module m;\nfn f() {\n  let b = [\n    0,\n    if debug => 7 else 8,\n    for r in rows =>\n      r * 10,\n    ..rows,\n  ];\n}\n";
+    let once = format(written).unwrap();
+    assert_eq!(once, expected);
+    assert_eq!(format(&once).unwrap(), once, "not idempotent");
+    assert_eq!(tokens(written), tokens(&once), "a token was lost");
+}
+
+/// On one line the forms space like the rest of the language: `..` hugs its
+/// list, `=>` has a space either side.
+#[test]
+fn a_literal_with_element_forms_on_one_line_is_spaced_like_code() {
+    let out = format("module m;\nfn f() { [0,if c=>1 else 2,for x in xs=>x,..  ys] }\n").unwrap();
+    assert!(out.contains("[0, if c => 1 else 2, for x in xs => x, ..ys]"), "{out}");
+}
+
 #[test]
 fn comments_survive() {
     let src = "module m;\n// leading\nfn f() {\n  // inside\n  1 // trailing\n}\n";

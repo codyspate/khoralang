@@ -52,6 +52,38 @@ fn render(source: &str) -> String {
     render_parse_errors(Path::new("src/main.kh"), source, parse.errors())
 }
 
+// --- list elements: the design's diagnostics table, one per row -----------
+
+/// The arrow and its value are consumed with the error, so one mistake is one
+/// message, and it names the statement spelling.
+#[test]
+fn a_for_element_outside_a_literal() {
+    assert_snapshot(
+        "list_for_outside_a_literal",
+        &render("module m;\nfn f() {\n  let e = for r in rows => r;\n}\n"),
+    );
+}
+
+#[test]
+fn an_if_element_outside_a_literal() {
+    assert_snapshot("list_if_outside_a_literal", &render("module m;\nfn f() {\n  g(if c => 1)\n}\n"));
+}
+
+#[test]
+fn a_spread_with_three_dots() {
+    assert_snapshot("list_three_dot_spread", &render("module m;\nfn f() {\n  [...xs]\n}\n"));
+}
+
+#[test]
+fn an_element_form_with_no_value() {
+    assert_snapshot("list_element_without_a_value", &render("module m;\nfn f() {\n  [if c =>]\n}\n"));
+}
+
+#[test]
+fn a_spread_with_nothing_to_spread() {
+    assert_snapshot("list_spread_without_a_list", &render("module m;\nfn f() {\n  [..]\n}\n"));
+}
+
 #[test]
 fn missing_semicolon_after_module() {
     assert_snapshot("missing_semicolon", &render("module app::main\n\nfn f() { 1 }\n"));

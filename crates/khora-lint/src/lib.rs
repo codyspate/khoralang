@@ -454,16 +454,19 @@ fn undocumented_exports(db: &dyn Db, file: SourceFile, out: &mut Vec<Finding>) {
 /// whole-statement case is left alone until `import_inherent` is keyed on the
 /// type rather than on the module, which its own doc comment says is the
 /// intent: methods should arrive "whether or not the file imported `Params`".
-/// Whether the file contains a `for` loop.
+/// Whether the file contains a `for` loop, written as a statement or as an
+/// element of `[..]`.
 ///
 /// Asked of the tree rather than the token stream, because `for` is a
 /// contextual keyword: `handler for Ledger` is not a loop, and counting it
 /// would silence the lint on two imports the file may genuinely not use.
+///
+/// The element form expands to the same `next` loop, so it uses the same two
+/// names without writing either.
 fn has_for_loop(db: &dyn Db, file: SourceFile) -> bool {
-    khora_db::parse(db, file)
-        .syntax()
-        .descendants()
-        .any(|node| node.kind() == khora_syntax::SyntaxKind::FOR_EXPR)
+    khora_db::parse(db, file).syntax().descendants().any(|node| {
+        matches!(node.kind(), khora_syntax::SyntaxKind::FOR_EXPR | khora_syntax::SyntaxKind::LIST_FOR)
+    })
 }
 
 fn unused_imports(

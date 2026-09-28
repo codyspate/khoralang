@@ -192,6 +192,22 @@ Parentheses without a comma group an expression:
 ]
 ```
 
+**Elements that come and go.** Inside `[..]`, three forms stand for any number of elements:
+
+```khora
+[header, if debug => trace, for r in rows => render(r), ..footer]
+```
+
+`if c => x` is `x` when `c` holds, and nothing otherwise; `else` gives the other case, and `else if` chains. `for p in xs => e` is one `e` per item. `..xs` is every element of the list `xs`. They nest, as in `[for x in xs => if x != 2 => x]`, and they are evaluated left to right, each condition and iterable once. An `else` belongs to the nearest `if`, so `[if a => if b => x else y]` is `y` when `a` holds and `b` does not.
+
+`=>` is what makes them elements. `[if c { x } else { y }]` is a one-element list holding the value of an `if` expression, and `[if c { x }]` is a type error unless `x` is `()`: "an `if` without `else` must produce `()`", followed by "inside `[..]`, an element that is only sometimes there is written `if c => x`".
+
+A `for` element needs `Step` and `Iterator` in scope, as a `for` loop does, and it is a cancellation point like one. It cannot be left with `break` or `continue`; filter with `if` instead. `return` and `!` work inside elements as they do anywhere in the function, and leave it with the elements made so far freed.
+
+Only `List` has a literal. A `match` that makes zero or more elements is written as a spread: `..match o { Option::Some(v) => [v], Option::None => [] }`.
+
+**Cost.** The literal is built front to back and reversed once, so it is linear in the elements it makes, and allocates what a `for` that pushes and then calls `reverse` would. A trailing `..xs` is shared rather than copied; a spread anywhere else walks its list.
+
 ## Integer division and remainder
 
 `/` **truncates toward zero** and `%` **takes the sign of the dividend**, which is what C, Rust, Go and the hardware instruction all do:

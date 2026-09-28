@@ -558,15 +558,18 @@ fn statement_holding(node: &SyntaxNode) -> Option<SyntaxNode> {
 /// Kinds that decide when, whether, or in what scope what is inside them runs.
 ///
 /// Three reasons, and all three end in the same refusal. An `if`, a `match`,
-/// a loop, a lambda body and a flow stage may not run their contents at all.
-/// A `with` block puts a capability in scope, so an expression lifted out of
-/// one no longer has what it asked for. A `catch` decides which failures are
-/// answered, so an expression lifted out of one raises past the handler that
-/// was written for it.
+/// a loop, a lambda body, a flow stage and a list literal's `if c => x` may
+/// not run their contents at all, and a list literal's `for x in xs => e` runs
+/// its value once per item. A `with` block puts a capability in scope, so an
+/// expression lifted out of one no longer has what it asked for. A `catch`
+/// decides which failures are answered, so an expression lifted out of one
+/// raises past the handler that was written for it.
 fn conditional(kind: SyntaxKind) -> bool {
     matches!(
         kind,
         SyntaxKind::IF_EXPR
+            | SyntaxKind::LIST_IF
+            | SyntaxKind::LIST_FOR
             | SyntaxKind::MATCH_EXPR
             | SyntaxKind::MATCH_ARM
             | SyntaxKind::WHILE_EXPR

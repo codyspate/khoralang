@@ -1,0 +1,5 @@
+error: Khora spreads with two dots, as `{ ..base }` does: write `..xs`
+ --> src/main.kh:3:6
+  |
+3 |   [...xs]
+  |      ^

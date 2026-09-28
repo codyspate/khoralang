@@ -1,0 +1,5 @@
+error: `for x in xs => e` is a list element and means something only inside `[..]`; here write `for x in xs { .. }`
+ --> src/main.kh:3:25
+  |
+3 |   let e = for r in rows => r;
+  |                         ^^

@@ -54,7 +54,31 @@ impl<'a> Ctx<'a> {
     /// tested. The cost is that the loop depends on `Step` being in scope, the
     /// same way Rust's `for` depends on `IntoIterator`.
     pub(super) fn lower_for(&mut self, e: &ast::ForExpr, range: TextRange) -> ExprId {
-        let iter = match e.iterable() {
+        let body = e.body();
+        self.lower_for_parts(e.pattern(), e.iterable(), range, Loop::Written, move |this| {
+            match body {
+                Some(b) => this.lower_block(&b),
+                None => this.add_expr(Expr::Missing, range),
+            }
+        })
+    }
+
+    /// The expansion of `for`, with the body supplied by the caller: a block
+    /// for the statement, one list element's pushes for `[for x in xs => e]`.
+    ///
+    /// One expansion for both, so the element loop cannot drift from the
+    /// statement loop: the same `Step`/`Iterator` requirement and message, and
+    /// the same back-edge, which is what makes the element a cancellation
+    /// point.
+    pub(super) fn lower_for_parts(
+        &mut self,
+        pattern: Option<ast::Pat>,
+        iterable: Option<ast::Expr>,
+        range: TextRange,
+        kind: Loop,
+        lower_body: impl FnOnce(&mut Self) -> ExprId,
+    ) -> ExprId {
+        let iter = match iterable {
             Some(i) => self.lower_expr(&i),
             None => self.add_expr(Expr::Missing, range),
         };
@@ -70,7 +94,7 @@ impl<'a> Ctx<'a> {
 
         // The arm binds its own scope: the item pattern belongs to the body.
         self.scopes.push(Vec::new());
-        let item_pat = match e.pattern() {
+        let item_pat = match pattern {
             Some(p) => self.lower_pat(&p, false),
             None => self.add_pat(Pat::Wildcard, range),
         };
@@ -81,13 +105,16 @@ impl<'a> Ctx<'a> {
             self.add_expr(Expr::Assign { target, value }, range)
         };
         // Inside the loop before the body is lowered, or a `break` in it would
-        // be reported as outside a loop.
-        self.loop_depth += 1;
-        let body = match e.body() {
-            Some(b) => self.lower_block(&b),
-            None => self.add_expr(Expr::Missing, range),
+        // be reported as outside a loop. An element's loop is one nobody
+        // wrote, so a `break` inside it is refused rather than attached to it
+        // or to a loop outside the literal.
+        let outer = self.loop_depth;
+        self.loop_depth = match kind {
+            Loop::Written => LoopDepth::Loops(outer.loops() + 1),
+            Loop::Element => LoopDepth::InElement,
         };
-        self.loop_depth -= 1;
+        let body = lower_body(self);
+        self.loop_depth = outer;
         self.scopes.pop();
 
         let arm_body = self.add_expr(
@@ -415,6 +442,168 @@ impl<'a> Ctx<'a> {
             type_name: found.type_name.clone(),
             name: found.name.clone(),
         })
+    }
+
+    /// `[a, if c => b, for x in xs => f(x), ..ys, z]`.
+    ///
+    /// ```text
+    /// {
+    ///   let mut acc = List::Nil;
+    ///   acc = List::Cons(a, acc);
+    ///   if c { acc = List::Cons(b, acc); };
+    ///   for x in xs { acc = List::Cons(f(x), acc); };
+    ///   acc = List::reverse_onto(ys, acc);
+    ///   acc = List::Cons(z, acc);
+    ///   List::reverse_onto(acc, List::Nil)
+    /// }
+    /// ```
+    ///
+    /// With a trailing `..tail`, the last two lines are
+    /// `let t = tail; List::reverse_onto(acc, t)`.
+    ///
+    /// **Built backwards and turned round once**, because `List` is a cons
+    /// list: the front is the only end that is cheap, and evaluation has to go
+    /// left to right. The turn is one walk over the elements the literal made.
+    /// A trailing `..ys` is not walked at all: it is the tail the turned list
+    /// is put in front of, and is shared, as `concat` shares its right
+    /// argument. A spread anywhere else is walked once.
+    ///
+    /// **Not closures.** `flat_map` over the elements would make `return`
+    /// inside one return from a lambda, need a `List` to walk where a `for`
+    /// takes any `Iterator`, and capture every local an element mentions.
+    ///
+    /// A literal with none of these forms never gets here; it is the `Cons`
+    /// chain it always was, so a program without them compiles to exactly
+    /// what it did before they existed.
+    pub(super) fn lower_list_with_forms(&mut self, e: &ast::ListExpr, range: TextRange) -> ExprId {
+        let (Some(nil), Some(cons)) = (self.list_case("Nil"), self.list_case("Cons")) else {
+            self.error("`[a, b, c]` builds a `List`; import it from `std::core`", range);
+            return self.add_expr(Expr::Missing, range);
+        };
+        let mut elements: Vec<ast::ListElement> = e.elements().collect();
+        let tail_spread = match elements.last() {
+            Some(ast::ListElement::Spread(s)) => {
+                let s = s.clone();
+                elements.pop();
+                Some(s)
+            }
+            _ => None,
+        };
+
+        self.scopes.push(Vec::new());
+        // A space cannot occur in an identifier, so no source can name it.
+        let acc = self.declare("list so far".to_string(), true, range);
+        let acc_pat = self.add_pat(Pat::Bind(acc), range);
+        let empty = self.add_expr(Expr::Path(nil.clone()), range);
+        let mut stmts = vec![Stmt::Let { pat: acc_pat, ty: None, init: Some(empty) }];
+        let pushes = Pushes { acc, cons };
+        for element in elements {
+            self.lower_element(&element, &pushes, &mut stmts);
+        }
+        let tail = match tail_spread {
+            // **Bound as the last statement, not passed straight to the
+            // turn.** As the turn's second argument, an operand that leaves
+            // early -- `..load()!`, `..(if c { return [] } else { xs })` --
+            // left after the accumulator had been moved into the call, and
+            // the cells the literal had built were never freed.
+            Some(s) => {
+                let operand = self.spread_operand(&s);
+                // The operand's own range, so a type error in it still points
+                // at the operand rather than at the whole literal.
+                let at = self.body.range(operand);
+                let tail = self.declare("list tail".to_string(), false, at);
+                let tail_pat = self.add_pat(Pat::Bind(tail), at);
+                stmts.push(Stmt::Let { pat: tail_pat, ty: None, init: Some(operand) });
+                self.add_expr(Expr::Local(tail), at)
+            }
+            None => self.add_expr(Expr::Path(nil), range),
+        };
+        let turn = self.reverse_onto(range);
+        let built = self.add_expr(Expr::Local(acc), range);
+        let result = self.add_call(Expr::Call { callee: turn, args: vec![built, tail] }, range);
+        self.scopes.pop();
+        self.add_expr(Expr::Block { stmts, tail: Some(result) }, range)
+    }
+
+    /// The statements that push one element's values onto the accumulator,
+    /// front first.
+    fn lower_element(&mut self, element: &ast::ListElement, pushes: &Pushes, stmts: &mut Vec<Stmt>) {
+        let range = element.syntax().text_range();
+        match element {
+            ast::ListElement::If(e) => {
+                let condition = match e.condition() {
+                    Some(c) => self.lower_expr(&c),
+                    None => self.add_expr(Expr::Missing, range),
+                };
+                let then_branch = self.element_block(e.then_element(), pushes, range);
+                let else_branch =
+                    e.else_element().map(|n| self.element_block(Some(n), pushes, range));
+                let branch = self.add_expr(Expr::If { condition, then_branch, else_branch }, range);
+                stmts.push(Stmt::Expr(branch));
+            }
+            ast::ListElement::For(e) => {
+                let body = e.body();
+                let lowered =
+                    self.lower_for_parts(e.pattern(), e.iterable(), range, Loop::Element, |this| {
+                        this.element_block(body, pushes, range)
+                    });
+                stmts.push(Stmt::Expr(lowered));
+            }
+            ast::ListElement::Spread(e) => {
+                let value = self.spread_operand(e);
+                let onto = self.reverse_onto(range);
+                let so_far = self.add_expr(Expr::Local(pushes.acc), range);
+                let pushed =
+                    self.add_call(Expr::Call { callee: onto, args: vec![value, so_far] }, range);
+                stmts.push(self.assign_acc(pushes.acc, pushed, range));
+            }
+            ast::ListElement::Expr(e) => {
+                let value = self.lower_expr(e);
+                self.note_element_ifs(&[value]);
+                let callee = self.add_expr(Expr::Path(pushes.cons.clone()), range);
+                let so_far = self.add_expr(Expr::Local(pushes.acc), range);
+                let pushed = self.add_expr(Expr::Call { callee, args: vec![value, so_far] }, range);
+                stmts.push(self.assign_acc(pushes.acc, pushed, range));
+            }
+        }
+    }
+
+    /// One element as a block of pushes, for the body of an `if` or `for`.
+    fn element_block(
+        &mut self,
+        element: Option<ast::ListElement>,
+        pushes: &Pushes,
+        range: TextRange,
+    ) -> ExprId {
+        let mut stmts = Vec::new();
+        self.scopes.push(Vec::new());
+        match element {
+            Some(e) => self.lower_element(&e, pushes, &mut stmts),
+            None => {
+                let missing = self.add_expr(Expr::Missing, range);
+                stmts.push(Stmt::Expr(missing));
+            }
+        }
+        self.scopes.pop();
+        self.add_expr(Expr::Block { stmts, tail: None }, range)
+    }
+
+    fn spread_operand(&mut self, e: &ast::ListSpread) -> ExprId {
+        match e.list() {
+            Some(xs) => self.lower_expr(&xs),
+            None => self.add_expr(Expr::Missing, e.syntax().text_range()),
+        }
+    }
+
+    /// `List::reverse_onto`, resolved as a written path would be, so a
+    /// program whose `List` is not `std::core`'s gets that type's answer.
+    fn reverse_onto(&mut self, range: TextRange) -> ExprId {
+        self.lower_segments(vec!["List".to_string(), "reverse_onto".to_string()], range)
+    }
+
+    fn assign_acc(&mut self, acc: LocalId, value: ExprId, range: TextRange) -> Stmt {
+        let target = self.add_expr(Expr::Local(acc), range);
+        Stmt::Expr(self.add_expr(Expr::Assign { target, value }, range))
     }
 
     /// `Step::Yield` and `Step::Done`, as the desugaring needs them, reporting

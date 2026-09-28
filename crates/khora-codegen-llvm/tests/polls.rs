@@ -240,6 +240,78 @@ fn an_infallible_loop_in_a_spawning_program_calls_the_runtime_only_behind_the_po
     }
 }
 
+/// A `for` statement and a `for` inside `[..]` over the same range, in a
+/// program that spawns. The element is the statement's expansion, so its
+/// back-edge must be a cancellation point just the same.
+const ELEMENT_LOOPS: &str = "module t;
+pub type Fiber<A, 'r>;
+impl<A, 'r> Fiber<A, 'r> {
+  fn spawn(body: () -> A raises 'r) -> Fiber<A, 'r>;
+  fn join(self) -> A raises 'r;
+}
+pub type Step<S, A> = | Yield(state: S, item: A) | Done;
+pub type Range = | Of(from: Int, to: Int);
+pub type List<A> = | Nil | Cons(head: A, tail: List<A>);
+impl<A> List<A> {
+  fn reverse_onto(self, acc: List<A>) -> List<A> {
+    match self { List::Nil => acc, List::Cons(h, t) => List::reverse_onto(t, List::Cons(h, acc)) }
+  }
+}
+trait Iterator {
+  type Item;
+  fn next(self) -> Step<Self, Self::Item>;
+}
+impl Iterator for Range {
+  type Item = Int;
+  fn next(self) -> Step<Range, Int> {
+    match self {
+      Range::Of(from, to) =>
+        if from >= to { Step::Done } else { Step::Yield(Range::Of(from + 1, to), from) },
+    }
+  }
+}
+
+fn element(n: Int) -> List<Int> { [for i in Range::Of(0, n) => i] }
+
+fn statement(n: Int) -> List<Int> {
+  let mut acc = List::Nil;
+  for i in Range::Of(0, n) { acc = List::Cons(i, acc); };
+  acc
+}
+
+fn main() -> Int {
+  let f = Fiber::spawn(fn () => element(3));
+  Fiber::join(f);
+  let g = statement(3);
+  0
+}
+";
+
+/// **A `for` inside `[..]` is a cancellation point**, with the same one call
+/// behind the same load as the `for` statement it is written like.
+#[test]
+fn a_for_element_polls_at_its_back_edge_like_a_for_statement() {
+    let element = function_ir("polls_element", ELEMENT_LOOPS, "element");
+    let statement = function_ir("polls_element_statement", ELEMENT_LOOPS, "statement");
+    let back_edges = |body: &str| {
+        let calls = calls_by_block(body, &["khora_safepoint", "khora_canceled", "khora_back_edge"]);
+        for (call, block) in &calls {
+            assert!(
+                block.starts_with("poll.slow"),
+                "`{call}` is in `{block}`, which every trip of the loop runs:\n{body}"
+            );
+        }
+        calls.iter().map(|(c, _)| c.to_string()).collect::<Vec<String>>()
+    };
+    let polled = back_edges(&element);
+    assert_eq!(polled, vec!["khora_back_edge"], "the element's loop is not a cancellation point:\n{element}");
+    assert_eq!(polled, back_edges(&statement), "the element polls differently from the statement");
+    assert!(
+        element.contains("load atomic i64, ptr @khora_poll monotonic"),
+        "the poll word is read with a relaxed load:\n{element}"
+    );
+}
+
 /// **The half of the poll word a spawning program cannot do without on the
 /// scheduler: a fiber that never suspends still gives its worker back.**
 ///

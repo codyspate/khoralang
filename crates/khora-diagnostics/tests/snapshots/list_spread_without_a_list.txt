@@ -1,0 +1,5 @@
+error: expected the list to spread after `..`
+ --> src/main.kh:3:6
+  |
+3 |   [..]
+  |      ^

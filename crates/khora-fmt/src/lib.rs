@@ -531,8 +531,12 @@ fn introduces_a_continuation(token: &SyntaxToken) -> bool {
 /// and a value that opens a block gets a second level from the brace as usual.
 ///
 /// A value that fits on one line is unaffected: no line break, nothing indented.
+///
+/// A list literal's `if c =>` and `for x in xs =>` are arms in all but name,
+/// and their value broken onto the next line would otherwise print level
+/// with the element it belongs to, reading as the literal's next element.
 fn carries_a_value(kind: SyntaxKind) -> bool {
-    matches!(kind, LET_DECL | CONST_DECL | MATCH_ARM)
+    matches!(kind, LET_DECL | CONST_DECL | MATCH_ARM | LIST_IF | LIST_FOR)
 }
 
 /// Whether a token starting a line continues the line above rather than

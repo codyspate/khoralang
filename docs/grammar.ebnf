@@ -168,7 +168,20 @@ RecordExpr     ::= "{" ( RecordExprBase ( "," )? )?
 RecordExprBase ::= ".." Expr ;
 RecordExprField::= Ident ":" Expr ;
 TupleExpr      ::= "(" ")" | "(" Expr ")" | "(" Expr ( "," Expr )+ ( "," )? ")" ;
-ListExpr       ::= "[" ( Expr ( "," Expr )* ( "," )? )? "]" ;
+(* Inside `[..]` an element may stand for any number of elements. `=>` is
+   what marks one: after an `if` or `for` head it is a parse error everywhere
+   else, so `[if c { a }]` is still one element, the value of an `if`
+   expression. The head is shared with the expression forms and decided by the
+   one token after it -- `{` for the expression, `=>` for the element -- with
+   record literals off in the condition and iterable, as for the expressions.
+   An `else` binds to the nearest `if`. An element form is complete: in
+   `[if c => a + 1]` the `+ 1` is part of the element's value. `..` never
+   begins an `Expr`, so a spread is only ever an element. *)
+ListExpr       ::= "[" ( ListElement ( "," ListElement )* ( "," )? )? "]" ;
+ListElement    ::= ListIf | ListFor | ListSpread | Expr ;
+ListIf         ::= "if" Expr "=>" ListElement ( "else" ListElement )? ;
+ListFor        ::= "for" Pattern "in" Expr "=>" ListElement ;
+ListSpread     ::= ".." Expr ;
 
 LambdaExpr     ::= "fn" ( Ident | "_" | ParamList ) "=>" ( Block | Expr ) ;
 

@@ -65,6 +65,10 @@ pub(crate) struct Parser<'a> {
     /// Cleared while parsing a `match` scrutinee, where a following `{` opens
     /// the arm list rather than a record literal.
     record_literals_allowed: bool,
+    /// The token position of an `if` or `for` that begins a list element, so
+    /// that the rule for it knows `=>` may follow its head. See
+    /// `exprs::list_element`.
+    pub(crate) element_head: Option<usize>,
 }
 
 impl<'a> Parser<'a> {
@@ -126,6 +130,7 @@ impl<'a> Parser<'a> {
             events: Vec::new(),
             errors,
             record_literals_allowed: true,
+            element_head: None,
         }
     }
 

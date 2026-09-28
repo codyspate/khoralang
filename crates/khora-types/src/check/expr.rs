@@ -102,12 +102,20 @@ impl<'a> Checker<'a> {
                     // Without an `else`, the branch is only well typed if it
                     // produces nothing — the same rule `match` follows.
                     None => {
-                        self.require(
+                        let fits = self.require(
                             &Type::Unit,
                             &then_ty,
                             "an `if` without `else` must produce `()`",
                             range,
                         );
+                        if !fits && self.body.element_ifs.contains(&id) {
+                            if let Some(said) = self.errors.last_mut() {
+                                said.message.push_str(
+                                    "; inside `[..]`, an element that is only sometimes \
+                                     there is written `if c => x`",
+                                );
+                            }
+                        }
                         Type::Unit
                     }
                 }

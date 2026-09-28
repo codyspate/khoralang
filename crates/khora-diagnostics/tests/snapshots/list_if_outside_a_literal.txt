@@ -1,0 +1,5 @@
+error: `if c => x` is a list element and means something only inside `[..]`; here write `if c { x }`
+ --> src/main.kh:3:10
+  |
+3 |   g(if c => 1)
+  |          ^^

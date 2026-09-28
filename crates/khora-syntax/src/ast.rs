@@ -180,6 +180,21 @@ ast_node!(RecordExprField, RECORD_EXPR_FIELD);
 ast_node!(RecordExprBase, RECORD_EXPR_BASE);
 ast_node!(TupleExpr, TUPLE_EXPR);
 ast_node!(ListExpr, LIST_EXPR);
+ast_node!(
+    /// `if c => x` or `if c => x else y`, as an element of `[..]`.
+    ListIf,
+    LIST_IF
+);
+ast_node!(
+    /// `for p in xs => e`, as an element of `[..]`.
+    ListFor,
+    LIST_FOR
+);
+ast_node!(
+    /// `..xs`, as an element of `[..]`.
+    ListSpread,
+    LIST_SPREAD
+);
 ast_node!(UnitExpr, UNIT_EXPR);
 ast_node!(ParenExpr, PAREN_EXPR);
 ast_node!(LambdaExpr, LAMBDA_EXPR);
@@ -240,6 +255,17 @@ ast_enum!(Expr {
 ast_enum!(Stmt {
     Let(LetDecl),
     Expr(ExprStmt),
+});
+
+// **Not a case of `Expr`.** An element form is not a value: it stands for
+// zero, one or many of them, and only a list literal knows what to do with
+// that. Keeping it out of `Expr` means a pass that walks expressions cannot
+// meet one somewhere other than directly under a `ListExpr`.
+ast_enum!(ListElement {
+    If(ListIf),
+    For(ListFor),
+    Spread(ListSpread),
+    Expr(Expr),
 });
 
 // --- patterns ------------------------------------------------------------
@@ -887,6 +913,68 @@ impl ForExpr {
         child(&self.0)
     }
     pub fn body(&self) -> Option<Block> {
+        child(&self.0)
+    }
+}
+
+impl ListExpr {
+    /// The elements, in the order they were written.
+    pub fn elements(&self) -> impl Iterator<Item = ListElement> {
+        children(&self.0)
+    }
+
+    /// Whether any element is an `if`, `for` or `..` form -- that is, whether
+    /// the literal's length is anything other than its number of elements.
+    pub fn has_element_forms(&self) -> bool {
+        self.elements().any(|e| !matches!(e, ListElement::Expr(_)))
+    }
+}
+
+/// The first node after the first `kind` token among `parent`'s children.
+///
+/// Positional access (`children().nth(1)`) is wrong on broken input: a missing
+/// condition moves the value into the condition's slot, and the value would
+/// then be lowered as a condition.
+fn node_after(parent: &SyntaxNode, kind: SyntaxKind) -> Option<SyntaxNode> {
+    parent
+        .children_with_tokens()
+        .skip_while(|it| it.as_token().is_none_or(|t| t.kind() != kind))
+        .find_map(|it| it.into_node())
+}
+
+impl ListIf {
+    pub fn condition(&self) -> Option<Expr> {
+        let value = node_after(&self.0, FAT_ARROW);
+        self.0.children().take_while(|n| Some(n) != value.as_ref()).find_map(Expr::cast)
+    }
+    /// The element produced when the condition holds.
+    pub fn then_element(&self) -> Option<ListElement> {
+        node_after(&self.0, FAT_ARROW).and_then(ListElement::cast)
+    }
+    /// The element produced when it does not; `else if` is a nested `ListIf`.
+    pub fn else_element(&self) -> Option<ListElement> {
+        node_after(&self.0, ELSE_KW).and_then(ListElement::cast)
+    }
+}
+
+impl ListFor {
+    /// The binding each item is matched against.
+    pub fn pattern(&self) -> Option<Pat> {
+        child(&self.0)
+    }
+    pub fn iterable(&self) -> Option<Expr> {
+        let body = node_after(&self.0, FAT_ARROW);
+        self.0.children().take_while(|n| Some(n) != body.as_ref()).find_map(Expr::cast)
+    }
+    /// The element made once per item.
+    pub fn body(&self) -> Option<ListElement> {
+        node_after(&self.0, FAT_ARROW).and_then(ListElement::cast)
+    }
+}
+
+impl ListSpread {
+    /// The list whose elements are spread.
+    pub fn list(&self) -> Option<Expr> {
         child(&self.0)
     }
 }

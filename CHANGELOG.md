@@ -672,6 +672,15 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   (`fold(true, step)`) and a first parameter (`assert_that(false, "..")`)
   are not reported.
 
+- **`if`, `for` and spread inside list literals.**
+  `[header, if debug => trace, for r in rows => render(r), ..footer]`: `if c =>
+  x` is `x` when `c` holds and nothing otherwise, with an optional `else`;
+  `for p in xs => e` is one `e` per item; `..xs` is every element of `xs`. The
+  forms nest and are evaluated left to right. `=>` is what marks an element
+  form, so `[if c { x }]` is a one-element list holding an `if` expression. A `for` element
+  needs `Step` and `Iterator` in scope, is a cancellation point, and refuses
+  `break` and `continue`.
+
 - **`Fiber::abort(handle)`** stops a fiber at its next cancellation point
   *including inside its cleanup*, and the children of any nursery it holds.
   Cleanup otherwise runs to completion, and canceling again does not change
