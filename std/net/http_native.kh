@@ -5,7 +5,9 @@ import std::permissions::{granted_host};
 import std::permissions::grants::{network};
 import std::net::socket::{accept_on, connect_to, invalid_handle, listen_on, receive, set_receive_timeout, shut, start, transmit};
 import std::net::tls::{TlsClient, TlsConnection, TlsError, TlsServer, client as tls_client, connect as tls_connect, receive as tls_receive, secure, server as tls_server, set_receive_timeout as tls_set_receive_timeout, shut as tls_shut, transmit as tls_transmit};
+import std::clock::{Clock};
 import std::json::{encode};
+import std::time::{Date, DateTime, Time};
 import std::schema::{Encode, Raw};
 
 //! HTTP/1.1, over the sockets in `std::net::socket`. Both directions.
@@ -303,12 +305,42 @@ impl Response {
   /// the body first would compute it as zero. RFC 9110 is explicit that the
   /// two answers carry the same headers and differ only in the body.
   pub fn head_keeping(self, keep: Bool) -> String {
+    Response::head_dated(self, keep, "")
+  }
+
+  /// `head_keeping`, with a `Date` line when `date` is not empty. What a
+  /// [`Connection`] sends; see [`Connection::reply`].
+  fn head_dated(self, keep: Bool, date: String) -> String {
     "HTTP/1.1 " + Int::to_string(self.status) + " " + Response::reason(self.status) + "\r\n"
     + "Content-Type: " + self.content_type + "\r\n"
     + "Content-Length: " + Int::to_string(String::byte_length(self.body)) + "\r\n"
+    + (if String::byte_length(date) == 0 { "" } else { "Date: ${date}\r\n" })
     + Response::extra(self.headers)
     + (if keep { "Connection: keep-alive\r\n" } else { "Connection: close\r\n" })
     + "\r\n"
+  }
+
+  /// Whether the handler set a `Date` of its own, in any case.
+  ///
+  /// Only a four-byte name is lowered to compare, so a response with no
+  /// `Date` among a few headers allocates nothing to find that out.
+  fn dates_itself(self) -> Bool {
+    let mut rest = self.headers;
+    let mut found = false;
+    let mut walking = true;
+    while walking {
+      match rest {
+        List::Nil => walking = false,
+        List::Cons(h, more) => {
+          if String::byte_length(h.name) == 4 && String::lower(h.name) == "date" {
+            found = true;
+            walking = false
+          };
+          rest = more
+        },
+      }
+    };
+    found
   }
 
   /// The caller's own headers. `with_header` prepends, so the most recently
@@ -774,6 +806,11 @@ fn chunk() -> Int { 4096 }
 /// one of them.
 pub type Transport = {
   /// Bytes into the buffer: how many, 0 when the peer closed, or -1.
+  ///
+  /// The buffer is lent for the call and is reused for the next read, so it
+  /// holds only this read's bytes until `receive` is called again. A
+  /// transport that keeps what it reads (a recorder, a tee, a shim that
+  /// decodes later) copies the bytes it needs before returning.
   pub receive: (Array<U8>) -> Int,
   /// The text, all of it, or -1.
   pub transmit: (String) -> Int,
@@ -980,6 +1017,11 @@ fn content_length(head: String) -> Int {
 /// loop and that is a decision of the accept loop, not of this type: a server
 /// that answers one caller at a time, or hands connections to a pool, is
 /// written against exactly this.
+///
+/// **Every answer it sends carries `Date`,** the current second as an
+/// IMF-fixdate, formatted once a second for the connection: see
+/// [`Connection::reply`]. The time comes from [`Clock::real`], or from the
+/// clock given to [`Connection::timed`].
 pub type Connection = {
   transport: Transport,
   buffer: Array<U8>,
@@ -993,7 +1035,81 @@ pub type Connection = {
   ///
   /// What it costs: 4 KiB per open connection, beside `buffer`.
   scratch: Array<U8>,
+  /// Where the `Date` header's time comes from. [`Clock::real`] unless the
+  /// connection was made with [`Connection::timed`].
+  clock: Clock,
+  /// The second `date` was written for, in seconds since 1970, or a value no
+  /// clock gives before the first answer.
+  mut second: Int,
+  /// The `Date` value for `second`, as an IMF-fixdate.
+  ///
+  /// **Kept per connection, not per process or per worker, because a
+  /// connection is on one fiber for its whole life.** A cache any two fibers
+  /// could read would be a `String` published to both, which is what the
+  /// shared-count rules exist to keep out; this one never leaves its fiber.
+  /// What it costs: the text once a second per open connection that
+  /// answers, and one clock read and one compare per answer. A client that
+  /// opens a connection per request formats it every time, which is what a
+  /// server writing its own date per request costs anyway.
+  mut date: String,
 };
+
+/// Before any second a clock gives, so the first answer formats its date.
+fn smallest_second() -> Int { -9223372036854775807 - 1 }
+
+/// `second` (since 1970) as RFC 9110's IMF-fixdate, the one form a server
+/// may send: `Sun, 06 Nov 1994 08:49:37 GMT`.
+fn imf_fixdate(second: Int) -> String {
+  let at = DateTime::of_unix_millis(second * 1000);
+  let day = at.date;
+  let time = at.time;
+  let weekday = weekday_name(Date::weekday(day));
+  let month = month_name(Date::month(day));
+  let year = four_digits(Date::year(day));
+  "${weekday}, ${two_digits(Date::day(day))} ${month} ${year} ${two_digits(Time::hour(time))}:${two_digits(Time::minute(time))}:${two_digits(Time::second(time))} GMT"
+}
+
+fn two_digits(n: Int) -> String {
+  if n < 10 { "0${Int::to_string(n)}" } else { Int::to_string(n) }
+}
+
+/// Four digits, zero-padded, as the grammar's `year = 4DIGIT` asks.
+fn four_digits(n: Int) -> String {
+  if n < 10 { "000${Int::to_string(n)}" }
+  else if n < 100 { "00${Int::to_string(n)}" }
+  else if n < 1000 { "0${Int::to_string(n)}" }
+  else { Int::to_string(n) }
+}
+
+/// ISO 8601's numbering, as `Date::weekday` gives it: Monday is 1.
+fn weekday_name(day: Int) -> String {
+  match day {
+    1 => "Mon",
+    2 => "Tue",
+    3 => "Wed",
+    4 => "Thu",
+    5 => "Fri",
+    6 => "Sat",
+    _sunday => "Sun",
+  }
+}
+
+fn month_name(month: Int) -> String {
+  match month {
+    1 => "Jan",
+    2 => "Feb",
+    3 => "Mar",
+    4 => "Apr",
+    5 => "May",
+    6 => "Jun",
+    7 => "Jul",
+    8 => "Aug",
+    9 => "Sep",
+    10 => "Oct",
+    11 => "Nov",
+    _december => "Dec",
+  }
+}
 
 /// What reading a connection produced.
 pub type Incoming =
@@ -1025,8 +1141,36 @@ impl Connection {
   /// request, so this is what one caller costs in memory for as long as they
   /// are connected.
   pub fn holding(transport: Transport, most: Int) -> Connection {
+    Connection::timed(transport, most, Clock::real())
+  }
+
+  /// The same, taking the time for its `Date` headers from `clock`.
+  ///
+  /// For a test that has to know what `Date` will say, and for a server that
+  /// keeps its own time: a fixed or a stepped clock is an ordinary `Clock`
+  /// handler.
+  pub fn timed(transport: Transport, most: Int, clock: Clock) -> Connection {
     let buffer: Array<U8> = Array::new(most, 0);
-    { transport: transport, buffer: buffer, carried: 0, scratch: Array::new(chunk(), 0) }
+    {
+      transport: transport, buffer: buffer, carried: 0, scratch: Array::new(chunk(), 0),
+      clock: clock, second: smallest_second(), date: "",
+    }
+  }
+
+  /// The `Date` to send with `response`: none when the handler set its own,
+  /// and otherwise this second's, formatted once per second.
+  fn date_for(self, response: Response) -> String {
+    if Response::dates_itself(response) {
+      ""
+    } else {
+      let now = with { clock: self.clock } { clock.unix_millis() };
+      let second = if now >= 0 { now / 1000 } else { (now - 999) / 1000 };
+      if second != self.second {
+        self.date = imf_fixdate(second);
+        self.second = second
+      };
+      self.date
+    }
   }
 
   /// Reads until one request is whole, and says what arrived.
@@ -1106,8 +1250,15 @@ impl Connection {
   /// status and the request's `Connection` header are both known once, at the
   /// point the request has been parsed, and working either out again afterwards
   /// means reading the request a second time.
+  ///
+  /// **Every answer carries `Date`**, which RFC 9110 asks of a server with a
+  /// clock: the current second as an IMF-fixdate, `Sun, 06 Nov 1994 08:49:37
+  /// GMT`, formatted once a second per connection. A response with a `Date`
+  /// header of its own, in any case, is sent with that one alone.
+  /// `Response::rendered` has no connection and so no clock, and writes none.
   pub fn reply(self, response: Response, keep: Bool) -> Int {
-    self.transport.transmit(Response::rendered_keeping(response, keep))
+    let date = Connection::date_for(self, response);
+    self.transport.transmit(Response::head_dated(response, keep, date) + response.body)
   }
 
   /// The same, for a request whose answer carries no body.
@@ -1117,7 +1268,8 @@ impl Connection {
   /// whole point of the method, and the reason this is decided here rather
   /// than by clearing a field somewhere upstream.
   pub fn reply_headless(self, response: Response, keep: Bool) -> Int {
-    self.transport.transmit(Response::head_keeping(response, keep))
+    let date = Connection::date_for(self, response);
+    self.transport.transmit(Response::head_dated(response, keep, date))
   }
 
   /// Ends the conversation and releases the transport.
@@ -1772,7 +1924,9 @@ impl Router {
     // half-open connection is not a leak.
     Router::answer_on_holding(router, transport, router.limit) catch {
       _ => {
-        transport.transmit(Response::rendered(Response::text(500, "handler failed")));
+        let failed = Response::text(500, "handler failed");
+        let now = with { clock: Clock::real() } { clock.unix_seconds() };
+        transport.transmit(Response::head_dated(failed, keep: false, imf_fixdate(now)) + failed.body);
       },
     }
   }

@@ -3,7 +3,7 @@ module postgres::conn;
 import std::core::{Array, Iterator, List, Option, Result, Step, Vector, assert};
 import std::db::{Cell, DbError, Row};
 import std::decimal::{Decimal};
-import std::net::socket::{connect_to, invalid_handle, nothing_yet, receive, receive_now, set_receive_timeout, shut, start, transmit_bytes};
+import std::net::socket::{accept_on, connect_to, invalid_handle, listen_on, nothing_yet, receive, receive_now, set_receive_timeout, shut, start, transmit_bytes};
 import postgres::wire::{Message, Reader, Writer, extended, framed, message_at, message_width, password, query, sasl_initial, sasl_response, startup, terminate};
 import postgres::scram::{Opening, ScramError, Session, begin, encode64, finish, verify};
 
@@ -961,6 +961,108 @@ test "taking the last buffered message lets the buffer go" {
   };
   assert(Array::length(c.pending) == 0);
   assert(c.start == 0);
+}
+
+/// A connection to a loopback socket this test holds the other end of, and
+/// that end: what the test writes there is what `next_message` and
+/// `still_open` read, in the pieces it was written in, with no server.
+///
+/// One fiber writes and then reads, which works because the kernel keeps
+/// what was written until it is read. A port is tried until one binds, so a
+/// port another program holds is skipped rather than failed on.
+type Wire = { client: Connection, server: Int, listener: Int };
+
+fn wire() -> Wire {
+  let mut port = 47100;
+  let mut listener = invalid_handle();
+  while listener == invalid_handle() && port < 47400 {
+    listener = listen_on(port);
+    if listener == invalid_handle() { port = port + 1 }
+  };
+  let handle = connect_to("127.0.0.1", port);
+  // A read that waits for bytes this test never sends fails after a second
+  // rather than holding the suite: a parse that went wrong usually looks
+  // like a message still arriving.
+  set_receive_timeout(handle, 1000);
+  let server = accept_on(listener);
+  // The inbox filled with a byte no message here uses, so a read that
+  // carried stale inbox bytes past what arrived shows as garbage rather
+  // than as zeros.
+  let c: Connection = {
+    handle: handle, pending: Array::new(0, 0), start: 0, scram: Option::None, broken: false,
+    open_transaction: false, depth: 0, inbox: Array::new(read_size(), 255),
+  };
+  { client: c, server: server, listener: listener }
+}
+
+/// `bytes` from `from` up to `to`.
+fn piece(bytes: Array<U8>, from: Int, to: Int) -> Array<U8> {
+  let out: Array<U8> = Array::new(to - from, 0);
+  Array::copy_into(bytes, from, out, 0, to - from);
+  out
+}
+
+fn unwire(w: Wire) -> () {
+  shut(w.client.handle);
+  shut(w.server);
+  shut(w.listener)
+}
+
+/// **Each read appends only the bytes it received, though the inbox is the
+/// same array every time.** A read that appended the whole inbox would carry
+/// the previous, longer read's leftovers into `pending`, and the next message
+/// would be parsed out of them. So a long message arrives first, then a short
+/// one alone, split across reads the way a socket delivers them, and each
+/// must come out whole and then nothing more.
+test "next_message reads only what arrived, into a reused inbox" {
+  let w = wire();
+  assert(w.listener != invalid_handle() && w.server != invalid_handle() && w.client.handle != invalid_handle());
+  let long = framed(68, Array::new(3000, 120));
+  let short = framed(90, Array::new(1, 73));
+  transmit_bytes(w.server, long);
+  match next_message(w.client) {
+    Result::Ok(m) => assert(m.kind == 68 && Array::length(m.payload) == 3000),
+    Result::Err(_) => assert(false),
+  };
+  // In two pieces: a header that is not yet a message, then the rest.
+  transmit_bytes(w.server, piece(short, 0, 3));
+  transmit_bytes(w.server, piece(short, 3, Array::length(short)));
+  match next_message(w.client) {
+    Result::Ok(m) => assert(m.kind == 90 && Array::length(m.payload) == 1 && U8::to_int(Array::get(m.payload, 0)) == 73),
+    Result::Err(_) => assert(false),
+  };
+  // Nothing left over from the long read.
+  assert(Array::length(w.client.pending) - w.client.start == 0);
+  assert(!w.client.broken);
+  unwire(w)
+}
+
+/// **The lease check keeps only what arrived as well.** A server may send a
+/// `ParameterStatus` between queries; `still_open` reads it through the same
+/// inbox and must leave exactly it in `pending`, for the next exchange to
+/// skip. Leftover inbox bytes would be judged as a message of their own and
+/// a healthy connection reported broken.
+test "still_open keeps only what arrived from a reused inbox" {
+  let w = wire();
+  assert(w.listener != invalid_handle() && w.server != invalid_handle() && w.client.handle != invalid_handle());
+  // A long message read first, so the inbox holds 3000 bytes of it.
+  transmit_bytes(w.server, framed(68, Array::new(3000, 120)));
+  match next_message(w.client) {
+    Result::Ok(m) => assert(m.kind == 68),
+    Result::Err(_) => assert(false),
+  };
+  let status = Writer::new();
+  Writer::cstring(status, "TimeZone");
+  Writer::cstring(status, "UTC");
+  let unasked = framed(83, Writer::finish(status));
+  transmit_bytes(w.server, unasked);
+  assert(still_open(w.client));
+  assert(Array::length(w.client.pending) - w.client.start == Array::length(unasked));
+  match next_message(w.client) {
+    Result::Ok(m) => assert(m.kind == 83),
+    Result::Err(_) => assert(false),
+  };
+  unwire(w)
 }
 
 /// A `RowDescription` with these columns, as the server frames it.

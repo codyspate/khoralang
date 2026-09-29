@@ -48,13 +48,15 @@ Where they differ, because each library does:
   `&#39;`; `Bun.escapeHTML` writes `&quot;` and `&#x27;`. All are the same
   page to a browser and to TechEmpower's verifier, and differ by at most a
   byte in length.
-- The `Date` header. Khora renders it per request, in the app. Go, Node and
-  Bun write it from their HTTP libraries; whether each re-renders per request
-  or once a second (the rules allow either) was not checked.
+- The `Date` header. Every server here writes it from its HTTP library:
+  Khora's `std::net::http` formats it once a second per connection, and Node
+  caches it once a second too. Whether Go and Bun re-render per request or
+  once a second (the rules allow either) was not checked.
 
 Khora gaps that the app works around (noted in the report, not fixed in
-`std`): no HTTP-date formatter, no HTML escaping, no template facility, no
-way to set `Server`/`Date` for every route at once.
+`std`): no HTML escaping, no template facility, and no way to set `Server`
+for every route at once, so each handler's answer passes through `stamped`.
+`std::net::http` writes `Date` on every response itself.
 
 ## Setting up (no root)
 

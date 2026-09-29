@@ -287,6 +287,55 @@ fn ask_tolerating_reset(request: &[u8]) -> String {
     read_message(&mut socket)
 }
 
+/// `answer` has exactly one `Date` header, it is an IMF-fixdate, and it is
+/// within five seconds of now.
+fn assert_date_is_now(answer: &str) {
+    let head = answer.split("\r\n\r\n").next().unwrap_or("");
+    let dates: Vec<&str> = head
+        .split("\r\n")
+        .filter_map(|line| line.split_once(": "))
+        .filter(|(name, _)| name.eq_ignore_ascii_case("date"))
+        .map(|(_, value)| value)
+        .collect();
+    assert_eq!(dates.len(), 1, "one Date header: {head}");
+    let seconds = imf_fixdate_seconds(dates[0]).unwrap_or_else(|| panic!("not an IMF-fixdate: {:?}", dates[0]));
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("after 1970").as_secs() as i64;
+    assert!((seconds - now).abs() <= 5, "Date {:?} is {}s from now", dates[0], seconds - now);
+}
+
+/// `Sun, 06 Nov 1994 08:49:37 GMT` as seconds since 1970, checking the
+/// weekday against the date; `None` for anything not in exactly that form.
+fn imf_fixdate_seconds(text: &str) -> Option<i64> {
+    const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let b = text.as_bytes();
+    if b.len() != 29 || &text[3..5] != ", " || &text[25..] != " GMT" {
+        return None;
+    }
+    let num = |s: &str| -> Option<i64> {
+        if s.bytes().all(|c| c.is_ascii_digit()) { s.parse().ok() } else { None }
+    };
+    let day = num(&text[5..7])?;
+    let month = MONTHS.iter().position(|m| *m == &text[8..11])? as i64 + 1;
+    let year = num(&text[12..16])?;
+    let (h, m, s) = (num(&text[17..19])?, num(&text[20..22])?, num(&text[23..25])?);
+    if &text[7..8] != " " || &text[11..12] != " " || &text[16..17] != " " || &text[19..20] != ":" || &text[22..23] != ":" {
+        return None;
+    }
+    // Days from civil, Howard Hinnant's algorithm.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    if DAYS[days.rem_euclid(7) as usize] != &text[0..3] {
+        return None;
+    }
+    Some(days * 86_400 + h * 3600 + m * 60 + s)
+}
+
 fn body_of(answer: &str) -> &str {
     answer.split_once("\r\n\r\n").expect("a blank line").1
 }
@@ -361,6 +410,15 @@ fn the_server_reads_what_a_client_actually_sends() {
     let answer = ask(b"GET /tagged HTTP/1.1\r\n\r\n");
     assert!(answer.contains("X-Trace: abc123\r\n"), "the handler's header: {answer}");
     assert_eq!(body_of(&answer), "tagged");
+
+    // --- and every response carries `Date`, from the real clock
+    //
+    // RFC 9110 asks it of any server with a clock, and TechEmpower requires
+    // it. Exactly one, an IMF-fixdate, within a few seconds of this process's
+    // own reading of the time: a server on the same machine that says another
+    // day is not using its clock.
+    assert_date_is_now(&answer);
+    assert_date_is_now(&ask(b"GET /nowhere HTTP/1.1\r\n\r\n"));
 
     // --- a body larger than one `recv`, which is 4096 bytes
     //

@@ -726,9 +726,18 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   and `postgres` connections keep one read buffer each; `postgres` builds
   messages in a byte array that doubles and copies in bulk, reads integer
   columns from their digits, and builds a reply's column names once rather
-  than once per row. The scheduler's fiber tables hash an id with one
-  multiply. Every value these produce is unchanged, including the text of
-  the most negative `Int` and the order of strings with bytes above `0x7f`.
+  than once per row. The scheduler's fiber tables hash an id with a
+  multiply, folding the high half into the low so ids a power of two apart
+  spread across the table. Every value these produce is unchanged,
+  including the text of the most negative `Int` and the order of strings
+  with bytes above `0x7f`.
+
+- **An HTTP `Transport`'s `receive` is handed the same buffer on every read
+  of a connection.** The buffer is lent for the call: a custom transport
+  that keeps the array it was given (a recorder, a tee, a TLS shim that
+  decodes later) finds it holding the latest read, and has to copy the
+  bytes it keeps before returning. The transports `std::net::http` provides
+  copy at once and are unaffected.
 
 - **The header's count word carries a shared flag, and debug builds trap on an
   unmarked crossing.** Bit 63 of an object's count word marks it as reachable
@@ -842,6 +851,14 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   error and joined twice); with the switch set, a write to that field races
   the counts of what it holds, which can crash a release build. A debug
   build traps on both with or without the switch.
+
+- **`std::net::http` writes `Date` on every response** a `Connection`
+  sends, including the `Router`'s: the current second as an IMF-fixdate
+  (`Sun, 06 Nov 1994 08:49:37 GMT`), formatted once a second per
+  connection. A response that sets its own `Date` header, in any case, is
+  sent with that one alone. `Connection::timed(transport, most, clock)`
+  takes the time from a `Clock` of your choosing, so a test can fix it.
+  `Response::rendered` has no clock and writes no `Date`.
 
 - **`Array::copy_into(source, from, target, at, count)` and
   `String::copy_into(from, target, at, count)`** copy bytes into an

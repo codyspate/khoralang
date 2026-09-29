@@ -254,6 +254,11 @@ pub receive: (Array<U8>) -> Int
 
 Bytes into the buffer: how many, 0 when the peer closed, or -1.
 
+The buffer is lent for the call and is reused for the next read, so it
+holds only this read's bytes until `receive` is called again. A
+transport that keeps what it reads (a recorder, a tee, a shim that
+decodes later) copies the bytes it needs before returning.
+
 #### transmit
 
 ```khora
@@ -278,6 +283,9 @@ pub type Connection = {
   buffer: Array<U8>,
   mut carried: Int,
   scratch: Array<U8>,
+  clock: Clock,
+  mut second: Int,
+  mut date: String,
 };
 ```
 
@@ -300,6 +308,11 @@ loop and that is a decision of the accept loop, not of this type: a server
 that answers one caller at a time, or hands connections to a pool, is
 written against exactly this.
 
+**Every answer it sends carries `Date`,** the current second as an
+IMF-fixdate, formatted once a second for the connection: see
+[`Connection::reply`](#reply). The time comes from `Clock::real`, or from the
+clock given to [`Connection::timed`](#timed).
+
 #### carried
 
 ```khora
@@ -321,6 +334,41 @@ Where each socket read lands before it is copied into `buffer`.
 holds it between reads: what arrived is copied out at once.
 
 What it costs: 4 KiB per open connection, beside `buffer`.
+
+#### clock
+
+```khora
+clock: Clock
+```
+
+Where the `Date` header's time comes from. `Clock::real` unless the
+connection was made with [`Connection::timed`](#timed).
+
+#### second
+
+```khora
+mut second: Int
+```
+
+The second `date` was written for, in seconds since 1970, or a value no
+clock gives before the first answer.
+
+#### date
+
+```khora
+mut date: String
+```
+
+The `Date` value for `second`, as an IMF-fixdate.
+
+**Kept per connection, not per process or per worker, because a
+connection is on one fiber for its whole life.** A cache any two fibers
+could read would be a `String` published to both, which is what the
+shared-count rules exist to keep out; this one never leaves its fiber.
+What it costs: the text once a second per open connection that
+answers, and one clock read and one compare per answer. A client that
+opens a connection per request formats it every time, which is what a
+server writing its own date per request costs anyway.
 
 ### Incoming
 
@@ -885,6 +933,18 @@ The buffer is allocated once for the connection rather than once per
 request, so this is what one caller costs in memory for as long as they
 are connected.
 
+#### timed
+
+```khora
+pub fn timed(transport: Transport, most: Int, clock: Clock) -> Connection
+```
+
+The same, taking the time for its `Date` headers from `clock`.
+
+For a test that has to know what `Date` will say, and for a server that
+keeps its own time: a fixed or a stepped clock is an ordinary `Clock`
+handler.
+
 #### next
 
 ```khora
@@ -923,6 +983,12 @@ The two travel together because they are decided together: the answer's
 status and the request's `Connection` header are both known once, at the
 point the request has been parsed, and working either out again afterwards
 means reading the request a second time.
+
+**Every answer carries `Date`**, which RFC 9110 asks of a server with a
+clock: the current second as an IMF-fixdate, `Sun, 06 Nov 1994 08:49:37
+GMT`, formatted once a second per connection. A response with a `Date`
+header of its own, in any case, is sent with that one alone.
+`Response::rendered` has no connection and so no clock, and writes none.
 
 #### reply_headless
 

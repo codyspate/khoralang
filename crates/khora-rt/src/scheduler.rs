@@ -1201,6 +1201,12 @@ fn park(shared: &Arc<Shared>, local: &Arc<Mutex<VecDeque<Task>>>) -> bool {
 /// top bits of a small counter are all zero, so every entry would share one tag
 /// and every probe would compare keys. Multiplying by an odd constant keeps
 /// distinct ids distinct and moves their differences into those bits.
+///
+/// Then the high half folded into the low: the map picks the bucket from the
+/// *low* bits, which a multiply leaves as the id's trailing zeros. Without the
+/// fold, fibers alive at ids 4096 apart share one bucket in 4096 and each
+/// lookup walks them all; with it, they spread. What it costs: a shift and an
+/// xor per hash.
 #[derive(Clone, Copy, Default)]
 struct ById;
 
@@ -1220,8 +1226,13 @@ impl std::hash::Hasher for IdHash {
     }
 
     fn write_usize(&mut self, id: usize) {
-        // 2^64 divided by the golden ratio, which is odd, so no two ids collide.
-        self.0 = (id as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        // 2^64 divided by the golden ratio, which is odd, so no two ids
+        // collide. The multiply spreads an id's differences upward only: the
+        // low bits, which pick the bucket, keep the id's trailing zeros. The
+        // xor brings the high half down, so ids a power of two apart land in
+        // different buckets. It stays one-to-one, as any `x ^ (x >> k)` is.
+        let p = (id as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        self.0 = p ^ (p >> 32);
     }
 
     /// Only a `usize` key is hashed here, and a key type that hashes as bytes
@@ -1245,6 +1256,12 @@ mod tests {
     /// uses to skip a slot without comparing keys, must vary as well. A hash of
     /// the id itself passes the first and fails the second, and would make
     /// every lookup compare the key of every fiber in its group.
+    ///
+    /// The low bits pick the bucket, and they must vary for ids that share a
+    /// power-of-two stride: the ids alive at once are every 4096th when a
+    /// program keeps one long fiber per round of 4096 it spawns. A bare
+    /// multiply keeps the id's twelve trailing zero bits, so those ids would
+    /// all land in one bucket in 4096, and the map would degrade to a list.
     #[test]
     fn fiber_ids_hash_apart_in_the_bits_the_map_reads() {
         use std::hash::BuildHasher;
@@ -1253,6 +1270,17 @@ mod tests {
         assert_eq!(distinct.len(), hashes.len(), "two fiber ids hashed alike");
         let tags: std::collections::HashSet<u64> = hashes.iter().map(|h| h >> 57).collect();
         assert_eq!(tags.len(), 128, "only {} of the 128 tags in use", tags.len());
+
+        // 4096 strided ids into a table of 4096 buckets, as the map would
+        // hold them: an even spread fills about 63% of the buckets
+        // (1 - 1/e); fewer than half means the stride is showing through.
+        let strided: Vec<u64> = (1usize..=4096).map(|k| ById.hash_one(k * 4096)).collect();
+        let buckets: std::collections::HashSet<u64> = strided.iter().map(|h| h & 4095).collect();
+        assert!(
+            buckets.len() > 2048,
+            "ids 4096 apart fill {} of 4096 buckets",
+            buckets.len()
+        );
     }
 
     /// Spends a safepoint the way generated code will, and yields if the

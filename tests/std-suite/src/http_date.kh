@@ -1,0 +1,166 @@
+module std_suite::http_date;
+
+//! The `Date` header `std::net::http` puts on every response.
+//!
+//! A connection is given a fixed clock here, through `Connection::timed`, so
+//! the header's text is known in advance and the second can be moved by hand.
+//! The transport is scripted: its reads are the requests, and what the server
+//! writes back is kept for the test to read.
+
+import std::core::{Iterator, List, Option, Shared, Split, Step, assert_that};
+import std::clock::{Clock};
+import std::net::http::{Connection, Incoming, Request, Response, Transport};
+
+extern fn khora_alloc_count() -> Int;
+
+/// The requests a transport will hand over, and the answers written to it.
+type Wire = { mut pieces: List<String>, mut written: List<String> };
+
+fn scripted(wire: Wire) -> Transport {
+  {
+    receive: fn buffer => match wire.pieces {
+      List::Nil => 0,
+      List::Cons(piece, rest) => {
+        wire.pieces = rest;
+        let n = String::byte_length(piece);
+        String::copy_into(piece, 0, buffer, 0, n);
+        n
+      },
+    },
+    transmit: fn text => { wire.written = List::Cons(text, wire.written); String::byte_length(text) },
+    shut: fn () => (),
+  }
+}
+
+/// A clock stopped at the milliseconds in `hands`, and moved on by setting
+/// them. A `Shared` cell because a handler has to be safe to hand to another
+/// fiber.
+fn stopped(hands: Shared<Int>) -> Clock {
+  handler for Clock {
+    unix_seconds: fn () => Shared::get(hands) / 1000,
+    unix_millis: fn () => Shared::get(hands),
+    monotonic_millis: fn () => Shared::get(hands),
+    sleep: fn _ms => (),
+  }
+}
+
+/// A moment, and the `Date` it should be sent as.
+type Case = { at: Int, want: String };
+
+/// Every value of the `Date` headers in `answer`, in order.
+fn dates(answer: String) -> List<String> {
+  let mut found: List<String> = List::Nil;
+  for line in String::split(answer, "\r\n") {
+    match String::split_once(line, ": ") {
+      Option::Some(parts) => if String::lower(parts.head) == "date" { found = List::Cons(parts.rest, found) },
+      Option::None => (),
+    }
+  };
+  List::reverse(found)
+}
+
+fn only_date(answer: String) -> String {
+  match dates(answer) {
+    List::Cons(one, List::Nil) => one,
+    List::Nil => "<none>",
+    List::Cons(_first, _more) => "<more than one>",
+  }
+}
+
+const GET: String = "GET / HTTP/1.1\r\n\r\n";
+
+/// Reads one request off `connection` and answers it with `response`,
+/// returning what went on the wire.
+fn answer_one(connection: Connection, wire: Wire, response: Response) -> String {
+  match Connection::next(connection) {
+    Incoming::Arrived(_request, keep) => { Connection::reply(connection, response, keep); () },
+    Incoming::Ended => (),
+    Incoming::Rejected(_response) => (),
+  };
+  match wire.written { List::Cons(last, _rest) => last, List::Nil => "" }
+}
+
+/// **The format is RFC 9110's IMF-fixdate**, and the RFC's own example is the
+/// first case. The rest are the edges of the arithmetic: the epoch, a leap
+/// day, the last second of a year, a single-digit day and hour, and a date
+/// before 1970.
+test "a response carries Date as an IMF-fixdate from the connection's clock" {
+  let cases: List<Case> = [
+    { at: 784111777000, want: "Sun, 06 Nov 1994 08:49:37 GMT" },
+    { at: 0, want: "Thu, 01 Jan 1970 00:00:00 GMT" },
+    { at: 951782400000, want: "Tue, 29 Feb 2000 00:00:00 GMT" },
+    { at: 1767225599999, want: "Wed, 31 Dec 2025 23:59:59 GMT" },
+    { at: 1790706573123, want: "Tue, 29 Sep 2026 18:29:33 GMT" },
+    { at: -1, want: "Wed, 31 Dec 1969 23:59:59 GMT" },
+  ];
+  for case in cases {
+    let wire: Wire = { pieces: [GET], written: [] };
+    let connection = Connection::timed(scripted(wire), 8192, stopped(Shared::of(case.at)));
+    let answer = answer_one(connection, wire, Response::text(200, "hi"));
+    assert_that(only_date(answer) == case.want, "at ${Int::to_string(case.at)}: ${only_date(answer)}, wanted ${case.want}");
+  };
+}
+
+/// **Cached per second, and only per second.** Two answers inside one second
+/// carry the same text; the next second changes it. That the second answer
+/// took the cached text rather than formatting the same second again is
+/// observed by allocation: formatting builds a date and a buffer and a
+/// string, so an answer in a second already formatted allocates fewer
+/// objects than one in a new second.
+test "Date changes with the second and is cached within it" {
+  let hands = Shared::of(784111777000);
+  let wire: Wire = { pieces: [GET, GET, GET, GET], written: [] };
+  let connection = Connection::timed(scripted(wire), 8192, stopped(hands));
+  let first = answer_one(connection, wire, Response::text(200, "a"));
+
+  Shared::set(hands, 784111777999);
+  let before_same = khora_alloc_count();
+  let second = answer_one(connection, wire, Response::text(200, "a"));
+  let same_second = khora_alloc_count() - before_same;
+  assert_that(only_date(second) == only_date(first), "within one second: ${only_date(second)}");
+
+  Shared::set(hands, 784111778000);
+  let before_next = khora_alloc_count();
+  let third = answer_one(connection, wire, Response::text(200, "a"));
+  let next_second = khora_alloc_count() - before_next;
+  assert_that(only_date(third) == "Sun, 06 Nov 1994 08:49:38 GMT", "the next second: ${only_date(third)}");
+  assert_that(same_second < next_second,
+    "an answer in a formatted second allocated ${Int::to_string(same_second)}, a new second ${Int::to_string(next_second)}");
+
+  // The clock going back is a new second too, not a stale cache.
+  Shared::set(hands, 784111777500);
+  let fourth = answer_one(connection, wire, Response::text(200, "a"));
+  assert_that(only_date(fourth) == "Sun, 06 Nov 1994 08:49:37 GMT", "back a second: ${only_date(fourth)}");
+}
+
+/// **A handler's own `Date` is the one sent**, once, in whatever case it was
+/// written in. A proxy relaying an upstream's date, or a test pinning one,
+/// sets it on purpose.
+test "a handler's own Date is kept and not doubled" {
+  for name in ["Date", "date", "DATE"] {
+    let wire: Wire = { pieces: [GET], written: [] };
+    let connection = Connection::timed(scripted(wire), 8192, stopped(Shared::of(784111777000)));
+    let mine = Response::with_header(Response::text(200, "x"), name, "Mon, 01 Jan 2001 00:00:00 GMT");
+    let answer = answer_one(connection, wire, mine);
+    let seen = String::join(dates(answer), " | ");
+    assert_that(dates(answer) == ["Mon, 01 Jan 2001 00:00:00 GMT"], "${name}: ${seen}");
+  };
+  // Another header that merely contains the word is not a Date.
+  let wire: Wire = { pieces: [GET], written: [] };
+  let connection = Connection::timed(scripted(wire), 8192, stopped(Shared::of(784111777000)));
+  let other = Response::with_header(Response::text(200, "x"), "X-Date", "whenever");
+  assert_that(only_date(answer_one(connection, wire, other)) == "Sun, 06 Nov 1994 08:49:37 GMT", "X-Date is not Date");
+}
+
+/// A refusal carries it too: a 413 or a 400 is a response.
+test "a rejected request is answered with a Date" {
+  let wire: Wire = { pieces: ["not a request at all\r\n\r\n"], written: [] };
+  let connection = Connection::timed(scripted(wire), 8192, stopped(Shared::of(0)));
+  match Connection::next(connection) {
+    Incoming::Rejected(response) => { Connection::reply(connection, response, false); () },
+    Incoming::Arrived(_r, _k) => assert_that(false, "nonsense was accepted"),
+    Incoming::Ended => assert_that(false, "nonsense ended the connection"),
+  };
+  let answer = match wire.written { List::Cons(last, _rest) => last, List::Nil => "" };
+  assert_that(only_date(answer) == "Thu, 01 Jan 1970 00:00:00 GMT", only_date(answer));
+}
