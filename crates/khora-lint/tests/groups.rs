@@ -465,7 +465,7 @@ fn the_built_in_groups_are_the_files_beside_std() {
     assert_eq!(khora_lint::level(&levels, UNUSED_IMPORT), LintLevel::Deny);
 }
 
-/// The shipped `idiomatic` group holds its seven lints, each at `warn`, and
+/// The shipped `idiomatic` group holds its eight lints, each at `warn`, and
 /// switching it on is what takes them from `allow` to `warn`.
 #[test]
 fn the_idiomatic_group_holds_its_lints_at_warn() {

@@ -176,6 +176,10 @@ It has already settled several calls:
 - No uniform function call syntax: `x.f()` finds a field of `x` or an item
   declared against `x`'s type, and nothing else
   (`docs/design/associated-items.md`).
+- One call form: a method is called as `Type::f(x)`, or `Trait::f(x)` for a
+  trait's, which names where it lives and composes with `|>`. `x.f()` is
+  accepted and is the second form, which the `idiomatic` group's
+  `method-call` reports.
 - `if`, `while`, assignment and early `return`, rather than expressing every
   loop as a fold (`docs/design/imperative.md`).
 - `!` on calls that can abort, because `?` and `try` have taught this audience to

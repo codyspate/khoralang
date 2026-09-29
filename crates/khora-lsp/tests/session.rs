@@ -6486,6 +6486,27 @@ fn fix_all_applies_what_the_manifest_reports() {
     }
 }
 
+/// **Two calls needing one import make it once.** Each `method-call` fix
+/// carries the import its owner needs, so two of them carry the same edit;
+/// sent twice, an editor applies it twice (or refuses the overlap), and the
+/// import line is written as `{Show, print}{Show, print}`.
+#[test]
+fn fix_all_makes_a_shared_import_once() {
+    let text = "module app::main;\n\nimport std::core::{print};\n\nfn f(n: Int, m: Int) -> () {\n  print(n.show());\n  print(m.show());\n}\n";
+    let w = workspace(&[
+        ("khora.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[lints.idiomatic]\n"),
+        ("src/main.kh", text),
+    ]);
+    let file = w.root.join("src/main.kh");
+    let replies = session(&[initialize(&w.root), did_open(&file, text), fix_all(&file, 2), exit()]);
+    let actions = result_of(&replies, 2);
+    let list = actions.as_array().expect("a list");
+    assert_eq!(list.len(), 1, "{actions}");
+    let out = with_edits(text, &list[0]);
+    assert!(out.contains("import std::core::{Show, print};\n\n"), "{out}");
+    assert!(out.contains("print(Show::show(n));\n  print(Show::show(m));"), "{out}");
+}
+
 /// A request with no `only` is the lightbulb at the cursor, and a file-wide
 /// rewrite is not offered there.
 #[test]

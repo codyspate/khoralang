@@ -110,7 +110,7 @@ derive(Show)
 type Config = { host: String, password: Redacted<String> };
 
 let settings: Config = { host: "db.internal", password: Redacted::of(secret) };
-print(settings.show());   // Config { host: db.internal, password: <redacted> }
+print(Show::show(settings));   // Config { host: db.internal, password: <redacted> }
 connect(Redacted::expose(settings.password));
 ```
 
@@ -253,7 +253,7 @@ pub type Range = | Of(from: Int, to: Int);
 pub type Mapped<I, B> = { inner: I, f: (I::Item) -> B };
 ```
 
-`it.map(f)`: the same walk, with each item put through `f`.
+`Iterator::map(it, f)`: the same walk, with each item put through `f`.
 
 ### Filtered
 
@@ -261,7 +261,7 @@ pub type Mapped<I, B> = { inner: I, f: (I::Item) -> B };
 pub type Filtered<I> = { inner: I, keep: (I::Item) -> Bool };
 ```
 
-`it.filter(keep)`: the items `keep` answers true for.
+`Iterator::filter(it, keep)`: the items `keep` answers true for.
 
 ### Taken
 
@@ -269,7 +269,7 @@ pub type Filtered<I> = { inner: I, keep: (I::Item) -> Bool };
 pub type Taken<I> = { inner: I, left: Int };
 ```
 
-`it.take(n)`: at most the first `n` items.
+`Iterator::take(it, n)`: at most the first `n` items.
 
 ### Never
 
@@ -1251,7 +1251,8 @@ Whether it came out `Greater`.
 pub fn reverse(self) -> Ordering
 ```
 
-`a.cmp(b).reverse()` sorts descending without a second comparison.
+`Ordering::reverse(Ord::cmp(a, b))` sorts descending without a second
+comparison.
 
 ### Option\<A>
 
@@ -4213,7 +4214,7 @@ the tree twice to answer one question.
 update are the same expression:
 
 ```khora
-counts = Dict::update(counts, word, fn seen => seen.unwrap_or(0) + 1);
+counts = Dict::update(counts, word, fn seen => Option::unwrap_or(seen, 0) + 1);
 ```
 
 One walk, and `step` is called exactly once. There is no version that

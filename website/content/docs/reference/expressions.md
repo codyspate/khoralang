@@ -66,13 +66,13 @@ reply(connection: c, response: "ok", keep_alive: true)
 - A label naming no parameter is refused. So is a label written twice, since
   it cannot match both positions, and a label on a parameter declared `_`.
   `_:` is not a label.
-- **Methods.** In `x.f(a)` the receiver is parameter 1 and is not labeled; `a`
-  is parameter 2. In `Type::f(x, a)` both are written, and `a` may be labeled.
-  `self:` is refused: the receiver is written one way.
+- **Methods.** In `Type::f(x, a)` the receiver is parameter 1 and is not
+  labeled; `a` is parameter 2 and may be. The same holds in the second form,
+  `x.f(a)`. `self:` is refused: the receiver is written one way.
 - **Pipes.** `x |> f(b: 1)` puts `x` in parameter 1, or in the `_` slot, and
   `b:` is checked against the parameter it lands in.
 - **Traits.** A trait method's labels are the trait's parameter names, however
-  the method is reached: `x.m(..)`, `Trait::m(x, ..)` or `Type::m(x, ..)`. An
+  the method is reached: `Trait::m(x, ..)`, `Type::m(x, ..)` or `x.m(..)`. An
   `impl` may name its parameters differently; those names are local to its
   body.
 - **Constructors.** A case with a named payload, `| A(v: Int, w: Bool)`, takes
@@ -88,15 +88,31 @@ There are no default arguments, and a label cannot skip or reorder one. A
 parameter's name is part of a public function's interface once any caller
 labels it: see [Compatibility](./compatibility/).
 
-## Runtime field projection and methods
+## Field projection and method calls
 
 ```khora
 user.name
 response.status
-user.display_name()
+User::display_name(user)
 ```
 
-`.` operates on a runtime value. It is distinct from `::` path lookup.
+`.` reads a field of a runtime value. It is distinct from `::` path lookup.
+
+**A method is called through its owner:** `User::display_name(user)`, with the
+receiver as the first argument. The owner is the type that declares the
+method, or the trait for a trait's method: `Show::show(n)`, and inside
+`fn f<A: Show>(x: A)`, `Show::show(x)`, since a type parameter has no `A::` to
+write. The qualified call names where the function lives, it is the form `|>`
+composes with (`name |> String::trim`), and it is the one that settles a name
+two traits share.
+
+`user.display_name()` is the second form of the same call, and it compiles:
+the receiver is found first and the method looked up on its type, a field
+holding a function winning over a method of the same name. Both forms
+evaluate the receiver first and then the arguments, left to right. The
+`idiomatic` lint group reports the second form as `method-call`, and
+`khora check --fix` rewrites it to the first; see
+[Lints](./lints/#fixing-what-they-find).
 
 ## Record literals
 

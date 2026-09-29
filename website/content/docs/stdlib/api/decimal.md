@@ -388,7 +388,7 @@ twelve-place rate carries twelve.
 
 An empty list totals `zero()`, which is scale nought and prints as `0` --
 under a column of `1250.00`s that is the wrong shape, and
-`Decimal::total(rows).at_scale(2)` is the fix. `at_scale` only ever
+`Decimal::at_scale(Decimal::total(rows), 2)` is the fix. `at_scale` only ever
 raises, so it cannot round a total that was already wider.
 
 Stops the program if the sum does not fit, like every addition here.

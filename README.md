@@ -204,14 +204,16 @@ those, because it has no way to know which origins a service trusts.
   answered by the same query `khora check` uses, so the editor and the build
   cannot disagree. What it does not do is anything cross-package, because
   packages resolve by path.
-- **The linter has twenty lints**, each deliberately narrow and each
+- **The linter has 21 lints**, each deliberately narrow and each
   declining the interesting cases rather than guessing: `dangling-expression`,
   `discarded-result`, `inconsistent-constructor`, `misplaced-main`,
   `nested-verdict`, `reference-cycle`, `undocumented-export`, `unknown-allow`,
   `unreachable-code`, `unused-binding`, `unused-capability`, `unused-import`,
-  `useless-allow`, and the seven of the `idiomatic` group, which flag a second
+  `useless-allow`, and the eight of the `idiomatic` group, which flag a second
   way of writing something and are off unless the manifest switches the group
-  on. `khora check --fix` applies their fixes; `unlabeled-flag` has none.
+  on. `khora check --fix` applies their fixes; `unlabeled-flag` has none. One
+  of the eight is `method-call`: a method is called as `Type::f(x)`, and
+  `x.f()` is the second form.
 
 ### Pinning a compiler
 

@@ -66,7 +66,7 @@ Several bounds:
 
 ```khora
 fn render<A: Eq + Show>(value: A) -> String {
-  value.show()
+  Show::show(value)
 }
 ```
 
@@ -244,7 +244,7 @@ Variance is written on the parameter declaration itself. Reach for it when desig
 ```khora
 impl<A: Show> Show for Box<A> {
   fn show(self) -> String {
-    self.value.show()
+    Show::show(self.value)
   }
 }
 ```

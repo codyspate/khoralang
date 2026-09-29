@@ -162,15 +162,16 @@ impl Email {
 }
 ```
 
-Another module calls `Email::parse` and reads `e.text()`. Writing
+Another module calls `Email::parse` and reads `Email::text(e)`. Writing
 `{ text: "nope" }` there is refused:
 
 ```text
 error: cannot build `Email` here: `text` is private to `email::address`, so only `email::address` can make one. Call one of its functions that returns `Email`, or, if `email::address` is yours, mark every field `pub`
 ```
 
-**A private field does not hide a method.** `e.text()` calls `Email::text`
-from outside even though `Email` has a private field of the same name.
+**A private field does not hide a method.** `e.text()`, the second form of
+`Email::text(e)`, calls the method from outside even though `Email` has a
+private field of the same name.
 
 **A case's payload is not a field and is always public**, because matching on
 it is how a variant is used. To hide a variant's shape, wrap it in a newtype,
@@ -186,7 +187,7 @@ nothing needs checking:
 ```khora
 impl Decode for Email {
   fn schema() -> Schema<Email> {
-    string().try_map("an email address", fn s => Email::parse(s))
+    Schema::try_map(string(), "an email address", fn s => Email::parse(s))
   }
 }
 ```

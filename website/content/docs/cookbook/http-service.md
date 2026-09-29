@@ -21,7 +21,7 @@ fn health(_request: Request) -> Response {
 }
 
 fn hello(request: Request) -> Response {
-  let name = match request.query("name") {
+  let name = match Request::query(request, "name") {
     Option::Some(value) => value,
     Option::None => "world",
   };
@@ -55,7 +55,7 @@ For example, a route with a path parameter can inspect it through `request.param
 
 ```khora
 fn show_user(request: Request) -> Response {
-  match request.params.get("id") {
+  match Params::get(request.params, "id") {
     Option::Some(id) => Response::text(200, "user ${id}"),
     Option::None => Response::text(400, "missing id"),
   }
@@ -143,7 +143,7 @@ import std::net::http::{HttpError, Request, Response, Router};
 
 /// One counter per name, in a cell every request fiber shares.
 fn greet(visits: Shared<Dict<String, Int>>, request: Request) -> Response {
-  let name = match request.query("name") {
+  let name = match Request::query(request, "name") {
     Option::Some(value) => value,
     Option::None => "world",
   };

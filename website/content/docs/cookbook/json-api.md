@@ -41,7 +41,7 @@ fn create_user(request: Request) -> Response {
     Result::Ok(value) => value,
   };
 
-  let input = match CreateUser::schema().decode(Raw::of_json(document)) {
+  let input = match Schema::decode(CreateUser::schema(), Raw::of_json(document)) {
     Validated::Invalid(problems) =>
       return Response::json(422, problems),
 

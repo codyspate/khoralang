@@ -48,14 +48,16 @@ pub const MODULE_PATH: &str = "module-path";
 /// group-off default in [`crate::default_level`], and for the check that
 /// `std/lints/idiomatic.toml` holds exactly these.
 ///
-/// **One list, so the four cannot drift apart.** `unlabeled-flag` lives in its
-/// own module, because it reads types and resolves the callee, and it has no
-/// fix; it is here all the same, since what makes a lint a member is the group,
-/// not the code that finds it. A member added to the toml and not here fails
+/// **One list, so the four cannot drift apart.** `unlabeled-flag` and
+/// `method-call` live in modules of their own, because each reads types and
+/// resolves the callee; they are here all the same, since what makes a lint a
+/// member is the group, not the code that finds it. A member added to the toml
+/// and not here fails
 /// `the_idiomatic_group_holds_its_lints_at_warn`.
 pub const ALL: &[&str] = &[
     BOOL_COMPARISON,
     CONCATENATED_STRING,
+    crate::method_call::METHOD_CALL,
     MODULE_PATH,
     NEEDLESS_RETURN,
     PARENTHESIZED_PARAMETER,
@@ -75,7 +77,9 @@ pub struct Edit {
 /// The edits that rewrite a finding into the canonical form.
 ///
 /// Offered only where the message names one edit and there is nothing to
-/// choose, which is the language server's bar for a quick fix too.
+/// choose, which is the language server's bar for a quick fix too. A fix may
+/// carry more than one edit: `method-call` rewrites the call and may add the
+/// import its owner needs.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Fix {
     /// Non-overlapping, in any order.
@@ -103,8 +107,7 @@ impl Fix {
 /// `khora check --fix` repeats until nothing is left.
 pub fn apply(text: &str, fixes: &[&Fix]) -> (String, usize) {
     let taken = select(fixes);
-    let mut edits: Vec<&Edit> = taken.iter().flat_map(|fix| fix.edits.iter()).collect();
-    edits.sort_by_key(|edit| std::cmp::Reverse((edit.range.start(), edit.range.end())));
+    let edits = distinct_edits(&taken);
     let mut out = text.to_string();
     for edit in edits {
         out.replace_range(std::ops::Range::<usize>::from(edit.range), &edit.replacement);
@@ -112,23 +115,47 @@ pub fn apply(text: &str, fixes: &[&Fix]) -> (String, usize) {
     (out, taken.len())
 }
 
-/// The fixes [`apply`] takes from `fixes` in one pass: none overlapping
-/// another, earliest first. The language server sends these as one edit,
-/// which the protocol requires to be free of overlaps.
+/// The fixes [`apply`] takes from `fixes` in one pass: no edit of one
+/// overlapping an edit of another, earliest first. The language server sends
+/// these as one edit, which the protocol requires to be free of overlaps.
+///
+/// **Edits are compared, not the ranges they span.** A `method-call` fix that
+/// adds an import spans from the imports to the call, so comparing spans let
+/// one such fix into a pass per file, and a file with thirty calls needed
+/// thirty passes where `khora check --fix` stops at eight. Two fixes making
+/// the *same* edit -- two calls needing one import -- agree rather than
+/// clash, and [`distinct_edits`] makes it once.
 pub fn select<'a>(fixes: &[&'a Fix]) -> Vec<&'a Fix> {
     let mut taken: Vec<&Fix> = Vec::new();
     let mut sorted: Vec<&Fix> = fixes.to_vec();
     sorted.sort_by_key(|fix| fix.span().map(|r| (r.start(), r.end())));
     for fix in sorted {
-        let Some(span) = fix.span() else { continue };
-        let clashes = taken.iter().any(|other| {
-            other.span().is_some_and(|o| o.intersect(span).is_some_and(|i| !i.is_empty() || o == span))
+        if fix.edits.is_empty() {
+            continue;
+        }
+        let clashes = taken.iter().flat_map(|other| other.edits.iter()).any(|o| {
+            fix.edits.iter().any(|e| {
+                e != o && o.range.intersect(e.range).is_some_and(|i| !i.is_empty() || o.range == e.range)
+            })
         });
         if !clashes {
             taken.push(fix);
         }
     }
     taken
+}
+
+/// Every edit of `fixes`, an edit two of them share counted once, latest
+/// first so each applies against text the ones before it did not move.
+pub fn distinct_edits<'a>(fixes: &[&'a Fix]) -> Vec<&'a Edit> {
+    let mut edits: Vec<&Edit> = Vec::new();
+    for edit in fixes.iter().flat_map(|fix| fix.edits.iter()) {
+        if !edits.contains(&edit) {
+            edits.push(edit);
+        }
+    }
+    edits.sort_by_key(|edit| std::cmp::Reverse((edit.range.start(), edit.range.end())));
+    edits
 }
 
 /// The six lints of this module over one file. `unlabeled-flag` runs with

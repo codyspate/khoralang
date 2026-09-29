@@ -580,7 +580,7 @@ pub fn decode(self, from: Raw) -> Validated<A, Rejection>
 
 Reads a value, reporting every problem rather than the first.
 
-The method a caller wants: `Settings::schema().decode(input)`.
+The method a caller wants: `Schema::decode(Settings::schema(), input)`.
 
 #### decode_or_stop
 
@@ -610,7 +610,7 @@ pub fn map<B>(self, f: (A) -> B) -> Schema<B>
 
 The same shape, decoding to something made from the value.
 
-How a newtype reads: `int().map(fn n => UserId(n))`.
+How a newtype reads: `Schema::map(int(), fn n => UserId(n))`.
 
 #### try_map
 
@@ -620,7 +620,7 @@ pub fn try_map<B>(self, wanted: String, f: (A) -> Option<B>) -> Schema<B>
 
 The same shape, decoding to something the value may fail to become.
 
-Parse, don't validate: `string().try_map("an ISO 8601 date",
+Parse, don't validate: `Schema::try_map(string(), "an ISO 8601 date",
 Date::of_string)` is a `Schema<Date>`, and a value that is not one reads
 `when should be an ISO 8601 date, and is "yesterday"`.
 
@@ -1523,6 +1523,6 @@ pub fn decode<A: Decode>(from: Raw) -> Validated<A, Rejection>
 Reads a value of the type the surrounding expression asks for.
 
 `let settings: Validated<Settings, Rejection> = decode(raw);` chooses the
-schema from the annotation; `Settings::schema().decode(raw)` is the same
+schema from the annotation; `Schema::decode(Settings::schema(), raw)` is the same
 call with the type named.
 

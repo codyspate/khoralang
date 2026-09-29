@@ -47,7 +47,7 @@ pub fn main() {
     match read(Settings::schema()) {
       Validated::Invalid(problems) => print(report(problems)),
       Validated::Valid(config) => {
-        print(config.show());
+        print(Show::show(config));
         serve(config)
       }
     }
@@ -174,7 +174,7 @@ of setting one on the machine:
 
 ```khora
 const fake_env = handler for Env {
-  variable: fn name => if name.eq("LISTEN_PORT") { Option::Some("8080") } else { Option::None },
+  variable: fn name => if name == "LISTEN_PORT" { Option::Some("8080") } else { Option::None },
   arguments: fn () => [],
 };
 

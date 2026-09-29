@@ -44,7 +44,7 @@ fn console_tracer(random: Random) -> Tracer {
         },
       };
 
-      print("start ${name}: trace=${span.context.trace_id()} span=${span.context.span_id()}");
+      print("start ${name}: trace=${Context::trace_id(span.context)} span=${Context::span_id(span.context)}");
       span
     },
 
@@ -138,7 +138,7 @@ let result = around_result(
 `Context` understands the W3C `traceparent` representation. An HTTP boundary can parse an incoming header without accepting malformed partial context:
 
 ```khora
-let incoming = match request.header("traceparent") {
+let incoming = match Request::header(request, "traceparent") {
   Option::None => Context::none(),
   Option::Some(header) => match Context::of_traceparent(header) {
     Option::None => Context::none(),
@@ -150,7 +150,7 @@ let incoming = match request.header("traceparent") {
 A valid context can be rendered for an outgoing request with:
 
 ```khora
-let header = incoming.to_traceparent();
+let header = Context::to_traceparent(incoming);
 ```
 
 The tracing model is designed so context associated with structured fiber work survives suspension and scheduler movement rather than depending on an OS-thread-local variable.

@@ -144,7 +144,7 @@ pub fn main() {
   with { db: demo_db() } {
     match transfer(10, 20, 2500) {
       Result::Ok(_) => print("transfer committed"),
-      Result::Err(error) => print("transfer failed: ${error.show()}"),
+      Result::Err(error) => print("transfer failed: ${error}"),
     }
   }
 }
@@ -196,7 +196,7 @@ fn record_transfer(from_account: Int, to_account: Int, amount: Int)
       transfer_body(from_account, to_account, amount));
     db.execute(
       "insert into audit (outcome) values (?)",
-      [Cell::Text(match moved { Result::Ok(_) => "moved", Result::Err(e) => e.show() })],
+      [Cell::Text(match moved { Result::Ok(_) => "moved", Result::Err(e) => Show::show(e) })],
     )
   })
 }

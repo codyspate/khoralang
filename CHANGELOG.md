@@ -816,6 +816,17 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   action, makes the same fixes. Editors run it on save when configured to run
   `source.fixAll`; it is not offered in the lightbulb menu.
 
+- **`method-call`**, a lint in the `idiomatic` group: `x.m(a)`, where
+  `T::m(x, a)` says it. `T` is the type that declares `m`, or the trait for a
+  trait's method, including one reached through a bound on a type parameter.
+  `khora check --fix` rewrites it with the receiver as the first argument,
+  labels kept, a piped value kept in its slot, and an `import` of `T` added
+  where the file lacks one. The fix is withheld, and the finding kept, where
+  `T::m` would reach something else (a type parameter or another type of that
+  name, a constructor named `m`), where the import would clash with a name the
+  file has, and where the receiver's type is not settled. `x.m(a)` still
+  compiles; a project with the group at `deny` refuses it.
+
 ### Documentation
 
 - The concurrency, sharing, effects, fiber-internals, traps, debugging,

@@ -15,6 +15,7 @@ description = "One way to write Khora."
 [group.lints]
 bool-comparison = "warn"
 concatenated-string = "warn"
+method-call = "warn"
 module-path = "warn"
 needless-return = "warn"
 parenthesized-parameter = "warn"

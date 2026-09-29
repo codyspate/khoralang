@@ -42,7 +42,7 @@ pub trait Named {
   fn name(self) -> String;
 
   fn greeting(self) -> String {
-    "Hello, ${self.name()}"
+    "Hello, ${Named::name(self)}"
   }
 }
 ```
@@ -164,7 +164,7 @@ declare for someone else's trait.
 ```khora
 impl<A: Show> Show for Box<A> {
   fn show(self) -> String {
-    self.value.show()
+    Show::show(self.value)
   }
 }
 ```
@@ -182,7 +182,7 @@ impl User {
   }
 
   pub fn display_name(self) -> String {
-    self.normalized_name()
+    User::normalized_name(self)
   }
 }
 ```
@@ -210,7 +210,7 @@ Several bounds:
 
 ```khora
 fn render<A: Eq + Show>(value: A) -> String {
-  value.show()
+  Show::show(value)
 }
 ```
 
@@ -278,12 +278,12 @@ which one is meant:
 
 ```khora
 module app::main;
-import std::core::{Functor, List, print};
+import std::core::{Functor, List, Show, print};
 
 pub fn main() -> Int {
   let xs = List::Cons(1, List::Cons(2, List::Nil));
   let ys = Functor::map(xs, fn (n) => n + 1);
-  print(ys.show());
+  print(Show::show(ys));
   0
 }
 ```

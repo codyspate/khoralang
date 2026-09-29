@@ -327,7 +327,7 @@ Generic implementations may put type parameters after `impl`:
 ```khora
 impl<A: Show> Show for Box<A> {
   fn show(self) -> String {
-    self.value.show()
+    Show::show(self.value)
   }
 }
 ```

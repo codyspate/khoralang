@@ -457,3 +457,86 @@ fn fixes_among_labeled_arguments_and_list_elements_print_the_same() {
     let after = run(&p);
     assert_eq!(before, after, "the fixed program prints something else:\n{}", source(&p));
 }
+
+// --- method-call ------------------------------------------------------------------
+
+/// Every trap `method-call`'s fix has to get right, in one program that says
+/// what ran when: the receiver evaluated before the arguments (`mk` prints
+/// before `noisy`), a chain, a receiver that is a call and one marked `!`,
+/// two traits with one method name, a generic receiver, `List`, `String` and
+/// `Int`, a method named like a field holding a function, a label, and a
+/// pipe with and without `_`.
+#[cfg(feature = "llvm")]
+const METHODS: &str = "module main;\n\n\
+    import std::core::{print, List};\n\n\
+    trait Named { fn name(self) -> String; }\n\
+    trait Titled { fn name(self) -> String; }\n\n\
+    type Box = { v: Int, twice: (Int) -> Int };\n\
+    type Cat = { age: Int };\n\
+    type Bad = | Oops;\n\n\
+    impl Named for Box { fn name(self) -> String { \"box\" } }\n\
+    impl Titled for Cat { fn name(self) -> String { \"cat\" } }\n\n\
+    impl Box {\n  \
+      pub fn add(self, a: Int, b: Int) -> Int { self.v + a + b }\n  \
+      pub fn me(self) -> Box { self }\n  \
+      pub fn twice(self, a: Int) -> Int { a * 100 }\n  \
+      pub fn older(self, by: Int, loud: Bool) -> Int { if loud { by * 10 } else { by } }\n\
+    }\n\n\
+    fn noisy(label: String, value: Int) -> Int {\n  print(label);\n  value\n}\n\n\
+    fn mk(label: String) -> Box {\n  print(label);\n  { v: 1, twice: fn x => x * 2 }\n}\n\n\
+    fn fallible(label: String) -> Box raises Bad {\n  print(label);\n  { v: 5, twice: fn x => x }\n}\n\n\
+    fn describe<A: Named>(x: A) -> String { x.name() }\n\n\
+    fn tried() -> Int raises Bad { fallible(\"f\")!.add(noisy(\"g\", 1), 2) }\n\n\
+    pub fn main() -> () {\n  \
+      print(mk(\"recv\").add(noisy(\"a\", 2), noisy(\"b\", 3)).show());\n  \
+      print(mk(\"chain\").me().me().add(1, 1).show());\n  \
+      let b = mk(\"b\");\n  \
+      let c: Cat = { age: 3 };\n  \
+      print(b.name() + c.name() + describe(b));\n  \
+      print(b.twice(4).show());\n  \
+      print(b.older(noisy(\"by\", 2), loud: true).show());\n  \
+      let xs = [3, 1, 2];\n  \
+      print(xs.length().show());\n  \
+      print(\" padded \".trim());\n  \
+      print((noisy(\"x\", 10) |> mk(\"y\").add(noisy(\"z\", 1))).show());\n  \
+      print((noisy(\"x\", 10) |> mk(\"y\").add(noisy(\"z\", 1), _)).show());\n  \
+      let t = tried()! catch { Bad::Oops => 0 };\n  \
+      print(t.show())\n\
+    }\n";
+
+/// **The receiver is evaluated first in both forms**, and every trap prints
+/// the same before and after `--fix`, on whichever backend this runs on.
+#[cfg(feature = "llvm")]
+#[test]
+fn method_calls_print_what_they_printed_before() {
+    let p = project(GROUP_ON, METHODS);
+    let run = |p: &Project| {
+        let (ok, out) = khora(&p.root, &["run", "."]);
+        assert!(ok, "{out}\n{}", source(p));
+        out.lines().filter(|l| !l.starts_with("warning") && !l.trim().is_empty()).map(str::to_string).collect::<Vec<_>>()
+    };
+    let before = run(&p);
+    assert_eq!(before[..4], ["recv", "a", "b", "6"], "the receiver runs first: {before:?}");
+    let (ok, out) = khora(&p.root, &["check", "--fix", "."]);
+    assert!(ok, "{out}");
+    let fixed = source(&p);
+    for expected in [
+        "Show::show(Box::add(mk(\"recv\"), noisy(\"a\", 2), noisy(\"b\", 3)))",
+        "Box::add(Box::me(Box::me(mk(\"chain\"))), 1, 1)",
+        "Named::name(b) + Titled::name(c) + describe(b)",
+        "{ Named::name(x) }",
+        "Show::show(b.twice(4))",
+        "Box::older(b, noisy(\"by\", 2), loud: true)",
+        "List::length(xs)",
+        "String::trim(\" padded \")",
+        "noisy(\"x\", 10) |> Box::add(mk(\"y\"), _, noisy(\"z\", 1))",
+        "noisy(\"x\", 10) |> Box::add(mk(\"y\"), noisy(\"z\", 1), _)",
+        "Box::add(fallible(\"f\")!, noisy(\"g\", 1), 2)",
+        "import std::core::{List, Show, print};",
+    ] {
+        assert!(fixed.contains(expected), "expected `{expected}` in:\n{fixed}");
+    }
+    assert!(!out.contains("[method-call]"), "nothing is left to report:\n{out}");
+    let after = run(&p);
+    assert_eq!(before, after, "the fixed program prints something else:\n{fixed}");
+}

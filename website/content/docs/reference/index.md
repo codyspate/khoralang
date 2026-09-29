@@ -74,7 +74,7 @@ The rest of this page is the full index, by topic.
 - [Modules and packages](./modules-and-packages/) — `src/bin`, dependencies, the lockfile, publishing, and package boundaries.
 - [The manifest](./manifest/) — every table in `khora.toml`: the required `[toolchain]` pin, `[package]`, workspaces, permissions, dependencies, lints, and tasks.
 - [Testing and benchmarks](./testing/) — `khora test` and `khora bench`, supplying capabilities to a test, build profiles, and CI.
-- [Lints](./lints/) — the twenty checks `khora check` runs, their default levels, and how to set them in `[lints]`.
+- [Lints](./lints/) — the 21 checks `khora check` runs, their default levels, and how to set them in `[lints]`.
 - [Debugging a program](./debugging/) — backtraces, debug information, what a debugger can and cannot be relied on for.
 - [Compatibility and stability](./compatibility/) — what `0.x` promises, what counts as a breaking change, and what 1.0 is waiting for.
 - [Environment variables](./environment/) — every `KHORA_*` you may set: where Khora keeps its cache and toolchains, which profile a build uses, and the runtime's fiber backend.

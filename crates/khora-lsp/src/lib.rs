@@ -1294,10 +1294,11 @@ impl Server {
         };
         let pass = khora_lint::fixing::pass(&mut copy, &files, &|path| path == this, &offer);
         let changed = pass.changed.into_iter().find(|changed| changed.path == this)?;
-        let edits: Vec<Value> = changed
-            .fixes
-            .iter()
-            .flat_map(|fix| fix.edits.iter())
+        // Two fixes may share an edit (two calls needing one import), and the
+        // protocol refuses a workspace edit whose edits overlap.
+        let fixes: Vec<&khora_lint::idiomatic::Fix> = changed.fixes.iter().collect();
+        let edits: Vec<Value> = khora_lint::idiomatic::distinct_edits(&fixes)
+            .into_iter()
             .map(|edit| {
                 json!({
                     "range": Range {

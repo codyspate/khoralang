@@ -18,7 +18,7 @@ pub type Settings = {
   pub mode: Mode,
 };
 
-let settings = Settings::schema().decode(Raw::of_json(document));
+let settings = Schema::decode(Settings::schema(), Raw::of_json(document));
 ```
 
 The alternative is a reader per source, and the signature of one that both
@@ -219,7 +219,7 @@ fn report(text: String) -> String {
   match parse(text) {
     Result::Err(_why) => "not JSON",
     Result::Ok(document) =>
-      match Validated::to_result(Settings::schema().decode(Raw::of_json(document))) {
+      match Validated::to_result(Schema::decode(Settings::schema(), Raw::of_json(document))) {
         Result::Ok(s) =>
           "listening on ${s.listen.host}:${s.listen.port} at ${s.rate}, password ${s.password}, debug ${s.debug}, mode ${s.mode}",
         Result::Err(problems) =>

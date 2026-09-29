@@ -34,7 +34,7 @@ Arithmetic is by name. `+`, `-` and `*` belong to the primitive numeric types,
 and adding a trait per operator is a language change Khora has not taken:
 
 ```khora
-let total = subtotal.add(shipping).sub(discount);
+let total = Decimal::sub(Decimal::add(subtotal, shipping), discount);
 let tax = 19.99d |> Decimal::mul(0.0825d) |> Decimal::rounded(2, Rounding::HalfEven);
 ```
 
@@ -49,7 +49,7 @@ the arithmetic exact, and it is also what makes a long chain overflow sooner
 than people expect. `rounded` is the way back:
 
 ```khora
-let charge = total.rounded(2, Rounding::HalfEven);
+let charge = Decimal::rounded(total, 2, Rounding::HalfEven);
 ```
 
 `Show` prints every place the scale says, so `Decimal::scaled(150, 2)` is
@@ -73,7 +73,7 @@ the two numbers but the *aligned* ones:
 let notional = 100000000.00d;   // scale 2
 let rate = 0.000000000001d;     // scale 12
 
-let together = notional.add(rate);  // needs the notional at scale 12
+let together = Decimal::add(notional, rate);  // needs the notional at scale 12
 ```
 
 Aligned, the notional needs 20 significant digits — well inside 38, and the
@@ -85,7 +85,7 @@ failure this type exists to prevent.
 
 ```khora
 let total = Decimal::total(rows);              // every one added up
-let shown = Decimal::total(rows).at_scale(2);  // and at the column's width
+let shown = Decimal::at_scale(Decimal::total(rows), 2);  // and at the column's width
 ```
 
 `total` of nothing is `Decimal::zero()`, which has scale nought and prints as

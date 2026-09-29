@@ -4,7 +4,7 @@ sidebar:
   order: 21
 ---
 
-`khora check` runs twenty lints alongside type checking. They are part of the compiler rather than a separate tool, so the editor underlines what the command line reports and there is no second configuration to keep in step.
+`khora check` runs 21 lints alongside type checking. They are part of the compiler rather than a separate tool, so the editor underlines what the command line reports and there is no second configuration to keep in step.
 
 ## The lints
 
@@ -15,6 +15,7 @@ sidebar:
 | `dangling-expression` | `warn` | A statement that computes something and does nothing with it. |
 | `discarded-result` | `warn` | A statement that produces a `Result` and drops it on the floor. |
 | `inconsistent-constructor` | `warn` | A constructor whose name disagrees with what it takes — `new`, `empty`, `root` and `of` follow a rule `std` keeps. |
+| `method-call` | `allow` | `x.m(a)`, which is `T::m(x, a)`. In the `idiomatic` group. |
 | `misplaced-main` | `warn` | A `main` in a file that is not an entry point. |
 | `module-path` | `allow` | `module main;` in a package, where `khora new` writes `module <package>::main;`. In the `idiomatic` group. |
 | `needless-return` | `allow` | `return e;` as a function's last statement, where the tail `e` says it. In the `idiomatic` group. |
@@ -162,7 +163,7 @@ Both kinds are used the same way. The rules for both:
 
 | Group | What it holds |
 | --- | --- |
-| `idiomatic` | One way to write Khora: `bool-comparison`, `concatenated-string`, `module-path`, `needless-return`, `parenthesized-parameter`, `subtraction-from-zero` and `unlabeled-flag`, each at `warn`. |
+| `idiomatic` | One way to write Khora: `bool-comparison`, `concatenated-string`, `method-call`, `module-path`, `needless-return`, `parenthesized-parameter`, `subtraction-from-zero` and `unlabeled-flag`, each at `warn`. |
 
 None of the `idiomatic` lints finds a mistake. Each finds correct code written in a second form where Khora has a first one, so each is `allow` until the group is switched on. `level = "deny"` makes the first form the only one a build accepts, and `khora check --fix` rewrites the rest, except `unlabeled-flag`, which is reported with no fix: which label to write is the reader's call.
 
@@ -170,7 +171,7 @@ A `// @klint allow` names one lint. Naming a group there is reported by `unknown
 
 ## The lints that are off
 
-Two lints are off by default for reasons of their own, below. The seven `idiomatic` lints are off too, until the group is switched on; see [Groups](#groups). `unlabeled-flag` is one of them, and why it is off is below as well.
+Two lints are off by default for reasons of their own, below. The eight `idiomatic` lints are off too, until the group is switched on; see [Groups](#groups). `unlabeled-flag` is one of them, and why it is off is below as well.
 
 **`undocumented-export`** is off for the reason Rust's `missing_docs` is: a young package gets forty warnings on its first build, and the answer to forty warnings is not forty doc comments. Switch it on when a package decides its surface is a promise. This repository sets it to `deny`, because `khora doc` regenerates the reference from `///` comments and the gate fails on a stale page — so a *documented* export cannot drift, and nothing else checked that an export was documented at all.
 
@@ -225,6 +226,7 @@ The lints with a fix are the `idiomatic` group's. Each is made only where the re
 | `parenthesized-parameter` | `fn (x) =>` becomes `fn x =>`. | A typed parameter, which needs its brackets; more than one parameter. |
 | `bool-comparison` | `b == true` becomes `b`; `b == false` becomes `!b`, or `!(a < c)` for an operator. | `!=`. `b == true` is reported with no fix when `b` holds a call or uses a local with no type written on it, because the `==` may be what makes it a `Bool`; `b == false` is still fixed there, because `!b` says the same. Reported with no fix when the result would start with `(` on a line right after a `}` with no `;`, because `(c)` there calls the value before it. |
 | `module-path` | `module main;` becomes `module <package>::main;` in `src/main.kh`, and `module <package>::<name>;` in `src/bin/<name>.kh`. | Any other file is reported without a fix, because renaming a module breaks every file that imports it; so is an entry file that another file imports, such as a test file with `import main::{helper}`. |
+| `method-call` | `x.m(a, b)` becomes `T::m(x, a, b)`, where `T` is the type that declares `m`, or the trait for a trait's method (a type parameter's method is its bound's trait). Labels are kept, and a piped value keeps its slot: `v \|> x.m(a)` becomes `v \|> T::m(x, _, a)`. A chain `a.f().g()` nests, `G::g(F::f(a))`. Where the file does not have `T` in scope, an `import` of it is added. | A field holding a function, `r.f(x)`, which is not a method call. Reported with no fix where `T::m` in this file would reach something else -- a type parameter named `T`, another type named `T`, a constructor `T::m` -- or where importing `T` would clash with a name the file already has; where the receiver's type is not settled at the call; and where a comment sits between the receiver and the `(`. |
 
 The language server offers the same fixes as one code action, "Apply idiomatic fixes", of kind `source.fixAll.khora`. An editor runs it on save when asked for `source.fixAll`; it is not offered in the lightbulb menu. It fixes what `khora check --fix` would, one pass at a time.
 

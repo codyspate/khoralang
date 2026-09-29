@@ -41,6 +41,7 @@ mod allow;
 mod exported;
 pub mod fixing;
 pub mod groups;
+mod method_call;
 mod unlabeled_flag;
 pub mod idiomatic;
 
@@ -50,6 +51,7 @@ pub use crate::idiomatic::{
     BOOL_COMPARISON, CONCATENATED_STRING, MODULE_PATH, NEEDLESS_RETURN, PARENTHESIZED_PARAMETER,
     SUBTRACTION_FROM_ZERO,
 };
+pub use crate::method_call::METHOD_CALL;
 pub use crate::unlabeled_flag::UNLABELED_FLAG;
 
 use khora_db::{Db, SourceFile};
@@ -82,6 +84,7 @@ pub const LINTS: &[&str] = &[
     DANGLING_EXPRESSION,
     DISCARDED_RESULT,
     INCONSISTENT_CONSTRUCTOR,
+    METHOD_CALL,
     MISPLACED_MAIN,
     MODULE_PATH,
     NEEDLESS_RETURN,
@@ -225,6 +228,7 @@ pub fn findings(db: &dyn Db, file: SourceFile) -> Vec<Finding> {
             discarded_results(body, types, &mut out);
             nested_verdicts(body, types, &mut out);
             unlabeled_flag::unlabeled_flags(db, file, body, types, &mut out);
+            method_call::method_calls(db, file, body, types, &mut out);
             typed.push((body, types));
         }
     }
