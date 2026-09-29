@@ -348,6 +348,18 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 
 ### Fixed
 
+- **An argument that left early leaked the arguments evaluated before it.**
+  In `List::reverse_onto(acc, load()!)`, when `load` raised, `acc` was never
+  released: every cell of it that nothing else held, on each call, on both
+  fiber backends. The same happened
+  with `return`, `break` or `continue` inside an argument, with a
+  cancellation while a later argument ran, and in every shape that evaluates
+  several operands before using them -- a method call's receiver, a
+  constructor, a pipe, a closure call, a record, list or tuple literal, an
+  interpolation, `+` on strings, a nested call. Every early exit releases the
+  operands evaluated so far. Evaluation order is unchanged: left to right,
+  each once.
+
 - **A case name written bare in a pattern matched every value.** A bare name
   in a pattern binds, so `match c { Color::Blue => "cool", Red => "warm" }`
   answered `warm` for `Color::Green`. Unless an arm after it was left

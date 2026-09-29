@@ -328,10 +328,8 @@ impl<'ctx> Lower<'_, 'ctx> {
             Err(message) => return self.fail(message, range),
         };
 
-        let mut values = Vec::with_capacity(args.len());
-        for arg in args {
-            values.push(self.expr(*arg)?.into());
-        }
+        let mut values: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> =
+            self.operands(args)?.into_iter().map(Into::into).collect();
         // Then the capabilities, which the source never writes: the row said
         // which and in what order.
         //

@@ -278,7 +278,9 @@ pub(crate) fn emit_closure<'ctx>(
 enum Cleanup<'ctx> {
     /// A local whose slot owns a reference.
     Local(LocalId),
-    /// An owned temporary: a `match` scrutinee, held while the guards run.
+    /// An owned temporary: a `match` scrutinee held while the guards run, a
+    /// closure callee or `with_data` subject, or an operand evaluated and
+    /// waiting for the operands after it (`Lower::operands`).
     Temp(BasicValueEnum<'ctx>, Type),
 }
 

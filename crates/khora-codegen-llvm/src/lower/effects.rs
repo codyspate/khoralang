@@ -52,8 +52,8 @@ impl<'ctx> Lower<'_, 'ctx> {
             }
             ("defer", [region_arg, finalizer]) => {
                 let region_ty = self.types.of(*region_arg).clone();
-                let region = self.expr(*region_arg)?;
-                let closure = self.expr(*finalizer)?;
+                let both = self.operands(&[*region_arg, *finalizer])?;
+                let (region, closure) = (both[0], both[1]);
 
                 // Both arrive owned, because the reference-counting plan reads
                 // this as the ordinary call it is written as. The runtime keeps
@@ -141,8 +141,8 @@ impl<'ctx> Lower<'_, 'ctx> {
             }
             ("set", [cell, value]) => {
                 let cell_ty = self.types.of(*cell).clone();
-                let handle = self.expr(*cell)?;
-                let held = self.expr(*value)?;
+                let both = self.operands(&[*cell, *value])?;
+                let (handle, held) = (both[0], both[1]);
                 let word = self.be.to_word(held);
                 let set = self.be.rt.shared_set;
                 self.be
@@ -157,8 +157,8 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let cell_ty = self.types.of(*cell).clone();
                 let value_ty = self.shared_contents(site, &cell_ty, range)?;
                 let change_ty = self.types.of(*change).clone();
-                let handle = self.expr(*cell)?;
-                let closure = self.expr(*change)?;
+                let both = self.operands(&[*cell, *change])?;
+                let (handle, closure) = (both[0], both[1]);
                 let Some(shim) = self.be.change_shim(&value_ty) else {
                     return self.fail(
                         format!("`{value_ty}` has no machine type, so it cannot be shared"),
@@ -209,8 +209,8 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let value_ty = self.shared_contents(site, &cell_ty, range)?;
                 let answer_ty = self.types.of(site).clone();
                 let change_ty = self.types.of(*change).clone();
-                let handle = self.expr(*cell)?;
-                let closure = self.expr(*change)?;
+                let both = self.operands(&[*cell, *change])?;
+                let (handle, closure) = (both[0], both[1]);
                 // **The carrier's own type, taken from the change function's
                 // signature.** `Changed` is an ordinary record, so at a scalar
                 // instantiation it is held inline and the shim is handed an
@@ -313,8 +313,8 @@ impl<'ctx> Lower<'_, 'ctx> {
             }
             ("send", [channel, value]) => {
                 let channel_ty = self.types.of(*channel).clone();
-                let handle = self.expr(*channel)?;
-                let held = self.expr(*value)?;
+                let both = self.operands(&[*channel, *value])?;
+                let (handle, held) = (both[0], both[1]);
                 let word = self.be.to_word(held);
                 let send = self.be.rt.channel_send;
                 let answered = self
@@ -748,8 +748,8 @@ impl<'ctx> Lower<'_, 'ctx> {
                     requires: Type::empty_row(),
                     raises: parameters[2].clone(),
                 };
-                let closure = self.expr(*wrapper)?.into_pointer_value();
-                let given = vec![self.expr(*argument)?];
+                let mut given = self.operands(&[*wrapper, *argument])?;
+                let closure = given.remove(0).into_pointer_value();
                 let invoked =
                     self.invoke_closure_at(site, *wrapper, closure, &signature, given, range)?;
                 let ret = signature.ret.clone();
@@ -872,8 +872,8 @@ impl<'ctx> Lower<'_, 'ctx> {
             }
             ("cancel_within", [fiber, millis]) => {
                 let ty = self.types.of(*fiber).clone();
-                let handle = self.expr(*fiber)?;
-                let millis = self.expr(*millis)?;
+                let both = self.operands(&[*fiber, *millis])?;
+                let (handle, millis) = (both[0], both[1]);
                 self.be
                     .builder
                     .build_call(self.be.rt.fiber_cancel_within, &[handle.into(), millis.into()], "")
@@ -1237,8 +1237,8 @@ impl<'ctx> Lower<'_, 'ctx> {
             }
             ("adopt", [nursery, fiber]) => {
                 let nursery_ty = self.types.of(*nursery).clone();
-                let handle = self.expr(*nursery)?;
-                let child = self.expr(*fiber)?;
+                let both = self.operands(&[*nursery, *fiber])?;
+                let (handle, child) = (both[0], both[1]);
                 let adopt = self.be.rt.fibers_adopt;
                 self.be
                     .builder

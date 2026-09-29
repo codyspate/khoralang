@@ -496,7 +496,9 @@ impl<'ctx> Lower<'_, 'ctx> {
         let [subject, rest @ ..] = args else {
             return self.fail(format!("`String::{name}` takes a string"), range);
         };
-        let object = self.expr(*subject)?.into_pointer_value();
+        let evaluated = self.operands(args)?;
+        let object = evaluated[0].into_pointer_value();
+        let rest_values = &evaluated[1..];
         let length = self.string_length(object);
         let bytes = runtime::byte_offset(
             self.be.ctx,
@@ -508,8 +510,8 @@ impl<'ctx> Lower<'_, 'ctx> {
 
         let result = match (name, rest) {
             ("byte_length", []) => length.into(),
-            ("byte", [index]) => {
-                let at = self.expr(*index)?.into_int_value();
+            ("byte", [_]) => {
+                let at = rest_values[0].into_int_value();
                 self.check_index(at, length);
                 // Recomputed after the check, because the check split the block
                 // and the pointer above belongs to the one before it.
@@ -571,8 +573,18 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .expect("copying a string's bytes");
                 array.into()
             }
-            ("slice", [from, to]) => self.string_slice(object, length, *from, *to)?,
-            ("find", [needle, from]) => self.string_find(object, length, *needle, *from)?,
+            ("slice", [_, _]) => self.string_slice(
+                object,
+                length,
+                rest_values[0].into_int_value(),
+                rest_values[1].into_int_value(),
+            ),
+            ("find", [_, _]) => self.string_find(
+                object,
+                length,
+                rest_values[0].into_pointer_value(),
+                rest_values[1].into_int_value(),
+            ),
             _ => {
                 return self.fail(
                     format!("`String::{name}` is not a string operation the backend knows"),
@@ -602,10 +614,9 @@ impl<'ctx> Lower<'_, 'ctx> {
         &mut self,
         object: PointerValue<'ctx>,
         length: IntValue<'ctx>,
-        needle: ExprId,
-        from: ExprId,
-    ) -> Flow<'ctx> {
-        let sought = self.expr(needle)?.into_pointer_value();
+        sought: PointerValue<'ctx>,
+        from: IntValue<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
         let sought_length = self.string_length(sought);
         let sought_bytes = runtime::byte_offset(
             self.be.ctx,
@@ -614,7 +625,6 @@ impl<'ctx> Lower<'_, 'ctx> {
             runtime::STRING_BYTES_OFFSET,
             "needle.bytes",
         );
-        let from = self.expr(from)?.into_int_value();
         let i64_type = self.be.ctx.i64_type();
         // Clamped rather than checked, the same as `String::slice`: searching
         // from past the end finds nothing, which is the answer, not a mistake.
@@ -667,12 +677,10 @@ impl<'ctx> Lower<'_, 'ctx> {
             .builder
             .build_int_compare(IntPredicate::SLT, at, i64_type.const_zero(), "find.missed")
             .expect("was it found");
-        Some(
-            self.be
-                .builder
-                .build_select(missed, at, shifted, "find.at")
-                .expect("choosing an answer"),
-        )
+        self.be
+            .builder
+            .build_select(missed, at, shifted, "find.at")
+            .expect("choosing an answer")
     }
 
     /// `String::slice`: the bytes from `from` up to `to`, as a new string.
@@ -698,11 +706,9 @@ impl<'ctx> Lower<'_, 'ctx> {
         &mut self,
         object: PointerValue<'ctx>,
         length: IntValue<'ctx>,
-        from: ExprId,
-        to: ExprId,
-    ) -> Flow<'ctx> {
-        let from = self.expr(from)?.into_int_value();
-        let to = self.expr(to)?.into_int_value();
+        from: IntValue<'ctx>,
+        to: IntValue<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
         let i64_type = self.be.ctx.i64_type();
         let zero = i64_type.const_zero();
 
@@ -795,7 +801,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             .builder
             .build_memcpy(into, 1, source, 1, count)
             .expect("copying a slice");
-        Some(string.into())
+        string.into()
     }
 
     /// `value` brought inside `low ..= high`, both ends inclusive.

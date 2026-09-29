@@ -47,8 +47,8 @@ impl<'ctx> Lower<'_, 'ctx> {
         let laid_out = self.field_types(&owner_ty, &type_name).unwrap_or_else(|| info.fields.clone());
         let at = self.be.field_slot(&laid_out, index);
 
-        let object = self.expr(base)?.into_pointer_value();
-        let new = self.expr(value)?;
+        let both = self.operands(&[base, value])?;
+        let (object, new) = (both[0].into_pointer_value(), both[1]);
 
         let slot = runtime::field_pointer(self.be.ctx, &self.be.builder, object, at);
         if self.be.owns_a_reference(&field_ty) {
@@ -92,10 +92,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         // Evaluated before the allocation, as a constructor's arguments are: an
         // element can diverge, and an object allocated before that happens is
         // unreachable and unfreed.
-        let mut values = Vec::with_capacity(items.len());
-        for item in items {
-            values.push(self.expr(*item)?);
-        }
+        let values = self.operands(items)?;
 
         let (at, words) = self.be.field_layout(&info.fields);
         let object = self.allocate_at(id, words, 0, "tuple");
@@ -129,18 +126,15 @@ impl<'ctx> Lower<'_, 'ctx> {
 
         // **The base first, because it is written first and can diverge.**
         // `{ ..old, x: 1 }` evaluates `old` before `1`, which is the order the
-        // reader sees.
-        let taken_from = match base {
-            Some(base) => Some((self.expr(base)?.into_pointer_value(), base)),
-            None => None,
-        };
-
-        // Evaluated in written order, so side effects happen where they read,
-        // and stored by label, so the order written does not matter.
-        let mut values = Vec::with_capacity(fields.len());
-        for (label, value) in fields {
-            values.push((label.clone(), self.expr(*value)?));
-        }
+        // reader sees. Then the fields in written order, so side effects
+        // happen where they read, and stored by label, so the order written
+        // does not matter.
+        let written: Vec<ExprId> = base.into_iter().chain(fields.iter().map(|(_, v)| *v)).collect();
+        let mut evaluated = self.operands(&written)?.into_iter();
+        let taken_from =
+            base.map(|base| (evaluated.next().expect("the base was evaluated").into_pointer_value(), base));
+        let values: Vec<(String, BasicValueEnum<'ctx>)> =
+            fields.iter().map(|(label, _)| label.clone()).zip(evaluated).collect();
 
         // Sized and indexed from the fields *at this instantiation*: a
         // generic record's declared field is a parameter, which has no width,
@@ -285,10 +279,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             return Some(self.be.static_variant(owner, case, tag).into());
         }
 
-        let mut values = Vec::with_capacity(args.len());
-        for arg in args {
-            values.push(self.expr(*arg)?);
-        }
+        let values = self.operands(args)?;
 
         let laid_out = self.field_types(&built, case).unwrap_or_else(|| info.fields.clone());
         let (at, words) = self.be.field_layout(&laid_out);
@@ -381,14 +372,11 @@ impl<'ctx> Lower<'_, 'ctx> {
         let Some(shape) = self.be.unboxed_type(ty) else {
             return self.fail(format!("`{ty}` has no inline layout"), range);
         };
-        let taken_from = match base {
-            Some(base) => Some(self.expr(base)?.into_struct_value()),
-            None => None,
-        };
-        let mut written = Vec::with_capacity(fields.len());
-        for (label, value) in fields {
-            written.push((label.clone(), self.expr(*value)?));
-        }
+        let operands: Vec<ExprId> = base.into_iter().chain(fields.iter().map(|(_, v)| *v)).collect();
+        let mut evaluated = self.operands(&operands)?.into_iter();
+        let taken_from = base.map(|_| evaluated.next().expect("the base was evaluated").into_struct_value());
+        let written: Vec<(String, BasicValueEnum<'ctx>)> =
+            fields.iter().map(|(label, _)| label.clone()).zip(evaluated).collect();
 
         // Zero rather than undef, so that a field the loop below leaves alone
         // -- there are none today, and a `poison` in a value something else
@@ -449,8 +437,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 .build_insert_value(value, which, 0, "case")
                 .expect("writing an inline tag");
         }
-        for (index, arg) in args.iter().enumerate() {
-            let field = self.expr(*arg)?;
+        for (index, field) in self.operands(args)?.into_iter().enumerate() {
             value = self.be.write_inline(value, ty, index, field);
         }
         Some(value.into_struct_value().into())

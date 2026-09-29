@@ -126,11 +126,9 @@ impl<'ctx> Lower<'_, 'ctx> {
     ) -> Option<Invoked<'ctx>> {
         // The callee before the arguments, which is the order the source is
         // written in and the order the reference-counting plan was made for.
-        let closure = self.expr(callee)?.into_pointer_value();
-        let mut given = Vec::with_capacity(args.len());
-        for arg in args {
-            given.push(self.expr(*arg)?);
-        }
+        let all: Vec<ExprId> = std::iter::once(callee).chain(args.iter().copied()).collect();
+        let mut given = self.operands(&all)?;
+        let closure = given.remove(0).into_pointer_value();
         self.invoke_closure_at(site, callee, closure, signature, given, range)
     }
 

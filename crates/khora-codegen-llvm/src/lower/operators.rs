@@ -20,8 +20,8 @@ impl<'ctx> Lower<'_, 'ctx> {
         }
 
         let operand_ty = self.types.of(lhs).clone();
-        let left = self.expr(lhs)?;
-        let right = self.expr(rhs)?;
+        let both = self.operands(&[lhs, rhs])?;
+        let (left, right) = (both[0], both[1]);
 
         match op {
             BinOp::Add if matches!(operand_ty, Type::Str) => self.concat(left, right),

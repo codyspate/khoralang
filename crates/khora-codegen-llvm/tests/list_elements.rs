@@ -202,9 +202,9 @@ pub fn main() -> Int {
 ///
 /// The same for a *trailing* spread whose operand raises or returns. That
 /// operand is the one the lowering keeps apart, as the tail the built list is
-/// turned onto, and passed as the turn's second argument it leaked the
-/// accumulator -- 7 objects a call here -- because an argument that leaves
-/// early does not free the arguments evaluated before it.
+/// turned onto: it is the turn's second argument, so the accumulator is an
+/// argument evaluated before one that leaves early -- 7 objects a call here
+/// if the exit does not release it.
 #[test]
 fn a_raise_mid_literal_stops_in_order_and_frees_what_was_built() {
     let exe = build(

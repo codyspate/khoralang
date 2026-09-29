@@ -228,8 +228,8 @@ impl<'ctx> Lower<'_, 'ctx> {
             ("new", [length, fill]) => {
                 let array_ty = self.types.of(site).clone();
                 let element = self.array_element(&array_ty, range)?;
-                let len = self.expr(*length)?.into_int_value();
-                let value = self.expr(*fill)?;
+                let both = self.operands(&[*length, *fill])?;
+                let (len, value) = (both[0].into_int_value(), both[1]);
 
                 let (holding, glue) = self.element_kind(&element);
                 let width = self.stride(&element);
@@ -295,8 +295,8 @@ impl<'ctx> Lower<'_, 'ctx> {
             ("get", [array, index]) => {
                 let array_ty = self.types.of(*array).clone();
                 let element = self.array_element(&array_ty, range)?;
-                let object = self.expr(*array)?.into_pointer_value();
-                let at = self.expr(*index)?.into_int_value();
+                let both = self.operands(&[*array, *index])?;
+                let (object, at) = (both[0].into_pointer_value(), both[1].into_int_value());
                 let slot = self.array_slot(object, at, self.stride(&element));
 
                 let Some(llvm_ty) = self.be.llvm_type(&element) else {
@@ -316,9 +316,8 @@ impl<'ctx> Lower<'_, 'ctx> {
             ("set", [array, index, value]) => {
                 let array_ty = self.types.of(*array).clone();
                 let element = self.array_element(&array_ty, range)?;
-                let object = self.expr(*array)?.into_pointer_value();
-                let at = self.expr(*index)?.into_int_value();
-                let new = self.expr(*value)?;
+                let all = self.operands(&[*array, *index, *value])?;
+                let (object, at, new) = (all[0].into_pointer_value(), all[1].into_int_value(), all[2]);
                 let slot = self.array_slot(object, at, self.stride(&element));
 
                 // A slot that owns something has to let go of it, whether it

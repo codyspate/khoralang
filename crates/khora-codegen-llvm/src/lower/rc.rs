@@ -266,6 +266,66 @@ impl<'ctx> Lower<'_, 'ctx> {
         }
     }
 
+    /// Evaluates `operands` left to right, for a consumer that takes them all
+    /// at once: a call, a constructor, a record, a tuple, an operator.
+    ///
+    /// **What this prevents: a leak on every early exit from the middle of an
+    /// operand list.** In `f(acc, load()!)` the value of `acc` is owned by
+    /// nothing but this list while `load` runs -- its binding handed the
+    /// reference over at the read -- and a raise, `return`, `break`,
+    /// `continue` or cancellation inside a later operand left without it.
+    /// Each evaluated operand is held as a temporary of a scope of its own, so
+    /// the unwind every one of those exits already runs releases it.
+    ///
+    /// The scope is popped *without* releasing on the path that reaches the
+    /// end, because the consumer owns the values from there: a callee's
+    /// parameters, a constructor's fields. A `catch` inside a later operand
+    /// took its depth above this scope, so an error it handles does not
+    /// release what the call still needs.
+    ///
+    /// What it costs: nothing on the path that reaches the consumer. Each
+    /// exit inside the list gains one release per operand held at that point.
+    /// Only an operand followed by another is held; the last has nothing
+    /// after it to leave through.
+    pub(super) fn operands(&mut self, operands: &[ExprId]) -> Option<Vec<BasicValueEnum<'ctx>>> {
+        self.scopes.push(Vec::new());
+        let mut values = Vec::with_capacity(operands.len());
+        for (index, operand) in operands.iter().enumerate() {
+            let Some(value) = self.expr(*operand) else {
+                // Left early: the unwind on that path has released this
+                // scope already, and nothing reaches the end of it.
+                self.scopes.pop();
+                return None;
+            };
+            if index + 1 < operands.len() {
+                self.hold_operand(*operand, value);
+            }
+            values.push(value);
+        }
+        self.scopes.pop();
+        Some(values)
+    }
+
+    /// Records an evaluated operand in the innermost scope, if it owns a
+    /// reference this frame would otherwise lose on an early exit.
+    ///
+    /// Not a borrowed argument, which made no reference, and not a closure's
+    /// own name, which is the caller's and is borrowed for the call.
+    fn hold_operand(&mut self, operand: ExprId, value: BasicValueEnum<'ctx>) {
+        if self.plan.borrowed.contains(&operand)
+            || matches!(self.body.expr(operand), Expr::LambdaSelf)
+        {
+            return;
+        }
+        let ty = self.types.of(operand).clone();
+        if !self.be.owns_a_reference(&ty) {
+            return;
+        }
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.push(Cleanup::Temp(value, ty));
+        }
+    }
+
     /// Releases and pops the innermost scope, on the path that reaches its end.
     pub(super) fn leave_scope(&mut self) {
         let scope = self.scopes.pop().unwrap_or_default();

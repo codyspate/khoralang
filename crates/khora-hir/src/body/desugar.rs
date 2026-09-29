@@ -458,8 +458,8 @@ impl<'a> Ctx<'a> {
     /// }
     /// ```
     ///
-    /// With a trailing `..tail`, the last two lines are
-    /// `let t = tail; List::reverse_onto(acc, t)`.
+    /// With a trailing `..tail`, the last line is
+    /// `List::reverse_onto(acc, tail)`.
     ///
     /// **Built backwards and turned round once**, because `List` is a cons
     /// list: the front is the only end that is cheap, and evaluation has to go
@@ -500,22 +500,11 @@ impl<'a> Ctx<'a> {
         for element in elements {
             self.lower_element(&element, &pushes, &mut stmts);
         }
+        // A trailing spread's operand is the turn's second argument. When it
+        // leaves early -- `..load()!` -- the accumulator already evaluated as
+        // the first is released by the exit, as any call's arguments are.
         let tail = match tail_spread {
-            // **Bound as the last statement, not passed straight to the
-            // turn.** As the turn's second argument, an operand that leaves
-            // early -- `..load()!`, `..(if c { return [] } else { xs })` --
-            // left after the accumulator had been moved into the call, and
-            // the cells the literal had built were never freed.
-            Some(s) => {
-                let operand = self.spread_operand(&s);
-                // The operand's own range, so a type error in it still points
-                // at the operand rather than at the whole literal.
-                let at = self.body.range(operand);
-                let tail = self.declare("list tail".to_string(), false, at);
-                let tail_pat = self.add_pat(Pat::Bind(tail), at);
-                stmts.push(Stmt::Let { pat: tail_pat, ty: None, init: Some(operand) });
-                self.add_expr(Expr::Local(tail), at)
-            }
+            Some(s) => self.spread_operand(&s),
             None => self.add_expr(Expr::Path(nil), range),
         };
         let turn = self.reverse_onto(range);
