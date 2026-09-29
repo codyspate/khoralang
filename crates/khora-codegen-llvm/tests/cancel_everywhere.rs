@@ -1304,11 +1304,19 @@ pub fn main() -> Int {
     }
 }
 
-/// **Three thousand `cancel_within` calls hold fewer than twenty threads.**
-/// Once for fibers already finished, once for fibers still running when it
-/// is called, whose deadlines are all pending while the threads are counted.
-/// A thread per call is what this guards against: three thousand sleeping
-/// threads, and a panic out of the runtime when the OS refuses the next.
+/// **Three thousand `cancel_within` calls hold a fixed number of threads
+/// beyond the scheduler's workers.** Once for fibers already finished, once
+/// for fibers still running when it is called, whose deadlines are all
+/// pending while the threads are counted. A thread per call is what this
+/// guards against: three thousand sleeping threads, and a panic out of the
+/// runtime when the OS refuses the next.
+///
+/// The bound is relative, because a fixed one failed on every machine with
+/// 16 or more CPUs: the scheduler starts one worker per CPU the process may
+/// run on, before any deadline is set. The margin covers the runtime's own
+/// threads (main, signals, deadlines, and on the scheduler the reactor and
+/// timers: five) with room to spare, and is three hundred times smaller than
+/// what a thread per call holds, so it cannot hide one.
 #[cfg(target_os = "linux")]
 #[test]
 fn cancel_within_does_not_hold_a_thread_per_call() {
@@ -1340,7 +1348,17 @@ pub fn main() -> Int {
 }
 ";
     let exe = build("cancel_everywhere_within", SOURCE);
+    // What `Scheduler::new(0)` reads in the program: it inherits this
+    // process's CPU affinity, so both see the same count. There is no
+    // variable that overrides it.
+    let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
+    const MARGIN: usize = 10;
     for backend in BACKENDS {
+        let workers = match backend {
+            "scheduler" => cpus,
+            "threads" => 0,
+            other => panic!("no worker count for backend `{other}`"),
+        };
         let mut child = Command::new(&exe)
             .env("KHORA_FIBERS", backend)
             .stdout(Stdio::piped())
@@ -1369,7 +1387,10 @@ pub fn main() -> Int {
             .expect("a thread count");
         let _ = child.kill();
         let _ = child.wait();
-        assert!(threads < 20, "`{backend}`: {threads} threads with 6000 deadlines set");
+        assert!(
+            threads <= workers + MARGIN,
+            "`{backend}`: {threads} threads with 6000 deadlines set, against {workers} workers"
+        );
     }
 }
 
