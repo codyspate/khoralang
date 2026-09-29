@@ -161,6 +161,10 @@ pub struct Runtime<'ctx> {
     /// `void khora_rc_check_owners(void)`: a debug build's `main` switches
     /// the owner check on. See [`Backend::check_owners`](crate::backend::Backend::check_owners).
     pub rc_check_owners: FunctionValue<'ctx>,
+    /// `void khora_rc_local(void)`: the `main` of a program built with
+    /// `KHORA_RC_LOCAL=1` tells the runtime, so its own counts of local
+    /// objects are plain too. See [`Backend::local_counts`](crate::backend::Backend::local_counts).
+    pub rc_local: FunctionValue<'ctx>,
     /// `void khora_rc_check(uint64_t word)`: the owner check, called beside a
     /// debug build's count with the word the count found.
     pub rc_check: FunctionValue<'ctx>,
@@ -415,6 +419,7 @@ impl<'ctx> Runtime<'ctx> {
             ),
             single_threaded: declare("khora_single_threaded", void.fn_type(&[], false)),
             rc_check_owners: declare("khora_rc_check_owners", void.fn_type(&[], false)),
+            rc_local: declare("khora_rc_local", void.fn_type(&[], false)),
             rc_check: declare("khora_rc_check", void.fn_type(&[i64t.into()], false)),
             enable_counters: declare("khora_enable_counters", void.fn_type(&[], false)),
             root_can_raise: declare("khora_root_can_raise", void.fn_type(&[], false)),

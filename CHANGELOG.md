@@ -816,6 +816,18 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 
 ### Added
 
+- **`KHORA_RC_LOCAL=1`: plain reference counts on objects one fiber owns.**
+  Off by default. In a program that starts a fiber, an object is local to
+  the fiber that made it until the runtime hands it to another fiber and
+  marks it shared; with the switch set at compile time, a local object's
+  count is an ordinary load and store instead of a locked instruction, and a
+  shared object's stays locked. The switch is part of the build cache key. It
+  is off because two programs the checker accepts still reach a record with
+  a mutable field from two fibers (a spawn capture whose type is settled
+  after the spawn, and a record with a mutable field raised as a fiber's
+  error and joined twice); with the switch set, a write to that field races
+  the counts of what it holds, which can crash a release build. A debug
+  build traps on both with or without the switch.
 - **Labeled arguments.** At a call to a named function an argument may be
   written `name: value`, where `name` is the name the declaration gives the
   parameter at that position: `reply(connection, "ok", keep_alive: false)`.

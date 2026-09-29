@@ -117,6 +117,14 @@ impl<'ctx> Backend<'ctx> {
                 .build_call(self.rt.rc_check_owners, &[], "")
                 .expect("switching the owner check on");
         }
+        // Before anything is allocated too, so the runtime's own counts of
+        // local objects (drop glue, `khora_drop`) take the plain path from
+        // the first one.
+        if self.local_counts {
+            self.builder
+                .build_call(self.rt.rc_local, &[], "")
+                .expect("switching local counts on in the runtime");
+        }
     }
 
     /// Hands `argc` and `argv` to the runtime before anything else runs.

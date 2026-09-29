@@ -176,13 +176,21 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// test reads as "survives". Its own word would not do: 2^40 has no bits
     /// in the count, which reads as the last reference.
     ///
-    /// **Every count here is atomic whatever the shared bit says**, and in a
-    /// debug build the owner check is called beside it (see
-    /// `Backend::check_owners`).
+    /// **With `KHORA_RC_LOCAL=1`, a program with threads takes the local
+    /// path instead** (`Backend::emit_local_count`): an object whose shared
+    /// and immortal bits are both clear is counted with a relaxed load and
+    /// store. Without it, every count below is atomic whatever the shared
+    /// bit says. In a debug build the owner check is called beside either
+    /// (see `Backend::check_owners`).
     pub(super) fn adjust_count(&mut self, object: PointerValue<'ctx>, by: i64) -> IntValue<'ctx> {
         let i64t = self.be.ctx.i64_type();
         let one = i64t.const_int(1, false);
         let plain = self.be.single_threaded || crate::plain_counts_forced();
+        if !plain && self.be.local_counts {
+            let function = self.function;
+            let check = self.be.check_owners;
+            return self.be.emit_local_count(function, object, by, check);
+        }
         let previous = self
             .be
             .builder

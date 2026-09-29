@@ -466,8 +466,10 @@ fn main() -> Int {
 /// Read from the IR for the reason the poll tests are. Two structural facts
 /// carry it. Every static is a read-only global whose count word has
 /// `KHORA_IMMORTAL` set. Every atomic add or subtract sits in the block that
-/// the immortal test skips. If the second fails, the first turns it into a
-/// fault at run time, but only on a path a test happens to run.
+/// the immortal test skips: `rc.count` with every count atomic, and
+/// `rc.shared` with `KHORA_RC_LOCAL=1`, where a static takes the flagged path
+/// and leaves it before that block. If the second fails, the first turns it
+/// into a fault at run time, but only on a path a test happens to run.
 #[test]
 fn no_count_operation_writes_a_static() {
     let ir = module_ir_as("polls_statics", STATICS, Profile::Debug);
@@ -494,7 +496,7 @@ fn no_count_operation_writes_a_static() {
         if line.contains("atomicrmw") {
             counted += 1;
             assert!(
-                block.starts_with("rc.count"),
+                block.starts_with("rc.count") || block.starts_with("rc.shared"),
                 "an atomic count in `{block}`, which a static reaches:\n{line}"
             );
         }

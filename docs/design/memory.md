@@ -224,10 +224,6 @@ entries that do:
 - `khora_channel_send`: the value, before it is enqueued;
 - `khora_shared_open`, `_set`, `_update`, `_modify`: the value stored,
   including what the change function returned;
-- `khora_region_release`: each finalizer closure, just before it runs. The
-  region's last holder runs and releases it, on whichever fiber that is.
-  The mark is taken here, not when the finalizer is deferred, for the reason
-  in the next paragraph;
 - `khora_fibers_adopt`: the handle;
 - the test runner: an error a `test` block raises, before the runner, on
   another fiber, releases it.
@@ -246,15 +242,12 @@ object that is already shared or immortal, which makes re-sending a structure
 one load. That rests on an invariant: a shared object points only at shared or
 immortal objects. The walk establishes it. Afterwards, a `Share` value has no
 mutable field, and the two containers written after publication (`Shared`,
-`Channel`) mark what is stored into them. **A deferred finalizer is the one
-route a non-`Share` value has across fibers.** `Region::defer` does not
-require `Share` captures, so a finalizer may capture a record with `mut`
-fields, or a `Map`, and the fiber that deferred it may go on writing them. A
-mark taken at the defer would not reach what is stored afterwards. So a
-finalizer is marked when the region runs it. By then every write the deferring
-fiber made is ordered before the release, through the region's count and the
-list's lock, and nothing writes the captures again. The cost is one walk per
-finalizer per release.
+`Channel`) mark what is stored into them. **A deferred finalizer is not a
+route**: a `Region` or `Scope` stays on the fiber that opened it, and the
+runtime traps a defer or a final release from any other fiber, so a
+finalizer's captures, which need not be `Share`, stay local to that fiber.
+The two routes by which a non-`Share` value does reach a second fiber are in
+the Stage 2 paragraph below.
 
 **Reuse makes a cell local again.** `khora_alloc_reuse` writes a fresh header
 with the bit clear, and that is true, not merely allowed: a token exists only
@@ -266,11 +259,61 @@ through the scheduler's queues, which are mutexes, so the old worker's unlock
 happens before the new worker's lock and every count written on one is
 visible on the other, with the two never concurrent.
 
-**Counting is atomic for every object, whatever the bit says.** The bit changes
-no count yet. What reads it today is the debug owner check: a debug build's
-`main` turns it on, `khora_alloc` then writes the running fiber's id into bits
-61..40, and every count of an object that is neither shared nor immortal
-compares that id with the counting fiber's. A mismatch is a crossing that no
+**Plain counts on local objects: `KHORA_RC_LOCAL=1` (Stage 2, off by
+default).** Without the switch, a program that spawns counts every object with
+a locked read-modify-write, whatever the bit says. With it, generated code
+(`backend/counts.rs`, called from `lower/rc.rs::adjust_count`) loads the word
+relaxed and compares it unsigned against bit 62:
+- neither flag (a local object): add or subtract and a relaxed store. On x86
+  and AArch64 that is a plain `mov`/`ldr`/`str`. Relaxed rather than plain so
+  that a missed crossing is a lost update at the LLVM level, not undefined
+  behavior the optimizer may exploit;
+- immortal: nothing is written, and the answer is 2 ("survives");
+- shared: the locked add (relaxed) or subtract (release), as before, with
+  `khora_drop_last`'s acquire fence pairing with it.
+
+The drop's last-reference test is unchanged: it truncates the previous word
+to its low 32 bits, which drops both flags and the owner on either path, and
+`khora_drop_last` masks to the count. The single-threaded path (a program
+that never spawns) is untouched.
+
+The runtime's `khora_dup`, `khora_drop` and `khora_drop_reuse` make the same
+test (`heap.rs::classify`) once the generated `main` has called
+`khora_rc_local`, which it does exactly when the switch is on. That matters
+more than it looks: a freed object's children are released by its drop glue
+through `khora_drop`, not by generated code, so in the services most count
+operations are the runtime's. A hand-written extern is covered by the same
+argument as generated code: it can only count what its own fiber holds a
+reference to, and a local object is held by one fiber. Without the switch the
+runtime's counts stay locked, whatever the bit says. The same change frees a
+leaf (an object with no field routine: a string, a byte buffer) at its last
+release directly instead of through the drain, which saves three
+thread-local accesses per freed leaf whichever way the counts go.
+
+**What Stage 2 rests on, and where it does not hold.** A local object must be
+counted by one fiber. That holds for every value that reaches another fiber
+through a runtime entry, because each entry marks it first. It does not hold
+where a *shared* object has a `mut` field that is written after it was
+marked: the store makes a shared object point at a local one, the invariant
+above breaks, and two fibers count the stored object. Two routes reach that
+today, both accepted by the checker and both found while building Stage 2:
+- a spawn capture whose type is still an unsolved variable at the spawn
+  (the capture check sees no `mut` field), then written by the parent;
+- a raised error with a `mut` field, which the child marks when it publishes
+  it: two fibers that `join` the same handle can both reach it, and one can
+  write a fresh object into it.
+Both are field races with every count atomic, and count races (a crash in
+release) with the switch on. The debug owner check traps on both. Until the
+checker refuses both, the switch stays off by default.
+
+**Flipping the default** is one line: `local_counts_enabled` in
+`crates/khora-codegen-llvm/src/lib.rs`.
+
+**The debug owner check.** A debug build's `main` turns it on, `khora_alloc`
+then writes the running fiber's id into bits 61..40, and every count of an
+object that is neither shared nor immortal compares that id with the counting
+fiber's. With the switch on, that count is the plain one, so this is what
+reports a missed mark before the heap does. A mismatch is a crossing that no
 entry marked:
 
     khora: object made on fiber 7 was counted on fiber 12 without being shared -- a runtime entry published it without marking it

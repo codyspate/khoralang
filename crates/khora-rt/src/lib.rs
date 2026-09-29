@@ -296,13 +296,15 @@ pub const KHORA_IMMORTAL: u64 = 1 << 62;
 
 /// The count-word bit of an object another fiber may be holding.
 ///
-/// **What it prevents, once counting is split: a plain count on an object
-/// two threads hold.** Set by [`khora_share`] on everything reachable from a
-/// value the runtime publishes (a spawn's closure, a channel send, a cell's
-/// contents, a fiber's answer, a deferred finalizer), and born set on the
-/// runtime's own handles. Counting stays atomic for every object whatever
-/// this bit says; for now it feeds the debug owner check, which traps on a
-/// local object counted by a fiber that did not make it.
+/// **What it prevents: a plain count on an object two threads hold.** Set by
+/// [`khora_share`] on everything reachable from a value the runtime
+/// publishes (a spawn's closure, a channel send, a cell's contents, a
+/// fiber's answer), and born set on the runtime's own handles. A program
+/// built with `KHORA_RC_LOCAL=1` counts an object with this bit clear with a
+/// relaxed load and store, and one with it set with a locked read-modify-write;
+/// without the switch every count in a program that spawns is locked, and the
+/// bit feeds only the debug owner check, which traps on a local object
+/// counted by a fiber that did not make it.
 ///
 /// Bit 63, so a set bit makes the word negative as an `i64`.
 pub const KHORA_SHARED: u64 = 1 << 63;

@@ -35,13 +35,17 @@ use std::sync::{Arc, Condvar, Mutex};
 /// A Khora pointer being moved to another fiber.
 ///
 /// Raw pointers are not `Send`, and for good reason; this asserts that *these*
-/// ones are safe to move, which they are because reference counts are atomic
-/// (D10) and a spawned closure is handed over rather than shared — the caller
-/// gives up its reference at the `spawn`.
+/// ones are safe to move. A spawned closure is handed over rather than shared
+/// (the caller gives up its reference at the `spawn`), and
+/// [`khora_fiber_spawn`] marks it and everything it captures shared before it
+/// builds one of these. A shared object is counted atomically in every
+/// build, including under `KHORA_RC_LOCAL=1`, where only unmarked objects
+/// take the plain path.
 pub(crate) struct Handed(pub(crate) *mut u8);
 
-// SAFETY: see the type's documentation. The pointer is a Khora object with an
-// atomic refcount, and exactly one fiber owns the reference being moved.
+// SAFETY: see the type's documentation. The pointer is a Khora object that
+// was marked shared before this was built, so every count of it is atomic,
+// and exactly one fiber owns the reference being moved.
 unsafe impl Send for Handed {}
 
 /// What a fallible Khora function returns: `{ i32 which, i64 payload }`.

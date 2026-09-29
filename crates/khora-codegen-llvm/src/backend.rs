@@ -203,6 +203,7 @@ enum Entry {
 // opens `impl<'ctx> Backend<'ctx>` again. The struct, `new`, `error`, `finish`
 // and the small predicates other modules ask about stay here.
 mod closures;
+mod counts;
 pub(crate) mod can_stop;
 mod driver;
 mod entry;
@@ -271,9 +272,19 @@ pub(crate) struct Backend<'ctx> {
     /// marking it shared.** The object then reaches a second fiber with its
     /// maker's id still in the count word, and the first count there traps
     /// naming both fibers. Debug builds of a program with threads only. The
-    /// count itself is atomic whether or not this is set; the check runs
-    /// beside it. It costs a call per count, which is why release has none.
+    /// check runs beside the count, which is atomic unless
+    /// [`Self::local_counts`] made a local object's count plain; then the
+    /// check is what sees a missed mark before the heap does. It costs a
+    /// call per count, which is why release has none.
     pub check_owners: bool,
+    /// Whether a count of an object with neither flag bit set is plain.
+    ///
+    /// **Set only in a program with threads, and only by
+    /// `KHORA_RC_LOCAL=1`** ([`crate::local_counts_enabled`]). A program with
+    /// none is [`Self::single_threaded`] and already counts everything plain.
+    /// See `backend/counts.rs` for what it rests on: every runtime entry that
+    /// publishes a value marks it shared first.
+    pub local_counts: bool,
     /// Khora functions that keep their plain return, because
     /// [`can_stop`] found no cancellation point they can reach.
     ///
@@ -525,6 +536,7 @@ impl<'ctx> Backend<'ctx> {
             // until told otherwise is the safe direction.
             single_threaded: false,
             check_owners: false,
+            local_counts: false,
             untagged: HashSet::new(),
             poll_at_entry: HashSet::new(),
             lambdas_poll_in: HashSet::new(),

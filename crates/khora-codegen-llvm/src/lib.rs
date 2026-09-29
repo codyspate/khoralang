@@ -61,8 +61,47 @@ pub fn unboxing_enabled() -> bool {
     !matches!(std::env::var("KHORA_UNBOXED").as_deref(), Ok("0"))
 }
 
+/// Whether a spawning program counts a local object with plain arithmetic.
+///
+/// **Off unless `KHORA_RC_LOCAL=1` says otherwise.** On, every count first
+/// tests the object's shared and immortal bits, and an object with neither
+/// (one no runtime entry has published) is counted with a relaxed load, an
+/// add and a relaxed store instead of a locked read-modify-write. That is
+/// sound only while every entry that hands a value to another fiber marks it
+/// (`khora_rt::khora_share`); an entry that forgets turns into a lost update
+/// on another core, which the debug owner check exists to catch first.
+///
+/// Read here, like [`unboxing_enabled`], so that the compiler and the build
+/// cache key cannot disagree about which counting a cached artifact used.
+///
+/// **Turning it on by default is this one line:** make the test
+/// `!matches!(.., Ok("0"))`, as [`unboxing_enabled`]'s is.
+pub fn local_counts_enabled() -> bool {
+    matches!(std::env::var("KHORA_RC_LOCAL").as_deref(), Ok("1"))
+}
+
 thread_local! {
     static PLAIN_COUNTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static LOCAL_COUNTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// **For tests only: build as `KHORA_RC_LOCAL=1` would, on this thread.**
+///
+/// The crossing tests have to run with local counts plain, in a test binary
+/// whose other tests must not: an environment variable belongs to the
+/// process, and a test binary compiles on several threads at once. Per
+/// thread for the reason [`force_plain_counts_on_this_thread`] is. The build
+/// cache never sees it, which is right: nothing that uses the cache sets it.
+#[doc(hidden)]
+pub fn force_local_counts_on_this_thread(local: bool) {
+    LOCAL_COUNTS.with(|l| l.set(local));
+}
+
+/// Whether local counts are on for this build: the switch, or the test-only
+/// force on this thread.
+#[cfg(feature = "llvm")]
+pub(crate) fn local_counts_for_this_build() -> bool {
+    local_counts_enabled() || LOCAL_COUNTS.with(|l| l.get())
 }
 
 /// **For tests only: count references without atomics in a program that

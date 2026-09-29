@@ -64,14 +64,20 @@ fn sources(db: &KhoraDatabase, dir: &std::path::Path, main: &str) -> Vec<SourceF
     out
 }
 
-/// Builds `body` after [`HEAD`] in the debug profile, which is the one with
-/// the owner check.
+/// Builds `body` after [`HEAD`], in the profile `KHORA_PROFILE` names: the
+/// debug profile, which is the one with the owner check, unless a run of
+/// this file asks for release to see what the counts do without it.
 fn build(name: &str, body: &str) -> PathBuf {
     build_whole(name, &format!("{HEAD}\n{body}"))
 }
 
-/// Builds a whole program, header and all, in the debug profile.
+/// Builds a whole program, header and all, as [`build`] does.
 fn build_whole(name: &str, source: &str) -> PathBuf {
+    build_whole_as(name, source, khora_codegen_llvm::Profile::from_env())
+}
+
+/// Builds a whole program in `profile`.
+fn build_whole_as(name: &str, source: &str, profile: khora_codegen_llvm::Profile) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("sharing_{name}"));
     harness::ensure_runtime();
     std::fs::create_dir_all(&dir).expect("a workspace");
@@ -79,8 +85,7 @@ fn build_whole(name: &str, source: &str) -> PathBuf {
     let _ = std::fs::remove_file(&exe);
     let db = KhoraDatabase::new();
     let root = SourceRoot::new(&db, sources(&db, &dir, source));
-    let outcome =
-        khora_codegen_llvm::compile_with(&db, root, &exe, khora_codegen_llvm::Profile::Debug);
+    let outcome = khora_codegen_llvm::compile_with(&db, root, &exe, profile);
     if let Err(errors) = outcome {
         let messages: Vec<String> = errors.into_iter().map(|e| e.message).collect();
         panic!("compiling `{name}` failed:\n  {}", messages.join("\n  "));
@@ -89,9 +94,21 @@ fn build_whole(name: &str, source: &str) -> PathBuf {
 }
 
 /// Builds and runs `body` on both fiber backends, and requires `expected` on
-/// stdout, a clean exit and no owner trap.
+/// stdout, a clean exit and no owner trap: once with every count atomic, and
+/// once with local objects counted plain (`KHORA_RC_LOCAL=1`).
+///
+/// **Both, because the second is where a missed mark does harm.** With every
+/// count atomic, a missed mark is a wrong owner and nothing more; with local
+/// counts plain it is two threads plain-counting one object. The owner check
+/// traps in either build, so each row goes red in each with its mark
+/// removed.
 fn crosses_marked(name: &str, body: &str, expected: &str) {
     runs_clean(name, &build(name, body), expected);
+    let local = format!("{name}_local");
+    khora_codegen_llvm::force_local_counts_on_this_thread(true);
+    let exe = build(&local, body);
+    khora_codegen_llvm::force_local_counts_on_this_thread(false);
+    runs_clean(&local, &exe, expected);
 }
 
 /// Runs `exe` on both fiber backends, and requires `expected` on stdout, a
@@ -1014,7 +1031,14 @@ test "the second test reaching the root scope" {
 /// error test missed this in the debug build.
 #[test]
 fn a_test_marks_the_error_it_raises() {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("sharing_test_raise");
+    for local in [false, true] {
+        test_raise_is_marked(local);
+    }
+}
+
+/// [`a_test_marks_the_error_it_raises`], with local counts plain if `local`.
+fn test_raise_is_marked(local: bool) {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("sharing_test_raise_{local}"));
     harness::ensure_runtime();
     std::fs::create_dir_all(&dir).expect("a workspace");
     let exe = dir.join(if cfg!(windows) { "tests.exe" } else { "tests" });
@@ -1034,7 +1058,10 @@ test \"an odd number has no half\" { assert(halve(7)! == 3); }
 ";
     let db = KhoraDatabase::new();
     let root = SourceRoot::new(&db, sources(&db, &dir, source));
-    if let Err(errors) = khora_codegen_llvm::compile_tests(&db, root, &exe) {
+    khora_codegen_llvm::force_local_counts_on_this_thread(local);
+    let built = khora_codegen_llvm::compile_tests(&db, root, &exe);
+    khora_codegen_llvm::force_local_counts_on_this_thread(false);
+    if let Err(errors) = built {
         let messages: Vec<String> = errors.into_iter().map(|e| e.message).collect();
         panic!("compiling failed:\n  {}", messages.join("\n  "));
     }
@@ -1045,7 +1072,7 @@ test \"an odd number has no half\" { assert(halve(7)! == 3); }
         stdout.contains("test an odd number has no half ... raised")
             && stdout.contains("0 passed, 1 failed")
             && out.status.code() == Some(1),
-        "{:?}, stdout {stdout:?}, stderr {stderr:?}",
+        "local counts {local}: {:?}, stdout {stdout:?}, stderr {stderr:?}",
         out.status.code()
     );
 }
@@ -1060,10 +1087,10 @@ test \"an odd number has no half\" { assert(halve(7)! == 3); }
 #[test]
 fn the_owner_check_traps_on_a_foreign_count() {
     let word = (99u64 << khora_rt::KHORA_OWNER_SHIFT) | 1;
-    let exe = build(
+    let exe = build_whole_as(
         "control",
         &format!(
-            "extern fn khora_rc_check(word: Int) -> ();
+            "{HEAD}\nextern fn khora_rc_check(word: Int) -> ();
 
 pub fn main() -> Int {{
   khora_rc_check({word});
@@ -1071,6 +1098,7 @@ pub fn main() -> Int {{
   0
 }}"
         ),
+        khora_codegen_llvm::Profile::Debug,
     );
     let out = Command::new(&exe).output().expect("the program should run");
     let stderr = String::from_utf8_lossy(&out.stderr);

@@ -208,6 +208,9 @@ pub(super) fn build(
     backend.single_threaded = counts_non_atomically(db, files, mono, entry_point);
     // A single-threaded program has one fiber, so there is nothing to check.
     backend.check_owners = profile == Profile::Debug && !backend.single_threaded;
+    // The local path is for a program with threads: one without has a plain
+    // count on every object already.
+    backend.local_counts = !backend.single_threaded && crate::local_counts_for_this_build();
 
     // One emitted function per *specialization*, not per source function: a
     // generic body has no machine representation until its type arguments are

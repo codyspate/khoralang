@@ -15,7 +15,7 @@ use super::*;
 use crate::counters::{ALLOC_COUNT, COUNTER_ORDER, LIVE_COUNT};
 use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error};
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 /// An object waiting to be released, and the callback that releases its
 /// fields.
@@ -266,6 +266,11 @@ pub extern "C" fn khora_alloc(size: u64, tag: u32) -> *mut u8 {
 
 /// Increments an object's refcount. Null is a no-op.
 ///
+/// **A plain add on a local object, in a program built with
+/// `KHORA_RC_LOCAL=1`** ([`khora_rc_local`]); the locked add otherwise. See
+/// [`classify`] for the test and for why a hand-written extern's call is
+/// covered by it.
+///
 /// # Safety
 ///
 /// `ptr` must be null or a live object from [`khora_alloc`], and the caller
@@ -283,38 +288,116 @@ pub unsafe extern "C" fn khora_dup(ptr: *mut u8) {
         let header = ptr.cast::<KhoraHeader>();
         // A static is in read-only memory, so this test is what keeps the add
         // below from faulting on one. See `KHORA_IMMORTAL`.
-        if is_immortal(&(*header).refcount) {
-            return;
+        match classify(&(*header).refcount) {
+            Count::Static => {}
+            Count::Local(word) => (*header).refcount.store(word + 1, Ordering::Relaxed),
+            // Relaxed is enough: the caller already owns a reference, so the
+            // object cannot be freed underneath this, and nothing is being
+            // published. Ordering is only needed on the *last* release, where
+            // `khora_drop` establishes it.
+            Count::Locked => {
+                (*header).refcount.fetch_add(1, Ordering::Relaxed);
+            }
         }
-        // Relaxed is enough: the caller already owns a reference, so the
-        // object cannot be freed underneath this, and nothing is being
-        // published. Ordering is only needed on the *last* release, where
-        // `khora_drop` establishes it.
-        (*header).refcount.fetch_add(1, Ordering::Relaxed);
     }
 }
 
-/// Whether this count word belongs to a static that nothing may write.
+/// Set once, by the `main` of a program built with `KHORA_RC_LOCAL=1`.
+static LOCAL_COUNTS: AtomicBool = AtomicBool::new(false);
+
+/// Records that this program counts local objects without a lock prefix.
 ///
-/// Relaxed is enough. The bit is in the initializer and never changes, so
-/// any load at all sees it.
+/// Called by the generated `main` of a program built with `KHORA_RC_LOCAL=1`,
+/// before anything is allocated, so the runtime's counts take the same local
+/// path as generated code's. **What it prevents: a switch-off build losing
+/// its safety net.** Without the switch every count stays locked, in the
+/// runtime too, so a program that reaches a `mut` field from two fibers
+/// (a field race Khora does not yet refuse everywhere) races fields and
+/// never counts. A library build never calls it, so its runtime counts stay
+/// locked.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_rc_local() {
+    LOCAL_COUNTS.store(true, Ordering::Relaxed);
+}
+
+/// What a runtime count has to do, read from the word it found.
+enum Count {
+    /// A static: nothing may write it.
+    Static,
+    /// Neither flag, and the program counts local objects plainly: the word
+    /// as loaded, to be stored back one more or one less.
+    Local(u64),
+    /// Shared, or any object in a program without the switch: the locked
+    /// read-modify-write.
+    Locked,
+}
+
+/// Reads the count word once and says which of the three counts applies.
 ///
-/// **A mask of bit 62, not `>= KHORA_IMMORTAL`.** Bit 63 is
+/// **The same test generated code makes** (`backend/counts.rs`): a relaxed
+/// load, the two flag bits, then a plain update of a local object. A local
+/// object is reachable from one fiber only: every runtime entry that hands
+/// a value to another fiber marks it shared first (`crate::share`), and a
+/// fiber moves between workers only through the scheduler's locked queues,
+/// so a runtime count of a local object runs on the fiber that owns it --
+/// the drop glue releasing a child the owner was holding, a runtime entry
+/// releasing what that same fiber handed it -- and never concurrently with
+/// another count of it. That covers a hand-written extern too: it can only
+/// count an object its own fiber holds a reference to, and a local object
+/// is held by one fiber. If a mark was missed, the owner check below is what
+/// reports it, in a debug build.
+///
+/// Relaxed is enough for the load. The immortal bit is in the initializer
+/// and never changes, and the shared bit is set before the publishing lock
+/// that hands the object over, so a fiber that can reach a shared object
+/// sees the bit.
+///
+/// **A mask of bit 62 for a static, not `>= KHORA_IMMORTAL`.** Bit 63 is
 /// [`KHORA_SHARED`], and the compare would read every shared object as a
 /// static: never counted, so never freed.
 ///
-/// In a debug build this is also where the owner check runs, since every
-/// runtime count loads the word here first.
+/// In a debug build this is also where the owner check runs, for every
+/// runtime count of an object that is neither shared nor static.
 #[inline(always)]
-fn is_immortal(count: &AtomicU64) -> bool {
+fn classify(count: &AtomicU64) -> Count {
     let word = count.load(Ordering::Relaxed);
     if word & KHORA_IMMORTAL != 0 {
-        return true;
+        return Count::Static;
     }
     if crate::share::checking() {
         crate::share::khora_rc_check(word);
     }
-    false
+    if word & KHORA_SHARED == 0 && LOCAL_COUNTS.load(Ordering::Relaxed) {
+        Count::Local(word)
+    } else {
+        Count::Locked
+    }
+}
+
+/// Takes one reference off a count word, answering the previous word.
+///
+/// The decrement of [`khora_drop`] and [`khora_drop_reuse`]: plain and
+/// relaxed on a local object, the locked release subtract otherwise, and
+/// `None` for a static. The caller takes the acquire fence on the last
+/// reference, as before; after a local decrement it orders nothing a
+/// program can see, since every count of the object was made by this
+/// fiber, and on x86 it is no instruction at all.
+#[inline(always)]
+fn decrement(count: &AtomicU64) -> Option<u64> {
+    match classify(count) {
+        Count::Static => None,
+        Count::Local(word) => {
+            count.store(word.wrapping_sub(1), Ordering::Relaxed);
+            Some(word)
+        }
+        Count::Locked => {
+            // Release, so that everything this thread did to the object
+            // happens before whichever thread performs the final decrement
+            // sees the count reach zero. The matching acquire is the fence
+            // the caller takes on the last reference.
+            Some(count.fetch_sub(1, Ordering::Release))
+        }
+    }
 }
 
 /// Decrements an object's refcount, freeing it when the count reaches zero.
@@ -340,6 +423,13 @@ fn is_immortal(count: &AtomicU64) -> bool {
 /// Aborts on a refcount that is already zero, which means a double free or a
 /// missing [`khora_dup`].
 ///
+/// A plain subtract on a local object when the program was built with
+/// `KHORA_RC_LOCAL=1`, the locked one otherwise; [`classify`] has why.
+///
+/// **An object with no field routine is freed at once, not queued.** It has
+/// no children to release, so nothing can recurse; claiming the drain for it
+/// cost three thread-local calls per string freed.
+///
 /// # Safety
 ///
 /// `ptr` must be null or a live object from [`khora_alloc`], and the caller
@@ -360,20 +450,9 @@ pub unsafe extern "C" fn khora_drop(ptr: *mut u8, drop_fields: Option<extern "C"
     let header = ptr.cast::<KhoraHeader>();
 
     // SAFETY: `ptr` points at a live object per the contract above, so its
-    // header is initialized and valid to read.
-    if is_immortal(unsafe { &(*header).refcount }) {
-        return;
-    }
-
-    // Release, so that everything this thread did to the object happens
-    // before whichever thread performs the final decrement sees the count
-    // reach zero. The standard reference-counting pair; the matching acquire
-    // is the fence below.
-    //
-    // SAFETY: `ptr` points at a live object per the contract above, so its
     // header is initialized and valid to read and write.
-    let refcount =
-        unsafe { (*header).refcount.fetch_sub(1, Ordering::Release) } & KHORA_COUNT_MASK;
+    let Some(previous) = decrement(unsafe { &(*header).refcount }) else { return };
+    let refcount = previous & KHORA_COUNT_MASK;
     // A decrement from a count of zero borrows from the bits above the
     // count, leaving the debug owner or a flag one less. That word is never
     // read again: the abort below is next.
@@ -388,6 +467,13 @@ pub unsafe extern "C" fn khora_drop(ptr: *mut u8, drop_fields: Option<extern "C"
     // acquire pairs with every other thread's release, so their writes are
     // visible before the fields are read and the memory is freed.
     std::sync::atomic::fence(Ordering::Acquire);
+
+    if drop_fields.is_none() {
+        // SAFETY: this thread took the count to zero, so it holds the only
+        // claim, and with no field routine nothing can be queued behind it.
+        unsafe { release_now(ptr, None) };
+        return;
+    }
 
     // Queued if something above is already freeing, so a graph is released
     // iteratively rather than as deep as it is. See [`PENDING`].
@@ -406,6 +492,14 @@ pub unsafe extern "C" fn khora_drop(ptr: *mut u8, drop_fields: Option<extern "C"
 /// memory **without freeing it**, so the caller can build the next object in
 /// the same cell. On any other outcome — a shared object, a null pointer — it
 /// behaves exactly as `khora_drop` does and returns null.
+///
+/// **A token only where the masked previous count was 1**, with the local
+/// path as with the shared one. On a shared object the locked subtract and
+/// the acquire fence after it order every other holder's release before
+/// this. On a local object every other count was made by this same fiber,
+/// in program order, whether by the relaxed store of generated code or a
+/// locked operation here, so the subtract reads all of them. Either way the
+/// caller held the one reference left and no other fiber can reach the cell.
 ///
 /// The value returned is a *token*, and the caller owes it to
 /// [`khora_alloc_reuse`] on every path. It is memory with no owner: nothing
@@ -439,13 +533,10 @@ pub unsafe extern "C" fn khora_drop_reuse(
     // `KHORA_IMMORTAL`.
     //
     // SAFETY: live per the contract, so the header is initialized.
-    if is_immortal(unsafe { &(*header).refcount }) {
+    let Some(previous) = decrement(unsafe { &(*header).refcount }) else {
         return std::ptr::null_mut();
-    }
-
-    // SAFETY: live per the contract, so the header is initialized.
-    let refcount =
-        unsafe { (*header).refcount.fetch_sub(1, Ordering::Release) } & KHORA_COUNT_MASK;
+    };
+    let refcount = previous & KHORA_COUNT_MASK;
     if refcount == 0 {
         fatal("drop of an object whose refcount is already zero (double free, or a missing dup)");
     }
@@ -493,6 +584,12 @@ pub unsafe extern "C" fn khora_drop_reuse(
 /// The last case is why a caller may hand over a token without first proving
 /// the shapes agree: the size lives in the header, so the check is one
 /// comparison here rather than a static analysis there.
+///
+/// **The header written is local: no shared bit, this fiber as owner.** Right
+/// with the local path as well as without it. A token means the calling
+/// fiber held the cell's only reference (see [`khora_drop_reuse`]), so no
+/// other fiber can count what is built here, and a plain count of it by this
+/// fiber is sound until a runtime entry marks it again.
 ///
 /// # Safety
 ///
@@ -601,8 +698,18 @@ pub unsafe extern "C" fn khora_drop_last(
 
     // Acquire, pairing with every other thread's release, so their writes are
     // visible before the fields are read and the memory is freed. The matching
-    // release is the caller's decrement.
+    // release is the caller's decrement. On x86 and AArch64 an acquire fence
+    // after a locked subtract costs nothing; after a local one it is ordering
+    // for the compiler only.
     std::sync::atomic::fence(Ordering::Acquire);
+
+    // A leaf is freed at once, as in `khora_drop`.
+    if drop_fields.is_none() {
+        // SAFETY: this thread took the count to zero and holds the only
+        // claim; with no field routine nothing can queue.
+        unsafe { release_now(ptr, None) };
+        return;
+    }
 
     // As `khora_drop`, and this is the one generated code calls: a graph is
     // released iteratively, so freeing costs no stack. See [`PENDING`].

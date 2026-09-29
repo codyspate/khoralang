@@ -143,10 +143,16 @@ pub(crate) struct Task {
 // Khora bodies can be reasoned about, and the language already did the work:
 //
 //   - Every value on a Khora stack is a Khora value, reference-counted. When a
-//     program can spawn at all, those counts are atomic — `SINGLE_THREADED` is
-//     the flag, and `khora_fiber_spawn` aborts a program that spawns after the
-//     compiler emitted non-atomic counting on the strength of it never doing
-//     so. So moving a stack between workers cannot race a count.
+//     program can spawn at all, a count is atomic unless the object is local
+//     to this fiber — never marked shared by a runtime entry, and so reachable
+//     from no other fiber — and a build asked for plain local counts
+//     (`KHORA_RC_LOCAL=1`). `SINGLE_THREADED` is the flag for a program that
+//     counts everything plain, and `khora_fiber_spawn` aborts a program that
+//     spawns after the compiler emitted that on the strength of it never
+//     doing so. A local object is counted by one fiber only, and this stack
+//     moves between workers only through the scheduler's locked queues, so
+//     every count written before the move happens before every count after
+//     it. So moving a stack between workers cannot race a count.
 //   - What may cross *into* a fiber is `Share`, checked by the type checker and
 //     restricted to the module declaring the type — `docs/design/sharing.md`.
 //     A fiber's stack therefore holds only what was already allowed to be there.

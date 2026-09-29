@@ -7,9 +7,12 @@
 //! closure, a channel send, a cell's contents, a fiber's answer. Each of those
 //! calls [`khora_share`] on what it publishes, before the lock or hand-off
 //! that publishes it, so the receiving thread sees the
-//! bit before it sees the pointer. Counting stays atomic for every object, so
-//! today the bit changes no count. What reads it is the owner check below,
-//! and a later stage that counts local objects without a lock prefix.
+//! bit before it sees the pointer. A program built with `KHORA_RC_LOCAL=1`
+//! reads it on every count: clear, and the count is a relaxed load, an add
+//! and a relaxed store; set, and it is the locked read-modify-write. A missed
+//! mark there is two threads plain-counting one object, and the owner check
+//! below is what reports it. Without the switch every count is locked and
+//! the bit feeds only the owner check.
 //!
 //! # The invariant a deep mark rests on
 //!
@@ -143,10 +146,13 @@ fn running_fiber() -> u64 {
 /// objects are exempt, and so is an object with no recorded owner: one made
 /// before the check was on, or by a fiber whose id is zero in the owner bits.
 ///
-/// **A detector, not a mode.** The count it sits beside is atomic either way,
-/// so a trap here reports a missed mark; it does not prevent corruption that
-/// would otherwise happen today. The cost is a call per count of a local
-/// object, in debug builds only, which is the profile `khora test` uses.
+/// **A detector, not a mode.** A trap here reports a missed mark. Without
+/// `KHORA_RC_LOCAL=1` the count beside it is locked anyway, so the trap
+/// names corruption that would happen only once local counts are plain; with
+/// the switch, the count beside it is plain, and this is the one thing that
+/// sees the race before it corrupts the heap. The cost is a call per count
+/// of a local object, in debug builds only, which is the profile `khora
+/// test` uses.
 #[unsafe(no_mangle)]
 // SHARE: reads a count word; takes no object.
 pub extern "C" fn khora_rc_check(word: u64) {

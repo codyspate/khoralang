@@ -298,6 +298,10 @@ impl Cache {
         // spellings of the same build -- share a key instead of each paying
         // for the other's miss. Any staging switch of this kind belongs here.
         field(&[u8::from(khora_codegen_llvm::unboxing_enabled())]);
+        // `KHORA_RC_LOCAL` for the same reason: it decides whether a local
+        // object's count is a locked read-modify-write or a plain add in
+        // every function emitted, and nothing in the sources says which.
+        field(&[u8::from(khora_codegen_llvm::local_counts_enabled())]);
 
         // Sorted by content rather than by path, so the order does not depend
         // on where the checkout is. Paths join the key only when debug

@@ -144,6 +144,19 @@ static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Compiles `source` into its own directory, with `KHORA_UNBOXED` set to
 /// `unboxed` and counts forced plain if `plain`.
 fn build(name: &str, source: &str, unboxed: &str, plain: bool) -> PathBuf {
+    build_as(name, source, unboxed, plain, false, khora_codegen_llvm::Profile::from_env())
+}
+
+/// [`build`], with `KHORA_RC_LOCAL=1` set while it compiles if `local`, in
+/// `profile`.
+fn build_as(
+    name: &str,
+    source: &str,
+    unboxed: &str,
+    plain: bool,
+    local: bool,
+    profile: khora_codegen_llvm::Profile,
+) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     harness::ensure_runtime();
     std::fs::create_dir_all(&dir).expect("a workspace");
@@ -154,11 +167,17 @@ fn build(name: &str, source: &str, unboxed: &str, plain: bool) -> PathBuf {
     // SAFETY-of-a-sort: process-wide, and every test in this binary holds the
     // lock while it is set.
     unsafe { std::env::set_var("KHORA_UNBOXED", unboxed) };
+    if local {
+        unsafe { std::env::set_var("KHORA_RC_LOCAL", "1") };
+    } else {
+        unsafe { std::env::remove_var("KHORA_RC_LOCAL") };
+    }
     khora_codegen_llvm::force_plain_counts_on_this_thread(plain);
     let db = KhoraDatabase::new();
     let root = SourceRoot::new(&db, sources(&db, &dir, source));
-    let outcome = khora_codegen_llvm::compile(&db, root, &exe);
+    let outcome = khora_codegen_llvm::compile_with(&db, root, &exe, profile);
     khora_codegen_llvm::force_plain_counts_on_this_thread(false);
+    unsafe { std::env::remove_var("KHORA_RC_LOCAL") };
     unsafe { std::env::remove_var("KHORA_UNBOXED") };
     if let Err(errors) = outcome {
         let messages: Vec<String> = errors.into_iter().map(|e| e.message).collect();
@@ -283,6 +302,112 @@ fn the_fixture_fails_when_counts_are_not_atomic() {
             runs.first()
         );
     }
+}
+
+/// **Every crossing with plain counts on local objects** (`KHORA_RC_LOCAL=1`),
+/// in both profiles and both layouts.
+///
+/// What this guards: a route the runtime does not mark. The fixture's
+/// values cross while both sides keep counting them, so with local counts
+/// plain an unmarked one loses updates -- a wrong total, a leak or a crash
+/// in release -- and traps on the owner check in debug. Marked, they are
+/// counted atomically and the total is exact.
+#[test]
+fn every_crossing_counts_to_zero_with_local_counts() {
+    use khora_codegen_llvm::Profile;
+    for profile in [Profile::Debug, Profile::Release] {
+        for unboxed in ["1", "0"] {
+            let name = format!("crossings_local_{unboxed}_{}", profile.name());
+            let exe = build_as(&name, CROSSINGS, unboxed, false, true, profile);
+            for backend in BACKENDS {
+                for attempt in 1..=3 {
+                    let ran = run(&exe, backend);
+                    assert_eq!(
+                        ran.as_deref(),
+                        Ok(CORRECT),
+                        "`KHORA_RC_LOCAL=1`, `{}`, `KHORA_UNBOXED={unboxed}`, `{backend}`, \
+                         run {attempt}",
+                        profile.name()
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A function that only ever counts objects its own fiber made, in a
+/// program that spawns.
+const LOCAL_ONLY: &str = "module main;
+
+import std::core::{print, Fiber, List};
+
+fn churn(n: Int) -> Int {
+  let mut xs = List::Nil;
+  let mut i = 0;
+  while i < n { xs = List::Cons(\"x${i}\", xs); i = i + 1; };
+  let ys = xs;
+  List::length(xs) + List::length(ys)
+}
+
+pub fn main() -> Int {
+  let f = Fiber::spawn(fn () => churn(10));
+  print(\"${churn(10) + Fiber::join(f)}\");
+  0
+}
+";
+
+/// **`KHORA_RC_LOCAL=1` is what turns the local path on**, and so does the
+/// test-only force the `sharing::` rows build with; nothing else does.
+///
+/// What this guards: a switch that stopped switching. The crossing tests
+/// pass whether counts are plain or locked, so without this they could run
+/// "with the switch on" and test nothing new. The switch is read when a
+/// program is compiled, so this compiles one three ways and reads the IR:
+/// with the variable or the force, `churn`'s counts include a relaxed `store
+/// atomic`, which only the local path emits; with neither, none.
+///
+/// **And `main` tells the runtime, exactly when the path is on.** The
+/// runtime's own counts (`khora_drop` from drop glue, `khora_dup`) are plain
+/// on a local object only after `khora_rc_local`. Without the call a program
+/// built with the switch still counts every freed child with a lock; with it
+/// in a switch-off build, the runtime would count plainly behind generated
+/// code that does not.
+#[test]
+fn the_switch_emits_the_local_path() {
+    use khora_codegen_llvm::Profile;
+    let stores = |local: bool, forced: bool| {
+        let name = format!("local_switch_{local}_{forced}");
+        // SAFETY, for both: process-wide, set and cleared under the lock the
+        // other tests here hold while they touch the environment. Another
+        // test's build that sees it only writes its IR beside its program.
+        let held = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("KHORA_EMIT_LLVM", "1") };
+        drop(held);
+        khora_codegen_llvm::force_local_counts_on_this_thread(forced);
+        let exe = build_as(&name, LOCAL_ONLY, "1", false, local, Profile::Debug);
+        khora_codegen_llvm::force_local_counts_on_this_thread(false);
+        let held = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("KHORA_EMIT_LLVM") };
+        drop(held);
+        assert_eq!(run(&exe, "threads").as_deref(), Ok("40"), "local {local}, forced {forced}");
+        let ir = std::fs::read_to_string(exe.with_extension("ll")).expect("the IR was dumped");
+        let churn = ir
+            .split("\ndefine ")
+            .find(|f| f.contains("main$churn"))
+            .expect("`churn` was emitted")
+            .to_string();
+        let tells = ir.contains("call void @khora_rc_local()");
+        (churn.matches("store atomic i64").count(), tells)
+    };
+    let (off, off_tells) = stores(false, false);
+    assert_eq!(off, 0, "a relaxed count store with the switch off");
+    assert!(!off_tells, "`main` switched the runtime to local counts with the switch off");
+    let (on, on_tells) = stores(true, false);
+    assert!(on > 0, "no relaxed count store with `KHORA_RC_LOCAL=1`");
+    assert!(on_tells, "`main` did not tell the runtime about `KHORA_RC_LOCAL=1`");
+    let (forced, forced_tells) = stores(false, true);
+    assert!(forced > 0, "no relaxed count store with the test-only force");
+    assert!(forced_tells, "`main` did not tell the runtime about the test-only force");
 }
 
 /// How many times each side of a crossing reads in [`CROSSINGS`].

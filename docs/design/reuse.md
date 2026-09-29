@@ -381,6 +381,15 @@ shift that moves them to the top of the word, which is smaller code than an
 the shared bit clear, since the token proves the caller held the only
 reference.
 
+**Reuse with plain local counts (`KHORA_RC_LOCAL=1`).** `khora_drop_reuse`
+hands a token only when the masked previous count was 1, and that answer is
+right on both paths. On a shared object the locked subtract and the acquire
+fence order every other holder's release before it. On a local object every
+count was made by the one fiber that holds it, in program order, whether by
+generated code's relaxed store or a locked operation in the runtime, so the
+subtract reads all of them. The cell `khora_alloc_reuse` then builds is local
+to that fiber, which is true for the same reason.
+
 **How the measurement nearly went wrong.** The first attempt at an envelope was
 a throwaway runtime with `khora_dup` and `khora_drop` returning immediately. It
 measured *slower* — nothing is ever freed, so the working set grows without
@@ -470,6 +479,13 @@ So it has to be per-*allocation-site*, and there are two known shapes:
   at the price of a wider header and a thread-identity comparison on every
   operation — perhaps half the ceiling, for a much smaller change, and no
   soundness argument to get wrong.
+
+**What was built instead: mark on share, behind `KHORA_RC_LOCAL=1`.** Neither
+shape below. Every object is local to the fiber that made it until a runtime
+entry publishes it and marks it (bit 63), and generated code counts a local
+object with a relaxed load and store and a shared one with the locked
+operation. `memory.md` §5 has the layout, what it rests on, the two routes
+by which it does not yet hold, and why it is off by default.
 
 **Neither is started, and neither should be started for the number.** A few per
 cent, for a whole-program flow analysis whose failure mode is a data race in a
