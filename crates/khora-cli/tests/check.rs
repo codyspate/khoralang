@@ -427,7 +427,7 @@ fn the_standard_library_needs_no_declaring() {
         dir.join("main.kh"),
         "module app::main;
 import std::core::{Option};
-pub fn main() -> Int { Option::Some(41).unwrap_or(0) + 1 }
+pub fn main() -> Int { Option::unwrap_or(Option::Some(41), 0) + 1 }
 ",
     )
     .expect("a fixture");

@@ -46,7 +46,7 @@ extern fn khora_net_forget(handle: I32) -> ();
 extern fn khora_net_connect(host: Ptr, host_len: Int, port: Int) -> Int;
 
 /// A failed call returns -1, and a handle is never negative.
-pub fn invalid_handle() -> Int { 0 - 1 }
+pub fn invalid_handle() -> Int { -1 }
 
 /// Nothing to start. Present so that a caller reads the same on all three targets.
 pub fn start() -> Bool { true }
@@ -246,7 +246,7 @@ pub fn receive_now(connection: Int, buffer: Array<U8>) -> Int {
 /// answer `receive_now` with a negative; only this one is still usable, and
 /// writing to the other ends the process on the platforms that raise
 /// `SIGPIPE`.
-pub fn nothing_yet(read: Int) -> Bool { read == 0 - 1 }
+pub fn nothing_yet(read: Int) -> Bool { read == -1 }
 
 /// Reads and discards what has already arrived, at most `rounds` times.
 fn drain(handle: Int, rounds: Int) -> () {
