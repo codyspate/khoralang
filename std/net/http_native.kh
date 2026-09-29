@@ -555,7 +555,7 @@ pub fn percent_decode(text: String) -> String {
     // A valid escape can spell a byte that is not text — `%FF` is not UTF-8 —
     // and `from_bytes` stops the program rather than pretend. A parameter
     // nobody can read as text is dropped instead of taking the server with it.
-    let taken = Array::prefix(out, written);
+    let taken = byte_prefix(out, written);
     if Array::is_utf8(taken) { String::from_bytes(taken) } else { "" }
   }
 }
@@ -822,8 +822,7 @@ pub fn over_tls(connection: TlsConnection) -> Transport {
 /// version safe is the deadline `serve_connection` sets before calling this —
 /// a client that goes quiet gets its socket closed instead of parking a fiber
 /// for the life of the process.
-fn read_request(transport: Transport, into: Array<U8>, from: Int) -> Int {
-  let scratch: Array<U8> = Array::new(chunk(), 0);
+fn read_request(transport: Transport, into: Array<U8>, from: Int, scratch: Array<U8>) -> Int {
   // What the last request on this connection left behind. A client is allowed
   // to send the next one before reading the last answer, so the bytes after a
   // request's end are not spare — they are the beginning of the next.
@@ -873,19 +872,21 @@ fn read_request(transport: Transport, into: Array<U8>, from: Int) -> Int {
 
 /// Moves `count` bytes from `at` to the front, for the next request to grow on.
 fn shift_down(buffer: Array<U8>, at: Int, count: Int) -> () {
-  let mut i = 0;
-  while i < count {
-    Array::set(buffer, i, Array::get(buffer, at + i));
-    i = i + 1;
-  }
+  Array::copy_into(buffer, at, buffer, 0, count)
 }
 
 fn copy_at(from: Array<U8>, into: Array<U8>, count: Int, offset: Int) -> () {
-  let mut i = 0;
-  while i < count {
-    Array::set(into, offset + i, Array::get(from, i));
-    i = i + 1;
-  }
+  Array::copy_into(from, 0, into, offset, count)
+}
+
+/// The first `count` bytes of `bytes`, copied: `Array::prefix` for a byte
+/// buffer, in one copy rather than a get and a set per byte.
+fn byte_prefix(bytes: Array<U8>, count: Int) -> Array<U8> {
+  let length = Array::length(bytes);
+  let taken = if count < 0 { 0 } else if count > length { length } else { count };
+  let out: Array<U8> = Array::new(taken, 0);
+  Array::copy_into(bytes, 0, out, 0, taken);
+  out
 }
 
 /// How long the whole request should be, or negative while the headers are
@@ -905,7 +906,7 @@ pub fn request_length(bytes: Array<U8>, filled: Int) -> Int {
   if after < 0 {
     -1
   } else {
-    let head = Array::prefix(bytes, after);
+    let head = byte_prefix(bytes, after);
     // Header bytes that are not text are a request nobody can answer, and
     // saying it ends here turns that into a 400 rather than a trap inside
     // `from_bytes`.
@@ -985,6 +986,13 @@ pub type Connection = {
   /// Bytes of the *next* request that arrived with the last one. A pipelining
   /// client sends two without waiting, and the second must not be dropped.
   mut carried: Int,
+  /// Where each socket read lands before it is copied into `buffer`.
+  ///
+  /// **One per connection, so reading a request allocates nothing.** Nothing
+  /// holds it between reads: what arrived is copied out at once.
+  ///
+  /// What it costs: 4 KiB per open connection, beside `buffer`.
+  scratch: Array<U8>,
 };
 
 /// What reading a connection produced.
@@ -1018,7 +1026,7 @@ impl Connection {
   /// are connected.
   pub fn holding(transport: Transport, most: Int) -> Connection {
     let buffer: Array<U8> = Array::new(most, 0);
-    { transport: transport, buffer: buffer, carried: 0 }
+    { transport: transport, buffer: buffer, carried: 0, scratch: Array::new(chunk(), 0) }
   }
 
   /// Reads until one request is whole, and says what arrived.
@@ -1026,7 +1034,7 @@ impl Connection {
   /// Blocks. Whether that blocks a thread, a fiber or the only thread there is
   /// belongs to the caller — see the note on [`Connection`].
   pub fn next(self) -> Incoming {
-    let filled = read_request(self.transport, self.buffer, self.carried);
+    let filled = read_request(self.transport, self.buffer, self.carried, self.scratch);
     let want = request_length(self.buffer, filled);
     // Whether what is in the buffer is already a whole request.
     let whole = want > 0 && want <= filled;
@@ -1050,7 +1058,7 @@ impl Connection {
         // about its length or simply sent too much, the answer is the same.
         Incoming::Rejected(Response::text(413, "request too large"))
       } else {
-        let taken = Array::prefix(self.buffer, length);
+        let taken = byte_prefix(self.buffer, length);
         // Held before parsing, so `next` leaves the connection ready whatever
         // the parse decides. `prefix` copied, so moving the buffer underneath
         // is safe.
@@ -2331,7 +2339,7 @@ fn read_answer(transport: Transport, limit: Int) -> Result<String, CallError> {
   } else if closed && want >= 0 && filled < want {
     Result::Err(CallError::Closed("the answer stopped short of its length"))
   } else {
-    Result::Ok(String::from_bytes(Array::prefix(into, filled)))
+    Result::Ok(String::from_bytes(byte_prefix(into, filled)))
   }
 }
 
@@ -2345,9 +2353,9 @@ fn answer_length(bytes: Array<U8>, filled: Int) -> Int {
   if after < 0 {
     -1
   } else {
-    let head = String::from_bytes(Array::prefix(bytes, after));
+    let head = String::from_bytes(byte_prefix(bytes, after));
     if is_chunked(head) {
-      let body = String::from_bytes(Array::prefix(bytes, filled));
+      let body = String::from_bytes(byte_prefix(bytes, filled));
       let ends = chunked_end(body, after);
       if ends < 0 { -1 } else { ends }
     } else {

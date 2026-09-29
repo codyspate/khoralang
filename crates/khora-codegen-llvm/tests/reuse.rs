@@ -148,8 +148,9 @@ fn walk(r: Range) -> Int {
 pub fn main() -> () {
   khora_reset_counters();
   let total = walk(Range::Of(0, 10));
+  let made = khora_alloc_count();
   print(Int::to_string(total));
-  print(Int::to_string(khora_alloc_count()))
+  print(Int::to_string(made))
 }
 ";
 
@@ -164,15 +165,16 @@ fn a_constructor_in_each_branch_still_reuses() {
     let lines: Vec<&str> = out.trim().lines().collect();
     assert_eq!(lines[0], "45", "the walk should sum 0..=9");
 
+    // The count is read before anything is printed, so it is the walk's
+    // alone and doesn't move when `Int::to_string` or `print` allocate less.
+    //
     // **Held inline there is no cell to reuse, and none to count.** `Range`
-    // and `Step` are then registers rather than objects, so the number this
-    // pins is not seventeen: the six that remain are what `print` builds. The
-    // claim above is about heap cells and this walk makes none of them -- the
-    // branch shape it guards is still compiled, and the walks over `List` in
-    // this file are recursive, so they are boxed either way and keep testing
-    // it. Delete the branch when the flag goes.
+    // and `Step` are then registers rather than objects, so the walk makes no
+    // heap cells at all. The branch shape this guards is still compiled, and
+    // the walks over `List` in this file are recursive, so they are boxed
+    // either way and keep testing it. Delete the branch when the flag goes.
     let inline = khora_codegen_llvm::unboxing_enabled();
-    let expected = if inline { "6" } else { "17" };
+    let expected = if inline { "0" } else { "11" };
     assert_eq!(lines[1], expected, "one allocation an element, not two");
 }
 

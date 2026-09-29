@@ -133,7 +133,7 @@ struct Shared {
     ///
     /// A waker needs the *state* to set `NOTIFIED` on, and that exists from the
     /// moment the fiber does.
-    live: Mutex<std::collections::HashMap<usize, Arc<crate::current::Fiber>>>,
+    live: Mutex<std::collections::HashMap<usize, Arc<crate::current::Fiber>, ById>>,
     /// Fibers waiting for something, by fiber id.
     ///
     /// **The same lock covers parking and waking**, which is what closes the
@@ -141,7 +141,7 @@ struct Shared {
     /// fiber's state and files the task here without letting go; a waker sets
     /// the state and takes the task out without letting go. Neither can see a
     /// half-finished version of the other.
-    parked: Mutex<std::collections::HashMap<usize, Task>>,
+    parked: Mutex<std::collections::HashMap<usize, Task, ById>>,
     /// Deadlines, and the fibers waiting on them.
     timers: Mutex<Timers>,
     /// Sockets, and the fibers waiting on them.
@@ -375,8 +375,8 @@ impl Scheduler {
         let shared = Arc::new(Shared {
             queued: Mutex::new(VecDeque::new()),
             locals,
-            live: Mutex::new(std::collections::HashMap::new()),
-            parked: Mutex::new(std::collections::HashMap::new()),
+            live: Mutex::new(std::collections::HashMap::default()),
+            parked: Mutex::new(std::collections::HashMap::default()),
             timers: Mutex::new(Timers::default()),
             reactor: Reactor::default(),
             arrived: Condvar::new(),
@@ -1188,10 +1188,72 @@ fn park(shared: &Arc<Shared>, local: &Arc<Mutex<VecDeque<Task>>>) -> bool {
     }
 }
 
+/// The hasher for [`Shared::live`] and [`Shared::parked`], which are keyed by
+/// fiber id.
+///
+/// **What this prevents: SipHash on every park and every wake.** The default
+/// hasher resists keys chosen to collide, and a fiber id is a counter the
+/// runtime hands out, so nobody chooses it. SipHash over those maps was 8.5% of
+/// a twenty-query request's instructions once the allocation costs were gone.
+///
+/// A multiply rather than the id itself: the standard map takes a seven-bit tag
+/// from the *top* of the hash to reject a slot without comparing keys, and the
+/// top bits of a small counter are all zero, so every entry would share one tag
+/// and every probe would compare keys. Multiplying by an odd constant keeps
+/// distinct ids distinct and moves their differences into those bits.
+#[derive(Clone, Copy, Default)]
+struct ById;
+
+impl std::hash::BuildHasher for ById {
+    type Hasher = IdHash;
+    fn build_hasher(&self) -> IdHash {
+        IdHash(0)
+    }
+}
+
+/// See [`ById`].
+struct IdHash(u64);
+
+impl std::hash::Hasher for IdHash {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write_usize(&mut self, id: usize) {
+        // 2^64 divided by the golden ratio, which is odd, so no two ids collide.
+        self.0 = (id as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+
+    /// Only a `usize` key is hashed here, and a key type that hashes as bytes
+    /// would otherwise get a hash of zero for everything and a map that is a
+    /// list. Folded in anyway rather than a panic, because a panic here is in
+    /// the middle of a wake.
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0 ^ u64::from(b)).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::coro::suspend;
+
+    /// **What this guards: a fiber-id hash that the map cannot tell apart.**
+    /// Every id must hash differently, and the top seven bits, which the map
+    /// uses to skip a slot without comparing keys, must vary as well. A hash of
+    /// the id itself passes the first and fails the second, and would make
+    /// every lookup compare the key of every fiber in its group.
+    #[test]
+    fn fiber_ids_hash_apart_in_the_bits_the_map_reads() {
+        use std::hash::BuildHasher;
+        let hashes: Vec<u64> = (1usize..=4096).map(|id| ById.hash_one(id)).collect();
+        let distinct: std::collections::HashSet<u64> = hashes.iter().copied().collect();
+        assert_eq!(distinct.len(), hashes.len(), "two fiber ids hashed alike");
+        let tags: std::collections::HashSet<u64> = hashes.iter().map(|h| h >> 57).collect();
+        assert_eq!(tags.len(), 128, "only {} of the 128 tags in use", tags.len());
+    }
 
     /// Spends a safepoint the way generated code will, and yields if the
     /// budget says to.

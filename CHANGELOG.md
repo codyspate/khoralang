@@ -716,6 +716,20 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 
 ### Changed
 
+- **Performance: the allocation and copying on a server's request path.**
+  The same answers with less work, measured on the TechEmpower server. A
+  new array's fill is written in bulk: nothing for a zero fill, one `memset`
+  for a byte, and doubling copies for anything wider, where it was one
+  `memcpy` call per element. `Int::to_string` builds one buffer. A
+  `String`'s order is one `memcmp`. `List::sort_by` sorts in an array and
+  rebuilds the list, so it is stable as before and recurses nowhere. HTTP
+  and `postgres` connections keep one read buffer each; `postgres` builds
+  messages in a byte array that doubles and copies in bulk, reads integer
+  columns from their digits, and builds a reply's column names once rather
+  than once per row. The scheduler's fiber tables hash an id with one
+  multiply. Every value these produce is unchanged, including the text of
+  the most negative `Int` and the order of strings with bytes above `0x7f`.
+
 - **The header's count word carries a shared flag, and debug builds trap on an
   unmarked crossing.** Bit 63 of an object's count word marks it as reachable
   from more than one fiber. The runtime sets it on everything a spawn
@@ -828,6 +842,13 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   error and joined twice); with the switch set, a write to that field races
   the counts of what it holds, which can crash a release build. A debug
   build traps on both with or without the switch.
+
+- **`Array::copy_into(source, from, target, at, count)` and
+  `String::copy_into(from, target, at, count)`** copy bytes into an
+  `Array<U8>` in one move. The ranges are checked once, and one that does
+  not fit stops the program with the index-out-of-range trap; the source
+  and target may be the same array and may overlap.
+
 - **Labeled arguments.** At a call to a named function an argument may be
   written `name: value`, where `name` is the name the declaration gives the
   parameter at that position: `reply(connection, "ok", keep_alive: false)`.

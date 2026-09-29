@@ -1,6 +1,6 @@
 module postgres::wire;
 
-import std::core::{Array, List, Option, Vector};
+import std::core::{Array, List, Option};
 
 /// The bytes of a PostgreSQL frontend/backend message, and how to read them
 /// back.
@@ -34,47 +34,77 @@ import std::core::{Array, List, Option, Vector};
 
 /// A message being built.
 ///
-/// A `Vector<U8>` rather than an `Array<U8>`, because the length is not known
-/// until the payload is finished — which is the whole reason a protocol puts
-/// the length first and a writer has to buffer.
+/// A byte array that doubles when it fills, and how much of it is written:
+/// the length is not known until the payload is finished — which is the whole
+/// reason a protocol puts the length first and a writer has to buffer.
+///
+/// **What the array is for: a message written a byte at a time.** A
+/// `Vector<U8>` took a call and a bounds check per byte and was copied out a
+/// byte at a time by `finish`; text and arrays here are one bounds check and
+/// one copy each, and `finish` is one copy.
+///
+/// What it costs: up to twice the message's size, held until the writer goes.
 pub type Writer = {
-  bytes: Vector<U8>,
+  mut bytes: Array<U8>,
+  mut used: Int,
 };
 
 impl Writer {
   pub fn new() -> Writer {
-    { bytes: Vector::new() }
+    { bytes: Array::new(256, 0), used: 0 }
+  }
+
+  /// Room for `more` bytes after what is written.
+  fn room(self, more: Int) -> () {
+    let need = self.used + more;
+    let have = Array::length(self.bytes);
+    if need > have {
+      let mut size = have * 2;
+      while size < need { size = size * 2 };
+      let bigger: Array<U8> = Array::new(size, 0);
+      Array::copy_into(self.bytes, 0, bigger, 0, self.used);
+      self.bytes = bigger
+    }
   }
 
   /// One byte.
   pub fn u8(self, value: Int) -> () {
-    Vector::push(self.bytes, U8::of(Int::and(value, 255)));
+    Writer::room(self, 1);
+    Array::set(self.bytes, self.used, U8::of(Int::and(value, 255)));
+    self.used = self.used + 1;
   }
 
   /// Sixteen bits, most significant first. The protocol is big-endian
   /// throughout, which is not this machine's order and so is written out
   /// rather than reinterpreted.
   pub fn i16(self, value: Int) -> () {
-    Writer::u8(self, Int::shr(value, 8));
-    Writer::u8(self, value);
+    Writer::room(self, 2);
+    Array::set(self.bytes, self.used, U8::of(Int::and(Int::shr(value, 8), 255)));
+    Array::set(self.bytes, self.used + 1, U8::of(Int::and(value, 255)));
+    self.used = self.used + 2;
   }
 
   /// Thirty-two bits, most significant first.
   pub fn i32(self, value: Int) -> () {
-    Writer::u8(self, Int::shr(value, 24));
-    Writer::u8(self, Int::shr(value, 16));
-    Writer::u8(self, Int::shr(value, 8));
-    Writer::u8(self, value);
+    Writer::room(self, 4);
+    Writer::put_i32(self, self.used, value);
+    self.used = self.used + 4;
+  }
+
+  /// Thirty-two bits at `at`, which is already written.
+  fn put_i32(self, at: Int, value: Int) -> () {
+    Array::set(self.bytes, at, U8::of(Int::and(Int::shr(value, 24), 255)));
+    Array::set(self.bytes, at + 1, U8::of(Int::and(Int::shr(value, 16), 255)));
+    Array::set(self.bytes, at + 2, U8::of(Int::and(Int::shr(value, 8), 255)));
+    Array::set(self.bytes, at + 3, U8::of(Int::and(value, 255)));
   }
 
   /// A string's bytes, without a terminator.
   pub fn text(self, value: String) -> () {
     let count = String::byte_length(value);
-    let mut at = 0;
-    while at < count {
-      Vector::push(self.bytes, String::byte(value, at));
-      at = at + 1
-    };
+    Writer::room(self, count);
+    String::copy_into(value, 0, self.bytes, self.used, count);
+    self.used = self.used + count;
   }
 
   /// A string, terminated by a zero byte, which is how the protocol carries
@@ -90,14 +120,12 @@ impl Writer {
   /// extended protocol's five frames become a single write.
   pub fn raw(self, values: Array<U8>) -> () {
     let count = Array::length(values);
-    let mut at = 0;
-    while at < count {
-      Vector::push(self.bytes, Array::get(values, at));
-      at = at + 1
-    };
+    Writer::room(self, count);
+    Array::copy_into(values, 0, self.bytes, self.used, count);
+    self.used = self.used + count;
   }
 
-  pub fn length(self) -> Int { Vector::length(self.bytes) }
+  pub fn length(self) -> Int { self.used }
 
   /// Starts a framed message in this buffer: the type byte, and four bytes
   /// for a length that [`Writer::close`] fills in once the payload is written.
@@ -119,25 +147,14 @@ impl Writer {
   /// the length itself plus everything written since, which is
   /// [`framed`]'s rule computed from the same buffer.
   pub fn close(self, at: Int) -> () {
-    let length = Writer::length(self) - at;
-    Vector::set(self.bytes, at, U8::of(Int::and(Int::shr(length, 24), 255)));
-    Vector::set(self.bytes, at + 1, U8::of(Int::and(Int::shr(length, 16), 255)));
-    Vector::set(self.bytes, at + 2, U8::of(Int::and(Int::shr(length, 8), 255)));
-    Vector::set(self.bytes, at + 3, U8::of(Int::and(length, 255)));
+    Writer::put_i32(self, at, Writer::length(self) - at);
   }
 
-  /// What has been written, as an array ready to send.
-  ///
-  /// `Vector::at` rather than `Vector::get`: the index is the loop's own, and
-  /// `get` would build an `Option` per byte to say so.
+  /// What has been written, as an array ready to send: exactly as long as
+  /// what was written, whatever the buffer grew to.
   pub fn finish(self) -> Array<U8> {
-    let count = Vector::length(self.bytes);
-    let out: Array<U8> = Array::new(count, 0);
-    let mut at = 0;
-    while at < count {
-      Array::set(out, at, Vector::at(self.bytes, at));
-      at = at + 1
-    };
+    let out: Array<U8> = Array::new(self.used, 0);
+    Array::copy_into(self.bytes, 0, out, 0, self.used);
     out
   }
 }
@@ -388,15 +405,7 @@ impl Reader {
   /// A SASL challenge is "the rest of this message" rather than a counted or
   /// terminated field, so reading it needs this rather than a width.
   pub fn rest(self) -> Array<U8> {
-    let left = Reader::remaining(self);
-    let out: Array<U8> = Array::new(left, 0);
-    let mut at = 0;
-    while at < left {
-      Array::set(out, at, Array::get(self.bytes, self.at + at));
-      at = at + 1;
-    };
-    self.at = self.at + left;
-    out
+    Reader::take(self, Reader::remaining(self))
   }
 
   /// One byte, or zero past the end.
@@ -432,12 +441,24 @@ impl Reader {
   /// string. Without the sign, every NULL in every result became an empty
   /// text, which is the kind of wrong that reaches a report rather than a
   /// crash. Found by the first query the driver ever ran.
+  ///
+  /// One bounds check for the four bytes when they are all there, which is
+  /// every read of a well-formed message; a read that runs off the end goes a
+  /// byte at a time, so the missing bytes are zeros as `u8` promises.
   pub fn i32(self) -> Int {
-    let a = Reader::u8(self);
-    let b = Reader::u8(self);
-    let c = Reader::u8(self);
-    let d = Reader::u8(self);
-    let raw = Int::or(Int::or(Int::shl(a, 24), Int::shl(b, 16)), Int::or(Int::shl(c, 8), d));
+    let at = self.at;
+    let raw = if at >= 0 && at + 4 <= Array::length(self.bytes) {
+      self.at = at + 4;
+      Int::or(
+        Int::or(Int::shl(U8::to_int(Array::get(self.bytes, at)), 24), Int::shl(U8::to_int(Array::get(self.bytes, at + 1)), 16)),
+        Int::or(Int::shl(U8::to_int(Array::get(self.bytes, at + 2)), 8), U8::to_int(Array::get(self.bytes, at + 3))))
+    } else {
+      let a = Reader::u8(self);
+      let b = Reader::u8(self);
+      let c = Reader::u8(self);
+      let d = Reader::u8(self);
+      Int::or(Int::or(Int::shl(a, 24), Int::shl(b, 16)), Int::or(Int::shl(c, 8), d))
+    };
     if raw >= 2147483648 { raw - 4294967296 } else { raw }
   }
 
@@ -459,18 +480,51 @@ impl Reader {
     String::from_bytes(bytes)
   }
 
-  /// `count` bytes, as their own array.
+  /// `count` bytes, as their own array, or fewer if fewer are left.
   pub fn take(self, count: Int) -> Array<U8> {
     let have = Reader::remaining(self);
     let n = if count < have { count } else { have };
     let out: Array<U8> = Array::new(n, 0);
-    let mut i = 0;
-    while i < n {
-      Array::set(out, i, Array::get(self.bytes, self.at + i));
-      i = i + 1
-    };
+    Array::copy_into(self.bytes, self.at, out, 0, n);
     self.at = self.at + n;
     out
+  }
+
+  /// The next `count` bytes as a decimal integer, if they are one, and the
+  /// reader moved past them; otherwise `None`, and the reader where it was.
+  ///
+  /// **What this is for: an `int4` column read without a `String` between.**
+  /// Every value in a row arrives as text, and going through `String` and
+  /// `Int::of_string` is two allocations per integer per row. This reads the
+  /// digits where they lie.
+  ///
+  /// It accepts what the server sends for an integer column -- an optional
+  /// `-` and one to eighteen digits -- and answers `None` for anything else,
+  /// including nineteen digits or more, which could overflow. `None` is the
+  /// caller's cue to take the slow path, which still gives the right answer.
+  pub fn digits(self, count: Int) -> Option<Int> {
+    let from = self.at;
+    let end = from + count;
+    if count < 1 || count > 19 || end > Array::length(self.bytes) {
+      Option::None
+    } else {
+      let negative = U8::to_int(Array::get(self.bytes, from)) == 45;
+      let first = if negative { from + 1 } else { from };
+      // Eighteen digits cannot overflow; the sign takes the nineteenth place.
+      let mut fine = first < end && end - first <= 18;
+      let mut value = 0;
+      let mut at = first;
+      while fine && at < end {
+        let digit = U8::to_int(Array::get(self.bytes, at)) - 48;
+        if digit < 0 || digit > 9 { fine = false } else { value = value * 10 + digit; at = at + 1 }
+      };
+      if fine {
+        self.at = end;
+        Option::Some(if negative { 0 - value } else { value })
+      } else {
+        Option::None
+      }
+    }
   }
 }
 

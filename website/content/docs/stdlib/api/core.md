@@ -1849,16 +1849,15 @@ takes `A: Ord` on purpose, so that `<` on the elements and `sort` on the
 list cannot disagree. Sorting a record by one of its fields is a
 different question, and this is where it is asked.
 
-The same merge sort and the same guarantees: stable, so equal elements
-keep the order they were given -- which is what makes sorting twice, by
-one key and then another, do what everybody expects.
+Stable, so equal elements keep the order they were given -- which is
+what makes sorting twice, by one key and then another, do what everybody
+expects.
 
-**Deeper than `sort`, though, and the two are not interchangeable on a
-long list.** `sort` gets its `log2(n)` frames because `take_first` under
-its `split` is a `while` loop; `split_evenly` here reaches `take_evenly`,
-which calls itself once per element it takes, so the first split alone is
-about `n / 2` frames. `Array::sort_by` is iterative throughout and is the
-one to move to when the list is long enough for that to matter.
+**Sorted in an array, and the list rebuilt from it.** The elements are
+copied into one array, sorted there by [`Array::sort_by`](#sort_by-1)'s bottom-up
+merge, and read back into a new list: two arrays and one new cell per
+element, however many rounds the merge takes. It recurses nowhere, so a
+long list costs no stack.
 
 `order` must be consistent: if it says `a` is less than `b` it must not
 also say `b` is less than `a`. One that is not produces some order and no
@@ -2554,6 +2553,42 @@ iteration.
 Only an array of numbers can be lent. An `Array<A>` of Khora objects
 holds reference-counted pointers, and handing those across is the mistake
 the whole boundary exists to prevent.
+
+### Array\<U8>
+
+```khora
+impl Array<U8>
+```
+
+#### copy_into
+
+```khora
+pub fn copy_into(source: Array<U8>, from: Int, target: Array<U8>, at: Int, count: Int) ->()
+```
+
+Copies `count` bytes of `source`, starting at `from`, into `target`
+starting at `at`, in one move.
+
+**What it is for: a byte buffer copied a byte at a time.** A loop of
+`get` and `set` checks two bounds and passes a cancellation point per
+byte, and a network protocol copies every byte it reads or writes at
+least once. This checks the two ranges once and moves the bytes with
+the C library's `memmove`.
+
+`source` and `target` may be the same array and the ranges may overlap:
+the bytes arrive as they were before the copy began, which is what
+moving the unread tail of a buffer to its front needs.
+
+A range that does not fit, on either side, or a negative `count`, stops
+the program and names the index, as [`Array::get`](#get) does. A `count` of
+zero copies nothing, anywhere a zero-length range fits -- including at
+either array's end.
+
+```khora
+let buffer: Array<U8> = Array::new(8, 0);
+Array::copy_into(String::bytes("hello"), 0, buffer, 3, 5);
+// buffer is 0 0 0 h e l l o
+```
 
 ### Int
 
@@ -3270,16 +3305,15 @@ pub fn to_string(self) -> String
 The number, written out.
 
 Needed by anything that puts a number in a message — a `Content-Length`,
-a status line, a log — and written here rather than in the runtime
-because it is four lines of Khora and a good test of whether they are
-pleasant to write.
+a status line, a log — so it is on every request path there is.
+
+**One buffer, counted first and filled from the end:** two allocations,
+the buffer and the string, whatever the number of digits.
 
 **The most negative `Int` prints.** Taking its magnitude with `0 - self`
 overflows — that is the whole peculiarity of the number — so the digits
-are never reached that way.
-
-The digits are walked on whichever side of zero the number is already on,
-so nothing is ever negated.
+are walked on whichever side of zero the number is already on, and
+only a remainder, which is in `-9..=9`, is ever negated.
 
 ### Ptr
 
@@ -3386,6 +3420,24 @@ pub fn with_data<B, 'ef, 'er>(self, body: (Ptr, Int) -> B with 'ef raises 'er) -
 
 See `Array::with_data`, which is the same thing and carries the argument
 for why the lifetime is a call rather than anything wider.
+
+#### copy_into
+
+```khora
+pub fn copy_into(self, from: Int, target: Array<U8>, at: Int, count: Int) ->()
+```
+
+Copies `count` of the string's bytes, starting at byte `from`, into
+`target` starting at `at`, in one move.
+
+[`Array::copy_into`](#copy_into) for a string's bytes, and the same rules: a range
+that does not fit, or a negative `count`, stops the program. What it
+saves over `String::bytes` and then a copy is the array in between,
+which is a whole copy of the string made to be thrown away.
+
+`from` counts bytes, not characters, so a range can end inside a
+character. The bytes are copied as they are; whether `target` holds text
+afterwards is `Array::is_utf8`'s question.
 
 ### U8
 
@@ -5215,6 +5267,9 @@ nobody has bound and the second differs from this one only above the basic
 plane. What it *is* is stable, cheap, and the same on every machine, which
 is what sorting for a program's own use wants. A human-facing sort wants a
 collation library and should say so.
+
+Compared by the runtime's `memcmp`, with no cancellation point inside: a
+comparison of two strings is one call however long they are.
 
 #### cmp
 

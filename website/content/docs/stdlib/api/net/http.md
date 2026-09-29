@@ -277,6 +277,7 @@ pub type Connection = {
   transport: Transport,
   buffer: Array<U8>,
   mut carried: Int,
+  scratch: Array<U8>,
 };
 ```
 
@@ -307,6 +308,19 @@ mut carried: Int
 
 Bytes of the *next* request that arrived with the last one. A pipelining
 client sends two without waiting, and the second must not be dropped.
+
+#### scratch
+
+```khora
+scratch: Array<U8>
+```
+
+Where each socket read lands before it is copied into `buffer`.
+
+**One per connection, so reading a request allocates nothing.** Nothing
+holds it between reads: what arrived is copied out at once.
+
+What it costs: 4 KiB per open connection, beside `buffer`.
 
 ### Incoming
 

@@ -157,14 +157,102 @@ pub unsafe extern "C" fn khora_array_new(
         } else {
             word.as_ptr()
         };
-        for index in 0..len {
-            elements.add(index * stride).copy_from_nonoverlapping(source, stride);
-            if boxed == ELEMENTS_ARE_POINTERS {
-                khora_dup(fill as *mut u8);
+        if boxed == ELEMENTS_ARE_POINTERS {
+            // A null fill is already there, and owns nothing to count. Any
+            // other is a count per slot, which costs more than the copy.
+            if fill != 0 {
+                for index in 0..len {
+                    elements.add(index * stride).copy_from_nonoverlapping(source, stride);
+                    khora_dup(fill as *mut u8);
+                }
             }
+        } else {
+            fill_elements(elements, len, stride, source);
         }
     }
     object
+}
+
+/// Writes the `stride` bytes at `source` into each of `len` slots at
+/// `elements`, which `khora_alloc` has already zeroed.
+///
+/// **What this prevents: `Array::new` costing a `memcpy` call per element.**
+/// Filling slot by slot was one call per *byte* of an `Array<U8>`, straight
+/// after the allocator had zeroed the same bytes, and the 4 KiB and 8 KiB
+/// buffers an HTTP request and a Postgres read allocate made that loop over
+/// half of a `/db` request's instructions. So a zero fill writes nothing, a
+/// byte fill is one `memset`, and anything wider is one slot followed by
+/// copies that double what is written: `log2(len)` calls rather than `len`.
+///
+/// What it relies on, and costs: the zeroing. An allocator that stopped
+/// zeroing would leave a zero fill holding garbage, which is why `khora_alloc`
+/// states that it zeroes and
+/// `a_new_array_holds_its_fill_in_every_slot_and_nothing_past_the_last`
+/// checks a zero fill of every width. Deciding that a fill is zero reads its
+/// `stride` bytes once.
+///
+/// # Safety
+///
+/// `elements` must address `len * stride` zeroed, writable bytes, and `source`
+/// `stride` readable bytes outside them.
+unsafe fn fill_elements(elements: *mut u8, len: usize, stride: usize, source: *const u8) {
+    let total = len * stride;
+    if total == 0 {
+        return;
+    }
+    // SAFETY: the caller guarantees `stride` readable bytes at `source`.
+    let value = unsafe { std::slice::from_raw_parts(source, stride) };
+    if value.iter().all(|&b| b == 0) {
+        return;
+    }
+    if stride == 1 {
+        // SAFETY: `total` writable bytes at `elements`, per the caller.
+        unsafe { elements.write_bytes(value[0], total) };
+        return;
+    }
+    // SAFETY: the first slot is inside the elements and `source` is outside
+    // them, so the two do not overlap.
+    unsafe { elements.copy_from_nonoverlapping(source, stride) };
+    let mut written = stride;
+    while written < total {
+        let more = written.min(total - written);
+        // SAFETY: `[0, written)` is filled and `[written, written + more)` is
+        // inside the elements and after it, so the ranges are disjoint; and a
+        // whole number of slots is copied each time, because `written` is one
+        // and `total - written` is too, so every slot starts on a boundary.
+        unsafe { elements.add(written).copy_from_nonoverlapping(elements, more) };
+        written += more;
+    }
+}
+
+/// Moves `count` bytes from `from + from_at` to `into + into_at`.
+///
+/// **What this prevents: a byte buffer copied one checked byte at a time.** A
+/// network protocol copies every byte it reads or writes at least once, and a
+/// Khora loop of `get` and `set` pays two bounds checks and a cancellation
+/// point per byte. `Array::copy_into` and `String::copy_into` in `std::core`
+/// check both ranges once and call this; nothing else should, because nothing
+/// here checks them.
+///
+/// A `memmove` rather than a `memcpy`, so the ranges may overlap: moving the
+/// unread tail of a buffer to its front is one of the callers.
+///
+/// # Safety
+///
+/// `from` must address at least `from_at + count` readable bytes and `into` at
+/// least `into_at + count` writable ones, both lent by `with_data` for the
+/// call, with `from_at` and `into_at` not negative. A `count` of zero or less
+/// reads neither pointer.
+#[unsafe(no_mangle)]
+// SHARE: moves bytes between two lent buffers on the calling fiber; takes no Khora object.
+pub unsafe extern "C" fn khora_bytes_copy(from: *const u8, from_at: i64, into: *mut u8, into_at: i64, count: i64) {
+    if count <= 0 {
+        return;
+    }
+    // SAFETY: the caller guarantees both ranges are inside live buffers and
+    // the offsets are not negative; `copy` is `memmove`, so an overlap is
+    // allowed.
+    unsafe { std::ptr::copy(from.add(from_at as usize), into.add(into_at as usize), count as usize) };
 }
 
 /// Releases every element of an array, then the array.

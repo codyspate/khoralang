@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use khora_rt::{
-    khora_str_eq,
+    khora_array_new, khora_array_release, khora_str_eq,
     khora_alloc, khora_alloc_count, khora_drop, khora_drop_reuse, khora_dup, khora_live_count,
     khora_print_bool, khora_print_int, khora_print_str, khora_refcount, khora_reset_counters,
     KhoraHeader, KHORA_FIELD_OFFSET, KHORA_HEADER_ALIGN, KHORA_HEADER_SIZE, KHORA_IMMORTAL,
@@ -565,4 +565,167 @@ fn empty_strings_are_equal_even_when_null() {
 fn an_empty_string_does_not_equal_a_full_one() {
     let b = b"x";
     assert!(!unsafe { khora_str_eq(std::ptr::null(), 0, b.as_ptr(), b.len() as u64) });
+}
+
+// --- allocation ------------------------------------------------------------
+
+/// **What this guards: an allocation entry that stops zeroing, or hands back
+/// memory the header cannot sit in.** A first allocation of a size is usually
+/// fresh pages, which are zero whatever the allocator promised, so this dirties
+/// every byte of each object, frees it, and allocates the same size again --
+/// the allocator's free list gives that block back -- and only then looks.
+/// Sizes cover each of the small classes and a few that are not small.
+#[test]
+fn every_object_is_zeroed_and_aligned_for_its_header() {
+    isolated(|| {
+        let sizes: Vec<u64> =
+            (0u64..=64).step_by(8).chain([72, 120, 248, 1000, 4096, 8192, 70_000, 1 << 20]).collect();
+        for round in 0..3 {
+            for &size in &sizes {
+                let object = khora_alloc(size, LEAF_TAG);
+                assert_eq!(object as usize % KHORA_HEADER_ALIGN, 0, "{size} bytes, round {round}");
+                // SAFETY: `object` is live with `size` bytes of fields, and
+                // nothing else holds it.
+                let fields = unsafe { std::slice::from_raw_parts_mut(object.add(KHORA_FIELD_OFFSET), size as usize) };
+                assert!(fields.iter().all(|&b| b == 0), "{size} bytes of fields not zeroed, round {round}");
+                fields.fill(0xa5);
+                // SAFETY: the one reference, to a live object with no children.
+                unsafe { khora_drop(object, None) };
+            }
+        }
+        assert_eq!(khora_live_count(), 0);
+    });
+}
+
+// --- filling a new array ---------------------------------------------------
+
+/// Where element zero of an array starts: past the header and the array's
+/// four header words. Written out rather than imported so that a change to the
+/// layout breaks this test as well as the code generator.
+const ARRAY_ELEMENTS: usize = KHORA_FIELD_OFFSET + 4 * 8;
+
+/// `khora_array_release` as the safe `drop_fields` pointer `khora_drop` takes,
+/// which is what the code generator passes for an array.
+extern "C" fn release_array(array: *mut u8) {
+    // SAFETY: `khora_drop` calls this only for a live array whose count has
+    // reached zero, which is `khora_array_release`'s contract.
+    unsafe { khora_array_release(array) }
+}
+
+/// The bytes of a fresh array from element zero to the end of its allocation,
+/// which is `len * stride` rounded up to a whole word.
+///
+/// # Safety
+///
+/// `array` must be live and from `khora_array_new(len, _, stride, ..)`.
+unsafe fn array_bytes(array: *const u8, len: usize, stride: usize) -> Vec<u8> {
+    let rounded = (len * stride).div_ceil(8) * 8;
+    // SAFETY: the allocation holds the header words and then `rounded` bytes of
+    // elements, and nothing writes the array during this read.
+    unsafe { std::slice::from_raw_parts(array.add(ARRAY_ELEMENTS), rounded).to_vec() }
+}
+
+/// **What this guards: `Array::new` storing something other than its fill.**
+/// The fill is a bulk write -- nothing for zero, one `memset` for a byte, and
+/// doubling copies for anything wider -- and each of those has an edge where a
+/// copy can stop one element short, run into the padding after the last
+/// element, or write the fill's high bytes where the low ones belong. So every
+/// width the runtime accepts, at lengths either side of each doubling step,
+/// with a fill whose bytes all differ, and the padding checked still zero.
+///
+/// Passes on the per-element loop this replaced as well: it is an equivalence
+/// test, not a regression test, and the mutants in the change's report are
+/// what show it can fail.
+#[test]
+fn a_new_array_holds_its_fill_in_every_slot_and_nothing_past_the_last() {
+    isolated(|| {
+        let lengths = [0usize, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 100, 4095, 4096, 4097];
+        // A fill whose low byte is zero and whose others are not, and one whose
+        // only nonzero byte is the last: "is it zero" has to look at every byte.
+        for fill in [0u64, 0x0807_0605_0403_0201, 0xff, 0xff00, 0xff00_0000_0000_0000] {
+            for stride in [1u8, 2, 4, 8] {
+                for &len in &lengths {
+                    // SAFETY: an inert fill needs no glue and is not a pointer.
+                    let array = unsafe { khora_array_new(len as i64, fill, stride, 0, None) };
+                    // SAFETY: just made with this length and stride.
+                    let bytes = unsafe { array_bytes(array, len, usize::from(stride)) };
+                    let want = &fill.to_le_bytes()[..usize::from(stride)];
+                    for (i, chunk) in bytes[..len * usize::from(stride)].chunks(usize::from(stride)).enumerate() {
+                        assert_eq!(chunk, want, "element {i} of {len}, stride {stride}, fill {fill:#x}");
+                    }
+                    assert!(
+                        bytes[len * usize::from(stride)..].iter().all(|&b| b == 0),
+                        "padding after {len} elements of stride {stride} was written"
+                    );
+                    // SAFETY: the one reference, to a live array.
+                    unsafe { khora_drop(array, Some(release_array)) };
+                }
+            }
+        }
+        assert_eq!(khora_live_count(), 0);
+    });
+}
+
+/// The same, for a value held inline: `fill` is then the *address* of the
+/// value, and a slot wider than a word is filled from it.
+#[test]
+fn an_array_of_inline_values_holds_the_value_not_its_address() {
+    isolated(|| {
+        for stride in [8usize, 16, 24, 40] {
+            let value: Vec<u8> = (1..=stride as u8).collect();
+            let zero = vec![0u8; stride];
+            for source in [&value, &zero] {
+                for len in [0usize, 1, 2, 3, 5, 8, 9, 33] {
+                    // SAFETY: `source` outlives the call and holds `stride`
+                    // bytes; no glue, so no element is ever released.
+                    let array = unsafe {
+                        khora_array_new(len as i64, source.as_ptr() as u64, stride as u8, 2, None)
+                    };
+                    // SAFETY: just made with this length and stride.
+                    let bytes = unsafe { array_bytes(array, len, stride) };
+                    for (i, chunk) in bytes[..len * stride].chunks(stride).enumerate() {
+                        assert_eq!(chunk, &source[..], "inline element {i} of {len}, stride {stride}");
+                    }
+                    assert!(bytes[len * stride..].iter().all(|&b| b == 0));
+                    // SAFETY: the one reference, to a live array.
+                    unsafe { khora_drop(array, Some(release_array)) };
+                }
+            }
+        }
+        assert_eq!(khora_live_count(), 0);
+    });
+}
+
+/// A counted fill is one reference per slot, and releasing the array gives
+/// every one of them back -- including for a null fill, which owns nothing.
+#[test]
+fn an_array_of_one_object_counts_it_once_per_slot() {
+    isolated(|| {
+        let child = khora_alloc(TWO_WORDS, LEAF_TAG);
+        for len in [0usize, 1, 2, 3, 9, 64] {
+            // SAFETY: `child` is live, and a `LEAF_TAG` object needs no glue.
+            let array = unsafe { khora_array_new(len as i64, child as u64, 8, 1, None) };
+            // SAFETY (this and every count and drop below): `child` and
+            // `array` are live until their own last drop, which comes last.
+            assert_eq!(unsafe { khora_refcount(child) }, 1 + len as u64, "{len} slots");
+            // SAFETY: just made with this length and a word stride.
+            let bytes = unsafe { array_bytes(array, len, 8) };
+            for (i, word) in bytes.chunks(8).enumerate() {
+                assert_eq!(u64::from_le_bytes(word.try_into().unwrap()), child as u64, "slot {i}");
+            }
+            unsafe { khora_drop(array, Some(release_array)) };
+            assert_eq!(unsafe { khora_refcount(child) }, 1);
+        }
+        // SAFETY: a null fill with a counted element type is the zeroed array
+        // every `Array::empty` and every freshly grown vector starts from.
+        let array = unsafe { khora_array_new(5, 0, 8, 1, None) };
+        // SAFETY: as above.
+        assert!(unsafe { array_bytes(array, 5, 8) }.iter().all(|&b| b == 0));
+        // SAFETY: the one reference to each, both live.
+        unsafe {
+            khora_drop(array, Some(release_array));
+            khora_drop(child, None);
+        }
+        assert_eq!(khora_live_count(), 0);
+    });
 }

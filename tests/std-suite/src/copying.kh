@@ -1,0 +1,275 @@
+module std_suite::copying;
+
+//! Copying bytes in bulk, and the `std::core` functions that are built on a
+//! bulk copy or a single buffer: `Array::copy_into`, `String::copy_into`,
+//! `Int::to_string`, `String`'s order and `List::sort_by`.
+//!
+//! **Each of these is a faster way to give the same answer**, so most of what
+//! is here compares against a slow version written out in the test, over the
+//! edges where a bulk operation goes wrong: a range that starts or ends at an
+//! array's end, two ranges in one array, the most negative `Int`, a string that
+//! is a prefix of another, bytes above 0x7f, and equal keys in a sort.
+//!
+//! What a trap does -- a range that does not fit -- cannot be checked from a
+//! `test` block, which it would end; `crates/khora-codegen-llvm/tests/arrays.rs`
+//! has those.
+
+import std::core::{Array, Eq, Iterator, List, Ord, Ordering, Step, String, assert_that};
+
+/// A sort key and where the element started, so a sort's stability can be
+/// read back.
+type Keyed = { key: Int, was: Int };
+
+/// A row as the fortunes page has one: an id and the text it sorts by.
+type Row = { id: Int, text: String };
+
+/// The bytes of `a` as `1 2 3`, for a message that says what was there.
+fn show(a: Array<U8>) -> String {
+  let mut out = "";
+  let mut i = 0;
+  while i < Array::length(a) {
+    out = if i == 0 { Int::to_string(U8::to_int(Array::get(a, i))) }
+          else { "${out} ${Int::to_string(U8::to_int(Array::get(a, i)))}" };
+    i = i + 1
+  };
+  out
+}
+
+/// `0, 1, 2, ...` as bytes, wrapping at 256.
+fn counting(n: Int) -> Array<U8> {
+  Array::from_fn(n, fn i => U8::of(Int::and(i, 255)))
+}
+
+/// What `copy_into` should do, a byte at a time, going through a copy so that
+/// overlapping ranges read what was there before.
+fn copied_slowly(source: Array<U8>, from: Int, target: Array<U8>, at: Int, count: Int) -> () {
+  let held: Array<U8> = Array::new(count, 0);
+  let mut i = 0;
+  while i < count { Array::set(held, i, Array::get(source, from + i)); i = i + 1 };
+  let mut j = 0;
+  while j < count { Array::set(target, at + j, Array::get(held, j)); j = j + 1 };
+}
+
+fn same(a: Array<U8>, b: Array<U8>) -> Bool {
+  let mut equal = Array::length(a) == Array::length(b);
+  let mut i = 0;
+  while equal && i < Array::length(a) {
+    equal = U8::to_int(Array::get(a, i)) == U8::to_int(Array::get(b, i));
+    i = i + 1
+  };
+  equal
+}
+
+test "copy_into copies every range a buffer can hold, and nothing either side" {
+  let sizes = [0, 1, 2, 7, 8, 9, 33];
+  let mut checked = 0;
+  for n in sizes {
+    for from in [0, 1, n / 2, n] {
+      for at in [0, 1, n / 2, n] {
+        for count in [0, 1, 2, n / 2, n] {
+          if from + count <= n && at + count <= n {
+            let source = counting(n);
+            let target: Array<U8> = Array::new(n, 200);
+            let expected: Array<U8> = Array::new(n, 200);
+            Array::copy_into(source, from, target, at, count);
+            copied_slowly(source, from, expected, at, count);
+            assert_that(same(target, expected),
+              "n=${n} from=${from} at=${at} count=${count}: [${show(target)}], wanted [${show(expected)}]");
+            checked = checked + 1
+          }
+        }
+      }
+    }
+  };
+  assert_that(checked > 100, "only ${checked} cases");
+}
+
+/// One array as both source and target, the ranges overlapping either way.
+/// `shift_down` in an HTTP connection moves a buffer's tail to its front like
+/// this, and a forward byte loop gets the other direction wrong.
+test "copy_into within one array reads the bytes as they were" {
+  for from in [0, 1, 3, 5] {
+    for at in [0, 1, 3, 5] {
+      for count in [0, 1, 3, 5] {
+        if from + count <= 10 && at + count <= 10 {
+          let buffer = counting(10);
+          let expected = counting(10);
+          Array::copy_into(buffer, from, buffer, at, count);
+          copied_slowly(expected, from, expected, at, count);
+          assert_that(same(buffer, expected),
+            "from=${from} at=${at} count=${count}: [${show(buffer)}], wanted [${show(expected)}]");
+        }
+      }
+    }
+  };
+}
+
+test "String::copy_into copies a slice of the bytes, including ones above 0x7f" {
+  let text = "café, naïve";
+  let n = String::byte_length(text);
+  let whole: Array<U8> = Array::new(n + 2, 0);
+  String::copy_into(text, 0, whole, 1, n);
+  assert_that(U8::to_int(Array::get(whole, 0)) == 0, "byte before the copy written");
+  assert_that(U8::to_int(Array::get(whole, n + 1)) == 0, "byte after the copy written");
+  let mut i = 0;
+  while i < n {
+    assert_that(U8::to_int(Array::get(whole, i + 1)) == U8::to_int(String::byte(text, i)),
+      "byte ${i}: [${show(whole)}]");
+    i = i + 1
+  };
+  // A middle slice, the length of `é` from where it starts.
+  let two: Array<U8> = Array::new(2, 0);
+  String::copy_into(text, 3, two, 0, 2);
+  assert_that(String::from_bytes(two) == "é", "[${show(two)}]");
+  // Nothing, from the empty string, at the very end of an array.
+  String::copy_into("", 0, two, 2, 0);
+  assert_that(String::from_bytes(two) == "é", "an empty copy wrote something");
+}
+
+// --- Int::to_string -------------------------------------------------------
+
+/// The digits the old recursive version produced: a string per digit, joined.
+fn digits_slowly(n: Int) -> String {
+  if n == 0 { "0" }
+  else if n < 0 { "-${below(n, "")}" }
+  else { above(n, "") }
+}
+
+fn above(n: Int, tail: String) -> String {
+  let here = digit(n % 10);
+  if n < 10 { here + tail } else { above(n / 10, here + tail) }
+}
+
+fn below(n: Int, tail: String) -> String {
+  let here = digit(0 - (n % 10));
+  if n > -10 { here + tail } else { below(n / 10, here + tail) }
+}
+
+fn digit(d: Int) -> String {
+  let out: Array<U8> = Array::new(1, 0);
+  Array::set(out, 0, U8::of(48 + d));
+  String::from_bytes(out)
+}
+
+test "Int::to_string gives every digit count, both signs and both ends" {
+  let most = 9223372036854775807;
+  let least = 0 - most - 1;
+  assert_that(Int::to_string(least) == "-9223372036854775808", Int::to_string(least));
+  assert_that(Int::to_string(most) == "9223372036854775807", Int::to_string(most));
+  assert_that(Int::to_string(0) == "0", Int::to_string(0));
+  assert_that(Int::to_string(-1) == "-1", Int::to_string(-1));
+  let mut checked = 0;
+  // 1, 9, 10, 99, 100, ... and their negatives: each digit count at both ends.
+  let mut power = 1;
+  let mut going = true;
+  while going {
+    for n in [power, power - 1, power + 1, 0 - power, 1 - power, 0 - power - 1, power * 7 / 3] {
+      let fast = Int::to_string(n);
+      let slow = digits_slowly(n);
+      assert_that(fast == slow, "${slow} printed as ${fast}");
+      checked = checked + 1
+    };
+    if power > most / 10 { going = false } else { power = power * 10 }
+  };
+  for n in [most, most - 1, least, least + 1, 1000000000000000000, -1000000000000000000] {
+    assert_that(Int::to_string(n) == digits_slowly(n), digits_slowly(n));
+  };
+  assert_that(checked > 100, "only ${checked} cases");
+}
+
+// --- String's order -------------------------------------------------------
+
+/// Byte order worked out a byte at a time, as `String`'s `cmp` did.
+fn order_slowly(a: String, b: String) -> Ordering {
+  let m = String::byte_length(a);
+  let n = String::byte_length(b);
+  let mut i = 0;
+  let mut answer = Ordering::Equal;
+  while i < m && i < n && Ordering::is_equal(answer) {
+    let x = U8::to_int(String::byte(a, i));
+    let y = U8::to_int(String::byte(b, i));
+    if x < y { answer = Ordering::Less } else if x > y { answer = Ordering::Greater } else { i = i + 1 }
+  };
+  if Ordering::is_equal(answer) {
+    if m < n { Ordering::Less } else if m > n { Ordering::Greater } else { Ordering::Equal }
+  } else {
+    answer
+  }
+}
+
+fn named(o: Ordering) -> String {
+  match o { Ordering::Less => "Less", Ordering::Equal => "Equal", Ordering::Greater => "Greater" }
+}
+
+/// Every pair from a set that has the awkward cases in it: the empty string,
+/// a prefix and what it prefixes, equal strings, a byte above 0x7f against one
+/// below it (a signed comparison gets that backwards), and a difference in the
+/// last byte only.
+test "String order is byte order, for prefixes, empties and high bytes" {
+  let texts = ["", "a", "ab", "abc", "abd", "b", "B", "é", "e", "ea", "zz", "\u{7f}", "\u{80}", "ab\u{0}", "ab"];
+  let mut checked = 0;
+  for a in texts {
+    for b in texts {
+      let fast = a.cmp(b);
+      let slow = order_slowly(a, b);
+      assert_that(Eq::eq(fast, slow),
+        "\"${a}\" against \"${b}\": ${named(fast)}, wanted ${named(slow)}");
+      checked = checked + 1
+    }
+  };
+  assert_that(checked == 225, "${checked} pairs");
+  assert_that(Ordering::is_less("".cmp("a")), "the empty string sorts first");
+  assert_that(Ordering::is_less("a".cmp("\u{80}")), "0x80 sorts above ASCII");
+  assert_that("abc" < "abd" && "ab" < "abc" && !("abc" < "abc"), "the operators agree");
+}
+
+// --- List::sort_by --------------------------------------------------------
+
+/// **Stable: equal keys keep the order they came in.** Each element carries
+/// its original position; after sorting by key alone, positions must rise
+/// within every run of equal keys. Lengths either side of the powers of two a
+/// merge sort splits at, and keys with many and with few repeats.
+test "List::sort_by sorts and keeps equal keys in their order" {
+  for n in [0, 1, 2, 3, 4, 5, 7, 8, 9, 16, 17, 31, 64, 100] {
+    for spread in [1, 2, 3, 10, 1000] {
+      let mut items: List<Keyed> = List::Nil;
+      let mut i = n - 1;
+      while i >= 0 {
+        // Scrambled keys with repeats, so the sort has work to do.
+        items = List::Cons({ key: (i * 7 + 3) % spread, was: i }, items);
+        i = i - 1
+      };
+      let sorted = List::sort_by(items, fn (x: Keyed, y: Keyed) => x.key.cmp(y.key));
+      assert_that(List::length(sorted) == n, "n=${n}: ${List::length(sorted)} came back");
+      let mut rest = sorted;
+      let mut last_key = -1;
+      let mut last_at = -1;
+      let mut walking = true;
+      while walking {
+        match rest {
+          List::Nil => walking = false,
+          List::Cons(p, tail) => {
+            assert_that(p.key >= last_key, "n=${n} spread=${spread}: key ${p.key} after ${last_key}");
+            if p.key == last_key {
+              assert_that(p.was > last_at,
+                "n=${n} spread=${spread}: equal keys ${p.key} out of order, ${p.was} after ${last_at}");
+            };
+            last_key = p.key;
+            last_at = p.was;
+            rest = tail
+          },
+        }
+      }
+    }
+  };
+}
+
+test "List::sort_by by a string field, the fortunes shape" {
+  let rows: List<Row> = [
+    { id: 3, text: "zebra" }, { id: 1, text: "apple" }, { id: 2, text: "" },
+    { id: 5, text: "apple" }, { id: 4, text: "é" }, { id: 6, text: "Apple" },
+  ];
+  let sorted = List::sort_by(rows, fn (x: Row, y: Row) => x.text.cmp(y.text));
+  let ids = List::map(sorted, fn (p: Row) => Int::to_string(p.id));
+  assert_that(String::join(ids, ",") == "2,6,1,5,3,4", String::join(ids, ","));
+}

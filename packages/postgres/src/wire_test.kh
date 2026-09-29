@@ -10,7 +10,7 @@ module postgres::wire_test;
 // found in a day: `Vector` has no `to_array`, and a test cannot say what it
 // expected. `docs/roadmap.md` Phase 13.
 
-import std::core::{Array, Option, assert};
+import std::core::{Array, Iterator, Option, Step, assert, assert_that};
 import std::core::{List};
 import postgres::wire::{Message, Reader, Writer, bind, describe_portal, execute, extended, framed, message_at, message_width, parse, password, query, startup, sync, terminate};
 
@@ -232,6 +232,143 @@ test "Execute with a row limit of zero means every row" {
 
 test "Sync is a type byte and a length and nothing else" {
   assert(hex(sync()) == "5300000004");
+}
+
+// --- the writer's buffer, and bulk reads -------------------------------------
+//
+// The writer is an array that doubles, and `take` and `text` are single
+// copies. What goes wrong with that shape is at the edges: a write that lands
+// exactly at a doubling, a length patched in after the buffer moved, a copy one
+// byte short. Each test below builds the expected bytes a byte at a time and
+// compares.
+
+/// `n` bytes counting up from `from`, wrapping at 256.
+fn run_of(n: Int, from: Int) -> Array<U8> {
+  Array::from_fn(n, fn i => U8::of(Int::and(from + i, 255)))
+}
+
+/// **A message across every doubling of the buffer.** A framed message whose
+/// length is patched in by `close` after the payload has pushed the buffer
+/// through one, two or three doublings; the text and the raw bytes are
+/// written by bulk copy and must land where a byte loop would put them.
+test "a writer's bytes survive the buffer growing under them" {
+  for n in [0, 1, 250, 251, 252, 255, 256, 257, 511, 512, 513, 1500, 5000] {
+    let out = Writer::new();
+    Writer::u8(out, 7);
+    let at = Writer::open(out, 68);
+    Writer::raw(out, run_of(n, 3));
+    Writer::text(out, "é!");
+    Writer::i16(out, 258);
+    Writer::close(out, at);
+    Writer::i32(out, -2);
+    let bytes = Writer::finish(out);
+
+    let want = 1 + 1 + 4 + n + 3 + 2 + 4;
+    assert_that(Array::length(bytes) == want, "n=${Int::to_string(n)}: ${Int::to_string(Array::length(bytes))} bytes");
+    let read = Reader::of(bytes);
+    assert_that(Reader::u8(read) == 7, "n=${Int::to_string(n)}: first byte");
+    assert_that(Reader::u8(read) == 68, "n=${Int::to_string(n)}: kind");
+    assert_that(Reader::i32(read) == 4 + n + 3 + 2, "n=${Int::to_string(n)}: length patched after growing");
+    let mut i = 0;
+    while i < n {
+      assert_that(Reader::u8(read) == Int::and(3 + i, 255), "n=${Int::to_string(n)}: payload byte ${Int::to_string(i)}");
+      i = i + 1
+    };
+    assert_that(Reader::u8(read) == 195 && Reader::u8(read) == 169 && Reader::u8(read) == 33, "n=${Int::to_string(n)}: text");
+    assert_that(Reader::i16(read) == 258, "n=${Int::to_string(n)}: i16");
+    assert_that(Reader::i32(read) == -2, "n=${Int::to_string(n)}: i32");
+    assert_that(Reader::remaining(read) == 0, "n=${Int::to_string(n)}: trailing bytes");
+  };
+}
+
+/// `take` from each position, for each count, including past the end, where
+/// it gives what is left; and `rest`, which is `take` of everything left.
+test "take copies exactly the bytes asked for, or what is left" {
+  let bytes = run_of(40, 100);
+  for from in [0, 1, 17, 39, 40] {
+    for count in [0, 1, 5, 23, 39, 40, 41, 100] {
+      let read = Reader::of(bytes);
+      Reader::take(read, from);
+      let got = Reader::take(read, count);
+      let left = 40 - from;
+      let n = if count < left { count } else { left };
+      assert_that(Array::length(got) == n, "from ${Int::to_string(from)} count ${Int::to_string(count)}: length");
+      assert_that(Reader::remaining(read) == left - n, "from ${Int::to_string(from)} count ${Int::to_string(count)}: position");
+      let mut i = 0;
+      while i < n {
+        assert_that(U8::to_int(Array::get(got, i)) == Int::and(100 + from + i, 255),
+          "from ${Int::to_string(from)} count ${Int::to_string(count)}: byte ${Int::to_string(i)}");
+        i = i + 1
+      }
+    }
+  };
+  let read = Reader::of(bytes);
+  Reader::take(read, 30);
+  assert(hex(Reader::rest(read)) == "82838485868788898a8b");
+  assert(Reader::remaining(read) == 0);
+}
+
+/// These numbers as bytes.
+fn bytes_of(values: List<Int>) -> Array<U8> {
+  let out: Array<U8> = Array::new(List::length(values), 0);
+  let mut at = 0;
+  for v in values {
+    Array::set(out, at, U8::of(v));
+    at = at + 1
+  };
+  out
+}
+
+/// **`i32` at the end of a buffer.** Four bytes in one check when they are
+/// there; with fewer left, the missing ones read as zeros, as `u8` says, and
+/// never as whatever follows the buffer.
+test "i32 reads four bytes at once, and zeros past the end" {
+  let bytes = bytes_of([255, 255, 255, 254, 1, 2, 3]);
+  let read = Reader::of(bytes);
+  assert(Reader::i32(read) == -2);
+  assert(Reader::remaining(read) == 3);
+  // Three bytes left: 01 02 03, then a zero.
+  assert(Reader::i32(read) == 16909056);
+  assert(Reader::remaining(read) == 0);
+  assert(Reader::i32(read) == 0);
+  let exact = Reader::of(bytes_of([128, 0, 0, 0]));
+  assert(Reader::i32(exact) == -2147483648);
+  assert(Reader::remaining(exact) == 0);
+}
+
+/// The text of `value`, read back as `digits` would find it in a row.
+fn digits_of(text: String) -> Option<Int> {
+  Reader::digits(Reader::of(String::bytes(text)), String::byte_length(text))
+}
+
+/// **An integer column read from its digits.** Anything `digits` answers must
+/// be what `Int::of_string` answers, and what it declines -- a sign it does
+/// not know, a stray byte, too many digits to be safe -- goes the slow way.
+test "digits reads what Int::of_string reads, and declines the rest" {
+  let accepted = ["0", "7", "-7", "42", "-0", "007", "2147483647", "-2147483648",
+    "999999999999999999", "-999999999999999999"];
+  for text in accepted {
+    match digits_of(text) {
+      Option::None => assert_that(false, "declined ${text}"),
+      Option::Some(n) => assert_that(Option::Some(n) == Int::of_string(text), "misread ${text}"),
+    }
+  };
+  let declined = ["", "-", "+5", "4a", " 4", "4 ", "1.5", "1000000000000000000", "-9223372036854775808"];
+  for text in declined {
+    match digits_of(text) {
+      Option::None => (),
+      Option::Some(n) => assert_that(false, "read ${text} as ${Int::to_string(n)}"),
+    }
+  };
+  // Declining leaves the reader where it was, for the slow path to start from.
+  let read = Reader::of(String::bytes("12x"));
+  assert(Reader::digits(read, 3) == Option::None);
+  assert(Reader::remaining(read) == 3);
+  // Reading moves past exactly the digits, not what follows them.
+  let two = Reader::of(String::bytes("1234"));
+  assert(Reader::digits(two, 2) == Option::Some(12));
+  assert(Reader::remaining(two) == 2);
+  assert(Reader::digits(two, 3) == Option::None);
 }
 
 /// The five messages in one buffer, which is one write and one chance to fail.

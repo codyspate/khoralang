@@ -9,7 +9,7 @@
 
 use crate::harness;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use khora_db::{KhoraDatabase, SourceFile, SourceRoot};
@@ -300,4 +300,107 @@ fn main() -> Int {
     );
     assert_eq!(ran.stdout, "2\n2\n1\n0\n16\n0\n");
     assert_eq!(ran.code, Some(0));
+}
+
+/// Every `.kh` file of `std` for this target, plus the program under test.
+fn with_std(db: &KhoraDatabase, dir: &Path, main: &str) -> Vec<SourceFile> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("std");
+    let mut out = Vec::new();
+    let mut stack = vec![root];
+    while let Some(here) = stack.pop() {
+        for entry in std::fs::read_dir(&here).expect("a readable std") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "kh")
+                && khora_db::selected_for_target(&path, khora_db::host_target())
+            {
+                let text = std::fs::read_to_string(&path).expect("readable");
+                out.push(SourceFile::new(db, path, text));
+            }
+        }
+    }
+    out.push(SourceFile::new(db, dir.join("main.kh"), main.to_string()));
+    out
+}
+
+/// **What this guards: a bulk copy that writes past an array.**
+/// `Array::copy_into` and `String::copy_into` hand two pointers and a count to
+/// a `memmove` that checks nothing, so the bounds in `std` are all there is
+/// between a wrong offset and a write over whatever is next in memory. Each
+/// range that does not fit, on each side, must stop the program with the
+/// index-out-of-range trap -- and before a byte is written, which the last
+/// line of each case would show by printing.
+///
+/// A trap ends the process, so these cannot be `test` blocks in
+/// `tests/std-suite`, where the copies' results are checked. One program,
+/// told which case to run by the environment, so the standard library is
+/// compiled once.
+#[test]
+fn a_bulk_copy_out_of_range_stops_the_program_before_writing() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("array_copy_bounds");
+    harness::ensure_runtime();
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
+    let _ = std::fs::remove_file(&exe);
+
+    let main = "module main;
+import std::core::{Array, Option, print};
+import std::env::{Env};
+
+fn case(which: String) -> () {
+  let source: Array<U8> = Array::new(8, 1);
+  let target: Array<U8> = Array::new(8, 0);
+  if which == \"source-end\" { Array::copy_into(source, 4, target, 0, 5) }
+  else if which == \"source-negative\" { Array::copy_into(source, -1, target, 0, 2) }
+  else if which == \"target-end\" { Array::copy_into(source, 0, target, 5, 4) }
+  else if which == \"target-negative\" { Array::copy_into(source, 0, target, -1, 1) }
+  else if which == \"count-negative\" { Array::copy_into(source, 0, target, 0, -1) }
+  else if which == \"text-end\" { String::copy_into(\"abc\", 1, target, 0, 3) }
+  else if which == \"text-target-end\" { String::copy_into(\"abcdef\", 0, target, 3, 6) }
+  else if which == \"fits\" { Array::copy_into(source, 0, target, 0, 8); String::copy_into(\"abc\", 3, target, 8, 0) }
+  else { print(\"unknown case\") };
+  print(\"wrote ${Int::to_string(U8::to_int(Array::get(target, 0)))}\")
+}
+
+pub fn main() -> Int {
+  let which = with { env: Env::real() } {
+    match env.variable(\"KHORA_COPY_CASE\")! catch { _ => Option::None } {
+      Option::None => \"none\",
+      Option::Some(found) => found,
+    }
+  };
+  case(which);
+  0
+}
+";
+    let db = KhoraDatabase::new();
+    let root = SourceRoot::new(&db, with_std(&db, &dir, main));
+    if let Err(errors) = khora_codegen_llvm::compile(&db, root, &exe) {
+        let messages: Vec<String> = errors.into_iter().map(|e| e.message).collect();
+        panic!("compiling the copy program failed:\n  {}", messages.join("\n  "));
+    }
+
+    let run = |case: &str| {
+        let out = Command::new(&exe).env("KHORA_COPY_CASE", case).output().expect("the program should run");
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n"),
+            String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n"),
+        )
+    };
+
+    // The control: in range, the copy happens and the program finishes.
+    let (code, stdout, _) = run("fits");
+    assert_eq!((code, stdout.as_str()), (Some(0), "wrote 1\n"), "an in-range copy");
+
+    for case in [
+        "source-end", "source-negative", "target-end", "target-negative", "count-negative", "text-end",
+        "text-target-end",
+    ] {
+        let (code, stdout, stderr) = run(case);
+        assert_ne!(code, Some(0), "{case}: an out-of-range copy must stop the program");
+        assert!(stderr.contains("is outside an array of"), "{case}: the trap names the index: {stderr:?}");
+        assert!(!stdout.contains("wrote"), "{case}: the program carried on: {stdout:?}");
+    }
 }

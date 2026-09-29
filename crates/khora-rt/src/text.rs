@@ -149,6 +149,36 @@ pub unsafe extern "C" fn khora_str_eq(
     unsafe { std::slice::from_raw_parts(a, a_len as usize) == std::slice::from_raw_parts(b, b_len as usize) }
 }
 
+/// The byte order of two strings: -1, 0 or 1.
+///
+/// **What this prevents: sorting text a byte at a time in Khora.** `String`'s
+/// `cmp` was a loop that bounds-checked two strings and polled for
+/// cancellation at every byte; sorting the thirteen rows of the fortunes page
+/// by their text was a fifth of the request. This is one `memcmp` and a length
+/// compare, and gives the same order: bytes compared unsigned, so 0x80 comes
+/// after `z`, and a string that is a prefix of another comes first.
+///
+/// # Safety
+///
+/// As [`khora_str_eq`]: each pointer must be null or address `len`
+/// initialized bytes that stay live and unmodified for the call. A length is
+/// never negative.
+#[unsafe(no_mangle)]
+// SHARE: reads two lent byte buffers; takes no Khora object.
+pub unsafe extern "C" fn khora_str_cmp(a: *const u8, a_len: i64, b: *const u8, b_len: i64) -> i64 {
+    // SAFETY: a length of zero never reads its pointer, which may be null for
+    // an uninitialized slot; any other length is the caller's guarantee of
+    // that many live bytes.
+    let mine: &[u8] = if a_len <= 0 { &[] } else { unsafe { std::slice::from_raw_parts(a, a_len as usize) } };
+    // SAFETY: as above.
+    let theirs: &[u8] = if b_len <= 0 { &[] } else { unsafe { std::slice::from_raw_parts(b, b_len as usize) } };
+    match mine.cmp(theirs) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }
+}
+
 /// Writes `value` into `into` as text, and says how many bytes that took.
 ///
 /// The shortest form that reads back as the same number, which is Rust's

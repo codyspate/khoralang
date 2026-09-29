@@ -1,0 +1,92 @@
+module std_suite::http_reading;
+
+//! What `Connection::next` reads off a transport, from reads that arrive in
+//! whatever pieces the network makes.
+//!
+//! A scripted transport stands in for the socket: each `receive` hands over
+//! the next piece. So a request split across reads, two requests in one read,
+//! and a request whose end shares a read with the next one's start can be
+//! written down exactly, which a real socket only produces by luck.
+
+import std::core::{List, assert_that};
+import std::net::http::{Connection, Incoming, Request, Transport};
+
+/// Where the scripted transport is in its script.
+type Script = { mut pieces: List<String> };
+
+/// A transport whose reads are `pieces`, in order, then the peer closing.
+fn scripted(pieces: List<String>) -> Transport {
+  let script: Script = { pieces: pieces };
+  {
+    receive: fn buffer => match script.pieces {
+      List::Nil => 0,
+      List::Cons(piece, rest) => {
+        script.pieces = rest;
+        let n = String::byte_length(piece);
+        String::copy_into(piece, 0, buffer, 0, n);
+        n
+      },
+    },
+    transmit: fn text => String::byte_length(text),
+    shut: fn () => (),
+  }
+}
+
+/// Each request `next` finds, as `path body`, until the stream ends; a
+/// rejection shows as `rejected`.
+fn read_all(pieces: List<String>) -> String {
+  let connection = Connection::over(scripted(pieces));
+  let mut seen = "";
+  let mut going = true;
+  while going {
+    match Connection::next(connection) {
+      Incoming::Arrived(request, _keep) => { seen = "${seen}[${request.path} ${request.body}]" },
+      Incoming::Ended => { going = false },
+      Incoming::Rejected(_response) => { seen = "${seen}[rejected]"; going = false },
+    }
+  };
+  seen
+}
+
+/// **Pipelined requests and requests in pieces, every way the pieces can
+/// fall.** One stream of three requests, two with bodies, cut at every
+/// offset into two reads and at pairs of offsets into three. Every cut must
+/// read the same three requests: the bytes carried from one request to the
+/// next are moved to the front of the buffer, and each read is copied in
+/// after what is already there.
+test "requests read the same however the stream is cut" {
+  let stream = "POST /a HTTP/1.1\r\nContent-Length: 5\r\n\r\nhelloGET /b HTTP/1.1\r\n\r\nPOST /c HTTP/1.1\r\nContent-Length: 3\r\n\r\nxyz";
+  let want = "[/a hello][/b ][/c xyz]";
+  assert_that(read_all([stream]) == want, "whole: ${read_all([stream])}");
+  let n = String::byte_length(stream);
+  let mut cut = 1;
+  while cut < n {
+    let got = read_all([String::slice(stream, 0, cut), String::slice(stream, cut, n)]);
+    assert_that(got == want, "cut at ${Int::to_string(cut)}: ${got}");
+    cut = cut + 1
+  };
+  let mut first = 1;
+  while first < n {
+    let mut second = first + 1;
+    while second < n {
+      let got = read_all([String::slice(stream, 0, first), String::slice(stream, first, second), String::slice(stream, second, n)]);
+      assert_that(got == want, "cuts at ${Int::to_string(first)}, ${Int::to_string(second)}: ${got}");
+      second = second + 7
+    };
+    first = first + 5
+  };
+}
+
+/// A read as large as the connection's read buffer, carrying more than one
+/// request's worth: nothing past what the transport said arrived is taken.
+test "a full read is copied whole, and only what arrived" {
+  let one = "GET /x HTTP/1.1\r\n\r\n";
+  let mut many = "";
+  let mut i = 0;
+  while i < 200 { many = many + one; i = i + 1 };
+  let mut want = "";
+  let mut j = 0;
+  while j < 200 { want = want + "[/x ]"; j = j + 1 };
+  let got = read_all([String::slice(many, 0, 4096), String::slice(many, 4096, String::byte_length(many))]);
+  assert_that(got == want, "${Int::to_string(String::byte_length(got))} bytes of requests read");
+}

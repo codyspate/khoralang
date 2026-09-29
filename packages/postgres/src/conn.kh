@@ -1,6 +1,6 @@
 module postgres::conn;
 
-import std::core::{Array, List, Option, Result, Vector, assert};
+import std::core::{Array, Iterator, List, Option, Result, Step, Vector, assert};
 import std::db::{Cell, DbError, Row};
 import std::decimal::{Decimal};
 import std::net::socket::{connect_to, invalid_handle, nothing_yet, receive, receive_now, set_receive_timeout, shut, start, transmit_bytes};
@@ -129,7 +129,20 @@ pub type Connection = {
   /// it back to 0, so a `ROLLBACK`, a `COMMIT` or a failed `BEGIN` cannot
   /// leave it counting savepoints the server has already dropped.
   mut depth: Int,
+  /// Where every socket read lands before `extend` copies out what arrived.
+  ///
+  /// **One per connection, so a read does not allocate.** A fresh 8 KiB
+  /// array per read, and another per lease check, was zeroed by the
+  /// allocator every time, and that was an eighth of a single-row query's
+  /// instructions. Nothing keeps a reference to it past the read: `extend`
+  /// copies the bytes that arrived into `pending`.
+  ///
+  /// What it costs: 8 KiB per open connection, for as long as it is open.
+  inbox: Array<U8>,
 };
+
+/// How many bytes one socket read asks for.
+fn read_size() -> Int { 8192 }
 
 /// What a column is called and what type the server says it is.
 pub type Column = {
@@ -153,16 +166,8 @@ pub type Answer = {
 fn extend(head: Array<U8>, from: Int, tail: Array<U8>, tail_len: Int) -> Array<U8> {
   let head_len = Array::length(head) - from;
   let out: Array<U8> = Array::new(head_len + tail_len, 0);
-  let mut i = 0;
-  while i < head_len {
-    Array::set(out, i, Array::get(head, from + i));
-    i = i + 1
-  };
-  let mut j = 0;
-  while j < tail_len {
-    Array::set(out, head_len + j, Array::get(tail, j));
-    j = j + 1
-  };
+  Array::copy_into(head, from, out, 0, head_len);
+  Array::copy_into(tail, 0, out, head_len, tail_len);
   out
 }
 
@@ -185,7 +190,7 @@ pub fn next_message(c: Connection) -> Result<Message, PgError> {
         going = false
       },
       Option::None => {
-        let buffer: Array<U8> = Array::new(8192, 0);
+        let buffer = c.inbox;
         let read = receive(c.handle, buffer);
         if read <= 0 {
           c.broken = true;
@@ -286,7 +291,7 @@ pub fn open_within(
       let empty: Array<U8> = Array::new(0, 0);
       let c: Connection = {
         handle: handle, pending: empty, start: 0, scram: Option::None, broken: false,
-        open_transaction: false, depth: 0,
+        open_transaction: false, depth: 0, inbox: Array::new(read_size(), 0),
       };
       let hello = startup(user, database);
       let began = khora_monotonic_millis();
@@ -552,7 +557,7 @@ pub fn still_open(c: Connection) -> Bool {
     // A bound, so a server that never stops talking cannot hold the check.
     let mut rounds = 16;
     while reading && rounds > 0 {
-      let probe: Array<U8> = Array::new(8192, 0);
+      let probe = c.inbox;
       let read = receive_now(c.handle, probe);
       if nothing_yet(read) {
         reading = false
@@ -725,6 +730,9 @@ fn cell_text(value: Cell) -> Option<String> {
 /// Reads until `ReadyForQuery`, gathering whatever came before it.
 fn collect(c: Connection) -> Result<Answer, PgError> {
   let mut columns: List<Column> = List::Nil;
+  // The column names every row carries, built once per reply: one list shared
+  // by every row, where building it per row was a list per row.
+  let mut names: List<String> = List::Nil;
   let mut rows: Vector<Row> = Vector::new();
   let mut tag = "";
   let mut failure: Option<PgError> = Option::None;
@@ -747,9 +755,10 @@ fn collect(c: Connection) -> Result<Answer, PgError> {
           if !c.open_transaction { c.depth = 0 };
           going = false
         } else if m.kind == 84 {
-          columns = describe(m)
+          columns = describe(m);
+          names = List::map(columns, fn column => column.name)
         } else if m.kind == 68 {
-          Vector::push(rows, data_row(m, columns))
+          Vector::push(rows, data_row(m, columns, names))
         } else if m.kind == 67 {
           tag = Reader::cstring(Reader::of(m.payload))
         } else if m.kind == 69 {
@@ -795,7 +804,14 @@ fn describe(m: Message) -> List<Column> {
 /// **Every value arrives as text.** The simple query protocol has no way to
 /// ask for anything else, so a `bool` is `"t"` and an `int4` is `"42"`, and
 /// `oid_to_cell` is where that becomes a `Cell`.
-fn data_row(m: Message, columns: List<Column>) -> Row {
+///
+/// An integer column is read from its digits where they lie, when they are
+/// plain digits; anything else goes through the text, as every other type
+/// does, and gets the same answer.
+///
+/// `names` is the columns' names, which every row carries: they are what a
+/// schema reads the row by. The caller builds them once per reply.
+fn data_row(m: Message, columns: List<Column>, names: List<String>) -> Row {
   let read = Reader::of(m.payload);
   let count = Reader::i16(read);
   let mut cells: Vector<Cell> = Vector::new();
@@ -806,15 +822,16 @@ fn data_row(m: Message, columns: List<Column>) -> Row {
     if length < 0 {
       Vector::push(cells, Cell::Null)
     } else {
-      let bytes = Reader::take(read, length);
-      let text = String::from_bytes(bytes);
-      Vector::push(cells, oid_to_cell(oid_at(columns, i), text))
+      let oid = oid_at(columns, i);
+      let quick = if oid == 20 || oid == 21 || oid == 23 { Reader::digits(read, length) } else { Option::None };
+      match quick {
+        Option::Some(n) => Vector::push(cells, Cell::Number(n)),
+        Option::None => Vector::push(cells, oid_to_cell(oid, String::from_bytes(Reader::take(read, length)))),
+      }
     };
     i = i + 1
   };
-  // The names come too: they are what a schema reads the row by, and the
-  // description had them all along.
-  { columns: List::map(columns, fn column => column.name), cells: to_list(cells) }
+  { columns: names, cells: to_list(cells) }
 }
 
 /// The type of column `index`, or text if the description is missing.
@@ -914,7 +931,10 @@ fn to_list<A>(v: Vector<A>) -> List<A> {
 /// A connection whose buffer already holds `bytes`, so `next_message` answers
 /// from it without reading the socket.
 fn holding(bytes: Array<U8>) -> Connection {
-  { handle: invalid_handle(), pending: bytes, start: 0, scram: Option::None, broken: false, open_transaction: false, depth: 0 }
+  {
+    handle: invalid_handle(), pending: bytes, start: 0, scram: Option::None, broken: false,
+    open_transaction: false, depth: 0, inbox: Array::new(read_size(), 0),
+  }
 }
 
 /// **An idle connection holds no buffer from its last reply.** Taking a
@@ -941,6 +961,151 @@ test "taking the last buffered message lets the buffer go" {
   };
   assert(Array::length(c.pending) == 0);
   assert(c.start == 0);
+}
+
+/// A `RowDescription` with these columns, as the server frames it.
+fn description(names: List<String>, oids: List<Int>) -> Array<U8> {
+  let body = Writer::new();
+  Writer::i16(body, List::length(names));
+  let mut rest_names = names;
+  let mut rest_oids = oids;
+  let mut going = true;
+  while going {
+    match rest_names {
+      List::Nil => going = false,
+      List::Cons(name, more) => {
+        let oid = match rest_oids { List::Nil => 25, List::Cons(o, _later) => o };
+        rest_oids = match rest_oids { List::Nil => List::Nil, List::Cons(_o, later) => later };
+        Writer::cstring(body, name);
+        Writer::i32(body, 0);
+        Writer::i16(body, 0);
+        Writer::i32(body, oid);
+        Writer::i16(body, 4);
+        Writer::i32(body, -1);
+        Writer::i16(body, 0);
+        rest_names = more
+      },
+    }
+  };
+  framed(84, Writer::finish(body))
+}
+
+/// A `DataRow` of these values, `None` for NULL.
+fn row_of(values: List<Option<String>>) -> Array<U8> {
+  let body = Writer::new();
+  Writer::i16(body, List::length(values));
+  let mut rest = values;
+  let mut going = true;
+  while going {
+    match rest {
+      List::Nil => going = false,
+      List::Cons(value, more) => {
+        match value {
+          Option::None => Writer::i32(body, -1),
+          Option::Some(text) => { Writer::i32(body, String::byte_length(text)); Writer::text(body, text) },
+        };
+        rest = more
+      },
+    }
+  };
+  framed(68, Writer::finish(body))
+}
+
+/// **A whole reply, read the way `ask` reads one.** Every row carries the
+/// column names, which are built once per reply and shared, and every
+/// integer column is read from its digits where it can be -- including the
+/// ones it cannot, which come out as the text path makes them. A reply with
+/// a second description (two statements) must not keep the first one's
+/// names.
+test "a reply's rows carry their names and read integers from their digits" {
+  let bytes = Writer::new();
+  Writer::raw(bytes, description(["id", "message", "big"], [23, 25, 20]));
+  Writer::raw(bytes, row_of([Option::Some("7"), Option::Some("hello"), Option::Some("-9000000000")]));
+  Writer::raw(bytes, row_of([Option::Some("-12"), Option::None, Option::Some("")]));
+  // Not digits, and too long to be safe: both go the slow way.
+  Writer::raw(bytes, row_of([Option::Some(" 3"), Option::Some("é"), Option::Some("9223372036854775807")]));
+  Writer::raw(bytes, framed(67, String::bytes("SELECT 3\u{0}")));
+  Writer::raw(bytes, framed(90, Array::new(1, 73)));
+  let c = holding(Writer::finish(bytes));
+
+  match collect(c) {
+    Result::Err(_) => assert(false),
+    Result::Ok(answer) => {
+      assert(answer.tag == "SELECT 3");
+      assert(List::length(answer.rows) == 3);
+      for row in answer.rows {
+        assert(row.columns == ["id", "message", "big"]);
+      };
+      match answer.rows {
+        List::Cons(first, later) => {
+          assert(first.cells == [Cell::Number(7), Cell::Text("hello"), Cell::Number(-9000000000)]);
+          match later {
+            List::Cons(second, last) => {
+              assert(second.cells == [Cell::Number(-12), Cell::Null, Cell::Text("")]);
+              match last {
+                List::Cons(third, _none) =>
+                  assert(third.cells == [Cell::Text(" 3"), Cell::Text("é"), Cell::Number(9223372036854775807)]),
+                List::Nil => assert(false),
+              }
+            },
+            List::Nil => assert(false),
+          }
+        },
+        List::Nil => assert(false),
+      }
+    },
+  };
+  assert(!c.open_transaction);
+}
+
+test "a second description in one reply names the rows after it" {
+  let bytes = Writer::new();
+  Writer::raw(bytes, description(["a"], [23]));
+  Writer::raw(bytes, row_of([Option::Some("1")]));
+  Writer::raw(bytes, description(["b"], [25]));
+  Writer::raw(bytes, row_of([Option::Some("1")]));
+  Writer::raw(bytes, framed(90, Array::new(1, 73)));
+  let c = holding(Writer::finish(bytes));
+  match collect(c) {
+    Result::Err(_) => assert(false),
+    Result::Ok(answer) => match answer.rows {
+      List::Cons(first, rest) => {
+        assert(first.columns == ["a"] && first.cells == [Cell::Number(1)]);
+        match rest {
+          List::Cons(second, _none) => assert(second.columns == ["b"] && second.cells == [Cell::Text("1")]),
+          List::Nil => assert(false),
+        }
+      },
+      List::Nil => assert(false),
+    },
+  };
+}
+
+/// **What a read appends to.** `extend` is what joins the unread end of the
+/// last read to the bytes a new one brought, and a copy that started in the
+/// wrong place or stopped short would put a reply out of step with no error
+/// until a later message made no sense. Every split of the head against every
+/// length of the tail, with the read buffer longer than what arrived, as the
+/// connection's read buffer always is.
+test "extend keeps the unread head and appends only what arrived" {
+  let head: Array<U8> = Array::from_fn(10, fn i => U8::of(100 + i));
+  let tail: Array<U8> = Array::from_fn(read_size(), fn i => U8::of(Int::and(i, 255)));
+  for from in [0, 1, 5, 9, 10] {
+    for arrived in [0, 1, 7, 4096, read_size()] {
+      let out = extend(head, from, tail, arrived);
+      assert(Array::length(out) == 10 - from + arrived);
+      let mut i = 0;
+      while i < 10 - from {
+        assert(U8::to_int(Array::get(out, i)) == 100 + from + i);
+        i = i + 1
+      };
+      let mut j = 0;
+      while j < arrived {
+        assert(U8::to_int(Array::get(out, 10 - from + j)) == Int::and(j, 255));
+        j = j + 1
+      }
+    }
+  };
 }
 
 /// A buffer holding the start of the next message is kept: dropping it would

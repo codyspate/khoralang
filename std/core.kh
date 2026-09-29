@@ -335,37 +335,21 @@ impl String {
 /// plane. What it *is* is stable, cheap, and the same on every machine, which
 /// is what sorting for a program's own use wants. A human-facing sort wants a
 /// collation library and should say so.
+///
+/// Compared by the runtime's `memcmp`, with no cancellation point inside: a
+/// comparison of two strings is one call however long they are.
 impl Ord for String {
   fn cmp(self, other: String) -> Ordering {
-    String::compare_bytes(self, other, 0)
+    let order = String::with_data(self, fn (mine, mine_length) =>
+      String::with_data(other, fn (theirs, their_length) =>
+        khora_str_cmp(mine, mine_length, theirs, their_length)));
+    if order < 0 { Ordering::Less } else if order > 0 { Ordering::Greater } else { Ordering::Equal }
   }
 }
 
-impl String {
-  fn compare_bytes(self, other: String, from: Int) -> Ordering {
-    let mine = String::byte_length(self);
-    let theirs = String::byte_length(other);
-    let shorter = if mine < theirs { mine } else { theirs };
-    let mut at = from;
-    let mut answer = Ordering::Equal;
-    while at < shorter && Ordering::is_equal(answer) {
-      let here = String::byte(self, at);
-      let there = String::byte(other, at);
-      if here < there { answer = Ordering::Less }
-      else if here > there { answer = Ordering::Greater }
-      else { at = at + 1 }
-    }
-    // Neither differed in the bytes they share, so the shorter one is first
-    // and equal lengths mean equal text.
-    if Ordering::is_equal(answer) {
-      if mine < theirs { Ordering::Less }
-      else if mine > theirs { Ordering::Greater }
-      else { Ordering::Equal }
-    } else {
-      answer
-    }
-  }
-}
+/// The byte order of two strings: negative, zero or positive. Unsigned bytes,
+/// and a string that is a prefix of the other comes first.
+extern fn khora_str_cmp(a: Ptr, a_length: Int, b: Ptr, b_length: Int) -> Int;
 
 impl Eq for Ordering {
   fn eq(self, other: Ordering) -> Bool {
@@ -1382,16 +1366,15 @@ impl<A> List<A> {
   /// list cannot disagree. Sorting a record by one of its fields is a
   /// different question, and this is where it is asked.
   ///
-  /// The same merge sort and the same guarantees: stable, so equal elements
-  /// keep the order they were given -- which is what makes sorting twice, by
-  /// one key and then another, do what everybody expects.
+  /// Stable, so equal elements keep the order they were given -- which is
+  /// what makes sorting twice, by one key and then another, do what everybody
+  /// expects.
   ///
-  /// **Deeper than `sort`, though, and the two are not interchangeable on a
-  /// long list.** `sort` gets its `log2(n)` frames because `take_first` under
-  /// its `split` is a `while` loop; `split_evenly` here reaches `take_evenly`,
-  /// which calls itself once per element it takes, so the first split alone is
-  /// about `n / 2` frames. `Array::sort_by` is iterative throughout and is the
-  /// one to move to when the list is long enough for that to matter.
+  /// **Sorted in an array, and the list rebuilt from it.** The elements are
+  /// copied into one array, sorted there by [`Array::sort_by`]'s bottom-up
+  /// merge, and read back into a new list: two arrays and one new cell per
+  /// element, however many rounds the merge takes. It recurses nowhere, so a
+  /// long list costs no stack.
   ///
   /// `order` must be consistent: if it says `a` is less than `b` it must not
   /// also say `b` is less than `a`. One that is not produces some order and no
@@ -1399,66 +1382,29 @@ impl<A> List<A> {
   pub fn sort_by(self, order: (A, A) -> Ordering) -> List<A> {
     match self {
       List::Nil => List::Nil,
-      List::Cons(only, rest) => match rest {
-        // One element is sorted, and stopping here is what keeps the split
-        // from recursing forever on a list it cannot make smaller.
-        List::Nil => List::Cons(only, List::Nil),
-        List::Cons(second, more) => {
-          let halves = List::split_evenly(List::Cons(only, List::Cons(second, more)));
-          List::merge_by(List::sort_by(halves.left, order), List::sort_by(halves.right, order), order)
-        }
+      List::Cons(first, _rest) => {
+        // `first` is the only value of `A` in reach to seed the array with;
+        // every cell is written by the walk below before the sort reads it.
+        let cells = Array::new(List::length(self), first);
+        let mut at = 0;
+        let mut rest = self;
+        let mut walking = true;
+        while walking {
+          match rest {
+            List::Nil => { walking = false; },
+            List::Cons(head, tail) => { Array::set(cells, at, head); at = at + 1; rest = tail; },
+          }
+        };
+        Array::sort_by(cells, order);
+        let mut out = List::Nil;
+        let mut back = at - 1;
+        while back >= 0 {
+          out = List::Cons(Array::get(cells, back), out);
+          back = back - 1;
+        };
+        out
       },
     }
-  }
-
-  /// The first half and the second, by count.
-  ///
-  /// `sort`'s own `split` wants `A: Ord` because of the block it sits in;
-  /// this is the same walk without the bound.
-  fn split_evenly(self) -> Halves<A> {
-    List::take_evenly(self, List::length(self) / 2, List::Nil)
-  }
-
-  fn take_evenly(self, count: Int, taken: List<A>) -> Halves<A> {
-    if count <= 0 {
-      { left: List::reverse(taken), right: self }
-    } else {
-      match self {
-        List::Nil => { left: List::reverse(taken), right: List::Nil },
-        List::Cons(head, tail) => List::take_evenly(tail, count - 1, List::Cons(head, taken)),
-      }
-    }
-  }
-
-  /// Two sorted lists as one, taking from the left on a tie.
-  ///
-  /// Taking from the left is what makes `sort_by` stable, and it is the only
-  /// line in here that decides it.
-  fn merge_by(self, other: List<A>, order: (A, A) -> Ordering) -> List<A> {
-    let mut out = List::Nil;
-    let mut mine = self;
-    let mut theirs = other;
-    let mut walking = true;
-    while walking {
-      match mine {
-        List::Nil => { out = List::reverse_onto(theirs, out); walking = false; },
-        List::Cons(head, tail) => match theirs {
-          List::Nil => {
-            out = List::reverse_onto(List::Cons(head, tail), out);
-            walking = false;
-          },
-          List::Cons(other_head, other_tail) =>
-            if Ordering::is_greater(order(head, other_head)) {
-              out = List::Cons(other_head, out);
-              theirs = other_tail;
-            } else {
-              out = List::Cons(head, out);
-              mine = tail;
-            },
-        },
-      }
-    };
-    List::reverse(out)
   }
 
   /// The elements `wanted` accepts and the ones it does not, in one walk.
@@ -2816,6 +2762,51 @@ impl<A> Array<A> {
     raises 'er;
 }
 
+/// Copies `count` bytes of `from`, starting at `from_at`, into `into` at
+/// `into_at`, as one `memmove`. The two ranges may overlap.
+///
+/// Bounds are the caller's to check, and [`Array::copy_into`] and
+/// [`String::copy_into`] are the only callers.
+extern fn khora_bytes_copy(from: Ptr, from_at: Int, into: Ptr, into_at: Int, count: Int) -> ();
+
+impl Array<U8> {
+  /// Copies `count` bytes of `source`, starting at `from`, into `target`
+  /// starting at `at`, in one move.
+  ///
+  /// **What it is for: a byte buffer copied a byte at a time.** A loop of
+  /// `get` and `set` checks two bounds and passes a cancellation point per
+  /// byte, and a network protocol copies every byte it reads or writes at
+  /// least once. This checks the two ranges once and moves the bytes with
+  /// the C library's `memmove`.
+  ///
+  /// `source` and `target` may be the same array and the ranges may overlap:
+  /// the bytes arrive as they were before the copy began, which is what
+  /// moving the unread tail of a buffer to its front needs.
+  ///
+  /// A range that does not fit, on either side, or a negative `count`, stops
+  /// the program and names the index, as [`Array::get`] does. A `count` of
+  /// zero copies nothing, anywhere a zero-length range fits -- including at
+  /// either array's end.
+  ///
+  /// ```khora
+  /// let buffer: Array<U8> = Array::new(8, 0);
+  /// Array::copy_into(String::bytes("hello"), 0, buffer, 3, 5);
+  /// // buffer is 0 0 0 h e l l o
+  /// ```
+  pub fn copy_into(source: Array<U8>, from: Int, target: Array<U8>, at: Int, count: Int) -> () {
+    if count < 0 {
+      khora_bounds_fail(count, Array::length(source))
+    } else if from < 0 || from + count > Array::length(source) {
+      khora_bounds_fail(if from < 0 { from } else { from + count - 1 }, Array::length(source))
+    } else if at < 0 || at + count > Array::length(target) {
+      khora_bounds_fail(if at < 0 { at } else { at + count - 1 }, Array::length(target))
+    } else if count > 0 {
+      Array::with_data(source, fn (bytes, _length) =>
+        Array::with_data(target, fn (into, _room) => khora_bytes_copy(bytes, from, into, at, count)))
+    }
+  }
+}
+
 /// Arithmetic that does not trap, and the bits underneath it.
 ///
 /// Ordinary `+`, `-` and `*` **stop the program** when they do not fit: a
@@ -3859,46 +3850,40 @@ impl Int {
   /// The number, written out.
   ///
   /// Needed by anything that puts a number in a message — a `Content-Length`,
-  /// a status line, a log — and written here rather than in the runtime
-  /// because it is four lines of Khora and a good test of whether they are
-  /// pleasant to write.
+  /// a status line, a log — so it is on every request path there is.
+  ///
+  /// **One buffer, counted first and filled from the end:** two allocations,
+  /// the buffer and the string, whatever the number of digits.
   ///
   /// **The most negative `Int` prints.** Taking its magnitude with `0 - self`
   /// overflows — that is the whole peculiarity of the number — so the digits
-  /// are never reached that way.
-  ///
-  /// The digits are walked on whichever side of zero the number is already on,
-  /// so nothing is ever negated.
+  /// are walked on whichever side of zero the number is already on, and
+  /// only a remainder, which is in `-9..=9`, is ever negated.
   pub fn to_string(self) -> String {
     if self == 0 {
       "0"
-    } else if self < 0 {
-      "-${Int::below_zero(self, "")}"
     } else {
-      Int::digits(self, "")
+      let mut count = 0;
+      let mut rest = self;
+      while rest != 0 {
+        rest = rest / 10;
+        count = count + 1
+      };
+      let width = if self < 0 { count + 1 } else { count };
+      // `-` is 45. Every cell is overwritten by a digit but the first of a
+      // negative number, which is the one that keeps it.
+      let out: Array<U8> = Array::new(width, 45);
+      let mut at = width - 1;
+      let mut left = self;
+      while left != 0 {
+        let digit = left % 10;
+        // `0` is 48, and the digits are consecutive.
+        Array::set(out, at, U8::of(48 + (if digit < 0 { 0 - digit } else { digit })));
+        left = left / 10;
+        at = at - 1
+      };
+      String::from_bytes(out)
     }
-  }
-
-  /// `self`'s digits, most significant first, accumulated from the least.
-  fn digits(self, tail: String) -> String {
-    let here = Int::digit(self % 10);
-    if self < 10 { here + tail } else { Int::digits(self / 10, here + tail) }
-  }
-
-  /// The same, for a negative `self`, without ever making it positive.
-  ///
-  /// `self % 10` is in `-9..=0` here, so negating *that* is safe where
-  /// negating the number is not.
-  fn below_zero(self, tail: String) -> String {
-    let here = Int::digit(0 - (self % 10));
-    if self > -10 { here + tail } else { Int::below_zero(self / 10, here + tail) }
-  }
-
-  fn digit(self) -> String {
-    let out: Array<U8> = Array::new(1, 0);
-    // `0` is 48, and the digits are consecutive.
-    Array::set(out, 0, U8::of(48 + self));
-    String::from_bytes(out)
   }
 }
 
@@ -3974,6 +3959,31 @@ impl String {
   pub fn with_data<B, 'ef, 'er>(self, body: (Ptr, Int) -> B with 'ef raises 'er) -> B
     with 'ef
     raises 'er;
+
+  /// Copies `count` of the string's bytes, starting at byte `from`, into
+  /// `target` starting at `at`, in one move.
+  ///
+  /// [`Array::copy_into`] for a string's bytes, and the same rules: a range
+  /// that does not fit, or a negative `count`, stops the program. What it
+  /// saves over `String::bytes` and then a copy is the array in between,
+  /// which is a whole copy of the string made to be thrown away.
+  ///
+  /// `from` counts bytes, not characters, so a range can end inside a
+  /// character. The bytes are copied as they are; whether `target` holds text
+  /// afterwards is `Array::is_utf8`'s question.
+  pub fn copy_into(self, from: Int, target: Array<U8>, at: Int, count: Int) -> () {
+    let length = String::byte_length(self);
+    if count < 0 {
+      khora_bounds_fail(count, length)
+    } else if from < 0 || from + count > length {
+      khora_bounds_fail(if from < 0 { from } else { from + count - 1 }, length)
+    } else if at < 0 || at + count > Array::length(target) {
+      khora_bounds_fail(if at < 0 { at } else { at + count - 1 }, Array::length(target))
+    } else if count > 0 {
+      String::with_data(self, fn (bytes, _length) =>
+        Array::with_data(target, fn (into, _room) => khora_bytes_copy(bytes, from, into, at, count)))
+    }
+  }
 }
 
 // --- The fixed-width integers ----------------------------------------------

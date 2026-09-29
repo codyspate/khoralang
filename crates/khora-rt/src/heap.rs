@@ -13,7 +13,9 @@
 
 use super::*;
 use crate::counters::{ALLOC_COUNT, COUNTER_ORDER, LIVE_COUNT};
-use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error};
+#[cfg(target_family = "wasm")]
+use std::alloc::alloc_zeroed;
+use std::alloc::{dealloc, handle_alloc_error};
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
@@ -200,7 +202,7 @@ unsafe fn release_now(ptr: *mut u8, drop_fields: Option<extern "C" fn(*mut u8)>)
         drop_fields(ptr);
     }
 
-    // SAFETY: `ptr` came from `alloc_zeroed` with exactly `layout`, which was
+    // SAFETY: `ptr` came from `zeroed` with exactly `layout`, which was
     // rebuilt from the same `field_bytes` the allocation used and the constant
     // alignment; the refcount is zero, so no other reference exists; and the
     // callback has already released everything the object owned.
@@ -234,9 +236,7 @@ pub extern "C" fn khora_alloc(size: u64, tag: u32) -> *mut u8 {
     let field_bytes = size as u32;
     let layout = object_layout(field_bytes);
 
-    // SAFETY: `layout` always includes the header, so its size is non-zero,
-    // which is `alloc_zeroed`'s one precondition.
-    let ptr = unsafe { alloc_zeroed(layout) };
+    let ptr = zeroed(layout);
     if ptr.is_null() {
         handle_alloc_error(layout);
     }
@@ -262,6 +262,50 @@ pub extern "C" fn khora_alloc(size: u64, tag: u32) -> *mut u8 {
     // `crate::contain` has the cost note.
     crate::contain::record(ptr);
     ptr
+}
+
+#[cfg(not(target_family = "wasm"))]
+unsafe extern "C" {
+    /// mimalloc's zeroed allocation, at the alignment every block it hands out
+    /// already has.
+    fn mi_zalloc(size: usize) -> *mut std::ffi::c_void;
+}
+
+/// `layout.size()` zeroed bytes, aligned to [`KHORA_HEADER_ALIGN`], or null.
+///
+/// **What this prevents: an aligned allocation's detour on every object.**
+/// `alloc_zeroed` reaches mimalloc through its *aligned* entry, which checks
+/// the alignment is a power of two and then whether the free block it found
+/// happens to be aligned, before doing what `mi_zalloc` does. A Khora header
+/// needs 8. mimalloc's size classes are whole words, so every block it hands
+/// out is at least 8-aligned (16 from 16 bytes up, which its own internal
+/// assertion checks), and a Khora object is never smaller than its 16-byte
+/// header. So the plain entry is enough;
+/// `every_object_is_zeroed_and_aligned_for_its_header` checks both halves
+/// over a spread of sizes, on reused memory.
+///
+/// Sound only because the global allocator *is* mimalloc (`lib.rs`), so the
+/// `dealloc` in [`release_now`] and [`release_raw`] reaches `mi_free`, which
+/// takes a block from either entry. A build that swapped the global allocator
+/// would have to swap this too; wasm, which keeps the default allocator, uses
+/// `alloc_zeroed` for exactly that reason.
+///
+/// Small: the performance round put it at about 2 µs of a Postgres `/db`
+/// request, from instruction counts rather than a timing.
+fn zeroed(layout: std::alloc::Layout) -> *mut u8 {
+    debug_assert!(layout.align() <= KHORA_HEADER_ALIGN && layout.size() >= KHORA_HEADER_SIZE);
+    #[cfg(not(target_family = "wasm"))]
+    {
+        // SAFETY: `mi_zalloc` has no precondition; a null answer is handled
+        // by the caller.
+        unsafe { mi_zalloc(layout.size()) }.cast::<u8>()
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        // SAFETY: `layout` always includes the header, so its size is
+        // non-zero, which is `alloc_zeroed`'s one precondition.
+        unsafe { alloc_zeroed(layout) }
+    }
 }
 
 /// Increments an object's refcount. Null is a no-op.
@@ -814,7 +858,7 @@ pub(crate) unsafe fn release_raw(ptr: *mut u8) {
     // and `field_bytes` is the one the allocation used.
     let field_bytes = unsafe { (*ptr.cast::<KhoraHeader>()).field_bytes };
     let layout = object_layout(field_bytes);
-    // SAFETY: `ptr` came from `alloc_zeroed` with exactly this layout, and the
+    // SAFETY: `ptr` came from `zeroed` with exactly this layout, and the
     // caller guarantees nothing else reaches it.
     unsafe { dealloc(ptr, layout) };
     if crate::counters::counting() {
