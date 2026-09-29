@@ -123,21 +123,17 @@ fn run() -> () raises ChildFailed {
 
 When the body completes normally, `nursery` waits until every adopted child is finished. If the body leaves by failure or cancellation, releasing the nursery cancels children that are still running and waits for them before the scope is gone.
 
-A child that acquires something is given a scope of its own, because a `Scope` stays on the fiber that opened it and a child cannot be handed its parent's. Spawn a named function that opens it:
+A child that acquires something is given a scope of its own, because a `Scope` stays on the fiber that opened it and a child cannot be handed its parent's. Open it in the child:
 
 ```khora
-fn serve_one(connection: Connection) -> () {
-  scoped(fn () => serve(connection))
-}
-
 fn accept_loop(connection: Connection) -> ()
-  with { nursery: Nursery }
+  with { scope: Scope, nursery: Nursery }
 {
-  nursery.adopt(Fiber::spawn(fn () => serve_one(connection)));
+  nursery.adopt(Fiber::spawn(fn () => scoped(fn () => serve(connection))));
 }
 ```
 
-What the child acquires is released when its `scoped` ends, on the child, on every way out including its cancellation. The lambda `scoped(fn () => serve(connection))` is written inside `serve_one`, which has no `scope` of its own; written inside a function that has one, `serve` would use that one, and the spawn is refused. [Sharing](/docs/reference/sharing/#regions-stay-home) has the rule.
+What the child acquires is released when its `scoped` ends, on the child, on every way out including its cancellation. `serve` uses the scope `scoped` hands it, not `accept_loop`'s own. [Sharing](/docs/reference/sharing/#regions-stay-home) has the rule.
 
 ### What a fiber is made of
 

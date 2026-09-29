@@ -71,13 +71,12 @@ is shareable, so neither can be captured by a fiber's body, sent on a channel,
 or put in a `Shared` cell. Every finalizer therefore runs on the fiber that
 deferred it, which is what lets one capture a record with `mut` fields that
 the fiber goes on writing. A child fiber that acquires something is given a
-scope of its own by handing `scoped` a named function,
-`Fiber::spawn(fn () => scoped(work))`, and what it acquires is released when
-that `scoped` ends. `Region::root()` and `Scope::root()` belong to the program's
-own fiber, and a spawned fiber that calls either stops with a fatal error; a
-`test` or `bench` block has a root region of its own, released when the block
-ends. [Sharing](/docs/reference/sharing/#regions-stay-home) has the rule, why
-the named function matters, and what it costs.
+scope of its own, `Fiber::spawn(fn () => scoped(work))`, and what it acquires
+is released when that `scoped` ends. `Region::root()` and `Scope::root()`
+belong to the program's own fiber, and a spawned fiber that calls either stops
+with a fatal error; a `test` or `bench` block has a root region of its own,
+released when the block ends. [Sharing](/docs/reference/sharing/#regions-stay-home)
+has the rule, which scope a lambda handed to `scoped` uses, and what it costs.
 
 ## Scope capability
 

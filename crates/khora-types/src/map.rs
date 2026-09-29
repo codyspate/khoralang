@@ -535,18 +535,17 @@ impl TypeMap {
 /// `Share` bound each refuse the same crossing, and a reader who meets two of
 /// them should be told the same fix: `scoped` inside the child.
 ///
-/// **The fix it names works in any function.** `scoped(fn () => work())`
-/// does not, inside a function with a `scope` of its own: a lambda passed to
-/// `scoped` there uses the enclosing `scope`, so that child is refused too,
-/// and naming it sent a reader in a circle. A named function handed to
-/// `scoped`, or a named function whose body calls `scoped`, gets the new one.
+/// **The fix it names works in any function**, including one with a `scope`
+/// of its own: what `scoped` hands its body, a named function or a lambda,
+/// shadows the enclosing `scope`. Before that held, a lambda there used the
+/// enclosing one and was refused by this very message, which sent a reader
+/// in a circle; `regions_stay_home::the_lambda_rewrite_compiles_inside_a_scope`
+/// keeps it from coming back.
 pub fn stays_on_its_fiber_because(subject: &str) -> String {
     format!(
         "{subject} stays on the fiber that opened it, so that its finalizers run on the \
          fiber that deferred them. To release something the child acquires, give the \
-         child a scope of its own by handing `scoped` a named function, \
-         `Fiber::spawn(fn () => scoped(work))`, or spawn a named function whose body \
-         calls `scoped`"
+         child a scope of its own, `Fiber::spawn(fn () => scoped(work))`"
     )
 }
 

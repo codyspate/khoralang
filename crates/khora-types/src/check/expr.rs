@@ -411,7 +411,8 @@ impl<'a> Checker<'a> {
                     raises: Box::new(raises.clone()),
                 };
                 self.lambdas.push(whole.clone());
-                self.enclosing_lambdas.push((id, Vec::new()));
+                let handed = offered.iter().map(|(label, _)| label.clone()).collect();
+                self.enclosing_lambdas.push((id, handed, Vec::new()));
 
                 let before = self.demanded.len();
                 // **The body is checked against what the lambda returns.**
@@ -475,7 +476,7 @@ impl<'a> Checker<'a> {
                 };
                 let _ = self.unifier.unify(&raises, &mine);
 
-                if let Some((_, found)) = self.enclosing_lambdas.pop() {
+                if let Some((_, _, found)) = self.enclosing_lambdas.pop() {
                     self.lambda_captures.insert(id, found);
                 }
                 self.lambdas.pop();

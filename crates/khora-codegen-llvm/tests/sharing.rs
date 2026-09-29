@@ -474,42 +474,195 @@ pub fn main() -> Int raises ChildFailed {
     );
 }
 
-/// **The lambda spelling of the rewrite is refused inside a function that
-/// has `scope`**, with the message naming the spelling above. There the
-/// lambda's `work()` uses the enclosing `scope`, so the child's acquire
-/// would go into its parent's region.
+/// **The lambda spelling of the rewrite, inside a function that has `scope`,
+/// releases on the child.** `scoped(fn () => work())` hands its lambda a
+/// scope, and that one shadows `run`'s, so "released c" comes before the
+/// join returns. Resolved to `run`'s, the child captured its parent's scope
+/// and was refused; before scopes stayed on their fiber, it compiled and
+/// released after `run` ended. The review's `rewrite_in_scope.kh`.
 #[test]
-fn the_lambda_rewrite_inside_a_scope_is_refused() {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("sharing_lambda_in_scope");
-    std::fs::create_dir_all(&dir).expect("a workspace");
-    let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
-    let source = r#"module main;
+fn the_lambda_rewrite_releases_on_the_child_inside_a_scope() {
+    let exe = build_whole(
+        "lambda_in_scope",
+        r#"module main;
 
 import std::core::{print, Fiber, Scope, scoped, acquire};
 
+type Conn = { name: String, mut uses: Int };
+
 fn work() -> Int with { scope: Scope } {
-  let _ = acquire(1, fn n => print("released c"));
-  1
+  let c = acquire({ name: "c", uses: 0 }, fn c => print("released ${c.name} after ${c.uses}"));
+  c.uses = c.uses + 1;
+  c.uses
 }
 
 fn run() -> Int with { scope: Scope } {
   let f = Fiber::spawn(fn () => scoped(fn () => work()));
-  Fiber::join(f)
+  let n = Fiber::join(f);
+  print("joined ${n}");
+  print("run ends");
+  n
 }
 
-pub fn main() -> Int { scoped(run) }
-"#;
-    let db = KhoraDatabase::new();
-    let root = SourceRoot::new(&db, sources(&db, &dir, source));
-    let Err(errors) = khora_codegen_llvm::compile_with(&db, root, &exe, khora_codegen_llvm::Profile::Debug)
-    else {
-        panic!("the lambda spelling compiled inside a function with `scope`");
-    };
-    let messages: Vec<String> = errors.into_iter().map(|e| e.message).collect();
-    assert!(
-        messages.iter().any(|m| m.contains("`scope` cannot be handed to another fiber")
-            && m.contains("`Fiber::spawn(fn () => scoped(work))`")),
-        "{messages:#?}"
+pub fn main() -> Int {
+  let n = scoped(fn () => run());
+  print("after scoped ${n}");
+  0
+}
+"#,
+    );
+    runs_clean(
+        "lambda_in_scope",
+        &exe,
+        "released c after 1\njoined 1\nrun ends\nafter scoped 1",
+    );
+}
+
+/// **On one fiber, a lambda handed to `scoped` inside a function that has
+/// `scope` releases at that `scoped`'s end**, as a named function does.
+/// Resolved to the enclosing `scope`, what the lambda's `work` acquired was
+/// released when the *outer* `scoped` ended: after "inner scoped ended",
+/// with nothing refused and nothing trapped. The review's
+/// `scoped_shadow.kh`.
+#[test]
+fn a_lambda_handed_to_scoped_uses_the_scope_it_is_handed() {
+    let exe = build_whole(
+        "scoped_shadow",
+        r#"module main;
+
+import std::core::{print, Scope, scoped, acquire};
+
+fn work(tag: String) -> Int with { scope: Scope } {
+  let _ = acquire(1, fn n => print("released ${tag}"));
+  1
+}
+
+fn w_named() -> Int with { scope: Scope } { work("named") }
+
+fn inner_scoped() -> Int with { scope: Scope } {
+  let _ = scoped(fn () => work("lambda"));
+  print("inner scoped ended (lambda)");
+  let _ = scoped(w_named);
+  print("inner scoped ended (named)");
+  1
+}
+
+pub fn main() -> Int {
+  let _ = scoped(fn () => inner_scoped());
+  print("outer scoped ended");
+  0
+}
+"#,
+    );
+    runs_clean(
+        "scoped_shadow",
+        &exe,
+        "released lambda\ninner scoped ended (lambda)\nreleased named\ninner scoped ended (named)\n\
+         outer scoped ended",
+    );
+}
+
+/// **Nested handlers pick the nearest scope.** Inside a function that has
+/// `scope`:
+/// - a lambda inside the lambda handed to `scoped`, handed the scope again
+///   by a function that forwards it, releases at that `scoped`'s end;
+/// - a `with { scope: .. }` block inside the lambda is nearer than what
+///   `scoped` hands it, and releases when its region does;
+/// - a `with { scope: .. }` block in the function is nearer than the
+///   function's own `scope`;
+/// - `nursery`, whose parameter hands a capability the same way, inside a
+///   lambda handed to `scoped`;
+/// - in `main`, which has no `scope`, a lambda handed to `scoped` inside a
+///   `with { scope: .. }` block: the handed scope is nearer than the block's.
+///
+/// Resolved to the lexical `scope`, the first and last two released late:
+/// after "run ends", and after "scoped in with ended".
+#[test]
+fn nested_handlers_pick_the_nearest_scope() {
+    let exe = build_whole(
+        "nested_scopes",
+        r#"module main;
+
+import std::core::{print, Scope, Region, scoped, acquire, nursery};
+
+fn work(tag: String) -> Int with { scope: Scope } {
+  let _ = acquire(1, fn n => print("released ${tag}"));
+  1
+}
+
+fn twice(f: () -> Int with { scope: Scope }) -> Int with { scope: Scope } { f() + f() }
+
+fn nested_lambda() -> Int with { scope: Scope } {
+  let _ = scoped(fn () => twice(fn () => work("nested")));
+  print("nested scoped ended");
+  1
+}
+
+fn with_inside() -> Int with { scope: Scope } {
+  {
+    let r = Region::open();
+    let _ = scoped(fn () => {
+      let n = with { scope: handler for Scope { defer: fn f => Region::defer(r, f) } } { work("with-in-lambda") };
+      print("lambda body ends");
+      n
+    });
+    print("with-inside scoped ended");
+  };
+  print("region ended");
+  1
+}
+
+fn with_block() -> Int with { scope: Scope } {
+  let n = {
+    let r = Region::open();
+    with { scope: handler for Scope { defer: fn f => Region::defer(r, f) } } { work("with-block") }
+  };
+  print("with-block ended");
+  n
+}
+
+fn in_nursery() -> Int with { scope: Scope } {
+  let _ = scoped(fn () => nursery(fn () => { let _ = work("nursery"); 1 })!)! catch { _ => 0 };
+  print("nursery scoped ended");
+  1
+}
+
+fn in_main_with() -> Int {
+  let r = Region::open();
+  with { scope: handler for Scope { defer: fn f => Region::defer(r, f) } } {
+    let _ = scoped(fn () => work("lambda in with"));
+    print("scoped in with ended");
+    1
+  }
+}
+
+fn run() -> Int with { scope: Scope } {
+  let _ = acquire(0, fn n => print("released run's own"));
+  let _ = nested_lambda();
+  let _ = with_inside();
+  let _ = with_block();
+  let _ = in_nursery();
+  print("run ends");
+  1
+}
+
+pub fn main() -> Int {
+  let _ = scoped(run);
+  let _ = in_main_with();
+  print("end");
+  0
+}
+"#,
+    );
+    runs_clean(
+        "nested_scopes",
+        &exe,
+        "released nested\nreleased nested\nnested scoped ended\n\
+         lambda body ends\nwith-inside scoped ended\nreleased with-in-lambda\nregion ended\n\
+         released with-block\nwith-block ended\n\
+         released nursery\nnursery scoped ended\n\
+         run ends\nreleased run's own\n\
+         released lambda in with\nscoped in with ended\nend",
     );
 }
 

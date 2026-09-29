@@ -49,15 +49,24 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   finalizers there.
 
   **The migration** is one line: a child that acquires something is given a
-  scope of its own by handing `scoped` a named function,
-  `Fiber::spawn(fn () => scoped(work))`, instead of being handed its
-  parent's. A named function whose body calls `scoped` works as well. What it
-  acquires is released when the child's `scoped` ends. Write the named
-  function, not `scoped(fn () => work())`: inside a function that has a
-  `scope` of its own, `work()` in that lambda uses the enclosing `scope`, and
-  the spawn is refused. A resource that has to outlive the child is a
-  shareable one (a pool, a channel, a `Shared` cell): acquire it in the parent
-  and hand the value in. The refusal names the fix.
+  scope of its own, `Fiber::spawn(fn () => scoped(work))`, instead of being
+  handed its parent's. A lambda works as well,
+  `scoped(fn () => work(connection))`, and so does a named function whose
+  body calls `scoped`. What it acquires is released when the child's `scoped`
+  ends. A resource that has to outlive the child is a shareable one (a pool,
+  a channel, a `Shared` cell): acquire it in the parent and hand the value
+  in. The refusal names the fix.
+
+- **A lambda handed to `scoped` or `nursery` inside a function with a
+  `scope` or `nursery` of its own used the enclosing one** (silent wrong
+  answer). In `fn f() with { scope: Scope }`, `scoped(fn () => work())` gave
+  `work` the `scope` of `f`, not the one `scoped` opens, so what `work`
+  acquired was released when `f`'s caller's scope ended rather than when
+  that `scoped` did. The capability `scoped` or `nursery` hands its lambda
+  is the lambda's own, and a binding of that label outside the lambda does
+  not shadow it. A capability the lambda writes by name, `scope.defer(..)`,
+  is the binding of that name in scope where the lambda is written, as any
+  name is.
 
 - **A record field is private to the module that declares its type, unless
   it is marked `pub`.** Outside that module a private field cannot be read,
@@ -373,6 +382,14 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   unaffected.
 
 ### Fixed
+
+- **A lambda handed to `scoped` inside a function with a `scope` of its own
+  released what it acquired at the outer scope's end** (see Breaking).
+  `scoped(fn () => work())` there released when the enclosing function's
+  caller's scope ended, after the line following `scoped`. It releases when
+  that `scoped` ends, as `scoped(work)` does, and
+  `Fiber::spawn(fn () => scoped(fn () => work()))` compiles there and
+  releases on the child.
 
 - **An argument that left early leaked the arguments evaluated before it.**
   In `List::reverse_onto(acc, load()!)`, when `load` raised, `acc` was never

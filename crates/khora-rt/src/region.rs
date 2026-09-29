@@ -97,7 +97,7 @@ pub unsafe extern "C" fn khora_region_root() -> *mut u8 {
         fatal(
             "`Region::root()` or `Scope::root()` reached from a spawned fiber: the root \
              region belongs to the program's own fiber, so give this one a scope of its own \
-             with `scoped(work)`, handing it a named function",
+             with `scoped(work)`",
         );
     }
     // SAFETY: single-threaded per the note above.
@@ -208,7 +208,7 @@ pub unsafe extern "C" fn khora_region_defer(
         fatal(
             "deferring a finalizer to a region another fiber opened: a finalizer runs on \
              the fiber that deferred it, so give this fiber a scope of its own with \
-             `scoped(work)`, handing it a named function",
+             `scoped(work)`",
         );
     }
     // SHARE: stores the closure; not a crossing. The check above makes this
@@ -273,7 +273,7 @@ pub unsafe extern "C" fn khora_region_release(region: *mut u8) {
         fatal(
             "releasing a region another fiber opened: a region's finalizers run on the \
              fiber that deferred them, so give this fiber a scope of its own with \
-             `scoped(work)`, handing it a named function",
+             `scoped(work)`",
         );
     }
     // Cleared before running anything, so a finalizer that reaches this region

@@ -271,12 +271,25 @@ impl<'ctx> Lower<'_, 'ctx> {
             // written, so no lookup by label finds it; the checker matched it
             // to this label and recorded which binding won.
             // `docs/design/capability-installation.md`.
-            let found = self.body.capability_at(site, &label).or_else(|| {
-                self.body
-                    .by_type_at(site)
-                    .into_iter()
-                    .find(|local| self.types.local(*local) == &ty)
-            });
+            // Handed to the lambda this call is in, which then has it as an
+            // incoming argument: a binding of that label outside the lambda
+            // is the wrong capability. `BodyTypes::is_handed`, which is keyed
+            // by the callee, as the checker's demands are.
+            let key = match self.body.expr(site) {
+                Expr::Call { callee, .. } => *callee,
+                _ => site,
+            };
+            let handed = self.types.is_handed(key, &label);
+            let found = if handed {
+                None
+            } else {
+                self.body.capability_at(site, &label).or_else(|| {
+                    self.body
+                        .by_type_at(site)
+                        .into_iter()
+                        .find(|local| self.types.local(*local) == &ty)
+                })
+            };
             let Some(local) = found else {
                 // Not a binding this body can name, but possibly one it was
                 // handed: a `with 'r` clause forwards capabilities it has no

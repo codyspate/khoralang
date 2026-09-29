@@ -152,8 +152,14 @@ pub(crate) struct Checker<'a> {
     /// about once the types are settled -- see [`Checker::settle_bare_names`].
     pub(crate) bare_names: Vec<(PatId, Type)>,
     /// The lambdas currently being inferred, innermost last, each with the
-    /// bindings it has been found to use implicitly.
-    pub(crate) enclosing_lambdas: Vec<(ExprId, Vec<khora_hir::body::LocalId>)>,
+    /// labels its callee hands it (`scoped`'s `with { 'ef | scope: Scope }`)
+    /// and the bindings it has been found to use implicitly.
+    pub(crate) enclosing_lambdas:
+        Vec<(ExprId, Vec<String>, Vec<khora_hir::body::LocalId>)>,
+    /// The calls whose capability, by label, is the one an enclosing lambda
+    /// is handed rather than the binding in lexical scope. See
+    /// [`Checker::handed_nearer`].
+    pub(crate) handed: HashSet<(ExprId, String)>,
     /// The finished answer, moved out as each lambda closes.
     pub(crate) lambda_captures: HashMap<ExprId, Vec<khora_hir::body::LocalId>>,
     /// What each call site asked for, published as [`crate::CallRows`].

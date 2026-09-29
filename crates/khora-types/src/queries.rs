@@ -31,6 +31,15 @@ pub struct BodyTypes {
     /// needs is the callee's row, which only the checker has read, so the
     /// answer is published here rather than guessed at twice.
     lambda_captures: HashMap<ExprId, Vec<khora_hir::body::LocalId>>,
+    /// The calls whose capability, by label, comes from what an enclosing
+    /// lambda is handed rather than from the binding in lexical scope.
+    ///
+    /// `scoped(fn () => work())` inside a function with a `scope` of its own:
+    /// lowering recorded that function's `scope` as the one in scope at
+    /// `work()`, and it is not the one `work` gets. Only the checker knows
+    /// which lambda was handed what, so code generation reads it here rather
+    /// than passing the lexical binding.
+    handed: HashSet<(ExprId, String)>,
     /// What each call site asked of the function containing it.
     ///
     /// **The checker computes this and used to drop it.** Row subtraction needs
@@ -118,6 +127,12 @@ impl BodyTypes {
         self.instantiations.get(&id)
     }
 
+    /// Whether the capability `label` at the call `site` is the enclosing
+    /// lambda's own, handed to it by its caller. See the field.
+    pub fn is_handed(&self, site: ExprId, label: &str) -> bool {
+        self.handed.contains(&(site, label.to_string()))
+    }
+
     /// Bindings this lambda captures implicitly. See the field.
     pub fn implicit_captures(&self, id: ExprId) -> &[khora_hir::body::LocalId] {
         self.lambda_captures.get(&id).map(Vec::as_slice).unwrap_or(&[])
@@ -169,6 +184,7 @@ impl BodyTypes {
             // generic body does, and there is nothing in a `LocalId` to
             // substitute.
             lambda_captures: self.lambda_captures.clone(),
+            handed: self.handed.clone(),
             call_rows: self.call_rows.clone(),
             caught: self.caught.iter().map(|(k, v)| (*k, settle(v))).collect(),
             total_catches: self.total_catches.clone(),
@@ -238,6 +254,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             bare_names: Vec::new(),
             enclosing_lambdas: Vec::new(),
             lambda_captures: HashMap::new(),
+            handed: HashSet::new(),
             call_rows: HashMap::new(),
             caught: HashMap::new(),
             total_catches: HashSet::new(),
@@ -318,6 +335,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             })
             .collect();
         let lambda_captures = std::mem::take(&mut checker.lambda_captures);
+        let handed = std::mem::take(&mut checker.handed);
         let call_rows = std::mem::take(&mut checker.call_rows);
         let caught = checker.caught.iter().map(|(k, v)| (*k, checker.unifier.zonk(v))).collect();
         let total_catches = std::mem::take(&mut checker.total_catches);
@@ -328,6 +346,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
                 locals,
                 instantiations,
                 lambda_captures,
+                handed,
                 call_rows,
                 caught,
                 total_catches,

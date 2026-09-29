@@ -388,36 +388,76 @@ pub fn main() -> Int {
     );
 }
 
-/// **The lambda spelling of the rewrite is refused inside a function that
-/// has `scope`**, and the refusal names the spelling that works there. A
-/// lambda passed to `scoped` inside such a function uses the enclosing
-/// `scope`, not the one `scoped` installs, so this child would acquire into
-/// its parent's region.
+/// **The lambda spelling of the rewrite compiles inside a function that has
+/// `scope`**, joined and adopted, and so does a lambda inside that lambda.
+/// The `scope` that `scoped` hands its lambda shadows the enclosing
+/// function's, so the child uses its own and nothing crosses. Resolved to
+/// the enclosing one, the child captured its parent's scope, and this was
+/// refused.
 #[test]
-fn the_lambda_rewrite_inside_a_scope_is_refused_with_the_named_spelling() {
+fn the_lambda_rewrite_compiles_inside_a_scope() {
     let found = errors_with_std(
         "module main;
 
-import std::core::{print, Fiber, Scope, scoped, acquire};
+import std::core::{print, Fiber, Scope, Nursery, scoped, nursery, acquire, ChildFailed};
 
-fn work() -> Int with { scope: Scope } {
-  let _ = acquire(1, fn n => print(\"released c\"));
+fn work(name: String) -> Int with { scope: Scope } {
+  let _ = acquire(1, fn n => print(\"released ${name}\"));
   1
 }
 
+fn twice(f: () -> Int with { scope: Scope }) -> Int with { scope: Scope } { f() + f() }
+
+fn run() -> Int with { scope: Scope, nursery: Nursery } {
+  let f = Fiber::spawn(fn () => scoped(fn () => work(\"joined\")));
+  let g = Fiber::spawn(fn () => scoped(fn () => twice(fn () => work(\"nested\"))));
+  nursery.adopt(Fiber::spawn(fn () => scoped(fn () => { let _ = work(\"adopted\"); () })));
+  Fiber::join(f) + Fiber::join(g)
+}
+
+pub fn main() -> Int raises ChildFailed {
+  scoped(fn () => nursery(fn () => run())!)!
+}
+",
+    );
+    assert!(found.is_empty(), "the lambda spelling is refused inside a scope: {found:#?}");
+}
+
+/// **A lambda that names its parent's scope is still refused**, inside
+/// `scoped` or not. A name written in the lambda is the binding of that name
+/// where the lambda is written: `outer`, and `scope` itself, are `run`'s
+/// scope, so the child would defer into its parent's region. What `scoped`
+/// hands its lambda shadows only the capability the body leaves unnamed.
+#[test]
+fn a_lambda_naming_its_parents_scope_is_refused_inside_scoped() {
+    refused(
+        "module main;
+
+import std::core::{print, Fiber, Scope, scoped};
+
 fn run() -> Int with { scope: Scope } {
-  let f = Fiber::spawn(fn () => scoped(fn () => work()));
+  let outer = scope;
+  let f = Fiber::spawn(fn () => scoped(fn () => { outer.defer(fn () => print(\"outer\")); 1 }));
   Fiber::join(f)
 }
 
 pub fn main() -> Int { scoped(run) }
 ",
+        "`outer` cannot be handed to another fiber",
     );
-    assert!(
-        found.iter().any(|m| m.contains("`scope` cannot be handed to another fiber")
-            && m.contains("`Fiber::spawn(fn () => scoped(work))`")
-            && m.contains("a named function")),
-        "expected the refusal to name the spelling that works: {found:#?}"
+    refused(
+        "module main;
+
+import std::core::{print, Fiber, Scope, scoped};
+
+fn run() -> Int with { scope: Scope } {
+  let f = Fiber::spawn(fn () => scoped(fn () => { scope.defer(fn () => print(\"named\")); 1 }));
+  Fiber::join(f)
+}
+
+pub fn main() -> Int { scoped(run) }
+",
+        "`scope` cannot be handed to another fiber",
     );
 }
 

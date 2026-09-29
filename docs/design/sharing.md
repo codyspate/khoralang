@@ -117,11 +117,12 @@ a `Scope` handler, which never crosses and so may capture its region. A fiber's
 error row is walked too (`check_raises_stay_home`): `Fiber`'s `A: Share` covers
 the answer and nothing covers the error, and asking the whole row for `Share`
 would refuse a `mut` record in an error, which is marked at the handover and
-correct. Every refusal names the rewrite: `Fiber::spawn(fn () => scoped(work))`
-with a named function, or a named function whose body calls `scoped`. Not
-`scoped(fn () => work())`: inside a function with a `scope` of its own, that
-lambda's `work()` resolves `scope` to the enclosing binding (a capability-
-resolution rule that predates this, on TODO-0.4), so it is refused too.
+correct. Every refusal names the rewrite: `Fiber::spawn(fn () => scoped(work))`.
+A lambda works as well, `scoped(fn () => work())`, inside a function with a
+`scope` of its own too: the capability `scoped`'s parameter hands the lambda
+shadows the enclosing binding for what the body requires without naming it
+(`Checker::handed_nearer`). A body that names `scope` still gets the
+enclosing binding, which is the lexical rule, and across a spawn is refused.
 
 The route no type can close is `Region::root()`, reachable by name from any
 fiber. The runtime records the opening fiber in each region and traps a defer

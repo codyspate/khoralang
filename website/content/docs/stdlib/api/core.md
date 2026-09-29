@@ -1028,8 +1028,7 @@ through.
 **A scope stays on the fiber that opened it**, so a finalizer runs on the
 fiber that deferred it and may capture a record with `mut` fields that
 fiber goes on writing. A fiber's body cannot capture one, nor can a handler
-for another effect; a child is given its own by handing `scoped` a named
-function.
+for another effect; a child is given its own with `scoped(work)`.
 
 The operation takes only a thunk. A handler's fields are ordinary closures
 and a closure is monomorphic, so an operation cannot be generic — and it
@@ -6347,10 +6346,10 @@ reaches the line after the loop.
 **It is also how a child fiber releases what it acquires.** The scope
 stays on the fiber that opened it, so a child cannot be handed its
 parent's; it opens its own, and its releases run on the child:
-`Fiber::spawn(fn () => scoped(work))`. **Hand it a named function**, or
-spawn a named function whose body calls `scoped`. Inside a function with a
-`scope` of its own, `work()` in `scoped(fn () => work())` uses the
-enclosing `scope`, not this one, so that spawn is refused.
+`Fiber::spawn(fn () => scoped(work))`, or with a lambda,
+`scoped(fn () => work(connection))`. The scope `scoped` hands its body is
+the one the body uses, inside a function with a `scope` of its own as
+anywhere else.
 
 ### acquire
 

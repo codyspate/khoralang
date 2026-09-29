@@ -184,7 +184,11 @@ impl<'a> Checker<'a> {
         if let (Some(site), Type::Row { fields, .. }) = (callee_site, &self.unifier.zonk(requires))
         {
             for (label, _) in fields {
-                self.note_implicit_capture(site, label);
+                if self.handed_nearer(site, label) {
+                    self.handed.insert((site, label.clone()));
+                } else {
+                    self.note_implicit_capture(site, label);
+                }
             }
         }
 
@@ -897,6 +901,14 @@ impl<'a> Checker<'a> {
                 // and have a binding for only one of them.
                 let mut left = Vec::new();
                 for (label, ty) in fields {
+                    // Handed to an enclosing lambda by its callee: this lambda
+                    // takes it as a parameter, whatever is in lexical scope.
+                    if demand.site.is_some_and(|s| self.handed.contains(&(s, label.clone()))) {
+                        if !mine.iter().any(|(l, _)| l == &label) {
+                            mine.push((label, ty));
+                        }
+                        continue;
+                    }
                     let lexical = demand
                         .site
                         .and_then(|site| self.body.capability_at(site, &label))
@@ -999,6 +1011,40 @@ impl<'a> Checker<'a> {
         None
     }
 
+    /// Whether the capability `label` at `site` is the one an enclosing
+    /// lambda's callee hands it, rather than the binding in lexical scope.
+    ///
+    /// **What this prevents: an acquire released by the wrong `scoped`.**
+    /// `scoped(fn () => work())` inside `fn f() with { scope: Scope }` gave
+    /// `work` the `scope` of `f`, not the one `scoped` opens: `scoped`
+    /// installed its scope and nothing used it, and what `work` acquired was
+    /// released when `f`'s caller's scope ended. Across a spawn the same
+    /// resolution captured the parent's scope, which the sharing check then
+    /// refused.
+    ///
+    /// The callee's `with { 'ef | scope: Scope }` is the lambda's parameter
+    /// in all but spelling, so it shadows what is outside the lambda, as a
+    /// parameter would. A binding *inside* the lambda -- a `with` block
+    /// written in its body -- is nearer still, and wins. Walked innermost
+    /// first, and the first lambda that decides it answers.
+    ///
+    /// Only for what a call requires without naming it. A capability the body
+    /// names, `scope.defer(f)`, is resolved by lowering, by name, and a
+    /// binding in lexical scope keeps it.
+    fn handed_nearer(&self, site: ExprId, label: &str) -> bool {
+        let lexical = self.body.capability_at(site, label);
+        for (lambda, handed, _) in self.enclosing_lambdas.iter().rev() {
+            let mark = self.body.lambda_marks.get(lambda).copied().unwrap_or(0);
+            if lexical.is_some_and(|local| local.index() >= mark) {
+                return false;
+            }
+            if handed.iter().any(|l| l == label) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Records that a lambda uses a capability without naming it.
     ///
     /// Against every enclosing lambda, not just the innermost: an inner
@@ -1008,7 +1054,7 @@ impl<'a> Checker<'a> {
     /// began, which is what captured means everywhere else.
     pub(super) fn note_implicit_capture(&mut self, site: ExprId, label: &str) {
         let Some(local) = self.body.capability_at(site, label) else { return };
-        for (lambda, found) in &mut self.enclosing_lambdas {
+        for (lambda, _, found) in &mut self.enclosing_lambdas {
             let mark = self.body.lambda_marks.get(lambda).copied().unwrap_or(0);
             if local.index() < mark && !found.contains(&local) {
                 found.push(local);

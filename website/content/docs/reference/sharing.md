@@ -233,21 +233,20 @@ What constrains it is the answer rather than the handle. `A: Share` is on the wh
 
 A `Region` stays on the fiber that opened it, and so does a `Scope`. Neither is shareable: a fiber's body cannot capture one, a channel cannot carry one, a `Shared` cell cannot hold one, a fiber cannot answer or raise one, and a handler for another effect cannot capture one. So a region's finalizers run on the fiber that deferred them, which is what lets a finalizer capture a record with `mut` fields that this fiber goes on writing.
 
-A child fiber that acquires something is given a scope of its own, by handing `scoped` a named function:
+A child fiber that acquires something is given a scope of its own:
 
 ```khora
 let worker = Fiber::spawn(fn () => scoped(work));
 ```
 
-A named function whose body calls `scoped` works too: `Fiber::spawn(fn () => serve_one(connection))`, where `serve_one` opens its own. What the child acquires is released when the child's `scoped` ends, on every way out, including a cancellation or an `abort` of the child.
+A lambda works as well, `Fiber::spawn(fn () => scoped(fn () => serve(connection)))`, and so does a named function whose body calls `scoped`. What the child acquires is released when the child's `scoped` ends, on every way out, including a cancellation or an `abort` of the child.
 
-Write a named function rather than `scoped(fn () => work())`. Inside a function that has a `scope` of its own, `work()` in that lambda uses the enclosing `scope`, not the one `scoped` opens, so the child would be handed its parent's scope, and the spawn is refused:
+The scope `scoped` hands its body is the one the body uses, also inside a function that has a `scope` of its own: there, `work()` in `scoped(fn () => work())` uses the new scope, not the enclosing one. What the body names is another matter. A lambda that writes `scope.defer(..)`, or captures `scope` under another name, uses the enclosing function's scope, and inside a spawn that is refused:
 
 ```text
 error: `scope` cannot be handed to another fiber: a `Scope` stays on the fiber that opened it,
 so that its finalizers run on the fiber that deferred them. To release something the child
-acquires, give the child a scope of its own by handing `scoped` a named function,
-`Fiber::spawn(fn () => scoped(work))`, or spawn a named function whose body calls `scoped`
+acquires, give the child a scope of its own, `Fiber::spawn(fn () => scoped(work))`
 ```
 
 `Region::root()` and `Scope::root()` belong to the program's own fiber. A spawned fiber that reaches for either is stopped with a fatal error (exit status 134), because the root region is reachable by name and no type rule can keep a child off it. A `test` or `bench` block is given a root region of its own, released when the block ends. A fiber that a test spawns is refused the test's root like any other, and because the fatal error ends the process, it ends the whole `khora test` run: the tests still running are not reported, and there is no summary line.
