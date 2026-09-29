@@ -643,3 +643,267 @@ pub fn main() -> Int {
     );
     assert!(found.is_empty(), "the rewrite the refusals name is refused: {found:#?}");
 }
+
+/// A program whose `go` spawns over a capture `x` that is still a type
+/// variable at the spawn, and is solved by the call `go(..)` written after.
+fn solved_after(declarations: &str, call: &str) -> String {
+    format!(
+        "module main;
+
+import std::core::{{print, Fiber, Region, SharedFn, Channel, Share, List}};
+
+type H = {{ mut n: Int }};
+{declarations}
+pub fn main() -> Int {{
+  let go = fn x => Fiber::spawn(fn () => {{ let _k = x; 3 }});
+  {call}
+}}
+"
+    )
+}
+
+/// A handler for `Log` whose `record` keeps `x`, built by a lambda whose
+/// parameter `x` is settled only by the call that follows it.
+fn handler_late(arg_type: &str, value: &str) -> String {
+    format!(
+        "module main;
+
+import std::core::{{Fiber, List, Channel}};
+import std::log::{{Log, info}};
+
+type Holder = {{ mut xs: List<String> }};
+type Frozen = {{ xs: List<String> }};
+
+fn logs(n: Int) -> Int with {{ log: Log }} {{
+  let mut i = 0;
+  while i < n {{ info(\"tick\"); i = i + 1; }};
+  n
+}}
+
+pub fn main() -> Int {{
+  let wrap = fn x => handler for Log {{
+    record: fn (_level, _message, _attributes) => {{ let _k = x; () }},
+  }};
+  let gate: Channel<Int> = Channel::bounded(1);
+  let h: {arg_type} = {value};
+  let lg = wrap(h);
+  let f = Fiber::spawn(fn () => {{
+    let _ = Channel::receive(gate);
+    logs(10) with {{ log: lg }}
+  }});
+  Channel::send(gate, 1);
+  Fiber::join(f)
+}}
+"
+    )
+}
+
+/// **A handler's capture whose type is solved after the handler is written
+/// is still asked about `Share`.** The RC Stage 2 review's `handler_late.kh`:
+/// `x` is a variable where `handler for Log` is written, a variable answers
+/// "shareable", and `wrap(h)` solves it to a record with a `mut` field only
+/// afterwards. A handler is shareable because its captures were checked, so
+/// the child that logs through it held the parent's `h`: a race on `xs`,
+/// and a list released while the parent was still counting it. So the
+/// capture is asked again once the body's types are settled.
+#[test]
+fn a_handler_capture_solved_later_to_a_mut_record_is_refused() {
+    let found = errors_with_std(&handler_late("Holder", "{ xs: List::Nil }"));
+    assert!(
+        found.iter().any(|m| m.contains("`Log`'s `record` captures `x`")
+            && m.contains("`Holder` can be written")),
+        "{found:#?}"
+    );
+}
+
+/// **The same handler capturing an annotated `mut` record is refused where
+/// it is written, with the message it always had.** `handler_direct.kh`: the
+/// type is known at the handler, so the refusal is the one written there.
+#[test]
+fn a_handler_capturing_a_known_mut_record_is_refused_as_before() {
+    let found = errors_with_std(
+        "module main;
+
+import std::core::{print, Fiber, List};
+import std::log::{Log, info};
+
+type Holder = { mut xs: List<String> };
+
+pub fn main() -> Int {
+  let h: Holder = { xs: List::Nil };
+  let lg = handler for Log {
+    record: fn (_level, _message, _attributes) => { let _k = h; () },
+  };
+  let f = Fiber::spawn(fn () => { info(\"tick\") with { log: lg }; 1 });
+  print(\"${Fiber::join(f)}\");
+  0
+}
+",
+    );
+    assert!(
+        found.iter().any(|m| m.contains(
+            "`Log`'s `record` captures `h`, and a handler has to be safe to hand to another fiber"
+        ) && m.contains("`Holder` can be written")),
+        "{found:#?}"
+    );
+}
+
+/// **A handler's capture solved later to a shareable value is accepted.**
+/// The re-check refuses what is writable, not what was unknown.
+#[test]
+fn a_handler_capture_solved_later_to_a_shareable_value_compiles() {
+    let found = errors_with_std(&handler_late("Frozen", "{ xs: List::Nil }"));
+    assert!(found.is_empty(), "a shareable late capture is refused: {found:#?}");
+}
+
+/// **A capture whose type is solved after the spawn is still asked about
+/// `Share`.** At the spawn, `x` is a variable, and a variable answers
+/// "shareable"; `go(h)` solves it to a record with a `mut` field only
+/// afterwards. Asked only at the spawn, this compiled, and the child held
+/// the parent's `h` -- a race on `n` that nothing traps. So the capture is
+/// asked again once the body's types are settled. `var_mut` in the review's
+/// route table.
+#[test]
+fn a_capture_solved_after_the_spawn_to_a_mut_record_is_refused() {
+    let found = errors_with_std(&solved_after("", "let h: H = { n: 0 };\n  Fiber::join(go(h))"));
+    assert!(
+        found.iter().any(|m| m.contains("`x` cannot be handed to another fiber")
+            && m.contains("`H` can be written")),
+        "{found:#?}"
+    );
+}
+
+/// **The same route with a `Region`** is refused at compile time: the
+/// review's `var_capture.kh`. The runtime's release check stays behind it,
+/// for a route no type can see.
+#[test]
+fn a_capture_solved_after_the_spawn_to_a_region_is_refused() {
+    refused(
+        &solved_after("", "Fiber::join(go(Region::open()))"),
+        "`x` cannot be handed to another fiber: a `Region` stays on the fiber",
+    );
+}
+
+/// **A capture solved after the spawn to something shareable is accepted**,
+/// including a container of one, so the second question refuses only what
+/// the first would have refused had it known.
+#[test]
+fn a_capture_solved_after_the_spawn_to_a_shareable_value_compiles() {
+    let found = errors_with_std(&solved_after(
+        "",
+        "Fiber::join(go(List::Cons(\"a\", List::Nil)))",
+    ));
+    assert!(found.is_empty(), "{found:#?}");
+    let found = errors_with_std(&solved_after("", "Fiber::join(go(41))"));
+    assert!(found.is_empty(), "{found:#?}");
+}
+
+/// **A container settled after the spawn**: a `mut` binding captured while
+/// it is still `List::Nil`, whose element type the next line decides.
+#[test]
+fn a_capture_whose_element_type_is_settled_after_the_spawn_is_refused() {
+    let found = errors_with_std(
+        "module main;
+
+import std::core::{Fiber, List};
+
+type H = { mut n: Int };
+
+pub fn main() -> Int {
+  let mut xs = List::Nil;
+  let f = Fiber::spawn(fn () => { let _k = xs; 3 });
+  let h: H = { n: 0 };
+  xs = List::Cons(h, List::Nil);
+  Fiber::join(f)
+}
+",
+    );
+    assert!(
+        found.iter().any(|m| m.contains("`xs` cannot be handed to another fiber")
+            && m.contains("`List<H>` can be written")),
+        "{found:#?}"
+    );
+}
+
+/// **The same route through `SharedFn::of`**, which certifies its closure's
+/// captures as `Fiber::spawn` does.
+#[test]
+fn a_shared_fn_capture_solved_after_the_call_is_refused() {
+    let found = errors_with_std(
+        "module main;
+
+import std::core::{SharedFn};
+
+type H = { mut n: Int };
+
+pub fn main() -> Int {
+  let go = fn x => SharedFn::of(fn (n: Int) => { let _k = x; n });
+  let h: H = { n: 0 };
+  let _s = go(h);
+  0
+}
+",
+    );
+    assert!(
+        found.iter().any(|m| m.contains("`x` cannot be handed to another fiber")
+            && m.contains("`H` can be written")),
+        "{found:#?}"
+    );
+}
+
+/// **The same route through `Channel::send` and a generic `A: Share`
+/// parameter** is refused by the bound on the channel and on the function,
+/// which are asked once the types are settled. Pinned beside the spawn
+/// rows so the three stay one rule.
+#[test]
+fn a_send_or_share_bound_solved_after_the_call_is_refused() {
+    let send = errors_with_std(
+        "module main;
+
+import std::core::{Channel};
+
+type H = { mut n: Int };
+
+pub fn main() -> Int {
+  let ch = Channel::bounded(1);
+  let go = fn x => Channel::send(ch, x);
+  let h: H = { n: 0 };
+  go(h);
+  0
+}
+",
+    );
+    assert!(send.iter().any(|m| m.contains("`H` does not implement `Share`")), "{send:#?}");
+    let bound = errors_with_std(
+        "module main;
+
+import std::core::{Share};
+
+type H = { mut n: Int };
+
+fn keep<A: Share>(a: A) -> Int { 0 }
+
+pub fn main() -> Int {
+  let go = fn x => keep(x);
+  let h: H = { n: 0 };
+  go(h)
+}
+",
+    );
+    assert!(bound.iter().any(|m| m.contains("`H` does not implement `Share`")), "{bound:#?}");
+}
+
+/// **A capture that stays unsolved to the end is not refused by the
+/// checker.** Nothing ever pins `x`, so nothing is ever passed in: `go` is
+/// never called, and no value of that type exists to cross. `khora check`
+/// accepts the program; building it is refused, because the backend cannot
+/// lay out a closure whose type was never pinned down (LLVM
+/// `sharing::a_capture_never_solved_is_refused_at_build`).
+#[test]
+fn a_capture_never_solved_is_not_a_sharing_error() {
+    let found = errors_with_std(&solved_after("", "0"));
+    assert!(
+        !found.iter().any(|m| m.contains("cannot be handed to another fiber")),
+        "{found:#?}"
+    );
+}

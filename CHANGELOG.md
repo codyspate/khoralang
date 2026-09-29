@@ -57,6 +57,13 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   a channel, a `Shared` cell): acquire it in the parent and hand the value
   in. The refusal names the fix.
 
+- **A capture whose type is settled after `Fiber::spawn` or `SharedFn::of`,
+  or after the `handler for` that captures it,
+  is held to `Share`** (silent wrong answer). A program where one such
+  capture ends up a record with a `mut` field, or a `Region`, compiled and
+  shared it between fibers; it is refused (see Fixed), as the same capture
+  is when its type is known at the spawn.
+
 - **A lambda handed to `scoped` or `nursery` inside a function with a
   `scope` or `nursery` of its own used the enclosing one** (silent wrong
   answer). In `fn f() with { scope: Scope }`, `scoped(fn () => work())` gave
@@ -382,6 +389,22 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   unaffected.
 
 ### Fixed
+
+- **A fiber could capture a `mut` record or a `Region` through a type
+  settled after the spawn.** In
+  `let go = fn x => Fiber::spawn(fn () => { let _k = x; 3 }); go(h)`,
+  `x`'s type was not yet known at the spawn and passed the `Share` check;
+  `go(h)` then made it a record with a `mut` field, and the child and the
+  parent shared it with nothing said. The same held for `SharedFn::of`, and
+  for a `mut` binding captured while it still held `List::Nil`, and for a
+  `handler for` operation's captures: `fn x => handler for Log { record: fn
+  (..) => { let _k = x; () } }`, called with a `mut` record, gave a
+  shareable handler holding it, which a spawned fiber then logged through.
+  Every capture is asked again once the function's types are settled, and
+  refused with the message a capture known at the spawn, or at the
+  handler, gets. A capture whose type
+  nothing ever settles has no value to cross; `khora build` refuses the
+  program because the closure's type was never pinned down.
 
 - **A lambda handed to `scoped` inside a function with a `scope` of its own
   released what it acquired at the outer scope's end** (see Breaking).

@@ -255,6 +255,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             enclosing_lambdas: Vec::new(),
             lambda_captures: HashMap::new(),
             handed: HashSet::new(),
+            unsettled_captures: Vec::new(),
             call_rows: HashMap::new(),
             caught: HashMap::new(),
             total_catches: HashSet::new(),
@@ -281,6 +282,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
         checker.settle_raises();
         checker.close_open_rows();
         checker.check_bounds();
+        checker.check_unsettled_captures();
         checker.settle_projections();
         // Before coverage: a bare case name is reported as what it is, and
         // the pattern it sits in is then not asked about coverage. After the

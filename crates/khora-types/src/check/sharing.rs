@@ -46,12 +46,56 @@ impl<'a> Checker<'a> {
         for local in captures {
             let ty = self.unifier.zonk(self.locals.get(&local).unwrap_or(&Type::Unknown));
             if self.types.is_shareable(&ty, &self.shared_params()) {
+                if holds_a_variable(&ty) {
+                    self.unsettled_captures.push((local, Captor::Spawn, range));
+                }
                 continue;
             }
-            let name = self.body.local(local).name.clone();
-            let why = self.types.why_unshareable(&ty);
-            self.error(format!("`{name}` cannot be handed to another fiber: {why}"), range);
+            self.refuse_capture(local, &ty, range);
         }
+    }
+
+    /// Asks again about each capture whose type still held a variable at its
+    /// spawn, now that the body's types are settled.
+    ///
+    /// **What this prevents: a `mut` record or a region handed to a fiber
+    /// through a type solved after the spawn.** In
+    /// `let go = fn x => Fiber::spawn(fn () => { let _k = x; 3 }); go(h)`
+    /// the capture `x` is a variable at the spawn, a variable answers
+    /// "shareable", and `go(h)` solves it only afterwards. The child then
+    /// held the parent's `h` with nothing said: a race on its fields, or for
+    /// a region, a finalizer run on the child, which only the runtime's
+    /// release check stopped.
+    ///
+    /// Run where `check_bounds` is, and for the same reason: a question about
+    /// a solved type, asked once everything that solves it has run. Only the
+    /// captures that were unsettled are asked, so a capture refused at the
+    /// spawn is not reported twice. One still unsolved here is shareable,
+    /// because no value of it exists: nothing ever pinned it, so nothing was
+    /// ever passed in.
+    ///
+    /// A handler's captures are asked again the same way, for the same
+    /// reason: a handler is shareable only because its captures were checked
+    /// where it is written, and a variable there answered "shareable".
+    pub(crate) fn check_unsettled_captures(&mut self) {
+        for (local, captor, range) in std::mem::take(&mut self.unsettled_captures) {
+            let ty = self.unifier.zonk(self.locals.get(&local).unwrap_or(&Type::Unknown));
+            if self.types.is_shareable(&ty, &self.shared_params()) {
+                continue;
+            }
+            match captor {
+                Captor::Spawn => self.refuse_capture(local, &ty, range),
+                Captor::Handler { owner, label } => {
+                    self.refuse_handler_capture(&owner, &label, local, &ty, range)
+                }
+            }
+        }
+    }
+
+    fn refuse_capture(&mut self, local: khora_hir::body::LocalId, ty: &Type, range: TextRange) {
+        let name = self.body.local(local).name.clone();
+        let why = self.types.why_unshareable(ty);
+        self.error(format!("`{name}` cannot be handed to another fiber: {why}"), range);
     }
 
     /// A fiber's error may not hold a `Region` or `Scope`.
@@ -135,19 +179,36 @@ impl<'a> Checker<'a> {
             for local in self.captures_of(*value) {
                 let ty = self.unifier.zonk(self.locals.get(&local).unwrap_or(&Type::Unknown));
                 if self.types.is_shareable(&ty, &self.shared_params()) {
+                    // A variable answers "shareable" here and may be solved
+                    // to a `mut` record by a later call, so it is asked again.
+                    if holds_a_variable(&ty) {
+                        let captor = Captor::Handler { owner: owner.to_string(), label: label.clone() };
+                        self.unsettled_captures.push((local, captor, range));
+                    }
                     continue;
                 }
-                let name = self.body.local(local).name.clone();
-                let why = self.types.why_unshareable(&ty);
-                self.error(
-                    format!(
-                        "`{owner}`'s `{label}` captures `{name}`, and a handler has to be safe \
-                         to hand to another fiber: {why}"
-                    ),
-                    range,
-                );
+                self.refuse_handler_capture(owner, label, local, &ty, range);
             }
         }
+    }
+
+    fn refuse_handler_capture(
+        &mut self,
+        owner: &str,
+        label: &str,
+        local: khora_hir::body::LocalId,
+        ty: &Type,
+        range: TextRange,
+    ) {
+        let name = self.body.local(local).name.clone();
+        let why = self.types.why_unshareable(ty);
+        self.error(
+            format!(
+                "`{owner}`'s `{label}` captures `{name}`, and a handler has to be safe to hand \
+                 to another fiber: {why}"
+            ),
+            range,
+        );
     }
 
     /// What the expression behind a handler's operation closes over.
@@ -178,5 +239,43 @@ impl<'a> Checker<'a> {
             })
             .map(|(_, g)| g.clone())
             .collect()
+    }
+}
+
+/// What captured a value whose type was not yet settled, so the re-check in
+/// [`Checker::check_unsettled_captures`] refuses it in that one's words.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Captor {
+    /// A body handed to `Fiber::spawn` or `SharedFn::of`.
+    Spawn,
+    /// An operation of a `handler for` `owner`, the field `label`.
+    Handler { owner: String, label: String },
+}
+
+/// Whether a zonked type still holds an inference variable anywhere a value
+/// could be: the variables that answer "shareable" before they are solved.
+///
+/// Exhaustive rather than `_ => false`, so that a new type form has to say
+/// whether it can hide one. A function type answers false: it is refused
+/// whatever it holds. A row carries no value.
+fn holds_a_variable(ty: &Type) -> bool {
+    match ty {
+        Type::Var(_) => true,
+        Type::Adt { args, .. } | Type::Tuple(args) => args.iter().any(holds_a_variable),
+        Type::Applied { head, args } => holds_a_variable(head) || args.iter().any(holds_a_variable),
+        Type::Assoc { owner, .. } => holds_a_variable(owner),
+        Type::Fn { .. } | Type::Row { .. } => false,
+        Type::Int
+        | Type::Fixed(_)
+        | Type::Float
+        | Type::Bool
+        | Type::Str
+        | Type::Unit
+        | Type::Ptr
+        | Type::Char
+        | Type::Param(_)
+        | Type::Const(_)
+        | Type::Never
+        | Type::Unknown => false,
     }
 }

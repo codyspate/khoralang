@@ -666,6 +666,40 @@ pub fn main() -> Int {
     );
 }
 
+/// **A capture whose type is never settled is refused at build**, after
+/// `khora check` accepted it: nothing pins `x`, so the backend cannot lay
+/// out `go`, and says so. Pinned so that a checker change which starts
+/// accepting such a program at build, or starts refusing it as a sharing
+/// error, is seen: an unsolved capture has no value, and so nothing crosses.
+#[test]
+fn a_capture_never_solved_is_refused_at_build() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("sharing_never_solved");
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
+    let source = "module main;
+
+import std::core::{Fiber};
+
+pub fn main() -> Int {
+  let go = fn x => Fiber::spawn(fn () => { let _k = x; 3 });
+  0
+}
+";
+    let db = KhoraDatabase::new();
+    let root = SourceRoot::new(&db, sources(&db, &dir, source));
+    let Err(errors) =
+        khora_codegen_llvm::compile_with(&db, root, &exe, khora_codegen_llvm::Profile::Debug)
+    else {
+        panic!("a closure whose capture was never solved compiled");
+    };
+    let messages: Vec<String> = errors.into_iter().map(|e| e.message).collect();
+    assert!(
+        messages.iter().any(|m| m.contains("never pinned down"))
+            && !messages.iter().any(|m| m.contains("cannot be handed to another fiber")),
+        "{messages:#?}"
+    );
+}
+
 /// **A fiber raising a region is refused before it can run.** Unrefused,
 /// the parent's catch dropped the child's region last and ran the child's
 /// finalizer on the parent (a debug build trapped in the owner check; a
@@ -701,19 +735,20 @@ pub fn main() -> Int {
     );
 }
 
-/// **A region whose last reference goes on another fiber traps, in every
-/// build, rather than running its finalizers there.** The spawn's capture
-/// check cannot see this one: `x` is still an unsolved variable when the
-/// spawn is checked, and `go(r)` solves it to `Region` afterwards. So the
-/// child is handed the region and may drop it last; the release's owner
-/// check stops it. The review's `var_capture.kh`, with one change: the child
-/// waits on a channel until the parent has let go, so the child's reference
-/// is the last on either backend. Without the wait, which fiber drops last is
-/// timing: on the scheduler the child tends to finish first, and the parent
-/// then releases its own region early, which is correct and shows nothing.
+/// **A region reaching a child through a capture whose type is solved after
+/// the spawn is refused before it can run.** At the spawn, `x` is still a
+/// variable; `go(r)` solves it to `Region` afterwards, and the capture is
+/// asked again then. Unrefused, the child was handed the region and dropped
+/// it last, and only the runtime's release check -- a fatal error, exit 134
+/// -- kept its finalizer off the child. That check stays as the backstop,
+/// tested without the compiler by `khora-rt`'s
+/// `region::tests::a_release_on_another_fiber_is_fatal`: this was the one
+/// program that reached it, and no route known reaches it now. The review's
+/// `var_capture.kh`, with the child waiting on a channel so that its
+/// reference would be the last on either backend.
 #[test]
-fn a_region_released_on_another_fiber_traps() {
-    let exe = build_whole(
+fn a_region_captured_through_a_type_solved_later_is_refused() {
+    refused(
         "var_capture",
         r#"module main;
 
@@ -744,18 +779,6 @@ pub fn main() -> Int {
 }
 "#,
     );
-    for backend in ["threads", "scheduler"] {
-        let out = Command::new(&exe).env("KHORA_FIBERS", backend).output().expect("the program should run");
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            out.status.code() == Some(134) && stderr.contains("releasing a region another fiber opened"),
-            "`{backend}`: the child's release of the parent's region was not stopped: {:?}, \
-             stdout {stdout:?}, stderr {stderr:?}",
-            out.status.code()
-        );
-        assert!(!stdout.contains("finalizer sees"), "`{backend}`: the finalizer ran on the child: {stdout:?}");
-    }
 }
 
 /// **A `bench` block has a root scope of its own**, as a test does. Each

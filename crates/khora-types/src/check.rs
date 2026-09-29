@@ -160,6 +160,10 @@ pub(crate) struct Checker<'a> {
     /// is handed rather than the binding in lexical scope. See
     /// [`Checker::handed_nearer`].
     pub(crate) handed: HashSet<(ExprId, String)>,
+    /// The spawn and handler captures whose type still held a variable where
+    /// they were checked, with what captured them and its range. See
+    /// [`Checker::check_unsettled_captures`].
+    pub(crate) unsettled_captures: Vec<(khora_hir::body::LocalId, sharing::Captor, TextRange)>,
     /// The finished answer, moved out as each lambda closes.
     pub(crate) lambda_captures: HashMap<ExprId, Vec<khora_hir::body::LocalId>>,
     /// What each call site asked for, published as [`crate::CallRows`].
