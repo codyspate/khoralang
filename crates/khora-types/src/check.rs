@@ -164,6 +164,9 @@ pub(crate) struct Checker<'a> {
     /// they were checked, with what captured them and its range. See
     /// [`Checker::check_unsettled_captures`].
     pub(crate) unsettled_captures: Vec<(khora_hir::body::LocalId, sharing::Captor, TextRange)>,
+    /// The raises rows of spawned bodies still unsettled at the spawn. See
+    /// [`Checker::check_unsettled_raises`].
+    pub(crate) unsettled_raises: Vec<(Type, sharing::Crossing, TextRange)>,
     /// The finished answer, moved out as each lambda closes.
     pub(crate) lambda_captures: HashMap<ExprId, Vec<khora_hir::body::LocalId>>,
     /// What each call site asked for, published as [`crate::CallRows`].

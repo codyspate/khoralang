@@ -343,27 +343,366 @@ pub fn main() -> Int {
     );
 }
 
-/// **A `mut` record in a fiber's error is not refused here.** The runtime
-/// marks an error at the handover, so only a region or scope, whose
-/// finalizers would move with it, is this rule's business.
+/// A program spawning `child`, which raises `Oops`, joined through `tail`.
+fn raising(declarations: &str, spawn: &str, tail: &str) -> String {
+    format!(
+        "module main;
+
+import std::core::{{print, Fiber, Array, Map, List, Outcome, Nursery, nursery, ChildFailed}};
+
+{declarations}
+
+pub fn main() -> Int {{
+  let f = {spawn};
+  {tail}
+}}
+"
+    )
+}
+
+/// Requires the refusal of `Oops` in a spawned fiber's error.
+fn error_refused(program: &str) {
+    let found = errors_with_std(program);
+    assert!(
+        found.iter().any(|m| m.contains(
+            "`Oops` does not implement `Share`, which a spawned fiber's error requires"
+        )),
+        "expected `Oops` refused as a fiber's error: {found:#?}"
+    );
+}
+
+/// **A spawned fiber's error must be `Share`, as its answer must.** The
+/// error reaches whoever joins, and a handle can be joined from two fibers:
+/// the RC Stage 2 review's `raise_mut_two.kh` had the parent write a fresh
+/// list into the raised record while a second joiner read that field. The
+/// runtime's mark at the handover made the counts atomic and left the field a
+/// race. A record with a `mut` field, directly and inside another record
+/// (`raise_mut` in the cleanup review's route table).
 #[test]
-fn a_fiber_may_still_raise_a_mutable_record() {
+fn a_fiber_cannot_raise_a_mutable_record() {
+    let mut_direct = "type Oops = { mut n: Int };
+fn child() -> Int raises Oops { let e: Oops = { n: 1 }; raise e }";
+    error_refused(&raising(mut_direct, "Fiber::spawn(fn () => child()!)", "Fiber::join(f)! catch { Oops { n } => n }"));
+    let mut_inside = "type H = { mut n: Int };
+type Oops = { h: H };
+fn child() -> Int raises Oops { raise { h: { n: 1 } } }";
+    error_refused(&raising(
+        mut_inside,
+        "Fiber::spawn(fn () => child()!)",
+        "let _ = Fiber::join(f)! catch { Oops { h } => h.n };\n  0",
+    ));
+}
+
+/// **An `Array` or a `Map` in a fiber's error is refused**: both can be
+/// written, and neither says `Share`.
+#[test]
+fn a_fiber_cannot_raise_an_array_or_a_map() {
+    error_refused(&raising(
+        "type Oops = { a: Array<Int> };
+fn child() -> Int raises Oops { raise { a: Array::new(2, 0) } }",
+        "Fiber::spawn(fn () => child()!)",
+        "Fiber::join(f)! catch { Oops { a } => 0 }",
+    ));
+    error_refused(&raising(
+        "type Oops = { m: Map<String, Int> };
+fn child() -> Int raises Oops { raise { m: Map::new() } }",
+        "Fiber::spawn(fn () => child()!)",
+        "Fiber::join(f)! catch { Oops { m } => 0 }",
+    ));
+}
+
+/// **Every way to a fiber's error goes through the spawn**: a named function
+/// spawned directly, `Fiber::outcome`, and a handle adopted into a nursery.
+/// One check at the spawn covers all three, because the row is the handle's.
+#[test]
+fn every_route_to_a_fibers_error_is_checked_at_the_spawn() {
+    let mut_oops = "type Oops = { mut n: Int };
+fn child() -> Int raises Oops { let e: Oops = { n: 1 }; raise e }";
+    error_refused(&raising(mut_oops, "Fiber::spawn(child)", "Fiber::join(f)! catch { Oops { n } => n }"));
+    error_refused(&raising(
+        mut_oops,
+        "Fiber::spawn(fn () => child()!)",
+        "let _ = Fiber::outcome(f)! catch { Oops { n } => Outcome::Stopped };\n  0",
+    ));
     let found = errors_with_std(
         "module main;
 
-import std::core::{print, Fiber};
+import std::core::{Fiber, Nursery, nursery, ChildFailed};
 
 type Oops = { mut n: Int };
 
-fn child() -> Int raises Oops { raise { n: 1 } }
+fn child() -> () raises Oops { let e: Oops = { n: 1 }; raise e }
+
+fn run() -> () with { nursery: Nursery } { nursery.adopt(Fiber::spawn(fn () => child()!)); () }
+
+pub fn main() -> Int raises ChildFailed { nursery(fn () => run())!; 0 }
+",
+    );
+    assert!(
+        found.iter().any(|m| m.contains("which a spawned fiber's error requires")),
+        "{found:#?}"
+    );
+}
+
+/// **A fiber's error settled after the spawn is asked again.** `fail(xs)`
+/// raises `Oops<A>` at `xs`'s type, which is `List<?>` at the spawn; the
+/// line after solves it to `List<H>`, a list of `mut` records.
+#[test]
+fn a_fibers_error_solved_after_the_spawn_is_refused() {
+    let found = errors_with_std(
+        "module main;
+
+import std::core::{Fiber, List};
+
+type H = { mut n: Int };
+type Oops<A> = { v: A };
+
+fn fail<A>(v: A) -> Int raises Oops<A> { let e: Oops<A> = { v: v }; raise e }
 
 pub fn main() -> Int {
-  let f = Fiber::spawn(fn () => child()!);
-  Fiber::join(f)! catch { Oops { n } => n }
+  let mut xs = List::Nil;
+  let f = Fiber::spawn(fn () => fail(xs)!);
+  let h: H = { n: 1 };
+  xs = List::Cons(h, List::Nil);
+  Fiber::join(f)! catch { Oops { v } => 0 }
 }
 ",
     );
-    assert!(found.is_empty(), "a `mut` error is refused: {found:#?}");
+    assert!(
+        found.iter().any(|m| m.contains("`Oops` does not implement `Share`, which a spawned fiber's error requires")
+            && m.contains("`Oops<List<H>>`")),
+        "{found:#?}"
+    );
+}
+
+/// Every diagnostic from `program`, compiled with `std` and with `modules`
+/// beside it, each a whole file declaring its own `module`.
+fn errors_with_std_and(modules: &[&str], program: &str) -> Vec<String> {
+    let std_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("std");
+    let mut paths = Vec::new();
+    sources(&std_dir, &mut paths);
+    paths.sort();
+
+    let db = KhoraDatabase::new();
+    let mut files: Vec<SourceFile> = paths
+        .iter()
+        .map(|p| {
+            let text = std::fs::read_to_string(p).expect("the sources should be readable");
+            SourceFile::new(&db, p.clone(), text)
+        })
+        .collect();
+    for (i, text) in modules.iter().enumerate() {
+        files.push(SourceFile::new(&db, PathBuf::from(format!("module{i}.kh")), text.to_string()));
+    }
+    let mine = SourceFile::new(&db, PathBuf::from("program.kh"), program.to_string());
+    files.push(mine);
+    SourceRoot::new(&db, files);
+
+    khora_types::diagnostics(&db, mine).iter().map(|e| e.message.clone()).collect()
+}
+
+/// **An error type the spawning file never imports is still seen for what it
+/// is.** The cookbook's deadline example: a fiber that opens a `nursery` can
+/// raise `ChildFailed`, which the file does not name. Its body arrives with
+/// the imported function's signature, so it is shareable here as it is in
+/// `std::core`, where it was refused as a type with no body.
+#[test]
+fn a_fiber_may_raise_an_error_its_file_never_imports() {
+    let found = errors_with_std(
+        "module main;
+
+import std::core::{Fiber, nursery};
+
+pub fn main() -> Int {
+  let f = Fiber::spawn(fn () => { nursery(fn () => 1)!; () });
+  Fiber::wait(f)! catch { _ => () };
+  0
+}
+",
+    );
+    assert!(found.is_empty(), "an unimported shareable error is refused: {found:#?}");
+}
+
+/// **An unimported error that can be written is refused for that, not for
+/// being unseen.** The case an "ask only what can be seen" rule would have let
+/// through: `Oops` comes from another module, the spawning file never names
+/// it, and it has a `mut` field.
+#[test]
+fn a_fiber_cannot_raise_an_unimported_mutable_error() {
+    let found = errors_with_std_and(
+        &["module lib;
+
+pub type Oops = { mut n: Int };
+
+pub fn fails() -> Int raises Oops { let e: Oops = { n: 1 }; raise e }
+"],
+        "module main;
+
+import std::core::{Fiber};
+import lib::{fails};
+
+pub fn main() -> Int {
+  let f = Fiber::spawn(fn () => fails()!);
+  Fiber::join(f)! catch { _ => 0 }
+}
+",
+    );
+    assert!(
+        found.iter().any(|m| m.contains("`Oops` does not implement `Share`")
+            && m.contains("`Oops` can be written")),
+        "{found:#?}"
+    );
+}
+
+/// **Two imports deep.** `relay` in `mid` raises `Deep`, declared in `deep`,
+/// a module the spawning file never mentions. A `mut` `Deep` is refused for
+/// its `mut` field; a shareable one crosses.
+#[test]
+fn an_error_two_imports_deep_is_seen() {
+    let program = "module main;
+
+import std::core::{Fiber};
+import mid::{relay};
+
+pub fn main() -> Int {
+  let f = Fiber::spawn(fn () => relay()!);
+  Fiber::join(f)! catch { _ => 0 }
+}
+";
+    let mid = "module mid;
+
+import deep::{Deep, fails};
+
+pub fn relay() -> Int raises Deep { fails()! }
+";
+    let found = errors_with_std_and(
+        &[
+            "module deep;
+
+pub type Deep = { mut n: Int };
+
+pub fn fails() -> Int raises Deep { let e: Deep = { n: 1 }; raise e }
+",
+            mid,
+        ],
+        program,
+    );
+    assert!(
+        found.iter().any(|m| m.contains("`Deep` does not implement `Share`")
+            && m.contains("`Deep` can be written")),
+        "{found:#?}"
+    );
+    let found = errors_with_std_and(
+        &[
+            "module deep;
+
+pub type Deep = { n: Int, why: String };
+
+pub fn fails() -> Int raises Deep { let e: Deep = { n: 1, why: \"x\" }; raise e }
+",
+            mid,
+        ],
+        program,
+    );
+    assert!(found.is_empty(), "a shareable error two imports deep is refused: {found:#?}");
+}
+
+/// **A row parameter cannot carry an error past the spawn.** `run` spawns a
+/// body whose error row is `'e`, which a caller could instantiate with a `mut`
+/// error; no bound can be written on a row. What refuses it is the capture of
+/// `g`, a closure. Pinned so that a change letting closures cross does not
+/// open this route without a test noticing.
+#[test]
+fn a_row_parameter_cannot_carry_an_error_past_the_spawn() {
+    let found = errors_with_std(
+        "module main;
+
+import std::core::{Fiber};
+
+type Oops = { mut n: Int };
+
+fn run<'e>(g: () -> Int raises 'e) -> Fiber<Int, 'e> { Fiber::spawn(fn () => g()!) }
+
+fn fails() -> Int raises Oops { let e: Oops = { n: 1 }; raise e }
+
+pub fn main() -> Int {
+  let f = run(fails);
+  Fiber::join(f)! catch { _ => 0 }
+}
+",
+    );
+    assert!(
+        found.iter().any(|m| m.contains("`g` cannot be handed to another fiber")),
+        "{found:#?}"
+    );
+}
+
+/// **A shareable error still crosses**: a record without `mut`, an enum, a
+/// record of a `String`, and an error whose type is settled after the spawn
+/// to something shareable.
+#[test]
+fn a_fiber_may_raise_a_shareable_error() {
+    for (declarations, tail) in [
+        (
+            "type Oops = { n: Int, why: String };
+fn child() -> Int raises Oops { raise { n: 1, why: \"x\" } }",
+            "Fiber::join(f)! catch { Oops { n, why } => n }",
+        ),
+        (
+            "type Oops = | Bad(n: Int) | Worse;
+fn child() -> Int raises Oops { raise Oops::Bad(1) }",
+            "Fiber::join(f)! catch { Oops::Bad(n) => n, Oops::Worse => 0 }",
+        ),
+        (
+            "type Oops = { why: String };
+fn child() -> Int raises Oops { raise { why: \"x\" } }",
+            "Fiber::join(f)! catch { Oops { why } => 0 }",
+        ),
+    ] {
+        let found = errors_with_std(&raising(declarations, "Fiber::spawn(fn () => child()!)", tail));
+        assert!(found.is_empty(), "a shareable error is refused: {found:#?}");
+    }
+    let found = errors_with_std(
+        "module main;
+
+import std::core::{Fiber, List};
+
+type Oops<A> = { v: A };
+
+fn fail<A>(v: A) -> Int raises Oops<A> { let e: Oops<A> = { v: v }; raise e }
+
+pub fn main() -> Int {
+  let mut xs = List::Nil;
+  let f = Fiber::spawn(fn () => fail(xs)!);
+  xs = List::Cons(1, List::Nil);
+  Fiber::join(f)! catch { Oops { v } => 0 }
+}
+",
+    );
+    assert!(found.is_empty(), "an error settled to a shareable type is refused: {found:#?}");
+}
+
+/// **A `SharedFn`'s error is not held to `Share`**, only kept free of a
+/// region. A certified closure is called on its caller's fiber, so what it
+/// raises stays there.
+#[test]
+fn a_shared_fn_may_raise_a_mutable_record() {
+    let found = errors_with_std(
+        "module main;
+
+import std::core::{SharedFn};
+
+type Oops = { mut n: Int };
+
+fn child(x: Int) -> Int raises Oops { let e: Oops = { n: x }; raise e }
+
+pub fn main() -> Int {
+  let s = SharedFn::of(fn (x: Int) => child(x)!);
+  SharedFn::call(s, 1)! catch { Oops { n } => n }
+}
+",
+    );
+    assert!(found.is_empty(), "{found:#?}");
 }
 
 /// **The same through a named function** handed to `spawn`, which captures
@@ -796,6 +1135,46 @@ fn a_capture_solved_after_the_spawn_to_a_shareable_value_compiles() {
     assert!(found.is_empty(), "{found:#?}");
     let found = errors_with_std(&solved_after("", "Fiber::join(go(41))"));
     assert!(found.is_empty(), "{found:#?}");
+}
+
+/// **The RC Stage 2 review's `var_mut_race.kh`** is refused by the same
+/// re-check: the capture sits beside a channel receive in a helper function,
+/// and the parent writes a fresh list into the record after the spawn marked
+/// it, so both fibers counted that list.
+#[test]
+fn the_var_mut_race_program_is_refused() {
+    let found = errors_with_std(
+        "module main;
+
+import std::core::{print, Fiber, List, Channel};
+
+type H = { mut n: Int, mut xs: List<String> };
+
+fn make(n: Int) -> List<String> {
+  let mut xs = List::Nil;
+  let mut i = 0;
+  while i < n { xs = List::Cons(\"x${i}\", xs); i = i + 1; };
+  xs
+}
+
+fn run() -> Int {
+  let h: H = { n: 1, xs: make(3) };
+  let go_on: Channel<Int> = Channel::bounded(1);
+  let go = fn x => Fiber::spawn(fn () => { let _ = Channel::receive(go_on); let _keep = x; 3 });
+  let f = go(h);
+  h.xs = make(10);
+  Channel::send(go_on, 1);
+  Fiber::join(f)
+}
+
+pub fn main() -> Int { let t = run(); print(\"total ${t}\"); 0 }
+",
+    );
+    assert!(
+        found.iter().any(|m| m.contains("`x` cannot be handed to another fiber")
+            && m.contains("`H` can be written")),
+        "{found:#?}"
+    );
 }
 
 /// **A container settled after the spawn**: a `mut` binding captured while

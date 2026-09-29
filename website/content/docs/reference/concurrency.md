@@ -32,6 +32,14 @@ impl<A: Share, 'er> Fiber<A, 'er> {
 ```
 
 `A` must be `Share`: the value is computed on one fiber and read on another.
+So must every error in `'er`, for the same reason: `join` hands the error the
+body raised to whoever joins, and a handle can be joined from more than one
+fiber. A record with a `mut` field, an `Array` or a `Map` in a spawned body's
+`raises` row is refused at the spawn, and a `Region` or `Scope` there is
+refused with the message that names `scoped`. `Fiber::outcome` and
+`nursery.adopt` take the same handle, so the spawn is where each is checked.
+The error of a `test` block is not held to this: the test runner reports it and
+releases it, and it reaches no other fiber of the program.
 
 `wait` waits without taking the answer, which is what you need after `cancel`: a
 canceled fiber has no answer, so `join` on one unwinds the joiner along with it.

@@ -16,7 +16,9 @@ use super::*;
 pub struct TypeMap {
     pub signatures: HashMap<String, Signature>,
     pub variants: Vec<VariantInfo>,
-    /// Bodies this module never named, reachable from the ones it did.
+    /// Bodies this module never named, reachable from the ones it did: from
+    /// an imported type's fields and methods, and from the types an imported
+    /// function's signature names.
     ///
     /// **Whether a type is shareable is a fact about the type, not about the
     /// importer.** `std::db`'s `Cell` holds a `Decimal`, so answering "may two
@@ -1019,6 +1021,25 @@ pub(crate) fn import_types(
                 // means everywhere else in the language.
                 if let Some(signature) = exported.signatures.get(name.as_str()) {
                     map.signatures.entry(local.clone()).or_insert_with(|| signature.clone());
+                    // **And the bodies its signature names.** A call hands
+                    // this file values of those types -- an error it raises
+                    // above all -- that it may never import. Without them
+                    // `ChildFailed`, raised by an imported `nursery`, had no
+                    // body here and was refused at a spawn as though it were
+                    // `Array`: whether a type is shareable is a fact about
+                    // the type, and here it depended on an import line.
+                    let mut seeds = Vec::new();
+                    for ty in signature
+                        .params
+                        .iter()
+                        .chain(std::iter::once(&signature.ret))
+                        .chain(std::iter::once(&signature.requires))
+                        .chain(std::iter::once(&signature.raises))
+                    {
+                        seeds.extend(type_names_through_functions(ty));
+                    }
+                    let reached = reachable_from_names(exported, seeds);
+                    take_reached(exported, map, reached);
                 }
             }
             // An `effect` declares exactly what a type does here: an entry in
@@ -1046,56 +1067,7 @@ pub(crate) fn import_types(
                 // And the bodies those fields reach, which are not in scope
                 // here but have to be *visible* -- see `TypeMap::reachable`.
                 let reached = reachable_from(exported, name);
-                // **Once each.** A body reached through two imported types --
-                // or already in scope by name -- was appended twice, and the
-                // module exporting this map then handed both copies to
-                // whoever imported from it, which reached them through *its*
-                // imports and appended each copy again. Every hop along an
-                // import chain multiplied the list, and a package three hops
-                // from `std::schema` took forty seconds to check.
-                for body in reached.bodies {
-                    if map.reachable.contains(&body) || map.variants.contains(&body) {
-                        continue;
-                    }
-                    map.reachable.push(body);
-                }
-                for (name, parameters) in reached.generics {
-                    map.reachable_adts.entry(name).or_insert(parameters);
-                }
-                // **And the `Share` impls of everything reached.** A reached
-                // type arriving without its impl answers the question *wrongly*
-                // rather than not at all: `impl Share for Channel<A>` is what
-                // makes a channel shareable, so without this a `Pool` holding
-                // one is refused unless the file also imported `Channel` — "add
-                // an unused import and your program compiles". `Share` is never
-                // named, so the ordinary route by which an impl arrives, its
-                // trait, never fires for it.
-                //
-                // Every name *mentioned*, not every name with a body: `Channel`
-                // is opaque, so the impl is its whole answer.
-                //
-                // Only `Share`. Every other trait is about resolving something
-                // the program wrote, and bringing those in would put methods
-                // within reach of a file that cannot name the type.
-                for extra in exported.traits.impls.iter().filter(|i| {
-                    i.trait_name == SHARE
-                        && i.head().is_some_and(|head| reached.mentioned.contains(&head))
-                }) {
-                    let known = map
-                        .traits
-                        .impls
-                        .iter()
-                        .any(|i| i.trait_name == extra.trait_name && i.head() == extra.head());
-                    if known {
-                        continue;
-                    }
-                    let mut extra = extra.clone();
-                    extra.local = false;
-                    map.traits.impls.push(extra);
-                    if let Some(def) = exported.traits.traits.get(SHARE) {
-                        map.traits.traits.entry(SHARE.to_string()).or_insert_with(|| def.clone());
-                    }
-                }
+                take_reached(exported, map, reached);
                 // **An impl travels with its type as well as with its
                 // trait.** Importing a trait brings the impls that satisfy it,
                 // which is right; being the *only* way one arrives is not.
@@ -1349,11 +1321,39 @@ struct Reached {
 }
 
 fn reachable_from(exported: &TypeMap, name: &str) -> Reached {
-    let mut seen: Vec<String> = vec![name.to_string()];
-    let mut queue: Vec<String> = vec![name.to_string()];
+    walk_reachable(exported, vec![name.to_string()], vec![name.to_string()], Vec::new(), Vec::new())
+}
+
+/// Every body reachable from `names`, **their own included**: a function's
+/// signature names types rather than being one, so each is itself reached.
+fn reachable_from_names(exported: &TypeMap, names: Vec<String>) -> Reached {
+    let known = || exported.variants.iter().chain(exported.reachable.iter());
+    let mut seen: Vec<String> = Vec::new();
     let mut found = Vec::new();
     let mut generics = Vec::new();
+    for name in names {
+        if seen.contains(&name) {
+            continue;
+        }
+        found.extend(known().filter(|v| v.type_name == name).cloned());
+        let parameters = exported.adts.get(&name).or_else(|| exported.reachable_adts.get(&name));
+        if let Some(parameters) = parameters {
+            generics.push((name.clone(), parameters.clone()));
+        }
+        seen.push(name);
+    }
+    walk_reachable(exported, seen.clone(), seen, found, generics)
+}
 
+/// The walk behind [`reachable_from`] and [`reachable_from_names`], from a
+/// queue whose own bodies the caller has already decided about.
+fn walk_reachable(
+    exported: &TypeMap,
+    mut seen: Vec<String>,
+    mut queue: Vec<String>,
+    mut found: Vec<VariantInfo>,
+    mut generics: Vec<(String, Vec<String>)>,
+) -> Reached {
     let known = || exported.variants.iter().chain(exported.reachable.iter());
 
     while let Some(here) = queue.pop() {
@@ -1406,6 +1406,57 @@ fn reachable_from(exported: &TypeMap, name: &str) -> Reached {
         }
     }
     Reached { bodies: found, generics, mentioned: seen }
+}
+
+/// Files what [`reachable_from`] found into `map`.
+fn take_reached(exported: &TypeMap, map: &mut TypeMap, reached: Reached) {
+    // **Once each.** A body reached through two imported types -- or already
+    // in scope by name -- was appended twice, and the module exporting this
+    // map then handed both copies to whoever imported from it, which reached
+    // them through *its* imports and appended each copy again. Every hop along
+    // an import chain multiplied the list, and a package three hops from
+    // `std::schema` took forty seconds to check.
+    for body in reached.bodies {
+        if map.reachable.contains(&body) || map.variants.contains(&body) {
+            continue;
+        }
+        map.reachable.push(body);
+    }
+    for (name, parameters) in reached.generics {
+        map.reachable_adts.entry(name).or_insert(parameters);
+    }
+    // **And the `Share` impls of everything reached.** A reached type arriving
+    // without its impl answers the question *wrongly* rather than not at all:
+    // `impl Share for Channel<A>` is what makes a channel shareable, so
+    // without this a `Pool` holding one is refused unless the file also
+    // imported `Channel` — "add an unused import and your program compiles".
+    // `Share` is never named, so the ordinary route by which an impl arrives,
+    // its trait, never fires for it.
+    //
+    // Every name *mentioned*, not every name with a body: `Channel` is opaque,
+    // so the impl is its whole answer.
+    //
+    // Only `Share`. Every other trait is about resolving something the
+    // program wrote, and bringing those in would put methods within reach of
+    // a file that cannot name the type.
+    for extra in exported.traits.impls.iter().filter(|i| {
+        i.trait_name == SHARE && i.head().is_some_and(|head| reached.mentioned.contains(&head))
+    }) {
+        let known = map
+            .traits
+            .impls
+            .iter()
+            .any(|i| i.trait_name == extra.trait_name && i.head() == extra.head());
+        if known {
+            continue;
+        }
+        let mut extra = extra.clone();
+        extra.local = false;
+        map.traits.impls.push(extra);
+        if let Some(def) = exported.traits.traits.get(SHARE) {
+            map.traits.traits.entry(SHARE.to_string()).or_insert_with(|| def.clone());
+        }
+    }
 }
 
 /// Every ADT name a type mentions, **including through a function type**.

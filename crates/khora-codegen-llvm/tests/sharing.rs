@@ -666,6 +666,71 @@ pub fn main() -> Int {
     );
 }
 
+/// **A raised record with a `mut` field, joined from two fibers, is refused
+/// before it can run.** The RC Stage 2 review's `raise_mut_two.kh`: the
+/// parent catches the error and stores a fresh list into it while a second
+/// child, joining the same handle, reads that field. The runtime marks the
+/// error at the handover, which makes the counts atomic and leaves the field
+/// a race, so a spawned fiber's error is held to `Share`.
+#[test]
+fn an_error_with_a_mut_field_cannot_leave_a_fiber() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("sharing_raise_mut_two");
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
+    let source = r#"module main;
+
+import std::core::{print, Fiber, List, Channel};
+
+type Oops = { mut xs: List<String> };
+
+fn make(n: Int) -> List<String> {
+  let mut xs = List::Nil;
+  let mut i = 0;
+  while i < n { xs = List::Cons("x${i}", xs); i = i + 1; };
+  xs
+}
+
+fn fails() -> Int raises Oops { raise { xs: make(3) } }
+
+fn spin(xs: List<String>, times: Int) -> Int {
+  let mut acc = 0;
+  let mut i = 0;
+  while i < times { let ys = xs; acc = acc + List::length(ys); i = i + 1; };
+  acc
+}
+
+pub fn main() -> Int {
+  let f = Fiber::spawn(fn () => fails()!);
+  let go_on: Channel<Int> = Channel::bounded(1);
+  let g = Fiber::spawn(fn () => {
+    let _ = Channel::receive(go_on);
+    Fiber::join(f)! catch { Oops { xs } => spin(xs, 200000) }
+  });
+  let mut mine_xs = List::Nil;
+  let _ = Fiber::join(f)! catch { e => { e.xs = make(10); mine_xs = e.xs; 0 } };
+  Channel::send(go_on, 1);
+  let mine = spin(mine_xs, 200000);
+  let theirs = Fiber::join(g);
+  print("mine ${mine} theirs ${theirs}");
+  0
+}
+"#;
+    let db = KhoraDatabase::new();
+    let root = SourceRoot::new(&db, sources(&db, &dir, source));
+    let Err(errors) =
+        khora_codegen_llvm::compile_with(&db, root, &exe, khora_codegen_llvm::Profile::Debug)
+    else {
+        panic!("a fiber raising a `mut` record compiled");
+    };
+    let messages: Vec<String> = errors.into_iter().map(|e| e.message).collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("`Oops` does not implement `Share`, which a spawned fiber's error requires")),
+        "{messages:#?}"
+    );
+}
+
 /// **A capture whose type is never settled is refused at build**, after
 /// `khora check` accepted it: nothing pins `x`, so the backend cannot lay
 /// out `go`, and says so. Pinned so that a checker change which starts

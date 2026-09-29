@@ -114,10 +114,16 @@ opaque with no impl, which refuses it; `Scope` is an effect, and effects are
 otherwise shareable (see below), so `TypeMap::shareable_with` answers false for
 it by name (`khora_types::REGION_TYPE`) and `check_handler_is_shareable` exempts
 a `Scope` handler, which never crosses and so may capture its region. A fiber's
-error row is walked too (`check_raises_stay_home`): `Fiber`'s `A: Share` covers
-the answer and nothing covers the error, and asking the whole row for `Share`
-would refuse a `mut` record in an error, which is marked at the handover and
-correct. Every refusal names the rewrite: `Fiber::spawn(fn () => scoped(work))`.
+error row is held to `Share` as its answer is (`check_raises_cross`, owner
+decision E1): `Fiber`'s `A: Share` covers the answer and nothing covered the
+error, and a raised `mut` record joined from two fibers was a race on its
+fields that the handover mark could not prevent. A region there keeps the
+`scoped` message. `SharedFn::of`'s row keeps only the region half, since a
+certified closure's error stays on its caller. An error type the spawning
+file never imports is judged by its body all the same: `import_types` reaches
+the types an imported function's signature names into `TypeMap::reachable`,
+as it did an imported type's fields. Without that, `ChildFailed` raised
+through `nursery` looked opaque and was refused. Every refusal names the rewrite: `Fiber::spawn(fn () => scoped(work))`.
 A lambda works as well, `scoped(fn () => work())`, inside a function with a
 `scope` of its own too: the capability `scoped`'s parameter hands the lambda
 shadows the enclosing binding for what the body requires without naming it

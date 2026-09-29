@@ -208,6 +208,8 @@ let response = SharedFn::call(callback, request);
 
 Use `SharedFn` when a callback must be stored inside another shareable value, such as a router or callback table.
 
+Its error `'er` need not be `Share`. `SharedFn::call` runs the closure on the calling fiber, so an error it raises is raised and caught on that one fiber and reaches no other. A `Fiber`'s error is different, because the fiber that joins receives it.
+
 ## `Fiber<A, 'er>`
 
 A fiber handle is shareable, so one fiber can hold another's and act on it:
@@ -228,6 +230,15 @@ pub fn main() -> () {
 **This is what a supervisor is made of**, and what a deadline would be made of: there is no `timeout` or `race` in `std` (see [Concurrency](/docs/reference/concurrency/)), so anything of that shape is written from a handle one fiber holds and another cancels.
 
 What constrains it is the answer rather than the handle. `A: Share` is on the whole `impl<A: Share, 'er> Fiber<A, 'er>`, because a value computed on one fiber and read on another has to be safe to hold twice — so it is a condition on having a `Fiber<A, 'er>` at all, and `wait` needs it as much as `join` does even though `wait` never hands the answer back.
+
+The error is held to the same rule. Every error in a spawned body's `raises` row must be `Share`, because `join` and `outcome` hand the raised error to whoever joins, and two fibers may join one handle. It is asked at the spawn, and again once the function's types are settled if the row was not known there:
+
+```text
+error: `Oops` does not implement `Share`, which a spawned fiber's error requires: whoever joins
+the fiber holds the error it raised. `Oops` can be written, and two fibers writing one value is a race
+```
+
+A `SharedFn`'s error is not held to it: a certified closure is called on the caller's fiber, so what it raises stays there. It may still not raise a `Region` or `Scope`.
 
 ## Regions stay home
 

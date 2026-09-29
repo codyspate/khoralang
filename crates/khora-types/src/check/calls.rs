@@ -20,14 +20,19 @@ impl<'a> Checker<'a> {
         // only known once it has been inferred.
         let certifying = match self.body.expr(callee) {
             Expr::Path(khora_hir::Resolution::TraitItem { owner, name }) => {
-                (owner == FIBER_TYPE && name == "spawn")
-                    || (owner == SHARED_FN_TYPE && name == "of")
+                if owner == FIBER_TYPE && name == "spawn" {
+                    Some(super::sharing::Crossing::Fiber)
+                } else if owner == SHARED_FN_TYPE && name == "of" {
+                    Some(super::sharing::Crossing::Certified)
+                } else {
+                    None
+                }
             }
-            _ => false,
+            _ => None,
         };
-        if certifying {
+        if let Some(crossing) = certifying {
             let result = self.infer_call_inner(callee, args, hint, range);
-            self.check_spawnable(args, range);
+            self.check_spawnable(args, crossing, range);
             return result;
         }
         self.infer_call_inner(callee, args, hint, range)

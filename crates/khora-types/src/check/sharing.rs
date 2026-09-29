@@ -19,9 +19,9 @@ impl<'a> Checker<'a> {
     /// Anything else is refused, because a check that cannot see what it is
     /// checking is not a check — and the rule is worth having anyway, since
     /// **a fiber's body is written where it starts**.
-    pub(super) fn check_spawnable(&mut self, args: &[ExprId], range: TextRange) {
+    pub(super) fn check_spawnable(&mut self, args: &[ExprId], crossing: Crossing, range: TextRange) {
         let Some(body) = args.first().copied() else { return };
-        self.check_raises_stay_home(body, range);
+        self.check_raises_cross(body, crossing, range);
         let captures: Vec<khora_hir::body::LocalId> = match self.body.expr(body) {
             Expr::Lambda { captures, .. } => captures
                 .iter()
@@ -98,27 +98,52 @@ impl<'a> Checker<'a> {
         self.error(format!("`{name}` cannot be handed to another fiber: {why}"), range);
     }
 
-    /// A fiber's error may not hold a `Region` or `Scope`.
+    /// What a spawned fiber, or a certified closure, may raise.
     ///
-    /// **What this prevents: a child's finalizer run on its parent.** An error
-    /// a fiber raises is caught by whoever joins it, so a region inside one
-    /// reaches that fiber, and its last reference -- and with it the child's
-    /// finalizers, over captures the child may have been writing -- goes
-    /// there. The answer is asked for `Share` by `Fiber`'s own bound; the
-    /// error row is not, and this closes the region half of that gap only.
+    /// **What this prevents: an error that two fibers hold at once.** A
+    /// fiber's error is caught by whoever joins it, and a handle can be joined
+    /// from more than one fiber, so a raised record with a `mut` field was
+    /// written by the parent while a second joiner read it: a race on its
+    /// fields, and a use-after-free when a field was replaced under the
+    /// reader. A `Region` or `Scope` in the error ran the child's finalizers on
+    /// the joiner. So a spawned body's error is held to `Share`, as its answer
+    /// is by `Fiber`'s own bound, and a region is refused with the message
+    /// that names `scoped`.
     ///
-    /// A `mut` record in an error is marked at the handover and is not this
-    /// rule's business, so asking the whole row for `Share` would refuse
-    /// programs that are correct.
+    /// **`SharedFn::of` keeps only the region half.** A certified closure is
+    /// called on the caller's own fiber, so its error never crosses and a
+    /// `mut` record in it is not a race; a region in it is refused as before.
     ///
-    /// Asked of the body's type as inference has it at the spawn, so a raises
-    /// row still open there is not seen: the same limit the capture check has.
-    fn check_raises_stay_home(&mut self, body: ExprId, range: TextRange) {
+    /// A row that still holds an inference variable at the spawn is asked
+    /// once the body's types are settled, as a capture is
+    /// ([`Checker::check_unsettled_captures`]), and only then, so an error is
+    /// not reported twice. What it cannot see: a rigid row parameter, `'er`
+    /// in a generic function that spawns whatever it is handed. The caller's
+    /// row is not checked at that call; that is the same gap a rigid `A`
+    /// without `A: Share` would be, and rows have no bound to write.
+    fn check_raises_cross(&mut self, body: ExprId, crossing: Crossing, range: TextRange) {
         let Some(ty) = self.exprs.get(&body).map(|t| self.unifier.zonk(t)) else { return };
         let Type::Fn { raises, .. } = ty else { return };
-        let Type::Row { fields, .. } = *raises else { return };
+        if row_is_unsettled(&raises) {
+            self.unsettled_raises.push((*raises, crossing, range));
+            return;
+        }
+        self.refuse_unshareable_errors(&raises, crossing, range);
+    }
+
+    /// Asks each raises row that was unsettled at its spawn. See
+    /// [`Checker::check_raises_cross`].
+    pub(crate) fn check_unsettled_raises(&mut self) {
+        for (row, crossing, range) in std::mem::take(&mut self.unsettled_raises) {
+            let row = self.unifier.zonk(&row);
+            self.refuse_unshareable_errors(&row, crossing, range);
+        }
+    }
+
+    fn refuse_unshareable_errors(&mut self, raises: &Type, crossing: Crossing, range: TextRange) {
+        let Type::Row { fields, .. } = raises else { return };
         for (label, error) in fields {
-            if let Some(fiber_bound) = self.types.fiber_bound_inside(&error) {
+            if let Some(fiber_bound) = self.types.fiber_bound_inside(error) {
                 let why = crate::map::stays_on_its_fiber_because(&fiber_bound);
                 self.error(
                     format!(
@@ -127,7 +152,23 @@ impl<'a> Checker<'a> {
                     ),
                     range,
                 );
+                continue;
             }
+            match crossing {
+                Crossing::Fiber => {}
+                Crossing::Certified => continue,
+            }
+            if self.types.is_shareable(error, &self.shared_params()) {
+                continue;
+            }
+            let why = self.types.why_unshareable(error);
+            self.error(
+                format!(
+                    "`{label}` does not implement `Share`, which a spawned fiber's error \
+                     requires: whoever joins the fiber holds the error it raised. {why}"
+                ),
+                range,
+            );
         }
     }
 
@@ -250,6 +291,30 @@ pub(crate) enum Captor {
     Spawn,
     /// An operation of a `handler for` `owner`, the field `label`.
     Handler { owner: String, label: String },
+}
+
+/// Where a checked closure's captures and error go.
+///
+/// Two cases, matched exhaustively, because the error rule differs: a fiber's
+/// error reaches its joiner, and a certified closure's stays on its caller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Crossing {
+    /// `Fiber::spawn`: the body runs on another fiber and its error is joined.
+    Fiber,
+    /// `SharedFn::of`: the closure may be held anywhere, and is called on the
+    /// caller's fiber.
+    Certified,
+}
+
+/// Whether a zonked error row may still be solved to an error nobody has
+/// seen: a field whose type holds a variable, or a tail that is one.
+fn row_is_unsettled(row: &Type) -> bool {
+    if let Type::Var(_) = row {
+        return true;
+    }
+    let Type::Row { fields, tail } = row else { return false };
+    fields.iter().any(|(_, t)| holds_a_variable(t))
+        || tail.as_deref().is_some_and(|t| matches!(t, Type::Var(_)))
 }
 
 /// Whether a zonked type still holds an inference variable anywhere a value

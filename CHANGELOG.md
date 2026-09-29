@@ -57,6 +57,24 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   a channel, a `Shared` cell): acquire it in the parent and hand the value
   in. The refusal names the fix.
 
+- **A spawned fiber's error must be `Share`, as its answer must.** Every error
+  in the `raises` row of a body handed to `Fiber::spawn` is held to `Share`,
+  so raising a record with a `mut` field, an `Array` or a `Map` out of a
+  fiber is refused at the spawn. `join` and `outcome` hand the raised error
+  to whoever joins, and two fibers could join one handle: one wrote the
+  error's fields while the other read them. `Fiber::outcome` and
+  `nursery.adopt` take the same handle, so the spawn covers them. A
+  `SharedFn::of` closure's error is not held to it, because it is raised on
+  the caller's own fiber, and neither is a `test` block's. **The
+  migration:** raise an error without `mut` fields, or with the data the
+  joiner needs copied into immutable fields; a `Region` or `Scope` in an
+  error is refused as before, with the message that names `scoped`. The
+  error is judged by its own declaration, also when the spawning file never
+  imports it: a body raising `ChildFailed` through `nursery` crosses without
+  `ChildFailed` being named. For that, a file sees the declarations of the
+  types an imported function's signature names, as it sees those an imported
+  type's fields name. It sees them only to judge them; they are not in scope.
+
 - **A capture whose type is settled after `Fiber::spawn` or `SharedFn::of`,
   or after the `handler for` that captures it,
   is held to `Share`** (silent wrong answer). A program where one such
