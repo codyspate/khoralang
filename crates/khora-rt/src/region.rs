@@ -26,12 +26,35 @@ struct Finalizer {
     call: Option<Trampoline1>,
 }
 
-/// A region's finalizers, in the order they were deferred.
+/// A region's finalizers, in the order they were deferred, and the one fiber
+/// that may defer them.
 ///
 /// Held Rust-side rather than as a Khora list because deferring *grows* it, and
 /// nothing in Khora can grow a value in place. The Khora object is a handle:
 /// one field holding a pointer to this.
-type Finalizers = Mutex<Vec<Finalizer>>;
+///
+/// **`owner` is the backstop for a finalizer run on the wrong fiber.** A
+/// finalizer's captures need not be `Share`, so it may hold a `mut` record
+/// the deferring fiber goes on writing; run on another fiber, it reads a field
+/// that fiber can replace and free under it. The checker refuses every route
+/// a `Region` or `Scope` has to another fiber (`khora_types::REGION_TYPE`),
+/// so this never fires on a program that compiled -- unless a route was
+/// missed, and then it traps at the defer rather than racing at the release.
+/// It costs a fiber-id read per defer.
+///
+/// **The `Mutex` guards against a runtime bug, not a language one.** Every
+/// defer comes from `owner`, so it is never contended. It stays because a
+/// region is not a hot path -- it is touched when a resource is acquired, not
+/// when one is used -- and a lock taken uncontended costs next to nothing.
+struct Finalizers {
+    owner: usize,
+    list: Mutex<Vec<Finalizer>>,
+}
+
+/// The running fiber's id, as [`Finalizers::owner`] records it.
+fn this_fiber() -> usize {
+    crate::current::current(|fiber| fiber.id())
+}
 
 /// The tag every region object carries. Regions are not an ADT, so no variant
 /// index competes for it.
@@ -47,13 +70,36 @@ static mut ROOT: *mut u8 = std::ptr::null_mut();
 
 /// A reference to the root region.
 ///
+/// **Only the program's own fiber may reach it**, and a spawned fiber that
+/// asks is a fatal error. `Region::root()` is reachable by name, so no type
+/// rule keeps it on one fiber, and a finalizer a child deferred into it would
+/// run at exit on the main fiber while the child might still be writing what
+/// it captured. A child that wants something released opens a `scoped` of its
+/// own, and the message says so.
+///
+/// A `test` block is the exception the harness makes: each runs on a spawned
+/// fiber, and gets a root region of its own, released when the test ends.
+/// [`crate::testing::test_root`].
+///
 /// # Safety
 ///
 /// Single-threaded, like everything else here: fibers running across cores
 /// (A5) will need this behind the same lock the refcounts eventually go
-/// behind. `docs/roadmap.md` D10.
+/// behind. `docs/roadmap.md` D10. The spawned-fiber trap is what keeps the
+/// program's fibers off it; a foreign thread calling an exported function is
+/// not a spawned fiber, and is not kept off it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn khora_region_root() -> *mut u8 {
+    if crate::current::current(|fiber| fiber.is_spawned()) {
+        if let Some(root) = crate::testing::test_root() {
+            return root;
+        }
+        fatal(
+            "`Region::root()` or `Scope::root()` reached from a spawned fiber: the root \
+             region belongs to the program's own fiber, so give this one a scope of its own \
+             with `scoped(work)`, handing it a named function",
+        );
+    }
     // SAFETY: single-threaded per the note above.
     unsafe {
         if ROOT.is_null() {
@@ -91,7 +137,8 @@ pub unsafe extern "C" fn khora_region_close_root() {
 /// generated code passes and generated code has no notion of Rust's `unsafe`.
 /// The release itself keeps its contract, so the shim is where the claim that
 /// the contract holds is made — once, here, rather than at every drop site.
-extern "C" fn release_shim(region: *mut u8) {
+// SHARE: releases a region; see `khora_region_release`.
+pub(crate) extern "C" fn release_shim(region: *mut u8) {
     // SAFETY: only ever reached through `khora_drop`, which calls it with the
     // object whose last reference it just released.
     unsafe { khora_region_release(region) };
@@ -108,10 +155,11 @@ extern "C" fn release_shim(region: *mut u8) {
 #[unsafe(no_mangle)]
 pub extern "C" fn khora_region_open() -> *mut u8 {
     let object = khora_alloc(std::mem::size_of::<*mut Finalizers>() as u64, REGION_TAG);
-    // Every region handle is born shared, and that covers the root region:
-    // the one runtime-held object every fiber can reach.
+    // Every region handle is born shared. Its references all live on its
+    // owner, so it could be born local; it is not, because a shared handle
+    // costs an atomic count and a missed route would cost a torn one.
     crate::share::born_shared(object);
-    let list: Box<Finalizers> = Box::default();
+    let list = Box::new(Finalizers { owner: this_fiber(), list: Mutex::default() });
     // SAFETY: `khora_alloc` returned an object with one field's worth of
     // space, zeroed and aligned, and nothing else holds this pointer yet.
     unsafe {
@@ -154,25 +202,24 @@ pub unsafe extern "C" fn khora_region_defer(
     if list.is_null() {
         fatal("deferring a finalizer to a region that has already been released");
     }
-    // **Not marked here, though the closure may cross.** A finalizer's
-    // captures need not be `Share`, so the deferring fiber may go on writing
-    // them: a `mut` field, a `Map`. Whatever it stores after this point is
-    // made on this fiber, and a mark taken now would not reach it. The mark
-    // is taken when the region runs the finalizer, in `khora_region_release`.
-    // SHARE: stores the closure under the region's lock; it is marked when
-    // `khora_region_release` runs it.
-    // Locked, because a region is shareable and so two fibers may defer to one
-    // at the same moment: a fiber that acquires a connection wants it released
-    // by the scope that outlives it, which is the whole point of handing a
-    // `Scope` across. `std::core::Share`.
-    //
-    // Uncontended almost always, and a region is not a hot path — it is
-    // touched when a resource is acquired, not when one is used.
+    // SAFETY: non-null, so the box `khora_region_open` made is still alive,
+    // and `owner` is never written after it was.
+    if unsafe { (*list).owner } != this_fiber() {
+        fatal(
+            "deferring a finalizer to a region another fiber opened: a finalizer runs on \
+             the fiber that deferred it, so give this fiber a scope of its own with \
+             `scoped(work)`, handing it a named function",
+        );
+    }
+    // SHARE: stores the closure; not a crossing. The check above makes this
+    // fiber the region's owner, the only one that can release it and so run
+    // the closure, which is why it is never marked.
     //
     // SAFETY: as above; the box is alive until the region is released, and the
     // field is the only handle to it.
     unsafe {
         (*list)
+            .list
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(Finalizer { closure, glue, call })
@@ -199,6 +246,9 @@ pub unsafe extern "C" fn khora_region_defer(
 /// reached zero.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn khora_region_release(region: *mut u8) {
+    // SHARE: releases, and runs finalizers on the fiber that deferred them: a
+    // region's references never leave its owner, and the check below traps
+    // a release anywhere else, so nothing here crosses.
     if region.is_null() {
         return;
     }
@@ -211,6 +261,21 @@ pub unsafe extern "C" fn khora_region_release(region: *mut u8) {
     if list.is_null() {
         return;
     }
+    // **The release is checked as the defer is.** A route the checker missed
+    // may hand another fiber only the last reference, with no defer for the
+    // check there to see; this fiber would then run the owner's finalizers
+    // over captures the owner may still be writing. Trapped here instead, in
+    // every build. A fiber-id read per region release.
+    //
+    // SAFETY: non-null, so the box `khora_region_open` made is still alive,
+    // and `owner` is never written after it was.
+    if unsafe { (*list).owner } != this_fiber() {
+        fatal(
+            "releasing a region another fiber opened: a region's finalizers run on the \
+             fiber that deferred them, so give this fiber a scope of its own with \
+             `scoped(work)`, handing it a named function",
+        );
+    }
     // Cleared before running anything, so a finalizer that reaches this region
     // again finds it released rather than re-entering the list being drained.
     unsafe { slot.write(std::ptr::null_mut()) };
@@ -218,7 +283,7 @@ pub unsafe extern "C" fn khora_region_release(region: *mut u8) {
     // SAFETY: the pointer came from `Box::into_raw` in `khora_region_open` and
     // has not been freed — the null check above is what guarantees that.
     let list = unsafe { Box::from_raw(list) };
-    let list = list.into_inner().unwrap_or_else(|e| e.into_inner());
+    let list = list.list.into_inner().unwrap_or_else(|e| e.into_inner());
 
     // **Finalizers are not cancelable.** This release may itself be part of a
     // cancellation unwinding, in which case the flag is still set and the
@@ -228,17 +293,12 @@ pub unsafe extern "C" fn khora_region_release(region: *mut u8) {
     let _shield = crate::cancel::Shielded::new();
 
     for finalizer in list.into_iter().rev() {
-        // **The crossing a deferred finalizer makes, marked where it
-        // happens.** The region is `Share`, so the fiber releasing it last,
-        // which runs and releases this closure, need not be the one that
-        // deferred it. The mark is here and not at the defer because the
-        // captures may be `mut` and written after it. Here every write the
-        // deferring fiber made is ordered before this point, through the
-        // region's count and the list's lock, and nothing writes them again.
-        // One walk per finalizer per release, next to running the finalizer.
-        // SAFETY: the list owns a reference to a live closure whose release is
-        // `glue`.
-        unsafe { crate::share::khora_share(finalizer.closure, finalizer.glue) };
+        // **Not marked: this is not a crossing.** A region's references all
+        // live on the fiber that opened it, so the fiber releasing it last is
+        // the one that deferred this closure, and its captures stay local,
+        // counted by the fiber that made them. A missed route shows up as the
+        // owner check's trap in a debug build, not as a torn count.
+        //
         // SAFETY: a closure's first field is its code pointer, and a `() -> ()`
         // closure is called with its own object as the only argument. Through
         // the trampoline `khora_region_defer` was handed when there is one,
@@ -380,6 +440,128 @@ mod tests {
         }
         assert_eq!(COUNT.load(Ordering::SeqCst), 2);
         assert_eq!(khora_canceled(), 0);
+    }
+
+    // --- A region stays on the fiber that opened it -------------------------
+    //
+    // The checker refuses every route a `Region` or `Scope` has to another
+    // fiber. These are the runtime's backstop for the routes it cannot see,
+    // and each one ends the process, so each runs in a copy of this test
+    // binary and the parent reads how the copy died.
+
+    /// Set in the copy of the test binary that [`dies_in_a_copy`] starts,
+    /// naming which of the fatal cases to run.
+    const FATAL_CHILD: &str = "KHORA_RT_REGION_FATAL_CHILD";
+
+    /// Runs the test `name` in a copy of this binary with [`FATAL_CHILD`] set
+    /// to `case`, and requires that it exit 134 saying `expected`.
+    fn dies_in_a_copy(name: &str, case: &str, expected: &str) {
+        let out = std::process::Command::new(std::env::current_exe().expect("the test binary"))
+            .args(["--exact", name, "--nocapture", "--test-threads=1"])
+            .env(FATAL_CHILD, case)
+            .output()
+            .expect("the copy of the test binary should start");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(134), "the copy did not trap: {stderr}");
+        assert!(stderr.contains(expected), "the copy trapped for another reason: {stderr}");
+    }
+
+    /// Runs `body` on a fresh thread carrying a spawned fiber, as
+    /// `khora_fiber_spawn` runs a child on the thread backend.
+    fn on_a_spawned_fiber(body: impl FnOnce() + Send + 'static) {
+        std::thread::spawn(move || {
+            let _entered = crate::current::enter(crate::current::Fiber::spawned());
+            body();
+        })
+        .join()
+        .expect("the spawned fiber's thread");
+    }
+
+    extern "C" fn nothing(_closure: *mut u8) {}
+
+    /// **A defer from a fiber that did not open the region is fatal.** This
+    /// is what a route the checker missed looks like: the finalizer would run
+    /// on the region's owner while the deferring fiber still wrote its
+    /// captures.
+    #[test]
+    fn a_defer_from_another_fiber_is_fatal() {
+        if std::env::var(FATAL_CHILD).as_deref() == Ok("defer") {
+            let region = khora_region_open() as usize;
+            on_a_spawned_fiber(move || {
+                // SAFETY: a live region, opened above and not yet released,
+                // and a live closure whose drop is the default.
+                unsafe { khora_region_defer(region as *mut u8, closure(nothing), None, None) };
+            });
+            return;
+        }
+        dies_in_a_copy(
+            "region::tests::a_defer_from_another_fiber_is_fatal",
+            "defer",
+            "deferring a finalizer to a region another fiber opened",
+        );
+    }
+
+    /// **The root region from a spawned fiber is fatal.** It is reachable by
+    /// name, so no type keeps a child off it.
+    #[test]
+    fn the_root_region_from_a_spawned_fiber_is_fatal() {
+        if std::env::var(FATAL_CHILD).as_deref() == Ok("root") {
+            on_a_spawned_fiber(|| {
+                // SAFETY: nothing else in this copy touches the root region.
+                let _ = unsafe { khora_region_root() };
+            });
+            return;
+        }
+        dies_in_a_copy(
+            "region::tests::the_root_region_from_a_spawned_fiber_is_fatal",
+            "root",
+            "`Region::root()` or `Scope::root()` reached from a spawned fiber",
+        );
+    }
+
+    /// **A release on a fiber that did not open the region is fatal.** This
+    /// is a route the checker missed where the other fiber never defers: it
+    /// only drops the last reference, and so would run the owner's
+    /// finalizers over captures the owner may still be writing. The
+    /// review's `var_capture.kh` is this shape.
+    #[test]
+    fn a_release_on_another_fiber_is_fatal() {
+        if std::env::var(FATAL_CHILD).as_deref() == Ok("release") {
+            let region = khora_region_open() as usize;
+            // SAFETY: a live region and a live closure whose drop is the default.
+            unsafe { khora_region_defer(region as *mut u8, closure(nothing), None, None) };
+            on_a_spawned_fiber(move || {
+                // SAFETY: the only reference, handed to this fiber, released
+                // the way generated code releases it.
+                unsafe { khora_drop(region as *mut u8, Some(release_shim)) };
+            });
+            return;
+        }
+        dies_in_a_copy(
+            "region::tests::a_release_on_another_fiber_is_fatal",
+            "release",
+            "releasing a region another fiber opened",
+        );
+    }
+
+    /// A defer from the fiber that opened the region is the ordinary case, on
+    /// a spawned fiber as on the program's own: the owner is the fiber, not
+    /// "the main one".
+    #[test]
+    fn a_spawned_fiber_defers_into_its_own_region() {
+        static RAN: AtomicUsize = AtomicUsize::new(0);
+        extern "C" fn counting(_closure: *mut u8) {
+            RAN.fetch_add(1, Ordering::SeqCst);
+        }
+        on_a_spawned_fiber(|| {
+            let region = khora_region_open();
+            // SAFETY: a live region this fiber opened, and its only reference.
+            unsafe {
+                khora_region_defer(region, closure(counting), None, None);
+                khora_drop(region, Some(release_shim));
+            }
+        });
+        assert_eq!(RAN.load(Ordering::SeqCst), 1);
     }
 
     // --- S3: a drain left open across a finalizer ---------------------------

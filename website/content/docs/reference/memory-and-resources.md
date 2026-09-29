@@ -45,10 +45,9 @@ Finalizers execute in **reverse registration order** when the region is
 released, and a region is released **when the last reference to it goes** --
 which for the ordinary case is the end of the block its binding is in, on every
 way out of that block, including a cancellation. The exception is a reference
-that outlives the block: a closure that captured the region, or a `Scope`
-handed to a fiber, keeps it open until that reference goes too. That is what
-lets a fiber hold a scope belonging to the call that spawned it, and it means a
-captured region's finalizers run later than the block, not at it. So the example above
+that outlives the block: a closure that captured the region keeps it open until
+that closure goes too, so a captured region's finalizers run later than the
+block, not at it. So the example above
 runs its finalizers when `work` returns, and putting the `let` inside a smaller
 block ends the region there instead:
 
@@ -66,6 +65,19 @@ ends with the caller, and it is worth being deliberate about: a `Region::open()`
 at the top of a function holds everything until the function returns.
 
 `Region::root()` refers to the outer program region. Its finalizers run as the program exits.
+
+**A region stays on the fiber that opened it**, and so does a `Scope`: neither
+is shareable, so neither can be captured by a fiber's body, sent on a channel,
+or put in a `Shared` cell. Every finalizer therefore runs on the fiber that
+deferred it, which is what lets one capture a record with `mut` fields that
+the fiber goes on writing. A child fiber that acquires something is given a
+scope of its own by handing `scoped` a named function,
+`Fiber::spawn(fn () => scoped(work))`, and what it acquires is released when
+that `scoped` ends. `Region::root()` and `Scope::root()` belong to the program's
+own fiber, and a spawned fiber that calls either stops with a fatal error; a
+`test` or `bench` block has a root region of its own, released when the block
+ends. [Sharing](/docs/reference/sharing/#regions-stay-home) has the rule, why
+the named function matters, and what it costs.
 
 ## Scope capability
 

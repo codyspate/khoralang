@@ -33,6 +33,32 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 
 ### Breaking
 
+- **A `Region` or `Scope` stays on the fiber that opened it.** Neither is
+  `Share`: a fiber's body cannot capture one, a channel cannot carry one, a
+  `Shared` cell cannot hold one, a fiber cannot answer or raise one, and a
+  handler for another effect cannot capture a `scope`. So every finalizer runs
+  on the fiber that deferred it. Before this, a child could defer a finalizer over a `mut`
+  record into its parent's scope, and the parent's release could run it while
+  the child was still writing the record: a data race on its fields, and a
+  use-after-free when the child replaced a field the finalizer was reading.
+  `Region::root()` and `Scope::root()` belong to the program's own fiber, and
+  a spawned fiber that calls either stops with a fatal error (exit 134). A
+  `test` or `bench` block has a root region of its own, released when that
+  block ends. A region whose last reference goes on a fiber that did not open
+  it stops the program with a fatal error too, rather than running its
+  finalizers there.
+
+  **The migration** is one line: a child that acquires something is given a
+  scope of its own by handing `scoped` a named function,
+  `Fiber::spawn(fn () => scoped(work))`, instead of being handed its
+  parent's. A named function whose body calls `scoped` works as well. What it
+  acquires is released when the child's `scoped` ends. Write the named
+  function, not `scoped(fn () => work())`: inside a function that has a
+  `scope` of its own, `work()` in that lambda uses the enclosing `scope`, and
+  the spawn is refused. A resource that has to outlive the child is a
+  shareable one (a pool, a channel, a `Shared` cell): acquire it in the parent
+  and hand the value in. The refusal names the fix.
+
 - **A record field is private to the module that declares its type, unless
   it is marked `pub`.** Outside that module a private field cannot be read,
   assigned, named in a literal or an update, or bound in a pattern, and a

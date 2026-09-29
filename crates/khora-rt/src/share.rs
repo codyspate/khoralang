@@ -4,9 +4,9 @@
 //! **What this prevents: a local object reaching a second fiber unmarked.**
 //! Every object starts local to the fiber that made it. A value becomes
 //! reachable from another fiber only through a runtime entry: a spawn's
-//! closure, a channel send, a cell's contents, a fiber's answer, a deferred
-//! finalizer. Each of those calls [`khora_share`] on what it publishes, before
-//! the lock or hand-off that publishes it, so the receiving thread sees the
+//! closure, a channel send, a cell's contents, a fiber's answer. Each of those
+//! calls [`khora_share`] on what it publishes, before the lock or hand-off
+//! that publishes it, so the receiving thread sees the
 //! bit before it sees the pointer. Counting stays atomic for every object, so
 //! today the bit changes no count. What reads it is the owner check below,
 //! and a later stage that counts local objects without a lock prefix.
@@ -20,16 +20,15 @@
 //! already shared, and sending the same structure twice costs one load the
 //! second time.
 //!
-//! **A deferred finalizer is the one route a non-`Share` value has across
-//! fibers,** and the reason it is marked late. `Region::defer` does not
-//! require `Share` captures, so a finalizer may hold a `mut` record or a
-//! `Map` that the deferring fiber goes on writing. A mark taken at the defer
-//! breaks the invariant with the first such write: the fresh object stored
-//! into a shared record is local. So `khora_region_release` marks each
-//! finalizer just before it runs it, after every write the deferring fiber
-//! made. What a finalizer shares with live code on another fiber is a data
-//! race on its fields whatever the counts do; that is a language question,
-//! and this module does not settle it.
+//! **A deferred finalizer is not a route, though its captures need not be
+//! `Share`.** `Region::defer` takes a finalizer that may hold a `mut` record
+//! or a `Map` the deferring fiber goes on writing, which no mark could cover:
+//! the first write after it stores a fresh local object into a shared one.
+//! So the finalizer never crosses at all. A `Region` or `Scope` stays on
+//! the fiber that opened it (`khora_types::REGION_TYPE`), and
+//! `crate::region` traps a defer from any other fiber and the root region
+//! from a spawned one, so a finalizer is deferred, run and released on one
+//! fiber and its captures stay local.
 //!
 //! # Fiber migration is not a crossing
 //!

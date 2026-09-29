@@ -229,6 +229,33 @@ pub fn main() -> () {
 
 What constrains it is the answer rather than the handle. `A: Share` is on the whole `impl<A: Share, 'er> Fiber<A, 'er>`, because a value computed on one fiber and read on another has to be safe to hold twice — so it is a condition on having a `Fiber<A, 'er>` at all, and `wait` needs it as much as `join` does even though `wait` never hands the answer back.
 
+## Regions stay home
+
+A `Region` stays on the fiber that opened it, and so does a `Scope`. Neither is shareable: a fiber's body cannot capture one, a channel cannot carry one, a `Shared` cell cannot hold one, a fiber cannot answer or raise one, and a handler for another effect cannot capture one. So a region's finalizers run on the fiber that deferred them, which is what lets a finalizer capture a record with `mut` fields that this fiber goes on writing.
+
+A child fiber that acquires something is given a scope of its own, by handing `scoped` a named function:
+
+```khora
+let worker = Fiber::spawn(fn () => scoped(work));
+```
+
+A named function whose body calls `scoped` works too: `Fiber::spawn(fn () => serve_one(connection))`, where `serve_one` opens its own. What the child acquires is released when the child's `scoped` ends, on every way out, including a cancellation or an `abort` of the child.
+
+Write a named function rather than `scoped(fn () => work())`. Inside a function that has a `scope` of its own, `work()` in that lambda uses the enclosing `scope`, not the one `scoped` opens, so the child would be handed its parent's scope, and the spawn is refused:
+
+```text
+error: `scope` cannot be handed to another fiber: a `Scope` stays on the fiber that opened it,
+so that its finalizers run on the fiber that deferred them. To release something the child
+acquires, give the child a scope of its own by handing `scoped` a named function,
+`Fiber::spawn(fn () => scoped(work))`, or spawn a named function whose body calls `scoped`
+```
+
+`Region::root()` and `Scope::root()` belong to the program's own fiber. A spawned fiber that reaches for either is stopped with a fatal error (exit status 134), because the root region is reachable by name and no type rule can keep a child off it. A `test` or `bench` block is given a root region of its own, released when the block ends. A fiber that a test spawns is refused the test's root like any other, and because the fatal error ends the process, it ends the whole `khora test` run: the tests still running are not reported, and there is no summary line.
+
+A region whose last reference goes on a fiber that did not open it is stopped with the same kind of fatal error, rather than running its finalizers on that fiber.
+
+What this costs: a child cannot acquire something and have its parent's longer scope release it. A resource that honestly has to outlive the child is a shareable one — a pool, a channel, a `Shared` cell — and the parent acquires it first and hands the shareable value in.
+
 ## Choosing the boundary
 
 Use `Shared<A>` when several fibers coordinate around **one evolving value**. Use `Channel<A>` when a value or unit of work is **handed to one receiver**, especially when backpressure matters. Use `SharedFn` when a **callback itself** must cross the sharing boundary. A `Fiber<A, 'er>` handle crosses too, which is what lets one fiber cancel or wait on another.

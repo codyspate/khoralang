@@ -7,6 +7,7 @@ use super::*;
 use crate::current::{enter, Fiber};
 use crate::fiber::Handed;
 use crate::heap::khora_drop;
+use std::cell::Cell;
 use std::io::Write;
 use std::sync::Mutex;
 
@@ -38,6 +39,63 @@ impl Finished {
 
 /// The tests a program declared, in the order they were written.
 static PENDING: Mutex<Vec<PendingTest>> = Mutex::new(Vec::new());
+
+thread_local! {
+    /// The running test's own root region: its fiber's id, and the region,
+    /// or null until the test first asks for it.
+    ///
+    /// **What this prevents: `Scope::root()` trapping in every `test` block.**
+    /// The root region belongs to the program's own fiber, and a test runs on
+    /// a spawned one, so the test would be refused the root its `main`-side
+    /// code reaches for. The program's root is not the answer either: a test's
+    /// finalizers would run at program exit, after every other test, on the
+    /// main fiber. So each test has one of its own, opened on first use and
+    /// released on the test's fiber when the test ends.
+    ///
+    /// Per thread, because each test has a thread of its own and its body
+    /// never leaves it; the fiber id is checked too, so a fiber the test
+    /// spawns is refused the test's root as it is the program's.
+    static TEST_ROOT: Cell<(usize, *mut u8)> = const { Cell::new((0, std::ptr::null_mut())) };
+}
+
+/// The running test's root region, with a reference for the caller, or `None`
+/// when the running fiber is not a test's. See [`TEST_ROOT`].
+pub(crate) fn test_root() -> Option<*mut u8> {
+    let id = crate::current::current(|fiber| fiber.id());
+    let (owner, region) = TEST_ROOT.with(Cell::get);
+    if owner != id {
+        return None;
+    }
+    let region = if region.is_null() {
+        let opened = crate::khora_region_open();
+        TEST_ROOT.with(|slot| slot.set((id, opened)));
+        opened
+    } else {
+        region
+    };
+    // SAFETY: a live region `TEST_ROOT` holds a reference to until the test
+    // ends, which it has not: this is the test's own fiber asking.
+    unsafe { crate::heap::khora_dup(region) };
+    Some(region)
+}
+
+/// Makes the running fiber a test's or a bench's, whose root region
+/// [`test_root`] opens.
+pub(crate) fn begin_test_root() {
+    let id = crate::current::current(|fiber| fiber.id());
+    TEST_ROOT.with(|slot| slot.set((id, std::ptr::null_mut())));
+}
+
+/// Releases the running test's root region, if it opened one, running what
+/// was deferred to it on the test's own fiber.
+pub(crate) fn end_test_root() {
+    let (_, region) = TEST_ROOT.with(|slot| slot.replace((0, std::ptr::null_mut())));
+    if !region.is_null() {
+        // SAFETY: `TEST_ROOT`'s own reference to a live region, released the
+        // way `khora_region_close_root` releases the program's.
+        unsafe { khora_drop(region, Some(crate::region::release_shim)) };
+    }
+}
 
 /// Registers a test. Called once per `test` block by the generated entry point.
 ///
@@ -347,8 +405,10 @@ pub extern "C" fn khora_test_run() -> i32 {
         std::thread::spawn(move || {
             let code = code;
             let _entered = enter(Fiber::spawned());
+            begin_test_root();
             let mut payload: u64 = 0;
             let which = (call)(code.0, &raw mut payload);
+            end_test_root();
             // **A crossing: an error escaping the block is released by the
             // runner**, on its own thread and fiber, below. So it is marked
             // here, before the join publishes it. The runner releases it with

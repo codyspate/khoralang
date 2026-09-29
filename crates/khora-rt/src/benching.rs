@@ -109,6 +109,10 @@ pub extern "C" fn khora_bench_run() -> i32 {
     let mut failed = 0usize;
     for bench in selected {
         let _entered = enter(Fiber::spawned());
+        // A bench runs on a spawned fiber, like a test, so it gets the same
+        // root region of its own: opened on first use, released on this fiber
+        // when the bench's samples are done, not at program exit on another.
+        crate::testing::begin_test_root();
 
         let mut samples: Vec<u64> = Vec::new();
         let mut broke = None;
@@ -144,6 +148,7 @@ pub extern "C" fn khora_bench_run() -> i32 {
             }
         }
 
+        crate::testing::end_test_root();
         if let Some(why) = broke {
             failed += 1;
             let _ = writeln!(out, "bench {} ... {why}", bench.name);

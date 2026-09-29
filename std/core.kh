@@ -2180,6 +2180,12 @@ pub type Never;
 /// however it ends: falling off the end, an early `return`, or a raise passing
 /// through.
 ///
+/// **A scope stays on the fiber that opened it**, so a finalizer runs on the
+/// fiber that deferred it and may capture a record with `mut` fields that
+/// fiber goes on writing. A fiber's body cannot capture one, nor can a handler
+/// for another effect; a child is given its own by handing `scoped` a named
+/// function.
+///
 /// The operation takes only a thunk. A handler's fields are ordinary closures
 /// and a closure is monomorphic, so an operation cannot be generic — and it
 /// need not be: `acquire` below is an ordinary generic function that closes
@@ -2196,10 +2202,12 @@ pub effect Scope {
 /// paths that release a binding are already the paths a region has to end on.
 pub type Region;
 
-/// A fiber that acquires something wants it released by the scope that outlives
-/// it, so a `Scope` has to be able to cross — which means the region behind it
-/// does. `khora_region_defer` takes a lock for exactly this.
-impl Share for Region {}
+/// **Not `Share`, and neither is a `Scope`.** A finalizer's captures need not
+/// be shareable -- a connection with `mut` fields is what `acquire` is for --
+/// so the fiber that runs a finalizer must be the one that deferred it, and
+/// that holds only if the region cannot reach another fiber. A child that
+/// acquires something is handed `scoped(work)`. The compiler knows both names:
+/// `khora_types::REGION_TYPE`.
 
 impl Region {
   /// A new region with nothing deferred into it.
@@ -2235,6 +2243,11 @@ impl Region {
   pub fn defer(self, finalizer: () -> ()) -> ();
   /// The region that ends when the program does, released by the entry point
   /// after `main` returns — on the failing path as well as the ordinary one.
+  ///
+  /// **It belongs to the program's own fiber.** A spawned fiber that calls
+  /// this traps: a finalizer it deferred here would run at exit, on the main
+  /// fiber, while the child might still be writing what it captured. A
+  /// `test` block has a root region of its own, released when the test ends.
   pub fn root() -> Region;
 }
 
@@ -2245,6 +2258,9 @@ impl Scope {
   /// above it to ask. Everything else should take one rather than reach for
   /// this — a library that roots its own scope has decided its caller's
   /// lifetimes for it.
+  ///
+  /// Like `Region::root`, it belongs to the program's own fiber, and a
+  /// spawned fiber that calls it traps. A child is handed `scoped(work)`.
   pub fn root() -> Scope {
     let region = Region::root();
     handler for Scope { defer: fn f => Region::defer(region, f) }
@@ -5938,6 +5954,14 @@ pub fn bounded_nursery<A, 'ef, 'er>(
 /// a return, a raise, or a cancellation. That last one is why this exists
 /// rather than a close written after the loop: a canceled fiber never
 /// reaches the line after the loop.
+///
+/// **It is also how a child fiber releases what it acquires.** The scope
+/// stays on the fiber that opened it, so a child cannot be handed its
+/// parent's; it opens its own, and its releases run on the child:
+/// `Fiber::spawn(fn () => scoped(work))`. **Hand it a named function**, or
+/// spawn a named function whose body calls `scoped`. Inside a function with a
+/// `scope` of its own, `work()` in `scoped(fn () => work())` uses the
+/// enclosing `scope`, not this one, so that spawn is refused.
 pub fn scoped<A, 'ef, 'er>(body: () -> A with { 'ef | scope: Scope } raises 'er) -> A
   with 'ef
   raises 'er

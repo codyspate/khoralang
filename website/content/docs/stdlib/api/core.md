@@ -1025,6 +1025,12 @@ A finalizer registered with a scope runs when the enclosing region ends,
 however it ends: falling off the end, an early `return`, or a raise passing
 through.
 
+**A scope stays on the fiber that opened it**, so a finalizer runs on the
+fiber that deferred it and may capture a record with `mut` fields that
+fiber goes on writing. A fiber's body cannot capture one, nor can a handler
+for another effect; a child is given its own by handing `scoped` a named
+function.
+
 The operation takes only a thunk. A handler's fields are ordinary closures
 and a closure is monomorphic, so an operation cannot be generic — and it
 need not be: `acquire` below is an ordinary generic function that closes
@@ -2026,6 +2032,11 @@ pub fn root() -> Region
 The region that ends when the program does, released by the entry point
 after `main` returns — on the failing path as well as the ordinary one.
 
+**It belongs to the program's own fiber.** A spawned fiber that calls
+this traps: a finalizer it deferred here would run at exit, on the main
+fiber, while the child might still be writing what it captured. A
+`test` block has a root region of its own, released when the test ends.
+
 ### Scope
 
 ```khora
@@ -2044,6 +2055,9 @@ An entry point has to get a `Scope` from somewhere, and there is nothing
 above it to ask. Everything else should take one rather than reach for
 this — a library that roots its own scope has decided its caller's
 lifetimes for it.
+
+Like `Region::root`, it belongs to the program's own fiber, and a
+spawned fiber that calls it traps. A child is handed `scoped(work)`.
 
 ### Fiber\<A, 'er>
 
@@ -6329,6 +6343,14 @@ pub fn main() -> Int { scoped(fn () => serve()); 0 }
 a return, a raise, or a cancellation. That last one is why this exists
 rather than a close written after the loop: a canceled fiber never
 reaches the line after the loop.
+
+**It is also how a child fiber releases what it acquires.** The scope
+stays on the fiber that opened it, so a child cannot be handed its
+parent's; it opens its own, and its releases run on the child:
+`Fiber::spawn(fn () => scoped(work))`. **Hand it a named function**, or
+spawn a named function whose body calls `scoped`. Inside a function with a
+`scope` of its own, `work()` in `scoped(fn () => work())` uses the
+enclosing `scope`, not this one, so that spawn is refused.
 
 ### acquire
 

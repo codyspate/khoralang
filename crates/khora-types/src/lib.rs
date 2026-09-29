@@ -701,6 +701,33 @@ pub const FIBER_TYPE: &str = "Fiber";
 /// The certified-closure wrapper. `SharedFn::of` is where the check happens.
 pub const SHARED_FN_TYPE: &str = "SharedFn";
 
+/// The type a finalizer is deferred into, which may not reach another fiber.
+///
+/// **What this prevents: a finalizer run on a fiber other than the one that
+/// deferred it.** A finalizer's captures need not be `Share` -- `acquire` of
+/// a connection with `mut` fields is what one is for -- so a `Region` or
+/// `Scope` that could cross let another fiber run and release a record this
+/// fiber was still writing, a use-after-free once the writer replaces a
+/// field the finalizer is reading. So neither crosses, and every finalizer
+/// is deferred, run and released on one fiber.
+///
+/// The cost is the pattern it refuses: a child that acquires into its
+/// parent's scope. The child opens its own with `scoped`, and every refusal
+/// says so. `Region::root()` is reachable by name from any fiber, so no type
+/// rule can close that route; the runtime traps it instead.
+///
+/// **Matched by name, like the rest of this file's constants**, so a user's
+/// own record called `Region` or effect called `Scope` is held to it too:
+/// refused a crossing it would otherwise be allowed. Errata 46.
+pub const REGION_TYPE: &str = "Region";
+/// The capability a finalizer is deferred through. See [`REGION_TYPE`].
+pub const SCOPE_EFFECT: &str = "Scope";
+
+/// Whether `name` is [`REGION_TYPE`] or [`SCOPE_EFFECT`].
+pub fn stays_on_its_fiber(name: &str) -> bool {
+    name == REGION_TYPE || name == SCOPE_EFFECT
+}
+
 /// Every declaration the compiler treats specially, by the name it goes by.
 ///
 /// **These are matched by name, and a name is not an identity.** A user's

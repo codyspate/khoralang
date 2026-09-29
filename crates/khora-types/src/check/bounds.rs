@@ -153,10 +153,18 @@ impl<'a> Checker<'a> {
                         // can go and look at, and `Convert<Bool>` is the whole
                         // of what is wrong here.
                         let wanted = Bound { name: wanted.name.clone(), args: at };
+                        // A region is refused `Share` on purpose, and the bare
+                        // "does not implement" reads as a missing impl to add.
+                        let why = match self.types.fiber_bound_inside(&arg) {
+                            Some(fiber_bound) if wanted.name == SHARE => {
+                                format!(": {}", crate::map::stays_on_its_fiber_because(&fiber_bound))
+                            }
+                            _ => String::new(),
+                        };
                         self.error(
                             format!(
                                 "`{arg}` does not implement `{wanted}`, which `{called}` \
-                                 requires"
+                                 requires{why}"
                             ),
                             range,
                         );

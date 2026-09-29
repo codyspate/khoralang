@@ -232,6 +232,9 @@ impl TypeMap {
     /// The message has to say which, or a reader whose capability was refused
     /// goes looking for a `mut` field that is not there.
     pub fn why_unshareable(&self, ty: &Type) -> String {
+        if let Some(fiber_bound) = self.fiber_bound_inside(ty) {
+            return stays_on_its_fiber_because(&fiber_bound);
+        }
         if let Type::Param(name) = ty {
             return format!(
                 "`{name}` is a type the caller chooses, so nothing here can tell whether it \
@@ -255,6 +258,58 @@ impl TypeMap {
             )
         } else {
             format!("`{ty}` can be written, and two fibers writing one value is a race")
+        }
+    }
+
+    /// The `Region` or `Scope` that `ty` is or holds, if any.
+    ///
+    /// **Asked only to explain a refusal, never to make one.** A record
+    /// holding a region is refused because the region is, and the generic
+    /// ``Holds` does not implement `Share`` sends the reader looking for a
+    /// `mut` field that is not there; the fix is `scoped` in the child, and
+    /// only this can say so. `crate::REGION_TYPE`.
+    ///
+    /// What it answers is the subject of [`stays_on_its_fiber_because`]'s
+    /// sentence: "a `Region`" for std's own, and "std's `Region`" with the
+    /// reason for a user's type of that name, which the rule catches by name.
+    /// Without the second, the author of a record called `Region` is told
+    /// their record stays on a fiber, and has no way to see why.
+    pub fn fiber_bound_inside(&self, ty: &Type) -> Option<String> {
+        self.fiber_bound_in(ty, &mut Vec::new())
+    }
+
+    fn fiber_bound_in(&self, ty: &Type, visiting: &mut Vec<String>) -> Option<String> {
+        match ty {
+            Type::Tuple(items) => items.iter().find_map(|t| self.fiber_bound_in(t, visiting)),
+            Type::Applied { head, args } => self
+                .fiber_bound_in(head, visiting)
+                .or_else(|| args.iter().find_map(|t| self.fiber_bound_in(t, visiting))),
+            Type::Adt { name, args, home } => {
+                if crate::stays_on_its_fiber(name) {
+                    let stds = home.as_ref().is_none_or(|h| h.segments() == ["std", "core"]);
+                    return Some(if stds {
+                        format!("a `{name}`")
+                    } else {
+                        format!(
+                            "std's `{name}` -- which the compiler knows by name, so a type of \
+                             this module's called `{name}` is held to the same rule --"
+                        )
+                    });
+                }
+                if let Some(found) = args.iter().find_map(|t| self.fiber_bound_in(t, visiting)) {
+                    return Some(found);
+                }
+                if self.effects.contains(name) || visiting.iter().any(|n| n == name) {
+                    return None;
+                }
+                visiting.push(name.clone());
+                let found = self
+                    .bodies_of(name)
+                    .find_map(|v| v.fields.iter().find_map(|t| self.fiber_bound_in(t, visiting)));
+                visiting.pop();
+                found
+            }
+            _ => None,
         }
     }
 
@@ -412,6 +467,15 @@ impl TypeMap {
                 if visiting.iter().any(|n| n == name) {
                     return true;
                 }
+                // **A `Scope` does not cross, though it is an effect.** Its
+                // one operation defers into a region, and a region's
+                // finalizers must run on the fiber that deferred them.
+                // `crate::REGION_TYPE`. A `Region` needs no line here: it is
+                // opaque and std declares no `Share` for it, which refuses
+                // it above.
+                if crate::stays_on_its_fiber(name) {
+                    return false;
+                }
                 // A handler's operations are closures whose captures were
                 // checked where the handler was written, so they are not asked
                 // about again here — see the note above.
@@ -463,6 +527,27 @@ impl TypeMap {
         }
     }
 
+}
+
+/// The sentence every refusal of a `Region` or `Scope` crossing ends with.
+///
+/// One function, because the spawn capture, the handler capture and the
+/// `Share` bound each refuse the same crossing, and a reader who meets two of
+/// them should be told the same fix: `scoped` inside the child.
+///
+/// **The fix it names works in any function.** `scoped(fn () => work())`
+/// does not, inside a function with a `scope` of its own: a lambda passed to
+/// `scoped` there uses the enclosing `scope`, so that child is refused too,
+/// and naming it sent a reader in a circle. A named function handed to
+/// `scoped`, or a named function whose body calls `scoped`, gets the new one.
+pub fn stays_on_its_fiber_because(subject: &str) -> String {
+    format!(
+        "{subject} stays on the fiber that opened it, so that its finalizers run on the \
+         fiber that deferred them. To release something the child acquires, give the \
+         child a scope of its own by handing `scoped` a named function, \
+         `Fiber::spawn(fn () => scoped(work))`, or spawn a named function whose body \
+         calls `scoped`"
+    )
 }
 
 #[salsa::tracked(returns(ref))]

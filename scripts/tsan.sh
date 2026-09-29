@@ -76,10 +76,10 @@ build_std="-Zbuild-std"
 # The tests that race between real threads. Named rather than "everything
 # minus", so that a new test is included on purpose rather than by accident.
 #
-# `region::` joined the list with 13.3: a region is shareable, two fibers may
-# defer to one at the same moment, and the cancellation shield added a second
+# `region::` joined the list with 13.3, for the cancellation shield: a second
 # per-fiber word that a finalizer reads while somebody else may be writing the
-# first.
+# first. A region itself stays on the fiber that opened it, and its tests that
+# use threads are the S3 scheduler tests and the owner traps.
 FILTERS="channel:: wait:: contain:: decimal:: trap:: region::"
 
 # Where the run is kept, so the verdict can be read out of it below.

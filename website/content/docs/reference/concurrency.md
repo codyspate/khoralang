@@ -123,6 +123,22 @@ fn run() -> () raises ChildFailed {
 
 When the body completes normally, `nursery` waits until every adopted child is finished. If the body leaves by failure or cancellation, releasing the nursery cancels children that are still running and waits for them before the scope is gone.
 
+A child that acquires something is given a scope of its own, because a `Scope` stays on the fiber that opened it and a child cannot be handed its parent's. Spawn a named function that opens it:
+
+```khora
+fn serve_one(connection: Connection) -> () {
+  scoped(fn () => serve(connection))
+}
+
+fn accept_loop(connection: Connection) -> ()
+  with { nursery: Nursery }
+{
+  nursery.adopt(Fiber::spawn(fn () => serve_one(connection)));
+}
+```
+
+What the child acquires is released when its `scoped` ends, on the child, on every way out including its cancellation. The lambda `scoped(fn () => serve(connection))` is written inside `serve_one`, which has no `scope` of its own; written inside a function that has one, `serve` would use that one, and the spawn is refused. [Sharing](/docs/reference/sharing/#regions-stay-home) has the rule.
+
 ### What a fiber is made of
 
 A fiber is an operating-system thread. There is a second implementation —

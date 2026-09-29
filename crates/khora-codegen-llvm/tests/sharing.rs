@@ -12,6 +12,11 @@
 //! trap is the only symptom: without it a missed mark changes nothing today,
 //! and becomes a race only once local objects are counted without a lock.
 //!
+//! A deferred finalizer is not among the entries: a `Region` stays on the
+//! fiber that opened it, so a finalizer is run on the fiber that deferred
+//! it and its captures never cross. Programs that hand one across are
+//! refused, and those tests sit next to the rewrite a program takes.
+//!
 //! Each test was watched red with its entry's mark removed, and
 //! [`the_owner_check_traps_on_a_foreign_count`] keeps the check itself from
 //! going quiet: it counts an object with another fiber's id and requires the
@@ -225,32 +230,6 @@ fn a_cell_marks_what_modify_returned() {
     );
 }
 
-/// **Deferred into a `Region`.** A child defers a finalizer capturing its own list; the parent's region runs and releases it.
-#[test]
-fn a_region_marks_a_deferred_finalizer() {
-    crosses_marked(
-        "defer",
-        "fn count(xs: List<String>) -> Int { List::length(xs) }
-
-fn run() -> Int {
-  let r = Region::open();
-  let f = Fiber::spawn(fn () => {
-    let xs = make(10);
-    Region::defer(r, fn () => { let _ = count(xs); () });
-    0
-  });
-  Fiber::join(f)
-}
-
-pub fn main() -> Int {
-  let n = run();
-  print(\"got 10 ${n}\");
-  0
-}",
-        "got 10 0",
-    );
-}
-
 /// **Adopted into a nursery.** A child adopts a handle it made into the parent's nursery, and the parent releases it. The handle is born shared, so this row's mark and the birth mark each cover it: the test goes red only with both removed.
 #[test]
 fn a_nursery_marks_an_adopted_handle() {
@@ -271,16 +250,35 @@ fn a_nursery_marks_an_adopted_handle() {
     );
 }
 
-/// **A finalizer deferred by one fiber may capture a `mut` record, written
-/// after the defer, and run on another.** `Region::defer` does not require
-/// `Share` captures, so this is the one route a non-`Share` value has across
-/// fibers. Marking the finalizer when it was deferred left the fresh list the
-/// child stored afterwards local to the child, and the region's release on
-/// the main fiber counted it: a trap on a correct program. It is marked when
-/// the region runs it instead.
+/// Compiles a whole program and requires the checker to refuse it, with a
+/// message that names `scoped`: the rewrite a refused crossing takes.
+fn refused(name: &str, source: &str) {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("sharing_{name}"));
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
+    let db = KhoraDatabase::new();
+    let root = SourceRoot::new(&db, sources(&db, &dir, source));
+    match khora_codegen_llvm::compile_with(&db, root, &exe, khora_codegen_llvm::Profile::Debug) {
+        Ok(()) => panic!("`{name}` compiled; a region or scope reached another fiber"),
+        Err(errors) => {
+            let messages: Vec<String> = errors.into_iter().map(|e| e.message).collect();
+            assert!(
+                messages.iter().any(|m| m.contains("stays on the fiber that opened it") && m.contains("scoped")),
+                "`{name}` was refused for another reason: {messages:#?}"
+            );
+        }
+    }
+}
+
+/// **A child cannot defer into a region its parent opened.** A finalizer's
+/// captures need not be `Share`, so this one holds a `mut` record the child
+/// writes after the defer; run by the parent's release, it read a field the
+/// child could replace and free under it. Before a region stayed on its
+/// fiber this compiled and ran, and the rows below it pinned the marks that
+/// made the counts safe -- which left the fields racing.
 #[test]
-fn a_finalizer_sees_what_was_stored_after_it_was_deferred() {
-    let exe = build_whole(
+fn a_child_cannot_defer_into_its_parents_region() {
+    refused(
         "defer_mut",
         r#"module main;
 
@@ -288,19 +286,12 @@ import std::core::{print, Fiber, Region, List};
 
 type Holder = { mut xs: List<String> };
 
-fn make(n: Int) -> List<String> {
-  let mut xs = List::Nil;
-  let mut i = 0;
-  while i < n { xs = List::Cons("x${i}", xs); i = i + 1; };
-  xs
-}
-
 pub fn main() -> Int {
   let r = Region::open();
   let f = Fiber::spawn(fn () => {
     let h: Holder = { xs: List::Nil };
     Region::defer(r, fn () => print("finalizer sees ${List::length(h.xs)}"));
-    h.xs = make(5);
+    h.xs = List::Cons("x", List::Nil);
     0
   });
   let n = Fiber::join(f);
@@ -309,14 +300,12 @@ pub fn main() -> Int {
 }
 "#,
     );
-    runs_clean("defer_mut", &exe, "joined 0\nfinalizer sees 5");
 }
 
-/// **The same through a `Map`**, which is `mut` inside: entries inserted after
-/// the defer are local objects until the finalizer runs.
+/// **The same through a `Map`**, which is `mut` inside.
 #[test]
-fn a_finalizer_sees_a_map_filled_after_it_was_deferred() {
-    let exe = build_whole(
+fn a_child_cannot_defer_a_map_into_its_parents_region() {
+    refused(
         "defer_map",
         r#"module main;
 
@@ -328,7 +317,6 @@ pub fn main() -> Int {
     let seen: Map<String, Int> = Map::new();
     Region::defer(r, fn () => print("finalizer sees ${Map::len(seen)}"));
     Map::insert(seen, "a", 1);
-    Map::insert(seen, "b", 2);
     0
   });
   let n = Fiber::join(f);
@@ -337,38 +325,25 @@ pub fn main() -> Int {
 }
 "#,
     );
-    runs_clean("defer_map", &exe, "joined 0\nfinalizer sees 2");
 }
 
-/// **`std`'s own `acquire`, from a child, into its parent's `Scope`.** A
-/// `Scope` is `Share`, so a child may be handed one. The child acquires a
-/// connection, whose `mut` fields it then writes, and the parent's `scoped`
-/// runs the finalizer when it ends.
+/// **`std`'s own `acquire`, from a child, into its parent's `Scope`.** The
+/// child acquires a connection whose `mut` fields it goes on writing, so the
+/// parent's `scoped` would release it on the parent's fiber.
 #[test]
-fn a_child_acquires_into_its_parents_scope() {
-    let exe = build_whole(
+fn a_child_cannot_acquire_into_its_parents_scope() {
+    refused(
         "scope_child",
         r#"module main;
 
 import std::core::{print, Fiber, Scope, List, scoped, acquire, ChildFailed};
 
-fn make(n: Int) -> List<String> {
-  let mut xs = List::Nil;
-  let mut i = 0;
-  while i < n { xs = List::Cons("x${i}", xs); i = i + 1; };
-  xs
-}
-
-type Conn = { name: String, mut uses: Int, mut log: List<String> };
-
-fn open_conn(n: Int) -> Conn { { name: "c${n}", uses: 0, log: List::Nil } }
-fn close_conn(c: Conn) -> () { print("closed ${c.name} after ${c.uses} uses, log ${List::length(c.log)}") }
+type Conn = { name: String, mut uses: Int };
 
 fn work() -> Int with { scope: Scope } {
-  let c = acquire(open_conn(1), fn c => close_conn(c));
+  let c = acquire({ name: "c1", uses: 0 }, fn c => print("closed ${c.name} after ${c.uses} uses"));
   c.uses = c.uses + 1;
-  c.log = make(3);
-  List::length(c.log)
+  c.uses
 }
 
 fn part_a() -> Int with { scope: Scope } {
@@ -384,7 +359,410 @@ pub fn main() -> Int raises ChildFailed {
 }
 "#,
     );
-    runs_clean("scope_child", &exe, "closed c1 after 1 uses, log 3\nA 3");
+}
+
+/// **The rewrite: each child opens its own `scoped`.** Two children each
+/// acquire a connection with `mut` fields, write it, and close it when their
+/// own `scoped` ends. Every defer and every release is on the child that
+/// opened the region, so the runtime's owner check on the defer passes, and
+/// in this debug build the finalizer's captures -- never marked shared --
+/// are counted only by the fiber that made them, or the owner check traps.
+#[test]
+fn each_child_releases_what_it_acquires_in_its_own_scope() {
+    let exe = build_whole(
+        "twofibers",
+        r#"module main;
+
+import std::core::{print, Fiber, Scope, List, scoped, acquire};
+
+type Conn = { name: String, mut uses: Int, mut log: List<String> };
+
+fn make(n: Int) -> List<String> {
+  let mut xs = List::Nil;
+  let mut i = 0;
+  while i < n { xs = List::Cons("x${i}", xs); i = i + 1; };
+  xs
+}
+
+fn work(n: Int) -> Int with { scope: Scope } {
+  let c = acquire({ name: "c${n}", uses: 0, log: List::Nil },
+    fn c => print("closed ${c.name} after ${c.uses} uses, log ${List::length(c.log)}"));
+  c.uses = c.uses + 1;
+  c.log = make(n);
+  List::length(c.log)
+}
+
+pub fn main() -> Int {
+  let a = Fiber::spawn(fn () => scoped(fn () => work(3)));
+  let na = Fiber::join(a);
+  let b = Fiber::spawn(fn () => scoped(fn () => work(4)));
+  let nb = Fiber::join(b);
+  print("joined ${na + nb}");
+  0
+}
+"#,
+    );
+    runs_clean(
+        "twofibers",
+        &exe,
+        "closed c3 after 1 uses, log 3\nclosed c4 after 1 uses, log 4\njoined 7",
+    );
+}
+
+/// **The rewrite inside a function that has `scope` of its own**, the shape
+/// of a server's handler loop. Each child is handed `scoped` with a named
+/// function, joined or adopted into a nursery, and what it acquires is
+/// released on the child when its own `scoped` ends: before the join returns,
+/// and, for the adopted child, before that child's `scoped` call returns. The
+/// adopted child waits for `run` to signal on a channel, so the order of its
+/// lines is fixed. The model is the review's `rewrite_in_scope.kh`, whose
+/// lambda spelling released into the parent's scope instead.
+#[test]
+fn the_rewrite_works_inside_a_function_with_its_own_scope() {
+    let exe = build_whole(
+        "rewrite_in_scope",
+        r#"module main;
+
+import std::core::{print, Fiber, Scope, Nursery, List, Channel, scoped, nursery, acquire, ChildFailed};
+
+type Conn = { name: String, mut uses: Int, mut log: List<String> };
+
+fn work(name: String) -> Int with { scope: Scope } {
+  let c = acquire({ name: name, uses: 0, log: List::Nil },
+    fn c => print("released ${c.name} after ${c.uses}"));
+  c.uses = c.uses + 1;
+  c.log = List::Cons("x", c.log);
+  c.uses
+}
+
+fn joined_work() -> Int with { scope: Scope } { work("joined") }
+fn adopted_work() -> () with { scope: Scope } { let _ = work("adopted"); () }
+fn opens_its_own() -> Int { scoped(fn () => work("helper")) }
+fn adopted_after(go: Channel<Int>) -> () {
+  let _ = Channel::receive(go);
+  scoped(adopted_work);
+  print("adopted scoped ended");
+}
+
+fn run() -> Int with { scope: Scope, nursery: Nursery } {
+  let _ = acquire(0, fn n => print("released run's own"));
+  let f = Fiber::spawn(fn () => scoped(joined_work));
+  let n = Fiber::join(f);
+  print("joined ${n}");
+  let g = Fiber::spawn(fn () => opens_its_own());
+  let m = Fiber::join(g);
+  print("joined helper ${m}");
+  let go: Channel<Int> = Channel::bounded(1);
+  nursery.adopt(Fiber::spawn(fn () => adopted_after(go)));
+  print("run ends");
+  Channel::send(go, 1);
+  n + m
+}
+
+pub fn main() -> Int raises ChildFailed {
+  let n = scoped(fn () => nursery(fn () => run())!)!;
+  print("after scoped ${n}");
+  0
+}
+"#,
+    );
+    runs_clean(
+        "rewrite_in_scope",
+        &exe,
+        "released joined after 1\njoined 1\nreleased helper after 1\njoined helper 1\nrun ends\n\
+         released adopted after 1\nadopted scoped ended\nreleased run's own\nafter scoped 2",
+    );
+}
+
+/// **The lambda spelling of the rewrite is refused inside a function that
+/// has `scope`**, with the message naming the spelling above. There the
+/// lambda's `work()` uses the enclosing `scope`, so the child's acquire
+/// would go into its parent's region.
+#[test]
+fn the_lambda_rewrite_inside_a_scope_is_refused() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("sharing_lambda_in_scope");
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
+    let source = r#"module main;
+
+import std::core::{print, Fiber, Scope, scoped, acquire};
+
+fn work() -> Int with { scope: Scope } {
+  let _ = acquire(1, fn n => print("released c"));
+  1
+}
+
+fn run() -> Int with { scope: Scope } {
+  let f = Fiber::spawn(fn () => scoped(fn () => work()));
+  Fiber::join(f)
+}
+
+pub fn main() -> Int { scoped(run) }
+"#;
+    let db = KhoraDatabase::new();
+    let root = SourceRoot::new(&db, sources(&db, &dir, source));
+    let Err(errors) = khora_codegen_llvm::compile_with(&db, root, &exe, khora_codegen_llvm::Profile::Debug)
+    else {
+        panic!("the lambda spelling compiled inside a function with `scope`");
+    };
+    let messages: Vec<String> = errors.into_iter().map(|e| e.message).collect();
+    assert!(
+        messages.iter().any(|m| m.contains("`scope` cannot be handed to another fiber")
+            && m.contains("`Fiber::spawn(fn () => scoped(work))`")),
+        "{messages:#?}"
+    );
+}
+
+/// **A fiber raising a region is refused before it can run.** Unrefused,
+/// the parent's catch dropped the child's region last and ran the child's
+/// finalizer on the parent (a debug build trapped in the owner check; a
+/// release build raced). The review's `raise_region.kh`.
+#[test]
+fn a_child_cannot_raise_its_region_to_the_parent() {
+    refused(
+        "raise_region",
+        r#"module main;
+
+import std::core::{print, Fiber, Region, List};
+
+type H = { mut n: Int, mut xs: List<String> };
+type Oops = { why: String, r: Region };
+
+fn child() -> Int raises Oops {
+  let h: H = { n: 0, xs: List::Nil };
+  let r = Region::open();
+  Region::defer(r, fn () => print("finalizer sees n=${h.n}"));
+  h.n = 1;
+  raise { why: "carrying the region", r: r }
+}
+
+pub fn main() -> Int {
+  let f = Fiber::spawn(fn () => child()!);
+  let got = Fiber::join(f)! catch {
+    Oops { why, r } => { print("parent caught: ${why}"); 7 },
+  };
+  print("parent after catch ${got}");
+  0
+}
+"#,
+    );
+}
+
+/// **A region whose last reference goes on another fiber traps, in every
+/// build, rather than running its finalizers there.** The spawn's capture
+/// check cannot see this one: `x` is still an unsolved variable when the
+/// spawn is checked, and `go(r)` solves it to `Region` afterwards. So the
+/// child is handed the region and may drop it last; the release's owner
+/// check stops it. The review's `var_capture.kh`, with one change: the child
+/// waits on a channel until the parent has let go, so the child's reference
+/// is the last on either backend. Without the wait, which fiber drops last is
+/// timing: on the scheduler the child tends to finish first, and the parent
+/// then releases its own region early, which is correct and shows nothing.
+#[test]
+fn a_region_released_on_another_fiber_traps() {
+    let exe = build_whole(
+        "var_capture",
+        r#"module main;
+
+import std::core::{print, Fiber, Region, List, Channel};
+
+type H = { mut n: Int, mut xs: List<String> };
+
+fn make(n: Int) -> List<String> {
+  let mut xs = List::Nil;
+  let mut i = 0;
+  while i < n { xs = List::Cons("x${i}", xs); i = i + 1; };
+  xs
+}
+
+pub fn main() -> Int {
+  let h: H = { n: 0, xs: List::Nil };
+  let let_go: Channel<Int> = Channel::bounded(1);
+  let go = fn x => Fiber::spawn(fn () => { let _ = Channel::receive(let_go); let _keep = x; 3 });
+  let r = Region::open();
+  Region::defer(r, fn () => print("finalizer sees n=${h.n} len=${List::length(h.xs)}"));
+  let f = go(r);
+  h.n = 1;
+  h.xs = make(5);
+  Channel::send(let_go, 1);
+  let k = Fiber::join(f);
+  print("parent joined ${k}, n=${h.n}");
+  0
+}
+"#,
+    );
+    for backend in ["threads", "scheduler"] {
+        let out = Command::new(&exe).env("KHORA_FIBERS", backend).output().expect("the program should run");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.code() == Some(134) && stderr.contains("releasing a region another fiber opened"),
+            "`{backend}`: the child's release of the parent's region was not stopped: {:?}, \
+             stdout {stdout:?}, stderr {stderr:?}",
+            out.status.code()
+        );
+        assert!(!stdout.contains("finalizer sees"), "`{backend}`: the finalizer ran on the child: {stdout:?}");
+    }
+}
+
+/// **A `bench` block has a root scope of its own**, as a test does. Each
+/// bench runs on a spawned fiber, which the root refuses. The review's
+/// `benchroot.kh`.
+#[test]
+fn a_bench_block_has_its_own_root_scope() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("sharing_bench_root");
+    harness::ensure_runtime();
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    let exe = dir.join(if cfg!(windows) { "benches.exe" } else { "benches" });
+    let _ = std::fs::remove_file(&exe);
+    let source = r#"module main;
+
+import std::core::{print, Scope, acquire};
+
+type Conn = { name: String, mut uses: Int };
+
+fn uses(name: String) -> Int with { scope: Scope } {
+  let c = acquire({ name: name, uses: 0 }, fn c => print("released ${c.name}"));
+  c.uses = c.uses + 1;
+  c.uses
+}
+
+bench "acquiring into the root scope" {
+  let _ = uses("b") with { scope: Scope::root() };
+}
+
+pub fn main() -> Int { 0 }
+"#;
+    let db = KhoraDatabase::new();
+    let root = SourceRoot::new(&db, sources(&db, &dir, source));
+    if let Err(errors) = khora_codegen_llvm::compile_benches(&db, root, &exe) {
+        let messages: Vec<String> = errors.into_iter().map(|e| e.message).collect();
+        panic!("compiling failed:\n  {}", messages.join("\n  "));
+    }
+    for backend in ["threads", "scheduler"] {
+        let out = Command::new(&exe).env("KHORA_FIBERS", backend).output().expect("the benches should run");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let released = stdout.find("released b");
+        let reported = stdout.find("bench acquiring into the root scope ... P50");
+        assert!(
+            out.status.success() && released.is_some() && reported.is_some() && released < reported,
+            "`{backend}`: the bench's root scope was not released when the bench ended: {:?}, \
+             stderr {stderr:?}, stdout starts {:?}",
+            out.status.code(),
+            &stdout[..stdout.len().min(300)]
+        );
+    }
+}
+
+/// **A child reaching for the root region traps.** It is reachable by name,
+/// so no type rule keeps a child off it, and a finalizer the child deferred
+/// there would run at exit on the main fiber while the child might still be
+/// writing what it captured.
+#[test]
+fn a_child_reaching_the_root_region_traps() {
+    let exe = build_whole(
+        "root_child",
+        r#"module main;
+
+import std::core::{print, Fiber, Region};
+
+type Holder = { mut n: Int };
+
+fn child() -> Int {
+  let h: Holder = { n: 0 };
+  Region::defer(Region::root(), fn () => print("root finalizer sees n=${h.n}"));
+  h.n = 5;
+  h.n
+}
+
+pub fn main() -> Int {
+  let f = Fiber::spawn(fn () => child());
+  let n = Fiber::join(f);
+  print("joined ${n}");
+  0
+}
+"#,
+    );
+    for backend in ["threads", "scheduler"] {
+        let out = Command::new(&exe).env("KHORA_FIBERS", backend).output().expect("the program should run");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(134), "`{backend}`: stderr {stderr:?}");
+        assert!(
+            stderr.contains("`Region::root()` or `Scope::root()` reached from a spawned fiber")
+                && stderr.contains("scoped"),
+            "`{backend}`: {stderr:?}"
+        );
+    }
+}
+
+/// **A `test` block has a root scope of its own**, released when the test
+/// ends. Each test runs on a spawned fiber, which the root region refuses, so
+/// without one a test reaching `Scope::root()` would trap; with the program's
+/// root, its finalizer would run at exit, after the summary line, on another
+/// fiber. It runs before the test's verdict is reported instead.
+#[test]
+fn a_test_block_has_its_own_root_scope() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("sharing_test_root");
+    harness::ensure_runtime();
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    let exe = dir.join(if cfg!(windows) { "tests.exe" } else { "tests" });
+    let _ = std::fs::remove_file(&exe);
+    let source = r#"module main;
+
+import std::core::{print, Scope, acquire, assert};
+
+type Conn = { name: String, mut uses: Int };
+
+fn uses(name: String) -> Int with { scope: Scope } {
+  let c = acquire({ name: name, uses: 0 }, fn c => print("released ${c.name} after ${c.uses}"));
+  c.uses = c.uses + 1;
+  c.uses
+}
+
+test "the first test reaching the root scope" {
+  let n = uses("one") with { scope: Scope::root() };
+  assert(n == 1);
+}
+
+test "the second test reaching the root scope" {
+  let n = uses("two") with { scope: Scope::root() };
+  assert(n == 1);
+}
+"#;
+    let db = KhoraDatabase::new();
+    let root = SourceRoot::new(&db, sources(&db, &dir, source));
+    if let Err(errors) = khora_codegen_llvm::compile_tests(&db, root, &exe) {
+        let messages: Vec<String> = errors.into_iter().map(|e| e.message).collect();
+        panic!("compiling failed:\n  {}", messages.join("\n  "));
+    }
+    for backend in ["threads", "scheduler"] {
+        // One at a time, so the order of the lines is the order of events.
+        let out = Command::new(&exe)
+            .env("KHORA_FIBERS", backend)
+            .arg("--filter=first")
+            .output()
+            .expect("the suite should run");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(0), "`{backend}`: stdout {stdout:?}, stderr {stderr:?}");
+        let released = stdout.find("released one after 1");
+        let reported = stdout.find("test the first test reaching the root scope ... ok");
+        assert!(
+            released.is_some() && reported.is_some() && released < reported,
+            "`{backend}`: the test's root scope was not released when the test ended: {stdout:?}"
+        );
+
+        let both = Command::new(&exe).env("KHORA_FIBERS", backend).output().expect("the suite should run");
+        let stdout = String::from_utf8_lossy(&both.stdout);
+        assert!(
+            both.status.success()
+                && stdout.contains("released one after 1")
+                && stdout.contains("released two after 1")
+                && stdout.contains("2 passed, 0 failed"),
+            "`{backend}`: each test has a root of its own: {stdout:?}"
+        );
+    }
 }
 
 /// **A `test` block's raised error.** `khora test` runs each block on a

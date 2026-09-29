@@ -103,9 +103,43 @@ Nobody writes it for a record, a variant or a tuple: those are shareable exactly
 when their contents are, and a `Share` bound is satisfied by looking rather than
 by finding an impl. Derived where derivable, asserted only where it must be.
 
-Declared today, each with its reason: `Fibers` and `Region` (both take a lock —
-see below), `Fiber` (every operation is a message to the runtime), and
-`SharedFn`.
+Declared today, each with its reason: `Fibers` (it takes a lock — see below),
+`Fiber` (every operation is a message to the runtime), and `SharedFn`.
+
+**`Region` is deliberately not on the list, and neither is `Scope`.** A
+finalizer's captures need not be `Share` — `acquire` of a connection with `mut`
+fields is what one is for — so the fiber that runs a finalizer has to be the one
+that deferred it, and that holds only if the region cannot cross. `Region` is
+opaque with no impl, which refuses it; `Scope` is an effect, and effects are
+otherwise shareable (see below), so `TypeMap::shareable_with` answers false for
+it by name (`khora_types::REGION_TYPE`) and `check_handler_is_shareable` exempts
+a `Scope` handler, which never crosses and so may capture its region. A fiber's
+error row is walked too (`check_raises_stay_home`): `Fiber`'s `A: Share` covers
+the answer and nothing covers the error, and asking the whole row for `Share`
+would refuse a `mut` record in an error, which is marked at the handover and
+correct. Every refusal names the rewrite: `Fiber::spawn(fn () => scoped(work))`
+with a named function, or a named function whose body calls `scoped`. Not
+`scoped(fn () => work())`: inside a function with a `scope` of its own, that
+lambda's `work()` resolves `scope` to the enclosing binding (a capability-
+resolution rule that predates this, on TODO-0.4), so it is refused too.
+
+The route no type can close is `Region::root()`, reachable by name from any
+fiber. The runtime records the opening fiber in each region and traps a defer
+or a release from any other, and traps `khora_region_root` from a spawned
+fiber; `khora test` and `khora bench` give each block a root region of its own.
+The release check is what catches a route the checker misses in every build: a
+capture whose type is settled only after the spawn is checked (on TODO-0.4) can
+hand a child the last reference with no defer for the defer check to see. With
+every defer and release on one fiber, a finalizer's captures never cross, so
+`khora_region_release` does not mark them.
+
+The cost is a pattern: a child that acquires into its parent's longer scope.
+Structured concurrency's "released by the scope that outlives it" is
+expressible only for a `Share` resource, acquired by the parent and handed in.
+The alternatives — `acquire<A: Share>` (refuses 9 std sites and every package),
+keeping the mark for life (leaves the field race), or making a region's release
+wait for every fiber that deferred into it (a join at every block end) — are
+weighed in the design round `finalizer-sharing`.
 
 **The assertion has to travel as far as the type does**, and getting that wrong
 is invisible in the module that wrote it. An impl arrives in another file two
@@ -194,9 +228,10 @@ happens without either.
 
 An `impl Share` is a promise the runtime has to keep, so:
 
-- `Region`'s finalizer list and the nursery's child list are behind a `Mutex`.
-  A fiber that acquires a resource wants it released by the scope that outlives
-  it, which is the point of handing a `Scope` across.
+- The nursery's child list is behind a `Mutex`, because a shareable nursery
+  may be adopted into from two fibers at once. `Region`'s finalizer list is
+  behind one too, although only its owner fiber ever defers: it guards against
+  a runtime bug, uncontended, on a path touched when a resource is acquired.
 - A fiber handle's join slot is behind a `Mutex`: two fibers may hold one handle
   and both call `join`, and "take it if it is there" has to happen once.
 - `khora_fibers_wait` drains in **rounds** until a round finds nothing. A child

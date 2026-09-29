@@ -21,6 +21,7 @@ impl<'a> Checker<'a> {
     /// **a fiber's body is written where it starts**.
     pub(super) fn check_spawnable(&mut self, args: &[ExprId], range: TextRange) {
         let Some(body) = args.first().copied() else { return };
+        self.check_raises_stay_home(body, range);
         let captures: Vec<khora_hir::body::LocalId> = match self.body.expr(body) {
             Expr::Lambda { captures, .. } => captures
                 .iter()
@@ -53,6 +54,39 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// A fiber's error may not hold a `Region` or `Scope`.
+    ///
+    /// **What this prevents: a child's finalizer run on its parent.** An error
+    /// a fiber raises is caught by whoever joins it, so a region inside one
+    /// reaches that fiber, and its last reference -- and with it the child's
+    /// finalizers, over captures the child may have been writing -- goes
+    /// there. The answer is asked for `Share` by `Fiber`'s own bound; the
+    /// error row is not, and this closes the region half of that gap only.
+    ///
+    /// A `mut` record in an error is marked at the handover and is not this
+    /// rule's business, so asking the whole row for `Share` would refuse
+    /// programs that are correct.
+    ///
+    /// Asked of the body's type as inference has it at the spawn, so a raises
+    /// row still open there is not seen: the same limit the capture check has.
+    fn check_raises_stay_home(&mut self, body: ExprId, range: TextRange) {
+        let Some(ty) = self.exprs.get(&body).map(|t| self.unifier.zonk(t)) else { return };
+        let Type::Fn { raises, .. } = ty else { return };
+        let Type::Row { fields, .. } = *raises else { return };
+        for (label, error) in fields {
+            if let Some(fiber_bound) = self.types.fiber_bound_inside(&error) {
+                let why = crate::map::stays_on_its_fiber_because(&fiber_bound);
+                self.error(
+                    format!(
+                        "`{label}`, which this fiber can raise, cannot be handed to another \
+                         fiber: {why}"
+                    ),
+                    range,
+                );
+            }
+        }
+    }
+
     /// Every operation of a handler must be safe to hand to another fiber.
     ///
     /// **This is what buys an effect its shareability.** A capability has to be
@@ -66,6 +100,13 @@ impl<'a> Checker<'a> {
     /// test double counting its calls in a `mut` field is refused. The error
     /// says which binding and why.
     pub(super) fn check_handler_is_shareable(&mut self, owner: &str, fields: &[(String, ExprId)]) {
+        // **A `Scope` handler never crosses**, so what it captures need not
+        // either: it captures the region it defers into, which is exactly
+        // what must stay on this fiber. `scoped` and `Scope::root` are both
+        // this shape. `crate::REGION_TYPE`.
+        if crate::stays_on_its_fiber(owner) {
+            return;
+        }
         for (label, value) in fields {
             let range = self.body.range(*value);
             // **The closure has to be written here.** A binding holding one
