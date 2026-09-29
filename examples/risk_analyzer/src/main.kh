@@ -1,7 +1,7 @@
 module risk_analyzer::main;
 
 import std::core::{ChildFailed, Eq, List, Option, Scope, SharedFn, Show, assert, print};
-import std::net::http::{HttpError, Request, Response, Router};
+import std::net::http::{HttpError, Params, Request, Response, Router};
 import ai::llm::{LLMService, ModelError, Prompt, extract};
 import std::schema::{Decode, Encode};
 
@@ -53,8 +53,8 @@ impl Show for RiskLevel {
   fn show(self) -> String {
     match self {
       RiskLevel::Low => "low",
-      RiskLevel::Moderate(reason) => "moderate: " + reason,
-      RiskLevel::Critical(action) => "critical: " + action,
+      RiskLevel::Moderate(reason) => "moderate: ${reason}",
+      RiskLevel::Critical(action) => "critical: ${action}",
     }
   }
 }
@@ -92,7 +92,7 @@ pub fn analyze_transaction_risk(account_id: String) -> AnalysisReport
 
   let prompt = Prompt::new()
     |> Prompt::system("You are a financial fraud and risk engine. Output structured assessments.")
-    |> Prompt::user("Analyze history: " + history);
+    |> Prompt::user("Analyze history: ${history}");
 
   // Annotated because `extract` returns whatever the caller asks for, so the
   // caller has to ask. The same thing Rust's `serde_json::from_str` requires,
@@ -104,7 +104,7 @@ pub fn analyze_transaction_risk(account_id: String) -> AnalysisReport
     RiskLevel::Moderate(_reason) => ledger.flag_account(account_id, report.risk)!,
     RiskLevel::Critical(_action) => {
       ledger.flag_account(account_id, report.risk)!;
-      print("ALERT: Critical threat detected on " + account_id);
+      print("ALERT: Critical threat detected on ${account_id}");
     }
   };
 
@@ -120,7 +120,7 @@ pub fn handle(req: Request) -> Response
   // The route declares `:account_id`, so this is only `None` if the route
   // and the handler have drifted apart — which is worth an answer, not a
   // crash.
-  let id = match req.params.get("account_id") {
+  let id = match Params::get(req.params, "account_id") {
     Option::Some(id) => id,
     Option::None => return Response::text(400, "no account id in the path"),
   };

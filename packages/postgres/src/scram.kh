@@ -116,7 +116,7 @@ fn unbase(c: Int) -> Int {
   else if c >= 48 && c <= 57 { c - 48 + 52 }
   else if c == 43 { 62 }
   else if c == 47 { 63 }
-  else { 0 - 1 }
+  else { -1 }
 }
 
 /// Base64 to bytes. Characters outside the alphabet — including padding and
@@ -183,9 +183,9 @@ pub type Opening = {
 /// and RFC 5802 says to send `n=` when it is carried elsewhere — sending it
 /// twice is how a driver gets a puzzling mismatch from the server.
 pub fn begin(nonce: String) -> Opening {
-  let bare = "n=,r=" + nonce;
+  let bare = "n=,r=${nonce}";
   {
-    message: "n,," + bare,
+    message: "n,,${bare}",
     session: { nonce: nonce, first_bare: bare, expected_signature: "" },
   }
 }
@@ -197,7 +197,7 @@ fn field(message: String, key: String) -> Option<String> {
     match found {
       Option::Some(v) => Option::Some(v),
       Option::None =>
-        if String::starts_with(part, key + "=") {
+        if String::starts_with(part, "${key}=") {
           Option::Some(String::slice(part, String::byte_length(key) + 1, String::byte_length(part)))
         } else {
           Option::None
@@ -235,18 +235,18 @@ pub fn finish(
             Option::None => Result::Err(ScramError::Malformed("the server sent no iteration count")),
             Option::Some(count) => match Int::of_string(count) {
               Option::None => Result::Err(ScramError::Malformed(
-                  "the server's iteration count is not a number: " + count)),
+                  "the server's iteration count is not a number: ${count}")),
               Option::Some(iterations) => {
                 let salted = pbkdf2(String::bytes(password), decode64(salt64), iterations);
                 match salted {
                   Option::None => Result::Err(ScramError::Rejected(
-                      "the server asked for an iteration count this client will not use: " + count)),
+                      "the server asked for an iteration count this client will not use: ${count}")),
                   Option::Some(salted_password) => {
                     let client_key = hmac(salted_password, String::bytes("Client Key"));
                     let stored_key = sha256(client_key);
-                    let without_proof = "c=biws,r=" + combined;
+                    let without_proof = "c=biws,r=${combined}";
                     let auth_message =
-                      session.first_bare + "," + server_first + "," + without_proof;
+                      "${session.first_bare},${server_first},${without_proof}";
                     let signature = hmac(stored_key, String::bytes(auth_message));
                     let proof = xor(client_key, signature);
                     // Kept now, checked when the server's final message arrives:
@@ -255,7 +255,7 @@ pub fn finish(
                     let server_key = hmac(salted_password, String::bytes("Server Key"));
                     session.expected_signature =
                     encode64(hmac(server_key, String::bytes(auth_message)));
-                    Result::Ok(without_proof + ",p=" + encode64(proof))
+                    Result::Ok("${without_proof},p=${encode64(proof)}")
                   },
                 }
               },
@@ -278,7 +278,7 @@ pub fn finish(
 pub fn verify(session: Session, server_final: String) -> Result<Bool, ScramError> {
   match field(server_final, "e") {
     Option::Some(reason) => Result::Err(ScramError::Rejected(
-        "the server refused the SASL exchange: " + reason)),
+        "the server refused the SASL exchange: ${reason}")),
     Option::None => match field(server_final, "v") {
       Option::None =>
         Result::Err(ScramError::Malformed("the server's final message has no signature")),
@@ -327,7 +327,7 @@ test "a server that cannot prove it holds the password is refused" {
         Result::Err(_) => assert(true),
       };
       // The signature this client computed is the one a real server sends.
-      match verify(opening.session, "v=" + opening.session.expected_signature) {
+      match verify(opening.session, "v=${opening.session.expected_signature}") {
         Result::Ok(_) => assert(true),
         Result::Err(_) => assert(false),
       };

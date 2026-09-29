@@ -81,9 +81,9 @@ test "a range contains its draws" {
 
   // Negative bounds, because `low + scale(..)` is where an unsigned reduction
   // would quietly go wrong.
-  let signed = with { rng: Random::seeded(7) } { survey(0 - 5, 5, 1000) };
+  let signed = with { rng: Random::seeded(7) } { survey(-5, 5, 1000) };
   assert_that(signed.inside == 1000, "${signed.inside} of a thousand were in [-5, 5)");
-  assert_that(signed.least >= 0 - 5, "the smallest draw was ${signed.least}");
+  assert_that(signed.least >= -5, "the smallest draw was ${signed.least}");
   assert_that(signed.most < 5, "the largest draw was ${signed.most}");
 
   // A range of one has exactly one answer, and a thousand of them.

@@ -1,6 +1,6 @@
 module std::json;
 
-import std::core::{Array, List, Map, Option, Pair, Result, Show};
+import std::core::{Array, List, Map, Option, Ord, Pair, Result, Show};
 
 //! JSON, written in Khora.
 //!
@@ -270,7 +270,7 @@ impl Json {
 fn sorted_fields(fields: Map<String, Json>) -> List<Field> {
   let named = List::fold(Map::entries(fields), List::Nil, fn (out, pair) =>
     List::Cons({ name: pair.key, value: pair.value }, out));
-  List::sort_by(named, fn (l, r) => l.name.cmp(r.name))
+  List::sort_by(named, fn (l, r) => Ord::cmp(l.name, r.name))
 }
 
 // ---------------------------------------------------------------------------
@@ -290,8 +290,8 @@ pub fn encode(value: Json) -> String {
     // keeps every digit, which is the whole of #142.
     Json::Number(literal) => literal,
     Json::Text(text) => quote(text),
-    Json::Array(items) => "[" + encoded_items(items, "") + "]",
-    Json::Object(fields) => "{" + encoded_fields(sorted_fields(fields), "") + "}",
+    Json::Array(items) => "[${encoded_items(items, "")}]",
+    Json::Object(fields) => "{${encoded_fields(sorted_fields(fields), "")}}",
   }
 }
 
@@ -312,13 +312,13 @@ fn encoded_fields(fields: List<Field>, separator: String) -> String {
   match fields {
     List::Nil => "",
     List::Cons(head, tail) =>
-      separator + quote(head.name) + ":" + encode(head.value) + encoded_fields(tail, ","),
+      "${separator}${quote(head.name)}:${encode(head.value)}${encoded_fields(tail, ",")}",
   }
 }
 
 /// A string, quoted and escaped.
 fn quote(text: String) -> String {
-  "\"" + escaped(text, 0, 0) + "\""
+  "\"${escaped(text, 0, 0)}\""
 }
 
 /// Copies from `run` forward, emitting an escape wherever one is needed.
@@ -362,7 +362,7 @@ fn escape_for(byte: Int) -> Option<String> {
   } else if byte == 12 {
     Option::Some("\\f")
   } else if byte < 32 {
-    Option::Some("\\u00" + hex_digit(byte / 16) + hex_digit(byte % 16))
+    Option::Some("\\u00${hex_digit(byte / 16)}${hex_digit(byte % 16)}")
   } else {
     Option::None
   }

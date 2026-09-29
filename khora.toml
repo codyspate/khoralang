@@ -79,9 +79,10 @@ env = ["ledger_service", "link_shortener", "risk_analyzer"]
 fs = ["khq", "link_shortener", "risk_analyzer"]
 extern = []
 
-# The two lints that are off by default, on for this repository.
+# The two lints that are off by default, on for this repository, and the
+# `idiomatic` group.
 #
-# `khora_lint::default_level` warns for everything except these and the six
+# `khora_lint::default_level` warns for everything except these and the eight
 # `idiomatic` lints, which are off until the group is switched on. Each of the two has a
 # reason that is about the language's users rather than about this checkout.
 # Neither reason survives contact with the project's own standard.
@@ -110,6 +111,16 @@ extern = []
 [lints]
 undocumented-export = "deny"
 useless-allow = "warn"
+
+# **`idiomatic` is a `deny` for the reason `undocumented-export` is**: `std` is
+# the code people copy, and a second way of writing something in it is the
+# second way they learn. Each member names its own policy in its own
+# manifest; this table governs `khora check std`, and
+# `crates/khora-lint/tests/std_idiomatic.rs` holds `std` to it under
+# `cargo nextest`, since `std` has no manifest of its own. `khora check --fix
+# std` rewrites what it reports.
+[lints.idiomatic]
+level = "deny"
 
 # What somebody runs before pushing. Roadmap 14.18.
 #

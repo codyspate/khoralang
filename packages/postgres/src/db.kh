@@ -246,13 +246,13 @@ fn answer(c: Connection, work: Work) -> Reply {
       if transaction_depth(c) != level {
         Reply::Finished(Result::Err(out_of_turn("SAVEPOINT", level, transaction_depth(c))))
       } else {
-        Reply::Finished(opened(c, statement(c, "SAVEPOINT " + savepoint_name(level)), level + 1))
+        Reply::Finished(opened(c, statement(c, "SAVEPOINT ${savepoint_name(level)}"), level + 1))
       },
     Work::Release(level) =>
       if transaction_depth(c) != level + 1 {
         Reply::Finished(Result::Err(out_of_turn("RELEASE", level, transaction_depth(c))))
       } else {
-        Reply::Finished(opened(c, statement(c, "RELEASE SAVEPOINT " + savepoint_name(level)), level))
+        Reply::Finished(opened(c, statement(c, "RELEASE SAVEPOINT ${savepoint_name(level)}"), level))
       },
     // **A savepoint that was never opened is not rolled back to.** The undo
     // is registered before `SAVEPOINT` is sent, so a cancel can bring it
@@ -270,7 +270,7 @@ fn answer(c: Connection, work: Work) -> Reply {
         Reply::Finished(Result::Ok(()))
       } else {
         let name = savepoint_name(level);
-        Reply::Finished(opened(c, statement(c, "ROLLBACK TO SAVEPOINT " + name + "; RELEASE SAVEPOINT " + name), level))
+        Reply::Finished(opened(c, statement(c, "ROLLBACK TO SAVEPOINT ${name}; RELEASE SAVEPOINT ${name}"), level))
       },
     Work::Break => {
       forsake(c);
@@ -503,7 +503,7 @@ fn depth(c: Connection) -> Int {
 /// from a caller, so it needs no quoting, and one per depth, so a savepoint
 /// never shadows one still open below it.
 fn savepoint_name(level: Int) -> String {
-  "khora_sp_" + Int::to_string(level)
+  "khora_sp_${Int::to_string(level)}"
 }
 
 /// A savepoint operation for a level the connection is not at.
@@ -512,7 +512,7 @@ fn savepoint_name(level: Int) -> String {
 /// the depth first; refused rather than sent, because a savepoint at the
 /// wrong level would be released or rolled back by the wrong `transaction`.
 fn out_of_turn(verb: String, level: Int, at: Int) -> DbError {
-  DbError::Rejected(verb + " for depth " + Int::to_string(level) + " on a connection at depth " + Int::to_string(at))
+  DbError::Rejected("${verb} for depth ${Int::to_string(level)} on a connection at depth ${Int::to_string(at)}")
 }
 
 /// How many rows a `CommandComplete` tag says were affected.

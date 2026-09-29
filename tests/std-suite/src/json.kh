@@ -20,7 +20,7 @@ import std::json::{Json, JsonError, encode, parse};
 fn shown(text: String) -> String {
   match parse(text) {
     Result::Ok(value) => encode(value),
-    Result::Err(why) => "at " + Int::to_string(why.at) + ": expected " + why.expected,
+    Result::Err(why) => "at ${Int::to_string(why.at)}: expected ${why.expected}",
   }
 }
 
@@ -72,7 +72,7 @@ test "numbers parse in every shape" {
   // than only the first.
   let wrong = List::fold(cases, "", fn (sofar, c) => {
       let got = shown(c.key);
-      if got == c.value { sofar } else { sofar + c.key + " -> " + got + "; " }
+      if got == c.value { sofar } else { "${sofar}${c.key} -> ${got}; " }
     });
   assert_that(wrong == "", "these shapes did not round trip: ${wrong}");
 }

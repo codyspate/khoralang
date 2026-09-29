@@ -1,4 +1,4 @@
-module main;
+module iteration::main;
 
 import std::core::{Iterator, List, Step, print};
 import std::clock::{Clock};

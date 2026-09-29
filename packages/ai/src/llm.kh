@@ -111,7 +111,7 @@ impl Prompt {
   /// appended. What `extract` puts between a caller's request and the model:
   /// the type's JSON Schema, as text.
   fn describing(self, spec: String) -> Prompt {
-    Prompt::saying(self, "user", "Answer with exactly this shape: " + spec)
+    Prompt::saying(self, "user", "Answer with exactly this shape: ${spec}")
   }
 }
 

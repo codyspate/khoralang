@@ -1,6 +1,6 @@
 module std::permissions;
 
-import std::core::{List, Option, Split};
+import std::core::{Eq, List, Option, Split};
 import std::permissions::grants::{fs_read, fs_write};
 
 //! What the manifest allows, as data the program carries.
@@ -79,7 +79,7 @@ pub fn granted(grants: List<String>, path: String) -> Bool {
 /// both compile to exactly this list, so treating `**` as a restriction stops
 /// a program that never mentioned permissions from reading `../anything`.
 fn unrestricted(grants: List<String>) -> Bool {
-  List::any(grants, fn grant => normalized(grant).eq("**"))
+  List::any(grants, fn grant => Eq::eq(normalized(grant), "**"))
 }
 
 /// Whether any grant covers `name`.
@@ -183,7 +183,7 @@ pub fn normalized(path: String) -> String {
 /// and turning it into the empty string would make it match nothing rather
 /// than what it says.
 fn without_dots(path: String) -> String {
-  let kept = List::filter(String::split(path, "/"), fn piece => !piece.eq("."));
+  let kept = List::filter(String::split(path, "/"), fn piece => !Eq::eq(piece, "."));
   if List::is_empty(kept) { path } else { String::join(kept, "/") }
 }
 
@@ -193,7 +193,7 @@ fn without_dots(path: String) -> String {
 /// left alone. `path` has been through `normalized` already, so `\\` is
 /// `/` and there is one spelling of a boundary to split on.
 fn climbs(path: String) -> Bool {
-  List::any(String::split(path, "/"), fn piece => piece.eq(".."))
+  List::any(String::split(path, "/"), fn piece => Eq::eq(piece, ".."))
 }
 
 /// The index of the last byte `wanted` accepts, walking back from `at`.

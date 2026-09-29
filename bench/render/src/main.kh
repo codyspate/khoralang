@@ -1,4 +1,4 @@
-module main;
+module render::main;
 
 import std::core::{Array, ChildFailed, Fiber, Nursery, bounded_nursery, print};
 import std::net::http::{Response};

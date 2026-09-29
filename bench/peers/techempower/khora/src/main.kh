@@ -1,6 +1,6 @@
 module techempower::main;
 
-import std::core::{ChildFailed, Fibers, List, Option, Result, SharedFn};
+import std::core::{ChildFailed, Fibers, List, Option, Ord, Result, SharedFn};
 import std::clock::{Clock};
 import std::db::{Cell, Db, DbError, Row};
 import std::env::{Env, EnvError, variable_or};
@@ -69,13 +69,13 @@ fn stamped(response: Response) -> Response with { clock: Clock } {
 /// formatter, so the names and padding are here.
 fn http_date(millis: Int) -> String {
   let at = DateTime::of_unix_millis(millis);
-  weekday_name(at.date.weekday()) + ", " + two(at.date.day()) + " " + month_name(at.date.month())
-  + " " + Int::to_string(at.date.year()) + " " + two(at.time.hour()) + ":" + two(at.time.minute())
-  + ":" + two(at.time.second()) + " GMT"
+  weekday_name(Date::weekday(at.date)) + ", " + two(Date::day(at.date)) + " " + month_name(Date::month(at.date))
+  + " " + Int::to_string(Date::year(at.date)) + " " + two(Time::hour(at.time)) + ":" + two(Time::minute(at.time))
+  + ":" + two(Time::second(at.time)) + " GMT"
 }
 
 fn two(n: Int) -> String {
-  if n < 10 { "0" + Int::to_string(n) } else { Int::to_string(n) }
+  if n < 10 { "0${Int::to_string(n)}" } else { Int::to_string(n) }
 }
 
 fn weekday_name(day: Int) -> String {
@@ -176,7 +176,7 @@ fn single(pool: Pool) -> Response with { rng: Random } {
 /// `queries` read by TechEmpower's rule: missing, not a number, or below one
 /// is one; above 500 is 500.
 fn count_of(request: Request) -> Int {
-  match request.query("queries") {
+  match Request::query(request, "queries") {
     Option::None => 1,
     Option::Some(text) => match Int::of_string(text) {
       Option::None => 1,
@@ -216,7 +216,7 @@ fn fortunes(pool: Pool) -> Response {
       Option::None => Response::text(500, "a fortune row had an unexpected shape"),
       Option::Some(read) => {
         let added = List::Cons({ id: 0, message: "Additional fortune added at request time." }, read);
-        let sorted = added.sort_by(fn (a, b) => a.message.cmp(b.message));
+        let sorted = List::sort_by(added, fn (a, b) => Ord::cmp(a.message, b.message));
         Response::of(200, "text/html; charset=utf-8", render(sorted))
       },
     },
@@ -246,7 +246,7 @@ fn read_fortunes(rows: List<Row>) -> Option<List<Fortune>> {
 
 fn render(fortunes: List<Fortune>) -> String {
   let rows = List::map(fortunes, fn f =>
-    "<tr><td>" + Int::to_string(f.id) + "</td><td>" + escape_html(f.message) + "</td></tr>");
+    "<tr><td>${Int::to_string(f.id)}</td><td>${escape_html(f.message)}</td></tr>");
   "<!DOCTYPE html><html><head><title>Fortunes</title></head><body><table>"
   + "<tr><th>id</th><th>message</th></tr>"
   + String::join(rows, "")

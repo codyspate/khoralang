@@ -150,7 +150,7 @@ fn create(store: Store, request: Request) -> Response
           // loud, not worth failing the request over.
           _ => print("warning: could not write the link file"),
         };
-        Response::json(201, made.as_json())
+        Response::json(201, Link::as_json(made))
       },
   }
 }

@@ -25,6 +25,6 @@ impl Checked {
 
 impl Decode for Checked {
   fn schema() -> Schema<Checked> {
-    string().try_map("a non-empty name", fn s => Checked::of(s))
+    Schema::try_map(string(), "a non-empty name", fn s => Checked::of(s))
   }
 }

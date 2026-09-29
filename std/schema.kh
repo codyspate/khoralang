@@ -334,7 +334,7 @@ pub type Rule =
 
 /// `1 character`, `3 characters`.
 fn count(n: Int, noun: String) -> String {
-  if n == 1 { "1 " + noun } else { Int::to_string(n) + " " + noun + "s" }
+  if n == 1 { "1 ${noun}" } else { "${Int::to_string(n)} ${noun}s" }
 }
 
 impl Rule {
@@ -342,16 +342,16 @@ impl Rule {
   /// 65535`, `have at least 1 item`.
   pub fn describe(self) -> String {
     match self {
-      Rule::Custom(must) => "be " + must,
-      Rule::Between(low, high) => "be between " + low + " and " + high,
-      Rule::AtLeast(bound) => "be at least " + bound,
-      Rule::AtMost(bound) => "be at most " + bound,
-      Rule::MinLength(n) => "be at least " + count(n, "character"),
-      Rule::MaxLength(n) => "be at most " + count(n, "character"),
-      Rule::MinItems(n) => "have at least " + count(n, "item"),
-      Rule::MaxItems(n) => "have at most " + count(n, "item"),
+      Rule::Custom(must) => "be ${must}",
+      Rule::Between(low, high) => "be between ${low} and ${high}",
+      Rule::AtLeast(bound) => "be at least ${bound}",
+      Rule::AtMost(bound) => "be at most ${bound}",
+      Rule::MinLength(n) => "be at least ${count(n, "character")}",
+      Rule::MaxLength(n) => "be at most ${count(n, "character")}",
+      Rule::MinItems(n) => "have at least ${count(n, "item")}",
+      Rule::MaxItems(n) => "have at most ${count(n, "item")}",
       Rule::OneOf(allowed) =>
-        "be one of " + String::join(List::map(allowed, fn a => "`" + a + "`"), ", "),
+        "be one of ${String::join(List::map(allowed, fn a => "`" + a + "`"), ", ")}",
     }
   }
 }
@@ -414,8 +414,8 @@ impl Segment {
   /// The step as it appears in a path: `.name` or `[3]`.
   pub fn write(self) -> String {
     match self {
-      Segment::Field(name) => "." + name,
-      Segment::Index(at) => "[" + Int::to_string(at) + "]",
+      Segment::Field(name) => ".${name}",
+      Segment::Index(at) => "[${Int::to_string(at)}]",
     }
   }
 }
@@ -464,15 +464,15 @@ impl Rejection {
   /// supplies the subject and keeps the rest.
   pub fn describe_as(self, at: String) -> String {
     match self.problem {
-      Problem::Missing => at + " is not set",
-      Problem::Refused(rule) => at + " must " + Rule::describe(rule),
-      Problem::Unexpected => at + " is not expected",
-      Problem::Denied => at + " is not granted",
+      Problem::Missing => "${at} is not set",
+      Problem::Refused(rule) => "${at} must ${Rule::describe(rule)}",
+      Problem::Unexpected => "${at} is not expected",
+      Problem::Denied => "${at} is not granted",
       Problem::Wrong(wanted, found) =>
         if self.secret {
-          at + " should be " + wanted
+          "${at} should be ${wanted}"
         } else {
-          at + " should be " + wanted + ", and is " + Redacted::expose(found)
+          "${at} should be ${wanted}, and is ${Redacted::expose(found)}"
         },
     }
   }
@@ -553,22 +553,22 @@ impl Show for Shape {
       Shape::Float => "Float",
       Shape::Decimal => "Decimal",
       Shape::Bool => "Bool",
-      Shape::List(of) => "List(" + Show::show(of) + ")",
-      Shape::Dict(of) => "Dict(" + Show::show(of) + ")",
+      Shape::List(of) => "List(${Show::show(of)})",
+      Shape::Dict(of) => "Dict(${Show::show(of)})",
       Shape::Struct(fields) =>
-        "Struct(" + String::join(List::map(fields, fn named => named.name + ": " + Show::show(named.shape)), ", ") + ")",
+        "Struct(${String::join(List::map(fields, fn named => named.name + ": " + Show::show(named.shape)), ", ")})",
       Shape::Cases(cases) =>
-        "Cases(" + String::join(List::map(cases, fn case => case.name), ", ") + ")",
-      Shape::Optional(inner) => "Optional(" + Show::show(inner) + ")",
-      Shape::Nullable(inner) => "Nullable(" + Show::show(inner) + ")",
-      Shape::Default(inner) => "Default(" + Show::show(inner) + ")",
-      Shape::Keyed(wire, inner) => "Keyed(" + wire + ", " + Show::show(inner) + ")",
-      Shape::Refined(inner, rule) => "Refined(" + Show::show(inner) + ", " + Show::show(rule) + ")",
-      Shape::Via(inner, becomes) => "Via(" + Show::show(inner) + ", " + becomes + ")",
-      Shape::Secret(inner) => "Secret(" + Show::show(inner) + ")",
-      Shape::Closed(inner) => "Closed(" + Show::show(inner) + ")",
-      Shape::Described(inner, text) => "Described(" + Show::show(inner) + ", " + text + ")",
-      Shape::Lazy(name, _inner) => "Lazy(" + name + ")",
+        "Cases(${String::join(List::map(cases, fn case => case.name), ", ")})",
+      Shape::Optional(inner) => "Optional(${Show::show(inner)})",
+      Shape::Nullable(inner) => "Nullable(${Show::show(inner)})",
+      Shape::Default(inner) => "Default(${Show::show(inner)})",
+      Shape::Keyed(wire, inner) => "Keyed(${wire}, ${Show::show(inner)})",
+      Shape::Refined(inner, rule) => "Refined(${Show::show(inner)}, ${Show::show(rule)})",
+      Shape::Via(inner, becomes) => "Via(${Show::show(inner)}, ${becomes})",
+      Shape::Secret(inner) => "Secret(${Show::show(inner)})",
+      Shape::Closed(inner) => "Closed(${Show::show(inner)})",
+      Shape::Described(inner, text) => "Described(${Show::show(inner)}, ${text})",
+      Shape::Lazy(name, _inner) => "Lazy(${name})",
     }
   }
 }
@@ -744,7 +744,7 @@ impl<A> Schema<A> {
   /// `_tag`.
   pub fn cases_tagged(tag: String, cases: List<Case<A>>) -> Schema<A> {
     let wanted =
-      "one of " + String::join(List::map(cases, fn case => "`" + case.name + "`"), ", ");
+      "one of ${String::join(List::map(cases, fn case => "`" + case.name + "`"), ", ")}";
     {
       shape: Shape::Cases(List::map(cases, fn case => {
             let alternative: Alternative = { name: case.name, fields: case.fields };
@@ -902,8 +902,8 @@ fn wrong<A>(path: List<Segment>, wanted: String, saw: Raw) -> Validated<A, Rejec
       Validated::error({ path: path, secret: false, problem: Problem::Denied }),
     _ => {
       let found = match saw {
-        Raw::Text(text) => "\"" + text + "\"",
-        Raw::Untyped(text) => "\"" + text + "\"",
+        Raw::Text(text) => "\"${text}\"",
+        Raw::Untyped(text) => "\"${text}\"",
         Raw::Number(text) => text,
         Raw::Bool(value) => Bool::to_string(value),
         other => Raw::describe(other),
@@ -1227,9 +1227,9 @@ pub fn via<A, B: Show>(inner: Schema<B>, becomes: String, forward: (B) -> Option
 
 /// Whether `low <= a <= high`.
 fn within<A: Ord>(a: A, low: A, high: A) -> Bool {
-  match a.cmp(low) {
+  match Ord::cmp(a, low) {
     Ordering::Less => false,
-    _ => match a.cmp(high) {
+    _ => match Ord::cmp(a, high) {
       Ordering::Greater => false,
       _ => true,
     },
@@ -1244,13 +1244,13 @@ pub fn between<A: Ord + Show>(inner: Schema<A>, low: A, high: A) -> Schema<A> {
 /// A value no smaller than `bound`.
 pub fn at_least<A: Ord + Show>(inner: Schema<A>, bound: A) -> Schema<A> {
   checked(inner, Rule::AtLeast(Show::show(bound)), fn a =>
-    match a.cmp(bound) { Ordering::Less => false, _ => true })
+    match Ord::cmp(a, bound) { Ordering::Less => false, _ => true })
 }
 
 /// A value no larger than `bound`.
 pub fn at_most<A: Ord + Show>(inner: Schema<A>, bound: A) -> Schema<A> {
   checked(inner, Rule::AtMost(Show::show(bound)), fn a =>
-    match a.cmp(bound) { Ordering::Greater => false, _ => true })
+    match Ord::cmp(a, bound) { Ordering::Greater => false, _ => true })
 }
 
 /// Text of at least `n` characters.
@@ -1623,7 +1623,7 @@ impl Encode for DateTime {
 impl<A: Encode> Encode for Option<A> {
   fn encode(self) -> Raw {
     match self {
-      Option::Some(value) => value.encode(),
+      Option::Some(value) => Encode::encode(value),
       Option::None => Raw::Absent,
     }
   }
@@ -1631,19 +1631,19 @@ impl<A: Encode> Encode for Option<A> {
 
 impl<A: Encode> Encode for List<A> {
   fn encode(self) -> Raw {
-    let items = List::fold(self, List::Nil, fn (acc, item) => List::Cons(item.encode(), acc));
+    let items = List::fold(self, List::Nil, fn (acc, item) => List::Cons(Encode::encode(item), acc));
     Raw::Sequence(List::reverse(items))
   }
 }
 
 impl<A: Encode> Encode for Vector<A> {
-  fn encode(self) -> Raw { Vector::to_list(self).encode() }
+  fn encode(self) -> Raw { Encode::encode(Vector::to_list(self)) }
 }
 
 impl<V: Encode> Encode for Dict<String, V> {
   fn encode(self) -> Raw {
     let entries = List::fold(Dict::entries(self), List::Nil, fn (acc, pair) =>
-      List::Cons(Raw::entry(pair.key, pair.value.encode()), acc));
+      List::Cons(Raw::entry(pair.key, Encode::encode(pair.value)), acc));
     Raw::Record(List::reverse(entries))
   }
 }
@@ -1651,7 +1651,7 @@ impl<V: Encode> Encode for Dict<String, V> {
 impl<V: Encode> Encode for Map<String, V> {
   fn encode(self) -> Raw {
     let entries = List::fold(Map::entries(self), List::Nil, fn (acc, pair) =>
-      List::Cons(Raw::entry(pair.key, pair.value.encode()), acc));
+      List::Cons(Raw::entry(pair.key, Encode::encode(pair.value)), acc));
     Raw::Record(List::reverse(entries))
   }
 }
@@ -1705,7 +1705,7 @@ fn typed(kind: String) -> Json {
 
 /// `{ "$ref": "#/$defs/Name" }`.
 fn reference(name: String) -> Json {
-  object(List::Cons(member("$ref", Json::Text("#/$defs/" + name)), List::Nil))
+  object(List::Cons(member("$ref", Json::Text("#/$defs/${name}")), List::Nil))
 }
 
 /// The document with one more key. An object is a map, and the map is the
@@ -1863,7 +1863,7 @@ fn numeric(shape: Shape) -> Bool {
 /// keyword for it -- a bound on a decimal, which the document carries as a
 /// string, is a sentence.
 fn ruled(document: Json, inner: Shape, rule: Rule) -> Json {
-  let sentence = Json::Text("must " + Rule::describe(rule));
+  let sentence = Json::Text("must ${Rule::describe(rule)}");
   match rule {
     Rule::Between(low, high) =>
       if numeric(inner) {

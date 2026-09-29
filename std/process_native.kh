@@ -348,7 +348,7 @@ fn read_status(bytes: Array<U8>) -> Int {
     i = i - 1;
   };
   // Eight bytes of a signed status, read back as one.
-  if value > 9223372036854775807 { 0 - 1 } else { value }
+  if value > 9223372036854775807 { -1 } else { value }
 }
 
 /// Turns "the shell would not start" into the error, and anything else into

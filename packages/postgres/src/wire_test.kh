@@ -178,7 +178,7 @@ test "Parse is the unnamed statement, the SQL, and no parameter types" {
   //   00          the unnamed statement
   //   73 00       "s\0"
   //   00 00       zero parameter types: let the server infer them
-  assert(hex(bytes) == "5000000009007300" + "0000");
+  assert(hex(bytes) == "50000000090073000000");
 }
 
 test "Bind sends the value in its own length-prefixed field" {
@@ -193,7 +193,7 @@ test "Bind sends the value in its own length-prefixed field" {
   //   00 00 00 02 two bytes long
   //   68 69       "hi"
   //   00 00       zero result format codes: text back
-  assert(hex(bytes) == "4200000012" + "0000" + "0000" + "0001" + "00000002" + "6869" + "0000");
+  assert(hex(bytes) == "42000000120000000000010000000268690000");
 }
 
 /// **NULL is a length of -1, and an empty string is a length of zero.** They
@@ -202,8 +202,8 @@ test "Bind sends the value in its own length-prefixed field" {
 test "NULL is a length of minus one, not an empty value" {
   let null: List<Option<String>> = List::Cons(Option::None, List::Nil);
   let empty: List<Option<String>> = List::Cons(Option::Some(""), List::Nil);
-  assert(hex(bind("", "", null)) == "4200000010" + "0000" + "0000" + "0001" + "ffffffff" + "0000");
-  assert(hex(bind("", "", empty)) == "4200000010" + "0000" + "0000" + "0001" + "00000000" + "0000");
+  assert(hex(bind("", "", null)) == "4200000010000000000001ffffffff0000");
+  assert(hex(bind("", "", empty)) == "4200000010000000000001000000000000");
 }
 
 test "a value keeps a quote mark as a quote mark" {
@@ -212,22 +212,22 @@ test "a value keeps a quote mark as a quote mark" {
   // Here it is five bytes with a length in front, and nothing reads it as SQL.
   let hostile: List<Option<String>> = List::Cons(Option::Some("'; --"), List::Nil);
   let bytes = bind("", "", hostile);
-  assert(hex(bytes) == "4200000015" + "0000" + "0000" + "0001" + "00000005" + "273b202d2d" + "0000");
+  assert(hex(bytes) == "420000001500000000000100000005273b202d2d0000");
 }
 
 test "Bind with no values still says how many there are" {
   let none: List<Option<String>> = List::Nil;
-  assert(hex(bind("", "", none)) == "420000000c" + "0000" + "0000" + "0000" + "0000");
+  assert(hex(bind("", "", none)) == "420000000c0000000000000000");
 }
 
 test "Describe asks about the portal, not the statement" {
   // 44 'D', length 6, 50 'P', 00 the unnamed portal.
-  assert(hex(describe_portal("")) == "4400000006" + "50" + "00");
+  assert(hex(describe_portal("")) == "44000000065000");
 }
 
 test "Execute with a row limit of zero means every row" {
   // 45 'E', length 9, 00 unnamed portal, 00000000 no limit.
-  assert(hex(execute("", 0)) == "4500000009" + "00" + "00000000");
+  assert(hex(execute("", 0)) == "45000000090000000000");
 }
 
 test "Sync is a type byte and a length and nothing else" {

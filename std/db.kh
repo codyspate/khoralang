@@ -458,7 +458,7 @@ pub fn transaction<A, 'ef, 'er>(
     // report than the reason it was needed, and the finalizer tells the
     // handler.
     Result::Ok(_) => match body()! {
-      Result::Err(problem) => Result::Err(DbError::RolledBack(problem.show())),
+      Result::Err(problem) => Result::Err(DbError::RolledBack(Show::show(problem))),
       Result::Ok(answer) => if level == 0 { committed(settled, answer) } else { released(settled, level, answer) },
     },
   }
@@ -697,7 +697,7 @@ impl Show for Cell {
       Cell::Null => "null",
       Cell::Text(value) => value,
       Cell::Number(value) => Int::to_string(value),
-      Cell::Money(value) => value.show(),
+      Cell::Money(value) => Show::show(value),
       Cell::Flag(value) => if value { "true" } else { "false" },
     }
   }
@@ -712,9 +712,9 @@ impl Show for DbError {
   /// they want rather than a constructor.
   fn show(self) -> String {
     match self {
-      DbError::Rejected(why) => "rejected: " + why,
-      DbError::Disconnected(why) => "disconnected: " + why,
-      DbError::RolledBack(why) => "rolled back: " + why,
+      DbError::Rejected(why) => "rejected: ${why}",
+      DbError::Disconnected(why) => "disconnected: ${why}",
+      DbError::RolledBack(why) => "rolled back: ${why}",
     }
   }
 }

@@ -681,6 +681,12 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   71.6k -> 88.9k requests per second at 256 connections, +2% at 32. The
   thread backend does not use this code and is unchanged.
 
+- **The reference, the guide, the cookbook and `std` write a call as
+  `Type::f(x)`.** `x.f()` is accepted everywhere it was and is documented as
+  the second form, which the `idiomatic` group's `method-call` reports. This
+  repository's manifest switches the group on at `deny`, and `std`, the
+  examples, the packages, the benchmarks and the tests are written that way.
+
 - **String literals and constructors with no fields are never reference
   counted.** Every fiber that touched `""` or `Option::None` wrote the same
   count, so on several cores those writes contended. They are immortal and

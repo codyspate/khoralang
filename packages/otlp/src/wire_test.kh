@@ -26,7 +26,7 @@ fn finished(parent: Int, status: Status) -> Finished {
     status: status,
     started: 1700000000000000000,
     ended: 1700000000123000000,
-    attributes: [text("db.system", "postgresql"), number("rows", 3), flag("cached", false)],
+    attributes: [text("db.system", "postgresql"), number("rows", 3), flag("cached", value: false)],
   }
 }
 
@@ -39,8 +39,8 @@ test "an id is sixteen hex characters, padded" {
 /// and so is negative about half the time; `Int::shr` is arithmetic, so a
 /// renderer written as "halve until zero" would not terminate for half of them.
 test "a negative id renders as its unsigned bits" {
-  assert(hex16(0 - 1) == "ffffffffffffffff");
-  assert(hex16(0 - 2) == "fffffffffffffffe");
+  assert(hex16(-1) == "ffffffffffffffff");
+  assert(hex16(-2) == "fffffffffffffffe");
 }
 
 test "a trace id is the two halves, high first" {

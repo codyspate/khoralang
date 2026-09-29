@@ -250,7 +250,7 @@ fn write_bind(out: Writer, portal: String, statement: String, values: List<Optio
         match head {
           // NULL. A length of -1, which is four bytes of `ff` and not an empty
           // value: `WHERE x = ''` and `WHERE x IS NULL` are different questions.
-          Option::None => Writer::i32(out, 0 - 1),
+          Option::None => Writer::i32(out, -1),
           Option::Some(text) => {
             Writer::i32(out, String::byte_length(text));
             Writer::text(out, text)

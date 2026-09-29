@@ -269,12 +269,12 @@ impl Decimal {
   /// So `1.0d` and `1.00d` are the same number and either may come back; the
   /// left one does, which is the choice `List::min` makes for the same reason.
   pub fn min(self, other: Decimal) -> Decimal {
-    if Decimal::cmp(self, other).is_greater() { other } else { self }
+    if Ordering::is_greater(Decimal::cmp(self, other)) { other } else { self }
   }
 
   /// The larger of two, and the left one on a tie.
   pub fn max(self, other: Decimal) -> Decimal {
-    if Decimal::cmp(self, other).is_less() { other } else { self }
+    if Ordering::is_less(Decimal::cmp(self, other)) { other } else { self }
   }
 
   /// Whether it is exactly zero.
@@ -348,7 +348,7 @@ impl Decimal {
 }
 
 /// The upper half of an `Int` widened to the significand: all ones, or none.
-fn sign_of(units: Int) -> Int { if units < 0 { 0 - 1 } else { 0 } }
+fn sign_of(units: Int) -> Int { if units < 0 { -1 } else { 0 } }
 
 /// The larger of two scales, which is where a sum or a difference lands.
 fn larger(left: Int, right: Int) -> Int { if left > right { left } else { right } }
@@ -421,7 +421,7 @@ impl Show for Decimal {
       let filled = padded(digits, self.scale + 1);
       let width = String::byte_length(filled);
       let cut = width - self.scale;
-      sign + String::slice(filled, 0, cut) + "." + String::slice(filled, cut, width)
+      "${sign}${String::slice(filled, 0, cut)}.${String::slice(filled, cut, width)}"
     }
   }
 }
@@ -438,7 +438,7 @@ impl Show for Decimal {
 fn padded(text: String, width: Int) -> String {
   let mut out = text;
   while String::byte_length(out) < width {
-    out = "0" + out;
+    out = "0${out}";
   };
   out
 }

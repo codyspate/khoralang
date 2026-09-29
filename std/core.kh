@@ -348,7 +348,7 @@ impl String {
     let shorter = if mine < theirs { mine } else { theirs };
     let mut at = from;
     let mut answer = Ordering::Equal;
-    while at < shorter && answer.is_equal() {
+    while at < shorter && Ordering::is_equal(answer) {
       let here = String::byte(self, at);
       let there = String::byte(other, at);
       if here < there { answer = Ordering::Less }
@@ -357,7 +357,7 @@ impl String {
     }
     // Neither differed in the bytes they share, so the shorter one is first
     // and equal lengths mean equal text.
-    if answer.is_equal() {
+    if Ordering::is_equal(answer) {
       if mine < theirs { Ordering::Less }
       else if mine > theirs { Ordering::Greater }
       else { Ordering::Equal }
@@ -390,11 +390,11 @@ impl Show for Ordering {
 
 impl Ordering {
   /// Whether the comparison came out `Less`.
-  pub fn is_less(self) -> Bool { self.eq(Ordering::Less) }
+  pub fn is_less(self) -> Bool { Eq::eq(self, Ordering::Less) }
   /// Whether it came out `Equal`.
-  pub fn is_equal(self) -> Bool { self.eq(Ordering::Equal) }
+  pub fn is_equal(self) -> Bool { Eq::eq(self, Ordering::Equal) }
   /// Whether it came out `Greater`.
-  pub fn is_greater(self) -> Bool { self.eq(Ordering::Greater) }
+  pub fn is_greater(self) -> Bool { Eq::eq(self, Ordering::Greater) }
   /// `Ordering::reverse(Ord::cmp(a, b))` sorts descending without a second
   /// comparison.
   pub fn reverse(self) -> Ordering {
@@ -444,7 +444,7 @@ pub type Result<A, E> =
 impl<A: Show> Show for Option<A> {
   fn show(self) -> String {
     match self {
-      Option::Some(value) => "Some(" + Show::show(value) + ")",
+      Option::Some(value) => "Some(${Show::show(value)})",
       Option::None => "None",
     }
   }
@@ -496,8 +496,8 @@ impl<A: Ord> Ord for Option<A> {
 impl<A: Show, E: Show> Show for Result<A, E> {
   fn show(self) -> String {
     match self {
-      Result::Ok(value) => "Ok(" + Show::show(value) + ")",
-      Result::Err(error) => "Err(" + Show::show(error) + ")",
+      Result::Ok(value) => "Ok(${Show::show(value)})",
+      Result::Err(error) => "Err(${Show::show(error)})",
     }
   }
 }
@@ -1007,7 +1007,7 @@ impl<A: Ord> List<A> {
         List::Nil => List::Cons(only, List::Nil),
         List::Cons(second, more) => {
           let halves = List::split(List::Cons(only, List::Cons(second, more)));
-          List::merge(halves.left.sort(), halves.right.sort())
+          List::merge(List::sort(halves.left), List::sort(halves.right))
         }
       },
     }
@@ -1024,7 +1024,7 @@ impl<A: Ord> List<A> {
   /// The cost is a length and a reversal, both linear, against a sort that is
   /// already linearithmic.
   pub fn split(self) -> Halves<A> {
-    List::take_first(self, self.length() / 2, List::Nil)
+    List::take_first(self, List::length(self) / 2, List::Nil)
   }
 
   /// The first `count` elements and the rest, with `taken` already collected
@@ -1048,7 +1048,7 @@ impl<A: Ord> List<A> {
         },
       }
     };
-    { left: got.reverse(), right: rest }
+    { left: List::reverse(got), right: rest }
   }
 
   /// The smallest element, or nothing if there are none.
@@ -1137,7 +1137,7 @@ impl<A: Ord> List<A> {
         },
       }
     };
-    out.reverse()
+    List::reverse(out)
   }
 }
 
@@ -1179,11 +1179,11 @@ impl<A> List<A> {
   /// argument. Building a list by repeatedly concatenating onto the end is the
   /// quadratic way to do it; push and `reverse` once.
   pub fn concat(self, other: List<A>) -> List<A> {
-    List::reverse_onto(self.reverse(), other)
+    List::reverse_onto(List::reverse(self), other)
   }
 
   /// The same elements, back to front.
-  pub fn reverse(self) -> List<A> { self.reverse_onto(List::Nil) }
+  pub fn reverse(self) -> List<A> { List::reverse_onto(self, List::Nil) }
 
   /// `self` reversed, in front of `acc`.
   ///
@@ -1306,7 +1306,7 @@ impl<A> List<A> {
         },
       }
     };
-    taken.reverse()
+    List::reverse(taken)
   }
 
   /// Everything after the first `count` elements.
@@ -1329,7 +1329,7 @@ impl<A> List<A> {
 
   /// The element at `index`, counting from zero, or nothing.
   pub fn nth(self, index: Int) -> Option<A> {
-    if index < 0 { Option::None } else { List::head(self.drop(index)) }
+    if index < 0 { Option::None } else { List::head(List::drop(self, index)) }
   }
 
   /// The last element, or nothing.
@@ -1372,7 +1372,7 @@ impl<A> List<A> {
         },
       }
     };
-    kept.reverse()
+    List::reverse(kept)
   }
 
   /// The same elements, in the order `order` asks for.
@@ -1405,7 +1405,7 @@ impl<A> List<A> {
         List::Nil => List::Cons(only, List::Nil),
         List::Cons(second, more) => {
           let halves = List::split_evenly(List::Cons(only, List::Cons(second, more)));
-          List::merge_by(halves.left.sort_by(order), halves.right.sort_by(order), order)
+          List::merge_by(List::sort_by(halves.left, order), List::sort_by(halves.right, order), order)
         }
       },
     }
@@ -1416,7 +1416,7 @@ impl<A> List<A> {
   /// `sort`'s own `split` wants `A: Ord` because of the block it sits in;
   /// this is the same walk without the bound.
   fn split_evenly(self) -> Halves<A> {
-    List::take_evenly(self, self.length() / 2, List::Nil)
+    List::take_evenly(self, List::length(self) / 2, List::Nil)
   }
 
   fn take_evenly(self, count: Int, taken: List<A>) -> Halves<A> {
@@ -1448,7 +1448,7 @@ impl<A> List<A> {
             walking = false;
           },
           List::Cons(other_head, other_tail) =>
-            if order(head, other_head).is_greater() {
+            if Ordering::is_greater(order(head, other_head)) {
               out = List::Cons(other_head, out);
               theirs = other_tail;
             } else {
@@ -1458,7 +1458,7 @@ impl<A> List<A> {
         },
       }
     };
-    out.reverse()
+    List::reverse(out)
   }
 
   /// The elements `wanted` accepts and the ones it does not, in one walk.
@@ -1609,7 +1609,7 @@ impl Iterator for Range {
 /// of something unshowable is still unshowable, which is the honest answer.
 impl<A: Show> Show for List<A> {
   fn show(self) -> String {
-    "[" + List::shown(self) + "]"
+    "[${List::shown(self)}]"
   }
 }
 
@@ -1700,7 +1700,7 @@ impl<A: Ord> Ord for List<A> {
           List::Nil => { answer = Ordering::Greater; walking = false; },
           List::Cons(other_head, other_tail) => {
             let step = Ord::cmp(head, other_head);
-            if step.is_equal() {
+            if Ordering::is_equal(step) {
               mine = tail;
               theirs = other_tail;
             } else {
@@ -1789,7 +1789,7 @@ impl<A> List<A> {
         },
       }
     };
-    out.reverse()
+    List::reverse(out)
   }
 
   /// Pairs, one from each, stopping at the shorter.
@@ -1815,7 +1815,7 @@ impl<A> List<A> {
         },
       }
     };
-    out.reverse()
+    List::reverse(out)
   }
 }
 
@@ -2026,7 +2026,7 @@ impl Applicative for Option {
 impl Traversable for Option {
   fn traverse<A, B, F: Applicative>(self: Option<A>, f: (A) -> F<B>) -> F<Option<B>> {
     match self {
-      Option::Some(v) => f(v).map(fn b => Option::Some(b)),
+      Option::Some(v) => Functor::map(f(v), fn b => Option::Some(b)),
       Option::None => F::pure(Option::None),
     }
   }
@@ -2104,7 +2104,7 @@ impl Traversable for List {
       match left {
         List::Nil => { combining = false; },
         List::Cons(head, tail) => {
-          out = head.map2(out, fn (value, so_far) => List::Cons(value, so_far));
+          out = Applicative::map2(head, out, fn (value, so_far) => List::Cons(value, so_far));
           left = tail;
         },
       }
@@ -2734,7 +2734,7 @@ impl<A> Array<A> {
       } else if right >= hi {
         true
       } else {
-        order(Array::get(source, left), Array::get(source, right)).is_greater() == false
+        !Ordering::is_greater(order(Array::get(source, left), Array::get(source, right)))
       };
       if from_left {
         Array::set(into, out, Array::get(source, left));
@@ -3681,7 +3681,7 @@ impl Float {
       let after_point = if whole.at < length && U8::to_int(String::byte(text, whole.at)) == 46 {
         let fraction = Float::digits(text, whole.at + 1, 0.0);
         if fraction.at == whole.at + 1 {
-          { number: 0.0, at: 0 - 1 }
+          { number: 0.0, at: -1 }
         } else {
           {
             number: whole.number
@@ -3769,7 +3769,7 @@ impl Float {
 /// has been read — so the only way to write it down is to walk to it. Wanted
 /// by `Int::of_string`, which counts downward so that this number is one it
 /// can reach.
-fn smallest_int() -> Int { 0 - 9223372036854775807 - 1 }
+fn smallest_int() -> Int { -9223372036854775807 - 1 }
 
 impl Int {
   /// The number a string spells, or nothing.
@@ -3858,7 +3858,7 @@ impl Int {
     if self == 0 {
       "0"
     } else if self < 0 {
-      "-" + Int::below_zero(self, "")
+      "-${Int::below_zero(self, "")}"
     } else {
       Int::digits(self, "")
     }
@@ -3876,7 +3876,7 @@ impl Int {
   /// negating the number is not.
   fn below_zero(self, tail: String) -> String {
     let here = Int::digit(0 - (self % 10));
-    if self > 0 - 10 { here + tail } else { Int::below_zero(self / 10, here + tail) }
+    if self > -10 { here + tail } else { Int::below_zero(self / 10, here + tail) }
   }
 
   fn digit(self) -> String {
@@ -4388,7 +4388,7 @@ impl<K: Hash, V> Chain<K, V> {
     match self {
       Chain::Empty => Option::None,
       Chain::Node(k, v, rest) =>
-        if k.eq(key) { Option::Some(v) } else { Chain::find(rest, key) },
+        if Eq::eq(k, key) { Option::Some(v) } else { Chain::find(rest, key) },
     }
   }
 
@@ -4397,7 +4397,7 @@ impl<K: Hash, V> Chain<K, V> {
     match self {
       Chain::Empty => Chain::Empty,
       Chain::Node(k, v, rest) =>
-        if k.eq(key) { rest } else { Chain::Node(k, v, Chain::without(rest, key)) },
+        if Eq::eq(k, key) { rest } else { Chain::Node(k, v, Chain::without(rest, key)) },
     }
   }
 
@@ -4422,7 +4422,7 @@ impl<K: Show, V: Show> Show for Pair<K, V> {
   /// No brackets around it. A `Pair` is nearly always inside something that
   /// has its own -- `Dict` and `Map` both print a list of these -- and a pair
   /// that brought its own would double them.
-  fn show(self) -> String { self.key.show() + ": " + self.value.show() }
+  fn show(self) -> String { "${Show::show(self.key)}: ${Show::show(self.value)}" }
 }
 
 /// The smallest entry of a tree, and what is left without it.
@@ -4725,7 +4725,7 @@ impl<K: Ord + Show, V: Show> Show for Dict<K, V> {
   /// `Dict` asks of its keys at all, and `Show` is what printing one asks. A
   /// map whose keys order but cannot print does not print, which is the right
   /// answer -- there is nothing to write in place of the key.
-  fn show(self) -> String { "{" + entries_shown(Dict::entries(self)) + "}" }
+  fn show(self) -> String { "{${entries_shown(Dict::entries(self))}}" }
 }
 
 /// The entries of a map, comma-separated, without the braces.
@@ -4734,7 +4734,7 @@ impl<K: Ord + Show, V: Show> Show for Dict<K, V> {
 /// differently -- the whole reason somebody reads one of these in a log is to
 /// compare it with another.
 fn entries_shown<K: Show, V: Show>(entries: List<Pair<K, V>>) -> String {
-  String::join(List::map(entries, fn pair => pair.show()), ", ")
+  String::join(List::map(entries, fn pair => Show::show(pair)), ", ")
 }
 
 /// A hash table: unordered, mutated in place, and the fast one.
@@ -4961,9 +4961,9 @@ impl<K: Hash, V> Map<K, V> {
   fn slot(self, key: K) -> Int {
     let width = Array::length(self.buckets);
     if width == 0 {
-      0 - 1
+      -1
     } else {
-      let mixed = Int::wrapping_mul(key.hash(), 2654435761);
+      let mixed = Int::wrapping_mul(Hash::hash(key), 2654435761);
       let spread = Int::xor(mixed, Int::shr(mixed, 16));
       Int::and(spread, width - 1)
     }
@@ -5010,7 +5010,7 @@ impl<K: Hash + Show, V: Show> Show for Map<K, V> {
   /// keys hash but do not order could not print at all -- and the reason this
   /// exists is that a record holding a `Map` could not derive `Show`. Trading
   /// that back for a tidier order is the wrong way round.
-  fn show(self) -> String { "{" + entries_shown(Map::entries(self)) + "}" }
+  fn show(self) -> String { "{${entries_shown(Map::entries(self))}}" }
 }
 
 /// A sequence that grows: an array, the part of it that is in use, and a
@@ -5127,7 +5127,7 @@ impl<A: Show> Show for Vector<A> {
       i = i - 1;
       parts = List::Cons(Show::show(Array::get(self.items, i)), parts);
     };
-    "[" + String::join(parts, ", ") + "]"
+    "[${String::join(parts, ", ")}]"
   }
 }
 

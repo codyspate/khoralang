@@ -25,8 +25,8 @@ import postgres::conn::{oid_to_cell};
 fn shown(cell: Cell) -> String {
   match cell {
     Cell::Money(amount) => Decimal::show(amount),
-    Cell::Number(n) => "Number(" + Int::to_string(n) + ")",
-    Cell::Text(text) => "Text(" + text + ")",
+    Cell::Number(n) => "Number(${Int::to_string(n)})",
+    Cell::Text(text) => "Text(${text})",
     Cell::Flag(flag) => if flag { "Flag(true)" } else { "Flag(false)" },
     Cell::Null => "Null",
   }
@@ -51,7 +51,7 @@ test "a numeric column arrives as Money with its scale intact" {
 /// with forty digits can still do it.
 test "a numeric too wide for a Decimal stays Text rather than becoming wrong" {
   let huge = "123456789012345678901234567890123456789012345.6789";
-  assert(shown(oid_to_cell(1700, huge)) == "Text(" + huge + ")");
+  assert(shown(oid_to_cell(1700, huge)) == "Text(${huge})");
 }
 
 /// **A float column is not a number.**

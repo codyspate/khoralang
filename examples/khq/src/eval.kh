@@ -60,7 +60,7 @@ pub fn eval(filter: Filter, input: Json) -> List<Json> raises Problem {
       List::flat_map(eval(of, input)!, fn v => elements_of(v, span)!)!,
     Filter::Slice(of, from, to, span) => {
       let start = bound(from, input, 0)!;
-      let stop = bound(to, input, 0 - 1)!;
+      let stop = bound(to, input, -1)!;
       List::map(eval(of, input)!, fn v => slice_of(v, start, stop, span)!)!
     },
     // **The whole language, in one line.** Everything the left side produced,
@@ -205,7 +205,7 @@ fn slice_of(value: Json, from: Int, to: Int, span: Span) -> Json raises Problem 
     Json::Array(items) => {
       let count = List::length(items);
       let start = clamp(if from < 0 { count + from } else { from }, count);
-      let stop = if to == 0 - 1 {
+      let stop = if to == -1 {
         count
       } else {
         clamp(if to < 0 { count + to } else { to }, count)
@@ -220,7 +220,7 @@ fn slice_of(value: Json, from: Int, to: Int, span: Span) -> Json raises Problem 
       // the reader did not choose.
       let length = String::byte_length(text);
       let raw_start = clamp(if from < 0 { length + from } else { from }, length);
-      let raw_stop = if to == 0 - 1 {
+      let raw_stop = if to == -1 {
         length
       } else {
         clamp(if to < 0 { length + to } else { to }, length)

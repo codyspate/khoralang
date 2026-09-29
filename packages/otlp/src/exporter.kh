@@ -269,7 +269,7 @@ impl Exporter {
       // Reversed, because the batch is built by pushing onto the front and a
       // collector draws a trace in the order it reads it.
       let body = request(service, List::reverse(held));
-      let _ = client.send(Call::json(endpoint + "/v1/traces", body));
+      let _ = client.send(Call::json("${endpoint}/v1/traces", body));
     }
   }
 

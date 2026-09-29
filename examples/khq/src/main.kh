@@ -100,7 +100,7 @@ fn line() -> Schema<Line> {
 /// schema rejects, or one with no query, is answered with the usage text.
 fn plan(args: List<String>) -> Option<Asked> {
   let schema = line();
-  let read = schema.decode(Raw::of_arguments_for(schema.shape, args));
+  let read = Schema::decode(schema, Raw::of_arguments_for(schema.shape, args));
   match Validated::to_result(read) {
     Result::Err(_problems) => Option::None,
     Result::Ok(line) => match List::head(line.arguments) {

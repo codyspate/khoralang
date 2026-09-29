@@ -351,7 +351,7 @@ impl Offset {
   /// carry is 100000, which `Show` would write as `+1666:40` and `of_string`
   /// refuses to read back.
   pub fn of_minutes(minutes: Int) -> Option<Offset> {
-    if minutes < 0 - 1439 || minutes > 1439 {
+    if minutes < -1439 || minutes > 1439 {
       Option::None
     } else {
       Option::Some({ minutes: minutes })
@@ -365,10 +365,10 @@ impl Offset {
   /// what every wire format in the world writes. Refusing it would mean a
   /// parser that cannot read the timestamps it is for.
   pub fn of_string(text: String) -> Option<Offset> {
-    if text.eq("Z") {
+    if Eq::eq(text, "Z") {
       Option::Some(Offset::utc())
     } else {
-      let sign = if String::starts_with(text, "-") { 0 - 1 } else { 1 };
+      let sign = if String::starts_with(text, "-") { -1 } else { 1 };
       if String::byte_length(text) != 6
       || (!String::starts_with(text, "+") && !String::starts_with(text, "-"))
       || !separated(text, 3, 58) {
@@ -547,7 +547,7 @@ impl Show for Date {
   /// nine characters and sometimes ten does not sort as text and half the
   /// world sorts dates as text.
   fn show(self) -> String {
-    padded(self.year, 4) + "-" + padded(self.month, 2) + "-" + padded(self.day, 2)
+    "${padded(self.year, 4)}-${padded(self.month, 2)}-${padded(self.day, 2)}"
   }
 }
 
@@ -564,7 +564,7 @@ impl Show for DateTime {
   /// ISO 8601 with a `T`, and no zone — because there is none. A `Z` here
   /// would be a claim this type does not make.
   fn show(self) -> String {
-    self.date.show() + "T" + self.time.show()
+    "${Show::show(self.date)}T${Show::show(self.time)}"
   }
 }
 
@@ -573,7 +573,7 @@ impl Show for Offset {
   fn show(self) -> String {
     let sign = if self.minutes < 0 { "-" } else { "+" };
     let magnitude = if self.minutes < 0 { 0 - self.minutes } else { self.minutes };
-    sign + padded(magnitude / 60, 2) + ":" + padded(magnitude % 60, 2)
+    "${sign}${padded(magnitude / 60, 2)}:${padded(magnitude % 60, 2)}"
   }
 }
 
@@ -629,10 +629,10 @@ fn padded(value: Int, width: Int) -> String {
   let negative = value < 0;
   let magnitude = if negative { 0 - value } else { value };
   let digits = zeros(Int::to_string(magnitude), width);
-  if negative { "-" + digits } else { digits }
+  if negative { "-${digits}" } else { digits }
 }
 
 /// `text` with leading zeros until it is `width` long.
 fn zeros(text: String, width: Int) -> String {
-  if String::byte_length(text) >= width { text } else { zeros("0" + text, width) }
+  if String::byte_length(text) >= width { text } else { zeros("0${text}", width) }
 }

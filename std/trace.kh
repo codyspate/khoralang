@@ -277,7 +277,7 @@ fn reported<A, E: Show, 'ef, 'er>(
   leave_to(outer);
   match answer {
     Result::Ok(_) => tracer.finish(span, Status::Ok),
-    Result::Err(problem) => tracer.finish(span, Status::Failed(problem.show())),
+    Result::Err(problem) => tracer.finish(span, Status::Failed(Show::show(problem))),
   }
   answer
 }

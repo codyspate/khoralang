@@ -11,7 +11,7 @@ module std_suite::decoding;
 
 import std::core::{Result, String, Validated, assert_that};
 import std::json::{parse};
-import std::schema::{Decode, Raw};
+import std::schema::{Decode, Raw, Schema};
 import std_suite::checked::{Checked};
 
 /// All `pub`, so its derive is allowed: it builds a `Holder` and asks
@@ -24,8 +24,8 @@ fn checked(text: String) -> String {
   match parse(text) {
     Result::Err(_why) => "not JSON",
     Result::Ok(document) =>
-      match Checked::schema().decode(Raw::of_json(document)) {
-        Validated::Valid(c) => c.text(),
+      match Schema::decode(Checked::schema(), Raw::of_json(document)) {
+        Validated::Valid(c) => Checked::text(c),
         Validated::Invalid(_problems) => "refused",
       },
   }
@@ -36,8 +36,8 @@ fn held(text: String) -> String {
   match parse(text) {
     Result::Err(_why) => "not JSON",
     Result::Ok(document) =>
-      match Holder::schema().decode(Raw::of_json(document)) {
-        Validated::Valid(h) => h.name.text(),
+      match Schema::decode(Holder::schema(), Raw::of_json(document)) {
+        Validated::Valid(h) => Checked::text(h.name),
         Validated::Invalid(_problems) => "refused",
       },
   }

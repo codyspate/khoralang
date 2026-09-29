@@ -100,7 +100,7 @@ pub fn variables(shape: Shape) -> List<String> {
 pub fn describe(problem: Rejection) -> String {
   let name = variable_of(problem.path);
   match problem.problem {
-    Problem::Denied => name + " is not granted -- add it to `[permissions] env` in khora.toml",
+    Problem::Denied => "${name} is not granted -- add it to `[permissions] env` in khora.toml",
     _ => Rejection::describe_as(problem, name),
   }
 }
@@ -128,8 +128,8 @@ fn variable_of(path: List<Segment>) -> String {
   List::fold(List::reverse(path), "", fn (acc, step) =>
     match step {
       Segment::Field(field) =>
-        if acc == "" { String::upper(field) } else { acc + "_" + String::upper(field) },
-      Segment::Index(at) => acc + "[" + Int::to_string(at) + "]",
+        if acc == "" { String::upper(field) } else { "${acc}_${String::upper(field)}" },
+      Segment::Index(at) => "${acc}[${Int::to_string(at)}]",
     })
 }
 

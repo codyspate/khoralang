@@ -59,7 +59,7 @@ fn laid_out(value: Json, depth: Int) -> String {
       _ => {
         let inner = String::repeat("  ", depth + 1);
         let parts = List::map(items, fn i => inner + laid_out(i, depth + 1));
-        "[\n" + String::join(parts, ",\n") + "\n" + String::repeat("  ", depth) + "]"
+        "[\n${String::join(parts, ",\n")}\n${String::repeat("  ", depth)}]"
       },
     },
     Json::Object(fields) => {
@@ -70,9 +70,9 @@ fn laid_out(value: Json, depth: Int) -> String {
           let inner = String::repeat("  ", depth + 1);
           let parts = List::map(
             keys,
-            fn k => inner + quoted(k) + ": " + laid_out(at_key(fields, k), depth + 1),
+            fn k => "${inner}${quoted(k)}: ${laid_out(at_key(fields, k), depth + 1)}",
           );
-          "{\n" + String::join(parts, ",\n") + "\n" + String::repeat("  ", depth) + "}"
+          "{\n${String::join(parts, ",\n")}\n${String::repeat("  ", depth)}}"
         },
       }
     },
@@ -82,12 +82,12 @@ fn laid_out(value: Json, depth: Int) -> String {
 
 fn compact(value: Json) -> String {
   match value {
-    Json::Array(items) => "[" + String::join(List::map(items, fn i => compact(i)), ",") + "]",
+    Json::Array(items) => "[${String::join(List::map(items, fn i => compact(i)), ",")}]",
     Json::Object(fields) => {
       let keys = sorted_keys(fields);
       "{"
       + String::join(
-        List::map(keys, fn k => quoted(k) + ":" + compact(at_key(fields, k))),
+        List::map(keys, fn k => "${quoted(k)}:${compact(at_key(fields, k))}"),
         ",",
       )
       + "}"
@@ -160,7 +160,7 @@ fn escaped(b: Int) -> String {
   } else if b == 12 {
     "\\f"
   } else if b < 32 {
-    "\\u00" + hex(b / 16) + hex(b % 16)
+    "\\u00${hex(b / 16)}${hex(b % 16)}"
   } else {
     ""
   }

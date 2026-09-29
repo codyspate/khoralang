@@ -1,4 +1,4 @@
-module main;
+module service::main;
 
 import std::core::{ChildFailed, SharedFn};
 import std::net::http::{HttpError, Response, Router};

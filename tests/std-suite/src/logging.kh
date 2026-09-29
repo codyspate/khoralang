@@ -42,7 +42,7 @@ fn capturing(into: Shared<String>, minimum: Severity) -> Log {
     if Severity::severity(level) >= Severity::severity(minimum) {
       let _kept = Shared::update(
         into,
-        fn sofar => sofar + Severity::name(level) + " " + message + attached(attributes) + ";",
+        fn sofar => "${sofar}${Severity::name(level)} ${message}${attached(attributes)};",
       );
     } else {},
   }
@@ -58,7 +58,7 @@ fn count(cell: Shared<String>) -> Int {
 
 /// The attributes as ` name=value`, in the order they were given.
 fn attached(attributes: List<Attribute>) -> String {
-  List::fold(attributes, "", fn (acc, a) => acc + " " + a.name + "=" + shown(a.value))
+  List::fold(attributes, "", fn (acc, a) => "${acc} ${a.name}=${shown(a.value)}")
 }
 
 fn shown(v: Value) -> String {
@@ -89,7 +89,7 @@ test "attributes keep the order they were given" {
     log.record(
       Severity::Info,
       "retrying",
-      [text("job", "abc"), number("attempt", 2), flag("retry", true)],
+      [text("job", "abc"), number("attempt", 2), flag("retry", value: true)],
     );
   };
   let shown = Shared::get(lines);
@@ -107,7 +107,7 @@ test "a level below the minimum says nothing" {
     warn("loud");
     error("louder");
   };
-  assert_that(count(lines) == 2, "only warn and error survive: " + Shared::get(lines));
+  assert_that(count(lines) == 2, "only warn and error survive: ${Shared::get(lines)}");
   let shown = Shared::get(lines);
   assert_that(shown == "warn loud;error louder;", "recorded ${shown}");
 }

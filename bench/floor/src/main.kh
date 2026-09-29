@@ -1,4 +1,4 @@
-module main;
+module floor::main;
 
 import std::core::{Array, ChildFailed, Fiber, Nursery, bounded_nursery, print};
 import std::net::socket::{accept_on, invalid_handle, listen_on, receive, set_receive_timeout, shut, start, transmit};

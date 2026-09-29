@@ -51,7 +51,7 @@ test "a character is written between apostrophes" {
 
 /// And can be matched, which is what makes a lexer writable.
 test "a character can be matched" {
-  let describe = fn (c) => match c {
+  let describe = fn c => match c {
     'a' => "letter a",
     '0' => "zero",
     '😀' => "a face",

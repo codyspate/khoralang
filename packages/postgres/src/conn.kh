@@ -222,7 +222,7 @@ fn error_text(m: Message) -> String {
       if field == 77 { message = value } else if field == 67 { code = value } else { () }
     }
   };
-  if code == "" { message } else { message + " [" + code + "]" }
+  if code == "" { message } else { "${message} [${code}]" }
 }
 
 // --- connecting ------------------------------------------------------------
@@ -280,7 +280,7 @@ pub fn open_within(
     let handle = connect_to(host, port);
     if handle == invalid_handle() {
       Result::Err(PgError::Unreachable(
-          "could not reach " + host + ":" + Int::to_string(port),
+          "could not reach ${host}:${Int::to_string(port)}",
         ))
     } else {
       let empty: Array<U8> = Array::new(0, 0);
@@ -321,7 +321,7 @@ fn unanswered(why: PgError, millis: Int, took: Int) -> PgError {
   match why {
     PgError::Closed(said) => if took >= millis {
       PgError::Closed(
-        "the server did not finish the handshake within " + Int::to_string(millis) + " ms",
+        "the server did not finish the handshake within ${Int::to_string(millis)} ms",
       )
     } else {
       PgError::Closed(said)
@@ -446,7 +446,7 @@ fn authenticate(c: Connection, m: Message, secret: String) -> Result<Bool, PgErr
         let challenge = String::from_bytes(Reader::rest(read));
         match finish(session, challenge, secret) {
           Result::Err(why) => Result::Err(PgError::Refused(match why {
-                ScramError::Malformed(m) => "the server's SASL challenge is malformed: " + m,
+                ScramError::Malformed(m) => "the server's SASL challenge is malformed: ${m}",
                 ScramError::Rejected(m) => m,
               })),
           Result::Ok(final) =>
@@ -471,7 +471,7 @@ fn authenticate(c: Connection, m: Message, secret: String) -> Result<Bool, PgErr
         match verify(session, shown) {
           Result::Ok(_) => Result::Ok(true),
           Result::Err(why) => Result::Err(PgError::Refused(match why {
-                ScramError::Malformed(m) => "the server's SASL conclusion is malformed: " + m,
+                ScramError::Malformed(m) => "the server's SASL conclusion is malformed: ${m}",
                 ScramError::Rejected(m) => m,
               })),
         }

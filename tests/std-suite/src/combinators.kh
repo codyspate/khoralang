@@ -53,10 +53,10 @@ test "a fallible step maps over a list" {
 /// the failures come back as data. Useful, and a different operation -- the
 /// Guide documents both, and only one of them existed.
 test "a failing step stops the walk" {
-  match attempt(fn () => load_all([1, 0 - 5, 3])!) {
+  match attempt(fn () => load_all([1, -5, 3])!) {
     Result::Ok(_xs) => assert_that(false, "a bad id was accepted"),
     Result::Err(UserError::NotFound(id)) =>
-      assert_that(id == 0 - 5, "stopped at ${id} rather than at -5"),
+      assert_that(id == -5, "stopped at ${id} rather than at -5"),
   }
 }
 
@@ -91,9 +91,9 @@ test "option and result take one too" {
     let fell = Option::unwrap_or_else(Option::None, fn () => load_user(7)!)!;
     let ok: Result<Int, UserError> = Result::Ok(5);
     let doubled = Result::map(ok, fn n => load_user(n)!)!;
-    let m = Option::unwrap_or(mapped, 0 - 1);
-    let k = Option::unwrap_or(kept, 0 - 1);
-    let d = Result::unwrap_or(doubled, 0 - 1);
+    let m = Option::unwrap_or(mapped, -1);
+    let k = Option::unwrap_or(kept, -1);
+    let d = Result::unwrap_or(doubled, -1);
     "mapped ${m} kept ${k} fell ${fell} doubled ${d}"
   };
   match attempt(fn () => chained()!) {

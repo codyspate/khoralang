@@ -235,7 +235,7 @@ impl Response {
   pub fn json<A: Encode>(status: Int, body: A) -> Response {
     {
       status: status,
-      body: encode(Raw::to_json(body.encode())),
+      body: encode(Raw::to_json(Encode::encode(body))),
       content_type: "application/json",
       headers: List::Nil,
     }
@@ -317,7 +317,7 @@ impl Response {
   fn extra(headers: List<Header>) -> String {
     match headers {
       List::Nil => "",
-      List::Cons(h, rest) => h.name + ": " + h.value + "\r\n" + Response::extra(rest),
+      List::Cons(h, rest) => "${h.name}: ${h.value}\r\n${Response::extra(rest)}",
     }
   }
 
@@ -903,7 +903,7 @@ fn copy_at(from: Array<U8>, into: Array<U8>, count: Int, offset: Int) -> () {
 pub fn request_length(bytes: Array<U8>, filled: Int) -> Int {
   let after = end_of_headers(bytes, filled);
   if after < 0 {
-    0 - 1
+    -1
   } else {
     let head = Array::prefix(bytes, after);
     // Header bytes that are not text are a request nobody can answer, and
@@ -924,7 +924,7 @@ pub fn request_length(bytes: Array<U8>, filled: Int) -> Int {
 /// fragment can split a character.
 fn end_of_headers(bytes: Array<U8>, filled: Int) -> Int {
   let mut i = 0;
-  let mut found = 0 - 1;
+  let mut found = -1;
   while found < 0 && i + 3 < filled {
     if U8::to_int(Array::get(bytes, i)) == 13
     && U8::to_int(Array::get(bytes, i + 1)) == 10
@@ -1386,10 +1386,10 @@ impl Router {
   fn unmatched<'er>(all: List<Route<'er>>, request: Request) -> Response {
     let allowed = Router::answerable(all, request.path);
     if String::byte_length(allowed) == 0 {
-      Response::text(404, "no route for " + request.path)
+      Response::text(404, "no route for ${request.path}")
     } else {
       Response::with_header(
-        Response::text(405, method_name(request.method) + " is not allowed for " + request.path),
+        Response::text(405, "${method_name(request.method)} is not allowed for ${request.path}"),
         "Allow",
         allowed,
       )
@@ -1430,7 +1430,7 @@ impl Router {
   fn naming(so_far: String, name: String) -> String {
     match String::index_of(so_far, name) {
       Option::Some(_at) => so_far,
-      Option::None => so_far + ", " + name,
+      Option::None => "${so_far}, ${name}",
     }
   }
 
@@ -1454,7 +1454,7 @@ impl Router {
               } else {
                 match String::index_of(so_far, name) {
                   Option::Some(_at) => so_far,
-                  Option::None => so_far + ", " + name,
+                  Option::None => "${so_far}, ${name}",
                 }
               };
             Router::allowing(rest, path, next)
@@ -1481,7 +1481,7 @@ impl Router {
     let server = Router::bound(port)!;
     // Announced before the loop rather than after it, because after never
     // comes: `serving` returns when the process stops.
-    print("listening on " + Int::to_string(port));
+    print("listening on ${Int::to_string(port)}");
     Router::serving(router, server)!
   }
 
@@ -1594,7 +1594,7 @@ impl Router {
   {
     let settings = tls_server(certificate, key)!;
     let server = Router::bound(port)!;
-    print("listening on " + Int::to_string(port) + ", over TLS");
+    print("listening on ${Int::to_string(port)}, over TLS");
     bounded_nursery(256, fn () => Router::serve_secured(router, server, settings)!)!
   }
 
@@ -1888,7 +1888,7 @@ impl Router {
   fn allowed_answer<'er>(routes: List<Route<'er>>, path: String) -> Response {
     let allowed = Router::answerable(routes, path);
     if String::byte_length(allowed) == 0 {
-      Response::text(404, "no route for " + path)
+      Response::text(404, "no route for ${path}")
     } else {
       Response::with_header(
         { status: 204, body: "", content_type: "text/plain", headers: List::Nil },
@@ -2199,7 +2199,7 @@ fn dial(url: Url) -> Result<Transport, CallError>
   } else {
     let socket = connect_to(url.host, url.port);
     if socket == invalid_handle() {
-      Result::Err(CallError::Unreachable(url.host + ":" + Int::to_string(url.port)))
+      Result::Err(CallError::Unreachable("${url.host}:${Int::to_string(url.port)}"))
     } else {
       set_receive_timeout(socket, default_answer_timeout());
       Result::Ok(over_socket(socket))
@@ -2251,7 +2251,7 @@ fn render(call: Call, url: Url) -> String {
   let host = if url.port == default_port(url.secure) {
     url.host
   } else {
-    url.host + ":" + Int::to_string(url.port)
+    "${url.host}:${Int::to_string(url.port)}"
   };
   method_name(call.method) + " " + url.target + " HTTP/1.1\r\n"
   + "Host: " + host + "\r\n"
@@ -2267,7 +2267,7 @@ fn rendered_headers(headers: List<Header>) -> String {
   match headers {
     List::Nil => "",
     List::Cons(head, rest) =>
-      head.name + ": " + head.value + "\r\n" + rendered_headers(rest),
+      "${head.name}: ${head.value}\r\n${rendered_headers(rest)}",
   }
 }
 
@@ -2300,7 +2300,7 @@ fn read_answer(transport: Transport, limit: Int) -> Result<String, CallError> {
   let into: Array<U8> = Array::new(limit, 0);
   let scratch: Array<U8> = Array::new(chunk(), 0);
   let mut filled = 0;
-  let mut want = 0 - 1;
+  let mut want = -1;
   let mut closed = false;
   let mut full = false;
   let mut going = true;
@@ -2343,16 +2343,16 @@ fn read_answer(transport: Transport, limit: Int) -> Result<String, CallError> {
 fn answer_length(bytes: Array<U8>, filled: Int) -> Int {
   let after = end_of_headers(bytes, filled);
   if after < 0 {
-    0 - 1
+    -1
   } else {
     let head = String::from_bytes(Array::prefix(bytes, after));
     if is_chunked(head) {
       let body = String::from_bytes(Array::prefix(bytes, filled));
       let ends = chunked_end(body, after);
-      if ends < 0 { 0 - 1 } else { ends }
+      if ends < 0 { -1 } else { ends }
     } else {
       match declared_length(head) {
-        Option::None => 0 - 1,
+        Option::None => -1,
         Option::Some(length) => after + length,
       }
     }
@@ -2370,7 +2370,7 @@ fn is_chunked(head: String) -> Bool {
     Option::None => false,
     Option::Some(lines) => match Map::get(parse_headers(lines.rest), "transfer-encoding") {
       Option::None => false,
-      Option::Some(value) => String::index_of(lowered(value), "chunked").is_some(),
+      Option::Some(value) => Option::is_some(String::index_of(lowered(value), "chunked")),
     },
   }
 }
@@ -2395,7 +2395,7 @@ fn declared_length(head: String) -> Option<Int> {
 /// -1 while the terminating chunk has not arrived.
 fn chunked_end(text: String, from: Int) -> Int {
   let mut at = from;
-  let mut answer = 0 - 1;
+  let mut answer = -1;
   let mut going = true;
   while going {
     match chunk_header(text, at) {
@@ -2453,7 +2453,7 @@ fn trailer_end(text: String, from: Int) -> Int {
   let rest = String::slice(text, from, String::byte_length(text));
   match String::index_of(rest, "\r\n\r\n") {
     // No trailers: the final chunk's CRLF is immediately the terminating one.
-    Option::None => if String::starts_with(rest, "\r\n") { from + 2 } else { 0 - 1 },
+    Option::None => if String::starts_with(rest, "\r\n") { from + 2 } else { -1 },
     Option::Some(at) => if at == 0 { from + 2 } else { from + at + 4 },
   }
 }

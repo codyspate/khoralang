@@ -2,7 +2,7 @@ module ledger_service::main;
 
 import std::core::{ChildFailed, Fibers, List, Map, Option, Result, SharedFn, Show, Validated, print};
 import std::db::{Cell, Db, DbError, Row, transaction};
-import std::schema::{Decode, Rejection, list};
+import std::schema::{Decode, Rejection, Schema, list};
 import std::clock::{Clock};
 import std::env::{Env, EnvError, variable_or};
 import std::json::{Json, JsonError, parse};
@@ -110,7 +110,7 @@ fn number_at(cells: List<Cell>, index: Int) -> Option<Int> {
 /// a database that has drifted from this file is a thing to know, and a
 /// listing that was quietly one entry short is how nobody knew.
 fn entries_of(rows: List<Row>) -> Validated<List<Entry>, Rejection> {
-  list(Entry::schema()).decode(Row::sequence(rows))
+  Schema::decode(list(Entry::schema()), Row::sequence(rows))
 }
 
 // ---------------------------------------------------------------------------
@@ -393,7 +393,7 @@ fn number_setting(name: String, fallback: Int) -> Int with { env: Env } raises E
     // An operator's typo is worth saying so about and not worth refusing to
     // start over. `link_shortener` makes the same call for the same reason.
     Option::None => {
-      print(name + " is not a number; using " + Int::to_string(fallback));
+      print("${name} is not a number; using ${Int::to_string(fallback)}");
       fallback
     },
   }

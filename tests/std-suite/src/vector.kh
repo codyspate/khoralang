@@ -293,7 +293,7 @@ fn cost_of_indexing() -> Int {
   // the difference then comes out at minus two, which is the collector working
   // exactly as promised and this test measuring the wrong thing.
   let still = Vector::length(v);
-  if read == 7 && still == 1 { after - before } else { 0 - 1 }
+  if read == 7 && still == 1 { after - before } else { -1 }
 }
 
 test "a vector indexes without building an option" {
@@ -310,7 +310,7 @@ test "a stable sort keeps equal elements in the order they were given" {
     { key: 2, value: "second" },
   ];
   let sorted = List::sort_by(items, fn (a, b) => Int::cmp(a.key, b.key));
-  let shown = List::fold(sorted, "", fn (acc, p) => acc + p.value + " ");
+  let shown = List::fold(sorted, "", fn (acc, p) => "${acc}${p.value} ");
   assert_that(shown == "only first second ", "the sort gave: ${shown}");
 }
 

@@ -68,7 +68,7 @@ pub fn run(command: String) -> Int {
 /// child is comparing against what `$?` would have said.
 fn exit_status(status: Int) -> Int {
   if status < 0 {
-    0 - 1
+    -1
   } else {
     let signal = Int::and(status, 127);
     if signal == 0 { Int::and(Int::shr(status, 8), 255) } else { 128 + signal }

@@ -266,7 +266,7 @@ impl Log {
     handler for Log {
       record: fn (level, message, attributes) =>
       if Severity::severity(level) >= Severity::severity(minimum) {
-        eprint(Severity::label(level) + " " + message + rendered(attributes))
+        eprint("${Severity::label(level)} ${message}${rendered(attributes)}")
       } else {
       },
     }
@@ -290,7 +290,7 @@ fn quoted(text: String) -> String {
 /// diffable between runs.
 fn fields(attributes: List<Attribute>) -> String {
   List::fold(attributes, "", fn (sofar, each) =>
-    sofar + "," + quoted(each.name) + ":" + as_json(each.value))
+    "${sofar},${quoted(each.name)}:${as_json(each.value)}")
 }
 
 /// One attribute value, as JSON.
@@ -306,7 +306,7 @@ fn as_json(value: Value) -> String {
 /// The attributes as ` key=value`, or nothing at all when there are none.
 fn rendered(attributes: List<Attribute>) -> String {
   List::fold(attributes, "", fn (sofar, each) =>
-    sofar + " " + each.name + "=" + shown(each.value))
+    "${sofar} ${each.name}=${shown(each.value)}")
 }
 
 /// One attribute value, as text.
