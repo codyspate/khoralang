@@ -844,13 +844,13 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   the fiber that made it until the runtime hands it to another fiber and
   marks it shared; with the switch set at compile time, a local object's
   count is an ordinary load and store instead of a locked instruction, and a
-  shared object's stays locked. The switch is part of the build cache key. It
-  is off because two programs the checker accepts still reach a record with
-  a mutable field from two fibers (a spawn capture whose type is settled
-  after the spawn, and a record with a mutable field raised as a fiber's
-  error and joined twice); with the switch set, a write to that field races
-  the counts of what it holds, which can crash a release build. A debug
-  build traps on both with or without the switch.
+  shared object's stays locked. The switch is part of the build cache key.
+  It rests on no fiber reaching a record with a mutable field that another
+  fiber holds. The checker refuses the three routes known to do that, each
+  listed under Fixed: a capture whose type is settled after a spawn or a
+  handler, and a fiber's error. If one is missed, a write to that field races
+  the counts of what it holds, which can crash a release build with the
+  switch set. A debug build traps on it with or without the switch.
 
 - **`std::net::http` writes `Date` on every response** a `Connection`
   sends, including the `Router`'s: the current second as an IMF-fixdate
