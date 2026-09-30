@@ -1210,7 +1210,15 @@ test "still_open keeps only what arrived from a reused inbox" {
   Writer::cstring(status, "UTC");
   let unasked = framed(83, Writer::finish(status));
   transmit_bytes(w.server, unasked);
-  assert(still_open(w.client));
+  // `still_open` reads only what has already arrived, and loopback delivery
+  // isn't instant everywhere: on macOS the first look could find nothing and
+  // leave `pending` empty. Each look keeps what it found and changes nothing
+  // else, so look until the message is there, or give up after a bound.
+  let mut looks = 0;
+  while Array::length(w.client.pending) - w.client.start < Array::length(unasked) && looks < 200000 {
+    assert(still_open(w.client));
+    looks = looks + 1
+  };
   assert(Array::length(w.client.pending) - w.client.start == Array::length(unasked));
   match next_message(w.client) {
     Result::Ok(m) => assert(m.kind == 83),
