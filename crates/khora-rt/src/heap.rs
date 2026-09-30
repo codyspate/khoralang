@@ -16,7 +16,7 @@ use crate::counters::{ALLOC_COUNT, COUNTER_ORDER, LIVE_COUNT};
 #[cfg(target_family = "wasm")]
 use std::alloc::alloc_zeroed;
 use std::alloc::{dealloc, handle_alloc_error};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 /// An object waiting to be released, and the callback that releases its
@@ -41,9 +41,10 @@ thread_local! {
     /// scope, went the deep way. It is why `List::sort` still gave out in the tens
     /// of thousands after everything else stopped.
     ///
-    /// So the recursion becomes a queue. `None` means nothing is draining and the
-    /// next free owns the drain; `Some` means one is in progress, and a nested
-    /// free hands its object over rather than descending into it. The order frees
+    /// So past [`SHALLOW`] levels the recursion becomes a queue. `None` means
+    /// nothing is draining, and the next free either recurses (see [`claim`])
+    /// or owns the drain; `Some` means one is in progress, and a nested free
+    /// hands its object over rather than descending into it. The order frees
     /// happen in is not observable — nothing runs at destruction but the release
     /// of children — so a queue is as correct as the stack was.
     ///
@@ -52,28 +53,112 @@ thread_local! {
     /// the path that *actually frees*, which already pays for `dealloc`; the
     /// common case, a decrement that does not reach zero, never gets here.
     static PENDING: RefCell<Option<Vec<Deferred>>> = const { RefCell::new(None) };
+
+    /// How many releases on this thread are nested inside one another without
+    /// a drain, each one freeing its object directly from inside its parent's
+    /// `drop_fields`. Never more than [`SHALLOW`]; see [`claim`].
+    ///
+    /// It belongs to the fiber, as the drain does (S3), and leaves with it at
+    /// a switch: see [`take_drain`].
+    static DIRECT: Cell<u32> = const { Cell::new(0) };
 }
 
-/// Hands an object to whoever is draining, or claims the drain.
+/// How deep a release may recurse before it falls back to the drain.
 ///
-/// `true` when the object was queued and this call is done with it. `false`
-/// when there was no drain in progress — the caller now owns one, and must
-/// release the object itself and then call [`drain`].
+/// **What this prevents: paying for the queue on every small graph.** Most
+/// objects a program frees are shallow -- a record and its strings, a JSON
+/// node and its fields -- and queueing each child costs a vector allocation
+/// for the drain, a push and a pop per child, and the thread-local calls
+/// around them. Freeing them directly, by recursion, is what the queue
+/// replaced, and for a graph this shallow the recursion is safe. On the
+/// TechEmpower server it saves about 5% of user instructions per request on
+/// `/json` and on `/fortunes`.
+///
+/// **What it costs: 24 more frames of stack at most**, a `release_now`, a
+/// `drop_fields` and a `khora_drop` each, on top of what a drain uses. The
+/// release at this depth claims a drain, and everything under it is queued
+/// as before, so a list of any length is still freed in bounded stack.
+const SHALLOW: u32 = 24;
+
+/// What the caller of [`claim`] now owes the object it took to zero.
+enum Claim {
+    /// Release it directly, then [`leave_direct`].
+    Direct,
+    /// Nothing: it is queued behind the drain in progress.
+    Queued,
+    /// Release it, then [`drain`]: the caller opened the drain.
+    Drain,
+}
+
+/// Decides how an object whose last reference is gone gets released.
+///
+/// **A drain in progress takes the object, whatever the depth.** Below
+/// [`SHALLOW`] with no drain the caller releases directly; at it, the caller
+/// opens a drain. The first rule is not what bounds the stack: a drain this
+/// function opened runs at depth [`SHALLOW`], so its objects queue by the
+/// depth alone. It decides only the drain [`khora_drop_reuse`] opens at any
+/// depth, whose released subtree stays on the queue, as it was before direct
+/// release existed.
+///
+/// Not inlined, for the reason [`leave_direct`] gives: it is reached again
+/// from inside releases that may have moved the fiber to another worker.
 #[inline(never)]
-fn queued(ptr: *mut u8, glue: Option<extern "C" fn(*mut u8)>) -> bool {
+fn claim(ptr: *mut u8, glue: Option<extern "C" fn(*mut u8)>) -> Claim {
     PENDING.with(|pending| {
         let mut slot = pending.borrow_mut();
-        match slot.as_mut() {
-            Some(queue) => {
-                queue.push((ptr as usize, glue));
-                true
-            }
-            None => {
-                *slot = Some(Vec::new());
-                false
-            }
+        if let Some(queue) = slot.as_mut() {
+            queue.push((ptr as usize, glue));
+            return Claim::Queued;
         }
+        let depth = DIRECT.with(Cell::get);
+        if depth < SHALLOW {
+            DIRECT.with(|direct| direct.set(depth + 1));
+            return Claim::Direct;
+        }
+        *slot = Some(Vec::new());
+        Claim::Drain
     })
+}
+
+/// Ends a direct release that [`claim`] allowed.
+///
+/// **Not inlined, and it decrements rather than restoring a saved depth.**
+/// The release before it can suspend (a finalizer that blocks, a fiber
+/// handle's join) and come back on another worker. Inlined, the compiler may
+/// reuse the thread-local's address computed before the switch, and write the
+/// depth into the old worker's slot, under whichever fiber runs there now
+/// (`crate::coro::installed` has the argument). A saved depth would be right
+/// only on the thread it was read on; the fiber's own depth came with it
+/// through [`restore_drain`], so taking one off is right on either.
+#[inline(never)]
+fn leave_direct() {
+    DIRECT.with(|direct| direct.set(direct.get() - 1));
+}
+
+/// Releases the object the caller took to zero, by whichever route [`claim`]
+/// picks. The tail of [`khora_drop`] and [`khora_drop_last`] for an object
+/// with a field routine.
+///
+/// # Safety
+///
+/// As [`release_now`]: `ptr` is live with a count of zero, the caller holds
+/// the only claim, and `drop_fields` matches its layout.
+#[inline(always)]
+unsafe fn release_last(ptr: *mut u8, drop_fields: Option<extern "C" fn(*mut u8)>) {
+    match claim(ptr, drop_fields) {
+        Claim::Direct => {
+            // SAFETY: the caller's contract, passed on unchanged.
+            unsafe { release_now(ptr, drop_fields) };
+            leave_direct();
+        }
+        Claim::Queued => {}
+        Claim::Drain => {
+            // SAFETY: as above; the drain this call opened releases what the
+            // object's fields queue.
+            unsafe { release_now(ptr, drop_fields) };
+            drain();
+        }
+    }
 }
 
 /// Releases everything queued, then ends the drain.
@@ -93,8 +178,8 @@ fn drain() {
     end_drain();
 }
 
-/// The next object in this thread's drain. See [`queued`] for why it is not
-/// inlined.
+/// The next object in this thread's drain. See [`leave_direct`] for why it is
+/// not inlined.
 #[inline(never)]
 fn next_queued() -> Option<Deferred> {
     PENDING.with(|pending| pending.borrow_mut().as_mut().and_then(|queue| queue.pop()))
@@ -112,19 +197,42 @@ fn swap_drain(with: Option<Vec<Deferred>>) -> Option<Vec<Deferred>> {
     PENDING.with(|pending| std::mem::replace(&mut *pending.borrow_mut(), with))
 }
 
-/// Takes this thread's drain away, for a fiber about to suspend. See
-/// [`crate::coro::suspend`].
-pub(crate) fn take_drain() -> Option<Vec<Deferred>> {
-    swap_drain(None)
+/// A suspended fiber's release in progress: its drain, and how deep its
+/// direct releases were nested when it left.
+pub(crate) struct Releasing {
+    queue: Option<Vec<Deferred>>,
+    depth: u32,
 }
 
-/// Puts a resumed fiber's drain back, on whichever thread it resumed on.
-pub(crate) fn restore_drain(drain: Option<Vec<Deferred>>) {
-    let left = swap_drain(drain);
+/// Swaps this thread's direct-release depth for `with`, answering what was
+/// there. Not inlined, as [`swap_drain`] is not.
+#[inline(never)]
+fn swap_direct(with: u32) -> u32 {
+    DIRECT.with(|direct| direct.replace(with))
+}
+
+/// Takes this thread's release in progress away, for a fiber about to
+/// suspend. See [`crate::coro::suspend`].
+///
+/// **The depth goes too.** Left behind, a fiber parked [`SHALLOW`] deep would
+/// hand the next fiber on its worker a depth that fiber never entered, so
+/// every release that fiber made would open a drain -- and the parked fiber
+/// would come back on another worker with that worker's depth, and leave
+/// taking one off it.
+pub(crate) fn take_drain() -> Releasing {
+    Releasing { queue: swap_drain(None), depth: swap_direct(0) }
+}
+
+/// Puts a resumed fiber's release in progress back, on whichever thread it
+/// resumed on.
+pub(crate) fn restore_drain(releasing: Releasing) {
+    let left = swap_drain(releasing.queue);
+    let depth = swap_direct(releasing.depth);
     // A worker resumes fibers from its own loop, never from inside a release,
-    // and every fiber that suspended took its drain with it -- so there is
+    // and every fiber that suspended took its release with it -- so there is
     // nothing here to overwrite.
     debug_assert!(left.is_none(), "a fiber resumed onto a worker that already had a drain open");
+    debug_assert!(depth == 0, "a fiber resumed onto a worker that was already releasing directly");
 }
 
 /// Sets this thread's drain aside for as long as it is alive, and puts it back
@@ -197,8 +305,8 @@ unsafe fn release_now(ptr: *mut u8, drop_fields: Option<extern "C" fn(*mut u8)>)
 
     if let Some(drop_fields) = drop_fields {
         // Releases the children this object owns. They come back through
-        // `khora_drop`, see a drain in progress, and queue themselves rather
-        // than descending.
+        // `khora_drop`, and either descend one level (see [`claim`]) or
+        // queue themselves behind a drain.
         drop_fields(ptr);
     }
 
@@ -519,14 +627,11 @@ pub unsafe extern "C" fn khora_drop(ptr: *mut u8, drop_fields: Option<extern "C"
         return;
     }
 
-    // Queued if something above is already freeing, so a graph is released
-    // iteratively rather than as deep as it is. See [`PENDING`].
-    if queued(ptr, drop_fields) {
-        return;
-    }
+    // Directly while shallow, else queued behind the drain or opening one,
+    // so a graph costs no more stack than [`SHALLOW`] levels. See [`claim`].
+    //
     // SAFETY: this thread took the count to zero and holds the only claim.
-    unsafe { release_now(ptr, drop_fields) };
-    drain();
+    unsafe { release_last(ptr, drop_fields) };
 }
 
 /// Releases a reference and, if it was the last, keeps the memory.
@@ -755,15 +860,11 @@ pub unsafe extern "C" fn khora_drop_last(
         return;
     }
 
-    // As `khora_drop`, and this is the one generated code calls: a graph is
-    // released iteratively, so freeing costs no stack. See [`PENDING`].
-    if queued(ptr, drop_fields) {
-        return;
-    }
+    // As `khora_drop`, and this is the one generated code calls.
+    //
     // SAFETY: still allocated — this thread took the count to zero and holds
     // the only claim on it.
-    unsafe { release_now(ptr, drop_fields) };
-    drain();
+    unsafe { release_last(ptr, drop_fields) };
 }
 
 /// Frees a token nothing spent.
@@ -863,5 +964,287 @@ pub(crate) unsafe fn release_raw(ptr: *mut u8) {
     unsafe { dealloc(ptr, layout) };
     if crate::counters::counting() {
         LIVE_COUNT.fetch_sub(1, COUNTER_ORDER);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Releasing directly while shallow ([`SHALLOW`]), against the three
+    //! things the queue exists for: stack bounded by depth, a drain that
+    //! belongs to its fiber (S3), and finalizers that free more.
+
+    use super::*;
+    use crate::region::{khora_region_defer, khora_region_open, release_shim};
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Mutex;
+
+    /// A link: field 0 is a child object, field 1 its drop glue (or null).
+    /// The shape every generated glue has -- release each field through
+    /// `khora_drop` -- with the child's glue carried in the object so one
+    /// routine serves any graph.
+    fn link(child: *mut u8, glue: Option<extern "C" fn(*mut u8)>) -> *mut u8 {
+        let object = khora_alloc(16, 0);
+        // SAFETY: a fresh object with two words of fields, reached by nothing
+        // else yet.
+        unsafe {
+            let fields = object.add(KHORA_FIELD_OFFSET);
+            fields.cast::<*mut u8>().write(child);
+            fields.add(8).cast::<Option<extern "C" fn(*mut u8)>>().write(glue);
+        }
+        object
+    }
+
+    /// Releases a [`link`]'s child.
+    fn release_child(object: *mut u8) {
+        // SAFETY: called only on a live link, from its own glue, whose
+        // reference to the child is being given up here.
+        unsafe {
+            let fields = object.add(KHORA_FIELD_OFFSET);
+            let child = fields.cast::<*mut u8>().read();
+            let glue = fields.add(8).cast::<Option<extern "C" fn(*mut u8)>>().read();
+            khora_drop(child, glue);
+        }
+    }
+
+    /// A list of `n` links, each one's child the next, counting releases in
+    /// `glue`'s counter.
+    fn list(n: usize, glue: extern "C" fn(*mut u8)) -> *mut u8 {
+        let mut head = std::ptr::null_mut();
+        for _ in 0..n {
+            head = link(head, Some(glue));
+        }
+        head
+    }
+
+    /// A closure object of type `() -> ()`, as `crate::region`'s tests build
+    /// one: a single field holding the code pointer.
+    fn closure(code: extern "C" fn(*mut u8)) -> *mut u8 {
+        let object = khora_alloc(8, 0);
+        // SAFETY: one word of fields, freshly allocated.
+        unsafe { object.add(KHORA_FIELD_OFFSET).cast::<extern "C" fn(*mut u8)>().write(code) };
+        object
+    }
+
+    /// A region with one finalizer, as a link's child.
+    fn region_running(finalizer: extern "C" fn(*mut u8)) -> *mut u8 {
+        let region = khora_region_open();
+        // SAFETY: a live region and a live closure with no captures.
+        unsafe { khora_region_defer(region, closure(finalizer), None, None) };
+        region
+    }
+
+    /// Waits up to five seconds for `done`, so a red run fails rather than
+    /// hangs.
+    fn eventually(done: impl Fn() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !done() {
+            if std::time::Instant::now() > deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        true
+    }
+
+    /// **A list 100,000 deep is freed without running out of stack**, on a
+    /// test thread's stack and on a fiber's. What this guards: a depth
+    /// bound that stopped bounding. Direct release recurses three frames
+    /// per level, so without the fall-back to the drain at [`SHALLOW`] this
+    /// is 300,000 frames and the process dies.
+    #[test]
+    fn a_list_a_hundred_thousand_deep_is_freed_without_overflowing() {
+        static FREED: AtomicUsize = AtomicUsize::new(0);
+        extern "C" fn counted(object: *mut u8) {
+            FREED.fetch_add(1, Ordering::Relaxed);
+            release_child(object);
+        }
+        const DEEP: usize = 100_000;
+
+        let head = list(DEEP, counted);
+        // SAFETY: the list's only reference.
+        unsafe { khora_drop(head, Some(counted)) };
+        assert_eq!(FREED.load(Ordering::Relaxed), DEEP, "every link of the list was released");
+
+        let pool = crate::scheduler::Scheduler::new(1);
+        pool.spawn(crate::coro::Task::new(|| {
+            let head = list(DEEP, counted);
+            // SAFETY: as above.
+            unsafe { khora_drop(head, Some(counted)) };
+        }));
+        pool.drain();
+        assert_eq!(FREED.load(Ordering::Relaxed), 2 * DEEP, "and again on a fiber's stack");
+    }
+
+    /// **A drain one fiber opened is not taken over by another** (S3), nor
+    /// is how deep its direct releases were.
+    ///
+    /// Fiber A releases a list longer than [`SHALLOW`]: the first 24 links
+    /// go directly, the 25th opens a drain, and a release queued behind it
+    /// parks with a sibling still queued. Fiber B then runs on the same
+    /// worker. Its releases must see neither A's queue nor A's depth: its
+    /// shallow graph is released directly (its child freed inside its own
+    /// glue, not after it), and its region's finalizer runs when the region
+    /// ends. Then A resumes and finishes its own queue.
+    ///
+    /// A's sibling released before A parked means there was no bound at all.
+    #[test]
+    fn a_drain_opened_by_one_fiber_is_not_taken_over_by_another() {
+        use crate::coro::Task;
+        use crate::scheduler::{park_current, waker_for_current, Scheduler, Waker};
+
+        static PARKED: Mutex<Option<Waker>> = Mutex::new(None);
+        static SIBLING_FREED: AtomicUsize = AtomicUsize::new(0);
+        static SIBLING_AT_PARK: AtomicUsize = AtomicUsize::new(usize::MAX);
+        static A_LINKS: AtomicUsize = AtomicUsize::new(0);
+        static IN_PARENT: AtomicUsize = AtomicUsize::new(0);
+        static CHILD_INSIDE: AtomicUsize = AtomicUsize::new(usize::MAX);
+        static FINALIZED: AtomicUsize = AtomicUsize::new(0);
+        static B_SAW: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+        extern "C" fn a_link(object: *mut u8) {
+            A_LINKS.fetch_add(1, Ordering::SeqCst);
+            release_child(object);
+        }
+        extern "C" fn parks(_object: *mut u8) {
+            SIBLING_AT_PARK.store(SIBLING_FREED.load(Ordering::SeqCst), Ordering::SeqCst);
+            *PARKED.lock().unwrap() = waker_for_current();
+            park_current();
+        }
+        extern "C" fn sibling(_object: *mut u8) {
+            SIBLING_FREED.fetch_add(1, Ordering::SeqCst);
+        }
+        /// Releases the sibling, then the parker. Behind a drain the two
+        /// are queued, and the parker, pushed last, is popped first.
+        extern "C" fn pair(object: *mut u8) {
+            A_LINKS.fetch_add(1, Ordering::SeqCst);
+            release_child(object);
+            // SAFETY: a pair is a link with a second link as its child's
+            // sibling: see how the test builds it.
+            unsafe {
+                let parker = object.add(KHORA_FIELD_OFFSET + 16).cast::<*mut u8>().read();
+                khora_drop(parker, Some(parks));
+            }
+        }
+        extern "C" fn parent(object: *mut u8) {
+            IN_PARENT.store(1, Ordering::SeqCst);
+            release_child(object);
+            IN_PARENT.store(0, Ordering::SeqCst);
+        }
+        extern "C" fn child(_object: *mut u8) {
+            CHILD_INSIDE.store(IN_PARENT.load(Ordering::SeqCst), Ordering::SeqCst);
+        }
+        extern "C" fn finalizer(_closure: *mut u8) {
+            FINALIZED.fetch_add(1, Ordering::SeqCst);
+        }
+
+        let pool = Scheduler::new(1);
+        pool.spawn(Task::new(|| {
+            // The pair: a link to the sibling, with the parker in a third
+            // field.
+            let pair_object = khora_alloc(24, 0);
+            // SAFETY: a fresh object with three words of fields.
+            unsafe {
+                let fields = pair_object.add(KHORA_FIELD_OFFSET);
+                fields.cast::<*mut u8>().write(khora_alloc(0, 0));
+                fields.add(8).cast::<Option<extern "C" fn(*mut u8)>>().write(Some(sibling));
+                fields.add(16).cast::<*mut u8>().write(khora_alloc(0, 0));
+            }
+            let mut head = pair_object;
+            let mut glue: extern "C" fn(*mut u8) = pair;
+            for _ in 0..(SHALLOW as usize + 6) {
+                head = link(head, Some(glue));
+                glue = a_link;
+            }
+            // SAFETY: the graph's only reference.
+            unsafe { khora_drop(head, Some(glue)) };
+        }));
+        assert!(eventually(|| PARKED.lock().unwrap().is_some()), "fiber A never parked");
+        assert_eq!(
+            SIBLING_AT_PARK.load(Ordering::SeqCst),
+            0,
+            "the sibling was released before its queued neighbor parked: the release never \
+             fell back to the drain, so it was not bounded"
+        );
+
+        pool.spawn(Task::new(|| {
+            let object = link(link(std::ptr::null_mut(), Some(child)), Some(child));
+            // SAFETY: the only reference; `parent` releases the link to `child`.
+            unsafe { khora_drop(object, Some(parent)) };
+            let holder = link(region_running(finalizer), Some(release_shim));
+            // SAFETY: the only reference.
+            unsafe { khora_drop(holder, Some(a_link_free)) };
+            B_SAW.store(FINALIZED.load(Ordering::SeqCst), Ordering::SeqCst);
+        }));
+        extern "C" fn a_link_free(object: *mut u8) {
+            release_child(object);
+        }
+        assert!(eventually(|| B_SAW.load(Ordering::SeqCst) != usize::MAX), "fiber B never finished");
+        assert_eq!(
+            CHILD_INSIDE.load(Ordering::SeqCst),
+            1,
+            "fiber B's shallow graph was not released directly: it inherited A's queue or depth"
+        );
+        assert_eq!(
+            B_SAW.load(Ordering::SeqCst),
+            1,
+            "fiber B's region ended and its finalizer had not run: its release was queued behind A"
+        );
+
+        if let Some(waker) = PARKED.lock().unwrap().take() {
+            waker.wake();
+        }
+        pool.drain();
+        assert_eq!(SIBLING_FREED.load(Ordering::SeqCst), 1, "A's own drain finished when A resumed");
+        assert_eq!(A_LINKS.load(Ordering::SeqCst), SHALLOW as usize + 7, "every link of A's graph was released");
+    }
+
+    /// **A finalizer that frees more during a shallow release works**: a
+    /// deep list is freed in bounded stack, a region it ends runs its
+    /// finalizer at once, and everything is freed exactly once.
+    ///
+    /// The region is three links down, so it is released directly with the
+    /// depth at three and no drain open, and its finalizer's frees start
+    /// from there.
+    #[test]
+    fn a_finalizer_frees_more_during_a_shallow_release() {
+        static LIST_FREED: AtomicUsize = AtomicUsize::new(0);
+        static INNER_RAN: AtomicUsize = AtomicUsize::new(0);
+        static OUTER_SAW: AtomicUsize = AtomicUsize::new(usize::MAX);
+        static LINKS: AtomicUsize = AtomicUsize::new(0);
+        const DEEP: usize = 100_000;
+
+        extern "C" fn counted(object: *mut u8) {
+            LIST_FREED.fetch_add(1, Ordering::SeqCst);
+            release_child(object);
+        }
+        extern "C" fn counted_link(object: *mut u8) {
+            LINKS.fetch_add(1, Ordering::SeqCst);
+            release_child(object);
+        }
+        extern "C" fn inner(_closure: *mut u8) {
+            INNER_RAN.fetch_add(1, Ordering::SeqCst);
+        }
+        extern "C" fn outer(_closure: *mut u8) {
+            let head = list(DEEP, counted);
+            // SAFETY: the list's only reference.
+            unsafe { khora_drop(head, Some(counted)) };
+            let holder = link(region_running(inner), Some(release_shim));
+            // SAFETY: the only reference.
+            unsafe { khora_drop(holder, Some(counted_link)) };
+            OUTER_SAW.store(INNER_RAN.load(Ordering::SeqCst), Ordering::SeqCst);
+        }
+
+        let mut head = region_running(outer);
+        let mut glue: extern "C" fn(*mut u8) = release_shim;
+        for _ in 0..3 {
+            head = link(head, Some(glue));
+            glue = counted_link;
+        }
+        // SAFETY: the graph's only reference.
+        unsafe { khora_drop(head, Some(glue)) };
+
+        assert_eq!(LIST_FREED.load(Ordering::SeqCst), DEEP, "the finalizer's list was freed");
+        assert_eq!(OUTER_SAW.load(Ordering::SeqCst), 1, "the region ended in the finalizer ran its finalizer there");
+        assert_eq!(LINKS.load(Ordering::SeqCst), 4, "every link was released once");
     }
 }

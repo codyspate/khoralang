@@ -729,6 +729,12 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 
 ### Changed
 
+- **Performance: a small object graph is freed directly.** Releasing the last
+  reference to an object frees its children by recursion up to 24 levels
+  deep, and queues whatever lies deeper, so a list of any length is still
+  freed in bounded stack. On the TechEmpower server this is 4.8% fewer user
+  instructions per `/json` request and 4.9% fewer per `/fortunes` request.
+
 - **Performance: the allocation and copying on a server's request path.**
   The same answers with less work, measured on the TechEmpower server. A
   new array's fill is written in bulk: nothing for a zero fill, one `memset`
