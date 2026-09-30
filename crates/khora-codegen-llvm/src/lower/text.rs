@@ -22,27 +22,44 @@
 use super::*;
 
 impl<'ctx> Lower<'_, 'ctx> {
-    /// `a + b` on two strings.
+    /// `a + b + .. + z` on strings, as one string.
+    ///
+    /// **What this prevents: one allocation and one copy of everything so far
+    /// per `+`.** `"<${a}|${b}>"` desugars to four `+`s, and building them
+    /// pairwise made four strings, three of them freed at once, and copied the
+    /// front of the text once per piece after it. Here it is one `khora_alloc`
+    /// sized for every piece and one `memcpy` per piece. Nothing can tell the
+    /// difference: a string is immutable and has no identity.
     ///
     /// Generated rather than a runtime call, for the same reason `String::bytes`
     /// is: the string layout is the code generator's business, and the runtime
-    /// stays a function of the data it is handed. `khora_alloc` and two
-    /// `memcpy`s are the whole of it.
+    /// stays a function of the data it is handed.
     ///
-    /// Both operands are released afterwards. Neither is reused even when one
-    /// is empty — returning the other would be one fewer allocation and a
-    /// second rule about when the result shares storage, and a string is
-    /// immutable so nothing would notice, but nothing needs it yet either.
-    pub(super) fn concat(&mut self, left: BasicValueEnum<'ctx>, right: BasicValueEnum<'ctx>) -> Flow<'ctx> {
+    /// Every piece is owned here and released afterwards, including one that
+    /// is empty. Returning the only non-empty piece would be one fewer
+    /// allocation and a second rule about when the result shares storage;
+    /// nothing needs it yet. The pieces must all be evaluated before this is
+    /// called, held so that an early exit between them releases the ones
+    /// before it (`Lower::operands`).
+    ///
+    /// What it costs: every piece stays live until the last one is built, so a
+    /// chain peaks at the pieces plus the result, where the pairwise form
+    /// peaked at the text so far plus the next piece.
+    pub(super) fn concat_n(&mut self, parts: &[BasicValueEnum<'ctx>]) -> Flow<'ctx> {
         let i64_type = self.be.ctx.i64_type();
-        let (a, b) = (left.into_pointer_value(), right.into_pointer_value());
-        let a_len = self.string_length(a);
-        let b_len = self.string_length(b);
-        let total = self
-            .be
-            .builder
-            .build_int_add(a_len, b_len, "concat.len")
-            .expect("adding two string lengths");
+        let pointers: Vec<_> = parts.iter().map(|p| p.into_pointer_value()).collect();
+        let lengths: Vec<_> = pointers.iter().map(|p| self.string_length(*p)).collect();
+        let mut total = i64_type.const_zero();
+        for (index, length) in lengths.iter().enumerate() {
+            total = match index {
+                0 => *length,
+                _ => self
+                    .be
+                    .builder
+                    .build_int_add(total, *length, "concat.len")
+                    .expect("adding string lengths"),
+            };
+        }
 
         let size = self
             .be
@@ -77,37 +94,49 @@ impl<'ctx> Lower<'_, 'ctx> {
             STRING_BYTES_OFFSET,
             "concat.bytes",
         );
-        for (source, len, offset) in [(a, a_len, None), (b, b_len, Some(a_len))] {
+        let mut at: Option<IntValue<'ctx>> = None;
+        for (source, len) in pointers.iter().zip(&lengths) {
             let from = runtime::byte_offset(
                 self.be.ctx,
                 &self.be.builder,
-                source,
+                *source,
                 STRING_BYTES_OFFSET,
                 "part.bytes",
             );
-            let to = match offset {
+            let to = match at {
                 None => out,
-                // SAFETY: `out` was just allocated with room for both halves,
-                // and `at` is the first half's length — so the second half
-                // starts inside the allocation by construction.
+                // SAFETY: `out` was just allocated with room for every piece,
+                // and `at` is the sum of the lengths of the pieces before this
+                // one, which is at most `total` -- so this piece starts inside
+                // the allocation, or one past its end when it and every piece
+                // after it are empty, which `inbounds` allows.
                 Some(at) => unsafe {
                     self.be
                         .builder
-                        .build_in_bounds_gep(self.be.ctx.i8_type(), out, &[at], "concat.second")
-                        .expect("addressing the second half")
+                        .build_in_bounds_gep(self.be.ctx.i8_type(), out, &[at], "concat.at")
+                        .expect("addressing the next piece")
                 },
             };
             // Alignment 1: the bytes follow a length word so they are in fact
-            // word-aligned, but the *second* copy starts wherever the first one
-            // ended, which is any offset at all.
+            // word-aligned, but every copy after the first starts wherever the
+            // one before it ended, which is any offset at all.
             self.be
                 .builder
-                .build_memcpy(to, 1, from, 1, len)
+                .build_memcpy(to, 1, from, 1, *len)
                 .expect("copying a string");
+            at = Some(match at {
+                None => *len,
+                Some(at) => self
+                    .be
+                    .builder
+                    .build_int_add(at, *len, "concat.next")
+                    .expect("advancing past a piece"),
+            });
         }
 
-        self.drop(left, &Type::Str);
-        self.drop(right, &Type::Str);
+        for part in parts {
+            self.drop(*part, &Type::Str);
+        }
         Some(object.into())
     }
 

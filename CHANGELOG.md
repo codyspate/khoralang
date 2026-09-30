@@ -729,6 +729,11 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 
 ### Changed
 
+- **A `+` chain on strings builds one string.** `"<${a}|${b}>"` and
+  `a + b + c` allocate the result once and copy each piece once, where each
+  `+` allocated and copied the text so far; every piece stays alive until
+  the result is built.
+
 - **Performance: `with_data` given a lambda written in place builds the
   closure in the caller's frame**, not on the heap: one allocation fewer per
   call. `String::join` of 64 pieces makes 2 allocations, the buffer and the

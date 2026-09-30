@@ -42,6 +42,7 @@ mod channels;
 mod chars;
 mod combinators;
 mod compile;
+mod concat_chain;
 mod conformance;
 mod config;
 mod db;

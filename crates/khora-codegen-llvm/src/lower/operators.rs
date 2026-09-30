@@ -20,11 +20,18 @@ impl<'ctx> Lower<'_, 'ctx> {
         }
 
         let operand_ty = self.types.of(lhs).clone();
+        if matches!(op, BinOp::Add) && matches!(operand_ty, Type::Str) {
+            let pieces = self.string_chain(lhs, rhs);
+            let values = self.operands(&pieces)?;
+            return self.concat_n(&values);
+        }
         let both = self.operands(&[lhs, rhs])?;
         let (left, right) = (both[0], both[1]);
 
         match op {
-            BinOp::Add if matches!(operand_ty, Type::Str) => self.concat(left, right),
+            BinOp::Add if matches!(operand_ty, Type::Str) => {
+                unreachable!("string `+` is lowered as a chain above")
+            }
             // IEEE arithmetic does not overflow — it reaches infinity — so
             // there is nothing to trap on and nothing to check.
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div
@@ -104,6 +111,31 @@ impl<'ctx> Lower<'_, 'ctx> {
             }
             _ => self.compare(site, op, left, right, &operand_ty, range),
         }
+    }
+
+    /// The pieces of a `+` chain on strings, leftmost first.
+    ///
+    /// **Both sides are followed, not just the left spine.** `"a" + (b + c)`
+    /// is three pieces as surely as `"a" + b + c` is: a string `+` has no
+    /// effect but its result, and the pieces are still evaluated in the order
+    /// they are written, which is the order the nested form evaluated them in.
+    /// An operand that is not itself a string `+` -- a call, a hole, a block
+    /// ending in a `+` -- is one piece, built by its own lowering.
+    fn string_chain(&self, lhs: ExprId, rhs: ExprId) -> Vec<ExprId> {
+        let mut pieces = Vec::new();
+        let mut pending = vec![rhs, lhs];
+        while let Some(next) = pending.pop() {
+            match self.body.expr(next) {
+                Expr::Binary { op: BinOp::Add, lhs, rhs }
+                    if matches!(self.types.of(*lhs), Type::Str) =>
+                {
+                    pending.push(*rhs);
+                    pending.push(*lhs);
+                }
+                _ => pieces.push(next),
+            }
+        }
+        pieces
     }
 
     /// `a == b` on two strings, by content.
