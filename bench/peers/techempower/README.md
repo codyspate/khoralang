@@ -30,6 +30,10 @@ What every server does the same way:
 - **one process, pool of 16 connections** (`POOL` overrides it);
 - **multiple queries run one after another**, each its own statement; no
   `IN (...)`, no batching, no fan-out;
+- **one connection leased for the whole multiple-queries request**, not one
+  per query: Khora's handler takes a single lease and runs every query on it;
+  Go's pool could acquire once the same way. Neither driver's per-lease cost
+  is charged more than once per request;
 - **no caching** of rows, pages or serialised bodies;
 - `Server` and `Date` on every response, `Content-Length` on every response;
 - prepared statements **as the driver does by default**. The documented

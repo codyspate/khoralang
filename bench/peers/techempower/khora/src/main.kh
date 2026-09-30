@@ -135,26 +135,42 @@ fn count_of(request: Request) -> Int {
   }
 }
 
-/// **One query per row, one after another, each on its own lease.** The test
-/// forbids `IN (...)` and batching into one statement; every server here also
-/// runs them sequentially, so the comparison is not also a comparison of how
-/// much each fans out.
-fn multiple(pool: Pool, request: Request) -> Response with { rng: Random } {
-  let wanted = count_of(request);
+/// One lease's worth of rows: `wanted` queries, sequentially, on the
+/// connection the caller already holds.
+fn some_worlds(wanted: Int) -> Option<List<World>> with { db: Db, rng: Random } {
   let mut worlds: List<World> = List::Nil;
   let mut failed = false;
   let mut done = 0;
   while done < wanted && !failed {
-    match random_world(pool) {
-      Option::Some(world) => worlds = List::Cons(world, worlds),
-      Option::None => failed = true,
+    let id = rng.in_range(1, 10001);
+    match world_by_id(id) {
+      Result::Ok(List::Cons(row, List::Nil)) => match world_of(row) {
+        Option::Some(world) => worlds = List::Cons(world, worlds),
+        Option::None => failed = true,
+      },
+      _other => failed = true,
     };
     done = done + 1
   };
-  if failed {
-    Response::text(500, "the database did not answer")
-  } else {
-    Response::json(200, List::reverse(worlds))
+  if failed { Option::None } else { Option::Some(worlds) }
+}
+
+/// **One query per row, one after another, all on one lease.** The test
+/// forbids `IN (...)` and batching into one statement; every server here also
+/// runs them sequentially, so the comparison is not also a comparison of how
+/// much each fans out. The lease is taken once for the whole request, not
+/// once per row: pgx's pool can do the same (`Acquire` once, `QueryRow` in a
+/// loop), so this is a fair comparison of the pool designs, not a handicap
+/// for Go.
+fn multiple(pool: Pool, request: Request) -> Response with { rng: Random } {
+  let wanted = count_of(request);
+  let got = match with_db(pool, fn () => some_worlds(wanted)) {
+    Result::Ok(found) => found,
+    Result::Err(_) => Option::None,
+  };
+  match got {
+    Option::None => Response::text(500, "the database did not answer"),
+    Option::Some(worlds) => Response::json(200, List::reverse(worlds)),
   }
 }
 
