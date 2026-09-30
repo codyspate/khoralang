@@ -759,8 +759,8 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   keeps running, or blocks its thread, another worker takes it by stealing:
   an idle worker as soon as it looks for work, and a busy one once that
   worker has not started a fiber in about thirty-one of the busy one's
-  turns. A wake from a socket, a
-  timer or a thread that is not a fiber wakes an idle worker, and
+  turns. A wake from a timer or a thread that is not a fiber wakes an idle
+  worker, and
   so does a fiber's wake when its worker's queue already holds 512 fibers.
   `KHORA_WAKE_LOCAL=0` sends every wake to the shared queue. Measured on the
   TechEmpower server, four CPUs, 256 connections: server CPU per request
@@ -769,6 +769,22 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   as evenly as with the switch off. Nothing a program computes is different.
   `KHORA_SCHEDULER_REPORT` lines carry the counts of each path and each
   worker's turns.
+
+- **On the scheduler backend, workers find ready sockets themselves.** A
+  worker checks for ready sockets between fibers, every eighth fiber it runs
+  and whenever it runs out of work, and runs what it finds on its own queue
+  with no signal to another thread. The scheduler's watcher thread checks
+  only when no worker has for 2 ms, as when every worker is held by a
+  long-running fiber, and wakes an idle worker for what it finds. The timer
+  thread sleeps while no fiber is waiting on a deadline. `KHORA_WAKE_LOCAL=0`
+  sends what a worker finds to the shared queue, like every other wake.
+  Measured on the TechEmpower server, one CPU, 64 connections, per
+  request: kernel instructions 42.3k -> 28.7k on `/json` and 116k -> 76k on
+  `/fortunes`, context switches 0.99 -> 0.09 and 3.2 -> 0.4, user
+  instructions unchanged. The 99th-percentile latency of `/fortunes` on one
+  CPU rose from 17-35 ms to 59-73 ms in the same runs.
+  `KHORA_SCHEDULER_REPORT` lines carry `worker_polls`, `backstop_polls` and
+  `timer_passes`.
 
 - **An HTTP `Transport`'s `receive` is handed the same buffer on every read
   of a connection.** The buffer is lent for the call: a custom transport

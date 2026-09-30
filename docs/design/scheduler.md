@@ -932,10 +932,11 @@ within a megabyte.
 
 **The rule.** A wake made by a fiber running on a worker of the same pool puts
 the woken task on *that worker's* queue, and nothing else: no shared queue, no
-condvar, no reactor nudge. Every other wake keeps `inject` — from the reactor
-thread, the timer thread, a thread that is not a worker, a worker's own thread
-outside a fiber (`serve_io` delivering what it found), and a fiber of another
-pool. `KHORA_WAKE_LOCAL=0` sends every wake through `inject`; it is read once,
+condvar, no reactor nudge. Every other wake keeps `inject` — from the backstop
+thread, the timer thread, a thread that is not a worker, and a fiber of another
+pool — except readiness a worker finds in its own look at the reactor, which
+goes on that worker's queue by the same rule (see "Workers look at the reactor"
+below). `KHORA_WAKE_LOCAL=0` sends every wake through `inject`; it is read once,
 when a pool starts. `scheduler::wake_locally` is the code, and the counters
 `wakes_local`, `wakes_injected` and `wakes_over_bound` say which path a
 workload takes.
@@ -1094,6 +1095,113 @@ at once. For a waker that keeps running, it is up to a millisecond (a parked
 thief) or ten (the poller). The local path also moves work by stealing rather
 than by the shared queue, and a steal takes two locks where a pop takes one;
 at this load that did not show in the shares or the p99.
+
+### Workers look at the reactor
+
+**The rule.** A worker looks at the reactor itself, without waiting: every
+eight turns while it has work (`LOOK_EVERY`), and once more when its queues
+run dry, before the one idle worker allowed to wait in `epoll_wait` does so
+(`serve_io`). Readiness a worker finds goes on its own queue, as a
+fiber-to-fiber wake does, under the same bound and the same
+`KHORA_WAKE_LOCAL` switch. The `khora-reactor` thread is a backstop: every
+2 ms (`BACKSTOP_GAP`) it checks when a worker last looked, and only if none
+has for that long does it look itself, without waiting, and inject what it
+finds. Every caller of `Reactor::poll` claims `Shared::polling` first, so one
+poller at a time is in the kernel; the nudge's "is anybody polling" flag
+depends on that.
+
+**Why.** perf-r2 measured the JSON test on one CPU at 36.9 µs per request
+against Node's 24.3, and all of the gap was kernel time: each readiness was
+found by the reactor thread in a blocking `epoll_wait`, pushed through the
+shared queue with a condvar signal, and run by a worker taken off the CPU and
+put back. That was about one voluntary context switch per request on the
+reactor thread and one involuntary on the worker; Node makes 0.02. An idle
+worker already polled for itself (`serve_io`), but a server's worker is never
+idle: it always has the next woken fiber. Making the reactor thread's
+handoff cheaper was tried first (signal the condvar only when a worker was
+parked on it) and moved nothing, because the cost was the two threads
+sharing one CPU, not the futex.
+
+**Why local, and the case against.** The prototype ran with the woken fiber
+injected and with it local. On one CPU local bought about 0.9 µs; on four
+CPUs at 256 connections the JSON p99 rose from 5.1 ms (wake-one alone) to
+7.4–9.5 ms with worker polling (base 5.6–7.0), and the design review
+attributed that to the local half: workers keep the readiness they find, and
+only stealing spreads it. The spec for this change chose local, on by
+default, with no switch but `KHORA_WAKE_LOCAL`. The 4-CPU p99 has not been
+re-measured on this code, and is the first thing to check if a server's tail
+rises.
+
+**Why readiness is not stranded.** Two ways a woken fiber could sit on a
+queue nobody looks at, both already covered for wake-local:
+
+- *The worker sleeps.* The push is made on the worker's own thread, between
+  turns, and the next thing the loop does is `next`, which looks at that
+  queue before `serve_io` or `park` can put the worker to sleep.
+- *The worker's thread blocks.* It is running a fiber, so the look has
+  already ended; what it found is on its queue, and other workers steal it on
+  their `GLOBAL_INTERVAL` tick exactly as they would a local wake.
+
+And one new way readiness could go uncollected: every worker held in a long
+turn (a fiber that never reaches a safepoint, or a foreign call). Nobody goes
+round a loop to look, so the backstop does, within 2 ms, and injects. The
+fiber then runs on the first worker to come free.
+
+**The timer thread sleeps when there are no timers.** It used to wake every
+millisecond whatever the heap held. It now waits on a condvar, `timer_added`,
+while the heap is empty; `sleep_until` signals it when it adds the first
+deadline, and the pool's drop signals it to stop. Both signal under the
+timers' lock, so the thread cannot be between finding the heap empty and
+waiting when either arrives. With deadlines pending it still wakes at least
+every millisecond, because a deadline earlier than the soonest one does not
+signal it. perf-r2 put this thread at 1.2 µs of a fortunes request and 1.6%
+of a CPU at idle.
+
+**Counters.** `worker_polls` and `backstop_polls` count looks by each; a busy
+server whose `backstop_polls` climbs has workers held by long turns.
+`timer_passes` counts the timer thread's passes and stays still on a pool with
+no deadlines.
+
+**The tests.**
+`a_busy_workers_own_look_delivers_readiness_with_the_backstop_stalled` keeps
+the only worker busy with a yielding fiber and switches the backstop off, so
+only the look between turns can find the socket; without it the read hangs.
+`the_backstop_delivers_readiness_while_every_worker_is_held` holds both
+workers in spins without a safepoint and requires the byte's wake to be
+injected by the backstop before they are let go.
+`wakes_from_timers_are_injected_and_readiness_a_worker_finds_is_local` pins
+the paths: a worker's finds local (and injected under `KHORA_WAKE_LOCAL=0`),
+the timer thread's injected.
+`a_pool_with_no_timers_leaves_the_timer_thread_asleep` allows at most one
+pass in 100 ms with no deadlines, then requires a later `sleep_until` to fire.
+
+**Measured.** The TechEmpower server pinned to CPU 1 (one worker), `wrk -t2
+-c64` on CPUs 9-10, Postgres on 5,7; one compiler, one `std` and one app
+source, linked against the release runtime with and without this change;
+three interleaved rounds of 3 s warm-up and 5 s measured, medians. Counts
+from `perf stat` per request; kernel instructions are total minus `:u`. The
+box was at load 5.6-8.1, so CPU time is indicative and the counts are the
+result:
+
+| test | runtime | instr:u (k) | instr:k (k) | context switches | CPU µs (indicative) |
+| --- | --- | --- | --- | --- | --- |
+| `/json` | base | 80.0 | 42.3 | 0.99 | 41.0 |
+| `/json` | workers look | 80.2 | 28.7 | 0.09 | 28.7 |
+| `/fortunes` | base | 533.1 | 116.1 | 3.24 | 171.1 |
+| `/fortunes` | workers look | 532.4 | 76.4 | 0.42 | 128.0 |
+
+User instructions do not move; kernel instructions fall by a third on both,
+and context switches by 90% and 87%. The backstop looked 24-83 times per 5 s
+sample under load (305 in one sample where the box's load rose), against
+35,000-50,000 looks by the worker, and injected 56-267 wakes against
+139,000-256,000 local.
+
+**Open: fortunes' p99 on one CPU rose.** Across two sittings, five of five
+samples: base 17-35 ms, with workers looking 59-73 ms, at higher throughput
+(and JSON's p99 did not move in a consistent direction). The same binary
+with `KHORA_WAKE_LOCAL=0`, which injects what a worker finds, was worse
+(125 and 224 ms in two samples), so the local half is not the cause here.
+Not investigated; the 4-CPU tail is unmeasured too.
 
 ### Scale
 

@@ -70,6 +70,37 @@ const BUDGET: u32 = 128;
 /// queue itself, which spawns grow without limit.
 const WAKE_LOCAL_BOUND: usize = 512;
 
+/// How many turns a busy worker runs between its own looks at the reactor.
+///
+/// **What this prevents: a thread handoff for every readiness on a busy
+/// pool.** When only a separate thread watched sockets, each readiness it
+/// found was a shared-queue push, a condvar signal and the worker taken off
+/// its CPU and put back: on one CPU that was a context switch each way per
+/// request, and more than half of a JSON request's CPU. A worker that looks
+/// itself finds the readiness on the thread that will run the fiber, and puts
+/// it on its own queue.
+///
+/// What it costs: a zero-timeout `epoll_wait` every eight turns, about a
+/// microsecond, paid whether or not anything is ready. Taken from the
+/// prototype that measured it; not swept.
+const LOOK_EVERY: usize = 8;
+
+/// How long the reactor may go without a worker looking at it before the
+/// backstop thread looks instead.
+///
+/// **What this prevents: readiness nobody collects while every worker is
+/// held.** A worker looks between turns, so a pool whose every worker is in
+/// a long turn -- a fiber computing without a safepoint, or blocked in a
+/// foreign call -- looks at nothing, and a fiber whose socket became ready
+/// would wait for the first turn to end. The backstop injects what it finds,
+/// which is what wakes a worker that is parked.
+///
+/// What it costs: the backstop thread wakes this often for as long as the
+/// pool exists, busy or idle. What it does not do: run the fiber sooner. A
+/// readiness that arrives while every worker is held is found up to this
+/// late, and runs when the first worker is free.
+const BACKSTOP_GAP: std::time::Duration = std::time::Duration::from_millis(2);
+
 /// Whether a wake made by a fiber may go to its own worker's queue, from the
 /// value of `KHORA_WAKE_LOCAL`.
 ///
@@ -179,6 +210,13 @@ struct Shared {
     parked: Mutex<std::collections::HashMap<usize, Task, ById>>,
     /// Deadlines, and the fibers waiting on them.
     timers: Mutex<Timers>,
+    /// Wakes the timer thread when the first deadline arrives in an empty
+    /// heap, or the pool stops. Waited on with `timers`' lock.
+    ///
+    /// **What this prevents: a thread waking a thousand times a second to
+    /// find nothing.** A pool with no deadlines has nothing for the timer
+    /// thread to do, and it sleeps here until it has.
+    timer_added: Condvar,
     /// Sockets, and the fibers waiting on them.
     reactor: Reactor,
     /// Wakes a parked worker.
@@ -213,6 +251,15 @@ struct Shared {
     /// the worker count, which is what `Audit::in_hand` would otherwise
     /// assume.
     in_transit: AtomicUsize,
+    /// When the pool started, the origin of `last_look`.
+    born: std::time::Instant,
+    /// Microseconds after `born` at which a worker last finished looking at
+    /// the reactor. The backstop reads it to decide whether anybody is.
+    last_look: AtomicU64,
+    /// Tests only: the backstop thread never looks, so a test can show that
+    /// workers find readiness with nobody else watching.
+    #[cfg(test)]
+    backstop_off: AtomicBool,
     stopping: AtomicBool,
     counts: Counts,
 }
@@ -339,6 +386,23 @@ pub(crate) struct Counts {
     /// Included in `wakes_injected`. Zero under a workload means the bound
     /// never mattered to it.
     pub(crate) wakes_over_bound: AtomicU64,
+    /// Looks at the reactor made by a worker's own thread, busy or idle.
+    ///
+    /// Beside `backstop_polls` because the pair says who is finding
+    /// readiness: a busy server whose backstop count climbs has workers held
+    /// by long turns, and every wake the backstop delivers is a condvar
+    /// signal the worker's own look would not have paid.
+    pub(crate) worker_polls: AtomicU64,
+    /// Looks at the reactor made by the backstop thread, because no worker
+    /// had looked for [`BACKSTOP_GAP`].
+    pub(crate) backstop_polls: AtomicU64,
+    /// Times the timer thread looked at its heap.
+    ///
+    /// **What it exposes: a timer thread that ticks with nothing to wait
+    /// for.** An idle pool should leave this still; a count that climbs by
+    /// a thousand a second with no timers registered is the thread polling
+    /// instead of sleeping.
+    pub(crate) timer_passes: AtomicU64,
 }
 
 /// One worker's count of turns, alone on its cache line.
@@ -367,6 +431,9 @@ impl Counts {
             wakes_local: self.wakes_local.load(Ordering::Relaxed),
             wakes_injected: self.wakes_injected.load(Ordering::Relaxed),
             wakes_over_bound: self.wakes_over_bound.load(Ordering::Relaxed),
+            worker_polls: self.worker_polls.load(Ordering::Relaxed),
+            backstop_polls: self.backstop_polls.load(Ordering::Relaxed),
+            timer_passes: self.timer_passes.load(Ordering::Relaxed),
         }
     }
 }
@@ -392,6 +459,9 @@ pub(crate) struct Snapshot {
     pub(crate) wakes_local: u64,
     pub(crate) wakes_injected: u64,
     pub(crate) wakes_over_bound: u64,
+    pub(crate) worker_polls: u64,
+    pub(crate) backstop_polls: u64,
+    pub(crate) timer_passes: u64,
 }
 
 thread_local! {
@@ -471,12 +541,17 @@ impl Scheduler {
             live: Mutex::new(std::collections::HashMap::default()),
             parked: Mutex::new(std::collections::HashMap::default()),
             timers: Mutex::new(Timers::default()),
+            timer_added: Condvar::new(),
             reactor: Reactor::default(),
             arrived: Condvar::new(),
             polling: AtomicBool::new(false),
             wake_local,
             turns: (0..workers).map(|_| Turns::default()).collect(),
             in_transit: AtomicUsize::new(0),
+            born: std::time::Instant::now(),
+            last_look: AtomicU64::new(0),
+            #[cfg(test)]
+            backstop_off: AtomicBool::new(false),
             stopping: AtomicBool::new(false),
             counts: Counts::default(),
         });
@@ -491,9 +566,9 @@ impl Scheduler {
             })
             .collect();
 
-        // One thread watching sockets. Like the timer thread, this is a
-        // thread waiting so that no *worker* has to — which is the whole
-        // distinction the phase turns on.
+        // One thread that looks at sockets when no worker has lately: every
+        // worker held in a long turn still leaves somebody watching. See
+        // `watch`.
         let watching = shared.clone();
         handles.push(
             std::thread::Builder::new()
@@ -718,6 +793,13 @@ impl Drop for Scheduler {
     fn drop(&mut self) {
         self.shared.stopping.store(true, Ordering::Release);
         self.shared.arrived.notify_all();
+        // Under the timers' lock, for the reason in `sleep_until`: a timer
+        // thread that read `stopping` as false is already waiting when this
+        // gets the lock, and one that has not read it yet will see it true.
+        {
+            let _timers = self.shared.timers.lock().expect("the timers");
+            self.shared.timer_added.notify_all();
+        }
         for worker in self.workers.drain(..) {
             let _ = worker.join();
         }
@@ -763,7 +845,17 @@ pub(crate) fn park_current() -> bool {
 pub(crate) fn sleep_until(at: std::time::Instant) -> bool {
     let Some(shared) = shared_pool() else { return false };
     let id = crate::current::current(|fiber| fiber.id());
-    shared.timers.lock().expect("the timers").add(at, id);
+    {
+        let mut timers = shared.timers.lock().expect("the timers");
+        let first = timers.len() == 0;
+        timers.add(at, id);
+        // Under the lock, so the timer thread cannot be between finding the
+        // heap empty and waiting: it is either waiting, and this wakes it, or
+        // it has not looked yet and will find this deadline.
+        if first {
+            shared.timer_added.notify_one();
+        }
+    }
     park_current()
 }
 
@@ -852,6 +944,23 @@ pub(crate) fn waker_for_current() -> Option<Waker> {
 ///
 /// `an_avalanche_of_wakes_resumes_a_fiber_once` is the test.
 fn wake(shared: &Arc<Shared>, fiber: usize, state: &Wait) {
+    deliver(shared, fiber, state, None)
+}
+
+/// [`wake`], for readiness a worker's own thread found by looking at the
+/// reactor: the task goes on `mine`, that worker's queue, rather than
+/// through [`inject`]. See [`look`].
+fn wake_found(shared: &Arc<Shared>, fiber: usize, state: &Wait, mine: &Arc<Mutex<VecDeque<Task>>>) {
+    deliver(shared, fiber, state, Some(mine))
+}
+
+/// The body of [`wake`] and [`wake_found`]: the two claims, then the queue.
+fn deliver(
+    shared: &Arc<Shared>,
+    fiber: usize,
+    state: &Wait,
+    found_by: Option<&Arc<Mutex<VecDeque<Task>>>>,
+) {
     shared.counts.wakes.fetch_add(1, Ordering::Relaxed);
 
     // Under the same lock the worker parks with, so a wake cannot land between
@@ -885,7 +994,11 @@ fn wake(shared: &Arc<Shared>, fiber: usize, state: &Wait) {
     if state.stop_counting() {
         shared.counts.waiting.fetch_sub(1, Ordering::Relaxed);
     }
-    let task = match wake_locally(shared, task) {
+    let task = match found_by {
+        Some(mine) => onto_own_queue(shared, mine, task),
+        None => wake_locally(shared, task),
+    };
+    let task = match task {
         None => {
             shared.counts.wakes_local.fetch_add(1, Ordering::Relaxed);
             shared.in_transit.fetch_sub(1, Ordering::AcqRel);
@@ -914,11 +1027,11 @@ fn wake(shared: &Arc<Shared>, fiber: usize, state: &Wait) {
 /// **Only from a fiber, on a worker of this pool.** A wake from anywhere else
 /// is handed back:
 ///
-///   - the reactor and timer threads, and a thread that is not the
+///   - the backstop and timer threads, and a thread that is not the
 ///     scheduler's at all, have no queue of their own;
-///   - a worker's own thread outside a fiber -- `serve_io` delivering what it
-///     found -- is about to go round its loop, not to run anything sooner than
-///     any other worker, and must wake one;
+///   - a worker's own thread outside a fiber has no fiber whose suspension
+///     it is about to run, except for readiness it found itself, which
+///     [`wake_found`] handles;
 ///   - a fiber of another pool would put the task on a worker that does not
 ///     know it.
 ///
@@ -939,7 +1052,9 @@ fn wake(shared: &Arc<Shared>, fiber: usize, state: &Wait) {
 /// millisecond from `park`, up to ten from `serve_io` -- and busy ones within
 /// two of their ticks, about sixty turns. So a waker that keeps its worker
 /// after waking holds the woken fiber back by up to that long, and
-/// [`WAKE_LOCAL_BOUND`] caps how many it can hold back at once.
+/// [`WAKE_LOCAL_BOUND`] caps how many it can hold back at once. The same holds
+/// for readiness a worker finds with [`look`], which goes on its queue by the
+/// same rule.
 fn wake_locally(shared: &Arc<Shared>, task: Task) -> Option<Task> {
     if !shared.wake_local || !crate::coro::on_a_fiber() {
         return Some(task);
@@ -948,6 +1063,20 @@ fn wake_locally(shared: &Arc<Shared>, task: Task) -> Option<Task> {
         return Some(task);
     };
     if !Arc::ptr_eq(&mine, shared) {
+        return Some(task);
+    }
+    onto_own_queue(shared, &queue, task)
+}
+
+/// Pushes a woken task onto a worker's own queue, or hands it back for
+/// [`inject`] when the queue is at [`WAKE_LOCAL_BOUND`] or the local path is
+/// switched off.
+fn onto_own_queue(
+    shared: &Arc<Shared>,
+    queue: &Arc<Mutex<VecDeque<Task>>>,
+    task: Task,
+) -> Option<Task> {
+    if !shared.wake_local {
         return Some(task);
     }
     let mut queue = queue.lock().expect("a local queue");
@@ -1030,15 +1159,36 @@ pub(crate) fn wait_until_ready_by(
     }
 }
 
-/// Wakes every fiber whose socket has become ready, for ever.
+/// Wakes every fiber whose socket has become ready, when no worker is looking.
+///
+/// **A backstop, not the poller.** Workers look at the reactor themselves --
+/// every [`LOOK_EVERY`] turns while busy, and whenever idle -- and deliver
+/// what they find to their own queues. This thread looks only when no worker
+/// has for [`BACKSTOP_GAP`]: every worker held in a long turn, or blocked in
+/// a call. What it finds goes through [`inject`], since it has no queue of
+/// its own and a parked worker has to be woken to run it.
+///
+/// A zero-timeout look, never a blocking one: blocking here would put this
+/// thread back in `epoll_wait` beside the workers, and a readiness it
+/// collected would be the thread handoff the workers' looks exist to avoid.
 fn watch(shared: Arc<Shared>) {
     while !shared.stopping.load(Ordering::Acquire) {
-        // A short wait rather than an indefinite one, because a registration
-        // arriving while `poll` is already blocked would otherwise not be seen
-        // until something else woke it. A self-pipe or an event handle is the
-        // refinement, and it is the same shape of change on all three
-        // platforms.
-        let ready = shared.reactor.poll(std::time::Duration::from_millis(50));
+        std::thread::sleep(BACKSTOP_GAP);
+        #[cfg(test)]
+        if shared.backstop_off.load(Ordering::Acquire) {
+            continue;
+        }
+        let since = micros_since(&shared).saturating_sub(shared.last_look.load(Ordering::Acquire));
+        if since < BACKSTOP_GAP.as_micros() as u64 {
+            continue;
+        }
+        // Somebody is in `serve_io`'s wait, which delivers whatever arrives.
+        if shared.polling.swap(true, Ordering::AcqRel) {
+            continue;
+        }
+        let ready = shared.reactor.poll(std::time::Duration::ZERO);
+        shared.polling.store(false, Ordering::Release);
+        shared.counts.backstop_polls.fetch_add(1, Ordering::Relaxed);
         if ready.is_empty() {
             continue;
         }
@@ -1051,9 +1201,22 @@ fn watch(shared: Arc<Shared>) {
     }
 }
 
+/// Microseconds since the pool started, the clock `last_look` is kept in.
+fn micros_since(shared: &Shared) -> u64 {
+    shared.born.elapsed().as_micros() as u64
+}
+
 /// Wakes every fiber whose deadline has passed, for ever.
+///
+/// **Asleep on `timer_added` while there are no deadlines**, rather than
+/// waking every millisecond to find the heap empty. A deadline added to an
+/// empty heap wakes it ([`sleep_until`]), and so does the pool stopping.
+///
+/// While there are deadlines it still wakes at least every millisecond,
+/// because a deadline added ahead of the soonest one does not wake it.
 fn tick(shared: Arc<Shared>) {
-    while !shared.stopping.load(Ordering::Acquire) {
+    loop {
+        shared.counts.timer_passes.fetch_add(1, Ordering::Relaxed);
         let now = std::time::Instant::now();
         let due = shared.timers.lock().expect("the timers").expired(now);
         if !due.is_empty() {
@@ -1074,17 +1237,24 @@ fn tick(shared: Arc<Shared>) {
             }
         }
 
-        // Until the next deadline, or a short while if there is none. A
-        // condvar the timer thread could wait on is the refinement; this is
-        // one thread sleeping, not a worker.
-        let nap = shared
-            .timers
-            .lock()
-            .expect("the timers")
+        // Checked and waited on under one lock, so a deadline added or a
+        // stop made between the look and the wait still wakes this.
+        let mut timers = shared.timers.lock().expect("the timers");
+        loop {
+            if shared.stopping.load(Ordering::Acquire) {
+                return;
+            }
+            if timers.len() > 0 {
+                break;
+            }
+            timers = shared.timer_added.wait(timers).expect("the timers");
+        }
+        let nap = timers
             .next_deadline()
             .map(|at| at.saturating_duration_since(std::time::Instant::now()))
-            .unwrap_or(std::time::Duration::from_millis(1))
+            .unwrap_or_default()
             .min(std::time::Duration::from_millis(1));
+        drop(timers);
         std::thread::sleep(nap);
     }
 }
@@ -1140,21 +1310,37 @@ fn work(shared: Arc<Shared>, me: usize) {
 
     let mut turn = 0usize;
     let mut seen = vec![u64::MAX; shared.locals.len()];
+    let mut since_look = 0usize;
     loop {
         if shared.stopping.load(Ordering::Acquire) {
             break;
+        }
+        // **A busy worker looks for I/O between turns.** It never reaches
+        // `serve_io` while it has work, so without this every readiness on a
+        // loaded pool was found by another thread and handed across. See
+        // [`LOOK_EVERY`].
+        since_look += 1;
+        if since_look >= LOOK_EVERY {
+            since_look = 0;
+            look(&shared, &local);
         }
         match next(&shared, &local, me, &mut turn, &mut seen) {
             Some(task) => {
                 shared.turns[me].0.fetch_add(1, Ordering::Relaxed);
                 run(&shared, &local, task)
             }
+            // Out of work: a look that costs nothing to wait for comes before
+            // the one that waits, since what it finds is runnable now.
+            None if look(&shared, &local) => {
+                since_look = 0;
+                continue;
+            }
             // **An idle worker looks for I/O itself rather than sleeping while
             // another thread does it.** Readiness discovered here is readiness
             // discovered by the thread that is about to run the fiber, which
             // is one operating-system handoff shorter than being told. Only
             // one worker does this; the rest park as they always did.
-            None if serve_io(&shared) => continue,
+            None if serve_io(&shared, &local) => continue,
             None => {
                 if !park(&shared, &local) {
                     break;
@@ -1355,25 +1541,68 @@ fn run(shared: &Arc<Shared>, local: &Arc<Mutex<VecDeque<Task>>>, mut task: Task)
 ///
 /// True when this worker did the waiting, whether or not it found anything —
 /// the caller goes round again either way, because the queues may have changed
-/// under it while it waited.
+/// under it while it waited. What it finds goes on this worker's own queue,
+/// as [`look`]'s does.
 ///
 /// **The wait is bounded even though `inject` nudges.** A local queue has no
 /// way to announce itself the way the shared one does, so going back to look is
 /// how work in somebody else's deque is ever found.
-fn serve_io(shared: &Arc<Shared>) -> bool {
+fn serve_io(shared: &Arc<Shared>, local: &Arc<Mutex<VecDeque<Task>>>) -> bool {
     if shared.polling.swap(true, Ordering::AcqRel) {
         return false;
     }
     let ready = shared.reactor.poll(std::time::Duration::from_millis(10));
-    shared.polling.store(false, Ordering::Release);
+    looked(shared, local, ready);
+    true
+}
 
+/// Looks at the backend without waiting, if nobody else is, and puts what is
+/// ready on this worker's own queue. True when it found something.
+///
+/// **Why the worker's own queue, not the shared one:** the worker is about to
+/// go round its loop and run it, and anything else is the thread handoff this
+/// look exists to avoid. On a pool with more than one worker the others take
+/// a share by stealing, as they do a crowd a fiber woke.
+///
+/// What it costs: a zero-timeout `epoll_wait` (or, where there is no `epoll`,
+/// a `poll` over every registered socket), taken only when no other thread is
+/// already in one. With no socket registered, only the reactor's lock to read
+/// that.
+fn look(shared: &Arc<Shared>, local: &Arc<Mutex<VecDeque<Task>>>) -> bool {
+    if shared.reactor.len() == 0 {
+        // Nothing to find, and so nothing for the backstop to find either:
+        // counted as a look so that a pool with no sockets keeps it asleep.
+        shared.last_look.store(micros_since(shared), Ordering::Release);
+        return false;
+    }
+    if shared.polling.swap(true, Ordering::AcqRel) {
+        return false;
+    }
+    let ready = shared.reactor.poll(std::time::Duration::ZERO);
+    let found = !ready.is_empty();
+    looked(shared, local, ready);
+    found
+}
+
+/// Ends a worker's look at the backend, and delivers what it found to the
+/// worker's own queue.
+///
+/// `polling` must be held by the caller, and is let go here.
+fn looked(shared: &Arc<Shared>, local: &Arc<Mutex<VecDeque<Task>>>, ready: Vec<usize>) {
+    // Before `polling` is let go. The backstop reads this first and takes
+    // `polling` second, so the other order let it read a stale time, find
+    // the reactor free, and look again straight after a worker had. Harmless
+    // either way (a look finds what is ready, or nothing); this only makes
+    // it rarer.
+    shared.last_look.store(micros_since(shared), Ordering::Release);
+    shared.polling.store(false, Ordering::Release);
+    shared.counts.worker_polls.fetch_add(1, Ordering::Relaxed);
     for id in ready {
         shared.counts.sockets_ready.fetch_add(1, Ordering::Relaxed);
         if let Some(state) = state_of(shared, id) {
-            wake(shared, id, state.wait());
+            wake_found(shared, id, state.wait(), local);
         }
     }
-    true
 }
 
 /// Sleeps until something arrives or the pool stops. False means stop.
@@ -2651,28 +2880,20 @@ mod tests {
         assert!(ours.settle(std::time::Duration::from_secs(2)).settled(), "{:?}", ours.audit());
     }
 
-    /// **Wakes from the timer thread and from the reactor go through the
-    /// shared queue**, including readiness an idle worker finds in
-    /// `serve_io`: that runs on a worker, but not on a fiber, and nothing
-    /// there is about to run the queue it would land on sooner than any
-    /// other worker.
-    ///
-    /// Twenty socket rounds, because which of the reactor thread and an idle
-    /// worker sees a readiness first is a race, and the worker has to win
-    /// some of them for the second half of this to be tested.
-    #[test]
-    fn wakes_from_timers_and_the_reactor_are_injected() {
-        use crate::reactor::{a_connected_pair, socket_of, Interest};
-        use std::io::{Read, Write};
-        const ROUNDS: usize = 20;
-
-        let pool = Scheduler::started(2, true);
-        let (client, mut peer) = a_connected_pair();
+    /// Spawns a fiber that reads `rounds` bytes from `client`, one wait per
+    /// byte, counting each into `got`. `sleeps` timer waits come first, so a
+    /// test can see which path a timer's wake took.
+    fn a_reader(
+        client: std::net::TcpStream,
+        rounds: usize,
+        sleeps: usize,
+        got: Arc<AtomicUsize>,
+    ) -> Task {
+        use crate::reactor::{socket_of, Interest};
+        use std::io::Read;
         let socket = socket_of(&client);
-        let read = Arc::new(AtomicUsize::new(0));
-        let got = read.clone();
-        pool.spawn(Task::new(move || {
-            for _ in 0..3 {
+        Task::new(move || {
+            for _ in 0..sleeps {
                 sleep_until(std::time::Instant::now() + std::time::Duration::from_millis(5));
             }
             // Non-blocking and retried, as every socket operation on the
@@ -2681,7 +2902,7 @@ mod tests {
             // the byte is there. A blocking read would then hold the worker.
             let mut client = client;
             client.set_nonblocking(true).expect("non-blocking");
-            for _ in 0..ROUNDS {
+            for _ in 0..rounds {
                 let mut byte = [0u8; 1];
                 loop {
                     match client.read(&mut byte) {
@@ -2695,29 +2916,210 @@ mod tests {
                 }
                 got.fetch_add(1, Ordering::SeqCst);
             }
-        }));
+        })
+    }
 
+    /// Writes `rounds` bytes to `peer`, each only once the reader is filed
+    /// waiting on the socket, and waits for it to be read.
+    ///
+    /// Filed, not merely registered, so every byte's wake is a real one
+    /// rather than a wake that beat the park, and its path is counted.
+    fn feed(pool: &Scheduler, peer: &mut std::net::TcpStream, rounds: usize, read: &AtomicUsize) {
+        use std::io::Write;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        for round in 0..ROUNDS {
+        for round in 0..rounds {
             while pool.watching() == 0 {
                 assert!(std::time::Instant::now() < deadline, "round {round} never registered");
                 std::thread::yield_now();
             }
-            // Filed, too, so the wake is a real one rather than a wake that
-            // beat the park.
-            until_parked(&pool, 1);
+            until_parked(pool, 1);
             peer.write_all(b"x").expect("writing");
             while read.load(Ordering::SeqCst) <= round {
-                assert!(std::time::Instant::now() < deadline, "round {round} never read");
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "round {round} never read: {:?}",
+                    pool.counts()
+                );
                 std::thread::yield_now();
             }
         }
+    }
+
+    /// **Wakes from the timer thread go through the shared queue, and
+    /// readiness a worker finds itself goes on that worker's own queue.**
+    ///
+    /// The timer thread has no queue of its own and must wake a worker. A
+    /// worker that finds readiness in its own look at the reactor is about to
+    /// go round its loop and run the fiber, and a trip through the shared
+    /// queue would be the thread handoff the look exists to avoid. The
+    /// backstop thread's wakes are injected too;
+    /// `the_backstop_delivers_readiness_while_every_worker_is_held` has that
+    /// half, since the backstop only looks when no worker can.
+    ///
+    /// With the backstop off, so every readiness here is found by a worker
+    /// and the counts are exact. `KHORA_WAKE_LOCAL=0` puts the worker's finds
+    /// back through the shared queue, like every other wake.
+    #[test]
+    fn wakes_from_timers_are_injected_and_readiness_a_worker_finds_is_local() {
+        use crate::reactor::a_connected_pair;
+        const ROUNDS: usize = 20;
+        const SLEEPS: usize = 3;
+
+        for wake_local in [true, false] {
+            let pool = Scheduler::started(2, wake_local);
+            pool.shared.backstop_off.store(true, Ordering::Release);
+            let (client, mut peer) = a_connected_pair();
+            let read = Arc::new(AtomicUsize::new(0));
+            pool.spawn(a_reader(client, ROUNDS, SLEEPS, read.clone()));
+            feed(&pool, &mut peer, ROUNDS, &read);
+            drained(&pool);
+
+            let counts = pool.counts();
+            assert!(counts.timers_fired >= SLEEPS as u64, "{counts:?}");
+            assert_eq!(counts.backstop_polls, 0, "{counts:?}");
+            // Every byte's wake is exact, because `feed` writes only once
+            // the reader is filed. A timer's wake is counted only if the
+            // fiber was filed before its deadline, which a loaded machine
+            // may not manage in 5 ms, so those are a range; with the backstop
+            // off, the timer thread is the only thing here that can inject.
+            if wake_local {
+                assert_eq!(counts.wakes_local, ROUNDS as u64, "{counts:?}");
+                assert!((1..=SLEEPS as u64).contains(&counts.wakes_injected), "{counts:?}");
+            } else {
+                assert_eq!(counts.wakes_local, 0, "{counts:?}");
+                let injected = ROUNDS as u64 + 1..=(ROUNDS + SLEEPS) as u64;
+                assert!(injected.contains(&counts.wakes_injected), "{counts:?}");
+            }
+        }
+    }
+
+    /// **A busy worker finds readiness itself, with nobody else looking.**
+    /// One worker, kept busy by a fiber that yields for ever, so it never
+    /// runs out of work and never reaches `serve_io`; and the backstop
+    /// thread switched off. The only thing left that can see the socket
+    /// become ready is the look the worker takes between turns. Without it
+    /// the reader waits for ever.
+    #[test]
+    fn a_busy_workers_own_look_delivers_readiness_with_the_backstop_stalled() {
+        use crate::reactor::a_connected_pair;
+        const ROUNDS: usize = 20;
+
+        let pool = Scheduler::started(1, true);
+        pool.shared.backstop_off.store(true, Ordering::Release);
+        let done = Arc::new(AtomicBool::new(false));
+        let spinning = done.clone();
+        pool.spawn(Task::new(move || {
+            while !spinning.load(Ordering::SeqCst) {
+                suspend();
+            }
+        }));
+        let (client, mut peer) = a_connected_pair();
+        let read = Arc::new(AtomicUsize::new(0));
+        pool.spawn(a_reader(client, ROUNDS, 0, read.clone()));
+        feed(&pool, &mut peer, ROUNDS, &read);
+        done.store(true, Ordering::SeqCst);
         drained(&pool);
 
         let counts = pool.counts();
-        assert_eq!(counts.wakes_local, 0, "{counts:?}");
-        assert!(counts.wakes_injected >= ROUNDS as u64, "{counts:?}");
-        assert!(counts.timers_fired >= 1, "{counts:?}");
+        assert_eq!(counts.backstop_polls, 0, "{counts:?}");
+        assert!(counts.worker_polls >= 1, "{counts:?}");
+        assert_eq!(counts.wakes_local, ROUNDS as u64, "{counts:?}");
+    }
+
+    /// **The backstop still delivers readiness when every worker is held.**
+    /// Two workers, each running a fiber that spins without a safepoint, so
+    /// neither goes round its loop to look. The reader's byte arrives while
+    /// both are held; the backstop thread has to find it and inject it, and
+    /// it runs once a worker is let go.
+    ///
+    /// Found is the oracle, not run: nothing can run the reader while the
+    /// workers are held, so the test waits for the wake to be counted, then
+    /// lets them go.
+    #[test]
+    fn the_backstop_delivers_readiness_while_every_worker_is_held() {
+        use crate::reactor::a_connected_pair;
+        use std::io::Write;
+
+        /// Lets the holders go however the test ends, so a failed assertion
+        /// does not leave the pool's drop waiting on two spinning workers.
+        struct Release(Arc<AtomicBool>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let pool = Scheduler::started(2, true);
+        let (client, mut peer) = a_connected_pair();
+        let read = Arc::new(AtomicUsize::new(0));
+        pool.spawn(a_reader(client, 1, 0, read.clone()));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while pool.watching() == 0 {
+            assert!(std::time::Instant::now() < deadline, "the reader never registered");
+            std::thread::yield_now();
+        }
+        until_parked(&pool, 1);
+
+        let release = Release(Arc::new(AtomicBool::new(false)));
+        let holding = Arc::new(AtomicUsize::new(0));
+        for _ in 0..2 {
+            let (go, held) = (release.0.clone(), holding.clone());
+            pool.spawn(Task::new(move || {
+                held.fetch_add(1, Ordering::SeqCst);
+                while !go.load(Ordering::SeqCst) {
+                    std::hint::spin_loop();
+                }
+            }));
+        }
+        while holding.load(Ordering::SeqCst) < 2 {
+            assert!(std::time::Instant::now() < deadline, "the workers were never both held");
+            std::thread::yield_now();
+        }
+
+        let before = pool.counts();
+        peer.write_all(b"x").expect("writing");
+        while pool.counts().wakes_injected == before.wakes_injected {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "nobody found the readiness while every worker was held: {:?}",
+                pool.counts()
+            );
+            std::thread::yield_now();
+        }
+        drop(release);
+        drained(&pool);
+
+        assert_eq!(read.load(Ordering::SeqCst), 1);
+        let counts = pool.counts();
+        assert!(counts.backstop_polls > before.backstop_polls, "{counts:?}");
+        assert_eq!(counts.wakes_local, before.wakes_local, "{counts:?}");
+    }
+
+    /// **A pool with no deadlines leaves the timer thread asleep**, and a
+    /// deadline added to it afterwards still fires.
+    ///
+    /// The first half is what the condvar is for: a thread that woke every
+    /// millisecond to find an empty heap passed a hundred times in the
+    /// window. The second is what makes the first safe: a sleep that waited
+    /// for a tick that never comes would wait for ever.
+    #[test]
+    fn a_pool_with_no_timers_leaves_the_timer_thread_asleep() {
+        let pool = Scheduler::started(1, true);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let before = pool.counts().timer_passes;
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let after = pool.counts().timer_passes;
+        assert!(after - before <= 1, "the timer thread ran {} times with no timers", after - before);
+
+        let woke = Arc::new(AtomicBool::new(false));
+        let mine = woke.clone();
+        pool.spawn(Task::new(move || {
+            sleep_until(std::time::Instant::now() + std::time::Duration::from_millis(5));
+            mine.store(true, Ordering::SeqCst);
+        }));
+        drained(&pool);
+        assert!(woke.load(Ordering::SeqCst));
+        assert!(pool.counts().timers_fired >= 1, "{:?}", pool.counts());
     }
 
     /// **The bound.** Below it a fiber's wake is local; at it, the wake goes

@@ -307,12 +307,13 @@ impl Reactor {
         // inside the poll in flight still nudges. Every `poll` is capped at
         // `LONGEST_SLICE`, so a deadline beyond it cannot.
         //
-        // **Limit: `polling` is one bool for two pollers.** When the reactor
-        // thread and a worker are both in `poll`, one leaving clears the flag
-        // while the other is still asleep; a nudge sent in that window is
-        // dropped, and the deadline is reported at the end of that poller's
-        // slice instead -- up to about `LONGEST_SLICE` (50 ms) late. Already
-        // true on `main` before this change; not fixed here.
+        // **Only one caller at a time may be in `poll`, or a nudge can be
+        // lost.** `polling` is one bool: with two pollers, one leaving clears
+        // it while the other is still asleep, and a nudge sent in that window
+        // is dropped, so the deadline is reported at the end of that poller's
+        // slice instead, up to about `LONGEST_SLICE` (50 ms) late. The
+        // scheduler keeps it to one: every caller of `poll` there, backstop
+        // thread included, first claims `Shared::polling`.
         let near = watch.deadline.is_some_and(|at| {
             at.saturating_duration_since(std::time::Instant::now()) < LONGEST_SLICE
         });
