@@ -1,7 +1,7 @@
 module risk_analyzer::main;
 
 import std::core::{ChildFailed, Eq, List, Option, Scope, SharedFn, Show, assert, print};
-import std::net::http::{HttpError, Params, Request, Response, Router};
+import std::net::http::{HttpError, Params, Request, Response, Router, matches};
 import ai::llm::{LLMService, ModelError, Prompt, extract};
 import std::schema::{Decode, Encode};
 
@@ -195,7 +195,15 @@ test "a critical assessment flags the account" {
 }
 
 test "a rate-limited model yields an unavailable report" {
-  let response = handle(Request::get("/analyze/acc_1"))! with Mock {
+  // `handle` reads `account_id` from `req.params`, which only a matched route
+  // binds; `Request::get` alone leaves it empty and `handle` answers 400.
+  // Binding through `matches`, against the pattern `main` mounts, gives the
+  // request a route match produces.
+  let bound = match matches("/analyze/:account_id", "/analyze/acc_1") {
+    Option::Some(params) => params,
+    Option::None => Params::empty(),
+  };
+  let response = handle({ ..Request::get("/analyze/acc_1"), params: bound })! with Mock {
     ai: stub_classifier(ModelError::RateLimited(2000)),
   };
 

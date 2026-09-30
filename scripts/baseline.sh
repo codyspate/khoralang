@@ -324,40 +324,20 @@ step 'a released documentation tree is the tag it says it is'
 # a tag that does not exist is not.
 bash scripts/check-released-docs.sh
 
-step 'the packages pass their own tests'
+step 'every member passes its own tests'
 # A package whose tests nobody runs is a package with no tests. `khora test`
 # compiles the `test` blocks into their own executable and runs it — the same
 # path a user of the language would take.
 #
-# **`otlp` was not here and it has twelve of them.** The sentence above states
-# the rule and the line below it kept one package, so twelve tests asserting
-# the rendered OTLP bytes -- the ones that caught `service.name` going out as a
-# bare string where the protocol wants an `AnyValue`, which a collector drops
-# in silence -- had been running nowhere since they were written. They pass, so
-# this widens the gate rather than fixing anything, which is the good case.
+# **A fixed list of packages here let tests go unrun.** `otlp`'s twelve and
+# `risk_analyzer`'s two ran nowhere while the list left them out, and one of
+# `risk_analyzer`'s had been failing. `khora test .` at the root, like
+# `khora check .` above, tests every member, so a new package or example is
+# covered without anyone editing this file.
 #
-# `packages/ai` is deliberately absent: it has no `test` blocks. When it gets
-# one it belongs here, and this comment is the reminder.
-"$khora" test packages/postgres
-"$khora" test packages/otlp
-
-step "the standard library's own tests"
-# **`tests/std-suite` is how `std` is checked, and it is one compile.**
-#
-# The suite's price is per program rather than per assertion: one check against
-# the real `std` costs about sixteen seconds and two hundred cost eighteen. So
-# a test per program is the expensive shape, and `khora-codegen-llvm` had
-# hundreds of them -- thirteen for `Vector` alone were 193 seconds here and 231
-# on macOS. The same assertions are `test` blocks in one package now, and
-# adding an area costs a file rather than a build.
-#
-# It is a *consumer* of `std` rather than a part of it, which is the other half
-# of why it is here. `struct({ .. })` in `std::schema` is rewritten before it is
-# typed and the rewrite is skipped when the name resolves locally, so a test
-# inside that module cannot call the API the module exists to provide -- and
-# anything in `std/*.kh` is parsed and checked by every build in the repository,
-# including a user's.
-"$khora" test tests/std-suite
+# That includes `tests/std-suite`, which is how `std` is checked: a consumer
+# of `std` rather than a part of it, and one compile for all its assertions.
+"$khora" test .
 
 step 'every reference application builds'
 # `ledger_service` is here for the same reason the packages are: it depends on
@@ -375,12 +355,6 @@ for app in examples/core_demo examples/risk_analyzer examples/link_shortener \
            examples/ledger_service examples/khq; do
     "$khora" build "$app" --no-cache
 done
-
-# **And `khq`'s own tests**, which are the only reference application that has
-# any. It is a query language, so what it means is a table of query, document
-# and answer -- and half of those are refusals, because a query language
-# producing nothing and looking like it worked is its whole failure mode.
-"$khora" test examples/khq
 
 step 'the build cache answers, and answers with the right bytes'
 # The claim 14.17 rests on, checked against the real corpus rather than a
