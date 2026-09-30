@@ -29,7 +29,7 @@ fn show(a: Array<U8>) -> String {
   let mut i = 0;
   while i < Array::length(a) {
     out = if i == 0 { Int::to_string(U8::to_int(Array::get(a, i))) }
-          else { "${out} ${Int::to_string(U8::to_int(Array::get(a, i)))}" };
+    else { "${out} ${Int::to_string(U8::to_int(Array::get(a, i)))}" };
     i = i + 1
   };
   out
@@ -220,7 +220,7 @@ test "String order is byte order, for prefixes, empties and high bytes" {
   assert_that(checked == 225, "${checked} pairs");
   assert_that(Ordering::is_less("".cmp("a")), "the empty string sorts first");
   assert_that(Ordering::is_less("a".cmp("\u{80}")), "0x80 sorts above ASCII");
-  assert_that("abc" < "abd" && "ab" < "abc" && !("abc" < "abc"), "the operators agree");
+  assert_that("abc" < "abd" && "ab" < "abc" && ! ("abc" < "abc"), "the operators agree");
 }
 
 // --- List::sort_by --------------------------------------------------------
