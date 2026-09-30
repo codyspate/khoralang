@@ -390,7 +390,11 @@ fn the_switch_emits_the_local_path() {
         unsafe { std::env::remove_var("KHORA_EMIT_LLVM") };
         drop(held);
         assert_eq!(run(&exe, "threads").as_deref(), Ok("40"), "local {local}, forced {forced}");
-        let ir = std::fs::read_to_string(exe.with_extension("ll")).expect("the IR was dumped");
+        // The backend appends `.ll` to the whole output name, so on Windows
+        // it is `program.exe.ll`; `with_extension` would replace the `.exe`.
+        let mut dumped = exe.clone().into_os_string();
+        dumped.push(".ll");
+        let ir = std::fs::read_to_string(dumped).expect("the IR was dumped");
         let churn = ir
             .split("\ndefine ")
             .find(|f| f.contains("main$churn"))
