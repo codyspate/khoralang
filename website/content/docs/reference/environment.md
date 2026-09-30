@@ -248,6 +248,24 @@ KHORA_FIBERS=scheduler KHORA_SCHEDULER_REPORT=500 ./build/myapp
 
 This is how counters get out of a program that does not end: a server runs until it is killed, so there is no moment to print them at. The difference between two lines is the interesting part. It does nothing without `KHORA_FIBERS=scheduler` — there is no scheduler to report on — and each line is a write to standard error, so a short interval on a busy program is itself load.
 
+Each line ends with `turns=[...]`, how many times each worker has run a fiber so far. The differences between two lines say how the work was shared out over that interval.
+
+### `KHORA_WAKE_LOCAL`
+
+Where a fiber goes when another fiber wakes it, under `KHORA_FIBERS=scheduler`.
+
+**Default:** on.
+
+**Value:** `0` turns it off. Any other value, or none, leaves it on.
+
+```bash
+KHORA_FIBERS=scheduler KHORA_WAKE_LOCAL=0 ./build/myapp
+```
+
+A fiber woken by another fiber — a channel receive released by a send, a pooled connection handed back — goes to the queue of the worker the waking fiber is running on, and that worker runs it as soon as the waking fiber waits. Nothing else is signaled. A wake from anywhere else — a socket becoming ready, a timer expiring, a thread that is not a fiber — goes to the shared queue and wakes an idle worker. So does a fiber-to-fiber wake when the waking worker's queue already holds 512 fibers, so that no one worker's queue grows without limit from wakes. Idle workers take work from a busy worker's queue by stealing half of it.
+
+With the value `0`, every wake goes to the shared queue. That costs a signal to an idle worker for every handoff, which on a server whose requests pass through channels is most of its system time. It is there to rule the local path in or out of a problem, the way `KHORA_FIBERS=threads` rules the scheduler in or out. The value is read once, when the scheduler starts, and does nothing under the thread backend.
+
 ## Variables that are not knobs
 
 Two names reach a compiled program and are deliberately not documented above, because setting them is not supported:

@@ -408,6 +408,19 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 
 ### Fixed
 
+- **On the scheduler backend, a fiber preempted while holding a `Shared`
+  cell's lock could hang the program on a busy pool.** Inside
+  `Shared::update`'s change function, a fiber that yielded at a loop, or
+  waited on a channel, kept the cell locked and went back onto its own
+  worker's queue. If the next fiber that worker ran read the same cell, the
+  worker's thread blocked on the lock, and while every other worker had work
+  of its own none of them looked at that queue, so the holder never ran again.
+  A busy worker takes work from a worker that has not started a fiber in
+  about thirty-one of its own turns, so the holder is found and the cell
+  released. That needs one worker whose thread is not blocked: with one
+  worker, or when every worker's thread blocks on the same cell, the program
+  still hangs.
+
 - **A fiber could capture a `mut` record or a `Region` through a type
   settled after the spawn.** In
   `let go = fn x => Fiber::spawn(fn () => { let _k = x; 3 }); go(h)`,
@@ -732,6 +745,25 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   including the text of the most negative `Int` and the order of strings
   with bytes above `0x7f`.
 
+- **On the scheduler backend, a fiber woken by another fiber runs on the
+  waking fiber's worker.** A channel send that releases a receiver, a pooled
+  connection handed back, a join: the woken fiber goes to the queue of the
+  worker the waking fiber is running on, and that worker runs it when the
+  waking fiber waits, with no signal to any other thread. If the waking fiber
+  keeps running, or blocks its thread, another worker takes it by stealing:
+  an idle worker as soon as it looks for work, and a busy one once that
+  worker has not started a fiber in about thirty-one of the busy one's
+  turns. A wake from a socket, a
+  timer or a thread that is not a fiber wakes an idle worker, and
+  so does a fiber's wake when its worker's queue already holds 512 fibers.
+  `KHORA_WAKE_LOCAL=0` sends every wake to the shared queue. Measured on the
+  TechEmpower server, four CPUs, 256 connections: server CPU per request
+  226 -> 190 us on the single-query test, 4,162 -> 2,850 on twenty queries
+  and 322 -> 245 on fortunes, with the work spread across the four workers
+  as evenly as with the switch off. Nothing a program computes is different.
+  `KHORA_SCHEDULER_REPORT` lines carry the counts of each path and each
+  worker's turns.
+
 - **An HTTP `Transport`'s `receive` is handed the same buffer on every read
   of a connection.** The buffer is lent for the call: a custom transport
   that keeps the array it was given (a recorder, a tee, a TLS shim that
@@ -758,17 +790,19 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   comment or a row tail. A file `khora fmt --check` accepted before may need
   formatting again; `std` and the `postgres` and `otlp` packages have been.
 
-- **A channel send wakes one blocked receiver, not every one.** On the
-  default thread backend every fiber is a thread, and a send woke every
-  thread blocked on the channel, all but one of which found nothing and
-  blocked again. A connection pool is a channel, so with more requests than
-  connections, each connection given back woke every waiting request. A send
-  wakes one blocked receiver and a receive wakes one blocked sender; `close`
-  still wakes everyone, and a canceled fiber is still woken at once.
-  Measured on Linux x86-64, thread backend, the TechEmpower single-query test
-  (64 connections, a pool of 16): server CPU per request 368 -> 229 us, 1.6×
-  the requests per second. Fibers on the scheduler backend park differently
-  and are unchanged.
+- **A channel send wakes one blocked receiver, not every one**, on both
+  backends. On the default thread backend every fiber is a thread, and a send
+  woke every thread blocked on the channel, all but one of which found nothing
+  and blocked again; on the scheduler backend a send woke every fiber parked
+  on the channel, with the same result. A connection pool is a channel, so
+  with more requests than connections, each connection given back woke every
+  waiting request. A send wakes one blocked receiver and a receive wakes one
+  blocked sender, in the order they began waiting; a receiver or sender that
+  stops waiting for any other reason, a cancellation included, takes no later
+  value's wake with it. `close` still wakes everyone, and a canceled fiber is
+  still woken at once. Measured on Linux x86-64, thread backend, the
+  TechEmpower single-query test (64 connections, a pool of 16): server CPU
+  per request 368 -> 229 us, 1.6× the requests per second.
 
 - **The `postgres` package copies each message once.** Building a query
   pushed every byte three times and copied it into an array three times,

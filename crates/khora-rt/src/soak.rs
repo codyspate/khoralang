@@ -182,15 +182,26 @@ enum Shape {
     /// Waits on a socket a sibling will write to: the reactor, and
     /// deregistration racing cancellation.
     Socket,
+    /// Takes values over a one-slot channel from a child that slept first,
+    /// then waits on a socket the child writes to last.
+    ///
+    /// **The one shape whose wakes are all three kinds in one exchange**: the
+    /// child's first wake comes from the timer thread, every value after it
+    /// is a fiber waking a fiber -- receiver woken by a send, sender woken by
+    /// a receive, since one slot means each waits for the other -- and the
+    /// parent's last wake comes from the reactor. Fiber-to-fiber wakes are
+    /// the ones that go to the waker's own worker, so this is where a task
+    /// stranded on a worker's queue, or run by two, would show.
+    Relay,
 }
 
 impl Shape {
-    /// Weighted rather than uniform. `Socket` is one in sixteen because each
-    /// one is a loopback connection, and a few hundred an run is enough to
-    /// exercise the reactor without leaving thousands of sockets in
-    /// `TIME_WAIT` behind every soak.
+    /// Weighted rather than uniform. `Socket` and `Relay` are one in
+    /// seventeen each because each one is a loopback connection, and a few
+    /// hundred a run is enough to exercise the reactor without leaving
+    /// thousands of sockets in `TIME_WAIT` behind every soak.
     fn pick(rng: &mut Rng) -> Shape {
-        match rng.upto(16) {
+        match rng.upto(17) {
             0..=2 => Shape::Prompt,
             3..=5 => Shape::Yielding,
             6..=7 => Shape::Sleeping,
@@ -198,8 +209,53 @@ impl Shape {
             10..=11 => Shape::Spawning,
             12..=13 => Shape::Blocking,
             14 => Shape::Joining,
-            _ => Shape::Socket,
+            15 => Shape::Socket,
+            _ => Shape::Relay,
         }
+    }
+}
+
+/// A one-slot unboxed channel shared by two fibers, released by whichever
+/// lets go of it last.
+///
+/// **What the `Arc` prevents: a release while the other side is still inside
+/// a send or a receive.** `khora_channel_release` frees the channel outright,
+/// and the side that finishes first cannot know whether the other has
+/// returned from its last call.
+struct Pipe(usize);
+
+impl Pipe {
+    fn open() -> Pipe {
+        // SAFETY: a capacity, the blocking strategy, unboxed, and no glue,
+        // which is what an unboxed channel takes.
+        Pipe(unsafe { crate::channel::khora_channel_open(1, 0, false, None) } as usize)
+    }
+
+    fn send(&self, value: u64) -> bool {
+        // SAFETY: the handle is live until this `Pipe` drops, and the value
+        // is a number, so there is nothing to own.
+        unsafe { crate::channel::khora_channel_send(self.0 as *mut u8, value) }
+    }
+
+    fn receive(&self) -> Option<u64> {
+        let mut out = 0u64;
+        // SAFETY: the handle is live until this `Pipe` drops, and `out` is a
+        // writable word on this stack.
+        unsafe { crate::channel::khora_channel_receive(self.0 as *mut u8, &mut out) }
+            .then_some(out)
+    }
+
+    fn close(&self) {
+        // SAFETY: the handle is live until this `Pipe` drops.
+        unsafe { crate::channel::khora_channel_close(self.0 as *mut u8) }
+    }
+}
+
+impl Drop for Pipe {
+    fn drop(&mut self) {
+        // SAFETY: the last reference to the handle, since the `Arc` around
+        // this `Pipe` is gone, so nothing can use it afterwards.
+        unsafe { crate::channel::khora_channel_release(self.0 as *mut u8) }
     }
 }
 
@@ -302,6 +358,47 @@ fn fiber(shape: Shape, seed: u64, tally: Arc<Tally>) -> Task {
                     tally.children.fetch_add(1, Ordering::Relaxed);
                     tally.finished.fetch_add(1, Ordering::Relaxed);
                 }));
+                wait_until_ready(watch, Interest::Readable);
+                i_am_still(me);
+                drop(mine);
+            }
+            Shape::Relay => {
+                let pipe = Arc::new(Pipe::open());
+                let (mine, peer) = crate::reactor::a_connected_pair();
+                let watch = crate::reactor::socket_of(&mine);
+                let theirs = pipe.clone();
+                let tally = tally.clone();
+                schedule(Task::new(move || {
+                    let me = crate::current::current(|f| f.id());
+                    sleep_until(std::time::Instant::now() + std::time::Duration::from_millis(nap));
+                    i_am_still(me);
+                    for n in 0..rounds {
+                        // Refused only once the parent, canceled, has closed
+                        // the channel: nobody is left to take the rest.
+                        if !theirs.send(n) {
+                            break;
+                        }
+                        i_am_still(me);
+                    }
+                    use std::io::Write;
+                    let mut peer = peer;
+                    let _ = peer.write_all(b"x");
+                    tally.children.fetch_add(1, Ordering::Relaxed);
+                    tally.finished.fetch_add(1, Ordering::Relaxed);
+                }));
+                for n in 0..rounds {
+                    match pipe.receive() {
+                        Some(got) => assert_eq!(got, n, "a value arrived out of order"),
+                        // Canceled while waiting. Closing is what releases a
+                        // child blocked on a full slot; without it the child
+                        // waits for ever and the soak reads as a lost wake.
+                        None => {
+                            pipe.close();
+                            break;
+                        }
+                    }
+                    i_am_still(me);
+                }
                 wait_until_ready(watch, Interest::Readable);
                 i_am_still(me);
                 drop(mine);

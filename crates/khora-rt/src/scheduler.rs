@@ -46,6 +46,41 @@ const GLOBAL_INTERVAL: usize = 31;
 /// Safepoints a fiber may spend before it is asked to give the worker back.
 const BUDGET: u32 = 128;
 
+/// How long a worker's own queue may be before a wake stops adding to it.
+///
+/// **What this prevents: one worker's queue growing without limit from
+/// wakes.** A wake made from a fiber goes to the waker's own worker, and only
+/// a thief moves it from there. A fiber that wakes a crowd -- a channel send
+/// on the scheduler wakes every fiber parked on the channel -- puts the whole
+/// crowd behind one worker, and past this length the rest go to the shared
+/// queue and wake somebody.
+///
+/// **Chosen from a sweep, and set above what the sweep's workload reaches.**
+/// On the TechEmpower server on four CPUs under 256 connections, bounds of 8
+/// and 64 turned 25-70% of wakes back into injections and cost up to 30%
+/// more CPU per request, while each of the four workers ran between 24.2% and
+/// 25.6% of the turns at every bound, unbounded included: stealing already
+/// spreads a crowd, so a low bound bought nothing. At 512 no wake reached the
+/// bound, and the numbers matched unbounded. So this caps a pathological
+/// crowd rather than balancing the ordinary one; `docs/design/scheduler.md`
+/// has the table.
+///
+/// What it costs: a wake past the bound pays the condvar and the reactor
+/// nudge that the local path exists to avoid. What it does not do: bound the
+/// queue itself, which spawns grow without limit.
+const WAKE_LOCAL_BOUND: usize = 512;
+
+/// Whether a wake made by a fiber may go to its own worker's queue, from the
+/// value of `KHORA_WAKE_LOCAL`.
+///
+/// On unless the variable is exactly `0`. Anything else, unset included,
+/// leaves it on: the switch exists to rule the local path in or out of a
+/// problem, and a typo that silently turned it off would rule it out of the
+/// wrong one.
+fn wake_local_from(value: Option<&str>) -> bool {
+    value != Some("0")
+}
+
 thread_local! {
     /// What the fiber running on this worker has left before it should yield.
     ///
@@ -155,6 +190,20 @@ struct Shared {
     /// would be right, so who may block is a backend's business —
     /// `docs/design/scheduler.md` §10a.
     polling: AtomicBool,
+    /// Whether a fiber's wake may go to its own worker's queue. See
+    /// [`wake`].
+    ///
+    /// Read once, when the pool starts, so that one pool never runs both
+    /// ways and a counter taken from it describes one of them.
+    wake_local: bool,
+    /// Turns each worker has given a fiber, indexed by worker.
+    ///
+    /// **The only record of how the work was shared out.** `resumes` is the
+    /// total; a pool where one worker does it all and a pool where four share
+    /// it read the same there, and that is the difference the local wake path
+    /// could make. One cache line each, so counting a turn never contends with
+    /// another worker counting one.
+    turns: Vec<Turns>,
     /// Tasks that belong to no queue at this instant because somebody is
     /// carrying them between two.
     ///
@@ -166,6 +215,12 @@ struct Shared {
     in_transit: AtomicUsize,
     stopping: AtomicBool,
     counts: Counts,
+}
+
+impl Shared {
+    fn turns(&self) -> Vec<u64> {
+        self.turns.iter().map(|t| t.0.load(Ordering::Relaxed)).collect()
+    }
 }
 
 /// Everywhere a fiber can be, at one instant. See [`Scheduler::audit`].
@@ -269,7 +324,27 @@ pub(crate) struct Counts {
     /// high attempt count with a low success rate is workers spinning, and a
     /// high fibers-moved with few sweeps is a pool sharing out a burst.
     pub(crate) fibers_stolen: AtomicU64,
+    /// Wakes that went to the waking fiber's own worker's queue.
+    pub(crate) wakes_local: AtomicU64,
+    /// Wakes that went to the shared queue, with a condvar signal and a
+    /// reactor nudge.
+    ///
+    /// Beside `wakes_local` because together they say which path a workload
+    /// takes, and `wakes` counts attempts, including the ones that found
+    /// nothing to move.
+    pub(crate) wakes_injected: AtomicU64,
+    /// Wakes that could have been local and went to the shared queue because
+    /// the waker's queue was at [`WAKE_LOCAL_BOUND`].
+    ///
+    /// Included in `wakes_injected`. Zero under a workload means the bound
+    /// never mattered to it.
+    pub(crate) wakes_over_bound: AtomicU64,
 }
+
+/// One worker's count of turns, alone on its cache line.
+#[derive(Default)]
+#[repr(align(64))]
+struct Turns(AtomicU64);
 
 impl Counts {
     fn snapshot(&self) -> Snapshot {
@@ -289,6 +364,9 @@ impl Counts {
             steals_attempted: self.steals_attempted.load(Ordering::Relaxed),
             steals_succeeded: self.steals_succeeded.load(Ordering::Relaxed),
             fibers_stolen: self.fibers_stolen.load(Ordering::Relaxed),
+            wakes_local: self.wakes_local.load(Ordering::Relaxed),
+            wakes_injected: self.wakes_injected.load(Ordering::Relaxed),
+            wakes_over_bound: self.wakes_over_bound.load(Ordering::Relaxed),
         }
     }
 }
@@ -311,6 +389,9 @@ pub(crate) struct Snapshot {
     pub(crate) steals_attempted: u64,
     pub(crate) steals_succeeded: u64,
     pub(crate) fibers_stolen: u64,
+    pub(crate) wakes_local: u64,
+    pub(crate) wakes_injected: u64,
+    pub(crate) wakes_over_bound: u64,
 }
 
 thread_local! {
@@ -358,7 +439,19 @@ pub(crate) struct Scheduler {
 
 impl Scheduler {
     /// Starts `workers` threads. Zero means one per available core.
+    ///
+    /// Reads `KHORA_WAKE_LOCAL` here, once, for the life of the pool.
     pub(crate) fn new(workers: usize) -> Scheduler {
+        let wake_local = wake_local_from(std::env::var("KHORA_WAKE_LOCAL").ok().as_deref());
+        Scheduler::started(workers, wake_local)
+    }
+
+    /// [`Scheduler::new`], with the wake path chosen by the caller rather
+    /// than the environment.
+    ///
+    /// For tests, which run in one process and cannot each set a variable
+    /// the others read.
+    pub(crate) fn started(workers: usize, wake_local: bool) -> Scheduler {
         let workers = match workers {
             0 => std::thread::available_parallelism().map_or(1, |n| n.get()),
             n => n,
@@ -381,6 +474,8 @@ impl Scheduler {
             reactor: Reactor::default(),
             arrived: Condvar::new(),
             polling: AtomicBool::new(false),
+            wake_local,
+            turns: (0..workers).map(|_| Turns::default()).collect(),
             in_transit: AtomicUsize::new(0),
             stopping: AtomicBool::new(false),
             counts: Counts::default(),
@@ -435,7 +530,7 @@ impl Scheduler {
                     while !watching.stopping.load(Ordering::Acquire) {
                         std::thread::sleep(gap);
                         eprintln!(
-                            "khora-scheduler {:?} queued={} local={} parked={} live={}",
+                            "khora-scheduler {:?} queued={} local={} parked={} live={} turns={:?}",
                             watching.counts.snapshot(),
                             watching.queued.lock().expect("the shared queue").len(),
                             watching
@@ -445,6 +540,7 @@ impl Scheduler {
                                 .sum::<usize>(),
                             watching.parked.lock().expect("the parked fibers").len(),
                             watching.live.lock().expect("the live fibers").len(),
+                            watching.turns(),
                         );
                     }
                 });
@@ -465,6 +561,11 @@ impl Scheduler {
 
     pub(crate) fn counts(&self) -> Snapshot {
         self.shared.counts.snapshot()
+    }
+
+    /// Turns each worker has given a fiber so far, by worker.
+    pub(crate) fn turns(&self) -> Vec<u64> {
+        self.shared.turns()
     }
 
     /// Waits until every fiber handed over has finished.
@@ -678,6 +779,11 @@ pub(crate) struct Waker {
 }
 
 impl Waker {
+    /// The fiber this wakes, so a list of wakers can find one fiber's entry.
+    pub(crate) fn fiber(&self) -> usize {
+        self.fiber
+    }
+
     /// Makes the fiber runnable. Safe whatever it is doing, and safe if it has
     /// already finished — a wake for a fiber the pool has forgotten is a
     /// lookup that finds nothing.
@@ -779,8 +885,79 @@ fn wake(shared: &Arc<Shared>, fiber: usize, state: &Wait) {
     if state.stop_counting() {
         shared.counts.waiting.fetch_sub(1, Ordering::Relaxed);
     }
+    let task = match wake_locally(shared, task) {
+        None => {
+            shared.counts.wakes_local.fetch_add(1, Ordering::Relaxed);
+            shared.in_transit.fetch_sub(1, Ordering::AcqRel);
+            return;
+        }
+        Some(task) => task,
+    };
+    shared.counts.wakes_injected.fetch_add(1, Ordering::Relaxed);
     inject(shared, task);
     shared.in_transit.fetch_sub(1, Ordering::AcqRel);
+}
+
+/// Puts a woken task on the waking fiber's own worker's queue, or hands it
+/// back for [`inject`].
+///
+/// **What this prevents: a condvar signal, a reactor nudge and an idle
+/// worker's wake-up for every fiber-to-fiber handoff.** A channel send, a
+/// pool lease and a join are each a fiber waking another, and `inject` pays
+/// for three things none of them needs: the shared queue's lock, a condvar
+/// signal, and -- while a worker is idle in `epoll_wait` -- a write to the
+/// nudge socket and the read that drains it. On a database request that was
+/// nineteen system calls where two would do. The worker the
+/// waker is running on reaches its own queue as soon as the waker suspends,
+/// which for a fiber about to wait for a reply is at once.
+///
+/// **Only from a fiber, on a worker of this pool.** A wake from anywhere else
+/// is handed back:
+///
+///   - the reactor and timer threads, and a thread that is not the
+///     scheduler's at all, have no queue of their own;
+///   - a worker's own thread outside a fiber -- `serve_io` delivering what it
+///     found -- is about to go round its loop, not to run anything sooner than
+///     any other worker, and must wake one;
+///   - a fiber of another pool would put the task on a worker that does not
+///     know it.
+///
+/// **Nothing is signaled, which is sound for a worker that goes to sleep and
+/// not, on its own, for one whose thread blocks.** The push happens on the
+/// worker's own thread, before `run` returns to `work`, and `next` looks at
+/// this queue before `serve_io` or `park` can put the worker to sleep, under
+/// that queue's lock: no instant has the task queued and the worker committed
+/// to sleeping without having looked. But a waker that then blocks the
+/// thread -- on a `Shared` cell the woken fiber holds, say -- keeps the worker
+/// from `next` until the woken fiber has run, and only another worker can run
+/// it. What finds it is the steal every worker makes on its
+/// `GLOBAL_INTERVAL` tick, busy or idle, from a worker that has not started
+/// a fiber since the thief's previous tick; see [`next`].
+///
+/// What it costs: nothing else is told the task exists. Idle workers find it
+/// by stealing when their parking timeout sends them round again -- a
+/// millisecond from `park`, up to ten from `serve_io` -- and busy ones within
+/// two of their ticks, about sixty turns. So a waker that keeps its worker
+/// after waking holds the woken fiber back by up to that long, and
+/// [`WAKE_LOCAL_BOUND`] caps how many it can hold back at once.
+fn wake_locally(shared: &Arc<Shared>, task: Task) -> Option<Task> {
+    if !shared.wake_local || !crate::coro::on_a_fiber() {
+        return Some(task);
+    }
+    let (Some(queue), Some(mine)) = (local_queue(), shared_pool()) else {
+        return Some(task);
+    };
+    if !Arc::ptr_eq(&mine, shared) {
+        return Some(task);
+    }
+    let mut queue = queue.lock().expect("a local queue");
+    if queue.len() >= WAKE_LOCAL_BOUND {
+        drop(queue);
+        shared.counts.wakes_over_bound.fetch_add(1, Ordering::Relaxed);
+        return Some(task);
+    }
+    queue.push_back(task);
+    None
 }
 
 /// Suspends the running fiber until `socket` is ready.
@@ -962,12 +1139,16 @@ fn work(shared: Arc<Shared>, me: usize) {
     attach(Some(local.clone()), Some(shared.clone()));
 
     let mut turn = 0usize;
+    let mut seen = vec![u64::MAX; shared.locals.len()];
     loop {
         if shared.stopping.load(Ordering::Acquire) {
             break;
         }
-        match next(&shared, &local, me, &mut turn) {
-            Some(task) => run(&shared, &local, task),
+        match next(&shared, &local, me, &mut turn, &mut seen) {
+            Some(task) => {
+                shared.turns[me].0.fetch_add(1, Ordering::Relaxed);
+                run(&shared, &local, task)
+            }
             // **An idle worker looks for I/O itself rather than sleeping while
             // another thread does it.** Readiness discovered here is readiness
             // discovered by the thread that is about to run the fiber, which
@@ -986,19 +1167,57 @@ fn work(shared: Arc<Shared>, me: usize) {
 }
 
 /// The next fiber for this worker, or nothing.
+///
+/// `seen` is each worker's turn count at this worker's last tick, which is
+/// how the tick tells a stuck worker from a busy one.
 fn next(
     shared: &Arc<Shared>,
     local: &Arc<Mutex<VecDeque<Task>>>,
     me: usize,
     turn: &mut usize,
+    seen: &mut [u64],
 ) -> Option<Task> {
     *turn = turn.wrapping_add(1);
 
     // Every so often, the shared queue first. Otherwise a fiber that spawns in
     // a loop keeps this worker in its own queue for ever and nothing injected
     // from outside is ever seen.
+    //
+    // **And then a steal, busy or not: what rescues a fiber whose worker's
+    // thread is blocked.** A worker that runs a fiber blocking the thread --
+    // on a `Shared` cell's mutex, stdout's lock, a DNS lookup, any foreign
+    // call -- does not come back to its queue until the call returns, and
+    // what is on that queue may be the very fiber the call is waiting for: a
+    // fiber woken there, preempted there holding the lock, or spawned there.
+    // A worker steals when it runs out of work, and on a loaded pool none
+    // does, so without this that fiber waited for ever: a valid program
+    // deadlocked. Catching every call that can block a thread instead is not
+    // possible from here, since a foreign function is one of them.
+    //
+    // **Only from a worker that looks stuck**: one that has not started a
+    // fiber since this worker's last tick. Stealing from every worker on
+    // every tick moved half a busy queue each time with nobody blocked, and
+    // cost up to 45% of the pool's turns with 2,000 runnable fibers on four
+    // workers. A worker running one long fiber with no safepoints also looks
+    // stuck; taking its queue is right then too, since it is not getting to
+    // it.
+    //
+    // What it costs: reading one counter per other worker every
+    // `GLOBAL_INTERVAL` turns. What it does not do: run the fiber sooner than
+    // two of this worker's ticks after the thread blocked, so a blocked
+    // worker's queue waits up to about sixty turns on each other worker. And
+    // it needs one worker whose thread is not blocked: with one worker, or
+    // every worker blocked on the same lock, nothing is left to steal.
     if *turn % GLOBAL_INTERVAL == 0 {
         if let Some(task) = shared.queued.lock().expect("the shared queue").pop_front() {
+            return Some(task);
+        }
+        if let Some(task) = steal_where(shared, local, me, |victim| {
+            let now = shared.turns[victim].0.load(Ordering::Relaxed);
+            let stuck = seen[victim] == now;
+            seen[victim] = now;
+            stuck
+        }) {
             return Some(task);
         }
     }
@@ -1008,7 +1227,7 @@ fn next(
     if let Some(task) = shared.queued.lock().expect("the shared queue").pop_front() {
         return Some(task);
     }
-    steal(shared, local, me)
+    steal_where(shared, local, me, |_| true)
 }
 
 /// Takes work from another worker, and returns one fiber to run now.
@@ -1023,11 +1242,14 @@ fn next(
 /// tick and a pool sharing out a burst spends it all on lock traffic.
 ///
 /// Victims are visited starting at `me + 1` rather than zero, so that idle
-/// workers do not all descend on worker 0 together.
-fn steal(
+/// workers do not all descend on worker 0 together. `may_take` is asked about
+/// each other worker in that order, before its queue is locked, until one
+/// yields a fiber; a worker it refuses is passed over.
+fn steal_where(
     shared: &Arc<Shared>,
     mine: &Arc<Mutex<VecDeque<Task>>>,
     me: usize,
+    mut may_take: impl FnMut(usize) -> bool,
 ) -> Option<Task> {
     let workers = shared.locals.len();
     if workers < 2 {
@@ -1037,6 +1259,9 @@ fn steal(
 
     for offset in 1..workers {
         let victim = (me + offset) % workers;
+        if !may_take(victim) {
+            continue;
+        }
         let mut taken = {
             let mut queue = shared.locals[victim].lock().expect("a local queue");
             let taken = take_half(&mut queue);
@@ -2228,6 +2453,646 @@ mod tests {
     fn parking_without_a_scheduler_is_refused() {
         assert!(!park_current(), "there is no worker here");
         assert!(!sleep_until(std::time::Instant::now()));
+    }
+
+    // --- where a wake goes ----------------------------------------------------
+
+    /// Waits until `count` fibers are filed in the parked map.
+    ///
+    /// **Filed, not merely waiting.** `waiting` counts a fiber from just before
+    /// it suspends, and a wake that lands before its worker files it takes
+    /// neither path in `wake`: the worker finds `NOTIFIED` and requeues it
+    /// itself. A test that counted paths after waiting for `waiting` would
+    /// count a race.
+    fn until_parked(pool: &Scheduler, count: usize) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while pool.audit().parked < count {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "only {} of {count} parked",
+                pool.audit().parked
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    /// [`Scheduler::drain`] with a deadline, so that a woken fiber stranded on
+    /// a queue nobody looks at fails the test with the counts rather than
+    /// hanging it.
+    fn drained(pool: &Scheduler) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let counts = pool.counts();
+            if counts.completed == counts.spawned && pool.audit().queued == 0 {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the pool never drained: {counts:?} {:?}",
+                pool.audit()
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    /// Spawns `count` fibers that each hand over a waker and park once.
+    ///
+    /// Answers the wakers and a count of how many have run since.
+    fn parked_fibers(pool: &Scheduler, count: usize) -> (Arc<Mutex<Vec<Waker>>>, Arc<AtomicUsize>) {
+        let wakers = Arc::new(Mutex::new(Vec::new()));
+        let resumed = Arc::new(AtomicUsize::new(0));
+        for _ in 0..count {
+            let wakers = wakers.clone();
+            let resumed = resumed.clone();
+            pool.spawn(Task::new(move || {
+                wakers.lock().unwrap().push(waker_for_current().expect("on a worker"));
+                park_current();
+                resumed.fetch_add(1, Ordering::SeqCst);
+            }));
+        }
+        until_parked(pool, count);
+        (wakers, resumed)
+    }
+
+    /// **The local wake path, end to end.** A fiber woken by another fiber
+    /// on the same worker is put on that worker's queue and runs there, and
+    /// nothing goes through the shared queue.
+    ///
+    /// Two workers, so an injected wake could have gone to either. The woken
+    /// fiber runs on the waker's worker unless the idle one stole it, which is
+    /// what stealing is for; the counts say whether it did, and the thread
+    /// check applies when it did not.
+    #[test]
+    fn a_fiber_woken_by_a_fiber_runs_on_the_wakers_worker() {
+        let pool = Scheduler::started(2, true);
+        let wakers = Arc::new(Mutex::new(Vec::new()));
+        let ran_on = Arc::new(Mutex::new(None));
+        {
+            let wakers = wakers.clone();
+            let ran_on = ran_on.clone();
+            pool.spawn(Task::new(move || {
+                wakers.lock().unwrap().push(waker_for_current().expect("on a worker"));
+                park_current();
+                *ran_on.lock().unwrap() = Some(std::thread::current().id());
+            }));
+        }
+        until_parked(&pool, 1);
+
+        let waker: Waker = wakers.lock().unwrap().pop().expect("a waker");
+        let woke_on = Arc::new(Mutex::new(None));
+        let mine = woke_on.clone();
+        pool.spawn(Task::new(move || {
+            *mine.lock().unwrap() = Some(std::thread::current().id());
+            waker.wake();
+        }));
+        drained(&pool);
+
+        let counts = pool.counts();
+        assert_eq!(counts.wakes_local, 1, "the wake did not go to the waker's worker: {counts:?}");
+        assert_eq!(counts.wakes_injected, 0, "a fiber-to-fiber wake went through inject: {counts:?}");
+        if counts.fibers_stolen == 0 {
+            assert_eq!(*ran_on.lock().unwrap(), *woke_on.lock().unwrap(), "{counts:?}");
+        }
+        assert!(pool.settle(std::time::Duration::from_secs(2)).settled(), "{:?}", pool.audit());
+    }
+
+    /// The same on four workers, sixteen times: every fiber-to-fiber wake is
+    /// local, however the workers share the wakers out.
+    #[test]
+    fn every_fiber_to_fiber_wake_on_a_pool_is_local() {
+        const PAIRS: usize = 16;
+        let pool = Scheduler::started(4, true);
+        let (wakers, resumed) = parked_fibers(&pool, PAIRS);
+        for waker in wakers.lock().unwrap().drain(..) {
+            pool.spawn(Task::new(move || waker.wake()));
+        }
+        drained(&pool);
+
+        assert_eq!(resumed.load(Ordering::SeqCst), PAIRS);
+        let counts = pool.counts();
+        assert_eq!(counts.wakes_local, PAIRS as u64, "{counts:?}");
+        assert_eq!(counts.wakes_injected, 0, "{counts:?}");
+        assert!(pool.settle(std::time::Duration::from_secs(2)).settled(), "{:?}", pool.audit());
+    }
+
+    /// **`KHORA_WAKE_LOCAL=0` sends every wake through the shared queue**,
+    /// fiber-to-fiber ones included.
+    #[test]
+    fn with_wake_local_off_every_wake_is_injected() {
+        const PAIRS: usize = 16;
+        let pool = Scheduler::started(4, false);
+        let (wakers, resumed) = parked_fibers(&pool, PAIRS);
+        for waker in wakers.lock().unwrap().drain(..) {
+            pool.spawn(Task::new(move || waker.wake()));
+        }
+        drained(&pool);
+
+        assert_eq!(resumed.load(Ordering::SeqCst), PAIRS);
+        let counts = pool.counts();
+        assert_eq!(counts.wakes_local, 0, "{counts:?}");
+        assert_eq!(counts.wakes_injected, PAIRS as u64, "{counts:?}");
+    }
+
+    /// The switch is off for `0` alone. Unset, empty and anything else leave
+    /// the local path on.
+    #[test]
+    fn only_zero_turns_wake_local_off() {
+        assert!(!wake_local_from(Some("0")));
+        assert!(wake_local_from(None));
+        assert!(wake_local_from(Some("1")));
+        assert!(wake_local_from(Some("")));
+        assert!(wake_local_from(Some("off")));
+    }
+
+    /// **A wake from a thread that is not a worker goes through the shared
+    /// queue**: there is no worker queue of the waker's to put it on, and one
+    /// chosen for it would be one nobody was about to look at.
+    #[test]
+    fn a_wake_from_a_foreign_thread_is_injected() {
+        const FIBERS: usize = 8;
+        let pool = Scheduler::started(2, true);
+        let (wakers, resumed) = parked_fibers(&pool, FIBERS);
+        let taken: Vec<Waker> = wakers.lock().unwrap().drain(..).collect();
+        std::thread::spawn(move || {
+            for waker in taken {
+                waker.wake();
+            }
+        })
+        .join()
+        .expect("the foreign waker");
+        drained(&pool);
+
+        assert_eq!(resumed.load(Ordering::SeqCst), FIBERS);
+        let counts = pool.counts();
+        assert_eq!(counts.wakes_local, 0, "{counts:?}");
+        assert_eq!(counts.wakes_injected, FIBERS as u64, "{counts:?}");
+    }
+
+    /// **A fiber on one pool waking a fiber on another goes through the
+    /// shared queue of the other.** Its own worker's queue belongs to the
+    /// wrong pool: the woken fiber would run on a worker that does not know
+    /// it, and each pool's audit would be off by one in opposite directions.
+    #[test]
+    fn a_wake_from_a_fiber_of_another_pool_is_injected() {
+        let theirs = Scheduler::started(1, true);
+        let ours = Scheduler::started(1, true);
+        let (wakers, resumed) = parked_fibers(&theirs, 1);
+        let waker = wakers.lock().unwrap().pop().expect("a waker");
+        ours.spawn(Task::new(move || waker.wake()));
+        drained(&ours);
+        drained(&theirs);
+
+        assert_eq!(resumed.load(Ordering::SeqCst), 1);
+        assert_eq!(ours.counts().wakes_local + ours.counts().wakes_injected, 0);
+        let counts = theirs.counts();
+        assert_eq!(counts.wakes_local, 0, "{counts:?}");
+        assert_eq!(counts.wakes_injected, 1, "{counts:?}");
+        assert!(theirs.settle(std::time::Duration::from_secs(2)).settled(), "{:?}", theirs.audit());
+        assert!(ours.settle(std::time::Duration::from_secs(2)).settled(), "{:?}", ours.audit());
+    }
+
+    /// **Wakes from the timer thread and from the reactor go through the
+    /// shared queue**, including readiness an idle worker finds in
+    /// `serve_io`: that runs on a worker, but not on a fiber, and nothing
+    /// there is about to run the queue it would land on sooner than any
+    /// other worker.
+    ///
+    /// Twenty socket rounds, because which of the reactor thread and an idle
+    /// worker sees a readiness first is a race, and the worker has to win
+    /// some of them for the second half of this to be tested.
+    #[test]
+    fn wakes_from_timers_and_the_reactor_are_injected() {
+        use crate::reactor::{a_connected_pair, socket_of, Interest};
+        use std::io::{Read, Write};
+        const ROUNDS: usize = 20;
+
+        let pool = Scheduler::started(2, true);
+        let (client, mut peer) = a_connected_pair();
+        let socket = socket_of(&client);
+        let read = Arc::new(AtomicUsize::new(0));
+        let got = read.clone();
+        pool.spawn(Task::new(move || {
+            for _ in 0..3 {
+                sleep_until(std::time::Instant::now() + std::time::Duration::from_millis(5));
+            }
+            // Non-blocking and retried, as every socket operation on the
+            // scheduler is: readiness is a hint, and a second report of one
+            // readiness leaves a wake standing that ends the next wait before
+            // the byte is there. A blocking read would then hold the worker.
+            let mut client = client;
+            client.set_nonblocking(true).expect("non-blocking");
+            for _ in 0..ROUNDS {
+                let mut byte = [0u8; 1];
+                loop {
+                    match client.read(&mut byte) {
+                        Ok(1) => break,
+                        Ok(_) => return,
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            wait_until_ready(socket, Interest::Readable);
+                        }
+                        Err(_) => return,
+                    }
+                }
+                got.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        for round in 0..ROUNDS {
+            while pool.watching() == 0 {
+                assert!(std::time::Instant::now() < deadline, "round {round} never registered");
+                std::thread::yield_now();
+            }
+            // Filed, too, so the wake is a real one rather than a wake that
+            // beat the park.
+            until_parked(&pool, 1);
+            peer.write_all(b"x").expect("writing");
+            while read.load(Ordering::SeqCst) <= round {
+                assert!(std::time::Instant::now() < deadline, "round {round} never read");
+                std::thread::yield_now();
+            }
+        }
+        drained(&pool);
+
+        let counts = pool.counts();
+        assert_eq!(counts.wakes_local, 0, "{counts:?}");
+        assert!(counts.wakes_injected >= ROUNDS as u64, "{counts:?}");
+        assert!(counts.timers_fired >= 1, "{counts:?}");
+    }
+
+    /// **The bound.** Below it a fiber's wake is local; at it, the wake goes
+    /// to the shared queue.
+    ///
+    /// One worker, and the waker fills its own queue by spawning, so the
+    /// queue's length when the wake arrives is exactly what was spawned.
+    #[test]
+    fn a_wake_past_the_bound_is_injected() {
+        for (queued, local, injected) in [(WAKE_LOCAL_BOUND - 1, 1, 0), (WAKE_LOCAL_BOUND, 0, 1)] {
+            let pool = Scheduler::started(1, true);
+            let (wakers, resumed) = parked_fibers(&pool, 1);
+            let waker = wakers.lock().unwrap().pop().expect("a waker");
+            pool.spawn(Task::new(move || {
+                for _ in 0..queued {
+                    schedule(Task::new(|| {}));
+                }
+                waker.wake();
+            }));
+            drained(&pool);
+
+            assert_eq!(resumed.load(Ordering::SeqCst), 1);
+            let counts = pool.counts();
+            assert_eq!(counts.wakes_local, local, "{queued} queued: {counts:?}");
+            assert_eq!(counts.wakes_injected, injected, "{queued} queued: {counts:?}");
+            assert_eq!(counts.wakes_over_bound, injected, "{queued} queued: {counts:?}");
+        }
+    }
+
+    /// **A worker that queues a wake locally and then has nothing else to
+    /// run still runs the woken fiber.** The waker parks straight after
+    /// waking, so the next thing its worker does is look for work -- and the
+    /// woken fiber exists only in that worker's own queue. A worker that
+    /// went to sleep, or to `epoll_wait`, without looking there would leave
+    /// it stranded until something unrelated woke the worker.
+    ///
+    /// One worker, so nobody can steal it out from under the test.
+    #[test]
+    fn a_worker_that_wakes_locally_and_then_parks_runs_the_woken_fiber() {
+        let pool = Scheduler::started(1, true);
+        let (wakers, resumed) = parked_fibers(&pool, 1);
+        let waker = wakers.lock().unwrap().pop().expect("a waker");
+        let second = Arc::new(Mutex::new(None));
+        let mine = second.clone();
+        pool.spawn(Task::new(move || {
+            *mine.lock().unwrap() = waker_for_current();
+            waker.wake();
+            park_current();
+        }));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while resumed.load(Ordering::SeqCst) == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the woken fiber was stranded on its waker's queue: {:?} {:?}",
+                pool.counts(),
+                pool.audit()
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(pool.counts().wakes_local, 1, "{:?}", pool.counts());
+
+        until_parked(&pool, 1);
+        second.lock().unwrap().take().expect("the waker's waker").wake();
+        drained(&pool);
+    }
+
+    /// **The starvation guard.** One fiber wakes a crowd and then holds its
+    /// worker; every one of the crowd is on that worker's queue, and three
+    /// other workers are idle. The crowd must be shared out by stealing,
+    /// without the waker ever giving its worker back.
+    ///
+    /// Measured by a handshake: the waker spins until every woken fiber has
+    /// run, which can only happen on another worker. The deadline is there to
+    /// turn a failure into a message, not to measure anything.
+    #[test]
+    fn a_crowd_woken_by_one_busy_fiber_is_shared_out() {
+        const CROWD: usize = 32;
+        const { assert!(CROWD < WAKE_LOCAL_BOUND, "the crowd must fit under the bound to be all local") };
+
+        let pool = Scheduler::started(4, true);
+        let wakers = Arc::new(Mutex::new(Vec::new()));
+        let ran = Arc::new(AtomicUsize::new(0));
+        let threads = Arc::new(Mutex::new(Vec::new()));
+        for _ in 0..CROWD {
+            let wakers = wakers.clone();
+            let ran = ran.clone();
+            let threads = threads.clone();
+            pool.spawn(Task::new(move || {
+                wakers.lock().unwrap().push(waker_for_current().expect("on a worker"));
+                park_current();
+                threads.lock().unwrap().push(std::thread::current().id());
+                ran.fetch_add(1, Ordering::SeqCst);
+            }));
+        }
+        until_parked(&pool, CROWD);
+
+        let crowd: Vec<Waker> = wakers.lock().unwrap().drain(..).collect();
+        let waker_thread = Arc::new(Mutex::new(None));
+        let spread = Arc::new(AtomicBool::new(false));
+        let (seen, done, mine) = (ran.clone(), spread.clone(), waker_thread.clone());
+        pool.spawn(Task::new(move || {
+            *mine.lock().unwrap() = Some(std::thread::current().id());
+            for waker in &crowd {
+                waker.wake();
+            }
+            // Holding the worker: no suspension, no safepoint.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while seen.load(Ordering::SeqCst) < CROWD && std::time::Instant::now() < deadline {
+                std::hint::spin_loop();
+            }
+            done.store(seen.load(Ordering::SeqCst) == CROWD, Ordering::SeqCst);
+        }));
+        drained(&pool);
+
+        let counts = pool.counts();
+        assert_eq!(counts.wakes_local, CROWD as u64, "{counts:?}");
+        assert!(
+            spread.load(Ordering::SeqCst),
+            "the crowd stayed behind its busy waker: {counts:?} turns={:?}",
+            pool.turns()
+        );
+        let busy = waker_thread.lock().unwrap().expect("the waker ran");
+        assert!(
+            threads.lock().unwrap().iter().all(|t| *t != busy),
+            "a woken fiber ran on the busy waker's worker"
+        );
+        assert!(counts.fibers_stolen >= CROWD as u64, "{counts:?}");
+        // Every turn is some worker's, and more than the waker's worker took
+        // one: the per-worker count is what the load gate reads balance from.
+        let turns = pool.turns();
+        assert_eq!(turns.iter().sum::<u64>(), counts.resumes, "turns={turns:?} {counts:?}");
+        assert!(turns.iter().filter(|t| **t > 0).count() > 1, "turns={turns:?}");
+    }
+
+    // --- a worker whose thread is blocked -------------------------------------
+
+    /// A lock that holds the thread of whoever waits for it, and may be
+    /// released on a different thread from the one that took it.
+    ///
+    /// **Not `std::sync::Mutex`**, whose guard must be dropped on the thread
+    /// that locked it on some platforms, and a fiber that takes one and then
+    /// suspends may resume on another worker. What these tests need from it
+    /// is only that a waiter keeps its worker's thread, which a spin does.
+    struct SpinLock(AtomicBool);
+
+    impl SpinLock {
+        fn new() -> SpinLock {
+            SpinLock(AtomicBool::new(false))
+        }
+
+        fn take(&self) {
+            while self.0.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+                std::hint::spin_loop();
+            }
+        }
+
+        fn give_back(&self) {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+
+    /// Spawns `count` fibers that give their worker back at every turn until
+    /// `stop`, so that every worker's own queue is never empty and no worker
+    /// ever finds itself idle. Waits until every one has run once.
+    ///
+    /// **This is the state that hides a stranded fiber.** An idle worker
+    /// steals, so a fiber stuck on a blocked worker's queue is rescued by the
+    /// first worker that runs out of work. A loaded pool has no such worker.
+    fn busy_spinners(pool: &Scheduler, count: usize, stop: &Arc<AtomicBool>) {
+        let started = Arc::new(AtomicUsize::new(0));
+        for _ in 0..count {
+            let (stop, started) = (stop.clone(), started.clone());
+            pool.spawn(Task::new(move || {
+                started.fetch_add(1, Ordering::SeqCst);
+                while !stop.load(Ordering::SeqCst) {
+                    suspend();
+                }
+            }));
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while started.load(Ordering::SeqCst) < count {
+            assert!(std::time::Instant::now() < deadline, "the spinners never started");
+            std::thread::yield_now();
+        }
+    }
+
+    /// Waits up to `patience` for `flag`, and answers whether it came.
+    ///
+    /// The watchdog in the tests below, and never the thing a test decides
+    /// on: each decides on whether the flag was set *while the spinners were
+    /// still busy*, then stops them so the pool can drain either way.
+    fn came(flag: &AtomicBool, patience: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + patience;
+        while !flag.load(Ordering::SeqCst) {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::yield_now();
+        }
+        true
+    }
+
+    /// **The review's deadlock, in Rust.** X holds a lock and parks on it --
+    /// a change function in `Shared::update` waiting on a channel is the Khora
+    /// spelling. W wakes X, and then blocks its worker's thread on that lock.
+    /// X is on W's worker's queue, and every other worker is kept busy.
+    ///
+    /// Nothing but another worker can run X, and a busy worker never looked
+    /// anywhere but its own queue and the shared one, so W waited for ever:
+    /// on every run, on two workers and on four.
+    #[test]
+    fn a_waker_that_blocks_on_a_lock_its_wakee_holds_is_not_stranded() {
+        for workers in [2usize, 4] {
+            let pool = Scheduler::started(workers, true);
+            let lock = Arc::new(SpinLock::new());
+            let released = Arc::new(AtomicBool::new(false));
+            let x_waker: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
+            {
+                let (lock, x_waker, released) = (lock.clone(), x_waker.clone(), released.clone());
+                pool.spawn(Task::new(move || {
+                    lock.take();
+                    *x_waker.lock().unwrap() = waker_for_current();
+                    park_current();
+                    released.store(true, Ordering::SeqCst);
+                    lock.give_back();
+                }));
+            }
+            until_parked(&pool, 1);
+            let stop = Arc::new(AtomicBool::new(false));
+            busy_spinners(&pool, 2 * workers, &stop);
+
+            let got_it = Arc::new(AtomicBool::new(false));
+            {
+                let (lock, x_waker, got_it) = (lock.clone(), x_waker.clone(), got_it.clone());
+                let released = released.clone();
+                pool.spawn(Task::new(move || {
+                    x_waker.lock().unwrap().take().expect("X's waker").wake();
+                    // Holds this worker's thread until X has run.
+                    lock.take();
+                    assert!(released.load(Ordering::SeqCst), "the lock was taken before X released it");
+                    lock.give_back();
+                    got_it.store(true, Ordering::SeqCst);
+                }));
+            }
+            let in_time = came(&got_it, std::time::Duration::from_secs(10));
+            stop.store(true, Ordering::SeqCst);
+            drained(&pool);
+            assert!(
+                in_time,
+                "{workers} workers: the fiber W woke was stranded behind W's blocked thread \
+                 while the other workers were busy: {:?}",
+                pool.counts()
+            );
+        }
+    }
+
+    /// **The same, without a lock: the waker keeps its worker until the
+    /// fiber it woke has run.** A spinning waker is not a deadlock -- it
+    /// bounds only how late the woken fiber is -- but it is the plainest
+    /// form of the question: does a busy pool ever look at a worker's queue
+    /// while that worker is not getting to it?
+    #[test]
+    fn a_waker_that_holds_its_worker_does_not_hold_back_the_fiber_it_woke() {
+        for workers in [2usize, 4] {
+            let pool = Scheduler::started(workers, true);
+            let (wakers, resumed) = parked_fibers(&pool, 1);
+            let waker = wakers.lock().unwrap().pop().expect("a waker");
+            let stop = Arc::new(AtomicBool::new(false));
+            busy_spinners(&pool, 2 * workers, &stop);
+
+            let ran = Arc::new(AtomicBool::new(false));
+            {
+                let (ran, resumed) = (ran.clone(), resumed.clone());
+                pool.spawn(Task::new(move || {
+                    waker.wake();
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                    while resumed.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+                        std::hint::spin_loop();
+                    }
+                    ran.store(resumed.load(Ordering::SeqCst) == 1, Ordering::SeqCst);
+                }));
+            }
+            let in_time = came(&ran, std::time::Duration::from_secs(12));
+            stop.store(true, Ordering::SeqCst);
+            drained(&pool);
+            assert!(
+                in_time,
+                "{workers} workers: the woken fiber did not run while its waker held the worker: {:?}",
+                pool.counts()
+            );
+        }
+    }
+
+    /// **The case that needs no wake at all, and was there before the local
+    /// wake path.** H takes a lock and is preempted holding it, which puts H
+    /// back on its own worker's queue; B, next on that queue, blocks the
+    /// thread on the same lock. H can only run elsewhere, and every other
+    /// worker is busy. On either wake path, since nothing here is a wake.
+    #[test]
+    fn a_fiber_preempted_holding_a_lock_is_not_stranded_behind_one_blocked_on_it() {
+        for wake_local in [false, true] {
+            let pool = Scheduler::started(2, wake_local);
+            let stop = Arc::new(AtomicBool::new(false));
+            busy_spinners(&pool, 4, &stop);
+
+            let lock = Arc::new(SpinLock::new());
+            let released = Arc::new(AtomicBool::new(false));
+            let got_it = Arc::new(AtomicBool::new(false));
+            {
+                let (lock, got_it, released) = (lock.clone(), got_it.clone(), released.clone());
+                // One fiber schedules both, so both land on its worker's queue,
+                // H first.
+                pool.spawn(Task::new(move || {
+                    let (held, done) = (lock.clone(), released.clone());
+                    schedule(Task::new(move || {
+                        held.take();
+                        // Preempted holding it: back to the end of this
+                        // worker's queue, behind B.
+                        suspend();
+                        done.store(true, Ordering::SeqCst);
+                        held.give_back();
+                    }));
+                    schedule(Task::new(move || {
+                        lock.take();
+                        assert!(released.load(Ordering::SeqCst), "B took the lock before H released it");
+                        lock.give_back();
+                        got_it.store(true, Ordering::SeqCst);
+                    }));
+                }));
+            }
+            let in_time = came(&got_it, std::time::Duration::from_secs(10));
+            stop.store(true, Ordering::SeqCst);
+            drained(&pool);
+            assert!(
+                in_time,
+                "wake_local={wake_local}: a fiber preempted holding a lock was stranded behind \
+                 the fiber blocked on it: {:?}",
+                pool.counts()
+            );
+        }
+    }
+
+    /// **A busy pool with nobody blocked moves (almost) nothing between
+    /// workers.** Every worker has a queue of fibers that only yield, so none
+    /// is ever idle and none is ever stuck: the tick has nothing to rescue.
+    /// Stealing on every tick regardless moved half of some worker's queue
+    /// each time, which with a long queue cost up to 45% of the pool's fiber
+    /// turns in moving fibers back and forth.
+    ///
+    /// Counted over a window after the spinners are spread: fewer than one
+    /// tick in ten may take anything. An unconditional tick takes something on
+    /// nearly every one. The margin is for a worker thread the OS deschedules
+    /// on a loaded host, which does look stuck, and is correctly stolen from.
+    #[test]
+    fn a_busy_pool_with_nobody_blocked_steals_almost_nothing_on_the_tick() {
+        let pool = Scheduler::started(4, true);
+        let stop = Arc::new(AtomicBool::new(false));
+        busy_spinners(&pool, 64, &stop);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let before = pool.counts();
+        let turns_before: u64 = pool.turns().iter().sum();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let after = pool.counts();
+        let turns_after: u64 = pool.turns().iter().sum();
+        stop.store(true, Ordering::SeqCst);
+        drained(&pool);
+        let ticks = (turns_after - turns_before) / GLOBAL_INTERVAL as u64;
+        let steals = after.steals_succeeded - before.steals_succeeded;
+        let moved = after.fibers_stolen - before.fibers_stolen;
+        assert!(ticks > 100, "too few turns to judge: {ticks} ticks");
+        assert!(
+            steals * 10 < ticks,
+            "{steals} steals moved {moved} fibers in {ticks} ticks, with no worker blocked"
+        );
     }
 
     // `a_fiber_keeps_its_identity_across_workers` used to live here, and it

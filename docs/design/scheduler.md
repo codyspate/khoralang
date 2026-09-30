@@ -928,6 +928,173 @@ can see something accumulating *between* pools. Five thousand schedulers built
 and destroyed, something over two million fibers, and resident memory flat to
 within a megabyte.
 
+### Wake-local
+
+**The rule.** A wake made by a fiber running on a worker of the same pool puts
+the woken task on *that worker's* queue, and nothing else: no shared queue, no
+condvar, no reactor nudge. Every other wake keeps `inject` — from the reactor
+thread, the timer thread, a thread that is not a worker, a worker's own thread
+outside a fiber (`serve_io` delivering what it found), and a fiber of another
+pool. `KHORA_WAKE_LOCAL=0` sends every wake through `inject`; it is read once,
+when a pool starts. `scheduler::wake_locally` is the code, and the counters
+`wakes_local`, `wakes_injected` and `wakes_over_bound` say which path a
+workload takes.
+
+**Why.** perf-0929 measured the scheduler losing to threads on every database
+test by 1.8–2.1×, all of it kernel time: each fiber-to-fiber wake paid the
+shared queue's lock, a condvar signal and, with a worker idle in
+`epoll_wait`, a one-byte write to the nudge socket and the read that drains
+it. A `/db` request makes about twenty such wakes — nineteen `sendto` per
+request against two on threads.
+
+**Why the woken fiber cannot be stranded, and the case the first version
+missed.** Two ways a worker can stop looking at its own queue:
+
+- *It sleeps.* The push happens on the worker's own thread, inside `run`,
+  before control returns to `work`. The next thing `work` does is `next`,
+  which takes the worker's own queue's lock and looks at it before
+  `serve_io` or `park` can put the worker to sleep, and `park` looks at it
+  again under the shared queue's lock before it waits. So there is no instant
+  at which the task is on the queue and its worker is committed to sleeping
+  without having looked.
+  `a_worker_that_wakes_locally_and_then_parks_runs_the_woken_fiber` is the
+  case, and removing the local-queue check from `next` makes it fail.
+- *Its thread blocks.* The waker wakes X, then blocks the thread: on a
+  `Shared` cell's mutex that X holds (`Shared::update` holds it across the
+  change function, and a `receive` inside one parks X with it held), on
+  stdout's lock, in a DNS lookup, in any foreign call. The worker does not
+  come back to `next` until the call returns, and the call may be waiting for
+  X. The first version said only an idle worker steals, and on a loaded pool
+  none is idle, so the review's program deadlocked: 25 of 40 runs on two
+  CPUs and 33 of 40 on four, in this round's reproduction.
+
+The second is not specific to wake-local. A fiber *preempted* while holding a
+lock goes back onto its own worker's queue, and a fiber *spawned* goes onto
+its spawner's; if the next fiber that worker runs blocks the thread on the
+same lock, the holder is stranded the same way. That was there before
+wake-local; wake-local made it the ordinary shape of every `receive` inside
+`update`.
+
+**The fix: a busy worker steals too, on the `GLOBAL_INTERVAL` tick, from a
+worker that looks stuck.** Every thirty-first turn a worker already looks at
+the shared queue first; if that is empty it sweeps the other workers' queues
+as an idle one would, but takes only from a worker whose turn count has not
+moved since this worker's previous tick: one that has not started a fiber in
+about thirty-one of this worker's turns. A fiber stuck on a blocked worker's
+queue is then found within about sixty-two turns of some other worker, busy or
+not. A worker running one long fiber with no safepoints looks stuck too, and
+taking its queue is right then as well.
+
+Stealing on every tick regardless also fixes the hang, and costs a great deal
+with nobody blocked: it moves half of some busy worker's queue each time. With
+2,000 runnable fibers that only yield, on four workers, that cost 45% of the
+pool's fiber turns; with 16 to 256 fibers, 7 to 16%. Taking only from a stuck
+worker moved 0.00 to 0.14 fibers per turn instead of 0.13 to 7.8, and ran
+14.7M turns per 1.5 s at 2,000 fibers against 8.7M to 10.0M (16.7M to 17.6M
+with no tick steal at all). `a_busy_pool_with_nobody_blocked_steals_almost_nothing_on_the_tick`
+holds it there.
+
+**Where it stops.** The steal needs one worker whose thread is not blocked.
+With one worker, or when every worker's thread blocks on the same cell while
+its holder waits on a queue, nothing is left to run the holder and the program
+hangs, as it did before wake-local. Only spilling the queue before blocking,
+or a cell lock that parks the fiber instead of the thread, would close that.
+
+The steal on the tick was chosen over spilling the queue before each blocking
+call because the blocking calls are not a closed set: the ones in the runtime
+can be listed (below), but a foreign function is one too, and a check that
+every call site remembered to spill could not see those.
+`a_waker_that_blocks_on_a_lock_its_wakee_holds_is_not_stranded`,
+`a_waker_that_holds_its_worker_does_not_hold_back_the_fiber_it_woke` and
+`a_fiber_preempted_holding_a_lock_is_not_stranded_behind_one_blocked_on_it`
+are the cases, on two and four workers with every other worker kept busy, and
+the last fails on both wake paths without the tick's steal.
+
+The calls in the runtime that block a worker's thread, reachable from Khora
+code on the scheduler:
+
+| call | blocks on |
+| --- | --- |
+| `Shared::get`, `set`, `update`, `modify` | the cell's `std::sync::Mutex`, held across a change function |
+| `print`, `eprint` | stdout's or stderr's lock, and the write |
+| `net::connect`, a TLS connect | DNS and `connect(2)`, done inline |
+| an `extern` function | whatever it does |
+| the runtime's own short locks (channel, latch, scheduler maps) | never held across a park or a call out |
+
+The blocking pool's submit parks the fiber when the pool is full rather than
+blocking the thread, and file I/O goes through the pool, so neither is on the
+list.
+
+**How soon an idle worker steals.** `park` waits at most a millisecond on the
+condvar and then returns to `next`, which steals half of the first non-empty
+victim's queue. The poller, if one worker is in `serve_io`, waits up to ten.
+Measured with a crowd of eight woken by one fiber that then held its worker
+(release, idle pool, 40 trials): the first woken fiber ran on another worker
+after 0.17–0.19 ms at the median, 0.5–1.3 ms at p90, and once 10 ms on two
+workers — which matches the poller's timeout, though that run did not record
+which worker was in `epoll_wait`. `a_crowd_woken_by_one_busy_fiber_is_shared_out` is the
+deterministic guard: every woken fiber has to run somewhere else while the
+waker spins without a safepoint.
+
+**The bound**, `WAKE_LOCAL_BOUND`: once the waker's queue holds 512 tasks, a
+wake goes to `inject` instead. Picked from a sweep on the TechEmpower server,
+four CPUs, `wrk -c256`, 30 s per sample, two interleaved rounds, medians:
+
+| bound | `/db` µs/req | `/queries?queries=20` µs/req | `/fortunes` µs/req | wakes over the bound | workers' shares |
+| --- | --- | --- | --- | --- | --- |
+| 8 | 205 | 3,619 | 246 | 63–71% | 0.242–0.256 |
+| 64 | 206 | 3,347 | 246 | 24–36% | 0.247–0.253 |
+| 512 | 174 | 2,721 | 231 | 0 | 0.243–0.254 |
+| none | 175 | 2,807 | 234 | 0 | 0.247–0.252 |
+
+A low bound bought no balance — the shares were even at every bound — and
+cost up to 30% more CPU per request, because each wake over it pays the full
+`inject`. The crowds that reach it come from `khora_channel_send` waking every
+fiber parked on a channel, which on the scheduler the connection pool's
+`idle` channel does with up to a couple of hundred requests waiting. 512 is
+above anything this workload reached, so it caps a pathological crowd rather
+than shaping an ordinary one.
+
+**The three gates**, all run with wake-local on:
+
+1. `nursery::tests` on the scheduler with `--test-threads=1`: 9/9, three runs
+   each in debug and release. The whole `khora-rt` suite with
+   `--release --features fiber-audit`: 258/258, three runs on each backend.
+2. The soak: ten runs of 6,000 rounds with a fresh seed each, in debug and in
+   release with `fiber-audit`, all three soak tests, no watchdog dump and no
+   audit failure; then `a_long_soak_over_many_seeds` for two minutes in each
+   (1,601 and 1,698 passes, resident drift −3.3 MB and −3.5 MB). The soak
+   gained a `Relay` workload — a child that sleeps, then hands values over a
+   one-slot channel, then writes a socket its parent waits on — so one
+   exchange carries timer, fiber-to-fiber and reactor wakes; in a 3,000-round
+   run about one real wake in eleven took the local path.
+3. The TechEmpower server on the scheduler, four CPUs, `wrk -c256`, 60 s per
+   sample, on and off interleaved over three rounds, medians. No errors and no
+   non-2xx responses, and `verify.sh` passed afterward on both backends:
+
+| test | wake-local | req/s | CPU µs/req | user / sys | p99 | fibers stolen / req | workers' shares |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `/db` | off | 10,287 | 226 | 105 / 121 | 142 ms | 0 | 0.249–0.251 |
+| `/db` | on | 16,079 | 190 | 121 / 67 | 84 ms | 41.5 | 0.248–0.252 |
+| `/queries?queries=20` | off | 788 | 4,162 | 1,839 / 2,324 | 560 ms | 0 | 0.249–0.251 |
+| `/queries?queries=20` | on | 868 | 2,850 | 1,981 / 870 | 516 ms | 1,042 | 0.248–0.251 |
+| `/fortunes` | off | 10,242 | 322 | 187 / 135 | 140 ms | 0 | 0.249–0.251 |
+| `/fortunes` | on | 15,773 | 245 | 181 / 65 | 84 ms | 6.3 | 0.245–0.253 |
+
+"Balanced" is read against wake-local off, where every wake is injected and
+any idle worker takes it: there, each of the four workers ran 24.9–25.1% of
+all fiber turns. With wake-local on, 24.5–25.3%. Stealing does the spreading
+— tens to a thousand fibers moved per request — and it keeps up. The box sat
+at load 14–20 throughout (other agents), so read the deltas, not the
+absolutes.
+
+**What it costs.** The woken fiber waits for its waker to suspend, or for a
+thief. For a waker about to wait for a reply — the ordinary shape — that is
+at once. For a waker that keeps running, it is up to a millisecond (a parked
+thief) or ten (the poller). The local path also moves work by stealing rather
+than by the shared queue, and a steal takes two locks where a pop takes one;
+at this load that did not show in the shares or the p99.
+
 ### Scale
 
 A thousand, ten thousand and a hundred thousand fibers, all waiting at once,

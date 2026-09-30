@@ -89,10 +89,19 @@ impl WhenFull {
 /// What a `Channel<A>` holds.
 struct Queue {
     items: VecDeque<u64>,
-    /// Fibers waiting for room. Woken by a receive.
-    senders: Vec<Waker>,
-    /// Fibers waiting for a value. Woken by a send.
-    receivers: Vec<Waker>,
+    /// Fibers waiting for room, oldest first. A receive wakes one.
+    senders: VecDeque<Waker>,
+    /// Fibers waiting for a value, oldest first. A send wakes one.
+    ///
+    /// **One, and every entry is a fiber that is still waiting.** Woken all
+    /// at once, every receiver but one found the queue empty and parked
+    /// again -- on a pool's idle channel, a hundred wakes for each
+    /// connection handed back. Waking one is only safe if the one woken is
+    /// still there to take the value, so a fiber takes its own entry out
+    /// every time it comes back to the lock ([`withdraw`]), whether a send,
+    /// a cancel or anything else woke it. An entry is therefore a fiber that
+    /// has not looked at the queue since it enrolled, and it will look.
+    receivers: VecDeque<Waker>,
     /// Threads blocked in [`park_until_moved`] for room, and for a value.
     ///
     /// **What lets a send or receive wake one thread, or none, instead of
@@ -286,8 +295,8 @@ pub unsafe extern "C" fn khora_channel_open(
     let channel: Box<Channel> = Box::new(Channel {
         state: Mutex::new(Queue {
             items: VecDeque::new(),
-            senders: Vec::new(),
-            receivers: Vec::new(),
+            senders: VecDeque::new(),
+            receivers: VecDeque::new(),
             threads_sending: 0,
             threads_receiving: 0,
             #[cfg(test)]
@@ -360,6 +369,26 @@ fn park_until_moved(
     crate::current::current(|fiber| fiber.unpark_from());
 }
 
+/// Takes this fiber's own entry out of `waiting`, if it left one.
+///
+/// **What makes waking one waiter safe.** A fiber enrolls, parks, and is
+/// woken -- by the send or receive that picked it, by a cancel, or by
+/// anything else. If it then left the channel while its entry stayed, the
+/// next send could pick that entry and wake a fiber that has gone, and the
+/// value would sit queued behind receivers that are still waiting. Called
+/// under the channel's lock on every return to it after a park, before the
+/// queue is looked at, so an entry never outlives its fiber's next look.
+///
+/// What it costs: a scan of the waiting list, once per wake of a fiber that
+/// had enrolled. A fiber the send picked is at the front.
+fn withdraw(waiting: &mut VecDeque<Waker>, enrolled: &mut Option<usize>) {
+    if let Some(fiber) = enrolled.take() {
+        if let Some(at) = waiting.iter().position(|w| w.fiber() == fiber) {
+            waiting.remove(at);
+        }
+    }
+}
+
 /// Whether this fiber should give up a wait: [`crate::current::Fiber::gives_up_waiting`].
 ///
 /// The predicate `khora_canceled` answers with, plus a change function's
@@ -398,8 +427,10 @@ pub unsafe extern "C" fn khora_channel_send(handle: *mut u8, value: u64) -> bool
         unsafe { crate::share::khora_share(value as *mut u8, channel.glue) };
     }
 
+    let mut enrolled = None;
     loop {
         let mut state = channel.state.lock().unwrap_or_else(|e| e.into_inner());
+        withdraw(&mut state.senders, &mut enrolled);
         if state.closed {
             drop(state);
             channel.release(value);
@@ -407,11 +438,11 @@ pub unsafe extern "C" fn khora_channel_send(handle: *mut u8, value: u64) -> bool
         }
         if state.items.len() < channel.capacity {
             state.items.push_back(value);
-            let waiting = std::mem::take(&mut state.receivers);
+            let next = state.receivers.pop_front();
             let threads = state.threads_receiving;
             drop(state);
             channel.a_value_arrived(threads);
-            for waker in waiting {
+            if let Some(waker) = next {
                 waker.wake();
             }
             return true;
@@ -434,7 +465,7 @@ pub unsafe extern "C" fn khora_channel_send(handle: *mut u8, value: u64) -> bool
             WhenFull::Slide => {
                 let evicted = state.items.pop_front();
                 state.items.push_back(value);
-                let waiting = std::mem::take(&mut state.receivers);
+                let next = state.receivers.pop_front();
                 let threads = state.threads_receiving;
                 drop(state);
                 // After the lock, for the reason `release` gives: a drop
@@ -443,7 +474,7 @@ pub unsafe extern "C" fn khora_channel_send(handle: *mut u8, value: u64) -> bool
                     channel.release(old);
                 }
                 channel.a_value_arrived(threads);
-                for waker in waiting {
+                if let Some(waker) = next {
                     waker.wake();
                 }
                 return true;
@@ -465,7 +496,8 @@ pub unsafe extern "C" fn khora_channel_send(handle: *mut u8, value: u64) -> bool
         // two leaves this fiber parked on room that already exists.
         match waker_for_current() {
             Some(waker) => {
-                state.senders.push(waker);
+                enrolled = Some(waker.fiber());
+                state.senders.push_back(waker);
                 drop(state);
                 park_current();
             }
@@ -493,14 +525,16 @@ pub unsafe extern "C" fn khora_channel_receive(handle: *mut u8, out: *mut u64) -
         fatal("receiving on a channel that has already been released");
     };
 
+    let mut enrolled = None;
     loop {
         let mut state = channel.state.lock().unwrap_or_else(|e| e.into_inner());
+        withdraw(&mut state.receivers, &mut enrolled);
         if let Some(value) = state.items.pop_front() {
-            let waiting = std::mem::take(&mut state.senders);
+            let next = state.senders.pop_front();
             let threads = state.threads_sending;
             drop(state);
             channel.room_appeared(threads);
-            for waker in waiting {
+            if let Some(waker) = next {
                 waker.wake();
             }
             // SAFETY: the caller guarantees a writable word.
@@ -523,7 +557,8 @@ pub unsafe extern "C" fn khora_channel_receive(handle: *mut u8, out: *mut u64) -
 
         match waker_for_current() {
             Some(waker) => {
-                state.receivers.push(waker);
+                enrolled = Some(waker.fiber());
+                state.receivers.push_back(waker);
                 drop(state);
                 park_current();
             }
@@ -600,13 +635,13 @@ pub unsafe extern "C" fn khora_channel_poll(handle: *mut u8, out: *mut u64) -> b
     let Some(value) = state.items.pop_front() else {
         return false;
     };
-    // Room appeared, so anybody waiting for it is woken -- exactly as a
+    // Room appeared, so one sender waiting for it is woken -- exactly as a
     // receive does, because to a blocked sender this *is* a receive.
-    let waiting = std::mem::take(&mut state.senders);
+    let next = state.senders.pop_front();
     let threads = state.threads_sending;
     drop(state);
     channel.room_appeared(threads);
-    for waker in waiting {
+    if let Some(waker) = next {
         waker.wake();
     }
     // SAFETY: the caller promised a writable word.
@@ -1063,6 +1098,385 @@ mod tests {
             stalls.is_empty(),
             "a value stayed queued while a receiver was blocked (round, queued, returned): {stalls:?}"
         );
+    }
+
+    // --- fibers on the scheduler: one wake per value ---------------------------
+
+    use crate::coro::Task;
+    use crate::scheduler::Scheduler;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Spawns `count` fibers that each receive once from `channel`, and waits
+    /// until every one of them is parked in the receive. Answers how many
+    /// have received, and how many got nothing (a close, or a cancel).
+    fn parked_receivers(
+        pool: &Scheduler,
+        channel: usize,
+        count: usize,
+    ) -> (Arc<AtomicUsize>, Arc<AtomicUsize>, Vec<usize>) {
+        let got = Arc::new(AtomicUsize::new(0));
+        let none = Arc::new(AtomicUsize::new(0));
+        let mut ids = Vec::new();
+        for _ in 0..count {
+            let (got, none) = (got.clone(), none.clone());
+            let task = Task::new(move || match take(channel as *mut u8) {
+                Some(_) => {
+                    got.fetch_add(1, Ordering::SeqCst);
+                }
+                None => {
+                    none.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+            ids.push(task.fiber().id());
+            pool.spawn(task);
+        }
+        until(|| pool.audit().parked == count);
+        (got, none, ids)
+    }
+
+    /// Waits, with a deadline that turns a hang into a message, for `done`.
+    fn settled_on(pool: &Scheduler, what: &str, mut done: impl FnMut() -> bool) {
+        let start = std::time::Instant::now();
+        while !done() {
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(10),
+                "{what}: {:?} {:?}",
+                pool.counts(),
+                pool.audit()
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    /// **One value wakes one parked fiber**, as it wakes one blocked thread.
+    ///
+    /// Woken all at once, every receiver but one found the queue empty and
+    /// parked again: on a pool's idle channel under 256 connections, about a
+    /// hundred wakes for each connection handed back, each a resume, a lock
+    /// and a park.
+    #[test]
+    fn one_value_wakes_one_parked_fiber() {
+        const READERS: usize = 16;
+        let pool = Scheduler::started(1, true);
+        let channel = open(1) as usize;
+        let (got, _, _) = parked_receivers(&pool, channel, READERS);
+
+        let before = pool.counts().wakes;
+        assert!(unsafe { khora_channel_send(channel as *mut u8, 1) });
+        settled_on(&pool, "the value was never taken", || got.load(Ordering::SeqCst) == 1);
+        settled_on(&pool, "the rest never parked again", || pool.audit().parked == READERS - 1);
+        let wakes = pool.counts().wakes - before;
+        assert_eq!(wakes, 1, "one send woke {wakes} of {READERS} parked receivers");
+
+        unsafe { khora_channel_close(channel as *mut u8) };
+        settled_on(&pool, "the close left a receiver parked", || pool.audit().parked == 0);
+        drop(pool);
+        unsafe { khora_channel_release(channel as *mut u8) };
+    }
+
+    /// **A close wakes every parked fiber**, on both sides, and each gets the
+    /// closed answer.
+    #[test]
+    fn closing_wakes_every_parked_fiber() {
+        const EACH: usize = 6;
+        let pool = Scheduler::started(2, true);
+        let empty = open(1) as usize;
+        let (_, none, _) = parked_receivers(&pool, empty, EACH);
+
+        let full = open(1) as usize;
+        assert!(unsafe { khora_channel_send(full as *mut u8, 100) });
+        let refused = Arc::new(AtomicUsize::new(0));
+        for n in 0..EACH as u64 {
+            let refused = refused.clone();
+            pool.spawn(Task::new(move || {
+                if !unsafe { khora_channel_send(full as *mut u8, n) } {
+                    refused.fetch_add(1, Ordering::SeqCst);
+                }
+            }));
+        }
+        settled_on(&pool, "the senders never parked", || pool.audit().parked == 2 * EACH);
+
+        unsafe { khora_channel_close(empty as *mut u8) };
+        unsafe { khora_channel_close(full as *mut u8) };
+        settled_on(&pool, "a close left somebody parked", || {
+            none.load(Ordering::SeqCst) == EACH && refused.load(Ordering::SeqCst) == EACH
+        });
+        drop(pool);
+        unsafe { khora_channel_release(empty as *mut u8) };
+        unsafe { khora_channel_release(full as *mut u8) };
+    }
+
+    /// **The same for room: one receive wakes one parked sender**, and every
+    /// value still arrives, in the order the channel took them.
+    #[test]
+    fn one_receive_wakes_one_parked_sender() {
+        const WRITERS: usize = 12;
+        let pool = Scheduler::started(1, true);
+        let channel = open(1) as usize;
+        assert!(unsafe { khora_channel_send(channel as *mut u8, 1000) });
+        let sent = Arc::new(AtomicUsize::new(0));
+        for n in 0..WRITERS as u64 {
+            let sent = sent.clone();
+            pool.spawn(Task::new(move || {
+                assert!(unsafe { khora_channel_send(channel as *mut u8, n) });
+                sent.fetch_add(1, Ordering::SeqCst);
+            }));
+        }
+        settled_on(&pool, "the senders never parked", || pool.audit().parked == WRITERS);
+
+        let before = pool.counts().wakes;
+        assert_eq!(take(channel as *mut u8), Some(1000));
+        settled_on(&pool, "no sender filled the room", || sent.load(Ordering::SeqCst) == 1);
+        settled_on(&pool, "the rest never parked again", || pool.audit().parked == WRITERS - 1);
+        let wakes = pool.counts().wakes - before;
+        assert_eq!(wakes, 1, "one slot of room woke {wakes} of {WRITERS} parked senders");
+
+        let mut got = Vec::new();
+        while got.len() < WRITERS {
+            got.push(take(channel as *mut u8).expect("a value"));
+        }
+        got.sort_unstable();
+        assert_eq!(got, (0..WRITERS as u64).collect::<Vec<_>>());
+        drop(pool);
+        unsafe { khora_channel_release(channel as *mut u8) };
+    }
+
+    /// **A receiver that leaves empty-handed takes no later value's wake
+    /// with it.** Waking one receiver per value rests on the woken one being
+    /// a receiver that is still there. R1 is canceled while it waits: the
+    /// cancel wakes it, it finds nothing and leaves. The next value must go
+    /// to R2 or R3, which are still parked -- a send that woke R1's leftover
+    /// enrollment instead would wake a fiber that has gone, and the value
+    /// would sit queued behind two waiting receivers.
+    #[test]
+    fn a_receiver_that_left_takes_no_later_wake_with_it() {
+        for wake_local in [true, false] {
+            let pool = Scheduler::started(1, wake_local);
+            let channel = open(4) as usize;
+            let (got, none, ids) = parked_receivers(&pool, channel, 3);
+
+            pool.cancel_fiber(ids[0]);
+            settled_on(&pool, "the canceled receiver never left", || none.load(Ordering::SeqCst) == 1);
+            assert!(unsafe { khora_channel_send(channel as *mut u8, 7) });
+            settled_on(&pool, "the value stayed queued while two receivers waited", || {
+                got.load(Ordering::SeqCst) == 1
+            });
+
+            unsafe { khora_channel_close(channel as *mut u8) };
+            settled_on(&pool, "the close left a receiver parked", || none.load(Ordering::SeqCst) == 2);
+            drop(pool);
+            unsafe { khora_channel_release(channel as *mut u8) };
+        }
+    }
+
+    /// **The same on the sending side**: a sender canceled while it waits
+    /// for room leaves, and the room a receive makes goes to a sender that is
+    /// still waiting.
+    #[test]
+    fn a_sender_that_left_takes_no_later_room_with_it() {
+        let pool = Scheduler::started(1, true);
+        let channel = open(1) as usize;
+        assert!(unsafe { khora_channel_send(channel as *mut u8, 1000) });
+        let (sent, refused) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let mut ids = Vec::new();
+        for n in 0..3u64 {
+            let (sent, refused) = (sent.clone(), refused.clone());
+            let task = Task::new(move || {
+                if unsafe { khora_channel_send(channel as *mut u8, n) } {
+                    sent.fetch_add(1, Ordering::SeqCst);
+                } else {
+                    refused.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+            ids.push(task.fiber().id());
+            pool.spawn(task);
+        }
+        settled_on(&pool, "the senders never parked", || pool.audit().parked == 3);
+
+        pool.cancel_fiber(ids[0]);
+        settled_on(&pool, "the canceled sender never left", || refused.load(Ordering::SeqCst) == 1);
+        assert_eq!(take(channel as *mut u8), Some(1000));
+        settled_on(&pool, "the room stayed empty while two senders waited", || {
+            sent.load(Ordering::SeqCst) == 1
+        });
+
+        unsafe { khora_channel_close(channel as *mut u8) };
+        settled_on(&pool, "the close left a sender parked", || refused.load(Ordering::SeqCst) == 2);
+        drop(pool);
+        unsafe { khora_channel_release(channel as *mut u8) };
+    }
+
+    /// **A burst of values reaches as many parked receivers**, whatever order
+    /// the wakes and the receivers run in, and with no more wakes than
+    /// values.
+    #[test]
+    fn a_burst_of_sends_reaches_every_parked_receiver_once() {
+        const READERS: usize = 32;
+        for workers in [1usize, 4] {
+            let pool = Scheduler::started(workers, true);
+            let channel = open(READERS as i64) as usize;
+            let (got, _, _) = parked_receivers(&pool, channel, READERS);
+            let before = pool.counts().wakes;
+            let sender = Task::new(move || {
+                for n in 0..READERS as u64 {
+                    assert!(unsafe { khora_channel_send(channel as *mut u8, n) });
+                }
+            });
+            pool.spawn(sender);
+            settled_on(&pool, "a value was stranded", || got.load(Ordering::SeqCst) == READERS);
+            let wakes = pool.counts().wakes - before;
+            assert!(wakes <= READERS as u64, "{workers} workers: {wakes} wakes for {READERS} values");
+            drop(pool);
+            unsafe { khora_channel_release(channel as *mut u8) };
+        }
+    }
+
+    /// **The review's herd, measured.** Two hundred fibers receive in a loop
+    /// from one channel while one fiber sends two hundred values, yielding
+    /// after each the way a request handler returns to its loop. Wakes per
+    /// value is the number: a send that woke every parked receiver made it
+    /// about a hundred, with every woken receiver running at once on the
+    /// sender's worker and parking again before the next send.
+    #[test]
+    fn the_send_herd_is_one_wake_per_value() {
+        const RECEIVERS: usize = 200;
+        const VALUES: usize = 200;
+        let pool = Scheduler::started(4, true);
+        let channel = open(1) as usize;
+        let (got, _, _) = parked_receivers(&pool, channel, RECEIVERS);
+        let before = pool.counts().wakes;
+        pool.spawn(Task::new(move || {
+            for n in 0..VALUES as u64 {
+                assert!(unsafe { khora_channel_send(channel as *mut u8, n) });
+                crate::coro::suspend();
+            }
+        }));
+        settled_on(&pool, "a value was stranded", || got.load(Ordering::SeqCst) == VALUES);
+        let wakes = pool.counts().wakes - before;
+        // The senders' own parks on a full slot are wakes too, one per
+        // receive at most; so twice the values bounds a one-wake-per-value
+        // channel, where a herd is a hundred times.
+        assert!(
+            wakes <= 2 * VALUES as u64,
+            "{wakes} wakes for {VALUES} values ({:.1} per value)",
+            wakes as f64 / VALUES as f64
+        );
+        drop(pool);
+        unsafe { khora_channel_release(channel as *mut u8) };
+    }
+
+    /// Occupies a one-worker pool's only worker with a fiber that spins
+    /// without a safepoint, so the wakes made meanwhile queue up in the
+    /// order they were made. Answers the switch that lets it go.
+    fn hold_the_worker(pool: &Scheduler) -> Arc<std::sync::atomic::AtomicBool> {
+        use std::sync::atomic::AtomicBool;
+        let hold = Arc::new(AtomicBool::new(true));
+        let started = Arc::new(AtomicBool::new(false));
+        let (held, running) = (hold.clone(), started.clone());
+        pool.spawn(Task::new(move || {
+            running.store(true, Ordering::SeqCst);
+            while held.load(Ordering::SeqCst) {
+                std::hint::spin_loop();
+            }
+        }));
+        settled_on(pool, "the holder never ran", || started.load(Ordering::SeqCst));
+        hold
+    }
+
+    /// **A receiver that takes a value another was woken for leaves no entry
+    /// behind.** R1 is canceled while it waits, and before it runs, a send
+    /// picks R0. R1 runs first and takes the value, since a receive looks at
+    /// the queue before the flag, so R0 finds nothing and waits again. R1's
+    /// entry has to be gone by then: left at the front, it would take the
+    /// next send's wake to a fiber that has finished, and that value would
+    /// sit queued while R0 waits.
+    #[test]
+    fn a_receiver_that_takes_a_value_it_was_not_woken_for_leaves_no_entry() {
+        let pool = Scheduler::started(1, true);
+        let channel = open(4) as usize;
+        let (got, none, ids) = parked_receivers(&pool, channel, 2);
+
+        let hold = hold_the_worker(&pool);
+        pool.cancel_fiber(ids[1]);
+        assert!(unsafe { khora_channel_send(channel as *mut u8, 1) });
+        hold.store(false, Ordering::SeqCst);
+        settled_on(&pool, "the first value was never taken", || {
+            got.load(Ordering::SeqCst) == 1 && pool.audit().parked == 1
+        });
+        assert_eq!(none.load(Ordering::SeqCst), 0, "the canceled receiver left empty-handed");
+
+        assert!(unsafe { khora_channel_send(channel as *mut u8, 2) });
+        settled_on(&pool, "the second value stayed queued while a receiver waited", || {
+            got.load(Ordering::SeqCst) == 2
+        });
+        drop(pool);
+        unsafe { khora_channel_release(channel as *mut u8) };
+    }
+
+    /// **The same for a sender that fills room another was woken for.** S1
+    /// is canceled while it waits for room, a receive picks S0, and S1 runs
+    /// first and sends, since a send looks for room before the flag. S0 finds
+    /// the channel full again and waits. The next receive's room must reach
+    /// S0, not S1's leftover entry.
+    #[test]
+    fn a_sender_that_fills_room_it_was_not_woken_for_leaves_no_entry() {
+        let pool = Scheduler::started(1, true);
+        let channel = open(1) as usize;
+        assert!(unsafe { khora_channel_send(channel as *mut u8, 1000) });
+        let sent = Arc::new(AtomicUsize::new(0));
+        let mut ids = Vec::new();
+        for n in 0..2u64 {
+            let sent = sent.clone();
+            let task = Task::new(move || {
+                assert!(unsafe { khora_channel_send(channel as *mut u8, n) });
+                sent.fetch_add(1, Ordering::SeqCst);
+            });
+            ids.push(task.fiber().id());
+            pool.spawn(task);
+            settled_on(&pool, "a sender never parked", || pool.audit().parked == ids.len());
+        }
+
+        let hold = hold_the_worker(&pool);
+        pool.cancel_fiber(ids[1]);
+        assert_eq!(take(channel as *mut u8), Some(1000));
+        hold.store(false, Ordering::SeqCst);
+        settled_on(&pool, "the room was never filled", || {
+            sent.load(Ordering::SeqCst) == 1 && pool.audit().parked == 1
+        });
+
+        assert_eq!(take(channel as *mut u8), Some(1), "the canceled sender's value came first");
+        settled_on(&pool, "the room stayed empty while a sender waited", || {
+            sent.load(Ordering::SeqCst) == 2
+        });
+        assert_eq!(take(channel as *mut u8), Some(0));
+        drop(pool);
+        unsafe { khora_channel_release(channel as *mut u8) };
+    }
+
+    /// **A poll that takes a value makes room for a parked sender**, exactly
+    /// as a receive does.
+    #[test]
+    fn a_poll_wakes_one_parked_sender() {
+        let pool = Scheduler::started(1, true);
+        let channel = open(1) as usize;
+        assert!(unsafe { khora_channel_send(channel as *mut u8, 1000) });
+        let sent = Arc::new(AtomicUsize::new(0));
+        let counter = sent.clone();
+        pool.spawn(Task::new(move || {
+            assert!(unsafe { khora_channel_send(channel as *mut u8, 1) });
+            counter.fetch_add(1, Ordering::SeqCst);
+        }));
+        settled_on(&pool, "the sender never parked", || pool.audit().parked == 1);
+
+        let mut out = 0u64;
+        assert!(unsafe { khora_channel_poll(channel as *mut u8, &mut out) });
+        assert_eq!(out, 1000);
+        settled_on(&pool, "the room a poll made never reached the parked sender", || {
+            sent.load(Ordering::SeqCst) == 1
+        });
+        assert_eq!(take(channel as *mut u8), Some(1));
+        drop(pool);
+        unsafe { khora_channel_release(channel as *mut u8) };
     }
 
     #[test]

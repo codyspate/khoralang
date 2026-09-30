@@ -2829,3 +2829,154 @@ pub fn main() -> () { let t = work(); print("${t}") }
         "refused for another reason: {messages:?}"
     );
 }
+
+// --- a worker whose thread is blocked ------------------------------------------
+
+/// **A waker that blocks on a cell the woken fiber holds.** X holds `cell`
+/// inside `Shared::update` and waits on `ch` there; W sends on `ch`, which
+/// wakes X, and then reads `cell`, which blocks W's worker's thread until X
+/// releases it. Eight spinners keep every other worker busy until X is done.
+///
+/// On the scheduler X is woken onto W's worker's queue, which W's worker
+/// cannot reach while its thread waits for X. Only another worker can run X,
+/// and a busy worker used to look only at its own queue and the shared one:
+/// the program hung in most runs on two and four CPUs. It finishes in tens of
+/// milliseconds when it works.
+const BLOCKED_WAKER: &str = r#"module main;
+import std::core::{print, Fiber, Shared, Channel, Option};
+
+pub type Stop = | Stop;
+
+fn holder(cell: Shared<Int>, ch: Channel<Int>, inside: Channel<Int>, done: Shared<Int>) -> Int raises Stop {
+  let v = Shared::update(cell, fn x => {
+    Channel::send(inside, 1);
+    let got = Channel::receive(ch);
+    match got { Option::Some(n) => x + n, Option::None => x + 100 }
+  });
+  Shared::set(done, 1);
+  v
+}
+
+fn spinner(done: Shared<Int>) -> Int {
+  let mut n = 0;
+  while Shared::get(done) == 0 {
+    n = n + 1;
+  }
+  n
+}
+
+fn waker(cell: Shared<Int>, ch: Channel<Int>) -> Int raises Stop {
+  Channel::send(ch, 5);
+  Shared::get(cell)
+}
+
+pub fn main() -> Int raises Stop {
+  let cell = Shared::of(0);
+  let done = Shared::of(0);
+  let ch: Channel<Int> = Channel::bounded(1);
+  let inside: Channel<Int> = Channel::bounded(1);
+  let x = Fiber::spawn(fn () => holder(cell, ch, inside, done)!);
+  let _ = Channel::receive(inside);
+  let s1 = Fiber::spawn(fn () => spinner(done));
+  let s2 = Fiber::spawn(fn () => spinner(done));
+  let s3 = Fiber::spawn(fn () => spinner(done));
+  let s4 = Fiber::spawn(fn () => spinner(done));
+  let s5 = Fiber::spawn(fn () => spinner(done));
+  let s6 = Fiber::spawn(fn () => spinner(done));
+  let s7 = Fiber::spawn(fn () => spinner(done));
+  let s8 = Fiber::spawn(fn () => spinner(done));
+  let w = Fiber::spawn(fn () => waker(cell, ch)!);
+  Fiber::wait(w)! catch { _ => () };
+  Fiber::wait(x)! catch { _ => () };
+  Fiber::wait(s1)! catch { _ => () };
+  Fiber::wait(s2)! catch { _ => () };
+  Fiber::wait(s3)! catch { _ => () };
+  Fiber::wait(s4)! catch { _ => () };
+  Fiber::wait(s5)! catch { _ => () };
+  Fiber::wait(s6)! catch { _ => () };
+  Fiber::wait(s7)! catch { _ => () };
+  Fiber::wait(s8)! catch { _ => () };
+  print("done; cell=${Shared::get(cell)}");
+  0
+}
+"#;
+
+/// The CPUs this process may run on, lowest first, or none where that
+/// cannot be read.
+fn allowed_cpus() -> Vec<usize> {
+    let Ok(status) = std::fs::read_to_string("/proc/self/status") else { return Vec::new() };
+    let Some(line) = status.lines().find(|l| l.starts_with("Cpus_allowed_list:")) else {
+        return Vec::new();
+    };
+    let mut cpus = Vec::new();
+    for part in line.trim_start_matches("Cpus_allowed_list:").trim().split(',') {
+        match part.split_once('-') {
+            Some((a, b)) => {
+                if let (Ok(a), Ok(b)) = (a.parse::<usize>(), b.parse::<usize>()) {
+                    cpus.extend(a..=b);
+                }
+            }
+            None => cpus.extend(part.parse::<usize>().ok()),
+        }
+    }
+    cpus
+}
+
+/// **The review's program, 20 runs each pinned to two and to four CPUs,
+/// every run watched: a run that has not finished in 10 s is killed and
+/// counted as a hang.** The scheduler backend with the local wake path on,
+/// which is its default. Linux only, because the pinning is `taskset`; the
+/// Rust tests in `khora-rt`'s scheduler module cover the mechanism on every
+/// platform.
+#[test]
+fn a_waker_blocked_on_a_cell_its_wakee_holds_does_not_hang_the_program() {
+    if !cfg!(target_os = "linux") || Command::new("taskset").arg("-V").output().is_err() {
+        eprintln!("skipping: needs Linux and taskset to pin the program to a few CPUs");
+        return;
+    }
+    let cpus = allowed_cpus();
+    let exe = match build_std("blocked_waker", BLOCKED_WAKER, "scheduler") {
+        Ok(exe) => exe,
+        Err(messages) => panic!("compiling failed:\n  {}", messages.join("\n  ")),
+    };
+    let mut hangs = Vec::new();
+    for count in [2usize, 4] {
+        if cpus.len() < count {
+            continue;
+        }
+        let list: Vec<String> = cpus[..count].iter().map(|c| c.to_string()).collect();
+        for run in 0..20 {
+            let mut child = Command::new("taskset")
+                .args(["-c", &list.join(",")])
+                .arg(&exe)
+                .env("KHORA_FIBERS", "scheduler")
+                .env_remove("KHORA_WAKE_LOCAL")
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .expect("the program should start");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                match child.try_wait().expect("waiting on the program") {
+                    Some(status) => {
+                        let mut out = String::new();
+                        use std::io::Read;
+                        if let Some(mut pipe) = child.stdout.take() {
+                            let _ = pipe.read_to_string(&mut out);
+                        }
+                        assert_eq!(status.code(), Some(0), "{count} CPUs, run {run}: {out}");
+                        assert_eq!(out, "done; cell=5\n", "{count} CPUs, run {run}");
+                        break;
+                    }
+                    None if std::time::Instant::now() > deadline => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        hangs.push((count, run));
+                        break;
+                    }
+                    None => std::thread::sleep(std::time::Duration::from_millis(5)),
+                }
+            }
+        }
+    }
+    assert!(hangs.is_empty(), "runs that hung (CPUs, run): {hangs:?}");
+}
