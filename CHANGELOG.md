@@ -738,6 +738,13 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 
 ### Changed
 
+- **Performance: `postgres` prepares each statement once per connection**
+  and reads each reply's messages in the buffer they arrived in: a
+  statement's later runs send Bind, Execute and Sync with no Parse or
+  Describe, a refusal forgets the statement, and a connection keeps at most
+  512, closing the least recently used; `postgres::wire::Message` has
+  `buffer`, `from` and `width` in place of `payload`.
+
 - **A field read or write through a local or parameter counts nothing on the
   record**, unless the value written assigns something or reads that binding;
   the TechEmpower `/fortunes` handler runs 5.7% fewer user instructions per

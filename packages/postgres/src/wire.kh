@@ -224,8 +224,8 @@ pub fn query(sql: String) -> Array<U8> {
 /// error.
 ///
 /// An empty name is the *unnamed* statement, which every backend keeps exactly
-/// one of and replaces without being asked. That is what a query run once
-/// wants; a name is what reuse would want, and reuse is not here yet.
+/// one of and replaces without being asked. That is what `extended` sends; a
+/// name is what `prepare_and_run` sends, so that the parse can be reused.
 pub fn parse(name: String, sql: String) -> Array<U8> {
   let out = Writer::new();
   write_parse(out, name, sql);
@@ -352,6 +352,71 @@ pub fn extended(sql: String, values: List<Option<String>>) -> Array<U8> {
   Writer::finish(out)
 }
 
+/// `Close` of a prepared statement: the server forgets `name`.
+///
+/// **Closing a statement that does not exist is not an error**, which is
+/// what lets a driver close a statement whose `Parse` it cannot be sure
+/// landed. The server answers `CloseComplete` either way.
+pub fn close_statement(name: String) -> Array<U8> {
+  let out = Writer::new();
+  write_close(out, name);
+  Writer::finish(out)
+}
+
+fn write_close(out: Writer, name: String) -> () {
+  let at = Writer::open(out, 67);
+  Writer::u8(out, 83);
+  Writer::cstring(out, name);
+  Writer::close(out, at)
+}
+
+/// A `Close` for each of `names`, in order, ahead of whatever `out` gets next.
+fn write_closes(out: Writer, names: List<String>) -> () {
+  let mut rest = names;
+  let mut going = true;
+  while going {
+    match rest {
+      List::Nil => going = false,
+      List::Cons(name, more) => {
+        write_close(out, name);
+        rest = more
+      },
+    }
+  }
+}
+
+/// The first use of a statement on a connection, as one write: `Close` for
+/// each of `closing`, then Parse under `name`, Bind, Describe, Execute, Sync.
+///
+/// The same one round trip as `extended`. What differs is that the parse is
+/// kept under `name`, for `run_prepared` to use from then on; `closing` is
+/// how statements the connection has let go of leave the server without a
+/// round trip of their own.
+pub fn prepare_and_run(closing: List<String>, name: String, sql: String, values: List<Option<String>>) -> Array<U8> {
+  let out = Writer::new();
+  write_closes(out, closing);
+  write_parse(out, name, sql);
+  write_bind(out, "", name, values);
+  write_describe_portal(out, "");
+  write_execute(out, "", 0);
+  write_sync(out);
+  Writer::finish(out)
+}
+
+/// A statement the connection has already parsed as `name`, run again:
+/// `Close` for each of `closing`, then Bind, Execute, Sync.
+///
+/// No `Parse` and no `Describe`: the server keeps the plan, and the caller
+/// kept the columns the first `Describe` answered.
+pub fn run_prepared(closing: List<String>, name: String, values: List<Option<String>>) -> Array<U8> {
+  let out = Writer::new();
+  write_closes(out, closing);
+  write_bind(out, "", name, values);
+  write_execute(out, "", 0);
+  write_sync(out);
+  Writer::finish(out)
+}
+
 /// A password, in whatever form the server asked for.
 pub fn password(secret: String) -> Array<U8> {
   let body = Writer::new();
@@ -389,16 +454,26 @@ pub fn terminate() -> Array<U8> {
 
 // --- reading ---------------------------------------------------------------
 
-/// A position in a received buffer.
+/// A position in a received buffer, and where the part being read ends.
 pub type Reader = {
   bytes: Array<U8>,
   mut at: Int,
+  /// Where reading stops: the array's length for `of`, and the end of one
+  /// message's payload for `over`.
+  ///
+  /// **What stops a reader running into the next message.** `over` reads a
+  /// payload inside a buffer that holds the messages after it too, and a
+  /// read that ran off the end would take their bytes as this one's.
+  end: Int,
 };
 
 impl Reader {
-  pub fn of(bytes: Array<U8>) -> Reader { { bytes: bytes, at: 0 } }
+  pub fn of(bytes: Array<U8>) -> Reader { { bytes: bytes, at: 0, end: Array::length(bytes) } }
 
-  pub fn remaining(self) -> Int { Array::length(self.bytes) - self.at }
+  /// A reader over one message's payload, in the buffer it arrived in.
+  pub fn over(m: Message) -> Reader { { bytes: m.buffer, at: m.from, end: m.from + m.width - 5 } }
+
+  pub fn remaining(self) -> Int { self.end - self.at }
 
   /// Every byte not yet read.
   ///
@@ -415,7 +490,7 @@ impl Reader {
   /// mistake was upstream and reporting it here would blame the wrong line.
   /// `remaining` is how a caller checks before it reads.
   pub fn u8(self) -> Int {
-    if self.at >= Array::length(self.bytes) {
+    if self.at >= self.end {
       0
     } else {
       let b = U8::to_int(Array::get(self.bytes, self.at));
@@ -447,7 +522,7 @@ impl Reader {
   /// byte at a time, so the missing bytes are zeros as `u8` promises.
   pub fn i32(self) -> Int {
     let at = self.at;
-    let raw = if at >= 0 && at + 4 <= Array::length(self.bytes) {
+    let raw = if at >= 0 && at + 4 <= self.end {
       self.at = at + 4;
       Int::or(
         Int::or(Int::shl(U8::to_int(Array::get(self.bytes, at)), 24), Int::shl(U8::to_int(Array::get(self.bytes, at + 1)), 16)),
@@ -468,7 +543,7 @@ impl Reader {
   /// time and then copying that out was every column name and command tag
   /// allocated three ways.
   pub fn cstring(self) -> String {
-    let end = Array::length(self.bytes);
+    let end = self.end;
     let mut stop = self.at;
     while stop < end && U8::to_int(Array::get(self.bytes, stop)) != 0 {
       stop = stop + 1
@@ -505,7 +580,7 @@ impl Reader {
   pub fn digits(self, count: Int) -> Option<Int> {
     let from = self.at;
     let end = from + count;
-    if count < 1 || count > 19 || end > Array::length(self.bytes) {
+    if count < 1 || count > 19 || end > self.end {
       Option::None
     } else {
       let negative = U8::to_int(Array::get(self.bytes, from)) == 45;
@@ -528,16 +603,30 @@ impl Reader {
   }
 }
 
-/// One message read off the wire, before anything is made of it.
+/// One message read off the wire, before anything is made of it: where it
+/// lies, not a copy of it.
 ///
-/// Both fields `pub`: the connection dispatches on `kind` and parses
-/// `payload`, and a message is what the bytes said, with nothing to keep true.
+/// **What this is for: a reply read without copying each message out.**
+/// Copying every payload into an array of its own was nine of a single-row
+/// query's twenty arrays. `Reader::over` reads a payload where it lies.
+///
+/// What it costs: a message keeps the whole buffer it arrived in alive, not
+/// only its own bytes. The connection gives a drained buffer up and holds no
+/// message past the reply it belongs to, so that is one reply's bytes at
+/// most. The fields are `pub` because the connection reads them; a message
+/// is what the bytes said, with nothing to keep true.
 pub type Message = {
   /// The type byte: `R` for authentication, `T` for a row description, and so
   /// on. Kept as a number because that is what the wire carries and a name
   /// here would be a second vocabulary to keep in step.
   pub kind: Int,
-  pub payload: Array<U8>,
+  /// The bytes the message lies in, with whatever came before and after it.
+  pub buffer: Array<U8>,
+  /// Where in `buffer` the payload starts: after the type byte and the length.
+  pub from: Int,
+  /// The whole message on the wire, type byte and length included: the
+  /// payload is five bytes fewer.
+  pub width: Int,
 };
 
 /// Reads one message from `bytes` starting at `from`, if a whole one is there.
@@ -561,12 +650,17 @@ pub fn message_at(bytes: Array<U8>, from: Int) -> Option<Message> {
       Option::None
     } else {
       let kind = U8::to_int(Array::get(bytes, from));
-      Option::Some({ kind: kind, payload: Reader::take(head, length - 4) })
+      Option::Some({ kind: kind, buffer: bytes, from: from + 5, width: length + 1 })
     }
   }
 }
 
-/// How many bytes a message occupies, given its payload.
+/// How many bytes a message occupies on the wire.
 pub fn message_width(message: Message) -> Int {
-  Array::length(message.payload) + 5
+  message.width
+}
+
+/// How many bytes of payload a message carries.
+pub fn payload_width(message: Message) -> Int {
+  message.width - 5
 }

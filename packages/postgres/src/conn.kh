@@ -1,10 +1,10 @@
 module postgres::conn;
 
-import std::core::{Array, Iterator, List, Option, Result, Step, Vector, assert, assert_that};
+import std::core::{Array, Iterator, List, Map, Option, Pair, Result, Step, Vector, assert, assert_that};
 import std::db::{Cell, DbError, Row};
 import std::decimal::{Decimal};
 import std::net::socket::{accept_on, connect_to, invalid_handle, listen_on, nothing_yet, receive, receive_now, set_receive_timeout, shut, start, transmit_bytes};
-import postgres::wire::{Message, Reader, Writer, extended, framed, message_at, message_width, password, query, sasl_initial, sasl_response, startup, terminate};
+import postgres::wire::{Message, Reader, Writer, framed, message_at, message_width, password, payload_width, prepare_and_run, query, run_prepared, sasl_initial, sasl_response, startup, terminate};
 import postgres::scram::{Opening, ScramError, Session, begin, encode64, finish, verify};
 
 extern fn khora_random_seed() -> Int;
@@ -83,6 +83,16 @@ pub type Connection = {
   /// A server may put several messages in one packet and split one across two,
   /// so the socket's boundaries and the protocol's have nothing to do with
   /// each other. This is where that is absorbed.
+  ///
+  /// **What this relies on: an array here is never written after it is
+  /// built.** A `Message` is not a copy; it is this array and an offset into
+  /// it, and `Reader::over` reads the payload in place. A read that appends
+  /// builds a new array (`extend`) and a drained buffer is replaced by an
+  /// empty one, so a message taken from the old array still reads the bytes
+  /// it was taken from. Writing into this array in place -- reading the
+  /// socket into it, or compacting it -- would change the bytes under every
+  /// message still being read, and a row would come back holding a later
+  /// reply's bytes. The socket reads into `inbox`, which no message points at.
   mut pending: Array<U8>,
   /// Where the first unconsumed byte of `pending` is.
   ///
@@ -139,7 +149,45 @@ pub type Connection = {
   ///
   /// What it costs: 8 KiB per open connection, for as long as it is open.
   inbox: Array<U8>,
+  /// The statements this connection has parsed under a name, by their SQL.
+  /// See `ask`.
+  prepared: Map<String, Prepared>,
+  /// How many statements this connection has named: the next is
+  /// `khora_{named + 1}`. Never reused, so a statement closed and parsed
+  /// again cannot meet a `Close` meant for its old name.
+  mut named: Int,
+  /// A count of `ask`s, stamped on a statement each time it runs, so the
+  /// least recently used one is the one with the smallest stamp.
+  mut uses: Int,
+  /// Names the server still holds and this connection has let go of: a
+  /// statement evicted, refused, or parsed by a run that failed. They go out
+  /// as `Close` messages at the head of the next `ask`'s write, which costs
+  /// no round trip of its own.
+  mut closing: List<String>,
 };
+
+/// A statement parsed once on a connection, and what its rows look like.
+///
+/// **The columns are kept because a later run does not ask for them.** A
+/// run of a prepared statement sends no `Describe`, so no `RowDescription`
+/// comes back, and the rows are read by the columns the first run was told.
+type Prepared = {
+  name: String,
+  columns: List<Column>,
+  /// The columns' names, which every row carries: built once per statement
+  /// rather than once per reply.
+  names: List<String>,
+  /// When it last ran, as a count of `ask`s. See `uses`.
+  mut used: Int,
+};
+
+/// How many statements a connection keeps prepared: 512, pgx's bound.
+///
+/// **What this prevents: a server holding a plan for every statement a
+/// program ever built.** A program that puts values into its SQL instead of
+/// binding them makes a distinct statement per value, and each prepared one
+/// holds memory in the server's backend until the connection closes.
+fn most_prepared() -> Int { 512 }
 
 /// How many bytes one socket read asks for.
 fn read_size() -> Int { 8192 }
@@ -214,7 +262,7 @@ pub fn next_message(c: Connection) -> Result<Message, PgError> {
 /// rest are severity, SQLSTATE, and where in the server's own source it came
 /// from, which nobody debugging their own SQL wants first.
 fn error_text(m: Message) -> String {
-  let read = Reader::of(m.payload);
+  let read = Reader::over(m);
   let mut message = "";
   let mut code = "";
   let mut going = true;
@@ -292,6 +340,7 @@ pub fn open_within(
       let c: Connection = {
         handle: handle, pending: empty, start: 0, scram: Option::None, broken: false,
         open_transaction: false, depth: 0, inbox: Array::new(read_size(), 0),
+        prepared: Map::new(), named: 0, uses: 0, closing: List::Nil,
       };
       let hello = startup(user, database);
       let began = khora_monotonic_millis();
@@ -404,7 +453,7 @@ fn nonce_bytes() -> Array<U8> {
 
 /// Answers whichever authentication the server asked for, if it can.
 fn authenticate(c: Connection, m: Message, secret: String) -> Result<Bool, PgError> {
-  let read = Reader::of(m.payload);
+  let read = Reader::over(m);
   let method = Reader::i32(read);
   if method == 0 {
     // AuthenticationOk. Nothing to send.
@@ -674,20 +723,110 @@ pub fn run(c: Connection, sql: String) -> Result<Answer, PgError> {
 /// or `--` is a value containing those characters and not a second statement.
 /// That is the whole reason this exists next to `run`.
 ///
-/// The statement is parsed and thrown away each time -- the *unnamed*
-/// statement, which every backend keeps one of. Reusing a named one across
-/// calls would save a parse; it would also mean tracking what this connection
-/// has already prepared, and invalidating it when the schema changes, which is
-/// a cache and not a slice of protocol. Round trips are unchanged either way:
-/// this is one write and one read, the same as `run`.
+/// **A statement is parsed once per connection, and then reused by name.**
+/// Its first run is Parse under a name, Bind, Describe, Execute and Sync; the
+/// columns the Describe answers are kept beside the name. Every later run of
+/// the same SQL is Bind, Execute and Sync. Parsing every time was the
+/// unnamed statement, which needs no bookkeeping, and it cost 14.5 thousand
+/// user instructions of the 140 thousand a TechEmpower `/db` request spent:
+/// the server's parse and plan, and a `ParseComplete` and a `RowDescription`
+/// read and turned into columns, all for an answer the first run had
+/// already given. Round trips are the same either way: one write, one read.
+///
+/// **Any refusal forgets the statement.** A refusal can mean the server no
+/// longer holds it -- `DEALLOCATE` or `DISCARD ALL` sent through `run` -- or
+/// that the table under it changed and its result type with it, which the
+/// server refuses as "cached plan must not change result type". Kept, it
+/// would fail the same way every time; forgotten, the next call parses it
+/// again. What that costs: the one call that meets the change fails, as in
+/// pgx, and a refusal that had nothing to do with the statement (a
+/// constraint, a canceled transaction) costs a parse on the next call.
+///
+/// At most `most_prepared` statements are kept; one more closes the one
+/// used longest ago. A statement let go of is closed on the server in the
+/// next call's write. Behind a pooler that hands each transaction a
+/// different server connection (PgBouncer's transaction mode) the names do
+/// not follow, and this driver does not work there, as pgx's default does not.
 pub fn ask(c: Connection, sql: String, values: List<Cell>) -> Result<Answer, PgError> {
   if c.broken {
     out_of_step()
-  } else if !send_frames(c, extended(sql, to_wire(values))) {
+  } else {
+    c.uses = c.uses + 1;
+    match Map::get(c.prepared, sql) {
+      Option::Some(known) => again(c, sql, known, values),
+      Option::None => first(c, sql, values),
+    }
+  }
+}
+
+/// A statement's first run on this connection: parse it under a new name
+/// and keep it if the run succeeds.
+fn first(c: Connection, sql: String, values: List<Cell>) -> Result<Answer, PgError> {
+  c.named = c.named + 1;
+  let name = "khora_${Int::to_string(c.named)}";
+  if !send_frames(c, prepare_and_run(c.closing, name, sql, to_wire(values))) {
     Result::Err(PgError::Closed("the query could not be sent"))
   } else {
-    collect(c)
+    c.closing = List::Nil;
+    let got = collect_as(c, List::Nil, List::Nil);
+    match got {
+      Result::Ok(answer) => keep(c, sql, {
+          name: name, columns: answer.columns,
+          names: List::map(answer.columns, fn column => column.name), used: c.uses,
+        }),
+      // The parse may have landed and the run failed after it (a division
+      // by zero, a constraint), so the server may hold the name.
+      Result::Err(_) => c.closing = List::Cons(name, c.closing),
+    };
+    got
   }
+}
+
+/// A later run of a statement this connection has already parsed.
+fn again(c: Connection, sql: String, known: Prepared, values: List<Cell>) -> Result<Answer, PgError> {
+  known.used = c.uses;
+  if !send_frames(c, run_prepared(c.closing, known.name, to_wire(values))) {
+    Result::Err(PgError::Closed("the query could not be sent"))
+  } else {
+    c.closing = List::Nil;
+    let got = collect_as(c, known.columns, known.names);
+    match got {
+      Result::Ok(_) => (),
+      Result::Err(_) => {
+        Map::remove(c.prepared, sql);
+        c.closing = List::Cons(known.name, c.closing)
+      },
+    };
+    got
+  }
+}
+
+/// Keeps `statement` under `sql`, first letting go of the one used longest
+/// ago if there is no room.
+///
+/// **Finding it walks every statement kept**, 512 of them and a list of
+/// their entries, which is paid only by a connection that has more distinct
+/// statements than that: once per new statement from then on. A list kept
+/// in order of use would find it at once and cost a relink on every run.
+fn keep(c: Connection, sql: String, statement: Prepared) -> () {
+  if Map::len(c.prepared) >= most_prepared() {
+    let mut oldest: Option<Pair<String, Prepared>> = Option::None;
+    for entry in Map::entries(c.prepared) {
+      let older = match oldest {
+        Option::None => true,
+        Option::Some(held) => entry.value.used < held.value.used,
+      };
+      if older { oldest = Option::Some(entry) }
+    };
+    match oldest {
+      Option::Some(evicted) => {
+        Map::remove(c.prepared, evicted.key);
+        c.closing = List::Cons(evicted.value.name, c.closing)
+      },
+      Option::None => (),
+    }
+  };
+  Map::insert(c.prepared, sql, statement)
 }
 
 /// Every `Cell` as the text the server will parse, or `None` for NULL.
@@ -729,10 +868,16 @@ fn cell_text(value: Cell) -> Option<String> {
 
 /// Reads until `ReadyForQuery`, gathering whatever came before it.
 fn collect(c: Connection) -> Result<Answer, PgError> {
-  let mut columns: List<Column> = List::Nil;
+  collect_as(c, List::Nil, List::Nil)
+}
+
+/// `collect`, reading rows by `columns` and `names` until a
+/// `RowDescription` says otherwise: a prepared statement's run gets none.
+fn collect_as(c: Connection, known: List<Column>, known_names: List<String>) -> Result<Answer, PgError> {
+  let mut columns: List<Column> = known;
   // The column names every row carries, built once per reply: one list shared
   // by every row, where building it per row was a list per row.
-  let mut names: List<String> = List::Nil;
+  let mut names: List<String> = known_names;
   let mut rows: Vector<Row> = Vector::new();
   let mut tag = "";
   let mut failure: Option<PgError> = Option::None;
@@ -750,8 +895,8 @@ fn collect(c: Connection) -> Result<Answer, PgError> {
           // which is why the error is remembered rather than returned here:
           // leaving the stream mid-reply would desynchronize the next query.
           // Its one byte is the transaction state: 'I' (73) is outside one.
-          c.open_transaction = Array::length(m.payload) > 0
-          && U8::to_int(Array::get(m.payload, 0)) != 73;
+          c.open_transaction = payload_width(m) > 0
+          && U8::to_int(Array::get(m.buffer, m.from)) != 73;
           if !c.open_transaction { c.depth = 0 };
           going = false
         } else if m.kind == 84 {
@@ -760,7 +905,7 @@ fn collect(c: Connection) -> Result<Answer, PgError> {
         } else if m.kind == 68 {
           Vector::push(rows, data_row(m, columns, names))
         } else if m.kind == 67 {
-          tag = Reader::cstring(Reader::of(m.payload))
+          tag = Reader::cstring(Reader::over(m))
         } else if m.kind == 69 {
           failure = Option::Some(PgError::Refused(error_text(m)))
         } else {
@@ -778,7 +923,7 @@ fn collect(c: Connection) -> Result<Answer, PgError> {
 
 /// `RowDescription`: a count, then a name and a type for each column.
 fn describe(m: Message) -> List<Column> {
-  let read = Reader::of(m.payload);
+  let read = Reader::over(m);
   let count = Reader::i16(read);
   let mut out: Vector<Column> = Vector::new();
   let mut i = 0;
@@ -815,7 +960,7 @@ fn describe(m: Message) -> List<Column> {
 /// **The cells are a `List` from the start**, one `Cons` each, rather than a
 /// `Vector` converted at the end: three fewer objects per row of two columns.
 fn data_row(m: Message, columns: List<Column>, names: List<String>) -> Row {
-  let read = Reader::of(m.payload);
+  let read = Reader::over(m);
   let count = Reader::i16(read);
   { columns: names, cells: cells_from(read, columns, count) }
 }
@@ -937,6 +1082,7 @@ fn holding(bytes: Array<U8>) -> Connection {
   {
     handle: invalid_handle(), pending: bytes, start: 0, scram: Option::None, broken: false,
     open_transaction: false, depth: 0, inbox: Array::new(read_size(), 0),
+    prepared: Map::new(), named: 0, uses: 0, closing: List::Nil,
   }
 }
 
@@ -952,7 +1098,7 @@ test "taking the last buffered message lets the buffer go" {
   let c = holding(Writer::finish(bytes));
 
   match next_message(c) {
-    Result::Ok(m) => assert(m.kind == 68 && Array::length(m.payload) == 3000),
+    Result::Ok(m) => assert(m.kind == 68 && payload_width(m) == 3000),
     Result::Err(_) => assert(false),
   };
   // One message still waiting, so the buffer is still needed.
@@ -998,6 +1144,7 @@ fn wire() -> Wire {
   let c: Connection = {
     handle: handle, pending: Array::new(0, 0), start: 0, scram: Option::None, broken: false,
     open_transaction: false, depth: 0, inbox: Array::new(read_size(), 255),
+    prepared: Map::new(), named: 0, uses: 0, closing: List::Nil,
   };
   { client: c, server: server, listener: listener }
 }
@@ -1028,14 +1175,14 @@ test "next_message reads only what arrived, into a reused inbox" {
   let short = framed(90, Array::new(1, 73));
   transmit_bytes(w.server, long);
   match next_message(w.client) {
-    Result::Ok(m) => assert(m.kind == 68 && Array::length(m.payload) == 3000),
+    Result::Ok(m) => assert(m.kind == 68 && payload_width(m) == 3000),
     Result::Err(_) => assert(false),
   };
   // In two pieces: a header that is not yet a message, then the rest.
   transmit_bytes(w.server, piece(short, 0, 3));
   transmit_bytes(w.server, piece(short, 3, Array::length(short)));
   match next_message(w.client) {
-    Result::Ok(m) => assert(m.kind == 90 && Array::length(m.payload) == 1 && U8::to_int(Array::get(m.payload, 0)) == 73),
+    Result::Ok(m) => assert(m.kind == 90 && payload_width(m) == 1 && U8::to_int(Array::get(m.buffer, m.from)) == 73),
     Result::Err(_) => assert(false),
   };
   // Nothing left over from the long read.
@@ -1233,6 +1380,237 @@ test "a partial message after the last whole one is kept" {
 }
 
 extern fn khora_alloc_count() -> Int;
+
+// --- prepared statements, against a server this test plays -------------------
+//
+// The test writes the server's reply to its end of the loopback socket before
+// `ask` runs, which the kernel keeps until `ask` reads it, and afterwards reads
+// what `ask` wrote. One fiber plays both sides, and what is checked is the
+// bytes on the wire.
+
+/// What the client wrote for one request, a message at a time, up to and
+/// including its `Sync`: `P name` for a Parse, `B statement` for a Bind, `C
+/// name` for a Close, and the bare letter for the rest.
+fn written(w: Wire) -> List<String> {
+  let inbox: Array<U8> = Array::new(read_size(), 0);
+  let mut bytes: Array<U8> = Array::new(0, 0);
+  let mut at = 0;
+  let mut out: Vector<String> = Vector::new();
+  let mut going = true;
+  while going {
+    match message_at(bytes, at) {
+      Option::Some(m) => {
+        at = at + message_width(m);
+        let read = Reader::over(m);
+        let said = if m.kind == 80 {
+          "P ${Reader::cstring(read)}"
+        } else if m.kind == 66 {
+          let _portal = Reader::cstring(read);
+          "B ${Reader::cstring(read)}"
+        } else if m.kind == 67 {
+          let _what = Reader::u8(read);
+          "C ${Reader::cstring(read)}"
+        } else {
+          String::from_bytes(Array::new(1, U8::of(m.kind)))
+        };
+        Vector::push(out, said);
+        if m.kind == 83 { going = false }
+      },
+      Option::None => {
+        let read = receive(w.server, inbox);
+        if read <= 0 {
+          Vector::push(out, "nothing more arrived");
+          going = false
+        } else {
+          bytes = extend(bytes, at, inbox, read);
+          at = 0
+        }
+      },
+    }
+  };
+  to_list(out)
+}
+
+/// A loopback connection whose server end gives up on a read after a second,
+/// so a test that expected a request that never came fails rather than hangs.
+fn server_wire() -> Wire {
+  let w = wire();
+  set_receive_timeout(w.server, 1000);
+  w
+}
+
+/// The reply to a statement's first run: the parse, the bind, the one `int4`
+/// column the describe asked about, one row holding `n`, and the end.
+fn first_reply(n: Int) -> Array<U8> {
+  let bytes = Writer::new();
+  Writer::raw(bytes, framed(49, Array::new(0, 0)));
+  Writer::raw(bytes, framed(50, Array::new(0, 0)));
+  Writer::raw(bytes, description(["n"], [23]));
+  Writer::raw(bytes, row_of([Option::Some(Int::to_string(n))]));
+  Writer::raw(bytes, framed(67, String::bytes("SELECT 1\u{0}")));
+  Writer::raw(bytes, framed(90, Array::new(1, 73)));
+  Writer::finish(bytes)
+}
+
+/// The reply to a prepared statement's later runs: no parse and no
+/// description, so a row read right has to have been read by the columns the
+/// first run remembered.
+fn later_reply(n: Int) -> Array<U8> {
+  let bytes = Writer::new();
+  Writer::raw(bytes, framed(50, Array::new(0, 0)));
+  Writer::raw(bytes, row_of([Option::Some(Int::to_string(n))]));
+  Writer::raw(bytes, framed(67, String::bytes("SELECT 1\u{0}")));
+  Writer::raw(bytes, framed(90, Array::new(1, 73)));
+  Writer::finish(bytes)
+}
+
+/// A refusal: an `ErrorResponse`, then the `ReadyForQuery` every exchange
+/// ends with.
+fn refusal() -> Array<U8> {
+  let body = Writer::new();
+  Writer::u8(body, 83);
+  Writer::cstring(body, "ERROR");
+  Writer::u8(body, 77);
+  Writer::cstring(body, "cached plan must not change result type");
+  Writer::u8(body, 0);
+  let bytes = Writer::new();
+  Writer::raw(bytes, framed(69, Writer::finish(body)));
+  Writer::raw(bytes, framed(90, Array::new(1, 73)));
+  Writer::finish(bytes)
+}
+
+/// Whether `ask` answered one row holding the number `n`.
+fn answered(got: Result<Answer, PgError>, n: Int) -> Bool {
+  match got {
+    Result::Err(_) => false,
+    Result::Ok(answer) => match answer.rows {
+      List::Cons(row, List::Nil) => row.cells == [Cell::Number(n)] && row.columns == ["n"],
+      _ => false,
+    },
+  }
+}
+
+/// What was written, for a failure message.
+fn shown(sent: List<String>) -> String {
+  String::join(sent, ", ")
+}
+
+/// `sql` run once on `w`, the server answering with `reply`: what `ask`
+/// answered, and what it wrote.
+type Ran = { got: Result<Answer, PgError>, sent: List<String> };
+
+fn run_once(w: Wire, sql: String, n: Int, reply: Array<U8>) -> Ran {
+  transmit_bytes(w.server, reply);
+  let got = ask(w.client, sql, [Cell::Number(n)]);
+  { got: got, sent: written(w) }
+}
+
+/// **A statement is parsed once per connection.** The first run parses it
+/// under a name and asks what its rows look like; the second binds that name
+/// and runs it, with no `Parse` and no `Describe`, and reads its row by the
+/// columns the first run was told.
+test "a statement's second run sends no Parse" {
+  let w = server_wire();
+  let sql = "select $1::int4 as n";
+  let first = run_once(w, sql, 7, first_reply(7));
+  assert(answered(first.got, 7));
+  assert_that(first.sent == ["P khora_1", "B khora_1", "D", "E", "S"], "first run wrote ${shown(first.sent)}");
+  let second = run_once(w, sql, 8, later_reply(8));
+  assert(answered(second.got, 8));
+  assert_that(second.sent == ["B khora_1", "E", "S"], "second run wrote ${shown(second.sent)}");
+  unwire(w)
+}
+
+/// **Any refusal forgets the statement, and closes it on the server.** A
+/// refusal of a prepared statement can mean the server no longer holds it
+/// (`DEALLOCATE`, `DISCARD ALL`) or that its result type changed under it; a
+/// driver that kept it would fail the same way on every later call. The next
+/// call parses it again under a new name, closing the old one in the same
+/// write, and then succeeds.
+test "an error in a prepared statement forgets it, and the next call prepares it again" {
+  let w = server_wire();
+  let sql = "select $1::int4 as n";
+  assert(answered(run_once(w, sql, 1, first_reply(1)).got, 1));
+  let refused = run_once(w, sql, 2, refusal());
+  assert(!answered(refused.got, 2));
+  assert_that(refused.sent == ["B khora_1", "E", "S"], "refused run wrote ${shown(refused.sent)}");
+  let again = run_once(w, sql, 3, first_reply(3));
+  assert(answered(again.got, 3));
+  assert_that(
+    again.sent == ["C khora_1", "P khora_2", "B khora_2", "D", "E", "S"],
+    "the run after the refusal wrote ${shown(again.sent)}",
+  );
+  let after = run_once(w, sql, 4, later_reply(4));
+  assert(answered(after.got, 4));
+  assert_that(after.sent == ["B khora_2", "E", "S"], "the run after that wrote ${shown(after.sent)}");
+  assert(!w.client.broken);
+  unwire(w)
+}
+
+/// **The 513th distinct statement pushes out the one used longest ago, not
+/// the one prepared first.** Statement 0 is prepared first and then used
+/// again, so statement 1 is the least recently used when statement 512
+/// arrives. Statement 1 is closed on the server in the next write, statement
+/// 0 is still prepared, and statement 1 is parsed again when it comes back.
+test "the 513th distinct statement evicts the least recently used one" {
+  let w = server_wire();
+  let mut i = 0;
+  let mut fine = true;
+  while i < 512 {
+    let ran = run_once(w, "select ${Int::to_string(i)} + $1::int4 as n", i, first_reply(i));
+    fine = fine && answered(ran.got, i) && List::length(ran.sent) == 5;
+    i = i + 1
+  };
+  assert_that(fine, "preparing 512 statements");
+  let reused = run_once(w, "select 0 + $1::int4 as n", 0, later_reply(0));
+  assert_that(reused.sent == ["B khora_1", "E", "S"], "statement 0 again wrote ${shown(reused.sent)}");
+  let newest = run_once(w, "select 512 + $1::int4 as n", 512, first_reply(512));
+  assert(answered(newest.got, 512));
+  assert_that(newest.sent == ["P khora_513", "B khora_513", "D", "E", "S"], "statement 512 wrote ${shown(newest.sent)}");
+  let kept = run_once(w, "select 0 + $1::int4 as n", 0, later_reply(0));
+  assert(answered(kept.got, 0));
+  assert_that(kept.sent == ["C khora_2", "B khora_1", "E", "S"], "statement 0 after the eviction wrote ${shown(kept.sent)}");
+  let back = run_once(w, "select 1 + $1::int4 as n", 1, first_reply(1));
+  assert(answered(back.got, 1));
+  assert_that(back.sent == ["P khora_514", "B khora_514", "D", "E", "S"], "statement 1 again wrote ${shown(back.sent)}");
+  unwire(w)
+}
+
+/// What `ask` allocated over `n` runs of an already prepared statement,
+/// counting nothing the test did to play the server, and whether every run
+/// answered right and sent no `Parse`.
+fn spent_asking(w: Wire, sql: String, n: Int) -> Spent {
+  let mut total = 0;
+  let mut right = true;
+  let mut i = 0;
+  while i < n {
+    transmit_bytes(w.server, later_reply(i));
+    let before = khora_alloc_count();
+    let got = ask(w.client, sql, [Cell::Number(i)]);
+    total = total + khora_alloc_count() - before;
+    right = right && answered(got, i) && written(w) == ["B khora_1", "E", "S"];
+    i = i + 1
+  };
+  { count: total, right: right }
+}
+
+/// **A prepared statement's run allocates no more than it needs.** A run
+/// of this one-row statement allocates 40 objects: its write, the row, the
+/// answer, and what the socket read appends. Parsing and describing it every
+/// time made it 58, and copying out the payload of every message it reads
+/// made it 44. What is counted is the cost of sixteen more runs, so the
+/// first run's parse is not in it.
+test "a prepared statement's run allocates a bounded amount" {
+  let w = server_wire();
+  let sql = "select $1::int4 as n";
+  assert(answered(run_once(w, sql, 0, first_reply(0)).got, 0));
+  let small = spent_asking(w, sql, 16);
+  let large = spent_asking(w, sql, 32);
+  let per_run = (large.count - small.count) / 16;
+  assert_that(per_run <= 40, "a prepared run allocated ${Int::to_string(per_run)}");
+  assert(small.right && large.right);
+  unwire(w)
+}
 
 /// A reply of `rows` rows of the fortunes page's shape -- an `int4` and a
 /// `text` column -- as the server frames it.

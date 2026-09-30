@@ -1499,6 +1499,35 @@ fn next_frame(stream: &mut TcpStream) -> Option<(u8, Vec<u8>)> {
     Some((kind[0], payload))
 }
 
+/// The statements a fake server's connection has been asked to parse, by
+/// name, so a `Bind` of a prepared statement finds its SQL.
+///
+/// **What this prevents: a fake server that answers a prepared statement's
+/// second run as if its SQL were empty.** The driver parses a statement once
+/// per connection and afterwards sends only `Bind`, `Execute` and `Sync`, so
+/// the SQL is in the `Parse` of an earlier request, not this one.
+#[derive(Default)]
+struct Statements(std::collections::HashMap<String, String>);
+
+impl Statements {
+    /// The SQL of a `Parse` payload (name, SQL, parameter types), remembered
+    /// under its name.
+    fn parse(&mut self, payload: &[u8]) -> String {
+        let parts: Vec<&[u8]> = payload.split(|b| *b == 0).collect();
+        let name = String::from_utf8_lossy(parts.first().copied().unwrap_or(&[])).into_owned();
+        let sql = String::from_utf8_lossy(parts.get(1).copied().unwrap_or(&[])).into_owned();
+        self.0.insert(name, sql.clone());
+        sql
+    }
+
+    /// The SQL of the statement a `Bind` payload (portal, statement, ...)
+    /// names, if this connection parsed it.
+    fn bound(&self, payload: &[u8]) -> Option<String> {
+        let name = payload.split(|b| *b == 0).nth(1)?;
+        self.0.get(String::from_utf8_lossy(name).as_ref()).cloned()
+    }
+}
+
 /// One backend message as bytes, so a reply can be cut wherever a test likes.
 fn framed(kind: u8, payload: &[u8]) -> Vec<u8> {
     let mut out = vec![kind];
@@ -1551,9 +1580,11 @@ fn answer_numbers_until_hung_up(
     if stream.write_all(&hello).is_err() {
         return;
     }
+    let mut statements = Statements::default();
     loop {
         // One request: the extended protocol's frames up to `Sync`, or one
-        // simple `Query`. The SQL is in `Parse` after the statement's name.
+        // simple `Query`. The SQL is in `Parse`, or in the `Parse` of an
+        // earlier request for the statement `Bind` names.
         let mut sql = String::new();
         loop {
             let Some((kind, payload)) = next_frame(stream) else { return };
@@ -1563,7 +1594,12 @@ fn answer_numbers_until_hung_up(
             };
             match kind {
                 b'X' => return,
-                b'P' => sql = text(1),
+                b'P' => sql = statements.parse(&payload),
+                b'B' => {
+                    if let Some(known) = statements.bound(&payload) {
+                        sql = known;
+                    }
+                }
                 b'Q' => {
                     sql = text(0);
                     break;
@@ -2494,6 +2530,7 @@ impl ScriptedState {
         if stream.write_all(&hello).is_err() {
             return;
         }
+        let mut statements = Statements::default();
         loop {
             let mut sql = String::new();
             loop {
@@ -2504,7 +2541,12 @@ impl ScriptedState {
                 };
                 match kind {
                     b'X' => return,
-                    b'P' => sql = text(1),
+                    b'P' => sql = statements.parse(&payload),
+                    b'B' => {
+                        if let Some(known) = statements.bound(&payload) {
+                            sql = known;
+                        }
+                    }
                     b'Q' => {
                         sql = text(0);
                         break;
@@ -4444,9 +4486,12 @@ fn tx_connection(mut stream: TcpStream, committed: &std::sync::Mutex<Vec<i64>>) 
         return;
     }
     let mut frames: Vec<Frame> = Vec::new();
+    let mut prepared = Statements::default();
     loop {
         // One request: a simple `Query`, or the extended protocol's frames up
-        // to `Sync`, whose one parameter (if any) is an integer in text.
+        // to `Sync`, whose one parameter (if any) is an integer in text. The
+        // SQL is in `Parse`, or in the `Parse` of an earlier request for the
+        // statement `Bind` names.
         let mut simple = None;
         let mut sql = String::new();
         let mut param = None;
@@ -4459,11 +4504,13 @@ fn tx_connection(mut stream: TcpStream, committed: &std::sync::Mutex<Vec<i64>>) 
                     simple = Some(String::from_utf8_lossy(&payload[..end]).into_owned());
                     break;
                 }
-                b'P' => {
-                    let parts: Vec<&[u8]> = payload.split(|b| *b == 0).collect();
-                    sql = String::from_utf8_lossy(parts.get(1).copied().unwrap_or(&[])).into_owned();
+                b'P' => sql = prepared.parse(&payload),
+                b'B' => {
+                    if let Some(known) = prepared.bound(&payload) {
+                        sql = known;
+                    }
+                    param = bound_integer(&payload)
                 }
-                b'B' => param = bound_integer(&payload),
                 b'S' => break,
                 _ => {}
             }

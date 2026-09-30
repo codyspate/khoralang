@@ -148,6 +148,26 @@ that has proved itself to a peer it never made prove anything back.
 variant exists so that a client refuses to authenticate through a proxy it
 cannot see, and advertising it without binding to the channel throws that away.
 
+## Prepared statements
+
+Each connection parses a statement once and reuses the parse by name. The
+first time a connection meets a statement it sends Parse, Bind, Describe,
+Execute and Sync, and keeps the name and the columns the server described.
+After that, running the same SQL sends only Bind, Execute and Sync. Round
+trips are the same either way: one write, one read.
+
+- **A refusal forgets the statement.** If the server refuses a prepared
+  statement, the connection drops it and parses it again on the next call.
+  This covers a statement the server has dropped (`DEALLOCATE`,
+  `DISCARD ALL`), and a table altered so that the statement's result type
+  changed. The call that meets the change still fails, as it does in pgx.
+- **At most 512 per connection.** One more closes the statement used longest
+  ago, on the server as well, so a program that builds its SQL out of values
+  cannot fill the server's memory with plans.
+- **Not behind a transaction-mode pooler.** A pooler that hands each
+  transaction a different server connection (PgBouncer's transaction mode)
+  does not carry the names across, so use session mode, as with pgx.
+
 ## What it does not do yet
 
 Named here because a driver's gaps decide whether it fits a service:
@@ -158,8 +178,6 @@ Named here because a driver's gaps decide whether it fits a service:
   network, this is not ready.
 - **MD5 authentication.** Refused by name rather than hung. `ring` does not
   carry MD5, deliberately.
-- **Named prepared statements.** Every query uses the unnamed statement, so a
-  hot query pays a parse each time. Round trips are unchanged.
 - **Binary result format, `COPY`, notifications, cursors.**
 
 ## Status

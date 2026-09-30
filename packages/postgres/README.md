@@ -163,6 +163,16 @@ never be handed anything a user typed.
 Interpolating a value into `run` is the oldest hole there is. The only defense
 a library can offer is to make the safe call the shorter one, and it is.
 
+**`ask` prepares each statement once per connection.** The first call with a
+given SQL string parses it under a name (`khora_1`, `khora_2`, ...) and keeps
+the columns the server describes; every later call with the same string sends
+only Bind, Execute and Sync. A refusal forgets the statement and the next call
+parses it again, so a `DISCARD ALL` or an `ALTER TABLE` that changes a
+statement's result type costs the one call that meets it. A connection keeps
+at most 512 statements and closes the one used longest ago to make room. The
+names do not survive a pooler in transaction mode (PgBouncer's), so run such a
+pooler in session mode. `run` prepares nothing.
+
 ## What arrives
 
 Every value comes back as text and becomes a `std::db::Cell`:
@@ -196,9 +206,6 @@ Going the other way, `ask` accepts all five `Cell` kinds including `Money`.
   offered rather than claimed and faked: its whole purpose is that a client
   refuses to authenticate through a proxy it cannot see, and a client that
   advertises it without binding to the channel has thrown that away.
-- **Named prepared statements.** Every `ask` uses the unnamed statement, so the
-  parse is not reused across calls. Round trips are unchanged — one write, one
-  read — but a hot query pays a parse each time.
 - **Binary result format**, **`COPY`**, **notifications**, **cursors**.
 
 ## Authentication

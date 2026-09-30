@@ -12,7 +12,7 @@ module postgres::wire_test;
 
 import std::core::{Array, Iterator, Option, Step, assert, assert_that};
 import std::core::{List};
-import postgres::wire::{Message, Reader, Writer, bind, describe_portal, execute, extended, framed, message_at, message_width, parse, password, query, startup, sync, terminate};
+import postgres::wire::{Message, Reader, Writer, bind, describe_portal, execute, extended, framed, message_at, message_width, parse, password, payload_width, query, startup, sync, terminate};
 
 /// The bytes as hex, so a failure says which byte rather than that two arrays
 /// differ.
@@ -120,9 +120,40 @@ test "a partial message is not yet rather than broken" {
   match message_at(whole, 0) {
     Option::Some(m) => {
       assert(m.kind == 81);
-      assert(Array::length(m.payload) == 9);
+      assert(payload_width(m) == 9);
     },
     Option::None => assert(false),
+  };
+}
+
+/// **A payload is read where it lies, and only it.** Two messages in one
+/// buffer, as a reply puts them: a reader over the first stops at the first's
+/// end, reading zeros past it as `u8` promises, and never the second's bytes.
+/// A C string with no terminator stops there too.
+test "a reader over a message stops at the message's end" {
+  let out = Writer::new();
+  Writer::raw(out, framed(67, String::bytes("ab")));
+  Writer::raw(out, framed(90, Array::new(1, 73)));
+  let both = Writer::finish(out);
+  match message_at(both, 0) {
+    Option::None => assert(false),
+    Option::Some(m) => {
+      assert(m.kind == 67 && payload_width(m) == 2);
+      assert(Reader::cstring(Reader::over(m)) == "ab");
+      let read = Reader::over(m);
+      assert(Reader::remaining(read) == 2);
+      assert(Reader::i16(read) == 24930);
+      assert(Reader::remaining(read) == 0);
+      assert(Reader::i32(read) == 0);
+      assert(Array::length(Reader::rest(Reader::over(m))) == 2);
+      match message_at(both, message_width(m)) {
+        Option::None => assert(false),
+        Option::Some(next) => {
+          assert(next.kind == 90);
+          assert(Reader::u8(Reader::over(next)) == 73);
+        },
+      }
+    },
   };
 }
 
