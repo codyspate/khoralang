@@ -259,9 +259,9 @@ through the scheduler's queues, which are mutexes, so the old worker's unlock
 happens before the new worker's lock and every count written on one is
 visible on the other, with the two never concurrent.
 
-**Plain counts on local objects: `KHORA_RC_LOCAL=1` (Stage 2, off by
-default).** Without the switch, a program that spawns counts every object with
-a locked read-modify-write, whatever the bit says. With it, generated code
+**Plain counts on local objects: `KHORA_RC_LOCAL` (Stage 2, on by
+default).** With `KHORA_RC_LOCAL=0`, a program that spawns counts every object with
+a locked read-modify-write, whatever the bit says. Otherwise, generated code
 (`backend/counts.rs`, called from `lower/rc.rs::adjust_count`) loads the word
 relaxed and compares it unsigned against bit 62:
 - neither flag (a local object): add or subtract and a relaxed store. On x86

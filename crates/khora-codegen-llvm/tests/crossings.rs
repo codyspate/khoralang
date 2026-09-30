@@ -170,7 +170,10 @@ fn build_as(
     if local {
         unsafe { std::env::set_var("KHORA_RC_LOCAL", "1") };
     } else {
-        unsafe { std::env::remove_var("KHORA_RC_LOCAL") };
+        // Explicit, now that the local path is on by default: a caller
+        // asking for the off path has to get it, not whatever the default
+        // happens to be this week.
+        unsafe { std::env::set_var("KHORA_RC_LOCAL", "0") };
     }
     khora_codegen_llvm::force_plain_counts_on_this_thread(plain);
     let db = KhoraDatabase::new();
@@ -412,6 +415,62 @@ fn the_switch_emits_the_local_path() {
     let (forced, forced_tells) = stores(false, true);
     assert!(forced > 0, "no relaxed count store with the test-only force");
     assert!(forced_tells, "`main` did not tell the runtime about the test-only force");
+}
+
+/// **The default, with the variable unset, is the local path.**
+///
+/// What this guards: a default that stayed off after the switch flipped.
+/// Built with `KHORA_RC_LOCAL` neither set nor forced, `churn`'s counts
+/// should include a relaxed `store atomic` -- the local path's mark -- and
+/// `main` should call `khora_rc_local`, exactly as `KHORA_RC_LOCAL=1` does
+/// in [`the_switch_emits_the_local_path`]. This is that same read, on the
+/// build the switch's absence produces.
+#[test]
+fn the_default_is_local_counts() {
+    use khora_codegen_llvm::Profile;
+    let name = "local_switch_default";
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    harness::ensure_runtime();
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
+    let _ = std::fs::remove_file(&exe);
+
+    let held = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: process-wide, held under the lock the other tests here hold
+    // while they touch the environment. `KHORA_RC_LOCAL` is left unset here
+    // -- unlike `build_as`, which always gives it one value or the other --
+    // because this is the one test asking what the compiler does when
+    // nobody has said anything.
+    unsafe { std::env::set_var("KHORA_UNBOXED", "1") };
+    unsafe { std::env::set_var("KHORA_EMIT_LLVM", "1") };
+    unsafe { std::env::remove_var("KHORA_RC_LOCAL") };
+    let db = KhoraDatabase::new();
+    let root = SourceRoot::new(&db, sources(&db, &dir, LOCAL_ONLY));
+    let outcome = khora_codegen_llvm::compile_with(&db, root, &exe, Profile::Debug);
+    unsafe { std::env::remove_var("KHORA_EMIT_LLVM") };
+    unsafe { std::env::remove_var("KHORA_UNBOXED") };
+    drop(held);
+    if let Err(errors) = outcome {
+        let messages: Vec<String> = errors.into_iter().map(|e| e.message).collect();
+        panic!("compiling `{name}` failed:\n  {}", messages.join("\n  "));
+    }
+    assert_eq!(run(&exe, "threads").as_deref(), Ok("40"), "default build");
+    let mut dumped = exe.clone().into_os_string();
+    dumped.push(".ll");
+    let ir = std::fs::read_to_string(dumped).expect("the IR was dumped");
+    let churn = ir
+        .split("\ndefine ")
+        .find(|f| f.contains("main$churn"))
+        .expect("`churn` was emitted")
+        .to_string();
+    assert!(
+        churn.matches("store atomic i64").count() > 0,
+        "no relaxed count store with the variable unset: the default is not local counts"
+    );
+    assert!(
+        ir.contains("call void @khora_rc_local()"),
+        "`main` did not tell the runtime about the default with the variable unset"
+    );
 }
 
 /// How many times each side of a crossing reads in [`CROSSINGS`].

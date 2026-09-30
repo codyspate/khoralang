@@ -63,7 +63,7 @@ pub fn unboxing_enabled() -> bool {
 
 /// Whether a spawning program counts a local object with plain arithmetic.
 ///
-/// **Off unless `KHORA_RC_LOCAL=1` says otherwise.** On, every count first
+/// **On unless `KHORA_RC_LOCAL=0` turns it off.** On, every count first
 /// tests the object's shared and immortal bits, and an object with neither
 /// (one no runtime entry has published) is counted with a relaxed load, an
 /// add and a relaxed store instead of a locked read-modify-write. That is
@@ -71,13 +71,15 @@ pub fn unboxing_enabled() -> bool {
 /// (`khora_rt::khora_share`); an entry that forgets turns into a lost update
 /// on another core, which the debug owner check exists to catch first.
 ///
+/// Off is for comparison against the locked path, or for ruling this stage
+/// out while chasing an unrelated bug: it was measured never slower and up
+/// to 8% faster on the TechEmpower suite, so a program that regresses with
+/// it off has its answer elsewhere.
+///
 /// Read here, like [`unboxing_enabled`], so that the compiler and the build
 /// cache key cannot disagree about which counting a cached artifact used.
-///
-/// **Turning it on by default is this one line:** make the test
-/// `!matches!(.., Ok("0"))`, as [`unboxing_enabled`]'s is.
 pub fn local_counts_enabled() -> bool {
-    matches!(std::env::var("KHORA_RC_LOCAL").as_deref(), Ok("1"))
+    !matches!(std::env::var("KHORA_RC_LOCAL").as_deref(), Ok("0"))
 }
 
 thread_local! {

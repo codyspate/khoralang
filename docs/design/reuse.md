@@ -480,12 +480,12 @@ So it has to be per-*allocation-site*, and there are two known shapes:
   operation — perhaps half the ceiling, for a much smaller change, and no
   soundness argument to get wrong.
 
-**What was built instead: mark on share, behind `KHORA_RC_LOCAL=1`.** Neither
+**What was built instead: mark on share, behind `KHORA_RC_LOCAL`.** Neither
 shape below. Every object is local to the fiber that made it until a runtime
 entry publishes it and marks it (bit 63), and generated code counts a local
 object with a relaxed load and store and a shared one with the locked
 operation. `memory.md` §5 has the layout, what it rests on, the two routes
-by which it does not yet hold, and why it is off by default.
+by which it does not yet hold, and why it is on by default.
 
 **Neither is started, and neither should be started for the number.** A few per
 cent, for a whole-program flow analysis whose failure mode is a data race in a

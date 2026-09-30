@@ -104,13 +104,15 @@ What to generate code for, instead of the machine you are on.
 
 Count references to objects that only one fiber can reach without a locked instruction.
 
-**Default:** unset, and every reference count in a program that starts a fiber is a locked read-modify-write.
+**Default:** on. Every reference count in a program that starts a fiber is, unless the object is shared, an ordinary load and store rather than a locked read-modify-write.
 
-**Value:** `1` turns it on; anything else, or unset, leaves it off. Read when a program is compiled, and part of the build cache's key, so a cached build made the other way is not reused.
+**Value:** `0` turns it off, so every count is locked whether or not the object is shared. Anything else, including unset, leaves it on. Read when a program is compiled, and part of the build cache's key, so a cached build made the other way is not reused.
 
-A program that never calls `Fiber::spawn` counts every reference with plain arithmetic whatever this says. For one that does, an object is local to the fiber that made it until the runtime hands it to another fiber — a spawn's captures, a channel send, a `Shared` cell, a fiber's answer or error — and marks it shared. With this set, a local object's count is an ordinary load and store and a shared object's is locked. On a handler that does real work, the locked instructions are a large part of the CPU a request costs.
+A program that never calls `Fiber::spawn` counts every reference with plain arithmetic whatever this says. For one that does, an object is local to the fiber that made it until the runtime hands it to another fiber — a spawn's captures, a channel send, a `Shared` cell, a fiber's answer or error — and marks it shared. With the default, a local object's count is an ordinary load and store and a shared object's is locked. On a handler that does real work, the locked instructions are a large part of the CPU a request costs; against every count locked, this was measured never slower and up to 8% faster on a realistic web workload.
 
-**What it costs, and why it is off.** Two programs the compiler accepts can reach a value with a mutable field from two fibers: a record captured by `Fiber::spawn` through a variable whose type is only settled after the spawn, and a record with a mutable field raised as a fiber's error and joined by two fibers. With every count locked, a write to that field from one fiber while another reads it is a race on the field. With this set, it is also a race on the reference counts of what the field holds, which can crash the program or free memory still in use. A debug build stops such a program the first time the second fiber counts the value, with `object made on fiber N was counted on fiber M without being shared`, whether or not this is set.
+Turn it off to compare against every count locked, or to rule this out while chasing a bug that might be a lost update on a shared reference count.
+
+**What it does not change.** Two programs the compiler accepts can reach a value with a mutable field from two fibers: a record captured by `Fiber::spawn` through a variable whose type is only settled after the spawn, and a record with a mutable field raised as a fiber's error and joined by two fibers. With every count locked, a write to that field from one fiber while another reads it is a race on the field. With the default, it is also a race on the reference counts of what the field holds, which can crash the program or free memory still in use. A debug build stops such a program the first time the second fiber counts the value, with `object made on fiber N was counted on fiber M without being shared`, whether or not this is set.
 
 ### `KHORA_UNBOXED` — not a knob
 

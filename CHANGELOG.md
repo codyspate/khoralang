@@ -873,18 +873,19 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 
 ### Added
 
-- **`KHORA_RC_LOCAL=1`: plain reference counts on objects one fiber owns.**
-  Off by default. In a program that starts a fiber, an object is local to
+- **`KHORA_RC_LOCAL`: plain reference counts on objects one fiber owns.** On
+  by default; `KHORA_RC_LOCAL=0` counts every reference locked instead, for
+  comparison against the locked path or to rule this out while chasing an
+  unrelated bug. In a program that starts a fiber, an object is local to
   the fiber that made it until the runtime hands it to another fiber and
-  marks it shared; with the switch set at compile time, a local object's
-  count is an ordinary load and store instead of a locked instruction, and a
-  shared object's stays locked. The switch is part of the build cache key.
-  It rests on no fiber reaching a record with a mutable field that another
-  fiber holds. The checker refuses the three routes known to do that, each
-  listed under Fixed: a capture whose type is settled after a spawn or a
-  handler, and a fiber's error. If one is missed, a write to that field races
-  the counts of what it holds, which can crash a release build with the
-  switch set. A debug build traps on it with or without the switch.
+  marks it shared; a local object's count is an ordinary load and store
+  instead of a locked instruction, and a shared object's stays locked. The
+  switch is part of the build cache key. It rests on no fiber reaching a
+  record with a mutable field that another fiber holds. The checker refuses
+  the three routes known to do that, each listed under Fixed: a capture
+  whose type is settled after a spawn or a handler, and a fiber's error. If
+  one is missed, a write to that field races the counts of what it holds,
+  which can crash a release build. A debug build traps on it either way.
 
 - **`std::net::http` writes `Date` on every response** a `Connection`
   sends, including the `Router`'s: the current second as an IMF-fixdate
