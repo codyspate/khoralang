@@ -346,6 +346,14 @@ through [`secret`](#secret), and not this, so a record holding one reads and doe
 not write, and the build says so rather than a round trip somewhere far
 away.
 
+**Two methods, and only `encode` has to be written.** `encode_json` is the
+same value as JSON text, and its default goes through `encode`, so a
+hand-written impl gets it for free. `derive(Encode)` writes both, and its
+`encode_json` writes the fields straight into the text, in declaration
+order, without building the `Raw` first: what a `Raw` costs on every
+response -- a list cell and a pair per field, then the text -- is most of
+what a small JSON body costs to make.
+
 #### encode
 
 ```khora
@@ -354,6 +362,21 @@ fn encode(self) -> Raw
 
 The value as a source would have produced it; [`Raw::to_json`](#to_json) is the
 bridge out.
+
+#### encode_json
+
+```khora
+fn encode_json(self) -> String
+```
+
+The value as JSON text: what [`json_text`](#json_text-1) and `Response::json` send.
+
+**An empty string means absent**, which is the one answer no JSON value
+can be: a record leaves the field out, a list writes `null` in its
+place, and [`json_text`](#json_text-1) writes `null` for a value that is absent
+altogether. `Option::None` answers it. An impl that overrides this has
+to agree with `encode`: the two are the same value, and nothing checks
+that they are.
 
 ## Methods
 
@@ -413,6 +436,34 @@ The JSON a value renders to; the one bridge out.
 An `Absent` entry is left out of an object and written as `null` inside
 an array, because an element cannot be omitted. `Untyped` is text, which
 is all a source that could not label it ever knew.
+
+#### json_text
+
+```khora
+pub fn json_text(self) -> String
+```
+
+The JSON text a value renders to, with a record's keys in the order
+the record holds them. Empty for `Absent`, which is how a record knows
+to leave a field out; see [`Encode::encode_json`](#encode_json).
+
+**The same document [`Raw::to_json`](#to_json) leads to, except for key order**:
+that one builds a `Json` object, which is a hash table and prints
+sorted. A record holding one key twice writes it twice here, where a
+`Json` keeps the last.
+
+#### object_text
+
+```khora
+pub fn object_text(members: List<String>) -> String
+```
+
+A JSON object from its members as text: each key already quoted with
+its colon, followed by its value's text, and a member whose value is
+empty -- absent -- left out.
+
+What `derive(Encode)` falls back on when a field turns out to be
+absent; a record whose fields are all present never calls it.
 
 #### of_map
 
@@ -987,6 +1038,12 @@ impl Encode for String
 fn encode(self) -> Raw
 ```
 
+#### encode_json
+
+```khora
+fn encode_json(self) -> String
+```
+
 ### Encode for Int
 
 ```khora
@@ -997,6 +1054,12 @@ impl Encode for Int
 
 ```khora
 fn encode(self) -> Raw
+```
+
+#### encode_json
+
+```khora
+fn encode_json(self) -> String
 ```
 
 ### Encode for Float
@@ -1038,6 +1101,12 @@ impl Encode for Bool
 fn encode(self) -> Raw
 ```
 
+#### encode_json
+
+```khora
+fn encode_json(self) -> String
+```
+
 ### Encode for Decimal
 
 ```khora
@@ -1053,6 +1122,12 @@ it back.
 
 ```khora
 fn encode(self) -> Raw
+```
+
+#### encode_json
+
+```khora
+fn encode_json(self) -> String
 ```
 
 ### Encode for Raw
@@ -1073,10 +1148,18 @@ fn encode(self) -> Raw
 impl Encode for Json
 ```
 
+An object keeps the order `Json::entries` gives, which is sorted by key.
+
 #### encode
 
 ```khora
 fn encode(self) -> Raw
+```
+
+#### encode_json
+
+```khora
+fn encode_json(self) -> String
 ```
 
 ### Encode for Date
@@ -1091,6 +1174,12 @@ impl Encode for Date
 fn encode(self) -> Raw
 ```
 
+#### encode_json
+
+```khora
+fn encode_json(self) -> String
+```
+
 ### Encode for Time
 
 ```khora
@@ -1103,6 +1192,12 @@ impl Encode for Time
 fn encode(self) -> Raw
 ```
 
+#### encode_json
+
+```khora
+fn encode_json(self) -> String
+```
+
 ### Encode for DateTime
 
 ```khora
@@ -1113,6 +1208,12 @@ impl Encode for DateTime
 
 ```khora
 fn encode(self) -> Raw
+```
+
+#### encode_json
+
+```khora
+fn encode_json(self) -> String
 ```
 
 ### Encode for Option\<A>
@@ -1130,6 +1231,12 @@ impl<A: Encode> Encode for Option<A>
 fn encode(self) -> Raw
 ```
 
+#### encode_json
+
+```khora
+fn encode_json(self) -> String
+```
+
 ### Encode for List\<A>
 
 ```khora
@@ -1140,6 +1247,12 @@ impl<A: Encode> Encode for List<A>
 
 ```khora
 fn encode(self) -> Raw
+```
+
+#### encode_json
+
+```khora
+fn encode_json(self) -> String
 ```
 
 ### Encode for Vector\<A>
@@ -1154,11 +1267,19 @@ impl<A: Encode> Encode for Vector<A>
 fn encode(self) -> Raw
 ```
 
+#### encode_json
+
+```khora
+fn encode_json(self) -> String
+```
+
 ### Encode for Dict\<String, V>
 
 ```khora
 impl<V: Encode> Encode for Dict<String, V>
 ```
+
+Written in key order, which is the order a `Dict` holds its keys in.
 
 #### encode
 
@@ -1171,6 +1292,11 @@ fn encode(self) -> Raw
 ```khora
 impl<V: Encode> Encode for Map<String, V>
 ```
+
+**Sorted by key**, because a `Map` is a hash table and has no order of its
+own: the order its buckets fall in changes as it grows, so the same map
+would print differently from one run to the next. Sorting costs the sort,
+and it is the one order that is the same every time.
 
 #### encode
 
@@ -1513,6 +1639,19 @@ thing from the declaration. The literal is for the record that needs
 something the declaration cannot say -- a refined port, a renamed key, a
 default -- and every schema that contains the record picks it up through
 the trait.
+
+### json_text
+
+```khora
+pub fn json_text<A: Encode>(value: A) -> String
+```
+
+A value as JSON text, `null` if it is absent.
+
+The fast way out: a derived record goes straight to text, with its keys in
+the order the type declares them. `std::json::encode(Raw::to_json(v.encode()))`
+gives the same document with an object's keys sorted, through a `Json`
+value built on the way.
 
 ### decode
 

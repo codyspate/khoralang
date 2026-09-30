@@ -545,10 +545,18 @@ fn write_impl(
             variant_decode(type_name, cases, type_doc)
         ),
         ("Encode", Shape::Record(fields, _, _)) => {
-            format!("fn encode(self) -> Raw {{ {} }}", record_encode(fields))
+            format!(
+                "fn encode(self) -> Raw {{ {} }}\n  fn encode_json(self) -> String {{ {} }}",
+                record_encode(fields),
+                members_json(None, &fields.iter().map(|f| (f.clone(), format!("self.{f}"))).collect::<Vec<_>>())
+            )
         }
         ("Encode", Shape::Variant(cases)) => {
-            format!("fn encode(self) -> Raw {{ {} }}", variant_encode(type_name, cases))
+            format!(
+                "fn encode(self) -> Raw {{ {} }}\n  fn encode_json(self) -> String {{ {} }}",
+                variant_encode(type_name, cases),
+                variant_json(type_name, cases)
+            )
         }
         _ => unreachable!("`{trait_name}` is not derivable and should have been refused"),
     };
@@ -1013,6 +1021,88 @@ fn variant_encode(type_name: &str, cases: &[Case]) -> String {
                 "{pattern} => Raw::Record({})",
                 cons_chain(std::iter::once(tag).chain(payload))
             )
+        })
+        .collect();
+    format!("match self {{ {} }}", arms.join(", "))
+}
+
+/// An object's members as JSON text, written straight into one string:
+/// `{"type"?, "name":value, ..}` in the order given, for `encode_json`.
+///
+/// **Declaration order, and no `Raw` on the way.** Going through `encode`
+/// built a list cell and a pair per field, and the text path after it put
+/// every field in a hash table and sorted the keys: about 22k instructions
+/// for one two-field record on the TechEmpower `/db` answer, which is what
+/// Go spends on the whole query.
+///
+/// A value whose text is empty is absent (an `Option` holding nothing), and
+/// its member is left out. Which fields can be absent is a question about
+/// types, which this pass cannot ask, so it is asked of the text at run
+/// time: when any value is empty the members go to `Raw::object_text`, which
+/// drops them; otherwise one `+` chain writes the object, with no list, no
+/// pair and no `Raw` built for it.
+///
+/// `tag` is the case name a variant's payload case writes first under
+/// `type`, and it is never absent.
+fn members_json(tag: Option<&str>, members: &[(String, String)]) -> String {
+    let mut lets = Vec::new();
+    let mut empties = Vec::new();
+    let mut fast = Vec::new();
+    let mut slow = Vec::new();
+    let mut lead = "{".to_string();
+    if let Some(name) = tag {
+        lead.push_str(&format!("\"type\":\"{name}\""));
+        slow.push(literal("\"type\":"));
+        slow.push(literal(&format!("\"{name}\"")));
+    }
+    for (i, (name, value)) in members.iter().enumerate() {
+        lets.push(format!("let v{i} = {value}.encode_json();"));
+        empties.push(format!("String::is_empty(v{i})"));
+        let comma = if i == 0 && tag.is_none() { "" } else { "," };
+        fast.push(literal(&format!("{lead}{comma}\"{name}\":")));
+        fast.push(format!("v{i}"));
+        slow.push(literal(&format!("\"{name}\":")));
+        slow.push(format!("v{i}"));
+        lead = String::new();
+    }
+    lead.push('}');
+    fast.push(literal(&lead));
+    if members.is_empty() {
+        return fast.join(" + ");
+    }
+    format!(
+        "{} if {} {{ Raw::object_text({}) }} else {{ {} }}",
+        lets.join(" "),
+        empties.join(" || "),
+        cons_chain(slow),
+        fast.join(" + ")
+    )
+}
+
+/// A variant as JSON text, in the two forms `variant_encode` writes: a
+/// payload-free case is its name as a string, and a payload case an object
+/// whose first key is `type`. A newtype writes the inner value's text.
+fn variant_json(type_name: &str, cases: &[Case]) -> String {
+    if is_newtype(cases) {
+        return format!(
+            "match self {{ {type_name}::{}(a0) => a0.encode_json() }}",
+            cases[0].name
+        );
+    }
+    let arms: Vec<String> = cases
+        .iter()
+        .map(|case| {
+            let pattern = case_pattern(type_name, case, "a");
+            if case.arity == 0 {
+                return format!("{pattern} => {}", literal(&format!("\"{}\"", case.name)));
+            }
+            let members: Vec<(String, String)> = case
+                .field_names
+                .iter()
+                .enumerate()
+                .map(|(i, name)| (name.clone(), format!("a{i}")))
+                .collect();
+            format!("{pattern} => {{ {} }}", members_json(Some(&case.name), &members))
         })
         .collect();
     format!("match self {{ {} }}", arms.join(", "))

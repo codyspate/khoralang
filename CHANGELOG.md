@@ -33,6 +33,15 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 
 ### Breaking
 
+- **`Response::json` writes a derived record's keys in the order the type
+  declares them, not sorted.** It built a `Json` object, a hash table, and
+  sorted its keys on every call; it writes the record straight to text, so
+  `{ zebra: Int, apple: String }` goes out as `{"zebra":..,"apple":..}` and a
+  `Rejection` as `{"path":..,"message":..}`. Declaration order is the one the
+  author chose and costs nothing to keep. A `Map` and a `Json` object are
+  written sorted by key, as is anything through `Raw::to_json`. `Encode`
+  gains `encode_json`, with a default, so hand-written impls compile
+  unchanged. A two-field record took 51 allocations to encode and takes 9.
 - **A `Region` or `Scope` stays on the fiber that opened it.** Neither is
   `Share`: a fiber's body cannot capture one, a channel cannot carry one, a
   `Shared` cell cannot hold one, a fiber cannot answer or raise one, and a

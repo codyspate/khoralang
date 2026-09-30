@@ -73,7 +73,7 @@ problem, because a `Rejection` encodes as an object with its `path` and its
 `message`, and a client wants the list rather than the first line of it:
 
 ```json
-[{"message":"name should be text, and is 7","path":"name"}]
+[{"path":"name","message":"name should be text, and is 7"}]
 ```
 
 ## A body over the limit never reaches the handler
@@ -149,9 +149,15 @@ Response::json(201, user)
 A record holding a `Redacted` has no `Encode`, so it cannot be sent by
 accident; the build stops at the `derive` line.
 
-For more complex response policies you can call `std::json::encode` on
-`Raw::to_json(value.encode())` directly and construct the HTTP response
-explicitly.
+A derived record's keys go out in the order the type declares them, and an
+`Option` field holding `None` is left out. A `Map` or a `Json` object goes
+out sorted by key.
+
+For more complex response policies, `std::schema::json_text(value)` gives the
+same text `Response::json` sends, and `Response::of` sends it with the status
+and content type you choose. `std::json::encode(Raw::to_json(value.encode()))`
+gives the same document built as a `Json` value first, with every object's
+keys sorted.
 
 For the complete JSON surface, see the [JSON API reference](/docs/stdlib/api/json/).
 For HTTP routing and request data, see [HTTP service](/docs/cookbook/http-service/).

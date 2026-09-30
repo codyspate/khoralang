@@ -6,9 +6,8 @@ import std::permissions::grants::{network};
 import std::net::socket::{accept_on, connect_to, invalid_handle, listen_on, receive, set_receive_timeout, shut, start, transmit};
 import std::net::tls::{TlsClient, TlsConnection, TlsError, TlsServer, client as tls_client, connect as tls_connect, receive as tls_receive, secure, server as tls_server, set_receive_timeout as tls_set_receive_timeout, shut as tls_shut, transmit as tls_transmit};
 import std::clock::{Clock};
-import std::json::{encode};
 import std::time::{Date, DateTime, Time};
-import std::schema::{Encode, Raw};
+import std::schema::{Encode, json_text};
 
 //! HTTP/1.1, over the sockets in `std::net::socket`. Both directions.
 //!
@@ -229,6 +228,9 @@ impl Response {
   /// client reads a refused request from. A record holding a secret has no
   /// `Encode`, so it cannot be sent by accident.
   ///
+  /// A derived record's keys go out in the order its type declares them; a
+  /// `Map` and a `Json` object go out sorted by key.
+  ///
   /// **A `String` argument is encoded, not passed through.** `String` has an
   /// `Encode` impl — it encodes to a JSON string — so passing JSON you
   /// assembled yourself sends it quoted and escaped inside another string.
@@ -237,7 +239,7 @@ impl Response {
   pub fn json<A: Encode>(status: Int, body: A) -> Response {
     {
       status: status,
-      body: encode(Raw::to_json(Encode::encode(body))),
+      body: json_text(body),
       content_type: "application/json",
       headers: List::Nil,
     }

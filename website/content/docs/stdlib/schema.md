@@ -138,12 +138,21 @@ and the build says so. `Rejection` implements `Encode`, so a list of problems
 is a response body a client can read: one object per problem, with its `path`
 and its `message`.
 
-**The object it prints is sorted by key, not in declaration order.** A
-`Json::Object` holds a `Map`, and every route out -- `Raw::to_json`, `encode`,
-a handwritten encoder -- goes through one. So a `{ zebra, apple, mango }`
-record encodes as `{"apple":..,"mango":..,"zebra":..}`. Nothing in JSON
-promises field order and nothing here keeps it; worth knowing before it is a
-surprise in a program's output.
+**Two routes to text, and they differ in key order.** `json_text(value)` --
+what `Response::json` sends -- writes a derived record straight to text, its
+keys in the order the type declares them, so a `{ zebra, apple, mango }`
+record encodes as `{"zebra":..,"apple":..,"mango":..}`. An `Option` field
+holding `None` is left out. `encode(Raw::to_json(value.encode()))` builds a
+`Json` value on the way, and a `Json::Object` holds a `Map`, so every object
+it prints is sorted by key. A `Map` encodes sorted by key on both routes,
+because a hash table has no order of its own that stays the same from one run
+to the next.
+
+`Encode` has a second method, `encode_json(self) -> String`, which is the fast
+route. It has a default that goes through `encode`, so a hand-written impl
+writes only `encode`; `derive(Encode)` writes both. An impl that writes its
+own `encode_json` must produce the same value as its `encode`, with an empty
+string for a value that is absent.
 
 ## Where a `Raw` comes from
 

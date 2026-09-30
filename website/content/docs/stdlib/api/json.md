@@ -300,14 +300,13 @@ Builds an object out of the fields it is given.
 `Json::Object` holds a `Map`, which is a hash table and forgets the order
 its keys arrived in; the sorting is `sorted_fields`, which `encode` and
 `Json::entries` both go through, and not anything the `Map` does. So the
-list here says which fields, not which order. Everything that builds an
-object goes through this: `Raw::to_json` in `std::schema`, so `encode`
-over a derived `Encode` prints alphabetically rather than in the order the
-record declares, and so does a handwritten encoder.
+list here says which fields, not which order. `Raw::to_json` in
+`std::schema` builds its objects here, so a value encoded through it
+prints its keys sorted too.
 
-Worth knowing before it is a surprise in a program's output. A reader
-depending on field order is depending on something JSON does not promise,
-and this makes that concrete rather than accidental.
+`std::schema::json_text` is the route that keeps a derived record's
+declaration order, because it writes the record as text and never builds
+a `Json`; it is what `Response::json` sends.
 
 ### encode
 
@@ -320,6 +319,18 @@ The value, as JSON text.
 Compact: no spaces and no newlines. Pretty-printing is a second function
 when something wants one, rather than a flag that doubles every branch
 below.
+
+### quote
+
+```khora
+pub fn quote(text: String) -> String
+```
+
+A string as JSON text: quoted, with every byte JSON requires escaped.
+
+**The one escaper**, shared with `std::schema`'s writer, so a string in
+a document built as `Json` and one written straight from a record come
+out byte for byte the same.
 
 ### parse
 

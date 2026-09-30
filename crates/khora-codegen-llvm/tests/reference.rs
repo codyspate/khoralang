@@ -105,14 +105,17 @@ fn the_reference_application_serves_a_request() {
         "the handler returned `Response::json`:\n{answer}"
     );
     // The report is encoded through `Encode`, so the body is the JSON a
-    // client reads rather than what `Show` printed: keys sorted, and the
-    // variant tagged with `type` and keyed by its payload name.
+    // client reads rather than what `Show` printed: keys in the order the
+    // record declares them, and the variant tagged with `type` first and
+    // then keyed by its payload name. (This pinned sorted keys while
+    // `Response::json` went through a `Json` object; it writes the record
+    // straight to text, in declaration order.)
     assert!(
         answer.contains("\r\n\r\n{\"account_id\":\"acc_9921\""),
         "the body is the report the model produced:\n{answer}"
     );
     assert!(
-        answer.contains("\"risk\":{\"action_required\":\"Immediate fund freeze\",\"type\":\"Critical\"}"),
+        answer.contains("\"risk\":{\"type\":\"Critical\",\"action_required\":\"Immediate fund freeze\"}"),
         "the risk level came through the whole stack:\n{answer}"
     );
 

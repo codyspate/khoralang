@@ -1,0 +1,153 @@
+module std_suite::encoding;
+
+//! JSON written from `Encode`: what `Response::json` puts in a body.
+//!
+//! **Key order is declaration order**, for a derived record and a derived
+//! variant's payload alike. Every record below declares its fields out of
+//! alphabetical order, so an encoder that sorted them would fail here.
+//!
+//! **The allocation count is asserted too.** A derived record is written
+//! straight to text; one that went back through a `Json` object would still
+//! print the right bytes, and only the count would say so.
+
+import std::core::{Iterator, List, Map, Option, Result, Step, String, assert_that};
+import std::json::{JsonError, encode, parse};
+import std::net::http::{Response};
+import std::schema::{Encode};
+
+extern fn khora_alloc_count() -> Int;
+
+derive(Encode)
+type World = { id: Int, randomNumber: Int };
+
+derive(Encode)
+type Order = { zebra: Int, apple: String, mango: Bool };
+
+derive(Encode)
+type Inner = { b: Int, a: Int };
+
+derive(Encode)
+type Outer = { name: String, inner: Inner, items: List<Inner> };
+
+derive(Encode)
+type Maybe = { first: Option<Int>, second: Int, third: Option<String> };
+
+derive(Encode)
+type Absent = { nothing: Option<Int>, neither: Option<Inner> };
+
+derive(Encode)
+type Lists = { ints: List<Int>, holes: List<Option<Int>>, empty: List<Inner> };
+
+derive(Encode)
+type Quoted = { text: String };
+
+derive(Encode)
+type Figure = | Dot | Circle(radius: Int, label: String);
+
+derive(Encode)
+type UserId = Int;
+
+/// The body `Response::json` answers with.
+fn body<A: Encode>(value: A) -> String {
+  Response::json(200, value).body
+}
+
+test "a derived record writes its fields in declaration order" {
+  let got = body({ zebra: 1, apple: "a", mango: true });
+  assert_that(got == "{\"zebra\":1,\"apple\":\"a\",\"mango\":true}", got);
+  let world: World = { id: 3, randomNumber: 42 };
+  let got_world = body(world);
+  assert_that(got_world == "{\"id\":3,\"randomNumber\":42}", got_world);
+}
+
+test "records nest, inside a field and inside a list" {
+  let first: Inner = { b: 1, a: 2 };
+  let second: Inner = { b: 3, a: 4 };
+  let outer: Outer = { name: "n", inner: first, items: [first, second] };
+  let got = body(outer);
+  let wanted = "{\"name\":\"n\",\"inner\":{\"b\":1,\"a\":2},\"items\":[{\"b\":1,\"a\":2},{\"b\":3,\"a\":4}]}";
+  assert_that(got == wanted, got);
+}
+
+test "an Option field that holds nothing is left out, wherever it is" {
+  let leading: Maybe = { first: Option::None, second: 2, third: Option::Some("t") };
+  let got = body(leading);
+  assert_that(got == "{\"second\":2,\"third\":\"t\"}", got);
+  let trailing: Maybe = { first: Option::Some(1), second: 2, third: Option::None };
+  let got_trailing = body(trailing);
+  assert_that(got_trailing == "{\"first\":1,\"second\":2}", got_trailing);
+  let none: Absent = { nothing: Option::None, neither: Option::None };
+  let got_none = body(none);
+  assert_that(got_none == "{}", got_none);
+  let some: Absent = { nothing: Option::Some(0), neither: Option::Some({ b: 5, a: 6 }) };
+  let got_some = body(some);
+  assert_that(got_some == "{\"nothing\":0,\"neither\":{\"b\":5,\"a\":6}}", got_some);
+}
+
+test "lists write every element, and a missing one as null" {
+  let lists: Lists = {
+    ints: [1, 2, 3],
+    holes: [Option::Some(1), Option::None, Option::Some(3)],
+    empty: [],
+  };
+  let got = body(lists);
+  assert_that(got == "{\"ints\":[1,2,3],\"holes\":[1,null,3],\"empty\":[]}", got);
+  let top = body([Option::Some(1), Option::None]);
+  assert_that(top == "[1,null]", top);
+  let nothing: Option<Int> = Option::None;
+  let bare = body(nothing);
+  assert_that(bare == "null", bare);
+}
+
+test "text is escaped the way JSON requires" {
+  let quoted: Quoted = { text: "a\"b\\c\nd\te/é" };
+  let got = body(quoted);
+  assert_that(got == "{\"text\":\"a\\\"b\\\\c\\nd\\te/é\"}", got);
+  // And it reads back as the same text.
+  match parse(got) {
+    Result::Ok(document) => {
+      let again = encode(document);
+      assert_that(again == got, "read back as ${again}");
+    },
+    Result::Err(why) => assert_that(false, "not JSON at ${Int::to_string(why.at)}: ${got}"),
+  };
+}
+
+test "a derived variant writes its tag first and its payload in declaration order" {
+  let dot = body(Figure::Dot);
+  assert_that(dot == "\"Dot\"", dot);
+  let circle = body(Figure::Circle(3, "c"));
+  assert_that(circle == "{\"type\":\"Circle\",\"radius\":3,\"label\":\"c\"}", circle);
+  let id = body(UserId(7));
+  assert_that(id == "7", id);
+}
+
+/// **A `Map` still prints sorted by key**: a hash table has no order of its
+/// own to keep, and sorted is the one that is the same every run. Twelve
+/// keys, inserted out of order, because three can land in sorted buckets by
+/// luck.
+test "a Map encodes sorted by key" {
+  let scores: Map<String, Int> = Map::new();
+  let mut n = 0;
+  for key in ["kiwi", "apple", "zebra", "mango", "fig", "date", "banana", "cherry", "lemon", "grape", "nut", "elder"] {
+    Map::insert(scores, key, n);
+    n = n + 1;
+  };
+  let got = body(scores);
+  let wanted = "{\"apple\":1,\"banana\":6,\"cherry\":7,\"date\":5,\"elder\":11,\"fig\":4,\"grape\":9,\"kiwi\":0,\"lemon\":8,\"mango\":3,\"nut\":10,\"zebra\":2}";
+  assert_that(got == wanted, got);
+}
+
+/// **Straight to text.** Nine, each one accounted for: two per number
+/// (`Int::to_string`), one per `+` in the five-piece chain that writes the
+/// object, and the `Response`. Going through a `Raw`, a `Json` object's hash
+/// table and a sorted list of its fields cost 51 on the same record.
+test "a two-field record encodes in a handful of allocations" {
+  let world: World = { id: 3, randomNumber: 42 };
+  let warm = body(world);
+  let before = khora_alloc_count();
+  let response = Response::json(200, world);
+  let spent = khora_alloc_count() - before;
+  assert_that(response.body == warm, response.body);
+  assert_that(spent <= 9, "encoding a two-field record allocated ${Int::to_string(spent)}");
+}

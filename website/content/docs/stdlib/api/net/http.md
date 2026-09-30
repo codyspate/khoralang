@@ -789,6 +789,9 @@ Encodes `body` as JSON and sends it with the given status.
 client reads a refused request from. A record holding a secret has no
 `Encode`, so it cannot be sent by accident.
 
+A derived record's keys go out in the order its type declares them; a
+`Map` and a `Json` object go out sorted by key.
+
 **A `String` argument is encoded, not passed through.** `String` has an
 `Encode` impl — it encodes to a JSON string — so passing JSON you
 assembled yourself sends it quoted and escaped inside another string.

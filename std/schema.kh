@@ -2,7 +2,7 @@ module std::schema;
 
 import std::core::{Dict, Eq, List, Map, Option, Ord, Ordering, Pair, Redacted, Result, Show, Validated, Vector};
 import std::decimal::{Decimal};
-import std::json::{Field, Json, member, object};
+import std::json::{Field, Json, encode as json_encode, member, object, quote};
 import std::time::{Date, DateTime, Time};
 
 //! One description of a value's shape, used to decode untrusted input.
@@ -172,6 +172,64 @@ impl Raw {
     }
   }
 
+  /// The JSON text a value renders to, with a record's keys in the order
+  /// the record holds them. Empty for `Absent`, which is how a record knows
+  /// to leave a field out; see [`Encode::encode_json`].
+  ///
+  /// **The same document [`Raw::to_json`] leads to, except for key order**:
+  /// that one builds a `Json` object, which is a hash table and prints
+  /// sorted. A record holding one key twice writes it twice here, where a
+  /// `Json` keeps the last.
+  pub fn json_text(self) -> String {
+    match self {
+      Raw::Absent => "",
+      Raw::Null => "null",
+      Raw::Text(text) => quote(text),
+      Raw::Untyped(text) => quote(text),
+      Raw::Number(text) => text,
+      Raw::Bool(value) => if value { "true" } else { "false" },
+      Raw::Sequence(items) => {
+        let pieces = List::fold(items, List::Nil, fn (acc, item) => List::Cons(element_text(Raw::json_text(item)), acc));
+        "[${String::join(List::reverse(pieces), ",")}]"
+      },
+      Raw::Record(fields) => {
+        let pieces = List::fold(fields, List::Nil, fn (acc, field) =>
+          List::Cons(Raw::json_text(field.value), List::Cons("${quote(field.key)}:", acc)));
+        Raw::object_text(List::reverse(pieces))
+      },
+      Raw::Denied => "null",
+    }
+  }
+
+  /// A JSON object from its members as text: each key already quoted with
+  /// its colon, followed by its value's text, and a member whose value is
+  /// empty -- absent -- left out.
+  ///
+  /// What `derive(Encode)` falls back on when a field turns out to be
+  /// absent; a record whose fields are all present never calls it.
+  pub fn object_text(members: List<String>) -> String {
+    let mut kept = List::Nil;
+    let mut first = true;
+    let mut rest = members;
+    let mut walking = true;
+    while walking {
+      match rest {
+        List::Cons(key, List::Cons(value, more)) => {
+          if !String::is_empty(value) {
+            if !first { kept = List::Cons(",", kept); };
+            kept = List::Cons(value, List::Cons(key, kept));
+            first = false;
+          };
+          rest = more;
+        },
+        // An odd piece out is a key with no value, which nothing in `std`
+        // writes; it is dropped rather than written as half a member.
+        _ => { walking = false; },
+      }
+    };
+    "{${String::join(List::reverse(kept), "")}}"
+  }
+
   /// A record of text nobody labeled: a query string, the path parameters,
   /// the headers.
   pub fn of_map(text: Map<String, String>) -> Raw {
@@ -259,6 +317,12 @@ impl Raw {
 
 /// `log-level` is the flag; `log_level` is the field.
 fn flag_name(flag: String) -> String { String::replace(flag, "-", "_") }
+
+/// A value's text where an element of an array goes: an element cannot be
+/// left out, so an absent one is `null`.
+fn element_text(text: String) -> String {
+  if String::is_empty(text) { "null" } else { text }
+}
 
 /// `--verbose` and `-c` are flags; `-` alone and a bare word are not.
 fn is_flag(argument: String) -> Bool {
@@ -1446,10 +1510,39 @@ pub trait Decode {
 /// through [`secret`], and not this, so a record holding one reads and does
 /// not write, and the build says so rather than a round trip somewhere far
 /// away.
+///
+/// **Two methods, and only `encode` has to be written.** `encode_json` is the
+/// same value as JSON text, and its default goes through `encode`, so a
+/// hand-written impl gets it for free. `derive(Encode)` writes both, and its
+/// `encode_json` writes the fields straight into the text, in declaration
+/// order, without building the `Raw` first: what a `Raw` costs on every
+/// response -- a list cell and a pair per field, then the text -- is most of
+/// what a small JSON body costs to make.
 pub trait Encode {
   /// The value as a source would have produced it; [`Raw::to_json`] is the
   /// bridge out.
   fn encode(self) -> Raw;
+
+  /// The value as JSON text: what [`json_text`] and `Response::json` send.
+  ///
+  /// **An empty string means absent**, which is the one answer no JSON value
+  /// can be: a record leaves the field out, a list writes `null` in its
+  /// place, and [`json_text`] writes `null` for a value that is absent
+  /// altogether. `Option::None` answers it. An impl that overrides this has
+  /// to agree with `encode`: the two are the same value, and nothing checks
+  /// that they are.
+  fn encode_json(self) -> String { Raw::json_text(Encode::encode(self)) }
+}
+
+/// A value as JSON text, `null` if it is absent.
+///
+/// The fast way out: a derived record goes straight to text, with its keys in
+/// the order the type declares them. `std::json::encode(Raw::to_json(v.encode()))`
+/// gives the same document with an object's keys sorted, through a `Json`
+/// value built on the way.
+pub fn json_text<A: Encode>(value: A) -> String {
+  let text = Encode::encode_json(value);
+  if String::is_empty(text) { "null" } else { text }
 }
 
 /// Reads a value of the type the surrounding expression asks for.
@@ -1556,10 +1649,12 @@ impl<V: Decode> Decode for Map<String, V> {
 
 impl Encode for String {
   fn encode(self) -> Raw { Raw::Text(self) }
+  fn encode_json(self) -> String { quote(self) }
 }
 
 impl Encode for Int {
   fn encode(self) -> Raw { Raw::Number(Int::to_string(self)) }
+  fn encode_json(self) -> String { Int::to_string(self) }
 }
 
 impl Encode for Float {
@@ -1588,6 +1683,7 @@ impl Encode for Float {
 
 impl Encode for Bool {
   fn encode(self) -> Raw { Raw::Bool(self) }
+  fn encode_json(self) -> String { if self { "true" } else { "false" } }
 }
 
 /// Written as text, because that is how money travels on most wires: every
@@ -1596,26 +1692,32 @@ impl Encode for Bool {
 /// it back.
 impl Encode for Decimal {
   fn encode(self) -> Raw { Raw::Text(Show::show(self)) }
+  fn encode_json(self) -> String { quote(Show::show(self)) }
 }
 
 impl Encode for Raw {
   fn encode(self) -> Raw { self }
 }
 
+/// An object keeps the order `Json::entries` gives, which is sorted by key.
 impl Encode for Json {
   fn encode(self) -> Raw { Raw::of_json(self) }
+  fn encode_json(self) -> String { json_encode(self) }
 }
 
 impl Encode for Date {
   fn encode(self) -> Raw { Raw::Text(Show::show(self)) }
+  fn encode_json(self) -> String { quote(Show::show(self)) }
 }
 
 impl Encode for Time {
   fn encode(self) -> Raw { Raw::Text(Show::show(self)) }
+  fn encode_json(self) -> String { quote(Show::show(self)) }
 }
 
 impl Encode for DateTime {
   fn encode(self) -> Raw { Raw::Text(Show::show(self)) }
+  fn encode_json(self) -> String { quote(Show::show(self)) }
 }
 
 /// `None` is an absent key, and both an absent key and `null` read back as
@@ -1627,6 +1729,13 @@ impl<A: Encode> Encode for Option<A> {
       Option::None => Raw::Absent,
     }
   }
+
+  fn encode_json(self) -> String {
+    match self {
+      Option::Some(value) => Encode::encode_json(value),
+      Option::None => "",
+    }
+  }
 }
 
 impl<A: Encode> Encode for List<A> {
@@ -1634,12 +1743,20 @@ impl<A: Encode> Encode for List<A> {
     let items = List::fold(self, List::Nil, fn (acc, item) => List::Cons(Encode::encode(item), acc));
     Raw::Sequence(List::reverse(items))
   }
+
+  fn encode_json(self) -> String {
+    let pieces = List::fold(self, List::Nil, fn (acc, item) =>
+      List::Cons(element_text(Encode::encode_json(item)), acc));
+    "[${String::join(List::reverse(pieces), ",")}]"
+  }
 }
 
 impl<A: Encode> Encode for Vector<A> {
   fn encode(self) -> Raw { Encode::encode(Vector::to_list(self)) }
+  fn encode_json(self) -> String { Encode::encode_json(Vector::to_list(self)) }
 }
 
+/// Written in key order, which is the order a `Dict` holds its keys in.
 impl<V: Encode> Encode for Dict<String, V> {
   fn encode(self) -> Raw {
     let entries = List::fold(Dict::entries(self), List::Nil, fn (acc, pair) =>
@@ -1648,11 +1765,15 @@ impl<V: Encode> Encode for Dict<String, V> {
   }
 }
 
+/// **Sorted by key**, because a `Map` is a hash table and has no order of its
+/// own: the order its buckets fall in changes as it grows, so the same map
+/// would print differently from one run to the next. Sorting costs the sort,
+/// and it is the one order that is the same every time.
 impl<V: Encode> Encode for Map<String, V> {
   fn encode(self) -> Raw {
     let entries = List::fold(Map::entries(self), List::Nil, fn (acc, pair) =>
       List::Cons(Raw::entry(pair.key, Encode::encode(pair.value)), acc));
-    Raw::Record(List::reverse(entries))
+    Raw::Record(List::sort_by(entries, fn (l, r) => Ord::cmp(l.key, r.key)))
   }
 }
 
