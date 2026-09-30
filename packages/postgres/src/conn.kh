@@ -973,6 +973,10 @@ test "taking the last buffered message lets the buffer go" {
 type Wire = { client: Connection, server: Int, listener: Int };
 
 fn wire() -> Wire {
+  // Winsock refuses every socket call until it is started; on Linux and
+  // macOS this does nothing. `connect` starts it the same way. A start that
+  // failed shows as the invalid handles each test asserts against.
+  let _started = start();
   let mut port = 47100;
   let mut listener = invalid_handle();
   while listener == invalid_handle() && port < 47400 {
