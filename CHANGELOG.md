@@ -729,6 +729,11 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 
 ### Changed
 
+- **A field read or write through a local or parameter counts nothing on the
+  record**, unless the value written assigns something or reads that binding;
+  the TechEmpower `/fortunes` handler runs 5.7% fewer user instructions per
+  request.
+
 - **A `+` chain on strings builds one string.** `"<${a}|${b}>"` and
   `a + b + c` allocate the result once and copy each piece once, where each
   `+` allocated and copied the text so far; every piece stays alive until

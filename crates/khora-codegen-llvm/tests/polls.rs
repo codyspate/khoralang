@@ -503,3 +503,43 @@ fn no_count_operation_writes_a_static() {
     }
     assert!(counted > 0, "the program spawns, so its counts should be atomic");
 }
+
+/// A loop that reads and writes fields of a record it was handed, and does
+/// nothing else with it.
+const FIELDS: &str = "module t;
+type Row = { id: Int, mut total: Int };
+
+fn walk(r: Row, n: Int) -> Int {
+  let mut i = 0;
+  let mut t = 0;
+  while i < n { t = t + r.id; r.total = t; i = i + 1; };
+  t + r.total
+}
+
+fn main() -> Int {
+  let r: Row = { id: 2, total: 0 };
+  walk(r, 3)
+}
+";
+
+/// **A field read or write through a binding counts nothing on the record.**
+/// Without the rule, `r.id` and `r.total = t` each duplicate `r` before the
+/// load or store and release it after: two count operations on every trip,
+/// for a record the parameter is holding anyway. On the fortunes benchmark
+/// the field-access sites made about 2,200 count operations a request.
+///
+/// Read from the IR because the runtime counts allocations, not count
+/// operations, and a duplicate and its release leave no trace a program can
+/// see. What is asserted is structural: `walk` has no inline duplicate at all
+/// (`Row` holds only machine words, so the only thing to count is `r`), and
+/// only the parameter's own releases remain -- one where the body ends and one
+/// where a cancellation at the back-edge leaves it. With the rule off there
+/// are two duplicates and five releases.
+#[test]
+fn a_field_read_or_write_through_a_binding_counts_nothing_on_the_record() {
+    let body = function_ir("polls_fields", FIELDS, "walk");
+    let dups = body.lines().filter(|l| l.starts_with("dup.bump")).count();
+    let drops = body.lines().filter(|l| l.starts_with("drop.release")).count();
+    assert_eq!(dups, 0, "a field access duplicated the record:\n{body}");
+    assert_eq!(drops, 2, "the parameter's releases, at the end and at a cancellation:\n{body}");
+}

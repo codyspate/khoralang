@@ -54,6 +54,34 @@ impl<'a> Planner<'a> {
         }
     }
 
+    /// Whether `base.f = value` may borrow `base` rather than copy it.
+    ///
+    /// **Only a binding, and only if `value` cannot change what it holds.**
+    /// The store happens after `value` is evaluated, and a borrowed base has
+    /// no reference of its own to keep the record alive until then. An
+    /// assignment anywhere in `value` could replace the binding and free the
+    /// record under the store, and a read of the binding in `value` could be
+    /// the take that hands its reference away. Either sends the write down the
+    /// ordinary path, which copies the base first.
+    ///
+    /// Conservative on purpose: `assigns_anything` counts an assignment inside
+    /// a lambda that `value` builds and never calls, and any `mut` field write
+    /// at all. What it costs is a dup and a drop at such a site.
+    fn writes_through_a_binding(&self, base: ExprId, value: ExprId) -> bool {
+        let Expr::Local(held) = *self.body.expr(base) else { return false };
+        !self.assigns_anything(value) && !self.reads_in(value).contains(&held)
+    }
+
+    /// Whether an assignment appears anywhere inside `id`.
+    fn assigns_anything(&self, id: ExprId) -> bool {
+        if matches!(self.body.expr(id), Expr::Assign { .. }) {
+            return true;
+        }
+        let mut found = false;
+        self.each_child(id, &mut |child| found = found || self.assigns_anything(child));
+        found
+    }
+
     /// What `borrowed_arguments` says, unless the program implements the method
     /// itself.
     ///
@@ -278,6 +306,21 @@ impl<'a> Planner<'a> {
                 self.walk(rhs);
             }
             Expr::Assign { target, value } => {
+                if let Expr::Field { base, .. } = self.body.expr(target).clone() {
+                    if self.writes_through_a_binding(base, value) {
+                        self.borrow(base);
+                        self.walk(value);
+                        return;
+                    }
+                    // **The ordinary path copies the base, on purpose**, and
+                    // walking the base rather than the target is what keeps it
+                    // a copy: the `Field` arm below would borrow it.
+                    let before = self.reads.len();
+                    self.walk(base);
+                    self.reads.truncate(before);
+                    self.walk(value);
+                    return;
+                }
                 // Walking the target records a *read* of the local, and a write
                 // is not a read: taking it for one would hand the binding's
                 // reference to the assignment and leave the new value with
@@ -288,6 +331,22 @@ impl<'a> Planner<'a> {
                 self.walk(value);
             }
             Expr::Unary { operand, .. } => self.walk(operand),
+            // **`r.x` through a binding borrows it**: no dup of `r` before the
+            // load, no drop after it. Only the field is retained. Sound
+            // because nothing runs between the load and the retain, so the
+            // binding's own reference covers the record for the whole read.
+            // The borrow is still a read for last-use purposes (`Read::borrowed`).
+            //
+            // **Only through a binding, never through a projection.** A binding
+            // cannot be reassigned by code the read runs -- a closure cannot
+            // assign what it captured -- but a `mut` field can. Borrowing
+            // `h.cell` whole into `Shared::update(h.cell, g)` let `g` run
+            // `h.cell = Shared::of(..)` and free the old cell while `update`
+            // was still inside it: a segfault. So `h.cell.x` borrows `h` to
+            // read `h.cell`, which it retains, and nothing wider.
+            Expr::Field { base, .. } if matches!(self.body.expr(base), Expr::Local(_)) => {
+                self.borrow(base)
+            }
             Expr::Field { base, .. } => self.walk(base),
             Expr::If { condition, then_branch, else_branch } => {
                 self.walk(condition);

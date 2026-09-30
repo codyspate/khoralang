@@ -2000,3 +2000,66 @@ fn abort_in_a_nested_transaction_undoes_inner_then_outer() {
         assert_eq!(ran.code, Some(0), "`{backend}`");
     }
 }
+
+/// **A cancellation inside the value of a field write releases the record once
+/// and the value it was building never.** `r.name = fill(..)` borrows `r`:
+/// the binding holds the only reference, and the write makes none. `fill`
+/// allocates, tells `main` it is inside the value, and blocks on a receive
+/// that `main` answers with a cancel. The unwind has to release `r` through
+/// its block and nothing else: releasing it again as a held operand of the
+/// write frees it twice, and not releasing the half-built value leaks. Twenty
+/// rounds on each backend, and the live count comes back to where it started.
+///
+/// With the planner's borrow disabled this passes too -- the ordinary path
+/// copies `r` and releases the copy on the way out. What it guards is the
+/// borrowed path: holding the borrowed base as an operand on the way out
+/// (`hold_operand` without its `borrowed` test, for field-write bases only)
+/// segfaults on the thread backend and trips the owner check on the
+/// scheduler.
+#[test]
+fn a_cancel_inside_a_field_writes_value_releases_the_record_once() {
+    const SOURCE: &str = "module main;
+import std::core::{print, Fiber, Channel, String};
+
+extern fn khora_live_count() -> Int;
+
+type Row = { id: Int, mut name: String };
+
+fn fill(i: Int, ready: Channel<Int>, go: Channel<Int>) -> String {
+  let partial = \"row \" + Int::to_string(i);
+  Channel::send(ready, 1);
+  let _ = Channel::receive(go);
+  partial + \" filled\"
+}
+
+fn write(i: Int, ready: Channel<Int>, go: Channel<Int>) -> Int {
+  let r: Row = { id: i, name: \"was \" + Int::to_string(i) };
+  r.name = fill(i, ready, go);
+  String::byte_length(r.name) + r.id
+}
+
+pub fn main() -> Int {
+  let before = khora_live_count();
+  let mut round = 0;
+  let mut stopped = 0;
+  while round < 20 {
+    let ready: Channel<Int> = Channel::bounded(1);
+    let go: Channel<Int> = Channel::bounded(1);
+    let f = Fiber::spawn(fn () => write(round, ready, go));
+    let _ = Channel::receive(ready);
+    Fiber::cancel(f);
+    Fiber::wait(f);
+    if Fiber::canceled(f) { stopped = stopped + 1 };
+    round = round + 1;
+  };
+  let delta = khora_live_count() - before;
+  print(\"stopped ${stopped}; live delta ${delta}\");
+  0
+}
+";
+    for (backend, ran) in on_both("cancel_everywhere_field_write", SOURCE) {
+        assert!(!ran.hung, "`{backend}`: {}", ran.stdout);
+        assert_eq!(ran.stdout, "stopped 20; live delta 0\n", "`{backend}`: {}", ran.stderr);
+        assert_eq!(ran.code, Some(0), "`{backend}`");
+    }
+}

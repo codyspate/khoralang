@@ -378,3 +378,125 @@ fn a_moved_binding_keeps_its_release_only_across_a_call_that_can_stop() {
         "every moved binding is struck when nothing can stop: {pruned:?}"
     );
 }
+
+// --- a field read or write through a binding --------------------------------
+
+/// The plan for `function` in `text`, with the body it was made from, for a
+/// test that has to find an expression by its shape.
+fn plan_with_body(
+    db: &dyn Db,
+    text: &str,
+    function: &str,
+) -> (RcPlan, khora_hir::body::Body) {
+    let file = SourceFile::new(db, "a.kh".into(), text.to_string());
+    let bodies = khora_hir::body::bodies(db, file);
+    let body = bodies.iter().find(|(n, _)| n == function).expect("the function").1.clone();
+    (plan(db, text, function), body)
+}
+
+/// The base of every `base.f = v` in `body`, in source order.
+fn written_bases(body: &khora_hir::body::Body) -> Vec<khora_hir::body::ExprId> {
+    use khora_hir::body::Expr;
+    let mut found: Vec<_> = body
+        .exprs()
+        .filter_map(|(_, e)| match e {
+            Expr::Assign { target, .. } => match body.expr(*target) {
+                Expr::Field { base, .. } => Some(*base),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+const SLOT: &str = "module m;\npub type Slot = { mut held: String };\n";
+
+/// **`r.x` borrows `r`**: the binding holds a reference for the whole read,
+/// so the read makes none of its own and the lowering gives none back.
+#[test]
+fn a_field_read_through_a_binding_borrows_it() {
+    use khora_hir::body::Expr;
+    let db = KhoraDatabase::new();
+    let (p, body) = plan_with_body(
+        &db,
+        &format!(
+            "{SLOT}fn f(s: Slot) -> Int {{\n  \
+             String::byte_length(s.held) + String::byte_length(s.held)\n}}\n"
+        ),
+        "f",
+    );
+    let bases: Vec<_> = body
+        .exprs()
+        .filter_map(|(_, e)| match e {
+            Expr::Field { base, .. } if matches!(body.expr(*base), Expr::Local(_)) => Some(*base),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bases.len(), 2, "two field reads: {p:?}");
+    for base in &bases {
+        assert!(p.borrowed.contains(base), "`s` in `s.held` should be borrowed: {p:?}");
+        assert!(
+            !p.dups.contains(base) && !p.takes.contains(base),
+            "and neither copied nor taken: {p:?}"
+        );
+    }
+    // Borrowing is not taking, so the parameter is still the block's to release.
+    let released: Vec<_> = p.drops.values().flatten().collect();
+    assert_eq!(released.len(), 1, "the parameter is released once, by the block: {p:?}");
+}
+
+/// **A write whose value cannot touch the binding borrows it too.**
+#[test]
+fn a_field_write_with_a_quiet_value_borrows_the_binding() {
+    let db = KhoraDatabase::new();
+    let (p, body) = plan_with_body(
+        &db,
+        &format!("{SLOT}fn f(s: Slot, t: String) -> Int {{ s.held = t + \"!\"; 0 }}\n"),
+        "f",
+    );
+    let bases = written_bases(&body);
+    assert_eq!(bases.len(), 1);
+    assert!(p.borrowed.contains(&bases[0]), "`s.held = t + ..` should borrow `s`: {p:?}");
+}
+
+/// **`r.x = v` where `v` assigns anything takes the ordinary path.** An
+/// assignment in `v` could replace `r` before the store, and a borrowed `r`
+/// holds no reference that would keep the old record alive until then.
+#[test]
+fn a_field_write_whose_value_assigns_does_not_borrow() {
+    let db = KhoraDatabase::new();
+    let (p, body) = plan_with_body(
+        &db,
+        &format!(
+            "{SLOT}fn f(s: Slot, t: Slot) -> Int {{\n  \
+             s.held = {{ t.held = \"a\"; \"b\" }};\n  0\n}}\n"
+        ),
+        "f",
+    );
+    let bases = written_bases(&body);
+    assert_eq!(bases.len(), 2, "the outer write and the one inside its value");
+    let (outer, inner) = (bases[0], bases[1]);
+    assert!(
+        !p.borrowed.contains(&outer),
+        "`s` must not be borrowed across a value that assigns: {p:?}"
+    );
+    assert!(p.dups.contains(&outer), "it is copied instead: {p:?}");
+    assert!(p.borrowed.contains(&inner), "the inner write's value is quiet, so it borrows: {p:?}");
+}
+
+/// **`r.x = v` where `v` reads `r` takes the ordinary path**, because that
+/// read could be the take that hands `r`'s reference away before the store.
+#[test]
+fn a_field_write_whose_value_reads_the_binding_does_not_borrow() {
+    let db = KhoraDatabase::new();
+    let (p, body) = plan_with_body(
+        &db,
+        &format!("{SLOT}fn f(s: Slot) -> Int {{ s.held = s.held + \"!\"; 0 }}\n"),
+        "f",
+    );
+    let bases = written_bases(&body);
+    assert_eq!(bases.len(), 1);
+    assert!(!p.borrowed.contains(&bases[0]), "`s` is read by the value: {p:?}");
+}

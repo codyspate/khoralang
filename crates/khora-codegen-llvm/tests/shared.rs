@@ -173,6 +173,52 @@ pub fn main() -> () {
     assert_eq!(out, "0\n0\n", "the trailing 0 is the live-object count");
 }
 
+/// **A field read through a projection is counted, even when it is lent.**
+///
+/// `Shared::update(h.cell, g)` only looks at the cell, and `g` replaces
+/// `h.cell` while `update` is inside the old one. The old cell survives
+/// because reading `h.cell` took a reference of its own. Borrowing it whole,
+/// as a read through a binding is borrowed, would let `g`'s write release the
+/// last reference under `update`. That variant segfaulted here where this
+/// prints `3` and a live count of 0. A binding cannot be reassigned by code a
+/// read runs, and a `mut` field can, which is where borrowing has to stop.
+///
+/// This pins the fallback, so it passes with field borrowing off as well;
+/// it goes red only if borrowing is widened to projections.
+#[test]
+fn a_cell_replaced_inside_its_own_update_survives_the_update() {
+    let out = run(
+        "shared_cell_in_a_field",
+        "module main;
+import std::core::{Shared, String, print};
+
+extern fn khora_live_count() -> Int;
+
+type Holder = { mut cell: Shared<String> };
+
+fn swap_inside(h: Holder) -> Int {
+  let g = fn old => {
+    h.cell = Shared::of(\"new\");
+    old + \"!\"
+  };
+  Shared::update(h.cell, g);
+  String::byte_length(Shared::get(h.cell))
+}
+
+fn work() -> () {
+  let h: Holder = { cell: Shared::of(\"old\" + String::slice(\"xyz\", 0, 1)) };
+  print(Int::to_string(swap_inside(h)))
+}
+
+pub fn main() -> () {
+  work();
+  print(Int::to_string(khora_live_count()))
+}
+",
+    );
+    assert_eq!(out, "3\n0\n", "`new` is three bytes; the trailing 0 is the live-object count");
+}
+
 // --- the map ---------------------------------------------------------------
 
 /// Ordered, and a later insert for the same key replaces rather than adds.

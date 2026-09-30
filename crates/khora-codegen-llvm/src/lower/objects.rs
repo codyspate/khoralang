@@ -65,9 +65,11 @@ impl<'ctx> Lower<'_, 'ctx> {
             self.be.builder.build_store(slot, new).expect("assigning a field");
         }
 
-        // The record itself was read to reach the field, and reading it
-        // duplicated the reference. Give it back.
-        self.drop(object.into(), &owner_ty);
+        // The record itself was read to reach the field, and unless the plan
+        // borrowed it that read duplicated the reference. Give it back.
+        if !self.plan.borrowed.contains(&base) {
+            self.drop(object.into(), &owner_ty);
+        }
         Some(self.be.unit_value())
     }
 
@@ -208,8 +210,13 @@ impl<'ctx> Lower<'_, 'ctx> {
             // takes a reference of its own before that value goes. Both are
             // no-ops for a value of nothing but machine words, which is why
             // this could be left out while only those were held inline.
+            //
+            // A base the plan borrowed was never counted for this read, so
+            // there is nothing to give back (`khora_perceus`'s `Field` arm).
             self.retain(read, &field_ty);
-            self.drop(whole, &owner);
+            if !self.plan.borrowed.contains(&base) {
+                self.drop(whole, &owner);
+            }
             return Some(read);
         }
 
@@ -217,10 +224,12 @@ impl<'ctx> Lower<'_, 'ctx> {
         let at = self.be.field_slot(&info.fields, index);
         let value = self.load_field(object, at, &field_ty);
         // The field is borrowed out of the record, and the record was owned by
-        // this expression, so reading one keeps the field alive past the
-        // release of what held it.
+        // this expression -- unless the plan borrowed it from a binding -- so
+        // reading one keeps the field alive past the release of what held it.
         self.retain(value, &field_ty);
-        self.drop(object.into(), &owner);
+        if !self.plan.borrowed.contains(&base) {
+            self.drop(object.into(), &owner);
+        }
         Some(value)
     }
 
