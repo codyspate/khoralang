@@ -3089,10 +3089,11 @@ impl String {
   /// **A compiler intrinsic underneath**, and the reason is a measurement.
   /// Written as a loop over `String::byte` this took 3,180 nanoseconds to find
   /// a six-byte word in eighty bytes — a call and a bounds check per byte, at
-  /// every candidate position. Bound to `memmem` but reaching it through
-  /// `String::with_data` it still took 500, because the two nested closures
-  /// that borrow the bytes are two heap allocations. Going straight to the
-  /// runtime call is 40.
+  /// every candidate position. Bound to `memmem` and reached through two
+  /// nested `String::with_data` calls it took 500, measured with each of their
+  /// closures built on the heap. A body written in place is built in the
+  /// caller's frame, which removes those two allocations but not the two
+  /// calls through a closure. Going straight to the runtime call is 40.
   ///
   /// That matters because this is the hottest thing in the request parser:
   /// `split_once` is built on it, and parsing one request is about eight
@@ -3327,9 +3328,9 @@ impl String {
   /// **Linear in the output, and no intermediate strings.** The pieces are
   /// measured first and copied into one buffer, which becomes the answer: two
   /// allocations and two copies of each byte (the buffer, then the string made
-  /// from it) whatever the number of pieces, plus a small closure per piece.
-  /// The walk is a loop rather than a stack, so tens of thousands of pieces
-  /// are fine. A single piece is returned without copying.
+  /// from it) whatever the number of pieces. The walk is a loop rather than a
+  /// stack, so tens of thousands of pieces are fine. A single piece is
+  /// returned without copying.
   pub fn join(pieces: List<String>, separator: String) -> String {
     // Two earlier versions, and why each went. `head + separator +
     // join(tail)` recursed once per piece, so it stopped the program past
@@ -3337,9 +3338,8 @@ impl String {
     // which is quadratic in the output. Combining adjacent pairs in log2(count)
     // rounds fixed both, but still built a separated copy of every piece, a
     // reversed list and a string per pair per round: 380 allocations to join
-    // 64 pieces, where this makes 68 (64 of them the closure `with_data`
-    // builds per piece). A web page is a join of hundreds of pieces per
-    // request.
+    // 64 pieces, where this makes 2. A web page is a join of hundreds of
+    // pieces per request.
     match pieces {
       List::Nil => "",
       List::Cons(head, tail) => match tail {
@@ -3380,8 +3380,7 @@ impl String {
   /// **Unchecked, and sound only because `joined_flat` measured first:** `into`
   /// holds exactly the pieces' lengths plus `gap` per boundary, and the list
   /// is immutable, so this walk sees the same lengths. `String::copy_into`
-  /// would check each range again and cost two closures per piece rather
-  /// than one.
+  /// would check each range again.
   fn laid_into(pieces: List<String>, between: Ptr, gap: Int, into: Ptr) -> () {
     let mut at = 0;
     let mut rest = pieces;

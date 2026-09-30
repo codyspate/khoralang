@@ -71,7 +71,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 self.check_cancellation(range);
                 self.expr(inner)
             }
-            Expr::Lambda { .. } => self.make_closure(id, range),
+            Expr::Lambda { .. } => self.make_closure(id, ClosureHome::Heap, range),
             // Parameter 0 of a lifted lambda *is* the closure, and it is live
             // for the duration of the call because the caller holds it. No
             // capture, no reference count, no cycle.

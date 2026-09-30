@@ -114,7 +114,7 @@ impl<'ctx> Backend<'ctx> {
     /// same reason: a drop site knows only that it holds a value of *some*
     /// function type, and two lambdas with the same signature capture entirely
     /// different things. The tag is what distinguishes them.
-    pub(super) fn closure_glue(&mut self) -> PointerValue<'ctx> {
+    pub(crate) fn closure_glue(&mut self) -> PointerValue<'ctx> {
         if !self.closures.iter().any(|c| c.captures.iter().any(|(_, t)| self.owns_a_reference(t))) {
             return self.null_pointer();
         }

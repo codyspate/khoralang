@@ -282,6 +282,25 @@ enum Cleanup<'ctx> {
     /// closure callee or `with_data` subject, or an operand evaluated and
     /// waiting for the operands after it (`Lower::operands`).
     Temp(BasicValueEnum<'ctx>, Type),
+    /// The captures of a closure built in this frame rather than on the heap
+    /// (`ClosureHome::Frame`). Its count never reaches zero, so nothing else
+    /// would release what it holds; this runs the closure drop glue on it
+    /// directly, on every way out of the call it was built for.
+    Captures(PointerValue<'ctx>),
+}
+
+/// Where [`Lower::make_closure`] puts a closure object.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClosureHome {
+    /// `khora_alloc`, counted and freed like any other object. Anything that
+    /// can outlive the expression that built it has to live here.
+    Heap,
+    /// An entry-block slot of the function being lowered, for a closure
+    /// nothing can reach once one call returns: the body of `with_data`
+    /// written in place. What it saves is one allocation and one free per
+    /// call. What it costs is that frame's size, one slot per such call site,
+    /// held for the whole of the function.
+    Frame,
 }
 
 /// The value a set of arms is dispatching on, and who releases it.

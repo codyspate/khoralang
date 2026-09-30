@@ -32,6 +32,11 @@ pub const TAG_OFFSET: u64 = std::mem::offset_of!(KhoraHeader, tag) as u64;
 /// Byte offset of the first field from an object pointer.
 pub const FIELD_OFFSET: u64 = KHORA_FIELD_OFFSET as u64;
 
+/// Byte offset of the header's field size, which the runtime reads to rebuild
+/// an object's layout when it frees it. Only an object the code generator
+/// lays out itself, rather than through `khora_alloc`, writes it.
+pub const FIELD_BYTES_OFFSET: u64 = std::mem::offset_of!(KhoraHeader, field_bytes) as u64;
+
 /// The `which` a cancellation travels under.
 ///
 /// Outside the range error-type ids are assigned from — they start at 1 and

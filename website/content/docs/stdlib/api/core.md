@@ -2871,10 +2871,11 @@ Where `needle` first occurs, or nothing.
 **A compiler intrinsic underneath**, and the reason is a measurement.
 Written as a loop over `String::byte` this took 3,180 nanoseconds to find
 a six-byte word in eighty bytes — a call and a bounds check per byte, at
-every candidate position. Bound to `memmem` but reaching it through
-`String::with_data` it still took 500, because the two nested closures
-that borrow the bytes are two heap allocations. Going straight to the
-runtime call is 40.
+every candidate position. Bound to `memmem` and reached through two
+nested `String::with_data` calls it took 500, measured with each of their
+closures built on the heap. A body written in place is built in the
+caller's frame, which removes those two allocations but not the two
+calls through a closure. Going straight to the runtime call is 40.
 
 That matters because this is the hottest thing in the request parser:
 `split_once` is built on it, and parsing one request is about eight
@@ -3057,9 +3058,9 @@ and not about lists: a `List<Int>` has no join.
 **Linear in the output, and no intermediate strings.** The pieces are
 measured first and copied into one buffer, which becomes the answer: two
 allocations and two copies of each byte (the buffer, then the string made
-from it) whatever the number of pieces, plus a small closure per piece.
-The walk is a loop rather than a stack, so tens of thousands of pieces
-are fine. A single piece is returned without copying.
+from it) whatever the number of pieces. The walk is a loop rather than a
+stack, so tens of thousands of pieces are fine. A single piece is
+returned without copying.
 
 #### replace
 

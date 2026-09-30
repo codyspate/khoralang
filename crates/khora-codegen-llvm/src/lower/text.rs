@@ -199,7 +199,24 @@ impl<'ctx> Lower<'_, 'ctx> {
             }
         };
 
-        let closure = self.expr(*body)?.into_pointer_value();
+        // **A lambda written in place is built in this frame.** Nothing but
+        // the call below can reach it: the runtime never sees it, and a
+        // literal argument has no name, so its body cannot hand itself on.
+        // Anything else -- a named function, a closure held in a binding --
+        // was built where it was written and may outlive the call, so it
+        // keeps its heap object.
+        let home = match self.body.expr(*body) {
+            Expr::Lambda { .. } => ClosureHome::Frame,
+            _ => ClosureHome::Heap,
+        };
+        let closure = match home {
+            ClosureHome::Frame => self.make_closure(*body, home, range)?.into_pointer_value(),
+            ClosureHome::Heap => self.expr(*body)?.into_pointer_value(),
+        };
+        self.scopes.push(match home {
+            ClosureHome::Frame => vec![Cleanup::Captures(closure)],
+            ClosureHome::Heap => Vec::new(),
+        });
         let Invoked { raw, fallible } = self.invoke_closure_at(
             site,
             *body,
@@ -217,7 +234,8 @@ impl<'ctx> Lower<'_, 'ctx> {
                 _ => raw.unwrap_or_else(|| self.be.unit_value()),
             }
         };
-        // The closure's own scope, then the one holding what was lent.
+        // The closure's reference, its captures, then what was lent.
+        self.leave_scope();
         self.leave_scope();
         self.leave_scope();
         Some(result)

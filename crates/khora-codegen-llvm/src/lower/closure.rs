@@ -11,7 +11,7 @@
 use super::*;
 
 impl<'ctx> Lower<'_, 'ctx> {
-    /// Allocates the closure object for a lambda expression.
+    /// Builds the closure object for a lambda expression.
     ///
     /// Field 0 holds the lifted function's address and the captures follow, all
     /// under the ordinary object header — so a closure is dup'ed, dropped and
@@ -21,7 +21,15 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// expression: lowering finds the names the body reads, and the checker
     /// adds the capabilities it uses without naming. The site is where the two
     /// were put together, and it is the only list this may read.
-    pub(super) fn make_closure(&mut self, id: ExprId, range: TextRange) -> Flow<'ctx> {
+    ///
+    /// **`ClosureHome::Frame` puts the same object in an entry-block slot.**
+    /// Its count starts at 2, so the one release the call site makes leaves
+    /// it at 1 and never reaches `khora_drop_last`, which would hand frame
+    /// memory to the allocator. The captures are still retained here; the
+    /// caller owes a `Cleanup::Captures` to release them. The slot is written
+    /// afresh each time the lambda is evaluated, so a loop reuses it rather
+    /// than finding last turn's count.
+    pub(super) fn make_closure(&mut self, id: ExprId, home: ClosureHome, range: TextRange) -> Flow<'ctx> {
         let owner = self.owner.clone();
         let Some(site) = self.be.closure_at(&owner, id).cloned() else {
             return self.fail("this closure was never declared, which is a compiler bug", range);
@@ -39,23 +47,25 @@ impl<'ctx> Lower<'_, 'ctx> {
         // one of them grew.
         let held: Vec<Type> = site.captures.iter().map(|(_, ty)| ty.clone()).collect();
         let (at, words) = self.be.capture_layout(&held);
-        let alloc = self.be.rt.alloc;
-        let object = self
-            .be
-            .builder
-            .build_call(
-                alloc,
-                &[
-                    self.be.ctx.i64_type().const_int(FIELD_WORD * words, false).into(),
-                    self.be.ctx.i32_type().const_int(tag as u64, false).into(),
-                ],
-                "closure.obj",
-            )
-            .expect("allocating a closure")
-            .try_as_basic_value()
-            .basic()
-            .expect("khora_alloc returns a pointer")
-            .into_pointer_value();
+        let object = match home {
+            ClosureHome::Heap => self
+                .be
+                .builder
+                .build_call(
+                    self.be.rt.alloc,
+                    &[
+                        self.be.ctx.i64_type().const_int(FIELD_WORD * words, false).into(),
+                        self.be.ctx.i32_type().const_int(tag as u64, false).into(),
+                    ],
+                    "closure.obj",
+                )
+                .expect("allocating a closure")
+                .try_as_basic_value()
+                .basic()
+                .expect("khora_alloc returns a pointer")
+                .into_pointer_value(),
+            ClosureHome::Frame => self.frame_closure(tag, words),
+        };
 
         let code = function.as_global_value().as_pointer_value();
         let slot = runtime::field_pointer(self.be.ctx, &self.be.builder, object, 0);
@@ -77,6 +87,43 @@ impl<'ctx> Lower<'_, 'ctx> {
         }
 
         Some(object.into())
+    }
+
+    /// The memory for a `ClosureHome::Frame` closure: an object header and
+    /// `words` zeroed fields in an entry-block slot, with the header written
+    /// as `khora_alloc` would write it except for the count.
+    ///
+    /// **Zeroed, as `khora_alloc`'s memory is.** A capture whose local has no
+    /// slot is skipped by the loop that fills the fields, and the drop glue
+    /// would otherwise release whatever the stack held there before.
+    ///
+    /// No owner bits: a debug build's owner check skips an object without
+    /// them, and a frame closure is never counted by any fiber but this one.
+    fn frame_closure(&mut self, tag: u32, words: u64) -> PointerValue<'ctx> {
+        let i64t = self.be.ctx.i64_type();
+        let i32t = self.be.ctx.i32_type();
+        let header_words = runtime::FIELD_OFFSET / FIELD_WORD;
+        let object = self.entry_slot(i64t.array_type((header_words + words) as u32).into(), "closure.frame");
+        let fields = runtime::byte_offset(self.be.ctx, &self.be.builder, object, runtime::FIELD_OFFSET, "closure.fields");
+        self.be
+            .builder
+            .build_memset(fields, 8, self.be.ctx.i8_type().const_zero(), i64t.const_int(FIELD_WORD * words, false))
+            .expect("zeroing a frame closure");
+        self.be.builder.build_store(object, i64t.const_int(2, false)).expect("a frame closure's count");
+        let tag_at = runtime::byte_offset(self.be.ctx, &self.be.builder, object, runtime::TAG_OFFSET, "closure.tag");
+        self.be.builder.build_store(tag_at, i32t.const_int(u64::from(tag), false)).expect("a frame closure's tag");
+        let size_at = runtime::byte_offset(
+            self.be.ctx,
+            &self.be.builder,
+            object,
+            runtime::FIELD_BYTES_OFFSET,
+            "closure.size",
+        );
+        self.be
+            .builder
+            .build_store(size_at, i32t.const_int(FIELD_WORD * words, false))
+            .expect("a frame closure's size");
+        object
     }
 
     /// Wraps a named function in a closure object so it can be passed along.

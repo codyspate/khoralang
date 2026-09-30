@@ -729,6 +729,11 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 
 ### Changed
 
+- **Performance: `with_data` given a lambda written in place builds the
+  closure in the caller's frame**, not on the heap: one allocation fewer per
+  call. `String::join` of 64 pieces makes 2 allocations, the buffer and the
+  string, and `String::escape_html` of text with nothing to escape makes none.
+
 - **Performance: a small object graph is freed directly.** Releasing the last
   reference to an object frees its children by recursion up to 24 levels
   deep, and queues whatever lies deeper, so a list of any length is still

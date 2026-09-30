@@ -378,6 +378,20 @@ impl<'ctx> Lower<'_, 'ctx> {
                 self.be.builder.build_store(slot, zero).expect("clearing a released slot");
             }
             Cleanup::Temp(value, ty) => self.drop(value, &ty),
+            Cleanup::Captures(object) => {
+                // Null when no closure in the program holds a counted
+                // capture, and then there is nothing to release.
+                let glue = self.be.closure_glue();
+                if glue.is_null() {
+                    return;
+                }
+                let ptr = self.be.ctx.ptr_type(AddressSpace::default());
+                let glue_ty = self.be.ctx.void_type().fn_type(&[ptr.into()], false);
+                self.be
+                    .builder
+                    .build_indirect_call(glue_ty, glue, &[object.into()], "")
+                    .expect("releasing a frame closure's captures");
+            }
         }
     }
 }
