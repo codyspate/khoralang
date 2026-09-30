@@ -976,14 +976,84 @@ fn end_of_headers(bytes: Array<U8>, filled: Int) -> Int {
   found
 }
 
+/// The body length `head`'s `Content-Length` promises, or zero.
+///
+/// **Read where it lies, without building the headers.** This runs on every
+/// request before it is parsed, and `parse` builds the header map anyway;
+/// building one here as well, to read one entry and throw the rest away, was
+/// two strings and a map insert per header, per request. Walking the lines
+/// and comparing each name in place allocates nothing.
+///
+/// It must answer what `Request::header(request, "content-length")` would
+/// answer, or the framing and the parsed request disagree about where the
+/// body ends: the same lines (from after the request line to the blank line),
+/// the same rule for a header (a colon inside the line; the name exactly,
+/// ignoring ASCII case, with no trimming), the last one winning, and the
+/// value's leading digits after leading spaces and tabs, as `digits_of` reads
+/// a trimmed value. `tests/std-suite/src/http_framing.kh` pins these.
 fn content_length(head: String) -> Int {
-  match String::split_once(head, "\r\n") {
-    Option::None => 0,
-    Option::Some(lines) => match Map::get(parse_headers(lines.rest), "content-length") {
-      Option::None => 0,
-      Option::Some(value) => digits_of(value),
-    },
+  let first = String::find(head, "\r\n", 0);
+  if first < 0 {
+    0
+  } else {
+    let blank = String::find(head, "\r\n\r\n", first + 2);
+    let end = if blank < 0 { String::byte_length(head) } else { blank };
+    let mut length = 0;
+    let mut at = first + 2;
+    while at < end {
+      let found = String::find(head, "\r\n", at);
+      let line_end = if found < 0 || found > end { end } else { found };
+      let colon = String::find(head, ":", at);
+      if colon >= 0 && colon < line_end && named(head, at, colon, "content-length") {
+        length = digits_after_blanks(head, colon + 1, line_end);
+      };
+      at = line_end + 2;
+    }
+    length
   }
+}
+
+/// Whether `text[from .. to]` is `name`, ignoring ASCII case. `name` is
+/// lowercase.
+fn named(text: String, from: Int, to: Int, name: String) -> Bool {
+  let count = String::byte_length(name);
+  if to - from != count {
+    false
+  } else {
+    let mut i = 0;
+    while i < count && lower_byte(String::byte(text, from + i)) == U8::to_int(String::byte(name, i)) {
+      i = i + 1;
+    }
+    i == count
+  }
+}
+
+fn lower_byte(byte: U8) -> Int {
+  let c = U8::to_int(byte);
+  if c >= 65 && c <= 90 { c + 32 } else { c }
+}
+
+/// `digits_of(trimmed_between(text, from, to))`, without the slice: trailing
+/// blanks end the digits anyway, so only the leading ones need skipping.
+fn digits_after_blanks(text: String, from: Int, to: Int) -> Int {
+  let mut start = from;
+  while start < to && blank(String::byte(text, start)) {
+    start = start + 1;
+  }
+  let mut value = 0;
+  let mut i = start;
+  let mut going = true;
+  while going && i < to {
+    let c = U8::to_int(String::byte(text, i));
+    // The same cap as `digits_of`, for the same reason: `value * 10` traps.
+    if c >= 48 && c <= 57 && value <= 100000000 {
+      value = value * 10 + (c - 48);
+      i = i + 1;
+    } else {
+      going = false;
+    }
+  }
+  value
 }
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 module postgres::conn;
 
-import std::core::{Array, Iterator, List, Option, Result, Step, Vector, assert};
+import std::core::{Array, Iterator, List, Option, Result, Step, Vector, assert, assert_that};
 import std::db::{Cell, DbError, Row};
 import std::decimal::{Decimal};
 import std::net::socket::{accept_on, connect_to, invalid_handle, listen_on, nothing_yet, receive, receive_now, set_receive_timeout, shut, start, transmit_bytes};
@@ -811,50 +811,53 @@ fn describe(m: Message) -> List<Column> {
 ///
 /// `names` is the columns' names, which every row carries: they are what a
 /// schema reads the row by. The caller builds them once per reply.
+///
+/// **The cells are a `List` from the start**, one `Cons` each, rather than a
+/// `Vector` converted at the end: three fewer objects per row of two columns.
 fn data_row(m: Message, columns: List<Column>, names: List<String>) -> Row {
   let read = Reader::of(m.payload);
   let count = Reader::i16(read);
-  let mut cells: Vector<Cell> = Vector::new();
-  let mut i = 0;
-  while i < count {
-    let length = Reader::i32(read);
-    // -1 is NULL, which is not the same as a value of length zero.
-    if length < 0 {
-      Vector::push(cells, Cell::Null)
-    } else {
-      let oid = oid_at(columns, i);
-      let quick = if oid == 20 || oid == 21 || oid == 23 { Reader::digits(read, length) } else { Option::None };
-      match quick {
-        Option::Some(n) => Vector::push(cells, Cell::Number(n)),
-        Option::None => Vector::push(cells, oid_to_cell(oid, String::from_bytes(Reader::take(read, length)))),
-      }
-    };
-    i = i + 1
-  };
-  { columns: names, cells: to_list(cells) }
+  { columns: names, cells: cells_from(read, columns, count) }
 }
 
-/// The type of column `index`, or text if the description is missing.
-fn oid_at(columns: List<Column>, index: Int) -> Int {
-  let mut at = 0;
-  let mut rest = columns;
-  let mut found = 25;
-  let mut going = true;
-  while going {
-    match rest {
-      List::Nil => going = false,
-      List::Cons(head, tail) => {
-        if at == index {
-          found = head.oid;
-          going = false
-        } else {
-          at = at + 1;
-          rest = tail
-        }
-      },
+/// The next `left` values of a `DataRow`, in order, typed by `columns`.
+///
+/// Recursive, so the list is built front to back with no reversal: a row has
+/// at most 1,664 columns (PostgreSQL's limit), which is the deepest this goes.
+/// `columns` is walked alongside rather than indexed, and a row with more
+/// values than the description has columns reads the extras as text, as
+/// `oid_at` did.
+fn cells_from(read: Reader, columns: List<Column>, left: Int) -> List<Cell> {
+  if left <= 0 {
+    List::Nil
+  } else {
+    let oid = match columns {
+      List::Nil => 25,
+      List::Cons(column, _more) => column.oid,
+    };
+    let later = match columns {
+      List::Nil => List::Nil,
+      List::Cons(_column, more) => more,
+    };
+    // Read before recursing: the reader is where this cell is.
+    let cell = cell_at(read, oid);
+    List::Cons(cell, cells_from(read, later, left - 1))
+  }
+}
+
+/// One value of a `DataRow`: its length, then that many bytes.
+fn cell_at(read: Reader, oid: Int) -> Cell {
+  let length = Reader::i32(read);
+  // -1 is NULL, which is not the same as a value of length zero.
+  if length < 0 {
+    Cell::Null
+  } else {
+    let quick = if oid == 20 || oid == 21 || oid == 23 { Reader::digits(read, length) } else { Option::None };
+    match quick {
+      Option::Some(n) => Cell::Number(n),
+      Option::None => oid_to_cell(oid, String::from_bytes(Reader::take(read, length))),
     }
-  };
-  found
+  }
 }
 
 /// A text value, as the `Cell` its column's type calls for.
@@ -1227,4 +1230,59 @@ test "a partial message after the last whole one is kept" {
     Result::Err(_) => assert(false),
   };
   assert(Array::length(c.pending) - c.start == 1);
+}
+
+extern fn khora_alloc_count() -> Int;
+
+/// A reply of `rows` rows of the fortunes page's shape -- an `int4` and a
+/// `text` column -- as the server frames it.
+fn fortunes_reply(rows: Int) -> Array<U8> {
+  let bytes = Writer::new();
+  Writer::raw(bytes, description(["id", "message"], [23, 25]));
+  let mut i = 0;
+  while i < rows {
+    Writer::raw(bytes, row_of([Option::Some(Int::to_string(i + 1)), Option::Some("fortune ${Int::to_string(i)}")]));
+    i = i + 1
+  };
+  Writer::raw(bytes, framed(67, String::bytes("SELECT ${Int::to_string(rows)}\u{0}")));
+  Writer::raw(bytes, framed(90, Array::new(1, 73)));
+  Writer::finish(bytes)
+}
+
+/// What `collect` allocated reading a reply, and whether it read the rows
+/// `fortunes_reply` wrote.
+type Spent = { count: Int, right: Bool };
+
+fn spent_reading(bytes: Array<U8>, rows: Int) -> Spent {
+  let c = holding(bytes);
+  let before = khora_alloc_count();
+  let answer = collect(c);
+  let count = khora_alloc_count() - before;
+  let right = match answer {
+    Result::Err(_) => false,
+    Result::Ok(read) => {
+      let mut fine = List::length(read.rows) == rows;
+      let mut n = 1;
+      for row in read.rows {
+        fine = fine && row.columns == ["id", "message"]
+        && row.cells == [Cell::Number(n), Cell::Text("fortune ${Int::to_string(n - 1)}")];
+        n = n + 1
+      };
+      fine
+    },
+  };
+  { count: count, right: right }
+}
+
+/// **Reading a reply builds each row's cells once.** A row is a `List<Cell>`,
+/// and gathering the cells into a `Vector` first and converting it cost 19
+/// objects per row of this shape, where building the list directly is 16.
+/// What is counted is the cost of sixteen more rows, so the reply's fixed
+/// cost is not in it.
+test "reading a row allocates its cells once" {
+  let small = spent_reading(fortunes_reply(16), 16);
+  let large = spent_reading(fortunes_reply(32), 32);
+  assert(small.right && large.right);
+  let per_row = (large.count - small.count) / 16;
+  assert_that(per_row <= 16, "a row of two columns allocated ${Int::to_string(per_row)}");
 }

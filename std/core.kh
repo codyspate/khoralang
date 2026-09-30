@@ -3218,6 +3218,40 @@ impl String {
     String::from_bytes(out)
   }
 
+  /// The text made safe to put in an HTML page: `&`, `<`, `>`, `"` and `'`
+  /// replaced by `&amp;`, `&lt;`, `&gt;`, `&quot;` and `&apos;`.
+  ///
+  /// **For text going into an element or a quoted attribute value**, which is
+  /// where a user's input goes in a page. All five are escaped, not only `<`
+  /// and `&`, so the same call is safe in `title="..."` and in
+  /// `title='...'`. It is not enough for an unquoted attribute, a URL, a
+  /// `<script>` or a `<style>`: each of those has rules of its own, and no
+  /// single escaper satisfies them all.
+  ///
+  /// Every other byte is kept as it is, so text in any language passes
+  /// through unchanged. `&apos;` is HTML5's (and XML's); a reader of HTML 4
+  /// would show it literally.
+  ///
+  /// Text with nothing to escape comes back as it is, with no copy. Otherwise
+  /// the answer is built in one buffer, with the plain runs between the five
+  /// characters copied whole.
+  ///
+  /// ```khora
+  /// let row = "<td>${String::escape_html(message)}</td>";
+  /// ```
+  pub fn escape_html(self) -> String {
+    let length = String::byte_length(self);
+    let wanted = String::with_data(self, fn (bytes, n) => khora_html_escape(bytes, n, Ptr::null(), 0));
+    if wanted == length {
+      self
+    } else {
+      let out: Array<U8> = Array::new(wanted, 0);
+      String::with_data(self, fn (bytes, n) =>
+        Array::with_data(out, fn (into, room) => khora_html_escape(bytes, n, into, room)));
+      String::from_bytes(out)
+    }
+  }
+
   /// The text with leading whitespace removed.
   pub fn trim_start(self) -> String {
     let length = String::byte_length(self);
@@ -3290,108 +3324,84 @@ impl String {
   /// decides both. Written here rather than on `List` because it is about text
   /// and not about lists: a `List<Int>` has no join.
   ///
-  /// **Adjacent pairs, halving, rather than one piece at a time.** Written the
-  /// obvious way — `head + separator + join(tail)` — this was wrong twice. It
-  /// recursed once per piece, so it stopped the program somewhere past four
-  /// thousand of them; and every one of those concatenations copied the whole
-  /// answer so far, so the work was quadratic in the *output*. Measured:
-  /// joining a thousand ten-byte pieces took under a millisecond, two thousand
-  /// took one, four thousand took four.
-  ///
-  /// Combining adjacent pairs copies the whole length once per round, and
-  /// there are log2(count) rounds. Sixteen thousand pieces goes from a
-  /// gigabyte and a half of copying to about two megabytes, using the same
-  /// `+`, and the walk is a loop rather than a stack.
+  /// **Linear in the output, and no intermediate strings.** The pieces are
+  /// measured first and copied into one buffer, which becomes the answer: two
+  /// allocations and two copies of each byte (the buffer, then the string made
+  /// from it) whatever the number of pieces, plus a small closure per piece.
+  /// The walk is a loop rather than a stack, so tens of thousands of pieces
+  /// are fine. A single piece is returned without copying.
   pub fn join(pieces: List<String>, separator: String) -> String {
+    // Two earlier versions, and why each went. `head + separator +
+    // join(tail)` recursed once per piece, so it stopped the program past
+    // about four thousand of them, and every `+` copied the answer so far,
+    // which is quadratic in the output. Combining adjacent pairs in log2(count)
+    // rounds fixed both, but still built a separated copy of every piece, a
+    // reversed list and a string per pair per round: 380 allocations to join
+    // 64 pieces, where this makes 68 (64 of them the closure `with_data`
+    // builds per piece). A web page is a join of hundreds of pieces per
+    // request.
     match pieces {
       List::Nil => "",
       List::Cons(head, tail) => match tail {
+        // One piece is already the answer, and copying it would be the only
+        // allocation this call makes.
         List::Nil => head,
-        // Two or more. Give every piece but the first its separator, then
-        // squash what that leaves.
-        List::Cons(_h, _t) => String::squash(
-          List::reverse(String::separated_onto(tail, separator, List::Cons(head, List::Nil))),
-        ),
+        List::Cons(_h, _t) => String::joined_flat(pieces, separator),
       },
     }
   }
 
-  /// Every piece of `rest` with `separator` in front of it, reversed onto
-  /// `so_far`.
-  ///
-  /// One small allocation per piece and none of them proportional to the
-  /// answer, so this pass is linear however long the result is. It is where
-  /// the separator goes, so that `squash` below is about nothing but
-  /// concatenation.
-  fn separated_onto(rest: List<String>, separator: String, so_far: List<String>) -> List<String> {
-    let mut out = so_far;
-    let mut walking = rest;
+  /// `join` for two or more pieces: the length first, then one buffer.
+  fn joined_flat(pieces: List<String>, separator: String) -> String {
+    let gap = String::byte_length(separator);
+    let mut total = 0;
+    let mut count = 0;
+    let mut walking = pieces;
     let mut going = true;
     while going {
       match walking {
         List::Nil => { going = false; },
         List::Cons(piece, more) => {
-          out = List::Cons(separator + piece, out);
+          total = total + String::byte_length(piece);
+          count = count + 1;
           walking = more;
         },
       }
     };
-    out
+    let out: Array<U8> = Array::new(total + gap * (count - 1), 0);
+    String::with_data(separator, fn (between, _gap) =>
+      Array::with_data(out, fn (into, _room) => String::laid_into(pieces, between, gap, into)));
+    String::from_bytes(out)
   }
 
-  /// One string from many, in order, combining adjacent pairs until one is
-  /// left.
+  /// Copies every piece to `into`, with the `gap` bytes at `between` before
+  /// each one but the first.
   ///
-  /// **Why this is not a fold.** Folding `+` over the pieces copies everything
-  /// accumulated so far at every step, which is the quadratic version. Pairing
-  /// touches each byte once per round and halves the count each time, so the
-  /// total is the length times the logarithm of the number of pieces rather
-  /// than the length times the number of pieces.
-  fn squash(items: List<String>) -> String {
-    let mut level = items;
-    let mut answer = "";
-    let mut going = true;
-    while going {
-      match level {
-        List::Nil => { answer = ""; going = false; },
-        List::Cons(first, rest) => match rest {
-          List::Nil => { answer = first; going = false; },
-          // At least two, so there is another round to do. The first pair is
-          // done here and seeds the accumulator, which is what lets the rest
-          // of the round be written without naming `level` again.
-          List::Cons(second, beyond) => {
-            level = List::reverse(
-              String::paired_onto(beyond, List::Cons(first + second, List::Nil)),
-            );
-          },
-        },
-      }
-    };
-    answer
-  }
-
-  /// Adjacent pairs of `items` concatenated, reversed onto `so_far`.
-  ///
-  /// An odd one out at the end goes across untouched rather than being
-  /// concatenated with the empty string, so a round never copies a piece it
-  /// did not need to.
-  fn paired_onto(items: List<String>, so_far: List<String>) -> List<String> {
-    let mut out = so_far;
-    let mut rest = items;
-    let mut going = true;
-    while going {
+  /// **Unchecked, and sound only because `joined_flat` measured first:** `into`
+  /// holds exactly the pieces' lengths plus `gap` per boundary, and the list
+  /// is immutable, so this walk sees the same lengths. `String::copy_into`
+  /// would check each range again and cost two closures per piece rather
+  /// than one.
+  fn laid_into(pieces: List<String>, between: Ptr, gap: Int, into: Ptr) -> () {
+    let mut at = 0;
+    let mut rest = pieces;
+    let mut first = true;
+    let mut again = true;
+    while again {
       match rest {
-        List::Nil => { going = false; },
-        List::Cons(left, more) => match more {
-          List::Nil => { out = List::Cons(left, out); going = false; },
-          List::Cons(right, beyond) => {
-            out = List::Cons(left + right, out);
-            rest = beyond;
-          },
+        List::Nil => { again = false; },
+        List::Cons(piece, more) => {
+          if !first {
+            khora_bytes_copy(between, 0, into, at, gap);
+            at = at + gap;
+          };
+          first = false;
+          let here = at;
+          at = at + String::with_data(piece, fn (bytes, n) => { khora_bytes_copy(bytes, 0, into, here, n); n });
+          rest = more;
         },
       }
     };
-    out
   }
 
   /// Every occurrence of `from` replaced by `to`.
@@ -3562,6 +3572,15 @@ extern fn khora_float_text(value: Float, into: Ptr, capacity: Int) -> Int;
 /// obvious Khora version rounds in binary floating point, which is the exact
 /// error `std::decimal` exists to avoid.
 extern fn khora_float_fixed(value: Float, places: Int, into: Ptr, capacity: Int) -> Int;
+
+/// `text` with the five HTML-special characters replaced by entities, written
+/// to `into`; answers the length needed and writes nothing when `capacity` is
+/// too small.
+///
+/// Bound for the reason `String`'s search is: a Khora loop pays a call, a
+/// bounds check and a safepoint per byte, and a page escapes every byte of
+/// every value it shows.
+extern fn khora_html_escape(text: Ptr, length: Int, into: Ptr, capacity: Int) -> Int;
 
 /// A partial number and where reading it stopped.
 ///

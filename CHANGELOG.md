@@ -735,6 +735,17 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   freed in bounded stack. On the TechEmpower server this is 4.8% fewer user
   instructions per `/json` request and 4.9% fewer per `/fortunes` request.
 
+- **Performance: `String::join` measures the pieces, allocates one buffer
+  and copies each piece into it once.** 68 allocations to join 64 pieces,
+  against 380 for the pairwise version; the answer is byte-identical.
+
+- **Performance: `std::net::http` reads a request's `Content-Length` in
+  place.** Finding where a request ends allocates nothing per header; the
+  length it finds is the same one `Request::header` reports.
+
+- **Performance: `postgres` builds a row's cells as a `List` directly**,
+  three objects fewer per row of two columns, with the same cells.
+
 - **Performance: the allocation and copying on a server's request path.**
   The same answers with less work, measured on the TechEmpower server. A
   new array's fill is written in bulk: nothing for a zero fill, one `memset`
@@ -894,6 +905,11 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   runtime touching memory that is not the program's, and asks for a report.
 
 ### Added
+
+- **`String::escape_html`**: `&`, `<`, `>`, `"` and `'` replaced by `&amp;`,
+  `&lt;`, `&gt;`, `&quot;` and `&apos;`, for text going into an HTML element
+  or a quoted attribute. Plain runs are copied whole in one runtime scan, and
+  text with nothing to escape comes back without a copy.
 
 - **`KHORA_RC_LOCAL`: plain reference counts on objects one fiber owns.** On
   by default; `KHORA_RC_LOCAL=0` counts every reference locked instead, for

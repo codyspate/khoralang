@@ -2981,6 +2981,34 @@ one that is right for *some* scripts silently is worse than one that is
 honest about being ASCII. Turkish dotless i is the example everybody
 learns this from.
 
+#### escape_html
+
+```khora
+pub fn escape_html(self) -> String
+```
+
+The text made safe to put in an HTML page: `&`, `<`, `>`, `"` and `'`
+replaced by `&amp;`, `&lt;`, `&gt;`, `&quot;` and `&apos;`.
+
+**For text going into an element or a quoted attribute value**, which is
+where a user's input goes in a page. All five are escaped, not only `<`
+and `&`, so the same call is safe in `title="..."` and in
+`title='...'`. It is not enough for an unquoted attribute, a URL, a
+`<script>` or a `<style>`: each of those has rules of its own, and no
+single escaper satisfies them all.
+
+Every other byte is kept as it is, so text in any language passes
+through unchanged. `&apos;` is HTML5's (and XML's); a reader of HTML 4
+would show it literally.
+
+Text with nothing to escape comes back as it is, with no copy. Otherwise
+the answer is built in one buffer, with the plain runs between the five
+characters copied whole.
+
+```khora
+let row = "<td>${String::escape_html(message)}</td>";
+```
+
 #### trim_start
 
 ```khora
@@ -3026,18 +3054,12 @@ The inverse of `split` for the same separator, which is the property that
 decides both. Written here rather than on `List` because it is about text
 and not about lists: a `List<Int>` has no join.
 
-**Adjacent pairs, halving, rather than one piece at a time.** Written the
-obvious way — `head + separator + join(tail)` — this was wrong twice. It
-recursed once per piece, so it stopped the program somewhere past four
-thousand of them; and every one of those concatenations copied the whole
-answer so far, so the work was quadratic in the *output*. Measured:
-joining a thousand ten-byte pieces took under a millisecond, two thousand
-took one, four thousand took four.
-
-Combining adjacent pairs copies the whole length once per round, and
-there are log2(count) rounds. Sixteen thousand pieces goes from a
-gigabyte and a half of copying to about two megabytes, using the same
-`+`, and the walk is a loop rather than a stack.
+**Linear in the output, and no intermediate strings.** The pieces are
+measured first and copied into one buffer, which becomes the answer: two
+allocations and two copies of each byte (the buffer, then the string made
+from it) whatever the number of pieces, plus a small closure per piece.
+The walk is a loop rather than a stack, so tens of thousands of pieces
+are fine. A single piece is returned without copying.
 
 #### replace
 

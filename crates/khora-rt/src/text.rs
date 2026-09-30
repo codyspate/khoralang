@@ -255,3 +255,115 @@ pub unsafe extern "C" fn khora_float_fixed(
     unsafe { into.copy_from_nonoverlapping(bytes.as_ptr(), bytes.len()) };
     bytes.len() as i64
 }
+
+/// Writes `len` bytes of text into `into` with `&`, `<`, `>`, `"` and `'`
+/// replaced by HTML entities, and says how many bytes that took.
+///
+/// **What this prevents: escaping a page a byte at a time in Khora.** A loop
+/// over `String::byte` pays a call, a bounds check and a safepoint per byte,
+/// and builds a string per run it keeps; on the fortunes page that was about
+/// five hundred loop iterations and two dozen allocations per request, for
+/// text that is almost all plain. This scans once and copies the plain runs
+/// whole, which is what `Bun.escapeHTML` does.
+///
+/// The entities are `&amp;`, `&lt;`, `&gt;`, `&quot;` and `&apos;`: the ones
+/// TechEmpower's reference page uses, so a page built with this matches it
+/// byte for byte. `&apos;` is HTML5 and XML; an HTML 4 reader would show it
+/// literally, which is a cost accepted rather than overlooked. Every other byte
+/// is copied as it is, so UTF-8 passes through: all five are ASCII, and no
+/// byte of a multi-byte character is below 0x80.
+///
+/// The same contract as [`khora_float_text`]: when `capacity` is too small,
+/// or `into` is null, nothing is written and the length needed is returned,
+/// so a caller measures with a null `into`, allocates exactly, and calls
+/// again. An answer equal to `len` means there was nothing to escape, so the
+/// caller can keep the original rather than copy it.
+///
+/// # Safety
+///
+/// `from` must be null with a zero `len`, or address `len` initialized bytes
+/// that stay live for the call. `into` must be null, or address `capacity`
+/// writable bytes that do not overlap `from`'s.
+#[unsafe(no_mangle)]
+// SHARE: reads one lent byte buffer and writes another; takes no Khora object.
+pub unsafe extern "C" fn khora_html_escape(from: *const u8, len: i64, into: *mut u8, capacity: i64) -> i64 {
+    let text: &[u8] = if len <= 0 || from.is_null() {
+        &[]
+    } else {
+        // SAFETY: a positive `len` with a non-null `from` is the caller's
+        // guarantee of that many live, initialized bytes.
+        unsafe { std::slice::from_raw_parts(from, len as usize) }
+    };
+    let needed: usize = text.iter().map(|&byte| html_entity(byte).map_or(1, <[u8]>::len)).sum();
+    if into.is_null() || capacity < needed as i64 {
+        return needed as i64;
+    }
+    // SAFETY: `into` is non-null and addresses `capacity` writable bytes by
+    // the caller's guarantee, `capacity >= needed` was just checked, and the
+    // two buffers do not overlap, so a shared and a mutable slice may coexist.
+    let out = unsafe { std::slice::from_raw_parts_mut(into, needed) };
+    let mut at = 0;
+    let mut run = 0;
+    for (here, &byte) in text.iter().enumerate() {
+        if let Some(entity) = html_entity(byte) {
+            let plain = &text[run..here];
+            out[at..at + plain.len()].copy_from_slice(plain);
+            at += plain.len();
+            out[at..at + entity.len()].copy_from_slice(entity);
+            at += entity.len();
+            run = here + 1;
+        }
+    }
+    let plain = &text[run..];
+    out[at..at + plain.len()].copy_from_slice(plain);
+    needed as i64
+}
+
+/// The entity `byte` becomes in HTML text, or `None` if it stands for itself.
+fn html_entity(byte: u8) -> Option<&'static [u8]> {
+    match byte {
+        b'&' => Some(b"&amp;"),
+        b'<' => Some(b"&lt;"),
+        b'>' => Some(b"&gt;"),
+        b'"' => Some(b"&quot;"),
+        b'\'' => Some(b"&apos;"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn escaped(text: &str) -> String {
+        // SAFETY: a live string's bytes, and a null `into`, which only measures.
+        let needed = unsafe { khora_html_escape(text.as_ptr(), text.len() as i64, std::ptr::null_mut(), 0) };
+        let mut out = vec![0u8; needed as usize];
+        // SAFETY: as above, and `out` is exactly `needed` writable bytes that
+        // do not overlap the text.
+        let wrote = unsafe { khora_html_escape(text.as_ptr(), text.len() as i64, out.as_mut_ptr(), needed) };
+        assert_eq!(wrote, needed);
+        String::from_utf8(out).expect("escaping keeps UTF-8")
+    }
+
+    #[test]
+    fn html_escape_replaces_the_five_and_copies_the_rest() {
+        assert_eq!(escaped(""), "");
+        assert_eq!(escaped("plain é 日本"), "plain é 日本");
+        assert_eq!(escaped("<>&\"'"), "&lt;&gt;&amp;&quot;&apos;");
+        assert_eq!(escaped("a<b>c&d\"e'f"), "a&lt;b&gt;c&amp;d&quot;e&apos;f");
+    }
+
+    /// **Too little room writes nothing.** A caller that measured, and then
+    /// passed a buffer one short, must get the length back and an untouched
+    /// buffer, not a partial page.
+    #[test]
+    fn html_escape_with_too_little_room_writes_nothing() {
+        let text = "a<b";
+        let mut out = [b'?'; 5];
+        // SAFETY: `out` is five writable bytes, one fewer than `a&lt;b` needs.
+        let needed = unsafe { khora_html_escape(text.as_ptr(), 3, out.as_mut_ptr(), 5) };
+        assert_eq!(needed, 6);
+        assert_eq!(&out, b"?????");
+    }
+}

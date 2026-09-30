@@ -1,0 +1,79 @@
+module std_suite::joining;
+
+//! `String::join`, which a web page is built out of: a template is a list of
+//! pieces joined once per request.
+//!
+//! **The answer is compared with a fold of `+`**, the slow version whose
+//! result nobody disputes, over the edges where a one-buffer join goes wrong:
+//! an empty separator, empty pieces at either end, multi-byte text on both
+//! sides of a boundary, and a list long enough that a stack would notice.
+//!
+//! **The allocation count is asserted too.** The point of the one-buffer
+//! version is that it builds no intermediate strings, and a join that quietly
+//! went back to building them would still give the right answer.
+
+import std::core::{Iterator, List, Step, assert_that};
+
+extern fn khora_alloc_count() -> Int;
+
+/// `pieces` joined by folding `+`, which is quadratic and obviously right.
+fn slowly(pieces: List<String>, separator: String) -> String {
+  let mut out = "";
+  let mut first = true;
+  for piece in pieces {
+    out = if first { piece } else { out + separator + piece };
+    first = false;
+  };
+  out
+}
+
+/// `count` pieces, each different and some of them multi-byte or empty.
+fn pieces(count: Int) -> List<String> {
+  let mut out: List<String> = List::Nil;
+  let mut i = count;
+  while i > 0 {
+    let piece = if i % 7 == 0 { "" } else if i % 5 == 0 { "é${Int::to_string(i)}日" } else { "p${Int::to_string(i)}" };
+    out = List::Cons(piece, out);
+    i = i - 1
+  };
+  out
+}
+
+test "join gives what a fold of + gives" {
+  let cases: List<List<String>> = [
+    [], [""], ["a"], ["", ""], ["a", ""], ["", "a"], ["a", "b"],
+    ["é", "日本", "", "x"], pieces(3), pieces(64),
+  ];
+  for separator in ["", ",", ", ", "→", "<td>"] {
+    for case in cases {
+      let fast = String::join(case, separator);
+      let slow = slowly(case, separator);
+      assert_that(fast == slow, "separator [${separator}]: [${fast}] is not [${slow}]");
+    };
+  };
+}
+
+test "join of many pieces is a loop, not a stack" {
+  let many = pieces(20000);
+  let joined = String::join(many, ",");
+  let mut expected = 0;
+  for piece in many {
+    expected = expected + String::byte_length(piece) + 1;
+  };
+  assert_that(String::byte_length(joined) == expected - 1, "length ${Int::to_string(String::byte_length(joined))}");
+  assert_that(String::starts_with(joined, "p1,p2,p3,p4,é5日,p6,,p8,"), String::slice(joined, 0, 30));
+}
+
+/// **At most one allocation per piece, plus a few.** The one-buffer join
+/// makes the buffer, the string and one closure per piece; building a string
+/// per separator or per pair, as a join of `+` does, is several per piece.
+test "join does not build a string per piece" {
+  for separator in ["", ", "] {
+    let many = pieces(64);
+    let before = khora_alloc_count();
+    let joined = String::join(many, separator);
+    let spent = khora_alloc_count() - before;
+    assert_that(String::byte_length(joined) > 0, "joined nothing");
+    assert_that(spent <= 64 + 8, "joining 64 pieces with [${separator}] allocated ${Int::to_string(spent)}");
+  };
+}

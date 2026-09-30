@@ -1,0 +1,91 @@
+module std_suite::http_framing;
+
+//! `request_length`, the framing primitive `Connection::next` calls on every
+//! request, sometimes twice: how long a request is, from its headers and
+//! `Content-Length`.
+//!
+//! **The answers are pinned** over the edges a header scan gets wrong: a name
+//! in any case, a value padded with spaces and tabs, a header whose name only
+//! contains `content-length`, a line with no colon, a value that is not
+//! digits, a value too large to hold, the header given twice (the last one
+//! counts, as it does in `Request::header`), and a body that itself looks like
+//! a header.
+//!
+//! **So is its allocation count.** It runs before the request is parsed, and
+//! reading one header by building a map of all of them was most of its cost.
+
+import std::core::{Array, Iterator, List, Option, Step, assert_that};
+import std::net::http::{request_length};
+
+extern fn khora_alloc_count() -> Int;
+
+/// A request and the body length its headers should promise.
+type Case = { text: String, body: Int };
+
+fn length_of(text: String) -> Int {
+  let bytes = String::bytes(text);
+  request_length(bytes, Array::length(bytes))
+}
+
+/// Where the headers end, counted by hand-independent means: the blank line.
+fn head_of(text: String) -> Int {
+  match String::index_of(text, "\r\n\r\n") {
+    Option::None => -1,
+    Option::Some(at) => at + 4,
+  }
+}
+
+test "request_length reads Content-Length as the headers say it" {
+  let line = "POST /a HTTP/1.1\r\n";
+  let cases: List<Case> = [
+    { text: "GET / HTTP/1.1\r\n\r\n", body: 0 },
+    { text: "${line}Content-Length: 5\r\n\r\nhello", body: 5 },
+    { text: "${line}content-length:5\r\n\r\n", body: 5 },
+    { text: "${line}CONTENT-LENGTH: \t 12 \t\r\n\r\n", body: 12 },
+    { text: "${line}Content-length:\t7\r\n\r\n", body: 7 },
+    { text: "${line}Host: x\r\nContent-Length: 3\r\nAccept: */*\r\n\r\n", body: 3 },
+    { text: "${line}Content-Length-X: 9\r\n\r\n", body: 0 },
+    { text: "${line}X-Content-Length: 9\r\n\r\n", body: 0 },
+    { text: "${line}Content-Length 9\r\n\r\n", body: 0 },
+    { text: "${line} Content-Length: 9\r\n\r\n", body: 0 },
+    { text: "${line}Content-Length : 9\r\n\r\n", body: 0 },
+    { text: "${line}Content-Length: nine\r\n\r\n", body: 0 },
+    { text: "${line}Content-Length: 7abc\r\n\r\n", body: 7 },
+    { text: "${line}Content-Length: +7\r\n\r\n", body: 0 },
+    { text: "${line}Content-Length:\r\n\r\n", body: 0 },
+    // Capped rather than overflowing, which would trap: see `digits_of`.
+    { text: "${line}Content-Length: 99999999999999999999\r\n\r\n", body: 999999999 },
+    // Twice: the last one counts, the same as the parsed headers.
+    { text: "${line}Content-Length: 4\r\nContent-Length: 2\r\n\r\n", body: 2 },
+    { text: "${line}Content-Length: 4\r\nContent-Length: x\r\n\r\n", body: 0 },
+    { text: "${line}Content-Length: 4\r\nContent-Length 2\r\n\r\n", body: 4 },
+    // A colon in the value, and a header with an empty name.
+    { text: "${line}Content-Length: 6:1\r\n: 5\r\n\r\n", body: 6 },
+    // Everything after the blank line is body, whatever it says.
+    { text: "${line}\r\nContent-Length: 5\r\n\r\n", body: 0 },
+    // No headers at all, and not even a request line.
+    { text: "\r\n\r\n", body: 0 },
+    { text: "Content-Length: 5\r\n\r\n", body: 0 },
+    { text: "GET /é HTTP/1.1\r\nX-日本: é\r\nContent-Length: 1\r\n\r\n", body: 1 },
+  ];
+  for case in cases {
+    let got = length_of(case.text);
+    let want = head_of(case.text) + case.body;
+    assert_that(got == want, "[${case.text}]: ${Int::to_string(got)}, not ${Int::to_string(want)}");
+  };
+  // Still arriving: no blank line yet.
+  assert_that(length_of("GET / HTTP/1.1\r\nContent-Length: 5\r\n") == -1, "an unfinished head has a length");
+}
+
+/// **Reading one header allocates nothing per header.** The copy of the head
+/// and the string made from it are the cost, however many headers there are.
+test "request_length does not build the headers to read one" {
+  let many = "GET /json HTTP/1.1\r\nHost: localhost\r\nUser-Agent: wrk\r\nAccept: */*\r\nAccept-Encoding: gzip\r\nConnection: keep-alive\r\nX-One: 1\r\nX-Two: 2\r\nContent-Length: 0\r\n\r\n";
+  let bytes = String::bytes(many);
+  let filled = Array::length(bytes);
+  let before = khora_alloc_count();
+  let got = request_length(bytes, filled);
+  let spent = khora_alloc_count() - before;
+  assert_that(got == filled, "length ${Int::to_string(got)} of ${Int::to_string(filled)}");
+  assert_that(spent <= 4, "reading the length of a request with 8 headers allocated ${Int::to_string(spent)}");
+}

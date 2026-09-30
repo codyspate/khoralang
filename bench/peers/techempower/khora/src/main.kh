@@ -190,54 +190,21 @@ fn read_fortunes(rows: List<Row>) -> Option<List<Fortune>> {
 // The page
 // ---------------------------------------------------------------------------
 //
-// **Khora's `std` has no template facility and no HTML escaping**, so both
-// are written here. The template is TechEmpower's minimum one with the
-// whitespace removed, which is what their example response is.
+// **Khora's `std` has no template facility**, so the page is written here.
+// The template is TechEmpower's minimum one with the whitespace removed,
+// which is what their example response is. The message is untrusted -- one
+// row is a `<script>` tag, and the test exists to catch a page that runs it
+// -- so it goes through `std`'s `String::escape_html`, as Go's app uses
+// `html/template` and Bun's `Bun.escapeHTML`. (Node has no escaper in its
+// standard library; its app writes one regex `replace`.)
 
 fn render(fortunes: List<Fortune>) -> String {
   let rows = List::map(fortunes, fn f =>
-    "<tr><td>${Int::to_string(f.id)}</td><td>${escape_html(f.message)}</td></tr>");
+    "<tr><td>${Int::to_string(f.id)}</td><td>${String::escape_html(f.message)}</td></tr>");
   "<!DOCTYPE html><html><head><title>Fortunes</title></head><body><table>"
   + "<tr><th>id</th><th>message</th></tr>"
   + String::join(rows, "")
   + "</table></body></html>"
-}
-
-/// The message with `&`, `<`, `>`, `"` and `'` replaced by entities.
-///
-/// **The message is untrusted**: one row is a `<script>` tag, and the test
-/// exists to catch a page that runs it. All five are escaped, not just `<`
-/// and `&`, so the text is also safe inside an attribute if the template
-/// ever puts it in one.
-///
-/// Copies runs of ordinary bytes whole rather than a byte at a time. Every
-/// escaped character is ASCII, so a run boundary never splits a multi-byte
-/// character and the Japanese row passes through untouched.
-fn escape_html(text: String) -> String {
-  let length = String::byte_length(text);
-  let mut pieces: List<String> = List::Nil;
-  let mut run = 0;
-  let mut at = 0;
-  while at < length {
-    let entity = match U8::to_int(String::byte(text, at)) {
-      38 => "&amp;",
-      60 => "&lt;",
-      62 => "&gt;",
-      34 => "&quot;",
-      39 => "&apos;",
-      _plain => "",
-    };
-    if String::byte_length(entity) > 0 {
-      pieces = List::Cons(entity, List::Cons(String::slice(text, run, at), pieces));
-      run = at + 1
-    };
-    at = at + 1
-  };
-  if run == 0 {
-    text
-  } else {
-    String::join(List::reverse(List::Cons(String::slice(text, run, length), pieces)), "")
-  }
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,78 @@
+module std_suite::html;
+
+//! `String::escape_html`, text made safe to put in an HTML page.
+//!
+//! **The five characters are the whole contract**, so each is checked alone,
+//! together, at both ends, doubled, and next to text that must pass through
+//! untouched: multi-byte characters, a `;`, an entity that is already
+//! escaped (escaped again, because the text is text), and bytes that look
+//! like markup but are not one of the five. A string with nothing to escape
+//! is checked to come back without a copy.
+
+import std::core::{Iterator, List, Step, assert_that};
+
+extern fn khora_alloc_count() -> Int;
+
+/// A text and what it must become.
+type Case = { text: String, want: String };
+
+test "escape_html replaces the five characters and nothing else" {
+  let cases: List<Case> = [
+    { text: "", want: "" },
+    { text: "&", want: "&amp;" },
+    { text: "<", want: "&lt;" },
+    { text: ">", want: "&gt;" },
+    { text: "\"", want: "&quot;" },
+    { text: "'", want: "&apos;" },
+    { text: "<>&\"'", want: "&lt;&gt;&amp;&quot;&apos;" },
+    { text: "&&", want: "&amp;&amp;" },
+    { text: "a<b", want: "a&lt;b" },
+    { text: "<a", want: "&lt;a" },
+    { text: "a>", want: "a&gt;" },
+    { text: "&amp;", want: "&amp;amp;" },
+    { text: "plain text; nothing = here / \\ ` ~", want: "plain text; nothing = here / \\ ` ~" },
+    {
+      text: "<script>alert(\"This should not be displayed in a browser alert box.\");</script>",
+      want: "&lt;script&gt;alert(&quot;This should not be displayed in a browser alert box.&quot;);&lt;/script&gt;",
+    },
+    {
+      text: "A computer scientist is someone who fixes things that aren't broken.",
+      want: "A computer scientist is someone who fixes things that aren&apos;t broken.",
+    },
+    { text: "フレームワークのベンチマーク", want: "フレームワークのベンチマーク" },
+    { text: "é<日>本&'x\"", want: "é&lt;日&gt;本&amp;&apos;x&quot;" },
+  ];
+  for case in cases {
+    let got = String::escape_html(case.text);
+    assert_that(got == case.want, "[${case.text}] became [${got}], not [${case.want}]");
+  };
+}
+
+test "escape_html of a long mixed string" {
+  let mut text = "";
+  let mut want = "";
+  let mut i = 0;
+  while i < 500 {
+    text = text + "row ${Int::to_string(i)} <td class='x'>a & b</td> é\n";
+    want = want + "row ${Int::to_string(i)} &lt;td class=&apos;x&apos;&gt;a &amp; b&lt;/td&gt; é\n";
+    i = i + 1
+  };
+  let got = String::escape_html(text);
+  assert_that(got == want, "lengths ${Int::to_string(String::byte_length(got))} and ${Int::to_string(String::byte_length(want))}");
+}
+
+/// **Nothing to escape is nothing to copy.** Most text in a page is plain,
+/// and a copy of each piece would be an allocation per interpolation.
+test "escape_html of plain text allocates no new string" {
+  let plain = "Additional fortune added at request time.";
+  let before = khora_alloc_count();
+  let same = String::escape_html(plain);
+  let spent = khora_alloc_count() - before;
+  assert_that(same == plain, same);
+  assert_that(spent <= 2, "escaping plain text allocated ${Int::to_string(spent)}");
+  let before_mixed = khora_alloc_count();
+  let escaped = String::escape_html("a < b");
+  let spent_mixed = khora_alloc_count() - before_mixed;
+  assert_that(escaped == "a &lt; b", escaped);
+  assert_that(spent_mixed <= 5, "escaping one character allocated ${Int::to_string(spent_mixed)}");
+}

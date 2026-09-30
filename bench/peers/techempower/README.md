@@ -19,7 +19,7 @@ Updates, Caching and Plaintext are not implemented.
 
 | directory | configuration | HTTP | database |
 | --- | --- | --- | --- |
-| `khora/` | Khora, `KHORA_FIBERS=threads` | `std::net::http` `Router` | `packages/postgres` pool, `Db` capability |
+| `khora/` | Khora, `KHORA_FIBERS=threads` | `std::net::http` `Router`, `String::escape_html` | `packages/postgres` pool, `Db` capability |
 | `khora/` | Khora, `KHORA_FIBERS=scheduler` | the same binary | the same |
 | `go/` | Go, static binary | `net/http`, `encoding/json`, `html/template` | `jackc/pgx/v5` `pgxpool` |
 | `node/` | Node | `node:http` | `pg` (node-postgres) `Pool` |
@@ -54,9 +54,10 @@ Where they differ, because each library does:
   once a second (the rules allow either) was not checked.
 
 Khora gaps that the app works around (noted in the report, not fixed in
-`std`): no HTML escaping, no template facility, and no way to set `Server`
-for every route at once, so each handler's answer passes through `stamped`.
-`std::net::http` writes `Date` on every response itself.
+`std`): no template facility, and no way to set `Server` for every route at
+once, so each handler's answer passes through `stamped`. Escaping is `std`'s
+`String::escape_html`. `std::net::http` writes `Date` on every response
+itself.
 
 ## Setting up (no root)
 
