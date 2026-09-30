@@ -260,6 +260,16 @@ struct Shared {
     /// workers find readiness with nobody else watching.
     #[cfg(test)]
     backstop_off: AtomicBool,
+    /// This pool's workers inside `Task::resume` right now.
+    ///
+    /// **Per pool, not the process's `coro::resuming_now`.** The soak's
+    /// last check is that none of *its* workers is still inside a fiber, and
+    /// the process-wide count also holds every other pool in the test
+    /// binary: a test beside it keeping a worker in a spinning fiber failed
+    /// the soak with its own pool settled. Under the same `cfg` as the
+    /// process-wide count, so an ordinary release build pays nothing.
+    #[cfg(any(debug_assertions, feature = "fiber-audit"))]
+    resuming: AtomicUsize,
     stopping: AtomicBool,
     counts: Counts,
 }
@@ -522,6 +532,22 @@ impl Scheduler {
     /// For tests, which run in one process and cannot each set a variable
     /// the others read.
     pub(crate) fn started(workers: usize, wake_local: bool) -> Scheduler {
+        Scheduler::started_with(workers, wake_local, false)
+    }
+
+    /// [`Scheduler::started`] with the backstop thread off from its first
+    /// instant. Setting `backstop_off` after `started` returned raced the
+    /// thread: it sleeps [`BACKSTOP_GAP`] and then looks, and on a loaded
+    /// host that first look could land before the store, so a test counting
+    /// `backstop_polls == 0` failed about one run in thirty.
+    #[cfg(test)]
+    pub(crate) fn started_without_backstop(workers: usize, wake_local: bool) -> Scheduler {
+        Scheduler::started_with(workers, wake_local, true)
+    }
+
+    fn started_with(workers: usize, wake_local: bool, backstop_off: bool) -> Scheduler {
+        #[cfg(not(test))]
+        let _ = backstop_off;
         let workers = match workers {
             0 => std::thread::available_parallelism().map_or(1, |n| n.get()),
             n => n,
@@ -551,7 +577,9 @@ impl Scheduler {
             born: std::time::Instant::now(),
             last_look: AtomicU64::new(0),
             #[cfg(test)]
-            backstop_off: AtomicBool::new(false),
+            backstop_off: AtomicBool::new(backstop_off),
+            #[cfg(any(debug_assertions, feature = "fiber-audit"))]
+            resuming: AtomicUsize::new(0),
             stopping: AtomicBool::new(false),
             counts: Counts::default(),
         });
@@ -641,6 +669,21 @@ impl Scheduler {
     /// Turns each worker has given a fiber so far, by worker.
     pub(crate) fn turns(&self) -> Vec<u64> {
         self.shared.turns()
+    }
+
+    /// How many of this pool's workers are inside a fiber right now, or
+    /// `None` where the count is not compiled in -- for the reason
+    /// `coro::resuming_now` answers `None`: a caller must not read "nobody
+    /// is counting" as zero.
+    pub(crate) fn resuming_now(&self) -> Option<usize> {
+        #[cfg(any(debug_assertions, feature = "fiber-audit"))]
+        {
+            Some(self.shared.resuming.load(Ordering::Acquire))
+        }
+        #[cfg(not(any(debug_assertions, feature = "fiber-audit")))]
+        {
+            None
+        }
     }
 
     /// Waits until every fiber handed over has finished.
@@ -1491,6 +1534,21 @@ fn take_half(queue: &mut VecDeque<Task>) -> VecDeque<Task> {
 fn run(shared: &Arc<Shared>, local: &Arc<Mutex<VecDeque<Task>>>, mut task: Task) {
     shared.counts.resumes.fetch_add(1, Ordering::Relaxed);
     refill();
+    #[cfg(any(debug_assertions, feature = "fiber-audit"))]
+    let outcome = {
+        // A guard, as `coro::ResumedOnce` is, so that a fiber that panics
+        // still leaves the count.
+        struct Inside<'a>(&'a AtomicUsize);
+        impl Drop for Inside<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::Release);
+            }
+        }
+        shared.resuming.fetch_add(1, Ordering::Relaxed);
+        let _inside = Inside(&shared.resuming);
+        task.resume()
+    };
+    #[cfg(not(any(debug_assertions, feature = "fiber-audit")))]
     let outcome = task.resume();
     let spent = REMAINING.with(|r| r.get()) == 0;
     withdraw();
@@ -2966,8 +3024,7 @@ mod tests {
         const SLEEPS: usize = 3;
 
         for wake_local in [true, false] {
-            let pool = Scheduler::started(2, wake_local);
-            pool.shared.backstop_off.store(true, Ordering::Release);
+            let pool = Scheduler::started_without_backstop(2, wake_local);
             let (client, mut peer) = a_connected_pair();
             let read = Arc::new(AtomicUsize::new(0));
             pool.spawn(a_reader(client, ROUNDS, SLEEPS, read.clone()));
@@ -3004,8 +3061,7 @@ mod tests {
         use crate::reactor::a_connected_pair;
         const ROUNDS: usize = 20;
 
-        let pool = Scheduler::started(1, true);
-        pool.shared.backstop_off.store(true, Ordering::Release);
+        let pool = Scheduler::started_without_backstop(1, true);
         let done = Arc::new(AtomicBool::new(false));
         let spinning = done.clone();
         pool.spawn(Task::new(move || {
@@ -3280,6 +3336,39 @@ mod tests {
         fn give_back(&self) {
             self.0.store(false, Ordering::Release);
         }
+
+        /// [`SpinLock::take`] that gives up after ten seconds, and says
+        /// whether it got the lock.
+        ///
+        /// **What the tests below wait with, so that a stranded fiber fails
+        /// the test instead of hanging it.** A waiter that spins for ever
+        /// keeps its worker for ever, and dropping the pool joins that worker:
+        /// the test ran on past its own assert and never finished.
+        fn take_in_time(&self) -> bool {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while self.0.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                std::hint::spin_loop();
+            }
+            true
+        }
+    }
+
+    /// Spins until `flag` is set or ten seconds pass, and says which.
+    ///
+    /// Blocks the worker's thread as [`SpinLock::take_in_time`] does, and is
+    /// bounded for the same reason.
+    fn spin_until_set(flag: &AtomicBool) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !flag.load(Ordering::SeqCst) {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::hint::spin_loop();
+        }
+        true
     }
 
     /// Spawns `count` fibers that give their worker back at every turn until
@@ -3358,11 +3447,13 @@ mod tests {
                 let released = released.clone();
                 pool.spawn(Task::new(move || {
                     x_waker.lock().unwrap().take().expect("X's waker").wake();
-                    // Holds this worker's thread until X has run.
-                    lock.take();
-                    assert!(released.load(Ordering::SeqCst), "the lock was taken before X released it");
-                    lock.give_back();
-                    got_it.store(true, Ordering::SeqCst);
+                    // Holds this worker's thread until X has run, or gives
+                    // up; `got_it` stays false then and the test fails.
+                    if lock.take_in_time() {
+                        let in_order = released.load(Ordering::SeqCst);
+                        lock.give_back();
+                        got_it.store(in_order, Ordering::SeqCst);
+                    }
                 }));
             }
             let in_time = came(&got_it, std::time::Duration::from_secs(10));
@@ -3419,6 +3510,16 @@ mod tests {
     /// back on its own worker's queue; B, next on that queue, blocks the
     /// thread on the same lock. H can only run elsewhere, and every other
     /// worker is busy. On either wake path, since nothing here is a wake.
+    ///
+    /// **B waits for H to hold the lock before it reaches for it.** Both
+    /// start on one worker's queue, H first, but nothing keeps them in that
+    /// order: a steal of the back half of a queue of two takes B alone, and B
+    /// then ran first on the other worker (2 rounds in 2,000 with four
+    /// spinners on two CPUs). B took the free lock, its assert panicked on
+    /// the worker with the lock still held, H spun on it for ever, and
+    /// dropping the pool joined that worker: the test hung. Waiting on
+    /// `holding` blocks B's thread whichever order they run in, which is the
+    /// case under test either way.
     #[test]
     fn a_fiber_preempted_holding_a_lock_is_not_stranded_behind_one_blocked_on_it() {
         for wake_local in [false, true] {
@@ -3427,16 +3528,20 @@ mod tests {
             busy_spinners(&pool, 4, &stop);
 
             let lock = Arc::new(SpinLock::new());
+            let holding = Arc::new(AtomicBool::new(false));
             let released = Arc::new(AtomicBool::new(false));
             let got_it = Arc::new(AtomicBool::new(false));
             {
                 let (lock, got_it, released) = (lock.clone(), got_it.clone(), released.clone());
+                let holding = holding.clone();
                 // One fiber schedules both, so both land on its worker's queue,
                 // H first.
                 pool.spawn(Task::new(move || {
-                    let (held, done) = (lock.clone(), released.clone());
+                    let (held, done, has_it) = (lock.clone(), released.clone(), holding.clone());
                     schedule(Task::new(move || {
+                        // Nobody else takes it before `has_it` is set.
                         held.take();
+                        has_it.store(true, Ordering::SeqCst);
                         // Preempted holding it: back to the end of this
                         // worker's queue, behind B.
                         suspend();
@@ -3444,10 +3549,13 @@ mod tests {
                         held.give_back();
                     }));
                     schedule(Task::new(move || {
-                        lock.take();
-                        assert!(released.load(Ordering::SeqCst), "B took the lock before H released it");
-                        lock.give_back();
-                        got_it.store(true, Ordering::SeqCst);
+                        // Each wait blocks this worker's thread, and gives
+                        // up in time; `got_it` stays false then.
+                        if spin_until_set(&holding) && lock.take_in_time() {
+                            let in_order = released.load(Ordering::SeqCst);
+                            lock.give_back();
+                            got_it.store(in_order, Ordering::SeqCst);
+                        }
                     }));
                 }));
             }
@@ -3470,13 +3578,23 @@ mod tests {
     /// each time, which with a long queue cost up to 45% of the pool's fiber
     /// turns in moving fibers back and forth.
     ///
-    /// Counted over a window after the spinners are spread: fewer than one
-    /// tick in ten may take anything. An unconditional tick takes something on
-    /// nearly every one. The margin is for a worker thread the OS deschedules
-    /// on a loaded host, which does look stuck, and is correctly stolen from.
+    /// Counted over a window after the spinners are spread: fewer than half
+    /// the ticks may take anything. An unconditional tick takes something on
+    /// nearly every one (152,528 steals in 152,526 ticks, measured), so half
+    /// still tells the two apart by a wide margin. The margin is for a worker
+    /// thread the OS deschedules, which does look stuck and is correctly
+    /// stolen from: on GitHub's three-CPU macOS runner, with the rest of the
+    /// suite running beside it, 16% of ticks took something. That didn't
+    /// reproduce on Linux pinned to three CPUs (0 of 10 whole-suite runs), so
+    /// the bound is set by the measurement, not by a model of the runner.
     #[test]
     fn a_busy_pool_with_nobody_blocked_steals_almost_nothing_on_the_tick() {
-        let pool = Scheduler::started(4, true);
+        let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
+        if cpus < 2 {
+            eprintln!("  note: one CPU, so no worker can steal from another; not checked");
+            return;
+        }
+        let pool = Scheduler::started(cpus.min(4), true);
         let stop = Arc::new(AtomicBool::new(false));
         busy_spinners(&pool, 64, &stop);
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -3492,7 +3610,7 @@ mod tests {
         let moved = after.fibers_stolen - before.fibers_stolen;
         assert!(ticks > 100, "too few turns to judge: {ticks} ticks");
         assert!(
-            steals * 10 < ticks,
+            steals * 2 < ticks,
             "{steals} steals moved {moved} fibers in {ticks} ticks, with no worker blocked"
         );
     }

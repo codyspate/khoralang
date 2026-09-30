@@ -517,7 +517,7 @@ fn adversarial_execution_leaves_nothing_behind() {
   resuming={:?} blocking={:?}",
                 pool.audit(),
                 pool.counts(),
-                crate::coro::resuming_now(),
+                pool.resuming_now(),
                 crate::blocking::pool().stats(),
             );
             std::process::abort();
@@ -603,23 +603,28 @@ fn adversarial_execution_leaves_nothing_behind() {
     assert!(audit.settled(), "the pool did not come back to empty\n{context}");
     assert_eq!(audit.in_hand(), 0, "{context}");
     // **Waited for, not sampled.** `settle` watches the audit — spawned equals
-    // completed, every queue empty — and `RESUMING` is decremented by
-    // `ResumedOnce::drop`, which runs *after* the completion it belongs to has
-    // been counted. So there is a window where the audit reads clean and a
-    // worker is still a few instructions from leaving `resume`, and asserting
-    // in it fails a run that did nothing wrong.
+    // completed, every queue empty — and the pool's count of workers inside a
+    // fiber drops only once `resume` has returned, after the fiber's body
+    // ended. So there is a window where the audit reads clean and a worker is
+    // still a few instructions from leaving `resume`, and asserting in it
+    // fails a run that did nothing wrong.
     //
     // Seen once in a full baseline and not again in thirty-two later runs,
     // twenty of them of this test alone: rare enough to look like a race in
     // the scheduler and shallow enough to be neither. The audit in the message
     // said so — 668 spawned, 668 completed, everything zero except this.
-    settle_and_assert_nobody_is_resuming(&context);
+    settle_and_assert_nobody_is_resuming(&pool, &context);
 }
 
-/// Waits for the last worker to leave `resume`, then asserts that it did.
+/// Waits for the last of `pool`'s workers to leave `resume`, then asserts
+/// that it did.
+///
+/// **This pool's workers, not the process's.** A test in the same binary
+/// that keeps its own pool's worker inside a fiber is no evidence about
+/// this one, and counting it failed the soak with its own pool settled.
 ///
 /// **One function because it was two copies**, and because the `None` arm has
-/// to exist in exactly one place. `coro::resuming_now` answers `None` in a
+/// to exist in exactly one place. `Scheduler::resuming_now` answers `None` in a
 /// release build without `fiber-audit`: the counter is not compiled in, so
 /// there is nothing to wait for and nothing to assert, and the alternative --
 /// reading `None` as zero -- is an assertion that passes by knowing nothing.
@@ -631,8 +636,8 @@ fn adversarial_execution_leaves_nothing_behind() {
 /// immediately after, so a checker reading between the two sees a settled pool
 /// and a fiber still resuming. Hence the second of grace before the assert
 /// rather than the assert alone.
-fn settle_and_assert_nobody_is_resuming(context: &str) {
-    let Some(_) = crate::coro::resuming_now() else {
+fn settle_and_assert_nobody_is_resuming(pool: &Scheduler, context: &str) {
+    let Some(_) = pool.resuming_now() else {
         eprintln!(
             "  note: the fiber audit is not compiled in, so \"nobody is still \
              inside a fiber\" was not checked. Build with `--features \
@@ -641,11 +646,11 @@ fn settle_and_assert_nobody_is_resuming(context: &str) {
         return;
     };
     let until = std::time::Instant::now() + std::time::Duration::from_secs(1);
-    while crate::coro::resuming_now() != Some(0) && std::time::Instant::now() < until {
+    while pool.resuming_now() != Some(0) && std::time::Instant::now() < until {
         std::thread::yield_now();
     }
     assert_eq!(
-        crate::coro::resuming_now(),
+        pool.resuming_now(),
         Some(0),
         "a worker is still inside a fiber\n{context}"
     );
@@ -955,7 +960,55 @@ fn a_hostile_schedule_leaves_nothing_behind() {
     assert!(audit.settled(), "the pool did not come back to empty\n{context}");
     assert_eq!(audit.in_hand(), 0, "{context}");
 
-    settle_and_assert_nobody_is_resuming(&context);
+    settle_and_assert_nobody_is_resuming(&pool, &context);
+}
+
+/// **A worker held inside a fiber by another pool is not this pool's.** The
+/// soak's last check asks whether any of its workers is still inside a
+/// fiber. Counted for the whole process, that also counted a test beside it
+/// in the same binary whose own pool held a worker in a spinning fiber, and
+/// the soak failed with its own pool settled: 3 of 30 whole-suite runs in
+/// release, never alone.
+#[test]
+fn a_worker_inside_a_fiber_on_another_pool_does_not_fail_the_check() {
+    let busy = Scheduler::new(1);
+    let started = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let (started, stop) = (started.clone(), stop.clone());
+        // Never suspends, so its worker stays inside it until `stop`.
+        busy.spawn(Task::new(move || {
+            started.store(true, Ordering::SeqCst);
+            while !stop.load(Ordering::SeqCst) {
+                std::hint::spin_loop();
+            }
+        }));
+    }
+    // Declared after `busy`, so dropped before it: `busy`'s drop joins the
+    // worker, which only returns once the spinner has been let go.
+    struct LetGo(Arc<AtomicBool>);
+    impl Drop for LetGo {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let _let_go = LetGo(stop.clone());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !started.load(Ordering::SeqCst) {
+        assert!(std::time::Instant::now() < deadline, "the spinner never started");
+        std::thread::yield_now();
+    }
+    // The count this test relies on is really kept: a pool whose worker is
+    // inside a fiber says so. Without this, a count nobody increments
+    // passes the check below by knowing nothing.
+    if let Some(inside) = busy.resuming_now() {
+        assert_eq!(inside, 1, "the busy pool's own worker is inside its spinner");
+    }
+
+    let pool = Scheduler::new(1);
+    pool.spawn(Task::new(|| {}));
+    pool.drain();
+    settle_and_assert_nobody_is_resuming(&pool, "a settled pool beside a busy one");
 }
 
 /// The same, over and over with a fresh seed, watching for drift.
