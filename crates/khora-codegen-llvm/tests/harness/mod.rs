@@ -5,6 +5,30 @@ use std::process::Command;
 use std::sync::OnceLock;
 use std::time::SystemTime;
 
+/// A command that runs `exe` under a stack limit of `kb` kilobytes.
+///
+/// **Through `sh`, never with `setrlimit` in `pre_exec`.** Lowering
+/// `RLIMIT_STACK` from a `pre_exec` hook worked on Linux and failed on macOS
+/// with `EINVAL` before the program ran: the child of a fork is a copy of the
+/// thread that forked, which under the test harness is not the main thread,
+/// and macOS refuses to lower the stack limit from anywhere but the main
+/// thread's own stack (xnu `kern_resource.c`, "not on the main stack:
+/// reject"). A shell's main thread sets it with `ulimit -s`, then `exec`s the
+/// program in the same process, so the child's pid and pipes are the
+/// program's. Callers add the program's arguments as usual.
+///
+/// `allow(dead_code)` for the reason [`python`] gives: only `suite` calls it.
+#[cfg(unix)]
+#[allow(dead_code)]
+pub fn with_stack_limit(exe: &Path, kb: u64) -> Command {
+    let mut command = Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg(format!("ulimit -s {kb} && exec \"$0\" \"$@\""))
+        .arg(exe);
+    command
+}
+
 /// The Python interpreter's name on this machine.
 ///
 /// **`python` is not a command on a current Debian or Ubuntu.** The name was

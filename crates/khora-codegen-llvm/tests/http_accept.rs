@@ -17,14 +17,13 @@
 //! connection runs out within a few thousand rather than after a hundred
 //! thousand: the recursive loop died at 2,500-3,900 connections in
 //! measurement, and each test asks for 20,000. Unix only, because the limit
-//! is set with `setrlimit` in the child before it starts.
+//! is set with `ulimit -s` (`harness::with_stack_limit`) before it starts.
 
 use crate::harness;
 
 use std::io::{Read, Write};
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use khora_db::{KhoraDatabase, SourceFile, SourceRoot};
 
@@ -121,20 +120,8 @@ fn start(name: &str, main: &str) -> Server {
         panic!("the test server did not build:\n  {}", messages.join("\n  "));
     }
 
-    let mut command = Command::new(&exe);
+    let mut command = harness::with_stack_limit(&exe, STACK / 1024);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    // SAFETY: runs in the forked child before `exec`, and calls only
-    // `setrlimit`, which is async-signal-safe and touches no memory the parent
-    // shares; the limit is a stack value that outlives the call.
-    unsafe {
-        command.pre_exec(|| {
-            let limit = libc::rlimit { rlim_cur: STACK, rlim_max: STACK };
-            if libc::setrlimit(libc::RLIMIT_STACK, &limit) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
     let mut server = Server { child: command.spawn().expect("the server should start") };
 
     // The announcement is the handshake: connecting before `listen` has bound
