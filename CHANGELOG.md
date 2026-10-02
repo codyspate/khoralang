@@ -12,206 +12,47 @@ it will behave differently now.
 
 ## Unreleased
 
-Cancellation has its own channel. A canceled fiber stops at its next
-cancellation point in every function, whatever the function's `raises` row;
-`raises` means only "can fail with these errors", and `!` marks only that.
+Coming from 0.3.0, read three groups of entries first.
 
-Read these first. Six fixes are for programs that gave a wrong answer with
-nothing to say so, so code that ran on 0.3.0 may behave differently: a
-`postgres` query could return another caller's rows; `std::db::transaction`
-could lose writes it had answered `Ok`, a `transaction` inside another one
-committed or rolled back the outer one, and a `postgres` transaction whose
-body ignored a failed statement was answered `Ok` with nothing committed;
-the type checker let through a
-pattern of the wrong type, a `catch` that yielded 0, and a `raise` that no
-`catch` saw; a case name written bare in a pattern matched every value; and
-a `catch` arm could read a generic error's field at the
-wrong type. Two language features are removed: glob imports, and a second
-`with` or `raises` clause. And a function with no `raises` row can be
-canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
-`catch` do for such code.
+**What stops code compiling.** A record field is private to its module
+unless it is marked `pub`. Glob imports and a second `with` or `raises`
+clause are removed. A bare case name in a pattern, a constructor pattern of
+the wrong type and two instantiations of one error type in a row are
+refused. A `Region`, a `Scope` and a `Db` stay on the fiber that opened
+them, and a spawned fiber's error must be `Share`. `Fiber::cancelled` is
+spelled `Fiber::canceled`. A `handler for Db` needs `query_each`, `depth`,
+`savepoint`, `release` and `rollback_to`. A `khora.toml` that does not load
+stops `check`, `build` and the other project commands, and three shapes
+0.3.0 warned about are refused.
+
+**Wrong answers given with nothing to say so**, fixed, so code that ran on
+0.3.0 may behave differently: a `postgres` query could return another
+caller's rows; `std::db::transaction` could lose writes it had answered
+`Ok`; a `transaction` inside another one committed or rolled back the outer
+one; a `postgres` transaction whose body ignored a failed statement was
+answered `Ok` with nothing committed; the type checker let through a pattern
+of the wrong type, a `catch` that yielded 0 and a `raise` that no `catch`
+saw; a case name written bare in a pattern matched every value; a `catch`
+arm could read a generic error's field at the wrong type; and a lambda
+handed to `scoped` inside a function with a scope of its own released what
+it acquired at the outer scope's end.
+
+**Crashes a server operator meets**, each of them in 0.3.0: every `Router`
+server died after about 130,000 connections; one client that reset its
+connection killed the whole server with `SIGPIPE`; the `otlp` exporter
+crashed every traced service after about 20,000 spans; a 31 KB request body
+of nested brackets, or other long input, ran the stack out and ended the
+server; and a fiber on the scheduler backend had an eighth of `main`'s
+stack.
+
+Cancellation has its own channel. A canceled fiber stops at its next
+cancellation point in every function, whatever the function's `raises` row,
+which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and `catch` do
+in code with no row. On the TechEmpower tests Khora serves more requests a
+second than Go on JSON, as many on Fortunes, and fewer on the two database
+tests (see Changed).
 
 ### Breaking
-
-- **`std::json::parse` refuses a document nested deeper than 512 levels.**
-  A document of 513 levels or more parsed when the stack held it (about
-  15,000 levels in a debug build on an eight-megabyte stack) and is a
-  `JsonError` whose `expected` is "at most 512 levels of nesting". Listed
-  here because a program that read such documents gets an error for them:
-  `parse_with_depth(text, limit)` takes another limit, at about 620 bytes of
-  stack a level in a debug build and 200 in a release one. See Fixed for why.
-- **`Db` gains `query_each`, so every `handler for Db` must implement it.**
-  `query_each(sql, sets)` runs one statement once per set of values and
-  answers what calling `query` once per set would, in order, one answer per
-  set. A handler over a driver that can pipeline writes every set before it
-  reads a reply, so twenty lookups are one exchange with the server instead
-  of twenty; the `postgres` package's handler does, with a `Sync` after each
-  set, so each set runs in its own implicit transaction and fails alone. A
-  handler that cannot pipeline calls its own `query` once per set:
-  `query_each: fn (sql, sets) => List::map(sets, fn values => my_query(sql, values))`.
-  A `handler for Db { .. }` without it is a compile error naming the gap.
-- **A `Db` stays on the fiber it was installed on.** A fiber spawned inside
-  a `with_db` body cannot use that body's `db`; it takes a lease of its own,
-  `Fiber::spawn(fn () => with_db(pool, work))`, and the refusal says so, at
-  the use inside the fiber and with the line of the spawn. A `Db` cannot
-  travel through a channel, a `Shared` cell, a certified closure or another
-  effect's handler either. In exchange a `Db` handler may capture a record
-  with `mut` fields, which is what lets a pool lend the borrower its
-  connection. The rule is by name, so a module's own type called `Db` is
-  held to it too.
-- **`Response::json` writes a derived record's keys in the order the type
-  declares them, not sorted.** It built a `Json` object, a hash table, and
-  sorted its keys on every call; it writes the record straight to text, so
-  `{ zebra: Int, apple: String }` goes out as `{"zebra":..,"apple":..}` and a
-  `Rejection` as `{"path":..,"message":..}`. Declaration order is the one the
-  author chose and costs nothing to keep. A `Map` and a `Json` object are
-  written sorted by key, as is anything through `Raw::to_json`. `Encode`
-  gains `encode_json`, with a default, so hand-written impls compile
-  unchanged. A two-field record took 51 allocations to encode and takes 9.
-- **A `Region` or `Scope` stays on the fiber that opened it.** Neither is
-  `Share`: a fiber's body cannot capture one, a channel cannot carry one, a
-  `Shared` cell cannot hold one, a fiber cannot answer or raise one, and a
-  handler for another effect cannot capture a `scope`. So every finalizer runs
-  on the fiber that deferred it. Before this, a child could defer a finalizer over a `mut`
-  record into its parent's scope, and the parent's release could run it while
-  the child was still writing the record: a data race on its fields, and a
-  use-after-free when the child replaced a field the finalizer was reading.
-  `Region::root()` and `Scope::root()` belong to the program's own fiber, and
-  a spawned fiber that calls either stops with a fatal error (exit 134). A
-  `test` or `bench` block has a root region of its own, released when that
-  block ends. A region whose last reference goes on a fiber that did not open
-  it stops the program with a fatal error too, rather than running its
-  finalizers there.
-
-  **The migration** is one line: a child that acquires something is given a
-  scope of its own, `Fiber::spawn(fn () => scoped(work))`, instead of being
-  handed its parent's. A lambda works as well,
-  `scoped(fn () => work(connection))`, and so does a named function whose
-  body calls `scoped`. What it acquires is released when the child's `scoped`
-  ends. A resource that has to outlive the child is a shareable one (a pool,
-  a channel, a `Shared` cell): acquire it in the parent and hand the value
-  in. The refusal names the fix.
-
-- **A spawned fiber's error must be `Share`, as its answer must.** Every error
-  in the `raises` row of a body handed to `Fiber::spawn` is held to `Share`,
-  so raising a record with a `mut` field, an `Array` or a `Map` out of a
-  fiber is refused at the spawn. `join` and `outcome` hand the raised error
-  to whoever joins, and two fibers could join one handle: one wrote the
-  error's fields while the other read them. `Fiber::outcome` and
-  `nursery.adopt` take the same handle, so the spawn covers them. A
-  `SharedFn::of` closure's error is not held to it, because it is raised on
-  the caller's own fiber, and neither is a `test` block's. **The
-  migration:** raise an error without `mut` fields, or with the data the
-  joiner needs copied into immutable fields; a `Region` or `Scope` in an
-  error is refused as before, with the message that names `scoped`. The
-  error is judged by its own declaration, also when the spawning file never
-  imports it: a body raising `ChildFailed` through `nursery` crosses without
-  `ChildFailed` being named. For that, a file sees the declarations of the
-  types an imported function's signature names, as it sees those an imported
-  type's fields name. It sees them only to judge them; they are not in scope.
-
-- **A capture whose type is settled after `Fiber::spawn` or `SharedFn::of`,
-  or after the `handler for` that captures it,
-  is held to `Share`** (silent wrong answer). A program where one such
-  capture ends up a record with a `mut` field, or a `Region`, compiled and
-  shared it between fibers; it is refused (see Fixed), as the same capture
-  is when its type is known at the spawn.
-
-- **A lambda handed to `scoped` or `nursery` inside a function with a
-  `scope` or `nursery` of its own used the enclosing one** (silent wrong
-  answer). In `fn f() with { scope: Scope }`, `scoped(fn () => work())` gave
-  `work` the `scope` of `f`, not the one `scoped` opens, so what `work`
-  acquired was released when `f`'s caller's scope ended rather than when
-  that `scoped` did. The capability `scoped` or `nursery` hands its lambda
-  is the lambda's own, and a binding of that label outside the lambda does
-  not shadow it. A capability the lambda writes by name, `scope.defer(..)`,
-  is the binding of that name in scope where the lambda is written, as any
-  name is.
-
-- **A record field is private to the module that declares its type, unless
-  it is marked `pub`.** Outside that module a private field cannot be read,
-  assigned, named in a literal or an update, or bound in a pattern, and a
-  value with any private field can only be built by its own module. A
-  wrapper's value follows the same rule: `type Port = Int;` can be built with
-  `Port(n)` and opened with `match p { Port(n) => .. }` only in its module,
-  and `type UserId = pub Int;` opens one to everybody. A case's payload is
-  always public. `derive(Decode)` is refused on a `pub` type with a private
-  field, because it would build one from input without calling anything that
-  checks. `pub` written in a row, on a case's payload or on an effect's
-  operation is a syntax error, and so is `mut` written in a row, which was
-  accepted and ignored.
-
-  **The migration.** For each error `khora check` reports:
-  - a record other modules read or build, with nothing to keep true (a
-    request body, a report, a settings record): write `pub` before each
-    field other modules use, as in `pub type Point = { pub x: Int, pub y:
-    Int };`. Its `derive(Decode)` then compiles unchanged;
-  - a record whose constructor checks something: keep the fields private and
-    call the constructor and getters from outside. For a `derive(Decode)` on
-    one, write `impl Decode for T` with `Schema::try_map` over the checking
-    function;
-  - an identifier wrapper built from other modules: `type UserId = pub Int;`;
-  - a test in a separate `module foo_test;` that reads `foo`'s private
-    fields: move it into `foo` as a `test` block, which is inside the module,
-    or test through `foo`'s functions.
-
-  In `std`, `Decimal`, `Map`, `Vector`, `Date`, `Time`, `Offset`,
-  `std::net::http::Connection`, the iterator adapters `Mapped`, `Filtered`
-  and `Taken`, the TLS handles and `Dict`'s `Least` keep their fields
-  private. `Date::year`, `month` and `day`, `Time::hour`, `minute`, `second`
-  and `milli`, `Offset::minutes` and `Decimal::scale` read them. Every field
-  of `std`'s other public records is `pub`. In `postgres`, `Connection`'s
-  fields are private; `transaction_depth` and `set_transaction_depth` in
-  `postgres::conn` read and write the one piece of state `postgres::db`
-  keeps there. `postgres::pool`'s `Pool` keeps its fields private; its
-  `Health` and `Reconnect` records have every field `pub`, and
-  `idle_count`, `take_offer` and `give_offer_back` count the idle offers,
-  and take one out and put it back into the pool it came from, without
-  exposing the channel they are in.
-
-  A record update, `{ ..base, field: value }`, whose base is a type
-  parameter is refused: a type parameter is not a record, whatever it is
-  instantiated at. One whose base is an unannotated lambda parameter is
-  checked once the parameter's type is known, with the same rules as any
-  other update, and one whose base's type is never known asks for an
-  annotation. A value there that needs the field's type to be typed -- an
-  integer literal for a `U8` field -- needs an annotation, because the
-  field's type is not known yet when the value is. Both kinds type-checked
-  with none of their fields checked, so a field that did not exist, or a
-  value of the wrong type, compiled.
-
-- **Names are spelled in US English.** Every public name with a British
-  spelling is renamed, with no alias for the old spelling:
-  - `Fiber::cancelled` → `Fiber::canceled` (`std::core`);
-  - `khora release --notes` writes its section as `## Behavior changes`
-    (was `## Behaviour changes`).
-
-  Diagnostics, documentation and the standard library's doc comments use
-  US spelling throughout: color, behavior, canceled, initialize, recognize,
-  analyze, license. No manifest key, lint name, CLI flag, environment
-  variable or diagnostic code had a British spelling, so none is renamed.
-
-- **`Fiber::abort` runs a finalizer written as a lambda in `Region::defer`**
-  when the function around it also calls a function value (see Fixed). A
-  program aborted there skipped that cleanup entirely on 0.3.0; it runs, and
-  `abort` can stop it only at a cancellation point inside it.
-
-- **A `transaction` inside a `transaction` committed or rolled back the
-  enclosing one** (see Fixed), and a `std::db::Db` handler has four more
-  operations: `depth`, `savepoint`, `release` and `rollback_to`. A handler
-  keeps how many transactions are open on its connection and answers
-  `depth` with it; `transaction` opens a savepoint instead of a transaction
-  when it is above 0. `rollback_to` is called for a savepoint that was never
-  opened when a cancel lands before `SAVEPOINT` went out, and must answer
-  `Ok` without undoing anything then. A handler written for 0.3.0 does not
-  compile until it has them. A handler that does not support nesting still
-  answers `depth` truthfully (1 between `begin` and its `commit` or
-  `rollback`, 0 otherwise) and refuses `savepoint`; a nested `transaction`
-  is then answered with that refusal instead of opening a second
-  transaction.
-
-- **A `postgres` transaction whose body ignored a failed statement was
-  answered `Ok`** (see Fixed). It is answered `DbError::RolledBack`.
 
 - **A `postgres` query could return another caller's rows** (see Fixed). A
   program that ran with a receive deadline, or on a network that dropped
@@ -220,15 +61,18 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   reconnects it (see the pool entry below).
 
 - **`std::db::transaction` could lose a write it had acknowledged with `Ok`**
-  (see Fixed), and a `std::db::Db` handler's `rollback` must accept being
-  called when no transaction is open. `transaction` registers its rollback
-  before it sends `BEGIN`, so a cancel that lands before the `BEGIN` goes
-  out, or while `COMMIT` waits for its reply, is followed by a `ROLLBACK`. A
-  handler must answer `Ok` then; one that answers `Err` is told `broken`, and
-  a pool built on it drops the connection. PostgreSQL answers a stray
-  `ROLLBACK` with a warning, which the `postgres` package reads as `Ok`. The
-  rollback of a body that failed runs as cleanup, which a plain cancel does
-  not interrupt, so a handler whose rollback blocks is waited for.
+  (see Fixed). A `transaction` whose fiber is canceled before its body
+  finishes is rolled back, including one canceled while `COMMIT` waited for
+  its reply, which changes nothing if the commit ran. A `Db` handler has a
+  rule to follow for it; see the `Db` handler entry below.
+
+- **A `transaction` inside a `transaction` committed or rolled back the
+  enclosing one** (see Fixed). An inner `transaction` is a savepoint: its
+  writes are committed with the enclosing transaction's or not at all, and
+  its failure undoes only its own writes.
+
+- **A `postgres` transaction whose body ignored a failed statement was
+  answered `Ok`** (see Fixed). It is answered `DbError::RolledBack`.
 
 - **A bare name in a pattern that is the name of one of its value's cases is
   refused**, in `match`, `catch`, `let` and `for`, at any depth, and for
@@ -237,19 +81,18 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   (`FsError::NotFound(_)` for a payload case, and the type's module where
   the file never imported it). A bare name that is a type's *only* case, as
   in `catch { Stop => () }` over a record `Stop`, matched what the case
-  would have and is refused too: write `_`. The check is against the value's
-  type, so a case added to a type later makes a binding of the same name an
-  error rather than a match. A capitalized bare name that is no case of
-  the value's type is refused as well: a name in a pattern that starts with
+  would have and is refused as well: write `_`. The check is against the
+  value's type, so a case added to a type later makes a binding of the same
+  name an error rather than a match. A capitalized bare name that is no case
+  of the value's type is refused as well: a name in a pattern that starts with
   a capital letter must be a case. The message reads like an undefined
   name and offers the nearest case, "`Color` has no case `Gren`. Did you
   mean `Color::Green`?", when one is within two edits (or a third of the
   name, if that is more); the language server offers it as a quick fix. A
   `const` written as a pattern (`FAVORITE => ..`, which binds rather than
   compares) is told to use a guard, `n if n == FAVORITE`. Bind with a
-  lower-case name. 0.3.0 built all
-  of these with an `unused-binding` warning at most, and gave a wrong answer
-  (see Fixed).
+  lower-case name. 0.3.0 built all of these with an `unused-binding`
+  warning at most, and gave a wrong answer (see Fixed).
 
 - **A constructor pattern of one type, matched against a value of another,
   is refused**, at any depth, in `match`, `catch`, `let` and a pattern inside
@@ -313,6 +156,129 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   arrived. Catch each where it is raised, in a `catch` around each call, or
   with a `_` arm alone.
 
+- **A lambda handed to `scoped` or `nursery` inside a function with a
+  `scope` or `nursery` of its own used the enclosing one** (silent wrong
+  answer). In `fn f() with { scope: Scope }`, `scoped(fn () => work())` gave
+  `work` the `scope` of `f`, not the one `scoped` opens, so what `work`
+  acquired was released when `f`'s caller's scope ended rather than when
+  that `scoped` did. The capability `scoped` or `nursery` hands its lambda
+  is the lambda's own, and a binding of that label outside the lambda does
+  not shadow it. A capability the lambda writes by name, `scope.defer(..)`,
+  is the binding of that name in scope where the lambda is written, as any
+  name is.
+
+- **On the scheduler backend, a finalizer could be skipped** (see Fixed). A
+  program on `KHORA_FIBERS=scheduler` whose cleanup was silently skipped
+  under load runs it.
+
+- **A record field is private to the module that declares its type, unless
+  it is marked `pub`.** Outside that module a private field cannot be read,
+  assigned, named in a literal or an update, or bound in a pattern, and a
+  value with any private field can only be built by its own module. A
+  wrapper's value follows the same rule: `type Port = Int;` can be built with
+  `Port(n)` and opened with `match p { Port(n) => .. }` only in its module,
+  and `type UserId = pub Int;` opens one to everybody. A case's payload is
+  always public. `derive(Decode)` is refused on a `pub` type with a private
+  field, because it would build one from input without calling anything that
+  checks. `pub` written in a row, on a case's payload or on an effect's
+  operation is a syntax error, and so is `mut` written in a row, which was
+  accepted and ignored.
+
+  **The migration.** For each error `khora check` reports:
+  - a record other modules read or build, with nothing to keep true (a
+    request body, a report, a settings record): write `pub` before each
+    field other modules use, as in `pub type Point = { pub x: Int, pub y:
+    Int };`. Its `derive(Decode)` then compiles unchanged;
+  - a record whose constructor checks something: keep the fields private and
+    call the constructor and getters from outside. For a `derive(Decode)` on
+    one, write `impl Decode for T` with `Schema::try_map` over the checking
+    function;
+  - an identifier wrapper built from other modules: `type UserId = pub Int;`;
+  - a test in a separate `module foo_test;` that reads `foo`'s private
+    fields: move it into `foo` as a `test` block, which is inside the module,
+    or test through `foo`'s functions.
+
+  In `std`, `Decimal`, `Map`, `Vector`, `Date`, `Time`, `Offset`,
+  `std::net::http::Connection`, the iterator adapters `Mapped`, `Filtered`
+  and `Taken`, the TLS handles and `Dict`'s `Least` keep their fields
+  private. `Date::year`, `month` and `day`, `Time::hour`, `minute`, `second`
+  and `milli`, `Offset::minutes` and `Decimal::scale` read them. Every field
+  of `std`'s other public records is `pub`. In `postgres`, `Connection`'s
+  fields are private; `transaction_depth` and `set_transaction_depth` in
+  `postgres::conn` read and write the one piece of state `postgres::db`
+  keeps there. `postgres::pool`'s `Pool` keeps its fields private; its
+  `Health` and `Reconnect` records have every field `pub`, and
+  `idle_count` counts the connections waiting to be lent.
+
+  A record update, `{ ..base, field: value }`, whose base is a type
+  parameter is refused: a type parameter is not a record, whatever it is
+  instantiated at. One whose base is an unannotated lambda parameter is
+  checked once the parameter's type is known, with the same rules as any
+  other update, and one whose base's type is never known asks for an
+  annotation. A value there that needs the field's type to be typed -- an
+  integer literal for a `U8` field -- needs an annotation, because the
+  field's type is not known yet when the value is. On 0.3.0 both kinds
+  type-checked with none of their fields checked, so a field that did not
+  exist, or a value of the wrong type, compiled.
+
+- **A `Region` or `Scope` stays on the fiber that opened it.** Neither is
+  `Share`: a fiber's body cannot capture one, a channel cannot carry one, a
+  `Shared` cell cannot hold one, a fiber cannot answer or raise one, and a
+  handler for another effect cannot capture a `scope`. So every finalizer runs
+  on the fiber that deferred it. On 0.3.0 a child could defer a finalizer
+  over a `mut` record into its parent's scope, and the parent's release could
+  run it while the child was still writing the record: a data race on its
+  fields, and a use-after-free when the child replaced a field the finalizer
+  was reading. `Region::root()` and `Scope::root()` belong to the program's
+  own fiber, and a spawned fiber that calls either stops with a fatal error
+  (exit 134). A `test` or `bench` block has a root region of its own,
+  released when that block ends. A region whose last reference goes on a
+  fiber that did not open it stops the program with a fatal error too,
+  rather than running its finalizers there.
+
+  **The migration** is one line: a child that acquires something is given a
+  scope of its own, `Fiber::spawn(fn () => scoped(work))`, instead of being
+  handed its parent's. A lambda works as well,
+  `scoped(fn () => work(connection))`, and so does a named function whose
+  body calls `scoped`. What it acquires is released when the child's `scoped`
+  ends. A resource that has to outlive the child is a shareable one (a pool,
+  a channel, a `Shared` cell): acquire it in the parent and hand the value
+  in. The refusal names the fix.
+
+- **A `Db` stays on the fiber it was installed on.** A fiber spawned inside
+  a `with_db` body cannot use that body's `db`; it takes a lease of its own,
+  `Fiber::spawn(fn () => with_db(pool, work))`, and the refusal says so, at
+  the use inside the fiber and with the line of the spawn. A `Db` cannot
+  travel through a channel, a `Shared` cell, a certified closure or another
+  effect's handler either. In exchange a `Db` handler may capture a record
+  with `mut` fields, which is what lets a pool lend the borrower its
+  connection. The rule is by name, so a module's own type called `Db` is
+  held to it too.
+
+- **A spawned fiber's error must be `Share`, as its answer must.** Every error
+  in the `raises` row of a body handed to `Fiber::spawn` is held to `Share`,
+  so raising a record with a `mut` field, an `Array` or a `Map` out of a
+  fiber is refused at the spawn. `join` and `outcome` hand the raised error
+  to whoever joins, and two fibers could join one handle: one wrote the
+  error's fields while the other read them. `Fiber::outcome` and
+  `nursery.adopt` take the same handle, so the spawn covers them. A
+  `SharedFn::of` closure's error is not held to it, because it is raised on
+  the caller's own fiber, and neither is a `test` block's. **The
+  migration:** raise an error without `mut` fields, or with the data the
+  joiner needs copied into immutable fields; a `Region` or `Scope` in an
+  error is refused as before, with the message that names `scoped`. The
+  error is judged by its own declaration, also when the spawning file never
+  imports it: a body raising `ChildFailed` through `nursery` crosses without
+  `ChildFailed` being named. For that, a file sees the declarations of the
+  types an imported function's signature names, as it sees those an imported
+  type's fields name. It sees them only to judge them; they are not in scope.
+
+- **A capture whose type is settled after `Fiber::spawn` or `SharedFn::of`,
+  or after the `handler for` that captures it, is held to `Share`.** A
+  program where one such capture ends up a record with a `mut` field, or a
+  `Region`, compiled and shared it between fibers; it is refused (see
+  Fixed), as the same capture is when its type is known at the spawn.
+
 - **Every function can be canceled, whatever its `raises` row.** A loop, a
   recursive call, a blocking operation or a call to a function that reaches
   one is a cancellation point in a function with no row, as it always was in
@@ -348,6 +314,116 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   channel is already the `Option` or `Bool` they return, and the row existed
   only to give a cancellation somewhere to go. A call needs no `!` --
   `Channel::receive(jobs)` -- and a leftover one is accepted.
+
+- **Names are spelled in US English.** Every public name with a British
+  spelling is renamed, with no alias for the old spelling:
+  - `Fiber::cancelled` → `Fiber::canceled` (`std::core`);
+  - `khora release --notes` writes its section as `## Behavior changes`
+    (was `## Behaviour changes`).
+
+  Diagnostics, documentation and the standard library's doc comments use
+  US spelling throughout: color, behavior, canceled, initialize, recognize,
+  analyze, license. No manifest key, lint name, CLI flag, environment
+  variable or diagnostic code had a British spelling, so none is renamed.
+
+- **A `std::db::Db` handler has five more operations, and its `rollback`
+  must accept being called when no transaction is open.** A
+  `handler for Db { .. }` written for 0.3.0 does not compile until it has
+  `query_each`, `depth`, `savepoint`, `release` and `rollback_to`, and the
+  error names the gap.
+  - `query_each(sql, sets)` runs one statement once per set of values and
+    answers what calling `query` once per set would, in order, one answer
+    per set. A handler over a driver that can pipeline writes every set
+    before it reads a reply, so twenty lookups are one exchange with the
+    server instead of twenty; the `postgres` package's handler does, with a
+    `Sync` after each set, so each set runs in its own implicit transaction
+    and fails alone. A handler that cannot pipeline calls its own `query`
+    once per set:
+    `query_each: fn (sql, sets) => List::map(sets, fn values => my_query(sql, values))`.
+  - A handler keeps how many transactions are open on its connection and
+    answers `depth` with it; `transaction` opens a savepoint instead of a
+    transaction when it is above 0. `rollback_to` is called for a savepoint
+    that was never opened when a cancel lands before `SAVEPOINT` went out,
+    and must answer `Ok` without undoing anything then. A handler that does
+    not support nesting still answers `depth` truthfully (1 between `begin`
+    and its `commit` or `rollback`, 0 otherwise) and refuses `savepoint`; a
+    nested `transaction` is then answered with that refusal instead of
+    opening a second transaction.
+  - `transaction` registers its rollback before it sends `BEGIN`, so a
+    cancel that lands before the `BEGIN` goes out, or while `COMMIT` waits
+    for its reply, is followed by a `ROLLBACK`. A handler must answer `Ok`
+    then; one that answers `Err` is told `broken`, and a pool built on it
+    drops the connection. PostgreSQL answers a stray `ROLLBACK` with a
+    warning, which the `postgres` package reads as `Ok`. The rollback of a
+    body that failed runs as cleanup, which a plain cancel does not
+    interrupt, so a handler whose rollback blocks is waited for.
+
+- **A `postgres` pool reconnects the connections it loses, checks each one
+  before lending it, and lends the connection itself.** A connection whose
+  reply was cut off, that `std::db` called `broken`, that the server closed
+  while it sat idle, or that an `abort` left inside a transaction, is closed
+  and reconnected by its slot, with exponential backoff from 50 ms to a 5 s
+  cap, with jitter, for up to 30 s. Callers wait for it rather than being
+  lent it. A connection that opens and then fails its check before it is
+  ever lent counts as a failed attempt on the same schedule, so a server
+  that admits connections and spoils each one is retried on the backoff and
+  not as fast as a slot can connect. The 30 s counts time spent
+  reconnecting, not the time a connection sat open: one left idle for
+  longer and then closed by a server restart is retried on the backoff like
+  any other. A connection that cannot be reconnected in that time leaves the
+  pool and retries every 30 s, and rejoins when it connects. A pool with no
+  connection live or reconnecting answers `with_db` at once with
+  `Disconnected` and the reason the last attempt failed, including callers
+  that were already waiting. In 0.3.0 a connection the server closed stayed
+  in the pool and every lease on it was answered `Disconnected` until the
+  pool closed, and a connection that never opened answered every request
+  with the reason.
+
+  `with_db` receives a connection over a `Handoff`, checks it on the
+  borrower's fiber (one the server reset while it sat idle, one mid-reply
+  and one inside a transaction are never lent; one the server sent a
+  notification, a notice or a parameter change is lent as it is), and
+  installs `postgres::db::direct(c)`, a `Db` that writes the socket and
+  reads the reply on the borrower's own fiber. A statement costs no channel
+  round trip and no fiber switch. The connection goes back when `with_db`
+  returns, however it returns, and every reply still arriving on it -- one
+  per set of a `query_each` batch whose borrower was canceled part-way -- is
+  read by its slot before it is lent again. `serve` and `over` keep the
+  serving-fiber `Db` for one connection shared by several fibers.
+
+  `open` therefore returns a pool that lends nothing until a connection
+  opens. `open_with` takes a `Reconnect` plan: its `fast` schedule, its
+  `slow` interval (`None` to stay out for good), and a `handshake` bound in
+  milliseconds (10 s by default), after which a server that accepted the
+  connection and has not finished the startup exchange counts as a failed
+  attempt. `Reconnect::never()` makes one attempt and no retry. `health`
+  reports how many connections are live, reconnecting and down.
+  `postgres::db::Work` has a case for each new `Db` operation, so code that
+  matches on it must follow.
+
+- **`Response::json` writes a derived record's keys in the order the type
+  declares them, not sorted.** It built a `Json` object, a hash table, and
+  sorted its keys on every call; it writes the record straight to text, so
+  `{ zebra: Int, apple: String }` goes out as `{"zebra":..,"apple":..}` and a
+  `Rejection` as `{"path":..,"message":..}`. Declaration order is the one the
+  author chose and costs nothing to keep. A `Map` and a `Json` object are
+  written sorted by key, as is anything through `Raw::to_json`. `Encode`
+  gains `encode_json`, with a default, so hand-written impls compile
+  unchanged. A two-field record took 51 allocations to encode and takes 9.
+
+- **`std::json::parse` refuses a document nested deeper than 512 levels.**
+  A document of 513 levels or more parsed when the stack held it (about
+  15,000 levels in a debug build on an eight-megabyte stack) and is a
+  `JsonError` whose `expected` is "at most 512 levels of nesting". Listed
+  here because a program that read such documents gets an error for them:
+  `parse_with_depth(text, limit)` takes another limit, at about 620 bytes of
+  stack a level in a debug build and 200 in a release one. See Fixed for why.
+
+- **`std::net::socket::receive_now` answers `-1` only when nothing has
+  arrived yet**, and a lower number when the read failed. A caller that
+  treated every negative as "nothing yet" can tell a reset connection from a
+  quiet one with `nothing_yet`; a caller that stops on any negative is
+  unaffected.
 
 - **Glob imports are removed.** `import a::b::*;` is a syntax error. Name
   what the file uses: `import a::b::{X, Y};`.
@@ -394,255 +470,7 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   under the type's own name** (`with Box<Int> + Box<String>`) is refused.
   0.3.0 kept the first and dropped the second without a word.
 
-- **On the scheduler backend, a finalizer could be skipped** (see Fixed). A
-  program on `KHORA_FIBERS=scheduler` whose cleanup was silently skipped
-  under load runs it.
-
-- **A `postgres` pool reconnects the connections it loses, and lends only
-  connected ones.** A connection whose reply was cut off, that `std::db`
-  called `broken`, that the server closed while it sat idle, or that an
-  `abort` left inside a transaction, is closed and reconnected by its own
-  serving fiber, with exponential backoff from 50 ms to a 5 s cap, with
-  jitter, for up to 30 s. Callers wait for it rather than being lent it. A
-  connection that opens and then fails its check before it is ever lent
-  counts as a failed attempt on the same schedule, so a server that
-  admits connections and spoils each one is retried on the backoff and not
-  as fast as a slot can connect. The 30 s counts time spent reconnecting,
-  not the time a connection sat open: one left idle for longer and then
-  closed by a server restart is retried on the backoff like any other. A
-  connection that cannot be reconnected in that time leaves the pool and
-  retries every 30 s, and rejoins when it connects. A pool with no
-  connection live or reconnecting answers `with_db` at once with
-  `Disconnected` and the reason the last attempt failed, including callers
-  that were already waiting. In 0.3.0 a lost connection stayed in the pool
-  and every lease on it was answered `Disconnected` until the pool closed,
-  and a connection that never opened answered every request with the
-  reason. `open` therefore returns a pool that lends nothing until a
-  connection opens. `open_with` takes a `Reconnect` plan: its `fast`
-  schedule, its `slow` interval (`None` to stay out for good), and a
-  `handshake` bound in milliseconds (10 s by default), after which a server
-  that accepted the connection and has not finished the startup exchange
-  counts as a failed attempt. `Reconnect::never()` makes one attempt and no
-  retry. A connection the server reset while it sat idle is caught by the
-  check before it is lent; one the server sent a notification, a notice or
-  a parameter change is lent as it is. A borrower stopped by `cancel`,
-  `abort` or `cancel_within` anywhere in `with_db` -- waiting, holding the
-  connection, mid-statement, inside a transaction's `ROLLBACK`, or with
-  fibers of its own still using `db` -- gives its connection back, and a
-  caller stopped while it was being told the pool is down leaves the next
-  caller to be told the same. `health` reports how many connections are
-  live, reconnecting and down. `Pool`, `Work` and `Connection` changed
-  shape: `Pool.idle` holds `Offer`s, `Work` gained `Check`, `Connection`
-  gained a field, so code that builds or reads them by hand must follow.
-
-- **`std::net::socket::receive_now` answers `-1` only when nothing has
-  arrived yet**, and a lower number when the read failed. A caller that
-  treated every negative as "nothing yet" can tell a reset connection from a
-  quiet one with `nothing_yet`; a caller that stops on any negative is
-  unaffected.
-
 ### Fixed
-
-- **Long input ran the stack out in `std` and in the OpenTelemetry
-  exporter.** Each function below took its next item by calling itself, Khora
-  does not promise tail calls, and so each kept a stack frame per item for as
-  long as its input ran. On the default eight-megabyte stack, which is also a
-  fiber's:
-  - `std::fs`: `fold_chunks` and `fold_lines` ended the process on a file of
-    about 4 GB; `fold_lines` on a 64 KiB stretch of 40,000 short lines, and
-    there it also held memory in the square of the line count -- about 2 GB
-    for a chunk of blank lines; `read_dir` on a directory of 52,000 entries;
-    `file_name`, `parent`, `extension` and `stem` on an 88 KB path.
-  - `Env::arguments` with 112,000 arguments.
-  - `std::json`: `parse` on 130,000 bytes of whitespace or digits in a row,
-    an array of 52,000 elements or an object of 37,000 members; `encode` on an
-    array of 75,000 or an object of 47,000; `quote` on a string with 65,000
-    characters to escape. A router raised to `Router::holding(1048576)`
-    accepts any of these in one request.
-  - `std::net::http::matches`, and so every routed request, on a path of
-    87,000 `/` -- 87 KB, which such a router also accepts.
-  - The permission checks behind every file, environment and network
-    operation, on a path or host of 87,000-130,000 bytes.
-  - `String::chars` and `String::char_length` on 87,000 and 104,000
-    characters, and `Float::of_string` on 87,000 digits.
-  - A `Map` whose keys share one bucket, at about 2,600 such keys under a
-    256 KB stack: one lookup, insert or growth walked the bucket a frame per
-    entry. Integer keys that differ only in their top sixteen bits all land
-    in one bucket.
-  - `packages/otlp`'s exporter, after about 20,000 spans: the fiber that
-    batches them took each report by calling itself, so every traced service
-    crashed after minutes to hours.
-
-  All of them are loops, and each is tested with 20,000 items (10,000
-  arguments, and 100,000 spans) under a 256 KB stack, where the recursive
-  version died at between 1,100 and 3,900. Nesting is the one shape left
-  that takes a frame per level, and `parse` limits it; see the next entry.
-- **A JSON document of nothing but `[` ended the process.** `std::json::parse`
-  took a stack frame per level of nesting with no limit, so 15,375 `[` -- 31
-  KB -- ran an eight-megabyte stack out, and any service that parsed a
-  request body under a `Router::holding` of 32 KB or more could be stopped by
-  one request. `parse` refuses nesting deeper than 512 levels with a
-  `JsonError` at the bracket that opens level 513, whose `expected` is "at
-  most 512 levels of nesting"; a megabyte of `[` is that error. `Raw::of_json`,
-  `Raw::to_json`, `Raw::json_text` and derived `Decode` walk what `parse`
-  produced, so the limit covers them. `encode` and `Show for Json` have no
-  limit: a `Json` deeper than 512 is one the program built.
-- **A `Router` server died of a segmentation fault after about 130,000
-  connections.** `Router::listen`, `listen_quietly`, `listen_tls`,
-  `serve_forever` and `serve_secured` took each next connection by a call that
-  kept its stack frame, so a server on an 8 MB main stack crashed after
-  roughly 130,000 connections over its life, however few were open at once
-  and on either fiber backend, with nothing on stderr. For a busy service
-  whose clients do not keep connections alive, that is minutes. The accept
-  loops are loops: a server accepts any number of connections.
-
-- **`let p: Pt = {};` passed `khora check`.** An empty record literal where a
-  record with fields was expected (an annotation, a return type, an argument)
-  got no error from the checker, the editor or `khora check`. `khora build`
-  then refused a record held inline with "`x` was not given", and built one
-  held behind a pointer -- any record with a `String`, a `List` or more than a
-  few fields -- with nothing in the missing fields, so the program crashed on
-  the first read of one. The literal is refused at the `{}` with "this `Pt`
-  is missing `x`", once per missing field, by `check`, `build` and the
-  language server alike.
-
-- **A fiber could recurse less deeply than `main`, and how much less depended
-  on the backend.** A recursive walk of twenty thousand list cells finished in
-  `main` and on a thread fiber and crashed on `KHORA_FIBERS=scheduler`,
-  because the stacks were eight, two and one megabytes. A fiber's stack is
-  eight megabytes on both backends, the same as `main` with a default
-  `ulimit -s`; idle fibers cost the same memory as before, because a stack is
-  committed only as it is used. And running out of stack on a fiber, or in a
-  `khora test` block, says "khora: the stack ran out" on Linux, where it ended
-  the process with no message.
-- **A program whose stack ran out while it started a fiber, or ran another
-  program, said nothing.** The C library blocks signals while it starts a
-  thread or a process, and on Linux a stack fault in that moment ends the
-  process at once, with status 139 and empty stderr, instead of reaching the
-  handler that prints "khora: the stack ran out". A server whose main thread
-  overflowed died exactly that way, at every stack size from 256 KB to 8 MB,
-  on the default fiber backend. The runtime checks for 16 KB of stack before
-  each thread or process it starts and, when that is not there, stops there
-  with the message. A program that had between 2 and 16 KB left at that point
-  used to survive the start; it now stops at it.
-- **On the scheduler backend, a fiber reading or writing a file could wait
-  for ever once the blocking pool's queue had filled.** File-system calls run
-  on a bounded pool of threads, and a fiber that finds the pool's queue full
-  waits for a slot. A waiting fiber woken by something else -- canceled, for
-  one -- kept its place in the line for slots, so the next slot that came free
-  went to it rather than to the fiber behind it, and that fiber was never
-  told. With nothing more queued, it waited with the pool idle. A fiber
-  gives up its place whenever it is woken, and waits again at the back if
-  there is still no room.
-
-- **On the scheduler backend, a fiber waiting on a `Channel` could lose the
-  value it was woken for to a fiber that had not waited, over and over.** A
-  send wakes the receiver that has waited longest, but another fiber that
-  ran first and called `receive` took the value, and the woken one went to
-  the back of the line again. A connection pool's waiters are exactly that
-  line: on the TechEmpower server on one CPU with 64 connections and 16
-  database connections, `/db`'s p99 was 50-97 ms against a p50 of 3 ms. A
-  value sent to a waiting receiver is now that receiver's; only values
-  beyond those go to whoever asks first. `/db`'s p99 is 3.5-5 ms on the same
-  setup, and queries20's and fortunes' tails shrink the same way, with the
-  same throughput. A receive or poll from a thread that is not a fiber still
-  takes any value, and the fiber it was meant for waits again.
-
-- **On the scheduler backend, a fiber preempted while holding a `Shared`
-  cell's lock could hang the program on a busy pool.** Inside
-  `Shared::update`'s change function, a fiber that yielded at a loop, or
-  waited on a channel, kept the cell locked and went back onto its own
-  worker's queue. If the next fiber that worker ran read the same cell, the
-  worker's thread blocked on the lock, and while every other worker had work
-  of its own none of them looked at that queue, so the holder never ran again.
-  A busy worker takes work from a worker that has not started a fiber in
-  about thirty-one of its own turns, so the holder is found and the cell
-  released. That needs one worker whose thread is not blocked: with one
-  worker, or when every worker's thread blocks on the same cell, the program
-  still hangs.
-
-- **A fiber could capture a `mut` record or a `Region` through a type
-  settled after the spawn.** In
-  `let go = fn x => Fiber::spawn(fn () => { let _k = x; 3 }); go(h)`,
-  `x`'s type was not yet known at the spawn and passed the `Share` check;
-  `go(h)` then made it a record with a `mut` field, and the child and the
-  parent shared it with nothing said. The same held for `SharedFn::of`, and
-  for a `mut` binding captured while it still held `List::Nil`, and for a
-  `handler for` operation's captures: `fn x => handler for Log { record: fn
-  (..) => { let _k = x; () } }`, called with a `mut` record, gave a
-  shareable handler holding it, which a spawned fiber then logged through.
-  Every capture is asked again once the function's types are settled, and
-  refused with the message a capture known at the spawn, or at the
-  handler, gets. A capture whose type
-  nothing ever settles has no value to cross; `khora build` refuses the
-  program because the closure's type was never pinned down.
-
-- **A lambda handed to `scoped` inside a function with a `scope` of its own
-  released what it acquired at the outer scope's end** (see Breaking).
-  `scoped(fn () => work())` there released when the enclosing function's
-  caller's scope ended, after the line following `scoped`. It releases when
-  that `scoped` ends, as `scoped(work)` does, and
-  `Fiber::spawn(fn () => scoped(fn () => work()))` compiles there and
-  releases on the child.
-
-- **An argument that left early leaked the arguments evaluated before it.**
-  In `List::reverse_onto(acc, load()!)`, when `load` raised, `acc` was never
-  released: every cell of it that nothing else held, on each call, on both
-  fiber backends. The same happened
-  with `return`, `break` or `continue` inside an argument, with a
-  cancellation while a later argument ran, and in every shape that evaluates
-  several operands before using them -- a method call's receiver, a
-  constructor, a pipe, a closure call, a record, list or tuple literal, an
-  interpolation, `+` on strings, a nested call. Every early exit releases the
-  operands evaluated so far. Evaluation order is unchanged: left to right,
-  each once.
-
-- **A case name written bare in a pattern matched every value.** A bare name
-  in a pattern binds, so `match c { Color::Blue => "cool", Red => "warm" }`
-  answered `warm` for `Color::Green`. Unless an arm after it was left
-  unreachable, the only thing said was that `Red` was never read, and that
-  went away once the arm read it. A `catch` of the same shape,
-  `load(n)! catch { LoadError::Broken(_) => 1, Missing => 2 }`, built a
-  binary that died with `Illegal instruction`. Both are refused at the name
-  (see Breaking).
-
-- **`Fiber::abort` skipped a cleanup written next to a call through a
-  function value.** In a function that also calls a function value (a
-  `body()` it was handed, a handler's operation), a finalizer written as
-  `Region::defer(region, fn () => ..)` did not run at all when the fiber was
-  aborted: the stop landed before its first line. It runs, and `abort` stops
-  it only at a cancellation point inside it, like any other cleanup. This
-  holds for a lambda written directly in `Region::defer`'s argument. A
-  finalizer bound to a `let` first, or registered through `Scope::defer` or
-  `acquire`, can still be skipped by `abort`, and so can one whose first step
-  is a call to a function that itself calls a function value.
-  `std::db::transaction`'s rollback is written the first way, so `abort` in a
-  transaction's body runs its rollback, at every level of nesting.
-
-- **A `transaction` inside a `transaction` gave answers that disagreed with
-  what was committed.** Both sent `BEGIN`, which PostgreSQL only warns about
-  inside a transaction, so the inner `COMMIT` committed the outer body's
-  writes and the inner `ROLLBACK` undid them. An outer body that failed after
-  an inner one succeeded was answered `Err` with every row committed; an
-  outer body that carried on after an inner one failed was answered `Ok`
-  with its own earlier writes gone. An inner `transaction` is a savepoint: its
-  `Ok` keeps its writes for the enclosing transaction to commit, and its
-  `Err`, a raise or a cancel undoes only its own writes, after which the
-  enclosing body can carry on and commit. A cancel in an inner body undoes
-  the inner savepoint and then the enclosing transaction, and so does
-  `Fiber::abort`. Two fibers sharing one `postgres` lease that run
-  `transaction` at the same time could have a row committed for a
-  `transaction` that answered `Err`; the driver refuses an operation for a
-  level its connection is not at, so one of them is answered `Err` and
-  nothing it wrote is kept. Fibers sharing a lease should not do this.
-
-- **A `postgres` transaction was answered `Ok` when nothing had been
-  committed.** A body that ran a statement which failed, ignored the
-  failure and returned `Ok` had its `COMMIT` answered by PostgreSQL with a
-  rollback and no error, and the driver reported that as a commit. The
-  caller is told `RolledBack`. Inside an inner `transaction`, PostgreSQL
-  refuses the savepoint's release instead; the inner body is told
-  `RolledBack`, its writes are undone, and the enclosing body carries on.
 
 - **A `postgres` query could return another caller's rows.** When a read
   failed partway through a reply, the caller was told `Disconnected`, but the
@@ -670,6 +498,40 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   back, which changes nothing if the commit ran and ends the transaction if
   it did not, and the rollback of a failed body runs as cleanup, so a cancel
   cannot cut it short.
+
+- **A `transaction` inside a `transaction` gave answers that disagreed with
+  what was committed.** Both sent `BEGIN`, which PostgreSQL only warns about
+  inside a transaction, so the inner `COMMIT` committed the outer body's
+  writes and the inner `ROLLBACK` undid them. An outer body that failed after
+  an inner one succeeded was answered `Err` with every row committed; an
+  outer body that carried on after an inner one failed was answered `Ok`
+  with its own earlier writes gone. An inner `transaction` is a savepoint: its
+  `Ok` keeps its writes for the enclosing transaction to commit, and its
+  `Err`, a raise or a cancel undoes only its own writes, after which the
+  enclosing body can carry on and commit. A cancel in an inner body undoes
+  the inner savepoint and then the enclosing transaction, and so does
+  `Fiber::abort`. Two fibers sharing one `postgres` lease that run
+  `transaction` at the same time could have a row committed for a
+  `transaction` that answered `Err`; the driver refuses an operation for a
+  level its connection is not at, so one of them is answered `Err` and
+  nothing it wrote is kept. Fibers sharing a lease should not do this.
+
+- **A `postgres` transaction was answered `Ok` when nothing had been
+  committed.** A body that ran a statement which failed, ignored the
+  failure and returned `Ok` had its `COMMIT` answered by PostgreSQL with a
+  rollback and no error, and the driver reported that as a commit. The
+  caller is told `RolledBack`. Inside an inner `transaction`, PostgreSQL
+  refuses the savepoint's release instead; the inner body is told
+  `RolledBack`, its writes are undone, and the enclosing body carries on.
+
+- **A case name written bare in a pattern matched every value.** A bare name
+  in a pattern binds, so `match c { Color::Blue => "cool", Red => "warm" }`
+  answered `warm` for `Color::Green`. Unless an arm after it was left
+  unreachable, the only thing said was that `Red` was never read, and that
+  went away once the arm read it. A `catch` of the same shape,
+  `load(n)! catch { LoadError::Broken(_) => 1, Missing => 2 }`, built a
+  binary that died with `Illegal instruction`. Both are refused at the name
+  (see Breaking).
 
 - **A constructor pattern was never checked against the type of the value it
   matched.** In 0.3.0, `match o { Option::Some(Result::Ok(v)) => .., _ => .. }`
@@ -706,22 +568,47 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   number or ending with a segmentation fault. Those operands are refused (see
   Breaking).
 
+- **A lambda handed to `scoped` inside a function with a `scope` of its own
+  released what it acquired at the outer scope's end** (see Breaking).
+  `scoped(fn () => work())` there released when the enclosing function's
+  caller's scope ended, after the line following `scoped`. It releases when
+  that `scoped` ends, as `scoped(work)` does, and
+  `Fiber::spawn(fn () => scoped(fn () => work()))` compiles there and
+  releases on the child.
+
+- **A fiber could capture a `mut` record through a type settled after the
+  spawn.** In
+  `let go = fn x => Fiber::spawn(fn () => { let _k = x; 3 }); go(h)`,
+  `x`'s type was not yet known at the spawn and passed the `Share` check;
+  `go(h)` then made it a record with a `mut` field, and the child and the
+  parent shared it with nothing said. The same held for `SharedFn::of`, and
+  for a `mut` binding captured while it still held `List::Nil`, and for a
+  `handler for` operation's captures: `fn x => handler for Log { record: fn
+  (..) => { let _k = x; () } }`, called with a `mut` record, gave a
+  shareable handler holding it, which a spawned fiber then logged through.
+  Every capture is asked again once the function's types are settled, and
+  refused with the message a capture known at the spawn, or at the
+  handler, gets. A capture whose type nothing ever settles has no value to
+  cross; `khora build` refuses the program because the closure's type was
+  never pinned down.
+
 - **On the scheduler backend, a finalizer that blocked kept the next fiber's
   finalizers from running.** A fiber whose cleanup was parked (a `receive`
   nobody answers, say) left its worker's release queue open, and every
-  release the next fiber on that worker made waited behind it for ever: its
+  release the next fiber on that worker made waited behind it forever: its
   own finalizers never ran, a canceled parent's child was never told to
   stop, and none of it was freed. The fiber still reported that it had
   finished. On the thread backend, a region released inside a finalizer
   waited for that finalizer to return.
 
-- **A `postgres` pool lost a connection when a fiber waiting in `with_db` was
-  canceled just as a connection reached it.** The connection was handed over,
-  and the fiber stopped before its return to the pool was arranged, so nothing
-  gave it back. Each such cancel shrank the pool by one for good; once it was
-  empty, every `with_db` and `Pool::close` waited for ever. A service whose
-  request timeouts cancel handlers meets this under load. The return is
-  arranged before the fiber can be stopped, on both fiber backends.
+- **A `Router` server died of a segmentation fault after about 130,000
+  connections.** `Router::listen`, `listen_quietly`, `listen_tls`,
+  `serve_forever` and `serve_secured` took each next connection by a call that
+  kept its stack frame, so a server on an 8 MB main stack crashed after
+  roughly 130,000 connections over its life, however few were open at once
+  and on either fiber backend, with nothing on stderr. For a busy service
+  whose clients do not keep connections alive, that is minutes. The accept
+  loops are loops: a server accepts any number of connections.
 
 - **One client that reset its connection could kill a whole Khora server.**
   After a peer's RST (a killed browser tab, a load balancer, `kill -9`), the
@@ -733,19 +620,134 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   affected: a program whose output is piped into `head` still stops on
   `SIGPIPE`, as Unix programs do.
 
+- **Long input ran the stack out in `std` and in the OpenTelemetry
+  exporter.** Each function below took its next item by calling itself, Khora
+  does not promise tail calls, and so each kept a stack frame per item for as
+  long as its input ran. On the default eight-megabyte stack, which is also a
+  fiber's:
+  - `std::fs`: `fold_chunks` and `fold_lines` ended the process on a file of
+    about 4 GB; `fold_lines` on a 64 KiB stretch of 40,000 short lines, and
+    there it also held memory in the square of the line count -- about 2 GB
+    for a chunk of blank lines; `read_dir` on a directory of 52,000 entries;
+    `file_name`, `parent`, `extension` and `stem` on an 88 KB path.
+  - `Env::arguments` with 112,000 arguments.
+  - `std::json`: `parse` on 130,000 bytes of whitespace or digits in a row,
+    an array of 52,000 elements or an object of 37,000 members; `encode` on an
+    array of 75,000 or an object of 47,000; `quote` on a string with 65,000
+    characters to escape. A router raised to `Router::holding(1048576)`
+    accepts any of these in one request.
+  - `std::net::http::matches`, and so every routed request, on a path of
+    87,000 `/` -- 87 KB, which such a router also accepts.
+  - The permission checks behind every file, environment and network
+    operation, on a path or host of 87,000-130,000 bytes.
+  - `String::chars` and `String::char_length` on 87,000 and 104,000
+    characters, and `Float::of_string` on 87,000 digits.
+  - A `Map` whose keys share one bucket, at about 2,600 such keys under a
+    256 KB stack: one lookup, insert or growth walked the bucket a frame per
+    entry. Integer keys that differ only in their top sixteen bits all land
+    in one bucket.
+  - `packages/otlp`'s exporter, after about 20,000 spans: the fiber that
+    batches them took each report by calling itself, so every traced service
+    crashed after minutes to hours.
+
+  All of them are loops, and each is tested with 20,000 items (10,000
+  arguments, and 100,000 spans) under a 256 KB stack, where the recursive
+  version died at between 1,100 and 3,900. Nesting is the one shape left
+  that takes a frame per level, and `parse` limits it; see the next entry.
+
+- **A JSON document of nothing but `[` ended the process.** `std::json::parse`
+  took a stack frame per level of nesting with no limit, so 15,375 `[` -- 31
+  KB -- ran an eight-megabyte stack out, and any service that parsed a
+  request body under a `Router::holding` of 32 KB or more could be stopped by
+  one request. `parse` refuses nesting deeper than 512 levels with a
+  `JsonError` at the bracket that opens level 513, whose `expected` is "at
+  most 512 levels of nesting"; a megabyte of `[` is that error. `Raw::of_json`,
+  `Raw::to_json`, `Raw::json_text` and derived `Decode` walk what `parse`
+  produced, so the limit covers them. `encode` and `Show for Json` have no
+  limit: a `Json` deeper than 512 is one the program built.
+
+- **A fiber could recurse less deeply than `main`, and how much less depended
+  on the backend.** A recursive walk of twenty thousand list cells finished in
+  `main` and on a thread fiber and crashed on `KHORA_FIBERS=scheduler`,
+  because the stacks were eight, two and one megabytes. A fiber's stack is
+  eight megabytes on both backends, the same as `main` with a default
+  `ulimit -s`; idle fibers cost the same memory as before, because a stack is
+  committed only as it is used. On Windows an executable's main thread has
+  eight megabytes too, where it had the linker's default of one.
+
+- **Running out of stack off `main`'s own path ended the process with no
+  message.** "khora: the stack ran out" was printed only for an overflow on
+  the main thread. An overflow on a fiber or in a `khora test` block ended
+  the process with a bare signal and empty stderr, on Linux and macOS, as
+  did one on Linux on the main thread while it started a fiber or ran
+  another program. The last is how a server whose main thread overflowed
+  died, at every stack size from 256 KB to 8 MB, on the default fiber
+  backend. Each of these prints the message. The runtime checks for 16 KB
+  of stack before each thread or process it starts and, when that is not
+  there, stops there with the message, so a program that had between 2 and
+  16 KB left at that point stops at it where it survived the start on 0.3.0.
+
+- **On the scheduler backend, a fiber reading or writing a file could wait
+  forever once the blocking pool's queue had filled.** File-system calls run
+  on a bounded pool of threads, and a fiber that finds the pool's queue full
+  waits for a slot. A waiting fiber woken by something else -- canceled, for
+  one -- kept its place in the line for slots, so the next slot that came free
+  went to it rather than to the fiber behind it, and that fiber was never
+  told. With nothing more queued, it waited with the pool idle. A fiber
+  gives up its place whenever it is woken, and waits again at the back if
+  there is still no room.
+
+- **On the scheduler backend, a fiber preempted while holding a `Shared`
+  cell's lock could hang the program on a busy pool.** Inside
+  `Shared::update`'s change function, a fiber that yielded at a loop, or
+  waited on a channel, kept the cell locked and went back onto its own
+  worker's queue. If the next fiber that worker ran read the same cell, the
+  worker's thread blocked on the lock, and while every other worker had work
+  of its own none of them looked at that queue, so the holder never ran again.
+  A busy worker takes work from a worker that has not started a fiber in
+  about thirty-one of its own turns, so the holder is found and the cell
+  released. That needs one worker whose thread is not blocked: with one
+  worker, or when every worker's thread blocks on the same cell, the program
+  still hangs.
+
+- **On the scheduler backend, a fiber waiting on a `Channel` could lose the
+  value it was woken for to a fiber that had not waited, over and over.** A
+  send woke a waiting receiver, but another fiber that ran first and called
+  `receive` took the value, and the woken one went back to waiting. A
+  connection pool's waiters are exactly that line. A value sent to a waiting
+  receiver is that receiver's; only values beyond those go to whoever asks
+  first. A receive or poll from a thread that is not a fiber still takes any
+  value, and the fiber it was meant for waits again. Measured on this
+  release's TechEmpower server before and after the fix, scheduler backend,
+  one CPU, 64 connections and 16 database connections: `/db`'s
+  99th-percentile latency went from 50-97 ms to 3.5-5 ms against a median of
+  3 ms, with the same throughput, and Fortunes' from 13-18 ms to 6-7 ms.
+
+- **A `postgres` pool lost a connection when a fiber waiting in `with_db` was
+  canceled just as a connection reached it.** The connection was handed over,
+  and the fiber stopped before its return to the pool was arranged, so nothing
+  gave it back. Each such cancel shrank the pool by one for good; once it was
+  empty, every `with_db` and `Pool::close` waited forever. A service whose
+  request timeouts cancel handlers meets this under load. A borrower stopped
+  by `cancel`, `abort` or `cancel_within` anywhere in `with_db` -- waiting,
+  holding the connection, mid-statement, inside a transaction's `ROLLBACK` --
+  gives its connection back, on both fiber backends, and a caller stopped
+  while it was being told the pool is down leaves the next caller to be told
+  the same.
+
 - **A socket write bigger than the socket's send buffer went out only in
   part.** That is about 2.6 MB on Linux over loopback. A write sent what
   fitted in the kernel's buffer and reported that count, and every write in
   `std::net::socket` took any count that was not negative as the whole
   message. A `postgres` statement that size hung: the driver sent the first
   part, the server waited for the rest, and the driver waited for the
-  answer, for ever or until a receive deadline ended it with
+  answer, forever or until a receive deadline ended it with
   `Disconnected`. An HTTP response that size, written to a client that read
   it slowly, could be cut short with nothing reported. Both fiber backends.
   `transmit` and `transmit_bytes` send every byte or report a failure.
 
-- **On the scheduler backend on Linux, a connection could go unanswered for
-  ever after a receive deadline expired.** A wait that ended at its deadline
+- **On the scheduler backend on Linux, a connection could go unanswered
+  forever after a receive deadline expired.** A wait that ended at its deadline
   left its socket recorded as watched. When that connection was closed and a
   new one was given the same descriptor number, the new connection's data
   was never reported, and the fiber waiting for it never woke. An expired
@@ -757,15 +759,27 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   transaction twice. The error is still `DbError::Disconnected`, and its text
   says it is not known whether the transaction committed.
 
-- **In a toolchain built from source, a socket read, write or accept on the
-  scheduler backend could fail although nothing was wrong.** This affected
-  programs linked against the development-profile runtime -- `khora build`
-  from a source checkout, and the test suites -- and not the released
-  toolchain, whose runtime is built differently and did not have it. A fiber
-  that waited for a socket and resumed on a different worker decided whether
-  to wait again by reading the error number of the worker it had left, so a
-  read could fail in the middle of a live stream. The error number is read
-  on the thread that made the call, in every build.
+- **`let p: Pt = {};` passed `khora check`.** An empty record literal where a
+  record with fields was expected (an annotation, a return type, an argument)
+  got no error from the checker, the editor or `khora check`. `khora build`
+  then refused a record held inline with "`x` was not given", and built one
+  held behind a pointer -- any record with a `String`, a `List` or more than a
+  few fields -- with nothing in the missing fields, so the program crashed on
+  the first read of one. The literal is refused at the `{}` with "this `Pt`
+  is missing `x`", once per missing field, by `check`, `build` and the
+  language server alike.
+
+- **A closure chosen by `if`, `match`, `loop` or `catch` crashed when it was
+  called**, with "the stack ran out", on both fiber backends. In 0.3.0,
+  `let k = if c { k1 } else { k2 }; k(x)` built and died at the call,
+  whatever `k1` and `k2` raised, and whether they were lambdas, named
+  functions or fields of one record. A function whose body ended in such a
+  choice (`fn pick(c: Bool) -> (Int) -> Int { if c { .. } else { .. } }`)
+  was refused as a body that "does not produce" its return type, or, with a
+  `raises` row, built and crashed when called. A choice called on the spot,
+  passed straight to a function or discarded stopped `khora build` itself
+  with an internal error. A closure chosen this way and never called was
+  never freed. The chosen closure is the value of the expression.
 
 - **A canceled `clock.sleep`, `accept`, `recv` or `send` ran the caller's
   next statements.** The call came back early, as it should, and the code
@@ -786,18 +800,6 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 - **A loop whose only way round was `continue` could not be canceled.** In a
   function with a `raises` row, a `while`, `loop` or `for` that went round
   only by `continue` never checked for a cancellation, and ran to its end.
-
-- **A closure chosen by `if`, `match`, `loop` or `catch` crashed when it was
-  called**, with "the stack ran out", on both fiber backends. In 0.3.0,
-  `let k = if c { k1 } else { k2 }; k(x)` built and died at the call,
-  whatever `k1` and `k2` raised, and whether they were lambdas, named
-  functions or fields of one record. A function whose body ended in such a
-  choice (`fn pick(c: Bool) -> (Int) -> Int { if c { .. } else { .. } }`)
-  was refused as a body that "does not produce" its return type, or, with a
-  `raises` row, built and crashed when called. A choice called on the spot,
-  passed straight to a function or discarded stopped `khora build` itself
-  with an internal error. A closure chosen this way and never called was
-  never freed. The chosen closure is the value of the expression.
 
 - **`Fiber::outcome` could end the process with "refcount is already zero"**
   (status 134) on a fiber that can fail whose answer is held inline and owns
@@ -826,6 +828,18 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   declared type built, and crashed** with "the stack ran out" at its first
   call. `khora build` refuses it, as it already refused the same body in a
   function with no row.
+
+- **An argument that left early leaked the arguments evaluated before it.**
+  In `List::reverse_onto(acc, load()!)`, when `load` raised, `acc` was never
+  released: every cell of it that nothing else held, on each call, on both
+  fiber backends. The same happened
+  with `return`, `break` or `continue` inside an argument, with a
+  cancellation while a later argument ran, and in every shape that evaluates
+  several operands before using them -- a method call's receiver, a
+  constructor, a pipe, a closure call, a record, list or tuple literal, an
+  interpolation, `+` on strings, a nested call. Every early exit releases the
+  operands evaluated so far. Evaluation order is unchanged: left to right,
+  each once.
 
 - **A fiber that failed leaked what its error held** when nobody joined it,
   when it was joined twice, when its error was one of several carrying
@@ -861,6 +875,16 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   read a field of a `Gx<Big>`, was refused** with "the type of this
   expression was never worked out". It compiles.
 
+- **In a toolchain built from source, a socket read, write or accept on the
+  scheduler backend could fail although nothing was wrong.** This affected
+  programs linked against the development-profile runtime -- `khora build`
+  from a source checkout, and the test suites -- and not the released
+  toolchain, whose runtime is built differently and did not have it. A fiber
+  that waited for a socket and resumed on a different worker decided whether
+  to wait again by reading the error number of the worker it had left, so a
+  read could fail in the middle of a live stream. The error number is read
+  on the thread that made the call, in every build.
+
 - **The editor's "Write it as one interpolated string" assist changed what
   a `$` and a `{` meeting across a join print.** On `"$" + "{a}"` it offered
   `"${a}"`, which prints the value of `a` where the original prints `${a}`.
@@ -869,83 +893,42 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 
 ### Changed
 
-- **`postgres`'s pool lends the connection itself.** `with_db` receives a
-  connection over a `Handoff`, checks it on the borrower's fiber (one the
-  server closed, one mid-reply and one inside a transaction are never lent),
-  and installs `postgres::db::direct(c)`, a `Db` that writes the socket and
-  reads the reply on the borrower's own fiber. A statement costs no channel
-  round trip and no fiber switch; each lease is one hand-off receive and one
-  send. The connection goes back when `with_db` returns, however it
-  returns, and every reply still arriving on it -- one per set of a
-  `query_each` batch whose borrower was canceled part-way -- is read by its
-  slot before it is lent again. `serve` and `over` keep the serving-fiber
-  `Db` for one connection shared by several fibers; `serve_lease` and
-  `Work::Check` are gone.
-- **Lockfiles write a `path` dependency outside the project relative to the
-  lockfile**, as `../../packages/postgres`, never as an absolute path. A
-  committed lockfile named the checkout it was last resolved in, and a
-  build in any other checkout rewrote it.
+- **On the TechEmpower tests, Khora serves more requests a second than Go
+  on JSON, as many on Fortunes, and fewer on the database tests.** Khora's requests
+  a second against Go's, on Khora's scheduler backend, measured on one laptop
+  in one run, the two servers given the same CPUs and the same database:
+  JSON 1.14 (40.6k against 35.5k), Fortunes 1.00 (10.9k against 11.0k), one
+  query 0.74 (13.7k against 18.5k), twenty queries 0.84 (1,614 against
+  1,928). The 99th-percentile latency is at or below Go's on every test but
+  one query, 6.7 ms against 6.4. **The database tests are a known limit of
+  this release:** a query costs more in the `postgres` driver and pool than
+  in Go's `pgx`, and that is the next performance work. The entries below
+  are what got it here.
 
-- **Performance: `postgres` prepares each statement once per connection**
-  and reads each reply's messages in the buffer they arrived in: a
-  statement's later runs send Bind, Execute and Sync with no Parse or
-  Describe, a refusal forgets the statement, and a connection keeps at most
-  512, closing the least recently used; `postgres::wire::Message` has
-  `buffer`, `from` and `width` in place of `payload`.
-
-- **A field read or write through a local or parameter counts nothing on the
-  record**, unless the value written assigns something or reads that binding;
-  the TechEmpower `/fortunes` handler runs 5.7% fewer user instructions per
-  request.
-
-- **A `match` arm that passes what it bound to a function hands over its own
-  reference**, in a body that can raise and in a loop as well as elsewhere:
-  in `match receive(h) { Option::Some(c) => consume(c), .. }` the value
-  arrives at `consume` held once, so `consume` can rebuild it in place, where
-  it arrived held twice and was copied.
-
-- **A `+` chain on strings builds one string.** `"<${a}|${b}>"` and
-  `a + b + c` allocate the result once and copy each piece once, where each
-  `+` allocated and copied the text so far; every piece stays alive until
-  the result is built.
-
-- **Performance: `with_data` given a lambda written in place builds the
-  closure in the caller's frame**, not on the heap: one allocation fewer per
-  call. `String::join` of 64 pieces makes 2 allocations, the buffer and the
-  string, and `String::escape_html` of text with nothing to escape makes none.
-
-- **Performance: a small object graph is freed directly.** Releasing the last
-  reference to an object frees its children by recursion up to 24 levels
-  deep, and queues whatever lies deeper, so a list of any length is still
-  freed in bounded stack. On the TechEmpower server this is 4.8% fewer user
-  instructions per `/json` request and 4.9% fewer per `/fortunes` request.
-
-- **Performance: `String::join` measures the pieces, allocates one buffer
-  and copies each piece into it once.** 68 allocations to join 64 pieces,
-  against 380 for the pairwise version; the answer is byte-identical.
-
-- **Performance: `std::net::http` reads a request's `Content-Length` in
-  place.** Finding where a request ends allocates nothing per header; the
-  length it finds is the same one `Request::header` reports.
-
-- **Performance: `postgres` builds a row's cells as a `List` directly**,
-  three objects fewer per row of two columns, with the same cells.
-
-- **Performance: the allocation and copying on a server's request path.**
-  The same answers with less work, measured on the TechEmpower server. A
-  new array's fill is written in bulk: nothing for a zero fill, one `memset`
-  for a byte, and doubling copies for anything wider, where it was one
-  `memcpy` call per element. `Int::to_string` builds one buffer. A
-  `String`'s order is one `memcmp`. `List::sort_by` sorts in an array and
-  rebuilds the list, so it is stable as before and recurses nowhere. HTTP
-  and `postgres` connections keep one read buffer each; `postgres` builds
-  messages in a byte array that doubles and copies in bulk, reads integer
-  columns from their digits, and builds a reply's column names once rather
-  than once per row. The scheduler's fiber tables hash an id with a
-  multiply, folding the high half into the low so ids a power of two apart
-  spread across the table. Every value these produce is unchanged,
-  including the text of the most negative `Int` and the order of strings
-  with bytes above `0x7f`.
+- **Objects one fiber owns are counted with plain instructions, not locked
+  ones.** In a program that started a fiber, 0.3.0 counted every reference
+  with a locked instruction: 6,635 per request in a JSON service. An object
+  is local to the fiber that made it until the runtime hands it to another
+  fiber -- what a spawn captures, what a fiber answers or raises, what a
+  channel or `Handoff` sends, what a `Shared` cell holds -- and marks it
+  shared before handing it over. A local object's count is an ordinary load
+  and store, and a shared object's stays locked. `KHORA_RC_LOCAL=0` counts
+  every reference locked instead, for comparison against the locked path or
+  to rule this out while chasing an unrelated bug; the switch is part of the
+  build cache key. It rests on no fiber reaching a record with a mutable
+  field that another fiber holds. The checker refuses the three routes known
+  to do that, each listed under Breaking: a capture whose type is settled
+  after a spawn or a handler, and a fiber's error. If one is missed, a write
+  to that field races the counts of what it holds, which can crash a release
+  build. A debug build records the fiber that made each object and stops
+  with `khora: object made on fiber N was counted on fiber M without being
+  shared -- a runtime entry published it without marking it` if another
+  fiber counts it unmarked. Measured on an idle 16-thread laptop, the JSON
+  service used 6% less CPU per request on the thread backend and 1.5% less
+  on the scheduler. A release build takes about 20% longer, and the binary
+  is about 1.6% larger. Bit 63 of an object's count word is the shared mark:
+  a C caller reading the count word directly has to mask it, and
+  `khora_refcount` answers the count alone.
 
 - **On the scheduler backend, a fiber woken by another fiber runs on the
   waking fiber's worker.** A channel send that releases a receiver, a pooled
@@ -956,15 +939,14 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   an idle worker as soon as it looks for work, and a busy one once that
   worker has not started a fiber in about thirty-one of the busy one's
   turns. A wake from a timer or a thread that is not a fiber wakes an idle
-  worker, and
-  so does a fiber's wake when its worker's queue already holds 512 fibers.
-  `KHORA_WAKE_LOCAL=0` sends every wake to the shared queue. Measured on the
-  TechEmpower server, four CPUs, 256 connections: server CPU per request
-  226 -> 190 us on the single-query test, 4,162 -> 2,850 on twenty queries
-  and 322 -> 245 on fortunes, with the work spread across the four workers
-  as evenly as with the switch off. Nothing a program computes is different.
-  `KHORA_SCHEDULER_REPORT` lines carry the counts of each path and each
-  worker's turns.
+  worker, and so does a fiber's wake when its worker's queue already holds
+  512 fibers. `KHORA_WAKE_LOCAL=0` sends every wake to the shared queue.
+  Measured on the TechEmpower server, four CPUs, 256 connections: server CPU
+  per request 226 -> 190 us on the single-query test, 4,162 -> 2,850 on
+  twenty queries and 322 -> 245 on Fortunes, with the work spread across the
+  four workers as evenly as with the switch off. Nothing a program computes
+  is different. `KHORA_SCHEDULER_REPORT` lines carry the counts of each path
+  and each worker's turns.
 
 - **On the scheduler backend, workers find ready sockets themselves.** A
   worker checks for ready sockets between fibers, every eighth fiber it runs
@@ -977,36 +959,8 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   Measured on the TechEmpower server, one CPU, 64 connections, per
   request: kernel instructions 42.3k -> 28.7k on `/json` and 116k -> 76k on
   `/fortunes`, context switches 0.99 -> 0.09 and 3.2 -> 0.4, user
-  instructions unchanged. The 99th-percentile latency of `/fortunes` on one
-  CPU rose from 17-35 ms to 59-73 ms in the same runs.
-  `KHORA_SCHEDULER_REPORT` lines carry `worker_polls`, `backstop_polls` and
-  `timer_passes`.
-
-- **An HTTP `Transport`'s `receive` is handed the same buffer on every read
-  of a connection.** The buffer is lent for the call: a custom transport
-  that keeps the array it was given (a recorder, a tee, a TLS shim that
-  decodes later) finds it holding the latest read, and has to copy the
-  bytes it keeps before returning. The transports `std::net::http` provides
-  copy at once and are unaffected.
-
-- **The header's count word carries a shared flag, and debug builds trap on an
-  unmarked crossing.** Bit 63 of an object's count word marks it as reachable
-  from more than one fiber. The runtime sets it on everything a spawn
-  captures, a fiber answers or raises, a channel carries, a `Shared` holds and
-  a `Region` defers, before handing it over. A debug build records the fiber
-  that made each object and stops with `khora: object made on fiber N was
-  counted on fiber M without being shared -- a runtime entry published it
-  without marking it` if another fiber counts it unmarked. Counting is atomic
-  for every object either way, and no program's behavior is otherwise
-  different. A C caller reading the count word directly has to mask it;
-  `khora_refcount` answers the count alone.
-
-- **`khora fmt` ends a list broken across lines with a comma**: a parameter
-  or argument list, a list, a record literal or type, and type arguments and
-  parameters, so adding an element changes one line. Never a tuple or a
-  parenthesized expression, where `(e,)` is a one-tuple, and never after a
-  comment or a row tail. A file `khora fmt --check` accepted before may need
-  formatting again; `std` and the `postgres` and `otlp` packages have been.
+  instructions unchanged. `KHORA_SCHEDULER_REPORT` lines carry
+  `worker_polls`, `backstop_polls` and `timer_passes`.
 
 - **A channel send wakes one blocked receiver, not every one**, on both
   backends. On the default thread backend every fiber is a thread, and a send
@@ -1022,16 +976,6 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   TechEmpower single-query test (64 connections, a pool of 16): server CPU
   per request 368 -> 229 us, 1.6× the requests per second.
 
-- **The `postgres` package copies each message once.** Building a query
-  pushed every byte three times and copied it into an array three times,
-  and reading a reply copied the rest of the buffer once per message, so
-  a reply of n rows cost n copies of its tail. Each message is framed
-  where it is written, and a reply is consumed by moving an offset.
-  Measured on Linux x86-64 against PostgreSQL 17, TechEmpower tests, 64
-  connections: single query 229 -> 187 us of server CPU per request on
-  the thread backend and 244 -> 196 on the scheduler; Fortunes 415 -> 350
-  (thread backend). The bytes sent are unchanged.
-
 - **A server on the scheduler backend answers about a quarter more requests
   at 256 connections.** Every socket wait, wake and poll scanned one list of
   every watched socket behind one lock, and workers queued on it while
@@ -1040,11 +984,73 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   71.6k -> 88.9k requests per second at 256 connections, +2% at 32. The
   thread backend does not use this code and is unchanged.
 
-- **The reference, the guide, the cookbook and `std` write a call as
-  `Type::f(x)`.** `x.f()` is accepted everywhere it was and is documented as
-  the second form, which the `idiomatic` group's `method-call` reports. This
-  repository's manifest switches the group on at `deny`, and `std`, the
-  examples, the packages, the benchmarks and the tests are written that way.
+- **Performance: the `postgres` driver prepares each statement once per
+  connection and copies each message once.** A statement's later runs send
+  Bind, Execute and Sync with no Parse or Describe, a refusal forgets the
+  statement, and a connection keeps at most 512, closing the least recently
+  used. Building a query pushed every byte three times and copied it into an
+  array three times, and reading a reply copied the rest of the buffer once
+  per message, so a reply of n rows cost n copies of its tail. Each message
+  is built in a byte array that doubles and copies in bulk, and read where
+  it arrived. A row's cells are built as a `List` directly, integer columns
+  are read from their digits, and a reply's column names are built once
+  rather than once per row. `postgres::wire::Message` has `buffer`, `from`
+  and `width` in place of `payload`. The bytes sent for a statement's first
+  run are unchanged. Measured on Linux x86-64 against PostgreSQL 17, 64
+  connections, the copying alone took the single-query test from 229 to
+  187 us of server CPU per request on the thread backend and from 244 to 196
+  on the scheduler, and Fortunes from 415 to 350 (thread backend); prepared
+  statements and reading messages in place took a further 12.7% off the
+  instructions per single-query request and 16.9% per twenty-query request.
+
+- **Performance: the allocation, copying and counting on a server's request
+  path.** The same answers with less work, measured on the TechEmpower
+  server:
+  - a new array's fill is written in bulk: nothing for a zero fill, one
+    `memset` for a byte, and doubling copies for anything wider, where it was
+    one `memcpy` call per element. HTTP connections keep one read buffer
+    each;
+  - `Int::to_string` builds one buffer; a `String`'s order is one `memcmp`;
+    `List::sort_by` sorts in an array and rebuilds the list, so it is stable
+    as before and recurses nowhere;
+  - `String::join` measures the pieces, allocates one buffer and copies each
+    piece into it once: 68 allocations to join 64 pieces, against 380;
+  - a `+` chain on strings, `"<${a}|${b}>"` or `a + b + c`, allocates the
+    result once and copies each piece once, where each `+` allocated and
+    copied the text so far; every piece stays alive until the result is
+    built;
+  - `with_data` given a lambda written in place builds the closure in the
+    caller's frame, not on the heap: one allocation fewer per call;
+  - a field read or write through a local or parameter counts nothing on the
+    record, unless the value written assigns something or reads that
+    binding;
+  - a `match` arm that passes what it bound to a function hands over its own
+    reference, in a body that can raise and in a loop as well as elsewhere:
+    in `match receive(h) { Option::Some(c) => consume(c), .. }` the value
+    arrives at `consume` held once, so `consume` can rebuild it in place,
+    where it arrived held twice and was copied;
+  - releasing the last reference to an object frees its children by
+    recursion up to 24 levels deep, and queues whatever lies deeper, so a
+    list of any length is still freed in bounded stack;
+  - `std::net::http` reads a request's `Content-Length` in place: finding
+    where a request ends allocates nothing per header;
+  - the scheduler's fiber tables hash an id with a multiply, folding the high
+    half into the low so ids a power of two apart spread across the table.
+
+  Every value these produce is unchanged, including the text of the most
+  negative `Int` and the order of strings with bytes above `0x7f`. The array
+  fill and copies alone took server CPU per request on the thread backend
+  from 47 to 34 us on JSON, 219 to 141 on one query, 3,634 to 2,497 on
+  twenty queries and 409 to 204 on Fortunes, measured on a loaded machine;
+  each of the others took between 3% and 13% off the instructions per
+  `/json` request.
+
+- **An HTTP `Transport`'s `receive` is handed the same buffer on every read
+  of a connection.** The buffer is lent for the call: a custom transport
+  that keeps the array it was given (a recorder, a tee, a TLS shim that
+  decodes later) finds it holding the latest read, and has to copy the
+  bytes it keeps before returning. The transports `std::net::http` provides
+  copy at once and are unaffected.
 
 - **String literals and constructors with no fields are never reference
   counted.** Every fiber that touched `""` or `Option::None` wrote the same
@@ -1091,53 +1097,22 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   Its note names the recursion that can still follow its input: the
   program's own functions, a derived `Eq`, `Ord` or `Show` on a deeply
   nested value, and `std::json::encode` on a `Json` the program nested very
-  deeply. It no longer names `std::json::parse`.
+  deeply. 0.3.0's note named `std::json::parse`, which limits its nesting
+  (see Fixed).
+
+- **`khora fmt` ends a list broken across lines with a comma**: a parameter
+  or argument list, a list, a record literal or type, and type arguments and
+  parameters, so adding an element changes one line. Never a tuple or a
+  parenthesized expression, where `(e,)` is a one-tuple, and never after a
+  comment or a row tail. A file `khora fmt --check` accepted before may need
+  formatting again; `std` and the `postgres` and `otlp` packages have been.
+
+- **Lockfiles write a `path` dependency outside the project relative to the
+  lockfile**, as `../../packages/postgres`, never as an absolute path. A
+  committed lockfile named the checkout it was last resolved in, and a
+  build in any other checkout rewrote it.
 
 ### Added
-
-- **`std::core::Handoff<A>`: a queue that gives values away.** A `Channel`
-  carries only `Share` values; a hand-off carries anything, including a
-  record with `mut` fields, an `Array` or a `Map`, because the sender keeps
-  nothing. `Handoff::bounded`, `send`, `receive` and `close`. A send checks
-  by reference count that nothing else holds a writable part of the value,
-  and stops the program naming the type if something does; `Share` parts may
-  be held elsewhere and are marked, as a channel marks what it sends. The
-  receiver counts what it received as its own, with plain counts. The check
-  walks every object in the value not already shared: about 2,400
-  instructions per send for a record of about a dozen objects.
-
-- **`String::escape_html`**: `&`, `<`, `>`, `"` and `'` replaced by `&amp;`,
-  `&lt;`, `&gt;`, `&quot;` and `&apos;`, for text going into an HTML element
-  or a quoted attribute. Plain runs are copied whole in one runtime scan, and
-  text with nothing to escape comes back without a copy.
-
-- **`KHORA_RC_LOCAL`: plain reference counts on objects one fiber owns.** On
-  by default; `KHORA_RC_LOCAL=0` counts every reference locked instead, for
-  comparison against the locked path or to rule this out while chasing an
-  unrelated bug. In a program that starts a fiber, an object is local to
-  the fiber that made it until the runtime hands it to another fiber and
-  marks it shared; a local object's count is an ordinary load and store
-  instead of a locked instruction, and a shared object's stays locked. The
-  switch is part of the build cache key. It rests on no fiber reaching a
-  record with a mutable field that another fiber holds. The checker refuses
-  the three routes known to do that, each listed under Fixed: a capture
-  whose type is settled after a spawn or a handler, and a fiber's error. If
-  one is missed, a write to that field races the counts of what it holds,
-  which can crash a release build. A debug build traps on it either way.
-
-- **`std::net::http` writes `Date` on every response** a `Connection`
-  sends, including the `Router`'s: the current second as an IMF-fixdate
-  (`Sun, 06 Nov 1994 08:49:37 GMT`), formatted once a second per
-  connection. A response that sets its own `Date` header, in any case, is
-  sent with that one alone. `Connection::timed(transport, most, clock)`
-  takes the time from a `Clock` of your choosing, so a test can fix it.
-  `Response::rendered` has no clock and writes no `Date`.
-
-- **`Array::copy_into(source, from, target, at, count)` and
-  `String::copy_into(from, target, at, count)`** copy bytes into an
-  `Array<U8>` in one move. The ranges are checked once, and one that does
-  not fit stops the program with the index-out-of-range trap; the source
-  and target may be the same array and may overlap.
 
 - **Labeled arguments.** At a call to a named function an argument may be
   written `name: value`, where `name` is the name the declaration gives the
@@ -1155,36 +1130,61 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   question. A public function's parameter names are part of its interface:
   renaming one breaks any caller that labeled it, and
   `reference/compatibility` lists it as breaking. The editor offers the
-  label for the parameter at the cursor, signature help shows the names
-  a call may use, `extern fn` included, and renaming a parameter renames
-  the labels written against it in every file. A rename to something that is
-  not a usable name, or onto a name already bound in the same function, is
-  refused and changes no file.
-
-- **`unlabeled-flag`**, a lint in the `idiomatic` group and off by default:
-  a `true` or `false` passed without a label to a parameter declared `Bool`
-  that is not the first. `reply(c, "ok", false)` is reported, and the message
-  names `keep_alive: false` as the edit. A parameter whose type is a type variable
-  (`fold(true, step)`) and a first parameter (`assert_that(false, "..")`)
-  are not reported.
+  label for the parameter at the cursor, and signature help shows the names
+  a call may use, `extern fn` included (see Editor for rename).
 
 - **`if`, `for` and spread inside list literals.**
   `[header, if debug => trace, for r in rows => render(r), ..footer]`: `if c =>
   x` is `x` when `c` holds and nothing otherwise, with an optional `else`;
   `for p in xs => e` is one `e` per item; `..xs` is every element of `xs`. The
   forms nest and are evaluated left to right. `=>` is what marks an element
-  form, so `[if c { x }]` is a one-element list holding an `if` expression. A `for` element
-  needs `Step` and `Iterator` in scope, is a cancellation point, and refuses
-  `break` and `continue`.
+  form, so `[if c { x }]` is a one-element list holding an `if` expression. A
+  `for` element needs `Step` and `Iterator` in scope, is a cancellation
+  point, and refuses `break` and `continue`.
+
+- **`std::core::Handoff<A>`: a queue that gives values away.** A `Channel`
+  carries only `Share` values; a hand-off carries anything, including a
+  record with `mut` fields, an `Array` or a `Map`, because the sender keeps
+  nothing. `Handoff::bounded`, `send`, `receive` and `close`. A send checks
+  by reference count that nothing else holds a writable part of the value,
+  and stops the program naming the type if something does; `Share` parts may
+  be held elsewhere and are marked, as a channel marks what it sends. The
+  receiver counts what it received as its own, with plain counts. The check
+  walks every object in the value not already shared: about 2,400
+  instructions per send for a record of about a dozen objects.
 
 - **`Fiber::abort(handle)`** stops a fiber at its next cancellation point
   *including inside its cleanup*, and the children of any nursery it holds.
   Cleanup otherwise runs to completion, and canceling again does not change
-  that.
+  that. A finalizer written as a lambda directly in `Region::defer`'s
+  argument runs until its first cancellation point; one bound to a `let`
+  first, registered through `Scope::defer` or `acquire`, or whose first step
+  calls a function that itself calls a function value, can be skipped
+  whole. `std::db::transaction`'s rollback and the `postgres` pool's
+  give-back are written so that `abort` cannot skip them.
 
 - **`Fiber::cancel_within(handle, millis)`** cancels at once and aborts the
   fiber if it is still running after `millis` milliseconds. There is no
   built-in deadline: the caller always chooses the number.
+
+- **`std::net::http` writes `Date` on every response** a `Connection`
+  sends, including the `Router`'s: the current second as an IMF-fixdate
+  (`Sun, 06 Nov 1994 08:49:37 GMT`), formatted once a second per
+  connection. A response that sets its own `Date` header, in any case, is
+  sent with that one alone. `Connection::timed(transport, most, clock)`
+  takes the time from a `Clock` of your choosing, so a test can fix it.
+  `Response::rendered` has no clock and writes no `Date`.
+
+- **`String::escape_html`**: `&`, `<`, `>`, `"` and `'` replaced by `&amp;`,
+  `&lt;`, `&gt;`, `&quot;` and `&apos;`, for text going into an HTML element
+  or a quoted attribute. Plain runs are copied whole in one runtime scan, and
+  text with nothing to escape comes back without a copy.
+
+- **`Array::copy_into(source, from, target, at, count)` and
+  `String::copy_into(from, target, at, count)`** copy bytes into an
+  `Array<U8>` in one move. The ranges are checked once, and one that does
+  not fit stops the program with the index-out-of-range trap; the source
+  and target may be the same array and may overlap.
 
 - **Lint groups.** A group is a TOML file naming built-in lints and the
   level each runs at when the group is on. `[lints.<group>]` in `khora.toml`
@@ -1192,23 +1192,34 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   own `[lints]` entry beats the group, whatever order the tables are in. One
   group's `level` also decides a lint that another enabled group holds, and
   two enabled groups that disagree at the same step are an error naming
-  both. The toolchain ships `idiomatic` (below). A project declares its own groups by path under `[lint-groups]`,
-  and a workspace member with `lints.workspace = true` takes the root's
-  `[workspace.lint-groups]` with its lints. A group file that is missing, does
-  not parse or names something that is not a lint stops `check` and `build`
-  with the file and the key. The editor applies groups at the same levels.
-  `// @klint allow <group>` is reported by `unknown-allow` as naming a group,
-  with the group's lints listed.
+  both. The toolchain ships `idiomatic` (below). A project declares its own
+  groups by path under `[lint-groups]`, and a workspace member with
+  `lints.workspace = true` takes the root's `[workspace.lint-groups]` with
+  its lints. A group file that is missing, does not parse or names something
+  that is not a lint stops `check` and `build` with the file and the key.
+  The editor applies groups at the same levels. `// @klint allow <group>` is
+  reported by `unknown-allow` as naming a group, with the group's lints
+  listed.
 
-- **Six lints in the `idiomatic` group**, each flagging correct code written
-  in a second form where Khora has a first one: `concatenated-string`
-  (`"a " + x` for `"a ${x}"`), `needless-return` (a last `return e;` for the
-  tail `e`), `subtraction-from-zero` (`0 - 1` for `-1`, `Int` literals only),
-  `parenthesized-parameter` (`fn (x) =>` for `fn x =>`), `bool-comparison`
-  (`b == true` and `b == false` for `b` and `!b`) and `module-path`
-  (`module main;` in a package for `module <package>::main;`). Each is
-  `allow` unless `[lints.idiomatic]` is in the manifest, and `warn` in the
-  group, which also holds `unlabeled-flag` (above).
+- **Eight lints in the `idiomatic` group**, each flagging correct code
+  written in a second form where Khora has a first one. Each is `allow`
+  unless `[lints.idiomatic]` is in the manifest, and `warn` in the group:
+  - `concatenated-string` (`"a " + x` for `"a ${x}"`), `needless-return` (a
+    last `return e;` for the tail `e`), `subtraction-from-zero` (`0 - 1` for
+    `-1`, `Int` literals only), `parenthesized-parameter` (`fn (x) =>` for
+    `fn x =>`), `bool-comparison` (`b == true` and `b == false` for `b` and
+    `!b`) and `module-path` (`module main;` in a package for
+    `module <package>::main;`);
+  - `method-call`: `x.m(a)`, where `T::m(x, a)` says it. `T` is the type
+    that declares `m`, or the trait for a trait's method, including one
+    reached through a bound on a type parameter. `x.m(a)` still compiles; a
+    project with the group at `deny` refuses it;
+  - `unlabeled-flag`: a `true` or `false` passed without a label to a
+    parameter declared `Bool` that is not the first. `reply(c, "ok", false)`
+    is reported, and the message names `keep_alive: false` as the edit. A
+    parameter whose type is a type variable (`fold(true, step)`) and a
+    first parameter (`assert_that(false, "..")`) are not reported. It has
+    no automatic fix.
 
 - **`khora check --fix`** rewrites what those lints report, in place, and
   checks again. It fixes only lints at `warn` or `deny` under the manifest,
@@ -1221,24 +1232,15 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   fixed package is checked before anything is written, and a fix that would
   leave it failing to parse or type-check is not made and is printed as
   `not fixed`. A fix is not made where it would remove the only thing that
-  gives a local with no written type, or a call's result, its type. Nothing is fixed while a file
-  in the package does not parse. Each pass is written whole or not at all,
-  through temporary files renamed into place.
-
-- **"Apply idiomatic fixes" in the editor**, a `source.fixAll.khora` code
-  action, makes the same fixes. Editors run it on save when configured to run
-  `source.fixAll`; it is not offered in the lightbulb menu.
-
-- **`method-call`**, a lint in the `idiomatic` group: `x.m(a)`, where
-  `T::m(x, a)` says it. `T` is the type that declares `m`, or the trait for a
-  trait's method, including one reached through a bound on a type parameter.
-  `khora check --fix` rewrites it with the receiver as the first argument,
-  labels kept, a piped value kept in its slot, and an `import` of `T` added
-  where the file lacks one. The fix is withheld, and the finding kept, where
-  `T::m` would reach something else (a type parameter or another type of that
-  name, a constructor named `m`), where the import would clash with a name the
-  file has, and where the receiver's type is not settled. `x.m(a)` still
-  compiles; a project with the group at `deny` refuses it.
+  gives a local with no written type, or a call's result, its type. Nothing
+  is fixed while a file in the package does not parse. Each pass is written
+  whole or not at all, through temporary files renamed into place.
+  `method-call` is rewritten with the receiver as the first argument, labels
+  kept, a piped value kept in its slot, and an `import` of `T` added where
+  the file lacks one. That fix is withheld, and the finding kept, where
+  `T::m` would reach something else (a type parameter or another type of
+  that name, a constructor named `m`), where the import would clash with a
+  name the file has, and where the receiver's type is not settled.
 
 ### Documentation
 
@@ -1250,6 +1252,11 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   that only waits needs no row, `abort` and `cancel_within` are how a stuck
   cleanup is ended, and a child's failure cancels the siblings still running
   when the nursery sees it, which depends on the order they were adopted in.
+
+- The reference, the guide, the cookbook and `std`'s documentation write a
+  call as `Type::f(x)`. `x.f()` is accepted everywhere it was and is
+  documented as the second form, which the `idiomatic` group's `method-call`
+  reports.
 
 - The lints and manifest reference pages describe lint groups. The grammar,
   declarations and modules-and-packages pages describe imports without
@@ -1278,6 +1285,25 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   when no `khora` is found, opens the installation page on khoralang.com;
   0.3.0 opened a domain that does not resolve.
 
+- **Hovering a binding's name shows the binding's type.** On the name a
+  `let`, a pattern, a `for` loop, a lambda parameter or a `match` arm binds,
+  hover showed the type of the block, lambda or loop around it, highlighted
+  over that whole construct: `let s = "hi"` inside a function returning
+  `Int` said `Int`. It says `String`, over `s`.
+
+- **A rename that would change the program is refused.** Renaming a local or
+  a parameter to something that is not a usable name (`_`, `self`, a
+  reserved word, anything that is not an identifier), or onto a name already
+  bound in the same function, is refused and changes no file. On 0.3.0 the
+  rename was made, and renaming one local onto another's name could build a
+  program that computed a different answer. Renaming a parameter renames the
+  labels written against it in every file.
+
+- **"Apply idiomatic fixes" in the editor**, a `source.fixAll.khora` code
+  action, makes the same fixes as `khora check --fix`. Editors run it on save
+  when configured to run `source.fixAll`; it is not offered in the lightbulb
+  menu.
+
 - **The extension's page in VS Code and on the Marketplace** says how to get
   started, and lists every feature, both settings with their defaults, the
   commands, and what to do when the server does not start.
@@ -1287,22 +1313,16 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   `raises E with {..}`, a shape that is a syntax error in this release and
   that 0.3.0 accepted without reading all of it.
 
-- **Publishing the extension checks that the packaged `.vsix` actually
-  starts a language server before anything goes out.** The check spawns
-  `khora lsp` with the arguments the extension passes and sends it an
-  `initialize` request, so a release that would again ship a server that
-  cannot start fails before publishing rather than after.
+- **Publishing the extension checks that the packaged `.vsix` starts a
+  language server before anything goes out.** The check spawns `khora lsp`
+  with the arguments the extension passes and sends it an `initialize`
+  request, so a release that would again ship a server that cannot start
+  fails before publishing rather than after.
 
 - **The packaged extension carries a license file**, and is one bundled
   file instead of several hundred unbundled ones. Neither changed what the
   extension does; both were warnings from the packaging tool with nothing
   to show for them in the installed extension.
-
-- **Hovering a binding's name shows the binding's type.** On the name a
-  `let`, a pattern, a `for` loop, a lambda parameter or a `match` arm binds,
-  hover showed the type of the block, lambda or loop around it, highlighted
-  over that whole construct: `let s = "hi"` inside a function returning
-  `Int` said `Int`. It says `String`, over `s`.
 
 ## 0.3.0 — 2026-09-23
 
