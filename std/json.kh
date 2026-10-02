@@ -289,8 +289,8 @@ pub fn encode(value: Json) -> String {
     // keeps every digit, which is the whole of #142.
     Json::Number(literal) => literal,
     Json::Text(text) => quote(text),
-    Json::Array(items) => "[${encoded_items(items, "")}]",
-    Json::Object(fields) => "{${encoded_fields(sorted_fields(fields), "")}}",
+    Json::Array(items) => "[${encoded_items(items)}]",
+    Json::Object(fields) => "{${encoded_fields(sorted_fields(fields))}}",
   }
 }
 
@@ -298,21 +298,19 @@ impl Show for Json {
   fn show(self) -> String { encode(self) }
 }
 
-/// The separator goes *before* each element and starts empty, which is how a
-/// comma lands between every pair and after none of them without a count.
-fn encoded_items(items: List<Json>, separator: String) -> String {
-  match items {
-    List::Nil => "",
-    List::Cons(head, tail) => separator + encode(head) + encoded_items(tail, ","),
-  }
+/// Every element, with a comma between each pair.
+///
+/// **`map` and `join`, which are loops.** This used to recurse once per
+/// element, so encoding an array of 75,000 ran an 8 MB stack out -- and the
+/// array is very often one somebody else sent. Nesting still recurses through
+/// `encode`, a frame per level: see `items_at`.
+fn encoded_items(items: List<Json>) -> String {
+  String::join(List::map(items, fn item => encode(item)), ",")
 }
 
-fn encoded_fields(fields: List<Field>, separator: String) -> String {
-  match fields {
-    List::Nil => "",
-    List::Cons(head, tail) =>
-      "${separator}${quote(head.name)}:${encode(head.value)}${encoded_fields(tail, ",")}",
-  }
+/// [`encoded_items`] for an object's members, and a loop for the same reason.
+fn encoded_fields(fields: List<Field>) -> String {
+  String::join(List::map(fields, fn field => "${quote(field.name)}:${encode(field.value)}"), ",")
 }
 
 /// A string as JSON text: quoted, with every byte JSON requires escaped.
@@ -330,15 +328,30 @@ pub fn quote(text: String) -> String {
 /// Everything between them is copied in one `slice` when the cursor reaches a
 /// byte that has to be written differently, so ordinary text costs one copy per
 /// escape rather than one per character.
+///
+/// **A loop, gathering the pieces and joining them once.** As a recursion it
+/// took a frame per escape, and a string of 65,000 newlines -- a log line, a
+/// pasted document -- ran an 8 MB stack out on the way to being written.
 fn escaped(text: String, run: Int, at: Int) -> String {
-  if at >= String::byte_length(text) {
-    String::slice(text, run, at)
-  } else {
+  let length = String::byte_length(text);
+  let mut pieces = List::Nil;
+  let mut run = run;
+  let mut at = at;
+  while at < length {
     match escape_for(U8::to_int(String::byte(text, at))) {
-      Option::None => escaped(text, run, at + 1),
-      Option::Some(escape) =>
-        String::slice(text, run, at) + escape + escaped(text, at + 1, at + 1),
-    }
+      Option::None => (),
+      Option::Some(escape) => {
+        pieces = List::Cons(escape, List::Cons(String::slice(text, run, at), pieces));
+        run = at + 1;
+      },
+    };
+    at = at + 1;
+  };
+  match pieces {
+    // Nothing needed escaping: the text as it is, with no join to pay for.
+    List::Nil => String::slice(text, run, at),
+    List::Cons(_last, _earlier) =>
+      String::join(List::reverse(List::Cons(String::slice(text, run, at), pieces)), ""),
   }
 }
 
@@ -458,19 +471,23 @@ fn word_at(text: String, at: Int, word: String, value: Json) -> Result<Value, Js
   }
 }
 
+/// Past any whitespace at `at`.
+///
+/// A loop: as a recursion, a body of 130,000 spaces ran an 8 MB stack out,
+/// which `Router::holding` makes a request any client may send.
 fn skip_space(text: String, at: Int) -> Int {
-  if at >= String::byte_length(text) {
-    at
-  } else {
-    let byte = U8::to_int(String::byte(text, at));
-    // The four JSON calls whitespace, and no others: a vertical tab between
-    // two values is a malformed document rather than a formatting choice.
-    if byte == 32 || byte == 9 || byte == 10 || byte == 13 {
-      skip_space(text, at + 1)
-    } else {
-      at
-    }
-  }
+  let length = String::byte_length(text);
+  let mut at = at;
+  // The four JSON calls whitespace, and no others: a vertical tab between
+  // two values is a malformed document rather than a formatting choice.
+  while at < length && is_space(U8::to_int(String::byte(text, at))) {
+    at = at + 1;
+  };
+  at
+}
+
+fn is_space(byte: Int) -> Bool {
+  byte == 32 || byte == 9 || byte == 10 || byte == 13
 }
 
 // --- strings ---------------------------------------------------------------
@@ -738,14 +755,18 @@ fn number_at(text: String, at: Int) -> Result<Value, JsonError> {
 }
 
 /// Where the run of digits starting at `at` ends. `at` itself if there is none.
+///
+/// A loop, for the reason `skip_space` is one.
 fn digits_end(text: String, at: Int) -> Int {
-  if at >= String::byte_length(text) {
-    at
-  } else {
-    let byte = U8::to_int(String::byte(text, at));
-    if byte >= 48 && byte <= 57 { digits_end(text, at + 1) } else { at }
-  }
+  let length = String::byte_length(text);
+  let mut at = at;
+  while at < length && is_digit(U8::to_int(String::byte(text, at))) {
+    at = at + 1;
+  };
+  at
 }
+
+fn is_digit(byte: Int) -> Bool { byte >= 48 && byte <= 57 }
 
 /// Past `.` and the digits after it, or `at` when there is no point.
 ///
@@ -825,25 +846,46 @@ fn array_at(text: String, at: Int) -> Result<Value, JsonError> {
   }
 }
 
+/// Every element up to the closing bracket, newest first.
+///
+/// **A loop over the elements; only nesting recurses.** As a recursion it was
+/// a frame per element, so `[1,1,...]` with 52,000 of them ran an 8 MB stack
+/// out -- a 100 KB body, under the megabyte `Router::holding` is shown
+/// admitting. The recursion left is `value_at` for an element that is itself
+/// an array or an object: a frame per level of nesting rather than per
+/// element, and **not a limit anything enforces**, so a document of nothing
+/// but `[` still runs the stack out.
 fn items_at(text: String, at: Int, acc: List<Json>) -> Result<Items, JsonError> {
-  match value_at(text, at) {
-    Result::Err(why) => Result::Err(why),
-    Result::Ok(found) => {
-      let with_it = List::Cons(found.json, acc);
-      let next = skip_space(text, found.at);
-      if next >= String::byte_length(text) {
-        Result::Err({ at: next, expected: "a comma or a closing bracket" })
-      } else {
-        let byte = U8::to_int(String::byte(text, next));
+  let length = String::byte_length(text);
+  let mut at = at;
+  let mut acc = acc;
+  let mut answer: Option<Result<Items, JsonError>> = Option::None;
+  loop {
+    match value_at(text, at) {
+      Result::Err(why) => {
+        answer = Option::Some(Result::Err(why));
+        break
+      },
+      Result::Ok(found) => {
+        acc = List::Cons(found.json, acc);
+        let next = skip_space(text, found.at);
+        let byte = if next < length { U8::to_int(String::byte(text, next)) } else { -1 };
         if byte == 44 {
-          items_at(text, skip_space(text, next + 1), with_it)
+          at = skip_space(text, next + 1);
         } else if byte == 93 {
-          Result::Ok({ items: with_it, at: next + 1 })
+          answer = Option::Some(Result::Ok({ items: acc, at: next + 1 }));
+          break
         } else {
-          Result::Err({ at: next, expected: "a comma or a closing bracket" })
+          answer = Option::Some(Result::Err({ at: next, expected: "a comma or a closing bracket" }));
+          break
         }
-      }
-    },
+      },
+    }
+  };
+  match answer {
+    Option::Some(found) => found,
+    // Unreachable: every path out of the loop sets it.
+    Option::None => Result::Err({ at: at, expected: "a comma or a closing bracket" }),
   }
 }
 
@@ -864,34 +906,51 @@ fn object_at(text: String, at: Int) -> Result<Value, JsonError> {
 /// happen, and every parser has to choose; last-wins is what a `Map` does for
 /// free and what the majority of implementations do, so a document that
 /// disagrees disagrees with them too.
+///
+/// A loop over the members, for the reason [`items_at`] is one: as a
+/// recursion, an object of 37,000 members ran an 8 MB stack out.
 fn members_at(text: String, at: Int, acc: Map<String, Json>) -> Result<Fields, JsonError> {
-  match string_at(text, at) {
-    Result::Err(why) => Result::Err(why),
-    Result::Ok(name) => {
-      let colon = skip_space(text, name.at);
-      if colon >= String::byte_length(text) || U8::to_int(String::byte(text, colon)) != 58 {
-        Result::Err({ at: colon, expected: "a colon" })
-      } else {
+  let length = String::byte_length(text);
+  let mut at = at;
+  let mut answer: Option<Result<Fields, JsonError>> = Option::None;
+  loop {
+    match string_at(text, at) {
+      Result::Err(why) => {
+        answer = Option::Some(Result::Err(why));
+        break
+      },
+      Result::Ok(name) => {
+        let colon = skip_space(text, name.at);
+        if colon >= length || U8::to_int(String::byte(text, colon)) != 58 {
+          answer = Option::Some(Result::Err({ at: colon, expected: "a colon" }));
+          break
+        };
         match value_at(text, skip_space(text, colon + 1)) {
-          Result::Err(why) => Result::Err(why),
+          Result::Err(why) => {
+            answer = Option::Some(Result::Err(why));
+            break
+          },
           Result::Ok(found) => {
             Map::insert(acc, name.text, found.json);
             let next = skip_space(text, found.at);
-            if next >= String::byte_length(text) {
-              Result::Err({ at: next, expected: "a comma or a closing brace" })
+            let byte = if next < length { U8::to_int(String::byte(text, next)) } else { -1 };
+            if byte == 44 {
+              at = skip_space(text, next + 1);
+            } else if byte == 125 {
+              answer = Option::Some(Result::Ok({ fields: acc, at: next + 1 }));
+              break
             } else {
-              let byte = U8::to_int(String::byte(text, next));
-              if byte == 44 {
-                members_at(text, skip_space(text, next + 1), acc)
-              } else if byte == 125 {
-                Result::Ok({ fields: acc, at: next + 1 })
-              } else {
-                Result::Err({ at: next, expected: "a comma or a closing brace" })
-              }
+              answer = Option::Some(Result::Err({ at: next, expected: "a comma or a closing brace" }));
+              break
             }
           },
         }
-      }
-    },
+      },
+    }
+  };
+  match answer {
+    Option::Some(found) => found,
+    // Unreachable: every path out of the loop sets it.
+    Option::None => Result::Err({ at: at, expected: "a comma or a closing brace" }),
   }
 }

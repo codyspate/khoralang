@@ -137,10 +137,15 @@ fn read_variable(name: String) -> Option<String> {
 ///
 /// Backwards because `List::Cons` puts a value at the front, so counting down
 /// builds the list in the order it was given without reversing it afterwards.
+/// A loop, because the count is whoever invoked the program's: as a recursion,
+/// 112,000 arguments -- one shell glob over a large directory -- ran an 8 MB
+/// stack out.
 fn collect_arguments(index: Int, gathered: List<String>) -> List<String> {
-  if index < 0 {
-    gathered
-  } else {
-    collect_arguments(index - 1, List::Cons(text_at(khora_arg(index)), gathered))
-  }
+  let mut index = index;
+  let mut gathered = gathered;
+  while index >= 0 {
+    gathered = List::Cons(text_at(khora_arg(index)), gathered);
+    index = index - 1;
+  };
+  gathered
 }

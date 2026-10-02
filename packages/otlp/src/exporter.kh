@@ -203,6 +203,12 @@ impl Exporter {
   }
 
   /// The fiber that owns the batch: take reports, send when full or told to.
+  ///
+  /// **A loop, because the reports never stop coming.** It took the next
+  /// report by calling itself, a frame per report on an 8 MB fiber stack, and
+  /// a span is two reports: the exporter's fiber died after about 20,000
+  /// spans, which is minutes for a traced service, and took the process with
+  /// it.
   fn draining(
     service: String,
     endpoint: String,
@@ -212,47 +218,56 @@ impl Exporter {
   ) -> ()
     with { client: HttpClient }
   {
-    match Channel::receive(reports) {
-      // The channel closed. Whatever is held goes, and then this ends.
-      Option::None => Exporter::post(service, endpoint, held),
-      Option::Some(Report::Stop) => Exporter::post(service, endpoint, held),
-      Option::Some(Report::Flush) => {
-        Exporter::post(service, endpoint, held);
-        Exporter::draining(service, endpoint, reports, List::Nil, begun)
-      },
-      Option::Some(Report::Began(id, at)) => {
-        // `Map` is mutable and this fiber owns it, so the same one goes round.
-        Map::insert(begun, id, at);
-        Exporter::draining(service, endpoint, reports, held, begun)
-      },
-      Option::Some(Report::Ended(finished)) => {
-        let id = finished.span.context.span;
-        // A span whose `Began` was dropped by a full queue keeps the zero it
-        // arrived with, which renders as a zero-length span rather than as a
-        // span in 1970.
-        let started = match Map::get(begun, id) {
-          Option::Some(at) => at * 1000000,
-          Option::None => finished.ended,
-        };
-        let whole: Finished = {
-          span: finished.span,
-          status: finished.status,
-          started: started,
-          ended: finished.ended,
-          attributes: finished.attributes,
-        };
-        let now = List::push(held, whole);
-        // Removed as soon as it is used, so a long-lived process does not
-        // accumulate one entry per span it ever started.
-        Map::remove(begun, id);
-        if List::length(now) >= batch_size() {
-          Exporter::post(service, endpoint, now);
-          Exporter::draining(service, endpoint, reports, List::Nil, begun)
-        } else {
-          Exporter::draining(service, endpoint, reports, now, begun)
-        }
-      },
-    }
+    let mut held = held;
+    let mut going = true;
+    while going {
+      match Channel::receive(reports) {
+        // The channel closed. Whatever is held goes, and then this ends.
+        Option::None => {
+          Exporter::post(service, endpoint, held);
+          going = false;
+        },
+        Option::Some(Report::Stop) => {
+          Exporter::post(service, endpoint, held);
+          going = false;
+        },
+        Option::Some(Report::Flush) => {
+          Exporter::post(service, endpoint, held);
+          held = List::Nil;
+        },
+        Option::Some(Report::Began(id, at)) => {
+          // `Map` is mutable and this fiber owns it, so the same one goes round.
+          Map::insert(begun, id, at);
+        },
+        Option::Some(Report::Ended(finished)) => {
+          let id = finished.span.context.span;
+          // A span whose `Began` was dropped by a full queue keeps the zero it
+          // arrived with, which renders as a zero-length span rather than as a
+          // span in 1970.
+          let started = match Map::get(begun, id) {
+            Option::Some(at) => at * 1000000,
+            Option::None => finished.ended,
+          };
+          let whole: Finished = {
+            span: finished.span,
+            status: finished.status,
+            started: started,
+            ended: finished.ended,
+            attributes: finished.attributes,
+          };
+          let now = List::push(held, whole);
+          // Removed as soon as it is used, so a long-lived process does not
+          // accumulate one entry per span it ever started.
+          Map::remove(begun, id);
+          if List::length(now) >= batch_size() {
+            Exporter::post(service, endpoint, now);
+            held = List::Nil;
+          } else {
+            held = now;
+          }
+        },
+      }
+    };
   }
 
   /// One batch, posted. A failure is dropped, deliberately.

@@ -70,6 +70,7 @@ mod json;
 mod labeled_args;
 mod list_elements;
 mod load;
+mod long_inputs;
 mod logging;
 mod main_overflow;
 mod matching;

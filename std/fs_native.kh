@@ -1,6 +1,6 @@
 module std::fs;
 
-import std::core::{Array, Eq, List, Option, Ptr, Region, Scope, Show, Split, acquire};
+import std::core::{Array, Eq, List, Option, Ptr, Region, Scope, Show, acquire};
 import std::permissions::{granted};
 import std::permissions::grants::{fs_read, fs_write};
 
@@ -350,17 +350,29 @@ pub fn fold_chunks<A>(path: String, start: A, step: (A, Array<U8>) -> A) -> A
 }
 
 /// The loop behind [`fold_chunks`], carrying the offset.
+///
+/// **A loop, because a frame per chunk is a limit on the file's size.** As a
+/// recursion it held one frame per 64 KiB, so a file of about 4 GB ran an
+/// 8 MB stack out, and a fold on a fiber or under a smaller stack died sooner:
+/// a streaming read that failed on the files streaming is for.
 fn fold_from<A>(path: String, offset: Int, acc: A, step: (A, Array<U8>) -> A) -> A
   with { reads: FsRead }
   raises IoError
 {
-  let chunk = reads.read_at(path, offset, chunk_size())!;
-  let got = Array::length(chunk);
-  if got == 0 {
-    acc
-  } else {
-    fold_from(path, offset + got, step(acc, chunk), step)!
-  }
+  let mut offset = offset;
+  let mut acc = acc;
+  let mut going = true;
+  while going {
+    let chunk = reads.read_at(path, offset, chunk_size())!;
+    let got = Array::length(chunk);
+    if got == 0 {
+      going = false;
+    } else {
+      offset = offset + got;
+      acc = step(acc, chunk);
+    }
+  };
+  acc
 }
 
 /// What a fold over lines carries between chunks.
@@ -454,16 +466,27 @@ fn absorb<A>(state: Lines<A>, text: String, step: (A, String) -> A) -> Lines<A> 
 }
 
 /// Peels complete lines off the front of `partial`.
+///
+/// **A cursor, not a recursion on what is left.** Taking a line and then
+/// calling itself on `split.rest` kept a frame per line *and* a copy of the
+/// rest of the chunk in each, so a chunk of short lines cost stack in the
+/// number of lines and memory in its square: 64 KiB of blank lines held about
+/// 2 GB live at the deepest point, and 1,600 lines in one chunk ran a 256 KB
+/// stack out. Each line is one `slice`, and the remainder is copied once.
 fn split_lines<A>(state: Lines<A>, step: (A, String) -> A) -> Lines<A> {
-  match String::split_once(state.partial, "\n") {
-    Option::None => state,
-    Option::Some(split) =>
-      split_lines(
-        { done: step(state.done, without_return(split.head)),
-          partial: split.rest,
-          text: state.text },
-        step,
-      ),
+  let text = state.partial;
+  let mut done = state.done;
+  let mut at = 0;
+  let mut newline = String::find(text, "\n", 0);
+  while newline >= 0 {
+    done = step(done, without_return(String::slice(text, at, newline)));
+    at = newline + 1;
+    newline = String::find(text, "\n", at);
+  };
+  if at == 0 {
+    state
+  } else {
+    { done: done, partial: String::slice(text, at, String::byte_length(text)), text: state.text }
   }
 }
 
@@ -594,15 +617,15 @@ fn last_dot(name: String) -> Option<Int> {
 /// Walks back from `at` for the last byte `wanted` accepts.
 ///
 /// Backwards rather than forwards because every caller wants the *last* one,
-/// and `String::find` only goes the other way.
+/// and `String::find` only goes the other way. A loop, because a path is
+/// whatever the program was handed: a recursion here held a frame per byte
+/// and ran an 8 MB stack out on an 88 KB name.
 fn last_byte_of(text: String, at: Int, wanted: (U8) -> Bool) -> Option<Int> {
-  if at < 0 {
-    Option::None
-  } else if wanted(String::byte(text, at)) {
-    Option::Some(at)
-  } else {
-    last_byte_of(text, at - 1, wanted)
-  }
+  let mut at = at;
+  while at >= 0 && !wanted(String::byte(text, at)) {
+    at = at - 1;
+  };
+  if at < 0 { Option::None } else { Option::Some(at) }
 }
 
 fn is_separator(byte: U8) -> Bool {
@@ -902,19 +925,26 @@ fn list_dir(path: String) -> List<String> raises IoError {
 
 /// Reads names until the directory is exhausted.
 ///
-/// Recursive rather than a loop because the result is a `List`, which is built
-/// from the end: a loop would have to accumulate and reverse.
+/// **A loop, gathered backwards and reversed once.** As a recursion it built
+/// the list from the end for free and kept a frame per entry to do it, so a
+/// directory of 52,000 files ran an 8 MB stack out and one of 1,500 a 256 KB
+/// stack: the number of files in a directory is nobody's choice but whoever
+/// filled it.
 fn collect_names(dir: Ptr, path: String) -> List<String> raises IoError {
-  let buffer: Array<U8> = Array::new(name_capacity(), 0);
-  let written = Array::with_data(buffer, fn (into, n) => khora_fs_dir_next(dir, into, n));
-  if written == 0 {
-    List::Nil
-  } else if written < 0 {
-    raise IoError::Failed(path)
-  } else {
-    let name = String::slice(String::from_bytes(buffer), 0, written);
-    List::Cons(name, collect_names(dir, path)!)
-  }
+  let mut names = List::Nil;
+  let mut going = true;
+  while going {
+    let buffer: Array<U8> = Array::new(name_capacity(), 0);
+    let written = Array::with_data(buffer, fn (into, n) => khora_fs_dir_next(dir, into, n));
+    if written == 0 {
+      going = false;
+    } else if written < 0 {
+      raise IoError::Failed(path)
+    } else {
+      names = List::Cons(String::slice(String::from_bytes(buffer), 0, written), names);
+    }
+  };
+  List::reverse(names)
 }
 
 /// The whole file, replaced.

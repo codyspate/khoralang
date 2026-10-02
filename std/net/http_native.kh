@@ -1362,37 +1362,56 @@ pub fn matches(pattern: String, path: String) -> Option<Params> {
   match_segments(pattern, path, Map::new())
 }
 
+/// The pattern and the path a segment at a time, binding as it goes.
+///
+/// **A loop, because the path is the client's.** Each segment used to be a
+/// call, so a request for 87,000 `/` -- 87 KB, which a router raised to
+/// `Router::holding(1048576)` admits -- ran a request fiber's 8 MB stack out
+/// and ended the server, from any client that could send one line.
 fn match_segments(pattern: String, path: String, bound: Map<String, String>) -> Option<Params> {
-  let here = segment(pattern);
-  let mine = segment(path);
-  if String::byte_length(here.head) == 0 && String::byte_length(mine.head) == 0 {
-    if String::byte_length(here.rest) == 0 && String::byte_length(mine.rest) == 0 {
-      Option::Some({ bound: bound })
+  let mut pattern = pattern;
+  let mut path = path;
+  let mut answer = Option::None;
+  let mut going = true;
+  while going {
+    let here = segment(pattern);
+    let mine = segment(path);
+    let pattern_done = String::byte_length(here.rest) == 0;
+    let path_done = String::byte_length(mine.rest) == 0;
+    going = false;
+    if String::byte_length(here.head) == 0 && String::byte_length(mine.head) == 0 {
+      if pattern_done && path_done {
+        answer = Option::Some({ bound: bound });
+      } else {
+        pattern = here.rest;
+        path = mine.rest;
+        going = true;
+      }
     } else {
-      match_segments(here.rest, mine.rest, bound)
+      let taken =
+        if String::starts_with(here.head, ":") {
+          // A parameter takes any segment but an empty one.
+          if String::byte_length(mine.head) == 0 {
+            false
+          } else {
+            Map::insert(bound, String::slice(here.head, 1, String::byte_length(here.head)), mine.head);
+            true
+          }
+        } else {
+          here.head == mine.head
+        };
+      if !taken || pattern_done != path_done {
+        answer = Option::None;
+      } else if pattern_done {
+        answer = Option::Some({ bound: bound });
+      } else {
+        pattern = here.rest;
+        path = mine.rest;
+        going = true;
+      }
     }
-  } else if String::starts_with(here.head, ":") {
-    if String::byte_length(mine.head) == 0 {
-      Option::None
-    } else {
-      Map::insert(bound, String::slice(here.head, 1, String::byte_length(here.head)), mine.head);
-      finish_match(here.rest, mine.rest, bound)
-    }
-  } else if here.head == mine.head {
-    finish_match(here.rest, mine.rest, bound)
-  } else {
-    Option::None
-  }
-}
-
-fn finish_match(pattern: String, path: String, bound: Map<String, String>) -> Option<Params> {
-  if String::byte_length(pattern) == 0 && String::byte_length(path) == 0 {
-    Option::Some({ bound: bound })
-  } else if String::byte_length(pattern) == 0 || String::byte_length(path) == 0 {
-    Option::None
-  } else {
-    match_segments(pattern, path, bound)
-  }
+  };
+  answer
 }
 
 /// The next `/`-separated piece, and what follows it.

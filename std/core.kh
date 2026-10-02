@@ -3014,12 +3014,21 @@ impl String {
     List::reverse(String::gather_chars(self, 0, List::Nil))
   }
 
+  /// A loop: a frame per character ran an 8 MB stack out at 87,000 of them.
   fn gather_chars(self, at: Int, so_far: List<Char>) -> List<Char> {
-    match String::char_at(self, at) {
-      Option::None => so_far,
-      Option::Some(c) =>
-        String::gather_chars(self, at + Char::utf8_length(c), List::Cons(c, so_far)),
-    }
+    let mut at = at;
+    let mut so_far = so_far;
+    let mut going = true;
+    while going {
+      match String::char_at(self, at) {
+        Option::None => { going = false; },
+        Option::Some(c) => {
+          at = at + Char::utf8_length(c);
+          so_far = List::Cons(c, so_far);
+        },
+      }
+    };
+    so_far
   }
 
   /// How many characters, which is not how many bytes.
@@ -3057,11 +3066,21 @@ impl String {
     seen
   }
 
+  /// A loop, for the reason `gather_chars` is.
   fn count_chars(self, at: Int, so_far: Int) -> Int {
-    match String::char_at(self, at) {
-      Option::None => so_far,
-      Option::Some(c) => String::count_chars(self, at + Char::utf8_length(c), so_far + 1),
-    }
+    let mut at = at;
+    let mut so_far = so_far;
+    let mut going = true;
+    while going {
+      match String::char_at(self, at) {
+        Option::None => { going = false; },
+        Option::Some(c) => {
+          at = at + Char::utf8_length(c);
+          so_far = so_far + 1;
+        },
+      }
+    };
+    so_far
   }
 
   /// Where `needle` first occurs at or after `from`, counting in bytes, or
@@ -3750,17 +3769,25 @@ impl Float {
   }
 
   /// A run of digits as a number, and where it stopped.
+  ///
+  /// A loop: the digits are the text's, and a frame each ran an 8 MB stack
+  /// out at 87,000 of them.
   fn digits(text: String, at: Int, so_far: Float) -> Scanned {
-    if at >= String::byte_length(text) {
-      { number: so_far, at: at }
-    } else {
+    let length = String::byte_length(text);
+    let mut at = at;
+    let mut so_far = so_far;
+    let mut going = at < length;
+    while going {
       let byte = U8::to_int(String::byte(text, at));
       if byte >= 48 && byte <= 57 {
-        Float::digits(text, at + 1, so_far * 10.0 + Int::to_float(byte - 48))
+        so_far = so_far * 10.0 + Int::to_float(byte - 48);
+        at = at + 1;
+        going = at < length;
       } else {
-        { number: so_far, at: at }
+        going = false;
       }
-    }
+    };
+    { number: so_far, at: at }
   }
 
   /// Ten to the `n`, for `n` at least zero.
@@ -4427,20 +4454,60 @@ impl<K: Hash, V> Chain<K, V> {
   ///
   /// Linear in the chain, which is fine because a chain is what one bucket
   /// holds: it is long only when the hash is bad.
+  ///
+  /// **A loop, because "only when the hash is bad" includes on purpose.** The
+  /// keys of a `Map` are often somebody else's -- the members of a JSON body,
+  /// the headers of a request -- and keys chosen to share a bucket made a
+  /// chain as long as the map. As a recursion each step was a frame, so 2,600
+  /// such keys ran a 256 KB stack out; now they cost time and not the process.
   fn find(self, key: K) -> Option<V> {
-    match self {
-      Chain::Empty => Option::None,
-      Chain::Node(k, v, rest) =>
-        if Eq::eq(k, key) { Option::Some(v) } else { Chain::find(rest, key) },
-    }
+    let mut rest = self;
+    let mut answer = Option::None;
+    let mut going = true;
+    while going {
+      match rest {
+        Chain::Empty => { going = false; },
+        Chain::Node(k, v, more) =>
+          if Eq::eq(k, key) {
+            answer = Option::Some(v);
+            going = false;
+          } else {
+            rest = more;
+          },
+      }
+    };
+    answer
   }
 
   /// The chain with `key` removed, or the same chain if it was not there.
+  ///
+  /// The entries before `key` are rebuilt in front of what follows it, so
+  /// they are gathered first and laid back down in order: a loop for the
+  /// reason `find` is one.
   fn without(self, key: K) -> Chain<K, V> {
-    match self {
-      Chain::Empty => Chain::Empty,
-      Chain::Node(k, v, rest) =>
-        if Eq::eq(k, key) { rest } else { Chain::Node(k, v, Chain::without(rest, key)) },
+    let mut before: List<Pair<K, V>> = List::Nil;
+    let mut rest = self;
+    let mut after = Chain::Empty;
+    let mut found = false;
+    let mut going = true;
+    while going {
+      match rest {
+        Chain::Empty => { going = false; },
+        Chain::Node(k, v, more) =>
+          if Eq::eq(k, key) {
+            after = more;
+            found = true;
+            going = false;
+          } else {
+            before = List::Cons({ key: k, value: v }, before);
+            rest = more;
+          },
+      }
+    };
+    if found {
+      List::fold(before, after, fn (chain, entry) => Chain::Node(entry.key, entry.value, chain))
+    } else {
+      self
     }
   }
 
@@ -5027,15 +5094,20 @@ impl<K: Hash, V> Map<K, V> {
 
   /// Puts one old bucket's entries back into the new buckets.
   ///
-  /// `grow`'s worker, public only because `grow` is.
+  /// `grow`'s worker, public only because `grow` is. A loop, because a bucket
+  /// is as long as whoever chose the keys made it: see `Chain::find`.
   fn rehash(self, chain: Chain<K, V>) -> () {
-    match chain {
-      Chain::Empty => (),
-      Chain::Node(k, v, rest) => {
-        let at = Map::slot(self, k);
-        Array::set(self.buckets, at, Chain::Node(k, v, Array::get(self.buckets, at)));
-        Map::rehash(self, rest);
-      },
+    let mut rest = chain;
+    let mut going = true;
+    while going {
+      match rest {
+        Chain::Empty => { going = false; },
+        Chain::Node(k, v, more) => {
+          let at = Map::slot(self, k);
+          Array::set(self.buckets, at, Chain::Node(k, v, Array::get(self.buckets, at)));
+          rest = more;
+        },
+      }
     };
   }
 }

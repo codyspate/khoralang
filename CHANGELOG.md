@@ -436,6 +436,41 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 
 ### Fixed
 
+- **Long input ran the stack out in `std` and in the OpenTelemetry
+  exporter.** Each function below took its next item by calling itself, Khora
+  does not promise tail calls, and so each kept a stack frame per item for as
+  long as its input ran. On the default eight-megabyte stack, which is also a
+  fiber's:
+  - `std::fs`: `fold_chunks` and `fold_lines` ended the process on a file of
+    about 4 GB; `fold_lines` on a 64 KiB stretch of 40,000 short lines, and
+    there it also held memory in the square of the line count -- about 2 GB
+    for a chunk of blank lines; `read_dir` on a directory of 52,000 entries;
+    `file_name`, `parent`, `extension` and `stem` on an 88 KB path.
+  - `Env::arguments` with 112,000 arguments.
+  - `std::json`: `parse` on 130,000 bytes of whitespace or digits in a row,
+    an array of 52,000 elements or an object of 37,000 members; `encode` on an
+    array of 75,000 or an object of 47,000; `quote` on a string with 65,000
+    characters to escape. A router raised to `Router::holding(1048576)`
+    accepts any of these in one request.
+  - `std::net::http::matches`, and so every routed request, on a path of
+    87,000 `/` -- 87 KB, which such a router also accepts.
+  - The permission checks behind every file, environment and network
+    operation, on a path or host of 87,000-130,000 bytes.
+  - `String::chars` and `String::char_length` on 87,000 and 104,000
+    characters, and `Float::of_string` on 87,000 digits.
+  - A `Map` whose keys share one bucket, at about 2,600 such keys under a
+    256 KB stack: one lookup, insert or growth walked the bucket a frame per
+    entry. Integer keys that differ only in their top sixteen bits all land
+    in one bucket.
+  - `packages/otlp`'s exporter, after about 20,000 spans: the fiber that
+    batches them took each report by calling itself, so every traced service
+    crashed after minutes to hours.
+
+  All of them are loops, and each is tested with 20,000 items (10,000
+  arguments, and 100,000 spans) under a 256 KB stack, where the recursive
+  version died at between 1,100 and 3,900. Nesting still recurses: `parse`
+  and `encode` take a frame per level of nesting, which a document of
+  nothing but `[` can still exhaust.
 - **A `Router` server died of a segmentation fault after about 130,000
   connections.** `Router::listen`, `listen_quietly`, `listen_tls`,
   `serve_forever` and `serve_secured` took each next connection by a call that

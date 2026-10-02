@@ -203,13 +203,11 @@ fn climbs(path: String) -> Bool {
 /// `std::fs` has the same three lines for the same reason, and two callers is
 /// not yet an argument for widening `core`'s surface.
 fn last_byte_of(text: String, at: Int, wanted: (U8) -> Bool) -> Option<Int> {
-  if at < 0 {
-    Option::None
-  } else if wanted(String::byte(text, at)) {
-    Option::Some(at)
-  } else {
-    last_byte_of(text, at - 1, wanted)
-  }
+  let mut at = at;
+  while at >= 0 && !wanted(String::byte(text, at)) {
+    at = at - 1;
+  };
+  if at < 0 { Option::None } else { Option::Some(at) }
 }
 
 /// Whether one pattern covers one value.
@@ -227,51 +225,68 @@ fn matches(pattern: String, path: String, segmented: Bool) -> Bool {
 /// Written as explicit indices rather than by slicing, because slicing a
 /// string builds one: a pattern of `n` characters against a path of `m` would
 /// allocate on every step, and this is called on every file operation.
+///
+/// **Loops over the path; recursion only per `*` in the pattern.** Each byte
+/// matched and each position a star tried used to be a call, so a frame per
+/// byte of the path: a 130 KB path checked against `**`, or an 87 KB host
+/// against `*`, ran an 8 MB stack out. The path is whatever the program was
+/// handed, the pattern is what its manifest says, so the depth left is the
+/// manifest's.
 fn walk(pattern: String, p: Int, path: String, s: Int, segmented: Bool) -> Bool {
   let plen = String::byte_length(pattern);
   let slen = String::byte_length(path);
-  if p >= plen {
-    // The pattern is spent: it matched exactly when the path is too.
-    s >= slen
-  } else if is_double_star(pattern, p) {
-    // `**` may consume anything, separators included. Try the shortest first
-    // and grow, which terminates because the path is finite.
-    let after = skip_double_star(pattern, p);
-    any_suffix(pattern, after, path, s, segmented)
-  } else if String::byte(pattern, p) == 42 {
-    // A single `*` stops at a separator only where there are segments.
-    if segmented {
-      any_within_segment(pattern, p + 1, path, s, segmented)
-    } else {
-      any_suffix(pattern, p + 1, path, s, segmented)
+  let mut p = p;
+  let mut s = s;
+  let mut answer = false;
+  let mut going = true;
+  while going {
+    going = false;
+    if p >= plen {
+      // The pattern is spent: it matched exactly when the path is too.
+      answer = s >= slen;
+    } else if is_double_star(pattern, p) {
+      // `**` may consume anything, separators included. Try the shortest first
+      // and grow, which terminates because the path is finite.
+      answer = any_suffix(pattern, skip_double_star(pattern, p), path, s, segmented);
+    } else if String::byte(pattern, p) == 42 {
+      // A single `*` stops at a separator only where there are segments.
+      answer =
+      if segmented {
+        any_within_segment(pattern, p + 1, path, s, segmented)
+      } else {
+        any_suffix(pattern, p + 1, path, s, segmented)
+      };
+    } else if s < slen && String::byte(pattern, p) == String::byte(path, s) {
+      p = p + 1;
+      s = s + 1;
+      going = true;
     }
-  } else if s < slen && String::byte(pattern, p) == String::byte(path, s) {
-    walk(pattern, p + 1, path, s + 1, segmented)
-  } else {
-    false
-  }
+  };
+  answer
 }
 
 /// Whether `**` can be made to work by consuming `path` from `s` onwards.
 fn any_suffix(pattern: String, after: Int, path: String, s: Int, segmented: Bool) -> Bool {
-  if walk(pattern, after, path, s, segmented) {
-    true
-  } else if s >= String::byte_length(path) {
-    false
-  } else {
-    any_suffix(pattern, after, path, s + 1, segmented)
-  }
+  let slen = String::byte_length(path);
+  let mut s = s;
+  let mut matched = walk(pattern, after, path, s, segmented);
+  while !matched && s < slen {
+    s = s + 1;
+    matched = walk(pattern, after, path, s, segmented);
+  };
+  matched
 }
 
 /// The same for a single `*`, which may not cross a separator.
 fn any_within_segment(pattern: String, after: Int, path: String, s: Int, segmented: Bool) -> Bool {
-  if walk(pattern, after, path, s, segmented) {
-    true
-  } else if s >= String::byte_length(path) || String::byte(path, s) == 47 {
-    false
-  } else {
-    any_within_segment(pattern, after, path, s + 1, segmented)
-  }
+  let slen = String::byte_length(path);
+  let mut s = s;
+  let mut matched = walk(pattern, after, path, s, segmented);
+  while !matched && s < slen && String::byte(path, s) != 47 {
+    s = s + 1;
+    matched = walk(pattern, after, path, s, segmented);
+  };
+  matched
 }
 
 /// Whether the pattern has `**` at `p`.
