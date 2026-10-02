@@ -587,15 +587,16 @@ impl Scheduler {
         let mut handles: Vec<std::thread::JoinHandle<()>> = (0..workers)
             .map(|index| {
                 let shared = shared.clone();
-                std::thread::Builder::new()
-                    .name(format!("khora-worker-{index}"))
-                    .spawn(move || {
+                crate::stack::spawn_thread(
+                    std::thread::Builder::new().name(format!("khora-worker-{index}")),
+                    move || {
                         // A coroutine that overflows faults on this thread,
                         // so this is where the report needs its room.
                         let _room = crate::stack::guard_this_thread();
                         work(shared, index)
-                    })
-                    .expect("a worker thread")
+                    },
+                )
+                .expect("a worker thread")
             })
             .collect();
 
@@ -604,10 +605,11 @@ impl Scheduler {
         // `watch`.
         let watching = shared.clone();
         handles.push(
-            std::thread::Builder::new()
-                .name("khora-reactor".to_string())
-                .spawn(move || watch(watching))
-                .expect("the reactor thread"),
+            crate::stack::spawn_thread(
+                std::thread::Builder::new().name("khora-reactor".to_string()),
+                move || watch(watching),
+            )
+            .expect("the reactor thread"),
         );
 
         // One thread for deadlines. A `sleep` that blocked a worker would
@@ -615,10 +617,11 @@ impl Scheduler {
         // rather than something a fiber does. `scheduler.md` §6.
         let ticking = shared.clone();
         handles.push(
-            std::thread::Builder::new()
-                .name("khora-timers".to_string())
-                .spawn(move || tick(ticking))
-                .expect("the timer thread"),
+            crate::stack::spawn_thread(
+                std::thread::Builder::new().name("khora-timers".to_string()),
+                move || tick(ticking),
+            )
+            .expect("the timer thread"),
         );
 
         // How the counters are read out of a program that does not end: a
@@ -631,9 +634,9 @@ impl Scheduler {
             .and_then(|v| v.parse::<u64>().ok())
         {
             let watching = shared.clone();
-            let started = std::thread::Builder::new()
-                .name("khora-report".to_string())
-                .spawn(move || {
+            let started = crate::stack::spawn_thread(
+                std::thread::Builder::new().name("khora-report".to_string()),
+                move || {
                     let gap = std::time::Duration::from_millis(every.max(1));
                     while !watching.stopping.load(Ordering::Acquire) {
                         std::thread::sleep(gap);
@@ -651,7 +654,8 @@ impl Scheduler {
                             watching.turns(),
                         );
                     }
-                });
+                },
+            );
             if let Ok(handle) = started {
                 handles.push(handle);
             }

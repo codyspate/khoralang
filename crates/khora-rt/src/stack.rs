@@ -330,6 +330,86 @@ fn disable_alternate_stack() {
 #[cfg(not(any(unix, windows)))]
 fn install() {}
 
+/// How much stack is touched before a thread or a process is started.
+///
+/// Measured on Linux x86-64 with glibc 2.41, from the caller of
+/// `std::thread::Builder::spawn` down: about 1.4 KB for a thread and 1.5 KB
+/// for `std::process::Command::spawn` (a stack painted with a pattern before
+/// the call and read back after it). Sixteen kilobytes is ten times that, so a
+/// libc that needs more still fits.
+const START_ROOM: usize = 16 * 1024;
+
+/// Faults here, where the report can run, rather than inside libc where it
+/// cannot -- if the stack is about to run out.
+///
+/// **What it prevents: a stack overflow that ends the process with nothing
+/// on stderr.** glibc's `pthread_create` blocks every signal while it builds
+/// the new thread, and `posix_spawn` blocks them while
+/// it forks. A stack fault in that window is a `SIGSEGV` delivered to a thread
+/// that has it blocked, and Linux does not queue a fault: it restores the
+/// default action, unblocks it and kills the process, so the handler in this
+/// module never runs. A Khora HTTP server whose accept loop recursed once per
+/// connection died exactly there, after about 130,000 connections at an 8 MB
+/// stack, with empty streams: the deepest point of each connection on its
+/// main thread was the `pthread_create` for that connection's fiber. With a
+/// release runtime it was silent at every stack size tried, 256 KB to 8 MB.
+///
+/// Every thread the runtime starts goes through [`spawn_thread`], which calls
+/// this, and a process start calls it before `Command` does. It takes
+/// [`START_ROOM`] of stack and writes to it a kilobyte at a time, top down,
+/// with signals as the caller has them: if the stack ends within that
+/// distance, the fault is here, the handler runs, and the report is printed.
+/// Otherwise the start that follows has the room it was measured to need.
+///
+/// **What it costs:** sixteen writes, to memory the start was about to use,
+/// per thread or process started; nothing per fiber on the scheduler, which
+/// starts its threads once. And a program that would have *just* survived --
+/// one that starts a thread with between 2 and 16 KB of stack left -- now dies
+/// there, of the same overflow it was one frame away from, and says so.
+///
+/// **What it does not cover:** a thread or process started by anything other
+/// than the runtime -- a C library linked into the program, for one.
+///
+/// On macOS and Windows it is not needed and is harmless. macOS's
+/// `pthread_create` does not block signals around the thread's creation, so
+/// a fault there reaches the handler like any other; a Windows overflow is a
+/// structured exception, which no signal mask defers. Neither claim has been
+/// tested by a run on those platforms here.
+#[inline(never)]
+pub(crate) fn before_a_start() {
+    const STEP: usize = 1024;
+    let mut room = std::mem::MaybeUninit::<[u8; START_ROOM]>::uninit();
+    let base = room.as_mut_ptr().cast::<u8>();
+    let mut at = START_ROOM;
+    while at >= STEP {
+        at -= STEP;
+        // SAFETY: `at` is less than `START_ROOM`, so the byte written is
+        // inside `room`, a local of this frame that nothing else can see.
+        // Writing a `u8` into uninitialized bytes is sound; nothing reads
+        // them. Volatile so the writes are not removed as dead.
+        unsafe { std::ptr::write_volatile(base.add(at), 0) };
+    }
+    std::hint::black_box(&room);
+}
+
+/// `builder.spawn(body)`, after [`before_a_start`].
+///
+/// The one way the runtime starts a thread, so that none of them can start
+/// one inside libc's blocked window with the stack nearly gone. Rust's own
+/// `std::thread::spawn` does not go through here; a thread started with it
+/// from a deep stack is the silence [`before_a_start`] describes.
+pub(crate) fn spawn_thread<F, T>(
+    builder: std::thread::Builder,
+    body: F,
+) -> std::io::Result<std::thread::JoinHandle<T>>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    before_a_start();
+    builder.spawn(body)
+}
+
 /// Room to report from, on the calling thread, for as long as the guard lives.
 ///
 /// **What it prevents: a fiber that runs out of stack and says nothing.**

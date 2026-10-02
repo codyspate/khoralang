@@ -104,3 +104,14 @@ debug = "line-tables-only"
 
 [profile.dev.package.khora-rt]
 opt-level = 3
+
+# **And its allocator, for the same reason and one more.** `mimalloc` is C,
+# compiled into the same archive, and is every `khora_alloc`; at `opt-level =
+# 0` its frames are several times their optimized size. That moves where a
+# program that runs out of stack faults: on a dev-built runtime the deepest
+# point of a thread start was an allocator refill, on a shipped one it is
+# inside `pthread_create` -- where a fault is silent unless the runtime
+# prevents it (`khora-rt`'s `stack::before_a_start`). A test of that, linked
+# against the dev runtime, passed with the prevention removed.
+[profile.dev.package.libmimalloc-sys]
+opt-level = 3

@@ -464,6 +464,16 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   committed only as it is used. And running out of stack on a fiber, or in a
   `khora test` block, says "khora: the stack ran out" on Linux, where it ended
   the process with no message.
+- **A program whose stack ran out while it started a fiber, or ran another
+  program, said nothing.** The C library blocks signals while it starts a
+  thread or a process, and on Linux a stack fault in that moment ends the
+  process at once, with status 139 and empty stderr, instead of reaching the
+  handler that prints "khora: the stack ran out". A server whose main thread
+  overflowed died exactly that way, at every stack size from 256 KB to 8 MB,
+  on the default fiber backend. The runtime checks for 16 KB of stack before
+  each thread or process it starts and, when that is not there, stops there
+  with the message. A program that had between 2 and 16 KB left at that point
+  used to survive the start; it now stops at it.
 - **On the scheduler backend, a fiber reading or writing a file could wait
   for ever once the blocking pool's queue had filled.** File-system calls run
   on a bounded pool of threads, and a fiber that finds the pool's queue full

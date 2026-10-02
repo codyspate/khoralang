@@ -135,10 +135,11 @@ pub(crate) fn install() {
     // still run; what it loses is the graceful stop, and an operator who is
     // told that can plan around it. Dying here would turn a resource shortage
     // into an outage.
-    if std::thread::Builder::new()
-        .name("khora-signals".to_string())
-        .spawn(move || watch(set, id))
-        .is_err()
+    if crate::stack::spawn_thread(
+        std::thread::Builder::new().name("khora-signals".to_string()),
+        move || watch(set, id),
+    )
+    .is_err()
     {
         // SAFETY: unblocking the same set this frame filled. Restoring the
         // default disposition is strictly better than leaving the signals

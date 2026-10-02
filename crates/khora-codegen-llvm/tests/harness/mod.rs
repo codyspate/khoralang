@@ -60,6 +60,40 @@ pub fn python() -> &'static str {
     })
 }
 
+/// The `khora` executable cargo built beside this test binary.
+///
+/// **What it prevents: a test that cannot find the compiler and passes.**
+/// The cross-process checks in `profiles` and `reproducible` asked for
+/// `CARGO_BIN_EXE_khora`, which cargo sets only in the tests of the crate that
+/// owns the binary -- `khora-cli`, not this one. So all three returned early,
+/// counted as passed in a dozen milliseconds, in every run there had ever
+/// been. A missing binary is a failure here, naming the command that builds
+/// it.
+///
+/// Found as `khora-cli/tests/doc.rs` finds it: a test binary is
+/// `target/<profile>/deps/<name>`, and `khora` is `target/<profile>/khora`.
+///
+/// A workspace run builds it; `-p khora-codegen-llvm` alone does not, and
+/// then the binary is whatever the last build left. Nothing here can tell a
+/// stale one from a fresh one without rebuilding it in the middle of a run,
+/// which other tests that hash it forbid.
+#[allow(dead_code)]
+pub fn khora() -> std::path::PathBuf {
+    let mut dir = std::env::current_exe().expect("the test binary");
+    dir.pop();
+    if dir.ends_with("deps") {
+        dir.pop();
+    }
+    let exe = dir.join(format!("khora{}", std::env::consts::EXE_SUFFIX));
+    assert!(
+        exe.is_file(),
+        "no `khora` at {}; build it with `cargo build -p khora-cli --features llvm` \
+         (the profile this test was built with) and run again",
+        exe.display()
+    );
+    exe
+}
+
 /// Makes sure the runtime archive exists and is current.
 ///
 /// `cargo test -p khora-codegen-llvm` builds `khora-rt`'s *rlib*, because that

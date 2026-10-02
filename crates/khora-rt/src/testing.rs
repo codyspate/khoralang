@@ -405,7 +405,8 @@ pub extern "C" fn khora_test_run() -> i32 {
         // A fiber's stack, and its room to report running out of it: a test
         // block is as entitled to recurse as the program it tests.
         // `crate::stack::FIBER_STACK`.
-        let started = std::thread::Builder::new().stack_size(crate::stack::FIBER_STACK).spawn(
+        let started = crate::stack::spawn_thread(
+            std::thread::Builder::new().stack_size(crate::stack::FIBER_STACK),
             move || {
                 let _room = crate::stack::guard_this_thread();
                 let code = code;

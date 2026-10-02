@@ -735,7 +735,8 @@ pub unsafe extern "C" fn khora_fiber_spawn(
     } else {
         // The same stack a coroutine gets, rather than Rust's two-megabyte
         // default, and room to say so when it runs out. `crate::stack`.
-        let thread = std::thread::Builder::new().stack_size(crate::stack::FIBER_STACK).spawn(
+        let thread = crate::stack::spawn_thread(
+            std::thread::Builder::new().stack_size(crate::stack::FIBER_STACK),
             move || {
                 let _room = crate::stack::guard_this_thread();
                 run()
@@ -1319,11 +1320,12 @@ impl Deadlines {
                 heap: std::sync::Mutex::new(std::collections::BinaryHeap::new()),
                 changed: std::sync::Condvar::new(),
             }));
-            std::thread::Builder::new()
-                .name("khora-deadlines".into())
-                .spawn(move || list.keep())
-                .ok()
-                .map(|_| list)
+            crate::stack::spawn_thread(
+                std::thread::Builder::new().name("khora-deadlines".into()),
+                move || list.keep(),
+            )
+            .ok()
+            .map(|_| list)
         })
     }
 

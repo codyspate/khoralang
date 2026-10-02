@@ -111,12 +111,7 @@ fn two_builds_of_one_program_agree() {
 /// the test above cannot see the failure this one can.
 #[test]
 fn two_processes_agree_too() {
-    let Some(khora) = std::env::var_os("CARGO_BIN_EXE_khora") else {
-        // Not built as part of this crate's test binaries; the in-process
-        // check above still covers the ordering.
-        eprintln!("no khora binary for the cross-process check; skipping");
-        return;
-    };
+    let khora = harness::khora();
 
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("reproducible_across");
     harness::ensure_runtime();
@@ -132,6 +127,10 @@ fn two_processes_agree_too() {
             .arg(dir.join("main.kh"))
             .arg("-o")
             .arg(&out)
+            // Both runs compile; the second would otherwise be a cache hit
+            // that writes no object. See `profiles::a_release_build_is_reproducible`.
+            .arg("--no-cache")
+            .env("KHORA_HOME", dir.join("home"))
             // Debug information is a separate question — see the module docs
             // and roadmap 12.9. What is under test here is the compiler.
             .env("KHORA_DEBUG", "0")

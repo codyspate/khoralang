@@ -14,6 +14,10 @@
 //
 // Usage: node transport-check.js <extracted-vsix-dir> <khora-executable>
 //
+// `<extracted-vsix-dir>` may be relative to the current directory.
+// `<khora-executable>` is passed to the extension as it is given, the way a
+// user's `khora.server.path` is, so a bare `khora` is looked up on `PATH`.
+//
 // Exits 1 and prints why on any of: the extension failed to load, the
 // extension itself reported a failed start, or it never spawned the
 // configured executable. Exits 0 once `activate()` resolves having spawned
@@ -32,7 +36,13 @@ function fail(message) {
   process.exit(1);
 }
 
-const ext = process.argv[2];
+// **Resolved, because `require` does not resolve against the working
+// directory.** A bare relative path is a module name to `require`, so
+// `x/extension` was looked up in `node_modules` and failed with `Cannot find
+// module 'x/extension/package.json'`; one starting `./` is relative to this
+// script's directory, not the caller's. Either failure reads as a broken
+// extension when it is a path the check misread.
+const ext = process.argv[2] && path.resolve(process.argv[2]);
 const khora = process.argv[3];
 if (!ext || !khora) {
   fail("usage: node transport-check.js <extracted-vsix-dir> <khora-executable>");

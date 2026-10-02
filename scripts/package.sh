@@ -69,11 +69,18 @@ echo "packaging $name"
 cargo build --release -p khora-cli --features llvm
 cargo build --release -p khora-rt
 
+# **Where cargo put them, which is not always `target/`.** With
+# `CARGO_TARGET_DIR` set, cargo builds there and `target/release` holds
+# whatever an earlier build left -- or nothing -- so copying from it packaged
+# a stale compiler or failed for want of one. A relative value is relative to
+# the directory cargo ran in, which is `$root`.
+built="${CARGO_TARGET_DIR:-target}/release"
+
 rm -rf "$stage"
 mkdir -p "$stage/bin"
 
-cp "target/release/khora$exe" "$stage/bin/"
-cp "target/release/$archive" "$stage/bin/"
+cp "$built/khora$exe" "$stage/bin/"
+cp "$built/$archive" "$stage/bin/"
 cp -r std "$stage/std"
 cp LICENSE-MIT LICENSE-APACHE "$stage/"
 

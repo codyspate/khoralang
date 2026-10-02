@@ -166,9 +166,10 @@ impl Pool {
 
     /// Starts one thread. The caller has already counted it in `started`.
     fn start(&'static self) {
-        let started = std::thread::Builder::new()
-            .name("khora-blocking".to_string())
-            .spawn(move || self.serve());
+        let started = crate::stack::spawn_thread(
+            std::thread::Builder::new().name("khora-blocking".to_string()),
+            move || self.serve(),
+        );
         if started.is_err() {
             // The machine would not give us a thread. Undo the count so the
             // next submission tries again rather than believing a thread

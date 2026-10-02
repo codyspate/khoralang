@@ -105,6 +105,9 @@ pub unsafe extern "C" fn khora_spawn_status(buffer: *const u8, len: i64, count: 
     // SAFETY: passed straight through; see this function's contract.
     let Some(parts) = (unsafe { arguments(buffer, len, count) }) else { return -1 };
     let Some(mut command) = command_of(&parts) else { return -1 };
+    // A process start blocks signals as a thread start does.
+    // `crate::stack::before_a_start`.
+    crate::stack::before_a_start();
     match command.status() {
         Err(_) => -1,
         Ok(status) => exit_status(status),
@@ -139,6 +142,7 @@ pub unsafe extern "C" fn khora_spawn_capture(
     // The child's standard *error* is left alone, so it goes wherever this
     // process's does -- the same choice `open_pipe` made, and for the same
     // reason: merging the two is a decision only the caller can make.
+    crate::stack::before_a_start();
     match command.output() {
         Err(_) => -1,
         Ok(done) => {

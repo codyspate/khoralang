@@ -127,10 +127,7 @@ fn release_is_the_smaller_object_for_this_program() {
 /// would make this test pass on a platform where the claim is false.
 #[test]
 fn a_release_build_is_reproducible() {
-    let Some(khora) = std::env::var_os("CARGO_BIN_EXE_khora") else {
-        eprintln!("no khora binary for the cross-process check; skipping");
-        return;
-    };
+    let khora = harness::khora();
 
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("profile_reproducible");
     harness::ensure_runtime();
@@ -147,10 +144,16 @@ fn a_release_build_is_reproducible() {
             .arg("-o")
             .arg(&out)
             .arg("--release")
+            // **Both runs compile.** Without this the second is a cache hit:
+            // it copies the first run's executable and writes no object, so
+            // the comparison is of one build with a copy of itself.
+            .arg("--no-cache")
             // Deliberately nothing in the environment. The profile is the
             // whole of the instruction.
             .env_remove("KHORA_DEBUG")
             .env_remove("KHORA_PROFILE")
+            // A cache of this test's own, not the user's.
+            .env("KHORA_HOME", dir.join("home"))
             .output()
             .expect("could not run khora");
         assert!(
@@ -179,16 +182,16 @@ fn a_release_build_is_reproducible() {
 /// measured or debugged.
 #[test]
 fn the_build_line_names_the_profile() {
-    let Some(khora) = std::env::var_os("CARGO_BIN_EXE_khora") else {
-        eprintln!("no khora binary; skipping");
-        return;
-    };
+    let khora = harness::khora();
 
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("profile_named");
     harness::ensure_runtime();
     std::fs::create_dir_all(&dir).expect("a workspace");
     std::fs::write(dir.join("main.kh"), WORK).expect("a program");
 
+    // The build line is progress, so it goes to stderr: `khora run . | head`
+    // must read the program's output, not the toolchain's. It is read there,
+    // and required to be absent from stdout.
     let say = |args: &[&str], env: Option<(&str, &str)>| -> String {
         let mut cmd = Command::new(&khora);
         cmd.arg("build")
@@ -197,19 +200,34 @@ fn the_build_line_names_the_profile() {
             .arg(dir.join("named.exe"))
             .args(args)
             .env_remove("KHORA_DEBUG")
-            .env_remove("KHORA_PROFILE");
+            .env_remove("KHORA_PROFILE")
+            .env("KHORA_HOME", dir.join("home"));
         if let Some((key, value)) = env {
             cmd.env(key, value);
         }
         let out = cmd.output().expect("could not run khora");
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        String::from_utf8_lossy(&out.stdout).into_owned()
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(out.status.success(), "{stderr}");
+        assert!(out.stdout.is_empty(), "the build line went to stdout: {:?}", out.stdout);
+        stderr
     };
 
-    assert!(say(&[], None).contains("[debug]"), "the default profile is debug");
-    assert!(say(&["--release"], None).contains("[release]"), "`--release` selects it");
+    assert!(say(&["--no-cache"], None).contains("[debug]"), "the default profile is debug");
     assert!(
-        say(&[], Some(("KHORA_PROFILE", "release"))).contains("[release]"),
+        say(&["--release", "--no-cache"], None).contains("[release]"),
+        "`--release` selects it"
+    );
+    assert!(
+        say(&["--no-cache"], Some(("KHORA_PROFILE", "release"))).contains("[release]"),
         "and so does the variable, which is how `test` and `bench` say it"
+    );
+    // **And a build served from the cache says it too**, in its own shape --
+    // `[<key>, release]` -- which is why the three above compile every time:
+    // run twice, the second of them was a cache hit and its line has no
+    // `[release]` in it.
+    let reused = say(&["--release"], None);
+    assert!(
+        reused.contains("from the cache") && reused.contains(", release]"),
+        "a cache hit names the profile it was built under: {reused}"
     );
 }
