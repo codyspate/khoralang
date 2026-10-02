@@ -62,6 +62,8 @@ khora: the stack ran out
 
 on standard error and exits with the platform's stack-overflow status.
 
+A spawned fiber has eight megabytes of stack on either fiber backend, which is what `main` gets by default on Linux and macOS, so there a recursion that runs in `main` runs the same on a fiber. [Traps](/docs/reference/traps/#running-out-of-stack) has how deep that goes and on which platforms a fiber's overflow is reported.
+
 Every traversal in `std::core`'s `List` is written as a loop rather than as recursion — `length`, `fold`, `reverse`, `filter`, `take`, `drop`, `any`, `all`, `find`, `contains`, `zip`, `flat_map`, `sum`, and the `merge` inside `sort` — so walking a list of any size is safe. `List::sort` recurses only to divide, which is about `log2(n)` deep.
 
 String operations are loops too. `split`, `join` and `repeat` handle inputs of

@@ -35,6 +35,7 @@
 use std::cell::Cell;
 use std::sync::Arc;
 
+use corosensei::stack::DefaultStack;
 use corosensei::{Coroutine, CoroutineResult, Yielder};
 
 use crate::current::{enter, Fiber};
@@ -179,7 +180,7 @@ impl Task {
     /// The same, for a fiber whose identity somebody else already holds —
     /// a parent that needs to be able to cancel it.
     pub(crate) fn with_fiber(fiber: Arc<Fiber>, body: impl FnOnce() + Send + 'static) -> Task {
-        let coroutine = Coroutine::new(move |yielder: &Yielder<(), ()>, ()| {
+        let coroutine = Coroutine::with_stack(fiber_stack(), move |yielder: &Yielder<(), ()>, ()| {
             // Entry. `suspend` re-installs this after every wake, and
             // `Task::resume` puts the worker's back when this turn ends.
             install(yielder as *const _);
@@ -222,6 +223,40 @@ impl Task {
     pub(crate) fn finished(&self) -> bool {
         self.coroutine.done()
     }
+}
+
+/// A coroutine's stack: [`crate::stack::FIBER_STACK`] of it, as a thread's.
+///
+/// `corosensei`'s default is one megabyte, against the two a spawned thread
+/// gets and the eight `main` gets, and that difference was the whole of a
+/// recursive walk passing on threads and crashing on the scheduler.
+///
+/// **Declines transparent huge pages, on Linux.** A one-megabyte mapping can
+/// never hold an aligned two-megabyte page; an eight-megabyte one can, so on a
+/// host with THP set to `always` a fiber that had once recursed half a
+/// megabyte deep could be resident for two. `MADV_NOHUGEPAGE` keeps a stack
+/// at the pages it touched. It costs one `madvise` per fiber -- about two and
+/// a half microseconds a spawn, a twelfth of `fibers_at_scale`'s round trip --
+/// and leaves the mapping count where it was: the guard page and the stack
+/// were already two mappings, and the advice covers both whole.
+///
+/// A stack that cannot be had is the same `panic` it was under `Coroutine::new`.
+fn fiber_stack() -> DefaultStack {
+    let stack = DefaultStack::new(crate::stack::FIBER_STACK).expect("a fiber's stack");
+    #[cfg(target_os = "linux")]
+    {
+        use corosensei::stack::Stack;
+        let low = stack.limit().get();
+        let length = stack.base().get() - low;
+        // SAFETY: advice on the range `stack` has just mapped and owns, from
+        // its lowest address (the guard page) to its highest. `madvise` reads
+        // and writes no memory; a failure leaves the default, which is what
+        // every stack had before.
+        unsafe {
+            libc::madvise(low as *mut libc::c_void, length, libc::MADV_NOHUGEPAGE);
+        }
+    }
+    stack
 }
 
 /// Whether the caller is running on a fiber stack at all.

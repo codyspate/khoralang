@@ -143,6 +143,35 @@ fn a_declared_fieldless_record_still_takes_an_empty_literal() {
     assert_clean("module m;\npub type Nothing = {};\nfn f() -> Int { let x = {}; 0 }\n");
 }
 
+/// **`{}` where a record with fields is expected names every missing field,
+/// at the literal.** The hint path anchored the missing-field error on the
+/// first field written, and `{}` has none, so `check` said nothing and the
+/// program failed only at `build` -- a check that passes and a build that
+/// does not is the one split a checker exists to prevent.
+#[test]
+fn an_empty_literal_where_a_record_with_fields_is_expected_names_what_is_missing() {
+    for source in [
+        format!("{POINT}fn f() -> Int {{ let p: Point = {{}}; p.x }}\n"),
+        format!("{POINT}fn f() -> Point {{ {{}} }}\n"),
+        format!("{POINT}fn take(p: Point) -> Int {{ p.x }}\nfn f() -> Int {{ take({{}}) }}\n"),
+    ] {
+        let db = KhoraDatabase::new();
+        let file = SourceFile::new(&db, "a.kh".into(), source.clone());
+        let found = diagnostics(&db, file);
+        let messages: Vec<&str> = found.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            ["this `Point` is missing `x`", "this `Point` is missing `y`"],
+            "{source}"
+        );
+        let literal = source.rfind("{}").expect("the literal");
+        for error in found.iter() {
+            let at = usize::from(error.range.start())..usize::from(error.range.end());
+            assert_eq!(at, literal..literal + 2, "not at the literal: {error:?}\n{source}");
+        }
+    }
+}
+
 /// A record's fields are declared against its own parameters, so a literal
 /// decides them.
 #[test]

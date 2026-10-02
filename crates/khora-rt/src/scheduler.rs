@@ -589,7 +589,12 @@ impl Scheduler {
                 let shared = shared.clone();
                 std::thread::Builder::new()
                     .name(format!("khora-worker-{index}"))
-                    .spawn(move || work(shared, index))
+                    .spawn(move || {
+                        // A coroutine that overflows faults on this thread,
+                        // so this is where the report needs its room.
+                        let _room = crate::stack::guard_this_thread();
+                        work(shared, index)
+                    })
                     .expect("a worker thread")
             })
             .collect();

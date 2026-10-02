@@ -164,10 +164,14 @@ apart. [Known
 limitations](/docs/limitations/#the-two-fiber-backends-are-distinguishable) has
 the detail.
 
-A thread gets the operating system's stack — two megabytes on Linux, one on
-Windows — and a coroutine gets one megabyte with a guard page, so deep
-recursion near the old limit may be over the new one. The failure is a clean
-fault rather than corruption.
+A fiber gets an eight-megabyte stack on either backend — what `main` gets
+from a default `ulimit -s` on Linux and macOS — so a recursion that fits in
+`main` fits in a fiber, and the backend does not change how deep a program may
+go. The stack is address space reserved up front and memory committed a page
+at a time as it is touched, so a fiber that never recurses deeply is resident
+for the few kilobytes it used. Running out is reported as in
+[Traps](/docs/reference/traps/#running-out-of-stack); there is no setting that
+makes a fiber's stack larger.
 
 [Fibers](/docs/internals/fibers/) describes how each is scheduled.
 

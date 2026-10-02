@@ -17,11 +17,10 @@
 //! months while the scheduler got meaningfully faster and nothing updated it.
 //! A measurement pasted into a comment is a measurement with no owner.
 //!
-//! **One thing a program can tell, on the scheduler.** A thread gets the
-//! operating system's stack — two megabytes on Linux, one on Windows — and a
-//! coroutine gets `corosensei`'s megabyte with a guard page. Recursion that was
-//! near the old limit is over the new one, and the failure is a clean fault at
-//! the guard page rather than corruption.
+//! **How deep a fiber may recurse is the same on both.** A thread gets the
+//! stack it asks for and a coroutine gets the one it is built with, and both
+//! are `crate::stack::FIBER_STACK`, so a recursion that fits on one backend
+//! fits on the other.
 
 use super::*;
 use crate::coro::Task;
@@ -734,7 +733,20 @@ pub unsafe extern "C" fn khora_fiber_spawn(
         }
         Completion::Fiber(done)
     } else {
-        Completion::Thread(Mutex::new(Some(std::thread::spawn(run))), done)
+        // The same stack a coroutine gets, rather than Rust's two-megabyte
+        // default, and room to say so when it runs out. `crate::stack`.
+        let thread = std::thread::Builder::new().stack_size(crate::stack::FIBER_STACK).spawn(
+            move || {
+                let _room = crate::stack::guard_this_thread();
+                run()
+            },
+        );
+        let thread = match thread {
+            Ok(thread) => thread,
+            // What `std::thread::spawn` did with the same refusal.
+            Err(refused) => panic!("failed to spawn thread: {refused:?}"),
+        };
+        Completion::Thread(Mutex::new(Some(thread)), done)
     };
 
     let object = khora_alloc(std::mem::size_of::<*mut FiberState>() as u64, FIBER_TAG);

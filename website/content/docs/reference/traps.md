@@ -54,7 +54,9 @@ khora: the stack ran out
 
 on standard error, followed by the platform's stack-overflow exit status rather than 134.
 
-**The message covers the stack the program started on, and not every stack.** Reporting from an exhausted stack needs room set aside before the fault, and the runtime sets it aside at the entry point: an alternate signal stack on Unix, a thread stack guarantee on Windows. A fiber runs on a stack of its own and a spawned thread gets a fresh one, and neither carries that reservation — so an overflow there ends the process with the status above and no message. The status is the same either way; only the sentence is missing.
+**On Linux the message covers every stack Khora code runs on**: the one the program started on, a fiber's on either backend, and a test's under `khora test`. Reporting from an exhausted stack needs room set aside before the fault, and the runtime sets it aside on each of those threads, as an alternate signal stack. On Windows and macOS only the stack the program started on is known to report; an overflow on a fiber there may end the process with the status above and no message.
+
+**How deep is deep.** A fiber's stack is eight megabytes on either backend, the same as `main` gets from a default `ulimit -s` on Linux and macOS. What that buys depends on the frame: a function that matches a list cell and recurses on the tail went about 100,000 calls deep in a debug build and 260,000 in a release build on x86-64 Linux, in `main` and on a fiber alike. A larger stack is not available, by setting or by `spawn` option. A walk deeper than that is one to write as a loop.
 
 Khora does not guarantee tail-call optimization, so a function that recurses once per element of its input uses a frame per element. See [Known limitations](/docs/limitations/) for what that means for `List` in practice, and which operations are unaffected.
 

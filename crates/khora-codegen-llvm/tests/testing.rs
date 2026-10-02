@@ -279,3 +279,61 @@ fn assert_outside_a_test_is_refused() {
         "{messages:?}"
     );
 }
+
+
+/// **A test block recurses as deep as `main`, and says so when it runs out.**
+///
+/// Each test runs on a thread of its own, which had Rust's two-megabyte
+/// default and no room to report from: a test walking fifty thousand cells
+/// recursively died where the same walk in `main` finished, and a test that
+/// recursed without end ended the run with empty streams. The walk passing
+/// and the bottomless one saying why are both asserted on one run, because
+/// the second ends the process.
+#[test]
+fn a_test_block_recurses_as_deep_as_main_and_says_when_it_runs_out() {
+    let exe = build_suite(
+        "suite_deep",
+        &format!(
+            "{PRELUDE}
+pub type Cells = | End | Cell(Int, Cells);
+
+fn build(n: Int) -> Cells {{
+  let mut cells = Cells::End;
+  let mut i = 0;
+  while i < n {{ cells = Cells::Cell(i, cells); i = i + 1; }};
+  cells
+}}
+
+fn walk(cells: Cells) -> Int {{
+  match cells {{
+    Cells::End => 0,
+    Cells::Cell(_, rest) => 1 + walk(rest),
+  }}
+}}
+
+test \"deep\" {{ assert(walk(build(50000)) == 50000); }}
+"
+        ),
+    );
+    let output = Command::new(&exe).output().expect("the suite should run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("1 passed, 0 failed"), "{stdout:?} {output:?}");
+    assert_eq!(output.status.code(), Some(0));
+
+    let exe = build_suite(
+        "suite_bottomless",
+        &format!(
+            "{PRELUDE}
+fn down(n: Int) -> Int {{
+  if n <= 0 {{ 0 }} else {{ 1 + down(n - 1) }}
+}}
+
+test \"bottomless\" {{ assert(down(1000000000) == 0); }}
+"
+        ),
+    );
+    let output = Command::new(&exe).output().expect("the suite should run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("khora: the stack ran out"), "said nothing: {output:?}");
+    assert_ne!(output.status.code(), Some(0));
+}

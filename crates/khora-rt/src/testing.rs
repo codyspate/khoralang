@@ -402,25 +402,36 @@ pub extern "C" fn khora_test_run() -> i32 {
     let start = |test: PendingTest| {
         let code = test.code;
         let call = test.call;
-        std::thread::spawn(move || {
-            let code = code;
-            let _entered = enter(Fiber::spawned());
-            begin_test_root();
-            let mut payload: u64 = 0;
-            let which = (call)(code.0, &raw mut payload);
-            end_test_root();
-            // **A crossing: an error escaping the block is released by the
-            // runner**, on its own thread and fiber, below. So it is marked
-            // here, before the join publishes it. The runner releases it with
-            // no drop routine, so only the object itself is counted there, and
-            // only it is marked.
-            if which != 0 && which != FAILED_WHICH && which != CANCELED_WHICH {
-                // SAFETY: a raised error is a live Khora object, or null, and
-                // this thread holds the only reference.
-                unsafe { crate::share::khora_share(payload as *mut u8, None) };
-            }
-            Tagged { which, payload }
-        })
+        // A fiber's stack, and its room to report running out of it: a test
+        // block is as entitled to recurse as the program it tests.
+        // `crate::stack::FIBER_STACK`.
+        let started = std::thread::Builder::new().stack_size(crate::stack::FIBER_STACK).spawn(
+            move || {
+                let _room = crate::stack::guard_this_thread();
+                let code = code;
+                let _entered = enter(Fiber::spawned());
+                begin_test_root();
+                let mut payload: u64 = 0;
+                let which = (call)(code.0, &raw mut payload);
+                end_test_root();
+                // **A crossing: an error escaping the block is released by the
+                // runner**, on its own thread and fiber, below. So it is marked
+                // here, before the join publishes it. The runner releases it
+                // with no drop routine, so only the object itself is counted
+                // there, and only it is marked.
+                if which != 0 && which != FAILED_WHICH && which != CANCELED_WHICH {
+                    // SAFETY: a raised error is a live Khora object, or null,
+                    // and this thread holds the only reference.
+                    unsafe { crate::share::khora_share(payload as *mut u8, None) };
+                }
+                Tagged { which, payload }
+            },
+        );
+        match started {
+            Ok(thread) => thread,
+            // What `std::thread::spawn` did with the same refusal.
+            Err(refused) => panic!("failed to spawn thread: {refused:?}"),
+        }
     };
 
     // Each test still gets a thread and a fiber of its own either way: what

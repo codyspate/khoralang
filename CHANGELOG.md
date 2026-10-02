@@ -436,6 +436,25 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 
 ### Fixed
 
+- **`let p: Pt = {};` passed `khora check`.** An empty record literal where a
+  record with fields was expected (an annotation, a return type, an argument)
+  got no error from the checker, the editor or `khora check`. `khora build`
+  then refused a record held inline with "`x` was not given", and built one
+  held behind a pointer -- any record with a `String`, a `List` or more than a
+  few fields -- with nothing in the missing fields, so the program crashed on
+  the first read of one. The literal is refused at the `{}` with "this `Pt`
+  is missing `x`", once per missing field, by `check`, `build` and the
+  language server alike.
+
+- **A fiber could recurse less deeply than `main`, and how much less depended
+  on the backend.** A recursive walk of twenty thousand list cells finished in
+  `main` and on a thread fiber and crashed on `KHORA_FIBERS=scheduler`,
+  because the stacks were eight, two and one megabytes. A fiber's stack is
+  eight megabytes on both backends, the same as `main` with a default
+  `ulimit -s`; idle fibers cost the same memory as before, because a stack is
+  committed only as it is used. And running out of stack on a fiber, or in a
+  `khora test` block, says "khora: the stack ran out" on Linux, where it ended
+  the process with no message.
 - **On the scheduler backend, a fiber reading or writing a file could wait
   for ever once the blocking pool's queue had filled.** File-system calls run
   on a bounded pool of threads, and a fiber that finds the pool's queue full

@@ -1074,13 +1074,13 @@ impl<'a> Checker<'a> {
         }
         for label in &record.labels {
             if !fields.iter().any(|(written, _)| written == label) {
-                let at = fields.first().map(|(_, v)| self.body.range(*v));
-                if let Some(at) = at {
-                    self.error(
-                        format!("this `{}` is missing `{label}`", record.type_name),
-                        at,
-                    );
-                }
+                // `at`, which is the literal's own range when it has no field
+                // to point to. Anchoring on the first field alone left `{}`
+                // with nowhere to go, so `check` reported nothing and the
+                // literal reached lowering: an inline record failed there, at
+                // the type's declaration, and a boxed one built, with a null
+                // in every pointer field for the first read to fault on.
+                self.error(format!("this `{}` is missing `{label}`", record.type_name), at);
             }
         }
         whole.clone()

@@ -196,6 +196,30 @@ fn main() -> Int {
     assert_eq!(ran.code, Some(0));
 }
 
+/// **`{}` where a `Counts` is expected is refused by the checker, naming each
+/// missing field**, and not by lowering, whose "`created` was not given"
+/// pointed at the type's declaration rather than at the literal.
+#[test]
+fn an_empty_literal_for_a_record_with_fields_is_refused_by_the_checker() {
+    let found = refused(
+        "record_empty_literal",
+        &format!(
+            "{TALLY}
+fn main() -> Int {{
+  let start: Counts = {{}};
+  shown(start);
+  0
+}}
+"
+        ),
+    );
+    for field in ["created", "deleted", "notified", "name"] {
+        let missing = format!("this `Counts` is missing `{field}`");
+        assert!(found.contains(&missing), "no {missing:?} in {found:?}");
+    }
+    assert!(!found.iter().any(|e| e.contains("was not given")), "{found:?}");
+}
+
 /// A field the base's type does not have.
 #[test]
 fn a_field_the_record_does_not_have_is_refused() {

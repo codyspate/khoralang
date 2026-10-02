@@ -36,7 +36,7 @@ The remaining difference is cost and density:
 
 | | thread | coroutine |
 | --- | --- | --- |
-| stack | 1–2 MB, the operating system's | 1 MB with a guard page |
+| stack | 8 MB, reserved and committed as it is touched | 8 MB with a guard page, the same |
 | suspend | a kernel transition | a stack switch |
 | how many | thousands | hundreds of thousands |
 

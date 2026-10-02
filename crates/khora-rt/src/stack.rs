@@ -52,6 +52,47 @@
 /// one out.
 const MESSAGE: &[u8] = b"khora: the stack ran out, or the runtime touched memory that is not the program's (a segmentation fault; please report it)\nnote: a function that recurses as deep as its input will do this -- one you\n      wrote, a derived `Eq`, `Ord` or `Show` on a deeply nested value, or\n      `std::json::parse` on a document with a very long string in it, which\n      recurses per character. Most of `std` walks with loops and is not the\n      cause; `json` is the exception.\n";
 
+/// How much stack a fiber gets, on either backend: eight megabytes.
+///
+/// **What it prevents: a program whose recursion limit depends on where it
+/// runs.** A recursive walk of twenty thousand list cells finished in `main`,
+/// finished on a fiber's thread, and died on the scheduler with a bare
+/// `SIGSEGV`, because the three had eight, two and one megabytes -- the
+/// process's `ulimit -s`, Rust's default for a spawned thread, and
+/// `corosensei`'s default for a coroutine. Eight is what `main` gets from a
+/// default `ulimit -s` on Linux and macOS, so a function that runs in `main`
+/// runs on a fiber, and a fiber runs the same on both backends.
+///
+/// **It costs address space, not memory.** Both kinds of stack are reserved
+/// and committed a page at a time as they are touched, so a fiber resident
+/// for 8 KB of stack is resident for 8 KB at any size; `fibers_at_scale` in
+/// `soak.rs` measured the same bytes per fiber at a hundred thousand fibers
+/// with one megabyte and with eight. Where it does cost:
+///
+/// - a host with `vm.overcommit_memory=2` charges the whole reservation, so
+///   it runs out of commit at an eighth of the fibers it did;
+/// - a hundred thousand fibers reserve 800 GB, which x86-64's 128 TB of user
+///   address space holds and a tight `RLIMIT_AS` does not;
+/// - transparent huge pages could make a used stack resident in 2 MB pieces,
+///   which a one-megabyte stack could never hold. `crate::coro::fiber_stack`
+///   declines them for a coroutine, for about two and a half microseconds per
+///   spawn. A fiber's *thread*, on the default backend, is not advised: on a
+///   host with THP set to `always` a thread that once recursed deep may stay
+///   resident for 2 MB more than it touched.
+///
+/// A program that needs more is one that should loop instead: there is no
+/// knob, and growing a stack by moving it is ruled out because the scheduler
+/// does not know where Khora's pointers are.
+pub(crate) const FIBER_STACK: usize = 8 * 1024 * 1024;
+
+/// The size of the stack the report runs on, where the platform needs one.
+///
+/// A handler for a stack overflow cannot run on the stack that overflowed, so
+/// it gets one of its own; the handler writes one constant and makes one
+/// call, and this is far more than that needs.
+#[cfg(unix)]
+const ALT_STACK: usize = 64 * 1024;
+
 /// Installs the stack guard and the signal watcher, once, before anything else
 /// runs.
 ///
@@ -189,10 +230,11 @@ fn install() {
     // frame happened to divide the last page -- and a message that appears
     // intermittently is one nobody can rely on.
     //
-    // **It covers this thread only.** A fiber switched onto a `corosensei`
-    // stack, and every thread the scheduler spawns, has a guarantee of zero
-    // and reports nothing on overflow. Reserving at each of those is a wider
-    // change than this one and is not made here.
+    // **It covers this thread only.** Every other thread that runs Khora code
+    // -- a fiber's thread, a scheduler worker, a test's thread -- asks for its
+    // own with `guard_this_thread`. A coroutine's stack is not a thread's, and
+    // `corosensei` copies this thread's guarantee into each one it builds; a
+    // coroutine built on a worker that has not reserved gets none.
     reserve();
 
     // First in the chain, so nothing installed later can swallow it.
@@ -205,10 +247,6 @@ fn install() {
 
 #[cfg(unix)]
 fn install() {
-    // A handler for a stack overflow cannot run on the stack that overflowed,
-    // so it gets one of its own. `SIGSTKSZ` is the platform's own answer to
-    // how big that has to be.
-    const ALT_STACK: usize = 64 * 1024;
     static mut ALT: [u8; ALT_STACK] = [0; ALT_STACK];
 
     /// Reports, restores the default disposition, and returns.
@@ -260,8 +298,173 @@ fn install() {
 #[cfg(not(any(unix, windows)))]
 fn install() {}
 
+/// Room to report from, on the calling thread, for as long as the guard lives.
+///
+/// **What it prevents: a fiber that runs out of stack and says nothing.**
+/// `khora_begin` sets room aside on the thread that calls it, and the room is
+/// per thread on both platforms -- an alternate signal stack on Unix, a stack
+/// guarantee on Windows. A fiber's thread, a scheduler worker (whose
+/// coroutines' overflows are delivered to the worker) and a test's thread had
+/// none, so an overflow on any of them faulted again on the way into the
+/// handler and the process ended with a status and empty streams.
+///
+/// Called first thing by each of those threads, which is every thread that
+/// runs Khora code. A thread that already has an alternate stack keeps it:
+/// the Rust test harness gives its threads one, and replacing it would free
+/// memory the harness still points at.
+///
+/// It costs one 64 KB mapping per such thread, released when the guard is
+/// dropped; a hundred thousand fibers on the scheduler share a handful of
+/// workers, so the cost scales with threads, not fibers.
+#[must_use = "the room is given back when the guard is dropped"]
+pub(crate) fn guard_this_thread() -> ThreadGuard {
+    #[cfg(unix)]
+    {
+        ThreadGuard { alt: alternate_stack() }
+    }
+    #[cfg(windows)]
+    {
+        reserve();
+        ThreadGuard {}
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        ThreadGuard {}
+    }
+}
+
+/// The room [`guard_this_thread`] set aside, given back on drop.
+pub(crate) struct ThreadGuard {
+    /// The mapping this guard installed, or null when the thread already had
+    /// one or none could be had.
+    #[cfg(unix)]
+    alt: *mut libc::c_void,
+}
+
+#[cfg(unix)]
+impl Drop for ThreadGuard {
+    fn drop(&mut self) {
+        if self.alt.is_null() {
+            return;
+        }
+        // SAFETY: `alt` is the mapping `alternate_stack` made and installed on
+        // this thread -- a guard is neither `Send` nor `Sync`, so it is
+        // dropped where it was made. Disabling comes first, so the kernel
+        // never delivers onto memory that has been unmapped; a signal handler
+        // cannot be running on it here, because the thread is running this.
+        unsafe {
+            let mut off: libc::stack_t = std::mem::zeroed();
+            off.ss_flags = libc::SS_DISABLE;
+            libc::sigaltstack(&raw const off, std::ptr::null_mut());
+            libc::munmap(self.alt, ALT_STACK);
+        }
+    }
+}
+
+/// Maps and installs an alternate signal stack for this thread, unless it
+/// has one. Null when it had one, or when the mapping failed: a failure is
+/// the silence that came before, not worse, and not a reason to stop a fiber.
+#[cfg(unix)]
+fn alternate_stack() -> *mut libc::c_void {
+    // SAFETY: a query (null for the value to install) into a local, then an
+    // anonymous mapping nothing else knows about, installed as this thread's
+    // alternate stack with its exact size.
+    unsafe {
+        let mut current: libc::stack_t = std::mem::zeroed();
+        libc::sigaltstack(std::ptr::null(), &raw mut current);
+        if current.ss_flags & libc::SS_DISABLE == 0 {
+            return std::ptr::null_mut();
+        }
+        let alt = libc::mmap(
+            std::ptr::null_mut(),
+            ALT_STACK,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        );
+        if alt == libc::MAP_FAILED {
+            return std::ptr::null_mut();
+        }
+        let mut stack: libc::stack_t = std::mem::zeroed();
+        stack.ss_sp = alt;
+        stack.ss_size = ALT_STACK;
+        stack.ss_flags = 0;
+        if libc::sigaltstack(&raw const stack, std::ptr::null_mut()) != 0 {
+            libc::munmap(alt, ALT_STACK);
+            return std::ptr::null_mut();
+        }
+        alt
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    /// **Every thread that runs Khora code has room to report from, and a
+    /// thread that already had room keeps its own.**
+    ///
+    /// A fresh thread gets an alternate stack it did not have, and loses it
+    /// again when the guard goes, so a thread pool does not collect them. A
+    /// thread with one -- the Rust test harness installs one on each of its
+    /// threads -- is left exactly as it was, because unmapping that stack on
+    /// drop would free memory its owner still points at.
+    #[cfg(unix)]
+    #[test]
+    fn a_thread_running_khora_code_has_room_to_report_from() {
+        fn installed() -> libc::stack_t {
+            // SAFETY: a pure query (null for the value to install) into a
+            // local of this frame.
+            unsafe {
+                let mut stack: libc::stack_t = std::mem::zeroed();
+                libc::sigaltstack(std::ptr::null(), &raw mut stack);
+                stack
+            }
+        }
+        fn none() -> bool {
+            installed().ss_flags & libc::SS_DISABLE != 0
+        }
+
+        std::thread::Builder::new()
+            .spawn(|| {
+                // A thread std spawns may already have one; this one must not,
+                // or the first half proves nothing.
+                // SAFETY: disables this thread's alternate stack, whose memory
+                // is std's and stays mapped; nothing here is a signal handler.
+                unsafe {
+                    let mut off: libc::stack_t = std::mem::zeroed();
+                    off.ss_flags = libc::SS_DISABLE;
+                    libc::sigaltstack(&raw const off, std::ptr::null_mut());
+                }
+                assert!(none(), "could not take the thread's alternate stack away");
+                {
+                    let _room = super::guard_this_thread();
+                    assert!(!none(), "a thread running Khora code has no room to report from");
+                    assert_eq!(installed().ss_size, super::ALT_STACK);
+                }
+                assert!(none(), "the room outlived the guard");
+            })
+            .expect("a thread")
+            .join()
+            .expect("the thread");
+
+        std::thread::Builder::new()
+            .spawn(|| {
+                let mine = installed();
+                if mine.ss_flags & libc::SS_DISABLE != 0 {
+                    return;
+                }
+                {
+                    let _room = super::guard_this_thread();
+                    assert_eq!(installed().ss_sp, mine.ss_sp, "a thread's own room was replaced");
+                }
+                assert_eq!(installed().ss_sp, mine.ss_sp, "a thread's own room was taken away");
+                assert_eq!(installed().ss_flags & libc::SS_DISABLE, 0);
+            })
+            .expect("a thread")
+            .join()
+            .expect("the thread");
+    }
+
     /// **The handler has somewhere to run.**
     ///
     /// Both platforms report from a stack that is already gone, so both have

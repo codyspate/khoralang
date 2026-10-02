@@ -2980,3 +2980,107 @@ fn a_waker_blocked_on_a_cell_its_wakee_holds_does_not_hang_the_program() {
     }
     assert!(hangs.is_empty(), "runs that hung (CPUs, run): {hangs:?}");
 }
+
+
+// --- how deep a fiber can recurse --------------------------------------------
+
+/// A walk that recurses once per cell, with work after the call so that no
+/// optimizer can turn it into a loop.
+const DEEP_WALK: &str = "module t;
+fn print(value: Int);
+
+pub type Cells = | End | Cell(Int, Cells);
+
+pub type Fiber<A, 'r>;
+impl<A, 'r> Fiber<A, 'r> {
+  fn spawn(body: () -> A raises 'r) -> Fiber<A, 'r>;
+  fn join(self) -> A raises 'r;
+}
+
+fn build(n: Int) -> Cells {
+  let mut cells = Cells::End;
+  let mut i = 0;
+  while i < n { cells = Cells::Cell(i, cells); i = i + 1; };
+  cells
+}
+
+fn walk(cells: Cells) -> Int {
+  match cells {
+    Cells::End => 0,
+    Cells::Cell(_, rest) => 1 + walk(rest),
+  }
+}
+";
+
+/// **A fiber recurses as deep as `main` does, on either backend.**
+///
+/// A fiber walking twenty thousand cells recursively died with a bare
+/// `SIGSEGV` on the scheduler, where a coroutine had a one-megabyte stack,
+/// and finished on threads, where it had two -- so the same program passed or
+/// crashed by an environment variable. Both are eight megabytes, the stack
+/// `main` gets from a default `ulimit -s`, and the walk is run in `main` too
+/// so the three are compared on one program. Fifty thousand cells is past
+/// what two megabytes held in a debug build, so it is the half that sees the
+/// thread backend's stack.
+#[test]
+fn a_fiber_walks_twenty_thousand_cells_recursively_on_either_backend() {
+    let source = format!(
+        "{DEEP_WALK}
+fn main() -> Int {{
+  print(walk(build(50000)));
+  let f = Fiber::spawn(fn () => walk(build(20000)));
+  print(Fiber::join(f));
+  let g = Fiber::spawn(fn () => walk(build(50000)));
+  print(Fiber::join(g));
+  0
+}}
+"
+    );
+    for backend in ["threads", "scheduler"] {
+        let ran = run_on(&format!("deep_walk_{backend}"), &source, backend);
+        assert_eq!(
+            (ran.stdout.as_str(), ran.code),
+            ("50000\n20000\n50000\n", Some(0)),
+            "on {backend}: {}",
+            ran.stderr
+        );
+    }
+}
+
+/// **Recursion with no bottom, on a fiber, says the stack ran out.**
+///
+/// It said nothing on either backend: the message is written from a stack set
+/// aside for the purpose, and only the thread `main` started on had one. A
+/// fiber's thread, a scheduler worker and a test's thread overflowed with no
+/// room to write from, and the process ended with an exit status and empty
+/// streams -- the silence `running_out_of_stack_says_so` was written to end
+/// on the main thread.
+#[test]
+fn unbounded_recursion_on_a_fiber_says_the_stack_ran_out_on_either_backend() {
+    let source = format!(
+        "{DEEP_WALK}
+fn down(n: Int) -> Int {{
+  if n <= 0 {{ 0 }} else {{ 1 + down(n - 1) }}
+}}
+
+fn main() -> Int {{
+  let f = Fiber::spawn(fn () => down(1000000000));
+  print(Fiber::join(f));
+  0
+}}
+"
+    );
+    for backend in ["threads", "scheduler"] {
+        let ran = run_on(&format!("deep_unbounded_{backend}"), &source, backend);
+        assert!(
+            ran.stderr.contains("khora: the stack ran out"),
+            "on {backend}, said nothing: {:?} (status {:?})",
+            ran.stderr,
+            ran.code
+        );
+        assert_eq!(ran.stdout, "", "on {backend}");
+        // Still dies of it: not a clean exit, and not the 134 of a trap.
+        assert_ne!(ran.code, Some(0), "on {backend}");
+        assert_ne!(ran.code, Some(134), "on {backend}");
+    }
+}
