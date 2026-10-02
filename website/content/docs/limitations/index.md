@@ -70,6 +70,13 @@ String operations are loops too. `split`, `join` and `repeat` handle inputs of
 any size, and `join` is linear rather than quadratic in the length of its
 result.
 
+`std::json` reads and writes documents of any length with loops. Nesting is
+the exception: each level of `[` or `{` takes a stack frame, so `parse`
+refuses a document nested deeper than 512 levels with a `JsonError` rather
+than letting the document decide how much stack it uses, and
+`parse_with_depth` takes another limit. `encode` has no limit, so a `Json`
+nested tens of thousands of levels deep by the program runs the stack out.
+
 Releasing a value costs no stack either: reference counting frees a value's children through a queue rather than by recursing, so letting go of a long list is a loop like walking one. A million-element `List` sorts.
 
 What is left is ordinary recursion that somebody writes. A function that calls itself once per element of its input will use a frame per element, and no analysis in the compiler turns that into a loop.

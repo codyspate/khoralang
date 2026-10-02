@@ -48,17 +48,71 @@ const BACKENDS: [&str; 2] = ["threads", "scheduler"];
 /// crash.
 const PROGRAM: &str = r#"module demo::main;
 
-import std::core::{List, Map, Option, Result, String, print};
+import std::core::{List, Map, Option, Result, String, Validated, print};
 import std::env::{Env};
 import std::fs::{FsRead, IoError, extension, file_name, fold_chunks, fold_lines};
-import std::json::{Json, JsonError, encode, parse, quote};
+import std::json::{Json, JsonError, encode, parse, parse_with_depth, quote};
 import std::net::http::{matches};
 import std::permissions::{granted, granted_host};
+import std::schema::{Decode, Raw, Rejection, decode};
+
+/// Two levels of nesting per record: the object, and the list inside it.
+derive(Decode)
+pub type Nest = { pub inner: List<Nest> };
 
 fn parsed(text: String) -> String {
   match parse(text) {
     Result::Ok(value) => encode(value),
     Result::Err(why) => "error at ${Int::to_string(why.at)}: ${why.expected}",
+  }
+}
+
+/// What a nested document parsed to: its length re-encoded, or the error.
+fn nested(found: Result<Json, JsonError>) -> String {
+  match found {
+    Result::Ok(value) => "ok ${Int::to_string(String::byte_length(encode(value)))}",
+    Result::Err(why) => "error at ${Int::to_string(why.at)}: ${why.expected}",
+  }
+}
+
+fn brackets(n: Int) -> String { String::repeat("[", n) + String::repeat("]", n) }
+
+/// The three ways `std::schema` walks a parsed document, each as deep as it.
+fn schema_walks(text: String) -> String {
+  match parse(text) {
+    Result::Ok(value) => {
+      let raw = Raw::of_json(value);
+      "ok ${length(encode(Raw::to_json(raw)))} ${length(Raw::json_text(raw))}"
+    },
+    Result::Err(why) => "error at ${Int::to_string(why.at)}: ${why.expected}",
+  }
+}
+
+fn records(n: Int) -> String { String::repeat("{\"inner\":[", n) + String::repeat("]}", n) }
+
+fn nest_depth(top: Nest) -> Int {
+  let mut depth = 1;
+  let mut here = top;
+  let mut going = true;
+  while going {
+    match here.inner {
+      List::Cons(next, _rest) => { depth = depth + 1; here = next; },
+      List::Nil => going = false,
+    }
+  };
+  depth
+}
+
+fn decoded(text: String) -> String {
+  match parse(text) {
+    Result::Err(why) => "error at ${Int::to_string(why.at)}: ${why.expected}",
+    Result::Ok(document) => {
+      let got: Validated<Nest, Rejection> = decode(Raw::of_json(document));
+      match got {
+        Validated::Valid(top) => "depth ${Int::to_string(nest_depth(top))}",
+        Validated::Invalid(problems) => Rejection::report(problems),
+      }
+    },
   }
 }
 
@@ -131,6 +185,12 @@ fn run(case: String, n: Int, path: String) -> String
     "lines" => Int::to_string(fold_lines(path, 0, fn (k, _line) => k + 1)!),
     "read_dir" => Int::to_string(List::length(reads.read_dir(path)!)),
     "colliding" => colliding(n),
+    "json_nested" => nested(parse(brackets(n))),
+    "json_nested_members" => nested(parse(String::repeat("{\"a\":", n) + "1" + String::repeat("}", n))),
+    "json_open" => nested(parse(String::repeat("[", n))),
+    "json_deeper" => "${nested(parse_with_depth(brackets(n), n))}; ${nested(parse_with_depth(brackets(n + 1), n))}",
+    "json_schema" => schema_walks(brackets(n)),
+    "json_decode" => decoded(records(n)),
     _ => "no case ${case}",
   }
 }
@@ -262,7 +322,12 @@ fn scratch(name: &str) -> PathBuf {
 /// Runs `exe` with `args` under [`STACK`] on `backend`, and answers its
 /// stdout, failing with the status and stderr if it did not exit cleanly.
 fn run_limited(exe: &Path, backend: &str, args: &[String]) -> String {
-    let mut command = harness::with_stack_limit(exe, STACK / 1024);
+    run_under(exe, backend, args, STACK)
+}
+
+/// [`run_limited`], under a stack of `stack` bytes.
+fn run_under(exe: &Path, backend: &str, args: &[String], stack: u64) -> String {
+    let mut command = harness::with_stack_limit(exe, stack / 1024);
     // Cleared, because Linux gives the arguments and the environment together
     // a quarter of the stack limit, 64 KB here, and every byte of this
     // process's environment is one an argument cannot have. The shell that
@@ -398,6 +463,196 @@ fn json_reads_and_writes_a_document_of_any_length() {
 fn a_route_matches_a_path_of_any_number_of_segments() {
     let exe = program("route");
     case(&exe, "route", ITEMS, "", "some some");
+}
+
+/// The stack the nesting cases run under: a megabyte.
+///
+/// **Not [`STACK`].** The parser keeps a frame per level of nesting by
+/// design, bounded by its limit rather than removed, and 512 levels take
+/// about 320 KB of stack in the debug build these tests compile -- so a
+/// 256 KB stack cannot hold a document `parse` must accept. A megabyte holds
+/// it three times over and still runs out within about 1,700 levels of the
+/// unlimited parser, so a document of a million `[` would end the process
+/// here as it ended a request fiber's 8 MB.
+const NESTING_STACK: u64 = 1024 * 1024;
+
+/// One case of [`PROGRAM`] under [`NESTING_STACK`], on both backends.
+fn nesting_case(exe: &Path, name: &str, n: usize, expected: &str) {
+    for backend in BACKENDS {
+        let args = vec![name.to_string(), n.to_string(), String::new()];
+        let got = run_under(exe, backend, &args, NESTING_STACK);
+        assert_eq!(got, expected, "case `{name}` at {n} on `{backend}`");
+    }
+}
+
+/// **What this prevents: a document that ends the process by nesting.** The
+/// parser recursed a frame per `[` or `{` with no limit, so 15,375 `[` -- 31
+/// KB -- ran an 8 MB stack out, and any route that parsed a body under a
+/// `Router::holding` of 32 KB or more was a crash any client could send.
+///
+/// `parse` takes 512 levels and refuses the 513th at the bracket that opens
+/// it, in an array and in an object; a megabyte of `[` is that error and not
+/// a crash; `parse_with_depth` admits more when asked to and refuses one past
+/// what it was asked.
+#[test]
+fn json_refuses_nesting_past_its_limit() {
+    let exe = program("json_nesting");
+    // `[` * 512 then `]` * 512, written back.
+    nesting_case(&exe, "json_nested", 512, "ok 1024");
+    nesting_case(&exe, "json_nested", 513, "error at 512: at most 512 levels of nesting");
+    // `{"a":` is five bytes, so the 513th brace is at 5 * 512.
+    nesting_case(&exe, "json_nested_members", 512, &format!("ok {}", 5 * 512 + 1 + 512));
+    nesting_case(
+        &exe,
+        "json_nested_members",
+        513,
+        "error at 2560: at most 512 levels of nesting",
+    );
+    nesting_case(&exe, "json_open", 1 << 20, "error at 512: at most 512 levels of nesting");
+    nesting_case(
+        &exe,
+        "json_deeper",
+        1000,
+        "ok 2000; error at 1000: at most 1000 levels of nesting",
+    );
+}
+
+/// `Raw::of_json`, `Raw::to_json` and `Raw::json_text` recurse as deep as the
+/// document, and a derived `Decode` as deep as its type's nesting. **None of
+/// them is limited of its own**: they take what `parse` produced, so its
+/// limit is theirs. Each is driven to that limit and one past it.
+#[test]
+fn json_nesting_limit_covers_schema_and_derived_decoders() {
+    let exe = program("json_schema_nesting");
+    nesting_case(&exe, "json_schema", 512, "ok 1024 1024");
+    nesting_case(&exe, "json_schema", 513, "error at 512: at most 512 levels of nesting");
+    // Two levels per record, so 256 records is 512 levels.
+    nesting_case(&exe, "json_decode", 256, "depth 256");
+    // `{"inner":[` is ten bytes; record 257's brace is at 10 * 256.
+    nesting_case(
+        &exe,
+        "json_decode",
+        257,
+        "error at 2560: at most 512 levels of nesting",
+    );
+}
+
+/// A service that decodes a JSON body, with room for a megabyte of it.
+const NESTING_SERVER: &str = r#"module demo::main;
+import std::core::{ChildFailed, List, Result, SharedFn, Validated};
+import std::json::{JsonError, parse};
+import std::net::http::{HttpError, Request, Response, Router};
+import std::schema::{Decode, Raw, Rejection, decode};
+
+derive(Decode)
+pub type Nest = { pub inner: List<Nest> };
+
+fn take(req: Request) -> Response {
+  match parse(req.body) {
+    Result::Err(why) => Response::text(400, "error at ${Int::to_string(why.at)}: ${why.expected}"),
+    Result::Ok(document) => {
+      let got: Validated<Nest, Rejection> = decode(Raw::of_json(document));
+      match got {
+        Validated::Valid(_top) => Response::text(200, "decoded"),
+        Validated::Invalid(problems) => Response::text(422, Rejection::report(problems)),
+      }
+    },
+  }
+}
+
+pub fn main() raises HttpError + ChildFailed {
+  Router::new()
+    |> Router::post("/nest", SharedFn::of(take))
+    |> Router::holding(1048576)
+    |> Router::listen(@PORT@)!
+}
+"#;
+
+/// Its own ports, one per backend; `tests/traps_in_a_server.rs` lists the
+/// ones in use.
+const NESTING_PORTS: [u16; 2] = [18738, 18739];
+
+/// Killed on every path out, so a failed run does not leave the port held.
+struct Server {
+    child: std::process::Child,
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Posts `body` to `/nest` on a connection of its own and reads to the close.
+fn post_nest(port: u16, body: &[u8]) -> String {
+    use std::io::{Read, Write};
+    let mut socket = std::net::TcpStream::connect(("127.0.0.1", port)).expect("the server");
+    let deadline = Some(std::time::Duration::from_secs(20));
+    socket.set_read_timeout(deadline).expect("a read deadline");
+    socket.set_write_timeout(deadline).expect("a write deadline");
+    let head = format!(
+        "POST /nest HTTP/1.1\r\nHost: t\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    let _ = socket.write_all(head.as_bytes());
+    let _ = socket.write_all(body);
+    let mut answer = Vec::new();
+    let _ = socket.read_to_end(&mut answer);
+    String::from_utf8_lossy(&answer).into_owned()
+}
+
+/// **The crash this limit exists for, over the wire.** A router holding a
+/// megabyte of request, a handler that parses the body and decodes it with a
+/// derived `Decode`, and a body of a million `[`: the server answers 400
+/// with the parser's error and goes on answering. Without the limit the
+/// request's fiber ran its 8 MB out and took the process with it.
+///
+/// A fiber's stack is 8 MB whatever `RLIMIT_STACK` says, so this runs with
+/// the limit as it is.
+#[test]
+fn a_server_survives_a_deeply_nested_body() {
+    use std::io::Read;
+    for (backend, port) in BACKENDS.into_iter().zip(NESTING_PORTS) {
+        // The port is written into `listen`, so each backend's server is a
+        // build of its own.
+        let exe = build(
+            &format!("long_inputs_nesting_server_{backend}"),
+            &[repository().join("std")],
+            &NESTING_SERVER.replace("@PORT@", &port.to_string()),
+        );
+        let mut server = Server {
+            child: std::process::Command::new(&exe)
+                .env("KHORA_FIBERS", backend)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("the server should start"),
+        };
+        let mut stdout = server.child.stdout.take().expect("piped");
+        let mut opened = [0u8; 9];
+        stdout.read_exact(&mut opened).expect("the server should announce itself");
+        assert_eq!(&opened, b"listening");
+
+        let answer = post_nest(port, &vec![b'['; 1_000_000]);
+        let alive = server.child.try_wait().ok().flatten().is_none();
+        let mut said = String::new();
+        if !alive {
+            if let Some(mut err) = server.child.stderr.take() {
+                let _ = err.read_to_string(&mut said);
+            }
+        }
+        assert!(
+            answer.starts_with("HTTP/1.1 400 ")
+                && answer.ends_with("error at 512: at most 512 levels of nesting"),
+            "on `{backend}`: the answer was {:?}; the server is {}; it said: {said}",
+            &answer[..answer.len().min(200)],
+            if alive { "running" } else { "gone" }
+        );
+        // And it is still there for the next caller.
+        let answer = post_nest(port, br#"{"inner":[{"inner":[]}]}"#);
+        assert!(answer.ends_with("decoded"), "on `{backend}`: {answer}");
+    }
 }
 
 /// Five times the 20,068 spans an exporter's fiber held, each one a report

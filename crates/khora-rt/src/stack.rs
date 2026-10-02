@@ -41,16 +41,19 @@
 /// somebody to read code that cannot be the cause.
 ///
 /// **And then it claimed too much in the other direction.** "`std` walks lists
-/// and strings with loops, so it is most likely a function of your own" is
-/// false for `std::json::parse`, which recurses once per character of a string
-/// literal: a 50 KB document kills the process on the main thread and an 11 KB
-/// one inside a request fiber, with no user code in the frame at all. A reader
-/// told to look at their own handlers spends an afternoon there.
+/// and strings with loops, so it is most likely a function of your own" was
+/// false while `std::json::parse` recursed once per character of a string
+/// literal: a 50 KB document killed the process with no user code in the
+/// frame at all, and a reader told to look at their own handlers would have
+/// spent an afternoon there.
 ///
-/// So the note names both possibilities and neither as "most likely". It
-/// cannot say which without a backtrace, and the thing it must not do is rule
-/// one out.
-const MESSAGE: &[u8] = b"khora: the stack ran out, or the runtime touched memory that is not the program's (a segmentation fault; please report it)\nnote: a function that recurses as deep as its input will do this -- one you\n      wrote, a derived `Eq`, `Ord` or `Show` on a deeply nested value, or\n      `std::json::parse` on a document with a very long string in it, which\n      recurses per character. Most of `std` walks with loops and is not the\n      cause; `json` is the exception.\n";
+/// So the note names every kind of recursion that can still follow its input
+/// and calls none of them "most likely": it cannot say which without a
+/// backtrace, and the thing it must not do is rule one out. `parse` is not on
+/// the list, because it walks strings with a loop and refuses nesting past
+/// 512; `encode` is, because a `Json` the program built has whatever depth
+/// the program gave it.
+const MESSAGE: &[u8] = b"khora: the stack ran out, or the runtime touched memory that is not the program's (a segmentation fault; please report it)\nnote: a function that recurses as deep as its input will do this -- one you\n      wrote, a derived `Eq`, `Ord` or `Show` on a deeply nested value, or\n      `std::json::encode` on a `Json` the program nested very deeply.\n";
 
 /// How much stack a fiber gets, on either backend: eight megabytes.
 ///
@@ -629,5 +632,26 @@ mod tests {
                 "only {current} bytes are set aside for the handler"
             );
         }
+    }
+
+    /// **The note names what can still recurse with its input, and nothing
+    /// that cannot.**
+    ///
+    /// It said `std::json::parse` recursed once per character of a string and
+    /// was "the exception" in `std`, long after both stopped being true: a
+    /// reader with a stack overflow was sent to read a parser that walks
+    /// strings with a loop and refuses nesting past 512. What is left is the
+    /// program's own recursion, a derived `Eq`, `Ord` or `Show`, and encoding
+    /// a `Json` the program built deeper than that.
+    #[test]
+    fn the_note_names_what_still_recurses() {
+        let note = std::str::from_utf8(super::MESSAGE).expect("the note is text");
+        assert!(note.starts_with("khora: the stack ran out"), "{note}");
+        assert!(note.contains("recurses as deep as its input"), "{note}");
+        assert!(note.contains("derived `Eq`, `Ord` or `Show`"), "{note}");
+        assert!(note.contains("`std::json::encode`"), "{note}");
+        assert!(!note.contains("parse"), "parse refuses deep nesting: {note}");
+        assert!(!note.contains("per character"), "no part of `std::json` does: {note}");
+        assert!(note.ends_with('\n'), "{note:?}");
     }
 }

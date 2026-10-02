@@ -281,6 +281,13 @@ fn sorted_fields(fields: Map<String, Json>) -> List<Field> {
 /// Compact: no spaces and no newlines. Pretty-printing is a second function
 /// when something wants one, rather than a flag that doubles every branch
 /// below.
+///
+/// **A stack frame per level of nesting, and no limit.** A value [`parse`]
+/// produced is at most 512 levels deep, which encodes in under 200 KB of
+/// stack. A deeper one came from [`parse_with_depth`] or was built by the
+/// program, and encoding it costs about 350 bytes of stack a level in a
+/// debug build and 200 in a release one: an 8 MB stack runs out at about
+/// 23,000 levels in debug, and the process ends.
 pub fn encode(value: Json) -> String {
   match value {
     Json::Null => "null",
@@ -294,6 +301,7 @@ pub fn encode(value: Json) -> String {
   }
 }
 
+/// [`encode`], and as deep: a frame per level of nesting.
 impl Show for Json {
   fn show(self) -> String { encode(self) }
 }
@@ -419,8 +427,32 @@ type Fields = { fields: Map<String, Json>, at: Int };
 /// Trailing text is an error rather than ignored: `{"a":1} oops` is a mistake
 /// somebody wants told about, and a parser that stops at the first complete
 /// value hides it.
+///
+/// **At most 512 levels of nesting.** The parser takes a stack frame per
+/// level, so with no limit a document of nothing but opening brackets would
+/// decide how much stack it used: 31 KB of them runs an 8 MB stack out and
+/// ends the process, and a request body is a document any client chooses.
+/// Deeper is an error: its `at` is the offset of the bracket that would open
+/// level 513, and its `expected` is `at most 512 levels of nesting`. 512 is
+/// far past what real documents nest, and costs about 320 KB of stack at its
+/// deepest in a debug build and 100 KB in a release one. For another limit,
+/// see [`parse_with_depth`].
 pub fn parse(text: String) -> Result<Json, JsonError> {
-  match value_at(text, skip_space(text, 0)) {
+  parse_with_depth(text, 512)
+}
+
+/// [`parse`], refusing nesting deeper than `limit` rather than 512.
+///
+/// For a caller who knows its documents nest deeper and has the stack for
+/// them. **Each level costs a stack frame**: about 620 bytes in a debug build
+/// and about 200 in a release one on x86-64 Linux, so an 8 MB stack -- what
+/// `main` gets by default and what every fiber gets -- holds about 13,000
+/// levels in debug and 40,000 in release, with nothing else on it. A limit
+/// past what the stack holds is no limit: the process ends instead of
+/// answering an error. A `limit` of 0 or less admits no array or object at
+/// all.
+pub fn parse_with_depth(text: String, limit: Int) -> Result<Json, JsonError> {
+  match value_at(text, skip_space(text, 0), 0, limit) {
     Result::Err(why) => Result::Err(why),
     Result::Ok(found) => {
       let end = skip_space(text, found.at);
@@ -433,7 +465,12 @@ pub fn parse(text: String) -> Result<Json, JsonError> {
   }
 }
 
-fn value_at(text: String, at: Int) -> Result<Value, JsonError> {
+/// One value, at `at`, which is `depth` levels inside arrays and objects.
+///
+/// `depth` and `limit` are what keep the nesting from deciding the stack: an
+/// array or an object recurses back here, a frame per level, so the bracket
+/// that would open level `limit + 1` is refused where it stands.
+fn value_at(text: String, at: Int, depth: Int, limit: Int) -> Result<Value, JsonError> {
   if at >= String::byte_length(text) {
     Result::Err({ at: at, expected: "a value" })
   } else {
@@ -449,16 +486,26 @@ fn value_at(text: String, at: Int) -> Result<Value, JsonError> {
         Result::Err(why) => Result::Err(why),
         Result::Ok(found) => Result::Ok({ json: Json::Text(found.text), at: found.at }),
       }
+    } else if (byte == 91 || byte == 123) && depth >= limit {
+      too_deep(at, limit)
     } else if byte == 91 {
-      array_at(text, at)
+      array_at(text, at, depth + 1, limit)
     } else if byte == 123 {
-      object_at(text, at)
+      object_at(text, at, depth + 1, limit)
     } else if byte == 45 || (byte >= 48 && byte <= 57) {
       number_at(text, at)
     } else {
       Result::Err({ at: at, expected: "a value" })
     }
   }
+}
+
+/// The refusal of the bracket at `at`, one level past `limit`.
+///
+/// A function of its own so that the text it builds takes room in this
+/// frame, once, and not in `value_at`'s, which is on the stack once per level.
+fn too_deep(at: Int, limit: Int) -> Result<Value, JsonError> {
+  Result::Err({ at: at, expected: "at most ${Int::to_string(limit)} levels of nesting" })
 }
 
 /// `null`, `true` or `false`, matched whole.
@@ -831,12 +878,12 @@ fn float_of(literal: String) -> Float {
 
 // --- arrays and objects ----------------------------------------------------
 
-fn array_at(text: String, at: Int) -> Result<Value, JsonError> {
+fn array_at(text: String, at: Int, depth: Int, limit: Int) -> Result<Value, JsonError> {
   let first = skip_space(text, at + 1);
   if first < String::byte_length(text) && U8::to_int(String::byte(text, first)) == 93 {
     Result::Ok({ json: Json::Array(List::Nil), at: first + 1 })
   } else {
-    match items_at(text, first, List::Nil) {
+    match items_at(text, first, List::Nil, depth, limit) {
       Result::Err(why) => Result::Err(why),
       Result::Ok(found) =>
       // Reversed because each item was prepended, which is the cheap end of a
@@ -853,15 +900,14 @@ fn array_at(text: String, at: Int) -> Result<Value, JsonError> {
 /// out -- a 100 KB body, under the megabyte `Router::holding` is shown
 /// admitting. The recursion left is `value_at` for an element that is itself
 /// an array or an object: a frame per level of nesting rather than per
-/// element, and **not a limit anything enforces**, so a document of nothing
-/// but `[` still runs the stack out.
-fn items_at(text: String, at: Int, acc: List<Json>) -> Result<Items, JsonError> {
+/// element, and bounded by the `limit` [`parse`] passes down.
+fn items_at(text: String, at: Int, acc: List<Json>, depth: Int, limit: Int) -> Result<Items, JsonError> {
   let length = String::byte_length(text);
   let mut at = at;
   let mut acc = acc;
   let mut answer: Option<Result<Items, JsonError>> = Option::None;
   loop {
-    match value_at(text, at) {
+    match value_at(text, at, depth, limit) {
       Result::Err(why) => {
         answer = Option::Some(Result::Err(why));
         break
@@ -889,13 +935,13 @@ fn items_at(text: String, at: Int, acc: List<Json>) -> Result<Items, JsonError> 
   }
 }
 
-fn object_at(text: String, at: Int) -> Result<Value, JsonError> {
+fn object_at(text: String, at: Int, depth: Int, limit: Int) -> Result<Value, JsonError> {
   let first = skip_space(text, at + 1);
   let empty: Map<String, Json> = Map::new();
   if first < String::byte_length(text) && U8::to_int(String::byte(text, first)) == 125 {
     Result::Ok({ json: Json::Object(empty), at: first + 1 })
   } else {
-    match members_at(text, first, empty) {
+    match members_at(text, first, empty, depth, limit) {
       Result::Err(why) => Result::Err(why),
       Result::Ok(found) => Result::Ok({ json: Json::Object(found.fields), at: found.at }),
     }
@@ -909,7 +955,7 @@ fn object_at(text: String, at: Int) -> Result<Value, JsonError> {
 ///
 /// A loop over the members, for the reason [`items_at`] is one: as a
 /// recursion, an object of 37,000 members ran an 8 MB stack out.
-fn members_at(text: String, at: Int, acc: Map<String, Json>) -> Result<Fields, JsonError> {
+fn members_at(text: String, at: Int, acc: Map<String, Json>, depth: Int, limit: Int) -> Result<Fields, JsonError> {
   let length = String::byte_length(text);
   let mut at = at;
   let mut answer: Option<Result<Fields, JsonError>> = Option::None;
@@ -925,7 +971,7 @@ fn members_at(text: String, at: Int, acc: Map<String, Json>) -> Result<Fields, J
           answer = Option::Some(Result::Err({ at: colon, expected: "a colon" }));
           break
         };
-        match value_at(text, skip_space(text, colon + 1)) {
+        match value_at(text, skip_space(text, colon + 1), depth, limit) {
           Result::Err(why) => {
             answer = Option::Some(Result::Err(why));
             break

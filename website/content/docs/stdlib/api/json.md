@@ -271,6 +271,8 @@ order on every document whether or not anybody looks at it.
 impl Show for Json
 ```
 
+[`encode`](#encode), and as deep: a frame per level of nesting.
+
 #### show
 
 ```khora
@@ -320,6 +322,13 @@ Compact: no spaces and no newlines. Pretty-printing is a second function
 when something wants one, rather than a flag that doubles every branch
 below.
 
+**A stack frame per level of nesting, and no limit.** A value [`parse`](#parse)
+produced is at most 512 levels deep, which encodes in under 200 KB of
+stack. A deeper one came from [`parse_with_depth`](#parse_with_depth) or was built by the
+program, and encoding it costs about 350 bytes of stack a level in a
+debug build and 200 in a release one: an 8 MB stack runs out at about
+23,000 levels in debug, and the process ends.
+
 ### quote
 
 ```khora
@@ -343,4 +352,31 @@ A whole document.
 Trailing text is an error rather than ignored: `{"a":1} oops` is a mistake
 somebody wants told about, and a parser that stops at the first complete
 value hides it.
+
+**At most 512 levels of nesting.** The parser takes a stack frame per
+level, so with no limit a document of nothing but opening brackets would
+decide how much stack it used: 31 KB of them runs an 8 MB stack out and
+ends the process, and a request body is a document any client chooses.
+Deeper is an error: its `at` is the offset of the bracket that would open
+level 513, and its `expected` is `at most 512 levels of nesting`. 512 is
+far past what real documents nest, and costs about 320 KB of stack at its
+deepest in a debug build and 100 KB in a release one. For another limit,
+see [`parse_with_depth`](#parse_with_depth).
+
+### parse_with_depth
+
+```khora
+pub fn parse_with_depth(text: String, limit: Int) -> Result<Json, JsonError>
+```
+
+[`parse`](#parse), refusing nesting deeper than `limit` rather than 512.
+
+For a caller who knows its documents nest deeper and has the stack for
+them. **Each level costs a stack frame**: about 620 bytes in a debug build
+and about 200 in a release one on x86-64 Linux, so an 8 MB stack -- what
+`main` gets by default and what every fiber gets -- holds about 13,000
+levels in debug and 40,000 in release, with nothing else on it. A limit
+past what the stack holds is no limit: the process ends instead of
+answering an error. A `limit` of 0 or less admits no array or object at
+all.
 

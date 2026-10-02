@@ -33,6 +33,13 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 
 ### Breaking
 
+- **`std::json::parse` refuses a document nested deeper than 512 levels.**
+  A document of 513 levels or more parsed when the stack held it (about
+  15,000 levels in a debug build on an eight-megabyte stack) and is a
+  `JsonError` whose `expected` is "at most 512 levels of nesting". Listed
+  here because a program that read such documents gets an error for them:
+  `parse_with_depth(text, limit)` takes another limit, at about 620 bytes of
+  stack a level in a debug build and 200 in a release one. See Fixed for why.
 - **`Db` gains `query_each`, so every `handler for Db` must implement it.**
   `query_each(sql, sets)` runs one statement once per set of values and
   answers what calling `query` once per set would, in order, one answer per
@@ -468,9 +475,18 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 
   All of them are loops, and each is tested with 20,000 items (10,000
   arguments, and 100,000 spans) under a 256 KB stack, where the recursive
-  version died at between 1,100 and 3,900. Nesting still recurses: `parse`
-  and `encode` take a frame per level of nesting, which a document of
-  nothing but `[` can still exhaust.
+  version died at between 1,100 and 3,900. Nesting is the one shape left
+  that takes a frame per level, and `parse` limits it; see the next entry.
+- **A JSON document of nothing but `[` ended the process.** `std::json::parse`
+  took a stack frame per level of nesting with no limit, so 15,375 `[` -- 31
+  KB -- ran an eight-megabyte stack out, and any service that parsed a
+  request body under a `Router::holding` of 32 KB or more could be stopped by
+  one request. `parse` refuses nesting deeper than 512 levels with a
+  `JsonError` at the bracket that opens level 513, whose `expected` is "at
+  most 512 levels of nesting"; a megabyte of `[` is that error. `Raw::of_json`,
+  `Raw::to_json`, `Raw::json_text` and derived `Decode` walk what `parse`
+  produced, so the limit covers them. `encode` and `Show for Json` have no
+  limit: a `Json` deeper than 512 is one the program built.
 - **A `Router` server died of a segmentation fault after about 130,000
   connections.** `Router::listen`, `listen_quietly`, `listen_tls`,
   `serve_forever` and `serve_secured` took each next connection by a call that
@@ -1072,6 +1088,10 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 - **A segmentation fault is reported as one.** The message that said "the
   stack ran out" for every segmentation fault says it may also be the
   runtime touching memory that is not the program's, and asks for a report.
+  Its note names the recursion that can still follow its input: the
+  program's own functions, a derived `Eq`, `Ord` or `Show` on a deeply
+  nested value, and `std::json::encode` on a `Json` the program nested very
+  deeply. It no longer names `std::json::parse`.
 
 ### Added
 
