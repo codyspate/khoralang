@@ -102,6 +102,25 @@ struct Queue {
     /// a cancel or anything else woke it. An entry is therefore a fiber that
     /// has not looked at the queue since it enrolled, and it will look.
     receivers: VecDeque<Waker>,
+    /// Receivers a send picked and woke, each owed one of the values in
+    /// `items`.
+    ///
+    /// **What stops a receive that never waited from taking a woken
+    /// receiver's value.** A send wakes the receiver that has waited longest,
+    /// but that fiber runs only when its worker reaches it, and any fiber that
+    /// runs first and receives found the value sitting there. The woken one
+    /// then found the queue empty and enrolled again at the back, behind the
+    /// fiber that took it: on a pool's idle channel under load the same
+    /// request lost that race several times in a row, and those requests
+    /// were the server's slowest 1% -- p99 twice the p90 the others saw.
+    /// A value is only free to take while `items` holds more than this list
+    /// has entries; a fiber listed here takes one whatever the count.
+    ///
+    /// Never longer than `items`: an entry is added with a value, and a send
+    /// that adds no value (a full sliding channel) adds no entry. What it
+    /// costs: a scan of this list, usually one or two long, on every return
+    /// to the lock after a park.
+    handed: Vec<usize>,
     /// Threads blocked in [`park_until_moved`] for room, and for a value.
     ///
     /// **What lets a send or receive wake one thread, or none, instead of
@@ -324,6 +343,7 @@ pub(crate) fn open(
             items: VecDeque::new(),
             senders: VecDeque::new(),
             receivers: VecDeque::new(),
+            handed: Vec::new(),
             threads_sending: 0,
             threads_receiving: 0,
             #[cfg(test)]
@@ -417,6 +437,80 @@ fn withdraw(waiting: &mut VecDeque<Waker>, enrolled: &mut Option<usize>) {
     }
 }
 
+/// Picks the receiver that has waited longest to be woken for the value just
+/// queued, and records that the value is its.
+///
+/// Picks nobody when every queued value is already owed to a woken receiver,
+/// which only a sliding channel reaches: its send replaced a value rather than
+/// adding one, so there is nothing new to give.
+fn hand_to_next(state: &mut Queue) -> Option<Waker> {
+    if state.handed.len() >= state.items.len() {
+        return None;
+    }
+    let next = state.receivers.pop_front()?;
+    state.handed.push(next.fiber());
+    Some(next)
+}
+
+/// Who is asking [`take_for`] for a value.
+#[derive(Clone, Copy)]
+enum Taker {
+    /// A fiber that enrolled as this id and parked, and is back.
+    Woken(usize),
+    /// A fiber that has not parked in this call.
+    Fresh,
+    /// Not a fiber: a thread, which a send never picks.
+    Thread,
+}
+
+impl Taker {
+    fn of(parked_as: Option<usize>) -> Taker {
+        match parked_as {
+            Some(fiber) => Taker::Woken(fiber),
+            None if crate::coro::on_a_fiber() => Taker::Fresh,
+            None => Taker::Thread,
+        }
+    }
+}
+
+/// The oldest value, if this taker may have it.
+///
+/// A fiber a send handed a value to always gets one, and another fiber gets
+/// one only while more are queued than are owed ([`Queue::handed`]).
+///
+/// **A thread takes any value, and the newest promise goes.** A thread is
+/// never on the receivers list, so nothing is ever handed to it, and a
+/// promise to a fiber that never runs again -- its pool stopped with it
+/// parked -- would otherwise keep that value from a thread for ever. The
+/// fiber whose promise went finds nothing and waits again, which is what
+/// every woken receiver did before promises existed.
+///
+/// **A woken receiver is owed *a* value, not the one its send queued.**
+/// Values come out oldest first whoever takes them, so the order the channel
+/// promises is kept whichever woken receiver runs first.
+fn take_for(state: &mut Queue, taker: Taker) -> Option<u64> {
+    match taker {
+        Taker::Woken(fiber) => match state.handed.iter().position(|&f| f == fiber) {
+            Some(at) => {
+                state.handed.remove(at);
+            }
+            None if state.items.len() <= state.handed.len() => return None,
+            None => {}
+        },
+        Taker::Fresh => {
+            if state.items.len() <= state.handed.len() {
+                return None;
+            }
+        }
+        Taker::Thread => {
+            if !state.items.is_empty() && state.items.len() <= state.handed.len() {
+                state.handed.pop();
+            }
+        }
+    }
+    state.items.pop_front()
+}
+
 /// Whether this fiber should give up a wait: [`crate::current::Fiber::gives_up_waiting`].
 ///
 /// The predicate `khora_canceled` answers with, plus a change function's
@@ -472,7 +566,7 @@ pub(crate) fn enqueue(channel: &Channel, value: u64) -> bool {
         }
         if state.items.len() < channel.capacity {
             state.items.push_back(value);
-            let next = state.receivers.pop_front();
+            let next = hand_to_next(&mut state);
             let threads = state.threads_receiving;
             drop(state);
             channel.a_value_arrived(threads);
@@ -499,7 +593,7 @@ pub(crate) fn enqueue(channel: &Channel, value: u64) -> bool {
             WhenFull::Slide => {
                 let evicted = state.items.pop_front();
                 state.items.push_back(value);
-                let next = state.receivers.pop_front();
+                let next = hand_to_next(&mut state);
                 let threads = state.threads_receiving;
                 drop(state);
                 // After the lock, for the reason `release` gives: a drop
@@ -572,8 +666,9 @@ pub(crate) unsafe fn dequeue(channel: &Channel, out: *mut u64) -> bool {
     let mut enrolled = None;
     loop {
         let mut state = channel.state.lock().unwrap_or_else(|e| e.into_inner());
+        let parked_as = enrolled;
         withdraw(&mut state.receivers, &mut enrolled);
-        if let Some(value) = state.items.pop_front() {
+        if let Some(value) = take_for(&mut state, Taker::of(parked_as)) {
             let next = state.senders.pop_front();
             let threads = state.threads_sending;
             drop(state);
@@ -676,7 +771,9 @@ pub unsafe extern "C" fn khora_channel_poll(handle: *mut u8, out: *mut u64) -> b
     };
 
     let mut state = channel.state.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(value) = state.items.pop_front() else {
+    // A fiber's poll never takes a value a send handed to a parked receiver:
+    // it has not waited for anything.
+    let Some(value) = take_for(&mut state, Taker::of(None)) else {
         return false;
     };
     // Room appeared, so one sender waiting for it is woken -- exactly as a
@@ -1427,27 +1524,28 @@ mod tests {
         hold
     }
 
-    /// **A receiver that takes a value another was woken for leaves no entry
-    /// behind.** R1 is canceled while it waits, and before it runs, a send
-    /// picks R0. R1 runs first and takes the value, since a receive looks at
-    /// the queue before the flag, so R0 finds nothing and waits again. R1's
-    /// entry has to be gone by then: left at the front, it would take the
-    /// next send's wake to a fiber that has finished, and that value would
-    /// sit queued while R0 waits.
+    /// **A canceled receiver that runs before the one a send woke leaves
+    /// empty-handed, and leaves no entry behind.** R1 is canceled while it
+    /// waits, and before it runs, a send picks R0. R1 runs first, and the
+    /// value is R0's, so R1 gives up on the cancel rather than taking it. R1's
+    /// entry has to be gone too: left in the list, it would take the next
+    /// send's wake to a fiber that has finished, and that value would sit
+    /// queued while R2 waits.
     #[test]
-    fn a_receiver_that_takes_a_value_it_was_not_woken_for_leaves_no_entry() {
+    fn a_canceled_receiver_takes_no_value_another_was_woken_for() {
         let pool = Scheduler::started(1, true);
         let channel = open(4) as usize;
-        let (got, none, ids) = parked_receivers(&pool, channel, 2);
+        let (got, none, ids) = parked_receivers(&pool, channel, 3);
 
         let hold = hold_the_worker(&pool);
         pool.cancel_fiber(ids[1]);
         assert!(unsafe { khora_channel_send(channel as *mut u8, 1) });
         hold.store(false, Ordering::SeqCst);
+        // Settled either way: R2 and one of R0 or R1 still parked, or R1 gone.
         settled_on(&pool, "the first value was never taken", || {
-            got.load(Ordering::SeqCst) == 1 && pool.audit().parked == 1
+            got.load(Ordering::SeqCst) == 1 && pool.audit().parked + none.load(Ordering::SeqCst) == 2
         });
-        assert_eq!(none.load(Ordering::SeqCst), 0, "the canceled receiver left empty-handed");
+        assert_eq!(none.load(Ordering::SeqCst), 1, "the canceled receiver took the woken one's value");
 
         assert!(unsafe { khora_channel_send(channel as *mut u8, 2) });
         settled_on(&pool, "the second value stayed queued while a receiver waited", || {
@@ -1493,6 +1591,83 @@ mod tests {
             sent.load(Ordering::SeqCst) == 2
         });
         assert_eq!(take(channel as *mut u8), Some(0));
+        drop(pool);
+        unsafe { khora_channel_release(channel as *mut u8) };
+    }
+
+    /// **A value sent to a parked receiver is that receiver's, and a receive
+    /// that never waited cannot take it first.** R0 has waited longest. The
+    /// send picks it and queues it behind B, a fiber that was already
+    /// runnable and receives next. If B could take the value, R0 would find
+    /// the queue empty and enroll again at the back, behind B's own entry and
+    /// everyone else's: a pool's idle channel under load did that to the same
+    /// waiter again and again, and the waits that lost several times in a row
+    /// were a server's slowest 1%.
+    #[test]
+    fn a_value_sent_to_a_parked_receiver_is_not_taken_by_a_later_one() {
+        let pool = Scheduler::started(1, true);
+        let channel = open(4) as usize;
+        let first = Arc::new(AtomicUsize::new(0));
+        let taker = first.clone();
+        pool.spawn(Task::new(move || {
+            if let Some(value) = take(channel as *mut u8) {
+                taker.store(value as usize, Ordering::SeqCst);
+            }
+        }));
+        settled_on(&pool, "the first receiver never parked", || pool.audit().parked == 1);
+
+        let hold = hold_the_worker(&pool);
+        let later = Arc::new(AtomicUsize::new(0));
+        let latecomer = later.clone();
+        // Queued before the send's wake, so it runs first.
+        pool.spawn(Task::new(move || {
+            if let Some(value) = take(channel as *mut u8) {
+                latecomer.store(value as usize, Ordering::SeqCst);
+            }
+        }));
+        assert!(unsafe { khora_channel_send(channel as *mut u8, 1) });
+        hold.store(false, Ordering::SeqCst);
+        settled_on(&pool, "the value was never taken", || {
+            first.load(Ordering::SeqCst) + later.load(Ordering::SeqCst) == 1 && pool.audit().parked == 1
+        });
+        assert_eq!(
+            later.load(Ordering::SeqCst),
+            0,
+            "a receive that had not waited took the value sent to the one that had"
+        );
+
+        assert!(unsafe { khora_channel_send(channel as *mut u8, 2) });
+        settled_on(&pool, "the second value never reached the receiver still waiting", || {
+            later.load(Ordering::SeqCst) == 2
+        });
+        drop(pool);
+        unsafe { khora_channel_release(channel as *mut u8) };
+    }
+
+    /// **A thread takes a value promised to a fiber, and the fiber waits
+    /// again.** A promise holds a value for a fiber that is going to run;
+    /// a thread cannot wait on that, because the fiber may never run (its pool
+    /// stopped with it parked), and nothing ever promises a value to a thread.
+    /// Here the promised fiber is held off its worker while the thread polls.
+    #[test]
+    fn a_thread_takes_a_value_promised_to_a_fiber_that_has_not_run() {
+        let pool = Scheduler::started(1, true);
+        let channel = open(4) as usize;
+        let (got, _, _) = parked_receivers(&pool, channel, 1);
+
+        let hold = hold_the_worker(&pool);
+        assert!(unsafe { khora_channel_send(channel as *mut u8, 1) });
+        let mut out = 0u64;
+        let taken = unsafe { khora_channel_poll(channel as *mut u8, &mut out) };
+        // Before the assertion, or a failure leaves the worker spinning and
+        // dropping the pool waits for it for ever.
+        hold.store(false, Ordering::SeqCst);
+        assert!(taken, "a thread's poll was refused a value promised to a fiber that had not run");
+        assert_eq!(out, 1);
+        settled_on(&pool, "the fiber whose value went never waited again", || pool.audit().parked == 1);
+
+        assert!(unsafe { khora_channel_send(channel as *mut u8, 2) });
+        settled_on(&pool, "the next value never reached the fiber", || got.load(Ordering::SeqCst) == 1);
         drop(pool);
         unsafe { khora_channel_release(channel as *mut u8) };
     }

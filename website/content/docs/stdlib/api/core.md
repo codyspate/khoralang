@@ -4848,6 +4848,12 @@ Takes a value out, waiting while the channel is empty.
 
 `None` only when the channel is closed *and* drained.
 
+**Waiting receivers are served in the order they started waiting**, on
+the scheduler backend: a value sent while some are waiting goes to the
+one that has waited longest, and a `receive` or `poll` from a fiber that
+has not waited cannot take it first. So fibers queued for a
+connection pool's connections get them in turn.
+
 **A cancellation point**, for the reason `send` gives. A receive that is
 canceled is always canceled empty-handed: the runtime looks at the flag
 only once it has established the queue is empty, so a send arriving at

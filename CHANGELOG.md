@@ -436,6 +436,19 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 
 ### Fixed
 
+- **On the scheduler backend, a fiber waiting on a `Channel` could lose the
+  value it was woken for to a fiber that had not waited, over and over.** A
+  send wakes the receiver that has waited longest, but another fiber that
+  ran first and called `receive` took the value, and the woken one went to
+  the back of the line again. A connection pool's waiters are exactly that
+  line: on the TechEmpower server on one CPU with 64 connections and 16
+  database connections, `/db`'s p99 was 50-97 ms against a p50 of 3 ms. A
+  value sent to a waiting receiver is now that receiver's; only values
+  beyond those go to whoever asks first. `/db`'s p99 is 3.5-5 ms on the same
+  setup, and queries20's and fortunes' tails shrink the same way, with the
+  same throughput. A receive or poll from a thread that is not a fiber still
+  takes any value, and the fiber it was meant for waits again.
+
 - **On the scheduler backend, a fiber preempted while holding a `Shared`
   cell's lock could hang the program on a busy pool.** Inside
   `Shared::update`'s change function, a fiber that yielded at a loop, or
