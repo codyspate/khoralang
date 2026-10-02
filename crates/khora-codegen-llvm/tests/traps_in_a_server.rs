@@ -36,8 +36,9 @@ use khora_db::{KhoraDatabase, SourceFile, SourceRoot};
 /// to bind and reporting a connection reset -- a server bug that is not one.
 ///
 /// The ports in use, so the next one is chosen by looking in one place:
-/// 18732 `http`, 18733 `http_layers`, 18734 here, 18847 `tls_cancel`,
-/// 18961 and 18962 `net_cancel`, 18971 and 18972 `tls`, 47821 `reference`.
+/// 18732 `http`, 18733 `http_layers`, 18734 here, 18736 and 18737
+/// `http_accept`, 18847 `tls_cancel`, 18961 and 18962 `net_cancel`, 18971 and
+/// 18972 `tls`, 47821 `reference`.
 const PORT: u16 = 18734;
 
 const DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);

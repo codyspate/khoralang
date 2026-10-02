@@ -61,6 +61,7 @@ mod fs;
 mod handoff;
 mod hashmap;
 mod http_client;
+mod http_accept;
 mod http_layers;
 mod http;
 mod interpolation;

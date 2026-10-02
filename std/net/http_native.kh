@@ -1859,17 +1859,21 @@ impl Router {
   /// The socket is already bound, which is what this has that `listen_tls`
   /// does not: a caller that wants the port opened on its own terms -- an
   /// inherited descriptor, a chosen backlog -- hands one over here.
+  ///
+  /// Like `serve_forever`, it accepts any number of connections over its
+  /// life.
   pub fn serve_secured<'er>(router: Router<'er>, server: Int, settings: TlsServer) -> ()
     with { nursery: Nursery }
     raises 'er + HttpError
   {
-    let connection = accept_on(server);
-    if connection == invalid_handle() {
-    } else {
-      set_receive_timeout(connection, 10000);
-      nursery.adopt(Fiber::spawn(fn () => Router::secure_and_serve(router, connection, settings)));
-    };
-    Router::serve_secured(router, server, settings)!
+    loop {
+      let connection = accept_on(server);
+      if connection == invalid_handle() {
+      } else {
+        set_receive_timeout(connection, 10000);
+        nursery.adopt(Fiber::spawn(fn () => Router::secure_and_serve(router, connection, settings)));
+      }
+    }
   }
 
   /// One connection, handshaken and then served.
@@ -1905,6 +1909,11 @@ impl Router {
   ///
   /// It does not return. A connection is served on a fiber of its own.
   ///
+  /// **It accepts any number of connections over its life.** It is a loop
+  /// rather than a call to itself, because Khora does not promise tail calls:
+  /// a call per connection would cost a stack frame per connection on the
+  /// thread running `main`, and an 8 MB stack holds about 130,000 of them.
+  ///
   /// **A trap inside a handler ends the server, not the request.** This said
   /// the opposite, and `reference/traps.md` has always been right: there is no
   /// per-fiber trap containment, the page says so in bold, and it tells you
@@ -1919,8 +1928,9 @@ impl Router {
     with { nursery: Nursery }
     raises 'er + HttpError
   {
-    Router::serve_once(router, server)!;
-    Router::serve_forever(router, server)!
+    loop {
+      Router::serve_once(router, server)!
+    }
   }
 
   /// Accepts one connection and hands it to a fiber of its own.

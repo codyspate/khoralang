@@ -1268,6 +1268,9 @@ The socket is already bound, which is what this has that `listen_tls`
 does not: a caller that wants the port opened on its own terms -- an
 inherited descriptor, a chosen backlog -- hands one over here.
 
+Like `serve_forever`, it accepts any number of connections over its
+life.
+
 #### serve_forever
 
 ```khora
@@ -1294,6 +1297,11 @@ pub fn main() -> Int {
 ```
 
 It does not return. A connection is served on a fiber of its own.
+
+**It accepts any number of connections over its life.** It is a loop
+rather than a call to itself, because Khora does not promise tail calls:
+a call per connection would cost a stack frame per connection on the
+thread running `main`, and an 8 MB stack holds about 130,000 of them.
 
 **A trap inside a handler ends the server, not the request.** This said
 the opposite, and `reference/traps.md` has always been right: there is no

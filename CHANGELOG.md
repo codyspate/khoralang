@@ -436,6 +436,15 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 
 ### Fixed
 
+- **A `Router` server died of a segmentation fault after about 130,000
+  connections.** `Router::listen`, `listen_quietly`, `listen_tls`,
+  `serve_forever` and `serve_secured` took each next connection by a call that
+  kept its stack frame, so a server on an 8 MB main stack crashed after
+  roughly 130,000 connections over its life, however few were open at once
+  and on either fiber backend, with nothing on stderr. For a busy service
+  whose clients do not keep connections alive, that is minutes. The accept
+  loops are loops: a server accepts any number of connections.
+
 - **`let p: Pt = {};` passed `khora check`.** An empty record literal where a
   record with fields was expected (an annotation, a return type, an argument)
   got no error from the checker, the editor or `khora check`. `khora build`
