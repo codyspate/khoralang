@@ -26,7 +26,7 @@
 use super::*;
 use crate::coro::Task;
 use crate::current::{enter, Fiber, Stop};
-use crate::scheduler::{park_current, Scheduler};
+use crate::scheduler::{park_current_for, Scheduler, Why};
 use crate::heap::SINGLE_THREADED;
 use crate::heap::{khora_alloc, khora_drop};
 use std::sync::atomic::Ordering;
@@ -553,7 +553,7 @@ impl Done {
                     }
                 }
             }
-            park_current();
+            park_current_for(Why::Join, self as *const Done as usize);
         }
     }
 }

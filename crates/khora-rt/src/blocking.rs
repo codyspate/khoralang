@@ -28,7 +28,7 @@
 //! holds the caller's buffer. The cancellation is observed at the next `!`,
 //! which is the same rule safepoints follow — `docs/design/scheduler.md` §1.
 
-use crate::scheduler::{park_current, waker_for_current, Waker};
+use crate::scheduler::{park_current_for, waker_for_current, Waker, Why};
 use std::collections::VecDeque;
 use std::sync::{Condvar, Mutex, OnceLock};
 
@@ -112,16 +112,37 @@ impl Pool {
     /// The waiting is the backpressure, and it is a *fiber* waiting: the worker
     /// underneath goes off and runs something else, so a program that
     /// oversubscribes the pool slows down without stalling.
+    ///
+    /// **A waiter takes its own entry out of `blocked` every time it comes
+    /// back to look**, whoever woke it. A finished job wakes exactly one
+    /// waiter for the slot it freed, so an entry left behind by a fiber woken
+    /// by something else -- a cancel, a stray wake -- is a wake spent on a
+    /// fiber that has already moved on or enrolled again behind its own
+    /// entry, and the waiter behind it is never told the slot exists: a fiber
+    /// parked for room in an empty queue, for ever. The same rule as a
+    /// channel's `withdraw`, for the same reason. What it costs: a scan of
+    /// `blocked` per wake of a fiber that enrolled, which is short, because
+    /// it only holds fibers that are waiting now.
     fn submit(&'static self, job: Job, done: Waker) {
+        let mut enrolled: Option<usize> = None;
         let mut queue = self.queue.lock().expect("the blocking queue");
-        while queue.jobs.len() >= self.depth {
+        loop {
+            if let Some(fiber) = enrolled.take() {
+                if let Some(at) = queue.blocked.iter().position(|w| w.fiber() == fiber) {
+                    queue.blocked.remove(at);
+                }
+            }
+            if queue.jobs.len() < self.depth {
+                break;
+            }
             // Only a fiber can wait without costing a thread. Off one there is
             // nothing to suspend, and exceeding the depth beats deadlocking.
             let Some(room) = waker_for_current() else { break };
             queue.waited += 1;
+            enrolled = Some(room.fiber());
             queue.blocked.push_back(room);
             drop(queue);
-            park_current();
+            park_current_for(Why::BlockingRoom, 0);
             queue = self.queue.lock().expect("the blocking queue");
         }
 
@@ -277,7 +298,7 @@ where
         if let Some(value) = arrived {
             return value;
         }
-        park_current();
+        park_current_for(Why::BlockingResult, std::sync::Arc::as_ptr(&slot) as usize);
     }
 }
 
@@ -473,5 +494,92 @@ mod tests {
         scheduler.drain();
 
         assert_eq!(got.load(Ordering::SeqCst), 7, "the blocking call was cut short");
+    }
+
+    /// Waits up to ten seconds for `done`, and says whether it came.
+    fn within_ten_seconds(mut done: impl FnMut() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !done() {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        true
+    }
+
+    /// **A fiber woken while it waits for room leaves no entry behind.** A
+    /// finished job wakes one waiter for the slot it freed. A waiter woken by
+    /// something else -- a cancel, any stray wake -- that left its entry in
+    /// the list had the next slot's wake spent on it, while the fiber queued
+    /// behind it waited for a wake that never came: the long soak's hang,
+    /// `queued: 0, active: 0` and fibers parked for room.
+    ///
+    /// One thread and room for one job. G holds the thread and Q fills the
+    /// queue, so A waits for room. A is woken twice by somebody else, and B
+    /// queues behind it. Then G is let go: G, Q and A's own job are the only
+    /// three wakes that will ever come, and with A's two stale entries ahead
+    /// of B, all three went to A.
+    #[test]
+    fn a_waiter_woken_by_something_else_does_not_take_the_next_waiters_room() {
+        let pool = a_pool(1, 1);
+        let scheduler = Scheduler::new(2);
+        let gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let finished = Arc::new(AtomicUsize::new(0));
+        let submitter = |finished: Arc<AtomicUsize>| {
+            Task::new(move || {
+                blocking_on(pool, || ());
+                finished.fetch_add(1, Ordering::SeqCst);
+            })
+        };
+
+        let held = gate.clone();
+        scheduler.spawn(Task::new(move || {
+            blocking_on(pool, move || {
+                while !held.load(Ordering::SeqCst) {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            });
+        }));
+        assert!(within_ten_seconds(|| pool.stats().active == 1), "G never took the thread");
+        scheduler.spawn(Task::new(|| blocking_on(pool, || ())));
+        assert!(within_ten_seconds(|| pool.stats().queued == 1), "Q never queued");
+        // G's and Q's submitters, parked for their results.
+        assert!(within_ten_seconds(|| scheduler.waiting() == 2), "G and Q never parked");
+
+        let a = submitter(finished.clone());
+        let a_id = a.fiber().id();
+        scheduler.spawn(a);
+        for waited in 1..=3 {
+            assert!(
+                within_ten_seconds(|| pool.stats().waited == waited && scheduler.waiting() == 3),
+                "A is not parked for room: {:?}",
+                pool.stats()
+            );
+            if waited < 3 {
+                scheduler.wake_fiber(a_id);
+            }
+        }
+        scheduler.spawn(submitter(finished.clone()));
+        assert!(
+            within_ten_seconds(|| pool.stats().waited == 4 && scheduler.waiting() == 4),
+            "B is not parked for room: {:?}",
+            pool.stats()
+        );
+
+        gate.store(true, Ordering::SeqCst);
+        let both = within_ten_seconds(|| finished.load(Ordering::SeqCst) == 2);
+        let (stats, done) = (pool.stats(), finished.load(Ordering::SeqCst));
+        if !both {
+            // One more job's completion is the wake B was owed. Without it
+            // B stays parked, and dropping the pool under it is not this
+            // test's business.
+            scheduler.spawn(Task::new(|| blocking_on(pool, || ())));
+            within_ten_seconds(|| finished.load(Ordering::SeqCst) == 2);
+        }
+        assert!(
+            both,
+            "{done} of 2 submitters finished; the other waits for room in an empty queue: {stats:?}"
+        );
     }
 }

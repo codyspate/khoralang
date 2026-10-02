@@ -1410,6 +1410,7 @@ fn main() -> Int {{
 /// returns.** `close` waits for every slot's fiber, and a slot's fiber waits
 /// for its connection to come home; a lease that ends after `close` began
 /// must send it there rather than into a pool nobody will lend from again.
+///
 /// A pool of one: a fiber holds the connection, `close` starts in another,
 /// and must still be waiting 100 ms later; the lease then ends, and `close`
 /// must return.

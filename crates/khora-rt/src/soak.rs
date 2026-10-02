@@ -264,6 +264,67 @@ impl Drop for Pipe {
 struct Tally {
     finished: AtomicUsize,
     children: AtomicUsize,
+    /// Which shape built each fiber, by id, children included.
+    ///
+    /// **What it prevents: a hang the dump cannot tie to a workload.** The
+    /// scheduler can say a fiber is parked and what for; only the soak knows
+    /// which of its shapes made it, and so whose job its release was.
+    born: Mutex<std::collections::HashMap<usize, Born>>,
+    /// Every `Waiting` fiber the releaser has woken, in order.
+    released: Mutex<Vec<usize>>,
+}
+
+/// Which shape made a fiber, for [`Tally::born`].
+#[derive(Clone, Copy)]
+enum Born {
+    /// Spawned by the soak's own loop.
+    Top(Shape),
+    /// Scheduled by a fiber of the given shape, whose id is given.
+    Child(Shape, usize),
+}
+
+impl std::fmt::Display for Born {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Born::Top(shape) => write!(f, "the soak, as {shape:?}"),
+            Born::Child(shape, parent) => write!(f, "fiber {parent}, a {shape:?}"),
+        }
+    }
+}
+
+impl Tally {
+    fn born(&self, id: usize, born: Born) {
+        self.born.lock().expect("the ledger").insert(id, born);
+    }
+
+    /// One line per parked fiber: what it waits on, which shape made it,
+    /// and whether the releaser has already woken it.
+    fn stranded(&self, pool: &Scheduler) -> String {
+        let Some(parked) = pool.stranded() else {
+            return "  (the fiber audit is not compiled in: build with `--features \
+                    fiber-audit` to see what each parked fiber waits on)"
+                .to_string();
+        };
+        let born = self.born.lock().expect("the ledger");
+        let released = self.released.lock().expect("the release record");
+        parked
+            .iter()
+            .map(|(id, why, on, state)| {
+                let made = born.get(id).map_or("nobody the soak knows".to_string(), |b| b.to_string());
+                let woke = released.iter().position(|r| r == id);
+                format!(
+                    "  fiber {id}: {why:?} on {on:#x}, wait state {state}, made by {made}, \
+                     released {}",
+                    woke.map_or("never".to_string(), |at| format!(
+                        "as the {}th of {}",
+                        at + 1,
+                        released.len()
+                    )),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 /// Builds one fiber of the given shape.
@@ -296,14 +357,18 @@ fn fiber(shape: Shape, seed: u64, tally: Arc<Tally>) -> Task {
             }
             Shape::Spawning => {
                 for _ in 0..rounds {
-                    let tally = tally.clone();
-                    schedule(Task::new(move || {
-                        let me = crate::current::current(|f| f.id());
-                        suspend();
-                        i_am_still(me);
-                        tally.children.fetch_add(1, Ordering::Relaxed);
-                        tally.finished.fetch_add(1, Ordering::Relaxed);
-                    }));
+                    let child = Task::new({
+                        let tally = tally.clone();
+                        move || {
+                            let me = crate::current::current(|f| f.id());
+                            suspend();
+                            i_am_still(me);
+                            tally.children.fetch_add(1, Ordering::Relaxed);
+                            tally.finished.fetch_add(1, Ordering::Relaxed);
+                        }
+                    });
+                    tally.born(child.fiber().id(), Born::Child(shape, me));
+                    schedule(child);
                 }
             }
             Shape::Blocking => {
@@ -322,17 +387,21 @@ fn fiber(shape: Shape, seed: u64, tally: Arc<Tally>) -> Task {
                 for _ in 0..rounds {
                     let left = left.clone();
                     let release = release.clone();
-                    let tally = tally.clone();
-                    schedule(Task::new(move || {
-                        let me = crate::current::current(|f| f.id());
-                        suspend();
-                        i_am_still(me);
-                        tally.children.fetch_add(1, Ordering::Relaxed);
-                        tally.finished.fetch_add(1, Ordering::Relaxed);
-                        if left.fetch_sub(1, Ordering::AcqRel) == 1 {
-                            release.wake();
+                    let child = Task::new({
+                        let tally = tally.clone();
+                        move || {
+                            let me = crate::current::current(|f| f.id());
+                            suspend();
+                            i_am_still(me);
+                            tally.children.fetch_add(1, Ordering::Relaxed);
+                            tally.finished.fetch_add(1, Ordering::Relaxed);
+                            if left.fetch_sub(1, Ordering::AcqRel) == 1 {
+                                release.wake();
+                            }
                         }
-                    }));
+                    });
+                    tally.born(child.fiber().id(), Born::Child(shape, me));
+                    schedule(child);
                 }
                 // **A loop, not a single park.** The release can arrive before
                 // this fiber parks, in which case `park_current` returns at
@@ -347,17 +416,21 @@ fn fiber(shape: Shape, seed: u64, tally: Arc<Tally>) -> Task {
             Shape::Socket => {
                 let (mine, peer) = crate::reactor::a_connected_pair();
                 let watch = crate::reactor::socket_of(&mine);
-                let tally = tally.clone();
-                schedule(Task::new(move || {
-                    let me = crate::current::current(|f| f.id());
-                    suspend();
-                    i_am_still(me);
-                    use std::io::Write;
-                    let mut peer = peer;
-                    let _ = peer.write_all(b"x");
-                    tally.children.fetch_add(1, Ordering::Relaxed);
-                    tally.finished.fetch_add(1, Ordering::Relaxed);
-                }));
+                let child = Task::new({
+                    let tally = tally.clone();
+                    move || {
+                        let me = crate::current::current(|f| f.id());
+                        suspend();
+                        i_am_still(me);
+                        use std::io::Write;
+                        let mut peer = peer;
+                        let _ = peer.write_all(b"x");
+                        tally.children.fetch_add(1, Ordering::Relaxed);
+                        tally.finished.fetch_add(1, Ordering::Relaxed);
+                    }
+                });
+                tally.born(child.fiber().id(), Born::Child(shape, me));
+                schedule(child);
                 wait_until_ready(watch, Interest::Readable);
                 i_am_still(me);
                 drop(mine);
@@ -367,25 +440,32 @@ fn fiber(shape: Shape, seed: u64, tally: Arc<Tally>) -> Task {
                 let (mine, peer) = crate::reactor::a_connected_pair();
                 let watch = crate::reactor::socket_of(&mine);
                 let theirs = pipe.clone();
-                let tally = tally.clone();
-                schedule(Task::new(move || {
-                    let me = crate::current::current(|f| f.id());
-                    sleep_until(std::time::Instant::now() + std::time::Duration::from_millis(nap));
-                    i_am_still(me);
-                    for n in 0..rounds {
-                        // Refused only once the parent, canceled, has closed
-                        // the channel: nobody is left to take the rest.
-                        if !theirs.send(n) {
-                            break;
-                        }
+                let child = Task::new({
+                    let tally = tally.clone();
+                    move || {
+                        let me = crate::current::current(|f| f.id());
+                        sleep_until(
+                            std::time::Instant::now() + std::time::Duration::from_millis(nap),
+                        );
                         i_am_still(me);
+                        for n in 0..rounds {
+                            // Refused only once the parent, canceled, has
+                            // closed the channel: nobody is left to take the
+                            // rest.
+                            if !theirs.send(n) {
+                                break;
+                            }
+                            i_am_still(me);
+                        }
+                        use std::io::Write;
+                        let mut peer = peer;
+                        let _ = peer.write_all(b"x");
+                        tally.children.fetch_add(1, Ordering::Relaxed);
+                        tally.finished.fetch_add(1, Ordering::Relaxed);
                     }
-                    use std::io::Write;
-                    let mut peer = peer;
-                    let _ = peer.write_all(b"x");
-                    tally.children.fetch_add(1, Ordering::Relaxed);
-                    tally.finished.fetch_add(1, Ordering::Relaxed);
-                }));
+                });
+                tally.born(child.fiber().id(), Born::Child(shape, me));
+                schedule(child);
                 for n in 0..rounds {
                     match pipe.receive() {
                         Some(got) => assert_eq!(got, n, "a value arrived out of order"),
@@ -448,10 +528,14 @@ fn adversarial_execution_leaves_nothing_behind() {
         let pool = pool.clone();
         let waiters = waiters.clone();
         let stop = stop.clone();
+        let tally = tally.clone();
         std::thread::spawn(move || loop {
             let next = waiters.lock().expect("the waiters").pop_front();
             match next {
-                Some(id) => pool.wake_fiber(id),
+                Some(id) => {
+                    pool.wake_fiber(id);
+                    tally.released.lock().expect("the release record").push(id);
+                }
                 None if stop.load(Ordering::Relaxed) => return,
                 None => std::thread::yield_now(),
             }
@@ -500,6 +584,7 @@ fn adversarial_execution_leaves_nothing_behind() {
     let watchdog = {
         let pool = pool.clone();
         let stop = stop.clone();
+        let tally = tally.clone();
         let patience = std::time::Duration::from_secs(env("KHORA_SOAK_PATIENCE", 120));
         std::thread::spawn(move || {
             let until = std::time::Instant::now() + patience;
@@ -514,11 +599,13 @@ fn adversarial_execution_leaves_nothing_behind() {
   seed={seed} rounds={rounds} workers={workers}
   {:?}
   {:?}
-  resuming={:?} blocking={:?}",
+  resuming={:?} blocking={:?}
+{}",
                 pool.audit(),
                 pool.counts(),
                 pool.resuming_now(),
                 crate::blocking::pool().stats(),
+                tally.stranded(&pool),
             );
             std::process::abort();
         })
@@ -529,6 +616,7 @@ fn adversarial_execution_leaves_nothing_behind() {
         let shape = Shape::pick(&mut rng);
         let task = fiber(shape, rng.next(), tally.clone());
         let id = task.fiber().id();
+        tally.born(id, Born::Top(shape));
         {
             let mut ids = known.lock().expect("the known fibers");
             // A window rather than a history: recent fibers are the ones whose
@@ -847,10 +935,14 @@ fn a_hostile_schedule_leaves_nothing_behind() {
         let pool = pool.clone();
         let waiters = waiters.clone();
         let stop = stop.clone();
+        let tally = tally.clone();
         std::thread::spawn(move || loop {
             let next = waiters.lock().expect("the waiters").pop_front();
             match next {
-                Some(id) => pool.wake_fiber(id),
+                Some(id) => {
+                    pool.wake_fiber(id);
+                    tally.released.lock().expect("the release record").push(id);
+                }
                 None if stop.load(Ordering::Relaxed) => return,
                 None => std::thread::yield_now(),
             }
@@ -896,6 +988,7 @@ fn a_hostile_schedule_leaves_nothing_behind() {
     let watchdog = {
         let pool = pool.clone();
         let stop = stop.clone();
+        let tally = tally.clone();
         let patience = std::time::Duration::from_secs(env("KHORA_SOAK_PATIENCE", 120));
         std::thread::spawn(move || {
             let until = std::time::Instant::now() + patience;
@@ -906,9 +999,10 @@ fn a_hostile_schedule_leaves_nothing_behind() {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
             eprintln!(
-                "HOSTILE SOAK STUCK after {patience:?}\n  seed={seed} rounds={rounds} pinned={pinned}\n  {:?}\n  {:?}",
+                "HOSTILE SOAK STUCK after {patience:?}\n  seed={seed} rounds={rounds} pinned={pinned}\n  {:?}\n  {:?}\n{}",
                 pool.audit(),
                 pool.counts(),
+                tally.stranded(&pool),
             );
             std::process::abort();
         })
@@ -919,6 +1013,7 @@ fn a_hostile_schedule_leaves_nothing_behind() {
         let shape = Shape::pick(&mut rng);
         let task = fiber(shape, rng.next(), tally.clone());
         let id = task.fiber().id();
+        tally.born(id, Born::Top(shape));
         {
             let mut ids = known.lock().expect("the known fibers");
             if ids.len() >= 64 {
@@ -1061,10 +1156,12 @@ fn a_long_soak_over_many_seeds() {
     let ended_at = rss();
     let drift = ended_at as isize - settled_at as isize;
     eprintln!(
-        "soak: {passes} passes over {minutes} min; resident {} -> {} MB, drift {} KB",
+        "soak: {passes} passes over {minutes} min; resident {} -> {} MB, drift {} KB; \
+         blocking pool {:?}",
         settled_at / (1024 * 1024),
         ended_at / (1024 * 1024),
         drift / 1024,
+        crate::blocking::pool().stats(),
     );
     assert!(passes > 5, "not enough passes to say anything: {passes}");
     // Generous, and still far below what any real accumulation would do: a

@@ -1872,6 +1872,7 @@ test "a reply nobody read is not the next statement's answer" {
 
 /// **A batch nobody finished reading is not the next statement's answer
 /// either.** A pipelined batch has a reply, and a `ReadyForQuery`, per set.
+///
 /// A borrower stopped after the first of them leaves the rest arriving, and
 /// the connection has to know how many are still to come, not only that one
 /// is: counted as one, the first `ReadyForQuery` said the connection was

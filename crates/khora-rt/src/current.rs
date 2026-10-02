@@ -105,6 +105,16 @@ pub(crate) struct Fiber {
     /// `fiber-audit`.
     #[cfg(any(debug_assertions, feature = "fiber-audit"))]
     pub(crate) resuming: std::sync::atomic::AtomicBool,
+    /// What this fiber last parked for, and the address of the thing it
+    /// parked on. See [`crate::scheduler::Why`].
+    ///
+    /// **What it prevents: a hang that says only `waiting: 1`.** The parked
+    /// map holds a task and nothing else, so a fiber nobody woke could be on a
+    /// channel, a join, the blocking pool or its own release list, and the
+    /// dump could not say which. Same `cfg` as `resuming`, so an ordinary
+    /// release build pays nothing.
+    #[cfg(any(debug_assertions, feature = "fiber-audit"))]
+    waits_on: Mutex<(crate::scheduler::Why, usize)>,
     /// Whether this is a spawned fiber rather than the program's own
     /// computation.
     ///
@@ -190,6 +200,8 @@ impl Fiber {
             pinned: AtomicUsize::new(0),
             #[cfg(any(debug_assertions, feature = "fiber-audit"))]
             resuming: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(any(debug_assertions, feature = "fiber-audit"))]
+            waits_on: Mutex::new((crate::scheduler::Why::Unnamed, 0)),
             spawned: false,
             wait: crate::wait::Wait::default(),
             parked_on: Mutex::new(None),
@@ -227,6 +239,8 @@ impl Fiber {
             pinned: AtomicUsize::new(0),
             #[cfg(any(debug_assertions, feature = "fiber-audit"))]
             resuming: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(any(debug_assertions, feature = "fiber-audit"))]
+            waits_on: Mutex::new((crate::scheduler::Why::Unnamed, 0)),
             spawned: true,
             wait: crate::wait::Wait::default(),
             parked_on: Mutex::new(None),
@@ -259,6 +273,19 @@ impl Fiber {
 
     pub(crate) fn id(&self) -> usize {
         self.id
+    }
+
+    /// Records what this fiber is about to park for. See
+    /// [`crate::scheduler::park_current_for`].
+    #[cfg(any(debug_assertions, feature = "fiber-audit"))]
+    pub(crate) fn set_waits_on(&self, why: crate::scheduler::Why, on: usize) {
+        *self.waits_on.lock().unwrap_or_else(|e| e.into_inner()) = (why, on);
+    }
+
+    /// What this fiber last parked for, and the address of what it parked on.
+    #[cfg(any(debug_assertions, feature = "fiber-audit"))]
+    pub(crate) fn waits_on(&self) -> (crate::scheduler::Why, usize) {
+        *self.waits_on.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     pub(crate) fn is_spawned(&self) -> bool {

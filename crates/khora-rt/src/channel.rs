@@ -49,7 +49,7 @@
 
 use super::*;
 use crate::heap::khora_alloc;
-use crate::scheduler::{park_current, waker_for_current, Waker};
+use crate::scheduler::{park_current_for, waker_for_current, Waker, Why};
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -113,6 +113,7 @@ struct Queue {
     /// fiber that took it: on a pool's idle channel under load the same
     /// request lost that race several times in a row, and those requests
     /// were the server's slowest 1% -- p99 twice the p90 the others saw.
+    ///
     /// A value is only free to take while `items` holds more than this list
     /// has entries; a fiber listed here takes one whatever the count.
     ///
@@ -627,7 +628,7 @@ pub(crate) fn enqueue(channel: &Channel, value: u64) -> bool {
                 enrolled = Some(waker.fiber());
                 state.senders.push_back(waker);
                 drop(state);
-                park_current();
+                park_current_for(Why::ChannelRoom, channel as *const Channel as usize);
             }
             // Not a fiber, so there is no worker to give back.
             None => park_until_moved(&channel.room, state, |q| &mut q.threads_sending),
@@ -699,7 +700,7 @@ pub(crate) unsafe fn dequeue(channel: &Channel, out: *mut u64) -> bool {
                 enrolled = Some(waker.fiber());
                 state.receivers.push_back(waker);
                 drop(state);
-                park_current();
+                park_current_for(Why::ChannelValue, channel as *const Channel as usize);
             }
             None => park_until_moved(&channel.arrived, state, |q| &mut q.threads_receiving),
         }

@@ -74,6 +74,7 @@ fn lent(c: Conn) -> Db {
     release: fn _level => Result::Ok(()),
     rollback_to: fn _level => Result::Ok(()),
     broken: fn () => (),
+    query_each: fn (_sql, sets) => List::map(sets, fn _values => { c.statements = c.statements + 1; Result::Ok(List::Nil) }),
   }
 }
 

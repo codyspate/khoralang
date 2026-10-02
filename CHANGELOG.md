@@ -436,6 +436,16 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 
 ### Fixed
 
+- **On the scheduler backend, a fiber reading or writing a file could wait
+  for ever once the blocking pool's queue had filled.** File-system calls run
+  on a bounded pool of threads, and a fiber that finds the pool's queue full
+  waits for a slot. A waiting fiber woken by something else -- canceled, for
+  one -- kept its place in the line for slots, so the next slot that came free
+  went to it rather than to the fiber behind it, and that fiber was never
+  told. With nothing more queued, it waited with the pool idle. A fiber
+  gives up its place whenever it is woken, and waits again at the back if
+  there is still no room.
+
 - **On the scheduler backend, a fiber waiting on a `Channel` could lose the
   value it was woken for to a fiber that had not waited, over and over.** A
   send wakes the receiver that has waited longest, but another fiber that

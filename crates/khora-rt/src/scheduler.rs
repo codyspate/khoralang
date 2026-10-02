@@ -686,6 +686,33 @@ impl Scheduler {
         }
     }
 
+    /// Every parked fiber, with what it parked for: its id, its [`Why`], the
+    /// address of what it waits on, and its wait state.
+    ///
+    /// **For a dump, and for nothing that has to be right while the pool
+    /// moves.** The list is read under the parking lock, so it is exact at
+    /// one instant, and stale the instant after. `None` where the audit is
+    /// not compiled in, for the reason [`Scheduler::resuming_now`] gives.
+    pub(crate) fn stranded(&self) -> Option<Vec<(usize, Why, usize, u8)>> {
+        #[cfg(any(debug_assertions, feature = "fiber-audit"))]
+        {
+            let parked = self.shared.parked.lock().expect("the parked fibers");
+            let mut out: Vec<(usize, Why, usize, u8)> = parked
+                .iter()
+                .map(|(id, task)| {
+                    let (why, on) = task.fiber().waits_on();
+                    (*id, why, on, task.fiber().wait().peek())
+                })
+                .collect();
+            out.sort_unstable_by_key(|entry| entry.0);
+            Some(out)
+        }
+        #[cfg(not(any(debug_assertions, feature = "fiber-audit")))]
+        {
+            None
+        }
+    }
+
     /// Waits until every fiber handed over has finished.
     ///
     /// For tests and for a program's own shutdown; a nursery's `Fibers::wait`
@@ -861,7 +888,49 @@ impl Drop for Scheduler {
 /// `crate::wait`'s invariant; the worker handling the suspension closes the
 /// second half.
 pub(crate) fn park_current() -> bool {
+    park_current_for(Why::Unnamed, 0)
+}
+
+/// What a parked fiber is waiting for, for a hung pool's dump.
+///
+/// **Said at the park, because nowhere else knows.** By the time a dump
+/// runs, the parked map holds a `Task` and the counters hold a number; which
+/// channel, join or pool queue the fiber went to sleep on was known only to
+/// the call that parked it. A soak that hung with `waiting: 6` could not say
+/// whether six wakes were lost or six fibers had nobody to wake them, and the
+/// two have opposite fixes.
+///
+/// Recorded only where the fiber audit is compiled in (debug, or
+/// `fiber-audit`); elsewhere `park_current_for` ignores it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Why {
+    /// A bare [`park_current`]: whoever holds the fiber's id or a [`Waker`]
+    /// for it is the one to wake it.
+    Unnamed,
+    /// [`sleep_until`]'s deadline.
+    Deadline,
+    /// A socket, through [`wait_until_ready_by`].
+    Socket,
+    /// Room in a full channel or hand-off; `on` is its queue's address.
+    ChannelRoom,
+    /// A value in an empty channel or hand-off; `on` is its queue's address.
+    ChannelValue,
+    /// Room in the blocking pool's queue.
+    BlockingRoom,
+    /// A blocking-pool job's result; `on` is the result slot.
+    BlockingResult,
+    /// Another fiber finishing; `on` is its completion latch.
+    Join,
+}
+
+/// [`park_current`], saying what for and on what, so that a hang can be read.
+/// See [`Why`].
+pub(crate) fn park_current_for(why: Why, on: usize) -> bool {
     let Some(shared) = shared_pool() else { return false };
+    #[cfg(any(debug_assertions, feature = "fiber-audit"))]
+    crate::current::current(|fiber| fiber.set_waits_on(why, on));
+    #[cfg(not(any(debug_assertions, feature = "fiber-audit")))]
+    let _ = (why, on);
     let waiting = crate::current::current(|fiber| {
         if fiber.wait().declare() {
             true
@@ -899,7 +968,7 @@ pub(crate) fn sleep_until(at: std::time::Instant) -> bool {
             shared.timer_added.notify_one();
         }
     }
-    park_current()
+    park_current_for(Why::Deadline, 0)
 }
 
 /// Makes one particular fiber runnable, from anywhere, later.
@@ -1187,7 +1256,7 @@ pub(crate) fn wait_until_ready_by(
     // insertion for every read that would block — one apiece, measured. The
     // reactor already holds this wait; it can hold when to give up on it.
     shared.reactor.register(Watch { socket, interest, fiber, deadline });
-    let parked = park_current();
+    let parked = park_current_for(Why::Socket, 0);
     // Woken by something else — a cancellation, or another registration — so
     // this one must come off, or a later readiness wakes a fiber that has
     // stopped caring about this socket.
