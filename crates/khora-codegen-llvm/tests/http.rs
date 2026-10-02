@@ -669,9 +669,21 @@ fn the_server_reads_what_a_client_actually_sends() {
         head.contains("Content-Length: 6\r\n"),
         "the length of the body a GET would have sent, not the zero bytes sent: {head}"
     );
+    // **`Date` is the one header allowed to differ**, and only by the clock:
+    // the two requests are separate, and when they straddle a second the
+    // header moves with it (seen on a 16-CPU laptop: `:20` against `:21`).
+    // Both must carry one; the comparison is on everything else.
+    fn without_date(head: &str) -> String {
+        let dates = head.lines().filter(|line| line.starts_with("Date: ")).count();
+        assert_eq!(dates, 1, "exactly one Date header: {head}");
+        head.lines().filter(|line| !line.starts_with("Date: ")).collect::<Vec<_>>().join("\r\n")
+    }
     assert_eq!(
-        head,
-        format!("{}\r\n\r\n", getted.split_once("\r\n\r\n").expect("a blank line").0),
+        without_date(&head),
+        without_date(&format!(
+            "{}\r\n\r\n",
+            getted.split_once("\r\n\r\n").expect("a blank line").0
+        )),
         "header for header, the answer GET gave — including the handler's own X-Trace"
     );
 
