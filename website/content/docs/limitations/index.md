@@ -28,8 +28,16 @@ language rule, a supported feature, and unfinished work.
   deadline is built from a fiber and a clock.
 - [Only Linux has a scalable I/O backend](#io-scaling-on-macos-and-windows)
   for the fiber scheduler; macOS and Windows wait on sockets with `poll`.
+- [On one CPU, the scheduler can hang](#the-fiber-scheduler) a program in
+  which a fiber blocks inside `Shared::update` on something another fiber
+  must do. The default thread backend does not.
+- [A `Map` whose keys a client chooses can be made slow](#maps-keyed-by-untrusted-input):
+  the string hash takes no secret, so colliding keys can be computed ahead of
+  time, and a JSON object built from them costs time in the square of its size.
 - [The `postgres` package does not speak TLS](#package-ecosystem), so rows
   cross the network in the clear.
+- [Database queries trail Go's](#performance-against-other-servers) on the
+  TechEmpower query tests; JSON and fortunes do not.
 - [Inbound connections are not permissioned](#inbound-connections-are-not-permissioned) —
   the manifest governs outbound only.
 
@@ -62,7 +70,22 @@ khora: the stack ran out
 
 on standard error and exits with the platform's stack-overflow status.
 
-A spawned fiber has eight megabytes of stack on either fiber backend, which is what `main` gets by default on Linux and macOS, so there a recursion that runs in `main` runs the same on a fiber. [Traps](/docs/reference/traps/#running-out-of-stack) has how deep that goes and on which platforms a fiber's overflow is reported.
+A spawned fiber has eight megabytes of stack on either fiber backend, which is what `main` gets by default on Linux and macOS and what a Khora program's `main` is linked with on Windows, so a recursion that runs in `main` runs the same on a fiber. [Traps](/docs/reference/traps/#running-out-of-stack) has how deep that goes.
+
+**Where the message is verified.** On Linux, on every stack Khora code runs
+on: `main`, a fiber on either backend, a test, and a stack that runs out while
+the runtime is starting a thread or a process. On macOS and Windows it is
+verified by continuous integration only, which covers `main`, a fiber on
+either backend and a test on both, and the thread-start case on macOS.
+
+**A thread a C library starts can still overflow silently.** Before the
+runtime starts a thread or a process it makes sure 16 KB of stack is left, so
+that an overflow lands where the message can be printed. A C library linked
+through [`build.link`](/docs/reference/ffi/#link-against-a-native-library)
+that starts threads of its own does not do that, and on Linux the C library
+blocks signals while it starts one: a Khora stack that runs out during that
+start ends the process with no message. It needs a call into such a library
+from very deep in a recursion.
 
 Every traversal in `std::core`'s `List` is written as a loop rather than as recursion — `length`, `fold`, `reverse`, `filter`, `take`, `drop`, `any`, `all`, `find`, `contains`, `zip`, `flat_map`, `sum`, and the `merge` inside `sort` — so walking a list of any size is safe. `List::sort` recurses only to divide, which is about `log2(n)` deep.
 
@@ -74,8 +97,21 @@ result.
 the exception: each level of `[` or `{` takes a stack frame, so `parse`
 refuses a document nested deeper than 512 levels with a `JsonError` rather
 than letting the document decide how much stack it uses, and
-`parse_with_depth` takes another limit. `encode` has no limit, so a `Json`
-nested tens of thousands of levels deep by the program runs the stack out.
+`parse_with_depth` takes another limit. `encode` and `Show for Json` have no
+limit and recurse once per level of a `Json` the program built itself: one
+nested 200,000 levels deep runs the stack out in a debug build. A `Json` that
+came from `parse` is at most 512 levels deep, so only a value the program
+nests by hand can reach that. A derived `Eq`, `Ord` or `Show` on a deeply
+nested value of the program's own recursive type recurses the same way.
+
+**`fold_lines` copies a long line once per chunk it spans.** It reads a file
+64 KB at a time and joins what is left of an unfinished line to the next
+chunk, so a line longer than a chunk is copied again for every chunk it
+crosses: the cost grows with the square of the line's length. A file of
+short lines is unaffected. A 16 MB file with no newline took 819 ms in a
+release build, against 19 ms for the same bytes in 1 KB lines, and doubling
+the line quadruples the time. To read a file that may be one long line, use
+`fold_chunks` and split it yourself, or `read_text` when it fits in memory.
 
 Releasing a value costs no stack either: reference counting frees a value's children through a queue rather than by recursing, so letting go of a long list is a loop like walking one. A million-element `List` sorts.
 
@@ -105,6 +141,18 @@ admits only `hostssl` connections refuses it.
 `khora lsp` already provides compiler-backed diagnostics, hover, formatting, completion, signature help, go-to-definition, references, document/workspace symbols, semantic tokens, code actions, code lenses, and inlay hints.
 
 Rename covers a declaration and every file that names it, including the import that brings the name into each file, and it renames the original rather than a file's own alias. A parameter's rename covers the labeled arguments written against it; a method's labels are found by its type and method name, so two modules that each declare a type (or a trait) and a method of the same names can have each other's labels renamed. It refuses two cases rather than applying a partial rename, each with a sentence saying why: a **trait member**, whose name belongs to the trait and to every impl of it, and a **constructor**, which has no recorded range to edit. It also refuses a new name that is not a usable identifier or that is already bound anywhere in the same function, even where that binding is in a separate `match` arm and could not have been captured. Further refactoring operations are editor-tooling work.
+
+**A record field has no go-to-definition, references or rename**, inside or
+outside the module that declares it. Renaming a field is a search and an edit
+by hand, and since a field is private to its module unless it is marked
+`pub`, the search can usually stop at that module's edges.
+
+**The language server reads lint and formatter settings once, when it
+starts**, from the `khora.toml` at the root of the folder the editor opened.
+An edit to that file or to a lint group file takes effect after the server
+restarts, and a workspace's `[workspace.lints]` and member manifests are not
+consulted, so the levels it shows can differ from what `khora check` reports
+in a member package. `khora check` is the authority.
 
 See [Editor setup](/docs/getting-started/editor/) for the language-server command and client setup.
 
@@ -175,6 +223,17 @@ server rather than of the `Router` type, so it does not appear in the generated
 [`std::net::http` pages](/docs/stdlib/api/net/http/); [Serve HTTP
 requests](/docs/cookbook/http-service/) is where it is discussed. Because of
 the off-by-one below, the peak actually observed is 257.
+
+## Performance against other servers
+
+On the TechEmpower read tests, run against PostgreSQL on one machine with
+Khora on the scheduler backend, the **database query tests trail Go**: the
+single-query test reached 74% of Go's requests per second and the 20-query
+test 84%. The JSON test was ahead of Go (114%) and fortunes level with it.
+Tail latency was at or below Go's in every test except the single query, where
+the 99th percentile was 6.7 ms against Go's 6.4 ms. These are one run on one
+machine, not a published benchmark; [Performance](/docs/performance/) says
+what a figure has to satisfy before it is published, and why.
 
 ## Inbound connections are not permissioned
 
@@ -284,21 +343,31 @@ A fiber is an operating-system thread. The M:N scheduler — stackful coroutines
 It is not the default, for three reasons, and one of them is a gap rather than a preference:
 
 - Threads are faster at the connection counts a service runs at.
-- The scheduler exists for fiber **density**, and that claim is measured on Windows only. Linux caps `vm.max_map_count` at 65530 and guard pages split mappings, so the "100,000 waiting fibers" figure has not been reproduced on the platform most deployments use.
+- The scheduler exists for fiber **density**. A hundred thousand waiting
+  fibers measured about 4 KB each on Linux as well as Windows, but on Linux
+  each fiber's stack and its guard page are two memory mappings, so a process
+  with more than about 32,000 fibers needs `vm.max_map_count` above the 65,530
+  many distributions set by default. Each fiber also reserves eight megabytes
+  of address space for its stack, so a host with `vm.overcommit_memory=2`
+  runs out of commit long before it runs out of memory.
 - It is the less-exercised path, and therefore the likelier home of the next runtime bug.
 
 The two backends are distinguishable under cancellation — see [The two fiber
 backends are distinguishable](#the-two-fiber-backends-are-distinguishable)
 below — so the default cannot change without a breaking-change note.
 
-**A known defect: under load, the scheduler can finish a canceled fiber
-without running its finalizer.** When four or more other fibers are sitting
-in cleanup blocked on a `receive`, a fiber canceled while parked in
-`Channel::receive` can report `finished` and `canceled` with its
-`Region::defer` finalizer never having run. Two such fibers in cleanup do not
-trigger it; the thread backend does not have it. Until it is fixed, do not
-rely on finalizers under `KHORA_FIBERS=scheduler` in a program that keeps
-several fibers blocked in cleanup at once.
+**A known defect: on one CPU, the scheduler can hang a program in which a
+fiber blocks inside a `Shared` change function.** If a fiber inside
+`Shared::update` or `modify` waits on a channel, and the fiber that will send
+on it then needs the same cell, the scheduler hangs when the process may run
+on only one CPU — a one-vCPU container or VM, or `taskset -c 0`. With two or
+more CPUs it finishes. The thread backend finishes either way. Measured on
+x86-64 Linux with the scheduler pinned to one CPU: 10 of 10 runs hung, against
+0 of 10 on two CPUs and on four. The change function holds its worker's thread
+while it waits, and with one worker nothing else can run the fiber it is
+waiting for. [Sharing](/docs/reference/sharing/) already advises keeping
+blocking work out of a change function; on one CPU under the scheduler, that
+advice is required.
 
 ## I/O scaling on macOS and Windows
 
@@ -328,6 +397,31 @@ let safe = String::slice(text, 0, String::next_boundary(text, 20));
 `is_char_boundary`, `next_boundary`, `previous_boundary`, `char_at`, `chars` and `char_length` are the character-level API; `byte_length` is the constant-time one and `char_length` walks.
 
 The character predicates — `Char::is_digit`, `is_alpha`, `is_whitespace`, `to_upper`, `to_lower` — are **ASCII only** and say so in their own documentation. Unicode case mapping and the full `Nd` category are not in `std`, deliberately: they need tables that would double its size, and a library is the right place for them.
+
+## Maps keyed by untrusted input
+
+**A `Map` whose keys come from a client can be made to take time in the square
+of its size.** `Map` is a hash table, and the hash of a `String` is FNV-1a
+with no per-process secret, so anybody can compute in advance a set of keys
+that all land in one bucket. Each insert or lookup then walks a chain as long
+as the map. Measured in a release build on x86-64 Linux: 8,192 colliding keys
+took 249 ms to insert against 10 ms for ordinary ones, and 16,384 took 1,032
+ms against 17 — twice the keys, four times the time.
+
+The path a server meets it on is JSON: `std::json::parse` builds every object
+as a `Map<String, Json>`, so a request body whose member names were chosen to
+collide costs the server that time while it parses. A 1.7 MB object of 16,384
+colliding names took 1.2 s to parse, against 25 ms for the same size with
+ordinary names. The default request limit of 8 KB keeps a body far below that.
+The [JSON API recipe](/docs/cookbook/json-api/) raises it to 1 MB with
+`Router::holding(1048576)`; at that limit a 786 KB body of 8,192 colliding
+names took 299 ms to parse, against 15 ms for ordinary ones, on every request
+that sends it.
+
+What to do about it: keep `Router::holding` as low as the application allows,
+and for a structure keyed by client-chosen strings that can grow large, use
+`Dict`, which is ordered by comparison rather than by hash and has no worst
+case of this shape.
 
 ## Anonymous union types
 
@@ -370,6 +464,31 @@ that never ends does not exit. Cancel it first.
 
 `Fiber::outcome` hands back an answer without unwinding the asker when the
 answer is wanted.
+
+## `abort` can skip a finalizer bound to a name first
+
+`Fiber::abort` (and a `cancel_within` deadline that runs out) stops a fiber
+at its next cancellation point, cleanup included. A finalizer written
+directly as `Region::defer`'s argument always starts:
+
+```khora
+Region::defer(region, fn () => give_back(conn));
+```
+
+**A finalizer bound to a `let` first can be skipped whole** when the function
+around it also calls a function value -- a parameter, a closure, anything
+called through a variable:
+
+```khora
+let finalizer = fn () => give_back(conn);
+Region::defer(region, finalizer);
+```
+
+Such a function's lambdas check for a stop as they are entered, so an abort
+fires at that check, before the finalizer's first line. Under a plain cancel
+it runs; under `abort` it ran 0 times in 20 on both backends. Write a
+finalizer in the `Region::defer` call. `std::db::transaction` and the
+`postgres` pool are written that way.
 
 ## Concurrency combinators
 
@@ -449,9 +568,11 @@ failure is reported rather than lost.
 
 The measurements below are `khora 0.2.0 (b16417c)` on x86_64 Linux, 20–25 runs
 per backend, under both the default thread backend and `KHORA_FIBERS=scheduler`.
-The first and fourth rows were re-measured on `khora 0.2.0 (a2593dd)`, three
-runs per backend, with the same result: `bounded_nursery(4)` peaked at 5, and
-with the failing child adopted last all eleven siblings ran to completion.
+The first, second, third and fourth rows were re-measured on a compiler built
+from the tree this page describes, one run per backend, with the same result:
+`bounded_nursery(1)` peaked at 2, `bounded_nursery(4)` at 5,
+`bounded_nursery(0)` ran all 24 children at once, and with the failing child
+adopted last all eleven siblings ran to completion.
 
 ### The bound is on children held, not work in flight
 
