@@ -1,2 +1,4 @@
 node_modules/
 *.vsix
+# The esbuild bundle, rebuilt by `npm run bundle`; `src/` is the source.
+dist/

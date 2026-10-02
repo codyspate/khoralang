@@ -1815,6 +1815,23 @@ impl Server {
         let checked = khora_types::checked(&self.db, file);
         let mut best: Option<(text_size::TextRange, String)> = None;
 
+        // **A binding's own name first.** A `let`, a pattern, a parameter or
+        // a `for` item binds a name that is not an expression, so the
+        // smallest expression covering it is whatever contains the binding:
+        // the block, the lambda, the loop's own iterator state. Hover answered
+        // with that -- `let s = "hi"` inside `fn f() -> Int` said `Int` over
+        // the whole block. The binding's type is recorded per local, so the
+        // name under the cursor is looked up as one before any expression is.
+        if let Some((range, ty)) = self.binding_type_at(file, offset, checked) {
+            return Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: format!("```khora\n{ty}\n```"),
+                }),
+                range: Some(index.range(range, self.encoding)),
+            });
+        }
+
         for (name, body) in khora_hir::body::bodies(&self.db, file) {
             let Some(types) = checked.bodies.iter().find(|(n, _)| n == name).map(|(_, t)| t)
             else {
@@ -1867,6 +1884,57 @@ impl Server {
             }),
             range: Some(index.range(range, self.encoding)),
         })
+    }
+
+    /// The type of the binding whose name is under the cursor, with the
+    /// name's range.
+    ///
+    /// **The token has to be the name itself**, not merely inside the
+    /// binding's range: a parameter's range covers its annotation, and the
+    /// `String` in `x: String` is a question about the type `String`, which
+    /// the expression and declaration lookups after this answer.
+    ///
+    /// `None` where the checker recorded no type for the binding, so hover
+    /// falls back to what it said before rather than printing `Unknown`.
+    fn binding_type_at(
+        &self,
+        file: SourceFile,
+        offset: text_size::TextSize,
+        checked: &khora_types::Checked,
+    ) -> Option<(text_size::TextRange, String)> {
+        let tree = khora_db::parse(&self.db, file).syntax();
+        let token = definition::token_at(&tree, offset)?;
+        if token.kind() != khora_syntax::SyntaxKind::IDENT {
+            return None;
+        }
+        let name_range = token.text_range();
+        // A use is already an expression with the right type. Asking the
+        // bindings about it instead could answer for the wrong one: some
+        // bindings -- a context's labels -- span the whole declaration, so a
+        // `let` shadowing one would have its uses claimed by the label.
+        if definition::local_use_at(&self.db, file, offset).is_some() {
+            return None;
+        }
+        for (name, body) in khora_hir::body::bodies(&self.db, file) {
+            let Some(types) = checked.bodies.iter().find(|(n, _)| n == name).map(|(_, t)| t)
+            else {
+                continue;
+            };
+            let found = body
+                .locals()
+                .filter(|(_, local)| {
+                    local.name == token.text() && local.range.contains_range(name_range)
+                })
+                .min_by_key(|(_, local)| local.range.len());
+            if let Some((id, _)) = found {
+                let ty = types.local(id);
+                if matches!(ty, khora_types::Type::Unknown) {
+                    return None;
+                }
+                return Some((name_range, ty.to_string()));
+            }
+        }
+        None
     }
 
     /// The declaration the cursor names, explained.

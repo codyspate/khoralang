@@ -1,8 +1,11 @@
 # What does not belong in the package.
 #
-# `node_modules` is *not* here: an extension ships its runtime dependencies,
-# and `vscode-languageclient` is the only one. `vsce` prunes dev dependencies
-# on its own.
+# `node_modules` is excluded: esbuild bundles `vscode-languageclient` and its
+# own dependencies into `dist/extension.js`, so none of the 331 files those
+# packages are made of need to ship separately. Before bundling, `vsce`
+# shipped every one of them; now it ships one file.
+# `src/` is excluded for the same reason: it is the bundle's input, not
+# something the installed extension runs.
 # `RELEASE.md` is the release *page*, written for somebody deciding whether to
 # download this; the packaged `readme.md` is for somebody who already has it.
 # Shipping both would put two overlapping introductions inside the extension.
@@ -17,8 +20,8 @@
 install.ps1
 RELEASE.md
 PUBLISHING.md
-scripts/**
-node_modules/sharp/**
-node_modules/@img/**
-*.vsix
 DEVELOPING.md
+scripts/**
+src/**
+node_modules/**
+*.vsix

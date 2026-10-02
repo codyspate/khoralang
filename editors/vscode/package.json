@@ -36,7 +36,7 @@
     "Programming Languages",
     "Formatters"
   ],
-  "main": "./src/extension.js",
+  "main": "./dist/extension.js",
   "activationEvents": [
     "onLanguage:khora"
   ],
@@ -114,9 +114,11 @@
   },
   "devDependencies": {
     "@types/vscode": "^1.75.0",
-    "@vscode/vsce": "^3.2.1"
+    "@vscode/vsce": "^3.2.1",
+    "esbuild": "^0.28.2"
   },
   "scripts": {
-    "package": "vsce package --allow-missing-repository -o khora.khora.vsix"
+    "bundle": "esbuild src/extension.js --bundle --platform=node --format=cjs --external:vscode --outfile=dist/extension.js",
+    "package": "npm run bundle && vsce package --allow-missing-repository -o khora.khora.vsix"
   }
 }

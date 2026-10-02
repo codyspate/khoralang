@@ -74,6 +74,18 @@ jobs:
         with:
           node-version: "22"
 
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: extension-transport-check
+
+      # No LLVM feature here: `khora lsp` never reaches the code generator,
+      # and this job exists to prove the server starts and answers
+      # `initialize`, not to exercise `khora run` or `khora build`.
+      - name: Build khora
+        run: cargo build --bin khora
+
       # **The tag has to agree with `package.json`.** VS Code shows the
       # version from the manifest whatever the file is called, so a tag that
       # says otherwise produces a release whose name is a lie about what
@@ -106,18 +118,24 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/dist"
           mv khora.khora.vsix "$GITHUB_WORKSPACE/dist/khora-vscode-$version.vsix"
 
-      # The one check worth having: a `.vsix` missing `extension.js` or the
-      # language client installs cleanly and then does nothing, which is the
-      # failure a user reports as "the extension is broken". `install.ps1`
-      # produced exactly that package for a while.
+      # The one check worth having: a `.vsix` missing `extension.js` installs
+      # cleanly and then does nothing, which is the failure a user reports as
+      # "the extension is broken". `install.ps1` produced exactly that
+      # package for a while.
+      #
+      # **`extension/dist/extension.js`, not `extension/src/extension.js`.**
+      # Bundling moved the entry point: `vsce` now ships the one file esbuild
+      # produces, with `vscode-languageclient` inlined into it rather than
+      # present as its own tree of files, so grepping for either by path
+      # would fail on a package built correctly.
       - name: It has to contain an extension
         run: |
           set -eu
           file=$(ls dist/*.vsix)
-          unzip -l "$file" | grep -q "extension/src/extension.js" \
+          unzip -l "$file" | grep -q "extension/dist/extension.js" \
             || { echo "no extension.js in $file"; exit 1; }
-          unzip -l "$file" | grep -q "vscode-languageclient" \
-            || { echo "no language client in $file"; exit 1; }
+          unzip -l "$file" | grep -q "extension/LICENSE" \
+            || { echo "no LICENSE in $file"; exit 1; }
           unzip -l "$file" | grep -q "extension/icon.png" \
             || { echo "no icon in $file: the gallery tile would be blank"; exit 1; }
           # **A build tool in the package is a shipped defect, not waste.**
@@ -130,16 +148,32 @@ jobs:
             echo "a build tool reached $file"; exit 1
           fi
           size=$(unzip -l "$file" | tail -1 | awk '{print $1}')
-          # The package unpacks to about 1.8 MB, nearly all of it the language
-          # client. Four is loose enough that a dependency growing does not
-          # fail a release, and tight enough to catch the 8.7 MB the native
-          # renderer made of it.
+          # The package unpacks to well under 1 MB now that it is bundled.
+          # Four is loose enough that a dependency growing does not fail a
+          # release, and tight enough to catch the 8.7 MB the native
+          # renderer made of it once.
           if [ "$size" -gt 4000000 ]; then
             echo "$file unpacks to $size bytes, which is far more than an"
             echo "editor client needs; something is riding along"
             exit 1
           fi
           echo "$file looks like an extension"
+
+      # **The one check this spec exists for: a packaged extension that
+      # cannot start a server before anything is published.** 0.3.0 and
+      # 0.3.1 both passed the check above and both shipped a server that
+      # never started, because that check never spawns anything. This one
+      # extracts the `.vsix` that was just built, loads its own
+      # `extension.js` the way VS Code would, and watches whether the
+      # server it spawns answers `initialize`.
+      - name: The packaged server has to start and answer initialize
+        working-directory: editors/vscode
+        run: |
+          set -eu
+          rm -rf /tmp/khora-extension-check
+          mkdir -p /tmp/khora-extension-check
+          unzip -q "$GITHUB_WORKSPACE"/dist/*.vsix -d /tmp/khora-extension-check
+          node scripts/transport-check.js /tmp/khora-extension-check/extension "$GITHUB_WORKSPACE/target/debug/khora"
 
       # **`--prerelease`, on a release that is not provisional.** The flag is
       # not a claim about the extension's quality; on GitHub it means "do not

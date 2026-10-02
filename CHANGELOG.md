@@ -1213,6 +1213,23 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   `raises E with {..}`, a shape that is a syntax error in this release and
   that 0.3.0 accepted without reading all of it.
 
+- **Publishing the extension checks that the packaged `.vsix` actually
+  starts a language server before anything goes out.** The check spawns
+  `khora lsp` with the arguments the extension passes and sends it an
+  `initialize` request, so a release that would again ship a server that
+  cannot start fails before publishing rather than after.
+
+- **The packaged extension carries a license file**, and is one bundled
+  file instead of several hundred unbundled ones. Neither changed what the
+  extension does; both were warnings from the packaging tool with nothing
+  to show for them in the installed extension.
+
+- **Hovering a binding's name shows the binding's type.** On the name a
+  `let`, a pattern, a `for` loop, a lambda parameter or a `match` arm binds,
+  hover showed the type of the block, lambda or loop around it, highlighted
+  over that whole construct: `let s = "hi"` inside a function returning
+  `Int` said `Int`. It says `String`, over `s`.
+
 ## 0.3.0 — 2026-09-23
 
 Graceful shutdown, a way to ask a cancelled fiber what it ended as, native

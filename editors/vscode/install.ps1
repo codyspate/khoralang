@@ -57,11 +57,11 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zip = [System.IO.Compression.ZipFile]::OpenRead($vsix)
 try {
     $entries = $zip.Entries.FullName
-    if (-not ($entries -contains "extension/src/extension.js")) {
-        throw "$vsix has no extension.js -- it would install and do nothing"
-    }
-    if (-not ($entries | Where-Object { $_ -like "*vscode-languageclient*" })) {
-        throw "$vsix has no language client -- it would install and do nothing"
+    # The bundle is the whole extension: esbuild inlines the language client
+    # into it, so there is no `node_modules` to look for, and a package
+    # without this one file installs and does nothing.
+    if (-not ($entries -contains "extension/dist/extension.js")) {
+        throw "$vsix has no dist/extension.js -- it would install and do nothing"
     }
 } finally {
     $zip.Dispose()

@@ -249,7 +249,7 @@ fn path_at(tree: &SyntaxNode, offset: TextSize) -> Option<Path> {
 ///
 /// At a boundary two tokens touch, and the cursor sitting at the end of a name
 /// should mean that name — which is where somebody who has just typed it is.
-fn token_at(tree: &SyntaxNode, offset: TextSize) -> Option<SyntaxToken> {
+pub(crate) fn token_at(tree: &SyntaxNode, offset: TextSize) -> Option<SyntaxToken> {
     let at = tree.token_at_offset(offset);
     match at {
         rowan::TokenAtOffset::None => None,

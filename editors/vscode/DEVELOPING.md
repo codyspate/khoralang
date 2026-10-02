@@ -29,7 +29,8 @@ the setting for another language.
 
 Open **this folder** (`editors/vscode`) in VS Code, run `npm install` once, and
 press **F5**. That launches an Extension Development Host — a second window with
-the extension loaded live. Reload the host window after editing `src/`.
+the extension loaded. It runs `dist/extension.js`, the bundle, so run
+`npm run bundle` after editing `src/` and then reload the host window.
 
 ## Installing a build
 
@@ -77,9 +78,9 @@ code --install-extension khora.khora.vsix --force
 ```
 
 `install.ps1` is the second of those with the mistakes taken out: it checks that
-the `.vsix` it built actually contains `src/extension.js` and
-`vscode-languageclient`, and it reads `code`'s exit status instead of announcing
-success over a failed install.
+the `.vsix` it built actually contains `dist/extension.js` -- the bundle, with
+`vscode-languageclient` inlined into it -- and it reads `code`'s exit status
+instead of announcing success over a failed install.
 
 That check is there because it used to build the zip by hand — a `.vsix` is an
 OPC package and PowerShell can write one without npm — and the hand-built one

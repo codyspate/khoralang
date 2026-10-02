@@ -8,8 +8,11 @@
   // is a runtime dependency, and without it activation fails with a module it
   // cannot resolve.
   //
-  // Reload the host window after editing `src/`. Restart it after editing the
-  // grammar.
+  // Reload the host window after editing `src/` -- after `npm run bundle`:
+  // the host runs `dist/extension.js`, the esbuild bundle `package.json`
+  // names as `main`, and `preLaunchTask` rebuilds it on each F5 so a fresh
+  // checkout, which has no `dist/`, still activates. Restart it after
+  // editing the grammar.
   //
   // The host runs whatever `khora` is on PATH, so it is the installed release
   // rather than your build unless `khora.server.path` says otherwise. That is
@@ -21,7 +24,8 @@
       "type": "extensionHost",
       "request": "launch",
       "args": ["--extensionDevelopmentPath=${workspaceFolder}"],
-      "outFiles": ["${workspaceFolder}/src/**/*.js"]
+      "outFiles": ["${workspaceFolder}/dist/**/*.js"],
+      "preLaunchTask": "npm: bundle"
     }
   ]
 }

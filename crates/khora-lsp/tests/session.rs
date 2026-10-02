@@ -243,6 +243,32 @@ fn a_type_error_is_published() {
     assert!(!last_diagnostics(&replies).is_empty(), "{replies:?}");
 }
 
+/// **`{}` where a record with fields is expected is an error in the editor**,
+/// on the literal's line, naming the fields it is missing. The checker let it
+/// through, so the editor showed a clean file that `khora build` refused.
+#[test]
+fn an_empty_literal_missing_fields_is_published_at_the_literal() {
+    let w = workspace(&[("src/main.kh", "module app::main;\n")]);
+    let path = w.root.join("src/main.kh");
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(
+            &path,
+            "module app::main;\ntype Pt = { pub x: Int, pub y: Int };\nfn f() -> Int {\n  let p: Pt = {};\n  p.x\n}\n",
+        ),
+        exit(),
+    ]);
+    let found = last_diagnostics(&replies);
+    let messages: Vec<&str> =
+        found.iter().filter_map(|d| d.pointer("/message").and_then(Value::as_str)).collect();
+    assert!(messages.iter().any(|m| m.contains("is missing `x`")), "{found:?}");
+    assert!(messages.iter().any(|m| m.contains("is missing `y`")), "{found:?}");
+    for diagnostic in &found {
+        assert_eq!(diagnostic.pointer("/range/start/line"), Some(&json!(3)), "{diagnostic}");
+        assert_eq!(diagnostic.pointer("/range/start/character"), Some(&json!(14)), "{diagnostic}");
+    }
+}
+
 /// A lint is a warning, and a warning is severity 2. It arriving as an error
 /// would make a clean build look broken.
 #[test]
@@ -492,6 +518,79 @@ fn hovering_a_binding_shows_its_type() {
         .and_then(Value::as_str)
         .unwrap_or_default();
     assert!(shown.contains("Int"), "hovering `x` should say Int, said {reply}");
+}
+
+/// Hovers the binding `name`, found as the first `name` inside the first
+/// `context` on `line`, and checks the answer is a `String` -- never the
+/// `Int` every enclosing function here returns -- with the range of the name
+/// and nothing wider.
+///
+/// **What this prevents: hover on a binding answering for the block around
+/// it.** A binding's name is not an expression, so the smallest expression
+/// covering it was the enclosing block, and hover showed the block's type
+/// over the block's range. Every function in these cases returns `Int` and
+/// binds a `String`, so that failure is visible in the text as well as in
+/// the range.
+fn assert_binding_hover(text: &str, line: u32, context: &str, name: &str) {
+    let w = workspace(&[("src/main.kh", text)]);
+    let path = w.root.join("src/main.kh");
+    let source_line = text.lines().nth(line as usize).expect("the line");
+    let start = source_line.find(context).expect("the context");
+    let column = (start + context.find(name).expect("the name in its context")) as u32;
+    let replies =
+        session(&[initialize(&w.root), did_open(&path, text), hover(&path, line, column), exit()]);
+
+    let reply = replies.iter().find(|r| r.get("id") == Some(&json!(42))).expect("a reply");
+    let shown = reply.pointer("/result/contents/value").and_then(Value::as_str).unwrap_or_default();
+    assert!(shown.contains("String"), "hovering `{name}` should say String, said {reply}");
+    assert!(!shown.contains("Int"), "hovering `{name}` showed an enclosing type: {reply}");
+    assert_eq!(
+        reply.pointer("/result/range"),
+        Some(&json!({
+            "start": { "line": line, "character": column },
+            "end": { "line": line, "character": column + name.len() as u32 }
+        })),
+        "the range should be the name `{name}` alone: {reply}"
+    );
+}
+
+#[test]
+fn hovering_a_let_binding_shows_the_bindings_own_type() {
+    let text = "module app::main;\nfn f() -> Int { let s = \"hi\"; 1 }\n";
+    assert_binding_hover(text, 1, "let s", "s");
+}
+
+/// `b`, the second name in a tuple pattern: the binding inside the pattern,
+/// not the pattern's tuple type and not the block.
+#[test]
+fn hovering_a_name_in_a_let_pattern_shows_that_names_type() {
+    let text = "module app::main;\nfn f() -> Int { let (a, b) = (1, \"hi\"); a }\n";
+    assert_binding_hover(text, 1, "(a, b)", "b");
+}
+
+/// A `for` statement's item is bound inside a desugaring; hovering it where
+/// it is written still names the element type.
+#[test]
+fn hovering_a_for_loop_variable_shows_the_element_type() {
+    let text = "module main;\n\nimport std::core::{Iterator, List, Step};\n\n\
+                fn go(rows: List<String>) -> Int {\n  let mut t = 0; for r in rows { t = t + 1; }; t\n}\n";
+    assert_binding_hover(text, 5, "r in", "r");
+}
+
+#[test]
+fn hovering_a_lambda_parameter_shows_its_type() {
+    let text = "module app::main;\n\
+                fn f() -> Int { let g = fn (x: String) => x; 1 }\n";
+    assert_binding_hover(text, 1, "(x:", "x");
+}
+
+/// A name bound by a constructor pattern in a `match` arm.
+#[test]
+fn hovering_a_match_arm_binding_shows_the_payload_type() {
+    let text = "module app::main;\n\
+                pub type Box = | Full(label: String) | Empty;\n\
+                fn f(b: Box) -> Int { match b { Box::Full(t) => 1, Box::Empty => 0 } }\n";
+    assert_binding_hover(text, 2, "(t)", "t");
 }
 
 /// Nothing under the cursor is `null`, not an error. An editor asks about
