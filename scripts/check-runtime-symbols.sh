@@ -63,8 +63,22 @@ grep -oE 'declare\("khora_[a-z_0-9]+"' crates/khora-codegen-llvm/src/runtime.rs 
 # at all rather than with an error -- so every symbol read as missing and the
 # gate failed with a list of thirty names that were all present. `llvm-nm`
 # reads both, and LLVM is already a build requirement.
+#
+# **And it has to be at least as new as the LLVM that wrote it.** The archive
+# carries LLVM bitcode from rustc, and an older `llvm-nm` can't read a newer
+# LLVM's bitcode: when Rust 1.99 moved to LLVM 23, Homebrew's LLVM 22 `nm`
+# failed on every member of the macOS archive ("Not an int attribute") and
+# this gate reported all thirty-nine symbols missing. The `llvm-nm` in
+# rustc's own `llvm-tools` component is the same LLVM as the compiler that
+# wrote the archive, by construction, so it comes first.
 reader=nm
-if command -v llvm-nm > /dev/null 2>&1; then
+host=$(rustc -vV 2>/dev/null | sed -n 's/^host: //p')
+rust_nm="$(rustc --print sysroot 2>/dev/null)/lib/rustlib/$host/bin/llvm-nm"
+if [ -n "$host" ] && [ -x "$rust_nm" ]; then
+    reader="$rust_nm"
+elif [ -n "$host" ] && [ -x "$rust_nm.exe" ]; then
+    reader="$rust_nm.exe"
+elif command -v llvm-nm > /dev/null 2>&1; then
     reader=llvm-nm
 elif [ -n "${LLVM_SYS_221_PREFIX:-}" ] && [ -x "$LLVM_SYS_221_PREFIX/bin/llvm-nm.exe" ]; then
     reader="$LLVM_SYS_221_PREFIX/bin/llvm-nm.exe"
@@ -81,8 +95,19 @@ fi
 # Stripping one leading underscore is enough and is not ambiguous. Nothing the
 # backend declares starts with one; the names are all `khora_*`, so an
 # underscore at the front is the platform's and never the symbol's.
-"$reader" --defined-only "$archive" 2>/dev/null \
+#
+# The reader's complaints are kept, not thrown away: "no symbols" for an empty
+# member is normal, but an error means a member went unread, and its symbols
+# would be reported missing when they aren't. Say that instead.
+"$reader" --defined-only "$archive" 2> "$work/read-errors" \
     | awk '$2 == "T" { sub(/^_/, "", $3); print $3 }' | sort -u > "$work/have"
+if grep -q -i 'error' "$work/read-errors"; then
+    printf '  FAILED  %s could not read all of %s:\n' "$reader" "$archive" >&2
+    grep -i 'error' "$work/read-errors" | sort -u | head -5 | sed 's/^/            /' >&2
+    printf '          A reader older than the LLVM that wrote the archive does this;\n' >&2
+    printf '          `rustup component add llvm-tools` installs one that matches.\n' >&2
+    exit 1
+fi
 if [ ! -s "$work/have" ]; then
     printf '  FAILED  %s read no defined symbols from %s.'"\n" "$reader" "$archive" >&2
     printf '          An empty read is the wrong reader for the format, not an'"\n" >&2
