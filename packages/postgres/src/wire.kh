@@ -417,6 +417,35 @@ pub fn run_prepared(closing: List<String>, name: String, values: List<Option<Str
   Writer::finish(out)
 }
 
+/// Many runs of a statement the connection has already parsed as `name`, as
+/// one write: `Close` for each of `closing`, then Bind, Execute and Sync for
+/// each of `sets`, in order.
+///
+/// **A `Sync` per set, not one at the end.** A `Sync` ends an implicit
+/// transaction, so each set runs in its own and an error in one discards
+/// only the messages up to its own `Sync`: the sets after it run. With one
+/// `Sync` for the batch, the first error would skip every set after it, and
+/// the rest would share one transaction. TechEmpower's rule 7 asks for the
+/// same separation, and pgx's batch sends the same shape.
+pub fn run_prepared_each(closing: List<String>, name: String, sets: List<List<Option<String>>>) -> Array<U8> {
+  let out = Writer::new();
+  write_closes(out, closing);
+  let mut rest = sets;
+  let mut going = true;
+  while going {
+    match rest {
+      List::Nil => going = false,
+      List::Cons(values, more) => {
+        write_bind(out, "", name, values);
+        write_execute(out, "", 0);
+        write_sync(out);
+        rest = more
+      },
+    }
+  };
+  Writer::finish(out)
+}
+
 /// A password, in whatever form the server asked for.
 pub fn password(secret: String) -> Array<U8> {
   let body = Writer::new();

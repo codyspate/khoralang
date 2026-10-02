@@ -39,6 +39,16 @@ while time.time() < end:
 sys.exit(1)"
 }
 
+# name -> whether it serves /pipelined-queries. Node's `pg` sends one
+# statement at a time per connection, so it has no pipelined route;
+# README.md says why.
+pipelined() {
+  case "$1" in
+    khora-threads|khora-scheduler|go|bun) echo --pipelined ;;
+    *) echo "" ;;
+  esac
+}
+
 servers=${*:-khora-threads khora-scheduler go node bun}
 failed=""
 for name in $servers; do
@@ -51,7 +61,7 @@ for name in $servers; do
   fi
   # Connections warmed before the query counts, so a pool opening lazily is
   # not counted against it.
-  python3 "$HERE/verify.py" --port "$PORT" --label "$name" || failed="$failed $name"
+  python3 "$HERE/verify.py" --port "$PORT" --label "$name" $(pipelined "$name") || failed="$failed $name"
   kill $pid 2>/dev/null; sleep 1; kill -9 $pid 2>/dev/null
   wait $pid 2>/dev/null
 done

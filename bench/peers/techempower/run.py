@@ -51,8 +51,15 @@ TESTS = [
     ("json", "/json"),
     ("db", "/db"),
     ("queries20", "/queries?queries=20"),
+    ("pipelined20", "/pipelined-queries?queries=20"),
     ("fortunes", "/fortunes"),
 ]
+
+# The servers whose stock driver pipelines, and so have /pipelined-queries.
+# The row compares Khora with Go and Bun pipelining the same way; the
+# headline queries20 row stays sequential for every server. README.md says
+# why Node is not in it.
+PIPELINING = {"khora-threads", "khora-scheduler", "go", "bun"}
 
 # Postgres at or above this share of its one CPU during a run is saturated.
 SATURATED = 0.90
@@ -261,6 +268,8 @@ def main():
                 proc = start(name)
                 try:
                     for test, path in TESTS:
+                        if test == "pipelined20" and name not in PIPELINING:
+                            continue
                         r = measure(name, proc, test, path, a.seconds, a.warmup, a.connections)
                         r["round"] = round_
                         runs.append(r)

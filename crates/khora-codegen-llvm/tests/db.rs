@@ -54,6 +54,7 @@ fn recording(fails: Bool) -> Db {{
   let depth = Shared::of(0);
   handler for Db {{
     query: fn (_sql, _binds) => Result::Ok(List::Nil),
+    query_each: fn (_sql, sets) => List::map(sets, fn _binds => Result::Ok(List::Nil)),
     execute: fn (_sql, _binds) => {{
       print("execute");
       Result::Ok(1)
@@ -318,6 +319,7 @@ const BRITTLE: &str = r#"
 fn brittle() -> Db {
   handler for Db {
     query: fn (_sql, _binds) => Result::Ok(List::Nil),
+    query_each: fn (_sql, sets) => List::map(sets, fn _binds => Result::Ok(List::Nil)),
     execute: fn (_sql, _binds) => Result::Ok(1),
     begin: fn () => {
       print("begin");
@@ -528,6 +530,7 @@ fn a_rollback_may_do_fallible_work_while_the_cancellation_waits() {
 fn talkative() -> Db {{
   handler for Db {{
     query: fn (_sql, _binds) => Result::Ok(List::Nil),
+    query_each: fn (_sql, sets) => List::map(sets, fn _binds => Result::Ok(List::Nil)),
     execute: fn (_sql, _binds) => Result::Ok(1),
     begin: fn () => {{ print("begin"); Result::Ok(()) }},
     commit: fn () => {{ print("commit"); Result::Ok(()) }},
@@ -651,6 +654,7 @@ fn dying(where_it_dies: String) -> Db {
   let gone = Shared::of(false);
   handler for Db {
     query: fn (_sql, _binds) => Result::Ok(List::Nil),
+    query_each: fn (_sql, sets) => List::map(sets, fn _binds => Result::Ok(List::Nil)),
     execute: fn (_sql, _binds) =>
       if where_it_dies.eq("execute") {
         Shared::set(gone, true);
@@ -868,6 +872,7 @@ fn turn() -> () {
 fn canceled_in(at: String) -> Db {
   handler for Db {
     query: fn (_sql, _binds) => Result::Ok(List::Nil),
+    query_each: fn (_sql, sets) => List::map(sets, fn _binds => Result::Ok(List::Nil)),
     execute: fn (_sql, _binds) => Result::Ok(1),
     begin: fn () => {
       print("begin");
@@ -1142,6 +1147,7 @@ fn stalls() -> Db {
   let base = recording(false);
   handler for Db {
     query: fn (sql, binds) => base.query(sql, binds),
+    query_each: fn (sql, sets) => base.query_each(sql, sets),
     execute: fn (sql, binds) => base.execute(sql, binds),
     depth: fn () => Shared::get(depth),
     begin: fn () => { Shared::set(depth, 1); base.begin() },
@@ -1206,6 +1212,7 @@ fn flat() -> Db {
   let depth = Shared::of(0);
   handler for Db {
     query: fn (_sql, _binds) => Result::Ok(List::Nil),
+    query_each: fn (_sql, sets) => List::map(sets, fn _binds => Result::Ok(List::Nil)),
     execute: fn (sql, _binds) => { print("execute " + sql); Result::Ok(1) },
     depth: fn () => Shared::get(depth),
     begin: fn () => { print("begin"); Shared::set(depth, 1); Result::Ok(()) },
@@ -1239,5 +1246,82 @@ fn told(r: Result<Int, DbError>) -> String {
         out,
         "begin\nexecute 1\ninner said Err rejected: this handler does not nest\nexecute 3\ncommit\nouter said Ok 1\n",
         "the nested transaction must be refused, with one `begin` and no second one"
+    );
+}
+
+/// **`query_each` through a handler that cannot pipeline answers what the
+/// same `query` calls would, one per set, in order.** The handler here loops
+/// over its own `query`, which answers a row holding its value and refuses
+/// the value 2, and says each statement as it runs it. The batch's answers
+/// and the calls one at a time must print the same, and a set that fails
+/// must not stop the sets after it.
+#[test]
+fn query_each_through_a_looping_handler_answers_as_query_would() {
+    let out = run_with(
+        "db_query_each_loop",
+        r#"/// One statement: a row holding the value, or a refusal for 2.
+fn one(values: List<Cell>) -> Result<List<Row>, DbError> {
+  match values {
+    List::Cons(Cell::Number(2), _) => {
+      print("ran 2");
+      Result::Err(DbError::Rejected("two is refused"))
+    },
+    List::Cons(Cell::Number(n), _) => {
+      print("ran " + Int::to_string(n));
+      Result::Ok(List::Cons({ columns: List::Cons("n", List::Nil), cells: values }, List::Nil))
+    },
+    _ => Result::Err(DbError::Rejected("not a number")),
+  }
+}
+
+/// Cannot pipeline, so it loops.
+fn looping() -> Db {
+  handler for Db {
+    query: fn (_sql, values) => one(values),
+    query_each: fn (_sql, sets) => List::map(sets, fn values => one(values)),
+    execute: fn (_sql, _binds) => Result::Ok(0),
+    depth: fn () => 0,
+    begin: fn () => Result::Ok(()),
+    commit: fn () => Result::Ok(()),
+    rollback: fn () => Result::Ok(()),
+    savepoint: fn _level => Result::Err(DbError::Rejected("one level only")),
+    release: fn _level => Result::Err(DbError::Rejected("one level only")),
+    rollback_to: fn _level => Result::Ok(()),
+    broken: fn () => (),
+  }
+}
+
+fn told(answer: Result<List<Row>, DbError>) -> String {
+  match answer {
+    Result::Err(why) => "Err " + why.show(),
+    Result::Ok(rows) => "Ok " + Int::to_string(List::length(rows)) + " row(s): " + List::fold(rows, "", fn (acc, row) =>
+      acc + List::fold(row.cells, "", fn (inner, cell) => inner + cell.show())),
+  }
+}
+
+fn sets() -> List<List<Cell>> {
+  List::Cons(List::Cons(Cell::Number(1), List::Nil),
+    List::Cons(List::Cons(Cell::Number(2), List::Nil),
+      List::Cons(List::Cons(Cell::Number(3), List::Nil), List::Nil)))
+}
+
+fn say_all(answers: List<Result<List<Row>, DbError>>) -> () {
+  match answers {
+    List::Nil => (),
+    List::Cons(answer, rest) => { print(told(answer)); say_all(rest) },
+  }
+}"#,
+        r#"  with { db: looping() } {
+    print("one at a time:");
+    say_all(List::map(sets(), fn values => db.query("q", values)));
+    print("as a batch:");
+    say_all(db.query_each("q", sets()));
+  }"#,
+    );
+    let calls = "ran 1\nran 2\nran 3\nOk 1 row(s): 1\nErr rejected: two is refused\nOk 1 row(s): 3\n";
+    assert_eq!(
+        out,
+        format!("one at a time:\n{calls}as a batch:\n{calls}"),
+        "a batch through a looping handler must give the answers of the calls one at a time, in order"
     );
 }

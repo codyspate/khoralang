@@ -168,6 +168,42 @@ trips are the same either way: one write, one read.
   transaction a different server connection (PgBouncer's transaction mode)
   does not carry the names across, so use session mode, as with pgx.
 
+## Many lookups in one exchange
+
+`db.query_each(sql, sets)` runs one statement once per set of values and
+answers what `db.query` once per set would, in order. This handler pipelines
+it: every set goes to the server in one write, as Bind, Execute and Sync,
+and the replies are read in order. Twenty lookups cost one round trip
+instead of twenty.
+
+```khora
+import std::core::{List, Result};
+import std::db::{Cell, Db, DbError, Row};
+
+fn users(ids: List<Int>) -> List<Result<List<Row>, DbError>> with { db: Db } {
+  db.query_each(
+    "select id, name from users where id = $1",
+    List::map(ids, fn id => [Cell::Number(id)]),
+  )
+}
+```
+
+- **Each set is its own statement, with its own `Sync`.** Outside a
+  transaction each runs in its own implicit transaction, so a set that fails
+  fails alone and the sets after it still run. Inside a transaction a failed
+  set aborts it, and the sets after it are refused, as separate `query`
+  calls would be.
+- **The first use of a statement on a connection prepares it** with the
+  first set, the ordinary way, and pipelines the rest behind it.
+- **A batch that is refused throughout is asked again.** A statement the
+  server dropped refuses every set that names it; the sets after the first
+  refusal are then run again after a fresh parse, which is what separate
+  calls would have done.
+- **A batch is one request to the connection's serving fiber**, which reads
+  every reply before it answers anything else. A borrower canceled while its
+  replies are arriving leaves the rest for that fiber to read, so the next
+  borrower never receives them.
+
 ## What it does not do yet
 
 Named here because a driver's gaps decide whether it fits a service:

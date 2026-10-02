@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -114,6 +115,36 @@ func queriesHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write(body)
 }
 
+// pipelinedHandler is the multiple-queries test with every lookup in one
+// pgx batch: pool.SendBatch writes them all before reading a reply. In pgx's
+// default mode each query is its own statement with its own Sync, which is
+// what TechEmpower's rule 7 asks of pipelining. Same clamping and body as
+// queriesHandler.
+func pipelinedHandler(w http.ResponseWriter, r *http.Request) {
+	n := queriesOf(r)
+	worlds := make([]World, n)
+	batch := &pgx.Batch{}
+	for i := 0; i < n; i++ {
+		batch.Queue(worldQuery, rand.IntN(10000)+1)
+	}
+	br := pool.SendBatch(r.Context(), batch)
+	for i := 0; i < n; i++ {
+		if err := br.QueryRow().Scan(&worlds[i].ID, &worlds[i].RandomNumber); err != nil {
+			br.Close()
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	if err := br.Close(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	body, _ := json.Marshal(worlds)
+	headers(w, "application/json")
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.Write(body)
+}
+
 func fortunesHandler(w http.ResponseWriter, r *http.Request) {
 	rows, err := pool.Query(r.Context(), fortuneQuery)
 	if err != nil {
@@ -159,6 +190,7 @@ func main() {
 	mux.HandleFunc("GET /json", jsonHandler)
 	mux.HandleFunc("GET /db", dbHandler)
 	mux.HandleFunc("GET /queries", queriesHandler)
+	mux.HandleFunc("GET /pipelined-queries", pipelinedHandler)
 	mux.HandleFunc("GET /fortunes", fortunesHandler)
 	log.Fatal(http.ListenAndServe(":"+setting("PORT", "8080"), mux))
 }

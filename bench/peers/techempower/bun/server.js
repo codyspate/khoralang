@@ -67,6 +67,26 @@ Bun.serve({
           for (let i = 0; i < n; i++) worlds.push(await randomWorld());
           return new Response(JSON.stringify(worlds), { headers: headers("application/json") });
         }
+        case "/pipelined-queries": {
+          // Every lookup issued on one reserved connection before any is
+          // awaited: Bun.sql writes them in one go, each its own statement
+          // with its own Sync, which is what TechEmpower's rule 7 asks of
+          // pipelining. One connection, as Khora's lease and pgx's batch.
+          const n = queriesOf(url);
+          const conn = await sql.reserve();
+          try {
+            const answers = await Promise.all(
+              Array.from({ length: n }, () => {
+                const id = 1 + Math.floor(Math.random() * 10000);
+                return conn`SELECT id, randomnumber FROM world WHERE id = ${id}`;
+              }),
+            );
+            const worlds = answers.map((rows) => ({ id: rows[0].id, randomNumber: rows[0].randomnumber }));
+            return new Response(JSON.stringify(worlds), { headers: headers("application/json") });
+          } finally {
+            conn.release();
+          }
+        }
         case "/fortunes": {
           const rows = await sql`SELECT id, message FROM fortune`;
           const fortunes = rows.map((r) => ({ id: r.id, message: r.message }));

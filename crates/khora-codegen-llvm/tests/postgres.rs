@@ -4777,6 +4777,7 @@ fn case_b(pool: Pool) -> () {
 fn paused(base: Db, read: Channel<Int>, go: Channel<Int>) -> Db {
   handler for Db {
     query: fn (sql, binds) => base.query(sql, binds),
+    query_each: fn (sql, sets) => base.query_each(sql, sets),
     execute: fn (sql, binds) => base.execute(sql, binds),
     depth: fn () => {
       let d = base.depth();
@@ -4861,3 +4862,332 @@ fn main() -> () {
   close_pool(pool);
 }
 "##;
+
+// --- a pipelined batch whose borrower is canceled ------------------------------
+
+/// Answers `select $1::int4 as n` with one `int4` row holding `$1`, pipelined
+/// the way PostgreSQL answers it: each `Sync` ends a reply, and a request is
+/// read until its `Sync` whatever came before.
+///
+/// **The first batch's replies stop half-way until the program says it has
+/// canceled**: once every request of the batch is in, the first three
+/// replies go out, the server says `B` on `control`, and the rest wait for a
+/// byte back. The borrower is then canceled while its batch has replies
+/// still to come. Everything asked after is answered at once.
+///
+/// Notes every `n` it answered in `heard`, in order.
+fn answer_a_held_batch(listener: TcpListener, control: TcpListener, batch: usize) -> Vec<String> {
+    let (mut stream, _) = listener.accept().expect("a connection");
+    let _ = stream.set_nodelay(true);
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(20)));
+    let mut heard = Vec::new();
+    let mut length = [0u8; 4];
+    if stream.read_exact(&mut length).is_err() {
+        return heard;
+    }
+    let mut startup = vec![0u8; (i32::from_be_bytes(length) as usize).saturating_sub(4)];
+    if stream.read_exact(&mut startup).is_err() {
+        return heard;
+    }
+    let mut hello = framed(b'R', &0i32.to_be_bytes());
+    hello.extend(framed(b'Z', b"I"));
+    if stream.write_all(&hello).is_err() {
+        return heard;
+    }
+    let mut control = Some(control);
+    // Replies waiting to go out, and whether the one in progress parsed.
+    let mut pending: Vec<Vec<u8>> = Vec::new();
+    let mut value = String::new();
+    let mut parsed = false;
+    loop {
+        let Some((kind, payload)) = next_frame(&mut stream) else { return heard };
+        match kind {
+            b'X' => return heard,
+            b'P' => parsed = true,
+            b'B' => {
+                // Portal, statement, 0 format codes, 1 parameter, its length
+                // and its text.
+                let mut parts = payload.splitn(3, |b| *b == 0);
+                let _portal = parts.next();
+                let _statement = parts.next();
+                let rest = parts.next().unwrap_or(&[]);
+                let len = i32::from_be_bytes(rest[4..8].try_into().expect("a length")) as usize;
+                value = String::from_utf8_lossy(&rest[8..8 + len]).into_owned();
+            }
+            b'S' => {
+                let mut reply = Vec::new();
+                if parsed {
+                    reply.extend(framed(b'1', &[]));
+                }
+                reply.extend(framed(b'2', &[]));
+                if parsed {
+                    let mut description = 1i16.to_be_bytes().to_vec();
+                    description.extend_from_slice(&cstring("n"));
+                    description.extend_from_slice(&0i32.to_be_bytes());
+                    description.extend_from_slice(&0i16.to_be_bytes());
+                    description.extend_from_slice(&23i32.to_be_bytes());
+                    description.extend_from_slice(&4i16.to_be_bytes());
+                    description.extend_from_slice(&(-1i32).to_be_bytes());
+                    description.extend_from_slice(&0i16.to_be_bytes());
+                    reply.extend(framed(b'T', &description));
+                }
+                let mut row = 1i16.to_be_bytes().to_vec();
+                row.extend_from_slice(&(value.len() as i32).to_be_bytes());
+                row.extend_from_slice(value.as_bytes());
+                reply.extend(framed(b'D', &row));
+                reply.extend(framed(b'C', &cstring("SELECT 1")));
+                reply.extend(framed(b'Z', b"I"));
+                heard.push(value.clone());
+                parsed = false;
+                pending.push(reply);
+                // The first statement prepares alone; the batch after it is
+                // `batch - 1` requests in one write, held half-way.
+                let holding = control.is_some() && heard.len() > 1;
+                if !holding || pending.len() == batch - 1 {
+                    let split = if holding { 3 } else { pending.len() };
+                    let first: Vec<u8> = pending.drain(..split).flatten().collect();
+                    if stream.write_all(&first).is_err() {
+                        return heard;
+                    }
+                    if holding {
+                        let (mut told, _) = control.take().expect("the control listener").accept().expect("the program");
+                        let _ = told.set_read_timeout(Some(std::time::Duration::from_secs(20)));
+                        let _ = told.write_all(b"B");
+                        let mut canceled = [0u8; 1];
+                        let _ = told.read_exact(&mut canceled);
+                        let rest: Vec<u8> = pending.drain(..).flatten().collect();
+                        if stream.write_all(&rest).is_err() {
+                            return heard;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The program for [`a_borrower_canceled_mid_batch_leaves_the_connection_usable`].
+///
+/// A pool of one. A fiber runs a batch of `BATCH` on its lease and is
+/// canceled once the server has sent the first three replies and holds the
+/// rest; the batch's replies are then let through. The next borrower asks
+/// 101, 102 and 103 one at a time on the same connection, then a batch of
+/// 201 to 203, and prints what it got.
+fn canceled_batch_program(port: u16, told: u16, batch: usize) -> String {
+    format!(
+        "module demo::main;
+import std::core::{{Array, Fiber, Fibers, List, Result, print}};
+import std::db::{{Cell, Db, DbError, Row}};
+import std::net::socket::{{start, connect_to, receive, transmit, shut}};
+import postgres::db::{{Settings}};
+import postgres::pool::{{close, open, with_db}};
+
+fn sets(from: Int, count: Int) -> List<List<Cell>> {{
+  let mut out: List<List<Cell>> = List::Nil;
+  let mut n = from + count - 1;
+  while n >= from {{
+    out = List::Cons(List::Cons(Cell::Number(n), List::Nil), out);
+    n = n - 1
+  }};
+  out
+}}
+
+fn shown(answer: Result<List<Row>, DbError>) -> String {{
+  match answer {{
+    Result::Ok(List::Cons(row, List::Nil)) => match row.cells {{
+      List::Cons(Cell::Number(n), List::Nil) => Int::to_string(n),
+      _ => \"a row of another shape\",
+    }},
+    Result::Ok(_) => \"not one row\",
+    Result::Err(why) => why.show(),
+  }}
+}}
+
+fn batch() -> Int with {{ db: Db }} {{
+  let answers = db.query_each(\"select $1::int4 as n\", sets(1, {batch}));
+  List::length(answers)
+}}
+
+fn after() -> String with {{ db: Db }} {{
+  let one = shown(db.query(\"select $1::int4 as n\", List::Cons(Cell::Number(101), List::Nil)));
+  let two = shown(db.query(\"select $1::int4 as n\", List::Cons(Cell::Number(102), List::Nil)));
+  let three = shown(db.query(\"select $1::int4 as n\", List::Cons(Cell::Number(103), List::Nil)));
+  let each = List::map(db.query_each(\"select $1::int4 as n\", sets(201, 3)), shown);
+  one + \" \" + two + \" \" + three + \" | \" + String::join(each, \" \")
+}}
+
+fn main() -> Int {{
+  let settings: Settings = {{ host: \"127.0.0.1\", port: {port}, user: \"khora\", database: \"khora\", secret: \"\" }};
+  if start() {{}} else {{ print(\"no sockets\") }};
+  let crew = Fibers::open();
+  let pool = open(crew, settings, 1);
+  let f = Fiber::spawn(fn () => {{
+    match with_db(pool, batch) {{
+      Result::Ok(n) => print(\"the canceled batch finished with \" + Int::to_string(n) + \" answers\"),
+      Result::Err(_) => print(\"the canceled batch had no lease\"),
+    }}
+  }});
+  let control = connect_to(\"127.0.0.1\", {told});
+  let one: Array<U8> = Array::new(1, 0);
+  let _ = receive(control, one);
+  Fiber::cancel(f);
+  let _ = transmit(control, \"c\");
+  shut(control);
+  Fiber::wait(f);
+  match with_db(pool, after) {{
+    Result::Ok(said) => print(\"next borrower: \" + said),
+    Result::Err(why) => print(\"next borrower had no lease: \" + why.show()),
+  }};
+  close(pool);
+  0
+}}
+"
+    )
+}
+
+/// **A borrower canceled while its batch's replies are still arriving
+/// leaves the connection usable, and the next borrower gets its own
+/// answers.**
+///
+/// What this prevents: the rest of a canceled batch's replies left on the
+/// connection. The batch is one request to the serving fiber, which reads
+/// every reply before it answers anything else, so a cancel on the
+/// borrower's side cannot stop it half-way, and the next borrower gets the
+/// same connection with nothing waiting on it. With the serving fiber
+/// leaving the last reply unread, the pool's lease check finds it and
+/// discards the connection, and this server, which accepts one connection,
+/// never sees the next borrower: the test fails either way the connection
+/// is left out of step.
+///
+/// The first statement of the batch prepares the statement; the other
+/// `BATCH - 1` go out in one write, and the server sends three replies,
+/// holds the rest until the cancel has been delivered, then sends them.
+#[test]
+fn a_borrower_canceled_mid_batch_leaves_the_connection_usable() {
+    const BATCH: usize = 8;
+    for backend in ["threads", "scheduler"] {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
+        let port = listener.local_addr().expect("an address").port();
+        let control = TcpListener::bind("127.0.0.1:0").expect("a control port");
+        let told = control.local_addr().expect("an address").port();
+        let server = std::thread::spawn(move || answer_a_held_batch(listener, control, BATCH));
+        let exe = build(
+            &format!("pg_canceled_batch_{backend}_{port}"),
+            &canceled_batch_program(port, told, BATCH),
+        );
+        let ran = run_watched(&exe, backend, std::time::Duration::from_secs(30));
+        let heard = server.join().expect("the scripted server");
+        assert!(!ran.hung, "{backend}: the program hung: {:?}", ran.stdout);
+        assert_eq!(
+            ran.stdout, "next borrower: 101 102 103 | 201 202 203\n",
+            "{backend}: stderr {}; the server answered {heard:?}",
+            ran.stderr
+        );
+        let expected: Vec<String> =
+            (1..=BATCH).map(|n| n.to_string()).chain(["101", "102", "103", "201", "202", "203"].map(String::from)).collect();
+        assert_eq!(heard, expected, "{backend}: the whole batch, then the next borrower's statements, in order");
+    }
+}
+
+/// The program for [`query_each_against_a_real_server`].
+const QUERY_EACH_REAL: &str = r#"module demo::main;
+import std::core::{Fibers, List, Result, String, print};
+import std::db::{Cell, Db, DbError, Row, transaction};
+import postgres::db::{Settings};
+import postgres::pool::{close, open, with_db};
+
+fn sets(values: List<Int>) -> List<List<Cell>> {
+  List::map(values, fn n => List::Cons(Cell::Number(n), List::Nil))
+}
+
+fn shown(answer: Result<List<Row>, DbError>) -> String {
+  match answer {
+    Result::Ok(List::Cons(row, List::Nil)) => match row.cells {
+      List::Cons(Cell::Number(n), List::Nil) => Int::to_string(n),
+      _ => "a row of another shape",
+    },
+    Result::Ok(_) => "not one row",
+    Result::Err(DbError::Rejected(_)) => "rejected",
+    Result::Err(DbError::Disconnected(_)) => "disconnected",
+    Result::Err(DbError::RolledBack(_)) => "rolled back",
+  }
+}
+
+fn said(answers: List<Result<List<Row>, DbError>>) -> String {
+  String::join(List::map(answers, shown), " ")
+}
+
+/// 100 / n: 0 is refused by the server, and only that set.
+fn divided(values: List<Int>) -> String with { db: Db } {
+  said(db.query_each("select (100 / $1::int4)::int4 as n", sets(values)))
+}
+
+fn batches() -> () with { db: Db } {
+  // First use: prepared by the first set, the rest pipelined.
+  print("first:   " + divided([1, 2, 4]));
+  // Prepared: one write. The zero fails alone.
+  print("alone:   " + divided([5, 0, 10, 20]));
+  // The server drops every prepared statement; the batch is refused
+  // throughout, and the sets after the first are asked again.
+  match db.execute("discard all", List::Nil) {
+    Result::Ok(_) => (),
+    Result::Err(_) => print("discard refused"),
+  };
+  print("dropped: " + divided([25, 50, 100]));
+  print("after:   " + divided([1, 2]));
+  // Inside a transaction a failed set aborts it: the sets after it are
+  // refused, as separate `query` calls would be, and the transaction rolls
+  // back.
+  let inside: Result<String, DbError> = transaction(fn () => Result::Ok(divided([1, 0, 2])));
+  match inside {
+    Result::Ok(s) => print("in tx:   " + s),
+    Result::Err(_) => print("in tx:   failed"),
+  };
+  print("then:    " + divided([4]));
+}
+
+fn main() -> Int {
+  let settings: Settings = { host: "127.0.0.1", port: 5433, user: "khora", database: "khora", secret: "khora" };
+  let crew = Fibers::open();
+  let pool = open(crew, settings, 1);
+  match with_db(pool, batches) {
+    Result::Ok(_) => (),
+    Result::Err(_) => print("no lease"),
+  };
+  close(pool);
+  0
+}
+"#;
+
+/// **`query_each` against a real server answers what `query` once per set
+/// would.** A set the server refuses fails alone outside a transaction; a
+/// batch after `DISCARD ALL` recovers after the first set, as separate calls
+/// do; inside a transaction the first failure aborts it and every set after
+/// it is refused. Skipped without `KHORA_POSTGRES`, like its neighbors.
+#[test]
+fn query_each_against_a_real_server() {
+    if std::env::var_os("KHORA_POSTGRES").is_none() {
+        eprintln!(
+            "skipping: set KHORA_POSTGRES=1 and bring up \
+             packages/postgres/docker-compose.yml to run this"
+        );
+        return;
+    }
+    for backend in ["threads", "scheduler"] {
+        let exe = build(&format!("pg_query_each_real_{backend}"), QUERY_EACH_REAL);
+        let ran = run_watched(&exe, backend, std::time::Duration::from_secs(30));
+        assert!(!ran.hung, "{backend}: the program hung: {:?}", ran.stdout);
+        assert_eq!(
+            ran.stdout,
+            "first:   100 50 25\n\
+             alone:   20 rejected 10 5\n\
+             dropped: rejected 2 1\n\
+             after:   100 50\n\
+             in tx:   failed\n\
+             then:    25\n",
+            "{backend}: stderr {}",
+            ran.stderr
+        );
+    }
+}

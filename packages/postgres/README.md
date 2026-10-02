@@ -173,6 +173,12 @@ at most 512 statements and closes the one used longest ago to make room. The
 names do not survive a pooler in transaction mode (PgBouncer's), so run such a
 pooler in session mode. `run` prepares nothing.
 
+**`ask_many(c, sql, sets)`** is `ask` once per set, pipelined: every set's
+Bind, Execute and Sync in one write, then the replies in order, with the
+answers the calls one at a time would give. Each set has its own `Sync`, so
+each runs in its own implicit transaction and fails alone. Through `Db` it is
+`db.query_each(sql, sets)`.
+
 ## What arrives
 
 Every value comes back as text and becomes a `std::db::Cell`:

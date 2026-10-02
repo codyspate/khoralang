@@ -1,10 +1,10 @@
 module postgres::conn;
 
-import std::core::{Array, Iterator, List, Map, Option, Pair, Result, Step, Vector, assert, assert_that};
+import std::core::{Array, Fiber, Iterator, List, Map, Option, Pair, Result, Step, Vector, assert, assert_that};
 import std::db::{Cell, DbError, Row};
 import std::decimal::{Decimal};
 import std::net::socket::{accept_on, connect_to, invalid_handle, listen_on, nothing_yet, receive, receive_now, set_receive_timeout, shut, start, transmit_bytes};
-import postgres::wire::{Message, Reader, Writer, framed, message_at, message_width, password, payload_width, prepare_and_run, query, run_prepared, sasl_initial, sasl_response, startup, terminate};
+import postgres::wire::{Message, Reader, Writer, framed, message_at, message_width, password, payload_width, prepare_and_run, query, run_prepared, run_prepared_each, sasl_initial, sasl_response, startup, terminate};
 import postgres::scram::{Opening, ScramError, Session, begin, encode64, finish, verify};
 
 extern fn khora_random_seed() -> Int;
@@ -801,6 +801,154 @@ fn again(c: Connection, sql: String, known: Prepared, values: List<Cell>) -> Res
   }
 }
 
+/// `ask` for each of `sets` in turn, with the answers those calls would
+/// give, in one write and one read where the statement is already prepared.
+///
+/// **What this is for: a round trip per set.** Twenty lookups asked one at
+/// a time are twenty writes, twenty waits for the server and twenty reads;
+/// here they are Bind, Execute and Sync for every set in one write, and the
+/// replies read in order. Each set has its own `Sync`, so each runs in its
+/// own implicit transaction and fails alone; see `run_prepared_each`.
+///
+/// **The first use of a statement goes the ordinary way.** Its first set
+/// is an `ask`, which parses the statement and learns its columns, and the
+/// rest are pipelined behind the name it was kept under. A statement that
+/// fails its parse is not kept, so the next set tries again, as its own
+/// `ask` would.
+///
+/// **A refusal forgets the statement, as in `ask`, unless a later set in the
+/// same batch was served, which proves the server still holds it.** And a
+/// batch whose every set after the first refusal was refused too asks those
+/// sets again. A statement the server no longer holds (`DEALLOCATE`,
+/// `DISCARD ALL`), or whose result type changed under it, refuses every set
+/// that names it, and every set after the first was already on the wire
+/// behind it. One at a time, the call after the refusal would have parsed
+/// the statement afresh and succeeded, so those sets are asked again, which
+/// does exactly that. A refused set changed nothing, so asking it again
+/// cannot apply anything twice. What this costs: more round trips for a
+/// batch whose tail was refused for reasons of its own -- inside a
+/// transaction the first refusal aborts it, and each set after it is asked
+/// alone and refused again, which is what the calls one at a time would
+/// have been told.
+///
+/// **A reply cut off marks the connection broken**, and every set after it
+/// is answered as a call on a broken connection is, without a read.
+pub fn ask_many(c: Connection, sql: String, sets: List<List<Cell>>) -> List<Result<Answer, PgError>> {
+  // A loop, not a call per set: a batch of five hundred on a statement that
+  // keeps failing its parse would otherwise take a frame per set.
+  let answers: Vector<Result<Answer, PgError>> = Vector::new();
+  let mut rest = sets;
+  let mut going = true;
+  while going {
+    match rest {
+      List::Nil => going = false,
+      List::Cons(values, more) =>
+        if c.broken {
+          Vector::push(answers, out_of_step());
+          rest = more
+        } else {
+          match Map::get(c.prepared, sql) {
+            Option::Some(known) => rest = pipelined(c, sql, known, rest, answers),
+            Option::None => {
+              Vector::push(answers, ask(c, sql, values));
+              rest = more
+            },
+          }
+        },
+    }
+  };
+  to_list(answers)
+}
+
+/// Every set of `sets` run as `known`, in one write, the replies read into
+/// `answers`, and the sets still to be asked: none, unless a refusal made
+/// the statement suspect. See `ask_many`.
+fn pipelined(
+  c: Connection,
+  sql: String,
+  known: Prepared,
+  sets: List<List<Cell>>,
+  answers: Vector<Result<Answer, PgError>>,
+) -> List<List<Cell>> {
+  c.uses = c.uses + 1;
+  known.used = c.uses;
+  if !send_frames(c, run_prepared_each(c.closing, known.name, List::map(sets, fn values => to_wire(values)))) {
+    // As the calls one at a time: the first is told its write failed, and
+    // the connection is broken for every one after it.
+    Vector::push(answers, Result::Err(PgError::Closed("the query could not be sent")));
+    match sets { List::Nil => List::Nil, List::Cons(_values, more) => more }
+  } else {
+    c.closing = List::Nil;
+    let read: Vector<Result<Answer, PgError>> = Vector::new();
+    for _values in sets {
+      Vector::push(read, if c.broken { out_of_step() } else { collect_as(c, known.columns, known.names) })
+    };
+    settled(c, sql, known, sets, read, answers)
+  }
+}
+
+/// Moves `read`, the replies to a batch of `sets` run as `known`, into
+/// `answers`, as the calls one at a time would have left them, and gives
+/// back the sets to be asked again.
+///
+/// **What this prevents: a whole batch refused for a statement the server
+/// dropped.** Every set after a refusal was already on the wire behind it,
+/// and if they were all refused too the statement is the likely cause; one
+/// at a time, the call after the refusal would have parsed it afresh. A
+/// set served after the refusal proves the server still holds it, and a
+/// broken connection has nothing more to ask, so neither asks again.
+fn settled(
+  c: Connection,
+  sql: String,
+  known: Prepared,
+  sets: List<List<Cell>>,
+  read: Vector<Result<Answer, PgError>>,
+  answers: Vector<Result<Answer, PgError>>,
+) -> List<List<Cell>> {
+  let count = Vector::length(read);
+  let mut first_refused = count;
+  let mut served_after = false;
+  let mut i = 0;
+  while i < count {
+    match Vector::get(read, i) {
+      Option::Some(Result::Err(why)) => if refusal_of(why) && first_refused == count { first_refused = i },
+      Option::Some(Result::Ok(_)) => if first_refused < count { served_after = true },
+      Option::None => (),
+    };
+    i = i + 1
+  };
+  // `ask` forgets a statement on any refusal, because it cannot tell a
+  // statement the server dropped from a refusal of its own. A batch with a
+  // set served after the refusal can: the server still holds it.
+  if first_refused < count && !served_after {
+    Map::remove(c.prepared, sql);
+    c.closing = List::Cons(known.name, c.closing)
+  };
+  let keep = if first_refused == count || served_after || c.broken { count } else { first_refused + 1 };
+  let mut rest = sets;
+  let mut j = 0;
+  while j < keep {
+    match Vector::get(read, j) {
+      Option::Some(answer) => Vector::push(answers, answer),
+      Option::None => (),
+    };
+    rest = match rest { List::Nil => List::Nil, List::Cons(_values, more) => more };
+    j = j + 1
+  };
+  rest
+}
+
+/// Whether the server answered and said no, as against a connection that
+/// failed: only a refusal can mean the statement is gone from the server.
+fn refusal_of(why: PgError) -> Bool {
+  match why {
+    PgError::Refused(_) => true,
+    PgError::Closed(_) => false,
+    PgError::Unreachable(_) => false,
+    PgError::Unsupported(_) => false,
+  }
+}
+
 /// Keeps `statement` under `sql`, first letting go of the one used longest
 /// ago if there is no room.
 ///
@@ -1400,10 +1548,18 @@ extern fn khora_alloc_count() -> Int;
 /// including its `Sync`: `P name` for a Parse, `B statement` for a Bind, `C
 /// name` for a Close, and the bare letter for the rest.
 fn written(w: Wire) -> List<String> {
+  written_through(w.server, 1)
+}
+
+/// `written`, read from the server's end `server` until `syncs` requests
+/// have arrived. Takes the handle and not the `Wire`, so a fiber playing the
+/// server can call it.
+fn written_through(server: Int, syncs: Int) -> List<String> {
   let inbox: Array<U8> = Array::new(read_size(), 0);
   let mut bytes: Array<U8> = Array::new(0, 0);
   let mut at = 0;
   let mut out: Vector<String> = Vector::new();
+  let mut left = syncs;
   let mut going = true;
   while going {
     match message_at(bytes, at) {
@@ -1422,10 +1578,13 @@ fn written(w: Wire) -> List<String> {
           String::from_bytes(Array::new(1, U8::of(m.kind)))
         };
         Vector::push(out, said);
-        if m.kind == 83 { going = false }
+        if m.kind == 83 {
+          left = left - 1;
+          if left == 0 { going = false }
+        }
       },
       Option::None => {
-        let read = receive(w.server, inbox);
+        let read = receive(server, inbox);
         if read <= 0 {
           Vector::push(out, "nothing more arrived");
           going = false
@@ -1581,6 +1740,230 @@ test "the 513th distinct statement evicts the least recently used one" {
   let back = run_once(w, "select 1 + $1::int4 as n", 1, first_reply(1));
   assert(answered(back.got, 1));
   assert_that(back.sent == ["P khora_514", "B khora_514", "D", "E", "S"], "statement 1 again wrote ${shown(back.sent)}");
+  unwire(w)
+}
+
+// --- a pipelined batch -------------------------------------------------------
+//
+// A batch cannot be played by one fiber the way `run_once` plays a single
+// run: the point is that the client writes every set before it reads any
+// reply. So the server here is a fiber of its own, and it **reads until it
+// has every request it expects before it answers any**. A client that waits
+// for an answer before sending the next set gets nothing, and the server's
+// read gives up after a second and notes `nothing more arrived`.
+// --- a pipelined batch -------------------------------------------------------
+//
+// A batch cannot be played by one fiber the way `run_once` plays a single
+// run: the point is that the client writes every set before it reads any
+// reply. So the server here is a fiber of its own, and it **reads until it
+// has every request a turn expects before it answers any**. A client that
+// waited for an answer before sending its next set would get nothing, and
+// the server's read would give up after a second and note `nothing more
+// arrived`.
+
+/// One reply the scripted server sends, named rather than built, so a
+/// script can cross to the server's fiber.
+type Said =
+  /// `first_reply(n)`: parse, bind, describe, the row, the end.
+  | First(Int)
+  /// `later_reply(n)`: bind, the row, the end.
+  | Later(Int)
+  /// `refusal()`.
+  | Refused
+  /// The first `bytes` of `later_reply(n)`, and then nothing.
+  | Cut(n: Int, bytes: Int);
+
+/// Wait for `hear` requests, then send `say`, as one write.
+type Turn = { hear: Int, say: List<Said> };
+
+fn said_bytes(said: Said) -> Array<U8> {
+  match said {
+    Said::First(n) => first_reply(n),
+    Said::Later(n) => later_reply(n),
+    Said::Refused => refusal(),
+    Said::Cut(n, bytes) => piece(later_reply(n), 0, bytes),
+  }
+}
+
+/// Plays `turns` on the server's end `server`, and answers everything the
+/// client wrote, in order.
+fn play(server: Int, turns: List<Turn>) -> List<String> {
+  let heard: Vector<String> = Vector::new();
+  for turn in turns {
+    for line in written_through(server, turn.hear) { Vector::push(heard, line) };
+    let bytes = Writer::new();
+    for said in turn.say { Writer::raw(bytes, said_bytes(said)) };
+    transmit_bytes(server, Writer::finish(bytes));
+  };
+  to_list(heard)
+}
+
+/// `sets` sets of one number each, 1 to `sets`.
+fn numbered(sets: Int) -> List<List<Cell>> {
+  let out: Vector<List<Cell>> = Vector::new();
+  let mut n = 1;
+  while n <= sets {
+    Vector::push(out, [Cell::Number(n)]);
+    n = n + 1
+  };
+  to_list(out)
+}
+
+/// Whether every answer is one row holding `from`, `from + 1`, and so on.
+fn counted_from(got: List<Result<Answer, PgError>>, from: Int) -> Bool {
+  let mut n = from;
+  let mut fine = true;
+  for answer in got {
+    fine = fine && answered(answer, n);
+    n = n + 1
+  };
+  fine
+}
+
+fn is_refused(got: Result<Answer, PgError>) -> Bool {
+  match got { Result::Err(PgError::Refused(_)) => true, _ => false }
+}
+
+fn is_closed(got: Result<Answer, PgError>) -> Bool {
+  match got { Result::Err(PgError::Closed(_)) => true, _ => false }
+}
+
+/// Prepares `select $1::int4 as n` on `w` as `khora_1`, so a batch on it is
+/// pipelined from its first set, and says whether that went right.
+fn prepared(w: Wire) -> Bool {
+  answered(run_once(w, "select $1::int4 as n", 0, first_reply(0)).got, 0)
+}
+
+/// **A batch goes out in one write, with a `Sync` for every set.** The
+/// server answers nothing until all three sets have arrived, so a client
+/// that waited for the first answer before sending the second would see the
+/// server give up, and a batch with one `Sync` at its end would leave it
+/// waiting for two more. A `Sync` per set is what makes each set its own
+/// implicit transaction, failing alone.
+test "a batch goes out in one write, each set with its own Sync" {
+  let w = server_wire();
+  assert(prepared(w));
+  let handle = w.server;
+  let server = Fiber::spawn(fn () =>
+    play(handle, [{ hear: 3, say: [Said::Later(1), Said::Later(2), Said::Later(3)] }]));
+  let got = ask_many(w.client, "select $1::int4 as n", numbered(3));
+  let sent = Fiber::join(server)!;
+  assert_that(
+    sent == ["B khora_1", "E", "S", "B khora_1", "E", "S", "B khora_1", "E", "S"],
+    "the batch wrote ${shown(sent)}",
+  );
+  assert_that(List::length(got) == 3 && counted_from(got, 1), "the batch's answers were not 1, 2, 3");
+  assert(!w.client.broken);
+  unwire(w)
+}
+
+/// **A statement's first use in a batch prepares it the ordinary way.** The
+/// first set is a whole `ask` -- Parse, Bind, Describe, Execute, Sync, and
+/// its answer read -- because the columns of the rest are not known until
+/// it has been described; the rest go out together behind the new name.
+test "a batch on a statement not yet prepared prepares it with its first set" {
+  let w = server_wire();
+  let handle = w.server;
+  let server = Fiber::spawn(fn () => play(handle, [
+        { hear: 1, say: [Said::First(1)] },
+        { hear: 2, say: [Said::Later(2), Said::Later(3)] },
+      ]));
+  let got = ask_many(w.client, "select $1::int4 as n", numbered(3));
+  let sent = Fiber::join(server)!;
+  assert_that(
+    sent == ["P khora_1", "B khora_1", "D", "E", "S", "B khora_1", "E", "S", "B khora_1", "E", "S"],
+    "the batch wrote ${shown(sent)}",
+  );
+  assert(counted_from(got, 1));
+  unwire(w)
+}
+
+/// **A set the server refuses fails alone.** The sets before and after it
+/// are answered, in their places, and the statement stays prepared: a set
+/// served after the refusal proves the server still holds it, so the next
+/// run binds it without a parse.
+test "a refused set in a batch fails alone" {
+  let w = server_wire();
+  assert(prepared(w));
+  let handle = w.server;
+  let server = Fiber::spawn(fn () =>
+    play(handle, [{ hear: 3, say: [Said::Later(1), Said::Refused, Said::Later(3)] }]));
+  let got = ask_many(w.client, "select $1::int4 as n", numbered(3));
+  let _sent = Fiber::join(server)!;
+  match got {
+    List::Cons(one, List::Cons(two, List::Cons(three, List::Nil))) => {
+      assert(answered(one, 1));
+      assert_that(is_refused(two), "the second set was not refused");
+      assert(answered(three, 3));
+    },
+    _ => assert_that(false, "${Int::to_string(List::length(got))} answers for 3 sets"),
+  };
+  let after = run_once(w, "select $1::int4 as n", 4, later_reply(4));
+  assert(answered(after.got, 4));
+  assert_that(after.sent == ["B khora_1", "E", "S"], "the run after the batch wrote ${shown(after.sent)}");
+  unwire(w)
+}
+
+/// **A batch refused from its first set to its last asks the rest again,
+/// preparing the statement afresh.** That is what a server that dropped the
+/// statement (`DISCARD ALL`) does to a batch: every set names it. One at a
+/// time, the first call would be refused and the second would parse the
+/// statement again and succeed, so a batch answers the same.
+test "a batch refused throughout is asked again after a fresh parse" {
+  let w = server_wire();
+  assert(prepared(w));
+  let handle = w.server;
+  let server = Fiber::spawn(fn () => play(handle, [
+        { hear: 3, say: [Said::Refused, Said::Refused, Said::Refused] },
+        { hear: 1, say: [Said::First(2)] },
+        { hear: 1, say: [Said::Later(3)] },
+      ]));
+  let got = ask_many(w.client, "select $1::int4 as n", numbered(3));
+  let sent = Fiber::join(server)!;
+  assert_that(
+    sent == [
+      "B khora_1", "E", "S", "B khora_1", "E", "S", "B khora_1", "E", "S",
+      "C khora_1", "P khora_2", "B khora_2", "D", "E", "S",
+      "B khora_2", "E", "S",
+    ],
+    "the batch and its retry wrote ${shown(sent)}",
+  );
+  match got {
+    List::Cons(one, rest) => {
+      assert_that(is_refused(one), "the first set was not refused");
+      assert_that(counted_from(rest, 2), "the sets after the refusal were not answered after a fresh parse");
+    },
+    List::Nil => assert(false),
+  };
+  unwire(w)
+}
+
+/// **A reply cut off in the middle of a batch breaks the connection, and
+/// every set after it is answered without a read.** The rest of the batch's
+/// replies may still be on their way, so reading on would take them as the
+/// answers to whatever is asked next.
+test "a batch whose reply is cut off answers every later set as out of step" {
+  let w = server_wire();
+  assert(prepared(w));
+  let handle = w.server;
+  let server = Fiber::spawn(fn () =>
+    play(handle, [{ hear: 3, say: [Said::Later(1), Said::Cut(2, 7)] }]));
+  let got = ask_many(w.client, "select $1::int4 as n", numbered(3));
+  let _sent = Fiber::join(server)!;
+  assert(w.client.broken);
+  match got {
+    List::Cons(one, List::Cons(two, List::Cons(three, List::Nil))) => {
+      assert(answered(one, 1));
+      assert(is_closed(two));
+      // Told the earlier reply was cut off, not that a read of its own
+      // failed: it never touched the socket.
+      assert_that(
+        match three { Result::Err(PgError::Closed(why)) => why == "an earlier reply on this connection was cut off, so it cannot be used again", _ => false },
+        "the set after the cut was read for",
+      );
+    },
+    _ => assert_that(false, "${Int::to_string(List::length(got))} answers for 3 sets"),
+  };
   unwire(w)
 }
 

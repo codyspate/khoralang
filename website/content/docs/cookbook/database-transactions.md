@@ -49,6 +49,11 @@ fn demo_db() -> Db {
     query: fn (_sql, _params) =>
       Result::Ok(List::Nil),
 
+    // The same answers as `query` once per set. A handler over a driver that
+    // can pipeline sends every set before reading a reply; this one loops.
+    query_each: fn (_sql, sets) =>
+      List::map(sets, fn _params => Result::Ok(List::Nil)),
+
     execute: fn (sql, _params) => {
       print("execute: ${sql}");
       Result::Ok(1)

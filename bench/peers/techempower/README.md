@@ -9,6 +9,7 @@ request.
 | JSON serialization | `/json` | build `{"message":"Hello, World!"}`, serialise it |
 | Single query | `/db` | one random `World` row by id, as JSON |
 | Multiple queries | `/queries?queries=N` | N random rows, one query each, clamped to 1..500 (timed at 20) |
+| Multiple queries, pipelined | `/pipelined-queries?queries=N` | the same rows, counts and body, with the N queries written to the database before any reply is read (timed at 20; not every server, see below) |
 | Fortunes | `/fortunes` | all `Fortune` rows, one added in memory, sorted, rendered to HTML with escaping |
 
 The rules are TechEmpower's:
@@ -28,8 +29,9 @@ Updates, Caching and Plaintext are not implemented.
 What every server does the same way:
 
 - **one process, pool of 16 connections** (`POOL` overrides it);
-- **multiple queries run one after another**, each its own statement; no
-  `IN (...)`, no batching, no fan-out;
+- **multiple queries run one after another** on `/queries`, each its own
+  statement; no `IN (...)`, no batching, no fan-out. That is the headline
+  row for every server; the pipelined row below is separate;
 - **one connection leased for the whole multiple-queries request**, not one
   per query: Khora's handler takes a single lease and runs every query on it;
   Go's pool could acquire once the same way. Neither driver's per-lease cost
@@ -62,6 +64,41 @@ Khora gaps that the app works around (noted in the report, not fixed in
 once, so each handler's answer passes through `stamped`. Escaping is `std`'s
 `String::escape_html`. `std::net::http` writes `Date` on every response
 itself.
+
+## The pipelined row
+
+`/pipelined-queries?queries=N` answers exactly what `/queries?queries=N`
+does, and differs in one thing: the N lookups are written to the database
+together, and the replies are read in order, instead of one round trip
+each. TechEmpower's General Requirement 7 allows this as long as the
+queries are still executed separately, and for PostgreSQL's extended
+protocol it says how: each query separated by a `Sync`. Every server that
+has the route sends exactly that, one Bind/Execute/Sync per query, so each
+query runs in its own implicit transaction and fails alone, and
+`pg_stat_statements` counts N queries per request, which `verify.py`
+checks.
+
+**Why a separate row, and not a pipelined `/queries`.** Pipelining changes
+what is measured: most of what it saves is the kernel's time for N-1 round
+trips, not the language's. A server that pipelines against one that does
+not "wins" by the design of the app. So the headline `queries20` row stays
+sequential for every server, and `pipelined20` compares the servers that
+pipeline the same way, each with its driver's own batch API:
+
+| server | how | driver |
+| --- | --- | --- |
+| Khora | `db.query_each(sql, sets)` on one lease | `packages/postgres` |
+| Go | `pool.SendBatch` of a `pgx.Batch` | pgx v5 |
+| Bun | every query issued on one `sql.reserve()` connection before any is awaited | `Bun.sql` |
+
+**Node has no pipelined route.** node-postgres (`pg` 8.13) keeps one query
+in flight per client: the next is written only after the previous one's
+`ReadyForQuery`, however many are queued. A proxy between it and Postgres
+shows five queries issued together on one client going out as five
+separate request/reply exchanges. Bun.sql, with the same five, writes all
+five Bind/Execute/Sync groups in one write before the first reply.
+Pipelining with Node would mean a different driver, which is not what a
+Node team would ship.
 
 ## Setting up (no root)
 
@@ -105,6 +142,7 @@ verifier rules (`verify.py`, a standard-library port of their
 `toolset/test_types`): status, `Server`/`Date`/`Content-Type`/length
 headers, a `Date` that changes and is accurate, JSON shape and integer types,
 `queries` clamping for `2`, `0`, `foo`, `501`, empty and absent, ids in range,
+the same for `/pipelined-queries` on the servers that have it,
 the Fortunes page through their normalising HTML parser, and — through
 `pg_stat_statements` — that every request's queries actually reached the
 database (a cache or an `IN (...)` shows up as too few). Some findings that

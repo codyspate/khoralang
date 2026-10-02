@@ -1902,6 +1902,7 @@ fn counting(log: Shared<List<String>>) -> Db {
   let depth = Shared::of(0);
   handler for Db {
     query: fn (_sql, _binds) => Result::Ok(List::Nil),
+    query_each: fn (_sql, sets) => List::map(sets, fn _binds => Result::Ok(List::Nil)),
     execute: fn (_sql, _binds) => Result::Ok(1),
     depth: fn () => Shared::get(depth),
     begin: fn () => { Shared::set(depth, 1); Result::Ok(()) },

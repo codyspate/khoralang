@@ -1,6 +1,6 @@
 module techempower::main;
 
-import std::core::{ChildFailed, Fibers, List, Option, Ord, Result, SharedFn};
+import std::core::{ChildFailed, Fibers, Iterator, List, Option, Ord, Result, SharedFn, Step};
 import std::db::{Cell, Db, DbError, Row};
 import std::env::{Env, EnvError, variable_or};
 import std::net::http::{HttpError, Request, Response, Router};
@@ -174,6 +174,49 @@ fn multiple(pool: Pool, request: Request) -> Response with { rng: Random } {
   }
 }
 
+/// `wanted` rows by `query_each`: every lookup written to the server before
+/// any reply is read, each still its own statement with its own `Sync`.
+fn pipelined_worlds(wanted: Int) -> Option<List<World>> with { db: Db, rng: Random } {
+  let mut ids: List<List<Cell>> = List::Nil;
+  let mut done = 0;
+  while done < wanted {
+    ids = List::Cons(List::Cons(Cell::Number(rng.in_range(1, 10001)), List::Nil), ids);
+    done = done + 1
+  };
+  let mut worlds: List<World> = List::Nil;
+  let mut failed = false;
+  let mut got = 0;
+  for answer in db.query_each("SELECT id, randomnumber FROM world WHERE id = $1", ids) {
+    match answer {
+      Result::Ok(List::Cons(row, List::Nil)) => match world_of(row) {
+        Option::Some(world) => worlds = List::Cons(world, worlds),
+        Option::None => failed = true,
+      },
+      _other => failed = true,
+    };
+    got = got + 1
+  };
+  if failed || got != wanted { Option::None } else { Option::Some(worlds) }
+}
+
+/// **The multiple-queries test, pipelined.** The same rows, counts and body
+/// as `/queries`, but the `wanted` lookups go to the server in one write
+/// and their replies are read in order. TechEmpower's rule 7 allows it as
+/// long as each query is its own statement separated by a `Sync`, which
+/// `query_each` guarantees. Its own route, so `/queries` stays sequential
+/// for every server; see the README for which servers have it and why.
+fn pipelined(pool: Pool, request: Request) -> Response with { rng: Random } {
+  let wanted = count_of(request);
+  let got = match with_db(pool, fn () => pipelined_worlds(wanted)) {
+    Result::Ok(found) => found,
+    Result::Err(_) => Option::None,
+  };
+  match got {
+    Option::None => Response::text(500, "the database did not answer"),
+    Option::Some(worlds) => Response::json(200, List::reverse(worlds)),
+  }
+}
+
 fn fortunes(pool: Pool) -> Response {
   match with_db(pool, all_fortunes) {
     Result::Err(_) => Response::text(500, "the database did not answer"),
@@ -254,6 +297,7 @@ pub fn main() raises HttpError + EnvError + ChildFailed {
       |> Router::get("/json", SharedFn::of(fn request => stamped(json(request))))
       |> Router::get("/db", SharedFn::of(fn _request => stamped(single(pool))))
       |> Router::get("/queries", SharedFn::of(fn request => stamped(multiple(pool, request))))
+      |> Router::get("/pipelined-queries", SharedFn::of(fn request => stamped(pipelined(pool, request))))
       |> Router::get("/fortunes", SharedFn::of(fn _request => stamped(fortunes(pool))))
       |> Router::listen_quietly(number_setting("PORT", 8080)!)!
   }

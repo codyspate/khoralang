@@ -328,10 +328,10 @@ def verify_db(port, requests, concurrency):
     check_query_count(port, path, "world", requests, concurrency, 1, 1)
 
 
-def verify_queries(port, requests, concurrency):
+def verify_queries(port, requests, concurrency, route="/queries"):
     # TechEmpower's cases: 2, 0, foo, 501 and empty.
     for q, expected in (("2", 2), ("0", 1), ("foo", 1), ("501", 500), ("", 1), ("20", 20)):
-        path = "/queries?queries=" + q
+        path = route + "?queries=" + q
         status, headers, body = fetch(port, path)
         try:
             arr = json.loads(body)
@@ -347,13 +347,15 @@ def verify_queries(port, requests, concurrency):
             check_world(path, obj)
         check_headers(port, path, status, headers, "json")
     # And with no parameter at all.
-    status, headers, body = fetch(port, "/queries")
+    status, headers, body = fetch(port, route)
     try:
         if len(json.loads(body)) != 1:
-            fail("/queries", "no parameter should be one row")
+            fail(route, "no parameter should be one row")
     except (ValueError, TypeError) as e:
-        fail("/queries", "invalid JSON: %s" % e)
-    check_query_count(port, "/queries?queries=20", "world", requests, concurrency, 20, 20)
+        fail(route, "invalid JSON: %s" % e)
+    # Pipelined or not, every row is its own query: a batched IN (...)
+    # shows up here as too few.
+    check_query_count(port, route + "?queries=20", "world", requests, concurrency, 20, 20)
 
 
 def verify_fortunes(port, requests, concurrency):
@@ -387,11 +389,15 @@ def main():
     ap.add_argument("--label", default="server")
     ap.add_argument("--requests", type=int, default=512)
     ap.add_argument("--concurrency", type=int, default=64)
+    ap.add_argument("--pipelined", action="store_true",
+                    help="also check /pipelined-queries, which only some servers have")
     a = ap.parse_args()
     print("verifying %s on port %d" % (a.label, a.port))
     verify_json(a.port)
     verify_db(a.port, a.requests, a.concurrency)
     verify_queries(a.port, a.requests // 4, a.concurrency)
+    if a.pipelined:
+        verify_queries(a.port, a.requests // 4, a.concurrency, "/pipelined-queries")
     verify_fortunes(a.port, a.requests, a.concurrency)
     if FAILURES:
         print("%s: FAILED %d check(s)" % (a.label, len(FAILURES)))

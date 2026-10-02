@@ -48,12 +48,15 @@ module postgres::db;
 
 import std::core::{Channel, List, Option, Result};
 import std::db::{Cell, Db, DbError, Row};
-import postgres::conn::{Answer, Connection, PgError, ask, close, forsake, in_transaction, open, open_within, run, set_transaction_depth, still_open, transaction_depth, usable};
+import postgres::conn::{Answer, Connection, PgError, ask, ask_many, close, forsake, in_transaction, open, open_within, run, set_transaction_depth, still_open, transaction_depth, usable};
 
 /// What a caller wants done.
 pub type Work =
   /// Rows back.
   | Query(sql: String, values: List<Cell>)
+  /// Rows back for each set of values, in one exchange with the server once
+  /// the statement is prepared. See `std::db::Db`'s `query_each`.
+  | QueryEach(sql: String, sets: List<List<Cell>>)
   /// A count back.
   | Execute(sql: String, values: List<Cell>)
   | Begin
@@ -80,14 +83,16 @@ pub type Work =
 /// What comes back.
 ///
 /// One variant per shape of answer, because a channel carries one type and
-/// `Db`'s five operations do not agree on what they return. A caller reads the
+/// `Db`'s operations do not agree on what they return. A caller reads the
 /// variant it asked for and treats the others as a broken server -- which they
 /// would be, since `serve` answers each `Work` with its matching `Reply` and
 /// nothing else can put anything on that reply channel.
 pub type Reply =
   | Rows(Result<List<Row>, DbError>)
   | Counted(Result<Int, DbError>)
-  | Finished(Result<(), DbError>);
+  | Finished(Result<(), DbError>)
+  /// An answer per set of a `QueryEach`, in order.
+  | Each(List<Result<List<Row>, DbError>>);
 
 /// One question and where to put the answer.
 pub type Request = {
@@ -181,6 +186,7 @@ fn refuse(requests: Channel<Request>, why: DbError) -> () {
 fn apology(work: Work, why: DbError) -> Reply {
   match work {
     Work::Query(_, _) => Reply::Rows(Result::Err(why)),
+    Work::QueryEach(_, sets) => Reply::Each(List::map(sets, fn _values => Result::Err(why))),
     Work::Execute(_, _) => Reply::Counted(Result::Err(why)),
     Work::Begin => Reply::Finished(Result::Err(why)),
     Work::Commit => Reply::Finished(Result::Err(why)),
@@ -197,6 +203,10 @@ fn apology(work: Work, why: DbError) -> Reply {
 fn answer(c: Connection, work: Work) -> Reply {
   match work {
     Work::Query(sql, values) => Reply::Rows(rows(c, sql, values)),
+    Work::QueryEach(sql, sets) => Reply::Each(List::map(ask_many(c, sql, sets), fn got => match got {
+          Result::Ok(answer) => Result::Ok(answer.rows),
+          Result::Err(why) => Result::Err(PgError::to_db(why)),
+        })),
     Work::Execute(sql, values) => Reply::Counted(affected(c, sql, values)),
     // The transaction verbs take no parameters, so they are simple queries.
     // `run` is the right call and not a shortcut: `BEGIN` through the extended
@@ -340,6 +350,12 @@ pub fn over(requests: Channel<Request>) -> Db {
     // borrower gets a fresh connection rather than uncommitted rows and
     // locks.
     broken: fn () => { let _ = ask_done(requests, Work::Break); () },
+    // **One request for the whole batch**, so the serving fiber writes every
+    // set at once and reads every reply before it answers anything else. A
+    // borrower that stops waiting -- canceled or aborted -- leaves the
+    // serving fiber to finish reading, so the connection is never lent again
+    // with part of a batch's replies still on their way.
+    query_each: fn (sql, sets) => ask_each(requests, sql, sets),
   }
 }
 
@@ -404,6 +420,16 @@ fn ask_rows(requests: Channel<Request>, work: Work) -> Result<List<Row>, DbError
     Option::Some(Reply::Rows(answer)) => answer,
     Option::Some(_) => Result::Err(confused()),
     Option::None => Result::Err(gone()),
+  }
+}
+
+/// An answer per set however the exchange ends, so a caller that pairs the
+/// answers with its sets never finds one missing.
+fn ask_each(requests: Channel<Request>, sql: String, sets: List<List<Cell>>) -> List<Result<List<Row>, DbError>> {
+  match exchange(requests, Work::QueryEach(sql, sets)) {
+    Option::Some(Reply::Each(answers)) => answers,
+    Option::Some(_) => List::map(sets, fn _values => Result::Err(confused())),
+    Option::None => List::map(sets, fn _values => Result::Err(gone())),
   }
 }
 

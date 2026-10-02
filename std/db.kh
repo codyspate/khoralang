@@ -222,6 +222,25 @@ pub effect Db {
   /// would need a handler for its own failure, and that handler would be this
   /// one.
   broken: () -> (),
+  /// Runs one statement once per set of values, in order, and gives back an
+  /// answer per set: **the same result as calling [`query`] once per set.**
+  ///
+  /// Each set is its own statement. Outside a transaction each runs in its
+  /// own implicit one, so a set that fails fails alone and the sets after it
+  /// still run; inside a transaction a failed set aborts it, and the sets
+  /// after it are refused, exactly as the same `query` calls would be.
+  ///
+  /// **What this is for: a round trip per set.** A handler may send every
+  /// set before reading any reply, so twenty lookups cost one exchange with
+  /// the server instead of twenty. That is safe because of the contract, not
+  /// the handler: a caller cannot tell a pipelined batch from a loop. A
+  /// handler that cannot pipeline calls its own `query` once per set, in
+  /// order, and is correct.
+  ///
+  /// The answer has one entry per set, in the order of `sets`, even when the
+  /// connection is lost part-way: the sets it did not reach are answered
+  /// with the reason, as a `query` on a lost connection would be.
+  query_each: (String, List<List<Cell>>) -> List<Result<List<Row>, DbError>>,
 }
 
 /// Runs `body` in a transaction, committing on success and rolling back

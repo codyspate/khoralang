@@ -33,6 +33,16 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 
 ### Breaking
 
+- **`Db` gains `query_each`, so every `handler for Db` must implement it.**
+  `query_each(sql, sets)` runs one statement once per set of values and
+  answers what calling `query` once per set would, in order, one answer per
+  set. A handler over a driver that can pipeline writes every set before it
+  reads a reply, so twenty lookups are one exchange with the server instead
+  of twenty; the `postgres` package's handler does, with a `Sync` after each
+  set, so each set runs in its own implicit transaction and fails alone. A
+  handler that cannot pipeline calls its own `query` once per set:
+  `query_each: fn (sql, sets) => List::map(sets, fn values => my_query(sql, values))`.
+  A `handler for Db { .. }` without it is a compile error naming the gap.
 - **`Response::json` writes a derived record's keys in the order the type
   declares them, not sorted.** It built a `Json` object, a hash table, and
   sorted its keys on every call; it writes the record straight to text, so
