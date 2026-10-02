@@ -16,7 +16,7 @@
 //! on the thread backend, so each level's deepest point is `pthread_create`.
 //! Without the runtime's guard (`khora-rt`'s `stack::before_a_start`) it was
 //! silent in 20 of 20 runs at each size below. Each run is under a lowered
-//! stack limit, set with `setrlimit` in the child, so the overflow comes after
+//! stack limit (`harness::with_stack_limit`), so the overflow comes after
 //! thousands of levels rather than a hundred thousand; each size runs [`RUNS`]
 //! times, because the stack's start address, and with it where the last level
 //! faults, changes from run to run.
@@ -35,9 +35,7 @@
 
 use crate::harness;
 
-use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::{Path, PathBuf};
 
 use khora_db::{KhoraDatabase, SourceFile, SourceRoot};
 
@@ -93,22 +91,9 @@ fn build() -> PathBuf {
 
 /// Runs `exe` on the thread backend under a stack of `kb` kilobytes; what it
 /// wrote to stderr, and how it ended.
-fn run_under(exe: &PathBuf, kb: u64) -> (String, std::process::ExitStatus) {
-    let bytes = kb * 1024;
-    let mut command = Command::new(exe);
+fn run_under(exe: &Path, kb: u64) -> (String, std::process::ExitStatus) {
+    let mut command = harness::with_stack_limit(exe, kb);
     command.env("KHORA_FIBERS", "threads");
-    // SAFETY: runs in the forked child before `exec`, and calls only
-    // `setrlimit`, which is async-signal-safe and touches no memory the parent
-    // shares; the limit is a stack value that outlives the call.
-    unsafe {
-        command.pre_exec(move || {
-            let limit = libc::rlimit { rlim_cur: bytes, rlim_max: bytes };
-            if libc::setrlimit(libc::RLIMIT_STACK, &limit) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
     let output = command.output().expect("the program should run");
     (String::from_utf8_lossy(&output.stderr).into_owned(), output.status)
 }

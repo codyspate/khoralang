@@ -13,12 +13,12 @@
 //! and 130,000 -- a 4 GB file, a directory of 52,000 files, a 1 MB request
 //! body to a router that `holding` let accept one.
 //!
-//! Every program runs under a 256 KB stack limit, set with `setrlimit` in the
-//! child before it starts, so a frame per item runs out within a few thousand
+//! Every program runs under a 256 KB stack limit
+//! (`harness::with_stack_limit`), so a frame per item runs out within a few thousand
 //! rather than after a hundred thousand, and each case asks for 20,000:
 //! between five and eighteen times what the recursive version survived
 //! (arguments are the exception, and say why).
-//! Unix only, for the `setrlimit`. Both fiber backends, because the limit is
+//! Unix only, for `ulimit`. Both fiber backends, because the limit is
 //! on the main thread and the program runs there on both.
 //!
 //! The exporter in `packages/otlp` runs on a fiber, whose stack is fixed at
@@ -27,9 +27,7 @@
 
 use crate::harness;
 
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use khora_db::{KhoraDatabase, SourceFile, SourceRoot};
 
@@ -264,29 +262,15 @@ fn scratch(name: &str) -> PathBuf {
 /// Runs `exe` with `args` under [`STACK`] on `backend`, and answers its
 /// stdout, failing with the status and stderr if it did not exit cleanly.
 fn run_limited(exe: &Path, backend: &str, args: &[String]) -> String {
-    let mut command = Command::new(exe);
+    let mut command = harness::with_stack_limit(exe, STACK / 1024);
     // Cleared, because Linux gives the arguments and the environment together
     // a quarter of the stack limit, 64 KB here, and every byte of this
-    // process's environment is one an argument cannot have.
+    // process's environment is one an argument cannot have. The shell that
+    // sets the limit needs none of it either.
     command
         .args(args)
         .env_clear()
         .env("KHORA_FIBERS", backend);
-    // SAFETY: runs in the forked child before `exec`, and calls only
-    // `setrlimit`, which is async-signal-safe and touches no memory the parent
-    // shares; the limit is a stack value that outlives the call.
-    unsafe {
-        command.pre_exec(|| {
-            let limit = libc::rlimit {
-                rlim_cur: STACK,
-                rlim_max: STACK,
-            };
-            if libc::setrlimit(libc::RLIMIT_STACK, &limit) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
     let output = command.output().expect("the program should start");
     let stdout = String::from_utf8_lossy(&output.stdout)
         .trim_end()
