@@ -172,6 +172,8 @@ mod fiber;
 #[cfg(not(target_family = "wasm"))]
 mod fs;
 #[cfg(not(target_family = "wasm"))]
+mod handoff;
+#[cfg(not(target_family = "wasm"))]
 mod hash;
 mod heap;
 #[cfg(not(target_family = "wasm"))]
@@ -223,6 +225,10 @@ pub use cancel::*;
 pub use counters::*;
 #[cfg(not(target_family = "wasm"))]
 pub use fiber::*;
+#[cfg(not(target_family = "wasm"))]
+pub use handoff::*;
+#[cfg(not(target_family = "wasm"))]
+pub use channel::khora_channel_release;
 pub use heap::*;
 #[cfg(not(target_family = "wasm"))]
 pub use nursery::*;

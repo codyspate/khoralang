@@ -221,7 +221,7 @@ fn stop(contained: bool) -> ! {
 /// Empty on the root fiber, where there is nothing to disambiguate and the
 /// number would be noise on every single-threaded program's worst day.
 #[cfg(not(target_family = "wasm"))]
-fn on_which_fiber() -> String {
+pub(crate) fn on_which_fiber() -> String {
     crate::current::current(|fiber| {
         if fiber.is_spawned() {
             format!(" on fiber {}", fiber.id())

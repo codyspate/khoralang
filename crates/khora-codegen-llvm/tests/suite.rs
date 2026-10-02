@@ -58,6 +58,7 @@ mod fixed;
 mod flow;
 mod foreign;
 mod fs;
+mod handoff;
 mod hashmap;
 mod http_client;
 mod http_layers;

@@ -81,7 +81,8 @@ impl<'ctx> Backend<'ctx> {
 
         // A channel's release frees the queue and everything abandoned in it,
         // for the same reason: the values are behind a lock the runtime owns.
-        if is_the_runtimes && name == runtime::CHANNEL_TYPE {
+        // A hand-off is the same queue.
+        if is_the_runtimes && (name == runtime::CHANNEL_TYPE || name == runtime::HANDOFF_TYPE) {
             return self.rt.channel_release.as_global_value().as_pointer_value();
         }
 

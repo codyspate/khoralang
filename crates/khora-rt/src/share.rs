@@ -84,7 +84,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 static WALKS: AtomicUsize = AtomicUsize::new(0);
 
 /// An object still to be visited, and its drop routine.
-type Pending = (usize, Option<extern "C" fn(*mut u8)>);
+pub(crate) type Pending = (usize, Option<extern "C" fn(*mut u8)>);
 
 thread_local! {
     /// This thread's walk: `Some` while one is in progress, holding what is
@@ -333,6 +333,24 @@ fn walked_slow(ptr: *mut u8, glue: Option<extern "C" fn(*mut u8)>) -> bool {
         }
         None => false,
     })
+}
+
+/// The references `object` holds, each with its own drop routine, found by
+/// running `glue` with this thread's `khora_drop` turned into collecting.
+///
+/// For `crate::handoff`, which needs a closure's captures and a `Share`
+/// value's fields but not the types they have. Nothing is marked and no count
+/// changes. A runtime handle's release answers nothing: it is not a field
+/// walk, and a handle is born shared, so no walk reaches one.
+pub(crate) fn children(object: *mut u8, glue: extern "C" fn(*mut u8)) -> Vec<Pending> {
+    if is_a_handle_release(glue) {
+        return Vec::new();
+    }
+    let outer = WALK.with(|w| w.borrow_mut().replace(Vec::new()));
+    WALKS.fetch_add(1, Ordering::Relaxed);
+    glue(object);
+    WALKS.fetch_sub(1, Ordering::Relaxed);
+    WALK.with(|w| std::mem::replace(&mut *w.borrow_mut(), outer)).unwrap_or_default()
 }
 
 /// Makes a runtime-allocated handle shared from birth.

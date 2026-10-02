@@ -1078,18 +1078,19 @@ fn a_quiet_server() -> String {
 /// Settings for the real server `KHORA_POSTGRES` promises.
 const REAL: &str = "{ host: \"127.0.0.1\", port: 5433, user: \"khora\", database: \"khora\", secret: \"khora\" }";
 
-/// A pool of one. Each trial takes the connection itself, parks a waiter in
-/// `with_db`, then gives the connection back and cancels the waiter straight
-/// after, so the cancel lands while the waiter is being handed the connection
-/// or just after. Whichever it is, the connection must end up back in the
-/// pool, and `close` must return.
+/// A pool of one. Each trial takes the connection itself in a lease whose
+/// body waits to be told to finish, parks a waiter in `with_db`, then ends
+/// the first lease and cancels the waiter straight after, so the cancel lands
+/// while the waiter is being handed the connection or just after. Whichever
+/// it is, the connection must end up back in the pool, and `close` must
+/// return.
 fn handover_program(settings: &str, leased: &str) -> String {
     format!(
         "module demo::main;
 import std::core::{{Channel, Fiber, Fibers, List, Option, Result, print}};
 import std::db::{{Db, DbError, Row}};
 import postgres::db::{{Settings}};
-import postgres::pool::{{Pool, close, open, with_db, idle_count, take_offer, give_offer_back}};
+import postgres::pool::{{Pool, close, open, with_db, idle_count}};
 
 extern fn khora_sleep(millis: Int) -> ();
 
@@ -1099,9 +1100,9 @@ fn leased() -> Int
   {leased}
 }}
 
-/// How many slots are idle once the pool has settled at `want`, or what it
-/// settled at after five seconds. A lease ends when its serving fiber reads
-/// the give-back, which is after `with_db` has returned.
+/// How many connections are idle once the pool has settled at `want`, or
+/// what it settled at after five seconds. A lease ends when its give-back
+/// runs, which is as `with_db` returns.
 fn settled(pool: Pool, want: Int) -> Int {{
   let mut left = 5000;
   while idle_count(pool) != want && left > 0 {{
@@ -1116,6 +1117,19 @@ fn lease(pool: Pool) -> () {{
   ()
 }}
 
+fn wait_for(go: Channel<Int>) -> Int with {{ db: Db }} {{
+  match Channel::receive(go) {{ Option::Some(n) => n, Option::None => 0 }}
+}}
+
+/// Holds the pool's connection until `go` is sent to.
+fn hold(pool: Pool, holding: Channel<Int>, go: Channel<Int>) -> () {{
+  let _ = with_db(pool, fn () => {{
+    Channel::send(holding, 1);
+    wait_for(go)
+  }});
+  ()
+}}
+
 fn main() -> Int {{
   let settings: Settings = {settings};
   let crew = Fibers::open();
@@ -1123,16 +1137,16 @@ fn main() -> Int {{
   let mut trial = 0;
   let mut lost = 0 - 1;
   while trial < 200 && lost < 0 {{
-    match take_offer(pool) {{
-      Option::None => (),
-      Option::Some(held) => {{
-        let waiter = Fiber::spawn(fn () => lease(pool));
-        khora_sleep(1 + trial % 3);
-        give_offer_back(held);
-        Fiber::cancel(waiter);
-        Fiber::wait(waiter);
-      }},
-    }};
+    let holding: Channel<Int> = Channel::bounded(1);
+    let go: Channel<Int> = Channel::bounded(1);
+    let holder = Fiber::spawn(fn () => hold(pool, holding, go));
+    let _ = Channel::receive(holding);
+    let waiter = Fiber::spawn(fn () => lease(pool));
+    khora_sleep(1 + trial % 3);
+    Channel::send(go, 1);
+    Fiber::wait(holder);
+    Fiber::cancel(waiter);
+    Fiber::wait(waiter);
     if settled(pool, 1) != 1 {{ lost = trial }} else {{}};
     trial = trial + 1
   }};
@@ -1228,7 +1242,7 @@ fn a_pool_gives_every_lease_back_however_the_body_ends() {
 import std::core::{{Channel, Fiber, Fibers, Option, Result, print}};
 import std::db::{{Db}};
 import postgres::db::{{Settings}};
-import postgres::pool::{{Pool, close, open, with_db, idle_count, take_offer, give_offer_back, HeldOffer}};
+import postgres::pool::{{Pool, close, open, with_db, idle_count}};
 
 extern fn khora_sleep(millis: Int) -> ();
 
@@ -1293,16 +1307,26 @@ fn canceled_inside(pool: Pool) -> () {{
   print(\"canceled while leased: \" + idle(pool));
 }}
 
-fn put_back(pool: Pool, taken: Option<HeldOffer>) -> () {{
-  match taken {{
-    Option::None => print(\"nothing to put back, which is wrong\"),
-    Option::Some(offer) => give_offer_back(offer),
-  }}
+fn wait_for(go: Channel<Int>) -> Int with {{ db: Db }} {{
+  match Channel::receive(go) {{ Option::Some(n) => n, Option::None => 0 }}
+}}
+
+/// Holds one of the pool's connections until `go` is sent to.
+fn hold(pool: Pool, holding: Channel<Int>, go: Channel<Int>) -> () {{
+  let _ = with_db(pool, fn () => {{
+    Channel::send(holding, 1);
+    wait_for(go)
+  }});
+  ()
 }}
 
 fn canceled_waiting(pool: Pool) -> () {{
-  let a = take_offer(pool);
-  let b = take_offer(pool);
+  let holding: Channel<Int> = Channel::bounded(2);
+  let go: Channel<Int> = Channel::bounded(2);
+  let a = Fiber::spawn(fn () => hold(pool, holding, go));
+  let b = Fiber::spawn(fn () => hold(pool, holding, go));
+  let _ = Channel::receive(holding);
+  let _ = Channel::receive(holding);
   let f = Fiber::spawn(fn () => {{
     let _ = with_db(pool, served_wrongly);
     ()
@@ -1310,8 +1334,10 @@ fn canceled_waiting(pool: Pool) -> () {{
   khora_sleep(20);
   Fiber::cancel(f);
   Fiber::wait(f);
-  put_back(pool, a);
-  put_back(pool, b);
+  Channel::send(go, 1);
+  Channel::send(go, 1);
+  Fiber::wait(a);
+  Fiber::wait(b);
   print(\"canceled while waiting: \" + idle(pool));
 }}
 
@@ -1378,21 +1404,26 @@ fn main() -> Int {{
     }
 }
 
-// --- an offer taken by hand goes back only where it came from ---------------
+// --- a lease that outlives `close` -----------------------------------------
 
-/// A program over two pools of one slot each, against a quiet server: takes
-/// `a`'s offer, runs `step`, and prints what each pool then holds.
-fn held_offer_program(settings: &str, step: &str) -> String {
-    format!(
+/// **A lease still out when `close` is called ends, and `close` then
+/// returns.** `close` waits for every slot's fiber, and a slot's fiber waits
+/// for its connection to come home; a lease that ends after `close` began
+/// must send it there rather than into a pool nobody will lend from again.
+/// A pool of one: a fiber holds the connection, `close` starts in another,
+/// and must still be waiting 100 ms later; the lease then ends, and `close`
+/// must return.
+#[test]
+fn a_lease_ended_after_close_lets_close_return() {
+    let main = format!(
         "module demo::main;
 import std::core::{{Channel, Fiber, Fibers, Option, print}};
+import std::db::{{Db}};
 import postgres::db::{{Settings}};
-import postgres::pool::{{Pool, close, open, idle_count, take_offer, give_offer_back}};
+import postgres::pool::{{Pool, close, open, idle_count, with_db}};
 
 extern fn khora_sleep(millis: Int) -> ();
 
-/// How many offers are idle once the pool has settled at `want`, or what it
-/// settled at after five seconds.
 fn settled(pool: Pool, want: Int) -> Int {{
   let mut left = 5000;
   while idle_count(pool) != want && left > 0 {{
@@ -1402,78 +1433,51 @@ fn settled(pool: Pool, want: Int) -> Int {{
   idle_count(pool)
 }}
 
-fn main() -> Int {{
-  let settings: Settings = {settings};
-  // A crew each: `close` waits for every fiber of its pool's crew, and one
-  // shared crew would make closing `a` wait for `b`'s fibers too.
-  let a = open(Fibers::open(), settings, 1);
-  let b = open(Fibers::open(), settings, 1);
-  print(\"before: a \" + Int::to_string(settled(a, 1)) + \", b \" + Int::to_string(settled(b, 1)));
-  let held = take_offer(a);
-  {step}
-  0
+fn wait_for(go: Channel<Int>) -> Int with {{ db: Db }} {{
+  match Channel::receive(go) {{ Option::Some(n) => n, Option::None => 0 }}
 }}
-"
-    )
-}
 
-/// **A `HeldOffer` goes back to the pool it was taken from, and to no
-/// other.** It used to go to whichever pool `give_offer_back` was handed:
-/// the pool it came from lost its only slot for good, and the other lent a
-/// slot none of its fibers served, in an `idle` that then had no room for its
-/// own down token. `give_offer_back` takes no pool now, so this is the only
-/// call there is; what it pins is that the offer lands back in `a` and `b`
-/// is untouched.
-#[test]
-fn an_offer_taken_from_one_pool_goes_back_to_that_pool() {
-    let step = "match held {
-    Option::Some(h) => give_offer_back(h),
-    Option::None => print(\"no offer\"),
-  };
-  print(\"after: a \" + Int::to_string(settled(a, 1)) + \", b \" + Int::to_string(idle_count(b)));
-  close(a);
-  close(b);
-  print(\"closed\");";
-    let exe = build("pool_held_offer_home", &held_offer_program(&a_quiet_server(), step));
-    for backend in ["threads", "scheduler"] {
-        let ran = run_watched(&exe, backend, std::time::Duration::from_secs(60));
-        assert!(!ran.hung, "{backend}: the program hung: stdout {:?}", ran.stdout);
-        assert_eq!(ran.code, Some(0), "{backend}: stderr {}", ran.stderr);
-        assert_eq!(ran.stdout, "before: a 1, b 1\nafter: a 1, b 1\nclosed\n", "{backend}");
-    }
-}
+fn hold(pool: Pool, holding: Channel<Int>, go: Channel<Int>) -> () {{
+  let _ = with_db(pool, fn () => {{
+    Channel::send(holding, 1);
+    wait_for(go)
+  }});
+  ()
+}}
 
-/// **An offer given back after its pool was closed ends its lease, so
-/// `close` returns.** `close` waits for every serving fiber, and a slot's
-/// fiber waits for its request channel to close. A give-back into a closed
-/// `idle` used to drop the offer with the channel still open, and `close`
-/// then waited for ever -- the same wait a `with_db` lease ending after
-/// `close` does not cause, because its give-back closes the channel.
-#[test]
-fn an_offer_given_back_after_close_lets_close_return() {
-    let step = "let done: Channel<Int> = Channel::bounded(1);
-  let closer = Fiber::spawn(fn () => {
+fn main() -> Int {{
+  let settings: Settings = {quiet};
+  let a = open(Fibers::open(), settings, 1);
+  print(\"before: \" + Int::to_string(settled(a, 1)));
+  let holding: Channel<Int> = Channel::bounded(1);
+  let go: Channel<Int> = Channel::bounded(1);
+  let holder = Fiber::spawn(fn () => hold(a, holding, go));
+  let _ = Channel::receive(holding);
+  let done: Channel<Int> = Channel::bounded(1);
+  let closer = Fiber::spawn(fn () => {{
     close(a);
     Channel::send(done, 1);
     ()
-  });
+  }});
   khora_sleep(100);
-  print(\"closed while the offer is held: \" + (if Channel::depth(done) == 1 { \"yes\" } else { \"no\" }));
-  match held {
-    Option::Some(h) => give_offer_back(h),
-    Option::None => print(\"no offer\"),
-  };
+  print(\"closed while the lease is out: \" + (if Channel::depth(done) == 1 {{ \"yes\" }} else {{ \"no\" }}));
+  Channel::send(go, 1);
+  Fiber::wait(holder);
   Fiber::wait(closer);
-  print(\"closed after the give-back\");
-  close(b);";
-    let exe = build("pool_held_offer_close", &held_offer_program(&a_quiet_server(), step));
+  print(\"closed after the lease ended\");
+  0
+}}
+",
+        quiet = a_quiet_server()
+    );
+    let exe = build("pool_lease_outlives_close", &main);
     for backend in ["threads", "scheduler"] {
         let ran = run_watched(&exe, backend, std::time::Duration::from_secs(60));
         assert!(!ran.hung, "{backend}: `close` never returned: stdout {:?}", ran.stdout);
         assert_eq!(ran.code, Some(0), "{backend}: stderr {}", ran.stderr);
         assert_eq!(
             ran.stdout,
-            "before: a 1, b 1\nclosed while the offer is held: no\nclosed after the give-back\n",
+            "before: 1\nclosed while the lease is out: no\nclosed after the lease ended\n",
             "{backend}"
         );
     }
@@ -2887,20 +2891,24 @@ fn assert_ran(runs: &[(&str, Watched, Scripted)], expected: &str, what: &str) {
 /// **A borrower stopped by `abort` never costs the pool its connection**,
 /// whether the abort lands in the body, with a statement in flight, while
 /// the borrower waits in `with_db` and is handed the connection, or while
-/// fibers the body spawned are using the lease's `db`. A pool of one, 200
-/// trials at each point; after each, the pool must be whole within three
-/// seconds (one live connection, idle), and in the child-fiber phases the
-/// next caller must get its own number. The child-fiber phases stop the
-/// borrower with `abort` and with `cancel_within(5)`, a grace shorter than
-/// the children's statements.
+/// fibers it spawned hold leases of their own or wait for one. A pool of
+/// one, 200 trials at each point; after each, the pool must be whole within
+/// three seconds (one live connection, idle), and in the child-fiber phases
+/// the next caller must get its own number. The child-fiber phases stop the
+/// parent with `abort` and with `cancel_within(5)`, a grace shorter than
+/// the children's statements: the stop reaches the children through the
+/// release of their handles, with one child's statement in flight and two
+/// children waiting in `with_db`.
 ///
-/// A stopped borrower can leave requests queued on the connection's
-/// channel -- one of its own, or one per child fiber -- and the end of its
-/// lease must still reach the serving fiber. Sent as a message, it needed
-/// room: with room for one, one queued request was enough to lose the slot,
-/// and with room for two, three children were. An aborted fiber does not
-/// wait for room, so the send gave up and the serving fiber waited for ever
-/// on a lease that had ended: `1 live, 0 reconnecting, 0 down`, idle 0.
+/// A borrower stopped with a statement in flight leaves its reply arriving on
+/// the connection. That connection must not be lent to the next caller with
+/// the old reply unread, and the lease must still come back: the give-back
+/// sends it to its slot, which reads the rest of the reply and lends it
+/// again, or replaces it.
+///
+/// A child cannot use its parent's lease -- a `Db` stays on the fiber it was
+/// installed on, and `a_fiber_cannot_use_its_parents_lease` pins that
+/// refusal -- so each child here takes its own.
 #[test]
 fn aborted_borrowers_never_lose_a_slot() {
     let body = r#"fn churn(pool: Pool) -> () {
@@ -2921,11 +2929,17 @@ fn looper(n: Int) -> () with { db: Db } {
   while going { let _ = db.query("stall " + Int::to_string(n), List::Nil); () }
 }
 
-/// A body that runs its statements from three fibers of its own.
-fn fanout() -> Int with { db: Db } {
-  let a = Fiber::spawn(fn () => looper(20));
-  let b = Fiber::spawn(fn () => looper(21));
-  let c = Fiber::spawn(fn () => looper(22));
+/// One child: a lease of its own, and statements until it is stopped.
+fn leased(pool: Pool, n: Int) -> () {
+  let _ = with_db(pool, fn () => looper(n));
+  ()
+}
+
+/// Three fibers, each running its statements on a lease of its own.
+fn fanout(pool: Pool) -> Int {
+  let a = Fiber::spawn(fn () => leased(pool, 20));
+  let b = Fiber::spawn(fn () => leased(pool, 21));
+  let c = Fiber::spawn(fn () => leased(pool, 22));
   Fiber::wait(a);
   Fiber::wait(b);
   Fiber::wait(c);
@@ -2933,12 +2947,13 @@ fn fanout() -> Int with { db: Db } {
 }
 
 fn parent(pool: Pool) -> () {
-  let _ = with_db(pool, fanout);
+  let _ = fanout(pool);
   ()
 }
 
-/// 200 borrowers whose children use `db`, each stopped 30-49 ms in; the
-/// trial the slot was lost at or the next caller went unanswered, or -1.
+/// 200 parents whose children hold or wait for leases, each stopped
+/// 30-49 ms in; the trial the slot was lost at or the next caller went
+/// unanswered, or -1.
 fn children(pool: Pool, abort: Bool) -> Int {
   let mut trial = 0;
   let mut lost = 0 - 1;
@@ -4362,280 +4377,153 @@ fn main() -> () {
 "##;
 
 
-// --- two fibers sharing one lease ---------------------------------------------
+// --- a lease's `db` stays on its fiber ----------------------------------------
 
-/// A server that keeps PostgreSQL's transaction and savepoint semantics for
-/// one table of integers, on every connection it is given.
-///
-/// **Just the part that decides the answer to two fibers on one lease**:
-/// `RELEASE` of a savepoint also releases every one opened after it, `ROLLBACK
-/// TO` undoes them, `COMMIT` keeps every savepoint still open, and `SAVEPOINT`
-/// outside a transaction is an error. That is what lets a test CI runs show
-/// a row committed for a `transaction` that answered `Err`, without a real
-/// server. Committed rows are shared between connections, as a table is.
-fn tx_server(committed: std::sync::Arc<std::sync::Mutex<Vec<i64>>>) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
-    let port = listener.local_addr().expect("an address").port();
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(stream) = stream else { break };
-            let committed = committed.clone();
-            std::thread::spawn(move || tx_connection(stream, &committed));
-        }
-    });
-    format!("{{ host: \"127.0.0.1\", port: {port}, user: \"khora\", database: \"khora\", secret: \"khora\" }}")
+/// The refusals the checker gives `main` compiled with `std` and the
+/// postgres package, as each message and the text its span covers.
+fn refusals_of(main: &str) -> Vec<(String, String)> {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("postgres_refusals");
+    let db = KhoraDatabase::new();
+    let files = sources(&db, &dir, main);
+    let mine = *files.last().expect("the program is the last source");
+    SourceRoot::new(&db, files);
+    khora_types::diagnostics(&db, mine)
+        .iter()
+        .map(|e| {
+            let (at, end) = (usize::from(e.range.start()), usize::from(e.range.end()));
+            (e.message.clone(), main.get(at..end).unwrap_or("").to_string())
+        })
+        .collect()
 }
 
-/// One savepoint (or the transaction itself, unnamed) and the rows written
-/// since it was opened.
-struct Frame {
-    name: Option<String>,
-    rows: Vec<i64>,
+/// The one-based line of the first occurrence of `what` in `text`.
+fn line_of(text: &str, what: &str) -> usize {
+    let at = text.find(what).expect("the text should be there");
+    text[..at].matches('\n').count() + 1
 }
 
-fn error_frame(code: &str, message: &str) -> Vec<u8> {
-    let mut fields = Vec::new();
-    fields.push(b'S');
-    fields.extend_from_slice(&cstring("ERROR"));
-    fields.push(b'C');
-    fields.extend_from_slice(&cstring(code));
-    fields.push(b'M');
-    fields.extend_from_slice(&cstring(message));
-    fields.push(0);
-    framed(b'E', &fields)
-}
-
-/// Runs one statement against `frames` (empty outside a transaction),
-/// answering its `CommandComplete` tag and any rows, or an error.
-fn tx_statement(
-    sql: &str,
-    param: Option<i64>,
-    frames: &mut Vec<Frame>,
-    committed: &std::sync::Mutex<Vec<i64>>,
-) -> Result<(String, Option<i64>), Vec<u8>> {
-    let sql = sql.trim();
-    let lower = sql.to_ascii_lowercase();
-    let word = |i: usize| lower.split_whitespace().nth(i).unwrap_or("").to_string();
-    if lower == "begin" {
-        if frames.is_empty() {
-            frames.push(Frame { name: None, rows: Vec::new() });
-        }
-        Ok(("BEGIN".into(), None))
-    } else if lower == "commit" {
-        let all: Vec<i64> = frames.drain(..).flat_map(|f| f.rows).collect();
-        committed.lock().expect("the table").extend(all);
-        Ok(("COMMIT".into(), None))
-    } else if lower == "rollback" {
-        frames.clear();
-        Ok(("ROLLBACK".into(), None))
-    } else if lower.starts_with("savepoint ") {
-        if frames.is_empty() {
-            return Err(error_frame("25P01", "SAVEPOINT can only be used in transaction blocks"));
-        }
-        frames.push(Frame { name: Some(word(1)), rows: Vec::new() });
-        Ok(("SAVEPOINT".into(), None))
-    } else if lower.starts_with("release savepoint ") || lower.starts_with("rollback to savepoint ") {
-        let releasing = lower.starts_with("release");
-        let name = word(if releasing { 2 } else { 3 });
-        let Some(at) = frames.iter().rposition(|f| f.name.as_deref() == Some(name.as_str())) else {
-            return Err(error_frame("3B001", &format!("savepoint \"{name}\" does not exist")));
-        };
-        if releasing {
-            // The savepoint and every one opened after it go; their rows
-            // become the enclosing level's.
-            let rows: Vec<i64> = frames.drain(at..).flat_map(|f| f.rows).collect();
-            frames.last_mut().expect("a transaction").rows.extend(rows);
-            Ok(("RELEASE".into(), None))
-        } else {
-            frames.truncate(at + 1);
-            frames[at].rows.clear();
-            Ok(("ROLLBACK".into(), None))
-        }
-    } else if lower.starts_with("insert ") {
-        let n = param.expect("a bound value");
-        match frames.last_mut() {
-            Some(top) => top.rows.push(n),
-            None => committed.lock().expect("the table").push(n),
-        }
-        Ok(("INSERT 0 1".into(), None))
-    } else if lower.starts_with("select count(*)") {
-        let n = param.expect("a bound value");
-        let count = committed.lock().expect("the table").iter().filter(|r| **r == n).count();
-        Ok(("SELECT 1".into(), Some(count as i64)))
-    } else if lower.starts_with("drop ") || lower.starts_with("create ") {
-        committed.lock().expect("the table").clear();
-        Ok(("CREATE TABLE".into(), None))
-    } else {
-        Err(error_frame("42601", &format!("the scripted server does not know `{sql}`")))
-    }
-}
-
-fn tx_connection(mut stream: TcpStream, committed: &std::sync::Mutex<Vec<i64>>) {
-    let _ = stream.set_nodelay(true);
-    let mut length = [0u8; 4];
-    if stream.read_exact(&mut length).is_err() {
-        return;
-    }
-    let mut startup = vec![0u8; (i32::from_be_bytes(length) as usize).saturating_sub(4)];
-    if stream.read_exact(&mut startup).is_err() {
-        return;
-    }
-    let mut hello = framed(b'R', &0i32.to_be_bytes());
-    hello.extend(framed(b'Z', b"I"));
-    if stream.write_all(&hello).is_err() {
-        return;
-    }
-    let mut frames: Vec<Frame> = Vec::new();
-    let mut prepared = Statements::default();
-    loop {
-        // One request: a simple `Query`, or the extended protocol's frames up
-        // to `Sync`, whose one parameter (if any) is an integer in text. The
-        // SQL is in `Parse`, or in the `Parse` of an earlier request for the
-        // statement `Bind` names.
-        let mut simple = None;
-        let mut sql = String::new();
-        let mut param = None;
-        loop {
-            let Some((kind, payload)) = next_frame(&mut stream) else { return };
-            match kind {
-                b'X' => return,
-                b'Q' => {
-                    let end = payload.iter().position(|b| *b == 0).unwrap_or(payload.len());
-                    simple = Some(String::from_utf8_lossy(&payload[..end]).into_owned());
-                    break;
-                }
-                b'P' => sql = prepared.parse(&payload),
-                b'B' => {
-                    if let Some(known) = prepared.bound(&payload) {
-                        sql = known;
-                    }
-                    param = bound_integer(&payload)
-                }
-                b'S' => break,
-                _ => {}
-            }
-        }
-        let mut reply = Vec::new();
-        let statements: Vec<String> = match &simple {
-            Some(text) => text.split(';').map(str::to_string).filter(|s| !s.trim().is_empty()).collect(),
-            None => {
-                reply.extend(framed(b'1', &[]));
-                reply.extend(framed(b'2', &[]));
-                vec![sql.clone()]
-            }
-        };
-        for statement in statements {
-            match tx_statement(&statement, param, &mut frames, committed) {
-                Ok((tag, row)) => {
-                    if let Some(value) = row {
-                        let mut description = 1i16.to_be_bytes().to_vec();
-                        description.extend_from_slice(&cstring("count"));
-                        description.extend_from_slice(&0i32.to_be_bytes());
-                        description.extend_from_slice(&0i16.to_be_bytes());
-                        description.extend_from_slice(&23i32.to_be_bytes());
-                        description.extend_from_slice(&4i16.to_be_bytes());
-                        description.extend_from_slice(&(-1i32).to_be_bytes());
-                        description.extend_from_slice(&0i16.to_be_bytes());
-                        let text = value.to_string();
-                        let mut data = 1i16.to_be_bytes().to_vec();
-                        data.extend_from_slice(&(text.len() as i32).to_be_bytes());
-                        data.extend_from_slice(text.as_bytes());
-                        reply.extend(framed(b'T', &description));
-                        reply.extend(framed(b'D', &data));
-                    }
-                    reply.extend(framed(b'C', &cstring(&tag)));
-                }
-                Err(error) => {
-                    reply.extend(error);
-                    break;
-                }
-            }
-        }
-        reply.extend(framed(b'Z', if frames.is_empty() { b"I" } else { b"T" }));
-        if stream.write_all(&reply).is_err() {
-            return;
-        }
-    }
-}
-
-/// The first parameter of a `Bind`, read as an integer in text.
-fn bound_integer(payload: &[u8]) -> Option<i64> {
-    let mut at = 0;
-    for _ in 0..2 {
-        at += payload[at..].iter().position(|b| *b == 0)? + 1;
-    }
-    let formats = i16::from_be_bytes(payload.get(at..at + 2)?.try_into().ok()?) as usize;
-    at += 2 + 2 * formats;
-    let count = i16::from_be_bytes(payload.get(at..at + 2)?.try_into().ok()?);
-    at += 2;
-    if count < 1 {
-        return None;
-    }
-    let len = i32::from_be_bytes(payload.get(at..at + 4)?.try_into().ok()?);
-    at += 4;
-    if len < 0 {
-        return None;
-    }
-    std::str::from_utf8(payload.get(at..at + len as usize)?).ok()?.parse().ok()
-}
-
-/// What each case of the two-fibers program must print: every answer agrees
-/// with the rows, and the next lease gets a connection outside a transaction.
-const TWO_FIBERS_EXPECTED: &str = "A: two fibers nest inside one lease's transaction\n  \
-     told: B Err, C Err, outer Ok\n  agree; next lease clean\n\
-     B: two fibers on one lease, no outer transaction\n  \
-     told: B Err, C Err\n  agree; next lease clean\n\
-     C: two fibers on one lease both read depth 0, then both begin\n  \
-     told: B Ok, C Err\n  agree; next lease clean\n";
-
-/// **Two fibers sharing one lease never get an answer the rows disagree
-/// with.** What this prevents: a row committed for a `transaction` that
-/// answered `Err`. With loose depth guards, fiber B's `RELEASE` of level 1
-/// also released fiber C's level 2 on top of it (case A), and B's `COMMIT`
-/// kept C's open savepoint (case B), so C's failure undid nothing. In case
-/// C both fibers read depth 0 before either begins, and C's `BEGIN`, a
-/// warning to PostgreSQL inside B's transaction, let C's `ROLLBACK` end B's
-/// transaction and C's write be kept. The guards refuse an operation for a
-/// level the connection is not exactly at, and turn a `COMMIT` with another
-/// fiber's savepoint open into a `ROLLBACK`: in A and B both fibers are told
-/// `Err` and neither row is kept, and in C, C's `BEGIN` is refused, so its
-/// body never runs and B commits alone. Against a scripted server that keeps
-/// PostgreSQL's savepoint rules, so CI runs it.
-#[test]
-fn two_fibers_on_one_lease_get_answers_that_agree_with_the_rows() {
-    let committed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let settings = tx_server(committed);
-    let main = TWO_FIBERS_PROGRAM.replace(
-        "{ host: \"127.0.0.1\", port: 5433, user: \"khora\", database: \"khora\", secret: \"khora\" }",
-        &settings,
+/// Asserts that `found` is exactly one refusal at each of `uses`, in order:
+/// the text a spawned fiber's use of its parent's `db` covers, and the text
+/// that starts the line of the spawn that took it there. Each must name the
+/// rewrite.
+fn assert_refused_at(main: &str, found: &[&(String, String)], uses: &[(&str, &str)]) {
+    assert_eq!(
+        found.len(),
+        uses.len(),
+        "expected one refusal per use of the parent's `db`, got {found:#?}"
     );
-    assert_ne!(main, TWO_FIBERS_PROGRAM, "the settings should have been replaced");
-    let exe = build("postgres_two_fibers_scripted", &main);
-    for backend in ["threads", "scheduler"] {
-        let ran = run_watched(&exe, backend, std::time::Duration::from_secs(60));
-        assert!(!ran.hung, "{backend}: the program hung: stdout {:?}", ran.stdout);
-        assert_eq!(ran.code, Some(0), "{backend}: stderr {}", ran.stderr);
-        assert_eq!(ran.stdout, TWO_FIBERS_EXPECTED, "{backend}");
+    for ((message, covered), (used, spawn)) in found.iter().copied().zip(uses) {
+        assert_eq!(covered, used, "the caret should be on the use: {message}");
+        assert!(
+            message.starts_with("`db` cannot be handed to another fiber"),
+            "the refusal should name `db`: {message}"
+        );
+        assert!(
+            message.contains(&format!("the fiber spawned at line {}, ", line_of(main, spawn))),
+            "the refusal should name the spawn on the line of `{spawn}`: {message}"
+        );
+        assert!(
+            message.contains("a fiber spawned inside a `with_db` body cannot use that body's `db`")
+                && message.contains("take a lease in the spawned fiber instead")
+                && message.contains("`Fiber::spawn(fn () => with_db(pool, work))`"),
+            "the refusal should name the rewrite: {message}"
+        );
     }
 }
 
-/// The same program against the real server, whose savepoint rules are the
-/// ones the scripted server copies.
+/// **Three fibers looping on their parent's lease are refused**, once per
+/// fiber, at the call that needs `db`. This was the child-fiber phase of
+/// `aborted_borrowers_never_lose_a_slot`, which takes a lease per child
+/// instead. What it prevents: three fibers writing one lent connection's
+/// `mut` fields, which the debug owner check traps on ("object made on
+/// fiber 4 was counted on fiber 5") and a release build does not see.
 #[test]
-fn two_fibers_on_one_lease_against_a_real_server() {
-    if std::env::var_os("KHORA_POSTGRES").is_none() {
-        eprintln!("skipping: set KHORA_POSTGRES=1 and bring up packages/postgres/docker-compose.yml to run this");
-        return;
-    }
-    let exe = build("postgres_two_fibers", TWO_FIBERS_PROGRAM);
-    for backend in ["threads", "scheduler"] {
-        let ran = run_watched(&exe, backend, std::time::Duration::from_secs(60));
-        assert!(!ran.hung, "{backend}: the program hung: stdout {:?}", ran.stdout);
-        assert_eq!(ran.code, Some(0), "{backend}: stderr {}", ran.stderr);
-        assert_eq!(ran.stdout, TWO_FIBERS_EXPECTED, "{backend}");
-    }
+fn a_fiber_cannot_use_its_parents_lease() {
+    let main = reconnect_program(
+        "{ host: \"127.0.0.1\", port: 1, user: \"khora\", database: \"khora\", secret: \"\" }",
+        r#"fn looper(n: Int) -> () with { db: Db } {
+  let mut going = true;
+  while going { let _ = db.query("stall " + Int::to_string(n), List::Nil); () }
 }
 
+fn fanout() -> Int with { db: Db } {
+  let a = Fiber::spawn(fn () => looper(20));
+  let b = Fiber::spawn(fn () => looper(21));
+  let c = Fiber::spawn(fn () => looper(22));
+  Fiber::wait(a);
+  Fiber::wait(b);
+  Fiber::wait(c);
+  1
+}
+
+fn main() -> Int {
+  let settings: Settings = SETTINGS;
+  let pool = open(Fibers::open(), settings, 1);
+  let _ = with_db(pool, fanout);
+  close(pool);
+  0
+}
+"#,
+    );
+    let found = refusals_of(&main);
+    assert_refused_at(
+        &main,
+        &found.iter().collect::<Vec<_>>(),
+        &[
+            ("looper(20)", "let a = Fiber::spawn"),
+            ("looper(21)", "let b = Fiber::spawn"),
+            ("looper(22)", "let c = Fiber::spawn"),
+        ],
+    );
+}
+
+/// **Two fibers on one lease, each running a `transaction`, are refused.**
+/// `both` in [`TWO_FIBERS_PROGRAM`]: the two fibers' levels were one
+/// connection's, so each could release or roll back the other's savepoint,
+/// and the package's depth guards turned that into an `Err` for both. A
+/// fiber that takes its own lease has its own connection and its own depth.
+/// Two fibers can still share one connection's depth through `over`, which
+/// is where the guards are exercised now:
+/// [`two_fibers_over_one_connection_get_answers_that_agree_with_the_rows`].
+#[test]
+fn two_fibers_nesting_on_one_lease_are_refused() {
+    let found = refusals_of(TWO_FIBERS_PROGRAM);
+    assert_eq!(found.len(), 4, "only `both` and `both_at_zero` should be refused: {found:#?}");
+    let in_both: Vec<_> = found.iter().filter(|(_, covered)| covered.starts_with("fiber_")).collect();
+    assert_refused_at(
+        TWO_FIBERS_PROGRAM,
+        &in_both,
+        &[
+            ("fiber_b(b_ok, b_open, c_open, b_done)", "let b = Fiber::spawn(fn () => fiber_b"),
+            ("fiber_c(c_ok, b_open, c_open, b_done)", "let c = Fiber::spawn(fn () => fiber_c"),
+        ],
+    );
+}
+
+/// **Two views of one lease handed to two fibers are refused too.**
+/// `both_at_zero` in [`TWO_FIBERS_PROGRAM`] wraps the lease's `db` in a
+/// handler of its own in each fiber (`paused(lease(), ..)`), so both fibers
+/// read depth 0 and both begin. The wrapper is built inside the spawned
+/// fiber from the parent's `db`, and that use is what is refused, whatever
+/// the wrapper does.
+#[test]
+fn two_views_of_one_lease_are_refused() {
+    let found = refusals_of(TWO_FIBERS_PROGRAM);
+    let at_lease: Vec<_> = found.iter().filter(|(_, covered)| covered == "lease()").collect();
+    assert_refused_at(
+        TWO_FIBERS_PROGRAM,
+        &at_lease,
+        &[
+            ("lease()", "let b = Fiber::spawn(fn () => side"),
+            ("lease()", "let c = Fiber::spawn(fn () => side"),
+        ],
+    );
+}
+
+/// Two fibers on one lease, each running a `transaction`: a program that
+/// compiled and ran until a `Db` stayed on its fiber, and is kept whole as
+/// what the refusal has to catch. `both` and `both_at_zero` are the two
+/// shapes; everything else here compiles.
 const TWO_FIBERS_PROGRAM: &str = r##"module demo::main;
 
 //! Two fibers on one lease, each running a `transaction`, interleaved
@@ -4863,6 +4751,491 @@ fn main() -> () {
 }
 "##;
 
+// --- two fibers sharing one connection through `over` ------------------------
+
+/// A server that keeps PostgreSQL's transaction and savepoint semantics for
+/// one table of integers, on every connection it is given.
+///
+/// **Just the part that decides the answer to two fibers on one lease**:
+/// `RELEASE` of a savepoint also releases every one opened after it, `ROLLBACK
+/// TO` undoes them, `COMMIT` keeps every savepoint still open, and `SAVEPOINT`
+/// outside a transaction is an error. That is what lets a test CI runs show
+/// a row committed for a `transaction` that answered `Err`, without a real
+/// server. Committed rows are shared between connections, as a table is.
+fn tx_server(committed: std::sync::Arc<std::sync::Mutex<Vec<i64>>>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
+    let port = listener.local_addr().expect("an address").port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { break };
+            let committed = committed.clone();
+            std::thread::spawn(move || tx_connection(stream, &committed));
+        }
+    });
+    format!("{{ host: \"127.0.0.1\", port: {port}, user: \"khora\", database: \"khora\", secret: \"khora\" }}")
+}
+
+/// One savepoint (or the transaction itself, unnamed) and the rows written
+/// since it was opened.
+struct Frame {
+    name: Option<String>,
+    rows: Vec<i64>,
+}
+
+fn error_frame(code: &str, message: &str) -> Vec<u8> {
+    let mut fields = Vec::new();
+    fields.push(b'S');
+    fields.extend_from_slice(&cstring("ERROR"));
+    fields.push(b'C');
+    fields.extend_from_slice(&cstring(code));
+    fields.push(b'M');
+    fields.extend_from_slice(&cstring(message));
+    fields.push(0);
+    framed(b'E', &fields)
+}
+
+/// Runs one statement against `frames` (empty outside a transaction),
+/// answering its `CommandComplete` tag and any rows, or an error.
+fn tx_statement(
+    sql: &str,
+    param: Option<i64>,
+    frames: &mut Vec<Frame>,
+    committed: &std::sync::Mutex<Vec<i64>>,
+) -> Result<(String, Option<i64>), Vec<u8>> {
+    let sql = sql.trim();
+    let lower = sql.to_ascii_lowercase();
+    let word = |i: usize| lower.split_whitespace().nth(i).unwrap_or("").to_string();
+    if lower == "begin" {
+        if frames.is_empty() {
+            frames.push(Frame { name: None, rows: Vec::new() });
+        }
+        Ok(("BEGIN".into(), None))
+    } else if lower == "commit" {
+        let all: Vec<i64> = frames.drain(..).flat_map(|f| f.rows).collect();
+        committed.lock().expect("the table").extend(all);
+        Ok(("COMMIT".into(), None))
+    } else if lower == "rollback" {
+        frames.clear();
+        Ok(("ROLLBACK".into(), None))
+    } else if lower.starts_with("savepoint ") {
+        if frames.is_empty() {
+            return Err(error_frame("25P01", "SAVEPOINT can only be used in transaction blocks"));
+        }
+        frames.push(Frame { name: Some(word(1)), rows: Vec::new() });
+        Ok(("SAVEPOINT".into(), None))
+    } else if lower.starts_with("release savepoint ") || lower.starts_with("rollback to savepoint ") {
+        let releasing = lower.starts_with("release");
+        let name = word(if releasing { 2 } else { 3 });
+        let Some(at) = frames.iter().rposition(|f| f.name.as_deref() == Some(name.as_str())) else {
+            return Err(error_frame("3B001", &format!("savepoint \"{name}\" does not exist")));
+        };
+        if releasing {
+            // The savepoint and every one opened after it go; their rows
+            // become the enclosing level's.
+            let rows: Vec<i64> = frames.drain(at..).flat_map(|f| f.rows).collect();
+            frames.last_mut().expect("a transaction").rows.extend(rows);
+            Ok(("RELEASE".into(), None))
+        } else {
+            frames.truncate(at + 1);
+            frames[at].rows.clear();
+            Ok(("ROLLBACK".into(), None))
+        }
+    } else if lower.starts_with("insert ") {
+        let n = param.expect("a bound value");
+        match frames.last_mut() {
+            Some(top) => top.rows.push(n),
+            None => committed.lock().expect("the table").push(n),
+        }
+        Ok(("INSERT 0 1".into(), None))
+    } else if lower.starts_with("select count(*)") {
+        let n = param.expect("a bound value");
+        let count = committed.lock().expect("the table").iter().filter(|r| **r == n).count();
+        Ok(("SELECT 1".into(), Some(count as i64)))
+    } else if lower.starts_with("drop ") || lower.starts_with("create ") {
+        committed.lock().expect("the table").clear();
+        Ok(("CREATE TABLE".into(), None))
+    } else {
+        Err(error_frame("42601", &format!("the scripted server does not know `{sql}`")))
+    }
+}
+
+fn tx_connection(mut stream: TcpStream, committed: &std::sync::Mutex<Vec<i64>>) {
+    let _ = stream.set_nodelay(true);
+    let mut length = [0u8; 4];
+    if stream.read_exact(&mut length).is_err() {
+        return;
+    }
+    let mut startup = vec![0u8; (i32::from_be_bytes(length) as usize).saturating_sub(4)];
+    if stream.read_exact(&mut startup).is_err() {
+        return;
+    }
+    let mut hello = framed(b'R', &0i32.to_be_bytes());
+    hello.extend(framed(b'Z', b"I"));
+    if stream.write_all(&hello).is_err() {
+        return;
+    }
+    let mut frames: Vec<Frame> = Vec::new();
+    let mut prepared = Statements::default();
+    loop {
+        // One request: a simple `Query`, or the extended protocol's frames up
+        // to `Sync`, whose one parameter (if any) is an integer in text. The
+        // SQL is in `Parse`, or in the `Parse` of an earlier request for the
+        // statement `Bind` names.
+        let mut simple = None;
+        let mut sql = String::new();
+        let mut param = None;
+        loop {
+            let Some((kind, payload)) = next_frame(&mut stream) else { return };
+            match kind {
+                b'X' => return,
+                b'Q' => {
+                    let end = payload.iter().position(|b| *b == 0).unwrap_or(payload.len());
+                    simple = Some(String::from_utf8_lossy(&payload[..end]).into_owned());
+                    break;
+                }
+                b'P' => sql = prepared.parse(&payload),
+                b'B' => {
+                    if let Some(known) = prepared.bound(&payload) {
+                        sql = known;
+                    }
+                    param = bound_integer(&payload)
+                }
+                b'S' => break,
+                _ => {}
+            }
+        }
+        let mut reply = Vec::new();
+        let statements: Vec<String> = match &simple {
+            Some(text) => text.split(';').map(str::to_string).filter(|s| !s.trim().is_empty()).collect(),
+            None => {
+                reply.extend(framed(b'1', &[]));
+                reply.extend(framed(b'2', &[]));
+                vec![sql.clone()]
+            }
+        };
+        for statement in statements {
+            match tx_statement(&statement, param, &mut frames, committed) {
+                Ok((tag, row)) => {
+                    if let Some(value) = row {
+                        let mut description = 1i16.to_be_bytes().to_vec();
+                        description.extend_from_slice(&cstring("count"));
+                        description.extend_from_slice(&0i32.to_be_bytes());
+                        description.extend_from_slice(&0i16.to_be_bytes());
+                        description.extend_from_slice(&23i32.to_be_bytes());
+                        description.extend_from_slice(&4i16.to_be_bytes());
+                        description.extend_from_slice(&(-1i32).to_be_bytes());
+                        description.extend_from_slice(&0i16.to_be_bytes());
+                        let text = value.to_string();
+                        let mut data = 1i16.to_be_bytes().to_vec();
+                        data.extend_from_slice(&(text.len() as i32).to_be_bytes());
+                        data.extend_from_slice(text.as_bytes());
+                        reply.extend(framed(b'T', &description));
+                        reply.extend(framed(b'D', &data));
+                    }
+                    reply.extend(framed(b'C', &cstring(&tag)));
+                }
+                Err(error) => {
+                    reply.extend(error);
+                    break;
+                }
+            }
+        }
+        reply.extend(framed(b'Z', if frames.is_empty() { b"I" } else { b"T" }));
+        if stream.write_all(&reply).is_err() {
+            return;
+        }
+    }
+}
+
+/// The first parameter of a `Bind`, read as an integer in text.
+fn bound_integer(payload: &[u8]) -> Option<i64> {
+    let mut at = 0;
+    for _ in 0..2 {
+        at += payload[at..].iter().position(|b| *b == 0)? + 1;
+    }
+    let formats = i16::from_be_bytes(payload.get(at..at + 2)?.try_into().ok()?) as usize;
+    at += 2 + 2 * formats;
+    let count = i16::from_be_bytes(payload.get(at..at + 2)?.try_into().ok()?);
+    at += 2;
+    if count < 1 {
+        return None;
+    }
+    let len = i32::from_be_bytes(payload.get(at..at + 4)?.try_into().ok()?);
+    at += 4;
+    if len < 0 {
+        return None;
+    }
+    std::str::from_utf8(payload.get(at..at + len as usize)?).ok()?.parse().ok()
+}
+
+/// What each case of [`TWO_FIBERS_OVER_ONE_CONNECTION`] must print: every
+/// answer agrees with the rows, and the connection is left outside a
+/// transaction.
+const TWO_FIBERS_OVER_EXPECTED: &str = "A: two fibers nest inside one connection's transaction\n  \
+     told: B Err, C Err, outer Ok\n  agree; after it clean\n\
+     B: two fibers on one connection, no outer transaction\n  \
+     told: B Err, C Err\n  agree; after it clean\n\
+     C: two fibers on one connection both read depth 0, then both begin\n  \
+     told: B Ok, C Err\n  agree; after it clean\n";
+
+/// **Two fibers sharing one connection through `serve` and `over` never get
+/// an answer the rows disagree with.** This is what the package's depth
+/// guards are for: a `Db` stays on its fiber, so a pool's lease cannot be
+/// shared, but `over` hands each fiber a `Db` of its own over one serving
+/// fiber's connection, and those fibers' transactions share its depth.
+///
+/// What this prevents: a row committed for a `transaction` that answered
+/// `Err`. With loose depth guards, fiber B's `RELEASE` of level 1 also
+/// released fiber C's level 2 on top of it (case A), and B's `COMMIT` kept
+/// C's open savepoint (case B), so C's failure undid nothing. In case C
+/// both fibers read depth 0 before either begins, and C's `BEGIN`, a warning
+/// to PostgreSQL inside B's transaction, let C's `ROLLBACK` end B's
+/// transaction and C's write be kept. The guards refuse an operation for a
+/// level the connection is not exactly at, and turn a `COMMIT` with another
+/// fiber's savepoint open into a `ROLLBACK`: in A and B both fibers are told
+/// `Err` and neither row is kept, and in C, C's `BEGIN` is refused, so its
+/// body never runs and B commits alone. Against a scripted server that keeps
+/// PostgreSQL's savepoint rules, so CI runs it.
+#[test]
+fn two_fibers_over_one_connection_get_answers_that_agree_with_the_rows() {
+    let committed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let settings = tx_server(committed);
+    let main = TWO_FIBERS_OVER_ONE_CONNECTION.replace(
+        "{ host: \"127.0.0.1\", port: 5433, user: \"khora\", database: \"khora\", secret: \"khora\" }",
+        &settings,
+    );
+    assert_ne!(main, TWO_FIBERS_OVER_ONE_CONNECTION, "the settings should have been replaced");
+    let exe = build("postgres_two_fibers_over_scripted", &main);
+    for backend in ["threads", "scheduler"] {
+        let ran = run_watched(&exe, backend, std::time::Duration::from_secs(60));
+        assert!(!ran.hung, "{backend}: the program hung: stdout {:?}", ran.stdout);
+        assert_eq!(ran.code, Some(0), "{backend}: stderr {}", ran.stderr);
+        assert_eq!(ran.stdout, TWO_FIBERS_OVER_EXPECTED, "{backend}");
+    }
+}
+
+/// The same program against the real server, whose savepoint rules are the
+/// ones the scripted server copies.
+#[test]
+fn two_fibers_over_one_connection_against_a_real_server() {
+    if std::env::var_os("KHORA_POSTGRES").is_none() {
+        eprintln!("skipping: set KHORA_POSTGRES=1 and bring up packages/postgres/docker-compose.yml to run this");
+        return;
+    }
+    let exe = build("postgres_two_fibers_over", TWO_FIBERS_OVER_ONE_CONNECTION);
+    for backend in ["threads", "scheduler"] {
+        let ran = run_watched(&exe, backend, std::time::Duration::from_secs(60));
+        assert!(!ran.hung, "{backend}: the program hung: stdout {:?}", ran.stdout);
+        assert_eq!(ran.code, Some(0), "{backend}: stderr {}", ran.stderr);
+        assert_eq!(ran.stdout, TWO_FIBERS_OVER_EXPECTED, "{backend}");
+    }
+}
+
+/// [`TWO_FIBERS_PROGRAM`]'s three cases, with every fiber given its own `Db`
+/// over one serving fiber's connection (`over(requests)`) instead of its
+/// parent's lease, which the checker refuses. Each fiber builds its `Db`
+/// itself, so no `Db` crosses a fiber.
+const TWO_FIBERS_OVER_ONE_CONNECTION: &str = r##"module demo::main;
+
+import std::core::{Channel, Fiber, Iterator, List, Option, Result, Shared, Step, print};
+import std::db::{Cell, Db, DbError, Row, transaction};
+import postgres::db::{Request, Settings, over, serve};
+
+fn settings() -> Settings {
+  { host: "127.0.0.1", port: 5433, user: "khora", database: "khora", secret: "khora" }
+}
+
+fn put(n: Int) -> Result<Int, DbError> with { db: Db } {
+  db.execute("insert into khora_twofib (n) values ($1)", List::Cons(Cell::Number(n), List::Nil))
+}
+
+fn fresh() -> () with { db: Db } {
+  let _ = db.execute("drop table if exists khora_twofib", List::Nil);
+  let _ = db.execute("create table khora_twofib (n int4)", List::Nil);
+}
+
+fn present(n: Int) -> Bool with { db: Db } {
+  match db.query("select count(*)::int4 from khora_twofib where n = $1", List::Cons(Cell::Number(n), List::Nil)) {
+    Result::Ok(List::Cons(row, _)) => match row.cells {
+      List::Cons(Cell::Number(k), _) => k > 0,
+      _ => false,
+    },
+    _ => false,
+  }
+}
+
+fn idle() -> String with { db: Db } {
+  match db.execute("savepoint khora_probe_idle", List::Nil) {
+    Result::Ok(_) => { let _ = db.rollback(); "left inside a transaction" },
+    Result::Err(_) => "clean",
+  }
+}
+
+fn ok(r: Result<Int, DbError>) -> Bool {
+  match r { Result::Ok(_) => true, Result::Err(_) => false }
+}
+
+fn fiber_b(b_ok: Shared<Bool>, b_open: Channel<Int>, c_open: Channel<Int>, b_done: Channel<Int>) -> () with { db: Db } {
+  let r = transaction(fn () => {
+    let _ = put(10);
+    let _ = Channel::send(b_open, 1);
+    let _ = Channel::receive(c_open);
+    Result::Ok(10)
+  });
+  Shared::set(b_ok, ok(r));
+  let _ = Channel::send(b_done, 1);
+}
+
+fn fiber_c(c_ok: Shared<Bool>, b_open: Channel<Int>, c_open: Channel<Int>, b_done: Channel<Int>) -> () with { db: Db } {
+  let _ = Channel::receive(b_open);
+  let r: Result<Int, DbError> = transaction(fn () => {
+    let _ = put(20);
+    let _ = Channel::send(c_open, 1);
+    let _ = Channel::receive(b_done);
+    Result::Err(DbError::Rejected("C fails"))
+  });
+  Shared::set(c_ok, ok(r));
+}
+
+fn both(requests: Channel<Request>, b_ok: Shared<Bool>, c_ok: Shared<Bool>) -> () {
+  let b_open: Channel<Int> = Channel::bounded(1);
+  let c_open: Channel<Int> = Channel::bounded(1);
+  let b_done: Channel<Int> = Channel::bounded(1);
+  let b = Fiber::spawn(fn () => with { db: over(requests) } { fiber_b(b_ok, b_open, c_open, b_done) });
+  let c = Fiber::spawn(fn () => with { db: over(requests) } { fiber_c(c_ok, b_open, c_open, b_done) });
+  Fiber::wait(b);
+  Fiber::wait(c);
+}
+
+/// What was told, as a line, and whether each row agrees with it.
+fn verdict(requests: Channel<Request>, outer_ok: Bool, b_ok: Bool, c_ok: Bool, outer_rows: List<Int>) -> () {
+  with { db: over(requests) } {
+    let mut wrong = "";
+    for n in outer_rows {
+      if present(n) != outer_ok { wrong = wrong + " row " + Int::to_string(n) }
+    };
+    if present(10) != (b_ok && outer_ok) { wrong = wrong + " row 10 (B)" };
+    if present(20) != (c_ok && outer_ok) { wrong = wrong + " row 20 (C)" };
+    let after = idle();
+    print("  told: B " + (if b_ok { "Ok" } else { "Err" }) + ", C " + (if c_ok { "Ok" } else { "Err" })
+      + (if outer_rows == List::Nil { "" } else if outer_ok { ", outer Ok" } else { ", outer Err" }));
+    print("  " + (if wrong == "" { "agree" } else { "DISAGREE:" + wrong }) + "; after it " + after);
+  }
+}
+
+fn case_a(requests: Channel<Request>) -> () {
+  with { db: over(requests) } { fresh() };
+  print("A: two fibers nest inside one connection's transaction");
+  let b_ok = Shared::of(false);
+  let c_ok = Shared::of(false);
+  let outer = with { db: over(requests) } {
+    transaction(fn () => {
+      let _ = put(1);
+      both(requests, b_ok, c_ok);
+      put(3)
+    })
+  };
+  let outer_ok = match outer { Result::Ok(_) => true, Result::Err(_) => false };
+  verdict(requests, outer_ok, Shared::get(b_ok), Shared::get(c_ok), List::Cons(1, List::Cons(3, List::Nil)));
+}
+
+fn case_b(requests: Channel<Request>) -> () {
+  with { db: over(requests) } { fresh() };
+  print("B: two fibers on one connection, no outer transaction");
+  let b_ok = Shared::of(false);
+  let c_ok = Shared::of(false);
+  both(requests, b_ok, c_ok);
+  verdict(requests, true, Shared::get(b_ok), Shared::get(c_ok), List::Nil);
+}
+
+/// A `Db` over `base`, stopping after each `depth` answer until it is let
+/// go: this is what lets case C have both fibers read the depth before
+/// either begins.
+fn paused(base: Db, read: Channel<Int>, go: Channel<Int>) -> Db {
+  handler for Db {
+    query: fn (sql, binds) => base.query(sql, binds),
+    query_each: fn (sql, sets) => base.query_each(sql, sets),
+    execute: fn (sql, binds) => base.execute(sql, binds),
+    depth: fn () => {
+      let d = base.depth();
+      let _ = Channel::send(read, d);
+      let _ = Channel::receive(go);
+      d
+    },
+    begin: fn () => base.begin(),
+    commit: fn () => base.commit(),
+    rollback: fn () => base.rollback(),
+    savepoint: fn level => base.savepoint(level),
+    release: fn level => base.release(level),
+    rollback_to: fn level => base.rollback_to(level),
+    broken: fn () => base.broken(),
+  }
+}
+
+/// One side of case C: a transaction on `on` that writes `n`, then waits
+/// for `hold` before answering (`Ok` if `succeeds`). It sends on `wrote`
+/// once its body has written, or once `transaction` answers without running
+/// the body, so either way the caller hears from it.
+fn side(on: Db, n: Int, succeeds: Bool, wrote: Channel<Int>, hold: Channel<Int>, told: Shared<Bool>) -> () {
+  with { db: on } {
+    let ran = Shared::of(false);
+    let r: Result<Int, DbError> = transaction(fn () => {
+      Shared::set(ran, true);
+      let _ = put(n);
+      let _ = Channel::send(wrote, n);
+      let _ = Channel::receive(hold);
+      if succeeds { Result::Ok(n) } else { Result::Err(DbError::Rejected("C fails")) }
+    });
+    if !Shared::get(ran) { let _ = Channel::send(wrote, 0 - n); () };
+    Shared::set(told, ok(r));
+  }
+}
+
+fn both_at_zero(requests: Channel<Request>, b_ok: Shared<Bool>, c_ok: Shared<Bool>) -> () {
+  let read: Channel<Int> = Channel::bounded(2);
+  let go_b: Channel<Int> = Channel::bounded(1);
+  let go_c: Channel<Int> = Channel::bounded(1);
+  let wrote: Channel<Int> = Channel::bounded(2);
+  let hold_b: Channel<Int> = Channel::bounded(1);
+  let hold_c: Channel<Int> = Channel::bounded(1);
+  let b = Fiber::spawn(fn () => side(paused(over(requests), read, go_b), 10, true, wrote, hold_b, b_ok));
+  let c = Fiber::spawn(fn () => side(paused(over(requests), read, go_c), 20, false, wrote, hold_c, c_ok));
+  // Both have read the depth, and neither has begun.
+  let _ = Channel::receive(read);
+  let _ = Channel::receive(read);
+  // B begins and writes; then C, which read the same depth 0, begins, and
+  // either writes inside B's transaction or is refused.
+  let _ = Channel::send(go_b, 1);
+  let _ = Channel::receive(wrote);
+  let _ = Channel::send(go_c, 1);
+  let _ = Channel::receive(wrote);
+  // B answers `Ok`, then C fails if its body ran at all.
+  let _ = Channel::send(hold_b, 1);
+  Fiber::wait(b);
+  let _ = Channel::send(hold_c, 1);
+  Fiber::wait(c);
+}
+
+fn case_c(requests: Channel<Request>) -> () {
+  with { db: over(requests) } { fresh() };
+  print("C: two fibers on one connection both read depth 0, then both begin");
+  let b_ok = Shared::of(false);
+  let c_ok = Shared::of(false);
+  both_at_zero(requests, b_ok, c_ok);
+  verdict(requests, true, Shared::get(b_ok), Shared::get(c_ok), List::Nil);
+}
+
+fn main() -> () {
+  let requests: Channel<Request> = Channel::bounded(8);
+  let server = Fiber::spawn(fn () => serve(settings(), requests));
+  case_a(requests);
+  case_b(requests);
+  case_c(requests);
+  Channel::close(requests);
+  Fiber::wait(server);
+}
+"##;
+
 // --- a pipelined batch whose borrower is canceled ------------------------------
 
 /// Answers `select $1::int4 as n` with one `int4` row holding `$1`, pipelined
@@ -5050,15 +5423,17 @@ fn main() -> Int {{
 /// leaves the connection usable, and the next borrower gets its own
 /// answers.**
 ///
-/// What this prevents: the rest of a canceled batch's replies left on the
-/// connection. The batch is one request to the serving fiber, which reads
-/// every reply before it answers anything else, so a cancel on the
-/// borrower's side cannot stop it half-way, and the next borrower gets the
-/// same connection with nothing waiting on it. With the serving fiber
-/// leaving the last reply unread, the pool's lease check finds it and
-/// discards the connection, and this server, which accepts one connection,
-/// never sees the next borrower: the test fails either way the connection
-/// is left out of step.
+/// What this prevents: the rest of a canceled batch's replies read as the
+/// next borrower's answers. The borrower reads its own batch on its own
+/// fiber, so a cancel stops it part-way, with replies still arriving. The
+/// connection counts the replies it is owed -- one per set -- and whoever
+/// touches it next reads them all first: the give-back sends it to its slot,
+/// which settles it and lends it again. Counted as a flag, the first set's
+/// `ReadyForQuery` cleared it, the give-back put the connection straight back
+/// in `idle`, the next borrower's lease check found the rest of the batch
+/// waiting and discarded the connection, and this server, which accepts one
+/// connection, never saw the next borrower: the test fails either way the
+/// connection is left out of step.
 ///
 /// The first statement of the batch prepares the statement; the other
 /// `BATCH - 1` go out in one write, and the server sends three replies,

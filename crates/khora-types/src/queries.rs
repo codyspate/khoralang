@@ -254,6 +254,8 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             bare_names: Vec::new(),
             enclosing_lambdas: Vec::new(),
             lambda_captures: HashMap::new(),
+            capture_uses: HashMap::new(),
+            source: file.text(db),
             handed: HashSet::new(),
             unsettled_captures: Vec::new(),
             unsettled_raises: Vec::new(),

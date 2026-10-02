@@ -50,12 +50,40 @@ pub const LOCKFILE: &str = "khora.lock";
 /// anywhere. A path that cannot be canonicalized -- a dependency pointing at a
 /// directory that is not there -- keeps its literal spelling, because the
 /// resolution is about to fail anyway and the spelling is the clue.
+///
+/// **A dependency outside the lockfile's directory is reached with `..`**,
+/// never written absolute. An absolute path names the machine and the
+/// checkout the lock was last resolved in, so every build in any other
+/// checkout rewrote a committed lockfile: the TechEmpower app's lock named
+/// one developer's clone, and a build in a worktree swapped in its own. Only
+/// a path with no directory in common with the lockfile's (another drive on
+/// Windows) is written absolute, since no relative spelling reaches it.
 fn relative_to(lock_dir: &Path, path: &Path) -> String {
     let written = match (lock_dir.canonicalize(), path.canonicalize()) {
-        (Ok(base), Ok(full)) => full.strip_prefix(&base).unwrap_or(&full).to_path_buf(),
+        (Ok(base), Ok(full)) => climbing(&base, &full),
         _ => path.to_path_buf(),
     };
     written.display().to_string().replace('\\', "/")
+}
+
+/// `full` spelled from `base`, both canonical: up out of `base` with `..`
+/// as far as the two share, then down. `full` itself when they share
+/// nothing, not even a root.
+fn climbing(base: &Path, full: &Path) -> std::path::PathBuf {
+    let base_parts: Vec<_> = base.components().collect();
+    let full_parts: Vec<_> = full.components().collect();
+    let shared = base_parts.iter().zip(&full_parts).take_while(|(a, b)| a == b).count();
+    if shared == 0 {
+        return full.to_path_buf();
+    }
+    let mut out = std::path::PathBuf::new();
+    for _ in shared..base_parts.len() {
+        out.push("..");
+    }
+    for part in &full_parts[shared..] {
+        out.push(part);
+    }
+    out
 }
 
 /// A parsed `khora.lock`.

@@ -723,9 +723,70 @@ pub const REGION_TYPE: &str = "Region";
 /// The capability a finalizer is deferred through. See [`REGION_TYPE`].
 pub const SCOPE_EFFECT: &str = "Scope";
 
-/// Whether `name` is [`REGION_TYPE`] or [`SCOPE_EFFECT`].
+/// The database capability, `std::db::Db`, which may not reach another
+/// fiber either.
+///
+/// **What this prevents: two fibers driving one connection.** A pool's lease
+/// lends the borrower's fiber the connection itself, and the driver writes
+/// the connection's `mut` fields on every statement: its read buffer, its
+/// prepared statements, its transaction depth. A second fiber using the
+/// lease's `db` counted and wrote objects the first had made, which the
+/// debug owner check traps on and a release build turns into a
+/// use-after-free, and each fiber could release or roll back the other's
+/// savepoint. Serializing the statements is not enough, because what they
+/// store into the connection is still counted by two fibers.
+///
+/// What it buys is the lent connection: a `Db` handler never crosses, so it
+/// may capture a record with `mut` fields, as a `Scope` handler captures its
+/// region. With it a pool lends the connection over one hand-off per lease,
+/// instead of a round trip to a serving fiber on every statement (7k
+/// instructions a statement, measured by the design round).
+///
+/// The cost is the pattern it refuses: a body that fans its statements out
+/// to fibers of its own. Each of those fibers takes a lease of its own, and
+/// every refusal says so. A test double that holds no connection is refused
+/// the same, because the rule is about the type, not the handler.
+pub const DB_EFFECT: &str = "Db";
+
+/// Which of the types that stay on their fiber a name is.
+///
+/// One enum rather than three comparisons, so that the reason a refusal
+/// gives and the module a type is expected to come from are each one
+/// exhaustive `match`: a fourth type added here has to say both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FiberBound {
+    /// [`REGION_TYPE`]: its finalizers run on the fiber that deferred them.
+    Region,
+    /// [`SCOPE_EFFECT`]: defers into a region.
+    Scope,
+    /// [`DB_EFFECT`]: drives a connection its fiber writes.
+    Db,
+}
+
+impl FiberBound {
+    /// The type `name` stays on its fiber as, if it does.
+    pub fn of(name: &str) -> Option<FiberBound> {
+        match name {
+            REGION_TYPE => Some(FiberBound::Region),
+            SCOPE_EFFECT => Some(FiberBound::Scope),
+            DB_EFFECT => Some(FiberBound::Db),
+            _ => None,
+        }
+    }
+
+    /// The module std declares it in, which is how a refusal tells std's own
+    /// from a user's type of the same name that the rule catches by name.
+    pub fn home(self) -> [&'static str; 2] {
+        match self {
+            FiberBound::Region | FiberBound::Scope => ["std", "core"],
+            FiberBound::Db => ["std", "db"],
+        }
+    }
+}
+
+/// Whether `name` is [`REGION_TYPE`], [`SCOPE_EFFECT`] or [`DB_EFFECT`].
 pub fn stays_on_its_fiber(name: &str) -> bool {
-    name == REGION_TYPE || name == SCOPE_EFFECT
+    FiberBound::of(name).is_some()
 }
 
 /// Every declaration the compiler treats specially, by the name it goes by.

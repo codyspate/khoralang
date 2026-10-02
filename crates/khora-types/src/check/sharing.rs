@@ -47,11 +47,11 @@ impl<'a> Checker<'a> {
             let ty = self.unifier.zonk(self.locals.get(&local).unwrap_or(&Type::Unknown));
             if self.types.is_shareable(&ty, &self.shared_params()) {
                 if holds_a_variable(&ty) {
-                    self.unsettled_captures.push((local, Captor::Spawn, range));
+                    self.unsettled_captures.push((local, Captor::Spawn(body, crossing), range));
                 }
                 continue;
             }
-            self.refuse_capture(local, &ty, range);
+            self.refuse_capture(local, &ty, body, crossing, range);
         }
     }
 
@@ -84,7 +84,9 @@ impl<'a> Checker<'a> {
                 continue;
             }
             match captor {
-                Captor::Spawn => self.refuse_capture(local, &ty, range),
+                Captor::Spawn(body, crossing) => {
+                    self.refuse_capture(local, &ty, body, crossing, range)
+                }
                 Captor::Handler { owner, label } => {
                     self.refuse_handler_capture(&owner, &label, local, &ty, range)
                 }
@@ -92,10 +94,46 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn refuse_capture(&mut self, local: khora_hir::body::LocalId, ty: &Type, range: TextRange) {
+    /// Refuses a spawned or certified body's capture of `local`.
+    ///
+    /// **A `Db` is refused at its use, and the sentence names the spawn.**
+    /// The capture is usually implicit -- a call inside the fiber to a
+    /// function that needs `db` -- so the spawn's lambda does not contain the
+    /// word, and a caret under the whole spawn left the reader to find which
+    /// call took it there. The spawn goes in the message as a line and
+    /// column, because a diagnostic has one span. A `Region` or `Scope` keeps
+    /// its caret on the spawn, where its tests pin it.
+    fn refuse_capture(
+        &mut self,
+        local: khora_hir::body::LocalId,
+        ty: &Type,
+        body: ExprId,
+        crossing: Crossing,
+        range: TextRange,
+    ) {
         let name = self.body.local(local).name.clone();
         let why = self.types.why_unshareable(ty);
-        self.error(format!("`{name}` cannot be handed to another fiber: {why}"), range);
+        let at_use = match self.types.fiber_bound_inside(ty) {
+            Some((crate::FiberBound::Db, _)) => self.capture_uses.get(&(body, local)).copied(),
+            Some((crate::FiberBound::Region | crate::FiberBound::Scope, _)) | None => None,
+        };
+        match at_use {
+            Some(used) => {
+                let (line, column) = line_and_column(self.source, range);
+                let taker = match crossing {
+                    Crossing::Fiber => "fiber spawned",
+                    Crossing::Certified => "closure certified",
+                };
+                self.error(
+                    format!(
+                        "`{name}` cannot be handed to another fiber, and the {taker} at line \
+                         {line}, column {column} uses it here: {why}"
+                    ),
+                    used,
+                );
+            }
+            None => self.error(format!("`{name}` cannot be handed to another fiber: {why}"), range),
+        }
     }
 
     /// What a spawned fiber, or a certified closure, may raise.
@@ -143,8 +181,8 @@ impl<'a> Checker<'a> {
     fn refuse_unshareable_errors(&mut self, raises: &Type, crossing: Crossing, range: TextRange) {
         let Type::Row { fields, .. } = raises else { return };
         for (label, error) in fields {
-            if let Some(fiber_bound) = self.types.fiber_bound_inside(error) {
-                let why = crate::map::stays_on_its_fiber_because(&fiber_bound);
+            if let Some((bound, subject)) = self.types.fiber_bound_inside(error) {
+                let why = crate::map::stays_on_its_fiber_because(bound, &subject);
                 self.error(
                     format!(
                         "`{label}`, which this fiber can raise, cannot be handed to another \
@@ -188,7 +226,8 @@ impl<'a> Checker<'a> {
         // **A `Scope` handler never crosses**, so what it captures need not
         // either: it captures the region it defers into, which is exactly
         // what must stay on this fiber. `scoped` and `Scope::root` are both
-        // this shape. `crate::REGION_TYPE`.
+        // this shape. `crate::REGION_TYPE`. A `Db` handler is the same: it
+        // captures the connection a lease lent this fiber. `crate::DB_EFFECT`.
         if crate::stays_on_its_fiber(owner) {
             return;
         }
@@ -287,8 +326,9 @@ impl<'a> Checker<'a> {
 /// [`Checker::check_unsettled_captures`] refuses it in that one's words.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Captor {
-    /// A body handed to `Fiber::spawn` or `SharedFn::of`.
-    Spawn,
+    /// A body handed to `Fiber::spawn` or `SharedFn::of`: the body, and
+    /// which of the two took it.
+    Spawn(ExprId, Crossing),
     /// An operation of a `handler for` `owner`, the field `label`.
     Handler { owner: String, label: String },
 }
@@ -304,6 +344,15 @@ pub(crate) enum Crossing {
     /// `SharedFn::of`: the closure may be held anywhere, and is called on the
     /// caller's fiber.
     Certified,
+}
+
+/// The one-based line and column, in characters, where `range` starts in
+/// `source`.
+fn line_and_column(source: &str, range: TextRange) -> (usize, usize) {
+    let at = usize::from(range.start()).min(source.len());
+    let before = source.get(..at).unwrap_or("");
+    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+    (before.matches('\n').count() + 1, before[line_start..].chars().count() + 1)
 }
 
 /// Whether a zonked error row may still be solved to an error nobody has

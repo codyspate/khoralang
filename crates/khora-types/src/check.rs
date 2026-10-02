@@ -169,6 +169,19 @@ pub(crate) struct Checker<'a> {
     pub(crate) unsettled_raises: Vec<(Type, sharing::Crossing, TextRange)>,
     /// The finished answer, moved out as each lambda closes.
     pub(crate) lambda_captures: HashMap<ExprId, Vec<khora_hir::body::LocalId>>,
+    /// Where each lambda first uses each binding it captures, by name or by
+    /// a call that needs it as a capability.
+    ///
+    /// **What this is for: a refusal of a capture that points at the use.**
+    /// A spawn's captures are checked at the spawn, and the spawn's range is
+    /// a whole lambda. A capability captured implicitly -- `db` taken by a
+    /// call to a function that needs it -- appears nowhere in that lambda,
+    /// so a caret on the spawn alone left the reader to find the call.
+    pub(crate) capture_uses: HashMap<(ExprId, khora_hir::body::LocalId), TextRange>,
+    /// The text of the file being checked, so a refusal can name a second
+    /// place by line and column. A diagnostic has one span; the other place
+    /// goes in its sentence.
+    pub(crate) source: &'a str,
     /// What each call site asked for, published as [`crate::CallRows`].
     ///
     /// Filled where the demand is raised rather than reconstructed afterwards,

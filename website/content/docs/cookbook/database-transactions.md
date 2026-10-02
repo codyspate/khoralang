@@ -211,7 +211,36 @@ Nothing is committed until the outermost `transaction` commits: an inner `Result
 
 The depth belongs to the connection, which is why a handler keeps it rather than `transaction`: two fibers leasing two connections from a pool nest independently, and one `db` used twice from one fiber is one connection at one depth. A cancellation inside an inner body rolls back the inner savepoint first and then the enclosing transaction, so nothing either body wrote survives.
 
-Fibers that share one lease must not run `transaction` at the same time. Their levels are one connection's, so each would release or roll back the other's savepoint; the PostgreSQL package refuses an operation for a level the connection is not at, so one of the two is answered `Err` and nothing it wrote is kept.
+A lease's `db` stays on the fiber that took the lease. `with_db` lends the body the connection itself, so a fiber spawned inside the body cannot use the body's `db`, and each fiber has its own transaction depth because each has its own connection. A fiber that needs the database takes its own lease:
+
+```khora
+fn record_both(pool: Pool, a: Int, b: Int) -> () {
+  let first = Fiber::spawn(fn () => with_db(pool, fn () => insert(a)));
+  let second = Fiber::spawn(fn () => with_db(pool, fn () => insert(b)));
+  Fiber::wait(first);
+  Fiber::wait(second);
+}
+```
+
+Spawning a fiber that uses the body's `db` is refused where the fiber uses it, and the message names the line of the spawn:
+
+```khora
+fn record_both(a: Int, b: Int) -> () with { db: Db } {
+  let first = Fiber::spawn(fn () => insert(a));
+  let second = Fiber::spawn(fn () => insert(b));
+  Fiber::wait(first);
+  Fiber::wait(second);
+}
+```
+
+```text
+error: `db` cannot be handed to another fiber, and the fiber spawned at line 2, column 15 uses it
+here: a `Db` stays on the fiber it was installed on, because it drives a connection that fiber
+writes, and a fiber spawned inside a `with_db` body cannot use that body's `db`: take a lease in
+the spawned fiber instead, `Fiber::spawn(fn () => with_db(pool, work))`
+```
+
+Two fibers that each take a lease from a pool of one connection take turns: the second waits in `with_db` until the first lease ends.
 
 A handler implements nesting with four operations beside `begin`, `commit` and `rollback`: `depth` says how many transactions are open, and `savepoint`, `release` and `rollback_to` take the level a savepoint was opened at. `rollback_to` is called for a savepoint that was never opened when a cancellation lands before it was, and must answer `Result::Ok` without undoing anything then, exactly as `rollback` must when no transaction is open. A handler that does not support nesting still answers `depth` truthfully (1 between `begin` and its `commit` or `rollback`, 0 otherwise) and refuses `savepoint`; a nested `transaction` is then answered with that refusal instead of opening a second transaction.
 

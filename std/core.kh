@@ -5588,6 +5588,74 @@ impl<A: Share> Channel<A> {
   pub fn depth(self) -> Int;
 }
 
+/// A queue that gives values away.
+///
+/// **What it is for: handing a value that can be written to another fiber.**
+/// A `Channel` shares what it carries, so it carries only `Share` values. A
+/// hand-off carries anything, because a send gives the value away: the
+/// sending fiber keeps nothing, so the receiver is the only fiber that can
+/// reach it. A database connection a pool lends out is the case it exists
+/// for.
+///
+/// **What the send requires.** The value sent must be the last use of it,
+/// and nothing writable it reaches -- a record with a `mut` field, an
+/// `Array`, a `Map` -- may be held by anything else. The compiler checks the
+/// first. The second is checked when the send runs, by reference count: a
+/// send that finds a writable part still held elsewhere **stops the program,
+/// naming the type**, rather than let two fibers hold one writable object.
+///
+/// A part of the value that is `Share` may be held elsewhere. It cannot be
+/// written, so it is marked for the receiving fiber the way a channel send
+/// marks what it carries.
+///
+/// **What trips the check.** Anything the sending fiber still uses after the
+/// send that holds a writable part: a binding read again later, or a value
+/// the sent one was taken out of that is read again later.
+///
+/// ```khora
+/// let got = connect(settings);
+/// match got {
+///   Result::Ok(c) => Handoff::send(pool, c),
+///   Result::Err(_) => false,
+/// };
+/// log(got)
+/// ```
+///
+/// stops the program at the send, because `got` still holds `c` for the
+/// `log` after it. Sending a `match` arm's binding is fine when the value
+/// matched on is not used again. The stop happens on every send of a shape
+/// that trips it, not by chance, so a test that runs the path finds it.
+///
+/// **What it costs.** A walk over every object in the value that is not
+/// already shared, at every send: about 2,400 instructions for a record of a
+/// dozen objects. Receiving costs what a channel receive does.
+///
+/// Like a channel's, a send and a receive are cancellation points, a full
+/// hand-off makes the sender wait, and `close` releases everybody waiting.
+pub type Handoff<A>;
+
+/// The lock is what makes this true, and every operation takes it.
+impl<A> Share for Handoff<A> {}
+
+impl<A> Handoff<A> {
+  /// A hand-off that holds at most `capacity` values. Below one is one.
+  pub fn bounded(capacity: Int) -> Handoff<A>;
+
+  /// Gives `value` away, waiting while the hand-off is full.
+  ///
+  /// False when it is closed, or this fiber is canceled while it waits; the
+  /// value is then released. Stops the program when something else holds a
+  /// writable part of `value` -- see the type.
+  pub fn send(self, value: A) -> Bool;
+
+  /// Takes a value, waiting while it is empty. `None` once it is closed and
+  /// drained, or this fiber is canceled while it waits.
+  pub fn receive(self) -> Option<A>;
+
+  /// Says nothing more will be sent, and releases everybody waiting.
+  pub fn close(self) -> ();
+}
+
 /// A value two fibers may both change.
 ///
 /// The sharing rules refuse a mutable record to a second fiber on purpose, and

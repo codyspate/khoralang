@@ -255,6 +255,23 @@ pub unsafe extern "C" fn khora_bytes_copy(from: *const u8, from_at: i64, into: *
     unsafe { std::ptr::copy(from.add(from_at as usize), into.add(into_at as usize), count as usize) };
 }
 
+/// An array's length and element width, for a walk over its slots.
+#[cfg(not(target_family = "wasm"))]
+pub(crate) fn shape(array: *const u8) -> (usize, usize) {
+    (array_word(array, ARRAY_LEN_FIELD), array_word(array, ARRAY_STRIDE_FIELD))
+}
+
+/// The address of element `index`, `stride` bytes wide.
+///
+/// # Safety
+///
+/// `array` must be live and `index` below its length.
+#[cfg(not(target_family = "wasm"))]
+pub(crate) unsafe fn slot(array: *mut u8, index: usize, stride: usize) -> *mut u8 {
+    // SAFETY: the caller's contract puts the slot inside the allocation.
+    unsafe { array.add(KHORA_FIELD_OFFSET + ARRAY_HEADER_FIELDS * FIELD_WORD + index * stride) }
+}
+
 /// Releases every element of an array, then the array.
 ///
 /// A `drop_fields` callback. The loop is here rather than generated because

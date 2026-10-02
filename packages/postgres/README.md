@@ -76,6 +76,12 @@ is part of their type via `with { db: Db }`. `with_db` is the composition
 boundary that satisfies that requirement for the duration of a connection
 lease.
 
+**A lease hands you the connection itself.** Your fiber writes the socket and
+reads the reply; no other fiber sits between you and the server. The `db` a
+lease installs therefore stays on the fiber that took the lease: a fiber you
+spawn inside the body cannot use it, and the compiler says so. If that fiber
+needs the database, it takes a lease of its own with `with_db`.
+
 **The two `Result`s answer different questions.** The outer one is whether a
 lease was obtained. It is `Err` when the pool has been closed, and when no
 connection is live or reconnecting: then it is `Disconnected` with the reason
@@ -84,8 +90,10 @@ that is the arm to log. The inner one is the statement's own answer; a
 connection lost in the middle of a lease answers its remaining statements
 `Disconnected` there, and is reconnected once the lease ends.
 
-A pool reconnects the connections it loses, with backoff, and shrinks while
-it cannot: `open_with` takes the schedule, and `health` counts the
+A connection is checked before every lease: one the server has closed while
+it sat idle, or one left inside a transaction, is reconnected instead of
+lent. A pool reconnects the connections it loses, with backoff, and shrinks
+while it cannot: `open_with` takes the schedule, and `health` counts the
 connections that are live, reconnecting and down. The
 [package page](https://khoralang.com/docs/packages/postgres/) has the
 numbers and the limits.

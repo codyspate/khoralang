@@ -65,12 +65,11 @@ A pool reconnects a connection it loses, and never lends one that is down.
   the middle of ending is not lent.
 - **A stopped caller costs nothing.** A fiber stopped by `cancel`, `abort` or
   `cancel_within` anywhere in `with_db` — waiting for a connection, holding
-  one, in the middle of a statement, inside a transaction's `ROLLBACK`, or
-  while fibers it started are still using `db` — gives its connection back,
-  and the pool stays its full size. Statements those fibers had already
-  queued are answered first and their answers dropped; anything they send
-  afterwards is refused with `Disconnected`, and never reaches the next
-  borrower.
+  one, in the middle of a statement or a batch, or inside a transaction's
+  `ROLLBACK` — gives its connection back, and the pool stays its full size.
+  A reply still arriving on it is read to the end before the connection is
+  lent again, so the next borrower never receives it. A fiber the body
+  spawns cannot use the body's `db`; it takes a lease of its own.
 - **Reconnecting.** The old socket is closed first and nothing more is read
   from it. The new one is tried on a backoff: 50 ms, doubling to 5 s, each
   delay drawn at 50-100% of its value, for up to 30 s. `with_db` waits
@@ -130,8 +129,10 @@ until one does. A pool whose server is unreachable answers its first callers
 - A connection whose peer vanished without closing (a cable pulled, a
   firewall dropping the flow) looks healthy until a statement times out on
   it. The check reads what has arrived and cannot see that.
-- Each lease costs a request channel of its own and one message to the
-  connection's serving fiber, the check, on top of the statements themselves.
+- A lease hands the borrower the connection itself: the borrower's fiber
+  writes the socket and reads the reply, with no fiber in between. What a
+  lease costs on top of its statements is taking the connection, the check
+  (one non-blocking read), and giving it back.
 
 ## Authentication
 
@@ -199,10 +200,10 @@ fn users(ids: List<Int>) -> List<Result<List<Row>, DbError>> with { db: Db } {
   server dropped refuses every set that names it; the sets after the first
   refusal are then run again after a fresh parse, which is what separate
   calls would have done.
-- **A batch is one request to the connection's serving fiber**, which reads
-  every reply before it answers anything else. A borrower canceled while its
-  replies are arriving leaves the rest for that fiber to read, so the next
-  borrower never receives them.
+- **A borrower canceled while its batch's replies are arriving** leaves the
+  rest on the connection, and the connection knows how many are still owed.
+  They are read to the end before it is lent again, so the next borrower
+  never receives them.
 
 ## What it does not do yet
 

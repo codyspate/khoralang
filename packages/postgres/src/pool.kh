@@ -2,16 +2,31 @@ module postgres::pool;
 
 //! Several connections, and a fair way to take one.
 //!
-//! `db.kh` gives one connection a serving fiber and a `Db` over it. That is
-//! correct and it is not concurrent: a second fiber's statements queue behind
-//! the first's, however many workers are free.
-//!
-//! A pool is the obvious fix and, given a channel, barely a thing at all.
-//! **The pool is a channel holding the idle connections.** Taking one is a
+//! **The pool is a queue holding the idle connections.** Taking one is a
 //! receive, giving it back is a send, and waiting when they are all busy is
-//! what a channel already does. There is no free list, no condition variable
-//! and no count of who has what -- those are the parts a pool usually is, and
-//! they are all the channel's.
+//! what a queue already does. There is no free list, no condition variable and
+//! no count of who has what -- those are the parts a pool usually is, and they
+//! are all the queue's.
+//!
+//! # The connection itself is lent
+//!
+//! The queue is a `Handoff`, not a `Channel`, and what it carries is the
+//! connection. A borrower receives it, drives it on its own fiber through
+//! `postgres::db::direct`, and sends it back when its lease ends. Nothing
+//! stands between the borrower and the socket: no serving fiber, no request
+//! channel, no reply channel.
+//!
+//! **What makes that sound is the send.** A `Handoff` send gives the value
+//! away: it checks, at the send, that nothing outside the value holds any
+//! writable part of it, and traps otherwise, so the connection is never
+//! reachable from two fibers. The pool keeps every reference to a connection
+//! inside the `Loan` it travels in, and the give-back empties the lease's
+//! holder before it sends, so that check passes.
+//!
+//! **A lease's `db` is the lease's fiber's alone.** The `Db` a lease installs
+//! drives the connection on the fiber that took the lease; the checker keeps
+//! it there, and a fiber spawned inside the body that needs the database takes
+//! a lease of its own.
 //!
 //! # Backpressure comes for free, and that is the point
 //!
@@ -25,107 +40,108 @@ module postgres::pool;
 //!
 //! `with_db` takes a connection, installs it as `db: Db` for the body, and must
 //! give it back including when the body raises and including when the fiber
-//! running it is canceled. Application code therefore keeps `Db` in its
-//! capability row instead of accepting a connection value just because the
+//! running it is canceled or aborted. Application code therefore keeps `Db` in
+//! its capability row instead of accepting a connection value just because the
 //! provider happens to be a pool.
 //!
-//! Returning the lease is a region's job: the return is registered with
-//! `Region::defer` before the body runs, and a region's finalizers run on the
-//! way out however the way out is reached.
+//! Returning the lease is a region's job, and three rules keep a lease from
+//! being lost. Each was learned from a pool that lost one:
 //!
-//! **Before the body is not early enough; it has to be before the first
-//! cancellation point after the receive.** The first version registered it
-//! through `scoped` and `acquire`, each of which checks for a cancellation
-//! when it is entered. A fiber canceled while it waited for a connection,
-//! and handed one at the same moment, stopped at that check holding a
-//! connection that no finalizer knew about. A pool of one lost its only
-//! connection within two hundred such cancels, and then `with_db` and `close`
-//! both waited for ever. `Region::open` and `Region::defer` are not
-//! cancellation points, so nothing lies between the receive and the
-//! registration.
+//! - **The give-back is registered before the first cancellation point after
+//!   the receive.** A receive that returns a value has handed the connection
+//!   to this fiber, and from then on only a registered finalizer can bring it
+//!   back. `Region::open` and `Region::defer` are not cancellation points, so
+//!   nothing lies between the receive and the registration. Registered
+//!   through `scoped` or `acquire`, each entered through a cancellation check,
+//!   a fiber canceled as it was handed a connection unwound holding it: a pool
+//!   of one lost its only connection within two hundred such cancels, and
+//!   then `with_db` and `close` both waited for ever.
+//! - **The give-back is built in a function that calls no function value**,
+//!   so it has no entry poll and an `abort` cannot skip it. See `returner`.
+//! - **The give-back's send cannot wait.** `idle` has room for every
+//!   connection and the down token, and the one going back is not in it. An
+//!   aborted fiber does not wait for room, so a send that could wait could be
+//!   dropped, and the connection with it.
 //!
-//! **The region has to be `with_db`'s own**, and the first version got this
-//! wrong in a way worth recording. It required a `Scope` from its caller,
-//! which reads as flexible and means the lease is held until the *caller's*
-//! region ends rather than until the call returns. Four jobs against a pool of
-//! two, all inside one `scoped`, took both connections and gave neither back:
-//! the third waited for ever. A pool of `n` behaved like a pool of `n` uses.
+//! **The region has to be `with_db`'s own.** Taken from a caller's `Scope`,
+//! the lease is held until the *caller's* region ends rather than until the
+//! call returns: four jobs against a pool of two, all inside one `scoped`,
+//! took both connections and gave neither back, and the third waited for
+//! ever. So `with_db` opens a region per lease. A caller needs no `Scope`
+//! capability for it, and the `Db` requirement disappears at this boundary
+//! because the leased handler is installed here.
 //!
-//! So `with_db` opens a region per lease. A caller needs no `Scope` capability
-//! for it, and the `Db` requirement disappears at this boundary because the
-//! leased handler is installed here.
+//! **The transaction is covered too**: `std::db::transaction` registers its
+//! rollback with a region of its own, so a fiber stopped mid-flight sends the
+//! `ROLLBACK` on its way out, and the lease then goes back holding a
+//! connection that is ready. A connection a stopped borrower left with a
+//! reply still arriving goes to its slot, which reads the rest and lends it
+//! again. One left inside a transaction, or broken part-way through a reply,
+//! is not lent again: its slot closes and reconnects it.
 //!
-//! **The transaction is covered too**, as of 13.3: `std::db::transaction`
-//! registers its rollback with a region of its own, so a fiber stopped
-//! mid-flight sends the `ROLLBACK` on its way out rather than leaving it to
-//! the server to notice when the connection is reused. The lease then comes
-//! back to a connection that is ready, which is why the two belong together.
+//! # Checked before every lease, on the borrower's fiber
+//!
+//! **A connection that is down is never lent.** Before the body runs,
+//! `with_db` asks the connection it received whether its socket is still open
+//! -- a server restart closes idle connections, and nothing reads an idle
+//! socket to notice -- and whether it is outside a transaction. One that
+//! fails is marked broken, given back to its slot to be reconnected, and
+//! `with_db` takes the next offer. What it costs: one non-blocking read per
+//! lease. What it does not see: a connection that dies between the check and
+//! the borrower's first statement. That statement is answered
+//! `Disconnected`, and the slot reconnects when the lease ends.
 //!
 //! # Reconnecting, shrinking, and growing back
 //!
-//! **Each slot's serving fiber owns its connection's whole life**, including
-//! losing it. `with_db` learns how a connection is doing only by asking the
-//! fiber that owns it.
+//! **Each slot has a fiber that owns its connection's opening and closing**,
+//! though not its use. It opens the connection, puts it into `idle`, and
+//! waits for it to come home: a lease that ends with the connection broken
+//! sends it to its slot rather than to `idle`.
 //!
-//! - A slot is in `idle` only while it is connected. `open` puts no slot
-//!   there; each serving fiber puts its own there once its connection opens.
-//! - Every lease starts with a `Check`: is the socket still open (a server
-//!   restart closes idle connections, and nothing reads an idle socket to
-//!   notice), and is the connection outside a transaction? A slot that fails
-//!   is not lent: its serving fiber marks it broken, `with_db` gives it back
-//!   at once and takes the next one.
-//! - Every lease ends by closing the request channel the slot offered for
-//!   it; the serving fiber answers what is still queued, and the close is
-//!   how it learns the lease is over. That is the only way back into `idle`,
-//!   so a slot that broke during the lease (a cut-off reply, `broken`, a
-//!   `ROLLBACK` an `abort` cut short) is reconnected instead of lent again.
-//!   A close needs no room and cannot be refused, so no way of stopping the
-//!   borrower -- and no number of fibers it left with requests queued --
-//!   keeps the lease from ending.
+//! - A slot's connection is in `idle` only while it is connected. `open` puts
+//!   none there; each slot's fiber puts its own there once it opens.
 //! - Reconnecting closes the old socket first and never reads it again, then
 //!   tries on the pool's fast `Schedule`. Meanwhile the slot counts as
 //!   `reconnecting`, and callers wait for it.
+//! - A connection that breaks before any lease on it has passed the check
+//!   counts as a failed attempt, so a server that accepts connections and
+//!   spoils each one is backed off like a server that refuses them.
 //! - When the fast schedule gives up, the slot **shrinks out**: it counts as
 //!   `down`, and tries again on the slow interval until it connects (and
 //!   rejoins `idle`) or the pool closes.
 //! - **A pool with no slot live or reconnecting fails its callers at once**,
-//!   with the reason the last attempt failed. The callers already waiting
-//!   are woken by the down token (`Offer::Down`), put into `idle` when the
-//!   last slot shrinks. A caller that receives it puts it back for the next
-//!   one and answers `Disconnected`; once a slot is live or reconnecting
-//!   again, the next caller to receive it drops it.
-//!
-//! What it costs: a request channel per lease, one `Check` message per lease,
-//! and one non-blocking read. What it does not see: a
-//! connection that dies between the `Check` and the borrower's first
-//! statement. That statement is answered `Disconnected`, and the slot
-//! reconnects when the lease ends.
+//!   with the reason the last attempt failed. The callers already waiting are
+//!   woken by the down token (`Lendable::Down`), put into `idle` when the last
+//!   slot shrinks. A caller that receives it answers `Disconnected`, and its
+//!   give-back puts the token back for the next one; once a slot is live or
+//!   reconnecting again, the next caller to receive it drops it.
 
-import std::core::{Changed, Channel, Fiber, Fibers, Option, Region, Result, Shared};
+import std::core::{Changed, Fiber, Fibers, Handoff, List, Option, Region, Result, Shared};
 import std::clock::{Clock};
 import std::db::{Db, DbError};
 import std::random::{Random};
 import std::resilience::{Schedule};
-import postgres::conn::{Connection, usable};
-import postgres::db::{Fitness, Request, Settings, connect, fitness, hang_up, over, serve_lease};
+import postgres::conn::{Connection, forsake, in_transaction, mid_reply, settle, still_open, usable};
+import postgres::db::{Settings, connect, direct, hang_up};
 
-/// A set of connections, each with a fiber serving it.
+/// A set of connections, each with a slot that opens and reopens it.
 pub type Pool = {
-  /// What is ready to lend: a slot whose connection is open and unused, as
-  /// the request channel for its next lease -- plus, at most once, the down
-  /// token. The module doc has both.
-  idle: Channel<Offer>,
-  /// The fibers doing the serving.
+  /// What is ready to lend: each connection that is open and unused, as a
+  /// `Loan` -- plus, at most once, the down token. The module doc has both.
+  idle: Handoff<Lendable>,
+  /// Whether the down token is in `idle`. With each slot's own `here`, this
+  /// is how `idle_count` counts what `idle` holds: a `Handoff` has no depth.
+  token_idle: Shared<Bool>,
+  /// Each slot's `here`, for `idle_count`.
+  slots: List<Shared<Bool>>,
+  /// The slots' fibers.
   ///
   /// **Held here because a pool that did not hold them would stop working on
   /// its way out of `open`.** A caller with no later use for its nursery hands
-  /// over its last reference, so the nursery is released when `open` returns —
+  /// over its last reference, so the nursery is released when `open` returns --
   /// and releasing a nursery cancels its children and waits for them, which is
-  /// every serving fiber this just started. The symptom is a pool that hangs
-  /// before it is ever used, and the cause is two rooms away.
-  ///
-  /// Keeping it is also the honest ownership: these fibers exist for this pool
-  /// and end with it, which is what `close` then has something to wait for.
+  /// every slot this just started. The symptom is a pool that hangs before it
+  /// is ever used, and the cause is two rooms away.
   crew: Fibers,
   /// How many slots are in each state, the last reason a connection failed,
   /// and whether the pool is closing.
@@ -192,22 +208,39 @@ impl Reconnect {
   }
 }
 
-/// What `with_db` takes from `idle`.
+/// What travels through `idle`.
 ///
-/// **The down token is a case of its own, not a channel that looks like
-/// one.** Told apart by the shape of a channel -- one with a request already
-/// queued -- a slot could pass for the token whenever something sent to it
-/// outside a lease, a detached fiber still holding an old lease's `db` for
-/// one, and its give-back then kept the slot out of `idle` for good.
-pub type Offer =
-  /// A slot, as the request channel for this one lease, and where the
-  /// borrower says the lease's check passed. Its serving fiber makes both
-  /// fresh for every lease, reads the channel until it is closed, and then
-  /// reads the verdict: a connection that never passes a check counts as a
-  /// failed connection attempt.
-  | Slot(Channel<Request>, Shared<Bool>)
+/// **The down token is a case of its own, not a connection that looks like
+/// one**, so nothing a borrower does to a connection can make it pass for the
+/// token, or the token for a connection.
+type Lendable =
+  | Ready(Loan)
   /// There is nothing to lend: no slot is live or reconnecting.
   | Down;
+
+/// One connection, and everything its lease needs to send it back.
+///
+/// **Every reference to the connection is in here**, and `Handoff::send`
+/// checks that at every send: this record is what the send gives away, so a
+/// field anywhere else that held `c` would make that send trap.
+type Loan = {
+  c: Connection,
+  /// Where the connection goes when a lease finds it broken: its slot's
+  /// fiber, which closes and reopens it.
+  home: Handoff<Lendable>,
+  /// Whether this connection is in `idle` right now, for `idle_count`.
+  here: Shared<Bool>,
+  /// Whether any lease on this connection passed its check. A connection
+  /// that breaks before one has counts as a failed connection attempt.
+  mut served: Bool,
+};
+
+/// Where a lease keeps what it received, so its give-back can take it out.
+///
+/// **What this prevents: a give-back that traps because the lease still holds
+/// the connection.** The finalizer captures this holder, not the loan, and
+/// empties it before it sends, so the loan in hand is the only reference.
+type Held = { mut got: Option<Lendable> };
 
 /// How many slots are in each state. See `health`.
 ///
@@ -232,8 +265,11 @@ type Tally = {
   /// Why the last connection attempt failed.
   last: String,
   closing: Bool,
-  /// Whether the down token is in `idle`, so there is never more than one.
+  /// Whether the down token is out, so there is never more than one.
   token: Bool,
+  /// How many slots' fibers have not finished. `close` gathers loans until
+  /// this is 0.
+  running: Int,
 };
 
 /// Where a slot is.
@@ -259,7 +295,7 @@ type Tries = {
 };
 
 /// How a connection's lending ended.
-type Lent =
+type Ended =
   /// The pool is closing.
   | Closing
   /// It broke after at least one lease had passed its check.
@@ -270,7 +306,7 @@ type Lent =
 /// One try at a lease.
 type Tried<A> =
   | Done(A)
-  /// The slot failed its `Check` and has been given back; take another.
+  /// The connection failed its check and has been sent home; take another.
   | Again
   | Refused(DbError);
 
@@ -280,30 +316,34 @@ pub fn open(crew: Fibers, settings: Settings, count: Int) -> Pool {
   open_with(crew, settings, count, Reconnect::default())
 }
 
-/// Opens `count` slots and adopts a serving fiber for each into `crew`.
+/// Opens `count` slots and adopts a fiber for each into `crew`.
 ///
-/// **Returns before any of them has connected.** A serving fiber opens its own
-/// connection, so this is a spawn and not a round trip. `with_db` waits for
-/// the first connection to open; a pool that cannot connect at all answers
-/// `Disconnected` with the reason once every slot's fast schedule has given
-/// up.
+/// **Returns before any of them has connected.** A slot's fiber opens its
+/// own connection, so this is a spawn and not a round trip. `with_db` waits
+/// for the first connection to open; a pool that cannot connect at all
+/// answers `Disconnected` with the reason once every slot's fast schedule has
+/// given up.
 ///
 /// Below one connection is one.
 pub fn open_with(crew: Fibers, settings: Settings, count: Int, plan: Reconnect) -> Pool {
   let wanted = if count < 1 { 1 } else { count };
-  // One more than the slots, for the down token. Each slot has at most one
-  // offer here at a time: it makes the next only once the last lease is over.
-  let idle: Channel<Offer> = Channel::bounded(wanted + 1);
+  // One more than the slots, for the down token: there is never more than
+  // one connection per slot and one token, so a send here never waits.
+  let idle: Handoff<Lendable> = Handoff::bounded(wanted + 1);
+  let token_idle = Shared::of(false);
   let tally = Shared::of({
       live: 0, reconnecting: wanted, down: 0, last: "no connection has been tried yet",
-      closing: false, token: false,
+      closing: false, token: false, running: wanted,
     });
+  let mut slots: List<Shared<Bool>> = List::Nil;
   let mut made = 0;
   while made < wanted {
-    Fibers::adopt(crew, Fiber::spawn(fn () => slot(settings, plan, idle, tally)));
+    let here = Shared::of(false);
+    slots = List::Cons(here, slots);
+    Fibers::adopt(crew, Fiber::spawn(fn () => slot(settings, plan, idle, token_idle, here, tally)));
     made = made + 1
   };
-  { idle: idle, crew: crew, tally: tally }
+  { idle: idle, token_idle: token_idle, slots: slots, crew: crew, tally: tally }
 }
 
 /// How many slots are live, reconnecting, and shrunk out, right now.
@@ -315,81 +355,39 @@ pub fn health(pool: Pool) -> Health {
   { live: t.live, reconnecting: t.reconnecting, down: t.down }
 }
 
-/// How many offers are waiting to be taken: connected slots nobody has
-/// borrowed, plus the down token if it is out.
+/// How many offers are waiting to be taken: connections nobody has borrowed,
+/// plus the down token if it is out.
 ///
 /// Stale the moment it is given, as every such count is. For tests and
-/// health checks, which wait for it to reach a number; nothing should
-/// branch on it.
+/// health checks, which wait for it to reach a number; nothing should branch
+/// on it. What it costs: one look at each slot's flag.
 pub fn idle_count(pool: Pool) -> Int {
-  Channel::depth(pool.idle)
-}
-
-/// An offer taken by hand with `take_offer`, to be given back once with
-/// `give_offer_back`.
-///
-/// **Only `take_offer` can make one, and it goes back only where it came
-/// from.** That is what keeps the pool's two rules out of a caller's reach:
-/// every slot in `idle` is one this pool's serving fibers made, and there is
-/// never more than one down token. An `Offer` put into some other `idle` --
-/// forged, or taken from a second pool -- breaks both: that pool lends a slot
-/// its own fibers do not serve, and its `idle`, which has room for exactly
-/// its own slots and one token, fills, so that `give_back`'s send of the
-/// token waits for ever. The pool the offer was taken from loses the slot
-/// the same way.
-pub type HeldOffer = {
-  offer: Offer,
-  /// The `idle` it was taken from, which is the only place it goes back to.
-  home: Channel<Offer>,
-  /// Whether this has been given back, so a second give-back of the same
-  /// value puts nothing in `idle`.
-  returned: Shared<Bool>,
-};
-
-/// Takes the next offer out of `idle`, waiting while there is none, and
-/// **does not start a lease**: no check is run, and nothing is lent until it
-/// comes back through `give_offer_back`. `None` once the pool is closed.
-///
-/// For tests of the lending protocol, which hold a slot to make a caller
-/// wait. What it costs is what `with_db` with a body that never returns
-/// costs: a slot never given back is out of the pool for good, and the down
-/// token never given back leaves every later `with_db` waiting, because no
-/// second token is ever made. `with_db` is the way to borrow.
-pub fn take_offer(pool: Pool) -> Option<HeldOffer> {
-  match Channel::receive(pool.idle) {
-    Option::None => Option::None,
-    Option::Some(offer) =>
-      Option::Some({ offer: offer, home: pool.idle, returned: Shared::of(false) }),
-  }
-}
-
-/// Puts an offer taken with `take_offer` back into the pool it was taken
-/// from, **once**: a second call with the same `HeldOffer` does nothing.
-///
-/// **It takes no pool**, so there is no other pool to hand it to. The one it
-/// goes back to was recorded when it was taken.
-///
-/// The send cannot wait: that `idle` has room for every one of its slots and
-/// one token, this offer is one of them, and it is not in there. Into a pool
-/// that has been closed it is ended the way `close` ends one it drains: a
-/// slot's request channel is closed, which is what its serving fiber is
-/// waiting for, and `close` is waiting for that fiber. A token is dropped.
-pub fn give_offer_back(taken: HeldOffer) -> () {
-  let first = Shared::modify(taken.returned, fn done => { state: true, result: !done });
-  if first && !Channel::send(taken.home, taken.offer) {
-    match taken.offer {
-      Offer::Slot(requests, _) => Channel::close(requests),
-      Offer::Down => (),
+  let mut n = if Shared::get(pool.token_idle) { 1 } else { 0 };
+  let mut rest = pool.slots;
+  let mut going = true;
+  while going {
+    match rest {
+      List::Nil => going = false,
+      List::Cons(here, tail) => {
+        if Shared::get(here) { n = n + 1 };
+        rest = tail
+      },
     }
-  }
+  };
+  n
 }
 
 /// Runs `body` with a leased connection installed as the `db: Db` capability.
 ///
 /// Waits while every connection is busy or reconnecting. The connection goes
 /// back **when this call returns**, however it returns -- normally, raising,
-/// or canceled -- because the lease is registered with a region this
+/// canceled or aborted -- because the lease is registered with a region this
 /// function opens, before anything after the receive can be canceled.
+///
+/// **The connection is checked before the body runs**, on this fiber: one
+/// whose socket the server has closed, or that is inside a transaction, is
+/// sent to its slot to be reconnected and never lent, and the next one is
+/// taken.
 ///
 /// **Answers `Err(Disconnected(reason))` at once when no connection is live
 /// or reconnecting**, with the reason the last attempt failed, rather than
@@ -397,7 +395,8 @@ pub fn give_offer_back(taken: HeldOffer) -> () {
 ///
 /// The `db` requirement is handled here and removed from the caller's row. Any
 /// other requirements and raised failures on `body` pass straight through.
-/// The `Result` is only about obtaining the lease.
+/// The `Result` is only about obtaining the lease. The `db` the body is given
+/// stays on this fiber: a fiber the body spawns takes a lease of its own.
 pub fn with_db<A, 'ef, 'er>(
   pool: Pool,
   body: () -> A with { 'ef | db: Db } raises 'er,
@@ -431,38 +430,107 @@ fn one_try<A, 'ef, 'er>(
   with 'ef
   raises 'er
 {
-  match Channel::receive(pool.idle) {
-    Option::None => Tried::Refused(DbError::Disconnected("the pool is closed")),
-    // **The give-back is registered before anything in this function can
-    // poll.** A receive that returns a value has handed the connection to
-    // this fiber, and from then on only a registered finalizer can bring it
-    // back. `Region::open` and `Region::defer` are not cancellation points;
-    // `scoped`, `acquire` and `Scope::defer` are all entered through a poll,
-    // and a cancel taken at any of them unwound holding a connection nobody
-    // else knew about. One such cancel costs the pool a connection, for good,
-    // and when the last one goes every `with_db` and `close` waits for ever.
-    //
-    // The region is this arm's, so the lease ends when the arm does: before
-    // a slot that failed its `Check` is replaced by another, not after.
-    Option::Some(offer) => {
-      let lease = Region::open();
-      Region::defer(lease, returner(pool.idle, pool.tally, offer));
-      match offer {
-        Offer::Slot(requests, passed) => match fitness(requests) {
-          Fitness::Fit => {
-            Shared::set(passed, true);
-            Tried::Done(body()! with { db: over(requests) })
-          },
-          Fitness::Unfit => Tried::Again,
-          // A lease's channel is closed only by its own give-back, and by
-          // `close` while it sits in `idle`; neither can have happened yet.
-          // Trying again meets the closed `idle` if the pool is closing.
-          Fitness::Gone => Tried::Again,
-        },
-        Offer::Down => answer_down(pool),
+  // **Received straight into the holder, with no binding between.** The
+  // holder is then the only thing on this fiber that holds the offer, which
+  // is what lets the give-back take it out and send it on.
+  let held = holding(Handoff::receive(pool.idle));
+  // **The give-back is registered before anything in this function can
+  // poll**; see the module doc. The region is this call's, so the lease ends
+  // when it returns: before a connection that failed its check is replaced by
+  // another, not after.
+  let lease = Region::open();
+  Region::defer(lease, returner(pool.idle, pool.token_idle, pool.tally, held));
+  match what(held, pool.token_idle) {
+    Offered::Nothing => Tried::Refused(DbError::Disconnected("the pool is closed")),
+    Offered::Token => answer_down(pool),
+    Offered::Lent => {
+      if fit(held) {
+        Tried::Done(run(held, body)!)
+      } else {
+        Tried::Again
       }
     },
   }
+}
+
+/// What a lease received, without holding any of it.
+type Offered =
+  | Nothing
+  | Token
+  | Lent;
+
+fn holding(got: Option<Lendable>) -> Held {
+  { got: got }
+}
+
+/// What `held` holds, and marks it as out of `idle`.
+fn what(held: Held, token_idle: Shared<Bool>) -> Offered {
+  match held.got {
+    Option::None => Offered::Nothing,
+    Option::Some(Lendable::Down) => {
+      Shared::set(token_idle, false);
+      Offered::Token
+    },
+    Option::Some(Lendable::Ready(loan)) => {
+      Shared::set(loan.here, false);
+      Offered::Lent
+    },
+  }
+}
+
+/// Whether the connection `held` holds can be lent: the check P-5 asks for,
+/// made on the borrower's fiber. One that fails is marked broken, so its
+/// give-back sends it home to be reconnected; one that passes marks its loan
+/// served, so a later break is not taken for a failed connection attempt.
+fn fit(held: Held) -> Bool {
+  match held.got {
+    Option::Some(Lendable::Ready(loan)) =>
+      if !mid_reply(loan.c) && still_open(loan.c) && !in_transaction(loan.c) {
+        loan.served = true;
+        true
+      } else {
+        forsake(loan.c);
+        false
+      },
+    Option::Some(Lendable::Down) => false,
+    Option::None => false,
+  }
+}
+
+/// Runs `body` over the connection `held` holds.
+fn run<A, 'ef, 'er>(held: Held, body: () -> A with { 'ef | db: Db } raises 'er) -> A
+  with 'ef
+  raises 'er
+{
+  match held.got {
+    Option::Some(Lendable::Ready(loan)) => body()! with { db: direct(loan.c) },
+    // Not reached: `one_try` runs this only for a connection, and only the
+    // give-back empties the holder.
+    Option::Some(Lendable::Down) => body()! with { db: refusing() },
+    Option::None => body()! with { db: refusing() },
+  }
+}
+
+/// A `Db` that answers everything `Disconnected`. Installed only on paths
+/// `one_try` does not take; a lease never runs a body without a connection.
+fn refusing() -> Db {
+  handler for Db {
+    query: fn (_sql, _values) => Result::Err(nothing_lent()),
+    execute: fn (_sql, _values) => Result::Err(nothing_lent()),
+    begin: fn () => Result::Err(nothing_lent()),
+    commit: fn () => Result::Err(nothing_lent()),
+    rollback: fn () => Result::Err(nothing_lent()),
+    depth: fn () => 0,
+    savepoint: fn _level => Result::Err(nothing_lent()),
+    release: fn _level => Result::Err(nothing_lent()),
+    rollback_to: fn _level => Result::Err(nothing_lent()),
+    broken: fn () => (),
+    query_each: fn (_sql, sets) => List::map(sets, fn _values => Result::Err(nothing_lent())),
+  }
+}
+
+fn nothing_lent() -> DbError {
+  DbError::Disconnected("no connection was lent")
 }
 
 /// A caller was handed the down token: the reason, or another try if a
@@ -475,16 +543,26 @@ fn one_try<A, 'ef, 'er>(
 /// and every later `with_db` would wait for ever. The give-back re-offers it
 /// under the rule this leaves in `tally.token`, and it runs however the
 /// caller stops.
+///
+/// A closing pool keeps the token, so every caller waiting in `with_db` is
+/// woken and answered.
 fn answer_down<A>(pool: Pool) -> Tried<A> {
   let keep = Shared::modify(pool.tally, fn t => {
-      let down = !t.closing && t.live + t.reconnecting == 0;
+      let down = t.closing || t.live + t.reconnecting == 0;
       {
         state: { live: t.live, reconnecting: t.reconnecting, down: t.down, last: t.last,
-          closing: t.closing, token: down },
+          closing: t.closing, token: down, running: t.running },
         result: down,
       }
     });
-  if keep { Tried::Refused(DbError::Disconnected(Shared::get(pool.tally).last)) } else { Tried::Again }
+  let t = Shared::get(pool.tally);
+  if !keep {
+    Tried::Again
+  } else if t.closing {
+    Tried::Refused(DbError::Disconnected("the pool is closed"))
+  } else {
+    Tried::Refused(DbError::Disconnected(t.last))
+  }
 }
 
 /// The give-back `with_db` registers, built outside `with_db`.
@@ -499,138 +577,275 @@ fn answer_down<A>(pool: Pool) -> Tried<A> {
 /// connection short for good, and at none every later `with_db` and `close`
 /// waited for ever. Built here, in a function that calls no function value,
 /// the lambda has no entry poll.
-///
-/// **Whether the lease is the down token is fixed here, from the offer's
-/// case, and never learned by trying a send.** A send that fails is followed
-/// by a cancellation check, and an aborted caller stops at it, so a give-back
-/// that branched on a send's answer never got as far as acting on it.
-fn returner(idle: Channel<Offer>, tally: Shared<Tally>, offer: Offer) -> () -> () {
-  fn () => give_back(idle, tally, offer)
+fn returner(idle: Handoff<Lendable>, token_idle: Shared<Bool>, tally: Shared<Tally>, held: Held) -> () -> () {
+  fn () => give_back(idle, token_idle, tally, held)
 }
 
 /// Ends a lease, in one step that cannot wait and cannot fail.
 ///
-/// **A slot's lease ends by closing its request channel.** The serving
-/// fiber answers whatever is still queued, reads the close as the end of the
-/// lease, and decides whether to lend the connection again or reconnect it.
+/// **Takes what the lease holds out of its holder first**, so the value in
+/// hand is the only reference to it and the send can give it away.
 ///
-/// A message on that channel would need room, and that is how leases were
-/// lost: a body whose own fibers each had a request queued could leave the
-/// channel full, an aborted fiber does not wait for room, and the dropped
-/// message left the serving fiber waiting for ever on a lease that had ended.
-/// No capacity is enough, because the number of fibers is the caller's.
-/// `Channel::close` needs no room, never waits and never gives up, and it is
-/// final: anything the lease's fibers send after it is refused, so none of
-/// it can reach the next lease, whose channel is a new one.
+/// A connection goes back to `idle` if it is fit for the next borrower and
+/// the pool is open; otherwise to its slot, which closes it and, unless the
+/// pool is closing, reconnects. Neither send can wait: `idle` has room for
+/// every connection and one token, and a slot's `home` has room for its one
+/// connection; the one being sent is in neither.
 ///
 /// The down token goes back into `idle` for the next caller while the pool
-/// still has nothing live or reconnecting -- the rule `answer_down` applies,
-/// and `tally.token` is where it left its decision. That send cannot wait
-/// either: `idle` has room for every slot and one token, and this token is
-/// not in it.
-fn give_back(idle: Channel<Offer>, tally: Shared<Tally>, offer: Offer) -> () {
-  match offer {
-    Offer::Slot(requests, _) => Channel::close(requests),
-    Offer::Down => {
-      let t = Shared::get(tally);
-      if t.token && !t.closing { Channel::send(idle, Offer::Down); () }
-    },
+/// has nothing live or reconnecting, or is closing -- the rule `answer_down`
+/// applies, and `tally.token` is where it left its decision.
+///
+/// **Whether it is the token is fixed by what was received, and never learned
+/// by trying a send.** A send that fails is followed by a cancellation check,
+/// and an aborted caller stops at it, so a give-back that branched on a
+/// send's answer never got as far as acting on it.
+fn give_back(idle: Handoff<Lendable>, token_idle: Shared<Bool>, tally: Shared<Tally>, held: Held) -> () {
+  let got = take_out(held);
+  match kind_of(got) {
+    Offered::Nothing => (),
+    Offered::Token =>
+      if Shared::get(tally).token {
+        Shared::set(token_idle, true);
+        Handoff::send(idle, Lendable::Down);
+        ()
+      },
+    Offered::Lent =>
+      if lendable(got) && !Shared::get(tally).closing {
+        mark_idle(got);
+        Handoff::send(idle, the_offer(got));
+        ()
+      } else {
+        send_home(the_offer(got))
+      },
   }
 }
 
-// --- the serving fiber -------------------------------------------------------
+/// Empties the holder and answers what it held.
+fn take_out(held: Held) -> Option<Lendable> {
+  let was = held.got;
+  held.got = Option::None;
+  was
+}
+
+fn kind_of(got: Option<Lendable>) -> Offered {
+  match got {
+    Option::None => Offered::Nothing,
+    Option::Some(Lendable::Down) => Offered::Token,
+    Option::Some(Lendable::Ready(_)) => Offered::Lent,
+  }
+}
+
+/// Whether the next borrower can have this connection from `idle` straight
+/// away: nothing has broken it, no reply is still arriving on it, and it is
+/// outside a transaction. A connection an `abort` left inside one would run
+/// the next borrower's statements in it; one left mid-reply would hand them
+/// the stopped caller's answer. Either goes to its slot instead, which reads
+/// what is still arriving and closes what cannot be lent, because the
+/// give-back must not wait.
+fn lendable(got: Option<Lendable>) -> Bool {
+  match got {
+    Option::Some(Lendable::Ready(loan)) =>
+      usable(loan.c) && !mid_reply(loan.c) && !in_transaction(loan.c),
+    Option::Some(Lendable::Down) => false,
+    Option::None => false,
+  }
+}
+
+fn mark_idle(got: Option<Lendable>) -> () {
+  match got {
+    Option::Some(Lendable::Ready(loan)) => Shared::set(loan.here, true),
+    Option::Some(Lendable::Down) => (),
+    Option::None => (),
+  }
+}
+
+/// The offer out of its `Option`, consuming it, so the offer is the only
+/// thing holding the loan by the time it is sent. The caller checked it is
+/// there.
+fn the_offer(got: Option<Lendable>) -> Lendable {
+  match got {
+    Option::Some(offer) => offer,
+    // Not reached; see above.
+    Option::None => Lendable::Down,
+  }
+}
+
+/// Sends a connection to its slot, which reads any reply still arriving on
+/// it and then lends it again or closes it. The token has no slot and is
+/// dropped.
+///
+/// **The offer is passed whole, and only its home is looked up**, so the
+/// send's argument is this function's own parameter at its last use and
+/// nothing else holds it: a loan taken out of a `match` arm would still be
+/// held by the value matched on, and the send would trap.
+fn send_home(offer: Lendable) -> () {
+  match home_of(offer) {
+    Option::None => (),
+    Option::Some(home) => { Handoff::send(home, offer); () },
+  }
+}
+
+fn home_of(offer: Lendable) -> Option<Handoff<Lendable>> {
+  match offer {
+    Lendable::Ready(loan) => Option::Some(loan.home),
+    Lendable::Down => Option::None,
+  }
+}
+
+// --- the slot's fiber --------------------------------------------------------
 
 /// One slot, for the pool's whole life: connect, lend, reconnect.
 fn slot(
   settings: Settings,
   plan: Reconnect,
-  idle: Channel<Offer>,
+  idle: Handoff<Lendable>,
+  token_idle: Shared<Bool>,
+  here: Shared<Bool>,
   tally: Shared<Tally>,
 ) -> () {
+  // Room for the one connection this slot owns.
+  let home: Handoff<Lendable> = Handoff::bounded(1);
+  // **Counted out however this fiber ends**, so a slot stopped by its crew
+  // still lets `close` see it has finished.
+  let done = Region::open();
+  Region::defer(done, finisher(tally));
   with { clock: Clock::real(), random: Random::real() } {
     let tries: Tries = { began: clock.monotonic_millis(), attempts: 0, phase: Phase::Reconnecting };
     let mut going = true;
     while going {
-      match reconnect(settings, plan, idle, tally, tries) {
-        Option::None => going = false,
-        Option::Some(c) => {
-          let opened = clock.monotonic_millis();
-          let lent = lend(c, idle, tally);
-          // **Closed before anything else is tried**, and never read again:
-          // whatever the server was still sending on it goes with it.
-          hang_up(c);
-          match lent {
-            Lent::Closing => going = false,
-            Lent::Served => {
-              moved(tally, idle, Phase::Live, Phase::Reconnecting);
-              tries.began = clock.monotonic_millis();
-              tries.attempts = 0;
-              tries.phase = Phase::Reconnecting
-            },
-            Lent::Spoiled => {
-              // **The time it sat open is not time spent reconnecting.** A
-              // connection nobody leased for longer than the fast phase, then
-              // closed by a server restart, would otherwise find the phase
-              // already over and take its slot straight to `down`.
-              tries.began = tries.began + (clock.monotonic_millis() - opened);
-              moved(tally, idle, Phase::Live, tries.phase);
-              remember(tally, spoiled());
-              if !back_off(plan, idle, tally, tries) { going = false }
-            },
-          }
-        },
+      let got = reconnect(settings, plan, idle, token_idle, tally, tries);
+      if is_none(got) {
+        going = false
+      } else {
+        let opened = clock.monotonic_millis();
+        // Taken out of its `Option` by a call, so nothing in this frame
+        // still holds the connection when `lend` gives it away.
+        match lend(offer_of(got, home, here), home, here, idle, tally) {
+          Ended::Closing => going = false,
+          Ended::Served => {
+            moved(tally, idle, token_idle, Phase::Live, Phase::Reconnecting);
+            tries.began = clock.monotonic_millis();
+            tries.attempts = 0;
+            tries.phase = Phase::Reconnecting
+          },
+          Ended::Spoiled => {
+            // **The time it sat open is not time spent reconnecting.** A
+            // connection nobody leased for longer than the fast phase, then
+            // closed by a server restart, would otherwise find the phase
+            // already over and take its slot straight to `down`.
+            tries.began = tries.began + (clock.monotonic_millis() - opened);
+            moved(tally, idle, token_idle, Phase::Live, tries.phase);
+            remember(tally, spoiled());
+            if !back_off(plan, idle, token_idle, tally, tries) { going = false }
+          },
+        }
       }
     };
+  };
+}
+
+fn is_none<A>(o: Option<A>) -> Bool {
+  match o { Option::None => true, Option::Some(_) => false }
+}
+
+/// The connection out of `got`, as an offer, consuming `got`: by the time
+/// this returns, the offer is the only thing holding the connection.
+fn offer_of(got: Option<Connection>, home: Handoff<Lendable>, here: Shared<Bool>) -> Lendable {
+  match got {
+    Option::Some(c) => Lendable::Ready({ c: c, home: home, here: here, served: false }),
+    // Not reached: `slot` looked first.
+    Option::None => Lendable::Down,
   }
+}
+
+/// The slot's end, built in a function that calls no function value, so it
+/// has no entry poll for a cancellation to stop it at.
+fn finisher(tally: Shared<Tally>) -> () -> () {
+  fn () => finished(tally)
+}
+
+fn finished(tally: Shared<Tally>) -> () {
+  Shared::update(tally, fn t => {
+      live: t.live, reconnecting: t.reconnecting, down: t.down, last: t.last,
+      closing: t.closing, token: t.token, running: t.running - 1,
+    });
+  ()
 }
 
 fn spoiled() -> DbError {
   DbError::Disconnected("the connection failed its check before it could be lent")
 }
 
-/// Lends `c` until its connection breaks or the pool closes, and says which,
-/// and whether any lease on it passed its check.
+/// Puts a connection into `idle`, and each time it comes home, either lends
+/// it again or closes it and says why: the pool is closing, or it broke,
+/// after or before any lease on it passed its check.
 ///
-/// **Every lease gets a request channel of its own**, made here and offered
-/// in `idle`, and the lease is over when that channel is closed and drained.
-/// A fresh channel per lease is what makes the close safe to use as the
-/// signal: a fiber from an old lease that still holds its `db` sends to a
-/// closed channel and is refused, and nothing it sends can be read as a
-/// request of the next lease. The same close is how `close` ends a slot that
-/// is waiting in `idle`, so the two are told apart by `tally.closing`, which
-/// `close` sets before it closes anything.
+/// **A connection that comes home with a reply still arriving is read to the
+/// end of it here**, and lent again if that leaves it healthy. Its borrower
+/// was stopped while it waited -- a transaction canceled in its `ROLLBACK`,
+/// say -- and a stopped borrower cannot wait for the rest; this fiber can,
+/// because nothing stops it but `close`. Closing it instead would cost a
+/// reconnect per stopped borrower. What it costs: while the server is still
+/// sending, the slot waits, and so does a `close` that waits for the slot.
 ///
-/// A lease's borrower says, through the offer, whether the lease's check
-/// passed. A connection that breaks before any has is `Spoiled`: it never
-/// did the one thing a connection is for, and counts as a failed attempt.
-/// What it costs: a borrower stopped between the check and saying so makes
-/// a healthy connection's next break count as one failed attempt -- one
-/// backoff delay, judged by the time the slot has spent reconnecting, not
-/// the time the connection spent open.
-fn lend(c: Connection, idle: Channel<Offer>, tally: Shared<Tally>) -> Lent {
-  let mut ended = Lent::Closing;
-  let mut served = false;
-  let mut lending = true;
-  while lending {
-    // Room for one waiting request: a connection answers one at a time, and
-    // a lease with more fibers than that makes the rest wait for their turn.
-    let requests: Channel<Request> = Channel::bounded(1);
-    let passed = Shared::of(false);
-    if !Channel::send(idle, Offer::Slot(requests, passed)) {
-      // `idle` is closed: the pool is closing.
-      lending = false
-    } else {
-      serve_lease(c, requests);
-      if Shared::get(passed) { served = true };
-      if closing(tally) {
-        lending = false
-      } else if !usable(c) {
-        ended = if served { Lent::Served } else { Lent::Spoiled };
-        lending = false
-      }
+/// **The connection is closed here, by the slot, and only here**, and never
+/// read again: whatever the server was still sending on it goes with it.
+fn lend(first: Lendable, home: Handoff<Lendable>, here: Shared<Bool>, idle: Handoff<Lendable>, tally: Shared<Tally>) -> Ended {
+  Shared::set(here, true);
+  Handoff::send(idle, first);
+  let mut result: Option<Ended> = Option::None;
+  while is_none(result) {
+    let got = Handoff::receive(home);
+    match returned(got, tally) {
+      Option::None => {
+        Shared::set(here, true);
+        Handoff::send(idle, the_offer(got));
+        ()
+      },
+      Option::Some(why) => {
+        hang_up_offer(got);
+        result = Option::Some(why)
+      },
     }
   };
-  ended
+  match result {
+    Option::Some(why) => why,
+    // Not reached: the loop leaves only with an answer.
+    Option::None => Ended::Closing,
+  }
+}
+
+/// What a connection that came home means, once any reply still arriving on
+/// it has been read: `None` to lend it again, or why its slot closes it.
+fn returned(got: Option<Lendable>, tally: Shared<Tally>) -> Option<Ended> {
+  match got {
+    Option::Some(Lendable::Ready(loan)) => {
+      let _ = settle(loan.c);
+      let fine = usable(loan.c) && !in_transaction(loan.c);
+      if fine && !closing(tally) {
+        Option::None
+      } else if fine {
+        Option::Some(Ended::Closing)
+      } else if loan.served {
+        Option::Some(Ended::Served)
+      } else {
+        Option::Some(Ended::Spoiled)
+      }
+    },
+    // Not reached: only connections are sent home, and `home` is never
+    // closed.
+    Option::Some(Lendable::Down) => Option::Some(Ended::Closing),
+    Option::None => Option::Some(Ended::Closing),
+  }
+}
+
+fn hang_up_offer(got: Option<Lendable>) -> () {
+  match got {
+    Option::Some(Lendable::Ready(loan)) => hang_up(loan.c),
+    Option::Some(Lendable::Down) => (),
+    Option::None => (),
+  }
 }
 
 /// Connects, on the fast schedule and then the slow interval. `None` when the
@@ -638,7 +853,8 @@ fn lend(c: Connection, idle: Channel<Offer>, tally: Shared<Tally>) -> Lent {
 fn reconnect(
   settings: Settings,
   plan: Reconnect,
-  idle: Channel<Offer>,
+  idle: Handoff<Lendable>,
+  token_idle: Shared<Bool>,
   tally: Shared<Tally>,
   tries: Tries,
 ) -> Option<Connection>
@@ -662,14 +878,14 @@ fn reconnect(
         },
         Result::Err(why) => {
           remember(tally, why);
-          if !back_off(plan, idle, tally, tries) { going = false }
+          if !back_off(plan, idle, token_idle, tally, tries) { going = false }
         },
       }
     }
   };
   match outcome {
     Option::Some(c) => {
-      moved(tally, idle, tries.phase, Phase::Live);
+      moved(tally, idle, token_idle, tries.phase, Phase::Live);
       Option::Some(c)
     },
     Option::None => Option::None,
@@ -683,7 +899,13 @@ fn reconnect(
 ///
 /// The one place a failure is counted, for a connect that failed and a
 /// connection that failed its check alike, so the two cannot drift apart.
-fn back_off(plan: Reconnect, idle: Channel<Offer>, tally: Shared<Tally>, tries: Tries) -> Bool
+fn back_off(
+  plan: Reconnect,
+  idle: Handoff<Lendable>,
+  token_idle: Shared<Bool>,
+  tally: Shared<Tally>,
+  tries: Tries,
+) -> Bool
   with { clock: Clock, random: Random }
 {
   tries.attempts = tries.attempts + 1;
@@ -698,7 +920,7 @@ fn back_off(plan: Reconnect, idle: Channel<Offer>, tally: Shared<Tally>, tries: 
         Option::Some(at) => Option::Some(at - now),
         Option::None => {
           tries.phase = Phase::Down;
-          moved(tally, idle, Phase::Reconnecting, Phase::Down);
+          moved(tally, idle, token_idle, Phase::Reconnecting, Phase::Down);
           slow_wait(plan)
         },
       }
@@ -718,12 +940,13 @@ fn slow_wait(plan: Reconnect) -> Option<Int> with { random: Random } {
   }
 }
 
-/// How long one slice of a reconnect's wait is.
+/// How long one slice of a wait is.
 ///
 /// **What this bounds: how long `close` waits for a slot that is between
-/// attempts.** The runtime has no receive with a deadline, so a slot cannot
-/// sleep on something `close` could wake; it sleeps in slices and looks at
-/// the pool between them. The cost is a wake every slice per waiting slot.
+/// attempts**, and how often `close` looks at the pool while a lease it is
+/// waiting for is out. The runtime has no receive with a deadline, so
+/// neither can sleep on something that would wake it; each sleeps in slices
+/// and looks between them. The cost is a wake every slice per waiting fiber.
 fn slice() -> Int { 25 }
 
 /// Waits `millis`, or less if the pool closes. `false` if it closed.
@@ -758,13 +981,13 @@ fn remember(tally: Shared<Tally>, why: DbError) -> () {
   };
   Shared::update(tally, fn t => {
       live: t.live, reconnecting: t.reconnecting, down: t.down, last: text,
-      closing: t.closing, token: t.token,
+      closing: t.closing, token: t.token, running: t.running,
     });
 }
 
 /// Moves one slot from `from` to `to`, and puts the down token into `idle`
 /// when that leaves nothing live or reconnecting.
-fn moved(tally: Shared<Tally>, idle: Channel<Offer>, from: Phase, to: Phase) -> () {
+fn moved(tally: Shared<Tally>, idle: Handoff<Lendable>, token_idle: Shared<Bool>, from: Phase, to: Phase) -> () {
   let token_now = Shared::modify(tally, fn t => {
       let live = t.live + step(Phase::Live, from, to);
       let reconnecting = t.reconnecting + step(Phase::Reconnecting, from, to);
@@ -772,12 +995,13 @@ fn moved(tally: Shared<Tally>, idle: Channel<Offer>, from: Phase, to: Phase) -> 
       let wanted = !t.closing && !t.token && live + reconnecting == 0;
       {
         state: { live: live, reconnecting: reconnecting, down: down, last: t.last,
-          closing: t.closing, token: t.token || wanted },
+          closing: t.closing, token: t.token || wanted, running: t.running },
         result: wanted,
       }
     });
   if token_now {
-    Channel::send(idle, Offer::Down);
+    Shared::set(token_idle, true);
+    Handoff::send(idle, Lendable::Down);
     ()
   };
 }
@@ -796,40 +1020,62 @@ fn same(a: Phase, b: Phase) -> Bool {
   }
 }
 
-/// Stops every serving fiber and waits for them.
+// --- closing -----------------------------------------------------------------
+
+/// Stops every slot and waits for them.
 ///
-/// **Prompt, including for slots that are reconnecting.** The pool is marked
-/// closing first; a slot between attempts sees that within one `slice`, a slot
-/// that finishes opening a connection after it hangs up at once, and the idle
-/// ones are ended by closing their request channels. A connection somebody is
-/// using is not closed underneath them: its lease ends when their `with_db`
-/// returns, and its serving fiber, finding `idle` closed, hangs up then. So
-/// waiting on the crew is what makes this a shutdown rather than a request
-/// to shut down.
+/// **Every connection in `idle` is taken and sent home to be closed, and every
+/// caller waiting in `with_db` is answered.** The pool is marked closing and
+/// the down token put into `idle` if it is not out already; a waiter that
+/// receives it answers "the pool is closed" and its give-back passes it on,
+/// and a lease that ends sends its connection home rather than to `idle`.
+/// `close` takes what it finds in `idle` until every slot has finished,
+/// putting the token back each time it takes it, and a slot between attempts
+/// sees the close within one `slice`. A connection somebody is using is not
+/// closed underneath them: its lease ends when their `with_db` returns.
 ///
+/// What it costs while a lease is out: a turn of the token every `slice`.
 /// What it cannot cut short: a connection attempt already under way. One in
 /// the startup exchange ends within the plan's `handshake` bound, when its
 /// read gives up; one still inside the operating system's TCP `connect` ends
 /// when that does, which for an address that drops packets is the system's
 /// connect timeout -- minutes on Linux.
 pub fn close(pool: Pool) -> () {
-  Shared::update(pool.tally, fn t => {
-      live: t.live, reconnecting: t.reconnecting, down: t.down, last: t.last,
-      closing: true, token: t.token,
+  let put = Shared::modify(pool.tally, fn t => {
+      state: { live: t.live, reconnecting: t.reconnecting, down: t.down, last: t.last,
+        closing: true, token: true, running: t.running },
+      result: !t.token,
     });
-  Channel::close(pool.idle);
-  let mut going = true;
-  while going {
-    match Channel::receive(pool.idle) {
-      Option::None => going = false,
-      Option::Some(Offer::Slot(requests, _)) => Channel::close(requests),
-      Option::Some(Offer::Down) => (),
-    }
+  if put {
+    Shared::set(pool.token_idle, true);
+    Handoff::send(pool.idle, Lendable::Down);
+    ()
+  };
+  with { clock: Clock::real() } {
+    while Shared::get(pool.tally).running > 0 {
+      let held = holding(Handoff::receive(pool.idle));
+      match what(held, pool.token_idle) {
+        // Not reached: `idle` is never closed.
+        Offered::Nothing => clock.sleep(slice()),
+        Offered::Token => {
+          put_token_back(pool, held);
+          clock.sleep(slice())
+        },
+        Offered::Lent => send_home(the_offer(take_out(held))),
+      }
+    };
   };
   // **The count is discarded here, and only here.** `Fibers::wait` answers
-  // how many children ended with an error, and this is a shutdown: the serving
-  // fibers were stopped on purpose a few lines above, by closing the channels
-  // they were waiting on. A pool that raised on the way out would be reporting
-  // its own request to stop as a fault, and there is nobody left to tell.
+  // how many children ended with an error, and this is a shutdown: the slots
+  // were stopped on purpose above. A pool that raised on the way out would be
+  // reporting its own request to stop as a fault, and there is nobody left
+  // to tell.
   let _stopped = Fibers::wait(pool.crew);
+}
+
+fn put_token_back(pool: Pool, held: Held) -> () {
+  let _ = take_out(held);
+  Shared::set(pool.token_idle, true);
+  Handoff::send(pool.idle, Lendable::Down);
+  ()
 }

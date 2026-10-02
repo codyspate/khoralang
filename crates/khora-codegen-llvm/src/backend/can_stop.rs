@@ -151,6 +151,7 @@ fn is_blocking_owner(name: &str) -> bool {
     name == crate::runtime::FIBER_TYPE
         || name == crate::runtime::FIBERS_TYPE
         || name == crate::runtime::CHANNEL_TYPE
+        || name == crate::runtime::HANDOFF_TYPE
 }
 
 /// Whether `owner` is a type the backend implements operations for, as

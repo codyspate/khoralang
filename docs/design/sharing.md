@@ -148,6 +148,34 @@ keeping the mark for life (leaves the field race), or making a region's release
 wait for every fiber that deferred into it (a join at every block end) — are
 weighed in the design round `finalizer-sharing`.
 
+**`Db` stays on its fiber too** (owner decision P-9, from the design round
+`perf-region`). `khora_types::DB_EFFECT` joins `Region` and `Scope` in
+`stays_on_its_fiber`, so a `Db` is not shareable, a `Db` handler may capture
+a `mut` record (the lent connection), and every refusal names the rewrite:
+take a lease in the spawned fiber, `Fiber::spawn(fn () => with_db(pool,
+work))`. A spawn's refusal of `db` points at the use inside the fiber, not at
+the spawn, because the capture is usually implicit (a call that needs `db`)
+and the spawn's lambda does not contain the word; the spawn's line and column
+go in the sentence.
+
+Why: the lending pool gives the borrower's fiber the connection itself over
+a `Handoff`, instead of serving every statement from a fiber of its own. On
+the design round's prototype that removed 7k instructions a statement and
+14k a `with_db`, and took queries20 from 0.95× to 1.08× of Go. The driver writes the connection's `mut`
+fields on every statement, so a second fiber on one lease counted and wrote
+objects the first had made. That is the S3 class, and the debug owner check
+trapped on it ("object made on fiber 4 was counted on fiber 5"). Serializing
+the statements with a token does not help, since what they store into the
+connection is still counted by two fibers. So the rule is "`db` stays on its
+fiber", not "`db` is serialized".
+
+What it costs: fan-out inside one lease. Measured over every `khora.toml` in
+the tree, 0 of 16 packages were affected. Three test programs were affected, all
+in `crates/khora-codegen-llvm/tests/postgres.rs`, and they are refusal tests
+now. The rule is by name, like `Region`'s: a test double for `Db` that holds
+no connection is held to it as well, and so is a user's own effect called
+`Db`, whose refusal says the name is why.
+
 **The assertion has to travel as far as the type does**, and getting that wrong
 is invisible in the module that wrote it. An impl arrives in another file two
 ways: with its trait, or with its type. Neither fires for a type nobody named —

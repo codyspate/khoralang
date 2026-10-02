@@ -210,6 +210,7 @@ mod entry;
 mod exports;
 mod functions;
 mod glue;
+mod handoff;
 mod inline;
 use inline::Adjust;
 mod header;

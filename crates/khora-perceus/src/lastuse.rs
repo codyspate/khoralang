@@ -84,6 +84,16 @@ impl<'a> Planner<'a> {
             for releases in self.plan.drops.values_mut() {
                 releases.retain(|local| !taken.contains(local));
             }
+        } else {
+            // **A `!` can leave between an arm's head and the read that hands
+            // its binding on**, and the code generator does not ask `!` the
+            // question it asks a cancellation point. So every take in a body
+            // that unwinds counts as held across one: a `match` arm then keeps
+            // its release of what it bound, and the take clears the slot, as
+            // a block's release already works here. What it costs is one
+            // release of a null slot at the arm's end.
+            let taken: Vec<LocalId> = self.plan.moved.iter().copied().collect();
+            self.plan.held_across.extend(taken);
         }
         self.plan.drops.retain(|_, releases| !releases.is_empty());
     }
@@ -184,6 +194,15 @@ impl<'a> Planner<'a> {
                 }
                 if arms.iter().any(|arm| arm.guard.is_some()) {
                     self.holding_at_a_stop(&live);
+                }
+                // **Backwards, an arm's bindings go out of scope at its
+                // pattern**, as a `let`'s do at the `let`. Left live, a
+                // `match` in a loop carried them round the back edge, so the
+                // read that hands one on found it wanted by the next turn and
+                // copied: the call got a count of 2 where the arm held the
+                // only reference.
+                for local in &bound {
+                    live.remove(local);
                 }
                 self.live_before(scrutinee, &live)
             }
@@ -495,23 +514,7 @@ impl<'a> Planner<'a> {
     /// consumes nothing — releasing at the head would free a value that arm is
     /// about to use, and releasing at the end is what the block already does.
     pub(super) fn across_arms(&mut self, arms: &[ExprId], arm_bound: &[LocalId], after: &Live) -> Live {
-        if self.unwinds {
-            let mut live = Live::new();
-            for arm in arms {
-                live.extend(self.reads_in(*arm));
-            }
-            live.extend(after.iter().copied());
-            return live;
-        }
-        let before: Vec<Live> = arms
-            .iter()
-            .map(|arm| {
-                let taken_before = self.plan.moved.clone();
-                let live = self.live_before(*arm, after);
-                let _ = taken_before;
-                live
-            })
-            .collect();
+        let before: Vec<Live> = arms.iter().map(|arm| self.live_before(*arm, after)).collect();
 
         // What each arm did with each binding, worked out from the reads it
         // holds rather than from the pass above — the pass shares one `moved`
@@ -551,7 +554,16 @@ impl<'a> Planner<'a> {
             // loop body, so no branch inside one ever had anything to settle.
             //
             // Every arm either takes it, or does not touch it at all.
-            let settled = !after.contains(&local)
+            //
+            // **And, in a body that can unwind, only for a binding the arms
+            // introduce themselves** (excluded above, so none reaches here).
+            // That is the case a hand-off needs. A binding from outside the
+            // branch keeps its copies there, as it always has: settling it
+            // would put an arm-head release beside the block's own, and
+            // whether the slot clearing makes that pair sound on every path
+            // is a question nothing here has tested.
+            let settled = !self.unwinds
+                && !after.contains(&local)
                 && takes
                     .iter()
                     .zip(&uses)

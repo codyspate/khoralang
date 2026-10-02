@@ -103,6 +103,9 @@ pub const SHARED_TYPE: &str = "Shared";
 /// The bounded channel. `docs/design/channels.md`.
 pub const CHANNEL_TYPE: &str = "Channel";
 
+/// The queue that gives values away. `std::core::Handoff`.
+pub const HANDOFF_TYPE: &str = "Handoff";
+
 /// The certified-closure wrapper, which is a closure and nothing else.
 pub const SHARED_FN_TYPE: &str = khora_types::SHARED_FN_TYPE;
 
@@ -265,6 +268,20 @@ pub struct Runtime<'ctx> {
     pub channel_depth: FunctionValue<'ctx>,
     /// `void khora_channel_release(void *channel)`, a `drop_fields` callback.
     pub channel_release: FunctionValue<'ctx>,
+    /// `void *khora_handoff_open(int64_t capacity, bool boxed, const HandoffType *root)`
+    ///
+    /// A hand-off is a channel's queue with its own send and receive, so its
+    /// `close`, `depth` and release are the channel's entries.
+    pub handoff_open: FunctionValue<'ctx>,
+    /// `bool khora_handoff_send(void *handoff, uint64_t value)`
+    pub handoff_send: FunctionValue<'ctx>,
+    /// `bool khora_handoff_receive(void *handoff, uint64_t *out)`
+    pub handoff_receive: FunctionValue<'ctx>,
+    /// `void khora_handoff_visit(void *walk, void *child, const HandoffType *type)`,
+    /// called by hand-off glue for each field that holds a reference.
+    pub handoff_visit: FunctionValue<'ctx>,
+    /// `void khora_handoff_elements(void *walk, void *array, void (*each)(void *, void *))`
+    pub handoff_elements: FunctionValue<'ctx>,
     /// `void *khora_fiber_spawn(void *body, void (*glue)(void *),
     ///                            uint32_t (*call)(const void *, void *, uint64_t *),
     ///                            void *plain, bool boxed, void (*value_glue)(void *),
@@ -513,6 +530,26 @@ impl<'ctx> Runtime<'ctx> {
             channel_release: declare(
                 "khora_channel_release",
                 void.fn_type(&[ptr.into()], false),
+            ),
+            handoff_open: declare(
+                "khora_handoff_open",
+                ptr.fn_type(&[i64t.into(), ctx.bool_type().into(), ptr.into()], false),
+            ),
+            handoff_send: declare(
+                "khora_handoff_send",
+                ctx.bool_type().fn_type(&[ptr.into(), i64t.into()], false),
+            ),
+            handoff_receive: declare(
+                "khora_handoff_receive",
+                ctx.bool_type().fn_type(&[ptr.into(), ptr.into()], false),
+            ),
+            handoff_visit: declare(
+                "khora_handoff_visit",
+                void.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+            ),
+            handoff_elements: declare(
+                "khora_handoff_elements",
+                void.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
             ),
             fiber_spawn: declare(
                 "khora_fiber_spawn",

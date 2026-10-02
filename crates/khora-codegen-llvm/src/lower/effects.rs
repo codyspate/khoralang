@@ -663,15 +663,17 @@ impl<'ctx> Lower<'_, 'ctx> {
         None
     }
 
-    /// What a `Channel<A>` carries, at this instantiation.
+    /// What a `Channel<A>` carries, at this instantiation. A `Handoff<A>` too:
+    /// the two are one queue to the backend.
     pub(super) fn channel_contents(
         &mut self,
         site: ExprId,
         channel: &Type,
         range: TextRange,
     ) -> Option<Type> {
+        let queue = |name: &str| name == runtime::CHANNEL_TYPE || name == runtime::HANDOFF_TYPE;
         if let Type::Adt { name, args, .. } = channel {
-            if name == runtime::CHANNEL_TYPE {
+            if queue(name) {
                 if let Some(first) = args.first() {
                     return Some(first.clone());
                 }
@@ -680,7 +682,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         // A `bounded` whose receiver type is not known, but whose result is:
         // the call site says `Channel<A>` even when the argument is a number.
         if let Type::Adt { name, args, .. } = &self.types.of(site).clone() {
-            if name == runtime::CHANNEL_TYPE {
+            if queue(name) {
                 if let Some(first) = args.first() {
                     return Some(first.clone());
                 }
@@ -691,6 +693,90 @@ impl<'ctx> Lower<'_, 'ctx> {
         // `fail` answers with a value.
         self.fail(format!("`{channel}` is not a channel"), range);
         None
+    }
+
+    /// `Handoff::bounded`, `send`, `receive` and `close`.
+    ///
+    /// A channel's shape with two differences, both in the runtime: the open
+    /// is handed a description of `A` (`backend/handoff.rs`), and the send
+    /// tests the value is held only by itself instead of marking it. `close`
+    /// is the channel's.
+    pub(super) fn handoff_intrinsic(
+        &mut self,
+        site: ExprId,
+        name: &str,
+        args: &[ExprId],
+        range: TextRange,
+    ) -> Flow<'ctx> {
+        match (name, args) {
+            ("bounded", [capacity]) => {
+                let held = self.channel_contents(site, &self.types.of(site).clone(), range)?;
+                let room = self.expr(*capacity)?;
+                let boxed =
+                    self.be.ctx.bool_type().const_int(u64::from(self.be.counted_across(&held)), false);
+                let root = self.be.handoff_root(&held);
+                let open = self.be.rt.handoff_open;
+                Some(
+                    self.be
+                        .builder
+                        .build_call(open, &[room.into(), boxed.into(), root.into()], "handoff")
+                        .expect("opening a hand-off")
+                        .try_as_basic_value()
+                        .basic()
+                        .expect("a hand-off is a value"),
+                )
+            }
+            ("send", [handoff, value]) => {
+                let handoff_ty = self.types.of(*handoff).clone();
+                let both = self.operands(&[*handoff, *value])?;
+                let (handle, held) = (both[0], both[1]);
+                let word = self.be.to_word(held);
+                let send = self.be.rt.handoff_send;
+                let answered = self
+                    .be
+                    .builder
+                    .build_call(send, &[handle.into(), word.into()], "given")
+                    .expect("giving a value away")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("a send answers");
+                // The value is the queue's now, as a channel send's is.
+                self.release_unless_lent(*handoff, handle, &handoff_ty);
+                self.canceled_empty_handed(answered.into_int_value(), range);
+                Some(answered)
+            }
+            ("receive", [handoff]) => {
+                let handoff_ty = self.types.of(*handoff).clone();
+                let held = self.channel_contents(site, &handoff_ty, range)?;
+                let handle = self.expr(*handoff)?;
+                let slot = self.entry_slot(self.be.ctx.i64_type().into(), "received");
+                let receive = self.be.rt.handoff_receive;
+                let arrived = self
+                    .be
+                    .builder
+                    .build_call(receive, &[handle.into(), slot.into()], "arrived")
+                    .expect("receiving from a hand-off")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("a receive answers")
+                    .into_int_value();
+                let word = self
+                    .be
+                    .builder
+                    .build_load(self.be.ctx.i64_type(), slot, "word")
+                    .expect("reading the received word")
+                    .into_int_value();
+                self.release_unless_lent(*handoff, handle, &handoff_ty);
+                self.canceled_empty_handed(arrived, range);
+                let answer_ty = self.types.of(site).clone();
+                self.option_of_word(arrived, word, &held, &answer_ty)
+            }
+            ("close", [_]) => self.channel_intrinsic(site, name, args, range),
+            _ => self.fail(
+                format!("`Handoff::{name}` is not a hand-off operation the backend knows"),
+                range,
+            ),
+        }
     }
 
     /// What a `Shared<A>` holds, at this instantiation.

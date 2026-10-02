@@ -48,7 +48,10 @@ impl<'a> Checker<'a> {
                 Literal::Char(_) => Type::Char,
                 Literal::Bool(_) => Type::Bool,
             },
-            Expr::Local(local) => self.locals.get(&local).cloned().unwrap_or(Type::Unknown),
+            Expr::Local(local) => {
+                self.note_capture_use(local, range);
+                self.locals.get(&local).cloned().unwrap_or(Type::Unknown)
+            }
             Expr::Path(resolution) => self.type_of_resolution(id, &resolution),
             Expr::Field { base, name } => self.infer_field(base, &name, range, "read"),
             Expr::Unary { op, operand } => match op {

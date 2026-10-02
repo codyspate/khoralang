@@ -500,3 +500,107 @@ fn a_field_write_whose_value_reads_the_binding_does_not_borrow() {
     assert_eq!(bases.len(), 1);
     assert!(!p.borrowed.contains(&bases[0]), "`s` is read by the value: {p:?}");
 }
+
+// --- an arm handing its binding on ------------------------------------------
+
+/// The reads of the local called `name` in `function`, in source order.
+fn reads_of(body: &khora_hir::body::Body, name: &str) -> Vec<khora_hir::body::ExprId> {
+    use khora_hir::body::Expr;
+    let mut found: Vec<_> = body
+        .exprs()
+        .filter_map(|(id, e)| match e {
+            Expr::Local(local) if body.local(*local).name == name => Some(id),
+            _ => None,
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+const HAND_ON: &str = "module m;\n\
+     pub type Bad = | Bad(Int);\n\
+     pub type Conn = | Open(Int, Conn) | End;\n\
+     pub type Opt = | Some(Conn) | None;\n\
+     fn consume(c: Conn) -> Int { 1 }\n\
+     fn receive(n: Int) -> Opt { Opt::None }\n\
+     fn check(n: Int) -> Int raises Bad { n }\n";
+
+/// **An arm hands its binding to a consuming call in a body that can
+/// unwind.** The arm copied `c` out of the payload at its head and released
+/// the scrutinee, so the arm's reference is the only one, and the call can
+/// take it. Copying it instead left the call a count of 2, which a hand-off's
+/// uniqueness test refuses.
+///
+/// Because a `!` can leave before the take, the arm keeps its release of `c`
+/// (`held_across`) and the take clears the slot, as every other binding in an
+/// unwinding body does.
+#[test]
+fn an_arm_binding_is_taken_in_a_body_that_can_unwind() {
+    let db = KhoraDatabase::new();
+    let (p, body) = plan_with_body(
+        &db,
+        &format!(
+            "{HAND_ON}fn f(o: Opt) -> Int raises Bad {{\n  \
+             let k = check(0)!;\n  \
+             match o {{ Opt::Some(c) => consume(c) + k, Opt::None => 0 }}\n}}\n"
+        ),
+        "f",
+    );
+    assert!(p.unwinds, "the `!` makes this an unwinding body: {p:?}");
+    let reads = reads_of(&body, "c");
+    assert_eq!(reads.len(), 1);
+    assert!(p.takes.contains(&reads[0]), "the call takes the arm's `c`: {p:?}");
+    assert!(!p.dups.contains(&reads[0]), "and does not copy it: {p:?}");
+    let c = p.moved.iter().copied().find(|l| body.local(*l).name == "c").expect("`c` moved");
+    assert!(p.held_across.contains(&c), "the arm keeps its release for a `!`: {p:?}");
+}
+
+/// **An arm binding is dead before its `match`**, as a `let` binding is
+/// before its `let`. Left live, a `match` in a loop carried the arm's `c` to
+/// the back edge, so the read at the call found it "needed later" and copied.
+#[test]
+fn an_arm_binding_is_taken_in_a_loop() {
+    let db = KhoraDatabase::new();
+    let (p, body) = plan_with_body(
+        &db,
+        &format!(
+            "{HAND_ON}fn f(n: Int) -> Int {{\n  \
+             let mut i = 0;\n  \
+             let mut total = 0;\n  \
+             while i < n {{\n    \
+             match receive(1) {{ Opt::Some(c) => total = total + consume(c), Opt::None => () }};\n    \
+             i = i + 1\n  \
+             }};\n  \
+             total\n}}\n"
+        ),
+        "f",
+    );
+    let reads = reads_of(&body, "c");
+    assert_eq!(reads.len(), 1);
+    assert!(p.takes.contains(&reads[0]), "the call takes the arm's `c`: {p:?}");
+    assert!(!p.dups.contains(&reads[0]), "and does not copy it: {p:?}");
+}
+
+/// **A binding from outside the branch is still the branch's to settle, and
+/// in an unwinding body it settles nothing.** Taking `s` in one arm would need
+/// a release at the head of the other, and the block also keeps its release
+/// there, so the read copies as before. Pins that the arm-binding rule above
+/// did not widen to this.
+#[test]
+fn an_outside_binding_is_not_taken_in_an_arm_of_an_unwinding_body() {
+    let db = KhoraDatabase::new();
+    let (p, body) = plan_with_body(
+        &db,
+        &format!(
+            "{HAND_ON}fn eat(s: String) -> Int {{ 1 }}\n\
+             fn f(o: Opt, s: String) -> Int raises Bad {{\n  \
+             let k = check(0)!;\n  \
+             match o {{ Opt::Some(_) => eat(s) + k, Opt::None => 0 }}\n}}\n"
+        ),
+        "f",
+    );
+    let reads = reads_of(&body, "s");
+    assert_eq!(reads.len(), 1);
+    assert!(p.dups.contains(&reads[0]), "`s` is copied: {p:?}");
+    assert!(p.arm_drops.is_empty(), "no arm releases it: {p:?}");
+}

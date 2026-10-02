@@ -280,6 +280,36 @@ and a release for nothing. `unowned` in `settle_last_uses` keeps the rest, and a
 `catch` arm's bindings entirely: a partial rollout of this is a use after free,
 so the two sets are complements by construction rather than by intention.
 
+**An arm that hands its binding on hands over the arm's reference.** With the
+payload copied and the scrutinee released at the head, the arm's copy is the
+only reference the arm has, so in `match receive(h) { Some(c) => send(other,
+c) }` the read of `c` at `send` is a take and `send` finds it held once. A
+send that gives a value away checks exactly that, by the count, and traps if
+it finds two. Two shapes copied at that read instead, and a hand-off pool is
+made of both:
+
+- **A body that can unwind** (a `!` anywhere in it) settled no branch at all,
+  so no read in any arm was ever a last use. The reason was a binding from
+  outside the branch, which would need a release at the head of the arms that
+  do not take it beside the block's own release. An arm's own bindings have
+  neither: no other arm has them, and no block lists them. So in such a body
+  the arms are walked and their own bindings taken, while bindings from
+  outside keep their copies as before. A `!` inside the arm can still leave
+  before the take, so the arm keeps its release of what it bound, and the take
+  clears the slot. That is the rule §1 already uses for a block in an
+  unwinding body, and it costs a release of a null slot at the arm's end.
+- **A `match` in a loop** left its arms' bindings live on the way out of the
+  pattern, where a `let` removes its binding. So the binding reached the back
+  edge, the next turn "wanted" it, and the read copied. Removing them at the
+  pattern is ordinary liveness.
+
+This does not change reuse. The scrutinee is released at the same point, by
+`khora_drop_reuse` where it was before, and the only difference is which
+reference the call receives. It does not make a count of 1 where there are two
+holders: if the scrutinee is read after the call, it still holds the payload
+there, and the call finds 2. `reuse::an_arm_hands_its_binding_on_at_a_consuming_call`
+checks all of these by whether the callee can rebuild its argument in place.
+
 Two paths needed saying out loud, and neither is the arm:
 
 - **A guard runs before any of it.** The `match` still pushes the scrutinee as a

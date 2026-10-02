@@ -64,7 +64,7 @@ const CHANNEL_TAG: u32 = 0;
 /// channel. Deciding it per call would let two senders disagree about whether
 /// the queue is lossy, which is not a thing a queue can be halfway.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum WhenFull {
+pub(crate) enum WhenFull {
     /// Wait for room. The default, and the only one with backpressure.
     Block,
     /// Refuse the value and say so.
@@ -127,7 +127,7 @@ struct Queue {
     closed: bool,
 }
 
-struct Channel {
+pub(crate) struct Channel {
     state: Mutex<Queue>,
     /// For threads waiting for room. One variable per side, so that a
     /// receive, which can only ever help a sender, never wakes a receiver.
@@ -136,8 +136,16 @@ struct Channel {
     arrived: Notified,
     capacity: usize,
     full: WhenFull,
-    boxed: bool,
-    glue: Option<extern "C" fn(*mut u8)>,
+    pub(crate) boxed: bool,
+    pub(crate) glue: Option<extern "C" fn(*mut u8)>,
+    /// What a `Handoff` knows about the type it carries, or `None` for a
+    /// `Channel`. See `crate::handoff`.
+    ///
+    /// **The one field the two queues differ by.** A hand-off is this queue
+    /// with a different send and receive; its waits, wakes, close and release
+    /// are the channel's, so the parking rules `withdraw` and
+    /// `park_until_moved` document hold for it without a second copy.
+    pub(crate) handing: Option<&'static crate::handoff::HandoffType>,
 }
 
 /// How many of the threads blocked on a condition variable to wake.
@@ -248,6 +256,13 @@ impl Channel {
         if !self.boxed || value == 0 {
             return;
         }
+        // A value a hand-off gave away carries the in-transit owner in a debug
+        // build, and whoever releases it here -- a closed send, a canceled
+        // send, the last holder of the handle -- is not that owner.
+        if let Some(carried) = self.handing {
+            // SAFETY: as below; the value is live and `carried` describes it.
+            unsafe { crate::handoff::adopt(value as *mut u8, carried) };
+        }
         // SAFETY: `boxed` says the word is a live Khora object, the queue has
         // held a reference to it since it was sent, and `glue` is the routine
         // recorded for exactly this type when the channel was opened.
@@ -260,7 +275,7 @@ impl Channel {
 /// # Safety
 ///
 /// `handle` must be a live object from [`khora_channel_open`].
-unsafe fn channel_of<'a>(handle: *mut u8) -> Option<&'a Channel> {
+pub(crate) unsafe fn channel_of<'a>(handle: *mut u8) -> Option<&'a Channel> {
     if handle.is_null() {
         return None;
     }
@@ -284,11 +299,23 @@ unsafe fn channel_of<'a>(handle: *mut u8) -> Option<&'a Channel> {
 /// `boxed` must say truthfully whether those values are pointers. `strategy`
 /// is a [`WhenFull`] discriminant.
 #[unsafe(no_mangle)]
+// SHARE: takes a drop routine, not a value; the handle it makes is born shared, in `open`.
 pub unsafe extern "C" fn khora_channel_open(
     capacity: i64,
     strategy: i64,
     boxed: bool,
     glue: Option<extern "C" fn(*mut u8)>,
+) -> *mut u8 {
+    open(capacity, WhenFull::of(strategy), boxed, glue, None)
+}
+
+/// Opens a queue: a channel when `handing` is `None`, a hand-off otherwise.
+pub(crate) fn open(
+    capacity: i64,
+    full: WhenFull,
+    boxed: bool,
+    glue: Option<extern "C" fn(*mut u8)>,
+    handing: Option<&'static crate::handoff::HandoffType>,
 ) -> *mut u8 {
     let object = khora_alloc(std::mem::size_of::<*mut Channel>() as u64, CHANNEL_TAG);
     crate::share::born_shared(object);
@@ -306,9 +333,10 @@ pub unsafe extern "C" fn khora_channel_open(
         room: Notified::new(),
         arrived: Notified::new(),
         capacity: if capacity < 1 { 1 } else { capacity as usize },
-        full: WhenFull::of(strategy),
+        full,
         boxed,
         glue,
+        handing,
     });
     // SAFETY: `khora_alloc` returned an object with one field's worth of
     // space, zeroed and aligned, and nothing else holds this pointer yet.
@@ -426,7 +454,13 @@ pub unsafe extern "C" fn khora_channel_send(handle: *mut u8, value: u64) -> bool
         // the channel was told to release one.
         unsafe { crate::share::khora_share(value as *mut u8, channel.glue) };
     }
+    enqueue(channel, value)
+}
 
+/// Puts a value the caller has made ready to cross into the queue, waiting
+/// while it is full. The half of a send a channel and a hand-off share: they
+/// differ in what they do to the value first, and in nothing after.
+pub(crate) fn enqueue(channel: &Channel, value: u64) -> bool {
     let mut enrolled = None;
     loop {
         let mut state = channel.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -524,7 +558,17 @@ pub unsafe extern "C" fn khora_channel_receive(handle: *mut u8, out: *mut u64) -
     let Some(channel) = (unsafe { channel_of(handle) }) else {
         fatal("receiving on a channel that has already been released");
     };
+    // SAFETY: the caller guarantees a writable word.
+    unsafe { dequeue(channel, out) }
+}
 
+/// Takes a value out of the queue, waiting while it is empty: the half of a
+/// receive a channel and a hand-off share.
+///
+/// # Safety
+///
+/// `out` must be a writable word.
+pub(crate) unsafe fn dequeue(channel: &Channel, out: *mut u64) -> bool {
     let mut enrolled = None;
     loop {
         let mut state = channel.state.lock().unwrap_or_else(|e| e.into_inner());

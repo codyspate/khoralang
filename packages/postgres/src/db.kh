@@ -6,51 +6,42 @@ module postgres::db;
 //! above it -- `std::db::transaction`, a service's business logic, a test
 //! double -- is written against `Db` and never learns that PostgreSQL exists.
 //!
-//! # One fiber owns the connection
+//! # Two ways to drive a connection
 //!
-//! Not a design flourish. A handler must be safe to hand to another fiber, so
-//! it may not capture anything writable, and a `Connection` is writable -- it
-//! buffers the bytes that arrived and were not yet a whole message. It is also
-//! **strictly serial**: two fibers writing one socket interleave their frames
-//! and desynchronize the stream, so even a `Connection` the compiler let
-//! through would be wrong.
+//! **`direct` drives it on the fiber that holds it.** This is what a pool's
+//! lease installs: the connection was handed to the borrower whole, by a
+//! `Handoff` send that proved nothing else holds it, so the borrower's own
+//! fiber writes the socket and reads the reply, with no fiber between them.
+//! A `Db` stays on the fiber it was installed on, so no other fiber can
+//! reach the connection through it, and two fibers cannot interleave frames
+//! on one socket.
 //!
-//! So `serve` owns the connection and nothing else touches it, and the handler
-//! captures a `Channel<Request>`, which is `Share`. Requests queue; answers
-//! come back on a reply channel the caller made. `docs/design/channels.md` was
-//! written for this case, and this package is why it exists.
-//!
-//! That arrangement is also what makes the transaction contract hold. `begin`,
-//! the statements between it and `commit`, and the commit itself all reach the
-//! same backend because there is only one, and they arrive in the order the
-//! caller made them because a channel is a queue.
+//! **`serve` owns it on a fiber of its own**, for a single connection several
+//! fibers use at once. A handler that crosses fibers may not capture anything
+//! writable, and a `Connection` is writable -- it buffers the bytes that
+//! arrived and were not yet a whole message -- and **strictly serial**: two
+//! fibers writing one socket interleave their frames and desynchronize the
+//! stream. So `serve` owns the connection and nothing else touches it, and
+//! `over`'s handler captures a `Channel<Request>`, which is `Share`. Requests
+//! queue; answers come back on a reply channel the caller made. The queue is
+//! also what makes the transaction contract hold there: `begin`, the
+//! statements after it and `commit` reach the one backend in the order they
+//! were sent. What it costs is a channel round trip and a fiber switch per
+//! statement, which is why a pool does not use it.
 //!
 //! # The serving fiber opens its own connection
 //!
-//! `serve` takes `Settings` and not a `Connection`, which looks like an
-//! inconvenience and is the only thing that works. A spawned fiber's captures
-//! are *copied* -- `docs/design/sharing.md` calls this `Sync` rather than
-//! `Send`, and names a consuming spawn as still open -- so handing a
-//! connection to the fiber that will own it needs the connection to be
-//! shareable, which is exactly what it is not.
-//!
-//! Opening it inside is better anyway, and not only because it compiles. The
-//! connection's lifetime becomes exactly the fiber's: it cannot be used before
-//! the fiber starts, cannot outlive it, and cannot be left open by a caller
-//! who forgot. A connection that never opened is not an error a caller has to
-//! remember to check either -- every request gets the reason as its answer.
-//!
-//! # Not a pool
-//!
-//! One handler is one connection, and a second fiber's statements queue behind
-//! the first's. `pool.kh` is how a service gets concurrency: several
-//! connections, each with a serving fiber, and a channel of the idle ones.
+//! `serve` takes `Settings` and not a `Connection`: a spawned fiber's captures
+//! are shared, not given away, so handing it a connection would need the
+//! connection to be `Share`, which it is not. Opening it inside also makes
+//! the connection's lifetime exactly the fiber's, and a connection that never
+//! opened is answered to every request with the reason.
 
 import std::core::{Channel, List, Option, Result};
 import std::db::{Cell, Db, DbError, Row};
-import postgres::conn::{Answer, Connection, PgError, ask, ask_many, close, forsake, in_transaction, open, open_within, run, set_transaction_depth, still_open, transaction_depth, usable};
+import postgres::conn::{Answer, Connection, PgError, ask, ask_many, close, forsake, in_transaction, open, open_within, run, run_moving, set_transaction_depth, settle, transaction_depth, usable};
 
-/// What a caller wants done.
+/// What a caller of `over` wants done.
 pub type Work =
   /// Rows back.
   | Query(sql: String, values: List<Cell>)
@@ -75,10 +66,7 @@ pub type Work =
   /// The connection cannot be trusted with another statement: `std::db` asks
   /// this when a `ROLLBACK` did not arrive. Answered at once; every statement
   /// after it on this connection is refused without touching the socket.
-  | Break
-  /// Is this connection still worth using? Asked by the pool once per lease,
-  /// before the borrower's first statement.
-  | Check;
+  | Break;
 
 /// What comes back.
 ///
@@ -196,133 +184,147 @@ fn apology(work: Work, why: DbError) -> Reply {
     Work::Release(_) => Reply::Finished(Result::Err(why)),
     Work::RollbackTo(_) => Reply::Finished(Result::Err(why)),
     Work::Break => Reply::Finished(Result::Ok(())),
-    Work::Check => Reply::Finished(Result::Err(why)),
   }
 }
 
 fn answer(c: Connection, work: Work) -> Reply {
   match work {
     Work::Query(sql, values) => Reply::Rows(rows(c, sql, values)),
-    Work::QueryEach(sql, sets) => Reply::Each(List::map(ask_many(c, sql, sets), fn got => match got {
-          Result::Ok(answer) => Result::Ok(answer.rows),
-          Result::Err(why) => Result::Err(PgError::to_db(why)),
-        })),
+    Work::QueryEach(sql, sets) => Reply::Each(each(c, sql, sets)),
     Work::Execute(sql, values) => Reply::Counted(affected(c, sql, values)),
-    // The transaction verbs take no parameters, so they are simple queries.
-    // `run` is the right call and not a shortcut: `BEGIN` through the extended
-    // protocol would be five frames for a statement with nothing to bind.
-    //
-    // **The depth guards below are exact, because two fibers can share one
-    // lease.** Each `transaction` asks for the depth and then acts on it, and
-    // a second fiber on the same connection can move it in between. An
-    // operation for a level the connection is not at would act on the other
-    // fiber's savepoint: `RELEASE` of level 1 also releases level 2, and
-    // `COMMIT` keeps any savepoint still open. So each one is refused unless
-    // the connection is exactly where its caller thinks. What that costs is an
-    // `Err` for one of two fibers that nest at once; it does not make that
-    // work, and `std::db::transaction` says not to do it.
-    Work::Begin =>
-      if transaction_depth(c) != 0 || in_transaction(c) {
-        Reply::Finished(Result::Err(out_of_turn("BEGIN", 0, transaction_depth(c))))
-      } else {
-        Reply::Finished(opened(c, statement(c, "BEGIN"), 1))
-      },
-    // **A `COMMIT` with a savepoint still open ends the transaction with a
-    // `ROLLBACK` instead.** Only another fiber's `transaction` can have left
-    // one open, since one fiber releases or rolls back its own inner levels
-    // before its commit, and committing would keep that fiber's writes
-    // whatever it is later told. Refusing without sending does not work
-    // either: `std::db` settles a transaction on any answer from `commit`, so
-    // no rollback would follow, and the connection would stay inside the
-    // transaction for the other fiber to release into and be told `Ok` for
-    // writes that are never committed. After the `ROLLBACK` the server is
-    // outside a transaction and `collect` puts the depth back to 0, so the
-    // other fiber's `release` is refused and its `rollback_to` finds nothing
-    // left to undo, which is the truth.
-    Work::Commit =>
-      if transaction_depth(c) > 1 {
-        match statement(c, "ROLLBACK") {
-          Result::Ok(_) => Reply::Finished(Result::Err(DbError::RolledBack(
-                "the transaction was rolled back instead of committed, because a savepoint another fiber opened on this connection was still open",
-              ))),
-          Result::Err(why) => Reply::Finished(Result::Err(why)),
-        }
-      } else {
-        Reply::Finished(commit(c))
-      },
+    Work::Begin => Reply::Finished(begin(c)),
+    Work::Commit => Reply::Finished(commit_at_depth(c)),
     Work::Rollback => Reply::Finished(statement(c, "ROLLBACK")),
     Work::Depth => Reply::Counted(Result::Ok(depth(c))),
-    Work::Savepoint(level) =>
-      if transaction_depth(c) != level {
-        Reply::Finished(Result::Err(out_of_turn("SAVEPOINT", level, transaction_depth(c))))
-      } else {
-        Reply::Finished(opened(c, statement(c, "SAVEPOINT ${savepoint_name(level)}"), level + 1))
-      },
-    Work::Release(level) =>
-      if transaction_depth(c) != level + 1 {
-        Reply::Finished(Result::Err(out_of_turn("RELEASE", level, transaction_depth(c))))
-      } else {
-        Reply::Finished(opened(c, statement(c, "RELEASE SAVEPOINT ${savepoint_name(level)}"), level))
-      },
-    // **A savepoint that was never opened is not rolled back to.** The undo
-    // is registered before `SAVEPOINT` is sent, so a cancel can bring it
-    // here for one that does not exist, and PostgreSQL answers that with an
-    // error that aborts the whole enclosing transaction.
-    //
-    // `Ok` for sending nothing is true with two fibers on the lease as well:
-    // a depth at or below `level` means this savepoint is gone, and the ways
-    // it can go without its own release -- a `ROLLBACK TO` a lower level, a
-    // `ROLLBACK`, a `COMMIT` turned into one above -- all undo its work. The
-    // exact `Release` guard is what keeps a lower level's release from taking
-    // this one with it, which would keep the work.
-    Work::RollbackTo(level) =>
-      if transaction_depth(c) <= level {
-        Reply::Finished(Result::Ok(()))
-      } else {
-        let name = savepoint_name(level);
-        Reply::Finished(opened(c, statement(c, "ROLLBACK TO SAVEPOINT ${name}; RELEASE SAVEPOINT ${name}"), level))
-      },
+    Work::Savepoint(level) => Reply::Finished(savepoint(c, level)),
+    Work::Release(level) => Reply::Finished(release(c, level)),
+    Work::RollbackTo(level) => Reply::Finished(rollback_to(c, level)),
     Work::Break => {
       forsake(c);
       Reply::Finished(Result::Ok(()))
     },
-    Work::Check =>
-      if still_open(c) && !in_transaction(c) {
-        Reply::Finished(Result::Ok(()))
-      } else {
-        forsake(c);
-        Reply::Finished(Result::Err(gone()))
-      },
   }
 }
 
-/// Answers one lease's requests on `c`, until the lease is over: until
-/// `requests`, which belongs to this lease alone, is closed and drained.
-///
-/// **The end of a lease is the close of its channel**, done by the pool's
-/// give-back, so the fiber that owns the connection is the one that learns
-/// it is free. That is what lets the pool check a connection before lending
-/// it again: a connection that broke during the lease, or that was left
-/// inside a transaction because an `abort` cut the `ROLLBACK` off, is
-/// reconnected by its serving fiber instead of being handed to the next
-/// caller. Requests already queued when the lease ends are answered first;
-/// their senders may have stopped, and an answer nobody reads is released
-/// with its channel.
-///
-/// A connection that breaks part-way through a lease stays leased: the
-/// statements after the break are refused with `Disconnected` without
-/// touching the socket, and the reconnect happens once the lease is over.
-pub fn serve_lease(c: Connection, requests: Channel<Request>) -> () {
-  let mut going = true;
-  while going {
-    match Channel::receive(requests) {
-      Option::None => going = false,
-      Option::Some(request) => {
-        Channel::send(request.reply, answer(c, request.work));
-        Channel::close(request.reply);
-      },
+// --- the transaction verbs ---------------------------------------------------
+//
+// They take no parameters, so they are simple queries. `run` is the right call
+// and not a shortcut: `BEGIN` through the extended protocol would be five
+// frames for a statement with nothing to bind.
+//
+// **The depth guards below are exact, because two fibers can share one
+// connection through `over`.** Each `transaction` asks for the depth and then
+// acts on it, and a second fiber on the same connection can move it in
+// between. An operation for a level the connection is not at would act on the
+// other fiber's savepoint: `RELEASE` of level 1 also releases level 2, and
+// `COMMIT` keeps any savepoint still open. So each one is refused unless the
+// connection is exactly where its caller thinks. What that costs is an `Err`
+// for one of two fibers that nest at once; it does not make that work, and
+// `std::db::transaction` says not to do it. Through `direct` only one fiber
+// drives the connection, and the guards never fire.
+
+fn begin(c: Connection) -> Result<(), DbError> {
+  if at(c) != 0 || in_transaction(c) {
+    Result::Err(out_of_turn("BEGIN", 0, transaction_depth(c)))
+  } else {
+    moving(c, "BEGIN", 1)
+  }
+}
+
+/// **A `COMMIT` with a savepoint still open ends the transaction with a
+/// `ROLLBACK` instead.** Only another fiber's `transaction` can have left one
+/// open, since one fiber releases or rolls back its own inner levels before
+/// its commit, and committing would keep that fiber's writes whatever it is
+/// later told. Refusing without sending does not work either: `std::db`
+/// settles a transaction on any answer from `commit`, so no rollback would
+/// follow, and the connection would stay inside the transaction for the other
+/// fiber to release into and be told `Ok` for writes that are never
+/// committed. After the `ROLLBACK` the server is outside a transaction and
+/// `collect` puts the depth back to 0, so the other fiber's `release` is
+/// refused and its `rollback_to` finds nothing left to undo, which is the
+/// truth.
+fn commit_at_depth(c: Connection) -> Result<(), DbError> {
+  if at(c) > 1 {
+    match statement(c, "ROLLBACK") {
+      Result::Ok(_) => Result::Err(DbError::RolledBack(
+          "the transaction was rolled back instead of committed, because a savepoint another fiber opened on this connection was still open",
+        )),
+      Result::Err(why) => Result::Err(why),
     }
-  };
+  } else {
+    commit(c)
+  }
+}
+
+fn savepoint(c: Connection, level: Int) -> Result<(), DbError> {
+  if at(c) != level {
+    Result::Err(out_of_turn("SAVEPOINT", level, transaction_depth(c)))
+  } else {
+    moving(c, "SAVEPOINT ${savepoint_name(level)}", level + 1)
+  }
+}
+
+fn release(c: Connection, level: Int) -> Result<(), DbError> {
+  if at(c) != level + 1 {
+    Result::Err(out_of_turn("RELEASE", level, transaction_depth(c)))
+  } else {
+    moving(c, "RELEASE SAVEPOINT ${savepoint_name(level)}", level)
+  }
+}
+
+/// **A savepoint that was never opened is not rolled back to.** The undo is
+/// registered before `SAVEPOINT` is sent, so a cancel can bring it here for
+/// one that does not exist, and PostgreSQL answers that with an error that
+/// aborts the whole enclosing transaction.
+///
+/// `Ok` for sending nothing is true with two fibers on the connection as
+/// well: a depth at or below `level` means this savepoint is gone, and the
+/// ways it can go without its own release -- a `ROLLBACK TO` a lower level, a
+/// `ROLLBACK`, a `COMMIT` turned into one above -- all undo its work. The
+/// exact `release` guard is what keeps a lower level's release from taking
+/// this one with it, which would keep the work.
+fn rollback_to(c: Connection, level: Int) -> Result<(), DbError> {
+  if at(c) <= level {
+    Result::Ok(())
+  } else {
+    let name = savepoint_name(level);
+    moving(c, "ROLLBACK TO SAVEPOINT ${name}; RELEASE SAVEPOINT ${name}", level)
+  }
+}
+
+/// A `Db` that drives `c` on the calling fiber: each operation writes the
+/// socket and reads the reply itself.
+///
+/// **For a connection this fiber holds and no other fiber can reach**, which
+/// is what a pool's lease hands over. The handler captures `c`, which is
+/// writable, so the checker keeps the `Db` on the fiber it is installed on;
+/// a fiber spawned inside the body that wants the database takes a lease of
+/// its own. What it saves against `over`: a channel round trip, a reply
+/// channel and two fiber switches per statement.
+pub fn direct(c: Connection) -> Db {
+  handler for Db {
+    query: fn (sql, values) => rows(c, sql, values),
+    execute: fn (sql, values) => affected(c, sql, values),
+    begin: fn () => begin(c),
+    commit: fn () => commit_at_depth(c),
+    rollback: fn () => statement(c, "ROLLBACK"),
+    depth: fn () => depth(c),
+    savepoint: fn level => savepoint(c, level),
+    release: fn level => release(c, level),
+    rollback_to: fn level => rollback_to(c, level),
+    // `std::db` calls this when a `ROLLBACK` did not arrive, which leaves a
+    // connection that may still be holding a transaction open. Marked, every
+    // later statement in this lease is refused without touching the socket,
+    // and the pool closes the connection when the lease ends instead of
+    // lending it again.
+    broken: fn () => forsake(c),
+    // **The borrower reads its own batch.** A borrower stopped part-way
+    // through the replies leaves the connection owed the rest, one per set
+    // (`postgres::conn`'s `replying`). Its give-back sends it to its slot,
+    // which reads them all before lending it again, so the next statement is
+    // answered its own reply and not the tail of this batch.
+    query_each: fn (sql, sets) => each(c, sql, sets),
+  }
 }
 
 /// A `Db` that sends its work to whoever is serving `requests`.
@@ -344,23 +346,20 @@ pub fn over(requests: Channel<Request>) -> Db {
     //
     // `std::db` calls this when a `ROLLBACK` did not arrive, which leaves a
     // connection that may still be holding a transaction open. The serving
-    // fiber marks it broken, so nothing else in this lease reaches the
-    // socket. Outside a pool, `serve` then closes the connection; in a pool,
-    // the serving fiber reconnects it when the lease ends, so the next
-    // borrower gets a fresh connection rather than uncommitted rows and
-    // locks.
+    // fiber marks it broken, so nothing after it reaches the socket, and
+    // `serve` closes the connection.
     broken: fn () => { let _ = ask_done(requests, Work::Break); () },
     // **One request for the whole batch**, so the serving fiber writes every
     // set at once and reads every reply before it answers anything else. A
-    // borrower that stops waiting -- canceled or aborted -- leaves the
-    // serving fiber to finish reading, so the connection is never lent again
-    // with part of a batch's replies still on their way.
+    // caller that stops waiting -- canceled or aborted -- leaves the serving
+    // fiber to finish reading, so the next request is never answered with
+    // part of a batch's replies.
     query_each: fn (sql, sets) => ask_each(requests, sql, sets),
   }
 }
 
-/// Opens a connection for a pool's serving fiber, in `std::db`'s terms. The
-/// handshake is bounded by `within` ms; see `open_within`.
+/// Opens a connection for a pool, in `std::db`'s terms. The handshake is
+/// bounded by `within` ms; see `open_within`.
 pub fn connect(settings: Settings, within: Int) -> Result<Connection, DbError> {
   match open_within(settings.host, settings.port, settings.user, settings.database, settings.secret, within) {
     Result::Err(why) => Result::Err(PgError::to_db(why)),
@@ -371,33 +370,6 @@ pub fn connect(settings: Settings, within: Int) -> Result<Connection, DbError> {
 /// Closes a pool's connection. Nothing still on its way is read.
 pub fn hang_up(c: Connection) -> () {
   close(c)
-}
-
-/// Whether a connection a pool is about to lend can be lent.
-pub type Fitness =
-  /// Connected, outside a transaction, and not closed by the server.
-  | Fit
-  /// Its serving fiber found it unusable, marked it, and will reconnect it
-  /// when this lease is given back.
-  | Unfit
-  /// Nobody took the question: the request channel is closed. A lease's
-  /// channel is closed by its own give-back, and by the pool's `close` while
-  /// it waits in `idle`, so a borrower that has just taken it does not meet
-  /// this; it is answered rather than assumed impossible.
-  | Gone;
-
-/// Asks the serving fiber behind `requests` whether it can be lent.
-pub fn fitness(requests: Channel<Request>) -> Fitness {
-  let reply: Channel<Reply> = Channel::bounded(1);
-  if !Channel::send(requests, { work: Work::Check, reply: reply }) {
-    Fitness::Gone
-  } else {
-    match Channel::receive(reply) {
-      Option::Some(Reply::Finished(Result::Ok(_))) => Fitness::Fit,
-      Option::Some(_) => Fitness::Unfit,
-      Option::None => Fitness::Unfit,
-    }
-  }
 }
 
 /// Sends one request and waits for its answer.
@@ -468,6 +440,15 @@ fn rows(c: Connection, sql: String, values: List<Cell>) -> Result<List<Row>, DbE
   }
 }
 
+/// `query_each` on `c`: an answer per set, in order, pipelined where the
+/// statement is prepared. See `postgres::conn::ask_many`.
+fn each(c: Connection, sql: String, sets: List<List<Cell>>) -> List<Result<List<Row>, DbError>> {
+  List::map(ask_many(c, sql, sets), fn got => match got {
+      Result::Ok(answer) => Result::Ok(answer.rows),
+      Result::Err(why) => Result::Err(PgError::to_db(why)),
+    })
+}
+
 fn affected(c: Connection, sql: String, values: List<Cell>) -> Result<Int, DbError> {
   match ask(c, sql, values) {
     Result::Ok(answer) => Result::Ok(changed(answer.tag)),
@@ -504,14 +485,17 @@ fn commit(c: Connection) -> Result<(), DbError> {
   }
 }
 
-/// Sets the connection's depth to `after` once `done` succeeded.
-fn opened(c: Connection, done: Result<(), DbError>, after: Int) -> Result<(), DbError> {
-  match done {
-    Result::Ok(_) => {
-      set_transaction_depth(c, after);
-      Result::Ok(())
-    },
-    Result::Err(why) => Result::Err(why),
+/// A transaction verb that leaves the connection at depth `after` if the
+/// server accepts it.
+///
+/// **The depth is recorded by whoever reads the reply**, not here once it
+/// returns: a caller stopped while it waited never got back here, and the
+/// connection then counted a savepoint the server had released. See
+/// `postgres::conn::run_moving`.
+fn moving(c: Connection, sql: String, after: Int) -> Result<(), DbError> {
+  match run_moving(c, sql, after) {
+    Result::Ok(_) => Result::Ok(()),
+    Result::Err(why) => Result::Err(PgError::to_db(why)),
   }
 }
 
@@ -521,7 +505,22 @@ fn opened(c: Connection, done: Result<(), DbError>, after: Int) -> Result<(), Db
 /// still a transaction, so a `transaction` inside it nests in a savepoint
 /// rather than sending a second `BEGIN` its `COMMIT` would end both of.
 fn depth(c: Connection) -> Int {
-  if in_transaction(c) && transaction_depth(c) == 0 { set_transaction_depth(c, 1) };
+  if at(c) == 0 && in_transaction(c) { set_transaction_depth(c, 1) };
+  transaction_depth(c)
+}
+
+/// The connection's depth once any reply still arriving on it has been
+/// read.
+///
+/// **What this prevents: a guard deciding on a depth the server has already
+/// left.** A caller stopped while a `RELEASE` was answered leaves the reply
+/// unread, and its undo comes straight here: read before the reply, the
+/// depth still counted the released savepoint, `rollback_to` sent `ROLLBACK
+/// TO` it, and PostgreSQL's refusal aborted the whole transaction and cost
+/// the pool the connection. What it costs: nothing when no reply is
+/// outstanding.
+fn at(c: Connection) -> Int {
+  let _ = settle(c);
   transaction_depth(c)
 }
 

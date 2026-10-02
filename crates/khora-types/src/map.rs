@@ -234,8 +234,8 @@ impl TypeMap {
     /// The message has to say which, or a reader whose capability was refused
     /// goes looking for a `mut` field that is not there.
     pub fn why_unshareable(&self, ty: &Type) -> String {
-        if let Some(fiber_bound) = self.fiber_bound_inside(ty) {
-            return stays_on_its_fiber_because(&fiber_bound);
+        if let Some((bound, subject)) = self.fiber_bound_inside(ty) {
+            return stays_on_its_fiber_because(bound, &subject);
         }
         if let Type::Param(name) = ty {
             return format!(
@@ -263,40 +263,47 @@ impl TypeMap {
         }
     }
 
-    /// The `Region` or `Scope` that `ty` is or holds, if any.
+    /// The `Region`, `Scope` or `Db` that `ty` is or holds, if any.
     ///
     /// **Asked only to explain a refusal, never to make one.** A record
     /// holding a region is refused because the region is, and the generic
     /// ``Holds` does not implement `Share`` sends the reader looking for a
-    /// `mut` field that is not there; the fix is `scoped` in the child, and
-    /// only this can say so. `crate::REGION_TYPE`.
+    /// `mut` field that is not there; the fix is `scoped` in the child (or a
+    /// lease of its own, for a `Db`), and only this can say so.
+    /// `crate::REGION_TYPE`, `crate::DB_EFFECT`.
     ///
-    /// What it answers is the subject of [`stays_on_its_fiber_because`]'s
-    /// sentence: "a `Region`" for std's own, and "std's `Region`" with the
-    /// reason for a user's type of that name, which the rule catches by name.
-    /// Without the second, the author of a record called `Region` is told
-    /// their record stays on a fiber, and has no way to see why.
-    pub fn fiber_bound_inside(&self, ty: &Type) -> Option<String> {
+    /// What it answers is which type it found, and the subject of
+    /// [`stays_on_its_fiber_because`]'s sentence: "a `Region`" for std's own,
+    /// and "std's `Region`" with the reason for a user's type of that name,
+    /// which the rule catches by name. Without the second, the author of a
+    /// record called `Region` is told their record stays on a fiber, and has
+    /// no way to see why.
+    pub fn fiber_bound_inside(&self, ty: &Type) -> Option<(crate::FiberBound, String)> {
         self.fiber_bound_in(ty, &mut Vec::new())
     }
 
-    fn fiber_bound_in(&self, ty: &Type, visiting: &mut Vec<String>) -> Option<String> {
+    fn fiber_bound_in(
+        &self,
+        ty: &Type,
+        visiting: &mut Vec<String>,
+    ) -> Option<(crate::FiberBound, String)> {
         match ty {
             Type::Tuple(items) => items.iter().find_map(|t| self.fiber_bound_in(t, visiting)),
             Type::Applied { head, args } => self
                 .fiber_bound_in(head, visiting)
                 .or_else(|| args.iter().find_map(|t| self.fiber_bound_in(t, visiting))),
             Type::Adt { name, args, home } => {
-                if crate::stays_on_its_fiber(name) {
-                    let stds = home.as_ref().is_none_or(|h| h.segments() == ["std", "core"]);
-                    return Some(if stds {
+                if let Some(bound) = crate::FiberBound::of(name) {
+                    let stds = home.as_ref().is_none_or(|h| h.segments() == bound.home());
+                    let subject = if stds {
                         format!("a `{name}`")
                     } else {
                         format!(
                             "std's `{name}` -- which the compiler knows by name, so a type of \
                              this module's called `{name}` is held to the same rule --"
                         )
-                    });
+                    };
+                    return Some((bound, subject));
                 }
                 if let Some(found) = args.iter().find_map(|t| self.fiber_bound_in(t, visiting)) {
                     return Some(found);
@@ -472,9 +479,10 @@ impl TypeMap {
                 // **A `Scope` does not cross, though it is an effect.** Its
                 // one operation defers into a region, and a region's
                 // finalizers must run on the fiber that deferred them.
-                // `crate::REGION_TYPE`. A `Region` needs no line here: it is
-                // opaque and std declares no `Share` for it, which refuses
-                // it above.
+                // `crate::REGION_TYPE`. **Nor does a `Db`**, which drives a
+                // connection its fiber writes: `crate::DB_EFFECT`. A
+                // `Region` needs no line here: it is opaque and std declares
+                // no `Share` for it, which refuses it above.
                 if crate::stays_on_its_fiber(name) {
                     return false;
                 }
@@ -531,24 +539,40 @@ impl TypeMap {
 
 }
 
-/// The sentence every refusal of a `Region` or `Scope` crossing ends with.
+/// The sentence every refusal of a `Region`, `Scope` or `Db` crossing ends
+/// with.
 ///
 /// One function, because the spawn capture, the handler capture and the
 /// `Share` bound each refuse the same crossing, and a reader who meets two of
-/// them should be told the same fix: `scoped` inside the child.
+/// them should be told the same fix: `scoped` inside the child for a region,
+/// and a lease of its own for a `Db`.
 ///
 /// **The fix it names works in any function**, including one with a `scope`
 /// of its own: what `scoped` hands its body, a named function or a lambda,
 /// shadows the enclosing `scope`. Before that held, a lambda there used the
 /// enclosing one and was refused by this very message, which sent a reader
 /// in a circle; `regions_stay_home::the_lambda_rewrite_compiles_inside_a_scope`
-/// keeps it from coming back.
-pub fn stays_on_its_fiber_because(subject: &str) -> String {
-    format!(
-        "{subject} stays on the fiber that opened it, so that its finalizers run on the \
-         fiber that deferred them. To release something the child acquires, give the \
-         child a scope of its own, `Fiber::spawn(fn () => scoped(work))`"
-    )
+/// keeps it from coming back. `with_db`'s body is handed its `db` the same
+/// way, and `db_stays_home::a_spawn_that_takes_its_own_lease_compiles` keeps
+/// that rewrite compiling.
+///
+/// The `Db` rewrite names `postgres::pool::with_db`, the lease a reader is
+/// most likely holding; a `Db` from anywhere else is refused the same, and
+/// the sentence's first half is what applies to it.
+pub fn stays_on_its_fiber_because(bound: crate::FiberBound, subject: &str) -> String {
+    match bound {
+        crate::FiberBound::Region | crate::FiberBound::Scope => format!(
+            "{subject} stays on the fiber that opened it, so that its finalizers run on the \
+             fiber that deferred them. To release something the child acquires, give the \
+             child a scope of its own, `Fiber::spawn(fn () => scoped(work))`"
+        ),
+        crate::FiberBound::Db => format!(
+            "{subject} stays on the fiber it was installed on, because it drives a connection \
+             that fiber writes, and a fiber spawned inside a `with_db` body cannot use that \
+             body's `db`: take a lease in the spawned fiber instead, \
+             `Fiber::spawn(fn () => with_db(pool, work))`"
+        ),
+    }
 }
 
 #[salsa::tracked(returns(ref))]

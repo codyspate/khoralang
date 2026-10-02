@@ -1,12 +1,13 @@
 #!/bin/sh
-# Build the Go server as a static binary. Module cache and build cache live on
-# /general so a rebuild does not refetch.
+# Build the Go server as a static binary, from the checkout this script is
+# in. Module cache and build cache live on /general so a rebuild does not
+# refetch.
 set -e
 export PATH=/general/toolchains/go/bin:$PATH
 export GOTOOLCHAIN=local
 export GOMODCACHE=/general/toolchains/gocache/mod
 export GOCACHE=/general/toolchains/gocache/build
-cd /general/khoralang/bench/peers/techempower/go
+cd "$(dirname "$0")"
 if [ ! -f go.mod ]; then
   go mod init techempower
   go get github.com/jackc/pgx/v5@v5.7.2

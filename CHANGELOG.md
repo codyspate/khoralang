@@ -43,6 +43,15 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   handler that cannot pipeline calls its own `query` once per set:
   `query_each: fn (sql, sets) => List::map(sets, fn values => my_query(sql, values))`.
   A `handler for Db { .. }` without it is a compile error naming the gap.
+- **A `Db` stays on the fiber it was installed on.** A fiber spawned inside
+  a `with_db` body cannot use that body's `db`; it takes a lease of its own,
+  `Fiber::spawn(fn () => with_db(pool, work))`, and the refusal says so, at
+  the use inside the fiber and with the line of the spawn. A `Db` cannot
+  travel through a channel, a `Shared` cell, a certified closure or another
+  effect's handler either. In exchange a `Db` handler may capture a record
+  with `mut` fields, which is what lets a pool lend the borrower its
+  connection. The rule is by name, so a module's own type called `Db` is
+  held to it too.
 - **`Response::json` writes a derived record's keys in the order the type
   declares them, not sorted.** It built a `Json` object, a hash table, and
   sorted its keys on every call; it writes the record straight to text, so
@@ -748,6 +757,23 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
 
 ### Changed
 
+- **`postgres`'s pool lends the connection itself.** `with_db` receives a
+  connection over a `Handoff`, checks it on the borrower's fiber (one the
+  server closed, one mid-reply and one inside a transaction are never lent),
+  and installs `postgres::db::direct(c)`, a `Db` that writes the socket and
+  reads the reply on the borrower's own fiber. A statement costs no channel
+  round trip and no fiber switch; each lease is one hand-off receive and one
+  send. The connection goes back when `with_db` returns, however it
+  returns, and every reply still arriving on it -- one per set of a
+  `query_each` batch whose borrower was canceled part-way -- is read by its
+  slot before it is lent again. `serve` and `over` keep the serving-fiber
+  `Db` for one connection shared by several fibers; `serve_lease` and
+  `Work::Check` are gone.
+- **Lockfiles write a `path` dependency outside the project relative to the
+  lockfile**, as `../../packages/postgres`, never as an absolute path. A
+  committed lockfile named the checkout it was last resolved in, and a
+  build in any other checkout rewrote it.
+
 - **Performance: `postgres` prepares each statement once per connection**
   and reads each reply's messages in the buffer they arrived in: a
   statement's later runs send Bind, Execute and Sync with no Parse or
@@ -759,6 +785,12 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   record**, unless the value written assigns something or reads that binding;
   the TechEmpower `/fortunes` handler runs 5.7% fewer user instructions per
   request.
+
+- **A `match` arm that passes what it bound to a function hands over its own
+  reference**, in a body that can raise and in a loop as well as elsewhere:
+  in `match receive(h) { Option::Some(c) => consume(c), .. }` the value
+  arrives at `consume` held once, so `consume` can rebuild it in place, where
+  it arrived held twice and was copied.
 
 - **A `+` chain on strings builds one string.** `"<${a}|${b}>"` and
   `a + b + c` allocate the result once and copy each piece once, where each
@@ -946,6 +978,17 @@ canceled, which changes what `SIGTERM`, `Fiber::join`, `Fiber::outcome` and
   runtime touching memory that is not the program's, and asks for a report.
 
 ### Added
+
+- **`std::core::Handoff<A>`: a queue that gives values away.** A `Channel`
+  carries only `Share` values; a hand-off carries anything, including a
+  record with `mut` fields, an `Array` or a `Map`, because the sender keeps
+  nothing. `Handoff::bounded`, `send`, `receive` and `close`. A send checks
+  by reference count that nothing else holds a writable part of the value,
+  and stops the program naming the type if something does; `Share` parts may
+  be held elsewhere and are marked, as a channel marks what it sends. The
+  receiver counts what it received as its own, with plain counts. The check
+  walks every object in the value not already shared: about 2,400
+  instructions per send for a record of about a dozen objects.
 
 - **`String::escape_html`**: `&`, `<`, `>`, `"` and `'` replaced by `&amp;`,
   `&lt;`, `&gt;`, `&quot;` and `&apos;`, for text going into an HTML element

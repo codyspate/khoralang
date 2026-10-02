@@ -127,6 +127,31 @@ pub type Connection = {
   /// What it costs: one failed read ends the connection, including a read
   /// that timed out on a server that was only slow.
   mut broken: Bool,
+  /// How many replies, each ended by a `ReadyForQuery`, the requests written
+  /// on this connection are still owed.
+  ///
+  /// **What this prevents: the next statement reading an earlier one's
+  /// reply.** A fiber stopped while it waits for a reply -- a cancel, an
+  /// `abort` -- leaves at the read, before anything after it runs, so the
+  /// reply is still arriving and nothing else says so. The next exchange on
+  /// the connection, the stopped fiber's own `ROLLBACK` or the next
+  /// borrower's first statement, would read it as its own. Set once a
+  /// request has been written whole, lowered by each `ReadyForQuery`;
+  /// `settle` reads what is left first. **A count, not a flag**, because a
+  /// pipelined batch is owed a reply per set: as a flag, the first set's
+  /// `ReadyForQuery` said the connection was settled with the rest of the
+  /// batch still arriving. What it costs: two stores per statement.
+  mut replying: Int,
+  /// How many bytes at the front of `inbox` a read took in and `pending`
+  /// does not have yet.
+  ///
+  /// **What this prevents: a stopped reader losing bytes it had already
+  /// taken off the socket.** Copying them into `pending` is a call that can
+  /// stop the fiber, and a count held only in a local went with it: the
+  /// stream was then out of step for good, and the next reader waited for
+  /// a reply that had already come. Recorded here before anything that can
+  /// stop, and taken in by `absorb` before any later read.
+  mut arrived: Int,
   /// Whether the last `ReadyForQuery` said a transaction is open. See
   /// `in_transaction`.
   mut open_transaction: Bool,
@@ -139,6 +164,21 @@ pub type Connection = {
   /// it back to 0, so a `ROLLBACK`, a `COMMIT` or a failed `BEGIN` cannot
   /// leave it counting savepoints the server has already dropped.
   mut depth: Int,
+  /// The depth the exchange whose reply is arriving leaves the connection
+  /// at if the server accepts it, or -1 when it changes nothing.
+  ///
+  /// **What this prevents: a depth left counting a savepoint the server has
+  /// already released.** Recorded by the caller once the reply returned, the
+  /// change was lost whenever the caller was stopped while it waited; the
+  /// reply was then read by `settle`, the server had moved, and the undo
+  /// that followed sent `ROLLBACK TO` a savepoint that no longer existed,
+  /// whose error aborts the whole transaction. So the change travels with
+  /// the request and is applied by the `ReadyForQuery` that ends a reply
+  /// with no `ErrorResponse` in it, whoever reads it.
+  mut after: Int,
+  /// Whether the reply being read has carried an `ErrorResponse`. See
+  /// `after`.
+  mut refused: Bool,
   /// Where every socket read lands before `extend` copies out what arrived.
   ///
   /// **One per connection, so a read does not allocate.** A fresh 8 KiB
@@ -223,10 +263,18 @@ fn extend(head: Array<U8>, from: Int, tail: Array<U8>, tail_len: Int) -> Array<U
 pub fn next_message(c: Connection) -> Result<Message, PgError> {
   let mut answer: Result<Message, PgError> = Result::Err(PgError::Closed("no message"));
   let mut going = true;
+  absorb(c);
   while going {
     match message_at(c.pending, c.start) {
       Option::Some(m) => {
         c.start = c.start + message_width(m);
+        // **Recorded as it is taken**, in the same straight run of code, so
+        // no cancellation point lies between consuming the end of a reply
+        // and saying so. This loop's back-edge is one: recorded by the
+        // caller instead, a fiber stopped there had read the whole reply
+        // and still counted as waiting for it, and `settle` then waited on
+        // the socket for a reply that had already come.
+        if m.kind == 90 { ready(c, m) } else if m.kind == 69 { c.refused = true };
         // Drained: let the buffer go, so an idle connection holds nothing
         // from its last reply. Otherwise a pooled connection that once
         // answered a 1 MB row keeps that megabyte until its next query.
@@ -238,8 +286,7 @@ pub fn next_message(c: Connection) -> Result<Message, PgError> {
         going = false
       },
       Option::None => {
-        let buffer = c.inbox;
-        let read = receive(c.handle, buffer);
+        let read = receive(c.handle, c.inbox);
         if read <= 0 {
           c.broken = true;
           answer = Result::Err(PgError::Closed(
@@ -247,13 +294,40 @@ pub fn next_message(c: Connection) -> Result<Message, PgError> {
             ));
           going = false
         } else {
-          c.pending = extend(c.pending, c.start, buffer, read);
-          c.start = 0
+          // Before anything that can stop the fiber; see `arrived`.
+          c.arrived = read;
+          absorb(c)
         }
       },
     }
   };
   answer
+}
+
+/// Takes the bytes a read left in `inbox` into `pending`. See `arrived`.
+///
+/// The new buffer is stored, and the count cleared, only once `extend` has
+/// returned, with nothing between them that can stop the fiber: stopped in
+/// `extend`, the bytes are still counted and the next call takes them in.
+fn absorb(c: Connection) -> () {
+  if c.arrived > 0 {
+    let joined = extend(c.pending, c.start, c.inbox, c.arrived);
+    c.pending = joined;
+    c.start = 0;
+    c.arrived = 0
+  }
+}
+
+/// What a `ReadyForQuery` says, recorded on the connection: the reply it
+/// ends is over, and its one byte is the transaction state, 'I' (73) outside
+/// one.
+fn ready(c: Connection, m: Message) -> () {
+  c.open_transaction = payload_width(m) > 0 && U8::to_int(Array::get(m.buffer, m.from)) != 73;
+  if c.after >= 0 && !c.refused { c.depth = c.after };
+  if !c.open_transaction { c.depth = 0 };
+  c.after = 0 - 1;
+  c.refused = false;
+  if c.replying > 0 { c.replying = c.replying - 1 }
 }
 
 /// The text of an `ErrorResponse`, which is a list of tagged fields.
@@ -339,7 +413,7 @@ pub fn open_within(
       let empty: Array<U8> = Array::new(0, 0);
       let c: Connection = {
         handle: handle, pending: empty, start: 0, scram: Option::None, broken: false,
-        open_transaction: false, depth: 0, inbox: Array::new(read_size(), 0),
+        replying: 0, arrived: 0, open_transaction: false, depth: 0, after: 0 - 1, refused: false, inbox: Array::new(read_size(), 0),
         prepared: Map::new(), named: 0, uses: 0, closing: List::Nil,
       };
       let hello = startup(user, database);
@@ -605,17 +679,17 @@ pub fn still_open(c: Connection) -> Bool {
     let mut reading = true;
     // A bound, so a server that never stops talking cannot hold the check.
     let mut rounds = 16;
+    absorb(c);
     while reading && rounds > 0 {
-      let probe = c.inbox;
-      let read = receive_now(c.handle, probe);
+      let read = receive_now(c.handle, c.inbox);
       if nothing_yet(read) {
         reading = false
       } else if read <= 0 {
         open = false;
         reading = false
       } else {
-        c.pending = extend(c.pending, c.start, probe, read);
-        c.start = 0;
+        c.arrived = read;
+        absorb(c);
         rounds = rounds - 1
       }
     };
@@ -699,17 +773,81 @@ fn out_of_step() -> Result<Answer, PgError> {
 /// byte went. `transmit_bytes` sends all of them or fails, so the length
 /// check costs a comparison and holds even if a transport ever returns a
 /// short count.
+///
+/// **A reply still arriving from an earlier exchange is read first**; see
+/// `replying` and `settle`.
 fn send_frames(c: Connection, frames: Array<U8>) -> Bool {
-  let sent = transmit_bytes(c.handle, frames) == Array::length(frames);
-  if !sent { c.broken = true };
-  sent
+  send_owed(c, frames, 0 - 1, 1)
+}
+
+/// `send_frames` for a pipelined batch whose frames end in `replies`
+/// `Sync`s, so `replies` replies are owed; see `replying`.
+fn send_batch(c: Connection, frames: Array<U8>, replies: Int) -> Bool {
+  send_owed(c, frames, 0 - 1, replies)
+}
+
+/// `send_frames` for a request that leaves the connection at depth `after`
+/// if the server accepts it; see `after`.
+fn send_moving(c: Connection, frames: Array<U8>, after: Int) -> Bool {
+  send_owed(c, frames, after, 1)
+}
+
+fn send_owed(c: Connection, frames: Array<U8>, after: Int, replies: Int) -> Bool {
+  if !settle(c) {
+    false
+  } else {
+    // **Marked after the write, not before.** The write is entered through
+    // a lambda that polls when it is entered, so a fiber stopped there has
+    // sent nothing, and a mark made first would have `settle` wait for a
+    // reply to a request that never went. Nothing between the write's
+    // return and the mark can stop the fiber.
+    let sent = transmit_bytes(c.handle, frames) == Array::length(frames);
+    if sent {
+      c.replying = replies;
+      c.after = after;
+      c.refused = false
+    } else {
+      c.broken = true
+    };
+    sent
+  }
+}
+
+/// Reads the rest of every reply earlier exchanges left arriving, through
+/// the last one's `ReadyForQuery`, and answers whether the connection can
+/// still be used.
+///
+/// **For a connection whose last caller was stopped while it waited**, so
+/// that what comes next reads its own reply. The transaction state the
+/// discarded replies end with is kept: a stopped `BEGIN` that arrives leaves
+/// the connection inside a transaction, and `in_transaction` says so. What
+/// it costs: nothing when no reply is outstanding; otherwise it waits for the
+/// server to finish those replies, however long it takes.
+pub fn settle(c: Connection) -> Bool {
+  while c.replying > 0 && !c.broken {
+    let _ = collect(c);
+    ()
+  };
+  !c.broken
+}
+
+/// Whether any reply is still arriving. See `settle`.
+pub fn mid_reply(c: Connection) -> Bool {
+  c.replying > 0
 }
 
 /// Runs one statement and reads everything it produces.
 pub fn run(c: Connection, sql: String) -> Result<Answer, PgError> {
+  run_moving(c, sql, 0 - 1)
+}
+
+/// `run` for a transaction verb that leaves the connection at depth `after`
+/// if the server accepts it. The depth is recorded by whoever reads the
+/// reply, a caller stopped while it waited included; see `after`.
+pub fn run_moving(c: Connection, sql: String, after: Int) -> Result<Answer, PgError> {
   if c.broken {
     out_of_step()
-  } else if !send_frames(c, query(sql)) {
+  } else if !send_moving(c, query(sql), after) {
     Result::Err(PgError::Closed("the query could not be sent"))
   } else {
     collect(c)
@@ -872,7 +1010,7 @@ fn pipelined(
 ) -> List<List<Cell>> {
   c.uses = c.uses + 1;
   known.used = c.uses;
-  if !send_frames(c, run_prepared_each(c.closing, known.name, List::map(sets, fn values => to_wire(values)))) {
+  if !send_batch(c, run_prepared_each(c.closing, known.name, List::map(sets, fn values => to_wire(values))), List::length(sets)) {
     // As the calls one at a time: the first is told its write failed, and
     // the connection is broken for every one after it.
     Vector::push(answers, Result::Err(PgError::Closed("the query could not be sent")));
@@ -1042,10 +1180,7 @@ fn collect_as(c: Connection, known: List<Column>, known_names: List<String>) -> 
           // 'Z' ReadyForQuery ends every exchange, including a failed one —
           // which is why the error is remembered rather than returned here:
           // leaving the stream mid-reply would desynchronize the next query.
-          // Its one byte is the transaction state: 'I' (73) is outside one.
-          c.open_transaction = payload_width(m) > 0
-          && U8::to_int(Array::get(m.buffer, m.from)) != 73;
-          if !c.open_transaction { c.depth = 0 };
+          // `next_message` has recorded what it says; see `ready`.
           going = false
         } else if m.kind == 84 {
           columns = describe(m);
@@ -1229,7 +1364,7 @@ fn to_list<A>(v: Vector<A>) -> List<A> {
 fn holding(bytes: Array<U8>) -> Connection {
   {
     handle: invalid_handle(), pending: bytes, start: 0, scram: Option::None, broken: false,
-    open_transaction: false, depth: 0, inbox: Array::new(read_size(), 0),
+    replying: 0, arrived: 0, open_transaction: false, depth: 0, after: 0 - 1, refused: false, inbox: Array::new(read_size(), 0),
     prepared: Map::new(), named: 0, uses: 0, closing: List::Nil,
   }
 }
@@ -1291,7 +1426,7 @@ fn wire() -> Wire {
   // than as zeros.
   let c: Connection = {
     handle: handle, pending: Array::new(0, 0), start: 0, scram: Option::None, broken: false,
-    open_transaction: false, depth: 0, inbox: Array::new(read_size(), 255),
+    replying: 0, arrived: 0, open_transaction: false, depth: 0, after: 0 - 1, refused: false, inbox: Array::new(read_size(), 255),
     prepared: Map::new(), named: 0, uses: 0, closing: List::Nil,
   };
   { client: c, server: server, listener: listener }
@@ -1711,6 +1846,98 @@ test "an error in a prepared statement forgets it, and the next call prepares it
   assert(answered(after.got, 4));
   assert_that(after.sent == ["B khora_2", "E", "S"], "the run after that wrote ${shown(after.sent)}");
   assert(!w.client.broken);
+  unwire(w)
+}
+
+/// **A reply left arriving by a caller stopped mid-read is read before the
+/// next statement, and never taken as that statement's answer.** A cancel or
+/// an `abort` leaves at the read with the rest of the reply still to come,
+/// and a connection lent on -- to the same fiber's `ROLLBACK`, or to the next
+/// borrower -- would read the old reply as its own. Here the stopped caller
+/// is a request written and never read; its reply, a row holding 5, arrives
+/// ahead of the next statement's, a row holding 6. The next statement must be
+/// answered 6.
+test "a reply nobody read is not the next statement's answer" {
+  let w = server_wire();
+  let sql = "select $1::int4 as n";
+  assert(answered(run_once(w, sql, 1, first_reply(1)).got, 1));
+  // Written, and its reply never read: what a stopped caller leaves.
+  assert(send_frames(w.client, run_prepared(List::Nil, "khora_1", [Option::Some("5")])));
+  transmit_bytes(w.server, later_reply(5));
+  let next = run_once(w, sql, 6, later_reply(6));
+  assert_that(answered(next.got, 6), "the next statement was not answered its own row");
+  assert(!mid_reply(w.client));
+  unwire(w)
+}
+
+/// **A batch nobody finished reading is not the next statement's answer
+/// either.** A pipelined batch has a reply, and a `ReadyForQuery`, per set.
+/// A borrower stopped after the first of them leaves the rest arriving, and
+/// the connection has to know how many are still to come, not only that one
+/// is: counted as one, the first `ReadyForQuery` said the connection was
+/// settled, the pool lent it on, and the next statement read the batch's
+/// second reply as its own. Here a batch of three is written and none of its
+/// replies read; the next statement must be answered its own row, 6.
+test "a batch nobody read to the end is not the next statement's answer" {
+  let w = server_wire();
+  let sql = "select $1::int4 as n";
+  assert(answered(run_once(w, sql, 1, first_reply(1)).got, 1));
+  // Written, and its replies never read: what a stopped borrower leaves.
+  let sets = [[Option::Some("3")], [Option::Some("4")], [Option::Some("5")]];
+  assert(send_batch(w.client, run_prepared_each(List::Nil, "khora_1", sets), 3));
+  let _batch = written_through(w.server, 3);
+  transmit_bytes(w.server, later_reply(3));
+  transmit_bytes(w.server, later_reply(4));
+  transmit_bytes(w.server, later_reply(5));
+  assert(mid_reply(w.client));
+  let next = run_once(w, sql, 6, later_reply(6));
+  assert_that(answered(next.got, 6), "the next statement was answered part of the batch");
+  assert(!mid_reply(w.client));
+  unwire(w)
+}
+
+/// A reply to a simple query: its `CommandComplete` tag, then a
+/// `ReadyForQuery` whose status byte is `status` ('T' 84 inside a
+/// transaction, 'I' 73 outside one).
+fn verb_reply(tag: String, status: Int) -> Array<U8> {
+  let bytes = Writer::new();
+  Writer::raw(bytes, framed(67, String::bytes(tag + "\u{0}")));
+  Writer::raw(bytes, framed(90, Array::new(1, U8::wrapping(status))));
+  Writer::finish(bytes)
+}
+
+/// A refusal inside a transaction: an `ErrorResponse`, then a
+/// `ReadyForQuery` whose status is 'E' (69), a failed transaction.
+fn refused_inside() -> Array<U8> {
+  let body = Writer::new();
+  Writer::u8(body, 77);
+  Writer::cstring(body, "savepoint refused");
+  Writer::u8(body, 0);
+  let bytes = Writer::new();
+  Writer::raw(bytes, framed(69, Writer::finish(body)));
+  Writer::raw(bytes, framed(90, Array::new(1, U8::wrapping(69))));
+  Writer::finish(bytes)
+}
+
+/// **A savepoint released by a reply its caller never read is not counted
+/// as open.** A fiber stopped while its `RELEASE SAVEPOINT` was answered
+/// leaves the reply to `settle`; the depth it moves the connection to has
+/// to be recorded all the same. Left at 2, the undo that follows sends
+/// `ROLLBACK TO` a savepoint the server no longer has, and PostgreSQL
+/// answers that with an error that aborts the whole transaction. A refused
+/// verb moves nothing.
+test "a transaction verb's reply read by settle still moves the depth" {
+  let w = server_wire();
+  set_transaction_depth(w.client, 2);
+  // Written, and its reply never read by its caller.
+  assert(send_moving(w.client, query("RELEASE SAVEPOINT khora_sp_1"), 1));
+  transmit_bytes(w.server, verb_reply("RELEASE", 84));
+  assert(settle(w.client));
+  assert_that(transaction_depth(w.client) == 1, "depth ${Int::to_string(transaction_depth(w.client))} after an unread RELEASE");
+  assert(send_moving(w.client, query("SAVEPOINT khora_sp_1"), 2));
+  transmit_bytes(w.server, refused_inside());
+  assert(settle(w.client));
+  assert_that(transaction_depth(w.client) == 1, "a refused SAVEPOINT moved the depth to ${Int::to_string(transaction_depth(w.client))}");
   unwire(w)
 }
 

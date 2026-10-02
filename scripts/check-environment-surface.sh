@@ -71,6 +71,11 @@ INTERNAL = {
     "KHORA_SOAK_ROUNDS": "how much of the soak workload to run; test-only.",
     "KHORA_SOAK_SEED": "fixes the soak's workload so a failure can be re-run; test-only.",
     "KHORA_SOAK_WORKERS": "how many scheduler workers the soak starts; test-only.",
+    "KHORA_HANDOFF_MUTANT":
+        "`=unique` makes a failing `Handoff` send queue its value anyway, so the "
+        "handoff tests can show the debug owner check catches a wrong walk. Read "
+        "only while the owner check is on (a debug build that spawns); a release "
+        "build never reads it.",
 }
 
 # **Reachable from a user's shell, and not decided.** These change what a

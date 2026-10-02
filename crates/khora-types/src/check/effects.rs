@@ -187,7 +187,7 @@ impl<'a> Checker<'a> {
                 if self.handed_nearer(site, label) {
                     self.handed.insert((site, label.clone()));
                 } else {
-                    self.note_implicit_capture(site, label);
+                    self.note_implicit_capture(site, label, range);
                 }
             }
         }
@@ -1052,12 +1052,24 @@ impl<'a> Checker<'a> {
     /// has to have captured it too. The mark is what says whether a binding is
     /// outside a given lambda — below it means declared before the lambda
     /// began, which is what captured means everywhere else.
-    pub(super) fn note_implicit_capture(&mut self, site: ExprId, label: &str) {
+    pub(super) fn note_implicit_capture(&mut self, site: ExprId, label: &str, range: TextRange) {
         let Some(local) = self.body.capability_at(site, label) else { return };
         for (lambda, _, found) in &mut self.enclosing_lambdas {
             let mark = self.body.lambda_marks.get(lambda).copied().unwrap_or(0);
             if local.index() < mark && !found.contains(&local) {
                 found.push(local);
+            }
+        }
+        self.note_capture_use(local, range);
+    }
+
+    /// Records `range` as where each enclosing lambda that captures `local`
+    /// first uses it. See [`Checker::capture_uses`].
+    pub(super) fn note_capture_use(&mut self, local: khora_hir::body::LocalId, range: TextRange) {
+        for (lambda, _, _) in &self.enclosing_lambdas {
+            let mark = self.body.lambda_marks.get(lambda).copied().unwrap_or(0);
+            if local.index() < mark {
+                self.capture_uses.entry((*lambda, local)).or_insert(range);
             }
         }
     }

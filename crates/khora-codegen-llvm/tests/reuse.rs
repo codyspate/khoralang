@@ -281,3 +281,184 @@ fn a_reuse_arm_never_builds_in_a_static() {
     assert_eq!(lines[0], "word lit nil", "the literal and `Nil` are what they were");
     assert_eq!(lines[1], "0", "nothing left over, and nothing freed twice");
 }
+
+/// `match receive(h) { Some(c) => send(other, c) }`, and the count of `c` at
+/// the call.
+///
+/// **What this prevents: a hand-off that traps on the most natural spelling of
+/// a pool.** A send that gives a value away checks that nothing else holds it,
+/// by its count. The arm copies `c` out of the payload and releases the
+/// scrutinee at its head, so the call should find `c` held once. It found it
+/// held twice in the two places a pool's code lives: a body that can unwind (a
+/// `!` anywhere in it), and a `match` inside a loop. In both the read at the
+/// call copied instead of handing over the arm's reference, and the arm
+/// released its copy after the call returned.
+///
+/// The count is read without an extern that takes an object, which the C ABI
+/// refuses: `rebuilt` consumes its argument by rebuilding it, and that
+/// allocates nothing exactly when the argument arrived held once, because the
+/// rebuild is made in the cell it matched. `Conn` is recursive so it is a
+/// counted cell with either representation.
+///
+/// `again` is the control: the scrutinee is read after the call, so it still
+/// holds the payload there, the count is 2, and the rebuild allocates.
+const HANDED_ON: &str = "module main;
+import std::core::{Option, Result, print};
+
+extern fn khora_alloc_count() -> Int;
+extern fn khora_live_count() -> Int;
+
+type Bad = | Bad(Int);
+type Conn = | Open(Int, Conn) | End;
+
+fn consume(c: Conn) -> Conn {
+  match c {
+    Conn::Open(n, rest) => Conn::Open(n + 1, rest),
+    Conn::End => Conn::End,
+  }
+}
+
+/// Allocations made consuming `c`: 0 when it arrived held once.
+fn rebuilt(c: Conn) -> Int {
+  let before = khora_alloc_count();
+  let kept = consume(c);
+  let made = khora_alloc_count() - before;
+  let _ = kept;
+  made
+}
+
+fn receive(n: Int) -> Option<Conn> {
+  if n > 0 { Option::Some(Conn::Open(n, Conn::End)) } else { Option::None }
+}
+
+fn check(n: Int) -> Int raises Bad {
+  if n < 0 { raise Bad::Bad(n) } else { n }
+}
+
+fn is_some(o: Option<Conn>) -> Int {
+  match o { Option::Some(_) => 1, Option::None => 0 }
+}
+
+fn straight(o: Option<Conn>) -> Int {
+  match o {
+    Option::Some(c) => rebuilt(c),
+    Option::None => 0,
+  }
+}
+
+fn unwinds(o: Option<Conn>) -> Int raises Bad {
+  let k = check(0)!;
+  match o {
+    Option::Some(c) => rebuilt(c) + k,
+    Option::None => 0,
+  }
+}
+
+fn nested(r: Result<Option<Conn>, String>) -> Int raises Bad {
+  let k = check(0)!;
+  match r {
+    Result::Ok(Option::Some(c)) => rebuilt(c) + k,
+    Result::Ok(Option::None) => 0,
+    Result::Err(_) => 0,
+  }
+}
+
+fn looped(n: Int) -> Int {
+  let mut i = 0;
+  let mut made = 0;
+  while i < n {
+    match receive(1) {
+      Option::Some(c) => made = made + rebuilt(c),
+      Option::None => (),
+    };
+    i = i + 1
+  };
+  made
+}
+
+fn nested_looped(n: Int) -> Int {
+  let mut i = 0;
+  let mut made = 0;
+  while i < n {
+    let r: Result<Option<Conn>, String> = Result::Ok(receive(1));
+    match r {
+      Result::Ok(Option::Some(c)) => made = made + rebuilt(c),
+      Result::Ok(Option::None) => (),
+      Result::Err(_) => (),
+    };
+    i = i + 1
+  };
+  made
+}
+
+fn again(o: Option<Conn>) -> Int raises Bad {
+  let k = check(0)!;
+  match o {
+    Option::Some(c) => rebuilt(c) + k + 0 * is_some(o),
+    Option::None => 0,
+  }
+}
+
+fn again_looped(n: Int) -> Int {
+  let mut i = 0;
+  let mut made = 0;
+  while i < n {
+    let o = receive(1);
+    match o {
+      Option::Some(c) => made = made + rebuilt(c) + 0 * is_some(o),
+      Option::None => (),
+    };
+    i = i + 1
+  };
+  made
+}
+
+/// Raises before the arm hands `c` on, and after.
+fn raises_before(o: Option<Conn>) -> Int raises Bad {
+  let k = check(0)!;
+  match o {
+    Option::Some(c) => {
+      let x = check(-1)!;
+      rebuilt(c) + x + k
+    },
+    Option::None => 0,
+  }
+}
+
+fn raises_after(o: Option<Conn>) -> Int raises Bad {
+  let k = check(0)!;
+  match o {
+    Option::Some(c) => {
+      let m = rebuilt(c);
+      check(m - 1)! + k
+    },
+    Option::None => 0,
+  }
+}
+
+pub fn main() -> () raises Bad {
+  let before = khora_live_count();
+  print(\"straight ${straight(receive(1))}\");
+  print(\"unwinds ${unwinds(receive(1))!}\");
+  print(\"nested ${nested(Result::Ok(receive(1)))!}\");
+  print(\"looped ${looped(3)}\");
+  print(\"nested_looped ${nested_looped(3)}\");
+  print(\"again ${again(receive(1))!}\");
+  print(\"again_looped ${again_looped(3)}\");
+  let b = raises_before(receive(1))! catch { Bad::Bad(_) => 7 };
+  let a = raises_after(receive(1))! catch { Bad::Bad(_) => 8 };
+  print(\"raised ${b} ${a}\");
+  print(\"live ${khora_live_count() - before}\")
+}
+";
+
+#[test]
+fn an_arm_hands_its_binding_on_at_a_consuming_call() {
+    let out = run("reuse_handed_on", HANDED_ON);
+    assert_eq!(
+        out.trim(),
+        "straight 0\nunwinds 0\nnested 0\nlooped 0\nnested_looped 0\n\
+         again 1\nagain_looped 3\nraised 7 8\nlive 0",
+        "0 is a count of 1 at the call; `again` holds the payload past it"
+    );
+}

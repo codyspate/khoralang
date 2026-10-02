@@ -180,6 +180,9 @@ impl<'ctx> Lower<'_, 'ctx> {
         if owner == runtime::CHANNEL_TYPE {
             return Some(self.channel_intrinsic(site, name, args, range));
         }
+        if owner == runtime::HANDOFF_TYPE {
+            return Some(self.handoff_intrinsic(site, name, args, range));
+        }
         if owner == runtime::ARRAY_TYPE {
             return Some(self.array_intrinsic(site, name, args, range));
         }

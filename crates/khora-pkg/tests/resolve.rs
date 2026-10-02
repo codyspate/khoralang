@@ -203,6 +203,48 @@ fn resolving_twice_changes_nothing() {
     assert_eq!(text, std::fs::read_to_string(w.root.join("khora.lock")).expect("the lockfile"));
 }
 
+/// Makes `tmp/<checkout>/` hold an application at `app/` with a `path`
+/// dependency on `packages/lib`, reached with `..`, as the TechEmpower app
+/// reaches the postgres package.
+fn checkout_with_a_path_dependency(at: &Path) -> PathBuf {
+    write(&at.join("packages").join("lib").join("khora.toml"), "[package]\nname = \"lib\"\nversion = \"0.1.0\"\n");
+    write(&at.join("packages").join("lib").join("src").join("lib.kh"), "module lib;\n");
+    let app = at.join("bench").join("app");
+    write(
+        &app.join("khora.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\nlib = { path = \"../../packages/lib\" }\n",
+    );
+    app
+}
+
+/// **A path dependency outside the lockfile's directory is written relative
+/// to it**, so the same project resolved in two checkouts writes the same
+/// lockfile. What this prevents: a committed lockfile that names the machine
+/// and the checkout it was last resolved in, which every build in any other
+/// checkout rewrote -- the TechEmpower app's lock held
+/// `/general/khoralang/packages/postgres`, and a build in a worktree
+/// replaced it with the worktree's own absolute path.
+#[test]
+fn a_path_dependency_outside_the_project_is_locked_relative_to_it() {
+    let w = world();
+    let one = checkout_with_a_path_dependency(&w.root.join("one"));
+    let two = checkout_with_a_path_dependency(&w.root.join("two"));
+
+    let first = resolve(&one.join("khora.toml"), &w.store, false).expect("resolution");
+    let locked = first.lockfile.get("lib").expect("an entry");
+    assert_eq!(locked.path.as_deref(), Some("../../packages/lib"), "{locked:?}");
+
+    // Resolved in another checkout, the same text, and nothing to change.
+    resolve(&two.join("khora.toml"), &w.store, false).expect("resolution");
+    let text_one = std::fs::read_to_string(one.join("khora.lock")).expect("the lockfile");
+    let text_two = std::fs::read_to_string(two.join("khora.lock")).expect("the lockfile");
+    assert_eq!(text_one, text_two);
+    std::fs::copy(one.join("khora.lock"), two.join("khora.lock")).expect("copying the lockfile");
+    let again = resolve(&two.join("khora.toml"), &w.store, true).expect("a copied lockfile is current");
+    assert!(!again.changed);
+}
+
 /// `--locked` is what CI wants: a build needing a new resolution is a build
 /// whose lockfile was not committed.
 #[test]
