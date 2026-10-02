@@ -229,6 +229,10 @@ pub use fiber::*;
 pub use handoff::*;
 #[cfg(not(target_family = "wasm"))]
 pub use channel::khora_channel_release;
+/// A fiber's stack size, which is also what the compiler reserves for `main`
+/// on Windows -- so the two can't drift.
+#[cfg(not(target_family = "wasm"))]
+pub use stack::FIBER_STACK;
 pub use heap::*;
 #[cfg(not(target_family = "wasm"))]
 pub use nursery::*;

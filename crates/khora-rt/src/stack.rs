@@ -83,7 +83,7 @@ const MESSAGE: &[u8] = b"khora: the stack ran out, or the runtime touched memory
 /// A program that needs more is one that should loop instead: there is no
 /// knob, and growing a stack by moving it is ruled out because the scheduler
 /// does not know where Khora's pointers are.
-pub(crate) const FIBER_STACK: usize = 8 * 1024 * 1024;
+pub const FIBER_STACK: usize = 8 * 1024 * 1024;
 
 /// The size of the stack the report runs on, where the platform needs one.
 ///
@@ -265,12 +265,12 @@ fn install() {
     /// use-after-free in `nursery::cancel_open_crews` faulted at address `0x20`
     /// on the `khora-deadlines` thread and was reported here as the stack
     /// running out. So the message names both.
-    unsafe extern "C" fn handler(_signal: i32) {
+    unsafe extern "C" fn handler(signal: i32) {
         report();
         // SAFETY: `signal` with `SIG_DFL` is async-signal-safe and is what
         // restores the behavior the process had before this was installed.
         unsafe {
-            libc::signal(libc::SIGSEGV, libc::SIG_DFL);
+            libc::signal(signal, libc::SIG_DFL);
         }
     }
 
@@ -290,7 +290,39 @@ fn install() {
         action.sa_sigaction = handler as *const () as usize;
         action.sa_flags = libc::SA_ONSTACK;
         libc::sigemptyset(&raw mut action.sa_mask);
-        libc::sigaction(libc::SIGSEGV, &raw const action, std::ptr::null_mut());
+        // **Both signals, because macOS overflows with the other one.** A
+        // thread's stack there ends in a guard page whose fault the kernel
+        // delivers as `SIGBUS`, not `SIGSEGV` -- only the main thread's is
+        // `SIGSEGV` -- so with one handler a fiber's overflow on macOS died
+        // with status 10 and said nothing. Rust's own runtime installs for
+        // the same two, for the same reason.
+        for signal in OVERFLOW_SIGNALS {
+            libc::sigaction(signal, &raw const action, std::ptr::null_mut());
+        }
+    }
+}
+
+/// The signals an exhausted stack can arrive as: `SIGSEGV` everywhere, and
+/// `SIGBUS` for a thread's guard page on macOS (and some BSDs).
+#[cfg(unix)]
+const OVERFLOW_SIGNALS: [i32; 2] = [libc::SIGSEGV, libc::SIGBUS];
+
+/// Turns this thread's alternate stack off.
+///
+/// **The size goes in even though it is ignored.** POSIX says `ss_sp` and
+/// `ss_size` are ignored when disabling, but macOS's `sigaltstack` checks the
+/// size first and refuses anything under `MINSIGSTKSZ` with `ENOMEM` -- so a
+/// zeroed `stack_t` left the stack installed. `ThreadGuard`'s drop then
+/// unmapped memory the kernel would still deliver a signal onto. Rust's
+/// runtime passes the size for the same bug.
+#[cfg(unix)]
+fn disable_alternate_stack() {
+    // SAFETY: installs nothing; the struct is fully initialized and only read.
+    unsafe {
+        let mut off: libc::stack_t = std::mem::zeroed();
+        off.ss_flags = libc::SS_DISABLE;
+        off.ss_size = ALT_STACK;
+        libc::sigaltstack(&raw const off, std::ptr::null_mut());
     }
 }
 
@@ -347,15 +379,14 @@ impl Drop for ThreadGuard {
         if self.alt.is_null() {
             return;
         }
+        // Disabling comes first, so the kernel never delivers onto memory
+        // that has been unmapped; a signal handler cannot be running on it
+        // here, because the thread is running this.
+        disable_alternate_stack();
         // SAFETY: `alt` is the mapping `alternate_stack` made and installed on
         // this thread -- a guard is neither `Send` nor `Sync`, so it is
-        // dropped where it was made. Disabling comes first, so the kernel
-        // never delivers onto memory that has been unmapped; a signal handler
-        // cannot be running on it here, because the thread is running this.
+        // dropped where it was made -- and it was just uninstalled.
         unsafe {
-            let mut off: libc::stack_t = std::mem::zeroed();
-            off.ss_flags = libc::SS_DISABLE;
-            libc::sigaltstack(&raw const off, std::ptr::null_mut());
             libc::munmap(self.alt, ALT_STACK);
         }
     }
@@ -427,14 +458,11 @@ mod tests {
         std::thread::Builder::new()
             .spawn(|| {
                 // A thread std spawns may already have one; this one must not,
-                // or the first half proves nothing.
-                // SAFETY: disables this thread's alternate stack, whose memory
-                // is std's and stays mapped; nothing here is a signal handler.
-                unsafe {
-                    let mut off: libc::stack_t = std::mem::zeroed();
-                    off.ss_flags = libc::SS_DISABLE;
-                    libc::sigaltstack(&raw const off, std::ptr::null_mut());
-                }
+                // or the first half proves nothing. The memory is std's and
+                // stays mapped; nothing here is a signal handler. Through the
+                // same call the guard's drop uses, so this half of the test
+                // also fails on macOS if the call can't disable.
+                super::disable_alternate_stack();
                 assert!(none(), "could not take the thread's alternate stack away");
                 {
                     let _room = super::guard_this_thread();
@@ -496,13 +524,15 @@ mod tests {
             assert!(!stack.ss_sp.is_null(), "no alternate stack to report on");
             assert_eq!(stack.ss_flags & libc::SS_DISABLE, 0, "the alternate stack is off");
 
-            let mut action: libc::sigaction = std::mem::zeroed();
-            libc::sigaction(libc::SIGSEGV, std::ptr::null(), &raw mut action);
-            assert_ne!(
-                action.sa_flags & libc::SA_ONSTACK,
-                0,
-                "the handler would run on the stack that overflowed"
-            );
+            for signal in super::OVERFLOW_SIGNALS {
+                let mut action: libc::sigaction = std::mem::zeroed();
+                libc::sigaction(signal, std::ptr::null(), &raw mut action);
+                assert_ne!(
+                    action.sa_flags & libc::SA_ONSTACK,
+                    0,
+                    "the handler for signal {signal} would run on the stack that overflowed"
+                );
+            }
         }
 
         #[cfg(windows)]

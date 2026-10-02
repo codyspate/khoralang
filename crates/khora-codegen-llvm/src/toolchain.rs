@@ -594,6 +594,18 @@ fn drive_clang(
         cmd.arg("-Wl,-Brepro");
     }
 
+    // **`main` gets the stack a fiber gets, on Windows too.** A fiber's stack
+    // is `khora_rt::stack::FIBER_STACK`, 8 MB, chosen as what `main` gets from
+    // a default `ulimit -s` on Linux and from the system on macOS. A Windows
+    // executable's main thread gets what its PE header asks for, and the
+    // linker's default is 1 MB -- so on Windows the program that recursed
+    // fifty thousand frames on a fiber overflowed doing it in `main`. Reserved,
+    // not committed: pages are only taken as the stack grows into them.
+    // Executables only; a library's host decides its own thread's stack.
+    if cfg!(windows) && !library {
+        cmd.arg(format!("-Wl,/STACK:{}", khora_rt::FIBER_STACK));
+    }
+
     // **A Mach-O image's reproducibility is decided by the output file's
     // name, and by nothing else here.** Two fields vary with it: `LC_UUID`,
     // which `ld64` hashes over the content *and the path*, and the ad-hoc code
