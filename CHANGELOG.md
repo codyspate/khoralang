@@ -472,6 +472,20 @@ tests (see Changed).
 
 ### Fixed
 
+- **On the scheduler backend, fibers sharing a `Shared` cell could hang.** A fiber
+  waiting for the cell blocked its worker thread while the lock holder needed
+  that worker to run. A long change function preempted while holding the cell
+  could hang on one, two or four CPUs when enough fibers contended; a change
+  function waiting on a channel could hang on one CPU. Cell waiters give their
+  workers back instead. `Shared::update` and `Shared::modify` also stop waiting
+  when canceled, without running the change function. Threads not running as
+  scheduler fibers still wait on their own threads. 0.3.0 had the same hang.
+- **A delayed cell wake could shorten a shielded cleanup sleep.** If a lock
+  release chose a waiting fiber just as it was canceled, the wake could arrive
+  after that fiber began a later sleep and end it before the deadline. A sleep
+  checks its absolute deadline after every wake; ordinary cancellation still
+  ends an unshielded sleep promptly.
+
 - **A `postgres` query could return another caller's rows.** When a read
   failed partway through a reply, the caller was told `Disconnected`, but the
   connection went back into service with the rest of that reply still

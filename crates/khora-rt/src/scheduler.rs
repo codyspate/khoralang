@@ -930,6 +930,8 @@ pub(crate) enum Why {
     BlockingResult,
     /// Another fiber finishing; `on` is its completion latch.
     Join,
+    /// A `Shared` cell another fiber holds; `on` is the cell.
+    Cell,
 }
 
 /// [`park_current`], saying what for and on what, so that a hang can be read.
@@ -962,7 +964,13 @@ pub(crate) fn park_current_for(why: Why, on: usize) -> bool {
     true
 }
 
-/// Suspends the running fiber until `at`.
+/// Suspends the running fiber until `at`, or until it gives up on a stop.
+///
+/// A wake belongs to the fiber, not to a particular wait: a cell or channel
+/// wake delayed past cancellation can reach a later, shielded sleep. Keep the
+/// one timer and check the absolute deadline after every wake, rather than
+/// treating an unrelated notification as the timer firing. A plain cancel
+/// outside a shield still ends the sleep promptly.
 pub(crate) fn sleep_until(at: std::time::Instant) -> bool {
     let Some(shared) = shared_pool() else { return false };
     let id = crate::current::current(|fiber| fiber.id());
@@ -977,7 +985,14 @@ pub(crate) fn sleep_until(at: std::time::Instant) -> bool {
             shared.timer_added.notify_one();
         }
     }
-    park_current_for(Why::Deadline, 0)
+    loop {
+        if crate::current::current(|fiber| fiber.gives_up_waiting()) || std::time::Instant::now() >= at {
+            return true;
+        }
+        if !park_current_for(Why::Deadline, 0) {
+            return false;
+        }
+    }
 }
 
 /// Makes one particular fiber runnable, from anywhere, later.
@@ -986,6 +1001,10 @@ pub(crate) fn sleep_until(at: std::time::Instant) -> bool {
 /// holds one across a foreign call it cannot interrupt, and hands the fiber
 /// back when the call returns — without needing to know what `Shared` is,
 /// which is what keeps that type private.
+///
+/// `Clone` for a cell's waiting line, which keeps a fiber's entry for as long
+/// as it waits and makes a fresh one each time it enrolls.
+#[derive(Clone)]
 pub(crate) struct Waker {
     shared: Arc<Shared>,
     fiber: usize,

@@ -2922,25 +2922,26 @@ fn allowed_cpus() -> Vec<usize> {
     cpus
 }
 
-/// **The review's program, 20 runs each pinned to two and to four CPUs,
-/// every run watched: a run that has not finished in 10 s is killed and
-/// counted as a hang.** The scheduler backend with the local wake path on,
-/// which is its default. Linux only, because the pinning is `taskset`; the
-/// Rust tests in `khora-rt`'s scheduler module cover the mechanism on every
-/// platform.
-#[test]
-fn a_waker_blocked_on_a_cell_its_wakee_holds_does_not_hang_the_program() {
+/// Builds `source` for the scheduler and runs it 20 times pinned to each of
+/// one, two and four CPUs, every run watched: one that has not finished in
+/// 10 s is killed and counted as a hang, and a count that hung once is not
+/// run further, so a red run costs seconds rather than minutes. Each run must
+/// print `expected` and exit 0. Answers the hangs as (CPUs, run).
+///
+/// The scheduler backend with the local wake path on, which is its default.
+/// Linux only, because the pinning is `taskset`; `None` where it cannot pin.
+fn pinned_runs(name: &str, source: &str, expected: &str) -> Option<Vec<(usize, usize)>> {
     if !cfg!(target_os = "linux") || Command::new("taskset").arg("-V").output().is_err() {
         eprintln!("skipping: needs Linux and taskset to pin the program to a few CPUs");
-        return;
+        return None;
     }
     let cpus = allowed_cpus();
-    let exe = match build_std("blocked_waker", BLOCKED_WAKER, "scheduler") {
+    let exe = match build_std(name, source, "scheduler") {
         Ok(exe) => exe,
         Err(messages) => panic!("compiling failed:\n  {}", messages.join("\n  ")),
     };
     let mut hangs = Vec::new();
-    for count in [2usize, 4] {
+    for count in [1usize, 2, 4] {
         if cpus.len() < count {
             continue;
         }
@@ -2955,7 +2956,7 @@ fn a_waker_blocked_on_a_cell_its_wakee_holds_does_not_hang_the_program() {
                 .spawn()
                 .expect("the program should start");
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-            loop {
+            let hung = loop {
                 match child.try_wait().expect("waiting on the program") {
                     Some(status) => {
                         let mut out = String::new();
@@ -2964,20 +2965,109 @@ fn a_waker_blocked_on_a_cell_its_wakee_holds_does_not_hang_the_program() {
                             let _ = pipe.read_to_string(&mut out);
                         }
                         assert_eq!(status.code(), Some(0), "{count} CPUs, run {run}: {out}");
-                        assert_eq!(out, "done; cell=5\n", "{count} CPUs, run {run}");
-                        break;
+                        assert_eq!(out, expected, "{count} CPUs, run {run}");
+                        break false;
                     }
                     None if std::time::Instant::now() > deadline => {
                         let _ = child.kill();
                         let _ = child.wait();
-                        hangs.push((count, run));
-                        break;
+                        break true;
                     }
                     None => std::thread::sleep(std::time::Duration::from_millis(5)),
                 }
+            };
+            if hung {
+                hangs.push((count, run));
+                break;
             }
         }
     }
+    Some(hangs)
+}
+
+/// **The review's program, pinned to one, two and four CPUs.** With one
+/// worker nothing but that worker can run X, and while the cell's lock took
+/// the worker's thread, W blocking on it left nobody: every run hung. A
+/// waiter for a cell parks its fiber instead, so the worker runs X.
+#[test]
+fn a_waker_blocked_on_a_cell_its_wakee_holds_does_not_hang_the_program() {
+    let Some(hangs) = pinned_runs("blocked_waker", BLOCKED_WAKER, "done; cell=5\n") else { return };
+    assert!(hangs.is_empty(), "runs that hung (CPUs, run): {hangs:?}");
+}
+
+/// **No blocking call at all: a change function that runs long enough to be
+/// preempted.** Each `slow` change function loops 2,000 times, which spends
+/// its turn's safepoint budget while it holds the cell, so its fiber goes
+/// back on the queue holding the lock. The next fibers to run read or update
+/// the same cell.
+///
+/// While a waiter blocked its worker's thread, that was a hang on **every**
+/// CPU count, not only one: once as many fibers were waiting as there were
+/// workers, every worker's thread was blocked and the holder was on a queue
+/// nobody could reach. The tick steal from a stuck worker needs one worker
+/// that is not blocked, and there was none.
+const PREEMPTED_HOLDER: &str = r#"module main;
+import std::core::{print, Fiber, Shared};
+
+pub type Stop = | Stop;
+
+fn slow(cell: Shared<Int>, rounds: Int) -> Int {
+  let mut i = 0;
+  while i < rounds {
+    Shared::update(cell, fn x => {
+      let mut k = 0;
+      let mut acc = x;
+      while k < 2000 { acc = acc + 1; k = k + 1; }
+      acc - 1999
+    });
+    i = i + 1;
+  }
+  0
+}
+
+fn reader(cell: Shared<Int>, rounds: Int) -> Int {
+  let mut i = 0;
+  let mut seen = 0;
+  while i < rounds {
+    seen = Shared::get(cell);
+    i = i + 1;
+  }
+  seen
+}
+
+fn bumper(cell: Shared<Int>, rounds: Int) -> Int {
+  let mut i = 0;
+  while i < rounds {
+    Shared::update(cell, fn x => x + 1);
+    i = i + 1;
+  }
+  0
+}
+
+pub fn main() -> Int raises Stop {
+  let cell = Shared::of(0);
+  let a = Fiber::spawn(fn () => slow(cell, 40));
+  let b = Fiber::spawn(fn () => slow(cell, 40));
+  let c = Fiber::spawn(fn () => reader(cell, 2000));
+  let d = Fiber::spawn(fn () => bumper(cell, 2000));
+  let e = Fiber::spawn(fn () => reader(cell, 2000));
+  let f = Fiber::spawn(fn () => bumper(cell, 2000));
+  Fiber::wait(a)! catch { _ => () };
+  Fiber::wait(b)! catch { _ => () };
+  Fiber::wait(c)! catch { _ => () };
+  Fiber::wait(d)! catch { _ => () };
+  Fiber::wait(e)! catch { _ => () };
+  Fiber::wait(f)! catch { _ => () };
+  print("done; cell=${Shared::get(cell)}");
+  0
+}
+"#;
+
+#[test]
+fn a_holder_preempted_inside_its_change_function_does_not_hang_the_program() {
+    let Some(hangs) = pinned_runs("preempted_holder", PREEMPTED_HOLDER, "done; cell=4080\n") else {
+        return;
+    };
     assert!(hangs.is_empty(), "runs that hung (CPUs, run): {hangs:?}");
 }
 

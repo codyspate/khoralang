@@ -996,10 +996,36 @@ with no tick steal at all). `a_busy_pool_with_nobody_blocked_steals_almost_nothi
 holds it there.
 
 **Where it stops.** The steal needs one worker whose thread is not blocked.
-With one worker, or when every worker's thread blocks on the same cell while
-its holder waits on a queue, nothing is left to run the holder and the program
-hangs, as it did before wake-local. Only spilling the queue before blocking,
-or a cell lock that parks the fiber instead of the thread, would close that.
+With one worker, or when every worker's thread blocks on the same lock while
+its holder sits on a queue, nothing is left to run the holder and the program
+hangs, as it did before wake-local.
+
+**A `Shared` cell is no longer such a lock.** It was, and it was the one an
+ordinary program reached: a change function preempted while holding the cell
+(a loop of a couple of thousand iterations is enough) goes back on its
+worker's queue, and once as many fibers waited for the cell as there were
+workers, every worker's thread was blocked on its `Mutex`. Six fibers on one
+cell hung every run on one, two *and* four CPUs, not only on one;
+`BLOCKED_WAKER` hung every run on one. The tick steal could not help, since
+the thieves were blocked too. A fiber that finds a cell taken now **parks**
+(`Why::Cell`), so its worker goes on to run the holder. Giving the cell back
+frees it and wakes the waiter that has waited longest, and a running fiber
+may take it first, as with a `Mutex`: handing it to the woken waiter every
+time held it for somebody not running, and eight fibers adding to one cell
+took 448 ms on two workers against 67 with the `Mutex`. A waiter passed over
+for longer than a millisecond is handed it, though -- the reservation the
+channel's `handed` list makes for a value -- so a newcomer cannot keep it
+from a woken waiter for long. A thread that is not a fiber on a worker (`main`, a
+blocking-pool thread, a foreign thread, every fiber on the threads backend)
+still blocks its thread, which is right there: there is no worker to give
+back. `crates/khora-rt/src/shared.rs` has the lock;
+`a_holder_preempted_inside_its_change_function_does_not_hang_the_program`
+and `a_waker_blocked_on_a_cell_its_wakee_holds_does_not_hang_the_program`
+are the programs, pinned to one, two and four CPUs.
+
+What is left on the list below still stops there: a `print` whose stdout is
+a full pipe, a DNS lookup, a foreign call that waits for something only a
+fiber can do. Only spilling the queue before blocking would close those.
 
 The steal on the tick was chosen over spilling the queue before each blocking
 call because the blocking calls are not a closed set: the ones in the runtime
@@ -1016,15 +1042,14 @@ code on the scheduler:
 
 | call | blocks on |
 | --- | --- |
-| `Shared::get`, `set`, `update`, `modify` | the cell's `std::sync::Mutex`, held across a change function |
 | `print`, `eprint` | stdout's or stderr's lock, and the write |
 | `net::connect`, a TLS connect | DNS and `connect(2)`, done inline |
 | an `extern` function | whatever it does |
 | the runtime's own short locks (channel, latch, scheduler maps) | never held across a park or a call out |
 
 The blocking pool's submit parks the fiber when the pool is full rather than
-blocking the thread, and file I/O goes through the pool, so neither is on the
-list.
+blocking the thread, file I/O goes through the pool, and a fiber waiting for a
+`Shared` cell parks, so none of them is on the list.
 
 **How soon an idle worker steals.** `park` waits at most a millisecond on the
 condvar and then returns to `next`, which steals half of the first non-empty

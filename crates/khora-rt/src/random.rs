@@ -12,7 +12,7 @@ use crate::time::{khora_monotonic_millis, khora_unix_millis};
 //
 // **Three pure functions and a seed, and no generator state here at all.** The
 // state lives on the Khora side in a `Shared<Int>`, which is a cell behind a
-// mutex — see `khora_shared_update`. That is the answer to "fibers are threads,
+// lock — see `khora_shared_update`. That is the answer to "fibers are threads,
 // so what serializes two of them drawing at once": the same lock every other
 // shared cell uses, taken by the step that advances the state, rather than a
 // second mechanism invented here. A `thread_local!` generator was the

@@ -471,6 +471,64 @@ pub fn main() -> Int {
     }
 }
 
+/// **A fiber canceled while it waits for a cell another fiber holds stops
+/// waiting, and its change does not happen.** The holder is inside a change
+/// function that waits on a channel nobody sends to until the end; the waiter
+/// lines up behind it and is canceled. It must stop at once, on both
+/// backends, with its change function never run and the statement after its
+/// `update` never reached, while the holder still holds the cell. A wait for a
+/// lock that ignored the cancel stayed until the holder let go, minutes later
+/// in a server, and then ran the change for a caller that had been told to
+/// stop.
+#[test]
+fn a_fiber_canceled_while_it_waits_for_a_cell_stops_waiting() {
+    const SOURCE: &str = "module main;
+import std::core::{print, Fiber, Shared, Channel};
+import std::clock::{Clock};
+
+fn holder(cell: Shared<Int>, inside: Channel<Int>, release: Channel<Int>) -> () {
+  Shared::update(cell, fn n => { Channel::send(inside, 1); let _ = Channel::receive(release); n + 1 });
+}
+
+fn waiter(cell: Shared<Int>, ran: Shared<Int>) -> () {
+  Shared::update(cell, fn n => { Shared::set(ran, 1); n + 100 });
+  print(\"TAIL waiter ran\");
+}
+
+pub fn main() -> Int {
+  with { clock: Clock::real() } {
+    let cell = Shared::of(41);
+    let ran = Shared::of(0);
+    let inside: Channel<Int> = Channel::bounded(1);
+    let release: Channel<Int> = Channel::bounded(1);
+    let h = Fiber::spawn(fn () => holder(cell, inside, release));
+    let _ = Channel::receive(inside);
+    let w = Fiber::spawn(fn () => waiter(cell, ran));
+    clock.sleep(200);
+    let t0 = clock.monotonic_millis();
+    Fiber::cancel(w);
+    Fiber::wait(w);
+    let waited = clock.monotonic_millis() - t0;
+    print(\"canceled: ${Fiber::canceled(w)}; prompt: ${waited < 2000}; change ran: ${Shared::get(ran)}\");
+    Channel::send(release, 1);
+    Fiber::wait(h);
+    print(\"cell = ${Shared::get(cell)}\");
+    0
+  }
+}
+";
+    for (backend, ran) in on_both("cancel_everywhere_cellwait", SOURCE) {
+        assert!(!ran.hung, "`{backend}`: {}", ran.stdout);
+        assert_eq!(
+            ran.stdout,
+            "canceled: true; prompt: true; change ran: 0\ncell = 42\n",
+            "`{backend}`: {}",
+            ran.stderr
+        );
+        assert_eq!(ran.code, Some(0), "`{backend}`");
+    }
+}
+
 /// **A change function that joins a child somebody else stopped changes
 /// nothing, and its caller stops** -- although nobody canceled the caller.
 /// Joining a stopped fiber stops the joiner, inside a change function as

@@ -84,8 +84,9 @@ pub extern "C" fn khora_sleep(millis: i64) {
         return;
     }
     // Already asked to stop: a sleep that began after the cancellation would
-    // otherwise wait out its whole length on the scheduler, where the wake is
-    // what ends a sleep and it has already happened.
+    // otherwise wait out its whole length on the scheduler. A canceled sleep
+    // cannot wait for a wake that was already delivered; the scheduler below
+    // also rechecks its deadline after unrelated wakes while shielded.
     if crate::current::current(|fiber| fiber.gives_up_waiting()) {
         return;
     }

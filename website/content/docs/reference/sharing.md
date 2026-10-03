@@ -70,6 +70,10 @@ Shared::set(cache, refreshed);
 
 Calling `update` or `modify` recursively on the **same cell** from inside its own change function would deadlock. Khora detects that case and traps instead of waiting forever.
 
+**Waiting for a cell.** While one fiber is inside a change function, any other `get`, `set`, `update` or `modify` on that cell waits. On the scheduler backend a waiting fiber gives its worker back, so the worker runs other fibers -- the one holding the cell among them -- and a cell held across a preemption or a channel `receive` does not stop the program, even on one CPU. Fibers waiting for a cell are woken in the order they asked for it; a fiber that is running when the cell is let go may take it first, but not for longer than about a millisecond before the longest waiter is given its turn. The program's `main`, and every fiber on the threads backend, waits on its own thread. Two fibers each inside a change function and each waiting for the other's cell wait for ever; Khora detects only a fiber waiting for itself.
+
+A canceled fiber waiting for a cell in `update` or `modify` stops waiting: its change function does not run, and it stops at the `update` as it would at any cancellation point. In cleanup only `Fiber::abort` (or a `cancel_within` deadline running out) ends that wait. `get` and `set` have no answer for having given up, so they wait for the cell.
+
 **What a cancellation does to a change function.** Nothing inside one stops at a cancellation point -- not a loop, not a call, not even for a fiber stopped with `Fiber::abort` -- because it holds the cell's lock. What a cancellation does instead:
 
 - A blocking call inside it -- a channel `receive`, a `clock.sleep`, a socket read -- gives up at once with its "gave up" answer (`None`, an early return, `-1`), the change function carries on with that answer and returns, and the fiber stops after the `update`.
