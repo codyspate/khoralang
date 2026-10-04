@@ -13,7 +13,7 @@ version = "0.1.0"
 
 # Which Khora builds this project. Required.
 [toolchain]
-version = "0.3.0"
+version = "0.4.0"
 ```
 
 Tables may appear in any order. A key the compiler does not recognize is a warning rather than an error, so a manifest written for a newer Khora still builds with an older one — you are told what was ignored instead of being stopped.
@@ -24,7 +24,7 @@ Tables may appear in any order. A key the compiler does not recognize is a warni
 
 ```toml
 [toolchain]
-version = "0.3.0"
+version = "0.4.0"
 ```
 
 | Key | Value |
@@ -88,7 +88,7 @@ version = "0.4.0"
 authors = ["A Name <a@example.com>"]
 
 [toolchain]
-version = "0.3.0"
+version = "0.4.0"
 ```
 
 | Key | Value |

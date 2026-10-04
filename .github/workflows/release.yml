@@ -5,10 +5,13 @@ name: release
 #
 # The flow, and the order matters:
 #
-#   1. Create a release on GitHub with a new tag, and **save it as a draft**.
-#   2. This runs, builds a toolchain on each platform, and uploads them to that
-#      draft.
-#   3. You look at what is in it, and press Publish.
+#   1. Push the reviewed tag, then create a draft release against that tag.
+#      A draft created without a pushed tag has no immutable source to build.
+#   2. This runs against the tag (also on workflow_dispatch), builds a toolchain
+#      per platform, and uploads the artifacts to the draft.
+#   3. Verify the run SHA and all archives against the tag, then publish.
+#   4. For a stable release, open and merge the docs PR from the branch this
+#      workflow pushes. RCs leave /docs/next/ in place.
 #
 # Only step 3 makes it visible to `install.sh`. So a half-built or wrong
 # release is never something a `curl | sh` can reach: until somebody presses
@@ -89,13 +92,12 @@ jobs:
         # which was lying about the result.
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      # A draft release has no tag yet — GitHub creates it on publish — so
-      # there is nothing to check out by tag name. `target_commitish` is the
-      # branch or commit the release was made against, which is the thing the
-      # tag *will* point at.
+      # The tag is pushed before the draft is created. Both draft-release
+      # events and manual dispatches must build that immutable ref, never the
+      # branch selected in the Actions UI or a movable target_commitish.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.release.target_commitish || github.ref }}
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
 
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -254,9 +256,11 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      # This job used to need nothing from the repository. It does now:
-      # `scripts/release-notes.sh` cuts the notes out of `CHANGELOG.md`.
+      # Release notes and attestations must describe the same tagged source
+      # as the three package jobs, including on workflow_dispatch.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -332,20 +336,25 @@ jobs:
   # `git` commands. A newcomer reads that skew as "my compiler is ahead of its
   # documentation" and starts discounting pages that are correct.
   #
-  # This job does not push to `main`. It opens a pull request, because the cut
-  # is a real change to the site -- a tree and a `versions.mjs` entry -- and
-  # deserves the same review as any other. What it removes is the chance of
-  # forgetting.
+  # This job does not push to `main`. It pushes a branch for maintainer review
+  # because the cut is a real change to the site -- a tree and a `versions.mjs`
+  # entry. A maintainer opens and merges the PR; this job does not open it.
+  # Candidates keep their pages under /docs/next/. Cutting their tree as
+  # stable would redirect ordinary readers to a compiler only available with
+  # --pre, and the final tag would collide with the same v0.4 destination.
+  # The repository disables PR creation by GitHub Actions; this job pushes a
+  # branch for an authenticated maintainer to open and merge as a separate step.
   docs:
-    name: cut the documentation tree
+    name: prepare stable documentation tree
+    if: ${{ !contains(github.event.release.tag_name || inputs.tag, '-rc.') }}
     needs: attach
     permissions:
       contents: write
-      pull-requests: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
           # `cut-docs.sh` reads the tag with `git archive`, so the tag has to be
           # here: a shallow default checkout has the commit and not the refs.
           fetch-depth: 0
@@ -363,9 +372,7 @@ jobs:
           npm ci
           npm run build
 
-      - name: Open a pull request
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push documentation branch for maintainer review
         run: |
           set -eu
           branch="docs/cut-$TAG"
@@ -375,7 +382,4 @@ jobs:
           git add website/content/versions website/versions.mjs
           git commit -m "Documentation for $TAG, cut from the tag"
           git push origin "$branch"
-          gh pr create \
-            --title "Documentation for $TAG" \
-            --body "Cut from \`$TAG\` by the release workflow. Merging it makes \`/docs/\` resolve here, and returns \`next\` to being the tree that is being written." \
-            --base main --head "$branch"
+          printf 'Open and merge a PR from `%s` to `main` with an authenticated maintainer account. GitHub Actions cannot create PRs in this repository.\n' "$branch" >> "$GITHUB_STEP_SUMMARY"

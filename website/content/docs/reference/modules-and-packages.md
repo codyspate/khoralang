@@ -25,7 +25,7 @@ name = "orders"
 version = "0.1.0"
 
 [toolchain]
-version = "0.3.0"
+version = "0.4.0"
 ```
 
 Source lives under `src/`. [The manifest](/docs/reference/manifest/) documents
@@ -151,13 +151,16 @@ package's source; there are no binary artifacts to publish or to trust.
 
 ```toml
 [dependencies]
-# From a git repository, at a branch, tag or commit.
-postgres = { git = "https://github.com/codyspate/khoralang", rev = "main", subdir = "packages/postgres" }
+# From a git repository, at a version-matched, immutable tag.
+postgres = { git = "https://github.com/codyspate/khoralang", rev = "v0.4.0", subdir = "packages/postgres" }
 
 # From a directory on this machine, for a package you are also editing.
 shared = { path = "../shared" }
 ```
 
+The example above is for the published 0.4.0 toolchain. For its published
+candidate, pin `[toolchain]` to `0.4.0-rc.1` and the dependency's `rev` to
+`v0.4.0-rc.1`; neither tag can be fetched before that release is published.
 `subdir` is for a repository holding more than one package — a git URL names a
 repository, and the two are the same thing only in the simplest layout.
 
@@ -168,8 +171,13 @@ Use `git` for anything you did not write and `path` for anything you did.
 add a dependency without editing the manifest by hand:
 
 ```bash
-khora install https://github.com/codyspate/khoralang --subdir packages/postgres
+khora install https://github.com/codyspate/khoralang --rev v0.4.0 --subdir packages/postgres
 ```
+
+For the published candidate, use `--rev v0.4.0-rc.1` with its
+`[toolchain] version = "0.4.0-rc.1"` pin. Omitting `--rev` chooses moving
+`main`, which can resolve to a package newer than your compiler even though
+the resulting lockfile freezes that commit.
 
 That finds out the package's real name and whether it offers itself at all
 *before* writing the entry — two things a line typed into `[dependencies]`
@@ -196,8 +204,9 @@ checksum = "001bf5bf28448ba94bd6c08d2a8a3c55535692be5c61113fbfd94df74ff1ff55"
 ```
 
 A branch name resolves to the commit it pointed at, and the commit is what is
-recorded — so `rev = "main"` is a convenience at the moment the dependency is
-added, not a moving target afterwards.
+recorded. That makes a lockfile reproducible after resolution, but `rev = "main"`
+may already select an incompatible package when first added. Use a release tag
+matching the project's toolchain pin for packages in Khora's repository.
 
 **The checksum is verified, not merely recorded.** Every resolution hashes what
 arrived and compares it against the lockfile. If the same commit id ever
@@ -277,7 +286,7 @@ Every project says which compiler builds it, and the field is required:
 
 ```toml
 [toolchain]
-version = "0.3.0"
+version = "0.4.0"
 ```
 
 The pin takes precedence over the machine default, and a pinned version that is

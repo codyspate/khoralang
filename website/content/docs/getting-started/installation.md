@@ -6,6 +6,12 @@ sidebar:
 
 Install the Khora toolchain once, then use `khora` to manage compiler versions for all of your projects. There is no separate version manager to install.
 
+These `next` pages describe 0.4.0. Until its stable release is published,
+the ordinary installer still selects the latest published stable version.
+For 0.4 candidate testing, use the [release-candidate instructions](#release-candidates)
+*after* the candidate appears on the release page; examples pinned to 0.4.0
+require the stable artifact and do not install an unpublished release.
+
 ## Install Khora
 
 On macOS or Linux:
@@ -49,7 +55,7 @@ https://github.com/codyspate/khoralang/releases/download/v<version>/khora-<versi
 (`.zip` on Windows), and you check it the same way:
 
 ```bash
-sha256sum -c khora-0.3.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c khora-0.4.0-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 A checksum says the bytes are the ones that were published. It does not say who
@@ -60,7 +66,7 @@ which repository at which commit produced that exact file. Checking it needs
 the GitHub CLI signed in to any account (`gh auth login`):
 
 ```bash
-gh attestation verify khora-0.3.0-x86_64-unknown-linux-gnu.tar.gz   --repo codyspate/khoralang
+gh attestation verify khora-0.4.0-x86_64-unknown-linux-gnu.tar.gz   --repo codyspate/khoralang
 ```
 
 There is no maintainer key to trust and none to leak. The signing identity is
@@ -145,7 +151,7 @@ Use `khora` itself to install and switch compiler versions:
 
 ```bash
 khora update                      # install the newest release and use it
-khora toolchain install 0.3.0     # install a particular release
+khora toolchain install 0.4.0     # install a particular release
 khora toolchain default 0.1.0     # select an installed release as the default
 khora toolchain list              # list installed toolchains
 khora toolchain which             # show the version selected here and why
@@ -159,7 +165,7 @@ Every project says which compiler builds it, in `khora.toml`:
 
 ```toml
 [toolchain]
-version = "0.3.0"
+version = "0.4.0"
 ```
 
 **The field is required.** A project without it stops with a message carrying the two lines to add — the version, the quoting and the table name are not things anybody should have to guess.
@@ -199,20 +205,23 @@ cargo build -p khora-rt
 You can register a compiler you built locally as a Khora toolchain:
 
 ```bash
-khora toolchain link 0.3.0 target/debug/khora
+khora toolchain link 0.4.0 target/debug/khora
 ```
 
 ## Release candidates
 
-If you intentionally want to test a release candidate, opt into prerelease versions explicitly. **These pages — the `next` documentation — describe the newest candidate**, and the release page on GitHub names which one that is.
+If you intentionally want to test a release candidate, opt into prerelease versions explicitly. **These `next` documentation pages describe 0.4.0, but candidate artifacts are published only after the release page lists them.** Check that page for the current candidate before using a pinned command.
 
-On macOS or Linux, the newest release including candidates, or one by name:
+On macOS or Linux, choose the newest published version including candidates, or select the 0.4 candidate by name once published:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/codyspate/khoralang/main/install.sh | sh -s -- --pre
-curl -fsSL https://raw.githubusercontent.com/codyspate/khoralang/main/install.sh | sh -s -- --version 0.3.0-rc.1
+curl -fsSL https://raw.githubusercontent.com/codyspate/khoralang/main/install.sh | sh -s -- --version 0.4.0-rc.1
 ```
 
+The 0.4 candidate has its own version and pin, `0.4.0-rc.1`: replace
+`version = "0.4.0"` with `version = "0.4.0-rc.1"` in an application
+manifest for candidate testing, and pin packages from the same release tag.
 `--version` takes the version without the leading `v`, and works for any published release, candidate or not.
 
 On Windows PowerShell, `installrc.ps1` is `install.ps1` with prereleases allowed — PowerShell cannot pass an argument to a script piped into `iex`, so the option is a second file rather than a flag:
@@ -234,7 +243,7 @@ A project built with a candidate pins it by its full name — `khora new` writes
 
 ```toml
 [toolchain]
-version = "0.3.0-rc.1"
+version = "0.4.0-rc.1"
 ```
 
 When you are ready to write code, continue with [Your first Khora project](/docs/getting-started/first-project/).

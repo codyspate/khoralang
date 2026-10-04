@@ -205,16 +205,32 @@ fn write_version(manifest: &Path, from: &str, to: &str) -> Result<()> {
     let text = std::fs::read_to_string(manifest)
         .with_context(|| format!("reading {}", manifest.display()))?;
     let needle = format!("version = \"{from}\"");
-    let hits = text.matches(&needle).count();
-    if hits != 1 {
+    let mut in_package = false;
+    let mut matches = Vec::new();
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_package = trimmed == "[workspace.package]";
+        } else if in_package && trimmed == needle {
+            matches.push(offset + line.find(&needle).expect("the trimmed line matches"));
+        }
+        offset += line.len();
+    }
+    if matches.len() != 1 {
         bail!(
-            "expected exactly one `{needle}` in {}, found {hits}. Edit it by hand; a release \
-             tool guessing which one you meant is worse than one that stops",
-            manifest.display()
+            "expected exactly one `{needle}` under [workspace.package] in {}, found {}. \
+             Edit it by hand; a release tool guessing which one you meant is worse than one that stops",
+            manifest.display(),
+            matches.len()
         );
     }
-    std::fs::write(manifest, text.replace(&needle, &format!("version = \"{to}\"")))
-        .with_context(|| format!("writing {}", manifest.display()))
+    let mut updated = text;
+    updated.replace_range(
+        matches[0]..matches[0] + needle.len(),
+        &format!("version = \"{to}\""),
+    );
+    std::fs::write(manifest, updated).with_context(|| format!("writing {}", manifest.display()))
 }
 
 /// Writes the notes skeleton.

@@ -382,7 +382,7 @@ fn a_manifest_that_does_not_load_is_an_error_in_the_editor() {
     let w = workspace(&[
         (
             "khora.toml",
-            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[toolchain]\nversion = \"0.3.0\"\n\n\
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[toolchain]\nversion = \"0.4.0\"\n\n\
              [lints]\ndangling-expression = \"deny\"\nunused-binding = \"loud\"\n",
         ),
         ("src/main.kh", "module app::main;\n"),
@@ -6492,7 +6492,7 @@ fn a_pinned_project_is_not_told_anything() {
     let w = workspace(&[
         (
             "khora.toml",
-            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[toolchain]\nversion = \"0.3.0\"\n",
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[toolchain]\nversion = \"0.4.0\"\n",
         ),
         ("src/main.kh", "module app::main;\n\npub fn main() -> Int {\n  0\n}\n"),
     ]);

@@ -74,12 +74,14 @@ same base image.
 
 ## The artifacts, and checking one
 
-A release publishes one archive per triple and a checksum beside it, named for
-the tag:
+A published stable release provides one archive per triple and a checksum
+beside it, named for the tag. These 0.4.0 URLs work only after the stable
+release is published; for a published release candidate, replace both `0.4.0`
+strings with its full version, such as `0.4.0-rc.1`:
 
 ```text
-https://github.com/codyspate/khoralang/releases/download/v0.3.0/khora-0.3.0-x86_64-unknown-linux-gnu.tar.gz
-https://github.com/codyspate/khoralang/releases/download/v0.3.0/khora-0.3.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+https://github.com/codyspate/khoralang/releases/download/v0.4.0/khora-0.4.0-x86_64-unknown-linux-gnu.tar.gz
+https://github.com/codyspate/khoralang/releases/download/v0.4.0/khora-0.4.0-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 `install.sh` and `install.ps1` fetch exactly that pair and refuse the archive if
@@ -87,7 +89,7 @@ the digest does not match. To do it by hand — in a build image that should not
 pipe a script into a shell, say:
 
 ```bash
-version=0.3.0
+version=0.4.0
 triple=x86_64-unknown-linux-gnu
 base=https://github.com/codyspate/khoralang/releases/download/v$version
 curl -fsSLO "$base/khora-$version-$triple.tar.gz"

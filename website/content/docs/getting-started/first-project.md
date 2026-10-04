@@ -7,6 +7,11 @@ sidebar:
 A Khora package has a `khora.toml` manifest and source files, conventionally under `src/`. This walkthrough adds a small function and a test, then formats, checks, tests, builds, and runs the package with the installed `khora` toolchain.
 
 If `khora --version` does not work yet, start with [Installation](/docs/getting-started/installation/).
+For the 0.4 release candidate, use its [explicit candidate install](/docs/getting-started/installation/#release-candidates)
+after publication rather than the plain stable installer. `khora new` pins
+whichever compiler ran it: keep `0.4.0-rc.1` in a candidate project, and pin
+Khora-repository dependencies to `v0.4.0-rc.1`. The manifest below shows the
+stable 0.4.0 release, which is installable only after it is published.
 
 ## Package structure
 
@@ -55,7 +60,7 @@ version = "0.1.0"
 
 # Which Khora builds this project. Required.
 [toolchain]
-version = "0.3.0"
+version = "0.4.0"
 ```
 
 The `[toolchain]` version is required, and it is what makes a project build the

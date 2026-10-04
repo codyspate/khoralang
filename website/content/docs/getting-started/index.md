@@ -14,17 +14,40 @@ problem; reading them is usually faster than searching these pages.
 
 ## 1. Install Khora
 
-On macOS or Linux:
+The ordinary installer selects the latest **published stable** version.
+To follow this 0.4 walkthrough before the stable release, first use the
+[0.4 release-candidate installer](/docs/getting-started/installation/#release-candidates)
+once that candidate is published. Check `khora --version` before continuing:
+`khora new` pins that exact version, and a plain install during the RC period
+still creates a 0.3 project. The manifest examples below show stable 0.4.0;
+for the candidate, use `0.4.0-rc.1` in every `[toolchain]` pin.
+
+For the current published stable version on macOS or Linux:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/codyspate/khoralang/main/install.sh | sh
 ```
 
-On Windows, in PowerShell:
+For the 0.4 candidate, once it is published, **use this instead**:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/codyspate/khoralang/main/install.sh | sh -s -- --version 0.4.0-rc.1
+```
+
+On Windows, the ordinary stable installer is:
 
 ```powershell
 irm https://raw.githubusercontent.com/codyspate/khoralang/main/install.ps1 | iex
 ```
+
+For the published 0.4 candidate on Windows, run the prerelease installer
+instead (PowerShell cannot pass a flag through `iex`):
+
+```powershell
+irm https://raw.githubusercontent.com/codyspate/khoralang/main/installrc.ps1 | iex
+```
+
+Verify that `khora --version` reports `0.4.0-rc.1` before proceeding.
 
 Verify the toolchain is available:
 
@@ -59,8 +82,12 @@ name = "hello_khora"
 version = "0.1.0"
 
 [toolchain]
-version = "0.3.0"
+version = "0.4.0"
 ```
+
+The example pin is for the stable 0.4.0 release. On the candidate path above,
+`khora new` writes `version = "0.4.0-rc.1"` instead; keep it, and use a
+package dependency tagged `v0.4.0-rc.1` if the project adds one.
 
 Both tables are required. `[toolchain]` is what makes "this project builds the
 same way on your machine" true by default rather than by convention, so a
@@ -198,7 +225,7 @@ name = "hello_khora"
 version = "0.1.0"
 
 [toolchain]
-version = "0.3.0"
+version = "0.4.0"
 
 [dependencies]
 postgres = { path = "../packages/postgres" }

@@ -21,11 +21,14 @@ That downloads the release for this platform, checks it against the published
 `~/.profile`, `~/.bashrc` and `~/.zshrc` already exist. Nothing is compiled,
 nothing needs root, and `rm -rf ~/.khora` undoes it.
 
-For a build machine, pin the version and leave the shell profiles alone:
+For a build machine, pin the version and leave the shell profiles alone.
+The 0.4.0 example works after the stable release is published; for a published
+candidate, substitute its full version (`0.4.0-rc.1`) in both this command and
+your project's pin:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/codyspate/khoralang/main/install.sh \
-  | sh -s -- --version 0.3.0 --to /opt/khora --no-modify-path
+  | sh -s -- --version 0.4.0 --to /opt/khora --no-modify-path
 export PATH="/opt/khora/bin:$PATH"
 ```
 

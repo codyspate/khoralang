@@ -25,18 +25,27 @@ changelog="$root/CHANGELOG.md"
 
 # `## 0.1.0 — 2026-08-27` or `## Unreleased`. The heading is matched exactly to
 # its version so that `0.1.0` does not also match `0.1.0-rc.3`.
-notes=$(awk -v want="$version" '
-    /^## / {
-        if (inside) exit
-        # Strip "## " and anything after the first space that follows the
-        # version, which is the em-dash and the date.
-        line = substr($0, 4)
-        split(line, parts, " ")
-        inside = (parts[1] == want)
-        if (inside) next
-    }
-    inside { print }
-' "$changelog")
+# A candidate is the same release's notes unless it has its own section. A
+# separate RC section is optional: repeating the entire release entry for each
+# candidate makes the public notes drift. Keep an exact match first, so a
+# candidate-specific correction still takes precedence.
+base=${version%-rc.*}
+notes_for() {
+    awk -v want="$1" '
+        /^## / {
+            if (inside) exit
+            line = substr($0, 4)
+            split(line, parts, " ")
+            inside = (parts[1] == want)
+            if (inside) next
+        }
+        inside { print }
+    ' "$changelog"
+}
+notes=$(notes_for "$version")
+if [ -z "$notes" ] && [ "$base" != "$version" ]; then
+    notes=$(notes_for "$base")
+fi
 
 # Trim the blank lines the section boundary leaves at each end.
 notes=$(printf '%s\n' "$notes" | sed -e '/./,$!d' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}')

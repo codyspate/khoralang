@@ -10,7 +10,7 @@ answer that is now right, then the rest. A bug that produced a *silently wrong*
 answer is listed under Breaking as well as Fixed, because code written around
 it will behave differently now.
 
-## Unreleased
+## 0.4.0 — 2026-10-03
 
 Coming from 0.3.0, read three groups of entries first.
 
@@ -471,6 +471,12 @@ tests (see Changed).
   0.3.0 kept the first and dropped the second without a word.
 
 ### Fixed
+
+- **`khora release --minor` and `--patch` refused a workspace whose toolchain
+  pin matched its package version.** Both fields carried the same `version =`
+  text, so the writer found two matches and stopped. It selects only the
+  `[workspace.package]` entry and leaves the toolchain pin untouched; the
+  workspace must update its pin separately when adopting the new compiler.
 
 - **On the scheduler backend, fibers sharing a `Shared` cell could hang.** A fiber
   waiting for the cell blocked its worker thread while the lock holder needed

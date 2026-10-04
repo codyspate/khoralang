@@ -5,7 +5,7 @@ version = "0.3.0"
 # Not a member of the repository's workspace (whose members are one level
 # under `bench/`), so it carries its own pin.
 [toolchain]
-version = "0.3.0"
+version = "0.4.0"
 
 # The port it answers on and the database it dials. Nothing else.
 [permissions]

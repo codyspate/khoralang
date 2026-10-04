@@ -12,6 +12,10 @@ single file.
 
 ## A Dockerfile
 
+This example pins the stable 0.4.0 release and builds after it is published.
+For a published release candidate, set `KHORA_VERSION=0.4.0-rc.1` and pin
+the application and its Khora-repository dependencies to the same candidate.
+
 ```dockerfile
 # --- build ------------------------------------------------------------------
 FROM debian:trixie-slim AS build
@@ -24,7 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Pinned. A plain `curl | sh` takes the newest stable release, which makes the
 # image depend on the day it was built.
-ARG KHORA_VERSION=0.3.0
+ARG KHORA_VERSION=0.4.0
 RUN curl -fsSL https://raw.githubusercontent.com/codyspate/khoralang/main/install.sh \
       | sh -s -- --version "${KHORA_VERSION}" --to /opt/khora --no-modify-path
 ENV PATH="/opt/khora/bin:${PATH}"
@@ -52,7 +56,7 @@ ENTRYPOINT ["/usr/local/bin/myservice"]
 ```
 
 ```bash
-docker build --build-arg KHORA_VERSION=0.3.0 -t myservice:1 .
+docker build --build-arg KHORA_VERSION=0.4.0 -t myservice:1 .
 docker run --rm -p 8080:8080 myservice:1
 ```
 

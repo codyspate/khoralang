@@ -8,11 +8,11 @@ Khora is `0.x`. It may break. This page says when, how you find out, and what 1.
 
 ## What `0.x` promises
 
-**Within one release, everything.** A program that compiles with one `khora 0.3.0` build compiles with every `0.3.0` build, and the lockfile resolves the same way. Pin the toolchain and a build is reproducible.
+**Within one release, everything.** A program that compiles with one `khora 0.4.0` build compiles with every `0.4.0` build, and the lockfile resolves the same way. Pin the toolchain and a build is reproducible.
 
 ```toml
 [toolchain]
-version = "0.3.0"
+version = "0.4.0"
 ```
 
 A pin that cannot be satisfied fails loudly. It never silently runs a different compiler — the toolchain shim hands over before argument parsing, and `khora toolchain which` tells you which build answered and why.

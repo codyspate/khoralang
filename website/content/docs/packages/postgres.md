@@ -10,8 +10,11 @@ is written against.
 
 ```toml
 [dependencies]
-postgres = { git = "https://github.com/codyspate/khoralang", rev = "v0.3.0", subdir = "packages/postgres" }
+postgres = { git = "https://github.com/codyspate/khoralang", rev = "v0.4.0", subdir = "packages/postgres" }
 ```
+
+Use `v0.4.0-rc.1` instead when testing that published candidate with a
+`0.4.0-rc.1` toolchain; the stable tag is available only after publication.
 
 **[`packages/postgres/README.md`](https://github.com/codyspate/khoralang/blob/main/packages/postgres/README.md)
 is the reference** — every function, both usage styles, and the honest list of
