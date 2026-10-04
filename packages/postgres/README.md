@@ -5,17 +5,24 @@ wire protocol, spoken directly over `std::net::socket`.
 
 ## Installing
 
+Use a release tag that matches your toolchain. After stable 0.4.0 is published:
+
 ```
-khora install https://github.com/codyspate/khoralang --subdir packages/postgres --rev v0.3.0
+khora install https://github.com/codyspate/khoralang --subdir packages/postgres --rev v0.4.0
 ```
 
+For a published 0.4.0 release candidate, pin your toolchain to `0.4.0-rc.1`
+and use `--rev v0.4.0-rc.1` instead. Neither new tag is available before its
+release is published; keep `v0.3.0` for a 0.3.0 toolchain. Do not use moving
+`main` as the revision for a version-matched release trial.
+
 `--subdir` because a git URL names a *repository*, and this package lives
-inside one that is mostly a compiler. The command writes the entry, so
-`khora.toml` ends up with:
+inside one that is mostly a compiler. The stable command writes the entry,
+so `khora.toml` ends up with:
 
 ```toml
 [dependencies]
-postgres = { git = "https://github.com/codyspate/khoralang", rev = "v0.3.0", subdir = "packages/postgres" }
+postgres = { git = "https://github.com/codyspate/khoralang", rev = "v0.4.0", subdir = "packages/postgres" }
 ```
 
 ## Using it as a `Db` capability
