@@ -1,0 +1,277 @@
+---
+title: Sharing
+sidebar:
+  order: 14
+---
+
+Khora keeps ordinary mutation fiber-local. A value may cross a fiber boundary only when its type is shareable, and coordinated mutation is expressed through synchronization types rather than by sharing an ordinary writable record or container.
+
+## `Share`
+
+`Share` is the marker trait for values that two fibers may hold at the same time:
+
+```khora
+pub trait Share {}
+```
+
+Structural values are shareable when all of their contents are shareable. For example, an immutable record containing only shareable fields needs no handwritten marker implementation.
+
+Opaque types are different: the compiler cannot inspect their representation, so they are not shareable unless their implementation explicitly promises that concurrent holders are safe:
+
+```khora
+pub type SafeHandle;
+
+impl Share for SafeHandle {}
+```
+
+Writing that implementation is an assertion about the opaque implementation. Do not add it merely to silence a sharing diagnostic.
+
+Mutable fiber-local containers are not made safe by wrapping their type name in a shareable record. If the value itself permits unsynchronized writes, it must remain local or be represented through a synchronization primitive designed for that use.
+
+## `Shared<A>`
+
+`Shared<A>` is a synchronized cell containing one shareable value:
+
+```khora
+pub type Shared<A>;
+
+impl<A> Share for Shared<A> {}
+
+impl<A: Share> Shared<A> {
+  pub fn of(value: A) -> Shared<A>;
+  pub fn get(self) -> A;
+  pub fn set(self, value: A) -> ();
+  pub fn update(self, change: (A) -> A) -> A;
+  pub fn modify<B>(self, change: (A) -> Changed<A, B>) -> B;
+}
+```
+
+Create, read, and replace a value as follows:
+
+```khora
+let count = Shared::of(0);
+
+let before = Shared::get(count);
+Shared::set(count, before + 1);
+```
+
+Use `update` when the read and write must be one serialized transition:
+
+```khora
+let after = Shared::update(count, fn n => n + 1);
+```
+
+The `change` closure runs once while the cell is locked. Its type has no `raises` row. Fallible, blocking, or otherwise slow work belongs outside the critical section, which keeps it small and stops external latency from turning into lock contention:
+
+```khora
+let refreshed = fetch_value()!;
+Shared::set(cache, refreshed);
+```
+
+Calling `update` or `modify` recursively on the **same cell** from inside its own change function would deadlock. Khora detects that case and traps instead of waiting forever.
+
+**Waiting for a cell.** While one fiber is inside a change function, any other `get`, `set`, `update` or `modify` on that cell waits. On the scheduler backend a waiting fiber gives its worker back, so the worker runs other fibers -- the one holding the cell among them -- and a cell held across a preemption or a channel `receive` does not stop the program, even on one CPU. Fibers waiting for a cell are woken in the order they asked for it; a fiber that is running when the cell is let go may take it first, but not for longer than about a millisecond before the longest waiter is given its turn. The program's `main`, and every fiber on the threads backend, waits on its own thread. Two fibers each inside a change function and each waiting for the other's cell wait for ever; Khora detects only a fiber waiting for itself.
+
+A canceled fiber waiting for a cell in `update` or `modify` stops waiting: its change function does not run, and it stops at the `update` as it would at any cancellation point. In cleanup only `Fiber::abort` (or a `cancel_within` deadline running out) ends that wait. `get` and `set` have no answer for having given up, so they wait for the cell.
+
+**What a cancellation does to a change function.** Nothing inside one stops at a cancellation point -- not a loop, not a call, not even for a fiber stopped with `Fiber::abort` -- because it holds the cell's lock. What a cancellation does instead:
+
+- A blocking call inside it -- a channel `receive`, a `clock.sleep`, a socket read -- gives up at once with its "gave up" answer (`None`, an early return, `-1`), the change function carries on with that answer and returns, and the fiber stops after the `update`.
+- A `Fiber::join`, `wait` or `outcome` inside it that comes back stopped -- because this fiber was canceled, or because the child was stopped by somebody else -- ends the change function. **The change does not happen**: the cell keeps the value it had, the lock is released, and the caller stops at the `update` as it would at any call to a stopped fiber.
+- **In cleanup, those three wait.** Inside a `Region::defer` finalizer or `scoped` cleanup, a plain cancel does not end a `join`, `wait` or `outcome` in a change function: it waits for the child with the lock held, the change happens, and the rest of the cleanup runs. Only `Fiber::abort` (or a `cancel_within` deadline running out) ends that wait, and then the cell keeps the value it had.
+- A change function that loops without blocking runs to its end. One that loops for ever holds the lock for ever, and nothing -- not `abort`, not `cancel_within` -- ends it but the process ending.
+
+## `Changed<A, B>` and `modify`
+
+`modify` is the atomic operation to use when a state transition also needs to return a value other than the new state.
+
+Its result record is:
+
+```khora
+pub type Changed<A, B> = {
+  state: A,
+  result: B,
+};
+```
+
+Example:
+
+```khora
+let issued = Shared::modify(next_id, fn current => {
+  {
+    state: current + 1,
+    result: current,
+  }
+});
+```
+
+Both the state replacement and the returned result belong to the same locked transition.
+
+## `Channel<A>`
+
+A channel is a bounded hand-off queue, not another kind of shared cell:
+
+```khora
+pub type Channel<A>;
+
+impl<A> Share for Channel<A> {}
+
+impl<A: Share> Channel<A> {
+  pub fn bounded(capacity: Int) -> Channel<A>;
+  pub fn dropping(capacity: Int) -> Channel<A>;
+  pub fn sliding(capacity: Int) -> Channel<A>;
+  pub fn send<'er>(self, value: A) -> Bool raises 'er;
+  pub fn receive<'er>(self) -> Option<A> raises 'er;
+  pub fn poll(self) -> Option<A>;
+  pub fn close(self) -> ();
+  pub fn depth(self) -> Int;
+}
+```
+
+Typical use:
+
+```khora
+let jobs = Channel::bounded(64);
+
+if Channel::send(jobs, job) {
+  ()
+} else {
+  handle_closed_queue(job)
+}
+
+match Channel::receive(jobs) {
+  Option::Some(next) => process(next),
+  Option::None => (),
+}
+```
+
+A send to a full channel suspends until space becomes available. A receive from an empty open channel suspends until a value arrives. Suspension gives the scheduler worker back; it is not a busy wait or a blocked worker thread.
+
+Both are cancellation points, and neither takes a `!`: neither raises an error, and a fiber canceled while parked on one stops there whatever its `raises` row says.
+
+A canceled channel operation is always canceled **empty-handed**. The runtime looks at the cancellation flag only once it has established there is nothing to take and no room to send, so a value arriving at the same moment as the cancellation is still delivered rather than dropped. A send that gives up releases its value, the same as a send to a closed channel.
+
+`poll` never waits, so it is not a cancellation point.
+
+`send` returns `false` when the channel is closed. Closing wakes waiters. Receivers drain values already queued before `receive` begins returning `Option::None`.
+
+A capacity less than one is treated as one. `Channel::bounded(0)` is therefore **not** a zero-capacity rendezvous channel.
+
+### What a full channel does
+
+The behavior belongs to the channel, not to the send. A queue is lossy or it is not, and two senders disagreeing about which is not a state a queue can be in.
+
+| Constructor | A send into a full one | `send` answers | What is left |
+| --- | --- | --- | --- |
+| `bounded` | waits | `true` | everything |
+| `dropping` | refuses the new value | `false` | the oldest |
+| `sliding` | evicts the oldest | `true` | the newest |
+
+`bounded` is the default because backpressure is: a queue nobody is draining is a producer that should slow down.
+
+`dropping` is for a producer that must not stall — the request path writing an audit event, a handler emitting a metric. The `false` makes the loss a value the caller can count and report.
+
+`sliding` is for a feed where only the newest value matters: a gauge, a progress indicator, a last-known position. It answers `true` because nothing was refused, so the loss is invisible at the call site. That is deliberate — nobody was going to act on it. Use `dropping` where somebody would.
+
+### `poll`
+
+`poll` takes a value if one is already there and never waits:
+
+```khora
+match Channel::poll(jobs) {
+  Option::Some(next) => process(next),
+  Option::None => do_something_else(),
+}
+```
+
+`None` means "not right now", not "not ever": a closed and drained channel and a live empty one both answer `None`, and telling them apart is what `receive` is for. Use `poll` in a loop that has other work between looks. A loop that only polls is a loop that spins.
+
+`depth` is observational: concurrent activity can make the returned count stale immediately, so it is appropriate for metrics and tests rather than synchronization decisions.
+
+## `SharedFn`
+
+A closure's function type does not reveal what the closure captured. `SharedFn` records the fact that a closure was checked for safe sharing at the point where its captures were visible:
+
+```khora
+pub type SharedFn<A, B, 'er>;
+
+impl<A, B, 'er> Share for SharedFn<A, B, 'er> {}
+
+impl<A, B, 'er> SharedFn<A, B, 'er> {
+  pub fn of(f: (A) -> B raises 'er) -> SharedFn<A, B, 'er>;
+  pub fn call(self, argument: A) -> B raises 'er;
+}
+```
+
+Construct one from a closure literal or named function:
+
+```khora
+let callback = SharedFn::of(fn request => handle(request));
+let response = SharedFn::call(callback, request);
+```
+
+Use `SharedFn` when a callback must be stored inside another shareable value, such as a router or callback table.
+
+Its error `'er` need not be `Share`. `SharedFn::call` runs the closure on the calling fiber, so an error it raises is raised and caught on that one fiber and reaches no other. A `Fiber`'s error is different, because the fiber that joins receives it.
+
+## `Fiber<A, 'er>`
+
+A fiber handle is shareable, so one fiber can hold another's and act on it:
+
+```khora
+pub fn main() -> () {
+  let worker = Fiber::spawn(fn () => slowly());
+  // The handle crosses, so a second fiber can stop the first.
+  let watcher = Fiber::spawn(fn () => Fiber::cancel(worker));
+  Fiber::wait(watcher);
+  Fiber::wait(worker);
+  print("both settled")
+}
+```
+
+`wait` needs no `!` here because neither child can fail. The fiber doing the waiting can itself be canceled while it is parked, and it stops there whatever its own `raises` row.
+
+**This is what a supervisor is made of**, and what a deadline would be made of: there is no `timeout` or `race` in `std` (see [Concurrency](/docs/reference/concurrency/)), so anything of that shape is written from a handle one fiber holds and another cancels.
+
+What constrains it is the answer rather than the handle. `A: Share` is on the whole `impl<A: Share, 'er> Fiber<A, 'er>`, because a value computed on one fiber and read on another has to be safe to hold twice — so it is a condition on having a `Fiber<A, 'er>` at all, and `wait` needs it as much as `join` does even though `wait` never hands the answer back.
+
+The error is held to the same rule. Every error in a spawned body's `raises` row must be `Share`, because `join` and `outcome` hand the raised error to whoever joins, and two fibers may join one handle. It is asked at the spawn, and again once the function's types are settled if the row was not known there:
+
+```text
+error: `Oops` does not implement `Share`, which a spawned fiber's error requires: whoever joins
+the fiber holds the error it raised. `Oops` can be written, and two fibers writing one value is a race
+```
+
+A `SharedFn`'s error is not held to it: a certified closure is called on the caller's fiber, so what it raises stays there. It may still not raise a `Region` or `Scope`.
+
+## Regions stay home
+
+A `Region` stays on the fiber that opened it, and so does a `Scope`. Neither is shareable: a fiber's body cannot capture one, a channel cannot carry one, a `Shared` cell cannot hold one, a fiber cannot answer or raise one, and a handler for another effect cannot capture one. So a region's finalizers run on the fiber that deferred them, which is what lets a finalizer capture a record with `mut` fields that this fiber goes on writing.
+
+A child fiber that acquires something is given a scope of its own:
+
+```khora
+let worker = Fiber::spawn(fn () => scoped(work));
+```
+
+A lambda works as well, `Fiber::spawn(fn () => scoped(fn () => serve(connection)))`, and so does a named function whose body calls `scoped`. What the child acquires is released when the child's `scoped` ends, on every way out, including a cancellation or an `abort` of the child.
+
+The scope `scoped` hands its body is the one the body uses, also inside a function that has a `scope` of its own: there, `work()` in `scoped(fn () => work())` uses the new scope, not the enclosing one. What the body names is another matter. A lambda that writes `scope.defer(..)`, or captures `scope` under another name, uses the enclosing function's scope, and inside a spawn that is refused:
+
+```text
+error: `scope` cannot be handed to another fiber: a `Scope` stays on the fiber that opened it,
+so that its finalizers run on the fiber that deferred them. To release something the child
+acquires, give the child a scope of its own, `Fiber::spawn(fn () => scoped(work))`
+```
+
+`Region::root()` and `Scope::root()` belong to the program's own fiber. A spawned fiber that reaches for either is stopped with a fatal error (exit status 134), because the root region is reachable by name and no type rule can keep a child off it. A `test` or `bench` block is given a root region of its own, released when the block ends. A fiber that a test spawns is refused the test's root like any other, and because the fatal error ends the process, it ends the whole `khora test` run: the tests still running are not reported, and there is no summary line.
+
+A region whose last reference goes on a fiber that did not open it is stopped with the same kind of fatal error, rather than running its finalizers on that fiber.
+
+What this costs: a child cannot acquire something and have its parent's longer scope release it. A resource that honestly has to outlive the child is a shareable one — a pool, a channel, a `Shared` cell — and the parent acquires it first and hands the shareable value in.
+
+## Choosing the boundary
+
+Use `Shared<A>` when several fibers coordinate around **one evolving value**. Use `Channel<A>` when a value or unit of work is **handed to one receiver**, especially when backpressure matters. Use `SharedFn` when a **callback itself** must cross the sharing boundary. A `Fiber<A, 'er>` handle crosses too, which is what lets one fiber cancel or wait on another.
+
+See [Concurrency](/docs/reference/concurrency/) for fiber and nursery lifetime rules and [Memory and resources](/docs/reference/memory-and-resources/) for structured cleanup.

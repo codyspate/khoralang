@@ -1,0 +1,285 @@
+---
+title: Run a database transaction
+sidebar:
+  order: 3
+---
+
+Wrap the body: `transaction(fn () => body())`. It commits when the body answers
+`Result::Ok`, rolls back on `Result::Err`, and rolls back during unwinding if
+the body is canceled. It takes `db` from the capability row, so there is
+nothing to thread through.
+
+Khora keeps the transaction contract in `std::db` while concrete database engines live in packages. Application code depends on the `Db` **capability**, not on a database value threaded through every function call.
+
+That distinction is the point of the API. A function that talks to the database says so in its type:
+
+```khora
+import std::db::{Cell, Db, DbError, Row, transaction};
+
+fn load_account(id: Int) -> Result<List<Row>, DbError>
+  with { db: Db }
+{
+  db.query(
+    "select id, balance from accounts where id = ?",
+    [Cell::Number(id)],
+  )
+}
+```
+
+There is no `db: Db` parameter. `with { db: Db }` is the function's authority to perform database operations, and the caller supplies that authority at a boundary.
+
+`transaction` follows the same rule. It requires `db: Db` through its capability row, so transaction boundaries do not turn the capability back into explicit dependency plumbing.
+
+## Complete example
+
+This complete module transfers money between two accounts. Both application functions require `Db` through their capability rows. The concrete `demo_db` handler appears only at the wiring boundary in `main`.
+
+```khora
+module main;
+
+import std::core::{List, Result, Shared, Show, print};
+import std::db::{Cell, Db, DbError, Row, transaction};
+
+fn demo_db() -> Db {
+  // The handler keeps the depth: how many transactions are open on its
+  // connection. `transaction` asks for it to choose between `BEGIN` and a
+  // savepoint.
+  let depth = Shared::of(0);
+  handler for Db {
+    query: fn (_sql, _params) =>
+      Result::Ok(List::Nil),
+
+    // The same answers as `query` once per set. A handler over a driver that
+    // can pipeline sends every set before reading a reply; this one loops.
+    query_each: fn (_sql, sets) =>
+      List::map(sets, fn _params => Result::Ok(List::Nil)),
+
+    execute: fn (sql, _params) => {
+      print("execute: ${sql}");
+      Result::Ok(1)
+    },
+
+    depth: fn () => Shared::get(depth),
+
+    begin: fn () => {
+      print("BEGIN");
+      Shared::set(depth, 1);
+      Result::Ok(())
+    },
+
+    commit: fn () => {
+      print("COMMIT");
+      Shared::set(depth, 0);
+      Result::Ok(())
+    },
+
+    rollback: fn () => {
+      print("ROLLBACK");
+      Shared::set(depth, 0);
+      Result::Ok(())
+    },
+
+    savepoint: fn level => {
+      print("SAVEPOINT sp_${level}");
+      Shared::set(depth, level + 1);
+      Result::Ok(())
+    },
+
+    release: fn level => {
+      print("RELEASE SAVEPOINT sp_${level}");
+      Shared::set(depth, level);
+      Result::Ok(())
+    },
+
+    // Called for a savepoint that was never opened when a cancel lands
+    // before it was; that must change nothing.
+    rollback_to: fn level => {
+      if Shared::get(depth) > level {
+        print("ROLLBACK TO SAVEPOINT sp_${level}");
+        Shared::set(depth, level);
+      };
+      Result::Ok(())
+    },
+
+    broken: fn () => print("the connection's state is no longer known"),
+  }
+}
+
+fn transfer_body(
+  from_account: Int,
+  to_account: Int,
+  amount: Int,
+) -> Result<(), DbError>
+  with { db: Db }
+{
+  let debited = db.execute(
+    "update accounts set balance = balance - ? where id = ?",
+    [Cell::Number(amount), Cell::Number(from_account)],
+  );
+
+  match debited {
+    Result::Err(error) => Result::Err(error),
+    Result::Ok(_) => {
+      let credited = db.execute(
+        "update accounts set balance = balance + ? where id = ?",
+        [Cell::Number(amount), Cell::Number(to_account)],
+      );
+
+      match credited {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => Result::Ok(()),
+      }
+    },
+  }
+}
+
+fn transfer(
+  from_account: Int,
+  to_account: Int,
+  amount: Int,
+) -> Result<(), DbError>
+  with { db: Db }
+{
+  transaction(fn () =>
+    transfer_body(from_account, to_account, amount)
+  )
+}
+
+pub fn main() {
+  with { db: demo_db() } {
+    match transfer(10, 20, 2500) {
+      Result::Ok(_) => print("transfer committed"),
+      Result::Err(error) => print("transfer failed: ${error}"),
+    }
+  }
+}
+```
+
+The dependency flow is visible directly in the signatures:
+
+```text
+main installs db
+     ↓
+transfer      with { db: Db }
+     ↓
+transaction   with { db: Db }
+     ↓
+transfer_body with { db: Db }
+     ↓
+db.execute(...)
+```
+
+Neither `transfer` nor `transfer_body` knows whether `db` is PostgreSQL, SQLite, D1, an in-memory test handler, or something else. They know only that a `Db` capability is available.
+
+## Failure behavior
+
+If either `execute` returns `Result::Err`, `transfer_body` returns that error. `transaction` sees the failed result and rolls the transaction back instead of committing it.
+
+If the fiber is canceled at any point after `transaction` starts, including while it waits for the server to answer `BEGIN` or `COMMIT`, the transaction's internal region finalizer performs the rollback during unwinding, so a pooled connection never goes back to the pool inside an open transaction. A caller does not need a second cancellation-specific transaction API.
+
+If `commit` itself fails, the commit error is returned. The helper does not report success for a transaction the database did not commit. A commit that loses its connection is reported as `DbError::Disconnected` with a message saying it is not known whether the transaction committed: the `COMMIT` may have reached the server, so do not treat that error as "nothing happened" and blindly retry.
+
+A body that ignores a failed statement and returns `Result::Ok` anyway is told `DbError::RolledBack`. PostgreSQL ends such a transaction with a rollback when it is asked to commit, and the PostgreSQL package reports that as the rollback it is.
+
+## Nesting
+
+A `transaction` inside another `transaction` on the same `db` is nested for real, with a savepoint:
+
+- the inner one opens a savepoint instead of a transaction;
+- its `Result::Ok` releases the savepoint, so its writes become part of the enclosing transaction and commit or roll back with it;
+- its `Result::Err`, a raise, or a cancellation rolls back to the savepoint, which undoes only the inner writes. The enclosing body is told `DbError::RolledBack` and can carry on and commit its own.
+
+```khora
+fn record_transfer(from_account: Int, to_account: Int, amount: Int)
+  -> Result<Int, DbError>
+  with { db: Db }
+{
+  transaction(fn () => {
+    // If the transfer fails, only its own writes are undone; the audit row
+    // below is still written and committed.
+    let moved = transaction(fn () =>
+      transfer_body(from_account, to_account, amount));
+    db.execute(
+      "insert into audit (outcome) values (?)",
+      [Cell::Text(match moved { Result::Ok(_) => "moved", Result::Err(e) => Show::show(e) })],
+    )
+  })
+}
+```
+
+Nothing is committed until the outermost `transaction` commits: an inner `Result::Ok` inside an outer failure is rolled back with the rest. Nesting goes as deep as the calls do, and each level is undone on its own.
+
+The depth belongs to the connection, which is why a handler keeps it rather than `transaction`: two fibers leasing two connections from a pool nest independently, and one `db` used twice from one fiber is one connection at one depth. A cancellation inside an inner body rolls back the inner savepoint first and then the enclosing transaction, so nothing either body wrote survives.
+
+A lease's `db` stays on the fiber that took the lease. `with_db` lends the body the connection itself, so a fiber spawned inside the body cannot use the body's `db`, and each fiber has its own transaction depth because each has its own connection. A fiber that needs the database takes its own lease:
+
+```khora
+fn record_both(pool: Pool, a: Int, b: Int) -> () {
+  let first = Fiber::spawn(fn () => with_db(pool, fn () => insert(a)));
+  let second = Fiber::spawn(fn () => with_db(pool, fn () => insert(b)));
+  Fiber::wait(first);
+  Fiber::wait(second);
+}
+```
+
+Spawning a fiber that uses the body's `db` is refused where the fiber uses it, and the message names the line of the spawn:
+
+```khora
+fn record_both(a: Int, b: Int) -> () with { db: Db } {
+  let first = Fiber::spawn(fn () => insert(a));
+  let second = Fiber::spawn(fn () => insert(b));
+  Fiber::wait(first);
+  Fiber::wait(second);
+}
+```
+
+```text
+error: `db` cannot be handed to another fiber, and the fiber spawned at line 2, column 15 uses it
+here: a `Db` stays on the fiber it was installed on, because it drives a connection that fiber
+writes, and a fiber spawned inside a `with_db` body cannot use that body's `db`: take a lease in
+the spawned fiber instead, `Fiber::spawn(fn () => with_db(pool, work))`
+```
+
+Two fibers that each take a lease from a pool of one connection take turns: the second waits in `with_db` until the first lease ends.
+
+A handler implements nesting with four operations beside `begin`, `commit` and `rollback`: `depth` says how many transactions are open, and `savepoint`, `release` and `rollback_to` take the level a savepoint was opened at. `rollback_to` is called for a savepoint that was never opened when a cancellation lands before it was, and must answer `Result::Ok` without undoing anything then, exactly as `rollback` must when no transaction is open. A handler that does not support nesting still answers `depth` truthfully (1 between `begin` and its `commit` or `rollback`, 0 otherwise) and refuses `savepoint`; a nested `transaction` is then answered with that refusal instead of opening a second transaction.
+
+## Install a real database at the boundary
+
+The portable application contract is the capability row:
+
+```khora
+fn transfer(from_account: Int, to_account: Int, amount: Int)
+  -> Result<(), DbError>
+  with { db: Db }
+```
+
+A PostgreSQL, SQLite, D1, or other package constructs a handler that satisfies `Db`. Install that handler at the application's composition boundary:
+
+```khora
+with { db: postgres_db } {
+  transfer(10, 20, 2500)
+}
+```
+
+**No driver ships in `std`.** `postgres_db` above stands for a handler somebody has written; `Db` is a record of closures, so a handler over an existing client is a day's work and the in-memory double below is the whole of what a test needs. For the drivers maintained alongside the compiler, see [Packages](/docs/packages/).
+
+The PostgreSQL pool helper does the same installation for a leased connection. Its callback requires `db: Db`; `with_db` supplies it and removes that requirement from the caller:
+
+```khora
+with_db(pool, fn () =>
+  transfer(10, 20, 2500)
+)
+```
+
+## Testing becomes substitution, not plumbing
+
+Because the dependency is a capability, the same function can be tested with a different handler without changing its arguments:
+
+```khora
+with { db: recording_db() } {
+  transfer(10, 20, 2500)
+}
+```
+
+For exact `Db`, `Cell`, `DbError`, and `transaction` declarations, see the [database API reference](/docs/stdlib/api/db/). For the capability model itself, see [Effects and capabilities](/docs/reference/capabilities/). For the cleanup mechanism underneath cancellation-safe transactions, see [Resources and regions](/docs/reference/memory-and-resources/).

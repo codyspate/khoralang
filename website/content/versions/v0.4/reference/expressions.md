@@ -1,0 +1,529 @@
+---
+title: Expressions
+sidebar:
+  order: 4
+---
+
+Khora is expression-oriented. Literals, calls, blocks, conditionals, matches, pipelines, lambdas, handlers, and control-flow forms all appear in expression position according to their type.
+
+## Literals
+
+```khora
+42
+1_000_000
+3.14
+6.02e23
+19.99d
+true
+false
+"hello"
+`multiline text`
+```
+
+See [Lexical structure](./lexical-structure/) for exact literal and interpolation forms.
+
+## Paths and names
+
+```khora
+value
+app::model::User
+Result::Ok
+```
+
+`::` is compile-time namespacing for modules, types, constructors, and associated items.
+
+## Calls
+
+```khora
+parse(input)
+connect(host, port)
+```
+
+Arguments are positional and may have a trailing comma.
+
+### Labeled arguments
+
+At a call to a named function, an argument may be written `name: value`, where
+`name` is the name the function's declaration gives that parameter. The label
+is checked and changes nothing else: arguments are still matched to parameters
+by position, and still evaluated left to right in the order written.
+
+```khora
+fn reply(connection: Connection, response: String, keep_alive: Bool) -> String {
+  response
+}
+
+reply(connection, "ok", keep_alive: false)
+reply(connection: c, response: "ok", keep_alive: true)
+```
+
+- **Any argument may be labeled, or none.** Labeled and unlabeled arguments
+  mix freely in any combination, because a label never moves anything. A
+  label is never required.
+- **A label must name the parameter at its position.**
+  `reply(c, keep_alive: true, response: "ok")` is refused even though both
+  names exist, and the error says which position each name has.
+- A label naming no parameter is refused. So is a label written twice, since
+  it cannot match both positions, and a label on a parameter declared `_`.
+  `_:` is not a label.
+- **Methods.** In `Type::f(x, a)` the receiver is parameter 1 and is not
+  labeled; `a` is parameter 2 and may be. The same holds in the second form,
+  `x.f(a)`. `self:` is refused: the receiver is written one way.
+- **Pipes.** `x |> f(b: 1)` puts `x` in parameter 1, or in the `_` slot, and
+  `b:` is checked against the parameter it lands in.
+- **Traits.** A trait method's labels are the trait's parameter names, however
+  the method is reached: `Trait::m(x, ..)`, `Type::m(x, ..)` or `x.m(..)`. An
+  `impl` may name its parameters differently; those names are local to its
+  body.
+- **Constructors.** A case with a named payload, `| A(v: Int, w: Bool)`, takes
+  labels exactly as a function does. A positional payload, `| B(Int)`, takes
+  none. Patterns are unchanged.
+- **Calls through a value take no labels.** A function type such as
+  `(Int, Bool) -> ()` names no parameters, so a label at a call through a
+  local, a parameter, a field, a closure or an effect operation is refused.
+- `extern fn` declarations are labeled by their declared names. Labels do not
+  reach C.
+
+There are no default arguments, and a label cannot skip or reorder one. A
+parameter's name is part of a public function's interface once any caller
+labels it: see [Compatibility](./compatibility/).
+
+## Field projection and method calls
+
+```khora
+user.name
+response.status
+User::display_name(user)
+```
+
+`.` reads a field of a runtime value. It is distinct from `::` path lookup.
+
+**A method is called through its owner:** `User::display_name(user)`, with the
+receiver as the first argument. The owner is the type that declares the
+method, or the trait for a trait's method: `Show::show(n)`, and inside
+`fn f<A: Show>(x: A)`, `Show::show(x)`, since a type parameter has no `A::` to
+write. The qualified call names where the function lives, it is the form `|>`
+composes with (`name |> String::trim`), and it is the one that settles a name
+two traits share.
+
+`user.display_name()` is the second form of the same call, and it compiles:
+the receiver is found first and the method looked up on its type, a field
+holding a function winning over a method of the same name. Both forms
+evaluate the receiver first and then the arguments, left to right. The
+`idiomatic` lint group reports the second form as `method-call`, and
+`khora check --fix` rewrites it to the first; see
+[Lints](./lints/#fixing-what-they-find).
+
+## Record literals
+
+```khora
+{
+  id: 42,
+  name: "Ada",
+}
+```
+
+A braced form beginning with `name:` is a record literal; an ordinary braced
+sequence is a block.
+
+**`{}` in expression position is a record literal, not an empty block.** It is
+the value of a record type declared with no fields — `pub type Nothing = {};` —
+and it only checks where such a type is expected:
+
+```khora
+pub type Nothing = {};
+
+let nothing: Nothing = {};
+```
+
+Everywhere else it is refused, and the message says so and says what to write
+instead:
+
+```text
+error: `{}` is an empty record literal, and no record type here is declared with no fields. Write `()` for a block that does nothing
+ --> src/main.kh:9:21
+  |
+9 |     Option::None => {},
+  |                     ^^
+```
+
+The place this bites is a `match` arm that should do nothing. `=>` is followed
+by an *expression*, so `Option::None => {}` is a record literal and is refused.
+Write `Option::None => ()` for an arm that produces unit. A braced block after
+`=>` is fine as long as it is not empty: `Option::None => { retire(); }`.
+
+## Record update
+
+`{ ..base, field: value }` builds a new record from an existing one. Every
+field not named comes from `base`:
+
+```khora
+let renamed = { ..user, name: "Grace" };
+```
+
+It is a **new record**: `user` is unchanged. What the syntax saves is writing
+out the fields that do not change, which starts to matter at more than a few:
+
+```khora
+fn applied(counts: Counts, event: Event) -> Counts {
+  match event {
+    Event::Created => { ..counts, created: counts.created + 1 },
+    Event::Deleted => { ..counts, deleted: counts.deleted + 1 },
+    Event::Expired => { ..counts, expired: counts.expired + 1 },
+  }
+}
+```
+
+The base comes first and appears once. A field named twice is an error rather
+than last-one-wins, so is a field the base's type does not have, and so is a
+base that is not a record. `{ ..base }` with nothing after it is `base`.
+
+**The base's type has to be a record the checker can name.** A type
+parameter is not one, whatever a caller instantiates it at, so `fn f<A>(x: A)
+-> A { { ..x, n: 1 } }` is refused. A lambda's parameter can be the base
+without an annotation when a call fixes its type: `let g = fn c => { ..c,
+created: 0 };` followed by `g(counts)` is checked as an update of `Counts`.
+When nothing ever fixes it, the update asks for an annotation, because there
+is no record to check the fields against. From outside a record's module,
+an update is subject to [field visibility](./types/#field-visibility) like
+any other way of building one.
+
+A [`mut` field](./types/#record-types) is the other way to do this. The update
+produces a new value; assigning a `mut` field changes the one already held.
+Reach for the update where the old value still matters, and for `mut` where it
+does not.
+
+## Tuple and unit expressions
+
+```khora
+()
+(1, "one")
+(1,)
+```
+
+Parentheses without a comma group an expression:
+
+```khora
+(value + 1)
+```
+
+## List literals
+
+```khora
+[]
+[1, 2, 3]
+[
+  "Ada",
+  "Grace",
+]
+```
+
+**Elements that come and go.** Inside `[..]`, three forms stand for any number of elements:
+
+```khora
+[header, if debug => trace, for r in rows => render(r), ..footer]
+```
+
+`if c => x` is `x` when `c` holds, and nothing otherwise; `else` gives the other case, and `else if` chains. `for p in xs => e` is one `e` per item. `..xs` is every element of the list `xs`. They nest, as in `[for x in xs => if x != 2 => x]`, and they are evaluated left to right, each condition and iterable once. An `else` belongs to the nearest `if`, so `[if a => if b => x else y]` is `y` when `a` holds and `b` does not.
+
+`=>` is what makes them elements. `[if c { x } else { y }]` is a one-element list holding the value of an `if` expression, and `[if c { x }]` is a type error unless `x` is `()`: "an `if` without `else` must produce `()`", followed by "inside `[..]`, an element that is only sometimes there is written `if c => x`".
+
+A `for` element needs `Step` and `Iterator` in scope, as a `for` loop does, and it is a cancellation point like one. It cannot be left with `break` or `continue`; filter with `if` instead. `return` and `!` work inside elements as they do anywhere in the function, and leave it with the elements made so far freed.
+
+Only `List` has a literal. A `match` that makes zero or more elements is written as a spread: `..match o { Option::Some(v) => [v], Option::None => [] }`.
+
+**Cost.** The literal is built front to back and reversed once, so it is linear in the elements it makes, and allocates what a `for` that pushes and then calls `reverse` would. A trailing `..xs` is shared rather than copied; a spread anywhere else walks its list.
+
+## Integer division and remainder
+
+`/` **truncates toward zero** and `%` **takes the sign of the dividend**, which is what C, Rust, Go and the hardware instruction all do:
+
+```khora
+(0 - 7) / 2       // -3, not -4
+7 / (0 - 2)       // -3
+(0 - 7) / (0 - 2) //  3
+
+(0 - 7) % 2       // -1
+7 % (0 - 2)       //  1
+(0 - 7) % (0 - 2) // -1
+```
+
+The two agree, so `a == (a / b) * b + (a % b)` holds for every pair that does not trap. `Float::to_int` truncates toward zero for the same reason, and says so.
+
+Both trap on a zero divisor rather than answering anything — see [Traps](/docs/reference/traps/). For a quotient that rounds rather than truncating, do the rounding in `Decimal`, where the mode is a parameter and not a convention.
+
+## Blocks
+
+```khora
+{
+  let subtotal = 40;
+  let tax = 2;
+  subtotal + tax
+}
+```
+
+The final expression without a semicolon is the block value. Statements before it are evaluated in order.
+
+## Local bindings
+
+```khora
+let value = compute();
+let value: Int = compute();
+let mut count = 0;
+let (left, right) = pair;
+```
+
+General form:
+
+```text
+let mut? Pattern (: Type)? = Expr ;
+```
+
+A binding is immutable unless it says `mut`, and a plain `let` cannot be
+assigned to later. `mut` is fiber-local mutation only: state that several
+fibers evolve is a `Shared` boundary instead, and
+[Sharing](./sharing/) says why.
+
+`let` is local. Module-level named expressions use `const`; see [Declarations](./declarations/#constants).
+
+## Assignment
+
+```khora
+count = count + 1
+```
+
+Assignment is an expression of type `()` and is right-associative. The target must be writable, such as a `let mut` binding or a mutable record field.
+
+## Lambdas
+
+Single parameter:
+
+```khora
+fn value => value * 2
+```
+
+Ignored parameter:
+
+```khora
+fn _ => fixed_value
+```
+
+Several or annotated parameters:
+
+```khora
+fn (left: Int, right: Int) => left + right
+```
+
+Block body:
+
+```khora
+fn value => {
+  let doubled = value * 2;
+  doubled + 1
+}
+```
+
+## Pipeline `|>`
+
+First-argument insertion:
+
+```khora
+value |> transform(a, b)
+```
+
+is equivalent to:
+
+```khora
+transform(value, a, b)
+```
+
+One `_` placeholder selects another argument position:
+
+```khora
+value |> transform(a, _, b)
+```
+
+A stage may contain at most one placeholder.
+
+Bare unary function:
+
+```khora
+value |> normalize |> validate
+```
+
+Fallible stage:
+
+```khora
+value |> parse! |> validate(config)!
+```
+
+A pipeline introduces no second error model: `!` still marks the exact call
+where a typed failure may leave the function, and `catch` still applies either
+to one stage or to the parenthesized pipeline as a whole.
+
+```khora
+let user = (raw |> parse! |> validate!) catch {
+  ParseError::Invalid(message) => User::invalid(message),
+};
+```
+
+## Flow lambda `||>`
+
+`||>` starts a unary anonymous pipeline:
+
+```khora
+||> normalize
+|> validate!
+|> persist!
+```
+
+For example:
+
+```khora
+items |> List::map(
+  ||> normalize
+  |> validate!
+)
+```
+
+It is equivalent in shape to `fn value => value |> ...`, and infers its
+effects, failures and captures the same way.
+
+Following `|>` stages belong to the flow lambda until grouping ends, so piping
+the function value itself takes parentheses:
+
+```khora
+(||> normalize) |> apply_twice
+```
+
+`||>` is always unary. An anonymous function of several parameters is `fn`.
+A named function needs neither: `items |> List::map(normalize)`.
+
+Reach for a pipeline when the value moving through the expression is the thing
+to follow, and for an ordinary call when the operation itself is the point of
+the line.
+
+## Operators and precedence
+
+From loosest to tightest:
+
+1. assignment `=` — right-associative
+2. pipeline `|>` — left-associative
+3. logical OR `||`
+4. logical AND `&&`
+5. comparisons `== != < > <= >=`
+6. addition/subtraction `+ -` — `+` also joins two `String`s, which is the only
+   concatenation operator there is; there is no `++`
+7. multiplication/division/remainder `* / %`
+8. prefix negation `-` and boolean not `!`
+9. postfix call, field access, failure `!`, `catch`, and `with`
+
+Examples:
+
+```khora
+value + 1 |> double
+ready && count > 0
+!enabled
+-total
+```
+
+Prefix `!value` is boolean negation. Postfix `call()!` marks failure propagation; position disambiguates them.
+
+## Failure postfix `!`
+
+```khora
+load_user(id)!
+```
+
+The inner call keeps its normal value type while its declared failure row is allowed to leave the current computation. See [Failures](./failures/).
+
+## `catch`
+
+```khora
+load_user(id)! catch {
+  UserError::NotFound(_) => User::guest(),
+  UserError::Unavailable(reason) => User::offline(reason),
+}
+```
+
+`catch` is postfix on the expression whose typed failures it handles, and that
+expression still needs its `!`. The mark is what lets the failure leave the
+call; `catch` only says what to do with it once it has. Omitting it is refused:
+
+```
+error: `load_user` can leave this function, so the call needs `!`:
+       write `load_user(..)!`
+```
+
+## Postfix capability installation
+
+```khora
+load_user(id)! with {
+  store: test_store,
+}
+```
+
+A named context can be supplied the same way:
+
+```khora
+load_user(id)! with Production
+```
+
+with overrides:
+
+```khora
+load_user(id)! with Production {
+  store: test_store,
+}
+```
+
+See [Capabilities](./capabilities/).
+
+## Handler expressions
+
+```khora
+handler for Clock {
+  now: fn () => fixed_instant,
+}
+```
+
+A handler expression produces a value implementing the named effect.
+
+## `with` blocks
+
+```khora
+with {
+  clock: fixed_clock,
+  store: test_store,
+} {
+  run_job()!
+}
+```
+
+Named context:
+
+```khora
+with Production {
+  run_server()!
+}
+```
+
+## Control-flow expressions
+
+The following forms are expressions or block-like expressions and have dedicated rules in [Control flow](./control-flow/):
+
+```khora
+if condition { a } else { b }
+match value { Pattern => result, }
+while condition { body; }
+for pattern in iterable { body; }
+loop { body; }
+break
+break value
+continue
+return
+return value
+raise error
+```
+
+Patterns used by `match`, `for`, destructuring `let`, and `catch` are listed in [Patterns](./patterns/).
