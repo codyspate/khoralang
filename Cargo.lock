@@ -705,6 +705,7 @@ dependencies = [
  "khora-hir",
  "khora-lint",
  "khora-manifest",
+ "khora-pkg",
  "khora-syntax",
  "khora-toolchain",
  "khora-types",
@@ -756,6 +757,8 @@ name = "khora-pkg"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "khora-db",
+ "khora-hir",
  "khora-manifest",
  "serde",
  "sha2",

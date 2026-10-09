@@ -8,6 +8,8 @@ license.workspace = true
 
 [dependencies]
 khora-manifest.workspace = true
+khora-db.workspace = true
+khora-hir.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 toml.workspace = true

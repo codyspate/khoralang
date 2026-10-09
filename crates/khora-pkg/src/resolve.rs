@@ -109,6 +109,23 @@ impl Resolution {
 /// `locked` refuses to change the lockfile, which is what CI wants: a build
 /// that would need a new resolution is a build whose lockfile was not committed.
 pub fn resolve(manifest_path: &Path, store: &Store, locked: bool) -> Result<Resolution> {
+    resolve_inner(manifest_path, store, locked, false)
+}
+
+/// Reads a locked graph using only packages already in the store.
+///
+/// A missing git checkout is an error, rather than a fetch that could stall an
+/// editor during startup. This never changes a lockfile or manifest.
+pub fn resolve_cached(manifest_path: &Path, store: &Store) -> Result<Resolution> {
+    resolve_inner(manifest_path, store, true, true)
+}
+
+fn resolve_inner(
+    manifest_path: &Path,
+    store: &Store,
+    locked: bool,
+    cached: bool,
+) -> Result<Resolution> {
     // **An empty parent is the working directory, not nowhere.**
     // `Path::new("khora.toml").parent()` is `Some("")` rather than `None`, so
     // the `unwrap_or` below it never fired and `root_dir` became `""`. That is
@@ -193,7 +210,7 @@ pub fn resolve(manifest_path: &Path, store: &Store, locked: bool) -> Result<Reso
                 continue;
             }
 
-            let package = acquire(name, &source, store, &existing, locked)
+            let package = acquire(name, &source, store, &existing, locked, cached)
                 .with_context(|| format!("resolving `{name}`, asked for by `{holder}`"))?;
 
             // Its own manifest is what says what *it* needs.
@@ -307,6 +324,7 @@ fn acquire(
     store: &Store,
     locked_to: &Lockfile,
     locked: bool,
+    cached: bool,
 ) -> Result<Resolved> {
     match source {
         Source::Path(directory) => {
@@ -360,7 +378,11 @@ fn acquire(
                 }
             }
 
+            if cached {
+                bail!("`{name}` is missing from the package store");
+            }
             let staged = store.staging(name)?;
+
             fetch::checkout(url, &wanted, &staged)?;
             let (checksum, directory) = store.insert(&staged)?;
 

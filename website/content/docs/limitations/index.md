@@ -138,21 +138,25 @@ admits only `hostssl` connections refuses it.
 
 ## Editor tooling
 
-`khora lsp` already provides compiler-backed diagnostics, hover, formatting, completion, signature help, go-to-definition, references, document/workspace symbols, semantic tokens, code actions, code lenses, and inlay hints.
+`khora lsp` provides compiler-backed diagnostics, hover, formatting, completion, signature help, go-to-definition, references, document/workspace symbols, semantic tokens, code actions, code lenses, and inlay hints.
 
-Rename covers a declaration and every file that names it, including the import that brings the name into each file, and it renames the original rather than a file's own alias. A parameter's rename covers the labeled arguments written against it; a method's labels are found by its type and method name, so two modules that each declare a type (or a trait) and a method of the same names can have each other's labels renamed. It refuses two cases rather than applying a partial rename, each with a sentence saying why: a **trait member**, whose name belongs to the trait and to every impl of it, and a **constructor**, which has no recorded range to edit. It also refuses a new name that is not a usable identifier or that is already bound anywhere in the same function, even where that binding is in a separate `match` arm and could not have been captured. Further refactoring operations are editor-tooling work.
+Rename covers a declaration and every file that names it, including the import that brings the name into each file, within the opened project; it does not edit dependency code outside the opened folder or in the package store. It renames the original rather than a file's own alias. A parameter's rename covers the labeled arguments written against it; a method's labels are found by its type and method name, so two modules that each declare a type (or a trait) and a method of the same names can have each other's labels renamed. It refuses a **trait member**, whose name belongs to the trait and to every impl of it, and a **constructor**, which has no recorded range to edit. It also refuses a new name that is not a usable identifier or that is already bound anywhere in the same function, even where that binding is in a separate `match` arm and could not have been captured. Further refactoring operations are editor-tooling work.
 
 **A record field has no go-to-definition, references or rename**, inside or
 outside the module that declares it. Renaming a field is a search and an edit
 by hand, and since a field is private to its module unless it is marked
 `pub`, the search can usually stop at that module's edges.
 
-**The language server reads lint and formatter settings once, when it
+**The language server reads lint and formatter settings and dependencies once, when it
 starts**, from the `khora.toml` at the root of the folder the editor opened.
-An edit to that file or to a lint group file takes effect after the server
-restarts, and a workspace's `[workspace.lints]` and member manifests are not
-consulted, so the levels it shows can differ from what `khora check` reports
-in a member package. `khora check` is the authority.
+An edit to the manifest or to a lint group file, or a dependency installed
+while the server is running, takes effect after it restarts. Opening a
+workspace root reads its members' source files but does not resolve their
+individual dependencies; open the member directory for dependency-aware
+editor checks. A workspace's `[workspace.lints]` and member manifests are not
+consulted for lint levels when the workspace root is opened, so the levels it
+shows can differ from what `khora check` reports in a member package. The
+command-line check is the authority.
 
 See [Editor setup](/docs/getting-started/editor/) for the language-server command and client setup.
 

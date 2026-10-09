@@ -486,6 +486,862 @@ fn a_name_from_another_file_resolves() {
     assert!(last_diagnostics(&replies).is_empty(), "{replies:?}");
 }
 
+// --- project dependencies --------------------------------------------------
+
+#[test]
+fn a_path_dependency_resolves_without_hiding_an_importers_error() {
+    let tmp = tempfile::tempdir().expect("temporary project");
+    let root = tmp.path().join("app");
+    std::fs::create_dir_all(root.join("src")).expect("app directory");
+    let w = Workspace { _tmp: tmp, root };
+    std::fs::write(w.root.join("khora.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\ngreet = { path = \"../greet\" }\n").expect("manifest");
+    std::fs::write(
+        w.root.join("src/main.kh"),
+        "module app::main;\nimport greet::{greeting};\nfn go() -> Int { greeting() }\n",
+    )
+    .expect("source");
+    // A sibling dependency, as in a project with a local package.
+    let dependency = w.root.parent().expect("a parent").join("greet");
+    std::fs::create_dir_all(&dependency).expect("dependency directory");
+    std::fs::write(
+        dependency.join("lib.kh"),
+        "module greet;\npub fn greeting() -> Int { 7 }\n",
+    )
+    .expect("dependency file");
+    let store = khora_pkg::Store::at(w.root.join("store")).expect("store");
+    khora_pkg::resolve(&w.root.join("khora.toml"), &store, false).expect("prepare the lockfile");
+    let manifest_before = std::fs::read(w.root.join("khora.toml")).expect("manifest");
+    let lock_before = std::fs::read(w.root.join("khora.lock")).expect("lockfile");
+    let path = w.root.join("src/main.kh");
+    let clean = std::fs::read_to_string(&path).expect("source");
+    let replies = session(&[initialize(&w.root), did_open(&path, &clean), exit()]);
+    assert!(
+        last_diagnostics(&replies).is_empty(),
+        "a valid import: {replies:?}"
+    );
+    let broken = clean.replace("greeting() }", "greeting() + nope }");
+    let replies = session(&[initialize(&w.root), did_open(&path, &broken), exit()]);
+    let errors: Vec<_> = last_diagnostics(&replies)
+        .into_iter()
+        .filter(|d| d["severity"] == 1)
+        .collect();
+    assert_eq!(errors.len(), 1, "only the deliberate error: {errors:?}");
+    assert!(
+        errors[0]["message"]
+            .as_str()
+            .is_some_and(|text| text.contains("nope")),
+        "{errors:?}"
+    );
+    assert_eq!(
+        std::fs::read(w.root.join("khora.toml")).expect("manifest"),
+        manifest_before
+    );
+    assert_eq!(
+        std::fs::read(w.root.join("khora.lock")).expect("lockfile"),
+        lock_before
+    );
+}
+
+/// Build an offline git dependency in an isolated store, with a pinned lockfile.
+fn git_project() -> (Workspace, khora_pkg::Store, std::path::PathBuf) {
+    use std::process::Command;
+    let tmp = tempfile::tempdir().expect("temporary project");
+    let repo = tmp.path().join("repo");
+    let root = tmp.path().join("app");
+    std::fs::create_dir_all(repo.join("src")).expect("repository");
+    std::fs::create_dir_all(root.join("src")).expect("application");
+    std::fs::write(
+        repo.join("khora.toml"),
+        "[package]\nname = \"greet\"\nversion = \"0.1.0\"\npublish = true\n",
+    )
+    .expect("package manifest");
+    std::fs::write(
+        repo.join("src/lib.kh"),
+        "module greet;\npub fn greeting() -> Int { 7 }\n",
+    )
+    .expect("package source");
+    std::fs::write(
+        repo.join("src/greet_test.kh"),
+        "module greet_test;\npub fn private_fixture() -> Int { nope }\n",
+    )
+    .expect("private module");
+    let git = |args: &[&str]| -> String {
+        let out = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .current_dir(&repo)
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout)
+            .expect("git output")
+            .trim()
+            .to_string()
+    };
+    git(&["init", "--quiet", "-b", "main"]);
+    git(&["add", "-A"]);
+    let tree = git(&["write-tree"]);
+    let commit = git(&["commit-tree", &tree, "-m", "first"]);
+    git(&["update-ref", "refs/heads/main", &commit]);
+    let url = url::Url::from_file_path(&repo).expect("local git URL");
+    std::fs::write(root.join("khora.toml"), format!("[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\ngreet = {{ git = \"{url}\", rev = \"main\" }}\n")).expect("manifest");
+    std::fs::write(
+        root.join("src/main.kh"),
+        "module app::main;\nimport greet::{greeting};\nfn go() -> Int { greeting() }\n",
+    )
+    .expect("app source");
+    let store = khora_pkg::Store::at(tmp.path().join("store")).expect("store");
+    let resolution =
+        khora_pkg::resolve(&root.join("khora.toml"), &store, false).expect("populate local store");
+    let dependency = resolution.packages[0].directory.join("src/lib.kh");
+    (Workspace { _tmp: tmp, root }, store, dependency)
+}
+
+#[test]
+fn a_cached_git_dependency_resolves_and_still_reports_a_real_error() {
+    let (w, store, dependency) = git_project();
+    let manifest_before = std::fs::read(w.root.join("khora.toml")).expect("manifest");
+    let lock_before = std::fs::read(w.root.join("khora.lock")).expect("lockfile");
+    let path = w.root.join("src/main.kh");
+    let clean = std::fs::read_to_string(&path).expect("source");
+    let mut server = khora_lsp::Server::with_store(store);
+    batch(&mut server, &[initialize(&w.root)]);
+    let replies = batch(&mut server, &[did_open(&path, &clean)]);
+    assert!(
+        last_diagnostics(&replies).is_empty(),
+        "cached git import: {replies:?}"
+    );
+    let column = column_of(&clean, 2, "greeting", 0);
+    let found = batch(
+        &mut server,
+        &[definition(&path, 2, column, 10), hover(&path, 2, column)],
+    );
+    assert_eq!(
+        result_of(&found, 10)["uri"],
+        url_of(&dependency),
+        "definition in store: {found:?}"
+    );
+    let hover = result_of(&found, 42);
+    assert!(
+        hover.to_string().contains("Int"),
+        "hover on dependency call: {hover}"
+    );
+    let offered = batch(&mut server, &[completion(&path, 1, 15, 11)]);
+    assert!(
+        labels(&offered, 11).iter().any(|label| label == "greeting"),
+        "completion: {offered:?}"
+    );
+    let symbols = batch(
+        &mut server,
+        &[
+            json!({"jsonrpc":"2.0", "id":12, "method":"workspace/symbol", "params":{"query":"greeting"}}),
+        ],
+    );
+    let refs = batch(&mut server, &[references(&path, 2, column, 13)]);
+    assert!(
+        result_of(&symbols, 12).to_string().contains("greeting"),
+        "public dependency symbol: {symbols:?}"
+    );
+    assert!(
+        result_of(&refs, 13)
+            .to_string()
+            .contains(&url_of(&dependency)),
+        "dependency declaration: {refs:?}"
+    );
+    let broken = clean.replace("greeting() }", "greeting() + nope }");
+    let replies = batch(&mut server, &[did_change(&path, &broken)]);
+    let errors: Vec<_> = last_diagnostics(&replies)
+        .into_iter()
+        .filter(|d| d["severity"] == 1)
+        .collect();
+    assert_eq!(errors.len(), 1, "only the intentional error: {errors:?}");
+    assert!(
+        errors[0]["message"]
+            .as_str()
+            .is_some_and(|text| text.contains("nope")),
+        "{errors:?}"
+    );
+    assert_eq!(
+        std::fs::read(w.root.join("khora.toml")).expect("manifest"),
+        manifest_before
+    );
+    assert_eq!(
+        std::fs::read(w.root.join("khora.lock")).expect("lockfile"),
+        lock_before
+    );
+    assert!(
+        dependency.starts_with(server_store_path(&w)),
+        "dependency belongs to fixture store"
+    );
+}
+
+fn server_store_path(w: &Workspace) -> std::path::PathBuf {
+    w.root.parent().expect("parent").join("store")
+}
+
+#[test]
+fn missing_git_store_shows_a_fix_and_checks_unrelated_files_offline() {
+    let (w, store, _) = git_project();
+    let pinned = khora_pkg::Lockfile::read(&w.root.join("khora.lock")).expect("lockfile");
+    let checksum = pinned
+        .get("greet")
+        .and_then(|entry| entry.checksum.as_ref())
+        .expect("hash");
+    let missing = store.root().join(checksum);
+    std::fs::remove_dir_all(&missing).expect("remove cached dependency");
+    let manifest_before = std::fs::read(w.root.join("khora.toml")).expect("manifest");
+    let lock_before = std::fs::read(w.root.join("khora.lock")).expect("lockfile");
+    let unrelated = w.root.join("src/other.kh");
+    let text = "module app::other;\nfn go() -> Int { nope }\n";
+    std::fs::write(&unrelated, text).expect("unrelated file");
+    let mut server = khora_lsp::Server::with_store(store);
+    let ready = batch(&mut server, &[initialize(&w.root)]);
+    let notice = ready
+        .iter()
+        .find(|r| r["method"] == "window/showMessage")
+        .and_then(|r| r.pointer("/params/message"))
+        .and_then(Value::as_str)
+        .expect("notice");
+    assert!(
+        notice.contains("greet") && notice.contains("khora check"),
+        "{notice}"
+    );
+    let replies = batch(&mut server, &[did_open(&unrelated, text)]);
+    let errors: Vec<_> = last_diagnostics(&replies)
+        .into_iter()
+        .filter(|d| d["severity"] == 1)
+        .collect();
+    assert_eq!(errors.len(), 1, "unrelated error survives: {errors:?}");
+    assert!(
+        errors[0]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("nope")),
+        "{errors:?}"
+    );
+    assert!(
+        !missing.exists(),
+        "startup must not fetch or recreate a missing store entry"
+    );
+    assert_eq!(
+        std::fs::read(w.root.join("khora.toml")).expect("manifest"),
+        manifest_before
+    );
+    assert_eq!(
+        std::fs::read(w.root.join("khora.lock")).expect("lockfile"),
+        lock_before
+    );
+}
+
+#[test]
+fn a_dependency_test_module_is_not_importable() {
+    let (w, store, _) = git_project();
+    let path = w.root.join("src/main.kh");
+    let text = "module app::main;\nimport greet_test::{private_fixture};\nfn go() -> Int { private_fixture() }\n";
+    let mut server = khora_lsp::Server::with_store(store);
+    batch(&mut server, &[initialize(&w.root)]);
+    let replies = batch(&mut server, &[did_open(&path, text)]);
+    let found = last_diagnostics(&replies);
+    assert!(
+        found.iter().any(|d| d["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("cannot find module `greet_test`"))),
+        "dependency test module must stay private: {found:?}"
+    );
+}
+
+#[test]
+fn renaming_a_dependency_item_refuses_to_edit_the_package_store() {
+    let (w, store, dependency) = git_project();
+    let path = w.root.join("src/main.kh");
+    let text = std::fs::read_to_string(&path).expect("app source");
+    let mut server = khora_lsp::Server::with_store(store);
+    batch(&mut server, &[initialize(&w.root)]);
+    batch(&mut server, &[did_open(&path, &text)]);
+    let column = column_of(&text, 2, "greeting", 0);
+    let ready = batch(&mut server, &[prepare_rename(&path, 2, column, 2)]);
+    assert!(
+        error_of(&ready, 2).is_some_and(|why| why.contains("dependency")),
+        "prepareRename should refuse: {ready:?}"
+    );
+    let replies = batch(&mut server, &[rename(&path, 2, column, "hello", 3)]);
+    assert!(
+        error_of(&replies, 3).is_some_and(|why| why.contains("dependency")),
+        "rename must refuse rather than edit: {replies:?}"
+    );
+    assert!(
+        result_of(&replies, 3).is_null(),
+        "no edit, especially not in {}: {replies:?}",
+        dependency.display()
+    );
+}
+
+#[test]
+fn opening_a_dependency_never_publishes_diagnostics_for_its_uri() {
+    let (w, store, dependency) = git_project();
+    let mut server = khora_lsp::Server::with_store(store);
+    batch(&mut server, &[initialize(&w.root)]);
+    let replies = batch(
+        &mut server,
+        &[did_open(
+            &dependency,
+            "module greet;\nfn broken() -> Int { nope }\n",
+        )],
+    );
+    assert!(
+        !replies
+            .iter()
+            .any(|r| r["method"] == "textDocument/publishDiagnostics"
+                && r["params"]["uri"] == url_of(&dependency)),
+        "do not report dependency internals: {replies:?}"
+    );
+}
+
+#[test]
+fn a_workspace_member_reads_the_roots_shared_lock() {
+    let tmp = tempfile::tempdir().expect("workspace");
+    let root = tmp.path().join("project");
+    let app = root.join("app");
+    let dep = root.join("greet");
+    std::fs::create_dir_all(app.join("src")).expect("member directory");
+    std::fs::create_dir_all(&dep).expect("dependency directory");
+    std::fs::write(
+        root.join("khora.toml"),
+        "[workspace]\nmembers = [\"app\"]\n",
+    )
+    .expect("workspace manifest");
+    std::fs::write(app.join("khora.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nworkspace = true\n\n[dependencies]\ngreet = { path = \"../greet\" }\n").expect("member manifest");
+    std::fs::write(
+        dep.join("lib.kh"),
+        "module greet;\npub fn greeting() -> Int { 7 }\n",
+    )
+    .expect("dependency source");
+    let text = "module app::main;\nimport greet::{greeting};\nfn go() -> Int { greeting() }\n";
+    let path = app.join("src/main.kh");
+    std::fs::write(&path, text).expect("member source");
+    let store = khora_pkg::Store::at(tmp.path().join("store")).expect("store");
+    khora_pkg::resolve(&app.join("khora.toml"), &store, false).expect("workspace lock");
+    assert!(
+        root.join("khora.lock").is_file(),
+        "lock lives at workspace root"
+    );
+    let before = std::fs::read(root.join("khora.lock")).expect("lockfile");
+    let mut server = khora_lsp::Server::with_store(store);
+    batch(&mut server, &[initialize(&app)]);
+    let replies = batch(&mut server, &[did_open(&path, text)]);
+    assert!(
+        last_diagnostics(&replies).is_empty(),
+        "member dependencies: {replies:?}"
+    );
+    assert_eq!(
+        std::fs::read(root.join("khora.lock")).expect("lockfile"),
+        before
+    );
+}
+
+#[test]
+fn a_bad_lockfile_shows_a_notice_without_losing_other_diagnostics() {
+    let (w, store, _) = git_project();
+    let broken_lock = b"not a valid lockfile\n";
+    std::fs::write(w.root.join("khora.lock"), broken_lock).expect("bad lockfile");
+    let unrelated = w.root.join("src/other.kh");
+    let text = "module app::other;\nfn go() -> Int { nope }\n";
+    std::fs::write(&unrelated, text).expect("unrelated source");
+    let mut server = khora_lsp::Server::with_store(store);
+    let ready = batch(&mut server, &[initialize(&w.root)]);
+    assert!(
+        ready.iter().any(|r| r["method"] == "window/showMessage"
+            && r["params"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("khora.lock") && m.contains("khora check"))),
+        "bad lock notice: {ready:?}"
+    );
+    let replies = batch(&mut server, &[did_open(&unrelated, text)]);
+    assert!(
+        last_diagnostics(&replies)
+            .iter()
+            .any(|d| d["message"].as_str().is_some_and(|m| m.contains("nope"))),
+        "unrelated diagnostic: {replies:?}"
+    );
+    assert_eq!(
+        std::fs::read(w.root.join("khora.lock")).expect("lockfile"),
+        broken_lock
+    );
+}
+
+// --- dependency ownership follow-up ----------------------------------------
+
+#[test]
+fn fresh_home_does_not_create_package_store() {
+    if std::env::var_os("KHORA_LSP_FRESH_HOME_CHILD").is_none() {
+        let tmp = tempfile::tempdir().expect("isolated home");
+        let run = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args(["--exact", "fresh_home_does_not_create_package_store", "--nocapture"])
+            .env("KHORA_LSP_FRESH_HOME_CHILD", "1")
+            .env("KHORA_HOME", tmp.path())
+            .output()
+            .expect("isolated test process");
+        assert!(run.status.success(), "{}\n{}", String::from_utf8_lossy(&run.stdout), String::from_utf8_lossy(&run.stderr));
+        return;
+    }
+    let w = workspace(&[
+        ("khora.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n"),
+        ("src/main.kh", "module app::main;\nfn go() -> Int { 1 }\n"),
+    ]);
+    let source = w.root.join("src/main.kh");
+    let replies = session(&[initialize(&w.root), did_open(&source, "module app::main;\nfn go() -> Int { 1 }\n"), exit()]);
+    assert!(last_diagnostics(&replies).is_empty(), "{replies:?}");
+    assert!(!std::path::Path::new(&std::env::var("KHORA_HOME").expect("isolated home")).join("store").exists(), "LSP must not create the package store");
+}
+
+fn vendor_project() -> (Workspace, khora_pkg::Store, std::path::PathBuf) {
+    let w = workspace(&[
+        ("khora.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\ngreet = { path = \"vendor/greet\" }\n"),
+        ("src/main.kh", "module app::main;\nimport greet::{greeting};\nfn go() -> Int { greeting() }\n"),
+        ("vendor/greet/src/lib.kh", "module greet;\npub fn greeting() -> Int { let changing = 1; changing + nope }\n"),
+    ]);
+    let store = khora_pkg::Store::at(w.root.join(".store")).expect("store");
+    khora_pkg::resolve(&w.root.join("khora.toml"), &store, false).expect("locked path dependency");
+    let dependency = w.root.join("vendor/greet/src/lib.kh");
+    (w, store, dependency)
+}
+
+fn check_owned_vendor(root: &Path, dependency: &Path, store: khora_pkg::Store) {
+    let text = std::fs::read_to_string(dependency).expect("vendor source");
+    let mut server = khora_lsp::Server::with_store(store);
+    batch(&mut server, &[initialize(root)]);
+    let replies = batch(&mut server, &[did_open(dependency, &text)]);
+    assert!(last_diagnostics(&replies).iter().any(|d| d["message"].as_str().is_some_and(|m| m.contains("nope"))), "owned vendor diagnostic: {replies:?}");
+    let col = column_of(&text, 1, "changing", 0);
+    let prepared = batch(&mut server, &[prepare_rename(dependency, 1, col, 91)]);
+    assert!(error_of(&prepared, 91).is_none(), "owned vendor prepareRename: {prepared:?}");
+    let edits = batch(&mut server, &[rename(dependency, 1, col, "changed", 92)]);
+    assert!(error_of(&edits, 92).is_none(), "owned vendor rename: {edits:?}");
+    assert!(result_of(&edits, 92).to_string().contains(&url_of(dependency)), "owned vendor edits: {edits:?}");
+}
+
+#[test]
+fn vendored_path_dependency_is_owned_and_renamable() {
+    let (w, store, dependency) = vendor_project();
+    check_owned_vendor(&w.root, &dependency, store);
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_root_still_owns_vendored_path_dependency() {
+    let (w, store, _) = vendor_project();
+    let outside = tempfile::tempdir().expect("alias parent");
+    let alias = outside.path().join("project");
+    std::os::unix::fs::symlink(&w.root, &alias).expect("symlinked project root");
+    check_owned_vendor(&alias, &alias.join("vendor/greet/src/lib.kh"), store);
+}
+
+#[test]
+fn private_git_module_is_neither_diagnosed_nor_renamable() {
+    let (w, store, dependency) = git_project();
+    let private = dependency.with_file_name("greet_private.kh");
+    let text = "module greet_private;\npub fn fixture() -> Int { let changing = 1; changing + nope }\n";
+    std::fs::write(&private, text).expect("private store file");
+    let mut server = khora_lsp::Server::with_store(store);
+    batch(&mut server, &[initialize(&w.root)]);
+    let replies = batch(&mut server, &[did_open(&private, text)]);
+    assert!(!replies.iter().any(|r| r["method"] == "textDocument/publishDiagnostics" && r["params"]["uri"] == url_of(&private)), "no diagnostics at all for a store URI: {replies:?}");
+    let col = column_of(text, 1, "changing", 0);
+    let prepared = batch(&mut server, &[prepare_rename(&private, 1, col, 93)]);
+    assert!(error_of(&prepared, 93).is_some_and(|e| e.contains("dependency")), "private prepareRename: {prepared:?}");
+    let renamed = batch(&mut server, &[rename(&private, 1, col, "changed", 94)]);
+    assert!(error_of(&renamed, 94).is_some_and(|e| e.contains("dependency")), "private rename: {renamed:?}");
+}
+
+#[test]
+fn an_unlisted_store_directory_is_still_read_only() {
+    let (w, store, _) = git_project();
+    let private = store.root().join("unlisted/src/private.kh");
+    std::fs::create_dir_all(private.parent().expect("parent")).expect("store subdirectory");
+    let text = "module unlisted;\nfn fixture() -> Int { nope }\n";
+    std::fs::write(&private, text).expect("unlisted source");
+    let mut server = khora_lsp::Server::with_store(store);
+    batch(&mut server, &[initialize(&w.root)]);
+    let replies = batch(&mut server, &[did_open(&private, text), rename(&private, 1, 4, "other", 97)]);
+    assert!(!replies.iter().any(|r| r["method"] == "textDocument/publishDiagnostics" && r["params"]["uri"] == url_of(&private)), "unlisted store diagnostic: {replies:?}");
+    assert!(error_of(&replies, 97).is_some_and(|e| e.contains("dependency")), "unlisted store rename: {replies:?}");
+}
+
+#[test]
+fn a_store_file_is_read_only_even_without_a_valid_manifest() {
+    let w = workspace(&[("src/main.kh", "module app::main;\n")]);
+    let outside = tempfile::tempdir().expect("isolated store parent");
+    let store = khora_pkg::Store::at(outside.path().join("store")).expect("store");
+    let private = store.root().join("anything/private.kh");
+    std::fs::create_dir_all(private.parent().expect("parent")).expect("store subdirectory");
+    let text = "module private;\nfn wrong() -> Int { nope }\n";
+    std::fs::write(&private, text).expect("store source");
+    let mut server = khora_lsp::Server::with_store(store);
+    batch(&mut server, &[initialize(&w.root)]);
+    let replies = batch(&mut server, &[did_open(&private, text), rename(&private, 1, 4, "other", 98)]);
+    assert!(!replies.iter().any(|r| r["method"] == "textDocument/publishDiagnostics" && r["params"]["uri"] == url_of(&private)), "store diagnostic without manifest: {replies:?}");
+    assert!(error_of(&replies, 98).is_some_and(|e| e.contains("dependency")), "store rename without manifest: {replies:?}");
+}
+
+#[test]
+fn private_store_file_offers_no_formatting_or_code_actions() {
+    let (w, store, dependency) = git_project();
+    let private = dependency.with_file_name("greet_private.kh");
+    let text = "module greet_private;\nfn fixture()->Int{1}\n";
+    std::fs::write(&private, text).expect("private store file");
+    let mut server = khora_lsp::Server::with_store(store);
+    batch(&mut server, &[initialize(&w.root), did_open(&private, text)]);
+    let published = std::fs::read_to_string(&dependency).expect("published source");
+    batch(&mut server, &[did_open(&dependency, &published)]);
+    let mut action = code_action(&dependency, Vec::new(), 96);
+    action["params"]["range"] = json!({"start": {"line": 1, "character": 7}, "end": {"line": 1, "character": 7}});
+    let replies = batch(&mut server, &[formatting(&private, 95), action]);
+    assert!(result_of(&replies, 95).as_array().is_some_and(Vec::is_empty), "store formatting edit: {replies:?}");
+    assert!(result_of(&replies, 96).as_array().is_some_and(Vec::is_empty), "store code action edit: {replies:?}");
+}
+
+#[test]
+fn a_store_file_offers_no_editing_completions() {
+    let (w, store, dependency) = git_project();
+    let mut server = khora_lsp::Server::with_store(store);
+    batch(&mut server, &[initialize(&w.root)]);
+    let text = std::fs::read_to_string(&dependency).expect("published source");
+    batch(&mut server, &[did_open(&dependency, &text)]);
+    let replies = batch(&mut server, &[completion(&dependency, 1, 12, 99)]);
+    assert!(result_of(&replies, 99).as_array().is_some_and(Vec::is_empty), "store completions offered: {}", result_of(&replies, 99).as_array().map_or(0, Vec::len));
+}
+
+#[test]
+fn locked_cycle_does_not_hide_the_roots_diagnostic() {
+    let tmp = tempfile::tempdir().expect("project");
+    let root = tmp.path().join("app");
+    let greet = root.join("vendor/greet");
+    std::fs::create_dir_all(root.join("src")).expect("app source directory");
+    std::fs::create_dir_all(greet.join("src")).expect("greet source directory");
+    std::fs::write(root.join("khora.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\ngreet = { path = \"vendor/greet\" }\n").expect("app manifest");
+    std::fs::write(greet.join("khora.toml"), "[package]\nname = \"greet\"\nversion = \"0.1.0\"\n\n[dependencies]\napp = { path = \"../..\" }\n").expect("greet manifest");
+    let text = "module app::main;\nfn real_error() -> Int { nope }\n";
+    let source = root.join("src/main.kh");
+    std::fs::write(&source, text).expect("app source");
+    std::fs::write(greet.join("src/lib.kh"), "module greet;\npub fn greeting() -> Int { 1 }\n").expect("greet source");
+    let store = khora_pkg::Store::at(tmp.path().join("store")).expect("store");
+    khora_pkg::resolve(&root.join("khora.toml"), &store, false).expect("lock cycle");
+    let before = std::fs::read(root.join("khora.lock")).expect("lockfile");
+    let mut server = khora_lsp::Server::with_store(store);
+    batch(&mut server, &[initialize(&root)]);
+    let replies = batch(&mut server, &[did_open(&source, text)]);
+    assert!(last_diagnostics(&replies).iter().any(|d| d["message"].as_str().is_some_and(|m| m.contains("nope"))), "root diagnostic in locked cycle: {replies:?}");
+    assert_eq!(std::fs::read(root.join("khora.lock")).expect("lockfile"), before);
+}
+
+#[test]
+fn missing_cache_notice_gives_recovery_advice_once() {
+    let (w, store, _) = git_project();
+    let lock = khora_pkg::Lockfile::read(&w.root.join("khora.lock")).expect("lockfile");
+    let hash = lock.get("greet").and_then(|p| p.checksum.as_ref()).expect("pinned hash");
+    std::fs::remove_dir_all(store.root().join(hash)).expect("evict checkout");
+    let mut server = khora_lsp::Server::with_store(store);
+    let replies = batch(&mut server, &[initialize(&w.root)]);
+    let notice = replies.iter().find(|r| r["method"] == "window/showMessage").and_then(|r| r.pointer("/params/message")).and_then(Value::as_str).expect("missing-cache notice");
+    assert_eq!(notice.matches("Run `khora check` or `khora install`").count(), 1, "duplicate recovery advice: {notice}");
+}
+
+// --- dependency ownership follow-up 2 --------------------------------------
+
+fn assert_read_only_dependency(server: &mut khora_lsp::Server, path: &Path, text: &str) {
+    let opened = batch(server, &[did_open(path, text)]);
+    assert!(
+        !opened.iter().any(|reply| reply["method"] == "textDocument/publishDiagnostics"
+            && reply["params"]["uri"] == url_of(path)),
+        "dependency diagnostics: {opened:?}"
+    );
+    let formatted = batch(server, &[formatting(path, 701)]);
+    assert!(result_of(&formatted, 701).as_array().is_some_and(Vec::is_empty), "dependency formatting edit: {formatted:?}");
+    let renamed = batch(server, &[rename(path, 1, column_of(text, 1, "changing", 0), "new_name", 702)]);
+    assert!(error_of(&renamed, 702).is_some_and(|why| why.contains("dependency")), "dependency rename edit: {renamed:?}");
+}
+
+fn assert_editable_owner(server: &mut khora_lsp::Server, path: &Path, text: &str) {
+    let opened = batch(server, &[did_open(path, text)]);
+    assert!(last_diagnostics(&opened).iter().any(|item| item["message"].as_str().is_some_and(|text| text.contains("nope"))), "owned diagnostic: {opened:?}");
+    let formatted = batch(server, &[formatting(path, 703)]);
+    assert!(result_of(&formatted, 703).as_array().is_some_and(|edits| !edits.is_empty()), "owned formatting edit: {formatted:?}");
+    let renamed = batch(server, &[rename(path, 1, column_of(text, 1, "local", 0), "new_name", 704)]);
+    assert!(error_of(&renamed, 704).is_none() && result_of(&renamed, 704).to_string().contains(&url_of(path)), "owned rename edit: {renamed:?}");
+}
+
+#[cfg(unix)]
+fn isolated_home_ownership(test: &str, case: &str) {
+    if std::env::var("KHORA_LSP_OWNERSHIP_CASE").ok().as_deref() != Some(case) {
+        let temp = tempfile::tempdir().expect("isolated home parent");
+        let actual = temp.path().join("home");
+        std::fs::create_dir(&actual).expect("home");
+        let home = match case {
+            "fresh_alias" => {
+                let alias = temp.path().join("alias");
+                std::os::unix::fs::symlink(&actual, &alias).expect("home alias");
+                alias
+            }
+            "fresh_dotdot" => actual.join("..").join("home"),
+            "project_is_home" | "late_store_symlink" => actual.clone(),
+            _ => panic!("unexpected case"),
+        };
+        let project = if case == "project_is_home" { actual.clone() } else { temp.path().join("app") };
+        std::fs::create_dir_all(project.join("src")).expect("project source directory");
+        std::fs::write(project.join("khora.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\n").expect("manifest");
+        let run = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", test, "--nocapture"])
+            .env("KHORA_LSP_OWNERSHIP_CASE", case)
+            .env("KHORA_HOME", home)
+            .env("KHORA_LSP_OWNERSHIP_REAL_HOME", &actual)
+            .env("KHORA_LSP_OWNERSHIP_PROJECT", &project)
+            .output()
+            .expect("isolated test process");
+        assert!(run.status.success(), "{}\n{}", String::from_utf8_lossy(&run.stdout), String::from_utf8_lossy(&run.stderr));
+        return;
+    }
+    let home = std::path::PathBuf::from(std::env::var("KHORA_LSP_OWNERSHIP_REAL_HOME").expect("real home"));
+    let root = std::path::PathBuf::from(std::env::var("KHORA_LSP_OWNERSHIP_PROJECT").expect("project"));
+    let private = if case == "late_store_symlink" {
+        root.parent().expect("project parent").join("relocated_store/unlisted/src/private.kh")
+    } else {
+        home.join("store/unlisted/src/private.kh")
+    };
+    let owner = root.join("src/main.kh");
+    let private_text = "module private;\npub fn changing()->Int{let local=1;local+nope}\n";
+    let owner_text = "module app::main;\nfn changing()->Int{let local=1;local+nope}\n";
+    std::fs::write(&owner, owner_text).expect("owned source");
+    if case == "project_is_home" {
+        std::fs::create_dir_all(private.parent().expect("store parent")).expect("store directory");
+        std::fs::write(&private, private_text).expect("existing store file");
+    }
+    let mut server = khora_lsp::Server::default();
+    batch(&mut server, &[initialize(&root)]);
+    if case != "project_is_home" {
+        assert!(!home.join("store").exists(), "server created the store");
+        if case == "late_store_symlink" {
+            assert_editable_owner(&mut server, &owner, owner_text);
+        }
+        std::fs::create_dir_all(private.parent().expect("store parent")).expect("store directory after initialize");
+        std::fs::write(&private, private_text).expect("late store file");
+        if case == "late_store_symlink" {
+            std::os::unix::fs::symlink(root.parent().expect("project parent").join("relocated_store"), home.join("store")).expect("relocated store link");
+        }
+    } else {
+        let found = batch(&mut server, &[json!({"jsonrpc":"2.0", "id":705, "method":"workspace/symbol", "params":{"query":"changing"}})]);
+        assert!(!result_of(&found, 705).to_string().contains(&url_of(&private)), "store file was compiled as workspace source: {found:?}");
+    }
+    assert_read_only_dependency(&mut server, &private, private_text);
+    if case == "late_store_symlink" {
+        let moved = root.parent().expect("project parent").join("moved_again/unlisted/src/private.kh");
+        std::fs::create_dir_all(moved.parent().expect("moved parent")).expect("moved store directory");
+        std::fs::write(&moved, private_text).expect("moved store file");
+        std::fs::remove_file(home.join("store")).expect("old store link");
+        std::os::unix::fs::symlink(root.parent().expect("project parent").join("moved_again"), home.join("store")).expect("new store link");
+        assert_read_only_dependency(&mut server, &moved, private_text);
+    }
+    assert_editable_owner(&mut server, &owner, owner_text);
+}
+
+#[cfg(unix)]
+#[test]
+fn late_store_under_symlinked_home_stays_read_only() {
+    isolated_home_ownership("late_store_under_symlinked_home_stays_read_only", "fresh_alias");
+}
+
+#[cfg(unix)]
+#[test]
+fn late_store_under_dotdot_home_stays_read_only() {
+    isolated_home_ownership("late_store_under_dotdot_home_stays_read_only", "fresh_dotdot");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_project_opened_at_home_cannot_edit_the_store() {
+    isolated_home_ownership("a_project_opened_at_home_cannot_edit_the_store", "project_is_home");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_store_symlink_created_after_initialize_remains_read_only() {
+    isolated_home_ownership("a_store_symlink_created_after_initialize_remains_read_only", "late_store_symlink");
+}
+
+#[test]
+fn an_external_path_dependency_without_a_lock_stays_read_only() {
+    let temp = tempfile::tempdir().expect("project parent");
+    let app = temp.path().join("app");
+    let dependency = temp.path().join("greet/src/lib.kh");
+    std::fs::create_dir_all(app.join("src")).expect("app source");
+    std::fs::create_dir_all(dependency.parent().expect("dependency parent")).expect("dependency source");
+    std::fs::write(app.join("khora.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[dependencies]\ngreet = { path = \"../greet\" }\n").expect("manifest");
+    std::fs::write(temp.path().join("greet/khora.toml"), "[package]\nname = \"greet\"\nversion = \"0.1.0\"\n").expect("dependency manifest");
+    let dep_text = "module greet;\npub fn changing()->Int{let local=1;local+nope}\n";
+    let own_text = "module app::main;\nfn changing()->Int{let local=1;local+nope}\n";
+    std::fs::write(&dependency, dep_text).expect("dependency source");
+    let own = app.join("src/main.kh");
+    std::fs::write(&own, own_text).expect("app source");
+    let store = khora_pkg::Store::at(temp.path().join("store")).expect("isolated store");
+    let mut server = khora_lsp::Server::with_store(store);
+    let initialized = batch(&mut server, &[initialize(&app)]);
+    assert!(initialized.iter().any(|reply| reply["method"] == "window/showMessage"), "missing-lock notice: {initialized:?}");
+    assert!(!app.join("khora.lock").exists(), "editor created the lockfile");
+    assert_read_only_dependency(&mut server, &dependency, dep_text);
+    assert_editable_owner(&mut server, &own, own_text);
+}
+
+#[test]
+fn a_members_external_path_dependency_is_read_only_with_a_missing_lock() {
+    let temp = tempfile::tempdir().expect("workspace parent");
+    let root = temp.path().join("project");
+    let app = root.join("packages/app");
+    let dependency = temp.path().join("greet/src/lib.kh");
+    std::fs::create_dir_all(app.join("src")).expect("member source");
+    std::fs::create_dir_all(dependency.parent().expect("dependency parent")).expect("dependency source");
+    std::fs::write(root.join("khora.toml"), "[workspace]\nmembers = [\"packages/*\"]\n").expect("workspace manifest");
+    std::fs::write(app.join("khora.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[dependencies]\ngreet = { path = \"../../../greet\" }\n").expect("member manifest");
+    std::fs::write(temp.path().join("greet/khora.toml"), "[package]\nname = \"greet\"\nversion = \"0.1.0\"\n").expect("dependency manifest");
+    let dep_text = "module greet;\npub fn changing()->Int{let local=1;local+nope}\n";
+    let own_text = "module app::main;\nfn changing()->Int{let local=1;local+nope}\n";
+    std::fs::write(&dependency, dep_text).expect("dependency source");
+    let own = app.join("src/main.kh");
+    std::fs::write(&own, own_text).expect("member source");
+    let store = khora_pkg::Store::at(temp.path().join("store")).expect("isolated store");
+    let mut server = khora_lsp::Server::with_store(store);
+    let initialized = batch(&mut server, &[initialize(&root)]);
+    assert!(initialized.iter().any(|reply| reply["method"] == "window/showMessage"), "missing-lock notice: {initialized:?}");
+    assert!(!root.join("khora.lock").exists(), "editor created the lockfile");
+    assert_read_only_dependency(&mut server, &dependency, dep_text);
+    assert_editable_owner(&mut server, &own, own_text);
+}
+
+// --- dependency ownership follow-up 3 --------------------------------------
+
+fn unlocked_transitive_project(cycle: bool) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let temp = tempfile::tempdir().expect("isolated path graph");
+    let app = temp.path().join("app");
+    let greet = temp.path().join("greet");
+    let helper = temp.path().join("helper");
+    for directory in [&app, &greet, &helper] {
+        std::fs::create_dir_all(directory.join("src")).expect("package source");
+    }
+    std::fs::write(app.join("khora.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[dependencies]\ngreet = { path = \"../greet\" }\n").expect("root manifest");
+    std::fs::write(greet.join("khora.toml"), "[package]\nname = \"greet\"\nversion = \"0.1.0\"\n[dependencies]\nhelper = { path = \"../helper\" }\n").expect("greet manifest");
+    std::fs::write(helper.join("khora.toml"), if cycle {
+        "[package]\nname = \"helper\"\nversion = \"0.1.0\"\n[dependencies]\ngreet = { path = \"../greet\" }\n"
+    } else {
+        "[package]\nname = \"helper\"\nversion = \"0.1.0\"\n"
+    }).expect("helper manifest");
+    let helper_source = helper.join("src/lib.kh");
+    std::fs::write(&helper_source, "module helper;\npub fn changing()->Int{let local=1;local+nope}\n").expect("external source");
+    std::fs::write(app.join("src/main.kh"), "module app::main;\nfn changing()->Int{let local=1;local+nope}\n").expect("owned source");
+    (temp, app, helper_source)
+}
+
+fn check_unlocked_transitive(cycle: bool) {
+    let (temp, app, external) = unlocked_transitive_project(cycle);
+    let store = khora_pkg::Store::at(temp.path().join("store")).expect("isolated store");
+    let mut server = khora_lsp::Server::with_store(store);
+    let initialized = batch(&mut server, &[initialize(&app)]);
+    assert!(initialized.iter().any(|reply| reply["method"] == "window/showMessage"), "missing-lock notice: {initialized:?}");
+    assert!(!app.join("khora.lock").exists(), "editor created the lockfile");
+    assert_read_only_dependency(&mut server, &external, "module helper;\npub fn changing()->Int{let local=1;local+nope}\n");
+    assert_editable_owner(&mut server, &app.join("src/main.kh"), "module app::main;\nfn changing()->Int{let local=1;local+nope}\n");
+}
+
+#[test]
+fn a_transitive_path_dependency_is_read_only_without_a_lock() {
+    check_unlocked_transitive(false);
+}
+
+#[test]
+fn an_unlocked_path_dependency_cycle_terminates_and_protects_external_files() {
+    check_unlocked_transitive(true);
+}
+
+#[test]
+fn a_malformed_root_manifest_keeps_external_files_read_only() {
+    let temp = tempfile::tempdir().expect("project parent");
+    let root = temp.path().join("app");
+    let outside = temp.path().join("greet/src/lib.kh");
+    std::fs::create_dir_all(root.join("src")).expect("project source");
+    std::fs::create_dir_all(outside.parent().expect("external parent")).expect("external source");
+    std::fs::write(root.join("khora.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[dependencies]\ngreet = { path = \"../greet\" }\n[fmt]\nindent_width = [unfinished\n").expect("malformed manifest");
+    let outside_text = "module greet;\npub fn changing()->Int{let local=1;local+nope}\n";
+    let owner_text = "module app::main;\nfn changing()->Int{let local=1;local+nope}\n";
+    std::fs::write(&outside, outside_text).expect("external source");
+    std::fs::write(root.join("src/main.kh"), owner_text).expect("owned source");
+    let store = khora_pkg::Store::at(temp.path().join("store")).expect("isolated store");
+    let mut server = khora_lsp::Server::with_store(store);
+    let initialized = batch(&mut server, &[initialize(&root)]);
+    let notice = initialized.iter().find(|reply| reply["method"] == "window/showMessage")
+        .and_then(|reply| reply.pointer("/params/message")).and_then(Value::as_str).expect("parse-error notice");
+    assert_read_only_dependency(&mut server, &outside, outside_text);
+    assert_editable_owner(&mut server, &root.join("src/main.kh"), owner_text);
+    assert!(notice.contains("Outside the opened folder"), "missing safety explanation: {notice}");
+}
+
+#[test]
+fn a_malformed_transitive_manifest_protects_its_directory_without_following_it() {
+    let (temp, app, external) = unlocked_transitive_project(false);
+    let helper = external.parent().expect("source directory").parent().expect("package directory");
+    std::fs::write(helper.join("khora.toml"), "[dependencies]\nmissing = { path = \"../unknown\"\n").expect("bad helper manifest");
+    let unrelated = temp.path().join("unrelated/src/lib.kh");
+    std::fs::create_dir_all(unrelated.parent().expect("unrelated parent")).expect("unrelated source");
+    let unrelated_text = "module unrelated;\nfn changing()->Int{let local=1;local+nope}\n";
+    std::fs::write(&unrelated, unrelated_text).expect("unrelated file");
+    let store = khora_pkg::Store::at(temp.path().join("store")).expect("isolated store");
+    let mut server = khora_lsp::Server::with_store(store);
+    batch(&mut server, &[initialize(&app)]);
+    assert_read_only_dependency(&mut server, &external, "module helper;\npub fn changing()->Int{let local=1;local+nope}\n");
+    assert_editable_owner(&mut server, &unrelated, unrelated_text);
+}
+
+#[test]
+fn a_bounded_path_walk_protects_unknown_external_files() {
+    let temp = tempfile::tempdir().expect("bounded graph");
+    let app = temp.path().join("app");
+    std::fs::create_dir_all(app.join("src")).expect("project source");
+    std::fs::write(app.join("khora.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[dependencies]\nnext = { path = \"../p000\" }\n").expect("root manifest");
+    let owner_text = "module app::main;\nfn changing()->Int{let local=1;local+nope}\n";
+    std::fs::write(app.join("src/main.kh"), owner_text).expect("owned source");
+    for index in 0..258 {
+        let package = temp.path().join(format!("p{index:03}"));
+        std::fs::create_dir_all(&package).expect("dependency directory");
+        let next = format!("[package]\nname = \"p{index:03}\"\nversion = \"0.1.0\"\n[dependencies]\nnext = {{ path = \"../p{:03}\" }}\n", index + 1);
+        std::fs::write(package.join("khora.toml"), next).expect("dependency manifest");
+    }
+    let unrelated = temp.path().join("unrelated/src/lib.kh");
+    std::fs::create_dir_all(unrelated.parent().expect("outside parent")).expect("outside source");
+    let outside_text = "module unrelated;\npub fn changing()->Int{let local=1;local+nope}\n";
+    std::fs::write(&unrelated, outside_text).expect("outside file");
+    let store = khora_pkg::Store::at(temp.path().join("store")).expect("isolated store");
+    let mut server = khora_lsp::Server::with_store(store);
+    let initialized = batch(&mut server, &[initialize(&app)]);
+    assert!(initialized.iter().filter_map(|reply| reply.pointer("/params/message").and_then(Value::as_str))
+        .any(|message| message.contains("exceeds the editor safety limit")), "missing limit notice: {initialized:?}");
+    assert_read_only_dependency(&mut server, &unrelated, outside_text);
+    assert_editable_owner(&mut server, &app.join("src/main.kh"), owner_text);
+}
+
+#[test]
+fn a_scratch_folder_without_a_manifest_keeps_unrelated_files_editable() {
+    let temp = tempfile::tempdir().expect("scratch folders");
+    let root = temp.path().join("scratch");
+    let outside = temp.path().join("unrelated/src/lib.kh");
+    std::fs::create_dir_all(&root).expect("scratch root");
+    std::fs::create_dir_all(outside.parent().expect("outside parent")).expect("outside source");
+    let text = "module unrelated;\nfn changing()->Int{let local=1;local+nope}\n";
+    std::fs::write(&outside, text).expect("outside source");
+    let store = khora_pkg::Store::at(temp.path().join("store")).expect("isolated store");
+    let mut server = khora_lsp::Server::with_store(store);
+    batch(&mut server, &[initialize(&root)]);
+    assert_editable_owner(&mut server, &outside, text);
+}
+
 // --- hover -----------------------------------------------------------------
 
 fn hover(path: &Path, line: u32, character: u32) -> Value {

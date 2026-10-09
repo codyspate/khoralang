@@ -31,11 +31,23 @@ pub struct Store {
 impl Store {
     /// The default store, `~/.khora/store`, or `$KHORA_HOME/store`.
     pub fn open() -> Result<Self> {
+        let store = Self::locate()?;
+        std::fs::create_dir_all(&store.root)
+            .with_context(|| format!("creating the package store at {}", store.root.display()))?;
+        Ok(store)
+    }
+
+    /// Locate the default store without creating its directory.
+    ///
+    /// An editor using cached resolution must not change the user's home on
+    /// startup. This handle can still stage or insert if asked; callers that
+    /// need disk-only behavior must pair it with `resolve_cached`.
+    pub fn locate() -> Result<Self> {
         let base = match std::env::var_os("KHORA_HOME") {
             Some(home) => PathBuf::from(home),
             None => home_directory()?.join(".khora"),
         };
-        Self::at(base.join("store"))
+        Ok(Self { root: base.join("store") })
     }
 
     /// A store at an explicit path, for tests and for a vendored build.

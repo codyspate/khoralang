@@ -21,6 +21,7 @@
 
 #![deny(missing_docs)]
 
+mod compilation;
 mod fetch;
 mod hash;
 mod install;
@@ -31,10 +32,11 @@ mod source;
 mod store;
 pub mod tasks;
 
+pub use compilation::{compilation, Compilation, SourceMode};
 pub use hash::{tree as hash_tree, ContentHash};
 pub use install::{install, Installed};
 pub use lock::{Lockfile, LockedPackage, FORMAT_VERSION, LOCKFILE};
-pub use resolve::{resolve, Resolution, Resolved};
+pub use resolve::{resolve, resolve_cached, Resolution, Resolved};
 pub use sbom::cyclonedx;
 pub use source::Source;
 pub use store::Store;

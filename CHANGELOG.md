@@ -1286,6 +1286,16 @@ tests (see Changed).
 
 ### Editor
 
+- **Imports from dependencies check in the editor.** `khora lsp` read only the
+  opened folder and the standard library, so every file importing a package
+  from `[dependencies]` showed `cannot find module` and errors on each
+  imported name, while `khora check` accepted it. The server reads installed
+  git and path dependencies from the lockfile and package store, without
+  fetching or writing anything. A dependency that is not installed yet gets a
+  message naming the command to run, and files that don't need it are still
+  checked. Dependency code outside the opened folder gets no diagnostics, and
+  rename and formatting never edit it.
+
 - **The language server starts.** The VS Code extension 0.3.0 launched
   `khora lsp --stdio`, which every released toolchain refuses, so the server
   exited before it answered and nothing but syntax coloring worked. From

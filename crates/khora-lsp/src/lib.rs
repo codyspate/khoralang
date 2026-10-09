@@ -53,7 +53,8 @@ mod structure;
 mod symbols;
 mod transport;
 
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
@@ -132,6 +133,22 @@ pub struct Server {
     db: KhoraDatabase,
     /// Every file in the project, by the path the database knows it as.
     files: HashMap<PathBuf, SourceFile>,
+    /// Package directories outside the opened project are read-only, including
+    /// their private modules that never enter the compiled source graph.
+    dependency_roots: Vec<PathBuf>,
+    /// Files under this root belong to the opened project, even if resolved
+    /// again through a path dependency or a cycle.
+    owned_roots: Vec<PathBuf>,
+    /// The store's original path, resolved again when its directory metadata
+    /// changes so a later symlink or relocation cannot make it editable.
+    store_root: Option<PathBuf>,
+    /// A directory-metadata-keyed canonical path; never a startup-only snapshot.
+    store_root_cache: RefCell<Option<(StorePathStamp, PathBuf)>>,
+    /// An invalid root manifest or bounded declaration walk cannot identify
+    /// all external dependencies, so outside documents stay read-only.
+    unknown_external_ownership: bool,
+    /// An explicit store for embedding clients and isolated sessions.
+    store: Option<khora_pkg::Store>,
     /// Line boundaries per open document, for translating positions.
     lines: HashMap<Url, LineIndex>,
     /// How this client counts a character offset.
@@ -186,6 +203,12 @@ impl Default for Server {
         Server {
             db: KhoraDatabase::new(),
             files: HashMap::new(),
+            dependency_roots: Vec::new(),
+            owned_roots: Vec::new(),
+            store_root: None,
+            store_root_cache: RefCell::new(None),
+            unknown_external_ownership: false,
+            store: None,
             lines: HashMap::new(),
             encoding: Encoding::default(),
             levels: khora_lint::Levels::default(),
@@ -199,6 +222,14 @@ impl Default for Server {
 }
 
 impl Server {
+    /// Starts a server with a specified store, for isolated editor sessions.
+    pub fn with_store(store: khora_pkg::Store) -> Self {
+        Self {
+            store: Some(store),
+            ..Self::default()
+        }
+    }
+
     /// Answers a batch of messages that arrived together.
     ///
     /// Two things are decided here that cannot be decided one message at a
@@ -369,6 +400,12 @@ impl Server {
                     // session, and nothing would ever take it back.
                     Some(url) => {
                         self.lines.remove(&url);
+                        if url
+                            .to_file_path()
+                            .is_ok_and(|path| self.is_dependency(&path))
+                        {
+                            return Vec::new();
+                        }
                         vec![notification(
                             "textDocument/publishDiagnostics",
                             json!({ "uri": url.as_str(), "diagnostics": [] }),
@@ -528,26 +565,22 @@ impl Server {
         to_value(result)
     }
 
-    /// Reads every `.kh` file under `root`, plus the standard library.
+    /// Reads every workspace `.kh` file, installed dependency, and standard library file.
     ///
-    /// All of it at once, because cross-file resolution needs one `SourceRoot`
-    /// and a file that arrives later would not be in it. An editor opens one
-    /// file and expects to be told about a name defined in another.
+    /// All of it at once, because cross-file resolution needs one `SourceRoot`.
+    /// Dependencies are read from disk only; a missing checkout leaves the
+    /// workspace usable and tells the reader how to install it.
     fn load(&mut self, root: &Path) {
+        self.owned_roots.push(root.canonicalize().unwrap_or_else(|_| root.to_path_buf()));
+        let store = self.store.clone().map(Ok).unwrap_or_else(khora_pkg::Store::locate);
+        self.store_root_cache.get_mut().take();
+        self.store_root = store.as_ref().ok().map(|store| store.root().to_path_buf());
+        let store_at_startup = self.store_root.as_deref().map(canonical_with_missing_tail);
         let mut paths = Vec::new();
-        gather(root, &mut paths);
+        gather(root, &mut paths, store_at_startup.as_deref());
         if let Some(std) = khora_db::standard_library() {
-            gather(&std, &mut paths);
+            gather(&std, &mut paths, store_at_startup.as_deref());
         }
-
-        let mut files = Vec::new();
-        for path in paths {
-            let Ok(text) = std::fs::read_to_string(&path) else { continue };
-            let file = SourceFile::new(&self.db, path.clone(), text);
-            self.files.insert(path, file);
-            files.push(file);
-        }
-        SourceRoot::new(&self.db, files);
         let manifest = root.join("khora.toml");
         let loaded = match khora_manifest::Manifest::load(&manifest) {
             Ok(parsed) => {
@@ -557,13 +590,15 @@ impl Server {
             // No manifest is a scratch directory, and entitled to the defaults.
             Err(_) if !manifest.is_file() => None,
             Err(why) => {
+                self.unknown_external_ownership = true;
                 // `1` is Error: every lint level and `[fmt]` setting in the
                 // file is being ignored, which is not a detail.
                 self.notice = Some((
                     1,
                     format!(
                         "{why}\n\nUntil it is fixed, every `[lints]` and `[fmt]` setting in it \
-                         is ignored, and each lint takes its default level. Fix it and \
+                         is ignored, and each lint takes its default level. Outside the opened folder, \
+                         files are read-only because dependencies cannot be identified. Fix it and \
                          restart the language server: the settings are read when it starts."
                     ),
                 ));
@@ -571,10 +606,59 @@ impl Server {
                 None
             }
         };
+        if loaded.is_some() {
+            let resolved = store.and_then(|store| {
+                khora_pkg::compilation(&manifest, &store, khora_pkg::SourceMode::Cached)
+            });
+            match resolved {
+                Ok(compilation) => {
+                    self.dependency_roots.extend(compilation.resolution.packages.iter().map(|package| {
+                        package.directory.canonicalize().unwrap_or_else(|_| package.directory.clone())
+                    }));
+                    paths.extend(compilation.files);
+                }
+                Err(why) => {
+                    // A bad lockfile removes sources, not the ownership boundary:
+                    // traverse declarations without acquiring or loading sources.
+                    if let Some(parsed) = &loaded {
+                        if !declared_path_graph(&mut self.dependency_roots, parsed, root) {
+                            self.unknown_external_ownership = true;
+                            self.notice = Some((1, "Cannot determine all external dependency roots: the declared path graph exceeds the editor safety limit. Outside the opened folder, files are read-only. Fix the project and restart the language server.".to_string()));
+                        }
+                    }
+                    if !self.unknown_external_ownership {
+                        self.notice = Some((1, format!(
+                            "Cannot load project dependencies: {why:#}. Run `khora check` or `khora install`, then restart the language server. Files without dependencies remain available."
+                        )));
+                    }
+                }
+            }
+        }
+        let mut files = Vec::new();
+        let mut seen = HashSet::new();
+        for path in paths {
+            if !seen.insert(path.canonicalize().unwrap_or_else(|_| path.clone())) {
+                continue;
+            }
+            if self.files.contains_key(&path) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let file = SourceFile::new(&self.db, path.clone(), text);
+            self.files.insert(path, file);
+            files.push(file);
+        }
+        SourceRoot::new(&self.db, files);
         // The groups are read even without a manifest: a broken built-in
         // group file is the toolchain's mistake and every project should hear
         // of it, the way `khora check` refuses to run.
-        match lint_levels(loaded.as_ref().map(|parsed| (&parsed.manifest, manifest.as_path()))) {
+        match lint_levels(
+            loaded
+                .as_ref()
+                .map(|parsed| (&parsed.manifest, manifest.as_path())),
+        ) {
             Ok(levels) => self.levels = levels,
             Err(why) => {
                 self.notice = Some((
@@ -659,6 +743,11 @@ impl Server {
         let Ok(path) = parsed.to_file_path() else { return Vec::new() };
 
         self.lines.insert(parsed.clone(), LineIndex::new(&text));
+        // An opened store file is readable for navigation, not a document we
+        // own: neither its buffer nor its diagnostics belong to this project.
+        if self.is_dependency(&path) {
+            return Vec::new();
+        }
 
         // A file the workspace scan did not see — a scratch buffer, or one
         // created since — joins the root rather than being ignored.
@@ -716,6 +805,7 @@ impl Server {
         let mut out = Vec::new();
         for url in self.lines.keys() {
             let Ok(path) = url.to_file_path() else { continue };
+            if self.is_dependency(&path) { continue; }
             let Some(file) = self.files.get(&path).copied() else { continue };
             out.push(notification(
                 "textDocument/publishDiagnostics",
@@ -749,6 +839,9 @@ impl Server {
             let Some(url) = change.get("uri").and_then(Value::as_str) else { continue };
             let Ok(parsed) = Url::parse(url) else { continue };
             let Ok(path) = parsed.to_file_path() else { continue };
+            if self.is_dependency(&path) {
+                continue;
+            }
             if self.lines.contains_key(&parsed) {
                 continue;
             }
@@ -1134,6 +1227,9 @@ impl Server {
     fn code_actions(&self, params: &Value) -> Option<Value> {
         let url = url_of(params)?;
         let path = url.to_file_path().ok()?;
+        if self.is_dependency(&path) {
+            return Some(Value::Array(Vec::new()));
+        }
         let file = self.files.get(&path).copied()?;
         let index = self.lines.get(&url)?;
         let text = file.text(&self.db);
@@ -1461,6 +1557,12 @@ impl Server {
 
     /// What could be written at the cursor.
     fn completion(&self, params: &Value) -> Option<Value> {
+        if url_of(params)
+            .and_then(|url| url.to_file_path().ok())
+            .is_some_and(|path| self.is_dependency(&path))
+        {
+            return Some(Value::Array(Vec::new()));
+        }
         let (file, offset) = self.locate(params)?;
         let root = khora_db::source_root(&self.db)?;
 
@@ -1579,8 +1681,71 @@ impl Server {
         Some(Value::Array(out))
     }
 
+    /// Reuse the canonical store root only while home, store link and store
+    /// target metadata agree. Avoid repeated canonicalization on edit requests
+    /// without missing a newly linked or relocated store.
+    fn current_store_root(&self, root: &Path) -> PathBuf {
+        let stamp = store_path_stamp(root);
+        let mut cache = self.store_root_cache.borrow_mut();
+        if let Some((saved, path)) = cache.as_ref() {
+            if *saved == stamp { return path.clone(); }
+        }
+        let path = canonical_with_missing_tail(root);
+        *cache = Some((stamp, path.clone()));
+        path
+    }
+
+    /// A package checkout cannot be edited through a consuming project, even
+    /// when its private source was never selected for compilation. The store
+    /// is immutable even inside the opened folder; elsewhere that folder wins
+    /// over path-dependency membership, including self-cycles and links.
+    fn is_dependency(&self, path: &Path) -> bool {
+        let canonical = canonical_with_missing_tail(path);
+        if self.store_root.as_ref().is_some_and(|root| canonical.starts_with(self.current_store_root(root))) {
+            return true;
+        }
+        if self.owned_roots.iter().any(|root| canonical.starts_with(root)) {
+            return false;
+        }
+        if self.unknown_external_ownership {
+            return true;
+        }
+        self.dependency_roots.iter().any(|root| canonical.starts_with(root))
+    }
+
+    /// A rename cannot change even one file from a dependency's published tree.
+    fn refuse_dependency_rename(
+        &self,
+        file: SourceFile,
+        renaming: &references::Renameable,
+    ) -> Result<(), String> {
+        if self.is_dependency(file.path(&self.db)) {
+            return Err("cannot rename an item in a dependency".to_string());
+        }
+        match renaming {
+            references::Renameable::Item { sites, .. } => {
+                if sites
+                    .iter()
+                    .any(|(each, _)| self.is_dependency(each.path(&self.db)))
+                {
+                    return Err("cannot rename an item in a dependency".to_string());
+                }
+            }
+            references::Renameable::Local { .. }
+            | references::Renameable::Refused(_)
+            | references::Renameable::Nothing => {}
+        }
+        Ok(())
+    }
+
     /// Whether a rename may proceed, and over what.
     fn prepare_rename(&self, params: &Value) -> Result<Value, String> {
+        if url_of(params)
+            .and_then(|url| url.to_file_path().ok())
+            .is_some_and(|path| self.is_dependency(&path))
+        {
+            return Err("cannot rename an item in a dependency".to_string());
+        }
         let Some((file, offset)) = self.locate(params) else {
             return Ok(Value::Null);
         };
@@ -1588,7 +1753,9 @@ impl Server {
         let url = url_of(params).ok_or_else(|| "no document".to_string())?;
         let index = self.lines.get(&url).ok_or_else(|| "that file is not open".to_string())?;
 
-        match references::renameable(&self.db, root, file, offset) {
+        let renaming = references::renameable(&self.db, root, file, offset);
+        self.refuse_dependency_rename(file, &renaming)?;
+        match renaming {
             references::Renameable::Local { name, ranges } => {
                 // The range under the cursor is what the editor pre-fills.
                 let here = ranges
@@ -1630,15 +1797,20 @@ impl Server {
 
     /// The edits a rename would make.
     fn rename(&self, params: &Value) -> Result<Value, String> {
+        if url_of(params)
+            .and_then(|url| url.to_file_path().ok())
+            .is_some_and(|path| self.is_dependency(&path))
+        {
+            return Err("cannot rename an item in a dependency".to_string());
+        }
         let new_name =
             params.get("newName").and_then(Value::as_str).ok_or("no new name given")?;
         let Some((file, offset)) = self.locate(params) else { return Ok(Value::Null) };
         let Some(root) = khora_db::source_root(&self.db) else { return Ok(Value::Null) };
         let url = url_of(params).ok_or_else(|| "no document".to_string())?;
         let index = self.lines.get(&url).ok_or_else(|| "that file is not open".to_string())?;
-        let _ = file;
-
         let renaming = references::renameable(&self.db, root, file, offset);
+        self.refuse_dependency_rename(file, &renaming)?;
         // Refused as an error, so the editor shows the sentence and edits
         // nothing: see `new_name_refused` for what a bad name would do.
         if let Some(why) = references::new_name_refused(&self.db, file, offset, &renaming, new_name) {
@@ -1778,6 +1950,9 @@ impl Server {
     /// editor that saves an untouched file records no change and no undo step.
     fn formatting(&self, params: &Value) -> Option<Vec<TextEdit>> {
         let url = url_of(params)?;
+        if self.is_dependency(&url.to_file_path().ok()?) {
+            return Some(Vec::new());
+        }
         let index = self.lines.get(&url)?;
         let text = index.text();
 
@@ -1955,8 +2130,127 @@ impl Server {
     }
 }
 
-/// Every `.kh` file under a directory, skipping what a build skips.
-fn gather(root: &Path, out: &mut Vec<PathBuf>) {
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
+    ctime: i64,
+    #[cfg(unix)]
+    ctime_ns: i64,
+    #[cfg(unix)]
+    mtime: i64,
+    #[cfg(unix)]
+    mtime_ns: i64,
+    #[cfg(not(unix))]
+    modified: Option<std::time::SystemTime>,
+    #[cfg(not(unix))]
+    created: Option<std::time::SystemTime>,
+    #[cfg(not(unix))]
+    len: u64,
+}
+
+type StorePathStamp = (Option<FileStamp>, Option<FileStamp>, Option<FileStamp>);
+
+fn file_stamp(metadata: std::io::Result<std::fs::Metadata>) -> Option<FileStamp> {
+    let metadata = metadata.ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some(FileStamp {
+            device: metadata.dev(), inode: metadata.ino(),
+            ctime: metadata.ctime(), ctime_ns: metadata.ctime_nsec(),
+            mtime: metadata.mtime(), mtime_ns: metadata.mtime_nsec(),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        Some(FileStamp {
+            modified: metadata.modified().ok(), created: metadata.created().ok(), len: metadata.len(),
+        })
+    }
+}
+
+/// Observe the home directory, store link, and resolved store directory. A
+/// replaced symlink or relocated target must invalidate the cached canonical
+/// root even when the directory containing the link has not changed.
+fn store_path_stamp(root: &Path) -> StorePathStamp {
+    (
+        root.parent().and_then(|home| file_stamp(std::fs::metadata(home))),
+        file_stamp(std::fs::symlink_metadata(root)),
+        file_stamp(std::fs::metadata(root)),
+    )
+}
+
+/// A failed cached resolution must not turn declared outside packages into
+/// editable scratch files. Only manifests are read, never dependency sources
+/// or the lockfile; a failed dependency parse stops that branch but protects
+/// its directory. Bound the walk so cycles or large graphs cannot delay
+/// startup; exceeding the limit protects every outside file.
+fn declared_path_graph(roots: &mut Vec<PathBuf>, parsed: &khora_manifest::Parsed, root: &Path) -> bool {
+    const MAX_DECLARED_PATHS: usize = 256;
+    let opened = canonical_with_missing_tail(root);
+    let mut visited = HashSet::from([opened.clone()]);
+    let mut pending = VecDeque::from([(opened.clone(), Some(parsed.manifest.clone()))]);
+    if let Some(workspace) = khora_manifest::enclosing(root).filter(|found| {
+        canonical_with_missing_tail(&found.root) == opened
+            || found.members.iter().any(|member| canonical_with_missing_tail(member) == opened)
+    }) {
+        for member in std::iter::once(workspace.root).chain(workspace.members) {
+            let member = canonical_with_missing_tail(&member);
+            if visited.insert(member.clone()) {
+                if visited.len() > MAX_DECLARED_PATHS { return false; }
+                pending.push_back((member, None));
+            }
+        }
+    }
+    while let Some((base, initial)) = pending.pop_front() {
+        let manifest = match initial {
+            Some(manifest) => manifest,
+            None => match khora_manifest::Manifest::load_for_resolution(&base.join("khora.toml")) {
+                Ok(parsed) => parsed.manifest,
+                Err(_) => continue,
+            },
+        };
+        for relative in manifest.dependencies.values().filter_map(|entry| entry.path.as_deref()) {
+            let directory = canonical_with_missing_tail(&base.join(relative));
+            if roots.len() >= MAX_DECLARED_PATHS { return false; }
+            roots.push(directory.clone());
+            if visited.insert(directory.clone()) {
+                if visited.len() > MAX_DECLARED_PATHS { return false; }
+                pending.push_back((directory, None));
+            }
+        }
+    }
+    true
+}
+
+/// Canonicalize an absent store through its nearest existing ancestor, so a
+/// symlinked home does not leave later-created store files unprotected. This
+/// reads the filesystem but never creates the store.
+fn canonical_with_missing_tail(path: &Path) -> PathBuf {
+    if let Ok(existing) = path.canonicalize() {
+        return existing;
+    }
+    let Some(parent) = path.parent() else { return path.to_path_buf() };
+    let mut base = canonical_with_missing_tail(parent);
+    match path.components().next_back() {
+        Some(std::path::Component::Normal(part)) => base.push(part),
+        Some(std::path::Component::ParentDir) => { base.pop(); }
+        Some(std::path::Component::CurDir) | Some(std::path::Component::RootDir)
+        | Some(std::path::Component::Prefix(_)) | None => {}
+    }
+    base
+}
+
+/// Every `.kh` file under a directory, skipping what a build skips and the
+/// immutable store. An opened home can be a project; its store cannot.
+fn gather(root: &Path, out: &mut Vec<PathBuf>, store: Option<&Path>) {
+    if store.is_some_and(|store| root.canonicalize().is_ok_and(|root| root.starts_with(store))) {
+        return;
+    }
     let Ok(entries) = std::fs::read_dir(root) else { return };
     for entry in entries.flatten() {
         let path = entry.path();
@@ -1964,7 +2258,7 @@ fn gather(root: &Path, out: &mut Vec<PathBuf>) {
             if path.file_name().is_some_and(|n| n == "target" || n == ".git") {
                 continue;
             }
-            gather(&path, out);
+            gather(&path, out, store);
         } else if path.extension().is_some_and(|e| e == "kh")
             && khora_db::selected_for_target(&path, khora_db::host_target())
         {
