@@ -57,7 +57,7 @@ What it writes is the interesting part. Parameters are the bindings the selectio
 
 ```khora
 fn extracted(id: Int) -> Row with { db: Db } raises DbError {
-  one_row(db.query("select .. where id = ?", [Cell::Number(id)])!)!
+  one_row(db.query("select .. where id = $1", [Cell::Number(id)])!)!
 }
 ```
 

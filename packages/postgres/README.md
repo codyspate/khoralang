@@ -201,14 +201,15 @@ Every value comes back as text and becomes a `std::db::Cell`:
 | PostgreSQL | `Cell` |
 | --- | --- |
 | `int2`, `int4`, `int8` | `Number` |
+| `numeric` | `Money` |
 | `bool` | `Flag` |
 | NULL | `Null` |
 | everything else | `Text` |
 
-`numeric` is `Text` rather than `Money`, deliberately: a `numeric` that failed
-to parse would have to become either a wrong number or a lost value, and
-neither is a decision to take quietly. The server's own digits are kept until
-that is settled.
+A `numeric` too wide for a `Decimal` stays `Text`, with the server's own
+digits, rather than becoming a wrong number or a lost value. `float4` and
+`float8` are `Text` too: a value that went through a binary float has already
+lost precision.
 
 Going the other way, `ask` accepts all five `Cell` kinds including `Money`.
 
