@@ -10,7 +10,7 @@ answer that is now right, then the rest. A bug that produced a *silently wrong*
 answer is listed under Breaking as well as Fixed, because code written around
 it will behave differently now.
 
-## 0.4.0 — 2026-10-03
+## 0.4.0 — 2026-10-09
 
 Coming from 0.3.0, read three groups of entries first.
 

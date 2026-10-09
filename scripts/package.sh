@@ -98,7 +98,9 @@ std/ and the runtime archive beside itself.
 
 One thing is not in here, and cannot be: a linker. Khora compiles to a native
 object and needs a C driver to link it against this platform's runtime.
-  Windows  Visual Studio Build Tools, "Desktop development with C++"
+  Windows  LLVM (https://releases.llvm.org), or Visual Studio Build Tools
+           with the "C++ Clang tools for Windows" component; the "Desktop
+           development with C++" workload alone does not include clang
   macOS    xcode-select --install
   Linux    clang or gcc from your package manager
 
