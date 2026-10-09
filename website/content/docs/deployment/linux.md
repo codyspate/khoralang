@@ -23,7 +23,7 @@ nothing needs root, and `rm -rf ~/.khora` undoes it.
 
 For a build machine, pin the version and leave the shell profiles alone.
 The 0.4.0 example works after the stable release is published; for a published
-candidate, substitute its full version (`0.4.0-rc.1`) in both this command and
+candidate, substitute its full version (`0.4.0-rc.2`) in both this command and
 your project's pin:
 
 ```bash

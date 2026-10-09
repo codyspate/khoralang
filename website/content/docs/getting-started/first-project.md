@@ -9,8 +9,8 @@ A Khora package has a `khora.toml` manifest and source files, conventionally und
 If `khora --version` does not work yet, start with [Installation](/docs/getting-started/installation/).
 For the 0.4 release candidate, use its [explicit candidate install](/docs/getting-started/installation/#release-candidates)
 after publication rather than the plain stable installer. `khora new` pins
-whichever compiler ran it: keep `0.4.0-rc.1` in a candidate project, and pin
-Khora-repository dependencies to `v0.4.0-rc.1`. The manifest below shows the
+whichever compiler ran it: keep `0.4.0-rc.2` in a candidate project, and pin
+Khora-repository dependencies to `v0.4.0-rc.2`. The manifest below shows the
 stable 0.4.0 release, which is installable only after it is published.
 
 ## Package structure

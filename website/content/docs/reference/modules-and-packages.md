@@ -159,8 +159,8 @@ shared = { path = "../shared" }
 ```
 
 The example above is for the published 0.4.0 toolchain. For its published
-candidate, pin `[toolchain]` to `0.4.0-rc.1` and the dependency's `rev` to
-`v0.4.0-rc.1`; neither tag can be fetched before that release is published.
+candidate, pin `[toolchain]` to `0.4.0-rc.2` and the dependency's `rev` to
+`v0.4.0-rc.2`; neither tag can be fetched before that release is published.
 `subdir` is for a repository holding more than one package — a git URL names a
 repository, and the two are the same thing only in the simplest layout.
 
@@ -174,8 +174,8 @@ add a dependency without editing the manifest by hand:
 khora install https://github.com/codyspate/khoralang --rev v0.4.0 --subdir packages/postgres
 ```
 
-For the published candidate, use `--rev v0.4.0-rc.1` with its
-`[toolchain] version = "0.4.0-rc.1"` pin. Omitting `--rev` chooses moving
+For the published candidate, use `--rev v0.4.0-rc.2` with its
+`[toolchain] version = "0.4.0-rc.2"` pin. Omitting `--rev` chooses moving
 `main`, which can resolve to a package newer than your compiler even though
 the resulting lockfile freezes that commit.
 

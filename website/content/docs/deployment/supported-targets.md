@@ -77,7 +77,7 @@ same base image.
 A published stable release provides one archive per triple and a checksum
 beside it, named for the tag. These 0.4.0 URLs work only after the stable
 release is published; for a published release candidate, replace both `0.4.0`
-strings with its full version, such as `0.4.0-rc.1`:
+strings with its full version, such as `0.4.0-rc.2`:
 
 ```text
 https://github.com/codyspate/khoralang/releases/download/v0.4.0/khora-0.4.0-x86_64-unknown-linux-gnu.tar.gz

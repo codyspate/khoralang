@@ -13,7 +13,7 @@ single file.
 ## A Dockerfile
 
 This example pins the stable 0.4.0 release and builds after it is published.
-For a published release candidate, set `KHORA_VERSION=0.4.0-rc.1` and pin
+For a published release candidate, set `KHORA_VERSION=0.4.0-rc.2` and pin
 the application and its Khora-repository dependencies to the same candidate.
 
 ```dockerfile

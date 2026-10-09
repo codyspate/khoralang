@@ -11,8 +11,8 @@ Use a release tag that matches your toolchain. After stable 0.4.0 is published:
 khora install https://github.com/codyspate/khoralang --subdir packages/postgres --rev v0.4.0
 ```
 
-For a published 0.4.0 release candidate, pin your toolchain to `0.4.0-rc.1`
-and use `--rev v0.4.0-rc.1` instead. Neither new tag is available before its
+For a published 0.4.0 release candidate, pin your toolchain to `0.4.0-rc.2`
+and use `--rev v0.4.0-rc.2` instead. Neither new tag is available before its
 release is published; keep `v0.3.0` for a 0.3.0 toolchain. Do not use moving
 `main` as the revision for a version-matched release trial.
 

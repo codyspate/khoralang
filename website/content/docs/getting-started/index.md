@@ -20,7 +20,7 @@ To follow this 0.4 walkthrough before the stable release, first use the
 once that candidate is published. Check `khora --version` before continuing:
 `khora new` pins that exact version, and a plain install during the RC period
 still creates a 0.3 project. The manifest examples below show stable 0.4.0;
-for the candidate, use `0.4.0-rc.1` in every `[toolchain]` pin.
+for the candidate, use `0.4.0-rc.2` in every `[toolchain]` pin.
 
 For the current published stable version on macOS or Linux:
 
@@ -31,7 +31,7 @@ curl -fsSL https://raw.githubusercontent.com/codyspate/khoralang/main/install.sh
 For the 0.4 candidate, once it is published, **use this instead**:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/codyspate/khoralang/main/install.sh | sh -s -- --version 0.4.0-rc.1
+curl -fsSL https://raw.githubusercontent.com/codyspate/khoralang/main/install.sh | sh -s -- --version 0.4.0-rc.2
 ```
 
 On Windows, the ordinary stable installer is:
@@ -47,7 +47,7 @@ instead (PowerShell cannot pass a flag through `iex`):
 irm https://raw.githubusercontent.com/codyspate/khoralang/main/installrc.ps1 | iex
 ```
 
-Verify that `khora --version` reports `0.4.0-rc.1` before proceeding.
+Verify that `khora --version` reports `0.4.0-rc.2` before proceeding.
 
 Verify the toolchain is available:
 
@@ -86,8 +86,8 @@ version = "0.4.0"
 ```
 
 The example pin is for the stable 0.4.0 release. On the candidate path above,
-`khora new` writes `version = "0.4.0-rc.1"` instead; keep it, and use a
-package dependency tagged `v0.4.0-rc.1` if the project adds one.
+`khora new` writes `version = "0.4.0-rc.2"` instead; keep it, and use a
+package dependency tagged `v0.4.0-rc.2` if the project adds one.
 
 Both tables are required. `[toolchain]` is what makes "this project builds the
 same way on your machine" true by default rather than by convention, so a

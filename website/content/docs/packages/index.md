@@ -27,7 +27,7 @@ postgres = { git = "https://github.com/codyspate/khoralang", rev = "v0.4.0", sub
 `khora.lock` records the commit each dependency resolved to, so a build stays
 reproducible even when the revision is a branch name. **Pin a tag when the
 dependency lives in the compiler's own repository** — `rev = "v0.4.0"` for
-a published 0.4.0 toolchain, or `rev = "v0.4.0-rc.1"` for that published
+a published 0.4.0 toolchain, or `rev = "v0.4.0-rc.2"` for that published
 candidate — because `main` moves ahead of the compiler you have, and a package
 from a newer commit may use `std` that yours lacks. These tags must exist on
 the release page before the corresponding example can be installed.

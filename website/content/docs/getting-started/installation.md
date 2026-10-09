@@ -216,11 +216,11 @@ On macOS or Linux, choose the newest published version including candidates, or 
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/codyspate/khoralang/main/install.sh | sh -s -- --pre
-curl -fsSL https://raw.githubusercontent.com/codyspate/khoralang/main/install.sh | sh -s -- --version 0.4.0-rc.1
+curl -fsSL https://raw.githubusercontent.com/codyspate/khoralang/main/install.sh | sh -s -- --version 0.4.0-rc.2
 ```
 
-The 0.4 candidate has its own version and pin, `0.4.0-rc.1`: replace
-`version = "0.4.0"` with `version = "0.4.0-rc.1"` in an application
+The 0.4 candidate has its own version and pin, `0.4.0-rc.2`: replace
+`version = "0.4.0"` with `version = "0.4.0-rc.2"` in an application
 manifest for candidate testing, and pin packages from the same release tag.
 `--version` takes the version without the leading `v`, and works for any published release, candidate or not.
 
@@ -243,7 +243,7 @@ A project built with a candidate pins it by its full name — `khora new` writes
 
 ```toml
 [toolchain]
-version = "0.4.0-rc.1"
+version = "0.4.0-rc.2"
 ```
 
 When you are ready to write code, continue with [Your first Khora project](/docs/getting-started/first-project/).
