@@ -1,0 +1,243 @@
+---
+title: Effects and rows
+sidebar:
+  order: 10
+---
+
+Khora functions can carry two orthogonal row-polymorphic dimensions in addition to parameters and return values:
+
+```text
+with    capabilities required by the computation
+raises  recoverable failures that may leave the computation
+```
+
+They are part of the function type and are checked by the compiler.
+
+## Effect declaration
+
+```khora
+pub effect Clock {
+  now: () -> Instant,
+}
+```
+
+An effect with fallible operations:
+
+```khora
+pub effect Store {
+  load: Id -> User raises StoreError,
+  save: User -> () raises StoreError,
+}
+```
+
+General form:
+
+```text
+pub? effect Name<TypeParams>? {
+  operation: FunctionType,
+  ...
+}
+```
+
+An effect name is the type of handlers implementing that effect.
+
+The `Clock` above is a stand-in cut down to one operation. The real one is
+[`std::clock::Clock`](/docs/stdlib/api/clock/): it lives in its own module
+rather than in `std::env`, and it has four operations, `sleep` among them.
+Waiting is an operation on the capability on purpose — a fake clock is an
+ordinary handler, so a test that exercises a retry loop finishes instantly:
+
+```khora
+handler for Clock {
+  sleep: fn _ms => (),
+  unix_seconds: fn () => 0,
+  unix_millis: fn () => 0,
+  monotonic_millis: fn () => 0,
+}
+```
+
+A handler gives every operation of its effect. There is no `..` for the rest,
+and leaving one out is an error naming the operation that is missing, so the
+fake above writes all four even though only `sleep` is what the test is for.
+
+### An operation may be generic in a row, but not in a type
+
+An operation's `raises` row may mention a row variable the operation itself binds. It is quantified per call, not per handler, so one handler serves callers whose failures are unrelated:
+
+```khora
+pub effect Nursery {
+  adopt: (Fiber<(), 'er>) -> (),
+}
+```
+
+An operation cannot introduce a *type* parameter the same way. The asymmetry follows from representation. A capability crosses as evidence and an error as a tag, so the handler's closure is the same machine code for every row — nothing in it depends on which failures the caller can raise. A type parameter decides a layout and must be monomorphized, and a handler's fields are closures, which have nowhere to put a per-layout instantiation.
+
+An effect may still take type parameters of its own on the `effect` declaration, as the general form above shows. Those are fixed when the handler is written; a row variable on an operation is not.
+
+## Capability requirement on a function
+
+```khora
+fn load_user(id: Id) -> User
+  with { store: Store }
+  raises StoreError
+{
+  store.load(id)!
+}
+```
+
+`with { store: Store }` introduces the label `store` into the body with the operations of `Store`.
+
+## Several capabilities
+
+```khora
+fn build_report(id: Id) -> Report
+  with { store: Store, clock: Clock }
+  raises StoreError
+{
+  // ...
+}
+```
+
+## Open capability row
+
+```khora
+fn use_clock<A, 'ef>(body: () -> A with { clock: Clock | 'ef }) -> A
+  with { clock: Clock | 'ef }
+{
+  body()
+}
+```
+
+A row variable preserves additional requirements not interpreted by the generic function.
+
+## Failure row
+
+Single type:
+
+```khora
+raises StoreError
+```
+
+Several failure types:
+
+```khora
+raises StoreError + ValidationError + HttpError
+```
+
+Open failure row:
+
+```khora
+raises 'er
+```
+
+## A helper that waits needs no row
+
+A `raises` row says how a function can fail, and nothing else. A helper that
+waits on a clock, a channel or a fiber and cannot fail declares no row, and it
+is still a place its fiber can be canceled — every blocking operation is,
+whatever the row:
+
+```khora
+fn nap(ms: Int) -> () with { clock: Clock } {
+  clock.sleep(ms)
+}
+```
+
+It can be called from a function with any row, fallible or not, without a `!`
+and without widening the caller's row. A row variable (`raises 'er`) belongs
+where a failure passes *through* the function — most often a closure the caller
+supplies — not on a helper that has no failure of its own.
+
+## Effects on function types
+
+```khora
+Request -> Response with { db: Db }
+```
+
+```khora
+Request -> Response raises HttpError
+```
+
+```khora
+Request -> Response
+  with { db: Db }
+  raises DbError + HttpError
+```
+
+Clauses belong to the function arrow they follow.
+
+## Handler expression
+
+```khora
+handler for Clock {
+  now: fn () => fixed_instant,
+}
+```
+
+Fallible operation implementation:
+
+```khora
+handler for Store {
+  load: fn id => load_from_disk(id)!,
+  save: fn user => save_to_disk(user)!,
+}
+```
+
+The implementation must satisfy the effect's operation types.
+
+## Install handlers
+
+One expression:
+
+```khora
+job() with {
+  clock: fixed_clock,
+}
+```
+
+Lexical block:
+
+```khora
+with {
+  clock: fixed_clock,
+  store: memory_store,
+} {
+  job()!
+}
+```
+
+Named contexts and overrides are specified in [Capabilities](./capabilities/).
+
+## Effect-polymorphic higher-order functions
+
+```khora
+fn map<A, B, 'ef, 'er>(
+  values: List<A>,
+  f: A -> B with 'ef raises 'er,
+) -> List<B>
+  with 'ef
+  raises 'er
+{
+  // ...
+}
+```
+
+The higher-order function preserves the capabilities and failures of its callback rather than wrapping it in a separate effect value.
+
+## Failure propagation and handling
+
+```khora
+operation()!
+```
+
+```khora
+operation()! catch {
+  Error::Case(value) => recover(value),
+}
+```
+
+See [Failures](./failures/) for `raise`, `!`, `catch`, and `attempt` semantics.
+
+## Capabilities and failures are independent
+
+A capability operation may be infallible, and a pure function may still raise a typed domain failure. `with` records authority; `raises` records recoverable non-local control flow. Neither implies the other.
