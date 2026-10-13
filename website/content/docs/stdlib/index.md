@@ -17,6 +17,8 @@ The current standard library includes APIs for:
   [`std::process::shell`](/docs/stdlib/api/process/shell/);
 - the environment, in [`std::env`](/docs/stdlib/api/env/);
 - randomness, in [`std::random`](/docs/stdlib/api/random/);
+- hashes, HMAC signatures, hex and base64, and random bytes for secrets, in
+  [`std::crypto`](/docs/stdlib/api/crypto/);
 - clocks and sleeping, in [`std::clock`](/docs/stdlib/api/clock/);
 - describing and decoding untrusted input, in [`std::schema`](/docs/stdlib/schema/);
 - typed configuration, in [`std::config`](/docs/stdlib/api/config/);

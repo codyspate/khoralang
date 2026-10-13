@@ -45,6 +45,7 @@ mod compile;
 mod concat_chain;
 mod conformance;
 mod config;
+mod crypto;
 mod db;
 mod decimal;
 mod derive;

@@ -174,7 +174,7 @@ mod fs;
 #[cfg(not(target_family = "wasm"))]
 mod handoff;
 #[cfg(not(target_family = "wasm"))]
-mod hash;
+mod crypto;
 mod heap;
 #[cfg(not(target_family = "wasm"))]
 mod migration;

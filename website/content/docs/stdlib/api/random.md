@@ -23,8 +23,9 @@ keeps the critical section to a single addition — see `draw` below.
 
 **These are not cryptographic numbers.** Anyone who sees one draw can predict
 every draw after it. Right for a shuffle, a retry jitter, a load-balancing
-choice or a test fixture; wrong for a session token or a key, which want a
-generator with a different name so that a program says which one it needed.
+choice or a test fixture; wrong for a session token or a key, which want
+`std::crypto::SecureRandom`, a capability with a different name so that a
+program says which one it needed.
 
 ## Effects
 

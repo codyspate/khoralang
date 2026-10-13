@@ -93,3 +93,26 @@ fn every_target_has_sockets() {
         );
     }
 }
+
+/// `std::crypto` is in every operating-system build and in no WebAssembly one.
+///
+/// **What it prevents: a wasm build that links against `ring`.** The module
+/// binds `khora_crypto_*`, which the runtime only has where `ring` builds, and
+/// `ring` does not build for wasm. Generating a wasm module from `std` (the
+/// LLVM tier's portability test) stops before linking, so a `crypto.kh` that
+/// lost its `_native` suffix would pass there and fail only when somebody
+/// linked a Worker. This asks the selection question directly.
+#[test]
+fn crypto_is_native_only() {
+    let is_crypto = |p: &std::path::PathBuf| {
+        p.file_stem().and_then(|s| s.to_str()).is_some_and(|s| s.starts_with("crypto"))
+    };
+    for target in TARGETS {
+        assert!(
+            sources_for(target).iter().any(is_crypto),
+            "`std::crypto` is not selected for `{target}`"
+        );
+    }
+    let wasm: Vec<_> = sources_for("wasm").into_iter().filter(is_crypto).collect();
+    assert!(wasm.is_empty(), "`std::crypto` is selected for wasm: {wasm:?}");
+}

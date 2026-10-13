@@ -778,6 +778,7 @@ dependencies = [
  "rustls",
  "rustls-native-certs",
  "rustls-pemfile",
+ "subtle",
  "windows-sys 0.59.0",
 ]
 

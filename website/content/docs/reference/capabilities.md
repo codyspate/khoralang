@@ -117,6 +117,7 @@ of `std`'s public API:
 | `FsWrite` | `writes` | [`std::fs`](/docs/stdlib/api/fs/) |
 | `Clock` | `clock` | [`std::clock`](/docs/stdlib/api/clock/) |
 | `Random` | `random` | [`std::random`](/docs/stdlib/api/random/) |
+| `SecureRandom` | `random` | [`std::crypto`](/docs/stdlib/api/crypto/) |
 | `Log` | `log` | [`std::log`](/docs/stdlib/api/log/) |
 | `Tracer` | `tracer` | [`std::trace`](/docs/stdlib/api/trace/) |
 | `Db` | `db` | [`std::db`](/docs/stdlib/api/db/) |

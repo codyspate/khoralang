@@ -5,9 +5,9 @@ import std::db::{Cell, DbError, Row};
 import std::decimal::{Decimal};
 import std::net::socket::{accept_on, connect_to, invalid_handle, listen_on, nothing_yet, receive, receive_now, set_receive_timeout, shut, start, transmit_bytes};
 import postgres::wire::{Message, Reader, Writer, framed, message_at, message_width, password, payload_width, prepare_and_run, query, run_prepared, run_prepared_each, sasl_initial, sasl_response, startup, terminate};
-import postgres::scram::{Opening, ScramError, Session, begin, encode64, finish, verify};
+import std::crypto::{Base64, SecureRandom};
+import postgres::scram::{Opening, ScramError, Session, begin, finish, verify};
 
-extern fn khora_random_seed() -> Int;
 extern fn khora_monotonic_millis() -> Int;
 
 /// A connection to a PostgreSQL server, and the conversation it has.
@@ -501,27 +501,18 @@ fn handshake(c: Connection, secret: String) -> Result<Bool, PgError> {
 
 /// Bytes for a client nonce.
 ///
-/// **A nonce must not repeat across connections**, because the proof is signed
-/// over it and a repeated one makes a recorded exchange replayable. The
-/// runtime's seed is drawn from the operating system, and each call draws
-/// again, so two connections opened in the same millisecond do not share one.
+/// **A nonce must not repeat across connections or be predictable**, because
+/// the proof is signed over it and a repeated or guessed one makes a recorded
+/// exchange replayable. Eighteen bytes from the operating system's
+/// cryptographic generator.
 ///
-/// This reaches for the runtime directly rather than taking a `Random`
-/// capability, because `open` has no capability row and adding one to it would
-/// change every caller for a value no caller should be choosing. A nonce the
+/// `SecureRandom::real()` is supplied here rather than taken as a capability,
+/// because `open` has no capability row and adding one to it would change
+/// every caller for a value no caller should be choosing. A nonce the
 /// application could pin is a nonce an application will eventually pin.
 fn nonce_bytes() -> Array<U8> {
   let out: Array<U8> = Array::new(18, 0);
-  let mut at = 0;
-  while at < 18 {
-    // One draw per three bytes: the seed is 64 bits and taking all eight from
-    // one would be eight bytes of one number, not eight independent ones.
-    let draw = khora_random_seed();
-    Array::set(out, at, U8::of(Int::and(draw, 255)));
-    if at + 1 < 18 { Array::set(out, at + 1, U8::of(Int::and(Int::shr(draw, 8), 255))) };
-    if at + 2 < 18 { Array::set(out, at + 2, U8::of(Int::and(Int::shr(draw, 16), 255))) };
-    at = at + 3;
-  };
+  with { random: SecureRandom::real() } { random.bytes(out) };
   out
 }
 
@@ -556,7 +547,7 @@ fn authenticate(c: Connection, m: Message, secret: String) -> Result<Bool, PgErr
     // exchange to the TLS channel, and claiming it without doing that binding
     // is worse than not offering it: the whole point of the `-PLUS` variant is
     // that a client refuses to authenticate through a proxy it cannot see.
-    let nonce = encode64(nonce_bytes());
+    let nonce = Base64::encode(nonce_bytes());
     let opening = begin(nonce);
     c.scram = Option::Some(opening.session);
     if transmit_bytes(c.handle, sasl_initial("SCRAM-SHA-256", opening.message)) < 0 {

@@ -19,133 +19,59 @@ module postgres::scram;
 //! authenticate a second. That is the whole point of the mechanism and the
 //! reason cleartext is not an acceptable substitute over a network.
 //!
-//! The hashes come from the runtime — `khora_hash_*` — because they are in
-//! every binary already for TLS. What is written here is the protocol: the
-//! message formats, the base64, and the exact byte strings the RFC says to
-//! sign.
+//! The hashes, the key derivation and the base64 are `std::crypto`'s. What is
+//! written here is the protocol: the message formats and the exact byte
+//! strings the RFC says to sign.
 
-import std::core::{Array, Int, List, Option, Result, String, U8, Vector, assert};
+import std::core::{Array, Int, List, Option, Redacted, Result, String, U8, assert};
+import std::crypto::{Base64, Hmac, pbkdf2_sha256, sha256};
 
-// --- the runtime's hashes ---------------------------------------------------
-
-extern fn khora_hash_sha256_length() -> Int;
-extern fn khora_hash_sha256(input: Ptr, length: Int, out: Ptr) -> ();
-extern fn khora_hash_hmac_sha256(
-  key: Ptr, key_length: Int, message: Ptr, message_length: Int, out: Ptr,
-) -> ();
-extern fn khora_hash_pbkdf2_sha256(
-  password: Ptr, password_length: Int,
-  salt: Ptr, salt_length: Int,
-  iterations: Int,
-  out: Ptr, out_length: Int,
-) -> U8;
-
-/// How wide every digest in this exchange is.
-pub fn digest_length() -> Int { khora_hash_sha256_length() }
-
-/// SHA-256 of some bytes.
-pub fn sha256(input: Array<U8>) -> Array<U8> {
-  let out: Array<U8> = Array::new(digest_length(), 0);
-  Array::with_data(input, fn (bytes, n) =>
-    Array::with_data(out, fn (into, _) => khora_hash_sha256(bytes, n, into)));
-  out
+/// HMAC-SHA-256 of `message` under `key`. Every key in SCRAM is derived from
+/// the password, so each is wrapped where it is used rather than carried
+/// around as a `Redacted`.
+fn hmac(key: Array<U8>, message: Array<U8>) -> Array<U8> {
+  Hmac::sha256(Redacted::of(key), message)
 }
 
-/// HMAC-SHA-256 of `message` under `key`.
-pub fn hmac(key: Array<U8>, message: Array<U8>) -> Array<U8> {
-  let out: Array<U8> = Array::new(digest_length(), 0);
-  Array::with_data(key, fn (k, kn) =>
-    Array::with_data(message, fn (m, mn) =>
-      Array::with_data(out, fn (into, _) => khora_hash_hmac_sha256(k, kn, m, mn, into))));
-  out
+/// The server's salt, decoded the way PostgreSQL and libpq decode it.
+///
+/// **What it prevents: refusing a server libpq logs in to.** `Base64::decode`
+/// refuses a final character whose unused low bits are set (`..gR==` rather
+/// than `..gQ==`), so that a tag has one spelling. A salt is only ever fed to
+/// PBKDF2, so a second spelling of it costs nothing, and PostgreSQL stores a
+/// hand-made verifier written that way and sends it verbatim. Those bits are
+/// cleared here and nothing else is relaxed: whitespace, wrong padding and
+/// characters outside the alphabet are still refused.
+fn decode_salt(text: String) -> Option<Array<U8>> {
+  let length = String::byte_length(text);
+  let padding = if String::ends_with(text, "==") { 2 } else if String::ends_with(text, "=") { 1 } else { 0 };
+  let last = length - padding - 1;
+  let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  if padding == 0 || last < 0 {
+    Base64::decode(text)
+  } else {
+    let value = position(alphabet, String::byte(text, last));
+    if value < 0 {
+      Option::None
+    } else {
+      // Two `=` leave four unused bits in the last character, one leaves two.
+      let kept = Int::and(value, if padding == 2 { 48 } else { 60 });
+      Base64::decode(String::slice(text, 0, last)
+        + String::slice(alphabet, kept, kept + 1)
+        + String::slice(text, last + 1, length))
+    }
+  }
 }
 
-/// PBKDF2-HMAC-SHA-256. `Option::None` when the server sent an iteration
-/// count this cannot honor — zero, or one that does not fit.
-pub fn pbkdf2(password: Array<U8>, salt: Array<U8>, iterations: Int) -> Option<Array<U8>> {
-  let out: Array<U8> = Array::new(digest_length(), 0);
-  let ok = Array::with_data(password, fn (p, pn) =>
-    Array::with_data(salt, fn (s, sn) =>
-      Array::with_data(out, fn (into, on) =>
-        khora_hash_pbkdf2_sha256(p, pn, s, sn, iterations, into, on))));
-  // **A runtime extern returning a boolean returns `U8`.** Compared against
-  // zero rather than to `true`, which is not a value this type has.
-  if U8::to_int(ok) != 0 { Option::Some(out) } else { Option::None }
-}
-
-// --- base64 -----------------------------------------------------------------
-//
-// Written here rather than in `std` because this is the only thing in the
-// package that needs it, and a base64 in the standard library is a decision
-// about what Khora promises rather than something a driver should settle.
-
-fn alphabet() -> String {
-  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-}
-
-/// Bytes to base64, padded.
-pub fn encode64(input: Array<U8>) -> String {
-  let table = String::bytes(alphabet());
-  let out: Array<U8> = Array::new(((Array::length(input) + 2) / 3) * 4, 0);
-  let total = Array::length(input);
+/// Where `byte` is in `alphabet`, or -1.
+fn position(alphabet: String, byte: U8) -> Int {
   let mut at = 0;
-  let mut put = 0;
-  while at < total {
-    let b0 = U8::to_int(Array::get(input, at));
-    let b1 = if at + 1 < total { U8::to_int(Array::get(input, at + 1)) } else { 0 };
-    let b2 = if at + 2 < total { U8::to_int(Array::get(input, at + 2)) } else { 0 };
-    let triple = Int::shl(b0, 16) + Int::shl(b1, 8) + b2;
-    Array::set(out, put, Array::get(table, Int::and(Int::shr(triple, 18), 63)));
-    Array::set(out, put + 1, Array::get(table, Int::and(Int::shr(triple, 12), 63)));
-    Array::set(out, put + 2, if at + 1 < total {
-        Array::get(table, Int::and(Int::shr(triple, 6), 63))
-      } else { U8::of(61) });
-    Array::set(out, put + 3, if at + 2 < total {
-        Array::get(table, Int::and(triple, 63))
-      } else { U8::of(61) });
-    at = at + 3;
-    put = put + 4;
-  };
-  String::from_bytes(out)
-}
-
-/// The index of `c` in the base64 alphabet, or -1.
-fn unbase(c: Int) -> Int {
-  if c >= 65 && c <= 90 { c - 65 }
-  else if c >= 97 && c <= 122 { c - 97 + 26 }
-  else if c >= 48 && c <= 57 { c - 48 + 52 }
-  else if c == 43 { 62 }
-  else if c == 47 { 63 }
-  else { -1 }
-}
-
-/// Base64 to bytes. Characters outside the alphabet — including padding and
-/// any whitespace a server wraps a long salt with — are skipped.
-pub fn decode64(input: String) -> Array<U8> {
-  let out = Vector::new();
-  let total = String::byte_length(input);
-  let mut accumulator = 0;
-  let mut bits = 0;
-  let mut at = 0;
-  while at < total {
-    let value = unbase(U8::to_int(String::byte(input, at)));
-    if value >= 0 {
-      accumulator = Int::shl(accumulator, 6) + value;
-      bits = bits + 6;
-      if bits >= 8 {
-        bits = bits - 8;
-        Vector::push(out, U8::of(Int::and(Int::shr(accumulator, bits), 255)));
-      }
-    };
+  let mut found = -1;
+  while at < String::byte_length(alphabet) && found < 0 {
+    if String::byte(alphabet, at) == byte { found = at };
     at = at + 1;
   };
-  let list = Vector::to_list(out);
-  let bytes: Array<U8> = Array::new(List::length(list), 0);
-  // **A fold rather than a loop with a captured counter.** A closure captures
-  // by value, so `index = index + 1` inside one is a write nobody sees — the
-  // compiler says so rather than letting the array fill with zeros.
-  List::fold(list, 0, fn (index, b) => { Array::set(bytes, index, b); index + 1 });
-  bytes
+  found
 }
 
 // --- the exchange -----------------------------------------------------------
@@ -236,13 +162,14 @@ pub fn finish(
             Option::Some(count) => match Int::of_string(count) {
               Option::None => Result::Err(ScramError::Malformed(
                   "the server's iteration count is not a number: ${count}")),
-              Option::Some(iterations) => {
-                let salted = pbkdf2(String::bytes(password), decode64(salt64), iterations);
-                match salted {
+              Option::Some(iterations) => match decode_salt(salt64) {
+                Option::None => Result::Err(ScramError::Malformed(
+                    "the server's salt is not base64: ${salt64}")),
+                Option::Some(salt) => match pbkdf2_sha256(Redacted::of(String::bytes(password)), salt, iterations) {
                   Option::None => Result::Err(ScramError::Rejected(
                       "the server asked for an iteration count this client will not use: ${count}")),
                   Option::Some(salted_password) => {
-                    let client_key = hmac(salted_password, String::bytes("Client Key"));
+                    let client_key = Hmac::sha256(salted_password, String::bytes("Client Key"));
                     let stored_key = sha256(client_key);
                     let without_proof = "c=biws,r=${combined}";
                     let auth_message =
@@ -252,12 +179,12 @@ pub fn finish(
                     // Kept now, checked when the server's final message arrives:
                     // the salted password does not survive this scope, and the
                     // server signature cannot be computed without it.
-                    let server_key = hmac(salted_password, String::bytes("Server Key"));
+                    let server_key = Hmac::sha256(salted_password, String::bytes("Server Key"));
                     session.expected_signature =
-                    encode64(hmac(server_key, String::bytes(auth_message)));
-                    Result::Ok("${without_proof},p=${encode64(proof)}")
+                    Base64::encode(hmac(server_key, String::bytes(auth_message)));
+                    Result::Ok("${without_proof},p=${Base64::encode(proof)}")
                   },
-                }
+                },
               },
             },
           },

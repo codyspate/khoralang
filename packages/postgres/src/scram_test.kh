@@ -8,19 +8,8 @@ module postgres::scram_test;
 //! that only checked the pieces against each other would pass for a client
 //! that was consistently wrong.
 
-import std::core::{Option, Result, String, assert};
-import postgres::scram::{Opening, Session, begin, decode64, encode64, finish, verify};
-
-test "base64 round-trips the RFC's salt" {
-  let salt = "W22ZaJ0SNY7soEsUEjb6gQ==";
-  assert(encode64(decode64(salt)) == salt);
-}
-
-test "base64 pads a length that is not a multiple of three" {
-  assert(encode64(String::bytes("a")) == "YQ==");
-  assert(encode64(String::bytes("ab")) == "YWI=");
-  assert(encode64(String::bytes("abc")) == "YWJj");
-}
+import std::core::{Result, assert};
+import postgres::scram::{Opening, Session, begin, finish, verify};
 
 test "the client's first message carries the GS2 header and the nonce" {
   let opening = begin("rOprNGfwEbeRWgbNEkqO");
@@ -64,6 +53,34 @@ test "a server nonce that does not extend the client's is refused" {
 test "a server error in place of a signature is reported as the server's words" {
   let opening = begin("rOprNGfwEbeRWgbNEkqO");
   match verify(opening.session, "e=invalid-proof") {
+    Result::Ok(_) => assert(false),
+    Result::Err(_) => assert(true),
+  };
+}
+
+/// **A salt whose unused bits are set is the same salt.** `gR==` and `gQ==`
+/// end in the same byte; the last character's low four bits are padding.
+/// PostgreSQL stores a verifier written that way as given and sends it
+/// verbatim, and libpq authenticates against it, so this driver must too.
+///
+/// The expected proof is Python's (`hashlib.pbkdf2_hmac` over the salt bytes
+/// `gQ==` spells, `hmac`), not RFC 7677's: the `AuthMessage` signs the
+/// server's message as sent, so the `R` changes the proof though not the key.
+test "a salt with non-zero leftover bits is the salt its bytes spell" {
+  let opening = begin("rOprNGfwEbeRWgbNEkqO");
+  let server_first =
+    "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gR==,i=4096";
+  match finish(opening.session, server_first, "pencil") {
+    Result::Err(_) => assert(false),
+    Result::Ok(final) => assert(final ==
+      "c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,"
+      + "p=fGHO0rquJJSMcuToP8aTR/H7WfpRAwX5SJ3P0knV7pg="),
+  };
+}
+
+test "a salt that is not base64 is malformed rather than a wrong proof" {
+  let opening = begin("rOprNGfwEbeRWgbNEkqO");
+  match finish(opening.session, "r=rOprNGfwEbeRWgbNEkqOxx,s=not base64!,i=4096", "pencil") {
     Result::Ok(_) => assert(false),
     Result::Err(_) => assert(true),
   };

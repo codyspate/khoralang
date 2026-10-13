@@ -26,6 +26,7 @@ Start with the recipe closest to the problem you are solving:
 - [Test code that uses capabilities](/docs/cookbook/testing-capabilities/) — supply deterministic handlers without global mutation or test-only branches in application code.
 - [Trace an operation](/docs/cookbook/tracing/) — implement a `Tracer`, wrap work with `around`, and keep span lifetime structured.
 - [Log, and correlate it with traces](/docs/cookbook/logging/) — emit one JSON object per line with `std::log`, and carry the trace and span identifiers onto every line inside a span.
+- [Sign and verify a webhook](/docs/cookbook/webhook-signatures/) — sign a timestamp and the body with HMAC-SHA-256, refuse old deliveries, verify in constant time, rotate the secret without dropping deliveries, and generate it with `SecureRandom`.
 
 ## How to read the examples
 

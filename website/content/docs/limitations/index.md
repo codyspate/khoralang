@@ -136,6 +136,18 @@ admits only `hostssl` connections refuses it.
 
 **A dependency cannot link a native library on your behalf.** `build.link` is read from the root package's manifest and nowhere else, so a package that ships an archive and declares `extern fn` against it cannot put a flag on your link line — a transitive package adding a native library to your build would be a supply-chain change with no signal at the place that would have to consent. The package does the work and documents one line for you to add, which means every native library a program links can be read off its own manifest. [Foreign function interface](/docs/reference/ffi/#link-against-a-native-library) has the shape.
 
+## Cryptography
+
+[`std::crypto`](/docs/stdlib/api/crypto/) has SHA-256 and SHA-512, HMAC with
+constant-time verification, a constant-time byte comparison, hex and base64,
+and random bytes from the operating system. **It has no ciphers, no
+authenticated encryption, no public-key signatures (Ed25519, ECDSA), no key
+exchange and no password hashing (argon2, scrypt, bcrypt).** TLS for HTTP
+connections is in [`std::net::tls`](/docs/stdlib/api/net/tls/). For the rest,
+bind a native library through the [foreign function
+interface](/docs/reference/ffi/). `std::crypto` is not available when compiling
+for WebAssembly.
+
 ## Editor tooling
 
 `khora lsp` provides compiler-backed diagnostics, hover, formatting, completion, signature help, go-to-definition, references, document/workspace symbols, semantic tokens, code actions, code lenses, and inlay hints.

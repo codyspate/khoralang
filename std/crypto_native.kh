@@ -1,0 +1,342 @@
+module std::crypto;
+
+import std::core::{Array, Option, Redacted, String, U8};
+
+//! Digests, message authentication, constant-time comparison, hex and base64,
+//! and random bytes from the operating system.
+//!
+//! **Bound, not written.** SHA-2, HMAC and the random source are `ring`'s,
+//! the library rustls is built on and every Khora executable already links. A
+//! digest written out by hand produces output that looks exactly like a
+//! digest when it is wrong, and no test of its own tells the difference.
+//!
+//! Signing and checking a webhook is the case this module is shaped around:
+//!
+//! ```khora
+//! let key = Redacted::of(String::bytes(secret));
+//! let header = "sha256=${Hex::encode(Hmac::sha256(key, String::bytes(body)))}";
+//! // and on receipt, never with `==`:
+//! let genuine = match Hex::decode(received) {
+//!   Option::Some(tag) => Hmac::verify_sha256(key, String::bytes(body), tag),
+//!   Option::None => false,
+//! };
+//! ```
+//!
+//! **Keys are `Redacted`.** Every function that takes a key takes a
+//! `Redacted<Array<U8>>`, so a key shows as `<redacted>` in a log line or an
+//! interpolation, a record holding one cannot derive `Encode`, and nothing here
+//! hands the bytes back. The only way to them is `Redacted::expose`, written
+//! where somebody can search for it.
+//!
+//! # What is not here, and why
+//!
+//! No ciphers, no authenticated encryption, no signatures (Ed25519, ECDSA), no
+//! key exchange and no password hashing. Each is a choice of algorithm,
+//! parameters and nonce rules that has to stay correct for as long as data
+//! encrypted or signed with it exists, and each has failure modes, a reused
+//! nonce or a weak work factor, that no type in this module can prevent. A
+//! hash and a MAC have no such parameters: SHA-256 is SHA-256. TLS, which is
+//! where most programs need encryption, is in `std::net::tls`. For password
+//! storage, use a dedicated argon2 or scrypt library through the foreign
+//! function interface; a fast hash such as SHA-256 is the wrong tool there,
+//! because being fast is what makes guessing passwords cheap.
+//!
+//! Not available when compiling for WebAssembly, which has no operating
+//! system random source and no build of `ring`.
+
+extern fn khora_crypto_sha256_length() -> Int;
+extern fn khora_crypto_sha512_length() -> Int;
+extern fn khora_crypto_sha256(data: Ptr, length: Int, out: Ptr, out_length: Int) -> ();
+extern fn khora_crypto_sha512(data: Ptr, length: Int, out: Ptr, out_length: Int) -> ();
+extern fn khora_crypto_hmac_sha256(
+  key: Ptr, key_length: Int, message: Ptr, message_length: Int, out: Ptr, out_length: Int,
+) -> ();
+extern fn khora_crypto_hmac_sha512(
+  key: Ptr, key_length: Int, message: Ptr, message_length: Int, out: Ptr, out_length: Int,
+) -> ();
+extern fn khora_crypto_hmac_verify_sha256(
+  key: Ptr, key_length: Int, message: Ptr, message_length: Int, tag: Ptr, tag_length: Int,
+) -> U8;
+extern fn khora_crypto_hmac_verify_sha512(
+  key: Ptr, key_length: Int, message: Ptr, message_length: Int, tag: Ptr, tag_length: Int,
+) -> U8;
+extern fn khora_crypto_equal(a: Ptr, a_length: Int, b: Ptr, b_length: Int) -> U8;
+extern fn khora_crypto_random_fill(out: Ptr, length: Int) -> ();
+extern fn khora_crypto_pbkdf2_sha256(
+  password: Ptr, password_length: Int,
+  salt: Ptr, salt_length: Int,
+  iterations: Int,
+  out: Ptr, out_length: Int,
+) -> U8;
+extern fn khora_crypto_hex_encode(data: Ptr, length: Int, out: Ptr, out_length: Int) -> ();
+extern fn khora_crypto_hex_decode(data: Ptr, length: Int, out: Ptr, out_length: Int) -> Int;
+extern fn khora_crypto_base64_length(length: Int, url_safe: U8) -> Int;
+extern fn khora_crypto_base64_encode(
+  data: Ptr, length: Int, out: Ptr, out_length: Int, url_safe: U8,
+) -> ();
+extern fn khora_crypto_base64_decode(
+  data: Ptr, length: Int, out: Ptr, out_length: Int, url_safe: U8,
+) -> Int;
+
+// A runtime extern answering a yes or no answers a `U8`; one is yes.
+fn yes(answer: U8) -> Bool { U8::to_int(answer) != 0 }
+
+// ---------------------------------------------------------------------------
+// Digests
+// ---------------------------------------------------------------------------
+
+/// The SHA-256 digest of `bytes`: 32 bytes.
+///
+/// For a checksum, a content address or a cache key. **Not for a password**:
+/// see the module's note on what is not here. To sign something, use
+/// `Hmac::sha256`; a digest of a secret followed by a message can be
+/// extended by anyone who sees it.
+///
+/// ```khora
+/// Hex::encode(sha256(String::bytes("abc")))
+/// // ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+/// ```
+pub fn sha256(bytes: Array<U8>) -> Array<U8> {
+  let width = khora_crypto_sha256_length();
+  let out: Array<U8> = Array::new(width, U8::of(0));
+  Array::with_data(bytes, fn (data, length) =>
+    Array::with_data(out, fn (into, _room) => khora_crypto_sha256(data, length, into, width)));
+  out
+}
+
+/// The SHA-512 digest of `bytes`: 64 bytes.
+pub fn sha512(bytes: Array<U8>) -> Array<U8> {
+  let width = khora_crypto_sha512_length();
+  let out: Array<U8> = Array::new(width, U8::of(0));
+  Array::with_data(bytes, fn (data, length) =>
+    Array::with_data(out, fn (into, _room) => khora_crypto_sha512(data, length, into, width)));
+  out
+}
+
+// ---------------------------------------------------------------------------
+// HMAC
+// ---------------------------------------------------------------------------
+
+/// Message authentication with a shared key (RFC 2104).
+///
+/// A namespace for four functions: sign with `sha256` or `sha512`, and check a
+/// tag you were sent with `verify_sha256` or `verify_sha512`. **Check with
+/// `verify`, never by comparing tags with `==`.** `==` stops at the first byte
+/// that differs, so how long it takes tells a caller how much of a forged tag
+/// was right, and a forger who can time it learns the real tag a byte at a
+/// time.
+pub type Hmac;
+
+impl Hmac {
+  /// The HMAC-SHA-256 tag of `message` under `key`: 32 bytes.
+  ///
+  /// A key of any length is accepted. RFC 2104 recommends at least the
+  /// digest's width, 32 bytes; [`SecureRandom`] is where one comes from.
+  pub fn sha256(key: Redacted<Array<U8>>, message: Array<U8>) -> Array<U8> {
+    let width = khora_crypto_sha256_length();
+    let out: Array<U8> = Array::new(width, U8::of(0));
+    Array::with_data(Redacted::expose(key), fn (k, kn) =>
+      Array::with_data(message, fn (m, mn) =>
+        Array::with_data(out, fn (into, _room) => khora_crypto_hmac_sha256(k, kn, m, mn, into, width))));
+    out
+  }
+
+  /// The HMAC-SHA-512 tag of `message` under `key`: 64 bytes.
+  pub fn sha512(key: Redacted<Array<U8>>, message: Array<U8>) -> Array<U8> {
+    let width = khora_crypto_sha512_length();
+    let out: Array<U8> = Array::new(width, U8::of(0));
+    Array::with_data(Redacted::expose(key), fn (k, kn) =>
+      Array::with_data(message, fn (m, mn) =>
+        Array::with_data(out, fn (into, _room) => khora_crypto_hmac_sha512(k, kn, m, mn, into, width))));
+    out
+  }
+
+  /// Whether `tag` is the HMAC-SHA-256 of `message` under `key`.
+  ///
+  /// **The comparison takes the same time wherever the tags differ**, so a
+  /// forger learns nothing from timing it. A tag of the wrong length,
+  /// including an empty or truncated one, is `false`: accepting a prefix of
+  /// the tag would let a forger guess a few bytes instead of thirty-two.
+  pub fn verify_sha256(key: Redacted<Array<U8>>, message: Array<U8>, tag: Array<U8>) -> Bool {
+    yes(Array::with_data(Redacted::expose(key), fn (k, kn) =>
+        Array::with_data(message, fn (m, mn) =>
+          Array::with_data(tag, fn (t, tn) => khora_crypto_hmac_verify_sha256(k, kn, m, mn, t, tn)))))
+  }
+
+  /// Whether `tag` is the HMAC-SHA-512 of `message` under `key`, in constant
+  /// time, as [`Hmac::verify_sha256`].
+  pub fn verify_sha512(key: Redacted<Array<U8>>, message: Array<U8>, tag: Array<U8>) -> Bool {
+    yes(Array::with_data(Redacted::expose(key), fn (k, kn) =>
+        Array::with_data(message, fn (m, mn) =>
+          Array::with_data(tag, fn (t, tn) => khora_crypto_hmac_verify_sha512(k, kn, m, mn, t, tn)))))
+  }
+}
+
+/// Whether `a` and `b` hold the same bytes, in time that does not depend on
+/// where they first differ.
+///
+/// For comparing a secret value you were sent against the one you hold, such as
+/// an API token or a session identifier, where `==` would leak through its
+/// timing how much of a guess was right. To check an HMAC tag, use
+/// [`Hmac::verify_sha256`], which computes the tag as well.
+///
+/// **Arrays of different lengths are `false` at once**, so the time does show
+/// whether the lengths matched, though nothing about the contents. That is
+/// harmless when the length is public, as it is for a fixed-width token or a
+/// digest; compare digests of the two values if it is not.
+pub fn constant_time_eq(a: Array<U8>, b: Array<U8>) -> Bool {
+  yes(Array::with_data(a, fn (x, xn) =>
+      Array::with_data(b, fn (y, yn) => khora_crypto_equal(x, xn, y, yn))))
+}
+
+// ---------------------------------------------------------------------------
+// Encodings
+// ---------------------------------------------------------------------------
+
+/// Bytes as hexadecimal text, two digits a byte.
+pub type Hex;
+
+impl Hex {
+  /// `bytes` as lowercase hex: `[255, 1]` is `ff01`.
+  pub fn encode(bytes: Array<U8>) -> String {
+    let width = Array::length(bytes) * 2;
+    let out: Array<U8> = Array::new(width, U8::of(0));
+    Array::with_data(bytes, fn (data, length) =>
+      Array::with_data(out, fn (into, _room) => khora_crypto_hex_encode(data, length, into, width)));
+    String::from_bytes(out)
+  }
+
+  /// The bytes `text` spells, or `None` if it is not hex.
+  ///
+  /// Either case is accepted. An odd number of digits, whitespace, a `0x`
+  /// prefix or any other character is `None`.
+  pub fn decode(text: String) -> Option<Array<U8>> {
+    let width = String::byte_length(text) / 2;
+    let out: Array<U8> = Array::new(width, U8::of(0));
+    let written = String::with_data(text, fn (data, length) =>
+      Array::with_data(out, fn (into, _room) => khora_crypto_hex_decode(data, length, into, width)));
+    if written < 0 { Option::None } else { Option::Some(out) }
+  }
+}
+
+/// Bytes as base64 text (RFC 4648).
+///
+/// Two alphabets. `encode` and `decode` are the standard one, `+` and `/`
+/// with `=` padding, which is what MIME, HTTP Basic authentication and most
+/// APIs mean by "base64". The `url_safe` pair is RFC 4648 §5, `-` and `_`
+/// **without padding**, which is what JWTs, URL parameters and cookie values
+/// use, because `+`, `/` and `=` all need escaping there.
+///
+/// **Decoding is strict.** Characters outside the alphabet, whitespace and
+/// line breaks included, are refused; so is missing or misplaced padding in
+/// the standard variant, any padding in the URL-safe one, and unused bits that
+/// are not zero. Each value then has exactly one encoding, so a signature
+/// compared after decoding cannot be altered in transit and still match.
+pub type Base64;
+
+impl Base64 {
+  /// `bytes` as standard, padded base64: `foo` is `Zm9v`, `f` is `Zg==`.
+  pub fn encode(bytes: Array<U8>) -> String { encode64(bytes, U8::of(0)) }
+
+  /// `bytes` as URL-safe base64 without padding: `f` is `Zg`.
+  pub fn encode_url_safe(bytes: Array<U8>) -> String { encode64(bytes, U8::of(1)) }
+
+  /// The bytes standard, padded base64 `text` spells, or `None` if it is not
+  /// that.
+  pub fn decode(text: String) -> Option<Array<U8>> { decode64(text, U8::of(0)) }
+
+  /// The bytes URL-safe, unpadded base64 `text` spells, or `None` if it is not
+  /// that.
+  pub fn decode_url_safe(text: String) -> Option<Array<U8>> { decode64(text, U8::of(1)) }
+}
+
+fn encode64(bytes: Array<U8>, url_safe: U8) -> String {
+  let width = khora_crypto_base64_length(Array::length(bytes), url_safe);
+  let out: Array<U8> = Array::new(width, U8::of(0));
+  Array::with_data(bytes, fn (data, length) =>
+    Array::with_data(out, fn (into, _room) =>
+      khora_crypto_base64_encode(data, length, into, width, url_safe)));
+  String::from_bytes(out)
+}
+
+fn decode64(text: String, url_safe: U8) -> Option<Array<U8>> {
+  // Three bytes per four characters, and room for the two a final short group
+  // of the unpadded variant can hold.
+  let room = String::byte_length(text) / 4 * 3 + 2;
+  let out: Array<U8> = Array::new(room, U8::of(0));
+  let written = String::with_data(text, fn (data, length) =>
+    Array::with_data(out, fn (into, _room) =>
+      khora_crypto_base64_decode(data, length, into, room, url_safe)));
+  if written < 0 { Option::None } else { Option::Some(Array::prefix(out, written)) }
+}
+
+// ---------------------------------------------------------------------------
+// Random bytes for secrets
+// ---------------------------------------------------------------------------
+
+/// Random bytes nobody can predict: for keys, tokens, session identifiers and
+/// nonces.
+///
+/// **Not `std::random::Random`.** That one is a fast generator anybody can
+/// predict from a single draw, which is what a shuffle or a test wants and
+/// exactly wrong for a secret. Two capabilities with two names, so a signature
+/// says which one a function needed.
+///
+/// A capability so that a test can supply the bytes. There is deliberately no
+/// way to seed the real one: a test that wants fixed bytes writes a handler
+/// that fills the buffer with them.
+///
+/// ```khora
+/// fn new_token() -> String with { random: SecureRandom } {
+///   let bytes: Array<U8> = Array::new(32, U8::of(0));
+///   random.bytes(bytes);
+///   Base64::encode_url_safe(bytes)
+/// }
+/// ```
+///
+/// Drawing needs no grant in the manifest. A grant limits what a program can
+/// reach, a file or a host or another program, and reading random bytes
+/// reaches nothing a dependency could misuse; the capability in the
+/// signature already says it happens.
+pub effect SecureRandom {
+  /// Fills every element of `buffer` with unpredictable bytes.
+  bytes: (Array<U8>) -> (),
+}
+
+impl SecureRandom {
+  /// The operating system's generator: `getrandom` on Linux, `getentropy` on
+  /// macOS, `ProcessPrng` on Windows.
+  ///
+  /// If the operating system cannot supply random bytes, the program stops
+  /// rather than continuing with weaker ones: a key made from anything else is
+  /// a key an attacker can make too.
+  pub fn real() -> SecureRandom {
+    handler for SecureRandom {
+      bytes: fn buffer =>
+      Array::with_data(buffer, fn (into, length) => khora_crypto_random_fill(into, length)),
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// For the postgres driver
+// ---------------------------------------------------------------------------
+
+/// PBKDF2-HMAC-SHA-256 of `password` and `salt` over `iterations` rounds,
+/// 32 bytes, or `None` for a count of zero or one too large.
+///
+/// What SCRAM-SHA-256 authentication derives a key with, which is the reason it
+/// is here. **Not a recommendation for storing passwords**: PBKDF2 can be
+/// computed cheaply on a GPU, and new designs should use argon2 or scrypt.
+///
+/// The result is `Redacted` because it stands in for the password: in SCRAM,
+/// whoever holds it can log in. Hand it straight to `Hmac::sha256` as a key.
+pub fn pbkdf2_sha256(password: Redacted<Array<U8>>, salt: Array<U8>, iterations: Int) -> Option<Redacted<Array<U8>>> {
+  let width = khora_crypto_sha256_length();
+  let out: Array<U8> = Array::new(width, U8::of(0));
+  let ok = Array::with_data(Redacted::expose(password), fn (p, pn) =>
+    Array::with_data(salt, fn (s, sn) =>
+      Array::with_data(out, fn (into, _room) =>
+        khora_crypto_pbkdf2_sha256(p, pn, s, sn, iterations, into, width))));
+  if yes(ok) { Option::Some(Redacted::of(out)) } else { Option::None }
+}

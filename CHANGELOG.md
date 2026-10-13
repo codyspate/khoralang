@@ -10,6 +10,40 @@ answer that is now right, then the rest. A bug that produced a *silently wrong*
 answer is listed under Breaking as well as Fixed, because code written around
 it will behave differently now.
 
+## Unreleased
+
+### Breaking
+
+- `packages/postgres`: `postgres::scram` does not export `sha256`, `hmac`,
+  `pbkdf2`, `digest_length`, `encode64` or `decode64`; use `std::crypto`. A
+  SCRAM salt from the server that is not base64 (whitespace, a character
+  outside the alphabet, wrong padding) is refused as `ScramError::Malformed`
+  rather than decoded leniently and refused later as a wrong password. A salt
+  whose last character has non-zero unused bits is accepted, as libpq accepts
+  it.
+- The runtime's `khora_hash_sha256`, `khora_hash_hmac_sha256`,
+  `khora_hash_pbkdf2_sha256` and `khora_hash_sha256_length` are removed. Code
+  that declared them as `extern fn` uses `std::crypto` instead.
+
+### Added
+
+- `std::crypto`: `sha256` and `sha512`; `Hmac::sha256`, `Hmac::sha512`,
+  `Hmac::verify_sha256` and `Hmac::verify_sha512`, which take the key as a
+  `Redacted<Array<U8>>` and verify in constant time; `constant_time_eq`;
+  `Hex::encode`/`decode`; `Base64::encode`/`decode` and the unpadded URL-safe
+  `encode_url_safe`/`decode_url_safe`, whose decoders accept exactly one
+  spelling of each value; `pbkdf2_sha256`, whose result is `Redacted`; and
+  `SecureRandom`, a capability whose `real()` handler reads the operating
+  system's cryptographic generator. Not available when compiling for
+  WebAssembly.
+- Cookbook: "Sign and verify a webhook", which signs a timestamp with the body
+  and refuses deliveries more than five minutes old.
+
+### Changed
+
+- `packages/postgres` draws its SCRAM client nonce from the operating
+  system's cryptographic generator.
+
 ## 0.4.0 — 2026-10-09
 
 Coming from 0.3.0, read three groups of entries first.
