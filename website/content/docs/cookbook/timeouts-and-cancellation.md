@@ -23,8 +23,8 @@ fn worker() -> () with { clock: Clock } raises Timeout {
 }
 
 fn fan_out() -> () with { nursery: Nursery, clock: Clock } {
-  nursery.adopt(Fiber::spawn(fn () => worker()!));
-  print("  worker adopted");
+  nursery.spawn(fn () => worker()!);
+  print("  worker spawned");
 }
 
 /// Runs the fan-out in its own fiber, and gives up on it after `millis`.
@@ -53,7 +53,7 @@ pub fn main() -> Int {
 
 ```text
 starting work with a 300ms deadline
-  worker adopted
+  worker spawned
   deadline reached; canceling
   canceled, and the wait returned
 gave up: took too long
@@ -114,10 +114,10 @@ channel receive or a wait. Every function has them, whatever its `raises` row,
 so a lambda with no row is stopped as promptly as a named function:
 
 ```khora
-nursery.adopt(Fiber::spawn(fn () => {
+nursery.spawn(fn () => {
   let mut n = 0;
   loop { n = n + 1; }
-}));
+});
 ```
 
 Canceling the fiber holding that nursery stops this loop at its next trip.

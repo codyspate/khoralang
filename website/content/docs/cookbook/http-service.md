@@ -194,10 +194,8 @@ registry — and anything else belongs in a database.
 accept loop inside `bounded_nursery(256, ...)`, and an accepted connection is a
 fiber that is inside your handler for as long as the handler runs. There is no
 second, smaller pool that handlers queue for, so that one number is both the
-most connections served at once and the most handlers running at once — 257
-live, in fact, for the reason
-[Bounded concurrency](/docs/cookbook/bounded-concurrency/) gives. It is not
-configurable in this release.
+most connections served at once and the most handlers running at once. It is
+not configurable in this release.
 
 That bound is not usually what limits throughput: a server saturates its cores
 well before it runs out of connection slots, and past saturation, raising a

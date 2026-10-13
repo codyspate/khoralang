@@ -513,7 +513,7 @@ impl Done {
     /// check and the wait notifies a waiter that is not waiting yet, and that
     /// wake is lost. The registration is the fast path; the timeout is the
     /// bound.
-    fn wait_until(&self, give_up: &dyn Fn() -> bool) -> bool {
+    pub(crate) fn wait_until(&self, give_up: &dyn Fn() -> bool) -> bool {
         loop {
             // **The waker is enrolled under the same lock that reads the
             // flag.** A child that finishes between the two would otherwise
@@ -1415,10 +1415,11 @@ fn deliver_to(state: &FiberState, stop: Stop) {
 /// longer knows its id, its flag has no reader, and it has no nursery open.
 pub(crate) fn deliver_to_fiber(fiber: &std::sync::Arc<crate::current::Fiber>, stop: Stop) {
     // **Its own flag first, then its nurseries' children.** A fiber parked on
-    // a child -- a nursery's wait, or an `adopt` waiting for room -- is woken
+    // a child -- a nursery's wait, or a `spawn` waiting for room -- is woken
     // by that child stopping, and then asks whether it was itself stopped. In
     // the other order the child could stop, wake it and be let go of before
-    // the flag was set, so the waiter found none and ran on: an `adopt` on
+    // the flag was set, so the waiter found none and ran on: an `adopt` (the
+    // operation `spawn` replaced) on
     // the scheduler reported `canceled false` and ran the statement after
     // it, intermittently.
     if on_the_scheduler() {

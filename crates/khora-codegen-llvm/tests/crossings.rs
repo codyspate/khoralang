@@ -90,7 +90,7 @@ fn crossings() -> Int raises ChildFailed {
   // Captured by a nursery's child.
   let d = make(10);
   let crew = Fibers::open();
-  Fibers::adopt(crew, Fiber::spawn(fn () => { let _ = read(d, 20000); () }));
+  Fibers::spawn(crew, fn () => { let _ = read(d, 20000); () });
   let here5 = read(d, 20000);
   let _failed = Fibers::wait(crew);
 

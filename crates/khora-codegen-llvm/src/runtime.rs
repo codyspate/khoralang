@@ -255,6 +255,8 @@ pub struct Runtime<'ctx> {
     pub channel_open: FunctionValue<'ctx>,
     /// `bool khora_channel_send(void *channel, uint64_t value)`
     pub channel_send: FunctionValue<'ctx>,
+    /// `bool khora_channel_offer(void *channel, uint64_t value)`
+    pub channel_offer: FunctionValue<'ctx>,
     /// `bool khora_channel_receive(void *channel, uint64_t *out)`
     pub channel_receive: FunctionValue<'ctx>,
     /// `void khora_channel_close(void *channel)`
@@ -332,8 +334,9 @@ pub struct Runtime<'ctx> {
     pub fibers_open: FunctionValue<'ctx>,
     /// `void *khora_fibers_open_bounded(int64_t limit)`
     pub fibers_bounded: FunctionValue<'ctx>,
-    /// `void khora_fibers_adopt(void *fibers, void *fiber)`
-    pub fibers_adopt: FunctionValue<'ctx>,
+    /// `bool khora_fibers_spawn(void *fibers, void *body, void *glue, void *call,
+    /// void *plain, bool boxed, void *value_glue, void *error_glue)`
+    pub fibers_spawn: FunctionValue<'ctx>,
     /// `int64_t khora_fibers_wait(void *fibers)`, answering how many children
     /// ended with an error.
     pub fibers_wait: FunctionValue<'ctx>,
@@ -517,6 +520,10 @@ impl<'ctx> Runtime<'ctx> {
                 "khora_channel_send",
                 ctx.bool_type().fn_type(&[ptr.into(), i64t.into()], false),
             ),
+            channel_offer: declare(
+                "khora_channel_offer",
+                ctx.bool_type().fn_type(&[ptr.into(), i64t.into()], false),
+            ),
             channel_receive: declare(
                 "khora_channel_receive",
                 ctx.bool_type().fn_type(&[ptr.into(), ptr.into()], false),
@@ -596,9 +603,9 @@ impl<'ctx> Runtime<'ctx> {
                 "khora_fibers_open_bounded",
                 ptr.fn_type(&[i64t.into()], false),
             ),
-            fibers_adopt: declare(
-                "khora_fibers_adopt",
-                void.fn_type(&[ptr.into(), ptr.into()], false),
+            fibers_spawn: declare(
+                "khora_fibers_spawn",
+                ctx.bool_type().fn_type(&[ptr.into(), ptr.into(), ptr.into(), ptr.into(), ptr.into(), ctx.bool_type().into(), ptr.into(), ptr.into()], false),
             ),
             fibers_wait: declare("khora_fibers_wait", i64t.fn_type(&[ptr.into()], false)),
             fibers_release: declare("khora_fibers_release", void.fn_type(&[ptr.into()], false)),

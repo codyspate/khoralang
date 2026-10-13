@@ -544,7 +544,7 @@ fn ask(client: HttpClient, call: Call) -> () {{
 
 fn main() -> () {{
   let crew = Fibers::open();
-  Fibers::adopt(crew, Fiber::spawn(fn () => serve()));
+  Fibers::spawn(crew, fn () => serve());
 
   // The server prints "listening on ..." before it accepts, and a call that
   // arrives first would be refused — so the first call is retried rather than

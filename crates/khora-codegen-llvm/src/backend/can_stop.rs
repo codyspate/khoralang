@@ -208,7 +208,9 @@ fn stop_free_item(name: &str) -> bool {
 
 /// Why a call to the bodiless type operation `owner::name` can stop, if it can.
 fn operation(owner: &str, name: &str) -> Option<Local> {
-    if is_blocking_owner(owner) {
+    if owner == crate::runtime::CHANNEL_TYPE && name == "offer" {
+        None
+    } else if is_blocking_owner(owner) {
         Some(Local::Blocking)
     } else if owner == crate::runtime::SHARED_FN_TYPE && name == "call" {
         // Calls the wrapped closure: a call through a function value.

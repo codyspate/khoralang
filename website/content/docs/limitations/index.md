@@ -13,12 +13,12 @@ language rule, a supported feature, and unfinished work.
   — `SIGTERM` and `SIGINT` unwind the program and run its finalizers, but a
   `main` with no cancellation point, a blocking `connect_to` and Windows are
   not covered.
-- [A bounded nursery runs `limit + 1` children](#what-a-nursery-actually-does),
-  and a limit of zero means no limit at all — so **a bound of exactly one
-  cannot be written**, which is the value a "one at a time" flag wants most.
-- [A child's failure is seen late unless it was adopted early](#a-childs-failure-is-seen-late-unless-it-was-adopted-early):
-  a failing child cancels its siblings only once every child adopted before it
+- [A child's failure is seen late unless it was spawned early](#a-childs-failure-is-seen-late-unless-it-was-spawned-early):
+  a failing child cancels its siblings only once every child spawned before it
   has finished.
+- [Work taken off a queue survives cancellation, not a crash](#work-taken-off-a-queue):
+  `Channel::claim` hands an unsettled job to its handler on every way out of
+  the program except SIGKILL, a trap, and a handler cut short by `abort`.
 - [A canceled fiber waiting on a child stops only when the child
   does](#a-canceled-fiber-waiting-on-a-child-stops-when-the-child-does), if
   it holds the child's last handle.
@@ -237,8 +237,7 @@ connections served at once and the most handlers running at once; the next
 connection waits for one of them to finish. It is a property of the reference
 server rather than of the `Router` type, so it does not appear in the generated
 [`std::net::http` pages](/docs/stdlib/api/net/http/); [Serve HTTP
-requests](/docs/cookbook/http-service/) is where it is discussed. Because of
-the off-by-one below, the peak actually observed is 257.
+requests](/docs/cookbook/http-service/) is where it is discussed.
 
 ## Performance against other servers
 
@@ -566,15 +565,12 @@ seeing one means a fiber somewhere raised.
 
 ## What a nursery actually does
 
-Four things about nurseries differ from what the [concurrency
+Three things about nurseries differ from what the [concurrency
 reference](/docs/reference/concurrency/) describes. All were found by
 measuring, and a program built on the prose will meet them as flakiness.
 
 | what you write | what happens | what to do |
 | --- | --- | --- |
-| `bounded_nursery(4)` | 5 children run at once | subtract one when the limit is a real resource |
-| `bounded_nursery(0)` | **no limit at all** | check a computed limit before passing it |
-| a bound of exactly 1 | **not expressible** — `bounded_nursery(0)` is unbounded, `bounded_nursery(1)` admits 2 | accept 2, or guard the work with a `Shared` flag of your own |
 | a child fails | siblings usually keep running | have long work check a `Shared` flag itself |
 | a child fails in a bounded nursery | new children still start | as above |
 | `Fiber::cancel` on a fiber whose body is a nursery | **returns** — it is the following `Fiber::wait` that never does, if a child has no cancellation point | cancel through a `Shared` flag the children read |
@@ -584,44 +580,23 @@ failure is reported rather than lost.
 
 The measurements below are `khora 0.2.0 (b16417c)` on x86_64 Linux, 20–25 runs
 per backend, under both the default thread backend and `KHORA_FIBERS=scheduler`.
-The first, second, third and fourth rows were re-measured on a compiler built
-from the tree this page describes, one run per backend, with the same result:
-`bounded_nursery(1)` peaked at 2, `bounded_nursery(4)` at 5,
-`bounded_nursery(0)` ran all 24 children at once, and with the failing child
-adopted last all eleven siblings ran to completion.
 
-### The bound is on children held, not work in flight
+The *bound* itself is exact: `bounded_nursery(n)` runs at most `n` children at
+once, and a limit below 1 is refused. [Concurrency](/docs/reference/concurrency/#bounded-nurseries)
+has the rule.
 
-`bounded_nursery(4)` runs five at once — the peak was exactly `limit + 1` on
-every run of both backends at limits of 1, 2, 4 and 8. `Fiber::spawn` *starts*
-the child and `nursery.adopt` is what blocks when the nursery is full, so by
-the time the bound applies the work is already running.
-
-[Bounded concurrency](/docs/cookbook/bounded-concurrency/) is built on this
-number: `bounded_nursery(64, ..)` there is 65 live children.
-
-### A limit of zero or less means no limit
-
-`bounded_nursery(0, ..)` is how the unbounded `nursery` is built, so zero is
-deliberate: 200 children ran at once under a limit of 0, and a negative limit
-behaves the same way.
-
-It is still a trap, because `Channel::bounded` does the opposite — it clamps a
-capacity below one *up* to one. A limit computed from configuration that comes
-out zero removes the bound rather than failing.
-
-### A child's failure is seen late unless it was adopted early
+### A child's failure is seen late unless it was spawned early
 
 **Do not rely on a sibling's failure to stop work that is expensive, holds a
 resource, or has an effect outside the process**, unless the child that can
-fail is adopted before the siblings it should stop.
+fail is spawned before the siblings it should stop.
 
 A nursery reaps handles oldest-first, so a failure is not seen until every
-child adopted before it has finished; the siblings still running at that point
+child spawned before it has finished; the siblings still running at that point
 are canceled. Twelve children busy for 400 ms, one raising after 10 ms, on
 both fiber backends:
 
-| the failing child was adopted | siblings canceled, of 11 | `ChildFailed` arrives |
+| the failing child was spawned | siblings canceled, of 11 | `ChildFailed` arrives |
 | --- | --- | --- |
 | first | 11, in every run | about 10 ms after the start |
 | in the middle (6th of 12) | 2 to 6 | after the earlier five finish |
@@ -637,6 +612,30 @@ With `bounded_nursery(3)` over twelve 200 ms children and a failure at 11 ms in
 the second, a median of 6.5 of the 10 remaining children were *started* after
 the failure was recorded, and the group did about 400 ms of further work past
 it.
+
+## Work taken off a queue
+
+`Channel::claim` makes a job taken off a channel impossible to lose silently
+inside a running program: an unsettled claim runs its abandon handler on
+return, raise, `break`, discard, cancellation, and the first SIGTERM or
+Ctrl-C. What it does not reach:
+
+- **SIGKILL, running out of memory, power loss.** No cleanup runs, and the job
+  in an in-memory channel is gone.
+- **A trap** (overflow, `todo()`, an index out of range) ends the process at
+  status 134 without running cleanup.
+- **`Fiber::abort`** stops the handler at its first cancellation point. A
+  handler made of `Channel::offer` and `Shared::set` has none; one that calls
+  a function that can stop may be cut short before it does anything.
+- **A foreign call that never returns** is not a cancellation point, so the
+  claim is never abandoned.
+- **A claim kept in a long-lived structure** is abandoned only when its last
+  reference goes; one held by a reference cycle never is.
+
+A plain `Channel::receive` followed by a call that can stop still loses the
+job on a cancel, and the compiler does not warn about it. [Take work off a
+queue safely](/docs/cookbook/taking-work-off-a-queue/) has the measurements
+and the hand-written pattern for values that do not come from a channel.
 
 ## The two fiber backends are distinguishable
 

@@ -543,3 +543,150 @@ fn a_field_read_or_write_through_a_binding_counts_nothing_on_the_record() {
     assert_eq!(dups, 0, "a field access duplicated the record:\n{body}");
     assert_eq!(drops, 2, "the parameter's releases, at the end and at a cancellation:\n{body}");
 }
+
+/// Compiles `main` against the real `std` with its IR dumped, and returns the
+/// body of the function whose symbol ends with `name`.
+fn std_function_ir(test: &str, main: &str, name: &str) -> String {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(test);
+    harness::ensure_runtime();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
+
+    let db = KhoraDatabase::new();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("std");
+    let mut files = Vec::new();
+    let mut stack = vec![root];
+    while let Some(here) = stack.pop() {
+        for entry in std::fs::read_dir(&here).expect("a readable std") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "kh")
+                && khora_db::selected_for_target(&path, khora_db::host_target())
+            {
+                let text = std::fs::read_to_string(&path).expect("readable");
+                files.push(SourceFile::new(&db, path, text));
+            }
+        }
+    }
+    files.push(SourceFile::new(&db, dir.join("main.kh"), main.to_string()));
+    let root = SourceRoot::new(&db, files);
+
+    let _held = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY-of-a-sort: process-wide, and this binary's tests hold the lock.
+    unsafe { std::env::set_var("KHORA_EMIT_LLVM", "1") };
+    let outcome = khora_codegen_llvm::compile_with(&db, root, &exe, Profile::Debug);
+    unsafe { std::env::remove_var("KHORA_EMIT_LLVM") };
+    outcome.expect("it compiles");
+
+    let mut path = exe.into_os_string();
+    path.push(".ll");
+    let ir = std::fs::read_to_string(path).expect("the IR was dumped");
+    let start = ir
+        .lines()
+        .position(|l| l.starts_with("define") && l.contains(&format!("{name}\"(")))
+        .unwrap_or_else(|| panic!("no function ending `{name}` in the IR"));
+    ir.lines().skip(start).take_while(|l| *l != "}").collect::<Vec<_>>().join("\n")
+}
+
+/// **`Channel::claim` takes a job and registers its abandon handler with no
+/// cancellation point in between.** That window is the whole of what `claim`
+/// is for: a cancel taken there drops a job nobody will ever see again, which
+/// is the loss the plain `receive` loop has.
+///
+/// Read from the IR because the window is one poll wide and a timing test
+/// finds it only some of the time (the 200-round harness did; it is in
+/// `claims.rs`). Between `khora_channel_receive` and `khora_region_defer` the
+/// body may make runtime calls that cannot stop (allocation, counting, the
+/// region itself) and nothing else: no call to a Khora function, which polls
+/// on entry, no call through a closure, and `khora_canceled` only in the
+/// block a receive that came back *empty-handed* leads to.
+///
+/// The mutant this was watched red with is the one handoff-b measured losing
+/// 13 of 200 jobs: the registration moved into a helper,
+/// `Option::Some(v) => Option::Some(hold(v, abandon))`.
+#[test]
+fn claim_registers_its_handler_with_no_cancellation_point_after_the_take() {
+    let main = "module main;
+import std::core::{Channel, Claim, Option, Shared, print};
+
+pub fn main() -> () {
+  let jobs: Channel<Int> = Channel::bounded(1);
+  let _ = Channel::send(jobs, 1);
+  let gone = Shared::of(0);
+  match Channel::claim(jobs, fn _ => Shared::set(gone, 1)) {
+    Option::None => (),
+    Option::Some(c) => c.done(),
+  };
+  print(\"${Shared::get(gone)}\");
+}
+";
+    let body = std_function_ir("polls_claim", main, "#Channel::claim$Int");
+    let lines: Vec<&str> = body.lines().collect();
+    let take = lines
+        .iter()
+        .position(|l| l.contains("@khora_channel_receive("))
+        .unwrap_or_else(|| panic!("`claim` does not receive:\n{body}"));
+    // Without a registration in this body at all (a helper doing it), every
+    // call after the take is scanned, and the helper is the one reported.
+    let register = lines
+        .iter()
+        .position(|l| l.contains("@khora_region_defer("))
+        .unwrap_or(lines.len());
+    assert!(take < register, "the handler is registered before the take:\n{body}");
+
+    const STOP_FREE: [&str; 6] = [
+        "khora_alloc",
+        "khora_region_open",
+        "khora_drop_last",
+        "khora_rc_check",
+        "khora_canceled",
+        "llvm.trap",
+    ];
+    // Which block each line is in, and the blocks only an empty-handed
+    // receive reaches: everything `moved.not` branches to.
+    let mut block = "entry";
+    let mut empty_handed: Vec<String> = vec!["moved.not".to_string()];
+    for line in &lines[take + 1..register] {
+        if !line.starts_with(' ') {
+            if let Some((label, rest)) = line.split_once(':') {
+                block = label;
+                let preds: Vec<&str> = rest
+                    .split("preds = ")
+                    .nth(1)
+                    .map(|p| p.split(", ").map(|s| s.trim().trim_start_matches('%')).collect())
+                    .unwrap_or_default();
+                if !preds.is_empty() && preds.iter().all(|p| empty_handed.iter().any(|e| e == p)) {
+                    empty_handed.push(label.to_string());
+                }
+                continue;
+            }
+        }
+        let Some(at) = line.find(" call ") else { continue };
+        let callee = &line[at..];
+        assert!(
+            callee.contains('@'),
+            "a call through a function value between the take and the registration, \
+             in `{block}`:\n{line}\n\n{body}"
+        );
+        let name = callee
+            .split('@')
+            .nth(1)
+            .map(|s| s.trim_start_matches('"'))
+            .and_then(|s| s.split(['"', '(']).next())
+            .unwrap_or("");
+        assert!(
+            STOP_FREE.contains(&name),
+            "`{name}` is called between the take and the registration, in `{block}`, \
+             and it is not known to be stop-free:\n{body}"
+        );
+        if name == "khora_canceled" {
+            assert!(
+                empty_handed.iter().any(|e| e == block),
+                "a cancellation check in `{block}`, which a receive holding a value \
+                 reaches:\n{body}"
+            );
+        }
+    }
+}

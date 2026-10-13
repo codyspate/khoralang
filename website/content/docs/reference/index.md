@@ -65,7 +65,7 @@ The rest of this page is the full index, by topic.
 
 - [Memory and resources](./memory-and-resources/) — `Region`, `Scope`, `scoped`, `acquire`, finalizer order, and cleanup on structured exits.
 - [Sharing](./sharing/) — `Share`, `Shared`, `Changed`, `Channel`, `SharedFn`, critical-section rules, and cross-fiber values.
-- [Concurrency](./concurrency/) — `Fiber`, `Nursery`, `nursery`, `bounded_nursery`, cancellation, suspension, and structured ownership.
+- [Concurrency](./concurrency/) — `Fiber`, `Nursery`, `nursery`, `bounded_nursery`, `Channel::claim`, cancellation, suspension, and structured ownership.
 - [Traps](./traps/) — checked overflow, bounds failures, process-fatal behavior, backtraces, and exported-call containment.
 - [FFI](./ffi/) — importing with `extern fn`, exporting with `pub extern fn`, `Ptr`, borrowed buffers, and the C ABI boundary.
 

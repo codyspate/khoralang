@@ -24,6 +24,34 @@ it will behave differently now.
 - The runtime's `khora_hash_sha256`, `khora_hash_hmac_sha256`,
   `khora_hash_pbkdf2_sha256` and `khora_hash_sha256_length` are removed. Code
   that declared them as `extern fn` uses `std::crypto` instead.
+- A nursery starts a child with `nursery.spawn(fn () => ..)`, and
+  `nursery.adopt(Fiber::spawn(..))` is removed; `Fibers::adopt(crew,
+  Fiber::spawn(..))` is `Fibers::spawn(crew, ..)`. The nursery admits the child
+  before it starts, so `bounded_nursery(n)` runs at most `n` children at once:
+  code that wrote `bounded_nursery(63, ..)` for a pool of 64 can write 64. The
+  body is checked as `Fiber::spawn`'s is, so it must be a lambda written at the
+  call or a named function. Keep the handle from `Fiber::spawn` when you want
+  the child's answer.
+- `std::net::http`'s `Router` serves at most 256 connections at once, as
+  documented. It served 257, because `bounded_nursery(256, ..)` around its
+  accept loops let one child past the limit; a server sized against the
+  observed peak of 257 gets 256.
+- `bounded_nursery` and `Fibers::bounded` need a limit of at least 1. An
+  integer literal below 1 is a compile error, and a limit computed at run time
+  that comes out below 1 stops the program at status 134 with a message naming
+  the value, before the body runs. A limit of 0 meant no limit; use `nursery`
+  for that.
+- `Handoff::send` refuses a value that holds a `Region`, a `Scope` or a `Db`,
+  at compile time, as `Channel::send` does. It compiled and then stopped the
+  program at status 134 when the receiver let the value go. The refusal
+  covers the value's type, what a closure written in the sending function
+  captured (also through `let` renamings), and the type a generic function's
+  caller chose, through any number of generic calls. A send the compiler
+  cannot see into -- a closure that arrived as a parameter, a send behind a
+  trait method, a type reached through an associated type such as
+  `I::Item`, a closure written inside a generic body that captures its type
+  parameter -- answers `false` when the value reaches a region, and
+  releases it on the sending fiber, so a region is never received.
 
 ### Fixed
 
@@ -43,6 +71,18 @@ it will behave differently now.
 
 ### Added
 
+- `Channel::claim(jobs, abandon)` takes a value off a channel as a `Claim`,
+  with `abandon` registered before anything after the take can stop. A claim
+  is settled with `Claim::done`, or with `Claim::give_back`, which puts the
+  value back on a channel without waiting; an unsettled claim runs `abandon`
+  once on every other way out, including a cancellation and the first
+  SIGTERM. Over 200 cancels at jittered moments and 1,000 cancels delivered
+  right after the take, on both fiber backends, it lost no job where the plain
+  `receive` loop lost almost every one.
+- `Channel::offer(value)`, a send that never waits: it answers `false` when
+  the channel is full or closed. It is what an abandon handler requeues with,
+  because a handler runs as cleanup and a waiting send there waits forever.
+
 - `std::crypto`: `sha256` and `sha512`; `Hmac::sha256`, `Hmac::sha512`,
   `Hmac::verify_sha256` and `Hmac::verify_sha512`, which take the key as a
   `Redacted<Array<U8>>` and verify in constant time; `constant_time_eq`;
@@ -54,6 +94,14 @@ it will behave differently now.
   WebAssembly.
 - Cookbook: "Sign and verify a webhook", which signs a timestamp with the body
   and refuses deliveries more than five minutes old.
+
+### Fixed
+
+- The cookbook's "Take work off a queue safely" example could lose jobs: it
+  bumped a counter with `Shared::update` between the receive and registering
+  the job, and `Shared::update` is a cancellation point. The page is written
+  around `Channel::claim`, and its hand-written pattern registers the job with
+  nothing in between; both are tested over 200 canceled rounds.
 
 ### Changed
 

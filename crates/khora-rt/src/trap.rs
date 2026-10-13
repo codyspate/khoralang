@@ -132,6 +132,29 @@ pub extern "C" fn khora_todo() -> ! {
     stop(contained)
 }
 
+/// Refuses a bounded nursery whose limit is below 1, and stops.
+///
+/// A trap, not a raise: a limit of zero or less is a bug in the program or its
+/// configuration, and every `bounded_nursery(..)!` in the world would
+/// otherwise carry a failure none of them can meet. The message names the
+/// value and the function that has no limit.
+pub(crate) fn nursery_limit_fail(limit: i64) -> ! {
+    // The same block, for the same reason as `khora_overflow`.
+    let contained = {
+        let _ = std::io::stdout().flush();
+        let mut err = std::io::stderr().lock();
+        let _ = writeln!(
+            err,
+            "khora: `bounded_nursery` needs a limit of at least 1, and this one is {limit}. \
+             `nursery` is the one without a limit{}",
+            on_which_fiber()
+        );
+        where_from(&mut err);
+        say_what_happens_next(&mut err)
+    };
+    stop(contained)
+}
+
 /// Reports an index that was not in range, and stops.
 ///
 /// A trap rather than a wrapped value or a poisoned read, for the same reason

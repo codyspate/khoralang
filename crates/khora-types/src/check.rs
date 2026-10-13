@@ -164,6 +164,9 @@ pub(crate) struct Checker<'a> {
     /// they were checked, with what captured them and its range. See
     /// [`Checker::check_unsettled_captures`].
     pub(crate) unsettled_captures: Vec<(khora_hir::body::LocalId, sharing::Captor, TextRange)>,
+    /// Every `Handoff::send` in the body: the value sent, and the call's
+    /// range. See [`Checker::check_handoff_sends`].
+    pub(crate) handoff_sends: Vec<(ExprId, TextRange)>,
     /// The raises rows of spawned bodies still unsettled at the spawn. See
     /// [`Checker::check_unsettled_raises`].
     pub(crate) unsettled_raises: Vec<(Type, sharing::Crossing, TextRange)>,

@@ -199,26 +199,37 @@ unsafe fn crew<'a>(fibers: *mut u8) -> Option<&'a Crew> {
 /// told which happened.
 #[unsafe(no_mangle)]
 pub extern "C" fn khora_fibers_open() -> *mut u8 {
-    khora_fibers_open_bounded(0)
+    open_crew(0)
 }
 
 /// Opens a nursery that will hold at most `limit` running children.
 ///
 /// **The bound is what turns a capacity ceiling into a queue.** A fiber is an
-/// operating-system thread today, so a server adopting one per connection
+/// operating-system thread today, so a server spawning one per connection
 /// spends about 33 KB apiece — measured — and an unbounded nursery meets its
 /// ceiling by exhausting memory, which is the worst way to meet one. With a
-/// bound, adopting the child past the limit *waits* for an older one to finish,
-/// the accept loop stops accepting, and the connections pile up in the
-/// listening socket's backlog where the operating system already knows how to
-/// hold them. Overload becomes latency instead of collapse.
+/// bound, spawning a child past the limit *waits* for an older one to finish
+/// before the new one starts, the accept loop stops accepting, and the
+/// connections pile up in the listening socket's backlog where the operating
+/// system already knows how to hold them. Overload becomes latency instead of
+/// collapse.
 ///
-/// Zero means unbounded, which is right for a nursery over a known handful of
-/// concurrent tasks — the shape `nursery(..)` is usually used for — and wrong
-/// for one fed by the outside world.
+/// **A limit below 1 is a trap.** It is a programming or configuration bug,
+/// not a condition the caller can handle where it calls, and zero has no
+/// meaning of its own: [`khora_fibers_open`] is the unbounded nursery. The
+/// checker refuses an integer literal below 1 before it gets here; this is
+/// for a limit computed at run time.
 #[unsafe(no_mangle)]
 pub extern "C" fn khora_fibers_open_bounded(limit: i64) -> *mut u8 {
-    let limit = if limit > 0 { limit as usize } else { 0 };
+    if limit < 1 {
+        crate::trap::nursery_limit_fail(limit);
+    }
+    open_crew(limit as usize)
+}
+
+/// A nursery with room for `limit` children, or as many as are spawned when
+/// `limit` is zero.
+fn open_crew(limit: usize) -> *mut u8 {
     let object = khora_alloc(std::mem::size_of::<*mut Crew>() as u64, FIBERS_TAG);
     crate::share::born_shared(object);
     // **`Arc`, so `OPEN` can hold one too.** A cancellation reaches this crew
@@ -257,59 +268,65 @@ unsafe fn fiber_finished(fiber: *mut u8) -> bool {
     state.completion.finished()
 }
 
-/// Makes `fiber` this nursery's responsibility, taking its reference.
+/// Starts `body` as a child of this nursery once there is room for it.
 ///
-/// **Children that have finished are let go of first**, and that sweep is not
-/// housekeeping — without it a nursery only ever grows. A server adopts one
-/// fiber per connection into a nursery it drains when it stops accepting,
-/// which is never, so every answered request left its handle in the list: three
-/// thousand requests, three thousand operating-system handles, none of them
-/// pointing at a running thread. Measured on the link shortener, which is what
-/// it took to see it.
+/// **Admitted before it starts, which is what makes a bound exact.** A child
+/// handed over already running (the old `adopt(Fiber::spawn(..))`) was a
+/// running fiber the nursery could only count after the fact, so a bound of
+/// `n` held `n + 1` while the producer waited. Here the body is a closure that
+/// has not started: the slot is taken under the lock and the fiber is spawned
+/// while it is still held, so no fiber runs that the nursery has not counted
+/// and none is missing from `held` when a cancellation walks it.
 ///
-/// **Not on every adoption**, which is the other measured thing. Asking a child
-/// whether it has finished takes its lock, so sweeping each time cost a
-/// bounded nursery 256 lock-unlock pairs per connection and two thirds of the
-/// server's throughput. `sweep_at` holds it to about one check per adoption
-/// amortized, by only walking the list once it has grown to twice what the
-/// last sweep left behind.
+/// **A slot is held until the child finishes, not until its handle is
+/// swept.** Finished children still in `held` do not count; they are swept
+/// here, and their failures recorded, when the nursery is full or `held` has
+/// grown past `sweep_at`. A full nursery waits for its oldest running child to
+/// finish. That is head-of-line: a younger child finishing first does not wake
+/// the spawner until the oldest does. The bound is exact; promptness is not a
+/// promise, and the oldest is the child least likely to be far from done.
+///
+/// **Without the trouble of sweeping on every spawn.** Asking a child whether
+/// it has finished takes its lock, so sweeping each time cost a bounded
+/// nursery 256 lock-unlock pairs per connection and two thirds of a server's
+/// throughput. `sweep_at` holds it to about one check per spawn amortized.
+///
+/// **A stop during the wait starts nothing.** The body is released unstarted
+/// and this answers false; the caller's cancellation check after the call is
+/// where the spawner unwinds. The children already running are left to the
+/// nursery's release, which cancels them, rather than being canceled here.
 ///
 /// # Safety
 ///
-/// `fibers` must be live from [`khora_fibers_open`] and `fiber` live from
-/// [`khora_fiber_spawn`].
+/// `fibers` must be a live nursery; `body` a live closure with the matching
+/// `glue`; and the trampolines and result/error descriptions what
+/// [`crate::fiber::khora_fiber_spawn`] requires. This call consumes `body`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn khora_fibers_adopt(fibers: *mut u8, fiber: *mut u8) {
-    // SAFETY: the caller guarantees a live nursery.
+// SHARE: the fiber spawn marks its captures before another fiber can run them.
+pub unsafe extern "C" fn khora_fibers_spawn(
+    fibers: *mut u8,
+    body: *mut u8,
+    glue: Option<extern "C" fn(*mut u8)>,
+    call: Option<Trampoline1>,
+    plain: Option<PlainTrampoline1>,
+    boxed: bool,
+    value_glue: Option<extern "C" fn(*mut u8)>,
+    error_glue: Option<extern "C" fn(u32, u64)>,
+) -> bool {
+    // SAFETY: the caller guarantees a live nursery, and holds its handle for
+    // the length of this call.
     let Some(list) = (unsafe { crew(fibers) }) else {
-        fatal("adopting a fiber into a nursery that has already ended");
+        fatal("spawning into a nursery that has already ended");
     };
-    // **A crossing: a child may adopt a handle it made into a parent's
-    // nursery**, and the parent then releases it. A handle is born shared, so
-    // this finds the bit set and returns; it is here so that the entry does
-    // not depend on how its argument was made.
-    // SAFETY: the caller hands over a live fiber handle. No routine is given:
-    // a handle's release joins the fiber, and what the fiber holds is marked
-    // by the spawn and by the child itself.
-    unsafe { crate::share::khora_share(fiber, None) };
-
-    // Until there is room. Each turn sweeps what has finished and, if that was
-    // not enough, takes the oldest child out to be waited for — outside the
-    // lock, because a join is not instant once the child is still running and a
-    // lock held across one is a nursery nobody else can adopt into.
     loop {
-        let (done, waiting) = {
-            // Locked: a nursery exists to be adopted into from more than one
-            // fiber, so this is the one place contention is expected rather
-            // than incidental.
+        let (done, busy) = {
+            // Locked: a nursery exists to be spawned into from more than one
+            // fiber, so this is the one place contention is expected.
             let mut crew = list.lock().unwrap_or_else(|e| e.into_inner());
-
-            // Only when the list has grown past its mark, or when there is no
-            // room and a sweep is the cheapest way to find some.
-            let crowded = crew.limit > 0 && crew.held.len() >= crew.limit;
+            let crowded = crew.limit > 0 && crew.held.len() + crew.joining.len() >= crew.limit;
             let done: Vec<Handed> = if crowded || crew.held.len() >= crew.sweep_at {
-                // SAFETY: every handle in the list was live when adopted and
-                // this list has held the only reference since.
+                // SAFETY: every handle in `held` is live and owned by the
+                // list until it is removed under this lock.
                 let (done, keep): (Vec<Handed>, Vec<Handed>) = std::mem::take(&mut crew.held)
                     .into_iter()
                     .partition(|Handed(f)| unsafe { fiber_finished(*f) });
@@ -319,27 +336,48 @@ pub unsafe extern "C" fn khora_fibers_adopt(fibers: *mut u8, fiber: *mut u8) {
             } else {
                 Vec::new()
             };
-
-            if crew.limit == 0 || crew.held.len() < crew.limit {
-                crew.held.push(Handed(fiber));
-                (done, None)
+            // What is still running, oldest first: a `khora_fibers_wait`
+            // round's children are in `joining` and are still children.
+            let running = |handle: &*mut u8| {
+                // SAFETY: live while this lock is held; `held` and `joining`
+                // remove a handle under it before releasing it.
+                unsafe { fiber_state(*handle) }
+                    .filter(|s| !s.completion.finished())
+                    .map(|s| s.completion.latch())
+            };
+            let busy = if crew.limit == 0 {
+                None
             } else {
-                // Oldest first, which is the order `khora_fibers_wait` uses and
-                // the only one that cannot starve a child.
-                (done, Some(crew.held.remove(0)))
+                let mut latches = crew
+                    .joining
+                    .iter()
+                    .chain(crew.held.iter().map(|Handed(f)| f))
+                    .filter_map(running);
+                let oldest = latches.next();
+                let occupied = usize::from(oldest.is_some()) + latches.count();
+                if occupied >= crew.limit { oldest } else { None }
+            };
+            if busy.is_none() {
+                // **Spawned under the lock**, so the child is in `held` from
+                // its first instruction: a cancellation walking the crew
+                // cannot miss it, and a second spawner cannot count the slot
+                // as free in between.
+                // SAFETY: the caller's contract, above.
+                let child = unsafe {
+                    crate::fiber::khora_fiber_spawn(body, glue, call, plain, boxed, value_glue, error_glue)
+                };
+                crew.held.push(Handed(child));
             }
+            (done, busy)
         };
 
-        // Joining a thread that has already ended returns at once, but a drop
-        // routine can reach another nursery, and a lock held across one of
-        // those is a lock ordering nobody agreed to.
-        //
-        // **The sweep counts what it buries.** These children have finished
-        // and one of them may have finished badly; letting them go without
-        // asking is how a failure disappeared between two adoptions.
+        // Released outside the lock: a drop routine can reach another
+        // nursery, and a lock held across one is an ordering nobody agreed to.
+        // **The sweep counts what it buries**, or a failure disappears between
+        // two spawns.
         let mut swept: i64 = 0;
         for Handed(spent) in done {
-            // SAFETY: as above; this is the last reference to each.
+            // SAFETY: out of the list above; this is the last reference.
             unsafe {
                 wait_for(spent);
                 if failed_and_reported(spent) {
@@ -352,50 +390,24 @@ pub unsafe extern "C" fn khora_fibers_adopt(fibers: *mut u8, fiber: *mut u8) {
             record_failures(list, swept);
         }
 
-        match waiting {
-            None => return,
-            Some(Handed(oldest)) => {
-                // **The child waited on for room is still a child, and a stop
-                // has to reach it.** Out of `held`, it was on no list
-                // `cancel_open_crews` walks, and `wait_for` does not give up:
-                // an adopter canceled here waited the child out -- 16 s,
-                // measured -- and then carried on. So it goes on `joining`
-                // for the length of the wait, where a cancel that arrives
-                // mid-wait is delivered to it, and a stop already pending is
-                // passed on here. Registered before the question is asked, so
-                // a cancel landing between the two is seen by one of them.
-                //
-                // Still *waited* for, as `khora_fibers_wait` waits for the
-                // children it cancels: a stopped child is prompt, and one
-                // stuck in cleanup is what `abort` exists for. The adopter
-                // stops at the check its caller makes after this returns.
-                list.lock().unwrap_or_else(|e| e.into_inner()).joining.push(oldest);
-                if crate::current::current(|me| me.stops_here()) {
-                    let stop = if crate::current::current(|me| me.is_forced()) {
-                        crate::current::Stop::Force
-                    } else {
-                        crate::current::Stop::Cancel
-                    };
-                    // SAFETY: the handle came out of `held`, which holds the
-                    // only reference, and it is released only below.
-                    unsafe { crate::fiber::deliver(oldest, stop) };
-                }
-                // SAFETY: as above.
-                unsafe { wait_for(oldest) };
-                {
-                    let mut crew = list.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Some(at) = crew.joining.iter().position(|f| *f == oldest) {
-                        crew.joining.swap_remove(at);
-                    }
-                }
-                // SAFETY: as above, and out of `joining` before it goes.
-                unsafe {
-                    if failed_and_reported(oldest) {
-                        record_failures(list, 1);
-                    }
-                    khora_drop(oldest, Some(fiber_release_shim));
-                }
-            }
+        let Some(latch) = busy else { return true };
+        // Waiting on a cloned latch, not on the handle: the handle stays in
+        // the list, where a cancellation of the nursery's owner reaches it and
+        // a `khora_fibers_wait` round may release it, and the latch outlives
+        // both.
+        let gave_up = latch.wait_until(&|| crate::current::current(|me| me.stops_here()));
+        // **Woken by room is not the same as allowed to start.** Canceling
+        // the spawner also reaches this nursery's children through `OPEN`,
+        // so the child being waited on can finish *because of* that cancel,
+        // and the latch then fires before the stop check above is asked.
+        // Taking the loop round from there spawned the body the cancel was
+        // meant to discard. A stop seen after any wake starts nothing.
+        let stopping = gave_up || crate::current::current(|me| me.stops_here());
+        if stopping {
+            // SAFETY: nothing started; the closure reference is still this
+            // call's, and `glue` is its drop routine.
+            unsafe { khora_drop(body, glue) };
+            return false;
         }
     }
 }
@@ -631,6 +643,18 @@ mod tests {
         unsafe { khora_fiber_spawn(closure(), None, None, Some(thunk), false, None, None) }
     }
 
+    /// Starts `thunk` as a child of `nursery`, waiting for room as a bounded
+    /// one does.
+    ///
+    /// # Safety
+    ///
+    /// `nursery` must be live.
+    unsafe fn spawn_into(nursery: *mut u8, thunk: crate::PlainTrampoline1) -> bool {
+        // SAFETY: a live nursery, a live closure whose drop is the default,
+        // an infallible trampoline and an answer that is not a pointer.
+        unsafe { khora_fibers_spawn(nursery, closure(), None, None, Some(thunk), false, None, None) }
+    }
+
     /// Cleanup that stops only when a cancellation point says so: shielded,
     /// as a region's finalizers are, and polling the real cancellation point.
     fn shielded_cleanup(inside: &AtomicUsize, outcome: &AtomicUsize) {
@@ -673,7 +697,7 @@ mod tests {
         // SAFETY: a live nursery and a live handle, whose reference the
         // nursery takes; then the nursery's last reference.
         unsafe {
-            khora_fibers_adopt(nursery, spawn(nursed_child));
+            spawn_into(nursery, nursed_child);
             khora_fibers_wait(nursery);
             khora_drop(nursery, Some(release_nursery));
         }
@@ -799,7 +823,7 @@ mod tests {
         // SAFETY: a live nursery and a live handle, whose reference the
         // nursery takes; then the nursery's last reference.
         unsafe {
-            khora_fibers_adopt(nursery, spawn(child));
+            spawn_into(nursery, child);
             until("the child reaching its cleanup", || inside.load(Ordering::SeqCst) == 1);
             if wait {
                 khora_fibers_wait(nursery);
@@ -929,7 +953,7 @@ mod tests {
     extern "C" fn crew_parent(_code: *const u8, _body: *mut u8) -> u64 {
         let nursery = khora_fibers_open();
         // SAFETY: a live nursery and a live handle, whose reference it takes.
-        unsafe { khora_fibers_adopt(nursery, spawn(crew_child)) };
+        unsafe { spawn_into(nursery, crew_child) };
         until_canceled();
         let _cleanup = Shielded::new();
         CREW_RELEASING.store(1, Ordering::SeqCst);
@@ -964,10 +988,10 @@ mod tests {
         // SAFETY: a live nursery and live handles, whose references it takes;
         // then the nursery's last reference.
         unsafe {
-            khora_fibers_adopt(nursery, spawn(full_child));
+            spawn_into(nursery, full_child);
             until("the child reaching its cleanup", || FULL_INSIDE.load(Ordering::SeqCst) == 1);
             FULL_ADOPTING.store(1, Ordering::SeqCst);
-            khora_fibers_adopt(nursery, spawn(full_quick));
+            spawn_into(nursery, full_quick);
             khora_drop(nursery, Some(release_nursery));
         }
         0
@@ -1040,7 +1064,7 @@ mod tests {
         // SAFETY: a live nursery and a live handle, whose reference the
         // nursery takes; then the nursery's last reference.
         unsafe {
-            khora_fibers_adopt(nursery, spawn(freed_child));
+            spawn_into(nursery, freed_child);
             until("the child reaching its cleanup", || FREED_INSIDE.load(Ordering::SeqCst) == 1);
             FREED_WAITING.store(1, Ordering::SeqCst);
             // Joins the child, then frees its handle and state -- while the

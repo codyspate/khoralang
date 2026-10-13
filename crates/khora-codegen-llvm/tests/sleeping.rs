@@ -144,10 +144,10 @@ fn main() -> () {
   with { clock: Clock::real() } {
     let done = Shared::of(0);
     let crew = Fibers::open();
-    with { nursery: handler for Nursery { adopt: fn f => Fibers::adopt(crew, f) } } {
+    with { nursery: handler for Nursery { spawn: fn f => Fibers::spawn(crew, f) } } {
       let mut spawned = 0;
       while spawned < 64 {
-        nursery.adopt(Fiber::spawn(fn () => napper(done)));
+        nursery.spawn(fn () => napper(done));
         spawned = spawned + 1
       }
     };

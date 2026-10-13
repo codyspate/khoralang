@@ -1,6 +1,6 @@
 module std::net::http;
 
-import std::core::{Array, ChildFailed, Eq, Fiber, List, Map, Nursery, Option, Result, Scope, SharedFn, Show, Split, acquire, attempt, bounded_nursery, scoped};
+import std::core::{Array, ChildFailed, Eq, List, Map, Nursery, Option, Result, Scope, SharedFn, Show, Split, acquire, attempt, bounded_nursery, scoped};
 import std::permissions::{granted_host};
 import std::permissions::grants::{network};
 import std::net::socket::{accept_on, connect_to, invalid_handle, listen_on, receive, set_receive_timeout, shut, start, transmit};
@@ -1890,7 +1890,7 @@ impl Router {
       if connection == invalid_handle() {
       } else {
         set_receive_timeout(connection, 10000);
-        nursery.adopt(Fiber::spawn(fn () => Router::secure_and_serve(router, connection, settings)));
+        nursery.spawn(fn () => Router::secure_and_serve(router, connection, settings));
       }
     }
   }
@@ -1962,7 +1962,7 @@ impl Router {
   /// said about routers.
   ///
   /// The nursery is what makes it structured rather than merely concurrent: an
-  /// adopted fiber cannot outlive it, so leaving `listen` — by a raise, or by
+  /// spawned fiber cannot outlive it, so leaving `listen` — by a raise, or by
   /// cancellation — deals with the connections still being answered instead of
   /// abandoning them.
   ///
@@ -1984,8 +1984,8 @@ impl Router {
       // The deadline goes on the socket before anything wraps it, because a
       // handshake can hang exactly as a request can.
       set_receive_timeout(connection, 10000);
-      nursery.adopt(Fiber::spawn(fn () =>
-          Router::serve_connection(router, over_socket(connection))));
+      nursery.spawn(fn () =>
+        Router::serve_connection(router, over_socket(connection)));
     }
   }
 

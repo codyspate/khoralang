@@ -60,7 +60,7 @@ module otlp::exporter;
 //! rather than a fabricated nanosecond. A collector renders both the same way.
 
 import std::clock::{Clock};
-import std::core::{Channel, Fiber, List, Map, Nursery, Option};
+import std::core::{Channel, List, Map, Nursery, Option};
 import std::random::{Random};
 import std::net::http::{Call, HttpClient};
 import std::trace::{Context, Span, Tracer, current};
@@ -133,8 +133,8 @@ impl Exporter {
   {
     let reports: Channel<Report> = Channel::dropping(queue_depth());
     let exporter: Exporter = { reports: reports };
-    nursery.adopt(Fiber::spawn(fn () =>
-        Exporter::draining(service, endpoint, reports, List::Nil, Map::new())));
+    nursery.spawn(fn () =>
+      Exporter::draining(service, endpoint, reports, List::Nil, Map::new()));
     let answer = body(Exporter::tracer(exporter, clock, random))!;
     // Whatever the body did, the batch goes.
     let _ = Channel::send(reports, Report::Stop);

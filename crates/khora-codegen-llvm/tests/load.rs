@@ -40,7 +40,7 @@ fn std_source(name: &str) -> String {
 fn run(name: &str, items: &str, body: &str) -> String {
     let main = format!(
         r#"module demo::main;
-import std::core::{{Changed, Channel, ChildFailed, Eq, Fiber, Fibers, List, Nursery, Option, Result, Share, Shared, Show, attempt, bounded_nursery, join_all, print}};
+import std::core::{{Changed, Channel, ChildFailed, Eq, Fiber, Fibers, List, Nursery, Option, Result, Share, Shared, Show, attempt, bounded_nursery, join_all, nursery, print}};
 
 extern fn khora_live_count() -> Int;
 
@@ -136,7 +136,7 @@ fn crowd<'e>(gauge: Shared<Gauge>, done: Shared<Int>) -> ()
 {
   let mut i = 0;
   while i < 200 {
-    nursery.adopt(Fiber::spawn(fn () => worker(gauge, done)));
+    nursery.spawn(fn () => worker(gauge, done));
     i = i + 1
   };
 }
@@ -182,13 +182,13 @@ fn crowd<'e>(done: Shared<Int>) -> ()
 {
   let mut i = 0;
   while i < 64 {
-    nursery.adopt(Fiber::spawn(fn () => worker(done)));
+    nursery.spawn(fn () => worker(done));
     i = i + 1
   };
 }
 "#,
         r#"  let done = Shared::of(0);
-  bounded_nursery(0, fn () => crowd(done))!;
+  nursery(fn () => crowd(done))!;
   print(Int::to_string(Shared::get(done)));"#,
     );
     assert_eq!(out, "64\n");
@@ -240,7 +240,7 @@ fn consume<'er>(work: Channel<Int>, deepest: Shared<Int>) -> Int raises 'er {
         r#"  let work: Channel<Int> = Channel::bounded(4);
   let deepest = Shared::of(0);
   let crew = Fibers::open();
-  Fibers::adopt(crew, Fiber::spawn(fn () => produce(work)!));
+  Fibers::spawn(crew, fn () => produce(work)!);
   // `main` carries no row, so the drain that now wants one is attempted.
   let seen = match attempt(fn () => consume(work, deepest)!) {
     Result::Ok(n) => n,
@@ -346,7 +346,7 @@ fn hire<'e>(work: Channel<Int>, gauge: Shared<Gauge>, total: Shared<Int>) -> ()
 {
   let mut i = 0;
   while i < 4 {
-    nursery.adopt(Fiber::spawn(fn () => worker(work, gauge, total)!));
+    nursery.spawn(fn () => worker(work, gauge, total)!);
     i = i + 1
   };
 }
@@ -357,7 +357,7 @@ fn hire<'e>(work: Channel<Int>, gauge: Shared<Gauge>, total: Shared<Int>) -> ()
   let deepest = Shared::of(0);
 
   let crew = Fibers::open();
-  Fibers::adopt(crew, Fiber::spawn(fn () => offer(work, deepest)!));
+  Fibers::spawn(crew, fn () => offer(work, deepest)!);
   bounded_nursery(4, fn () => hire(work, gauge, total))!;
   let _stopped = Fibers::wait(crew);
 
@@ -407,7 +407,7 @@ fn serve<'e>(work: Channel<Int>, total: Shared<Int>) -> ()
 {
   let mut i = 0;
   while i < 3 {
-    nursery.adopt(Fiber::spawn(fn () => worker(work, total)!));
+    nursery.spawn(fn () => worker(work, total)!);
     i = i + 1
   };
 }
@@ -423,14 +423,14 @@ fn rounds() -> () raises ChildFailed {
 fn round(total: Shared<Int>, count: Int) -> Int raises ChildFailed {
   let work: Channel<Int> = Channel::bounded(4);
   let crew = Fibers::open();
-  Fibers::adopt(crew, Fiber::spawn(fn () => {
+  Fibers::spawn(crew, fn () => {
     let mut i = 0;
     while i < count {
       Channel::send(work, 1)!;
       i = i + 1
     };
     Channel::close(work)
-  }));
+  });
   bounded_nursery(3, fn () => serve(work, total))!;
   let _stopped = Fibers::wait(crew);
   Channel::depth(work)
@@ -477,7 +477,7 @@ fn hire<'e>(work: Channel<Int>, done: Shared<Int>) -> ()
 {
   let mut i = 0;
   while i < 2 {
-    nursery.adopt(Fiber::spawn(fn () => worker(work, done)!));
+    nursery.spawn(fn () => worker(work, done)!);
     i = i + 1
   };
 }
@@ -653,16 +653,12 @@ fn main() -> () raises ChildFailed {{
         })
         .collect();
     let highest = peaks.iter().copied().max().unwrap_or(0);
-    // **Five, not four, and `bounded_nursery` says so.** `Fiber::spawn` starts
-    // the child before `adopt` blocks, so a limit of `n` admits `n + 1` live
-    // children -- which its documentation states and tells a caller to
-    // subtract one from where the limit stands for a real resource. This
-    // asserted four and had never been reached: the handler was too quick for
-    // two requests to overlap at all, so the number it pinned was one.
+    // **Four, exactly.** `nursery.spawn` admits a connection's handler before
+    // it starts, so a nursery of four never has a fifth running.
     assert!(
-        highest <= 5,
-        "the nursery of four served {highest} at once, which is more than the \
-         limit + 1 it admits, so the bound is decoration: {peaks:?}"
+        highest <= 4,
+        "the nursery of four served {highest} at once, which is more than its \
+         limit, so the bound is decoration: {peaks:?}"
     );
     assert!(
         highest > 1,

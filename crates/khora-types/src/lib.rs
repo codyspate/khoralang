@@ -698,6 +698,9 @@ fn is_a_type(kind: khora_hir::ItemKind) -> bool {
 /// code-generation one.
 pub const FIBER_TYPE: &str = "Fiber";
 
+/// The nursery type, whose `spawn` starts a fiber the same way, admitted first.
+pub const FIBERS_TYPE: &str = "Fibers";
+
 /// The certified-closure wrapper. `SharedFn::of` is where the check happens.
 pub const SHARED_FN_TYPE: &str = "SharedFn";
 

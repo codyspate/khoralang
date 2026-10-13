@@ -441,6 +441,213 @@ fn walk(db: &dyn Db, files: &[SourceFile]) -> Instances {
     out
 }
 
+/// The calls in `file` that hand a `Region`, a `Scope` or a `Db` to a generic
+/// function which gives it to `Handoff::send`.
+///
+/// **What this prevents: `send_generic<A>(pipe: Handoff<A>, value: A)` called
+/// with a record holding a region**, which compiled and then stopped the
+/// receiving fiber at status 134. The checker refuses a send whose value's
+/// type it can see; inside `send_generic` that type is `A`, which says
+/// nothing. The call that chooses `A` is where the region is visible, so that
+/// call is what is refused.
+///
+/// Per file, so the error renders against the module the call is in and
+/// `khora check` reports it -- which never monomorphizes. Each call, in any
+/// body, generic or not, is asked against [`handoff_reach`]'s summary of its
+/// callee: a type argument that holds something fiber-bound, in a position
+/// the summary says reaches a send, is refused. A call through a trait method
+/// is not followed (the runtime's walk refuses a region this misses, with a
+/// `false` answer from the send).
+pub fn handoff_errors(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
+    let reach = match khora_db::source_root(db) {
+        Some(root) => handoff_reach(db, root),
+        None => return Vec::new(),
+    };
+    let module =
+        khora_hir::item_map(db, file).module.clone().unwrap_or_else(|| ModulePath::new(Vec::new()));
+    let types = crate::type_map(db, file);
+    let checked = crate::checked(db, file);
+    let hir_bodies = khora_hir::body::bodies(db, file);
+    let mut errors = Vec::new();
+    for (name, body_types) in &checked.bodies {
+        let Some((_, hir)) = hir_bodies.iter().find(|(n, _)| n == name) else { continue };
+        for (site, (callee, args)) in body_types.instantiations() {
+            // The send itself is the checker's; this is for what reaches one.
+            if callee == HANDOFF_SEND {
+                continue;
+            }
+            let Some(reaching) = reach.callees.get(&(module.clone(), callee.clone())) else {
+                continue;
+            };
+            let found = reaching
+                .iter()
+                .zip(args)
+                .filter(|(reaches, _)| **reaches)
+                .find_map(|(_, a)| types.fiber_bound_inside(a).map(|b| (a.clone(), b)));
+            let Some((sent, (bound, subject))) = found else { continue };
+            let why = crate::map::stays_on_its_fiber_because(bound, &subject);
+            errors.push(HirError {
+                message: format!(
+                    "`{callee}` gives its argument to `Handoff::send`, and `{sent}` cannot be \
+                     handed to another fiber: {why}"
+                ),
+                range: hir.range(*site),
+            });
+        }
+    }
+    errors
+}
+
+/// The key an inherent `Handoff::send` call is recorded under.
+const HANDOFF_SEND: &str = "#Handoff::send";
+
+/// Which type parameters of each generic function reach `Handoff::send`,
+/// keyed the way a call names its callee from the calling module.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HandoffReach {
+    /// `(calling module, callee as written there)` -> one flag per type
+    /// parameter of the callee, in its signature's order: whether a value of
+    /// that type can reach a `Handoff::send`. Only callees with a flag set.
+    pub callees: HashMap<(ModulePath, String), Vec<bool>>,
+}
+
+/// Which type parameters of each generic function reach `Handoff::send`.
+///
+/// **What this prevents: a check that grows with the type space rather than
+/// the program.** The first version followed each call into the generic body
+/// at its concrete type arguments. Polymorphic recursion that branches --
+/// `grow<A>` calling `grow<Option<A>>` and `grow<(A, Int)>` -- makes 2^depth
+/// distinct instantiations, and `khora check` on a ten-line program ran out
+/// of memory. Whether `grow`'s `A` reaches a send is a property of `grow`,
+/// not of any one `A`, so it is computed once per function:
+///
+/// - `A` reaches a send if the body sends a type that holds `A` where
+///   [`TypeMap::fiber_bound_inside`] looks (a tuple, an applied type, an
+///   ADT's arguments), or
+/// - passes such a type, in a parameter position that reaches a send, to
+///   another generic function.
+///
+/// A least fixed point over the whole program's call graph: every flag starts
+/// false and only ever turns true, so it ends after at most one round per
+/// type parameter in the program, each round linear in the program's size.
+/// Recursion, polymorphic or mutual, is a cycle in that graph and needs
+/// nothing special.
+///
+/// The answer is about positions, not types, so it is exact for what the
+/// first version found: a fiber-bound type argument at a reaching position
+/// is fiber-bound at the send, because every step from the call to the send
+/// only wraps it in more type structure.
+#[salsa::tracked(returns(ref))]
+pub fn handoff_reach(db: &dyn Db, root: SourceRoot) -> HandoffReach {
+    let units: Vec<Unit<'_>> = root
+        .files(db)
+        .iter()
+        .map(|f| Unit {
+            module: khora_hir::item_map(db, *f)
+                .module
+                .clone()
+                .unwrap_or_else(|| ModulePath::new(Vec::new())),
+            file: *f,
+            types: crate::type_map(db, *f),
+            checked: crate::checked(db, *f),
+            scope: khora_hir::file_scope(db, *f),
+        })
+        .collect();
+
+    // Every generic body, by (unit, name), with its parameters and flags.
+    let mut flags: HashMap<(usize, String), Vec<bool>> = HashMap::new();
+    let mut generics_of: HashMap<(usize, String), Vec<String>> = HashMap::new();
+    for (index, unit) in units.iter().enumerate() {
+        for (name, _) in &unit.checked.bodies {
+            let generics =
+                unit.types.signatures.get(name.as_str()).map(|s| s.generics.clone()).unwrap_or_default();
+            if generics.is_empty() {
+                continue;
+            }
+            flags.insert((index, name.clone()), vec![false; generics.len()]);
+            generics_of.insert((index, name.clone()), generics);
+        }
+    }
+
+    // Each generic body's calls, resolved once: (callee's key, or None for a
+    // send) and the type arguments as written in the caller.
+    type Call<'a> = (Option<(usize, String)>, &'a [Type]);
+    let mut calls: HashMap<(usize, String), Vec<Call<'_>>> = HashMap::new();
+    for key in generics_of.keys() {
+        let (index, name) = key;
+        let Some(body) = units[*index].body(name) else { continue };
+        let mut out = Vec::new();
+        for (_, (callee, args)) in body.instantiations() {
+            if callee == HANDOFF_SEND {
+                out.push((None, args.as_slice()));
+            } else if let Some(target) = defining(&units, *index, callee) {
+                if flags.contains_key(&target) {
+                    out.push((Some(target), args.as_slice()));
+                }
+            }
+        }
+        calls.insert(key.clone(), out);
+    }
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (key, generics) in &generics_of {
+            for (position, param) in generics.iter().enumerate() {
+                if flags[key][position] {
+                    continue;
+                }
+                let reaches = calls[key].iter().any(|(target, args)| match target {
+                    None => args.iter().any(|a| holds_param_visibly(a, param)),
+                    Some(target) => flags[target]
+                        .iter()
+                        .zip(args.iter())
+                        .any(|(r, a)| *r && holds_param_visibly(a, param)),
+                });
+                if reaches {
+                    flags.get_mut(key).expect("a generic body")[position] = true;
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    // Keyed as callers name their callees: each unit's own generics, and
+    // every name a call in it resolves to.
+    let mut out = HandoffReach::default();
+    for (index, unit) in units.iter().enumerate() {
+        for (_, body) in &unit.checked.bodies {
+            for (_, (callee, _)) in body.instantiations() {
+                let key = (unit.module.clone(), callee.clone());
+                if callee == HANDOFF_SEND || out.callees.contains_key(&key) {
+                    continue;
+                }
+                let Some(target) = defining(&units, index, callee) else { continue };
+                if let Some(reaching) = flags.get(&target).filter(|f| f.iter().any(|r| *r)) {
+                    out.callees.insert(key, reaching.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Whether `param` appears in `ty` where [`TypeMap::fiber_bound_inside`]
+/// looks: so that a fiber-bound type put there makes `ty` fiber-bound too.
+/// Not inside a function type, which that answers no for whatever it holds.
+fn holds_param_visibly(ty: &Type, param: &str) -> bool {
+    match ty {
+        Type::Param(p) => p == param,
+        Type::Adt { args, .. } | Type::Tuple(args) => {
+            args.iter().any(|a| holds_param_visibly(a, param))
+        }
+        Type::Applied { head, args } => {
+            holds_param_visibly(head, param) || args.iter().any(|a| holds_param_visibly(a, param))
+        }
+        _ => false,
+    }
+}
+
 /// [`defining`], with the module that wrote the impl as a first guess.
 ///
 /// **A method key does not name a module, and two modules may answer to it.**

@@ -552,6 +552,42 @@ pub unsafe extern "C" fn khora_channel_send(handle: *mut u8, value: u64) -> bool
     enqueue(channel, value)
 }
 
+/// Refuses a full or closed queue instead of parking a cleanup handler.
+///
+/// A refusal consumes and releases the value, so a caller that needs a dead
+/// letter must retain its own reference. This cannot recover a job by itself.
+///
+/// # Safety
+///
+/// `handle` must be live, and `value` a live object owned by the caller.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_channel_offer(handle: *mut u8, value: u64) -> bool {
+    // SAFETY: the caller guarantees a live channel handle.
+    let Some(channel) = (unsafe { channel_of(handle) }) else {
+        fatal("offering on a channel that has already been released");
+    };
+    if channel.boxed {
+        // SAFETY: the caller owns the live value and the channel records its glue.
+        unsafe { crate::share::khora_share(value as *mut u8, channel.glue) };
+    }
+    let (next, threads) = {
+        let mut state = channel.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.closed || state.items.len() >= channel.capacity {
+            drop(state);
+            channel.release(value);
+            return false;
+        }
+        state.items.push_back(value);
+        let next = hand_to_next(&mut state);
+        (next, state.threads_receiving)
+    };
+    channel.a_value_arrived(threads);
+    if let Some(waker) = next {
+        waker.wake();
+    }
+    true
+}
+
 /// Puts a value the caller has made ready to cross into the queue, waiting
 /// while it is full. The half of a send a channel and a hand-off share: they
 /// differ in what they do to the value first, and in nothing after.
@@ -900,6 +936,17 @@ mod tests {
         let channel = open(4);
         unsafe { khora_channel_close(channel) };
         assert!(!unsafe { khora_channel_send(channel, 1) });
+        unsafe { khora_channel_release(channel) };
+    }
+
+    #[test]
+    fn offer_never_waits_and_refuses_full_or_closed_channels() {
+        let channel = open(1);
+        assert!(unsafe { khora_channel_offer(channel, 1) });
+        assert!(!unsafe { khora_channel_offer(channel, 2) });
+        assert_eq!(take(channel), Some(1));
+        unsafe { khora_channel_close(channel) };
+        assert!(!unsafe { khora_channel_offer(channel, 3) });
         unsafe { khora_channel_release(channel) };
     }
 

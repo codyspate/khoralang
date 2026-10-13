@@ -1056,8 +1056,8 @@ fn spin(n: Int) -> Int {
 
 fn group(log: Shared<Int>, ready: Channel<Int>) -> Int raises ChildFailed {
   let v = nursery(fn () => {
-    nursery.adopt(Fiber::spawn(fn () => { spin(300000000000); () }));
-    nursery.adopt(Fiber::spawn(fn () => { spin(300000000000); () }));
+    nursery.spawn(fn () => { spin(300000000000); () });
+    nursery.spawn(fn () => { spin(300000000000); () });
     Channel::send(ready, 1);
     5
   })!;
@@ -1166,13 +1166,13 @@ pub fn main() -> Int {
     }
 }
 
-/// **A bounded nursery's `adopt`, waiting for room, stops on a cancel.** With
-/// room for one child, the second `adopt` waits for the first, a long
-/// spinner. The cancel has to reach that child and end the wait, and the
-/// statement after the `adopt` must not run. It used to wait the spinner out
-/// (16 s) and then carry on, reporting the fiber not canceled.
+/// **A bounded nursery's `spawn`, waiting for room, stops on a cancel, and
+/// starts nothing.** With room for one child, the second `spawn` waits for the
+/// first, a long spinner. The cancel has to end the wait, the statement after
+/// the `spawn` must not run, and the body that was waiting must never start:
+/// it would write 9 to the log. The nursery's release then cancels the spinner.
 #[test]
-fn a_bounded_adopt_waiting_for_room_stops_on_a_cancel() {
+fn a_bounded_spawn_waiting_for_room_stops_on_a_cancel_and_starts_nothing() {
     const SOURCE: &str = "module main;
 import std::core::{print, Fiber, Shared, Channel, bounded_nursery, Nursery, ChildFailed};
 import std::clock::{Clock};
@@ -1186,10 +1186,10 @@ fn spin(n: Int) -> Int {
 
 fn group(log: Shared<Int>, ready: Channel<Int>) -> Int raises ChildFailed {
   bounded_nursery(1, fn () => {
-    nursery.adopt(Fiber::spawn(fn () => { spin(300000000000); () }));
+    nursery.spawn(fn () => { spin(300000000000); () });
     Shared::set(log, 1);
     Channel::send(ready, 1);
-    nursery.adopt(Fiber::spawn(fn () => { spin(10); () }));
+    nursery.spawn(fn () => { Shared::set(log, 9); () });
     Shared::set(log, 2);
     5
   })!
@@ -1215,7 +1215,7 @@ pub fn main() -> Int {
   }
 }
 ";
-    for (backend, ran) in on_both("cancel_everywhere_bounded_adopt", SOURCE) {
+    for (backend, ran) in on_both("cancel_everywhere_bounded_spawn", SOURCE) {
         assert!(!ran.hung, "`{backend}`: {}", ran.stdout);
         assert_eq!(
             ran.stdout, "waiting for room: log 1; canceled true; within 1 s true; log 1\n",
@@ -1650,12 +1650,12 @@ fn stubborn(ch: Channel<Int>, ready: Channel<Int>) -> () {
 }
 
 fn fan(ch: Channel<Int>, ready: Channel<Int>) -> () with { nursery: Nursery } {
-  nursery.adopt(Fiber::spawn(fn () => stubborn(ch, ready)))
+  nursery.spawn(fn () => stubborn(ch, ready))
 }
 
 fn body(ch: Channel<Int>, ready: Channel<Int>) -> () {
   let crew = Fibers::open();
-  let _ = with { nursery: handler for Nursery { adopt: fn f => Fibers::adopt(crew, f) } } {
+  let _ = with { nursery: handler for Nursery { spawn: fn f => Fibers::spawn(crew, f) } } {
     fan(ch, ready)
   };
   let _ = Fibers::wait(crew);

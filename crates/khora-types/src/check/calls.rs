@@ -20,7 +20,10 @@ impl<'a> Checker<'a> {
         // only known once it has been inferred.
         let certifying = match self.body.expr(callee) {
             Expr::Path(khora_hir::Resolution::TraitItem { owner, name }) => {
-                if owner == FIBER_TYPE && name == "spawn" {
+                // `Fibers::spawn(crew, body)` starts `body` on a fiber of its
+                // own, exactly as `Fiber::spawn(body)` does; only the body's
+                // position differs.
+                if (owner == FIBER_TYPE || owner == FIBERS_TYPE) && name == "spawn" {
                     Some(super::sharing::Crossing::Fiber)
                 } else if owner == SHARED_FN_TYPE && name == "of" {
                     Some(super::sharing::Crossing::Certified)
@@ -30,12 +33,123 @@ impl<'a> Checker<'a> {
             }
             _ => None,
         };
+        self.refuse_a_literal_limit_below_one(callee, args);
         if let Some(crossing) = certifying {
             let result = self.infer_call_inner(callee, args, hint, range);
-            self.check_spawnable(args, crossing, range);
+            let body: &[ExprId] = match self.body.expr(callee) {
+                Expr::Path(khora_hir::Resolution::TraitItem { owner, .. }) if owner == FIBERS_TYPE => {
+                    match args.get(1) {
+                        Some(&work) if self.forwards_a_nursery_spawn(work) => &[],
+                        _ => args.get(1..).unwrap_or(&[]),
+                    }
+                }
+                _ => args,
+            };
+            self.check_spawnable(body, crossing, range);
             return result;
         }
-        self.infer_call_inner(callee, args, hint, range)
+        let result = self.infer_call_inner(callee, args, hint, range);
+        // `nursery.spawn(body)`: the effect operation that starts a fiber.
+        // The handler forwards `body` to `Fibers::spawn`, where it arrives
+        // as a name and cannot be checked, so it is checked here, where it is
+        // written.
+        if let Expr::Field { base, name } = self.body.expr(callee) {
+            if name == "spawn"
+                && matches!(
+                    self.exprs.get(base).map(|t| self.unifier.zonk(t)),
+                    Some(Type::Adt { name, .. }) if name == "Nursery"
+                )
+            {
+                self.check_spawnable(args, super::sharing::Crossing::Fiber, range);
+            }
+        }
+        // A handoff crosses fibers without requiring `Share`, but a region or
+        // lease must still remain on the fiber that opened it. Checking the
+        // resolved signature covers both `Handoff::send(h, v)` and `h.send(v)`.
+        // Recorded here and asked once the body's types are settled
+        // ([`Checker::check_handoff_sends`]): a value whose type is still a
+        // variable at the send answers "nothing fiber-bound" until then.
+        if self.instantiations.get(&callee).is_some_and(|(key, _)| key == "#Handoff::send") {
+            if let Some(&value) = args.last() {
+                self.handoff_sends.push((value, range));
+            }
+        }
+        result
+    }
+
+    /// Refuses `bounded_nursery(0, ..)` and `Fibers::bounded(-1)`.
+    ///
+    /// **A limit below 1 is a bug where it is written**, so where it is an
+    /// integer literal it is refused here rather than at run time. A limit
+    /// computed at run time is the runtime's to refuse, with a trap that names
+    /// the value. `nursery` is the unbounded one.
+    fn refuse_a_literal_limit_below_one(&mut self, callee: ExprId, args: &[ExprId]) {
+        let named = match self.body.expr(callee) {
+            Expr::Path(khora_hir::Resolution::Item { module, name, .. }) => {
+                name == "bounded_nursery" && module.segments() == ["std", "core"]
+            }
+            Expr::Path(khora_hir::Resolution::TraitItem { owner, name }) => {
+                owner == FIBERS_TYPE && name == "bounded"
+            }
+            _ => false,
+        };
+        if !named {
+            return;
+        }
+        let Some(&limit) = args.first() else { return };
+        let Some(value) = self.integer_literal(limit) else { return };
+        if value < 1 {
+            self.error(
+                format!(
+                    "`bounded_nursery` needs a limit of at least 1, and this one is {value}. \
+                     `nursery` is the one without a limit"
+                ),
+                self.body.range(limit),
+            );
+        }
+    }
+
+    /// The value of an integer literal, negated or not, as written.
+    fn integer_literal(&self, expr: ExprId) -> Option<i128> {
+        match self.body.expr(expr) {
+            Expr::Literal(khora_hir::body::Literal::Int(text)) => {
+                text.replace('_', "").parse::<i128>().ok()
+            }
+            Expr::Unary { op: khora_hir::body::UnOp::Neg, operand } => {
+                self.integer_literal(*operand).map(|v| -v)
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether `body` is the parameter of a `handler for Nursery`'s `spawn`
+    /// operation, which is the one closure value `Fibers::spawn` accepts.
+    ///
+    /// **Already checked where it was written.** The operation is reached only
+    /// as `nursery.spawn(fn () => ..)`, and that call certifies its lambda
+    /// exactly as `Fiber::spawn` does; the handler is forwarding what that
+    /// check saw. Any other closure value handed to `Fibers::spawn` is refused
+    /// as `Fiber::spawn` would refuse it.
+    pub(super) fn forwards_a_nursery_spawn(&self, body: ExprId) -> bool {
+        let Expr::Local(local) = self.body.expr(body) else { return false };
+        let Some(lambda) = self.body.exprs().find_map(|(id, expr)| match expr {
+            Expr::Lambda { params, .. }
+                if params.iter().any(|p| {
+                    matches!(self.body.pat(*p), khora_hir::body::Pat::Bind(l) if l == local)
+                }) =>
+            {
+                Some(id)
+            }
+            _ => None,
+        }) else {
+            return false;
+        };
+        self.body.exprs().any(|(_, expr)| match expr {
+            Expr::Record { owner: Some(owner), fields, .. } => {
+                owner == "Nursery" && fields.iter().any(|(label, value)| label == "spawn" && *value == lambda)
+            }
+            _ => false,
+        })
     }
 
     pub(super) fn infer_call_inner(

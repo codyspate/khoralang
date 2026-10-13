@@ -308,6 +308,93 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Refuses a `Handoff::send` whose value holds a `Region`, a `Scope` or a
+    /// `Db`, once the body's types are settled.
+    ///
+    /// **What this prevents: a region's finalizers running on the fiber that
+    /// received it**, which the runtime traps on with status 134. Asked after
+    /// the body rather than at the call, because the value's type may still be
+    /// a variable there: `let go = fn x => Handoff::send(h, x)` learns what
+    /// `x` is from a later `go(Region::open())`.
+    ///
+    /// **A closure is checked by what it captured**, since a function type
+    /// says nothing about that. The sent expression is followed back through
+    /// `let` bindings to the lambda that made it, and each capture is held to
+    /// the same rule. A closure that arrived from anywhere else -- a
+    /// parameter, a field, a call's answer -- has captures this body cannot
+    /// see, and the runtime refuses its region instead (`khora-rt`'s
+    /// `handoff.rs`).
+    ///
+    /// A generic function's `A` is not known here at all; the call that
+    /// chooses it is checked by [`crate::mono::handoff_errors`].
+    pub(crate) fn check_handoff_sends(&mut self) {
+        for (value, range) in std::mem::take(&mut self.handoff_sends) {
+            let ty = self.unifier.zonk(self.exprs.get(&value).unwrap_or(&Type::Unknown));
+            if let Some((bound, subject)) = self.types.fiber_bound_inside(&ty) {
+                let why = crate::map::stays_on_its_fiber_because(bound, &subject);
+                self.error(format!("`{ty}` cannot be handed to another fiber: {why}"), range);
+                continue;
+            }
+            if !matches!(ty, Type::Fn { .. }) {
+                continue;
+            }
+            let Some(lambda) = self.lambda_behind(value) else { continue };
+            for local in self.captures_of(lambda) {
+                let captured = self.unifier.zonk(self.locals.get(&local).unwrap_or(&Type::Unknown));
+                if let Some((bound, subject)) = self.types.fiber_bound_inside(&captured) {
+                    let name = self.body.local(local).name.clone();
+                    let why = crate::map::stays_on_its_fiber_because(bound, &subject);
+                    self.error(
+                        format!(
+                            "this closure captures `{name}`, and `{captured}` cannot be handed to \
+                             another fiber: {why}"
+                        ),
+                        range,
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
+    /// The lambda `expr` evaluates to, written there or bound by a `let`
+    /// that nothing assigns to afterwards.
+    fn lambda_behind(&self, expr: ExprId) -> Option<ExprId> {
+        let mut at = expr;
+        // A chain of `let` renamings is short; the bound only stops a cycle
+        // the lowering should never produce.
+        for _ in 0..32 {
+            match self.body.expr(at) {
+                Expr::Lambda { .. } => return Some(at),
+                Expr::Block { tail: Some(tail), .. } => at = *tail,
+                Expr::Local(local) => {
+                    if self.body.local(*local).is_mut {
+                        return None;
+                    }
+                    at = self.let_initializer(*local)?;
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    /// The initializer of the `let` that binds `local` alone, if one does.
+    fn let_initializer(&self, local: khora_hir::body::LocalId) -> Option<ExprId> {
+        self.body.exprs().find_map(|(_, expr)| {
+            let Expr::Block { stmts, .. } = expr else { return None };
+            stmts.iter().find_map(|stmt| match stmt {
+                khora_hir::body::Stmt::Let { pat, init: Some(init), .. } => {
+                    match self.body.pat(*pat) {
+                        khora_hir::body::Pat::Bind(bound) if *bound == local => Some(*init),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+        })
+    }
+
     /// The type parameters this function declared `Share` for.
     pub(super) fn shared_params(&self) -> Vec<String> {
         self.signature

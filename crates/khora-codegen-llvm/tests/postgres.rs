@@ -720,7 +720,7 @@ fn main() -> Int {
   };
   let requests: Channel<Request> = Channel::bounded(4);
   let crew = Fibers::open();
-  Fibers::adopt(crew, Fiber::spawn(fn () => serve(settings, requests)));
+  Fibers::spawn(crew, fn () => serve(settings, requests));
   work(requests);
   Channel::close(requests);
   let _stopped = Fibers::wait(crew);
@@ -3604,7 +3604,7 @@ fn main() -> Int {
   let crew = Fibers::open();
   let mut spawned = 0;
   while spawned < 3 {
-    Fibers::adopt(crew, Fiber::spawn(fn () => waiter(pool, done)));
+    Fibers::spawn(crew, fn () => waiter(pool, done));
     spawned = spawned + 1
   };
   let mut heard = 0;
@@ -3936,7 +3936,7 @@ fn main() -> Int {
   let mut me = 1;
   while me <= 4 {
     let mine = me;
-    Fibers::adopt(crew, Fiber::spawn(fn () => load(pool, mine, stop, done)));
+    Fibers::spawn(crew, fn () => load(pool, mine, stop, done));
     me = me + 1
   };
   let mut heard = 0;

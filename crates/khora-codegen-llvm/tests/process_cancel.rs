@@ -277,8 +277,8 @@ fn doomed() -> () raises Oops {{
 /// ever canceled. Written that way round first, and the `ran on` assertion
 /// below is what caught it.
 fn both() -> () with {{ nursery: Nursery }} {{
-  nursery.adopt(Fiber::spawn(fn () => doomed()!));
-  nursery.adopt(Fiber::spawn(fn () => slow()!));
+  nursery.spawn(fn () => doomed()!);
+  nursery.spawn(fn () => slow()!);
 }}
 
 pub fn main() -> Int {{

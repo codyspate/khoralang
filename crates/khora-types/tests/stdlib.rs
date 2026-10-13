@@ -153,7 +153,7 @@ fn a_capability_whose_type_is_unimported_says_to_import_it() {
          import std::core::{ChildFailed, Fiber, nursery, print};\n\
          pub fn main() -> () raises ChildFailed {\n  \
            nursery(fn () => {\n    \
-             nursery.adopt(Fiber::spawn(fn () => print(\"child\")));\n  \
+             nursery.spawn(fn () => print(\"child\"));\n  \
            })!;\n\
          }\n",
     );
@@ -172,7 +172,7 @@ fn the_import_the_message_names_is_the_one_that_works() {
          import std::core::{ChildFailed, Fiber, Nursery, nursery, print};\n\
          pub fn main() -> () raises ChildFailed {\n  \
            nursery(fn () => {\n    \
-             nursery.adopt(Fiber::spawn(fn () => print(\"child\")));\n  \
+             nursery.spawn(fn () => print(\"child\"));\n  \
            })!;\n\
          }\n",
     );
@@ -726,4 +726,94 @@ fn a_bare_case_name_in_a_for_is_refused() {
     );
     assert!(found.iter().any(|e| e.contains("`Red` is a case of `Color`")), "{found:?}");
     assert!(found.iter().any(|e| e.contains("`Blue` is a case of `Color`")), "{found:?}");
+}
+
+/// **`bounded_nursery` with a literal limit below 1 is refused where it is
+/// written.** A nursery with no room is a bug in the program, and `nursery` is
+/// the one without a limit. The same for `Fibers::bounded`. A limit computed at
+/// run time compiles; the runtime traps on it, naming the value.
+#[test]
+fn a_literal_nursery_limit_below_one_is_a_compile_error() {
+    for call in [
+        "bounded_nursery(0, fn () => 1)!",
+        "bounded_nursery(-1, fn () => 1)!",
+        "{ let _ = Fibers::bounded(0); 1 }",
+    ] {
+        let found = errors_with_std(&format!(
+            "module program;\n\
+             import std::core::{{ChildFailed, Fibers, bounded_nursery}};\n\
+             pub fn main() -> Int raises ChildFailed {{\n  {call}\n}}\n"
+        ));
+        assert!(
+            found.iter().any(|m| m.contains("`bounded_nursery` needs a limit of at least 1")
+                && m.contains("`nursery` is the one without a limit")),
+            "`{call}` should be refused: {found:?}"
+        );
+    }
+    for call in ["bounded_nursery(1, fn () => 1)!", "bounded_nursery(limit(), fn () => 1)!"] {
+        let found = errors_with_std(&format!(
+            "module program;\n\
+             import std::core::{{ChildFailed, bounded_nursery}};\n\
+             fn limit() -> Int {{ 0 }}\n\
+             pub fn main() -> Int raises ChildFailed {{\n  {call}\n}}\n"
+        ));
+        assert!(found.is_empty(), "`{call}` should compile: {found:?}");
+    }
+}
+
+/// **`nursery.spawn` checks its body as `Fiber::spawn` does.** The body is
+/// started on another fiber, so a `mut` record it closes over is a race, and
+/// it is refused at the call that starts it.
+#[test]
+fn a_nursery_spawn_cannot_capture_a_mutable_record() {
+    let found = errors_with_std(
+        "module program;\n\
+         import std::core::{ChildFailed, Nursery, nursery};\n\
+         type Counter = { mut n: Int };\n\
+         pub fn main() -> () raises ChildFailed {\n  \
+           let c: Counter = { n: 0 };\n  \
+           nursery(fn () => {\n    \
+             nursery.spawn(fn () => { c.n = c.n + 1; });\n  \
+           })!;\n\
+         }\n",
+    );
+    assert!(
+        found.iter().any(|m| m.contains("`c` cannot be handed to another fiber")),
+        "a mutable capture crossing through `nursery.spawn` should be refused: {found:?}"
+    );
+}
+
+/// **`Fibers::spawn` refuses a closure that arrived under a name**, which is
+/// `Fiber::spawn`'s rule: what such a closure captured was decided somewhere
+/// the check cannot see. A `handler for Nursery` forwarding its `spawn`
+/// operation's parameter is the one exception, because `nursery.spawn` checked
+/// that closure where it was written.
+#[test]
+fn fibers_spawn_refuses_a_closure_value_but_not_a_nursery_handler() {
+    let found = errors_with_std(
+        "module program;\n\
+         import std::core::{Fibers};\n\
+         pub fn main() -> () {\n  \
+           let crew = Fibers::open();\n  \
+           let work = fn () => ();\n  \
+           Fibers::spawn(crew, work);\n  \
+           let _ = Fibers::wait(crew);\n\
+         }\n",
+    );
+    assert!(
+        found.iter().any(|m| m.contains("has to be a closure written here or a named function")),
+        "a closure value handed to `Fibers::spawn` should be refused: {found:?}"
+    );
+    let found = errors_with_std(
+        "module program;\n\
+         import std::core::{Fibers, Nursery, print};\n\
+         pub fn main() -> () {\n  \
+           let crew = Fibers::open();\n  \
+           with { nursery: handler for Nursery { spawn: fn work => Fibers::spawn(crew, work) } } {\n    \
+             nursery.spawn(fn () => print(\"child\"));\n    \
+           };\n  \
+           let _ = Fibers::wait(crew);\n\
+         }\n",
+    );
+    assert!(found.is_empty(), "a nursery handler's own forwarding should compile: {found:?}");
 }

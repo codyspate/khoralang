@@ -20,7 +20,7 @@ The major difference is where that model lives. Khora builds those ideas into a 
 | `Clock.sleep`, `TestClock` | `std::clock::Clock` — `sleep` is an operation on the capability, so a fake clock is a handler and needs no fork-or-deadlock caveat |
 | `Queue` with `dropping`/`sliding` | [`Channel::dropping` / `Channel::sliding`](/docs/reference/sharing/#what-a-full-channel-does) |
 | `Fiber.join` | `Fiber::join`, which re-raises the child's failure with its type |
-| `Effect.forkScoped` | `nursery.adopt(Fiber::spawn(..))` |
+| `Effect.forkScoped` | `nursery.spawn(..)` |
 | `Ref` | `Shared<A>` |
 | `Layer` | nothing — see below |
 

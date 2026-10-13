@@ -134,7 +134,7 @@ pub fn main() -> () {
   let crew = Fibers::open();
   let mut i = 0;
   while i < 8 {
-    Fibers::adopt(crew, Fiber::spawn(fn () => bump(count)));
+    Fibers::spawn(crew, fn () => bump(count));
     i = i + 1;
   };
   let _stopped = Fibers::wait(crew);
@@ -376,7 +376,7 @@ pub fn main() -> () {
   let crew = Fibers::open();
   let mut i = 0;
   while i < 16 {
-    Fibers::adopt(crew, Fiber::spawn(fn () => record(cache, i)));
+    Fibers::spawn(crew, fn () => record(cache, i));
     i = i + 1;
   };
   let _stopped = Fibers::wait(crew);

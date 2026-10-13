@@ -10,10 +10,11 @@ use super::*;
 
 /// Whether anything in the program can start a thread.
 ///
-/// `Fiber::spawn` is the only one: `khora_fiber_spawn` is the sole runtime
-/// entry point that calls `std::thread::spawn`, and a nursery adopts fibers
-/// that already exist rather than making them. So the whole question is
-/// whether any reachable body so much as *mentions* it.
+/// `Fiber::spawn` and `Fibers::spawn` are the two: both reach
+/// `khora_fiber_spawn`, the sole runtime entry point that calls
+/// `std::thread::spawn`. So the whole question is whether any reachable body
+/// so much as *mentions* either, and a false negative here would turn
+/// non-atomic reference counts into races.
 ///
 /// Mentions, not calls, and over the whole expression arena rather than a walk
 /// from the root. Both are the conservative direction: a `Fiber::spawn` handed
@@ -31,7 +32,8 @@ fn program_can_spawn<'a>(
                 matches!(
                     expr,
                     khora_hir::body::Expr::Path(khora_hir::Resolution::TraitItem { owner, name })
-                        if owner == crate::runtime::FIBER_TYPE && name == "spawn"
+                        if (owner == crate::runtime::FIBER_TYPE
+                            || owner == crate::runtime::FIBERS_TYPE) && name == "spawn"
                 )
             })
         })

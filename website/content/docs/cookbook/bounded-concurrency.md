@@ -4,7 +4,7 @@ sidebar:
   order: 5
 ---
 
-Structured concurrency tells you who owns concurrent work. `bounded_nursery` adds an admission limit: once the nursery has `limit` live children, adopting another child waits until capacity is available.
+Structured concurrency tells you who owns concurrent work. `bounded_nursery` adds an admission limit: once the nursery has `limit` running children, spawning another waits until one of them finishes, and the new child starts only then.
 
 Use this when the amount of work is controlled by the outside world or can otherwise grow beyond the capacity of a database, remote service, filesystem, or memory budget.
 
@@ -15,7 +15,7 @@ This program has 1,000 jobs available but allows only 64 of them to be live chil
 ```khora
 module main;
 
-import std::core::{ChildFailed, Fiber, Nursery, bounded_nursery, print};
+import std::core::{ChildFailed, Nursery, bounded_nursery, print};
 
 fn handle(job: Int) -> () {
   print("processing job ${job}");
@@ -29,9 +29,7 @@ fn launch_jobs() -> ()
   while next < 1000 {
     let job = next;
 
-    nursery.adopt(
-      Fiber::spawn(fn () => handle(job))
-    );
+    nursery.spawn(fn () => handle(job));
 
     next = next + 1;
   }
@@ -42,41 +40,41 @@ pub fn main() raises ChildFailed {
 }
 ```
 
-`launch_jobs` requires a `Nursery` capability because it adopts children. `bounded_nursery(64, launch_jobs)!` supplies that capability and does not return until all adopted children have finished.
+`launch_jobs` requires a `Nursery` capability because it spawns children. `bounded_nursery(64, launch_jobs)!` supplies that capability and does not return until all of its children have finished.
 
-The `!` is there because a nursery raises [`ChildFailed`](/docs/reference/concurrency/#a-child-that-failed) when a child fails: every child is waited for, the failure is reported, and the block's answer does not arrive. Whether it stops the siblings depends on where the failing child was adopted — see [Failure and cancellation](#failure-and-cancellation) below before you rely on it.
+The `!` is there because a nursery raises [`ChildFailed`](/docs/reference/concurrency/#a-child-that-failed) when a child fails: every child is waited for, the failure is reported, and the block's answer does not arrive. Whether it stops the siblings depends on when the failing child was spawned — see [Failure and cancellation](#failure-and-cancellation) below before you rely on it.
 
-The important line is not the `Fiber::spawn`; it is the adoption:
-
-```khora
-nursery.adopt(Fiber::spawn(fn () => handle(job)));
-```
-
-When 64 children are already live, the next adoption waits. The producer
-therefore slows down at the same boundary where it creates more work instead of
-filling an unbounded queue somewhere else.
-
-**Subtract one when the limit stands for a real resource.** `bounded_nursery(64, ...)`
-admits **65** live children, because `Fiber::spawn` starts the child before
-`adopt` blocks on the limit — the fiber the producer is currently handing over
-is already running. It does not matter when the limit is a rate you picked; it
-matters a great deal when it is a connection pool of exactly 64, where the
-sixty-fifth child is the one that waits on a connection that will never come
-free. Write `bounded_nursery(63, ...)` for a pool of 64.
-
-**A limit of zero or less is not a bound at all** — it is how the unbounded
-[`nursery`](/docs/stdlib/api/core/#bounded_nursery) is built — so check a limit
-that was computed from configuration before you pass it.
-
-`adopt` takes a `Fiber<(), 'er>`. The answer is fixed at `()` — a nursery has nothing to do with a result it cannot hand back — but the failure row is free, so a job that fails needs no `catch` at the adoption site:
+The line that applies the limit is the spawn:
 
 ```khora
-nursery.adopt(Fiber::spawn(fn () => handle(job)!));
+nursery.spawn(fn () => handle(job));
 ```
 
-The row is for failures only. Every child can be canceled whatever its row; the row is what lets a child that can fail be adopted, with its failure reported to the nursery at runtime as `ChildFailed` rather than caught at compile time.
+When 64 children are already running, the next `spawn` waits, and the job does
+not start until there is room. The producer therefore slows down at the same
+boundary where it creates more work instead of filling an unbounded queue
+somewhere else.
 
-Keep a job's answer by holding its handle instead of adopting it. `Fiber::join` gives back what the body computed, and re-raises what it raised.
+**The limit is exact.** `bounded_nursery(64, ...)` never runs a sixty-fifth
+child, so a nursery in front of a connection pool of 64 is
+`bounded_nursery(64, ...)`.
+
+**The limit must be at least 1.** `bounded_nursery(0, ...)` is a compile
+error, and a limit computed at run time that comes out below 1 stops the
+program with a message naming the value. For no limit at all, use
+[`nursery`](/docs/stdlib/api/core/#nursery).
+
+The body passed to `spawn` returns `()`, because a nursery has nothing to do with a result it cannot hand back, but it may raise, so a job that fails needs no `catch` where it is spawned:
+
+```khora
+nursery.spawn(fn () => handle(job)!);
+```
+
+The row is for failures only. Every child can be canceled whatever its row; the row is what lets a child that can fail be spawned, with its failure reported to the nursery at runtime as `ChildFailed` rather than caught at compile time.
+
+The body is checked the way `Fiber::spawn`'s is: write it at the call, as a lambda or a named function, and it may not close over anything another fiber cannot hold.
+
+Keep a job's answer with `Fiber::spawn` and its handle instead. `Fiber::join` gives back what the body computed, and re-raises what it raised.
 
 ## Keep unrelated limits separate
 
@@ -86,12 +84,12 @@ For a known, already-bounded handful of tasks, use an ordinary `nursery` instead
 
 ## Failure and cancellation
 
-The nursery owns its adopted children. On normal return it waits for them. If the nursery body leaves through failure or cancellation, children that are still running are canceled and joined before the nursery is released.
+The nursery owns its children. On normal return it waits for them. If the nursery body leaves through failure or cancellation, children that are still running are canceled and joined before the nursery is released.
 
 **A child's own failure stops only the siblings still running when the
 nursery sees it.** A nursery reaps handles oldest-first, so a failure is not
-seen until every child adopted before it has finished. A failing child adopted
-first cancels all its siblings within milliseconds; one adopted last is seen
+seen until every child spawned before it has finished. A failing child spawned
+first cancels all its siblings within milliseconds; one spawned last is seen
 after they have all finished, and cancels none.
 
 A bounded nursery also goes on admitting and starting new children after a

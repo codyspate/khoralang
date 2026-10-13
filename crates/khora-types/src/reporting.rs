@@ -143,6 +143,7 @@ pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
     all.extend(entry_point_shape_errors(db, file));
     all.extend(assert_outside_a_test_errors(db, file));
     all.extend(check_file(db, file).iter().cloned());
+    all.extend(crate::mono::handoff_errors(db, file));
 
     // **The same sentence at the same span, twice, is one mistake.** A missing
     // `!` on a fallible call whose result is method-chained reached the

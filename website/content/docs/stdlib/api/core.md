@@ -631,6 +631,28 @@ an error.
 **No select.** Waiting on the first of several channels wants a primitive
 of its own, and nothing has needed one yet.
 
+### Claim
+
+```khora
+pub type Claim<A> = { pub value: A, state: ClaimState, region: Region };
+```
+
+A value taken off a channel by `Channel::claim`, which this fiber is now
+answerable for.
+
+`value` is the job. Settle the claim with `done` once the work is finished,
+or with `give_back`. A claim that is let go unsettled -- by a return, a
+raise, a `break`, a cancellation, or a `let _ =` -- runs the abandon
+handler `claim` was given, once, on this fiber, when its last reference
+goes.
+
+That is at-least-once delivery: work that finished but was canceled before
+`done` is abandoned too. It covers a running program, not one that is killed
+or traps, which run no cleanup at all.
+
+A claim holds a `Region`, so it stays on the fiber that took it: it cannot
+be sent on a `Channel` or a `Handoff`, or captured by a spawned fiber.
+
 ### Handoff
 
 ```khora
@@ -734,7 +756,7 @@ pub type ChildFailed = { pub children: Int };
 Raised by a nursery when one or more of its children ended with an error.
 
 **Not the child's own error, because there is no such single thing.** A
-nursery holds `Fiber<(), 'er>` with the row quantified per adoption, so two
+nursery holds its children with the row quantified per spawn, so two
 children may fail with two unrelated types and the nursery has nowhere to
 put either — `Nursery` says why. What survives the handles is the count, so
 that is what this carries.
@@ -1096,18 +1118,22 @@ defer: (() ->()) ->()
 
 ```khora
 pub effect Nursery {
-  adopt: (Fiber<(), 'er>) -> (),
+  spawn: (() -> () raises 'er) -> (),
 }
 ```
 
 Where a spawned fiber goes.
 
-**The operation takes a fiber rather than a thunk**, because a thunk cannot
-be *forwarded* to
-`Fiber::spawn` at all. A fiber's body has to be written where it starts, so
-that what it closes over can be checked against the rule that a mutable
-value may not cross — a thunk that arrived from somewhere else took its
-captures with it, and that is the one thing the check cannot see.
+**The operation takes the body, not a running fiber**, so that the nursery
+admits a child before it starts. A bounded nursery that is full waits for
+room *before* the body runs, which is what makes its limit exact: no child
+is ever running that the nursery has not counted.
+
+The body is checked where `nursery.spawn` is written, exactly as
+`Fiber::spawn`'s is: a lambda written there or a named function, closing
+over nothing a mutable value or a region could cross in. A closure that
+arrived under a name is refused, because what it captured was decided
+somewhere the check cannot see.
 
 The answer is fixed at `()` because an operation cannot be generic in a
 *type*, and because a nursery has nothing to do with an answer it cannot
@@ -1117,21 +1143,19 @@ hand back. A fiber whose result matters is one you keep the handle to and
 The **row** is not fixed, and that is worth a sentence because it is the one
 place an operation is polymorphic. `'er` here is quantified per call rather
 than per handler: two children raising two different things are both
-adopted by one nursery. It costs nothing at run time — a capability crosses
+spawned by one nursery. It costs nothing at run time — a capability crosses
 as evidence and an error as a tag, so the handler's closure is the same code
 for every row, which is exactly why a row can be generic where a type
 cannot.
 
-So the idiom is one call inside another, and the body is on the screen:
-
 ```
-nursery.adopt(Fiber::spawn(fn () => analyze(id)!));
+nursery.spawn(fn () => analyze(id)!);
 ```
 
-#### adopt
+#### spawn
 
 ```khora
-adopt: (Fiber<(), 'er>) ->()
+spawn: (() ->() raises 'er) ->()
 ```
 
 ## Methods
@@ -4821,6 +4845,36 @@ pub fn call(self, argument: A) -> B raises 'er
 
 Calls it. A plain closure call; the wrapper costs nothing at runtime.
 
+### Claim\<A>
+
+```khora
+impl<A: Share> Claim<A>
+```
+
+#### done
+
+```khora
+pub fn done(self) ->()
+```
+
+Settles the claim: the work is done, and the abandon handler will not run.
+
+Call it after the last `!` of the work. A cancel that lands before it
+leaves the claim unsettled, and the job goes to the handler.
+
+#### give_back
+
+```khora
+pub fn give_back(self, to: Channel<A>) -> Bool
+```
+
+Puts the value back on `to` without waiting, and settles the claim if it
+landed.
+
+`false` when `to` is full or closed. The claim is then still unsettled,
+and the abandon handler runs when it is let go. Never waits, because a
+requeue that waited for room could wait forever.
+
 ### Channel\<A>
 
 ```khora
@@ -4888,6 +4942,55 @@ quietest possible leak.
 can sit indefinitely, so a cancellation reaches it here: the fiber stops
 and the value is released, the same as on a closed channel. It needs no
 `!`, because it cannot fail.
+
+#### offer
+
+```khora
+pub fn offer(self, value: A) -> Bool
+```
+
+Puts a value in if there is room, and never waits.
+
+`false` when the channel is full or closed, and the value is released.
+Not a cancellation point. This is the send an abandon handler requeues
+with: a handler runs as cleanup, where a `send` to a full channel waits
+forever.
+
+```khora
+let requeue = fn job => {
+  if !Channel::offer(jobs, job) { Shared::set(dropped, job); };
+};
+```
+
+#### claim
+
+```khora
+pub fn claim(self, abandon: (A) ->()) -> Option<Claim<A>>
+```
+
+Takes a value out as a `Claim`, waiting while the channel is empty.
+
+`abandon` is registered before anything after the take can stop, so a
+claim that is let go unsettled hands the value to it on every way out of
+the code holding it, a cancellation included. `None` when the channel is
+closed and drained.
+
+```khora
+loop {
+  match Channel::claim(jobs, fn job => requeue(job)) {
+    Option::None => break,
+    Option::Some(c) => {
+      serve(c.value)!;
+      c.done();
+    },
+  }
+}
+```
+
+**Keep `abandon` to recording or requeuing**, with `offer` and
+`Shared::set`. It runs as cleanup, so it cannot wait, and
+`Fiber::abort` stops it at its first cancellation point: a handler that
+calls a function that can stop may be cut short.
 
 #### receive
 
@@ -4968,6 +5071,16 @@ Gives `value` away, waiting while the hand-off is full.
 False when it is closed, or this fiber is canceled while it waits; the
 value is then released. Stops the program when something else holds a
 writable part of `value` -- see the type.
+
+A `value` that holds a `Region`, a `Scope` or a `Db` is refused at
+compile time: by its type, by what a closure written in the sending
+function captured, or by the type a generic function's caller chose.
+Where none of those can see it -- a closure that arrived as a parameter,
+a send behind a trait method, a type reached through an associated type
+such as `I::Item`, a closure written inside a generic body that captures
+its type parameter -- a `value` that reaches a region makes
+the send answer false and release `value` on this fiber, which is where
+the region's finalizers run.
 
 #### receive
 
@@ -5088,7 +5201,7 @@ pub fn open() -> Fibers
 
 A nursery with no limit on how many children it holds at once.
 
-`bounded` is usually the one to want: a server adopting a fiber per
+`bounded` is usually the one to want: a server spawning a fiber per
 connection meets an unbounded nursery's ceiling by exhausting memory.
 
 #### bounded
@@ -5097,34 +5210,44 @@ connection meets an unbounded nursery's ceiling by exhausting memory.
 pub fn bounded(limit: Int) -> Fibers
 ```
 
-A nursery that will hold at most `limit` running children.
+A nursery that will run at most `limit` children at once.
 
-Adopting past the limit waits for the oldest to finish. That is the whole
-of it, and it is what turns a capacity ceiling into a queue: a server
-adopting a fiber per connection meets an unbounded nursery's ceiling by
-exhausting memory, and meets a bounded one's by accepting more slowly,
-which the listening socket's backlog is already built to absorb.
+Spawning past the limit waits for a running child to finish before the
+new one starts. That is the whole of it, and it is what turns a capacity
+ceiling into a queue: a server spawning a fiber per connection meets an
+unbounded nursery's ceiling by exhausting memory, and meets a bounded
+one's by accepting more slowly, which the listening socket's backlog is
+already built to absorb.
+
+A `limit` below 1 traps, naming the value: there is no such thing as a
+nursery with no room, and `open` is the one without a limit. Written as a
+literal, it is refused at compile time.
 
 Unbounded is right for a nursery over a known handful of tasks — the
 shape `nursery(..)` is usually used for — and wrong for one fed by the
 outside world.
 
-#### adopt
+#### spawn
 
 ```khora
-pub fn adopt<'er>(self, fiber: Fiber<(), 'er>) ->()
+pub fn spawn<'er>(self, body: () ->() raises 'er) ->()
 ```
 
-Puts a running fiber under this nursery.
+Starts `body` on a fiber of its own, as a child of this nursery.
 
-The nursery takes the handle, so nothing else can outlive it with one.
-Adopting past a `bounded` limit waits for the oldest child to finish,
-which is what turns a ceiling into a queue. A cancel that arrives during
-that wait is passed to the child being waited on, and the adopting fiber
-stops once it has finished.
+**Admitted before it starts.** In a `bounded` nursery that is full, this
+waits for a running child to finish, and only then starts `body`, so
+the nursery never runs more than its limit. A cancel that arrives during
+that wait starts nothing: `body` is let go of unstarted and the spawning
+fiber stops here. The nursery's running children are left to the
+nursery, which cancels them on its way out.
 
-`Fiber<(), 'er>`: **adopting gives up the answer and keeps the failure.**
-A nursery holds its children as bare handles and waits for them; it could
+`body` is checked as `Fiber::spawn`'s is: written here, as a lambda or a
+named function, and closing over nothing that cannot cross to another
+fiber.
+
+`() -> ()`: **a child's answer is given up and its failure kept.** A
+nursery holds its children as bare handles and waits for them; it could
 not hand back what they computed even if it kept it, so the answer is
 fixed at `()`. The row stays so a child's failure can still be counted
 and reported as `ChildFailed`. Canceling the nursery's fiber cancels
@@ -5141,7 +5264,7 @@ answers how many of them ended with an error.
 
 **A count, because a count is what a nursery can honestly say.** Every
 child's error has a type of its own and a nursery holds them as bare
-handles — that is written down at `adopt` and is not going to change — so
+handles — that is written down at `spawn` and is not going to change — so
 there is no one value to hand back. `bounded_nursery` turns a non-zero
 answer into a `ChildFailed`, which is what a program should be reading
 rather than this.
@@ -5154,11 +5277,11 @@ rather than killed, so each stops at its next `!` and runs its finalizers
 on the way out, and every one of them is still waited for.
 
 **What is measured today is weaker than that reads.** A nursery reaps
-handles oldest-first, so a failure is noticed in adoption order: with
+handles oldest-first, so a failure is noticed in spawn order: with
 twelve children and a failure at 10 ms, the siblings were canceled in
-2-8 ms when the doomed child was adopted first, in about half of runs at
-all when it was adopted in the middle, and in none of twenty-five runs
-when it was adopted last -- everyone finished and the count came back
+2-8 ms when the doomed child was spawned first, in about half of runs at
+all when it was spawned in the middle, and in none of twenty-five runs
+when it was spawned last -- everyone finished and the count came back
 421 ms later. The group does collapse and every child is waited for.
 Promptness is not something to build on yet. Roadmap 16.7.
 
@@ -6437,8 +6560,8 @@ eta-expansion must not alter what a program means.
 
 ```khora
 nursery(fn () => {
-  nursery.adopt(Fiber::spawn(work));
-  nursery.adopt(Fiber::spawn(more));
+  nursery.spawn(work);
+  nursery.spawn(more);
 })!
 ```
 
@@ -6462,13 +6585,13 @@ the *outside world* should not be, because then the count is somebody
 else's decision.
 
 A fiber is an operating-system thread today, so unbounded there means a
-ceiling met by exhausting memory. Bounded means one met by adopting more
+ceiling met by exhausting memory. Bounded means one met by spawning more
 slowly, which for a server means accepting more slowly, which the listening
 socket's backlog is already built to absorb: overload becomes latency
 instead of collapse.
 
 ```khora
-import std::core::{ChildFailed, Fiber, Nursery, bounded_nursery, print};
+import std::core::{ChildFailed, Nursery, bounded_nursery, print};
 
 fn handle(job: Int) -> () { print("job ${job}") }
 
@@ -6476,7 +6599,7 @@ fn launch() -> () with { nursery: Nursery } {
   let mut next = 0;
   while next < 1000 {
     let job = next;
-    nursery.adopt(Fiber::spawn(fn () => handle(job)));
+    nursery.spawn(fn () => handle(job));
     next = next + 1;
   }
 }
@@ -6485,9 +6608,13 @@ pub fn main() raises ChildFailed { bounded_nursery(64, launch)! }
 ```
 
 The producer slows down at the boundary where it creates work rather than
-filling an unbounded queue somewhere else. **The limit admits `limit + 1`
-live children**, because `Fiber::spawn` starts the child before `adopt`
-blocks; subtract one where it stands for a real resource.
+filling an unbounded queue somewhere else. **At most `limit` children run
+at once**, exactly: `nursery.spawn` waits for room before the child
+starts, so a pool of 64 connections is `bounded_nursery(64, ..)`.
+
+**`limit` must be at least 1.** An integer literal below 1 is a compile
+error, and a computed one traps with a message naming the value; a nursery
+with no limit is `nursery`.
 
 ### scoped
 

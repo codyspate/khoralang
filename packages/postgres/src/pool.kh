@@ -116,7 +116,7 @@ module postgres::pool;
 //!   give-back puts the token back for the next one; once a slot is live or
 //!   reconnecting again, the next caller to receive it drops it.
 
-import std::core::{Changed, Fiber, Fibers, Handoff, List, Option, Region, Result, Shared};
+import std::core::{Changed, Fibers, Handoff, List, Option, Region, Result, Shared};
 import std::clock::{Clock};
 import std::db::{Db, DbError};
 import std::random::{Random};
@@ -316,7 +316,7 @@ pub fn open(crew: Fibers, settings: Settings, count: Int) -> Pool {
   open_with(crew, settings, count, Reconnect::default())
 }
 
-/// Opens `count` slots and adopts a fiber for each into `crew`.
+/// Opens `count` slots and spawns a fiber for each into `crew`.
 ///
 /// **Returns before any of them has connected.** A slot's fiber opens its
 /// own connection, so this is a spawn and not a round trip. `with_db` waits
@@ -340,7 +340,7 @@ pub fn open_with(crew: Fibers, settings: Settings, count: Int, plan: Reconnect) 
   while made < wanted {
     let here = Shared::of(false);
     slots = List::Cons(here, slots);
-    Fibers::adopt(crew, Fiber::spawn(fn () => slot(settings, plan, idle, token_idle, here, tally)));
+    Fibers::spawn(crew, fn () => slot(settings, plan, idle, token_idle, here, tally));
     made = made + 1
   };
   { idle: idle, token_idle: token_idle, slots: slots, crew: crew, tally: tally }

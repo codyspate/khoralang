@@ -36,8 +36,8 @@ So must every error in `'er`, for the same reason: `join` hands the error the
 body raised to whoever joins, and a handle can be joined from more than one
 fiber. A record with a `mut` field, an `Array` or a `Map` in a spawned body's
 `raises` row is refused at the spawn, and a `Region` or `Scope` there is
-refused with the message that names `scoped`. `Fiber::outcome` and
-`nursery.adopt` take the same handle, so the spawn is where each is checked.
+refused with the message that names `scoped`. `nursery.spawn` checks its body
+by the same rules, at the call that starts it.
 The error of a `test` block is not held to this: the test runner reports it and
 releases it, and it reaches no other fiber of the program.
 
@@ -90,24 +90,26 @@ A nursery owns a set of fibers. The capability installed in a nursery body is:
 
 ```khora
 pub effect Nursery {
-  adopt: (Fiber<(), 'er>) -> (),
+  spawn: (() -> () raises 'er) -> (),
 }
 ```
+
+`nursery.spawn(body)` starts `body` on a fiber of its own, as a child of the nursery. The nursery admits the child **before** it starts, which is what lets a bounded nursery's limit be exact (below). The body is checked the way `Fiber::spawn`'s is: it is written at the call, as a lambda or a named function, and it may close over nothing another fiber cannot hold.
 
 The answer is fixed at `()` and the row is not, and each half has its own reason.
 
 The answer is fixed because a nursery has nothing to do with a result it cannot hand back: it holds children as bare handles and waits for them. A fiber whose result matters is one whose handle you keep and `join`.
 
-The row stays for failures: it is how a child that can fail is adopted, and how its failure reaches the nursery. It has nothing to do with stopping a child. A cancellation leaves every function on a return of its own, whatever its row, so a child whose row is empty is stopped exactly like one whose row is not.
+The row stays for failures: it is how a child that can fail is spawned, and how its failure reaches the nursery. It has nothing to do with stopping a child. A cancellation leaves every function on a return of its own, whatever its row, so a child whose row is empty is stopped exactly like one whose row is not.
 
-`'er` is quantified per call rather than per handler, so children raising unrelated failures are adopted by one nursery. A body that starts children declares the requirement and adopts each handle; the child's body may raise, and no `catch` is needed at the adoption site:
+`'er` is quantified per call rather than per handler, so children raising unrelated failures are spawned by one nursery. A body that starts children declares the requirement and spawns each one; the child's body may raise, and no `catch` is needed where it is spawned:
 
 ```khora
 fn fan_out() -> ()
   with { nursery: Nursery }
 {
-  nursery.adopt(Fiber::spawn(fn () => first()));
-  nursery.adopt(Fiber::spawn(fn () => second()!));
+  nursery.spawn(fn () => first());
+  nursery.spawn(fn () => second()!);
 }
 ```
 
@@ -129,7 +131,7 @@ fn run() -> () raises ChildFailed {
 }
 ```
 
-When the body completes normally, `nursery` waits until every adopted child is finished. If the body leaves by failure or cancellation, releasing the nursery cancels children that are still running and waits for them before the scope is gone.
+When the body completes normally, `nursery` waits until every child is finished. If the body leaves by failure or cancellation, releasing the nursery cancels children that are still running and waits for them before the scope is gone.
 
 A child that acquires something is given a scope of its own, because a `Scope` stays on the fiber that opened it and a child cannot be handed its parent's. Open it in the child:
 
@@ -137,7 +139,7 @@ A child that acquires something is given a scope of its own, because a `Scope` s
 fn accept_loop(connection: Connection) -> ()
   with { scope: Scope, nursery: Nursery }
 {
-  nursery.adopt(Fiber::spawn(fn () => scoped(fn () => serve(connection))));
+  nursery.spawn(fn () => scoped(fn () => serve(connection)));
 }
 ```
 
@@ -183,19 +185,21 @@ A nursery is a unit: the block asked for these fibers together, so one failing m
 pub type ChildFailed = { children: Int };
 ```
 
-A count rather than the child's own error, because `adopt` binds the row per adoption — two children may fail with two unrelated types and there is no one value to hand back. A child the nursery *canceled* is not counted: that is what a nursery does to its children, not something that went wrong.
+A count rather than the child's own error, because `spawn` binds the row per call — two children may fail with two unrelated types and there is no one value to hand back. A child the nursery *canceled* is not counted: that is what a nursery does to its children, not something that went wrong.
 
-**A failure is seen in adoption order.** A nursery reaps handles oldest-first, so a child's failure is not seen until every child adopted before it has finished, and it cancels only the siblings still running at that moment. A failing child adopted first cancels all its siblings within milliseconds; one adopted in the middle of twelve canceled between two and six of the eleven in measurement; one adopted last is seen after every sibling has finished and cancels none. Every child is waited for and the failure is always reported. When a sibling's failure has to stop work that is expensive, holds a resource, or has an effect outside the process, adopt the child that can fail first, or have that work check a `Shared` flag itself. [Known limitations](/docs/limitations/#a-childs-failure-is-seen-late-unless-it-was-adopted-early) has the numbers.
+**A failure is seen in spawn order.** A nursery reaps handles oldest-first, so a child's failure is not seen until every child spawned before it has finished, and it cancels only the siblings still running at that moment. A failing child spawned first cancels all its siblings within milliseconds; one spawned in the middle of twelve canceled between two and six of the eleven in measurement; one spawned last is seen after every sibling has finished and cancels none. Every child is waited for and the failure is always reported. When a sibling's failure has to stop work that is expensive, holds a resource, or has an effect outside the process, spawn the child that can fail first, or have that work check a `Shared` flag itself. [Known limitations](/docs/limitations/#a-childs-failure-is-seen-late-unless-it-was-spawned-early) has the numbers.
 
 The body may be a named function or a lambda. A lambda resolves its capabilities where it is written, and as the argument to `nursery` that is inside the row `nursery` installs, so `nursery(fan_out)` and `nursery(fn () => fan_out())` mean the same thing.
 
 ### An operation can be generic in a row, but not in a type
 
-`adopt` binds `'er` and cannot bind an answer type, which is why `Fiber<(), 'er>` fixes the answer and leaves the failure row free. That asymmetry is a rule about every effect operation rather than about nurseries: [Effects and rows](/docs/reference/effects/#an-operation-may-be-generic-in-a-row-but-not-in-a-type) has the reason, with `adopt` as its example.
+`spawn` binds `'er` and cannot bind an answer type, which is why its body's type, `() -> () raises 'er`, fixes the answer and leaves the failure row free. That asymmetry is a rule about every effect operation rather than about nurseries: [Effects and rows](/docs/reference/effects/#an-operation-may-be-generic-in-a-row-but-not-in-a-type) has the reason.
 
-### Why `adopt` takes a fiber and not a thunk
+### Why `spawn` takes the body and not a running fiber
 
-A fiber's body must be written where it starts, so that what it closes over can be checked against the sharing rules. A thunk built somewhere else and forwarded to `spawn` inside the handler would move that check away from the code it is about.
+A running fiber can only be counted after it has started, so a bounded nursery handed one could apply its limit only to the next: while the producer waited for room, the child it was holding was already running. Taking the body lets the nursery wait for room first and start the child after.
+
+The body is still checked where it is written. `nursery.spawn(fn () => ..)` checks its lambda as `Fiber::spawn` would; the handler then forwards a closure that has already been checked, and no other closure value can be handed to `Fibers::spawn`.
 
 ## Bounded nurseries
 
@@ -216,19 +220,18 @@ fn serve() -> ()
 {
   loop {
     let request = next_request();
-    nursery.adopt(Fiber::spawn(fn () => handle(request)!));
+    nursery.spawn(fn () => handle(request)!);
   }
 }
 
 bounded_nursery(128, serve)
 ```
 
-Adopting past a bounded nursery's limit waits for older work to finish. Use this for work whose arrival rate is controlled externally so overload becomes backpressure instead of unbounded growth. A fiber canceled while it waits for room passes the cancel to the child it is waiting on, and stops as soon as that child has.
+**At most `limit` children run at once, exactly.** Spawning into a full bounded nursery waits for its oldest running child to finish, and only then starts the new one; `bounded_nursery(128, serve)` above never has a 129th request in flight. Use this for work whose arrival rate is controlled externally so overload becomes backpressure instead of unbounded growth.
 
-Two riders on the number, both measured rather than intended:
+A fiber canceled while it waits for room stops there, and the body it was spawning never starts. The children already running are the nursery's: they are canceled when the nursery is released on the way out.
 
-- **The limit admits `limit + 1` live children.** `Fiber::spawn` *starts* the child and `nursery.adopt` is what blocks, so by the time the bound is applied the extra work is already running. `bounded_nursery(128, serve)` above is 129 live children. Subtract one where the limit stands for a real resource such as a connection pool.
-- **A limit of zero or less means no limit**, because that is how the unbounded `nursery` is built. A limit computed from configuration that comes out zero removes the bound rather than clamping to one; check it before you pass it.
+**The limit must be at least 1.** An integer literal below 1 is a compile error. A limit computed at run time that comes out below 1 stops the program with a trap that names the value (`bounded_nursery` needs a limit of at least 1, and this one is 0), before the body runs. The unbounded nursery is `nursery`.
 
 Use unbounded `nursery` when the fan-out is already bounded by data the program holds, such as a known handful of independent tasks.
 
@@ -312,7 +315,7 @@ a function on a return of its own, not on the error channel.
 
 A `!` observes a pending cancellation *before* the call it marks, so a computation already asked to stop does not do work it is about to throw away, and the arguments are not evaluated.
 
-**A value the fiber is already holding is discarded with it.** Between the point a value becomes the fiber's responsibility and the next cancellation point after that, nobody else knows the fiber has it — so a cancellation there drops it, cleanly and silently. The shape that meets this is a worker taking a job off a channel and then calling something with it. Register the value with a region before that call and the region's finalizer runs on the unwind; [Take work off a queue safely](/docs/cookbook/taking-work-off-a-queue/) is the recipe.
+**A value the fiber is already holding is discarded with it.** Between the point a value becomes the fiber's responsibility and the next cancellation point after that, nobody else knows the fiber has it — so a cancellation there drops it, cleanly and silently. The shape that meets this is a worker taking a job off a channel and then calling something with it. For a channel, take the job with `Channel::claim` (below); for anything else, register the value with a region before that call and the region's finalizer runs on the unwind. [Take work off a queue safely](/docs/cookbook/taking-work-off-a-queue/) is the recipe.
 
 Reading the flag after the call instead would move the problem rather than remove it: the fiber would be holding the call's result at the same point. Work in flight across a cancellation boundary is at risk whichever side the boundary is read on.
 
@@ -337,6 +340,28 @@ interrupted: the fiber finishes it and stops at the next cancellation point
 after it.
 
 The check on the two channel operations comes *after* the call rather than before it, and only when the call comes back **empty-handed**. The runtime looks at the cancellation flag only once it has established there is nothing to take and no room to send, so a value arriving at the same moment as the cancellation is delivered rather than discarded — a canceled receive is never holding a value nobody will see again. A send that gives up releases its value, the same as a send to a closed channel.
+
+### Claiming work: `Channel::claim` and `Channel::offer`
+
+```khora
+impl<A: Share> Channel<A> {
+  pub fn claim(self, abandon: (A) -> ()) -> Option<Claim<A>>;
+  pub fn offer(self, value: A) -> Bool;
+}
+
+impl<A: Share> Claim<A> {
+  pub fn done(self) -> ();
+  pub fn give_back(self, to: Channel<A>) -> Bool;
+}
+```
+
+`claim` is `receive` for a value that is *work*. It takes a value the same way, waiting while the channel is empty, and registers `abandon` before anything after the take can stop. The value is `claim.value`. The claim is settled by `done`, or by a `give_back` that answered `true`; any other way out of the code holding an unsettled claim (returning, raising, `break`, discarding it, a cancellation, SIGTERM) runs `abandon(value)` once, on this fiber, when the claim's last reference goes.
+
+`offer` is a send that never waits: `false` when the channel is full or closed, and the value is released. It is not a cancellation point. `give_back` is `offer` back onto a channel, so it never waits either; when it answers `false` the claim is still unsettled.
+
+`abandon` runs as cleanup, so it cannot be canceled and should not wait: a `send` to a full channel inside it waits forever, which is why `offer` exists. `Fiber::abort` stops cleanup at its first cancellation point, so a handler that only records (`Shared::set`) or requeues (`offer`) runs to its end under `abort`, and a longer one can be cut short.
+
+A claim holds a `Region`, so it stays on the fiber that took it: sending it on a `Channel` or a `Handoff`, or capturing it in a spawned fiber, is refused at compile time. A claim gives at-least-once delivery, not exactly-once, and nothing survives a process that is killed or traps. [Take work off a queue safely](/docs/cookbook/taking-work-off-a-queue/) has the whole list.
 
 ### What cancellation costs
 

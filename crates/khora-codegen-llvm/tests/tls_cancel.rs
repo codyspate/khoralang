@@ -184,8 +184,8 @@ fn doomed() -> () raises Oops {{
 /// it adopted, so with the holder first the doomed child is not looked at
 /// until the holder has finished, and nothing is ever canceled.
 fn both() -> () with {{ nursery: Nursery }} {{
-  nursery.adopt(Fiber::spawn(fn () => doomed()!));
-  nursery.adopt(Fiber::spawn(fn () => scoped(fn () => hold()!)!));
+  nursery.spawn(fn () => doomed()!);
+  nursery.spawn(fn () => scoped(fn () => hold()!)!);
 }}
 
 pub fn main() -> Int {{

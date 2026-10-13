@@ -66,7 +66,7 @@ An operation's `raises` row may mention a row variable the operation itself bind
 
 ```khora
 pub effect Nursery {
-  adopt: (Fiber<(), 'er>) -> (),
+  spawn: (() -> () raises 'er) -> (),
 }
 ```
 

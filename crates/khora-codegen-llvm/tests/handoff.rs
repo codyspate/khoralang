@@ -555,3 +555,98 @@ fn a_handoffs_handle_is_lent_to_its_operations() {
     let exe = build("last_use", LAST_USE, khora_codegen_llvm::Profile::Debug);
     runs_clean("last_use", &exe, "send 1 receive 1 close 1 live 0");
 }
+
+/// Two sends whose region the compiler cannot see: a closure that arrived as
+/// a parameter, and a generic send behind a trait method. A receiver on
+/// another fiber takes whatever was queued and lets it go.
+const HIDDEN_REGION: &str = "module main;
+
+import std::core::{print, Fiber, Handoff, Option, Region};
+
+extern fn khora_live_count() -> Int;
+
+type Nested = { item: Option<Region> };
+
+trait Courier {
+  fn deliver<A>(self, pipe: Handoff<A>, value: A) -> Bool;
+}
+
+type Post = { name: String };
+
+impl Courier for Post {
+  fn deliver<A>(self, pipe: Handoff<A>, value: A) -> Bool { Handoff::send(pipe, value) }
+}
+
+fn pass_on(h: Handoff<(Int) -> Int>, cb: (Int) -> Int) -> Bool { Handoff::send(h, cb) }
+
+fn make(region: Region) -> (Int) -> Int { fn (n: Int) => { let _keep = region; n + 1 } }
+
+fn drain<A>(h: Handoff<A>) -> Int {
+  match Handoff::receive(h) {
+    Option::Some(_) => 1,
+    Option::None => 0,
+  }
+}
+
+fn param_case() -> Bool {
+  let region = Region::open();
+  Region::defer(region, fn () => print(\"finalized\"));
+  let h: Handoff<(Int) -> Int> = Handoff::bounded(1);
+  let sent = pass_on(h, make(region));
+  Handoff::close(h);
+  let f = Fiber::spawn(fn () => drain(h));
+  print(\"param received ${Fiber::join(f)}\");
+  sent
+}
+
+fn trait_case() -> Bool {
+  let region = Region::open();
+  Region::defer(region, fn () => print(\"finalized\"));
+  let pipe: Handoff<Nested> = Handoff::bounded(1);
+  let post: Post = { name: \"p\" };
+  let sent = post.deliver(pipe, { item: Option::Some(region) });
+  Handoff::close(pipe);
+  let f = Fiber::spawn(fn () => drain(pipe));
+  print(\"trait received ${Fiber::join(f)}\");
+  sent
+}
+
+pub fn main() -> Int {
+  let base = khora_live_count();
+  let a = param_case();
+  let b = trait_case();
+  print(\"param ${a} trait ${b} live ${khora_live_count() - base}\");
+  0
+}
+";
+
+/// [`build`] for a program with no [`HEAD`].
+fn build_alone(name: &str, program: &str, profile: khora_codegen_llvm::Profile) -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("handoff_{name}"));
+    harness::ensure_runtime();
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
+    let _ = std::fs::remove_file(&exe);
+    let db = KhoraDatabase::new();
+    let root = SourceRoot::new(&db, sources(&db, &dir, program));
+    if let Err(errors) = khora_codegen_llvm::compile_with(&db, root, &exe, profile) {
+        let messages: Vec<String> = errors.into_iter().map(|e| e.message).collect();
+        panic!("compiling `{name}` failed:\n  {}", messages.join("\n  "));
+    }
+    exe
+}
+
+/// **A value that reaches a region is not sent: the send answers false**,
+/// and the region is released on the fiber that opened it, its finalizer
+/// running there. The compiler refuses every such send it can see; these two
+/// it cannot, and they stopped the receiving fiber at status 134. Debug and
+/// release, both backends.
+#[test]
+fn a_send_whose_region_the_compiler_cannot_see_answers_false() {
+    let expected = "finalized\nparam received 0\nfinalized\ntrait received 0\nparam false trait false live 0";
+    for profile in [khora_codegen_llvm::Profile::Debug, khora_codegen_llvm::Profile::Release] {
+        let name = format!("hidden_region_{profile:?}").to_lowercase();
+        let exe = build_alone(&name, HIDDEN_REGION, profile);
+        runs_clean(&name, &exe, expected);
+    }
+}

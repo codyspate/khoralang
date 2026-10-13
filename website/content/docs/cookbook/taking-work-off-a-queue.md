@@ -15,15 +15,118 @@ loop {
 }
 ```
 
-`Channel::receive` has already emptied that slot. The call to `serve` is a cancellation point, and a cancellation that arrived in between is taken *before* the call runs — so the job is in nobody's hands. Not served, not in the queue, gone. Nothing is printed and the fiber unwinds cleanly.
+`Channel::receive` has already emptied that slot. The call to `serve` is a cancellation point, and a cancellation that arrived in between is taken *before* the call runs, so the job is in nobody's hands. It is not served and not in the queue. Nothing is printed and the fiber unwinds cleanly.
 
-Measured over two hundred canceled rounds, the loop above took 198 jobs out of the channel and accounted for none of them.
+Measured over two hundred canceled rounds, on both fiber backends, that loop took between 196 and 200 jobs out of the channel that it never accounted for.
 
-## The rule
+## Take a claim instead
 
-**A value stops being the queue's and starts being yours at the moment it is received.** Between that moment and the first `!` after it, the fiber owns something nobody else knows about, and a cancellation there discards it.
+```khora
+loop {
+  match Channel::claim(jobs, fn job => abandon(job)) {
+    Option::None => break,
+    Option::Some(c) => {
+      serve(c.value)!;
+      c.done();
+    },
+  }
+}
+```
 
-So register it before the first `!`:
+`Channel::claim` takes a job the way `receive` does, and registers the function you give it before anything after the take can stop. The claim is yours until you settle it:
+
+- `c.done()` says the job was handled. Call it after the last `!` of the work, because a cancel that lands between the work finishing and `done` makes the claim unsettled, and the job is handed to `abandon` again.
+- `c.give_back(queue)` puts the job back on a channel without waiting. It answers `false` when that channel is full or closed; the claim is then still unsettled, and `abandon` runs when it is let go.
+- Anything else runs `abandon(job)` once, on this fiber: returning, raising, `break`, discarding the claim with `let _ =`, a cancellation, and the first SIGTERM or Ctrl-C, which cancel the whole program.
+
+The handler is a required argument, so a worker cannot take a job without saying what happens to it if the work does not finish. What it should do is the application's decision: put the job back, write it to a dead-letter queue, or record that it was dropped.
+
+**Keep the handler to recording or requeuing, with `Channel::offer` and `Shared::set`.** It runs as cleanup, which has two consequences:
+
+- A cleanup cannot be canceled, and that also means it cannot wait: a `Channel::send` to a full queue inside one waits forever. `Channel::offer` never waits. It answers `false` when there is no room, and the handler can then record the job somewhere else.
+- `Fiber::abort`, and `cancel_within` once its deadline passes, stop cleanup at its first cancellation point. A handler made of `offer` and `Shared::set` has none and runs to the end; one that calls a function that can stop may be cut off before it does anything.
+
+```khora
+let requeue = fn job => {
+  if !Channel::offer(jobs, job) { Shared::set(dropped, job); };
+};
+```
+
+A claim gives *at-least-once* delivery. Work that finished but was canceled before `done` is abandoned, and if the handler requeues it, it runs again. Make the work idempotent.
+
+## Complete example
+
+```khora
+module worker::main;
+
+import std::core::{Channel, Claim, Fiber, Option, Shared, print};
+
+pub type Halt = | Now;
+
+fn serve(job: Int, stop: Channel<Int>) -> () raises Halt {
+  // Stands in for real work: waits until it is told to stop.
+  let _ = Channel::receive(stop);
+}
+
+fn worker(
+  jobs: Channel<Int>,
+  started: Channel<Int>,
+  stop: Channel<Int>,
+  served: Shared<Int>,
+  requeued: Shared<Int>,
+) -> () raises Halt {
+  loop {
+    match Channel::claim(jobs, fn job => {
+      if Channel::offer(jobs, job) { Shared::set(requeued, Shared::get(requeued) + 1); };
+    }) {
+      Option::None => break,
+      Option::Some(c) => {
+        let _ = Channel::send(started, c.value);
+        serve(c.value, stop)!;
+        c.done();
+        Shared::set(served, Shared::get(served) + 1);
+      },
+    }
+  }
+}
+
+pub fn main() -> () {
+  let jobs: Channel<Int> = Channel::bounded(4);
+  let started: Channel<Int> = Channel::bounded(1);
+  let stop: Channel<Int> = Channel::bounded(1);
+  let served = Shared::of(0);
+  let requeued = Shared::of(0);
+  let _ = Channel::send(jobs, 1);
+  let _ = Channel::send(jobs, 2);
+
+  let hand = Fiber::spawn(fn () => worker(jobs, started, stop, served, requeued)!);
+  // Cancel the worker in the middle of its first job.
+  let _ = Channel::receive(started);
+  Fiber::cancel(hand);
+  Fiber::wait(hand)! catch { _ => () };
+
+  print("served ${Shared::get(served)}, requeued ${Shared::get(requeued)}, queued ${Channel::depth(jobs)}");
+}
+```
+
+It prints `served 0, requeued 1, queued 2`: the job that was in the worker's hands is back in the queue next to the one it never took.
+
+**Assert the reconciliation in a real pool:** every job taken equals the jobs served plus the jobs abandoned. Count *taken* from the producer's side (sent, minus what is left in the queue), not in the worker, because a worker that loses a job is also the code that would fail to count it. Over the same two hundred canceled rounds as above, `claim` took 351 to 396 jobs per run and accounted for every one, on both backends. A thousand rounds of a cancel delivered right after the take lost none either, where the plain loop lost all of them on one backend and two thirds on the other.
+
+## What a claim does not cover
+
+- **SIGKILL, running out of memory, power loss.** No cleanup runs, and a job in an in-memory channel is gone. Only an external queue with leases survives this.
+- **A trap** (overflow, `todo()`, an index out of range). It ends the process at status 134 without running cleanup.
+- **A long handler under `abort`.** See above: anything past the handler's first cancellation point may not run.
+- **A foreign call that never returns.** It is not a cancellation point. The claim is abandoned at the next one after the call returns, so if it never does, nothing runs.
+- **A claim kept somewhere long-lived.** One stored in a list or a record is abandoned when its last reference goes, which can be much later. One held by a reference cycle is never abandoned.
+- **A row claimed in a database.** That needs a lease in the database itself: an expiry, and an owner checked when the work is acknowledged. A claim can release such a lease promptly on a cancel, but it cannot replace one, because the hazard that matters is the process dying.
+
+A claim cannot be sent to another fiber, through a `Channel` or a `Handoff`, or captured by a spawned fiber: it holds a `Region`, and a region stays on the fiber that opened it. The compiler refuses all three.
+
+## If you cannot use `claim`
+
+The same guarantee can be written by hand, for a value that does not come from a channel's `receive`, or one that needs more than the job in its handler. The registration has to come **immediately** after the take, with nothing in between:
 
 ```khora
 Option::Some(job) => {
@@ -37,99 +140,19 @@ Option::Some(job) => {
 }
 ```
 
-`Region::defer` runs on **every** way out of the enclosing block — a normal return, a typed failure, and an unwind from cancellation — which is why the flag is there. A finalizer that counted every job would be counting successes as losses; the flag is what tells it which of the three it is cleaning up after. Set it after the last `!`, where there is no longer a cancellation point between the work finishing and the record of it.
+`Region::open`, `Shared::of` and `Region::defer` cannot stop, so there is no cancellation point between the receive and the registration. **Nothing else may go there**, not even a counter: `Shared::update` hands a function to the runtime and is a cancellation point. An earlier version of this page bumped a `took` counter with `Shared::update` before `Region::open`, and in a design round's measurement that version lost 5 jobs in 200 rounds on threads. Calling a helper that does the registration has the same problem, because a function that takes a function value can stop as it is entered; that lost 13 in 200.
 
-What `abandon` should do is the application's decision — put the job back, mark it for redelivery, write it to a dead-letter queue, or simply record that it was dropped. The point is that something happens, and that the decision is made where the job is taken rather than left to nobody.
-
-**A `Region` is the right tool here because the cleanup depends on what
-happened.** For a resource that always releases the same way, `scoped` and
-`acquire` are shorter — see [Cancellation-safe
-resources](/docs/cookbook/cancellation-safe-resources/).
-
-## Complete example
-
-```khora
-module worker::main;
-
-import std::clock::{Clock};
-import std::core::{Channel, Fiber, Option, Region, Shared, attempt, print};
-
-pub type Halt = | Now;
-
-fn serve(done: Shared<Int>) -> () raises Halt {
-  let _ = Shared::update(done, fn n => n + 1);
-}
-
-fn worker(
-  jobs: Channel<Int>,
-  took: Shared<Int>,
-  done: Shared<Int>,
-  abandoned: Shared<Int>,
-) -> () raises Halt {
-  loop {
-    match Channel::receive(jobs) {
-      Option::None => break,
-      Option::Some(_job) => {
-        let _ = Shared::update(took, fn n => n + 1);
-        // Registered before the first `!` below, because after that line this
-        // fiber may never run again. The flag is what tells the finalizer
-        // whether it is cleaning up after a cancellation or after success.
-        let settled = Shared::of(false);
-        let region = Region::open();
-        Region::defer(region, fn () => {
-          if !Shared::get(settled) {
-            let _ = Shared::update(abandoned, fn n => n + 1);
-          };
-        });
-        serve(done)!;
-        Shared::set(settled, true);
-      },
-    }
-  }
-}
-
-pub fn main() -> Int {
-  let _ = attempt(fn () => {
-    let jobs: Channel<Int> = Channel::bounded(4);
-    let took = Shared::of(0);
-    let done = Shared::of(0);
-    let abandoned = Shared::of(0);
-
-    let hand = Fiber::spawn(fn () => worker(jobs, took, done, abandoned)!);
-    Channel::send(jobs, 1);
-    Channel::send(jobs, 2);
-    clock.sleep(40);
-    Fiber::cancel(hand);
-    Fiber::wait(hand)!;
-
-    print("took ${Shared::get(took)}, served ${Shared::get(done)}, abandoned ${Shared::get(abandoned)}");
-  } with { clock: Clock::real() });
-  0
-}
-```
-
-Every job that came off the queue is in exactly one of the last two counts. That reconciliation — *taken equals served plus abandoned* — is the invariant worth asserting in a real pool, because it is the one that catches this class of bug. Over two hundred rounds cut at a jittered moment it held every time. Without the reconciliation the loss is invisible: the program exits 0 either way.
-
-**This program prints nothing on standard error**, and that is worth saying
-because a nearby sentence in the [known
-limitations](/docs/limitations/#concurrency-combinators) is easy to misread.
-The runtime prints `khora: a fiber ended with an error nobody was waiting
-for` for a fiber that *failed* — written by that fiber the moment it ends,
-and neither `wait` nor `join` changes whether it appears. A cancellation is
-excluded from the message, so the canceled worker above is silent. If you
-ever do see the line from a supervisor like this one, a child raised on its
-own: investigate it rather than filtering it out, and note that it may be a
-failure the program went on to handle.
+Over two hundred canceled rounds this pattern, written exactly as above, lost no job on either backend.
 
 ## Why the check is before the call and not after
 
 A `!` reads the cancellation flag before the call it marks, so a computation already asked to stop does not evaluate arguments or do work it is about to throw away. The cost is exactly the case above.
 
-Checking afterwards instead would not remove the problem, only move it: the fiber would then be holding the call's *result* when it unwound. Work in flight across a cancellation boundary is at risk whichever side the boundary is read on, and a region is what makes it recoverable. That is what regions are for.
+Checking afterwards instead would not remove the problem, only move it: the fiber would then be holding the call's *result* when it unwound. Work in flight across a cancellation boundary is at risk whichever side the boundary is read on, and a region is what makes it recoverable.
 
-`Channel::send` and `Channel::receive` are the exception, and are safe: they are cancellation points themselves, and the runtime looks at the flag only once it has established there is nothing to take and no room to send. A canceled receive is never holding a value. See [Concurrency](/docs/reference/concurrency/).
+`Channel::send` and `Channel::receive` are the exception, and are safe: they are cancellation points themselves, and the runtime looks at the flag only once it has established there is nothing to take and no room to send. A canceled receive is never holding a value. That is what lets `claim` register its handler in time. See [Concurrency](/docs/reference/concurrency/).
 
 ## See also
 
-- [Make resource cleanup cancellation-safe](/docs/cookbook/cancellation-safe-resources/) — the same mechanism for a resource rather than a job.
-- [Bound concurrent work](/docs/cookbook/bounded-concurrency/) — how many workers, and what happens when they are all busy.
+- [Make resource cleanup cancellation-safe](/docs/cookbook/cancellation-safe-resources/): the same mechanism for a resource rather than a job.
+- [Bound concurrent work](/docs/cookbook/bounded-concurrency/): how many workers, and what happens when they are all busy.

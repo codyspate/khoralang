@@ -182,7 +182,7 @@ pub fn borrowed_arguments(owner: &str, method: &str) -> &'static [usize] {
         ("Shared", "get" | "set" | "update" | "modify") => RECEIVER,
         // `send` hands over the *value* — the queue owns it — while the handle
         // stays the caller's. A serving fiber sends per reply.
-        ("Channel", "send" | "receive" | "poll" | "close" | "depth") => RECEIVER,
+        ("Channel", "send" | "offer" | "receive" | "poll" | "close" | "depth") => RECEIVER,
         // The same for a hand-off: `send` gives the value away, not the handle.
         ("Handoff", "send" | "receive" | "close") => RECEIVER,
         // *Releasing* a handle is what joins; that is the binding's business.
@@ -191,7 +191,7 @@ pub fn borrowed_arguments(owner: &str, method: &str) -> &'static [usize] {
             "join" | "wait" | "cancel" | "abort" | "cancel_within" | "detach" | "finished"
             | "canceled" | "outcome",
         ) => RECEIVER,
-        ("Fibers", "adopt" | "wait") => RECEIVER,
+        ("Fibers", "spawn" | "wait") => RECEIVER,
 
         // The ones that pay: a borrow applies inside a loop where a last use
         // does not, and `lowered_between` calls `String::byte` per character.

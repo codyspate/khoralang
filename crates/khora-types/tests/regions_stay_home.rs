@@ -111,7 +111,7 @@ fn child(ready: Channel<Int>, go: Channel<Int>) -> () with { scope: Scope } {
 }
 
 fn opens(ready: Channel<Int>, go: Channel<Int>) -> () with { scope: Scope, nursery: Nursery } {
-  nursery.adopt(Fiber::spawn(fn () => child(ready, go)));
+  nursery.spawn(fn () => child(ready, go));
   let _ = Channel::receive(ready);
 }
 
@@ -191,6 +191,24 @@ pub fn main() -> Int {
 }
 ",
         "`Region` does not implement `Share`",
+    );
+}
+
+#[test]
+fn handoff_refuses_a_region_holding_payload() {
+    refused(
+        "module main;
+import std::core::{Handoff, Region};
+
+type Wrapped = { region: Region };
+
+pub fn main() -> () {
+  let pipe: Handoff<Wrapped> = Handoff::bounded(1);
+  let payload: Wrapped = { region: Region::open() };
+  Handoff::send(pipe, payload);
+}
+",
+        "cannot be handed to another fiber: a `Region` stays on the fiber",
     );
 }
 
@@ -433,7 +451,7 @@ type Oops = { mut n: Int };
 
 fn child() -> () raises Oops { let e: Oops = { n: 1 }; raise e }
 
-fn run() -> () with { nursery: Nursery } { nursery.adopt(Fiber::spawn(fn () => child()!)); () }
+fn run() -> () with { nursery: Nursery } { nursery.spawn(fn () => child()!); () }
 
 pub fn main() -> Int raises ChildFailed { nursery(fn () => run())!; 0 }
 ",
@@ -750,7 +768,7 @@ fn twice(f: () -> Int with { scope: Scope }) -> Int with { scope: Scope } { f() 
 fn run() -> Int with { scope: Scope, nursery: Nursery } {
   let f = Fiber::spawn(fn () => scoped(fn () => work(\"joined\")));
   let g = Fiber::spawn(fn () => scoped(fn () => twice(fn () => work(\"nested\"))));
-  nursery.adopt(Fiber::spawn(fn () => scoped(fn () => { let _ = work(\"adopted\"); () })));
+  nursery.spawn(fn () => scoped(fn () => { let _ = work(\"adopted\"); () }));
   Fiber::join(f) + Fiber::join(g)
 }
 
@@ -822,7 +840,7 @@ fn opens_its_own() -> Int { scoped(fn () => work(\"helper\")) }
 fn run() -> Int with { scope: Scope, nursery: Nursery } {
   let f = Fiber::spawn(fn () => scoped(joined_work));
   let g = Fiber::spawn(fn () => opens_its_own());
-  nursery.adopt(Fiber::spawn(fn () => scoped(adopted_work)));
+  nursery.spawn(fn () => scoped(adopted_work));
   Fiber::join(f) + Fiber::join(g)
 }
 
@@ -1285,4 +1303,204 @@ fn a_capture_never_solved_is_not_a_sharing_error() {
         !found.iter().any(|m| m.contains("cannot be handed to another fiber")),
         "{found:#?}"
     );
+}
+
+/// **A `Claim` cannot go through a `Handoff` either**, alone or inside a
+/// record: it holds the region its abandon handler is registered in. Both
+/// spellings of the send are checked, `Handoff::send(h, v)` and `h.send(v)`.
+#[test]
+fn handoff_refuses_a_claim_alone_or_in_a_record() {
+    for send in ["Handoff::send(pipe, c)", "pipe.send(c)"] {
+        refused(
+            &format!(
+                "module main;
+import std::core::{{Channel, Claim, Handoff, Option}};
+
+pub fn main() -> () {{
+  let jobs: Channel<Int> = Channel::bounded(1);
+  let pipe: Handoff<Claim<Int>> = Handoff::bounded(1);
+  match Channel::claim(jobs, fn _ => ()) {{
+    Option::None => (),
+    Option::Some(c) => {{ let _ = {send}; () }},
+  }}
+}}
+"
+            ),
+            "cannot be handed to another fiber: a `Region` stays on the fiber",
+        );
+    }
+    refused(
+        "module main;
+import std::core::{Channel, Claim, Handoff, Option};
+
+type Job = { claim: Claim<Int>, attempt: Int };
+
+pub fn main() -> () {
+  let jobs: Channel<Int> = Channel::bounded(1);
+  let pipe: Handoff<Job> = Handoff::bounded(1);
+  match Channel::claim(jobs, fn _ => ()) {
+    Option::None => (),
+    Option::Some(c) => { let _ = Handoff::send(pipe, { claim: c, attempt: 1 }); () },
+  }
+}
+",
+        "cannot be handed to another fiber: a `Region` stays on the fiber",
+    );
+}
+
+/// **A generic function that sends its `A` through a `Handoff`**, called with
+/// a record holding a `Region` inside an `Option`. The send's own check sees
+/// `A`; the refusal comes from the instantiation, and points at the call that
+/// chose the type.
+#[test]
+fn handoff_refuses_a_region_reaching_a_generic_send() {
+    refused(
+        r#"module main;
+import std::core::{Handoff, Option, Region};
+
+type Nested = { item: Option<Region> };
+
+fn send_generic<A>(pipe: Handoff<A>, value: A) -> Bool {
+  Handoff::send(pipe, value)
+}
+
+pub fn main() -> () {
+  let pipe: Handoff<Nested> = Handoff::bounded(1);
+  let v: Nested = { item: Option::Some(Region::open()) };
+  let _ = send_generic(pipe, v);
+}
+"#,
+        "cannot be handed to another fiber: a `Region` stays on the fiber",
+    );
+}
+
+/// The same through two generic functions: the outer one never names
+/// `Handoff::send`, and the call in `main` is still the one refused.
+#[test]
+fn handoff_refuses_a_region_through_two_generic_calls() {
+    refused(
+        r#"module main;
+import std::core::{Handoff, Region};
+
+fn inner<A>(pipe: Handoff<A>, value: A) -> Bool { Handoff::send(pipe, value) }
+fn outer<B>(pipe: Handoff<B>, value: B) -> Bool { inner(pipe, value) }
+
+pub fn main() -> () {
+  let pipe: Handoff<Region> = Handoff::bounded(1);
+  let _ = outer(pipe, Region::open());
+}
+"#,
+        "cannot be handed to another fiber: a `Region` stays on the fiber",
+    );
+}
+
+/// A generic send at a type with nothing fiber-bound in it is not refused.
+#[test]
+fn a_generic_send_of_a_plain_record_is_accepted() {
+    let found = errors_with_std(
+        r#"module main;
+import std::core::{Handoff};
+
+type Job = { mut tries: Int, name: String };
+
+fn send_generic<A>(pipe: Handoff<A>, value: A) -> Bool { Handoff::send(pipe, value) }
+
+pub fn main() -> () {
+  let pipe: Handoff<Job> = Handoff::bounded(1);
+  let _ = send_generic(pipe, { tries: 0, name: "a" });
+}
+"#,
+    );
+    assert!(found.is_empty(), "{found:#?}");
+}
+
+/// **A closure that captured a `Region`, sent as it is.** Its type is a
+/// function type and says nothing about what it holds, so the captures are
+/// what is checked: of a closure written at the send, of one bound by a
+/// `let` and sent by name, and of one renamed by a second `let`.
+#[test]
+fn handoff_refuses_a_closure_that_captured_a_region() {
+    for (bind, sent) in [
+        ("", r#"fn (n: Int) => { Region::defer(region, fn () => print("cleanup")); n + 1 }"#),
+        (
+            r#"let closure = fn (n: Int) => { Region::defer(region, fn () => print("cleanup")); n + 1 };"#,
+            "closure",
+        ),
+        ("let closure = fn (n: Int) => { let _keep = region; n + 1 }; let again = closure;", "again"),
+    ] {
+        refused(
+            &format!(
+                r#"module main;
+import std::core::{{Handoff, Region, print}};
+
+pub fn main() -> () {{
+  let region = Region::open();
+  let h: Handoff<(Int) -> Int> = Handoff::bounded(1);
+  {bind}
+  let _ = Handoff::send(h, {sent});
+}}
+"#
+            ),
+            "cannot be handed to another fiber: a `Region` stays on the fiber",
+        );
+    }
+}
+
+/// A closure that captured nothing fiber-bound is sent.
+#[test]
+fn a_closure_capturing_a_number_is_accepted() {
+    let found = errors_with_std(
+        r#"module main;
+import std::core::{Handoff};
+
+pub fn main() -> () {
+  let step = 2;
+  let h: Handoff<(Int) -> Int> = Handoff::bounded(1);
+  let closure = fn (n: Int) => n + step;
+  let _ = Handoff::send(h, closure);
+}
+"#,
+    );
+    assert!(found.is_empty(), "{found:#?}");
+}
+
+/// **A sent value whose type is settled after the send.** `x` is a variable
+/// at `Handoff::send`; the call below makes it a `Region`.
+#[test]
+fn handoff_refuses_a_region_whose_type_is_settled_after_the_send() {
+    refused(
+        r#"module main;
+import std::core::{Handoff, Region};
+
+pub fn main() -> () {
+  let h = Handoff::bounded(1);
+  let go = fn x => Handoff::send(h, x);
+  let _ = go(Region::open());
+}
+"#,
+        "cannot be handed to another fiber: a `Region` stays on the fiber",
+    );
+}
+
+/// **A generic that wraps its `A` before sending it**, in an `Option` and in
+/// a tuple: the send's type is `Option<A>`, not `A`, and the region inside
+/// is still refused at the call that chose `A`.
+#[test]
+fn handoff_refuses_a_region_a_generic_wraps_before_sending() {
+    for (pipe, sent) in [("Option<A>", "Option::Some(v)"), ("(A, Int)", "(v, 1)")] {
+        refused(
+            &format!(
+                r#"module main;
+import std::core::{{Handoff, Option, Region}};
+
+fn wrap<A>(pipe: Handoff<{pipe}>, v: A) -> Bool {{ Handoff::send(pipe, {sent}) }}
+
+pub fn main() -> () {{
+  let _ = wrap(Handoff::bounded(1), Region::open());
+}}
+"#
+            ),
+            "cannot be handed to another fiber: a `Region` stays on the fiber",
+        );
+    }
 }

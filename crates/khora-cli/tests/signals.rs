@@ -295,8 +295,8 @@ fn child(name: String, up: Channel<Int>) -> () with { scope: Scope } raises Stop
 // second child's first turn.
 fn both() -> () with { nursery: Nursery } raises Stop {
   let up: Channel<Int> = Channel::bounded(2);
-  nursery.adopt(Fiber::spawn(fn () => scoped(fn () => child("one", up)!)!));
-  nursery.adopt(Fiber::spawn(fn () => scoped(fn () => child("two", up)!)!));
+  nursery.spawn(fn () => scoped(fn () => child("one", up)!)!);
+  nursery.spawn(fn () => scoped(fn () => child("two", up)!)!);
   let _ = up.receive();
   let _ = up.receive();
   print("ready");

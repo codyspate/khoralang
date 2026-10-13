@@ -215,6 +215,27 @@ pub struct Walk {
     /// Every local object that moves, when the owner check is on.
     moved: Vec<usize>,
     stamping: bool,
+    /// Whether the value reaches a region. See [`khora_handoff_send`].
+    region: bool,
+}
+
+/// What [`give_away`] decided.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Given {
+    /// Tested and prepared: queue it.
+    Ready,
+    /// It reaches a region, and must not leave this fiber.
+    Refused,
+}
+
+/// Whether `glue` releases a region: how a region is told from the other
+/// runtime handles, which are all born shared and end the walk unread. The
+/// code generator hands a region's field `khora_region_release` itself as its
+/// drop glue (`backend/glue.rs`).
+fn is_a_region(glue: Option<extern "C" fn(*mut u8)>) -> bool {
+    let Some(glue) = glue else { return false };
+    let release: unsafe extern "C" fn(*mut u8) = crate::khora_region_release;
+    glue as usize == release as usize
 }
 
 thread_local! {
@@ -233,11 +254,17 @@ impl Walk {
         self.marks.clear();
         self.moved.clear();
         self.stamping = stamping;
+        self.region = false;
     }
 
     /// One reference to `object`, found inside the value.
     fn reach(&mut self, object: *mut u8, via: Via) {
         if object.is_null() {
+            return;
+        }
+        // Before the shared test below, which a region handle always passes.
+        if is_a_region(via.drop_glue()) {
+            self.region = true;
             return;
         }
         // SAFETY: a reference inside a value the sender owns, so live.
@@ -400,6 +427,17 @@ pub unsafe extern "C" fn khora_handoff_open(
 /// hand-off is closed or this fiber is canceled while it waits, and the value
 /// is then released here.
 ///
+/// **Answers false, sending nothing, when the value reaches a region.** The
+/// compiler refuses every send whose value it can see holds a `Region` or a
+/// `Scope`: the value's own type, the captures of a closure written in the
+/// sending body, and the type a generic function's caller chose. A closure
+/// that arrived as a parameter, or a send behind a trait method, hides its
+/// region from all three, and the receiver would then run the region's
+/// finalizers on the wrong fiber and stop the program. So the walk looks, and
+/// the value is released here, on the fiber that opened the region, which is
+/// where its finalizers belong. A `false` rather than a trap, because the
+/// sender is still on a fiber where the value is safe to drop.
+///
 /// # Safety
 ///
 /// `handle` must be a live hand-off, and `value` a live object the caller
@@ -413,7 +451,12 @@ pub unsafe extern "C" fn khora_handoff_send(handle: *mut u8, value: u64) -> bool
     };
     if let (true, Some(root)) = (channel.boxed, channel.handing) {
         // SAFETY: the caller gives up `value`, a live object of `root`'s type.
-        unsafe { give_away(value as *mut u8, root) };
+        if unsafe { give_away(value as *mut u8, root) } == Given::Refused {
+            // SAFETY: the caller gave up `value`, which nothing was handed,
+            // and `channel.glue` is its type's drop glue.
+            unsafe { crate::heap::khora_drop(value as *mut u8, channel.glue) };
+            return false;
+        }
     }
     enqueue(channel, value)
 }
@@ -445,21 +488,26 @@ pub unsafe extern "C" fn khora_handoff_receive(handle: *mut u8, out: *mut u64) -
 
 /// Tests `value` and prepares it to cross: traps if something outside it
 /// holds a writable part, marks its aliased `Share` parts, and in a debug
-/// build stamps what moves as in transit.
+/// build stamps what moves as in transit. Answers [`Given::Refused`], having
+/// changed nothing, when it reaches a region.
 ///
 /// # Safety
 ///
 /// `value` must be null or a live object of `root`'s type, owned by the
 /// caller.
-unsafe fn give_away(value: *mut u8, root: &'static HandoffType) {
+unsafe fn give_away(value: *mut u8, root: &'static HandoffType) -> Given {
     if value.is_null() {
-        return;
+        return Given::Ready;
     }
     let stamping = crate::share::checking();
     let mut walk = WALK.with(|w| w.borrow_mut().take()).unwrap_or_default();
     walk.clear(stamping);
     walk.reach(value, Via::Typed(root));
     walk.run();
+    if walk.region {
+        WALK.with(|w| *w.borrow_mut() = Some(walk));
+        return Given::Refused;
+    }
     if let Some(held) = walk.outside() {
         if !trusting() {
             let (count, edges, name) = (held.count, held.edges, held.via.name());
@@ -478,6 +526,7 @@ unsafe fn give_away(value: *mut u8, root: &'static HandoffType) {
         }
     }
     WALK.with(|w| *w.borrow_mut() = Some(walk));
+    Given::Ready
 }
 
 /// Makes the calling fiber the owner of what a value moved, in a debug build.

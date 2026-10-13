@@ -311,12 +311,12 @@ impl<'ctx> Lower<'_, 'ctx> {
                         .expect("a channel is a value"),
                 )
             }
-            ("send", [channel, value]) => {
+            ("send", [channel, value]) | ("offer", [channel, value]) => {
                 let channel_ty = self.types.of(*channel).clone();
                 let both = self.operands(&[*channel, *value])?;
                 let (handle, held) = (both[0], both[1]);
                 let word = self.be.to_word(held);
-                let send = self.be.rt.channel_send;
+                let send = if name == "offer" { self.be.rt.channel_offer } else { self.be.rt.channel_send };
                 let answered = self
                     .be
                     .builder
@@ -330,7 +330,9 @@ impl<'ctx> Lower<'_, 'ctx> {
                 // canceled before it could find room. The handle was only
                 // borrowed.
                 self.release_unless_lent(*channel, handle, &channel_ty);
-                self.canceled_empty_handed(answered.into_int_value(), range);
+                if name == "send" {
+                    self.canceled_empty_handed(answered.into_int_value(), range);
+                }
                 Some(answered)
             }
             // `receive` waits and `poll` does not; everything else about the
@@ -1283,12 +1285,13 @@ impl<'ctx> Lower<'_, 'ctx> {
         Some(decided.into())
     }
 
-    /// `Fibers::open`, `Fibers::adopt` and `Fibers::wait`.
+    /// `Fibers::open`, `Fibers::bounded`, `Fibers::spawn` and `Fibers::wait`.
     ///
-    /// A nursery holds fiber handles, and adopting one grows the list — which
+    /// A nursery holds fiber handles, and spawning one grows the list — which
     /// is why the list lives in the runtime and this is an intrinsic rather
-    /// than an extern. `adopt` takes the handle's reference; the nursery
-    /// releases it once the fiber has been waited for.
+    /// than an extern. `spawn` hands the runtime the body, which it starts
+    /// once there is room; the nursery holds the child's handle and releases
+    /// it once the fiber has been waited for.
     pub(super) fn nursery_intrinsic(
         &mut self,
         name: &str,
@@ -1321,21 +1324,44 @@ impl<'ctx> Lower<'_, 'ctx> {
                         .expect("a nursery is a value"),
                 )
             }
-            ("adopt", [nursery, fiber]) => {
-                let nursery_ty = self.types.of(*nursery).clone();
-                let both = self.operands(&[*nursery, *fiber])?;
-                let (handle, child) = (both[0], both[1]);
-                let adopt = self.be.rt.fibers_adopt;
-                self.be
-                    .builder
-                    .build_call(adopt, &[handle.into(), child.into()], "")
-                    .expect("adopting a fiber");
-                // The nursery keeps the fiber's reference and only borrows its
-                // own, so exactly one of the two is given back.
-                self.release_unless_lent(*nursery, handle, &nursery_ty);
-                // A bounded nursery's adopt can wait for room, and a stop that
-                // arrives then is passed to the child it waits on rather than
-                // ending the wait; the adopter stops here, once it has room.
+            ("spawn", [fibers, body]) => {
+                let crew_ty = self.types.of(*fibers).clone();
+                let both = self.operands(&[*fibers, *body])?;
+                let crew = both[0];
+                let closure = both[1];
+                let fallible = matches!(
+                    self.types.of(*body),
+                    Type::Fn { raises, .. } if !matches!(
+                        &**raises,
+                        Type::Row { fields, tail } if fields.is_empty() && tail.is_none()
+                    )
+                );
+                let glue = self.be.drop_glue(&Type::func(Vec::new(), Type::Unit));
+                let call = if fallible {
+                    self.be.tagged_trampoline(1).as_global_value().as_pointer_value()
+                } else {
+                    self.be.answered_trampoline(None).as_global_value().as_pointer_value()
+                };
+                let null = self.be.null_pointer();
+                let error_glue = if fallible {
+                    self.be.release_error().as_global_value().as_pointer_value()
+                } else {
+                    null
+                };
+                let started = self.be.builder.build_call(
+                    self.be.rt.fibers_spawn,
+                    &[
+                        crew.into(), closure.into(), glue.into(), call.into(), null.into(),
+                        self.be.ctx.bool_type().const_zero().into(), null.into(), error_glue.into(),
+                    ],
+                    "nursery.started",
+                ).expect("admitting a nursery child");
+                // The runtime consumes the closure whether it started it or
+                // not. A stop during the admission wait started nothing, and
+                // the spawner unwinds at the check below, once the borrowed
+                // nursery handle is given back.
+                self.release_unless_lent(*fibers, crew, &crew_ty);
+                let _ = started;
                 self.check_cancellation(range);
                 Some(self.be.unit_value())
             }

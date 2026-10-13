@@ -1061,7 +1061,7 @@ fn main() -> Int {{
 }
 
 /// `std::core` spells these the same way; they are here so the file stays one
-/// module. Note the idiom: `nursery.adopt(Fiber::spawn(fn () => ..))`, one call
+/// module. Note the idiom: `nursery.spawn(fn () => ..)`, one call
 /// inside another. A thunk cannot be *forwarded* to `Fiber::spawn`, because a
 /// fiber's body has to be written where it starts for what it closes over to be
 /// checked against the rule that a mutable value may not cross.
@@ -1080,17 +1080,17 @@ impl<A, 'r> Fiber<A, 'r> {
 
 pub type Fibers;
 pub trait Share {}
-/// A nursery is adopted into from more than one fiber; that is what it is for,
-/// and `khora_fibers_adopt` locks. Without this the handler below is refused,
+/// A nursery is spawned into from more than one fiber; that is what it is for,
+/// and `khora_fibers_spawn` locks. Without this the handler below is refused,
 /// which is the point of the rule — a bodyless type has to say.
 impl Share for Fibers {}
 impl Fibers {
   fn open() -> Fibers;
-  fn adopt<'er>(self, fiber: Fiber<(), 'er>) -> ();
+  fn spawn<'er>(self, body: () -> () raises 'er) -> ();
   fn wait(self) -> Int;
 }
 
-pub effect Nursery { adopt: (Fiber<(), 'er>) -> (), }
+pub effect Nursery { spawn: (() -> () raises 'er) -> (), }
 
 pub type Oops = | Bad;
 fn ok(n: Int) -> Int raises Oops { n }
@@ -1109,9 +1109,9 @@ fn second() -> () raises Oops {{ print(2); }}
 
 fn work() -> () {{
   let crew = Fibers::open();
-  with {{ nursery: handler for Nursery {{ adopt: fn f => Fibers::adopt(crew, f) }} }} {{
-    nursery.adopt(Fiber::spawn(fn () => first()!));
-    nursery.adopt(Fiber::spawn(fn () => second()!));
+  with {{ nursery: handler for Nursery {{ spawn: fn f => Fibers::spawn(crew, f) }} }} {{
+    nursery.spawn(fn () => first()!);
+    nursery.spawn(fn () => second()!);
   }}
   let _stopped = Fibers::wait(crew);
   print(3);
@@ -1157,14 +1157,14 @@ fn second() -> () raises Oops {{ print(2); }}
 
 fn scope(body: () -> () with {{ nursery: Nursery }}) -> () {{
   let crew = Fibers::open();
-  body() with {{ nursery: handler for Nursery {{ adopt: fn f => Fibers::adopt(crew, f) }} }};
+  body() with {{ nursery: handler for Nursery {{ spawn: fn f => Fibers::spawn(crew, f) }} }};
   let _stopped = Fibers::wait(crew);
 }}
 
 fn work() -> () {{
   scope(fn () => {{
-    {{ nursery.adopt(Fiber::spawn(fn () => first()!)); }};
-    nursery.adopt(Fiber::spawn(fn () => second()!));
+    {{ nursery.spawn(fn () => first()!); }};
+    nursery.spawn(fn () => second()!);
   }});
   print(3);
 }}
@@ -1203,8 +1203,8 @@ fn boom() -> Int raises Oops {{ raise Oops::Bad }}
 
 fn work() -> Int raises Oops {{
   let crew = Fibers::open();
-  let value = with {{ nursery: handler for Nursery {{ adopt: fn f => Fibers::adopt(crew, f) }} }} {{
-    nursery.adopt(Fiber::spawn(fn () => forever()!));
+  let value = with {{ nursery: handler for Nursery {{ spawn: fn f => Fibers::spawn(crew, f) }} }} {{
+    nursery.spawn(fn () => forever()!);
     boom()!
   }};
   let _stopped = Fibers::wait(crew);
@@ -1263,10 +1263,10 @@ fn bad() -> () raises Oops {{ raise Oops::Bad }}
 
 fn work() -> Int {{
   let crew = Fibers::open();
-  with {{ nursery: handler for Nursery {{ adopt: fn f => Fibers::adopt(crew, f) }} }} {{
-    nursery.adopt(Fiber::spawn(fn () => bad()!));
-    nursery.adopt(Fiber::spawn(fn () => forever()!));
-    nursery.adopt(Fiber::spawn(fn () => forever()!));
+  with {{ nursery: handler for Nursery {{ spawn: fn f => Fibers::spawn(crew, f) }} }} {{
+    nursery.spawn(fn () => bad()!);
+    nursery.spawn(fn () => forever()!);
+    nursery.spawn(fn () => forever()!);
   }}
   Fibers::wait(crew)
 }}
@@ -1300,9 +1300,9 @@ fn fine() -> () raises Oops {{ print(1); }}
 
 fn work() -> Int {{
   let crew = Fibers::open();
-  with {{ nursery: handler for Nursery {{ adopt: fn f => Fibers::adopt(crew, f) }} }} {{
-    nursery.adopt(Fiber::spawn(fn () => fine()!));
-    nursery.adopt(Fiber::spawn(fn () => fine()!));
+  with {{ nursery: handler for Nursery {{ spawn: fn f => Fibers::spawn(crew, f) }} }} {{
+    nursery.spawn(fn () => fine()!);
+    nursery.spawn(fn () => fine()!);
   }}
   Fibers::wait(crew)
 }}
@@ -1328,10 +1328,10 @@ fn three() -> () raises Oops {{ print(3); }}
 
 fn work() -> () {{
   let crew = Fibers::open();
-  with {{ nursery: handler for Nursery {{ adopt: fn f => Fibers::adopt(crew, f) }} }} {{
-    nursery.adopt(Fiber::spawn(fn () => one()!));
-    nursery.adopt(Fiber::spawn(fn () => two()!));
-    nursery.adopt(Fiber::spawn(fn () => three()!));
+  with {{ nursery: handler for Nursery {{ spawn: fn f => Fibers::spawn(crew, f) }} }} {{
+    nursery.spawn(fn () => one()!);
+    nursery.spawn(fn () => two()!);
+    nursery.spawn(fn () => three()!);
   }}
   let _stopped = Fibers::wait(crew);
 }}
@@ -1753,8 +1753,8 @@ fn forever() -> () raises Oops {{
 
 fn work() -> () {{
   let crew = Fibers::open();
-  with {{ nursery: handler for Nursery {{ adopt: fn f => Fibers::adopt(crew, f) }} }} {{
-    nursery.adopt(Fiber::spawn(fn () => forever()!));
+  with {{ nursery: handler for Nursery {{ spawn: fn f => Fibers::spawn(crew, f) }} }} {{
+    nursery.spawn(fn () => forever()!);
   }}
   // No `Fibers::wait`: leaving the block releases the nursery, which cancels
   // what is still running and then waits for it. If the child had no channel
@@ -1941,7 +1941,7 @@ extern fn khora_sleep(millis: Int) -> ();
 fn forever() -> () raises Oops {{ loop {{ let _ = ok(1)!; }} }}
 
 fn fan() -> () with {{ nursery: Nursery }} {{
-  nursery.adopt(Fiber::spawn(fn () => forever()!))
+  nursery.spawn(fn () => forever()!)
 }}
 
 // `body` carries `raises Oops` so the `Fiber::wait` below has a channel to be
@@ -1950,7 +1950,7 @@ fn fan() -> () with {{ nursery: Nursery }} {{
 // with no failure channel has nowhere to go. See `limitations/index.md`.
 fn body() -> () raises Oops {{
   let crew = Fibers::open();
-  let _ = with {{ nursery: handler for Nursery {{ adopt: fn f => Fibers::adopt(crew, f) }} }} {{
+  let _ = with {{ nursery: handler for Nursery {{ spawn: fn f => Fibers::spawn(crew, f) }} }} {{
     fan()
   }};
   let _ = Fibers::wait(crew);
@@ -2458,6 +2458,32 @@ fn run_std_on(name: &str, main: &str, backend: &str) -> Ran {
         stdout: String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
         stderr: String::from_utf8_lossy(&output.stderr).replace("\r\n", "\n"),
         code: output.status.code(),
+    }
+}
+
+/// An unsettled claim must not disappear when its last reference goes; a
+/// requeue to a full channel must refuse instead of hanging cleanup.
+#[test]
+fn claim_reconciles_an_unsettled_job_and_offer_refuses_full_queue() {
+    let source = r#"
+module main;
+import std::core::{Channel, Claim, Option, Shared, print};
+
+pub fn main() -> () {
+  let jobs: Channel<Int> = Channel::bounded(1);
+  let abandoned = Shared::of(0);
+  let _ = Channel::send(jobs, 1);
+  let claim = Channel::claim(jobs, fn _ => Shared::set(abandoned, 1));
+  match claim { Option::None => (), Option::Some(c) => { let _ = c.value; () } };
+  let _ = Channel::offer(jobs, 2);
+  let offered = Channel::offer(jobs, 3);
+  print("abandoned ${Shared::get(abandoned)} offered ${offered} depth ${Channel::depth(jobs)}");
+}
+"#;
+    for backend in ["threads", "scheduler"] {
+        let ran = run_std_on("claim_reconciles_unsettled", source, backend);
+        assert_eq!(ran.code, Some(0), "{backend}: {}", ran.stderr);
+        assert_eq!(ran.stdout, "abandoned 1 offered false depth 1\n", "{backend}");
     }
 }
 

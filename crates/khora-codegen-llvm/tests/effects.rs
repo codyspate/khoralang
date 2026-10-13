@@ -2090,18 +2090,18 @@ pub trait Share {}
 impl Share for Fibers {}
 impl Fibers {
   fn open() -> Fibers;
-  fn adopt<'er>(self, fiber: Fiber<(), 'er>) -> ();
+  fn spawn<'er>(self, body: () -> () raises 'er) -> ();
   fn wait(self) -> Int;
 }
 
-pub effect Nursery { adopt: (Fiber<(), 'er>) -> (), }
+pub effect Nursery { spawn: (() -> () raises 'er) -> (), }
 
 pub fn nursery<A, 'e, 'r>(body: () -> A with { 'e | nursery: Nursery } raises 'r) -> A
   with 'e
   raises 'r
 {
   let crew = Fibers::open();
-  let value = with { nursery: handler for Nursery { adopt: fn f => Fibers::adopt(crew, f) } } {
+  let value = with { nursery: handler for Nursery { spawn: fn f => Fibers::spawn(crew, f) } } {
     body()!
   };
   let _stopped = Fibers::wait(crew);
@@ -2115,7 +2115,7 @@ fn child(tag: Int) -> () { print(tag) }
 /// because a bare name is resolved by ordinary lookup and there is nothing for
 /// it to find. See the note in `docs/design/capability-passing.md`.
 fn spawn_one<'e>() -> () with { 'e | nursery: Nursery } {
-  nursery.adopt(Fiber::spawn(fn () => child(1)));
+  nursery.spawn(fn () => child(1));
 }
 
 fn main() -> Int {

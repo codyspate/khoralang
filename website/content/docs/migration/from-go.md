@@ -105,13 +105,13 @@ for _, job := range jobs {
 
 has no answer to *who waits for these*, *what happens when one panics*, or
 *what stops them*. A `sync.WaitGroup` and a `context` are the conventional
-answers and neither is enforced. In Khora a fiber is adopted by a nursery, and
+answers and neither is enforced. In Khora a fiber is spawned by a nursery, and
 the nursery is a scope that does not return until its children are done:
 
 ```khora
 module main;
 
-import std::core::{ChildFailed, Fiber, Nursery, bounded_nursery, print};
+import std::core::{ChildFailed, Nursery, bounded_nursery, print};
 
 fn handle(job: Int) -> () {
   print("processing job ${job}");
@@ -125,9 +125,7 @@ fn launch_jobs() -> ()
   while next < 1000 {
     let job = next;
 
-    nursery.adopt(
-      Fiber::spawn(fn () => handle(job))
-    );
+    nursery.spawn(fn () => handle(job));
 
     next = next + 1;
   }
@@ -139,20 +137,20 @@ pub fn main() raises ChildFailed {
 ```
 
 `bounded_nursery(64, ...)` is also the `WaitGroup` plus the semaphore Go
-programs write by hand: adoption blocks once the limit is live, so the producer
-slows at the boundary where it makes work instead of filling a queue. See
-[Bound concurrent work](/docs/cookbook/bounded-concurrency/), including the
-off-by-one to subtract when the limit is a real resource.
+programs write by hand: `spawn` waits once 64 children are running, and starts
+the next only when one finishes, so the producer slows at the boundary where it
+makes work instead of filling a queue. See [Bound concurrent
+work](/docs/cookbook/bounded-concurrency/).
 
 **Two of those three questions are answered today.** Every child is waited for
 and a failure is always reported as `ChildFailed`. The first failure cancels
 the siblings still running when the nursery sees it, and it sees failures in
-adoption order: a failing child adopted first stops all its siblings within
-milliseconds, one adopted last is seen only after the others have finished and
+spawn order: a failing child spawned first stops all its siblings within
+milliseconds, one spawned last is seen only after the others have finished and
 stops none. So work that is expensive, holds a resource, or has an effect
 outside the process should check a `Shared` flag itself rather than expect the
 group to collapse promptly. [Known
-limitations](/docs/limitations/#a-childs-failure-is-seen-late-unless-it-was-adopted-early)
+limitations](/docs/limitations/#a-childs-failure-is-seen-late-unless-it-was-spawned-early)
 has the measurements. A Go reader coming off `errgroup`, where the first error
 does cancel the group's context at once, should not assume the same here.
 
@@ -172,8 +170,8 @@ fn reaper() -> () with { clock: Clock } {
 ```
 
 The habit to drop: a bare `go`. There isn't one — `Fiber::spawn` produces a
-handle, and you either `join` it for its answer or `adopt` it into a nursery
-that will.
+handle you `join` for its answer, and `nursery.spawn` starts a child the
+nursery waits for.
 
 ## Memory: reference counting instead of a tracing collector
 

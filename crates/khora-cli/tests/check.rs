@@ -1662,3 +1662,174 @@ fn a_lint_policy_check_refuses_fails_build() {
     assert!(!ok, "{output}");
     assert!(output.contains("lints.unused-binding") && output.contains("needs a `level`"), "{output}");
 }
+
+/// What one capped `khora check` did: its exit code (`None` when killed or
+/// stopped by a signal), its output, its wall time, and its peak resident
+/// memory in kilobytes (`None` where `/proc` cannot say).
+#[cfg(unix)]
+struct Capped {
+    code: Option<i32>,
+    output: String,
+    secs: f64,
+    peak_kb: Option<u64>,
+}
+
+/// `khora check` over one file, as [`check`], with two limits, so a
+/// regression fails the test instead of taking the machine with it.
+///
+/// - **An address-space cap**, `ulimit -v`, through `sh` as the code
+///   generator's tests set a stack limit (`with_stack_limit`): `setrlimit`
+///   from a `pre_exec` hook is not portable, and `ulimit` then `exec` keeps
+///   the pid and the pipes. It is not the memory the test asserts on: a good
+///   run *reserves* about 1.8 GB of address space -- the worker thread's
+///   large stack, mostly -- while touching under 100 MB, and it still passes
+///   under 512 MB because the reservation is only a request. 200 MB of
+///   address space stops even a correct run.
+/// - **A clock**: the child is killed when `secs` run out.
+///
+/// The peak resident size, `VmHWM`, is sampled from `/proc` while the child
+/// runs. It only grows, so the last reading is within one sample of the
+/// peak; Linux only.
+#[cfg(unix)]
+fn check_capped(name: &str, source: &str, address_kb: u64, secs: u64) -> Capped {
+    use std::io::Read;
+    use std::time::{Duration, Instant};
+
+    let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}.kh"));
+    std::fs::write(&path, source).expect("could not write the fixture");
+    let mut child = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!("ulimit -v {address_kb} && exec \"$0\" check \"$1\""))
+        .arg(env!("CARGO_BIN_EXE_khora"))
+        .arg(&path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("could not run `khora`");
+    let status_file = PathBuf::from(format!("/proc/{}/status", child.id()));
+    let start = Instant::now();
+    let mut peak_kb = None;
+    let status = loop {
+        if let Ok(status) = std::fs::read_to_string(&status_file) {
+            let hwm = status
+                .lines()
+                .find_map(|l| l.strip_prefix("VmHWM:"))
+                .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<u64>().ok());
+            if hwm.is_some() {
+                peak_kb = peak_kb.max(hwm);
+            }
+        }
+        if let Some(status) = child.try_wait().expect("waiting on `khora`") {
+            break Some(status);
+        }
+        if start.elapsed() > Duration::from_secs(secs) {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let elapsed = start.elapsed().as_secs_f64();
+    let mut output = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = out.read_to_string(&mut output);
+    }
+    if let Some(mut err) = child.stderr.take() {
+        let _ = err.read_to_string(&mut output);
+    }
+    Capped { code: status.and_then(|s| s.code()), output, secs: elapsed, peak_kb }
+}
+
+/// The two limits [`check_capped`] is run with here, and the memory bound.
+#[cfg(unix)]
+const ADDRESS_CAP_KB: u64 = 512 * 1024;
+#[cfg(unix)]
+const SECONDS: u64 = 5;
+#[cfg(unix)]
+const RESIDENT_KB: u64 = 200 * 1024;
+
+/// Fails unless the run finished, in time, and (where `/proc` says) under
+/// [`RESIDENT_KB`].
+#[cfg(unix)]
+fn within_bounds(what: &str, run: &Capped) {
+    assert!(
+        run.secs < SECONDS as f64,
+        "{what}: killed or slow after {:.1}s (exit {:?}):\n{}",
+        run.secs,
+        run.code,
+        run.output
+    );
+    if let Some(kb) = run.peak_kb {
+        assert!(kb < RESIDENT_KB, "{what}: peak resident {kb} KB, over {RESIDENT_KB} KB");
+    }
+}
+
+/// Polymorphic recursion that branches, with `branches` recursive calls,
+/// each at a new type holding `v`. `base` is what the last level sends.
+fn polyrec(branches: usize, base: &str) -> String {
+    let calls = [
+        "grow(h, Option::Some(v), n - 1)",
+        "grow(h, (v, 1), n - 1)",
+        "grow(h, (1, v), n - 1)",
+    ];
+    format!(
+        "module polyrec;
+import std::core::{{Handoff, Region, Option, print}};
+fn grow<A>(h: Handoff<Int>, v: A, n: Int) -> Bool {{
+  if n <= 0 {{ {base} }} else {{
+    {}
+  }}
+}}
+pub fn main() -> () {{
+  let h: Handoff<Int> = Handoff::bounded(1);
+  print(\"sent ${{grow(h, Region::open(), 0)}}\");
+}}
+",
+        calls[..branches].join(" || ")
+    )
+}
+
+/// **The generic hand-off check is bounded by the program, not by the types
+/// it can make.** `grow<A>` calls `grow<Option<A>>` and `grow<(A, Int)>`, so
+/// its instantiations double at every level. A check that followed each one
+/// ran `khora check` on this ten-line file out of memory: 1.3 GB and status
+/// 134 under a 2 GB cap, and the whole machine without one. Asked once per
+/// function -- does `grow`'s `A` reach a send -- it is the size of the
+/// program. Under 200 MB and 5 s, with two branches and with three; and the
+/// base case sends `n`, so nothing is refused.
+#[cfg(unix)]
+#[test]
+fn polymorphic_recursion_does_not_blow_up_the_handoff_check() {
+    for branches in [2, 3] {
+        let name = format!("polyrec_{branches}");
+        let run = check_capped(&name, &polyrec(branches, "Handoff::send(h, n)"), ADDRESS_CAP_KB, SECONDS);
+        let what = format!("{branches} branches");
+        within_bounds(&what, &run);
+        assert_eq!(run.code, Some(0), "{what}: exit {:?}:\n{}", run.code, run.output);
+    }
+}
+
+/// The same recursion, with the base case sending `v`, which is a `Region`
+/// at the outermost call: refused at that call, in the same bounds.
+#[cfg(unix)]
+#[test]
+fn polymorphic_recursion_that_sends_its_region_is_refused() {
+    for branches in [2, 3] {
+        let name = format!("polyrec_sends_{branches}");
+        let run = check_capped(
+            &name,
+            &polyrec(branches, "Handoff::send(Handoff::bounded(1), v)"),
+            ADDRESS_CAP_KB,
+            SECONDS,
+        );
+        let what = format!("{branches} branches, sending `v`");
+        within_bounds(&what, &run);
+        assert_eq!(run.code, Some(1), "{what}: exit {:?}:\n{}", run.code, run.output);
+        assert!(
+            run.output.contains("`grow` gives its argument to `Handoff::send`")
+                && run.output.contains("a `Region` stays on the fiber"),
+            "{what}:\n{}",
+            run.output
+        );
+    }
+}

@@ -255,7 +255,7 @@ fn a_nursery_marks_an_adopted_handle() {
         "pub fn main() -> Int {
   let crew = Fibers::open();
   let f = Fiber::spawn(fn () => {
-    Fibers::adopt(crew, Fiber::spawn(fn () => { let _ = List::length(make(10)); () }));
+    Fibers::spawn(crew, fn () => { let _ = List::length(make(10)); () });
     0
   });
   let _ = Fiber::join(f);
@@ -470,7 +470,7 @@ fn run() -> Int with { scope: Scope, nursery: Nursery } {
   let m = Fiber::join(g);
   print("joined helper ${m}");
   let go: Channel<Int> = Channel::bounded(1);
-  nursery.adopt(Fiber::spawn(fn () => adopted_after(go)));
+  nursery.spawn(fn () => adopted_after(go));
   print("run ends");
   Channel::send(go, 1);
   n + m
