@@ -113,6 +113,8 @@ The same standard-library index is on the command line as `khora std search <que
 
 It is optional. Nothing about writing, building or testing correct Khora requires it, and the compiler and language server behave identically whether or not an agent is connected.
 
+For documentation rather than compiler queries, use [/llms.txt](/llms.txt) to find pages and [/llms-full.txt](/llms-full.txt) to read them together. These files cover the current stable release; [next](/docs/next/llms.txt) covers the unreleased compiler.
+
 A typical MCP client configuration is:
 
 ```json

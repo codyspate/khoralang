@@ -3,3 +3,5 @@ dist/
 .astro/
 src/content/docs/
 src/generated/
+public/docs/
+public/llms*.txt

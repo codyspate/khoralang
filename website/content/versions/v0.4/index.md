@@ -89,6 +89,8 @@ elsewhere, and you can tolerate a pre-1.0 implementation while it is proved.
 - **[Internals](/docs/internals/)** — how Khora works underneath: what a reference count costs, what `with` compiles to, what a fiber is made of, and what makes a release build reproducible. Nothing here is needed to write Khora; it is for debugging something strange or judging whether Khora suits a problem.
 - **[Limitations](/docs/limitations/)** — functionality that is intentionally incomplete, unsupported, or still evolving, with the measurements behind each entry.
 
+Reading this as an AI agent? [/llms.txt](/llms.txt) is the index and [/llms-full.txt](/llms-full.txt) is the whole documentation in one file.
+
 ## Tooling
 
 The Khora toolchain is one binary. These are the commands a project uses day to day; `khora --help` lists all of them.

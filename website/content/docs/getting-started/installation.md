@@ -12,6 +12,8 @@ For 0.4 candidate testing, use the [release-candidate instructions](#release-can
 *after* the candidate appears on the release page; examples pinned to 0.4.0
 require the stable artifact and do not install an unpublished release.
 
+Reading this as an AI agent? [/llms.txt](/llms.txt) is the index and [/llms-full.txt](/llms-full.txt) is the whole documentation in one file.
+
 ## Install Khora
 
 On macOS or Linux:

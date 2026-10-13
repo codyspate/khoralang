@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 import { current, editUrlFor, stable, versions } from '../versions.mjs';
+import { writeLlmDocs } from './llms.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
@@ -289,6 +290,10 @@ function resolvedDocLink(url, fromFile, source, version) {
   // broke `npm run build` and nothing noticed: the repository's own gate does
   // not build the site, and CI only runs on a push.
   if (isExternalUrl(raw) || raw.startsWith('//')) return null;
+  // Text exports live beside rendered pages, not in the Astro content
+  // collection. Checking them as page routes appends a slash to `.txt` and
+  // rejects a link to a file the same build writes into public/.
+  if (/^\/docs\/[^/]+\/llms(?:-full(?:-guide)?)?\.txt(?:[?#].*)?$/.test(raw)) return null;
   if (/\.mdx?(?:[?#].*)?$/i.test(raw)) {
     return { error: 'source filename is not a rendered route' };
   }
@@ -499,6 +504,7 @@ for (const tree of trees) {
     filter: (from) => !path.basename(from).startsWith('.'),
   });
   tree.knownRoutes = knownRoutes;
+  tree.sourceFiles = sourceFiles;
 }
 
 /// Where an unversioned `/docs/...` path should land.
@@ -694,6 +700,13 @@ for (const tree of trees) {
   await normalizeMarkdown(tree.target, tree);
   await enhanceGeneratedApi(path.join(tree.target, 'stdlib', 'api'));
 }
+
+// Both exports read the same version sources and routes as the rendered pages.
+// Writing them here avoids a second inventory that would omit newly cut trees.
+const llmOutputs = await writeLlmDocs(trees, path.join(root, 'public'), routeForFile, rewriteDocLinks);
+console.log('LLM documentation: ' + [...llmOutputs].map(([id, output]) =>
+  `${id}: ${output.count} pages, ${Buffer.byteLength(output.full)} bytes full`,
+).join('; '));
 
 const built = await writeProvenance();
 console.log(

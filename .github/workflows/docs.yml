@@ -75,6 +75,9 @@ jobs:
           node-version: 22
       - run: npm install --no-audit --no-fund
       - run: npm run build
+      - name: The agent-readable files are complete and every link resolves
+        run: node --test scripts/llms.test.mjs
+      - run: node scripts/check-llms.mjs
 
   deploy:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

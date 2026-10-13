@@ -116,6 +116,23 @@ export const current = versions.find((each) => each.stable)?.id ?? 'next';
 /// The newest stable version, or `null` before there is one.
 export const stable = versions.find((each) => each.stable) ?? null;
 
+/// Section order shared by the rendered sidebar and the text indexes.
+///
+/// A second list would let an agent read a different sequence from the one a
+/// person sees, and a newly added section could disappear from text exports.
+export const documentationSections = [
+  ['Getting Started', 'getting-started'],
+  ['Language Reference', 'reference'],
+  ['Standard Library', 'stdlib'],
+  ['Packages', 'packages'],
+  ['Cookbook', 'cookbook'],
+  ['Internals', 'internals'],
+  ['Deployment', 'deployment'],
+  ['Migration', 'migration'],
+  ['Performance', 'performance'],
+  ['Limitations', 'limitations'],
+];
+
 /// The entry for `id`, or `undefined`.
 export function versionOf(id) {
   return versions.find((each) => each.id === id);
