@@ -40,8 +40,58 @@
 //! what `std::trace::current` reads as `Option::None`. Span ids come from
 //! `Random::int`, so zero is not a value a real span takes; if one ever did it
 //! would be reported as a root, which is the same thing that happens today.
+//!
+//! # On wasm
+//!
+//! A wasm module has one thread of control and no `crate::current`, so it has
+//! one slot: [`one_slot`]. Without it `std::trace` would not link there.
 
+#[cfg(not(target_family = "wasm"))]
 use crate::current::{SpanContext, current};
+#[cfg(target_family = "wasm")]
+use one_slot::{SpanContext, current};
+
+/// **The span slot of a target with one fiber**, shaped like the native one so
+/// every function below is written once.
+///
+/// A `thread_local` rather than a `static`: `wasm32-unknown-unknown` has one
+/// thread, so the two are the same storage, and this one needs no `Sync`.
+#[cfg(target_family = "wasm")]
+mod one_slot {
+    use std::cell::Cell;
+
+    /// The innermost span: the same four words the native slot holds.
+    #[derive(Clone, Copy)]
+    pub(crate) struct SpanContext {
+        pub(crate) trace_high: i64,
+        pub(crate) trace_low: i64,
+        pub(crate) span: i64,
+        pub(crate) sampled: bool,
+    }
+
+    /// The one fiber there is, as far as its span goes.
+    pub(crate) struct Only(Cell<SpanContext>);
+
+    impl Only {
+        pub(crate) fn span(&self) -> SpanContext {
+            self.0.get()
+        }
+
+        pub(crate) fn set_span(&self, context: SpanContext) {
+            self.0.set(context);
+        }
+    }
+
+    thread_local! {
+        static ONLY: Only = const {
+            Only(Cell::new(SpanContext { trace_high: 0, trace_low: 0, span: 0, sampled: false }))
+        };
+    }
+
+    pub(crate) fn current<R>(body: impl FnOnce(&Only) -> R) -> R {
+        ONLY.with(body)
+    }
+}
 
 /// The trace id's high half, or zero.
 #[unsafe(no_mangle)]

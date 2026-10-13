@@ -52,13 +52,27 @@ pub const ARRAY_HEADER_FIELDS: usize = 4;
 /// The tag every array carries. Arrays are not an ADT, so nothing competes.
 const ARRAY_TAG: u32 = 0;
 
-/// Bytes of one field slot. Every Khora value is one word wide.
-const FIELD_WORD: usize = std::mem::size_of::<usize>();
+/// Bytes of one field slot: **eight on every target**, as a field is in
+/// generated code.
+///
+/// What this prevents: every array on wasm32 being corrupt. This was
+/// `size_of::<usize>()`, which is four there, so the runtime wrote the header
+/// in four-byte slots and put the elements sixteen bytes early, while
+/// generated code read eight-byte fields where it always does.
+/// `Array::new(24, 65)` read back as other bytes and `String::from_bytes`
+/// trapped on them. It is the mistake `KhoraHeader::refcount` already
+/// documents, one struct further in.
+const FIELD_WORD: usize = 8;
 
+/// Header field `index` of a live array, read as the eight bytes it occupies.
+///
+/// Narrowed to `usize` because every caller wants a length, a stride or an
+/// address, and on wasm32 each of those was written from a `usize` to begin
+/// with, so nothing is lost.
 fn array_word(array: *const u8, index: usize) -> usize {
     // SAFETY: the caller guarantees a live array, whose first fields were
-    // written by `khora_array_new`.
-    unsafe { *array.add(KHORA_FIELD_OFFSET + index * FIELD_WORD).cast::<usize>() }
+    // written by `khora_array_new`, eight-byte aligned like every field.
+    unsafe { *array.add(KHORA_FIELD_OFFSET + index * FIELD_WORD).cast::<u64>() as usize }
 }
 
 /// Allocates an array of `len` zeroed elements.
@@ -125,11 +139,11 @@ pub unsafe extern "C" fn khora_array_new(
     // SAFETY: `khora_alloc` returned space for the header fields and the
     // elements, zeroed and aligned.
     unsafe {
-        let base = object.add(KHORA_FIELD_OFFSET).cast::<usize>();
-        base.add(ARRAY_LEN_FIELD).write(len);
-        base.add(ARRAY_GLUE_FIELD).write(glue.map_or(0, |g| g as usize));
-        base.add(ARRAY_BOXED_FIELD).write(usize::from(boxed));
-        base.add(ARRAY_STRIDE_FIELD).write(stride);
+        let base = object.add(KHORA_FIELD_OFFSET).cast::<u64>();
+        base.add(ARRAY_LEN_FIELD).write(len as u64);
+        base.add(ARRAY_GLUE_FIELD).write(glue.map_or(0, |g| g as usize as u64));
+        base.add(ARRAY_BOXED_FIELD).write(u64::from(boxed));
+        base.add(ARRAY_STRIDE_FIELD).write(stride as u64);
 
         // Every slot holds the same value and every slot owns it, so the count
         // goes up once per slot. The caller keeps its own reference and

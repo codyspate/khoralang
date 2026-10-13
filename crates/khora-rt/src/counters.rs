@@ -54,33 +54,41 @@ pub(crate) const COUNTER_ORDER: Ordering = Ordering::Relaxed;
 
 /// Number of objects [`khora_alloc`] has produced since the last
 /// [`khora_reset_counters`].
+///
+/// **`i64` on every target**, the `long long` the generated header promises
+/// and the `Int` a Khora program declares it as. It was `usize`, an `i32` on
+/// wasm32, and `wasm-ld` links a call whose signature differs to a stub that
+/// traps: `extern fn khora_live_count() -> Int;`, the documented leak check,
+/// ended the call in every wasm module that made it.
 #[unsafe(no_mangle)]
-pub extern "C" fn khora_alloc_count() -> usize {
+pub extern "C" fn khora_alloc_count() -> i64 {
     if !counting() {
         return NOT_COUNTING;
     }
-    ALLOC_COUNT.load(COUNTER_ORDER)
+    ALLOC_COUNT.load(COUNTER_ORDER) as i64
 }
 
 /// Number of objects allocated and not yet freed.
 ///
 /// This is the leak check the roadmap's phase 2 exit criterion is written
 /// against: run a compiled program to completion and this must be zero.
+///
+/// `i64` for the reason [`khora_alloc_count`] gives.
 #[unsafe(no_mangle)]
-pub extern "C" fn khora_live_count() -> usize {
+pub extern "C" fn khora_live_count() -> i64 {
     if !counting() {
         return NOT_COUNTING;
     }
-    LIVE_COUNT.load(COUNTER_ORDER)
+    LIVE_COUNT.load(COUNTER_ORDER) as i64
 }
 
-/// What a counter answers when nothing was counting: `-1` read as an `Int`.
+/// What a counter answers when nothing was counting: `-1`.
 ///
 /// **Not zero.** Zero is what a leak check wants to see, and a check that
 /// passes because nothing was measured is worse than one that fails. Reaching
 /// this means a program read a counter without the compiler having seen it
 /// declare one, which should not happen -- so it is loud.
-const NOT_COUNTING: usize = usize::MAX;
+const NOT_COUNTING: i64 = -1;
 
 /// A counter that goes up by one every time it is read, starting at 1.
 ///

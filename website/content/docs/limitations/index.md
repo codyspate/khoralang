@@ -659,9 +659,12 @@ supported.
 
 WebAssembly needs more than a triple: a Worker or a browser has no filesystem
 and no sockets, so `std` would need a platform surface shaped for the host.
-Cloudflare Workers in particular is **not** an experimental target — none of
-the pieces exist, and [that page](/docs/deployment/cloudflare/) says what they
-would be.
+What a wasm build gives you is a library module that runs Khora code and
+imports nothing: one thread of control, no cancellation, no `Fiber::spawn`, and
+`print` and trap messages that go nowhere because the module has no output to
+write them to. Cloudflare Workers in particular is **not** an experimental
+target — the Worker-facing pieces do not exist, and
+[that page](/docs/deployment/cloudflare/) says what they would be.
 
 ## Stability
 

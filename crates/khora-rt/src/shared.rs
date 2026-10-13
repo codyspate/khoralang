@@ -718,6 +718,8 @@ pub unsafe extern "C" fn khora_shared_update(
     // generated code uses to call one.
     let mut produced: u64 = 0;
     let which = unsafe {
+        // No fiber on wasm can be canceled, so there is nothing to pin.
+        #[cfg(not(target_family = "wasm"))]
         let _pinned = crate::cancel::Pinned::new();
         let code = *change.add(KHORA_FIELD_OFFSET).cast::<*const u8>();
         call(code, change, cell.value, &raw mut produced)
@@ -806,6 +808,8 @@ pub unsafe extern "C" fn khora_shared_modify(
     let mut produced: u64 = 0;
     // SAFETY: the caller guarantees a live closure and a matching shim.
     let which = unsafe {
+        // As in `khora_shared_update`: nothing on wasm can be canceled.
+        #[cfg(not(target_family = "wasm"))]
         let _pinned = crate::cancel::Pinned::new();
         let code = *change.add(KHORA_FIELD_OFFSET).cast::<*const u8>();
         call(code, change, cell.value, &raw mut produced, &raw mut produced_answer)

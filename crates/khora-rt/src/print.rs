@@ -48,8 +48,13 @@ pub extern "C" fn khora_print_bool(value: bool) {
 /// If `len` is non-zero, `ptr` must point at `len` initialized bytes that stay
 /// valid and unmodified for the duration of the call. A zero `len` ignores
 /// `ptr` entirely, so the empty string may be passed as null.
+// **`u64`, not `usize`**, because generated code passes an `i64` on every
+// target. ELF links the two without comparing them; `wasm-ld` compares, and
+// links a call whose signature differs to a stub that traps, so every `print`
+// in a wasm module ended the call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn khora_print_str(ptr: *const u8, len: usize) {
+pub unsafe extern "C" fn khora_print_str(ptr: *const u8, len: u64) {
+    let len = len as usize;
     let mut out = std::io::stdout().lock();
     if len != 0 {
         if ptr.is_null() {
@@ -97,8 +102,11 @@ pub extern "C" fn khora_print_float(value: f64) {
 ///
 /// `ptr` must address `len` initialized bytes, live and unmodified for the
 /// duration of the call.
+// `u64` for the reason `khora_print_str` gives: `std` declares this with an
+// `Int` length, which is an `i64` on every target.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn khora_eprint(ptr: *const u8, len: usize) {
+pub unsafe extern "C" fn khora_eprint(ptr: *const u8, len: u64) {
+    let len = len as usize;
     let mut out = std::io::stderr().lock();
     if !ptr.is_null() && len > 0 {
         // SAFETY: the caller's guarantee, and `len` is far below `isize::MAX`

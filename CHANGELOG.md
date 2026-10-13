@@ -25,6 +25,22 @@ it will behave differently now.
   `khora_hash_pbkdf2_sha256` and `khora_hash_sha256_length` are removed. Code
   that declared them as `extern fn` uses `std::crypto` instead.
 
+### Fixed
+
+- Arrays and strings built from bytes are correct in WebAssembly builds.
+- A WebAssembly library containing a loop, a `!` or a region links, and its
+  region's finalizers run when the region ends.
+- `print` in a WebAssembly library returns to its caller. The text is not
+  written anywhere: the module has no standard output.
+- `khora_live_count` and `khora_alloc_count` return a 64-bit integer on every
+  target, as the generated C header declares them. In a WebAssembly library,
+  `extern fn khora_live_count() -> Int;` returns instead of trapping.
+- A WebAssembly link whose runtime function signatures disagree with the
+  compiler's fails, naming the function, instead of producing a module that
+  traps when the function is called.
+- The WebAssembly runtime builds: `cargo build -p khora-rt --target
+  wasm32-unknown-unknown` succeeds.
+
 ### Added
 
 - `std::crypto`: `sha256` and `sha512`; `Hmac::sha256`, `Hmac::sha512`,

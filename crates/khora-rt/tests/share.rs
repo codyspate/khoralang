@@ -98,7 +98,7 @@ fn a_million_cell_list_is_marked_without_recursion() {
                 assert_eq!(khora_refcount(*cell), 1, "marking changed a count");
             }
         }
-        assert_eq!(khora_live_count(), CELLS, "marking freed something");
+        assert_eq!(khora_live_count(), CELLS as i64, "marking freed something");
         assert_eq!(VISITS.load(Ordering::Relaxed), CELLS, "each cell is visited once");
 
         // Shared, so the last reference must still free all of it: this is

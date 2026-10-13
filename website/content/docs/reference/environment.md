@@ -98,7 +98,11 @@ What to generate code for, instead of the machine you are on.
 
 **Values:** one of `linux`, `macos`, `windows`, `wasm`, or a full target triple such as `aarch64-unknown-linux-gnu`. A triple selects its own family, so one setting moves both halves of a cross build: which platform's `std` files are read, and which target the code generator emits for. Any other value is rejected with a message naming what is accepted.
 
-**What it costs, and it is the whole story here.** This does not produce a runnable program for another platform. There is no cross linking: the build stops at generating and verifying a module. What it is for is checking that a combination *compiles* — a `std` surface that only one platform selects, a calling convention only one platform uses — from whichever machine you have. Running the result still needs the real platform. [Supported targets](/docs/deployment/supported-targets/) is what is actually shipped.
+**What it costs.** For every target but one, this does not produce a runnable program for another platform: there is no cross linking. What it is for is checking that a combination *compiles* — a `std` surface that only one platform selects, a calling convention only one platform uses — from whichever machine you have. Running the result still needs the real platform.
+
+**The exception is a WebAssembly library**: `KHORA_TARGET=wasm32-unknown-unknown` with `khora build --lib` links a module with `wasm-ld`, which needs no sysroot. It also needs the Khora runtime built for WebAssembly, and **release archives do not include one**. Build it from a source checkout of the same version with `cargo build -p khora-rt --target wasm32-unknown-unknown`, and name the resulting `libkhora_rt.a` in [`KHORA_RT_LIB`](#khora_rt_lib). Without it the link fails with one "neither Wasm object file nor LLVM bitcode" line per member of the native runtime it found instead. The bare family name `wasm` selects WebAssembly's `std` files but generates for the host, so it checks a build and does not produce a module.
+
+[Supported targets](/docs/deployment/supported-targets/) is what is actually shipped.
 
 ### `KHORA_RC_LOCAL`
 

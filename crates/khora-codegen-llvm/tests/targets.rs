@@ -146,21 +146,315 @@ fn an_unknown_triple_is_refused() {
 
 // --- and a module that actually links -------------------------------------
 
+/// Whether a missing tool or archive must fail the test rather than skip it.
+///
+/// **What this prevents: a check that has never run reporting that it passed.**
+/// Every wasm test below skipped when the wasm runtime archive was absent, and
+/// nothing in CI built one, so the archive went 36 compile errors and a
+/// corrupted `Array` header without a single red run. A developer without the
+/// wasm target still gets a skip; CI, which sets `CI`, gets a failure.
+///
+/// **Linux only**, because that is the one runner `ci.yml` builds the wasm
+/// archive on. The archive is the same bytes whichever host builds it, so the
+/// other two runners would be checking nothing new, and requiring it there
+/// without building it would make them fail for a missing artifact.
+fn must_not_skip() -> bool {
+    std::env::var_os("CI").is_some() && cfg!(target_os = "linux")
+}
+
+/// Skips with `why`, or fails under CI. See [`must_not_skip`].
+fn skip(why: &str) {
+    assert!(!must_not_skip(), "{why}; CI must run this, not skip it");
+    eprintln!("{why}; skipping");
+}
+
 /// The wasm runtime archive, if somebody has built one.
 ///
 /// Not built here: `cargo build -p khora-rt --target wasm32-unknown-unknown`
 /// downloads a target's standard library the first time and takes minutes, and
 /// a test that does that on a cold machine is a test nobody runs. Skipped with
-/// a message instead, which is the honest shape for a check whose input is a
-/// build artifact.
+/// a message instead, except under CI -- [`must_not_skip`].
+///
+/// Looked for in the target directory this test was built into, which is the
+/// one `cargo build -p khora-rt --target ...` beside it wrote to, wherever
+/// `CARGO_TARGET_DIR` put it.
 fn wasm_runtime() -> Option<PathBuf> {
-    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
-    let path = workspace
-        .join("target")
-        .join("wasm32-unknown-unknown")
-        .join("debug")
-        .join("libkhora_rt.a");
+    let target = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let target = target.parent()?;
+    let path = target.join("wasm32-unknown-unknown").join("debug").join("libkhora_rt.a");
     path.is_file().then_some(path)
+}
+
+/// Links `source` as a wasm library into `dir/lib.wasm` against `archive`.
+///
+/// `KHORA_RT_LIB` names the archive rather than leaving the toolchain to find
+/// it, so the module is linked against the archive [`wasm_runtime`] found and
+/// not some other one with the same name.
+fn wasm_library(dir: &std::path::Path, archive: &std::path::Path, source: &str) -> PathBuf {
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(dir).expect("a workspace");
+    let out = dir.join("lib.wasm");
+
+    let db = KhoraDatabase::new();
+    let files = vec![SourceFile::new(&db, dir.join("lib.kh"), source.to_string())];
+    let root = SourceRoot::new(&db, files);
+
+    // SAFETY-of-a-sort: process-wide, and held by the caller's lock.
+    unsafe {
+        std::env::set_var("KHORA_TARGET", "wasm32-unknown-unknown");
+        std::env::set_var("KHORA_RT_LIB", archive);
+    }
+    let outcome = khora_codegen_llvm::compile_library(&db, root, &out);
+    unsafe {
+        std::env::remove_var("KHORA_TARGET");
+        std::env::remove_var("KHORA_RT_LIB");
+    }
+
+    if let Err(errors) = outcome {
+        let said = errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("\n");
+        panic!("a wasm library should link:\n{said}");
+    }
+    out
+}
+
+/// Instantiates `module` with no imports under Node's WebAssembly API and
+/// calls `export` with `args`, returning what it printed: the answer, or
+/// `trap: ...`. Every export these tests call returns an `Int`, so an answer
+/// that is not an `i64` -- a JS `Number` rather than a `BigInt` -- comes back
+/// as `not an i64: ...` and fails whatever it is compared with.
+///
+/// **Run, not just inspected**, because the inspection passed while the
+/// module was wrong: a module that links, validates and exports the right
+/// names returned garbage from its first `Array<U8>`. `None` when there is no
+/// `node`, which [`skip`] turns into a failure under CI.
+fn run_wasm(module: &std::path::Path, export: &str, args: &[i64]) -> Option<String> {
+    // A file rather than `node -e`: the script is part of what a failure is
+    // reported against, and a reader can run it by hand.
+    const RUNNER: &str = "\
+const fs = require('fs');
+const [file, name, ...args] = process.argv.slice(2);
+const compiled = new WebAssembly.Module(fs.readFileSync(file));
+const instance = new WebAssembly.Instance(compiled, {});
+try {
+  const answer = instance.exports[name](...args.map(BigInt));
+  console.log(typeof answer === 'bigint' ? String(answer) : 'not an i64: ' + String(answer));
+} catch (e) {
+  console.log('trap: ' + e.message);
+}
+";
+    // Not `module` for the compiled module: CommonJS already declares that
+    // name, and Node answers the clash by rereading the file as an ES module,
+    // where `require` does not exist -- an error about something else.
+    let runner = module.with_file_name("run.cjs");
+    std::fs::write(&runner, RUNNER).expect("writing the runner");
+    let ran = std::process::Command::new("node")
+        .arg(&runner)
+        .arg(module)
+        .arg(export)
+        .args(args.iter().map(i64::to_string))
+        .output()
+        .ok()?;
+    assert!(
+        ran.status.success(),
+        "node could not run the module: {}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    Some(String::from_utf8_lossy(&ran.stdout).trim().to_string())
+}
+
+/// **Bytes made into an array, then a string, inside a wasm module.**
+///
+/// The runtime wrote an array's header -- length, glue, element kind, stride
+/// -- as `usize` words, which are four bytes on wasm32, while generated code
+/// reads eight-byte fields on every target. So every `Array` built in a wasm
+/// module had its length where generated code did not look and its elements
+/// eight bytes early, and nothing that linked or validated the module could
+/// tell: `String::from_bytes` saw bytes that were not the ones written and
+/// trapped as not UTF-8. The export below answers `24 + 65`, the length and
+/// the last byte.
+#[test]
+fn a_wasm_module_reads_back_the_bytes_it_built() {
+    let Some(archive) = wasm_runtime() else {
+        skip("no wasm khora-rt; build it with `cargo build -p khora-rt --target wasm32-unknown-unknown`");
+        return;
+    };
+    let _held = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("wasm_bytes");
+    let source = "module w;
+pub type Array<A>;
+impl<A> Array<A> {
+  fn new(length: Int, fill: A) -> Array<A>;
+  fn length(self) -> Int;
+}
+impl String {
+  fn from_bytes(bytes: Array<U8>) -> String;
+  fn byte_length(self) -> Int;
+  fn byte(self, index: Int) -> U8;
+}
+impl U8 {
+  fn of(value: Int) -> U8;
+  fn to_int(self) -> Int;
+}
+
+pub extern fn counted() -> Int {
+  let bytes: Array<U8> = Array::new(24, U8::of(65));
+  let text = String::from_bytes(bytes);
+  String::byte_length(text) + U8::to_int(String::byte(text, 23))
+}
+";
+    let module = wasm_library(&dir, &archive, source);
+    let Some(answer) = run_wasm(&module, "counted", &[]) else {
+        skip("no `node` to run the module with");
+        return;
+    };
+    assert_eq!(answer, "89", "24 bytes of `A` should read back as 24 bytes of `A`");
+}
+
+/// **A loop, a `!` and a region, inside a wasm module.**
+///
+/// Generated code is the same on every target: a back-edge and a `!` load
+/// `khora_poll` and may call `khora_canceled` or `khora_back_edge`, and a
+/// region is `khora_region_open`, `_defer` and `_release`. None of them
+/// existed on wasm, where there are no fibers to cancel, so any module with a
+/// loop failed in `wasm-ld`. This one also checks the finalizers ran, and in
+/// which order: each writes its digit after what is there, and the last one
+/// deferred runs first, as on every target -- a rollback before the
+/// connection it ran on is closed. So the answer is the loop's sum,
+/// 0 + 1 + ... + 9 = 45, plus `21`; first-deferred-first would give `12`.
+#[test]
+fn a_wasm_module_runs_a_loop_a_raise_and_a_region() {
+    let Some(archive) = wasm_runtime() else {
+        skip("no wasm khora-rt; build it with `cargo build -p khora-rt --target wasm32-unknown-unknown`");
+        return;
+    };
+    let _held = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("wasm_control");
+    let source = "module w;
+pub type Array<A>;
+impl<A> Array<A> {
+  fn new(length: Int, fill: A) -> Array<A>;
+  fn get(self, index: Int) -> A;
+  fn set(self, index: Int, value: A) -> ();
+}
+pub type Region;
+impl Region {
+  fn open() -> Region;
+  fn defer(self, finalizer: () -> ()) -> ();
+}
+
+type Bad = | Bad(Int);
+
+fn checked(n: Int) -> Int raises Bad {
+  if n < 0 { raise Bad::Bad(n) } else { n }
+}
+
+fn summed(n: Int, seen: Array<Int>) -> Int {
+  let region = Region::open();
+  Region::defer(region, fn () => Array::set(seen, 0, Array::get(seen, 0) * 10 + 1));
+  Region::defer(region, fn () => Array::set(seen, 0, Array::get(seen, 0) * 10 + 2));
+  let mut i = 0;
+  let mut total = 0;
+  while i < n {
+    total = total + (checked(i)! catch { Bad::Bad(_) => 0 });
+    i = i + 1;
+  };
+  total
+}
+
+pub extern fn looped(n: Int) -> Int {
+  let seen: Array<Int> = Array::new(1, 0);
+  let total = summed(n, seen);
+  total + Array::get(seen, 0)
+}
+";
+    let module = wasm_library(&dir, &archive, source);
+    let Some(answer) = run_wasm(&module, "looped", &[10]) else {
+        skip("no `node` to run the module with");
+        return;
+    };
+    assert_eq!(answer, "66", "the loop's 45, and the finalizers' 21: last deferred, first run");
+}
+
+/// **A `print` inside a wasm module returns.**
+///
+/// Generated code passes a string's length as an `i64` on every target, and
+/// the runtime took a `usize`, an `i32` on wasm32. ELF links the two without
+/// looking; `wasm-ld` checks, warns, and links the call to a stub whose body is
+/// `unreachable`. So every `print` in a wasm module was a trap. Where the text
+/// goes is the host's business -- this checks only that the call comes back.
+#[test]
+fn a_wasm_module_can_print_and_carry_on() {
+    let Some(archive) = wasm_runtime() else {
+        skip("no wasm khora-rt; build it with `cargo build -p khora-rt --target wasm32-unknown-unknown`");
+        return;
+    };
+    let _held = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("wasm_print");
+    let source = "module w;
+fn print(value: String);
+extern fn khora_eprint(text: Ptr, length: Int) -> ();
+pub type Ptr;
+impl String {
+  fn with_data<B, 'c, 'e>(self, body: (Ptr, Int) -> B with 'c raises 'e) -> B;
+}
+
+pub extern fn spoke(n: Int) -> Int {
+  print(\"to stdout\");
+  String::with_data(\"to stderr\", fn (p, len) => khora_eprint(p, len));
+  n + 1
+}
+";
+    let module = wasm_library(&dir, &archive, source);
+    let Some(answer) = run_wasm(&module, "spoke", &[41]) else {
+        skip("no `node` to run the module with");
+        return;
+    };
+    assert_eq!(answer, "42", "both prints should return");
+}
+
+/// **The leak check runs inside a wasm module.**
+///
+/// `extern fn khora_live_count() -> Int;` is how a Khora program asks what is
+/// still allocated, and an `Int` is an `i64`. The runtime returned a `usize`,
+/// an `i32` on wasm32, and `wasm-ld` links such a call to a stub that traps,
+/// so the check ended the call it was checking. A library has no `main` to
+/// switch counting on, so both counters answer `-1`, "not counting": the
+/// export answers `-1 * 1000 + -1`. The same counter is also exported to the
+/// host, where the generated header promises a `long long`; the runner
+/// refuses an answer that is not one.
+#[test]
+fn a_wasm_module_can_ask_what_is_live() {
+    let Some(archive) = wasm_runtime() else {
+        skip("no wasm khora-rt; build it with `cargo build -p khora-rt --target wasm32-unknown-unknown`");
+        return;
+    };
+    let _held = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("wasm_counters");
+    let source = "module w;
+extern fn khora_live_count() -> Int;
+extern fn khora_alloc_count() -> Int;
+
+pub extern fn counted() -> Int {
+  let live = khora_live_count();
+  let made = khora_alloc_count();
+  live * 1000 + made
+}
+";
+    let module = wasm_library(&dir, &archive, source);
+    let Some(answer) = run_wasm(&module, "counted", &[]) else {
+        skip("no `node` to run the module with");
+        return;
+    };
+    assert_eq!(answer, "-1001", "both counters, not counting");
+    let Some(exported) = run_wasm(&module, "khora_live_count", &[]) else {
+        skip("no `node` to run the module with");
+        return;
+    };
+    assert_eq!(exported, "-1", "the exported counter, as the host calls it");
 }
 
 /// **A `.wasm` module, linked, with the exports a host would call.**
@@ -180,35 +474,16 @@ fn wasm_runtime() -> Option<PathBuf> {
 /// the right names, and could not have been instantiated.
 #[test]
 fn a_wasm_library_links_and_exports_what_it_should() {
-    let Some(_archive) = wasm_runtime() else {
-        eprintln!(
-            "no wasm khora-rt; skipping. Build it with \
-             `cargo build -p khora-rt --target wasm32-unknown-unknown`"
-        );
+    let Some(archive) = wasm_runtime() else {
+        skip("no wasm khora-rt; build it with `cargo build -p khora-rt --target wasm32-unknown-unknown`");
         return;
     };
     let _held = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
 
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("wasm_library");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("a workspace");
-    let out = dir.join("lib.wasm");
-
-    let db = KhoraDatabase::new();
     let source = "module w;\n\
                   pub extern fn price(units: Int, scale: Int) -> Int { units * scale }\n";
-    let files = vec![SourceFile::new(&db, dir.join("lib.kh"), source.to_string())];
-    let root = SourceRoot::new(&db, files);
-
-    // SAFETY-of-a-sort: process-wide, and held by the lock above.
-    unsafe { std::env::set_var("KHORA_TARGET", "wasm32-unknown-unknown") };
-    let outcome = khora_codegen_llvm::compile_library(&db, root, &out);
-    unsafe { std::env::remove_var("KHORA_TARGET") };
-
-    if let Err(errors) = outcome {
-        let said = errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("\n");
-        panic!("a wasm library should link:\n{said}");
-    }
+    let out = wasm_library(&dir, &archive, source);
 
     let bytes = std::fs::read(&out).expect("the module was written");
     assert_eq!(&bytes[..4], b"\0asm", "it is a wasm module");

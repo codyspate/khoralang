@@ -247,6 +247,27 @@ jobs:
         with:
           tool: nextest
 
+      # `node` runs the wasm modules in the step below. The runner image has
+      # it; printing the version puts the one it ran with in the log.
+      - name: Node, for the wasm tests
+        if: runner.os == 'Linux'
+        run: node --version
+
+      # **The wasm runtime, built so the wasm tests cannot skip.** They used to
+      # skip when the archive was missing, and nothing here built it, so the
+      # archive failed to compile and every `Array` in a wasm module was
+      # corrupt without one red run. Under `CI` the tests in `targets` now fail
+      # instead of skipping, on this runner, which is the one that builds the
+      # archive: it is the same bytes from any host. `node` runs the modules,
+      # and the runner image has it.
+      - name: Build the wasm runtime and run the wasm tests
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo build -p khora-rt --target wasm32-unknown-unknown
+          cargo nextest run -p khora-codegen-llvm --features llvm --test targets
+
       # The whole baseline: the suite, clippy, the corpus check and formatter
       # over `std`, every reference application built, and twelve HTTP
       # conformance checks against a real `curl`. On Windows the script is

@@ -181,7 +181,9 @@ fn say_what_happens_next(err: &mut impl Write) -> bool {
         // Under `khora test` this is the difference between a run that reports
         // itself and one that stops mid-sentence: the harness knows which tests
         // it had not reached, and a trap is the only moment anybody wants that
-        // list. Empty outside a test run, where there is no list to give.
+        // list. Empty outside a test run, where there is no list to give, and
+        // on wasm, where `khora test` does not run.
+        #[cfg(not(target_family = "wasm"))]
         let _ = err.write_all(crate::testing::trap_context().as_bytes());
         return false;
     }

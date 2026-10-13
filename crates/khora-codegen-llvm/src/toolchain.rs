@@ -488,6 +488,15 @@ fn drive_wasm_ld(
     // A link error naming a missing symbol is the better failure by a wide
     // margin. When a Worker genuinely needs a host import — entropy, a clock —
     // it will be declared, and declared imports do not need this flag.
+    //
+    // **`--fatal-warnings`, because the warning that mattered was a trap.** A
+    // call whose signature differs from the definition's is only a warning to
+    // `wasm-ld`, which then links the call to a stub whose body is
+    // `unreachable`; and the warning was never shown, because this prints the
+    // linker's output only when it fails. A runtime function taking a `usize`
+    // where generated code passes an `i64` made every `print` in a wasm module
+    // a trap that way. With the flag it is a link error naming the function.
+    cmd.arg("--fatal-warnings");
     cmd.args(objects).arg(runtime).arg("-o").arg(out);
 
     let output = cmd.output().map_err(|e| format!("running {}: {e}", linker.display()))?;

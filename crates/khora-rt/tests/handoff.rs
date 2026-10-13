@@ -168,7 +168,7 @@ fn a_graph_held_only_by_itself_crosses_unmarked() {
                 assert_eq!(khora_refcount(*object), 1, "a send changed a count");
             }
         }
-        assert_eq!(khora_live_count(), every.len(), "a send freed or made something");
+        assert_eq!(khora_live_count(), every.len() as i64, "a send freed or made something");
         // SAFETY: the receiver's one reference.
         unsafe { khora_drop(got, Some(drop_conn)) };
         assert_eq!(khora_live_count(), 0, "the moved graph leaked");

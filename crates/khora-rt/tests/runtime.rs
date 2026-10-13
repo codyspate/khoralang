@@ -490,7 +490,7 @@ fn the_counters_survive_allocation_from_several_threads() {
 
         assert_eq!(
             khora_alloc_count(),
-            THREADS * PER_THREAD,
+            (THREADS * PER_THREAD) as i64,
             "no increment may be lost to a race"
         );
         assert_eq!(khora_live_count(), 0, "every thread's objects must be freed");
@@ -512,7 +512,7 @@ fn printing_accepts_the_edges_of_every_type_it_supports() {
         // SAFETY: the slice's bytes are initialized and live for the call, and
         // a zero length makes the null pointer unread.
         unsafe {
-            khora_print_str(text.as_ptr(), text.len());
+            khora_print_str(text.as_ptr(), text.len() as u64);
             khora_print_str(std::ptr::null(), 0);
         }
 

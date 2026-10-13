@@ -84,11 +84,11 @@
 //! uint64_t khora_refcount(const void *object);
 //! void  khora_print_int(int64_t value);
 //! void  khora_print_bool(_Bool value);
-//! void  khora_print_str(const uint8_t *bytes, size_t len);
+//! void  khora_print_str(const uint8_t *bytes, uint64_t len);
 //! _Bool khora_str_eq(const uint8_t *a, size_t a_len,
 //!                    const uint8_t *b, size_t b_len);
-//! size_t khora_alloc_count(void);
-//! size_t khora_live_count(void);
+//! int64_t khora_alloc_count(void);
+//! int64_t khora_live_count(void);
 //! void  khora_reset_counters(void);
 //! ```
 //!
@@ -178,6 +178,9 @@ mod crypto;
 mod heap;
 #[cfg(not(target_family = "wasm"))]
 mod migration;
+// Sockets, and the reactor that parks a fiber on one, need a scheduler and a
+// descriptor; a wasm module has neither.
+#[cfg(not(target_family = "wasm"))]
 mod net;
 #[cfg(not(target_family = "wasm"))]
 mod nursery;
@@ -189,6 +192,7 @@ mod random;
 #[cfg(not(target_family = "wasm"))]
 #[cfg(target_os = "linux")]
 mod epoll;
+#[cfg(not(target_family = "wasm"))]
 mod reactor;
 #[cfg(not(target_family = "wasm"))]
 mod region;
@@ -197,6 +201,10 @@ mod scheduler;
 mod share;
 mod shared;
 mod signals;
+// What generated code calls at a `!`, a loop and a region on a target with one
+// thread of control: the native `poll`, `cancel` and `region` need fibers.
+#[cfg(target_family = "wasm")]
+mod single;
 #[cfg(not(target_family = "wasm"))]
 mod soak;
 mod span;
@@ -361,7 +369,10 @@ pub const MAX_FIELD_BYTES: usize = u32::MAX as usize;
 // The documented table is the contract, so pin the numbers it quotes. A change
 // to `KhoraHeader` that moved a field would otherwise be caught only by the
 // code generator producing wrong programs.
-#[cfg(target_pointer_width = "64")]
+//
+// On every target, not only 64-bit ones: the code generator compiles these
+// numbers in for the host and uses them for wasm32 too, so a 32-bit layout
+// that differed would be the silent corruption the `Array` header had.
 const _: () = {
     assert!(KHORA_HEADER_SIZE == 16);
     assert!(KHORA_HEADER_ALIGN == 8);
