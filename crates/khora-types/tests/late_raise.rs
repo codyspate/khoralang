@@ -126,15 +126,34 @@ fn a_raised_value_never_worked_out_is_refused() {
     );
 }
 
-/// Alone in its operand, the raise still leaves the `catch` with nothing it
-/// knows is raised when the arms are checked; this stays refused.
+/// Alone in its operand, the raise is what the arms name once its type is
+/// known, so the `catch` is accepted.
+///
+/// It was refused as naming a type "nothing in this expression raises",
+/// because that was asked before the raise was typed. That refusal was also
+/// what kept the shape from compiling wrongly: only the first arm's
+/// instantiation was tied to the raise, so `Gx::Y` was compiled as a `Gx`
+/// of its own and the error walked past it into the trap for a total
+/// `catch` (exit 132). Both arms are tied now, and the LLVM test
+/// `catch_arms::an_untyped_raise_alone_in_a_catch_takes_its_arms` runs it.
 #[test]
-fn an_untyped_raise_alone_in_a_catch_is_still_refused() {
+fn an_untyped_raise_alone_in_a_catch_is_accepted() {
+    assert_clean(&format!(
+        "{TYPES}fn work() -> Int {{ \
+         let k = fn (e) => (raise e) catch {{ Gx::X(s, v) => v, Gx::Y(n) => n }}; \
+         k(Gx::X(\"a\", 3)) }}\n"
+    ));
+}
+
+/// Still refused where, once every raise is typed, nothing raises the type
+/// an arm names.
+#[test]
+fn an_untyped_raise_of_another_type_is_still_refused_by_name() {
     assert_reports(
         &format!(
             "{TYPES}fn work() -> Int {{ \
              let k = fn (e) => (raise e) catch {{ Gx::X(s, v) => 1, Gx::Y(n) => n }}; \
-             k(Gx::X(\"a\", 3)) }}\n"
+             let d: Dn = {{ q: 4 }}; k(d) }}\n"
         ),
         "nothing in this expression raises `Gx`",
     );

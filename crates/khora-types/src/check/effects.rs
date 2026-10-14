@@ -313,7 +313,7 @@ impl<'a> Checker<'a> {
     pub(super) fn absorb_raises(&mut self, before: usize) -> Type {
         let window: Vec<Demand> = self.demanded.split_off(before);
         let mut fields: Vec<(String, Type)> = Vec::new();
-        let mut tails: Vec<Type> = Vec::new();
+        let mut tails: Vec<(Type, TextRange)> = Vec::new();
         let mut at = None;
 
         let kept: Vec<Demand> = window
@@ -327,7 +327,7 @@ impl<'a> Checker<'a> {
                         }
                         fields.extend(raised);
                         if let Some(rest) = rest {
-                            tails.push(*rest);
+                            tails.push((*rest, demand.range));
                         }
                         demand.row = Type::empty_row();
                     }
@@ -353,15 +353,62 @@ impl<'a> Checker<'a> {
     /// typed.** Keeping only the first charged that raise to nobody again.
     /// The same tail met twice -- a closure called twice -- is one tail.
     /// Several distinct ones, one of them this machinery's, get a fresh head
-    /// defined as their union and solved by [`Self::settle_raises`]. Ordinary
-    /// row variables alone keep the first, as they always have.
-    fn join_tails(&mut self, tails: Vec<Type>) -> Option<Type> {
+    /// defined as their union and solved by [`Self::settle_raises`].
+    ///
+    /// **Nor when it is a rigid `'er`.** A closure calling one function with
+    /// an open row and a parameter raising `'er` kept the open tail and
+    /// lost `'er`: the enclosing function needed no `+ 'er`, and an error
+    /// the caller chose left through a `catch` the checker had called total
+    /// (exit 134). So the closure's row ends in `'er`.
+    ///
+    /// **The open tails beside it are left alone, not unified with `'er`.**
+    /// They belong to the closures this one calls, and what those raise is
+    /// part of what this one raises, not the other way round: unifying
+    /// `f`'s tail with `'er` typed `fn () => pay(1)!` -- and even
+    /// `fn () => "pure"` -- as raising `'er`, so passing `f` where
+    /// `raises Pay` was wanted, or calling it outside, was refused. An
+    /// ordinary open tail stands for nothing raised yet, only for room to
+    /// widen, so dropping it from this closure's row loses no error; the
+    /// tails this machinery solves later do stand for raises, and are kept.
+    ///
+    /// Two different rigid tails cannot be joined, because a row ends in one;
+    /// that is refused at `at` rather than one of them kept.
+    ///
+    /// Ordinary row variables alone keep the first, as they always have.
+    fn join_tails(&mut self, tails: Vec<(Type, TextRange)>) -> Option<Type> {
         let mut distinct: Vec<Type> = Vec::new();
-        for tail in tails {
+        let mut rigid: Vec<(Type, TextRange)> = Vec::new();
+        for (tail, at) in tails {
             let tail = self.unifier.shallow(&tail);
+            let is_rigid = matches!(&tail, Type::Param(name) if name.starts_with('\''));
+            if is_rigid && !rigid.iter().any(|(r, _)| r == &tail) {
+                rigid.push((tail.clone(), at));
+            }
             if !distinct.contains(&tail) {
                 distinct.push(tail);
             }
+        }
+        if let Some((first, _)) = rigid.first().cloned() {
+            for (other, at) in rigid.iter().skip(1) {
+                self.error(
+                    format!(
+                        "this closure raises the errors of both `{first}` and `{other}`, and \
+                         one closure's errors can follow only one of them; catch one of \
+                         them inside the closure with `_`, or split it in two"
+                    ),
+                    *at,
+                );
+            }
+            // The rigid tail first, so that a union defined below reads it
+            // as the rest of the row; then the tails that stand for raises
+            // still to be typed. Ordinary open tails are dropped.
+            let mut joined: Vec<Type> = vec![first.clone()];
+            for tail in distinct {
+                if self.is_derived_or_pending(&tail) && !joined.contains(&tail) {
+                    joined.push(tail);
+                }
+            }
+            distinct = joined;
         }
         if distinct.len() <= 1 || !distinct.iter().any(|t| self.is_derived_or_pending(t)) {
             return distinct.into_iter().next();
@@ -427,6 +474,61 @@ impl<'a> Checker<'a> {
         let contents = self.contents_of(&defs);
         for ((own, _), content) in defs.iter().zip(contents) {
             self.solve_tail(own, content);
+        }
+    }
+
+    /// Refuses an error a binding `catch` arm was not typed for, which
+    /// reached its operand through a tail solved only after the body; and a
+    /// named arm for a type that, once every raise is typed, nothing in its
+    /// operand raises after all.
+    ///
+    /// Run after [`Self::settle_raises`], when each such tail stands for the
+    /// errors it carries. An entry of another type is the failure the
+    /// binding would have read at the wrong layout; a rigid `'er` at the end
+    /// is the same failure for whatever type the caller picks. An ordinary
+    /// open rest is room left to widen, not an error, and passes.
+    pub(crate) fn check_bound_tails(&mut self) {
+        for (owner, tails, range) in std::mem::take(&mut self.named_late) {
+            let raised = tails.iter().any(|t| {
+                matches!(self.unifier.zonk(t), Type::Row { fields, .. }
+                    if fields.iter().any(|(label, _)| *label == owner))
+            });
+            if !raised {
+                self.error(format!("nothing in this expression raises `{owner}`"), range);
+            }
+        }
+        for (tail, bound, at) in std::mem::take(&mut self.bound_tails) {
+            let Type::Row { fields, tail: rest } = self.unifier.zonk(&tail) else { continue };
+            let bound = self.unifier.zonk(&bound);
+            let mut others: Vec<String> = Vec::new();
+            for (_, ty) in &fields {
+                if self.unifier.unify(&bound, ty).is_err() {
+                    let shown = format!("`{ty}`");
+                    if !others.contains(&shown) {
+                        others.push(shown);
+                    }
+                }
+            }
+            if let Some(rest) = rest {
+                if let Type::Param(name) = self.unifier.shallow(&rest) {
+                    if name.starts_with('\'') {
+                        others.push(format!("`{name}`, an error type the caller chooses"));
+                    }
+                }
+            }
+            if others.is_empty() {
+                continue;
+            }
+            self.error(
+                format!(
+                    "this `catch` arm binds the failure as `{bound}`, but the operand can \
+                     also raise {}, through a closure it calls, so there is no single type \
+                     to give the binding. Write an arm for each case you handle and let the \
+                     rest pass on, or use `_` to handle every failure without reading it",
+                    others.join(" and ")
+                ),
+                at,
+            );
         }
     }
 
@@ -625,13 +727,23 @@ impl<'a> Checker<'a> {
                 Def::Pending(_) | Def::Merged(_) => continue,
             };
             for entry in read_source(&sources[index][0], &value).entries {
-                if let Some((_, arm_ty, at)) = arms.iter().find(|(owner, _, _)| *owner == entry.label) {
+                // Every arm naming the type, not the first: each arm was
+                // given a fresh instantiation, and one left unsolved was
+                // compiled as a different type from the raise, so the error
+                // missed it and reached the trap for a `catch` the checker
+                // had called total.
+                let mine: Vec<(Type, TextRange)> = arms
+                    .iter()
+                    .filter(|(owner, _, _)| *owner == entry.label)
+                    .map(|(_, ty, at)| (ty.clone(), *at))
+                    .collect();
+                for (arm_ty, at) in mine {
                     self.require(
-                        arm_ty,
+                        &arm_ty,
                         &entry.ty,
                         "a `catch` arm handles one instantiation of a type, and this \
                          operand raises two; catch them with `_`, or in two `catch`es",
-                        *at,
+                        at,
                     );
                 }
             }
@@ -1155,6 +1267,18 @@ impl<'a> Checker<'a> {
                 continue;
             }
 
+            // **A rigid `'er` the function does not end its `raises` in is
+            // said as the fix.** Unification has only the rows to talk about,
+            // and printed "`'er` is a type the caller chooses, so it cannot be
+            // assumed to be `{ Pay: Pay }`" -- true, in a notation nobody
+            // writes, and silent on what to change.
+            if clause == Clause::Raises {
+                if let Some(message) = self.undeclared_rigid_tail(&callee, &row, &promise) {
+                    self.error(message, range);
+                    continue;
+                }
+            }
+
             if let Err(why) = self.unifier.unify(&promise, &row) {
                 // **A name that did not resolve is a phantom, and comparing
                 // it to the type it stands in for is a second error for one
@@ -1208,6 +1332,89 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+    }
+
+    /// What to say about a `raises` demand the function's row does not
+    /// cover, when either side ends in a rigid `'er`; `None` otherwise, and
+    /// when it is covered.
+    ///
+    /// **Said in the words a `raises` clause is written in.** Unification
+    /// compares the two rows and, on a rigid tail, could only report that
+    /// `'er` "cannot be assumed to be `{ Pay: Pay, | _ }`": true, in a
+    /// notation nobody writes, and silent on what to change. This names the
+    /// types missing and the clause that would cover them.
+    fn undeclared_rigid_tail(&mut self, callee: &str, demand: &Type, promise: &Type) -> Option<String> {
+        let Type::Row { fields: wanted_fields, tail: wanted } = self.unifier.zonk(demand) else {
+            return None;
+        };
+        let Type::Row { fields: held_fields, tail: held } = self.unifier.zonk(promise) else {
+            return None;
+        };
+        let rigid = |t: &Option<Box<Type>>| match t.as_deref() {
+            Some(Type::Param(name)) if name.starts_with('\'') => Some(name.clone()),
+            _ => None,
+        };
+        let (wanted_rigid, held_rigid) = (rigid(&wanted), rigid(&held));
+        if wanted_rigid.is_none() && held_rigid.is_none() {
+            return None;
+        }
+        // A promise ending in a variable can still grow to take anything,
+        // and unification answers that case in its own words.
+        if held.is_some() && held_rigid.is_none() {
+            return None;
+        }
+        let mut missing: Vec<String> = Vec::new();
+        for (label, ty) in &wanted_fields {
+            let covered = held_fields
+                .iter()
+                .any(|(l, t)| l == label && self.unifier.unify(t, ty).is_ok());
+            if !covered {
+                let shown = ty.to_string();
+                if !missing.contains(&shown) {
+                    missing.push(shown);
+                }
+            }
+        }
+        let tail_missing = match (&wanted_rigid, &held_rigid) {
+            (Some(w), Some(h)) if w == h => None,
+            (Some(w), _) => Some(w.clone()),
+            (None, _) => None,
+        };
+        if missing.is_empty() && tail_missing.is_none() {
+            return None;
+        }
+        if let (Some(w), Some(h)) = (&tail_missing, &held_rigid) {
+            let also = if missing.is_empty() {
+                String::new()
+            } else {
+                let named: Vec<String> = missing.iter().map(|m| format!("`{m}`")).collect();
+                format!("{} and ", named.join(" and "))
+            };
+            return Some(format!(
+                "`{callee}` raises {also}whatever `{w}` stands for, and this function's \
+                 `raises` ends in `{h}`; a function's errors can follow only one of them, \
+                 so catch the errors of `{callee}` here"
+            ));
+        }
+        let mut owed: Vec<String> = missing.iter().map(|m| format!("`{m}`")).collect();
+        if let Some(w) = &tail_missing {
+            owed.push(format!("whatever `{w}` stands for"));
+        }
+        let mut add: Vec<String> = missing.clone();
+        if let Some(w) = &tail_missing {
+            add.push(w.clone());
+        }
+        let clause = add.join(" + ");
+        let fix = if held_fields.is_empty() && held.is_none() {
+            format!("add `raises {clause}` to this function")
+        } else {
+            format!("add `+ {clause}` to this function's `raises`")
+        };
+        Some(format!(
+            "`{callee}` raises {}, which this function does not declare: {fix}, or catch \
+             it here",
+            owed.join(" and ")
+        ))
     }
 
     /// Whether `promise` covers `demand` outright, tails and all.

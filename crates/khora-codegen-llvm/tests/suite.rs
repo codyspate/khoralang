@@ -38,6 +38,8 @@ mod arrays;
 mod backtick;
 mod benching;
 mod cancel_everywhere;
+mod catch_arms;
+mod catch_rest;
 mod channels;
 mod chars;
 mod claims;

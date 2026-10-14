@@ -74,6 +74,34 @@ it will behave differently now.
   `I::Item`, a closure written inside a generic body that captures its type
   parameter -- answers `false` when the value reaches a region, and
   releases it on the sending fiber, so a region is never received.
+- A `raise` in a `catch` arm leaves that `catch`: the function it is in
+  must declare what it raises. `f()! catch { e => raise e }` in a function
+  whose `raises` does not name `f`'s error is a compile error naming the
+  type; it compiled, and the error stopped the program at status 134 when
+  it reached a caller's `catch`. Inside another `catch`'s operand, the
+  outer `catch` handles it.
+- A function that calls something raising a rigid `'er` must say it raises
+  `'er`, also when the call is inside a closure that calls another
+  function with an open error row; the error says to add `+ 'er` to the
+  function's `raises`. It compiled, and an error of the caller's choosing
+  stopped the program at status 134. Only the closure making both calls
+  carries `'er`: closures it calls keep their own rows. One closure that
+  raises through two different rigid rows (`'e1` and `'e2`) is refused.
+- A `catch` arm that binds the failure (`e => ..`) is refused when the
+  operand can raise a rigid `'er`, since the caller picks that type; name
+  the constructors to handle, or use `_`. It compiled and read the error
+  at the wrong type, ending in a segmentation fault. It is also refused
+  when a raise typed later in the function -- a closure's `raise e` whose
+  `e` is typed by a call after the `catch` -- gives the operand a type
+  other than the binding's; that compiled and stopped with `Illegal
+  instruction`.
+- An arm after a `catch`'s unguarded `_` or binding arm is refused as
+  unreachable, and a guarded `_` or binding arm with no unguarded one after
+  it is refused. `_ => .., e if c => ..` compiled and ended in a
+  segmentation fault. A guarded `_` or binding arm followed by an unguarded
+  one (`e if c => .., _ => ..`) hands what its guard turns away to the arms
+  after it. A constructor arm written below a guarded `_` or binding arm is
+  refused, since constructor arms are tried first.
 
 ### Fixed
 
@@ -90,6 +118,22 @@ it will behave differently now.
 - A fiber failure that `Fiber::join` handed back and a `catch` handled
   printed `khora: a fiber ended with an error nobody was waiting for`. It
   prints nothing. See Breaking.
+- A `catch` whose named arms take some cases of an error type, beside `_`
+  or a binding arm, sends the other cases of that type to the `_` or
+  binding arm. `catch { PaymentError::Declined(why) => .., _ => .. }` given
+  a `PaymentError::GatewayTimeout` stopped the program with `Illegal
+  instruction` (status 132). A case a named arm's field pattern or guard
+  turns away goes there as well.
+- A `match` or `catch` arm whose guard is false tries the next arm's
+  pattern. It ran the next arm's body on a value of a different case,
+  reading a string's address as an `Int`.
+- A `catch` arm's `raise` of a value typed later in the function, inside
+  another `catch`'s operand, is handled by that outer `catch`; it was
+  refused as "nothing in this expression raises" the type. A `catch` whose
+  operand is only such a `raise` reaches each of its named arms: it reached
+  the first and stopped with `Illegal instruction` for the rest.
+- `catch` arms that raise, and closures that join a rigid `'er` with
+  another error row: see Breaking.
 - Arrays and strings built from bytes are correct in WebAssembly builds.
 - A WebAssembly library containing a loop, a `!` or a region links, and its
   region's finalizers run when the region ends.

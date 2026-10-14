@@ -392,6 +392,14 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .build_indirect_call(glue_ty, glue, &[object.into()], "")
                     .expect("releasing a frame closure's captures");
             }
+            Cleanup::Spilled(object, ty) => {
+                let glue = self.be.spill_glue(&ty);
+                let drop = self.be.rt.drop;
+                self.be
+                    .builder
+                    .build_call(drop, &[object.into(), glue.into()], "")
+                    .expect("releasing the box a caught error crossed in");
+            }
         }
     }
 }

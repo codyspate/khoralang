@@ -283,6 +283,15 @@ pub(crate) struct Checker<'a> {
     /// the row said it carried when it was built. See
     /// [`Checker::settle_raises`] for why a closed tail is not the whole row.
     pub(crate) owner_rows: Vec<(Type, Vec<(String, Type)>)>,
+    /// Tails a binding `catch` arm subtracted before they were solved, with
+    /// the type the binding was given and where. See
+    /// [`Checker::check_bound_tails`].
+    pub(crate) bound_tails: Vec<(Type, Type, TextRange)>,
+    /// Error types a `catch` arm names that nothing in its operand was
+    /// known to raise when it was checked, beside tails not solved yet:
+    /// the type, those tails, and the `catch`. See
+    /// [`Checker::check_bound_tails`].
+    pub(crate) named_late: Vec<(String, Vec<Type>, TextRange)>,
     /// Record updates whose base was a variable when they were reached. See
     /// [`Checker::settle_updates`].
     pub(crate) pending_updates: Vec<PendingUpdate>,

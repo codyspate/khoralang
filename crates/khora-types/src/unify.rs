@@ -105,6 +105,22 @@ impl std::fmt::Display for Mismatch {
                 "nothing here says which type this is projected from; \
                  name it at the call or annotate the result"
             ),
+            Mismatch::Rigid { param, ty: ty @ Type::Row { .. } } => match row_as_written(ty) {
+                // **A row is said the way a clause writes it.** The row's own
+                // `Display` is the checker's notation -- `{}`, `{ Pay: Pay, |
+                // _ }` -- which no program contains, so a reader could not
+                // tell what was being asked of `'er`.
+                RowWords::Nothing => write!(
+                    f,
+                    "`{param}` is a type the caller chooses, so it cannot be assumed to be \
+                     empty"
+                ),
+                RowWords::Raises(written) => write!(
+                    f,
+                    "`{param}` is a type the caller chooses, so it cannot be assumed to be \
+                     `{written}`"
+                ),
+            },
             Mismatch::Rigid { param, ty } => write!(
                 f,
                 "`{param}` is a type the caller chooses, so it cannot be assumed to be `{ty}`"
@@ -125,6 +141,44 @@ impl std::fmt::Display for Mismatch {
             }
         }
     }
+}
+
+/// A row, in the words a `raises` or `with` clause would use.
+enum RowWords {
+    /// No entries and no rest: the row of something that cannot fail.
+    Nothing,
+    /// What a clause would write for it: `Pay + 'e1`, or `{ ledger: Ledger }`.
+    Raises(String),
+}
+
+/// Renders `row` as a clause writes it rather than as the checker holds it.
+///
+/// An error row labels each entry after its own type, so it is written as
+/// the types joined with `+`, as `raises Pay + 'e1` is. A capability row
+/// names each entry, and is written `{ name: Type | 'r }`, as `with` is. A
+/// rest the checker has not solved stands for nothing written, and is left
+/// out rather than printed as `_`.
+fn row_as_written(row: &Type) -> RowWords {
+    let Type::Row { fields, tail } = row else { return RowWords::Raises(row.to_string()) };
+    let rest = match tail.as_deref() {
+        Some(Type::Var(_)) | None => None,
+        Some(other) => Some(other.to_string()),
+    };
+    if fields.is_empty() && rest.is_none() {
+        return RowWords::Nothing;
+    }
+    let errors = fields.iter().all(|(label, ty)| match ty {
+        Type::Adt { name, .. } => name == label,
+        _ => false,
+    });
+    if errors {
+        let mut parts: Vec<String> = fields.iter().map(|(_, ty)| ty.to_string()).collect();
+        parts.extend(rest);
+        return RowWords::Raises(parts.join(" + "));
+    }
+    let named: Vec<String> = fields.iter().map(|(label, ty)| format!("{label}: {ty}")).collect();
+    let rest = rest.map(|r| format!(" | {r}")).unwrap_or_default();
+    RowWords::Raises(format!("{{ {}{rest} }}", named.join(", ")))
 }
 
 /// Of two types that print alike, the one whose name never resolved and the

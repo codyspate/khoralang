@@ -59,6 +59,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             value,
             ty: scrutinee_ty.clone(),
             released_by_arms: true,
+            unmatched: None,
         };
         let reached = self.emit_arms(arms, &on, slot, merge, range);
 
@@ -151,7 +152,10 @@ impl<'ctx> Lower<'_, 'ctx> {
         // body that is already this specialization's. `Gx<Int>` and `Gx<Big>`
         // are two ids and two layouts.
         let mut caught: Vec<(Type, Vec<MatchArm>)> = Vec::new();
-        let mut everything: Option<MatchArm> = None;
+        // The arms that take every failure, in written order. Each but the
+        // last has a guard (the checker refuses anything after an unguarded
+        // one), and what a guard turns away goes on to the next.
+        let mut rest: Vec<MatchArm> = Vec::new();
         for arm in arms {
             let Some(owner) = self.owner_of(arm.pat) else {
                 // A binding takes everything a `_` does. The difference is on
@@ -161,7 +165,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                     self.body.pat(arm.pat),
                     khora_hir::body::Pat::Wildcard | khora_hir::body::Pat::Bind(_)
                 ) {
-                    everything = Some(arm.clone());
+                    rest.push(arm.clone());
                 }
                 continue;
             };
@@ -206,14 +210,14 @@ impl<'ctx> Lower<'_, 'ctx> {
         // at the default means the checker lost an instantiation from a row;
         // propagating it once ran a function with no `raises` row out to an
         // exit of 130 and no message. The trap says which rule broke.
-        let total = everything.is_none() && self.types.is_total_catch(inner);
-        let (fallthrough, mut escapes) = match &everything {
-            None if total => (
+        let total = rest.is_empty() && self.types.is_total_catch(inner);
+        let (fallthrough, mut escapes) = match rest.is_empty() {
+            true if total => (
                 self.block("catch.missed"),
                 vec![runtime::CANCELED_WHICH, runtime::FAILED_WHICH],
             ),
-            None => (onward, Vec::new()),
-            Some(_) => (
+            true => (onward, Vec::new()),
+            false => (
                 self.block("catch.rest"),
                 vec![runtime::CANCELED_WHICH, runtime::FAILED_WHICH],
             ),
@@ -272,18 +276,36 @@ impl<'ctx> Lower<'_, 'ctx> {
             // its declaration *at these arguments*, and `Gb` with none
             // answered "pointer" for a `Gb<String>` held in registers.
             let error_ty = handled.clone();
-            let error = self.be.word_to_value(word, &error_ty);
+
+            // **Read where it stands, and taken over only once an arm has
+            // run.** These arms may take some of the type's cases and a
+            // catch-all the rest, and a case none of them takes goes on to
+            // the catch-all through `which` and `word` with the error as it
+            // arrived. An inline error crossed in a box, and taking it out of
+            // the box -- `word_to_value`, which frees it -- before the case
+            // was known left the catch-all reading freed memory. So the arms
+            // see a view into the box, and the box is what this frame
+            // releases after them. A boxed error is its own pointer, and the
+            // view of it costs nothing.
+            let (error, holding) = match self.be.read_spilled(word, &error_ty) {
+                Some((error, object)) => (error, Cleanup::Spilled(object, error_ty.clone())),
+                None => {
+                    let error = self.be.word_to_value(word, &error_ty);
+                    (error, Cleanup::Temp(error, error_ty.clone()))
+                }
+            };
 
             // The raising frame moved the error into its return, so this frame
             // owns it. The arms borrow their bindings out of it, exactly as a
             // `match` borrows out of a temporary scrutinee, and it is released
             // on the way to the join.
             let released = self.block(&format!("catch.{handled}.done"));
-            self.scopes.push(vec![Cleanup::Temp(error, error_ty.clone())]);
+            self.scopes.push(vec![holding]);
             let on = Scrutinee {
                 value: error,
                 ty: error_ty.clone(),
                 released_by_arms: false,
+                unmatched: (!rest.is_empty()).then_some(fallthrough),
             };
             let reached_here = self.emit_arms(mine, &on, slot, released, range);
             let scope = self.scopes.pop().unwrap_or_default();
@@ -300,24 +322,45 @@ impl<'ctx> Lower<'_, 'ctx> {
             reached += 1;
         }
 
-        if let Some(arm) = everything {
-            self.at(fallthrough);
+        // **The catch-all arms in turn, each guard falling to the next.** A
+        // guarded `e if c => ..` or `_ if c => ..` before the last catch-all
+        // is ordinary code, as `k if k > 0 => .., _ => ..` is in a `match`.
+        // Only one was kept, the last written, so the guarded arm never ran.
+        //
+        // A guard that fails must leave the error as it arrived, for the arm
+        // after it: a binding reads it in place, as a named arm does, and a
+        // `_` asks its guard before releasing anything.
+        let mut entry = fallthrough;
+        let count = rest.len();
+        for (index, arm) in rest.iter().enumerate() {
+            self.at(entry);
+            let last = index + 1 == count;
+            // Where a false guard sends the error. After the last arm there
+            // is no such place; the checker refuses a guard there.
+            let next = if last { None } else { Some(self.block(&format!("catch.rest{}", index + 1))) };
 
             // **A bound arm is the named path with the type read elsewhere.**
             // A constructor arm knows what it caught because it says so; a
             // binding knows because the operand raises one type and the
             // checker gave the local that type. From there it is the same
-            // shape: own the error, let the arm read it, release it on the way
-            // to the join.
+            // shape: hold the error, let the arm read it, release it on the
+            // way to the join.
             if let khora_hir::body::Pat::Bind(local) = self.body.pat(arm.pat) {
                 let error_ty = self.types.local(*local).clone();
-                let error = self.be.word_to_value(word, &error_ty);
+                let (error, holding) = match self.be.read_spilled(word, &error_ty) {
+                    Some((error, object)) => (error, Cleanup::Spilled(object, error_ty.clone())),
+                    None => {
+                        let error = self.be.word_to_value(word, &error_ty);
+                        (error, Cleanup::Temp(error, error_ty.clone()))
+                    }
+                };
                 let released = self.block("catch.bound.done");
-                self.scopes.push(vec![Cleanup::Temp(error, error_ty.clone())]);
+                self.scopes.push(vec![holding]);
                 let on = Scrutinee {
                     value: error,
                     ty: error_ty,
                     released_by_arms: false,
+                    unmatched: next,
                 };
                 let mine = [arm.clone()];
                 let reached_here = self.emit_arms(&mine, &on, slot, released, range);
@@ -326,34 +369,55 @@ impl<'ctx> Lower<'_, 'ctx> {
                 self.at(released);
                 if reached_here == 0 {
                     self.be.builder.build_unreachable().expect("sealing a diverging handler");
-                    return self.join(merge, reached, slot, &result_ty);
+                } else {
+                    for cleanup in scope.into_iter().rev() {
+                        self.release(cleanup);
+                    }
+                    self.br(merge);
+                    reached += 1;
                 }
-                for cleanup in scope.into_iter().rev() {
-                    self.release(cleanup);
+            } else {
+                // `_`: the guard first, since it cannot read the error and a
+                // false one hands the error on untouched.
+                if let (Some(guard), Some(next)) = (arm.guard, next) {
+                    let taken = self.block(&format!("catch.rest{index}.taken"));
+                    match self.expr(guard) {
+                        Some(test) => {
+                            self.be
+                                .builder
+                                .build_conditional_branch(test.into_int_value(), taken, next)
+                                .expect("a catch-all guard branch");
+                        }
+                        // A guard that never returns leaves this arm with no
+                        // way in; the next arm is reached from nowhere either.
+                        None => {
+                            self.at(taken);
+                            self.be.builder.build_unreachable().expect("sealing an unenterable arm");
+                            self.at(next);
+                            self.be.builder.build_unreachable().expect("sealing an unenterable arm");
+                            break;
+                        }
+                    }
+                    self.at(taken);
                 }
-                self.br(merge);
-                reached += 1;
-                return self.join(merge, reached, slot, &result_ty);
+                // Released first, by id, because after this there is no
+                // handle on it: the arm binds nothing — a `_` has no name to
+                // bind under — so this is the only place the error can be let
+                // go of.
+                let releaser = self.be.release_error();
+                self.be
+                    .builder
+                    .build_call(releaser, &[which.into(), word.into()], "")
+                    .expect("releasing a caught error of unknown type");
+                if let Some(value) = self.expr(arm.body) {
+                    self.store_result(slot, value);
+                    self.br(merge);
+                    reached += 1;
+                }
             }
-
-            // Released first, by id, because after this there is no handle on
-            // it: the arm binds nothing — a `_` has no name to bind under —
-            // so this is the only place the error can be let go of.
-            let releaser = self.be.release_error();
-            self.be
-                .builder
-                .build_call(releaser, &[which.into(), word.into()], "")
-                .expect("releasing a caught error of unknown type");
-            if let Some(guard) = arm.guard {
-                // A guard on a `_` would need somewhere to send a false, and
-                // the error has been released by now. The checker does not
-                // offer one; this is here so a future one is not silent.
-                let _ = guard;
-            }
-            if let Some(value) = self.expr(arm.body) {
-                self.store_result(slot, value);
-                self.br(merge);
-                reached += 1;
+            match next {
+                Some(next) => entry = next,
+                None => break,
             }
         }
 
@@ -404,8 +468,8 @@ impl<'ctx> Lower<'_, 'ctx> {
         merge: BasicBlock<'ctx>,
         range: TextRange,
     ) -> usize {
-        let Scrutinee { value, ty, released_by_arms: releases_scrutinee } = on;
-        let (value, releases_scrutinee) = (*value, *releases_scrutinee);
+        let Scrutinee { value, ty, released_by_arms: releases_scrutinee, unmatched } = on;
+        let (value, releases_scrutinee, unmatched) = (*value, *releases_scrutinee, *unmatched);
         // One pair of blocks per arm: bindings and guard first, then the body,
         // so a failing guard can jump on without the body ever being entered.
         let mut binds = Vec::with_capacity(arms.len());
@@ -415,26 +479,11 @@ impl<'ctx> Lower<'_, 'ctx> {
             bodies.push(self.block(&format!("arm{index}.body")));
         }
 
-        self.dispatch(arms, value, ty, &binds, range);
+        let retry = self.dispatch(arms, value, ty, &binds, unmatched, range);
 
         // The scope holding the scrutinee, which each arm body empties while it
         // runs. See `lower_match`.
         let held = self.scopes.len().saturating_sub(1);
-
-        // **A guard on the last arm can fail**, and then no arm ran and so no
-        // arm released. That edge gets a block of its own rather than going
-        // straight to the join.
-        let unguarded = if releases_scrutinee && arms.last().is_some_and(|a| a.guard.is_some()) {
-            let current = self.here();
-            let block = self.block("match.unguarded");
-            self.at(block);
-            self.drop(value, ty);
-            self.br(merge);
-            self.at(current);
-            block
-        } else {
-            merge
-        };
 
         let mut reached = 0;
         for (index, arm) in arms.iter().enumerate() {
@@ -442,9 +491,15 @@ impl<'ctx> Lower<'_, 'ctx> {
             self.bind_pattern(arm.pat, value, ty);
             match arm.guard {
                 Some(guard) => {
-                    // A guard is checked with the bindings in scope and, if it
-                    // fails, hands the value to the next arm untouched.
-                    let next = binds.get(index + 1).copied().unwrap_or(unguarded);
+                    // **A guard that fails hands the value to the next arm's
+                    // test, not to its bindings.** Jumping straight to the next
+                    // arm's bind block skipped its pattern, so `A(s) if c(s)`
+                    // failing ran `B(n) => n` on an `A`, reading its `String`
+                    // as an `Int`. After the last arm it is where a value no
+                    // arm takes goes: a `catch`'s catch-all, or the trap. It
+                    // joined with no result written, which a `String` arm
+                    // then read as a pointer (exit 139).
+                    let next = retry[index];
                     match self.expr(guard) {
                         Some(test) => {
                             self.be
@@ -588,17 +643,26 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// patterns, nested constructors, a non-ADT scrutinee) becomes a chain of
     /// tests, tried in written order, which is the only shape that gets
     /// fallthrough right.
+    ///
+    /// A value no arm applies to goes to `unmatched` where there is one -- a
+    /// `catch`'s catch-all, for the cases its named arms leave -- and to a
+    /// trap where there is not, since the checker made those arms exhaustive.
+    ///
+    /// Returns, per arm, where to go when its guard fails: the next arm's
+    /// test, or after the last arm wherever an unmatched value goes. Only the
+    /// chain of tests has guards; the `switch` shape is not taken for them.
     pub(super) fn dispatch(
         &mut self,
         arms: &[MatchArm],
         value: BasicValueEnum<'ctx>,
         scrutinee_ty: &Type,
         binds: &[BasicBlock<'ctx>],
+        unmatched: Option<BasicBlock<'ctx>>,
         range: TextRange,
-    ) {
+    ) -> Vec<BasicBlock<'ctx>> {
         if arms.is_empty() {
             self.fail("a `match` needs at least one arm", range);
-            return;
+            return Vec::new();
         }
 
         // **A type with one case has no tag to switch on.** Held inline it is
@@ -618,21 +682,25 @@ impl<'ctx> Lower<'_, 'ctx> {
                     None => default = Some(binds[index]),
                 }
             }
-            let default = default.unwrap_or_else(|| self.unmatched_block());
+            let fallback = unmatched.unwrap_or_else(|| self.unmatched_block());
+            let default = default.unwrap_or(fallback);
             self.be.builder.build_switch(tag, default, &cases).expect("a tag switch");
-            return;
+            return vec![fallback; arms.len()];
         }
 
         let tests: Vec<BasicBlock<'ctx>> =
             (0..arms.len()).map(|i| self.block(&format!("arm{i}.test"))).collect();
-        let unmatched = self.unmatched_block();
+        let unmatched = unmatched.unwrap_or_else(|| self.unmatched_block());
         self.br(tests[0]);
 
+        let mut retry = Vec::with_capacity(arms.len());
         for (index, arm) in arms.iter().enumerate() {
             let next = tests.get(index + 1).copied().unwrap_or(unmatched);
+            retry.push(next);
             self.at(tests[index]);
             self.test_pattern(arm.pat, value, scrutinee_ty, binds[index], next);
         }
+        retry
     }
 
     /// A tag per arm, or `None` for an arm that matches anything, when the

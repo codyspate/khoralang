@@ -180,6 +180,31 @@ operation()! catch {
 
 When those arms exhaust `UserError`, that type is subtracted from the failures that can leave the `catch` expression. A wildcard does not mean “all possible failures in an open row.”
 
+Beside a `_` arm, or an arm that binds the failure, the named arms may take only some of a type's variants. The variants they leave go to that arm, as does a variant whose arm is turned away by a guard or a field pattern:
+
+```khora
+let message = checkout(order)! catch {
+  PaymentError::Declined(why) => "declined: ${why}",
+  _ => "try again later",
+};
+```
+
+A binding arm is refused when the operand can raise a row variable such as `'er`, because the caller chooses that type and the binding has none to be given. Name the variants you handle, or use `_`.
+
+Arms are tried in the order they are written, and a guard that is false moves on to the next arm. Arms naming a constructor come before the arms that take every failure. A guarded `_` or binding arm hands what its guard turns away to the arm after it, and needs an unguarded `_` or binding arm somewhere after it to take what every guard refuses:
+
+```khora
+let message = checkout(order)! catch {
+  PaymentError::Declined(why) if retries > 3 => "declined: ${why}",
+  e if verbose => describe(e),
+  _ => "try again later",
+};
+```
+
+An arm after an unguarded `_` or binding arm could never run, and is refused.
+
+A `raise` inside an arm leaves the `catch`; it is not handled by the `catch` it is written in. The enclosing function declares what an arm raises, or an enclosing `catch` handles it.
+
 ## Translate failure types
 
 Catch one type and raise another:

@@ -289,6 +289,41 @@ impl<'ctx> Backend<'ctx> {
             .expect("counting what a spilled value holds");
     }
 
+    /// An inline value read out of the box it crossed in, with the box left
+    /// standing; `None` for a type that is not held inline.
+    ///
+    /// **For a reader that may not keep what it reads.** A `catch` tests the
+    /// case of the error that arrived before any arm commits to it, and
+    /// [`Self::word_to_value`] frees the box as it reads, which hands the
+    /// fields to the reader whether or not an arm takes them. A case no
+    /// named arm takes goes on to the catch-all, and that arm reads or
+    /// releases the error through the word -- after the box was freed, so it
+    /// read freed memory or released the fields twice.
+    ///
+    /// The value is a borrowed view of what the box holds. The caller owns
+    /// the box, and releases it with [`Self::spill_glue`] once the reading is
+    /// done, which takes the fields with it.
+    pub fn read_spilled(
+        &mut self,
+        word: inkwell::values::IntValue<'ctx>,
+        ty: &Type,
+    ) -> Option<(BasicValueEnum<'ctx>, PointerValue<'ctx>)> {
+        // Exactly the shapes `word_to_value` reloads from a box: an inline
+        // value narrow enough to be a word crossed as that word, not boxed.
+        let Some(BasicTypeEnum::StructType(shape)) = self.llvm_type(ty) else { return None };
+        let ptr = self.ctx.ptr_type(AddressSpace::default());
+        let object = self
+            .builder
+            .build_int_to_ptr(word, ptr, "spilled.view")
+            .expect("a word as the box an inline value crossed in");
+        let slot = crate::runtime::field_pointer(self.ctx, &self.builder, object, 0);
+        let value = self
+            .builder
+            .build_load(shape, slot, "spilled.read")
+            .expect("reading an inline value where it stands");
+        Some((value, object))
+    }
+
     /// A word some structure *keeps* read back as a value the reader owns.
     ///
     /// [`Self::word_to_value`] is for a hand-off: it frees the box with null

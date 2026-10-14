@@ -285,6 +285,11 @@ enum Cleanup<'ctx> {
     /// would release what it holds; this runs the closure drop glue on it
     /// directly, on every way out of the call it was built for.
     Captures(PointerValue<'ctx>),
+    /// The box an inline error of this type crossed in, released with what
+    /// it holds. A `catch` reads a named arm's error where it stands rather
+    /// than taking it out, so that a case no named arm takes reaches the
+    /// catch-all still in its box; this is the release once an arm has run.
+    Spilled(PointerValue<'ctx>, Type),
 }
 
 /// Where [`Lower::make_closure`] puts a closure object.
@@ -312,6 +317,10 @@ struct Scrutinee<'ctx> {
     value: BasicValueEnum<'ctx>,
     ty: Type,
     released_by_arms: bool,
+    /// Where a value no arm takes goes: a `catch`'s catch-all, for an error
+    /// whose named arms take only some of its cases. `None` is the trap,
+    /// for arms the checker made exhaustive.
+    unmatched: Option<BasicBlock<'ctx>>,
 }
 
 /// A closure call that has happened, before anything is decided about its tag.

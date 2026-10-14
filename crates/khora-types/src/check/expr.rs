@@ -1569,6 +1569,14 @@ impl<'a> Checker<'a> {
         self.catching += 1;
         let value = self.infer(inner);
         self.catching -= 1;
+        // **Only what the operand demanded is this `catch`'s to handle.** The
+        // arms are inferred below and push demands of their own -- a `raise`
+        // in an arm -- which leave the `catch` rather than enter it. Taking
+        // the window to the end of the list subtracted those too: `inv(n)!
+        // catch { e => raise e }` was accepted in a function that does not
+        // raise `InventoryError`, and a caller's `catch` the checker called
+        // total met it at run time and trapped.
+        let operand_end = self.demanded.len();
         let pending_after = self.pending_raises.len();
         let mut handler = Handler::Named(Vec::new());
 
@@ -1600,6 +1608,21 @@ impl<'a> Checker<'a> {
             }
         }
         let labels: Vec<String> = labels.into_iter().map(str::to_string).collect();
+        // The rigid tails the operand's rows end in: errors the caller of
+        // this function chooses, of no type known here.
+        let mut rigid: Vec<String> = Vec::new();
+        for demand in &self.demanded[before..operand_end] {
+            if demand.clause != Clause::Raises {
+                continue;
+            }
+            if let Type::Row { tail: Some(tail), .. } = &demand.row {
+                if let Type::Param(name) = self.unifier.shallow(tail) {
+                    if name.starts_with('\'') && !rigid.contains(&name) {
+                        rigid.push(name);
+                    }
+                }
+            }
+        }
 
         // Each arm is matched against its own error type rather than against
         // one scrutinee, which is the other way this differs from `match`.
@@ -1607,7 +1630,11 @@ impl<'a> Checker<'a> {
         let mut result: Option<Type> = None;
         // Whether an arm handles what the named ones did not.
         let mut everything = false;
-        for arm in arms {
+        // Whether an arm already seen handles every failure, unguarded.
+        let mut all_after = false;
+        // Whether a guarded arm that handles every failure was seen.
+        let mut guarded_all = false;
+        for (index, arm) in arms.iter().enumerate() {
             let owner = match self.body.pat(arm.pat) {
                 Pat::Path(r)
                 | Pat::TupleStruct { resolution: r, .. }
@@ -1622,7 +1649,120 @@ impl<'a> Checker<'a> {
             // this, which is the shape the Guide's own boundary-translation
             // recipe asks for and the one that did not scale.
             let binds = matches!(self.body.pat(arm.pat), Pat::Bind(_));
-            if owner.is_none() && binds && labels.len() != 1 {
+            let takes_all = owner.is_none() && (binds || matches!(self.body.pat(arm.pat), Pat::Wildcard));
+            // **Nothing after an arm that takes every failure can run**, and
+            // code generation, which tries the named arms by type first, ran
+            // a named arm written after `_` ahead of it, and lowered a second
+            // catch-all over the first. `_ => .., e if c => ..` ended at a
+            // join with no result written (exit 139).
+            if all_after {
+                self.error(
+                    "this arm is unreachable: an arm before it already handles every \
+                     failure. Move it above that arm, or remove it"
+                        .to_string(),
+                    self.body.range(arm.body),
+                );
+                continue;
+            }
+            // **A named arm is tried before every catch-all arm**, whatever the
+            // order they are written in: code generation dispatches on the
+            // error's type first. Below a guarded catch-all it would run
+            // ahead of it, so the order on the page would not be the order
+            // the arms are tried in.
+            if guarded_all && !takes_all {
+                if let Some((_, ty, case)) = match self.body.pat(arm.pat) {
+                    Pat::Path(r) | Pat::TupleStruct { resolution: r, .. } | Pat::Record { resolution: r, .. } => {
+                        variant_case(r)
+                    }
+                    _ => None,
+                } {
+                    self.error(
+                        format!(
+                            "`{ty}::{case}` is tried before the guarded arm above it, \
+                             because arms naming a constructor are tried before the arms \
+                             that take every failure. Move it above that arm"
+                        ),
+                        self.body.range(arm.body),
+                    );
+                }
+            }
+            // **A guarded catch-all needs a catch-all after it.** What its
+            // guard turns away goes on to the next arm that takes every
+            // failure; with none after it, an error the guard refused would
+            // be handled by no arm and declared by no row, and the `catch`
+            // would still be counted as handling everything.
+            if takes_all && arm.guard.is_some() {
+                guarded_all = true;
+                let rest_taken = arms[index + 1..].iter().any(|later| {
+                    later.guard.is_none() && matches!(self.body.pat(later.pat), Pat::Wildcard | Pat::Bind(_))
+                });
+                if !rest_taken {
+                    self.error(
+                        "this arm handles a failure only when its guard holds, and no arm \
+                         after it takes the failures the guard turns away: add a `_` arm \
+                         after it, or move the condition inside the arm, as an `if`"
+                            .to_string(),
+                        self.body.range(arm.body),
+                    );
+                }
+            }
+            if takes_all && arm.guard.is_none() {
+                all_after = true;
+            }
+            // **Not when the row also ends in a rigid `'er`.** Whatever the
+            // caller picks for it arrives here too, so the binding has no one
+            // type: it was typed as the one named type beside it, and an
+            // `AuditError` raised through `'er` was read as a `Pay` (exit 139).
+            //
+            // Refused, and then taken as a `_` would be, so that the operand's
+            // errors are still handled here: leaving them unhandled reported
+            // a second, false error at the call that raised them.
+            let refused = owner.is_none() && binds && !rigid.is_empty();
+            if refused {
+                let tails: Vec<String> = rigid.iter().map(|r| format!("`{r}`")).collect();
+                let tails = tails.join(" and ");
+                let complaint = if labels.is_empty() {
+                    format!(
+                        "this `catch` arm binds the failure, but the operand raises only \
+                         {tails}, an error type the caller chooses, so there is no type to \
+                         give the binding. Use `_` to handle the failure without reading \
+                         it, or leave out the `catch` and let it pass on"
+                    )
+                } else {
+                    let named: Vec<String> = labels.iter().map(|l| format!("`{l}`")).collect();
+                    // A real case of the first type, written as a pattern,
+                    // so the advice can be copied.
+                    let example = raised
+                        .first()
+                        .and_then(|(_, ty)| match ty {
+                            Type::Adt { name, home, .. } => self
+                                .types
+                                .variants_of(home.as_ref(), name)
+                                .first()
+                                .map(|v| {
+                                    let holes = if v.fields.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!("({})", vec!["_"; v.fields.len()].join(", "))
+                                    };
+                                    format!("{name}::{}{holes} => ..", v.name)
+                                }),
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| format!("{}::.. => ..", labels[0]));
+                    format!(
+                        "this `catch` arm binds the failure, but the operand raises {} and \
+                         also {tails}, an error type the caller chooses, so there is no \
+                         single type to give the binding. Write an arm for each case you \
+                         handle, such as `{example}`, and let the rest pass on, or use `_` \
+                         to handle every failure without reading it",
+                        named.join(", "),
+                    )
+                };
+                self.error(complaint, self.body.range(arm.body));
+                self.bind_pattern(arm.pat, &Type::Unknown);
+            }
+            if owner.is_none() && binds && !refused && labels.len() != 1 {
                 let named: Vec<&str> = labels.iter().map(String::as_str).collect();
                 let complaint = if raised.is_empty() {
                     "this `catch` arm binds the failure, but the operand raises \
@@ -1642,7 +1782,7 @@ impl<'a> Checker<'a> {
             }
             if owner.is_none() && (binds || matches!(self.body.pat(arm.pat), Pat::Wildcard)) {
                 everything = true;
-                if let Some((_, only)) = raised.first().filter(|_| binds) {
+                if let Some((_, only)) = raised.first().filter(|_| binds && !refused) {
                     let only = only.clone();
                     // One type, possibly at two instantiations: the binding
                     // gets one layout, so they have to be one. A `_` reads
@@ -1663,7 +1803,11 @@ impl<'a> Checker<'a> {
                     self.bind_pattern(arm.pat, &only);
                     handler = Handler::Binds(only.clone(), self.body.pat_range(arm.pat));
                 }
-                if !binds {
+                // A `_` after a binding arm that turned some failures away
+                // does not loosen what the binding was promised: a raise typed
+                // later still has to arrive at the binding's type, since the
+                // binding may be the arm that reads it.
+                if (!binds || refused) && !matches!(handler, Handler::Binds(..)) {
                     handler = Handler::Everything;
                 }
                 if let Some(guard) = arm.guard {
@@ -1713,7 +1857,7 @@ impl<'a> Checker<'a> {
             // type in the operand: one arm is compiled at one layout, so two
             // instantiations of one type cannot share it.
             let (arm_ty, _) = self.instantiate_adt(&owner);
-            let raises_of_owner: Vec<Type> = self.demanded[before..]
+            let raises_of_owner: Vec<Type> = self.demanded[before..operand_end]
                 .iter()
                 .filter(|d| d.clause == Clause::Raises)
                 .filter_map(|d| match &d.row {
@@ -1765,6 +1909,27 @@ impl<'a> Checker<'a> {
         // `catch` would do with it is recorded for then. Only for a raise in
         // this body: one inside a closure in the operand leaves that closure,
         // not this `catch`'s operand.
+        //
+        // **A binding arm also waits for every tail not solved yet**, which
+        // that misses: a closure called in the operand, `let k = fn () =>
+        // raise e; .. k()!`, carries its raise in a tail of its own, a row
+        // variable here. The binding was given the one type it could see, the
+        // `catch` subtracted the rest unread, and an `Audit` arrived where a
+        // `Pay` was bound (exit 132). [`Self::check_bound_tails`] reads each
+        // such tail once it is solved and refuses a type the binding was not
+        // given.
+        if let Handler::Binds(bound, at) = &handler {
+            for demand in &self.demanded[before..operand_end] {
+                if demand.clause != Clause::Raises {
+                    continue;
+                }
+                if let Type::Row { tail: Some(tail), .. } = &demand.row {
+                    if self.is_derived_or_pending(tail) {
+                        self.bound_tails.push((*tail.clone(), bound.clone(), *at));
+                    }
+                }
+            }
+        }
         let depth = self.lambdas.len();
         for pending in &mut self.pending_raises[pending_before..pending_after] {
             if pending.depth == depth {
@@ -1814,9 +1979,26 @@ impl<'a> Checker<'a> {
             }
         }
 
+        // **A raise not typed yet may be the one these arms name.** Its
+        // demand carries no entry until `settle_raises` types it, so an
+        // operand whose only `E3` is a `raise x` with `x` typed a line later
+        // read as raising nothing, and the `catch` was refused for naming
+        // `E3` -- including the outer `catch` around an inner arm's `raise
+        // x`. Where such a tail is in the operand, the question waits for
+        // [`Self::check_bound_tails`], when the tail says what it carries.
+        let unsolved: Vec<Type> = self.demanded[before..operand_end]
+            .iter()
+            .filter(|d| d.clause == Clause::Raises)
+            .filter_map(|d| match &d.row {
+                Type::Row { tail: Some(t), .. } if self.is_derived_or_pending(t) => Some(*t.clone()),
+                _ => None,
+            })
+            .collect();
+
         // Subtract. The demand stays even when nothing is left of its row: it
         // is also what checks that the call wore its `!`, and a `catch` does
         // not excuse the mark — control still leaves the operand.
+        let from_arms: Vec<Demand> = self.demanded.split_off(operand_end);
         let window: Vec<Demand> = self.demanded.split_off(before);
         let caught_arms: Vec<(String, Type, TextRange)> = match &handler {
             Handler::Named(arms) => arms.clone(),
@@ -1873,16 +2055,21 @@ impl<'a> Checker<'a> {
             })
             .collect();
         self.demanded.extend(kept);
+        // What the arms raise passes through untouched, to whatever encloses
+        // this `catch`.
+        self.demanded.extend(from_arms);
         if total && !caught.is_empty() {
             self.total_catches.insert(inner);
         }
 
         for owner in &caught {
-            if !names.contains(owner) {
-                self.error(
-                    format!("nothing in this expression raises `{owner}`"),
-                    range,
-                );
+            if names.contains(owner) {
+                continue;
+            }
+            if unsolved.is_empty() {
+                self.error(format!("nothing in this expression raises `{owner}`"), range);
+            } else {
+                self.named_late.push((owner.clone(), unsolved.clone(), range));
             }
         }
 
