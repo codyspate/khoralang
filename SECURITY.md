@@ -17,15 +17,21 @@ vulnerability" overlap more than they do in an application. The ones that
 matter most here:
 
 - **Memory unsafety reachable from safe Khora.** A program with no `extern fn`
-  that can be made to read or write memory it does not own. The runtime's
+  that can be made to read or write memory it does not own, or to release a
+  value twice, including across a cancellation. The runtime's
   `unsafe` surface is inventoried in `docs/design/soundness.md`; anything that
   invalidates an argument in that document is this.
 - **A data race in generated code**, including one caused by the compiler
   choosing non-atomic reference counting for a program that can reach two
   threads.
-- **An escape from the permissions table.** `khora.toml` says which parts of
-  the outside world a package may reach; code that reaches further without
-  saying so is a vulnerability rather than a bug.
+- **An escape from the permissions table** through the standard library.
+  `khora.toml` says which parts of the outside world a program may reach;
+  `std` code that reaches further without saying so is a vulnerability rather
+  than a bug. The table is a program limiting itself, not a sandbox: see the
+  next section.
+- **A flaw in `std::crypto` or in certificate checking.** A timing leak in
+  `Hmac::verify_sha256`/`verify_sha512` or `constant_time_eq`, a secret that escapes
+  `Redacted`, or an HTTPS connection that accepts a certificate it should not.
 - **Anything in `packages/postgres` that lets a value become SQL.** Bound
   parameters exist so that a value cannot; a path where one does is the whole
   class this was built to close.
@@ -37,6 +43,11 @@ matter most here:
 These are written down rather than hidden, and a report of one will be closed
 as a duplicate of the document that already describes it:
 
+- **The permissions table does not contain hostile code.** Every package in a
+  program shares one address space, and an `extern fn` reaches native code
+  directly. The gaps listed on the documentation's limitations page are known
+  and being closed. Until a sandboxed plugin target exists, do not run code you
+  do not trust inside your process.
 - **`publish = true` is an intent marker, not a permission.** Anyone can set
   it; anyone can write a dependency entry by hand. It prevents an accident, not
   an adversary. `docs/design/distribution.md`.
@@ -51,12 +62,19 @@ as a duplicate of the document that already describes it:
 
 ## Supported versions
 
-Khora has not had a release. Until it does, the supported version is `main`,
-and a fix lands there.
+Khora is before 1.0. A security fix lands on `main` and ships in a patch
+release of **the latest release series**: 0.4 until 0.5.0 is out, then 0.5.
+Older series do not get backports; the fix is to upgrade.
 
 ## What to expect
 
-An acknowledgment, and then either a fix or an explanation of why the
-behavior is intended — in which case it gets written into the design document
-that should have said so. This is a one-person project; the honest promise is
-attention rather than a service level.
+This is a one-person project, so these are the promises one person can keep:
+
+- **An acknowledgment within 7 days.**
+- **Triage within 14 days**: whether it reproduces, whether it crosses a
+  boundary Khora claims to enforce, and what happens next.
+- **A fix, best effort**, aimed at 30 days for a contained runtime or library
+  problem and 90 for one that needs a compiler change. The advisory is
+  published with credit once the patch release is out.
+- **Or an explanation** of why the behavior is intended, in which case it gets
+  written into the design document that should have said so.

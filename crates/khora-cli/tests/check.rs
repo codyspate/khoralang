@@ -1666,7 +1666,7 @@ fn a_lint_policy_check_refuses_fails_build() {
 /// What one capped `khora check` did: its exit code (`None` when killed or
 /// stopped by a signal), its output, its wall time, and its peak resident
 /// memory in kilobytes (`None` where `/proc` cannot say).
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 struct Capped {
     code: Option<i32>,
     output: String,
@@ -1689,8 +1689,14 @@ struct Capped {
 ///
 /// The peak resident size, `VmHWM`, is sampled from `/proc` while the child
 /// runs. It only grows, so the last reading is within one sample of the
-/// peak; Linux only.
-#[cfg(unix)]
+/// peak.
+///
+/// **Linux only, and not merely Unix.** macOS's `sh` refuses `ulimit -v`
+/// ("cannot modify limit: Invalid argument"), so the capped run fails before
+/// `khora` starts, and macOS has no `/proc` to read the peak from. The check
+/// these tests guard is the same code on every platform, so one platform that
+/// can bound it is enough.
+#[cfg(target_os = "linux")]
 fn check_capped(name: &str, source: &str, address_kb: u64, secs: u64) -> Capped {
     use std::io::Read;
     use std::time::{Duration, Instant};
@@ -1741,16 +1747,16 @@ fn check_capped(name: &str, source: &str, address_kb: u64, secs: u64) -> Capped 
 }
 
 /// The two limits [`check_capped`] is run with here, and the memory bound.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 const ADDRESS_CAP_KB: u64 = 512 * 1024;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 const SECONDS: u64 = 5;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 const RESIDENT_KB: u64 = 200 * 1024;
 
 /// Fails unless the run finished, in time, and (where `/proc` says) under
 /// [`RESIDENT_KB`].
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn within_bounds(what: &str, run: &Capped) {
     assert!(
         run.secs < SECONDS as f64,
@@ -1766,6 +1772,7 @@ fn within_bounds(what: &str, run: &Capped) {
 
 /// Polymorphic recursion that branches, with `branches` recursive calls,
 /// each at a new type holding `v`. `base` is what the last level sends.
+#[cfg(target_os = "linux")]
 fn polyrec(branches: usize, base: &str) -> String {
     let calls = [
         "grow(h, Option::Some(v), n - 1)",
@@ -1797,7 +1804,7 @@ pub fn main() -> () {{
 /// function -- does `grow`'s `A` reach a send -- it is the size of the
 /// program. Under 200 MB and 5 s, with two branches and with three; and the
 /// base case sends `n`, so nothing is refused.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn polymorphic_recursion_does_not_blow_up_the_handoff_check() {
     for branches in [2, 3] {
@@ -1811,7 +1818,7 @@ fn polymorphic_recursion_does_not_blow_up_the_handoff_check() {
 
 /// The same recursion, with the base case sending `v`, which is a `Region`
 /// at the outermost call: refused at that call, in the same bounds.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn polymorphic_recursion_that_sends_its_region_is_refused() {
     for branches in [2, 3] {
