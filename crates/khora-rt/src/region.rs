@@ -305,8 +305,8 @@ pub unsafe extern "C" fn khora_region_release(region: *mut u8) {
         // which is every closure generated code built; directly for a Rust
         // one, which returns nothing. What it answered is not read: a
         // finalizer runs shielded, so it cannot have been stopped unless it
-        // was forced, and then there is nothing left here to do but go on to
-        // the next one, which the force stops at its first cancellation point.
+        // was forced. No entry poll stops it before it reaches a point of its
+        // own (`crate::cancel::FinalizerStart`); the first such point does.
         unsafe {
             let code = *finalizer.closure.add(KHORA_FIELD_OFFSET).cast::<*const u8>();
             // **The finalizer runs outside the drain this release may be part
@@ -318,6 +318,7 @@ pub unsafe extern "C" fn khora_region_release(region: *mut u8) {
             // outer drain, so a chain of regions each captured by the last
             // one's finalizer is still released flat.
             let isolated = crate::heap::Isolated::new();
+            let start = crate::cancel::FinalizerStart::new();
             match finalizer.call {
                 Some(call) => {
                     let mut answer: u64 = 0;
@@ -328,6 +329,7 @@ pub unsafe extern "C" fn khora_region_release(region: *mut u8) {
                     call(finalizer.closure);
                 }
             }
+            drop(start);
             drop(isolated);
             khora_drop(finalizer.closure, finalizer.glue);
         }

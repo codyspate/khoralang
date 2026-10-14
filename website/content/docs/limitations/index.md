@@ -13,9 +13,10 @@ language rule, a supported feature, and unfinished work.
   — `SIGTERM` and `SIGINT` unwind the program and run its finalizers, but a
   `main` with no cancellation point, a blocking `connect_to` and Windows are
   not covered.
-- [A child's failure is seen late unless it was spawned early](#a-childs-failure-is-seen-late-unless-it-was-spawned-early):
-  a failing child cancels its siblings only once every child spawned before it
-  has finished.
+- [Nursery cancellation is cooperative](#nursery-cancellation-is-cooperative):
+  a failing child cancels its siblings when it fails, but a sibling with no
+  cancellation point runs on, and a body that keeps spawning keeps starting
+  children.
 - [Work taken off a queue survives cancellation, not a crash](#work-taken-off-a-queue):
   `Channel::claim` hands an unsettled job to its handler on every way out of
   the program except SIGKILL, a trap, and a handler cut short by `abort`.
@@ -480,30 +481,31 @@ that never ends does not exit. Cancel it first.
 `Fiber::outcome` hands back an answer without unwinding the asker when the
 answer is wanted.
 
-## `abort` can skip a finalizer bound to a name first
+## Finalizers under `abort`
 
 `Fiber::abort` (and a `cancel_within` deadline that runs out) stops a fiber
-at its next cancellation point, cleanup included. A finalizer written
-directly as `Region::defer`'s argument always starts:
-
-```khora
-Region::defer(region, fn () => give_back(conn));
-```
-
-**A finalizer bound to a `let` first can be skipped whole** when the function
-around it also calls a function value -- a parameter, a closure, anything
-called through a variable:
+at its next cancellation point, cleanup included. **Every registered
+finalizer still starts, and runs until the first loop trip, `!` or blocking
+call it reaches**, in its own body or in a function it calls. A blocking
+call is a `receive`, a `send` that has to wait, a sleep, a `join`; it stops
+the finalizer there, and does not hand it a made-up answer such as a `None`
+from a channel that is still open. Calling a function, directly or through a
+function value, does not stop it before then. That holds however the
+finalizer was registered — a lambda written in `Region::defer`, a lambda
+bound to a `let` first, a named function, one that arrived as a parameter,
+or the release `acquire` registers:
 
 ```khora
 let finalizer = fn () => give_back(conn);
 Region::defer(region, finalizer);
 ```
 
-Such a function's lambdas check for a stop as they are entered, so an abort
-fires at that check, before the finalizer's first line. Under a plain cancel
-it runs; under `abort` it ran 0 times in 20 on both backends. Write a
-finalizer in the `Region::defer` call. `std::db::transaction` and the
-`postgres` pool are written that way.
+So put the step that must happen in a finalizer before anything that can
+wait or loop: under `abort`, the first wait or loop trip is where it ends.
+A finalizer made only of calls and `Shared::set` runs to its end. An `abort`
+that arrives while a finalizer is already running is acted on at its next
+cancellation point of any kind, a call included. A plain cancel does not
+stop cleanup at all; only `abort` does.
 
 ## Concurrency combinators
 
@@ -536,82 +538,57 @@ hands back `Answered(value)` or `Stopped`, raising only when the child
 entry point still ends the program at 130, so `outcome` is the call for a
 caller that wants the answer and tolerates a stop. A stopped fiber's partial
 progress is never handed back; to keep it, the child writes a `Shared` cell.
-And a fiber that raised without anybody taking its answer prints
-`khora: a fiber ended with an error nobody was waiting for` to standard error,
-once per such fiber, with no way to suppress it and no effect on the exit
-status.
 
-**The line is written when that fiber ends, not at process exit**, and
-neither `Fiber::wait` nor `Fiber::join` changes whether it appears: the fiber
-writes it itself the moment it stores its outcome, which is before any joiner
-can have taken that outcome. So **a failure the program joins and handles is
-reported too**, and the message's own wording is wrong about that case —
-somebody was waiting. What it reliably means is narrower than it says: *a
-fiber ended in a failure*.
+**A failure nobody takes is reported once, on standard error, when its last
+handle is let go of:**
 
-The timing is the part worth using. The line sits at the point in the output
-where the failure happened, so a line among a program's first few lines means
-something failed during startup — a listener that could not bind is the usual
-one.
+```
+khora: a fiber ended with an error nobody was waiting for
+```
 
-**A cancellation is excluded from it.** The
-runtime emits that line only for a fiber that ended in a *failure*; a
-canceled fiber is silent, so a supervisor that cancels children does not
-print it — it prints it only when a child failed on its own. That is what
-keeps the line worth reading: it is not the ordinary noise of a shutdown, and
-seeing one means a fiber somewhere raised.
+It does not change the exit status and cannot be suppressed. What counts as
+taking the failure:
+
+| how the program treats a fiber that raised | the line |
+| --- | --- |
+| `Fiber::join` or `Fiber::outcome` hands back the error | not printed |
+| a nursery child; the nursery raises `ChildFailed` | not printed: `ChildFailed` is the report |
+| a nursery child, and the nursery's body raised or was canceled first, so no `ChildFailed` | printed once per such child, as the nursery ends |
+| the handle is let go of without a `join` (end of its block, `Fiber::wait` only, or nothing at all) | printed once, when the handle is let go of |
+| `Fiber::detach` | not printed: detaching says the answer is not wanted |
+| the fiber was canceled rather than failing | not printed: a cancellation is not a failure |
+
+**The line marks when the handle went, not when the fiber failed.** A handle
+let go of at the end of a block reports right there. One bound in `main` and
+never joined reports after `main`'s last line, as the program exits. One held
+by a loop that never ends reports only when that loop is stopped — on
+`SIGTERM`, as the unwind releases it — and until then the failure is silent.
+A supervisor that has to notice a failed worker while it runs asks
+`Fiber::finished` and then `Fiber::join` or `Fiber::outcome`; [Serve
+HTTP](/docs/cookbook/http-service/#stopping-a-service) has the loop.
 
 `Channel` also has no `select` (waiting on the first of several) and no zero-capacity rendezvous. `Channel::bounded(0)` gets a capacity of one rather than a rendezvous, deliberately.
 
-## What a nursery actually does
+## Nursery cancellation is cooperative
 
-Three things about nurseries differ from what the [concurrency
-reference](/docs/reference/concurrency/) describes. All were found by
-measuring, and a program built on the prose will meet them as flakiness.
+A child that fails cancels its siblings at the moment it fails, whichever
+order they were spawned in: an older sibling asleep for a second is canceled
+within milliseconds of a younger one raising. Every child is still waited for
+before the nursery raises `ChildFailed`. What a cancellation cannot do is stop
+work that has no cancellation point — a long computation with no loop, call or
+`!` in it runs to its end, and the nursery waits for it.
 
-| what you write | what happens | what to do |
-| --- | --- | --- |
-| a child fails | siblings usually keep running | have long work check a `Shared` flag itself |
-| a child fails in a bounded nursery | new children still start | as above |
-| `Fiber::cancel` on a fiber whose body is a nursery | **returns** — it is the following `Fiber::wait` that never does, if a child has no cancellation point | cancel through a `Shared` flag the children read |
+A failure cancels the children running at that moment, and every failure
+does: a child spawned after one failure is canceled by the next. A body
+that goes on calling `nursery.spawn` after a child has failed starts those
+children, and a bounded nursery admits them as room frees up. Stop
+producing work explicitly when that matters, for instance by having the
+producer check a `Shared` flag the failing work sets. A bound of `n` is exact
+either way: at most `n` children run at once, and a limit below 1 is refused.
 
-A nursery does still guarantee the other half: every child is waited for, and a
-failure is reported rather than lost.
-
-The measurements below are `khora 0.2.0 (b16417c)` on x86_64 Linux, 20–25 runs
-per backend, under both the default thread backend and `KHORA_FIBERS=scheduler`.
-
-The *bound* itself is exact: `bounded_nursery(n)` runs at most `n` children at
-once, and a limit below 1 is refused. [Concurrency](/docs/reference/concurrency/#bounded-nurseries)
-has the rule.
-
-### A child's failure is seen late unless it was spawned early
-
-**Do not rely on a sibling's failure to stop work that is expensive, holds a
-resource, or has an effect outside the process**, unless the child that can
-fail is spawned before the siblings it should stop.
-
-A nursery reaps handles oldest-first, so a failure is not seen until every
-child spawned before it has finished; the siblings still running at that point
-are canceled. Twelve children busy for 400 ms, one raising after 10 ms, on
-both fiber backends:
-
-| the failing child was spawned | siblings canceled, of 11 | `ChildFailed` arrives |
-| --- | --- | --- |
-| first | 11, in every run | about 10 ms after the start |
-| in the middle (6th of 12) | 2 to 6 | after the earlier five finish |
-| last | 0, in every run | about 405 ms after the start |
-
-With the children in `clock.sleep(400)` instead of busy the shape is the same,
-and a middle-position failure occasionally cancels none. At the last position
-every sibling runs to completion before the failure is reported.
-
-### New children start after a sibling has failed
-
-With `bounded_nursery(3)` over twelve 200 ms children and a failure at 11 ms in
-the second, a median of 6.5 of the 10 remaining children were *started* after
-the failure was recorded, and the group did about 400 ms of further work past
-it.
+`Fiber::cancel` on a fiber whose body is a nursery returns at once and cancels
+the children too. The `Fiber::wait` after it still waits for every child,
+including one with no cancellation point.
 
 ## Work taken off a queue
 
@@ -624,9 +601,10 @@ Ctrl-C. What it does not reach:
   in an in-memory channel is gone.
 - **A trap** (overflow, `todo()`, an index out of range) ends the process at
   status 134 without running cleanup.
-- **`Fiber::abort`** stops the handler at its first cancellation point. A
-  handler made of `Channel::offer` and `Shared::set` has none; one that calls
-  a function that can stop may be cut short before it does anything.
+- **`Fiber::abort`** starts the handler, which runs until the first loop
+  trip, `!` or blocking call it reaches. A handler made of `Channel::offer`
+  and `Shared::set` has none and runs to its end; one with a loop or a wait
+  may be cut short partway.
 - **A foreign call that never returns** is not a cancellation point, so the
   claim is never abandoned.
 - **A claim kept in a long-lived structure** is abandoned only when its last

@@ -512,6 +512,30 @@ impl<'ctx> Lower<'_, 'ctx> {
         self.at(carry_on);
     }
 
+    /// [`Self::check_cancellation`] for a function's entry poll, which asks
+    /// `khora_entry_canceled` instead.
+    ///
+    /// **An entry poll never stops a finalizer.** It is a point the compiler
+    /// adds to a function in a call cycle, or to a lambda lifted from a body
+    /// that calls through a function value, and every finalizer under
+    /// `Fiber::abort` passes through some: its own, a wrapper's (`acquire`'s
+    /// `fn () => release(value)`), its first callee's. Stopping there skipped
+    /// the finalizer whole. The runtime answers 0 here while a finalizer is
+    /// running and `khora_canceled`'s answer otherwise, so outside cleanup
+    /// nothing changes; inside it the first back-edge, `!` or blocking wait
+    /// is where a force stops it.
+    pub(super) fn check_cancellation_at_entry(&mut self) {
+        if !self.can_leave_on_a_cancel() {
+            return;
+        }
+        let (slow, carry_on) = self.poll(Some(runtime::POLL_CANCELED));
+        self.at(slow);
+        let asker = self.be.rt.entry_canceled;
+        self.ask_about_cancellation_with(asker);
+        self.br(carry_on);
+        self.at(carry_on);
+    }
+
     /// [`Self::check_cancellation`] after a runtime export that gives up on a
     /// cancel, asked only when `result` is the answer a give-up can be.
     /// `super::calls::GaveUp` says which that is. The answer is a machine

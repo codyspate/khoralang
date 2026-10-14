@@ -142,17 +142,16 @@ the next only when one finishes, so the producer slows at the boundary where it
 makes work instead of filling a queue. See [Bound concurrent
 work](/docs/cookbook/bounded-concurrency/).
 
-**Two of those three questions are answered today.** Every child is waited for
-and a failure is always reported as `ChildFailed`. The first failure cancels
-the siblings still running when the nursery sees it, and it sees failures in
-spawn order: a failing child spawned first stops all its siblings within
-milliseconds, one spawned last is seen only after the others have finished and
-stops none. So work that is expensive, holds a resource, or has an effect
-outside the process should check a `Shared` flag itself rather than expect the
-group to collapse promptly. [Known
-limitations](/docs/limitations/#a-childs-failure-is-seen-late-unless-it-was-spawned-early)
-has the measurements. A Go reader coming off `errgroup`, where the first error
-does cancel the group's context at once, should not assume the same here.
+All three of those questions have an answer. Every child is waited for; a
+failure is reported as `ChildFailed`; and every child that fails cancels the
+siblings still running at that moment, whichever order they were spawned in —
+the way the first error in an `errgroup` cancels the group's context. As in
+Go, the cancellation is cooperative: a sibling stops at its next cancellation
+point (below), and a body that keeps spawning after a failure starts those
+children (the next failure stops them), so have the producer check for
+itself when that matters. [Known
+limitations](/docs/limitations/#nursery-cancellation-is-cooperative) has the
+details.
 
 Cancellation arrives without a `ctx.Done()` channel to select on, and without
 a `raises` row either: a canceled fiber stops at its next **loop back-edge**,

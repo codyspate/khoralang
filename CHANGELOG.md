@@ -14,6 +14,28 @@ it will behave differently now.
 
 ### Breaking
 
+- A failure in a nursery child cancels its siblings at the moment the child
+  fails, and every failure does. The nursery noticed a failure only when it
+  reached that child's handle, oldest first, so a failing child spawned after
+  a long-running one let it run to completion: a child failing at 10 ms
+  beside a 250 ms sibling took 250 ms and the sibling finished its work. It
+  takes 10 ms, and the sibling is canceled and runs its finalizers. A child
+  spawned after one failure is canceled by the next. A program whose
+  siblings finished their work in spite of a child's failure has them
+  canceled.
+- `khora: a fiber ended with an error nobody was waiting for` is printed when
+  a failed fiber's last handle is let go of without anything having taken the
+  error, not when the fiber fails. A failure the program joins with
+  `Fiber::join` or `Fiber::outcome` prints nothing, and neither does a nursery
+  child whose failure the nursery raises as `ChildFailed`; both printed the
+  line. A failure nobody takes is still printed once, and its position marks
+  when the handle went: a handle held until `main` returns reports after
+  `main`'s last line, and one held by a loop that never ends reports only when
+  the loop is stopped. A supervisor that has to notice a failed worker while
+  it runs asks `Fiber::finished`. A nursery child that failed when no
+  `ChildFailed` was raised for it -- the nursery's body raised something
+  else first, or the fiber running the nursery was canceled while it waited
+  for its children -- is reported with the same line as the nursery ends.
 - `packages/postgres`: `postgres::scram` does not export `sha256`, `hmac`,
   `pbkdf2`, `digest_length`, `encode64` or `decode64`; use `std::crypto`. A
   SCRAM salt from the server that is not base64 (whitespace, a character
@@ -55,6 +77,19 @@ it will behave differently now.
 
 ### Fixed
 
+- `Fiber::abort` starts every finalizer registered on the way out, and runs
+  it until the first loop trip, `!` or blocking call it reaches, in its own
+  body or in a function it calls. Calling a function does not stop it before
+  then. Under `abort`, `acquire`'s release ran 0 times in 20, and so did a
+  finalizer bound to a `let` before `Region::defer`, a named one, or one
+  passed in as a parameter, when the function around it also called a
+  function value; each runs 20 in 20, on both fiber backends.
+- A nursery's failing child stops a sibling that is asleep or waiting, not
+  only one that reaches a cancellation point after the nursery happens to
+  look, and so does each later failure. See Breaking.
+- A fiber failure that `Fiber::join` handed back and a `catch` handled
+  printed `khora: a fiber ended with an error nobody was waiting for`. It
+  prints nothing. See Breaking.
 - Arrays and strings built from bytes are correct in WebAssembly builds.
 - A WebAssembly library containing a loop, a `!` or a region links, and its
   region's finalizers run when the region ends.

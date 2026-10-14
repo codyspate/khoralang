@@ -590,9 +590,10 @@ pub fn main() -> () {
 }
 
 /// **`Fiber::abort` still runs a handler that only records or requeues.**
-/// `abort` stops cleanup at its first cancellation point, so a handler that
-/// calls a function that can stop may be cut short; one made of `offer` and
-/// `Shared::set`, neither of which can stop, runs to its end.
+/// `abort` starts cleanup and stops it at its next cancellation point, so a
+/// handler that loops or calls a function that can stop may be cut short;
+/// one made of `offer` and `Shared::set`, neither of which can stop, runs to
+/// its end.
 ///
 /// The worker is parked mid-job when it is aborted. One handler records,
 /// the other requeues: the job must be back in the queue afterwards.

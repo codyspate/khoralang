@@ -98,7 +98,7 @@ pub(crate) fn emit_function<'ctx>(
     // parameters, which `take_evidence`'s scope and the plan cover.
     if lower.entry_poll && !matches!(body.root.map(|r| body.expr(r)), Some(Expr::Block { .. })) {
         lower.entry_poll = false;
-        lower.check_cancellation(TextRange::empty(0.into()));
+        lower.check_cancellation_at_entry();
     }
 
     let value = match body.root {
@@ -143,10 +143,8 @@ pub(crate) fn emit_closure<'ctx>(
     let unboxed = be.unboxed.clone();
     // A lambda lifted out of a body that calls through a function value may
     // be the far end of that call -- `let f = fn n => .. f(n - 1)` -- so it
-    // polls when entered, unless it is a `Region::defer` finalizer written
-    // in place. `Backend::lambdas_poll_in`.
-    let entry_poll = be.lambdas_poll_in.contains(&site.owner)
-        && !be.finalizer_literals.contains(&(site.owner.clone(), site.expr));
+    // polls when entered. `Backend::lambdas_poll_in`.
+    let entry_poll = be.lambdas_poll_in.contains(&site.owner);
 
     let entry = be.ctx.append_basic_block(function, "entry");
     be.builder.position_at_end(entry);
@@ -259,7 +257,7 @@ pub(crate) fn emit_closure<'ctx>(
     // releases the parameters just pushed.
     if lower.entry_poll && !matches!(body.expr(root), Expr::Block { .. }) {
         lower.entry_poll = false;
-        lower.check_cancellation(TextRange::empty(0.into()));
+        lower.check_cancellation_at_entry();
     }
 
     let value = lower.expr(root);

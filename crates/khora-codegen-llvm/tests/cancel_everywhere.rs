@@ -1788,6 +1788,143 @@ pub fn main() -> Int {
     }
 }
 
+/// A pure child is allowed in a nursery: its ABI must stay callable even
+/// when the handler treats polymorphic error rows as potentially fallible.
+#[test]
+fn a_pure_nursery_child_uses_a_compatible_trampoline() {
+    const SOURCE: &str = "module main;
+import std::core::{ChildFailed, Nursery, nursery, print};
+extern fn khora_live_count() -> Int;
+fn run_rounds(rounds: Int) -> Int {
+  let mut n = 0;
+  while n < rounds {
+    nursery(fn () => { nursery.spawn(fn () => ()); })! catch {
+      ChildFailed { children } => n = n + 1000 + children
+    };
+    n = n + 1;
+  };
+  n
+}
+pub fn main() -> Int {
+  let _ = run_rounds(1);
+  let before = khora_live_count();
+  let n = run_rounds(20);
+  let delta = khora_live_count() - before;
+  print(\"finished ${n}; live delta ${delta}\");
+  0
+}
+";
+    for (backend, ran) in on_both("conc_pure_nursery", SOURCE) {
+        assert!(!ran.hung, "`{backend}`: {}", ran.stderr);
+        assert_eq!(ran.code, Some(0), "`{backend}`: {}", ran.stderr);
+        assert_eq!(ran.stdout, "finished 20; live delta 0\n", "`{backend}`: {}", ran.stderr);
+        assert!(ran.stderr.is_empty(), "`{backend}`: {}", ran.stderr);
+    }
+}
+
+/// **A younger failed child must stop an older sleeping sibling before that
+/// sibling finishes its sleep.** The older child signals readiness before the
+/// younger one raises. Its region's finalizer has to run during the stop, and
+/// the nursery's error must be caught by the parent.
+#[test]
+fn a_younger_nursery_failure_promptly_stops_an_older_sibling() {
+    const SOURCE: &str = "module main;
+import std::clock::{Clock};
+import std::core::{Channel, ChildFailed, Nursery, Region, Shared, nursery, print};
+
+type Broken = | Boom;
+extern fn khora_live_count() -> Int;
+
+pub fn main() -> Int {
+  with { clock: Clock::real() } {
+    let finished = Shared::of(0);
+    let finalized = Shared::of(0);
+    let before = khora_live_count();
+    let mut caught = 0;
+    let mut prompt = true;
+    let mut n = 0;
+    while n < 4 {
+      let ready: Channel<Int> = Channel::bounded(1);
+      let began = clock.monotonic_millis();
+      nursery(fn () => {
+        nursery.spawn(fn () => {
+          let r = Region::open();
+          Region::defer(r, fn () => Shared::set(finalized, Shared::get(finalized) + 1));
+          Channel::send(ready, 1);
+          clock.sleep(1200);
+          Shared::set(finished, Shared::get(finished) + 1);
+        });
+        let _ = Channel::receive(ready);
+        nursery.spawn(fn () => { clock.sleep(20); raise Broken::Boom });
+      })! catch { ChildFailed { children } => caught = caught + children };
+      let elapsed = clock.monotonic_millis() - began;
+      if elapsed >= 900 { prompt = false };
+      n = n + 1;
+    };
+    let delta = khora_live_count() - before;
+    print(\"caught ${caught}; prompt ${prompt}; finished ${Shared::get(finished)}; finalized ${Shared::get(finalized)}; live delta ${delta}\");
+    0
+  }
+}
+";
+    for (backend, ran) in on_both("conc_younger_failure", SOURCE) {
+        assert!(!ran.hung, "`{backend}`: {}", ran.stderr);
+        assert_eq!(ran.stdout, "caught 4; prompt true; finished 0; finalized 4; live delta 0\n", "`{backend}`: {}", ran.stderr);
+        assert_eq!(ran.code, Some(0), "`{backend}`: {}", ran.stderr);
+        assert!(!ran.stderr.contains("nobody was waiting for"), "`{backend}`: {}", ran.stderr);
+    }
+}
+
+/// **A nursery child's failure that never becomes `ChildFailed` is still
+/// reported.** A nursery's children print no per-fiber line, because the
+/// nursery's wait hands their failures to the program as `ChildFailed`. When
+/// the body raises something else after a child has failed, no wait runs, the
+/// body's own error is what the caller catches, and the child's failure
+/// reaches nothing in the program -- so the nursery's release reports it on
+/// standard error, once. The control is the same program with the child not
+/// failing: nothing on stderr.
+#[test]
+fn a_nursery_child_failure_hidden_by_the_bodys_own_raise_is_reported_once() {
+    const SOURCE: &str = "module main;
+import std::clock::{Clock};
+import std::core::{ChildFailed, Nursery, nursery, print};
+
+type Broken = | Boom;
+type Other = | Mine;
+
+pub fn main() -> Int {
+  with { clock: Clock::real() } {
+    nursery(fn () => {
+      nursery.spawn(fn () => { clock.sleep(10); CHILD });
+      clock.sleep(200);
+      raise Other::Mine
+    })! catch {
+      ChildFailed { children } => print(\"child failed ${children}\"),
+      Other::Mine => print(\"body raised\"),
+    };
+    0
+  }
+}
+";
+    let failing = SOURCE.replace("CHILD", "raise Broken::Boom");
+    for (backend, ran) in on_both("conc_body_raised_child_failed", &failing) {
+        assert!(!ran.hung, "`{backend}`: {}", ran.stderr);
+        assert_eq!(ran.stdout, "body raised\n", "`{backend}`: {}", ran.stderr);
+        assert_eq!(ran.code, Some(0), "`{backend}`: {}", ran.stderr);
+        assert_eq!(
+            ran.stderr.matches("a fiber ended with an error nobody was waiting for").count(),
+            1,
+            "`{backend}`: the child's failure reached nothing else: {}",
+            ran.stderr
+        );
+    }
+    let quiet = SOURCE.replace("CHILD", "()");
+    for (backend, ran) in on_both("conc_body_raised_child_ok", &quiet) {
+        assert_eq!(ran.stdout, "body raised\n", "`{backend}`: {}", ran.stderr);
+        assert!(!ran.stderr.contains("nobody was waiting for"), "`{backend}`: {}", ran.stderr);
+    }
+}
+
 /// **A loop that goes round by `continue` stops too.** The check sat at the
 /// end of the body, and `continue` jumps to the head without reaching it, so a
 /// loop that always went round that way never checked and a canceled fiber in
@@ -1875,6 +2012,7 @@ pub fn main() -> Int {
 /// out and always lands after the registration.
 const ABORTED_NEXT_TO_A_CALL: &str = "module main;
 import std::core::{print, Fiber, Channel, Region, Shared};
+extern fn khora_live_count() -> Int;
 
 fn guarded(ran: Shared<Int>, started: Channel<Int>, body: () -> ()) -> () {
   let region = Region::open();
@@ -1890,6 +2028,7 @@ fn spin() -> () {
 
 pub fn main() -> Int {
   let ran = Shared::of(0);
+  let before = khora_live_count();
   let mut trial = 0;
   while trial < 20 {
     let started: Channel<Int> = Channel::bounded(1);
@@ -1899,7 +2038,8 @@ pub fn main() -> Int {
     Fiber::wait(f);
     trial = trial + 1;
   }
-  print(\"finalizer ran ${Shared::get(ran)} of 20\");
+  let delta = khora_live_count() - before;
+  print(\"finalizer ran ${Shared::get(ran)} of 20; live delta ${delta}\");
   0
 }
 ";
@@ -1908,36 +2048,529 @@ pub fn main() -> Int {
 /// is a lambda written in `Region::defer`'s argument, inside a function that
 /// calls `body()`. Such a function's lambdas poll when entered, and a forced
 /// stop fired at that poll, before the finalizer's first line, so it ran 0
-/// times in 20 on both backends: the shape of `transaction`'s rollback and a
-/// pool's give-back.
+/// times in 20 on both backends before 0.4.0 exempted such literals: the
+/// shape of `transaction`'s rollback and a pool's give-back. The exemption
+/// is gone; an entry poll does not stop a finalizer that started forced.
 #[test]
 fn abort_runs_a_finalizer_written_next_to_a_call_through_a_function_value() {
     let source = ABORTED_NEXT_TO_A_CALL
         .replace("DEFERRED", "Region::defer(region, fn () => Shared::set(ran, Shared::get(ran) + 1));");
     for (backend, ran) in on_both("cancel_everywhere_abort_literal_finalizer", &source) {
         assert!(!ran.hung, "`{backend}`: {}", ran.stdout);
-        assert_eq!(ran.stdout, "finalizer ran 20 of 20\n", "`{backend}`: {}", ran.stderr);
+        assert_eq!(ran.stdout, "finalizer ran 20 of 20; live delta 0\n", "`{backend}`: {}", ran.stderr);
         assert_eq!(ran.code, Some(0), "`{backend}`");
     }
 }
 
-/// **A finalizer bound to a `let` first keeps its entry poll, and `abort`
-/// still skips it.** Pinned, because it is a decision rather than an
-/// accident: a lambda with a binding can be called through it, by itself
-/// among others, so it may be the far end of a cycle that polls nowhere else.
-/// Only a lambda written in the argument is exempt. If this starts running
-/// the finalizer, the exemption has widened, and the argument on
-/// `Backend::lambdas_poll_in` has to be made again for the new shape.
+/// **A finalizer bound to a `let` first starts under `abort`.** The child
+/// signals after registration and spins until aborted, so the abort lands
+/// after the finalizer is registered every time. A lambda lifted from a
+/// function that calls a function value polls on entry, and the force
+/// stopped the finalizer there: 0 of 20 on both backends at e32887e.
 #[test]
-fn abort_still_skips_a_let_bound_finalizer_next_to_a_call_through_a_function_value() {
+fn abort_runs_a_let_bound_finalizer_next_to_a_call_through_a_function_value() {
     let source = ABORTED_NEXT_TO_A_CALL.replace(
         "DEFERRED",
         "let finalizer = fn () => Shared::set(ran, Shared::get(ran) + 1);\n  Region::defer(region, finalizer);",
     );
     for (backend, ran) in on_both("cancel_everywhere_abort_bound_finalizer", &source) {
         assert!(!ran.hung, "`{backend}`: {}", ran.stdout);
-        assert_eq!(ran.stdout, "finalizer ran 0 of 20\n", "`{backend}`: {}", ran.stderr);
+        assert_eq!(ran.stdout, "finalizer ran 20 of 20; live delta 0\n", "`{backend}`: {}", ran.stderr);
         assert_eq!(ran.code, Some(0), "`{backend}`");
+    }
+}
+
+/// **A named finalizer starts under `abort`.** A named function that calls a
+/// function value polls on entry, and the force stopped `cleanup` there,
+/// before its first line. `cleanup` cannot reach `ran` (a named `() -> ()`
+/// captures nothing), so it proves it started by printing, 20 times, while
+/// the counter stays at 0 by design. The lambda it then calls polls on entry
+/// too, and does not stop it either: no point of `cleanup`'s own comes first.
+#[test]
+fn abort_starts_a_named_finalizer() {
+    let source = ABORTED_NEXT_TO_A_CALL
+        .replace("DEFERRED", "Region::defer(region, cleanup);")
+        .replace("fn spin()", "fn cleanup() -> () { print(\"clean\"); let f = fn () => (); f() }\nfn spin()");
+    for (backend, ran) in on_both("cancel_everywhere_abort_named_finalizer", &source) {
+        assert!(!ran.hung, "`{backend}`: {}", ran.stderr);
+        assert_eq!(ran.stdout, format!("{}finalizer ran 0 of 20; live delta 0\n", "clean\n".repeat(20)), "`{backend}`: {}", ran.stderr);
+        assert_eq!(ran.code, Some(0), "`{backend}`: {}", ran.stderr);
+    }
+}
+
+/// **A finalizer that arrived as a parameter starts under `abort`.** The
+/// function registering it never sees the lambda's text, so no exemption
+/// written against `Region::defer`'s argument can reach it.
+#[test]
+fn abort_starts_a_parameter_finalizer() {
+    let source = ABORTED_NEXT_TO_A_CALL
+        .replace("body: () -> ())", "body: () -> (), finalizer: () -> ())")
+        .replace("DEFERRED", "Region::defer(region, finalizer);")
+        .replace("guarded(ran, started, spin)", "guarded(ran, started, spin, fn () => Shared::set(ran, Shared::get(ran) + 1))");
+    for (backend, ran) in on_both("cancel_everywhere_abort_parameter_finalizer", &source) {
+        assert!(!ran.hung, "`{backend}`: {}", ran.stderr);
+        assert_eq!(ran.stdout, "finalizer ran 20 of 20; live delta 0\n", "`{backend}`: {}", ran.stderr);
+        assert_eq!(ran.code, Some(0), "`{backend}`: {}", ran.stderr);
+    }
+}
+
+/// **A finalizer whose binding is used twice starts under `abort`.** The
+/// second use is what ruled out the compiler-side exemption for a `let`-bound
+/// lambda used exactly once.
+#[test]
+fn abort_starts_a_multiply_used_finalizer() {
+    let source = ABORTED_NEXT_TO_A_CALL.replace(
+        "DEFERRED",
+        "let finalizer = fn () => Shared::set(ran, Shared::get(ran) + 1);\n  let copy = finalizer;\n  Region::defer(region, finalizer);\n  let _ = copy;",
+    );
+    for (backend, ran) in on_both("cancel_everywhere_abort_multiply_used_finalizer", &source) {
+        assert!(!ran.hung, "`{backend}`: {}", ran.stderr);
+        assert_eq!(ran.stdout, "finalizer ran 20 of 20; live delta 0\n", "`{backend}`: {}", ran.stderr);
+        assert_eq!(ran.code, Some(0), "`{backend}`: {}", ran.stderr);
+    }
+}
+
+/// Under `Fiber::abort`, a finalizer starts and runs up to the first
+/// cancellation point in its own code: written in place or bound to a `let`,
+/// calling a function value first, waiting on a channel, or looping. Each
+/// shape is aborted 10 times. The reviewer's `p1_fnval` probe, with its
+/// comments and an unused live count left out.
+///
+/// What each line pins, and what it read before the fix (`aa55c90`, both
+/// backends):
+/// - `fnval_*`: the finalizer's first act is `step()`, a call through a
+///   function value, whose entry poll is the compiler's, not the
+///   finalizer's. `fnval_let` read `stepped=0`: the `let`-bound finalizer
+///   spent the one-poll allowance on its own entry poll and stopped at
+///   `step`'s.
+/// - `wait_*`: a `Channel::receive` on an open, empty channel gives up on the
+///   force, and the check after it stops the finalizer. `wait_lit` read
+///   `saw_none=10`: the literal had no entry poll, so the allowance was spent
+///   at that check and the finalizer ran on with a `None` the channel never
+///   sent.
+/// - `loop_*`: one trip, then the back-edge stops it. The literal read 20,
+///   two trips, for the same reason.
+#[test]
+fn abort_runs_every_finalizer_up_to_its_first_cancellation_point() {
+    const SOURCE: &str = "module main;
+import std::core::{print, Fiber, Channel, Option, Region, Shared};
+
+fn spin() -> () {
+  while true {}
+}
+
+fn case_fnval_lit(started: Shared<Int>, stepped: Shared<Int>, ready: Channel<Int>, step: () -> ()) -> () {
+  let r = Region::open();
+  Region::defer(r, fn () => {
+    Shared::set(started, Shared::get(started) + 1);
+    step()
+  });
+  Channel::send(ready, 1);
+  spin()
+}
+
+fn case_fnval_let(started: Shared<Int>, stepped: Shared<Int>, ready: Channel<Int>, step: () -> ()) -> () {
+  let r = Region::open();
+  let fin = fn () => {
+    Shared::set(started, Shared::get(started) + 1);
+    step()
+  };
+  Region::defer(r, fin);
+  Channel::send(ready, 1);
+  spin()
+}
+
+fn case_wait_lit(started: Shared<Int>, saw_none: Shared<Int>, ready: Channel<Int>, empty: Channel<Int>, body: () -> ()) -> () {
+  let r = Region::open();
+  Region::defer(r, fn () => {
+    Shared::set(started, Shared::get(started) + 1);
+    match Channel::receive(empty) {
+      Option::Some(_) => (),
+      Option::None => Shared::set(saw_none, Shared::get(saw_none) + 1),
+    }
+  });
+  Channel::send(ready, 1);
+  body()
+}
+
+fn case_wait_let(started: Shared<Int>, saw_none: Shared<Int>, ready: Channel<Int>, empty: Channel<Int>, body: () -> ()) -> () {
+  let r = Region::open();
+  let fin = fn () => {
+    Shared::set(started, Shared::get(started) + 1);
+    match Channel::receive(empty) {
+      Option::Some(_) => (),
+      Option::None => Shared::set(saw_none, Shared::get(saw_none) + 1),
+    }
+  };
+  Region::defer(r, fin);
+  Channel::send(ready, 1);
+  body()
+}
+
+fn case_loop_lit(trips: Shared<Int>, ready: Channel<Int>, body: () -> ()) -> () {
+  let r = Region::open();
+  Region::defer(r, fn () => {
+    while true {
+      Shared::set(trips, Shared::get(trips) + 1);
+    }
+  });
+  Channel::send(ready, 1);
+  body()
+}
+
+fn case_loop_let(trips: Shared<Int>, ready: Channel<Int>, body: () -> ()) -> () {
+  let r = Region::open();
+  let fin = fn () => {
+    while true {
+      Shared::set(trips, Shared::get(trips) + 1);
+    }
+  };
+  Region::defer(r, fin);
+  Channel::send(ready, 1);
+  body()
+}
+
+pub fn main() -> Int {
+  let lit_started = Shared::of(0);
+  let lit_stepped = Shared::of(0);
+  let let_started = Shared::of(0);
+  let let_stepped = Shared::of(0);
+  let wait_lit_started = Shared::of(0);
+  let wait_lit_saw_none = Shared::of(0);
+  let wait_let_started = Shared::of(0);
+  let wait_let_saw_none = Shared::of(0);
+  let loop_lit_trips = Shared::of(0);
+  let loop_let_trips = Shared::of(0);
+  let empty: Channel<Int> = Channel::bounded(1);
+
+  let mut i = 0;
+  while i < 10 {
+    let r1: Channel<Int> = Channel::bounded(1);
+    let f1 = Fiber::spawn(fn () => case_fnval_lit(lit_started, lit_stepped, r1, fn () => Shared::set(lit_stepped, Shared::get(lit_stepped) + 1)));
+    let _ = Channel::receive(r1);
+    Fiber::abort(f1);
+    Fiber::wait(f1);
+
+    let r2: Channel<Int> = Channel::bounded(1);
+    let f2 = Fiber::spawn(fn () => case_fnval_let(let_started, let_stepped, r2, fn () => Shared::set(let_stepped, Shared::get(let_stepped) + 1)));
+    let _ = Channel::receive(r2);
+    Fiber::abort(f2);
+    Fiber::wait(f2);
+
+    let r3: Channel<Int> = Channel::bounded(1);
+    let f3 = Fiber::spawn(fn () => case_wait_lit(wait_lit_started, wait_lit_saw_none, r3, empty, spin));
+    let _ = Channel::receive(r3);
+    Fiber::abort(f3);
+    Fiber::wait(f3);
+
+    let r4: Channel<Int> = Channel::bounded(1);
+    let f4 = Fiber::spawn(fn () => case_wait_let(wait_let_started, wait_let_saw_none, r4, empty, spin));
+    let _ = Channel::receive(r4);
+    Fiber::abort(f4);
+    Fiber::wait(f4);
+
+    let r5: Channel<Int> = Channel::bounded(1);
+    let f5 = Fiber::spawn(fn () => case_loop_lit(loop_lit_trips, r5, spin));
+    let _ = Channel::receive(r5);
+    Fiber::abort(f5);
+    Fiber::wait(f5);
+
+    let r6: Channel<Int> = Channel::bounded(1);
+    let f6 = Fiber::spawn(fn () => case_loop_let(loop_let_trips, r6, spin));
+    let _ = Channel::receive(r6);
+    Fiber::abort(f6);
+    Fiber::wait(f6);
+
+    i = i + 1;
+  };
+
+  print(\"fnval_lit: started=${Shared::get(lit_started)} stepped=${Shared::get(lit_stepped)}\");
+  print(\"fnval_let: started=${Shared::get(let_started)} stepped=${Shared::get(let_stepped)}\");
+  print(\"wait_lit: started=${Shared::get(wait_lit_started)} saw_none=${Shared::get(wait_lit_saw_none)}\");
+  print(\"wait_let: started=${Shared::get(wait_let_started)} saw_none=${Shared::get(wait_let_saw_none)}\");
+  print(\"loop_lit_trips=${Shared::get(loop_lit_trips)} loop_let_trips=${Shared::get(loop_let_trips)}\");
+  0
+}
+";
+    for (backend, ran) in on_both("conc_abort_finalizer_shapes", SOURCE) {
+        assert!(!ran.hung, "`{backend}`: {}", ran.stderr);
+        assert_eq!(
+            ran.stdout,
+            "fnval_lit: started=10 stepped=10\n\
+             fnval_let: started=10 stepped=10\n\
+             wait_lit: started=10 saw_none=0\n\
+             wait_let: started=10 saw_none=0\n\
+             loop_lit_trips=10 loop_let_trips=10\n",
+            "`{backend}`: {}",
+            ran.stderr
+        );
+        assert_eq!(ran.code, Some(0), "`{backend}`: {}", ran.stderr);
+    }
+}
+
+/// **`acquire`'s release runs under `Fiber::abort`, 20 times in 20**, beside
+/// nested regions, a region opened inside a finalizer, and a finalizer
+/// registered while the fiber was already canceled. `acquire` registers
+/// `fn () => release(value)` through `scope.defer`; that wrapper and
+/// `release` itself both poll on entry, and before the fix the wrapper spent
+/// the one-poll allowance and `release` stopped before its first line:
+/// `acquire_ran=0/20` on both backends. That is the shape of every pool's
+/// give-back. The reviewer's `p1_more` probe, with its comments left out.
+#[test]
+fn abort_runs_acquires_release_and_nested_finalizers() {
+    const SOURCE: &str = "module main;
+import std::core::{print, Fiber, Channel, Region, Scope, Shared, acquire, scoped};
+
+fn spin() -> () {
+  while true {}
+}
+
+fn guarded_acquire(ran: Shared<Int>, started: Channel<Int>, body: () -> ()) -> () with { scope: Scope } {
+  let _x = acquire(1, fn _ => Shared::set(ran, Shared::get(ran) + 1));
+  Channel::send(started, 1);
+  body()
+}
+
+fn guarded_two_regions(r1_ran: Shared<Int>, r2_ran: Shared<Int>, started: Channel<Int>, body: () -> ()) -> () {
+  let r1 = Region::open();
+  let f1 = fn () => Shared::set(r1_ran, Shared::get(r1_ran) + 1);
+  Region::defer(r1, f1);
+  {
+    let r2 = Region::open();
+    let f2 = fn () => Shared::set(r2_ran, Shared::get(r2_ran) + 1);
+    Region::defer(r2, f2);
+    Channel::send(started, 1);
+    body()
+  }
+}
+
+fn guarded_region_in_finalizer(outer_ran: Shared<Int>, inner_ran: Shared<Int>, started: Channel<Int>, body: () -> ()) -> () {
+  let r = Region::open();
+  let outer = fn () => {
+    Shared::set(outer_ran, Shared::get(outer_ran) + 1);
+    let r_in = Region::open();
+    let inner = fn () => Shared::set(inner_ran, Shared::get(inner_ran) + 1);
+    Region::defer(r_in, inner);
+  };
+  Region::defer(r, outer);
+  Channel::send(started, 1);
+  body()
+}
+
+fn guarded_defer_while_canceled(ran: Shared<Int>, in_fin: Channel<Int>, wait_abort: Channel<Int>, body: () -> ()) -> () {
+  let r = Region::open();
+  let outer = fn () => {
+    let r2 = Region::open();
+    let inner = fn () => Shared::set(ran, Shared::get(ran) + 1);
+    Region::defer(r2, inner);
+    Channel::send(in_fin, 1);
+    let _ = Channel::receive(wait_abort);
+    spin()
+  };
+  Region::defer(r, outer);
+  Channel::send(in_fin, 0);
+  body()
+}
+
+pub fn main() -> Int {
+  let acq_ran = Shared::of(0);
+  let two_r1 = Shared::of(0);
+  let two_r2 = Shared::of(0);
+  let nest_outer = Shared::of(0);
+  let nest_inner = Shared::of(0);
+  let canceled_defer_ran = Shared::of(0);
+
+  let mut i = 0;
+  while i < 20 {
+    let s1: Channel<Int> = Channel::bounded(1);
+    let f1 = Fiber::spawn(fn () => scoped(fn () => guarded_acquire(acq_ran, s1, spin)));
+    let _ = Channel::receive(s1);
+    Fiber::abort(f1);
+    Fiber::wait(f1);
+
+    let s2: Channel<Int> = Channel::bounded(1);
+    let f2 = Fiber::spawn(fn () => guarded_two_regions(two_r1, two_r2, s2, spin));
+    let _ = Channel::receive(s2);
+    Fiber::abort(f2);
+    Fiber::wait(f2);
+
+    let s3: Channel<Int> = Channel::bounded(1);
+    let f3 = Fiber::spawn(fn () => guarded_region_in_finalizer(nest_outer, nest_inner, s3, spin));
+    let _ = Channel::receive(s3);
+    Fiber::abort(f3);
+    Fiber::wait(f3);
+
+    let s4: Channel<Int> = Channel::bounded(2);
+    let w4: Channel<Int> = Channel::bounded(1);
+    let f4 = Fiber::spawn(fn () => guarded_defer_while_canceled(canceled_defer_ran, s4, w4, spin));
+    let _ = Channel::receive(s4);
+    Fiber::cancel(f4);
+    let _ = Channel::receive(s4);
+    Fiber::abort(f4);
+    let _ = Channel::send(w4, 1);
+    Fiber::wait(f4);
+
+    i = i + 1;
+  };
+
+  print(\"acquire_ran=${Shared::get(acq_ran)}/20\");
+  print(\"two_regions=${Shared::get(two_r1)}/20,${Shared::get(two_r2)}/20\");
+  print(\"region_in_fin=${Shared::get(nest_outer)}/20,${Shared::get(nest_inner)}/20\");
+  print(\"defer_while_canceled=${Shared::get(canceled_defer_ran)}/20\");
+  0
+}
+";
+    for (backend, ran) in on_both("conc_abort_acquire_and_nesting", SOURCE) {
+        assert!(!ran.hung, "`{backend}`: {}", ran.stderr);
+        assert_eq!(
+            ran.stdout,
+            "acquire_ran=20/20\n\
+             two_regions=20/20,20/20\n\
+             region_in_fin=20/20,20/20\n\
+             defer_while_canceled=20/20\n",
+            "`{backend}`: {}",
+            ran.stderr
+        );
+        assert_eq!(ran.code, Some(0), "`{backend}`: {}", ran.stderr);
+    }
+}
+
+/// **A second failure stops the siblings spawned after the first.** In
+/// `bounded_nursery(2)`, job 1 fails at once; then job 3 sleeps 5 s and job 4
+/// fails at 10 ms, while the body waits in `spawn` for room on job 3. Only
+/// the first failure ever cancelled, so job 3 slept its 5 s and the body
+/// waited it out (`caught=2 job3_finished=1`, 511 ms with the reviewer's
+/// 500 ms sleep). Job 4's failure cancels job 3: it is finalized and never
+/// finishes, and the nursery ends in tens of milliseconds. The bound is
+/// half the sleep, so a loaded machine has 2.5 s of slack and a red run
+/// cannot pass. The reviewer's `p2_second_fail`, with 5000 for 500 and its
+/// comments left out.
+#[test]
+fn a_second_failure_stops_a_sibling_spawned_after_the_first() {
+    const SOURCE: &str = "module main;
+import std::clock::{Clock};
+import std::core::{Channel, ChildFailed, Nursery, Region, Shared, bounded_nursery, print};
+
+type Broken = | Boom;
+
+pub fn main() -> Int {
+  with { clock: Clock::real() } {
+    let job3_finished = Shared::of(0);
+    let job3_finalized = Shared::of(0);
+    let mut caught = 0;
+    let t0 = clock.monotonic_millis();
+    bounded_nursery(2, fn () => {
+      let r1: Channel<Int> = Channel::bounded(1);
+      nursery.spawn(fn () => {
+        Channel::send(r1, 1);
+        raise Broken::Boom
+      });
+      let _ = Channel::receive(r1);
+      clock.sleep(10);
+
+      let r3: Channel<Int> = Channel::bounded(1);
+      nursery.spawn(fn () => {
+        let reg = Region::open();
+        Region::defer(reg, fn () => Shared::set(job3_finalized, Shared::get(job3_finalized) + 1));
+        Channel::send(r3, 1);
+        clock.sleep(5000);
+        Shared::set(job3_finished, Shared::get(job3_finished) + 1);
+      });
+      let _ = Channel::receive(r3);
+      let r4: Channel<Int> = Channel::bounded(1);
+      nursery.spawn(fn () => {
+        Channel::send(r4, 1);
+        clock.sleep(10);
+        raise Broken::Boom
+      });
+      let _ = Channel::receive(r4);
+      nursery.spawn(fn () => ());
+    })! catch { ChildFailed { children } => caught = children };
+    let elapsed = clock.monotonic_millis() - t0;
+    print(\"caught=${caught} job3_finished=${Shared::get(job3_finished)} job3_finalized=${Shared::get(job3_finalized)} elapsed_ms=${elapsed}\");
+    0
+  }
+}
+";
+    for (backend, ran) in on_both("conc_second_failure", SOURCE) {
+        assert!(!ran.hung, "`{backend}`: {}", ran.stderr);
+        let line = ran.stdout.trim();
+        let fields: Vec<&str> = line.split(' ').collect();
+        assert_eq!(
+            &fields[..3],
+            ["caught=2", "job3_finished=0", "job3_finalized=1"],
+            "`{backend}`: {line} / {}",
+            ran.stderr
+        );
+        let elapsed: i64 = fields[3]
+            .strip_prefix("elapsed_ms=")
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("`{backend}`: {line}"));
+        assert!(elapsed < 2500, "`{backend}`: job 3 was not stopped: {line}");
+        assert_eq!(ran.code, Some(0), "`{backend}`: {}", ran.stderr);
+    }
+}
+
+/// **A child's failure is reported once when the fiber running the nursery
+/// is canceled during the wait.** Child 2 fails, which cancels child 1;
+/// child 1 holds its cleanup open on a channel; `main` cancels the holder
+/// while it is parked in the nursery's wait, then lets child 1 finish. The
+/// wait returns a count of 1 to a fiber that unwinds instead of raising
+/// `ChildFailed`, so the nursery's release is what has to report it. Before
+/// the fix the wait marked the failure reported anyway, and nothing was
+/// printed at all; `e32887e` printed the line. The reviewer's `p3_vanish`.
+#[test]
+fn a_failure_is_reported_once_when_the_nursery_is_canceled_in_its_wait() {
+    const SOURCE: &str = "module main;
+import std::clock::{Clock};
+import std::core::{Channel, ChildFailed, Fiber, Nursery, Region, nursery, print};
+
+type Broken = | Boom;
+
+pub fn main() -> Int {
+  with { clock: Clock::real() } {
+    let c1_ready: Channel<Int> = Channel::bounded(1);
+    let in_cleanup: Channel<Int> = Channel::bounded(1);
+    let let_go: Channel<Int> = Channel::bounded(1);
+
+    let holder = Fiber::spawn(fn () => {
+      nursery(fn () => {
+        nursery.spawn(fn () => {
+          let r = Region::open();
+          Region::defer(r, fn () => {
+            Channel::send(in_cleanup, 1);
+            let _ = Channel::receive(let_go);
+          });
+          Channel::send(c1_ready, 1);
+          clock.sleep(5000);
+        });
+        let _ = Channel::receive(c1_ready);
+        nursery.spawn(fn () => {
+          raise Broken::Boom
+        });
+      })! catch {
+        ChildFailed { children } => print(\"caught ChildFailed ${children}\"),
+      };
+      print(\"holder after nursery\");
+    });
+
+    let _ = Channel::receive(in_cleanup);
+    clock.sleep(20);
+    Fiber::cancel(holder);
+    Channel::close(let_go);
+    Fiber::wait(holder);
+    print(\"done\");
+    0
+  }
+}
+";
+    for (backend, ran) in on_both("conc_failure_canceled_wait", SOURCE) {
+        assert!(!ran.hung, "`{backend}`: {}", ran.stderr);
+        assert!(ran.stdout.ends_with("done\n"), "`{backend}`: {}", ran.stderr);
+        let reports = ran.stderr.matches("a fiber ended with an error nobody was waiting for").count()
+            + ran.stdout.matches("caught ChildFailed").count();
+        assert_eq!(reports, 1, "`{backend}`: stdout {} / stderr {}", ran.stdout, ran.stderr);
+        assert_eq!(ran.code, Some(0), "`{backend}`: {}", ran.stderr);
     }
 }
 

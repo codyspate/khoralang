@@ -44,7 +44,7 @@ The handler is a required argument, so a worker cannot take a job without saying
 **Keep the handler to recording or requeuing, with `Channel::offer` and `Shared::set`.** It runs as cleanup, which has two consequences:
 
 - A cleanup cannot be canceled, and that also means it cannot wait: a `Channel::send` to a full queue inside one waits forever. `Channel::offer` never waits. It answers `false` when there is no room, and the handler can then record the job somewhere else.
-- `Fiber::abort`, and `cancel_within` once its deadline passes, stop cleanup at its first cancellation point. A handler made of `offer` and `Shared::set` has none and runs to the end; one that calls a function that can stop may be cut off before it does anything.
+- `Fiber::abort`, and `cancel_within` once its deadline passes, start the handler, which runs until the first loop trip, `!` or blocking call it reaches. A handler made of `offer` and `Shared::set` has none and runs to the end; one with a loop or a wait may be cut off partway.
 
 ```khora
 let requeue = fn job => {
@@ -117,7 +117,7 @@ It prints `served 0, requeued 1, queued 2`: the job that was in the worker's han
 
 - **SIGKILL, running out of memory, power loss.** No cleanup runs, and a job in an in-memory channel is gone. Only an external queue with leases survives this.
 - **A trap** (overflow, `todo()`, an index out of range). It ends the process at status 134 without running cleanup.
-- **A long handler under `abort`.** See above: anything past the handler's first cancellation point may not run.
+- **A long handler under `abort`.** See above: the handler starts, and anything past its first loop trip, `!` or wait may not run.
 - **A foreign call that never returns.** It is not a cancellation point. The claim is abandoned at the next one after the call returns, so if it never does, nothing runs.
 - **A claim kept somewhere long-lived.** One stored in a list or a record is abandoned when its last reference goes, which can be much later. One held by a reference cycle is never abandoned.
 - **A row claimed in a database.** That needs a lease in the database itself: an expiry, and an owner checked when the work is acknowledged. A claim can release such a lease promptly on a cancel, but it cannot replace one, because the hazard that matters is the process dying.

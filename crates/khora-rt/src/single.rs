@@ -45,6 +45,13 @@ pub extern "C" fn khora_back_edge() -> u8 {
     0
 }
 
+/// A function's entry poll: nothing to cancel. Reached under the same
+/// condition as [`khora_canceled`].
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_entry_canceled() -> u8 {
+    0
+}
+
 /// One deferred finalizer: the closure, its glue, and how to call it. The
 /// same three the native `region` keeps, for the same reasons.
 struct Finalizer {

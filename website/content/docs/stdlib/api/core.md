@@ -4988,9 +4988,10 @@ loop {
 ```
 
 **Keep `abandon` to recording or requeuing**, with `offer` and
-`Shared::set`. It runs as cleanup, so it cannot wait, and
-`Fiber::abort` stops it at its first cancellation point: a handler that
-calls a function that can stop may be cut short.
+`Shared::set`. It runs as cleanup, so it cannot wait, and under
+`Fiber::abort` it starts and runs until the first loop trip, `!` or
+blocking call it reaches: a handler with a loop or a wait may be cut
+short.
 
 #### receive
 
@@ -5269,21 +5270,22 @@ there is no one value to hand back. `bounded_nursery` turns a non-zero
 answer into a `ChildFailed`, which is what a program should be reading
 rather than this.
 
-**A failure cancels the siblings, and *when* is not yet a promise.** A
-nursery is a unit: the block asked for these fibers together, so one of
-them failing means the answer the group was computing is not coming and
-the rest are working on a question nobody will ask. They are canceled
-rather than killed, so each stops at its next `!` and runs its finalizers
-on the way out, and every one of them is still waited for.
+**A failure cancels the siblings at the moment it happens.** A nursery
+is a unit: the block asked for these fibers together, so one of them
+failing means the answer the group was computing is not coming and the
+rest are working on a question nobody will ask. The failing child
+cancels the others itself, before it reports that it has finished, so
+the order they were spawned in does not matter: a child spawned last
+stops one spawned first. They are canceled rather than killed, so each
+stops at its next cancellation point and runs its finalizers on the way
+out; one with no cancellation point runs to its end. Every one of them
+is still waited for before this answers.
 
-**What is measured today is weaker than that reads.** A nursery reaps
-handles oldest-first, so a failure is noticed in spawn order: with
-twelve children and a failure at 10 ms, the siblings were canceled in
-2-8 ms when the doomed child was spawned first, in about half of runs at
-all when it was spawned in the middle, and in none of twenty-five runs
-when it was spawned last -- everyone finished and the count came back
-421 ms later. The group does collapse and every child is waited for.
-Promptness is not something to build on yet. Roadmap 16.7.
+The cancel reaches the children running when the failure happens, and
+every failure sends one: a child spawned after a failure is stopped by
+the next. A body that goes on spawning after a failure starts those
+children, so a producer that must stop on a fault checks for one
+itself.
 
 ## Trait implementations
 

@@ -42,7 +42,7 @@ pub fn main() raises ChildFailed {
 
 `launch_jobs` requires a `Nursery` capability because it spawns children. `bounded_nursery(64, launch_jobs)!` supplies that capability and does not return until all of its children have finished.
 
-The `!` is there because a nursery raises [`ChildFailed`](/docs/reference/concurrency/#a-child-that-failed) when a child fails: every child is waited for, the failure is reported, and the block's answer does not arrive. Whether it stops the siblings depends on when the failing child was spawned — see [Failure and cancellation](#failure-and-cancellation) below before you rely on it.
+The `!` is there because a nursery raises [`ChildFailed`](/docs/reference/concurrency/#a-child-that-failed) when a child fails: every child is waited for, the failure is reported, and the block's answer does not arrive. The failing child cancels its siblings as it fails — see [Failure and cancellation](#failure-and-cancellation) below for what that does and does not stop.
 
 The line that applies the limit is the spawn:
 
@@ -86,24 +86,20 @@ For a known, already-bounded handful of tasks, use an ordinary `nursery` instead
 
 The nursery owns its children. On normal return it waits for them. If the nursery body leaves through failure or cancellation, children that are still running are canceled and joined before the nursery is released.
 
-**A child's own failure stops only the siblings still running when the
-nursery sees it.** A nursery reaps handles oldest-first, so a failure is not
-seen until every child spawned before it has finished. A failing child spawned
-first cancels all its siblings within milliseconds; one spawned last is seen
-after they have all finished, and cancels none.
+**A child that fails cancels its siblings when it fails**, whichever order
+they were spawned in. Cancellation is cooperative: a sibling stops at its next
+cancellation point, and one without any keeps working until it ends, and is
+still waited for.
 
-A bounded nursery also goes on admitting and starting new children after a
-failure has been recorded, so a limit of 64 over 1,000 jobs does not mean the
-run stops near the failure.
+A failure cancels the children running at that moment, and every failure
+does; it does not stop the body. A body that keeps calling `spawn` after a
+failure starts those children, and a bounded nursery admits them as room
+frees up, so have the producer stop on its own when a fault means the rest
+of the work is wasted.
+Every admitted child is waited for, and `ChildFailed` reports how many failed.
 
-What does hold is the other half: every child is waited for and `ChildFailed`
-is reported, never lost.
-
-So where a job is expensive, holds a connection, or has an effect outside the
-process, have the job check a `Shared` flag itself rather than expecting the
-group to collapse. [Known
-limitations](/docs/limitations/#what-a-nursery-actually-does) has the
-measurements.
+[Known limitations](/docs/limitations/#nursery-cancellation-is-cooperative)
+describes the remaining constraints.
 
 That ownership rule is why bounded concurrency remains structured rather than becoming a semaphore wrapped around detached tasks.
 

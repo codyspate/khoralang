@@ -34,7 +34,62 @@ pub extern "C" fn khora_cancel() {
 /// finishes and the unwind carries on afterwards.
 #[unsafe(no_mangle)]
 pub extern "C" fn khora_canceled() -> u8 {
-    u8::from(current(|fiber| fiber.stops_here()))
+    u8::from(current(|fiber| fiber.stops_at_point()))
+}
+
+/// [`khora_canceled`], asked at a function's entry poll rather than at a
+/// cancellation point in a body.
+///
+/// The same answer, except while a finalizer is starting, when it is 0
+/// ([`FinalizerStart`]). Generated code polls on entry to a function in a
+/// call cycle and to a lambda lifted from a function that calls through a
+/// function value; neither is a point the finalizer's author wrote.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_entry_canceled() -> u8 {
+    u8::from(current(|fiber| fiber.stops_at_entry()))
+}
+
+/// Marks a finalizer that starts on an already-forced fiber as starting, for
+/// as long as this lives or until the finalizer reaches a cancellation point
+/// in the code it runs, whichever is first. While it is starting, no entry
+/// poll stops it.
+///
+/// **What this prevents: `Fiber::abort` skipping a registered finalizer
+/// whole, or stopping it before the first line of something it calls.** A
+/// finalizer runs shielded, so only a force reaches it. Generated code polls
+/// on a function's entry: a named finalizer, one that arrived as a
+/// parameter, a closure bound to a name, the wrapper `acquire` registers
+/// (`fn () => release(value)`), and whatever such a finalizer calls first;
+/// a forced fiber stopped at the first of those, so `abort` ran `acquire`'s
+/// release 0 times in 20, and a finalizer whose first act was a call
+/// through a function value stopped before that function's first line.
+///
+/// **What stops a forced finalizer** is the first cancellation point in the
+/// code it runs: a loop's back-edge, a `!`, or a blocking wait, which gives
+/// up and then stops the finalizer at the check after it rather than handing
+/// it a made-up "closed" or "gave up" answer. Reaching one ends the start,
+/// so after that a callee's entry poll counts again. A force that arrives
+/// while a finalizer runs is not held off at all: it is acted on at the
+/// finalizer's next poll of any kind. A finalizer that only recurses, with
+/// no loop, `!` or wait, and was already forced when it started, is not
+/// stopped; it ends when the recursion does.
+///
+/// Nested finalizers (a region released inside a finalizer) put the outer
+/// mark back on the way out. Costs two relaxed atomic operations per
+/// finalizer, and one relaxed load at each cancellation point that reaches
+/// the runtime (the poll word is already non-zero there).
+pub(crate) struct FinalizerStart(bool);
+
+impl FinalizerStart {
+    pub(crate) fn new() -> Self {
+        Self(current(|fiber| fiber.begin_finalizer()))
+    }
+}
+
+impl Drop for FinalizerStart {
+    fn drop(&mut self) {
+        current(|fiber| fiber.end_finalizer(self.0));
+    }
 }
 
 /// Whether the fiber running `main` was canceled, asked once `main` has

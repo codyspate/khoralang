@@ -889,36 +889,12 @@ fn main() -> Int {{
     );
 }
 
-/// The unobserved-failure line is written when the fiber fails, not at exit.
-///
-/// **A message whose position in the output lies is a message that sends a
-/// reader to the wrong place.** `limitations/index.md` and
-/// `cookbook/http-service.md` both said this line arrived "at process exit".
-/// A developer running a feed aggregator saw it sit between `schema ready`
-/// and the server's own startup print, concluded from its position that the
-/// runtime was emitting it spuriously, and filed it as a false alarm. The
-/// server had in fact bound and served for the rest of that run; what the
-/// line reported is not recorded anywhere, because the documentation's
-/// account of *when* it arrives made the question look answered.
-///
-/// The interleaving is the only evidence a reader has about when a failure
-/// happened, so it is worth pinning.
-///
-/// **What this pins is that the line exists, exactly once, on a clean run —
-/// not when it is written.** Ordering is not observable here: stdout and
-/// stderr reach the harness through separate pipes. Nor does the emit site
-/// discriminate, because a handle released at the end of `main` prints the
-/// same line; disabling the completion-time emitter leaves this test green.
-///
-/// The test that does discriminate is
-/// `a_joined_failure_is_still_reported_as_one_nobody_waited_for` below: `join`
-/// marks the outcome observed, so the release path stays silent and only the
-/// completion-time emitter can produce the line. Disable that emitter and it
-/// is the one that goes red.
-///
-/// A *detached* fiber is deliberately silent — `fiber.rs` calls that "a
-/// failure the program said it did not want to hear about" — so detaching is
-/// not a way to test this either.
+/// **Dropping an unjoined failed handle reports its error exactly once.**
+/// The parent holds the handle until the child has failed, then leaves that
+/// scope without joining. Reporting on release distinguishes it from the
+/// handled error next to this test, at the cost of no stderr message while a
+/// failed handle is still held. A detached fiber deliberately stays silent.
+/// The error object itself is released; repeated failures cannot accumulate.
 #[test]
 fn an_unobserved_failure_is_reported_exactly_once() {
     let ran = run(
@@ -930,24 +906,26 @@ extern fn khora_sleep(millis: Int) -> ();
 fn bad() -> () raises Oops {{ raise Oops::Bad }}
 
 fn main() -> Int {{
+  let before = khora_live_count();
   print(1);
-  let f = Fiber::spawn(fn () => bad()!);
-  // **Nothing takes this fiber's answer.** The sleep is for the child to
-  // reach its raise while the parent still holds the handle, which is the
-  // shape a server has: spawn the listener, keep the handle, poll a flag.
-  khora_sleep(200);
-  print(2);
+  {{
+    let f = Fiber::spawn(fn () => bad()!);
+    // The handle stays held while the child fails, then is released unjoined.
+    khora_sleep(200);
+    print(2);
+  }};
+  let delta = khora_live_count() - before;
+  print(delta);
   0
 }}
 "
         ),
     );
-    assert_eq!(ran.stdout, "1\n2\n", "the program runs through: {:?}", ran.stdout);
+    assert_eq!(ran.stdout, "1\n2\n0\n", "the dropped failure left nothing live: {:?}", ran.stdout);
     assert_eq!(ran.code, Some(0), "an unobserved failure does not change the status");
     assert!(
         ran.stderr.contains("a fiber ended with an error nobody was waiting for"),
-        "a detached failure is announced by the fiber itself, with no release to \
-         do it later: {:?}",
+        "dropping an unjoined failed handle reports its failure: {:?}",
         ran.stderr
     );
     assert_eq!(
@@ -958,30 +936,46 @@ fn main() -> Int {{
     );
 }
 
-/// A failure is reported even when the program joined it and handled it.
-///
-/// **This is the over-reporting that makes the line worth ignoring, which is
-/// the failure that matters here.** The announcement is written by the fiber
-/// itself the moment its outcome is stored, before the completion latch is
-/// even signaled — so at that instant no joiner has taken the answer and the
-/// runtime cannot know that one is about to. `join` sets `observed`, but
-/// `announced` was already claimed, so the flag changes nothing on this path.
-///
-/// The consequence a reader meets: a program that spawns, joins and `catch`es
-/// a failure — having done everything right — still gets a line on stderr
-/// saying nobody was waiting for it. Somebody *was*. Trained on that, a reader
-/// discards the line, and then discards a true report of a listener that could
-/// not bind.
-///
-/// Pinned rather than fixed because fixing it is a design decision, not a
-/// mechanical one: announcing later would restore the missed alarm that moving
-/// it here was for — a server that holds its listener's handle and polls a
-/// stop flag never releases it, so a release-time report never comes. See
-/// REPORT.md under item 9. If this test starts failing because the line is
-/// gone, that is the fix landing, and the prose in
-/// `limitations/index.md` and `cookbook/http-service.md` moves with it.
+/// **A failure nobody ever joins is still reported when the handle is held
+/// until `main` returns.** The warning is written when the last handle is
+/// released, and a handle bound in `main` is released as `main` ends -- so
+/// the line arrives after the program's last output rather than when the
+/// child failed, and it does arrive. This is the shape at risk from moving
+/// the report to release time: if `main`'s own bindings were not released on
+/// the way out, this failure would leave no trace at all.
 #[test]
-fn a_joined_failure_is_still_reported_as_one_nobody_waited_for() {
+fn a_failure_held_until_main_returns_is_reported_once_at_the_end() {
+    let ran = run(
+        "fiber_unobserved_held_to_exit",
+        &format!(
+            "{NURSERY}
+extern fn khora_sleep(millis: Int) -> ();
+
+fn bad() -> () raises Oops {{ raise Oops::Bad }}
+
+fn main() -> Int {{
+  let f = Fiber::spawn(fn () => bad()!);
+  khora_sleep(100);
+  print(1);
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "1\n", "{:?}", ran.stderr);
+    assert_eq!(ran.code, Some(0), "an unobserved failure does not change the status");
+    assert_eq!(
+        ran.stderr.matches("a fiber ended with an error nobody was waiting for").count(),
+        1,
+        "a failure nobody joined is reported exactly once: {:?}",
+        ran.stderr
+    );
+}
+
+/// **A joined and caught error is observed, not an unhandled failure.**
+/// Twenty failing children leave no live objects or false stderr warnings.
+#[test]
+fn a_joined_failure_is_not_reported_as_unobserved() {
     let ran = run(
         "fiber_join_does_not_silence_report",
         &format!(
@@ -989,23 +983,23 @@ fn a_joined_failure_is_still_reported_as_one_nobody_waited_for() {
 fn bad() -> () raises Oops {{ raise Oops::Bad }}
 
 fn main() -> Int {{
-  let f = Fiber::spawn(fn () => bad()!);
-  // Joined and handled: the program observed this failure and acted on it.
-  Fiber::join(f)! catch {{ Oops::Bad => () }};
-  print(1);
+  let before = khora_live_count();
+  let mut n = 0;
+  while n < 20 {{
+    let f = Fiber::spawn(fn () => bad()!);
+    Fiber::join(f)! catch {{ Oops::Bad => () }};
+    n = n + 1;
+  }};
+  let delta = khora_live_count() - before;
+  print(delta);
   0
 }}
 "
         ),
     );
-    assert_eq!(ran.stdout, "1\n", "the catch ran and the program carried on");
+    assert_eq!(ran.stdout, "0\n", "joined error objects were released: {:?}", ran.stdout);
     assert_eq!(ran.code, Some(0));
-    assert!(
-        ran.stderr.contains("a fiber ended with an error nobody was waiting for"),
-        "the report is written by the fiber before any joiner can take the \
-         answer, so joining does not prevent it: {:?}",
-        ran.stderr
-    );
+    assert!(!ran.stderr.contains("a fiber ended with an error nobody was waiting for"), "the error was joined: {:?}", ran.stderr);
 }
 
 /// A canceled fiber says nothing on standard error.
@@ -1286,10 +1280,10 @@ fn main() -> Int {{
     assert_eq!(ran.code, Some(0));
 }
 
-/// Nothing went wrong, so the count is nothing.
+/// Nothing went wrong, so the count is zero.
 ///
-/// The other side of the one above, and worth its own test because a count that
-/// is never zero is a `ChildFailed` on every nursery in the program.
+/// The other side of the failing-child case above: a nonzero count would
+/// turn an otherwise successful nursery into `ChildFailed`.
 #[test]
 fn a_nursery_whose_children_all_finished_counts_none() {
     let ran = run(

@@ -97,6 +97,11 @@ pub(crate) struct Fiber {
     /// On the fiber rather than on the thread, because a finalizer may park —
     /// and the worker that comes back to it may not be the one that left.
     shielded: AtomicUsize,
+    /// Whether a finalizer has started and not yet reached a cancellation
+    /// point in its own code; while it has not, no entry poll stops it:
+    /// [`crate::cancel::FinalizerStart`]. Only the running fiber touches
+    /// this.
+    finalizer_starting: std::sync::atomic::AtomicBool,
     /// How deep this fiber is inside a `Shared::update` or `modify` change
     /// function. [`crate::cancel::Pinned`] says why.
     pinned: AtomicUsize,
@@ -197,6 +202,7 @@ impl Fiber {
             state: AtomicU8::new(0),
             poll: &crate::poll::khora_poll,
             shielded: AtomicUsize::new(0),
+            finalizer_starting: std::sync::atomic::AtomicBool::new(false),
             pinned: AtomicUsize::new(0),
             #[cfg(any(debug_assertions, feature = "fiber-audit"))]
             resuming: std::sync::atomic::AtomicBool::new(false),
@@ -236,6 +242,7 @@ impl Fiber {
             state: AtomicU8::new(0),
             poll,
             shielded: AtomicUsize::new(0),
+            finalizer_starting: std::sync::atomic::AtomicBool::new(false),
             pinned: AtomicUsize::new(0),
             #[cfg(any(debug_assertions, feature = "fiber-audit"))]
             resuming: std::sync::atomic::AtomicBool::new(false),
@@ -521,6 +528,47 @@ impl Fiber {
         state & CANCELED != 0
             && !self.is_pinned()
             && (state & FORCED != 0 || !self.is_shielded())
+    }
+
+    /// Whether generated code should leave at a function's entry poll.
+    ///
+    /// [`Fiber::stops_here`], except while a finalizer is starting, where it
+    /// is never true ([`crate::cancel::FinalizerStart`]). An entry poll is
+    /// not a point the finalizer's author wrote: it is the compiler's way of
+    /// putting a cancellation point on a cycle it cannot see, and under
+    /// `abort` it is what stopped a finalizer before its first line.
+    pub(crate) fn stops_at_entry(&self) -> bool {
+        !self.finalizer_starting.load(Ordering::Relaxed) && self.stops_here()
+    }
+
+    /// Whether generated code should leave at a cancellation point in a
+    /// body: a back-edge, a `!`, the check after a blocking wait.
+    ///
+    /// [`Fiber::stops_here`]. Reaching one also ends a finalizer's start, so
+    /// from here on its callees' entry polls count again.
+    pub(crate) fn stops_at_point(&self) -> bool {
+        if self.finalizer_starting.load(Ordering::Relaxed) {
+            self.finalizer_starting.store(false, Ordering::Relaxed);
+        }
+        self.stops_here()
+    }
+
+    /// Marks a finalizer as starting if a force is already here, and hands
+    /// back the mark it replaced, for [`Fiber::end_finalizer`].
+    ///
+    /// Only a force that came *before* the finalizer is held off its entry
+    /// polls: that force is what skipped finalizers whole. One that arrives
+    /// while the finalizer runs is acted on at its next poll of any kind,
+    /// entry polls included.
+    pub(crate) fn begin_finalizer(&self) -> bool {
+        self.finalizer_starting.swap(self.is_forced(), Ordering::Relaxed)
+    }
+
+    /// Puts back what [`Fiber::begin_finalizer`] replaced, so a finalizer
+    /// run inside another (a region released in cleanup) leaves the outer
+    /// one as it found it.
+    pub(crate) fn end_finalizer(&self, previous: bool) {
+        self.finalizer_starting.store(previous, Ordering::Relaxed);
     }
 
     /// Whether a blocking wait should give up and hand back its "gave up"
@@ -1161,6 +1209,91 @@ mod tests {
         assert!(fiber.is_forced(), "uncancel cleared the force");
         assert_eq!(counted(poll), 1, "and the count agrees with the flag");
         assert_eq!(crate::cancel::khora_canceled(), 1, "and it still stops in cleanup");
+    }
+
+    /// **A finalizer that starts forced gets past every entry poll until it
+    /// reaches a point of its own, and stops there.** Entry polls are the
+    /// compiler's (a named function, a lambda lifted from a body that calls
+    /// a function value, `acquire`'s wrapper, a callee's), and stopping at
+    /// one skipped the finalizer whole. The first back-edge, `!` or check
+    /// after a blocking wait is the finalizer's own.
+    #[test]
+    fn a_forced_finalizer_passes_entry_polls_and_stops_at_its_first_point() {
+        let fiber = Fiber::spawned_counting_in(word());
+        let _entered = enter(fiber.clone());
+        let _cleanup = crate::cancel::Shielded::new();
+        fiber.force();
+        let start = crate::cancel::FinalizerStart::new();
+        assert_eq!(crate::cancel::khora_entry_canceled(), 0, "the finalizer's own entry poll");
+        assert_eq!(crate::cancel::khora_entry_canceled(), 0, "a wrapper's, or a callee's");
+        assert_eq!(crate::cancel::khora_canceled(), 1, "its first point stops it");
+        assert_eq!(crate::cancel::khora_entry_canceled(), 1, "and after that an entry poll does too");
+        drop(start);
+        assert_eq!(crate::cancel::khora_canceled(), 1, "and after it, the unwind carries on");
+        assert_eq!(crate::cancel::khora_entry_canceled(), 1);
+    }
+
+    /// **The point after a blocking wait is not forgiven.** A wait gives up
+    /// on a force and hands back its "gave up" answer; the check after it
+    /// is what turns that into a stop. A finalizer with no entry poll (a
+    /// lambda written in `Region::defer`) reaches that check first, and an
+    /// allowance spent there handed it a made-up `None` from an open channel.
+    #[test]
+    fn a_forced_finalizer_stops_at_the_check_after_a_wait() {
+        let fiber = Fiber::spawned_counting_in(word());
+        let _entered = enter(fiber.clone());
+        let _cleanup = crate::cancel::Shielded::new();
+        fiber.force();
+        let start = crate::cancel::FinalizerStart::new();
+        assert!(fiber.stops_here(), "the wait gives up");
+        assert_eq!(crate::cancel::khora_canceled(), 1, "and the check after it stops the finalizer");
+        drop(start);
+    }
+
+    /// A force that arrives *after* a finalizer has started is not held off:
+    /// only a force already there at the start is. It stops the finalizer at
+    /// its next poll of any kind, an entry poll included.
+    #[test]
+    fn a_force_arriving_inside_a_finalizer_stops_its_next_poll() {
+        let fiber = Fiber::spawned_counting_in(word());
+        let _entered = enter(fiber.clone());
+        let _cleanup = crate::cancel::Shielded::new();
+        let start = crate::cancel::FinalizerStart::new();
+        assert_eq!(crate::cancel::khora_entry_canceled(), 0, "shielded, not forced");
+        fiber.force();
+        assert_eq!(crate::cancel::khora_entry_canceled(), 1, "the next entry poll");
+        assert_eq!(crate::cancel::khora_canceled(), 1);
+        drop(start);
+    }
+
+    /// Nested finalizers: the outer one is left as it was. A region released
+    /// inside a finalizer starts its own, and when that one ends the outer
+    /// finalizer is still starting if it had not reached a point.
+    #[test]
+    fn a_nested_finalizer_leaves_the_outer_one_as_it_found_it() {
+        let fiber = Fiber::spawned_counting_in(word());
+        let _entered = enter(fiber.clone());
+        let _cleanup = crate::cancel::Shielded::new();
+        fiber.force();
+        let outer = crate::cancel::FinalizerStart::new();
+        let inner = crate::cancel::FinalizerStart::new();
+        assert_eq!(crate::cancel::khora_entry_canceled(), 0, "inner entry poll");
+        assert_eq!(crate::cancel::khora_canceled(), 1, "inner's first point");
+        drop(inner);
+        assert_eq!(crate::cancel::khora_entry_canceled(), 0, "outer, still starting");
+        assert_eq!(crate::cancel::khora_canceled(), 1);
+        drop(outer);
+    }
+
+    /// Outside a finalizer an entry poll is an ordinary cancellation point.
+    #[test]
+    fn outside_a_finalizer_an_entry_poll_stops_a_canceled_fiber() {
+        let fiber = Fiber::spawned_counting_in(word());
+        let _entered = enter(fiber.clone());
+        fiber.cancel();
+        assert_eq!(crate::cancel::khora_entry_canceled(), 1);
+        assert_eq!(crate::cancel::khora_canceled(), 1);
+        crate::cancel::khora_cancel_reset();
     }
 
     /// Cancelers and forcers of one set of fibers at once: each fiber is

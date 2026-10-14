@@ -225,6 +225,13 @@ pub struct Runtime<'ctx> {
     pub region_root: FunctionValue<'ctx>,
     /// `uint8_t khora_canceled(void)`
     pub canceled: FunctionValue<'ctx>,
+    /// `uint8_t khora_entry_canceled(void)`
+    ///
+    /// The question a function's entry poll asks: `khora_canceled`'s answer,
+    /// except that an entry poll never stops a finalizer. A finalizer under
+    /// `abort` stops at the first cancellation point in its own code, not at
+    /// the poll the compiler put on its entry or its callee's.
+    pub entry_canceled: FunctionValue<'ctx>,
     /// `uint8_t khora_root_absorbed(void)`
     ///
     /// Asked by the entry point once `main` has returned normally: whether
@@ -490,6 +497,7 @@ impl<'ctx> Runtime<'ctx> {
             region_release: declare("khora_region_release", void.fn_type(&[ptr.into()], false)),
             region_root: declare("khora_region_root", ptr.fn_type(&[], false)),
             canceled: declare("khora_canceled", i8t.fn_type(&[], false)),
+            entry_canceled: declare("khora_entry_canceled", i8t.fn_type(&[], false)),
             root_absorbed: declare("khora_root_absorbed", i8t.fn_type(&[], false)),
             shared_open: declare(
                 "khora_shared_open",

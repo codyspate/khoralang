@@ -68,7 +68,7 @@ fn print_later(value: Int) -> () {
 }
 ```
 
-Releasing the final `Fiber` handle also waits for the child. This means a fiber cannot silently outlive the scope that still owns its handle.
+Releasing the final `Fiber` handle also waits for the child. This means a fiber cannot silently outlive the scope that still owns its handle. If the child raised and nothing took the error — no `join`, no `outcome` — the release also prints `khora: a fiber ended with an error nobody was waiting for` on standard error, once; a `join` that hands the error back prints nothing. [Known limitations](/docs/limitations/#concurrency-combinators) lists every case.
 
 `Fiber::detach` is the exception, and the only one: it stops waiting and asks the fiber to stop. Both halves are asynchronous — `detach` signals and returns at once, so the fiber keeps running until it reaches its next cancellation point rather than stopping where it is. Its answer is discarded when it arrives, and a later failure is silent — the program said it was no longer listening. It cancels as well as detaching, because a detached fiber nobody asked to stop is a leak with a nicer name.
 
@@ -179,7 +179,7 @@ makes a fiber's stack larger.
 
 ### A child that failed
 
-A nursery is a unit: the block asked for these fibers together, so one failing means the group's answer is not coming. The first failure cancels the siblings still running when the nursery sees it; every child is still waited for, and the nursery raises
+A nursery is a unit: the block asked for these fibers together, so one failing means the group's answer is not coming. Each failure cancels the siblings still running at the moment it happens; every child is still waited for, and the nursery raises
 
 ```khora
 pub type ChildFailed = { children: Int };
@@ -187,7 +187,9 @@ pub type ChildFailed = { children: Int };
 
 A count rather than the child's own error, because `spawn` binds the row per call — two children may fail with two unrelated types and there is no one value to hand back. A child the nursery *canceled* is not counted: that is what a nursery does to its children, not something that went wrong.
 
-**A failure is seen in spawn order.** A nursery reaps handles oldest-first, so a child's failure is not seen until every child spawned before it has finished, and it cancels only the siblings still running at that moment. A failing child spawned first cancels all its siblings within milliseconds; one spawned in the middle of twelve canceled between two and six of the eleven in measurement; one spawned last is seen after every sibling has finished and cancels none. Every child is waited for and the failure is always reported. When a sibling's failure has to stop work that is expensive, holds a resource, or has an effect outside the process, spawn the child that can fail first, or have that work check a `Shared` flag itself. [Known limitations](/docs/limitations/#a-childs-failure-is-seen-late-unless-it-was-spawned-early) has the numbers.
+**A failure is acted on when it happens, not when the nursery gets round to that child.** The failing child cancels its siblings itself, at the moment it fails, so a child spawned last stops a sibling spawned first and asleep for a second within milliseconds. Each sibling stops at its next cancellation point and runs its finalizers on the way out; one with no cancellation point runs to its end, and is still waited for. A body that keeps calling `spawn` after a failure starts those children: a failure cancels what is running, not what comes next, and the next failure cancels those. [Known limitations](/docs/limitations/#nursery-cancellation-is-cooperative) has the rest.
+
+**A child's failure is reported once, as `ChildFailed`**, not also as the `nobody was waiting for` line a fiber's unjoined failure prints. If the body raises something else first, or is canceled, there is no `ChildFailed` to carry it, and the nursery prints that line once per failed child as it ends.
 
 The body may be a named function or a lambda. A lambda resolves its capabilities where it is written, and as the argument to `nursery` that is inside the row `nursery` installs, so `nursery(fan_out)` and `nursery(fn () => fan_out())` mean the same thing.
 
@@ -271,9 +273,15 @@ Fiber::wait(child);
 ```
 
 `abort` stops the fiber at its next cancellation point **including inside a
-finalizer**, and the children of any nursery it holds with it. What it costs
-is cleanup cut off part-way: a `ROLLBACK` not sent, a connection dropped
-rather than returned. Khora has no default grace period, so nothing aborts a
+finalizer**, and the children of any nursery it holds with it. Every
+finalizer registered on the way out still starts, and runs until the first
+loop trip, `!` or blocking call it reaches, in its own body or in a function
+it calls; a blocking call stops it there rather than handing it a made-up
+answer. Calling a function does not stop it before then. An `abort` that
+arrives while a finalizer is already running stops it at its next
+cancellation point of any kind.
+What it costs is cleanup cut off part-way: a `ROLLBACK` not sent, a
+connection dropped rather than returned. Khora has no default grace period, so nothing aborts a
 fiber unless the program asks. `cancel_within` is the usual way to ask: it
 bounds how long cleanup may take, and a fiber that finishes before the
 deadline is not aborted.
@@ -359,7 +367,7 @@ impl<A: Share> Claim<A> {
 
 `offer` is a send that never waits: `false` when the channel is full or closed, and the value is released. It is not a cancellation point. `give_back` is `offer` back onto a channel, so it never waits either; when it answers `false` the claim is still unsettled.
 
-`abandon` runs as cleanup, so it cannot be canceled and should not wait: a `send` to a full channel inside it waits forever, which is why `offer` exists. `Fiber::abort` stops cleanup at its first cancellation point, so a handler that only records (`Shared::set`) or requeues (`offer`) runs to its end under `abort`, and a longer one can be cut short.
+`abandon` runs as cleanup, so it cannot be canceled and should not wait: a `send` to a full channel inside it waits forever, which is why `offer` exists. Under `Fiber::abort` the handler starts and runs until the first loop trip, `!` or blocking call it reaches, so a handler that only records (`Shared::set`) or requeues (`offer`) runs to its end, and a longer one can be cut short.
 
 A claim holds a `Region`, so it stays on the fiber that took it: sending it on a `Channel` or a `Handoff`, or capturing it in a spawned fiber, is refused at compile time. A claim gives at-least-once delivery, not exactly-once, and nothing survives a process that is killed or traps. [Take work off a queue safely](/docs/cookbook/taking-work-off-a-queue/) has the whole list.
 

@@ -43,12 +43,16 @@ set -eu
 # exist" both left for the same reason: `packages/postgres` authenticates to a
 # stock PostgreSQL and supplies `Db`, so `next` saying the driver exists is the
 # correction, not a regression of one.
+# "The moment it stores its outcome" (the unobserved-failure line is written
+# as the fiber ends, and `join` does not suppress it) left when the runtime
+# moved that line to the release of the last handle: in `next` a joined and
+# handled failure prints nothing. The v0.4 tree keeps the sentence, which is
+# true of 0.4.
 #
 # **The list being empty is a normal state**, not a sign the check is
 # disabled. It fills when a correction lands in `next` that readers of the
 # released tree are being misled without.
 corrections=$(cat <<'PHRASES'
-the moment it stores its outcome|The runtime announces an unobserved failure when the fiber ends, not at process exit, and joining it does not suppress the line. Both trees said otherwise, in three pages each. A developer running a feed aggregator read the line's position between two startup prints as proof the runtime was emitting it spuriously, filed it as a false alarm, and never found out what it reported -- the documentation's account of when it arrives made the question look answered. v0.2 readers need the corrected rule as much as `next` readers do. (Pinned to the limitations page; the queue cookbook's copy went when that page was rewritten around `Channel::claim`.)
 PHRASES
 )
 

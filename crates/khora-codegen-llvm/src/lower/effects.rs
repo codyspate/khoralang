@@ -1329,25 +1329,23 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let both = self.operands(&[*fibers, *body])?;
                 let crew = both[0];
                 let closure = both[1];
-                let fallible = matches!(
-                    self.types.of(*body),
-                    Type::Fn { raises, .. } if !matches!(
-                        &**raises,
-                        Type::Row { fields, tail } if fields.is_empty() && tail.is_none()
-                    )
-                );
+                // **Always the tagged trampoline and the error's release
+                // routine, whatever row the body's type shows here.**
+                // `Nursery::spawn` binds the child's row per call, and at this
+                // handler -- `fn work => Fibers::spawn(crew, work)` in `std`
+                // -- the body's row is the handler's own parameter, which can
+                // be inferred empty for a child that raises. The plain
+                // trampoline chosen on that reading returned the child's tag
+                // and dropped its error word with no glue to release it: one
+                // live object per failing child (+4 over 4 failing rounds,
+                // 0 with no failure). Every child answers `()`, so a tagged
+                // call and a plain one hand the runtime the same tag-and-word
+                // pair; an infallible child only pays the tagged shim, which
+                // measured within run-to-run noise over 100,000 spawns.
                 let glue = self.be.drop_glue(&Type::func(Vec::new(), Type::Unit));
-                let call = if fallible {
-                    self.be.tagged_trampoline(1).as_global_value().as_pointer_value()
-                } else {
-                    self.be.answered_trampoline(None).as_global_value().as_pointer_value()
-                };
+                let call = self.be.tagged_trampoline(1).as_global_value().as_pointer_value();
                 let null = self.be.null_pointer();
-                let error_glue = if fallible {
-                    self.be.release_error().as_global_value().as_pointer_value()
-                } else {
-                    null
-                };
+                let error_glue = self.be.release_error().as_global_value().as_pointer_value();
                 let started = self.be.builder.build_call(
                     self.be.rt.fibers_spawn,
                     &[

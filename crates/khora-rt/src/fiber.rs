@@ -233,13 +233,9 @@ struct Legacy {
     /// routine that dispatches on it. Null for a fiber whose row is empty,
     /// which has no error to release.
     error_glue: Option<extern "C" fn(u32, u64)>,
-    /// Whether the "nobody was waiting for this" line has been written.
-    ///
-    /// Two places can write it: the fiber itself, the moment it finishes with
-    /// an error, and `khora_fiber_release`, for a handle let go of later. Both
-    /// are needed -- a held handle never reaches the second, and a fiber that
-    /// has not finished never reaches the first -- and one failure is one
-    /// message, so whichever arrives first claims it here.
+    /// Whether the nursery has already claimed this error as ChildFailed, or
+    /// a release has printed it. Only a dropped, unjoined, non-nursery error
+    /// is reported on stderr; completion alone cannot know if a join awaits.
     announced: std::sync::atomic::AtomicBool,
 }
 
@@ -265,19 +261,6 @@ impl Legacy {
                 }
                 Tagged { which: outcome.which, payload: outcome.payload }
             }
-        }
-    }
-
-    /// Whether the answer is an error, without taking it.
-    ///
-    /// For a nursery, which waits for its children without joining them. A
-    /// cancellation is not a failure: it is what a nursery *does* to a child,
-    /// and counting it would make every early exit look like one.
-    fn failed(&self) -> bool {
-        match self.outcome.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-            Some(outcome) => outcome.which != 0 && outcome.which != CANCELED_WHICH,
-            // Not finished, which a caller that waited first cannot see.
-            None => false,
         }
     }
 
@@ -603,6 +586,7 @@ fn fibers() -> &'static Scheduler {
 /// pointer; and `error_glue`, where given, must release any error the thunk
 /// can raise.
 #[unsafe(no_mangle)]
+// SHARE: `spawn_with_failure` marks `body`'s captures before another fiber can run them.
 pub unsafe extern "C" fn khora_fiber_spawn(
     body: *mut u8,
     glue: Option<extern "C" fn(*mut u8)>,
@@ -612,6 +596,39 @@ pub unsafe extern "C" fn khora_fiber_spawn(
     value_glue: Option<extern "C" fn(*mut u8)>,
     error_glue: Option<extern "C" fn(u32, u64)>,
 ) -> *mut u8 {
+    // SAFETY: the exported function's caller promises each argument's contract.
+    unsafe {
+        spawn_with_failure(
+            body, glue, call, plain, boxed, value_glue,
+            FailureHooks { error_glue, on_failure: None },
+        )
+    }
+}
+
+/// Failure cleanup and an optional nursery notification for a spawned fiber.
+pub(crate) struct FailureHooks {
+    /// Drops an error payload after the answer is no longer needed.
+    pub(crate) error_glue: Option<extern "C" fn(u32, u64)>,
+    /// Tells the nursery about a stored error before the child signals done.
+    pub(crate) on_failure: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+/// The nursery hook runs after an error is stored, before completion is
+/// signaled, so a waiting parent cannot overlook a younger child's failure.
+///
+/// # Safety
+///
+/// The same contracts as [`khora_fiber_spawn`].
+pub(crate) unsafe fn spawn_with_failure(
+    body: *mut u8,
+    glue: Option<extern "C" fn(*mut u8)>,
+    call: Option<Trampoline1>,
+    plain: Option<PlainTrampoline1>,
+    boxed: bool,
+    value_glue: Option<extern "C" fn(*mut u8)>,
+    hooks: FailureHooks,
+) -> *mut u8 {
+    let FailureHooks { error_glue, on_failure } = hooks;
     // The compiler said this program has one thread and emitted non-atomic
     // reference counting on the strength of it. Carrying on would race every
     // count in the program. See `SINGLE_THREADED`.
@@ -663,7 +680,7 @@ pub unsafe extern "C" fn khora_fiber_spawn(
         // fiber now owns the reference. A closure's first field is its code
         // pointer; calling one with its own object is the convention generated
         // code uses.
-        unsafe {
+        let failed = unsafe {
             let code = *body.add(KHORA_FIELD_OFFSET).cast::<*const u8>();
             let outcome = match (call, plain) {
                 (Some(run), _) => {
@@ -686,38 +703,27 @@ pub unsafe extern "C" fn khora_fiber_spawn(
             // **Stored before the closure is released**, because releasing it
             // may run arbitrary drop routines and a joiner woken in the middle
             // of that must find the answer already there.
+            let failed = outcome.which != 0 && outcome.which != CANCELED_WHICH;
             *answers.outcome.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
             khora_drop(body, glue);
-        }
-        // **A failure nobody is waiting for is said here, not at release.**
-        //
-        // `khora_fiber_release` already reports one, which covers a handle that
-        // is let go of. It does not cover the shape a server is written in:
-        // spawn the listener, keep the handle, and poll a stop flag. If the
-        // bind fails, the fiber raises, the handle is still held, and the
-        // release that would have printed never runs -- so the process sits
-        // there having said nothing, serving nothing, and never exiting. That
-        // is worse than a crash, because a supervisor that restarts on exit
-        // sees a healthy process.
-        //
-        // Reported at most once: `announced` is the flag, and a later join or
-        // release finds it already set and stays quiet rather than saying it
-        // twice.
-        {
-            let held = answers.outcome.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(outcome) = held.as_ref() {
-                if outcome.which != 0
-                    && outcome.which != CANCELED_WHICH
-                    && !answers.announced.swap(true, Ordering::Relaxed)
-                {
-                    let mut err = std::io::stderr().lock();
-                    let _ = err
-                        .write_all(b"khora: a fiber ended with an error nobody was waiting for\n");
-                }
+            failed
+        };
+        if failed {
+            if let Some(ref notify) = on_failure {
+                // Reported as `ChildFailed` by the nursery's wait, or by the
+                // nursery's release if no wait hands it back, so this fiber's
+                // own release stays quiet. Marked before notifying, and both
+                // before `closes.signal()`, so nothing that wakes on the
+                // signal can find the child finished and its failure
+                // uncounted.
+                answers.announced.store(true, Ordering::Relaxed);
+                notify();
             }
         }
-        // Last, and after the closure has been released, so a joiner that
-        // wakes immediately finds the fiber finished in every sense.
+        // A joiner can still take this answer. Only the handle's eventual
+        // release knows whether anybody observed it; reporting here labels
+        // an error about to be caught as one nobody was waiting for.
+        // Nursery children are reported through ChildFailed instead.
         closes.signal();
     };
 
@@ -831,10 +837,9 @@ pub unsafe extern "C" fn khora_fiber_join(fiber: *mut u8, out: *mut u64) -> u32 
 /// **What a nursery does, and the difference from `join` is deliberate.** A
 /// nursery waits for its children because it must not outlive them, not
 /// because it wants what they computed -- it could not use it if it had it,
-/// since every child's answer has a type of its own and a nursery holds them
-/// as bare handles. So it waits, and the answer stays where it is until the
-/// release lets go of it. That is also what keeps "a fiber that failed and
-/// nobody joined says so on stderr" true of a child inside a nursery.
+/// because every child's answer has a type of its own and a nursery holds them
+/// as bare handles. The nursery counts failed children and reports ChildFailed;
+/// their individual errors are released without an unobserved warning.
 ///
 /// Answers whether it gave up on a cancellation rather than waited, which is
 /// the one thing a caller with a `raises` row can act on.
@@ -908,29 +913,6 @@ impl FiberState {
             passed_on = true;
         }
     }
-}
-
-/// Whether a finished fiber ended with an error, and takes the reporting on.
-///
-/// **The second half is why this is not a bare question.** A handle released
-/// without anybody having joined it prints a line on stderr, because a failure
-/// that nobody looked at would otherwise leave no trace anywhere. A nursery
-/// that asks this *is* looking: it is about to raise `ChildFailed`, which is a
-/// better report than the line and reaches the program rather than only the
-/// terminal. So asking marks the answer observed, and the two reports do not
-/// both happen.
-///
-/// # Safety
-///
-/// `fiber` must be a live object from [`khora_fiber_spawn`] that has finished.
-pub(crate) unsafe fn failed_and_reported(fiber: *mut u8) -> bool {
-    // SAFETY: the caller guarantees a live handle.
-    let Some(state) = (unsafe { fiber_state(fiber) }) else { return false };
-    let failed = state.legacy.failed();
-    if failed {
-        state.observed.store(true, Ordering::Relaxed);
-    }
-    failed
 }
 
 /// Whether the fiber has finished, without waiting for it to.

@@ -55,7 +55,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         // releases the parameters, so an unwind from here releases them.
         if self.entry_poll {
             self.entry_poll = false;
-            self.check_cancellation(TextRange::empty(0.into()));
+            self.check_cancellation_at_entry();
         }
 
         for stmt in stmts {

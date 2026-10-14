@@ -277,21 +277,14 @@ Fiber::wait(worker)!;
 Fiber::detach(server);
 ```
 
-A worker that fails on its own prints `khora: a fiber ended with an error
-nobody was waiting for`. The line is written **the moment that fiber ends**,
-not at exit, and neither `Fiber::wait` nor `Fiber::join` changes whether it
-appears — the fiber writes it before any joiner could have taken its outcome,
-so a failure the program joins and handles is reported too. Cancellation is
-excluded, so the shutdown above is silent: the line appears only when a child
-raised. It cannot be suppressed and does not change the exit status — see
-[known limitations](/docs/limitations/#concurrency-combinators).
-
-Read it as "a fiber raised", not as "a failure went unhandled" — the wording
-claims more than the runtime checks, and a program that handles its failures
-correctly still sees it. What is reliable is the *position*: the line sits
-where the failure happened, so one among a program's first few lines means
-something failed during startup. A listener that could not bind is the usual
-one.
+If `worker` raised, `Fiber::wait` waits for it without taking the error, so
+the runtime reports it on standard error when `worker`'s handle is let go of
+at the end of `main`: `khora: a fiber ended with an error nobody was waiting
+for`. A worker joined with `Fiber::join` and caught is not reported, and
+neither is a canceled one. The line does not say *when* the worker failed —
+only when its handle went — so a supervisor that has to react while the
+program runs asks `Fiber::finished` and then joins, as below. [Known
+limitations](/docs/limitations/#concurrency-combinators) has every case.
 
 Two things are worth being deliberate about. A request that arrives during the
 drain finds a closed channel, so `Channel::send` answers `false` — count it
@@ -317,15 +310,15 @@ This is the same fact as "drain first, stop last" seen from the other side: the
 listener is a child like any other, and somebody has to end it.
 
 **A listener that cannot bind does not stop the process on its own.**
-`Router::listen` raises inside the fiber that `Fiber::spawn` started. The
-runtime prints `khora: a fiber ended with an error nobody was waiting for` when
-that happens, so the failure is not silent — but a `main` polling a stop
-flag has still been told nothing it can act on, and keeps polling. A second
-copy started on a busy port serves nothing and, under a supervisor that
+`Router::listen` raises inside the fiber that `Fiber::spawn` started, and
+nothing reaches `main`: the failure is reported on standard error only when the
+handle is let go of, and a `main` polling a stop flag holds the handle for as
+long as it polls. So it is told nothing it can act on and keeps polling. A
+second copy started on a busy port serves nothing and, under a supervisor that
 restarts on exit, never restarts.
 
 Logging the port before you listen does **not** mitigate this: the line is
-emitted whether or not the bind succeeded, so it reports a healthy start for a
+printed whether or not the bind succeeded, so it reports a healthy start for a
 process listening on nothing.
 
 Ask the fiber instead. `Fiber::finished` answers without waiting, which is the

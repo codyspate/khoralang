@@ -6,9 +6,7 @@
 //! fiber cannot outlive the block that spawned it and nobody writes the cancel.
 
 use super::*;
-use crate::fiber::{
-    failed_and_reported, fiber_state, khora_fiber_cancel, khora_fiber_release, wait_for, Handed,
-};
+use crate::fiber::{fiber_state, khora_fiber_release, wait_for, Handed};
 use crate::heap::{khora_alloc, khora_drop};
 use std::sync::{Arc, Mutex};
 
@@ -47,15 +45,35 @@ struct Children {
     /// this is a view, not a second owner: the round still releases each handle
     /// exactly once, and removes it from here first.
     joining: Vec<*mut u8>,
+    /// Whether every child now in `held` or `joining` has been told to stop
+    /// by a failure.
+    ///
+    /// Set by a failing child after it cancels its siblings, and cleared by
+    /// every spawn. So a failure walks the list only when a child has
+    /// arrived since the last walk, and each failure stops every sibling
+    /// running at that moment: a child spawned after the first failure is
+    /// stopped by the next one. A second cancel of a child already told is
+    /// not an escalation (`a_shielded_fiber_canceled_twice_still_finishes_its_cleanup`),
+    /// so walking again would be harmless, only slower.
+    all_told: bool,
     /// How many children have ended with an error.
     ///
-    /// **Kept on the nursery rather than answered at the wait**, because the
-    /// wait is not the only place a child's outcome is seen. Adopting sweeps
-    /// the children that have finished, and a failure swept there would
-    /// otherwise be let go of before anybody counted it -- so a program that
-    /// adopts a thousand fibers and waits once would report only whatever
-    /// happened to be left in the list at the end.
+    /// **Counted by the child, not by whoever reaps it.** Each child spawned
+    /// here carries a hook that adds itself to this count after storing its
+    /// error and before signaling that it has finished, so the count is
+    /// complete by the time any wait or sweep can see the child as done. A
+    /// sweep or a wait round releases handles; neither counts.
     failed: i64,
+    /// How many of `failed` a [`khora_fibers_wait`] has handed back to a
+    /// caller that is going on to raise `ChildFailed`.
+    ///
+    /// **What keeps a nursery child's failure from vanishing.** A nursery's
+    /// children print no per-fiber "nobody was waiting" line, because the
+    /// wait hands their count to `std`, which raises `ChildFailed`. When no
+    /// wait hands it back -- the body raised, or the fiber running the
+    /// nursery was stopped during the wait -- nothing reaches the program,
+    /// so the release reports `failed - reported` failures on stderr itself.
+    reported: i64,
 }
 
 /// The shortest list worth walking. Below this a sweep costs more in
@@ -180,13 +198,19 @@ const FIBERS_TAG: u32 = 0;
 /// # Safety
 ///
 /// `fibers` must be a live object from [`khora_fibers_open`].
-unsafe fn crew<'a>(fibers: *mut u8) -> Option<&'a Crew> {
+unsafe fn crew(fibers: *mut u8) -> Option<Arc<Crew>> {
     if fibers.is_null() {
         return None;
     }
-    // SAFETY: the caller guarantees a live handle, whose field holds what
-    // `khora_fibers_open` wrote there.
-    unsafe { (*fibers.add(KHORA_FIELD_OFFSET).cast::<*mut Crew>()).as_ref() }
+    // SAFETY: the caller guarantees a live nursery. Its field owns an Arc
+    // reference until release, so incrementing before constructing our own
+    // reference keeps the crew alive across child completion callbacks.
+    unsafe {
+        let pointer = *fibers.add(KHORA_FIELD_OFFSET).cast::<*mut Crew>();
+        if pointer.is_null() { return None; }
+        Arc::increment_strong_count(pointer);
+        Some(Arc::from_raw(pointer))
+    }
 }
 
 /// Opens a nursery: a set of fibers that ends when the binding holding it does.
@@ -240,7 +264,9 @@ fn open_crew(limit: usize) -> *mut u8 {
         sweep_at: SWEEP_FLOOR,
         held: Vec::new(),
         joining: Vec::new(),
+        all_told: true,
         failed: 0,
+        reported: 0,
     })));
     opened(&list);
     // SAFETY: `khora_alloc` returned an object with one field's worth of
@@ -278,13 +304,14 @@ unsafe fn fiber_finished(fiber: *mut u8) -> bool {
 /// while it is still held, so no fiber runs that the nursery has not counted
 /// and none is missing from `held` when a cancellation walks it.
 ///
-/// **A slot is held until the child finishes, not until its handle is
-/// swept.** Finished children still in `held` do not count; they are swept
-/// here, and their failures recorded, when the nursery is full or `held` has
-/// grown past `sweep_at`. A full nursery waits for its oldest running child to
-/// finish. That is head-of-line: a younger child finishing first does not wake
-/// the spawner until the oldest does. The bound is exact; promptness is not a
-/// promise, and the oldest is the child least likely to be far from done.
+/// **A failed child stops its siblings itself, at the moment it fails.** Each
+/// child spawned here carries a hook that, after storing its error and before
+/// signaling that it has finished, counts the failure and cancels every
+/// sibling in `held` or `joining` ([`record_failures`]). So a failure is not
+/// waiting for anybody to reach its handle: an oldest-first wait parked on a
+/// sibling that sleeps for a second does not hide a younger child's failure,
+/// and a bounded nursery's admission wait does not either. A sweep here only
+/// releases finished handles; their failures are already counted.
 ///
 /// **Without the trouble of sweeping on every spawn.** Asking a child whether
 /// it has finished takes its lock, so sweeping each time cost a bounded
@@ -363,31 +390,34 @@ pub unsafe extern "C" fn khora_fibers_spawn(
                 // cannot miss it, and a second spawner cannot count the slot
                 // as free in between.
                 // SAFETY: the caller's contract, above.
+                let nursery = Arc::clone(&list);
+                let on_failure: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                    record_failures(&nursery, 1);
+                });
                 let child = unsafe {
-                    crate::fiber::khora_fiber_spawn(body, glue, call, plain, boxed, value_glue, error_glue)
+                    crate::fiber::spawn_with_failure(
+                        body, glue, call, plain, boxed, value_glue,
+                        crate::fiber::FailureHooks { error_glue, on_failure: Some(on_failure) },
+                    )
                 };
                 crew.held.push(Handed(child));
+                // A child the last failure's walk did not reach: the next
+                // failure walks again.
+                crew.all_told = false;
             }
             (done, busy)
         };
 
         // Released outside the lock: a drop routine can reach another
         // nursery, and a lock held across one is an ordering nobody agreed to.
-        // **The sweep counts what it buries**, or a failure disappears between
-        // two spawns.
-        let mut swept: i64 = 0;
+        // The completion hook already counted failures before it signaled
+        // each latch, so this only lets go of handles.
         for Handed(spent) in done {
             // SAFETY: out of the list above; this is the last reference.
             unsafe {
                 wait_for(spent);
-                if failed_and_reported(spent) {
-                    swept += 1;
-                }
                 khora_drop(spent, Some(fiber_release_shim));
             }
-        }
-        if swept > 0 {
-            record_failures(list, swept);
         }
 
         let Some(latch) = busy else { return true };
@@ -414,13 +444,21 @@ pub unsafe extern "C" fn khora_fibers_spawn(
 
 /// Records `count` failures, and stops whatever is still running.
 ///
-/// **The first failure ends the nursery's other work.** That is what makes a
-/// nursery a unit rather than a bag: the block asked for these fibers together,
-/// so one of them failing means the answer the group was computing is not
-/// coming, and the siblings are working on a question nobody will ask. Trio and
-/// every structured-concurrency design since says the same, and the alternative
-/// is what this replaced -- siblings running on for as long as they liked while
-/// the failure waited to be noticed.
+/// **Every failure ends the nursery's other work that is running when it
+/// happens.** That is what makes a nursery a unit rather than a bag: the block
+/// asked for these fibers together, so one of them failing means the answer
+/// the group was computing is not coming, and the siblings are working on a
+/// question nobody will ask. Trio and every structured-concurrency design
+/// since says the same, and the alternative is what this replaced -- siblings
+/// running on for as long as they liked while the failure waited to be
+/// noticed.
+///
+/// **Each failure, not only the first.** A body that goes on spawning after a
+/// child failed -- a bounded nursery's producer, say -- has children the
+/// first failure never saw, and a later failure has to stop them too, or a
+/// sibling sleeping half a second keeps the producer waiting on it for room.
+/// `all_told` keeps this to one walk per batch of new children rather than
+/// one per failure.
 ///
 /// Canceled rather than killed: a child stops at its next `!` and runs its
 /// finalizers on the way out, which is the only kind of stopping this runtime
@@ -429,21 +467,22 @@ fn record_failures(list: &Crew, count: i64) {
     let stopping = {
         let mut crew = list.lock().unwrap_or_else(|e| e.into_inner());
         crew.failed += count;
-        // Only the first failure cancels. Later ones are arriving *because* of
-        // it -- a sibling that stopped where it was told to and then failed on
-        // the way out -- and canceling twice says nothing new: a second cancel
-        // is not escalation, which
-        // `a_shielded_fiber_canceled_twice_still_finishes_its_cleanup` pins.
-        if crew.failed > count {
+        if crew.all_told {
             Vec::new()
         } else {
-            crew.held.iter().map(|Handed(fiber)| *fiber).collect::<Vec<_>>()
+            crew.all_told = true;
+            crew.held.iter().map(|Handed(f)| *f)
+                .chain(crew.joining.iter().copied())
+                .filter_map(|handle| {
+                    // SAFETY: each handle is owned by this crew while the lock
+                    // is held; the cloned identity remains live after unlock.
+                    unsafe { fiber_state(handle) }.map(|state| state.fiber.clone())
+                })
+                .collect::<Vec<_>>()
         }
     };
     for fiber in stopping {
-        // SAFETY: every handle in the list was live when adopted and the list
-        // holds the only reference; this only sets a flag on it.
-        unsafe { khora_fiber_cancel(fiber) };
+        crate::fiber::deliver_to_fiber(&fiber, crate::current::Stop::Cancel);
     }
 }
 
@@ -454,10 +493,12 @@ fn record_failures(list: &Crew, count: i64) {
 /// nursery holds them as bare handles, so the count is what survives. `std`
 /// turns a non-zero answer into a `ChildFailed` raise.
 ///
-/// **A child that failed stops the others.** The first failure cancels every
-/// sibling still running, here and at every later observation -- see
-/// [`record_failures`]. Every child is still *waited* for, because a nursery
-/// that returned while one was winding up would not be structured at all.
+/// **A child that failed stops the others.** Each failure cancels every
+/// sibling still running at the moment that child fails, whichever handle
+/// this wait happens to be parked on -- see [`record_failures`], which the
+/// failing child calls itself. Every child is still *waited* for, because a
+/// nursery that returned while one was winding up would not be structured at
+/// all.
 ///
 /// Oldest first because there is no reason to prefer otherwise and an order
 /// that is stated is easier to reason about than one that is not.
@@ -488,7 +529,17 @@ pub unsafe extern "C" fn khora_fibers_wait(fibers: *mut u8) -> i64 {
             round
         };
         if waiting.is_empty() {
-            return list.lock().unwrap_or_else(|e| e.into_inner()).failed;
+            let mut crew = list.lock().unwrap_or_else(|e| e.into_inner());
+            // **Reported only if `std` is going to raise `ChildFailed`.** The
+            // generated call checks for a cancellation before it hands this
+            // count on, and a fiber stopped here unwinds instead: the count
+            // reaches nobody, and the nursery's release has to print it.
+            // Marked reported in that case, a failure was printed nowhere.
+            // `stops_here` is the same question that check asks.
+            if !crate::current::current(|fiber| fiber.stops_here()) {
+                crew.reported = crew.failed;
+            }
+            return crew.failed;
         }
         // **And a round nobody is waiting on because *this* fiber was told to
         // stop.** Canceling a nursery cancels its children, transitively.
@@ -516,22 +567,10 @@ pub unsafe extern "C" fn khora_fibers_wait(fibers: *mut u8) -> i64 {
                 unsafe { crate::fiber::deliver(*fiber, stop) };
             }
         }
-        for index in 0..waiting.len() {
-            let fiber = waiting[index].0;
+        for Handed(fiber) in &waiting {
             // SAFETY: each handle was live when adopted and this list has held
             // the only reference since.
-            unsafe {
-                wait_for(fiber);
-                if failed_and_reported(fiber) {
-                    // The siblings still in this round are not in the list any
-                    // more -- this round took them -- so `record_failures`
-                    // cannot reach them and they are stopped here.
-                    for Handed(other) in waiting.iter().skip(index + 1) {
-                        khora_fiber_cancel(*other);
-                    }
-                    record_failures(list, 1);
-                }
-            }
+            unsafe { wait_for(*fiber) };
         }
         for Handed(fiber) in waiting {
             // Out of `joining` before the handle goes, so a cancellation
@@ -603,6 +642,21 @@ pub unsafe extern "C" fn khora_fibers_release(fibers: *mut u8) {
                 khora_drop(fiber, Some(fiber_release_shim));
             }
             round = std::mem::take(&mut list.lock().unwrap_or_else(|e| e.into_inner()).held);
+        }
+        // **A child's failure nobody saw is still reported.** Every child
+        // has finished, so every failure has been counted. Those no wait
+        // handed back -- the body raised or was canceled, so `ChildFailed`
+        // was never raised -- reached nothing in the program, and get the
+        // line a dropped, unjoined fiber gets, once each.
+        let unreported = {
+            let crew = list.lock().unwrap_or_else(|e| e.into_inner());
+            crew.failed - crew.reported
+        };
+        if unreported > 0 {
+            let mut err = std::io::stderr().lock();
+            for _ in 0..unreported {
+                let _ = err.write_all(b"khora: a fiber ended with an error nobody was waiting for\n");
+            }
         }
     }
 }
