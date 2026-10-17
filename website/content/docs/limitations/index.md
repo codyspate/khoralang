@@ -539,8 +539,8 @@ entry point still ends the program at 130, so `outcome` is the call for a
 caller that wants the answer and tolerates a stop. A stopped fiber's partial
 progress is never handed back; to keep it, the child writes a `Shared` cell.
 
-**A failure nobody takes is reported once, on standard error, when its last
-handle is let go of:**
+**A failure nobody takes is reported on standard error, once per fiber that
+ends holding it, when that fiber's last handle is let go of:**
 
 ```
 khora: a fiber ended with an error nobody was waiting for
@@ -551,10 +551,12 @@ taking the failure:
 
 | how the program treats a fiber that raised | the line |
 | --- | --- |
-| `Fiber::join` or `Fiber::outcome` hands back the error | not printed |
+| `Fiber::join`, `Fiber::outcome` or `Fiber::wait` hands back the error | not printed by that fiber's handle; the error belongs to whoever took it (the rows below) |
 | a nursery child; the nursery raises `ChildFailed` | not printed: `ChildFailed` is the report |
 | a nursery child, and the nursery's body raised or was canceled first, so no `ChildFailed` | printed once per such child, as the nursery ends |
-| the handle is let go of without a `join` (end of its block, `Fiber::wait` only, or nothing at all) | printed once, when the handle is let go of |
+| the handle is let go of and nothing took the error (end of its block, a `Fiber::wait` whose waiter was canceled before the child finished, or nothing at all) | printed once, when the handle is let go of |
+| two or more fibers each take the error with `join` or `wait`, pass it on with `!`, and their own handles are let go of unjoined | printed once per such fiber: each one carries its own copy of the error |
+| the error was handed back, and then dropped: a `catch` arm that is canceled before it acts on it, or `attempt(fn () => Fiber::wait(c)!)` whose `Result` is discarded | not printed: the error was taken, so nothing reports it — handle it where it arrives |
 | `Fiber::detach` | not printed: detaching says the answer is not wanted |
 | the fiber was canceled rather than failing | not printed: a cancellation is not a failure |
 

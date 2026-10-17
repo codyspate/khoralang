@@ -27,7 +27,7 @@ impl<A: Share, 'er> Fiber<A, 'er> {
   pub fn join(self) -> A raises 'er;
   pub fn cancel(self) -> ();
   pub fn detach(self) -> ();
-  pub fn wait(self) -> ();
+  pub fn wait(self) -> () raises 'er;
 }
 ```
 
@@ -42,7 +42,11 @@ The error of a `test` block is not held to this: the test runner reports it and
 releases it, and it reaches no other fiber of the program.
 
 `wait` waits without taking the answer, which is what you need after `cancel`: a
-canceled fiber has no answer, so `join` on one unwinds the joiner along with it.
+canceled fiber has no answer, so `join` on one unwinds the joiner along with it,
+and `wait` on one returns. A child that *failed* is different: `wait` raises its
+error, as `join` does, so `Fiber::wait(child)!` passes it on and a `catch`
+around the wait names it. That includes a child that failed before a `cancel`
+reached it: the cancellation came too late to count, and the failure stands.
 
 `join` waits and answers what the body answered. If the body raised, `join` re-raises with the same type, so the caller catches by name:
 
@@ -68,7 +72,7 @@ fn print_later(value: Int) -> () {
 }
 ```
 
-Releasing the final `Fiber` handle also waits for the child. This means a fiber cannot silently outlive the scope that still owns its handle. If the child raised and nothing took the error — no `join`, no `outcome` — the release also prints `khora: a fiber ended with an error nobody was waiting for` on standard error, once; a `join` that hands the error back prints nothing. [Known limitations](/docs/limitations/#concurrency-combinators) lists every case.
+Releasing the final `Fiber` handle also waits for the child. This means a fiber cannot silently outlive the scope that still owns its handle. If the child raised and nothing took the error — no `join`, no `outcome`, no `wait` that returned the error — the release also prints `khora: a fiber ended with an error nobody was waiting for` on standard error, once; a `join` or `wait` that hands the error back prints nothing. [Known limitations](/docs/limitations/#concurrency-combinators) lists every case.
 
 `Fiber::detach` is the exception, and the only one: it stops waiting and asks the fiber to stop. Both halves are asynchronous — `detach` signals and returns at once, so the fiber keeps running until it reaches its next cancellation point rather than stopping where it is. Its answer is discarded when it arrives, and a later failure is silent — the program said it was no longer listening. It cancels as well as detaching, because a detached fiber nobody asked to stop is a leak with a nicer name.
 
@@ -242,17 +246,22 @@ Use unbounded `nursery` when the fan-out is already bounded by data the program 
 Cancellation belongs to the target fiber:
 
 ```khora
-let child = Fiber::spawn(fn () => work());
+let child = Fiber::spawn(fn () => work()!);
 Fiber::cancel(child);
-Fiber::wait(child)!;
+Fiber::wait(child)! catch { _ => () };
 continue_parent();
 ```
 
 `wait` rather than `join`, because a canceled fiber has no answer: `join` on
 one unwinds the joiner along with it, and `continue_parent()` would never run.
+The `catch` is there for a child that failed *before* the cancellation reached
+it. A cancellation that arrives after the failure changes nothing —
+`Fiber::canceled` answers `false` — so `wait` raises the child's error, and
+with a bare `!` the parent would leave at the wait. Name the child's errors in
+the `catch` instead of `_` to handle them rather than drop them.
 `Fiber::outcome` is the third choice, when the answer is wanted if there is
 one: it returns `Outcome::Answered(value)` or `Outcome::Stopped` without
-unwinding the caller.
+unwinding the caller, and it too raises a child's failure.
 
 `wait` is itself a cancellation point: a waiter canceled while it is parked
 stops there. It needs no `raises` row for that.

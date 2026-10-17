@@ -2201,14 +2201,25 @@ unwinds the joiner along with it. This one just waits. Reach for it when
 what you needed was "not before that finishes", which is most of the time
 a fiber is spawned for what it does rather than for what it computes.
 
+**A child that failed raises its error here**, as `join` would: the row
+is the child's, so a waiter over a fallible child writes `!`, and a
+`catch` around the wait names the child's errors. A failure handed back
+this way has been observed, and is not reported again when the handle
+is let go of. A child that answered or was canceled raises nothing, and
+its answer is released with the handle. A cancellation that reaches a
+child after it has already failed does not count: `Fiber::canceled`
+answers `false` for it, and `wait` raises the failure. So
+`Fiber::cancel(f); Fiber::wait(f)!` raises when `f` had already failed;
+write `Fiber::wait(f)! catch { _ => () }` to go on regardless.
+
 Letting the binding go waits too — that is where structured concurrency
 comes from — so this is for the case where the waiting has to happen at a
 particular line rather than at the end of a scope.
 
 **A cancellation point.** A fiber parked here is asked to stop like any
-other, and stops here, whatever either fiber's row says. The row is the
-child's: a waiter over a fallible child writes `!`, and one over a child
-that cannot fail writes nothing.
+other, and stops here, whatever either fiber's row says. A waiter
+stopped this way has not observed the child: a failure that comes later
+is reported when the handle goes, as if nobody had waited.
 
 The child is not canceled by the waiter giving up. Letting the handle go
 still waits, which is what keeps it from outliving the binding.
@@ -2290,6 +2301,9 @@ and read the cell.
 change that, and asking first does not make the join safe — between the
 question and the join is another instant in which a cancellation can
 arrive. Reach for `Fiber::wait`, which waits without taking the answer.
+It still raises the error of a fiber that failed before the cancellation
+reached it, so a caller that means to go on whatever happened writes
+`Fiber::wait(f)! catch { _ => () }`.
 
 A `false` is a fact about the instant it was asked, exactly as it is for
 `finished`, so this belongs in a loop that sleeps between looks. Asking
@@ -6519,8 +6533,10 @@ in handle order has no entry to put where an answer was never computed.
 
 So a deadline over a fan-out is not spelled as a cancel and then a
 `join_all`. A caller who only needed the ordering wants `Fiber::wait`,
-which does not ask for an answer and so has nothing to lose when there is
-none; one who wants to stop waiting at all wants `Fiber::detach`.
+which does not ask for an answer and so does not unwind on a fiber that
+was stopped. It does raise the error of a fiber that failed before the
+cancellation reached it; write `Fiber::wait(f)! catch { _ => () }` to go
+on regardless. One who wants to stop waiting at all wants `Fiber::detach`.
 
 In handle order rather than completion order. A caller who wanted the
 fastest first wanted a channel, and one who wanted the answers lined up

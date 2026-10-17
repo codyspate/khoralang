@@ -133,6 +133,24 @@ it will behave differently now.
   - a closure whose parameter or result type nothing decides, such as
     `let f = fn x => x;` with `f` unused. When the closure is an argument to
     a call that is already an error, only that error is reported.
+- `Fiber::wait` raises the error of a child that failed, as `Fiber::join`
+  does: `Fiber::wait(f)!` passes it on, and a `catch` around the wait takes
+  the arm that names it. The error was dropped: the `catch` arm never ran,
+  the program went on past the wait as if the child had succeeded, and the
+  failure surfaced only as `khora: a fiber ended with an error nobody was
+  waiting for` when the handle was let go of. A program that waits on a
+  child that can fail stops at the wait with the child's error, or runs its
+  `catch`. A failure `wait` hands back is not reported on standard error. A
+  child that answered or was canceled raises nothing. A child that failed
+  *before* a `Fiber::cancel` reached it was not canceled -- `Fiber::canceled`
+  answers `false` for it -- so `Fiber::cancel(f); Fiber::wait(f)!` raises
+  its error and the code after the wait does not run; it went on. Write
+  `Fiber::wait(f)! catch { _ => () }` to go on regardless; `Fiber::outcome`
+  raises the failure as well. Leaving at the wait releases the handles the
+  function still holds, and releasing one waits for its fiber: a `main` that
+  waits on a failed worker with a bare `!` while it holds a listener it
+  meant to detach afterwards waits for that listener for ever. Catch the
+  error at the wait, or detach the listener first.
 
 ### Fixed
 
@@ -142,6 +160,9 @@ it will behave differently now.
   `extern fn`, including one with a `with` clause. These passed
   `khora check` and failed to build as invalid LLVM IR, reported as a
   compiler bug.
+- `Fiber::wait(f)! catch { .. }` runs the arm for the error `f`'s child
+  raised, on both fiber backends; the arm never ran and the program exited 0.
+  See Breaking.
 - `Fiber::abort` starts every finalizer registered on the way out, and runs
   it until the first loop trip, `!` or blocking call it reaches, in its own
   body or in a function it calls. Calling a function does not stop it before

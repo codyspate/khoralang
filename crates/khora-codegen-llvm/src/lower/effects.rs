@@ -973,26 +973,51 @@ impl<'ctx> Lower<'_, 'ctx> {
                 // **A cancellation point, unlike `cancel` and `detach`.** A
                 // waiter parked here observed nothing until the child finished
                 // on its own, so a `main` ending in a wait could not be
-                // stopped at all (roadmap §16.7). The runtime answers
-                // `CANCELED_WHICH` when the *waiter* was asked to stop, and
-                // the branch below is the `!` that unwinds on it -- which is
-                // why `Fiber::wait` carries a `raises 'er` row.
+                // stopped at all. The runtime answers `CANCELED_WHICH` when
+                // the *waiter* was asked to stop.
+                //
+                // **And the child's failure is this frame's**, which is the
+                // rest of what `raises 'er` on this method means. Lowered as
+                // `join` is up to the branch -- the slot, the error taken as
+                // the reader's own copy -- because an error crosses the same
+                // way whichever call reads it. Without it the `catch` around
+                // a wait never ran and the error surfaced, if at all, as the
+                // unobserved-failure line. The answer is never read: the
+                // runtime writes a zero word for an answered or stopped child.
                 let ty = self.types.of(*fiber).clone();
                 let handle = self.expr(*fiber)?;
+                let slot = self.entry_slot(self.be.ctx.i64_type().into(), "wait.error");
                 let which = self
                     .be
                     .builder
-                    .build_call(self.be.rt.fiber_wait, &[handle.into()], "wait.which")
+                    .build_call(
+                        self.be.rt.fiber_wait,
+                        &[handle.into(), slot.into()],
+                        "wait.which",
+                    )
                     .expect("waiting for a fiber")
                     .try_as_basic_value()
                     .basic()
                     .expect("a wait answers")
                     .into_int_value();
+                let word = self
+                    .be
+                    .builder
+                    .build_load(self.be.ctx.i64_type(), slot, "wait.word")
+                    .expect("reading the waited word")
+                    .into_int_value();
+                let taker = self.be.take_error();
+                let word = self
+                    .be
+                    .builder
+                    .build_call(taker, &[which.into(), word.into()], "waited.error")
+                    .expect("taking a waited error")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("a word")
+                    .into_int_value();
                 // Borrowed, like `cancel`: waiting does not consume the handle.
                 self.release_unless_lent(*fiber, handle, &ty);
-                // No answer travels with it, so the word is the unit every
-                // other `()`-returning fallible call carries.
-                let word = self.be.ctx.i64_type().const_zero();
                 let tagged = self.be.tagged_of(which, word);
                 self.split_tagged(tagged, &Type::Unit, range)
             }

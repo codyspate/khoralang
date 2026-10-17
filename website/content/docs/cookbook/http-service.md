@@ -272,18 +272,21 @@ loop {
 
 // Whatever the handlers feed: close it, and wait for the work already taken.
 Channel::close(jobs);
-Fiber::wait(worker)!;
+Fiber::wait(worker)! catch { _ => eprint("the worker failed") };
 // Only now.
 Fiber::detach(server);
 ```
 
-If `worker` raised, `Fiber::wait` waits for it without taking the error, so
-the runtime reports it on standard error when `worker`'s handle is let go of
-at the end of `main`: `khora: a fiber ended with an error nobody was waiting
-for`. A worker joined with `Fiber::join` and caught is not reported, and
-neither is a canceled one. The line does not say *when* the worker failed —
-only when its handle went — so a supervisor that has to react while the
-program runs asks `Fiber::finished` and then joins, as below. [Known
+If `worker` raised, `Fiber::wait` raises its error, as `Fiber::join` would,
+and the `catch` is what lets the stop carry on. Without it `main` leaves at the
+wait, before the listener is let go of — and releasing `server` on the way out
+waits for a listener that never ends, so the program hangs instead of
+stopping. A failure handed back this way is not reported again. A fiber nobody
+waits for or joins is reported on standard error when its handle is let go of:
+`khora: a fiber ended with an error nobody was waiting for`. A canceled one is
+not reported. That line does not say *when* the worker failed — only when its
+handle went — so a supervisor that has to react while the program runs asks
+`Fiber::finished` and then joins, as below. [Known
 limitations](/docs/limitations/#concurrency-combinators) has every case.
 
 Two things are worth being deliberate about. A request that arrives during the
@@ -305,6 +308,12 @@ exiting anyway:
 Fiber::cancel(server);
 Fiber::wait(server)!;
 ```
+
+A listener that had already failed — its port would not bind, say — is not
+stopped by the `cancel`, because there is nothing left to stop, and
+`Fiber::wait(server)!` raises its `HttpError` out of `main`. That is usually
+what you want at the end of a program: it exits non-zero with the error.
+To finish regardless, write `Fiber::wait(server)! catch { _ => () }`.
 
 This is the same fact as "drain first, stop last" seen from the other side: the
 listener is a child like any other, and somebody has to end it.

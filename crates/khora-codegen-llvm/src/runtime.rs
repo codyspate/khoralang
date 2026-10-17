@@ -303,11 +303,13 @@ pub struct Runtime<'ctx> {
     pub fiber_join: FunctionValue<'ctx>,
     /// `void khora_fiber_detach(void *fiber)`
     pub fiber_detach: FunctionValue<'ctx>,
-    /// `void khora_fiber_wait(void *fiber)`
+    /// `uint32_t khora_fiber_wait(void *fiber, uint64_t *out)`
     ///
     /// A join that does not take the answer, for a caller who wanted the
     /// ordering. It is also the only way to wait for a fiber that may have been
-    /// *canceled* without the cancellation unwinding the waiter.
+    /// *canceled* without the cancellation unwinding the waiter. A child's
+    /// error comes back as `join` hands it back: the tag, and the error in
+    /// `out`.
     pub fiber_wait: FunctionValue<'ctx>,
     /// `bool khora_fiber_finished(void *fiber)`
     ///
@@ -586,7 +588,10 @@ impl<'ctx> Runtime<'ctx> {
                 ctx.i32_type().fn_type(&[ptr.into(), ptr.into()], false),
             ),
             fiber_detach: declare("khora_fiber_detach", void.fn_type(&[ptr.into()], false)),
-            fiber_wait: declare("khora_fiber_wait", ctx.i32_type().fn_type(&[ptr.into()], false)),
+            fiber_wait: declare(
+                "khora_fiber_wait",
+                ctx.i32_type().fn_type(&[ptr.into(), ptr.into()], false),
+            ),
             fiber_finished: declare(
                 "khora_fiber_finished",
                 ctx.bool_type().fn_type(&[ptr.into()], false),

@@ -2614,6 +2614,191 @@ fn an_answer_joined_from_a_temporary_handle_is_not_leaked() {
     );
 }
 
+// --- `Fiber::wait` over a child that failed ---------------------------------
+//
+// `wait` is declared `raises 'er`, the child's row, so a waiter over a
+// fallible child writes `!` and a `catch` around it names the child's
+// errors. The failure these guard against is the error being dropped on the
+// floor: the `catch` arm never ran, the runtime printed the line it keeps for
+// a failure nobody asked about, and the program went on as if the child had
+// succeeded.
+
+const UNOBSERVED: &str = "a fiber ended with an error nobody was waiting for";
+
+/// [`leaves_nothing`], and no unobserved-failure line on either backend.
+fn waits_cleanly(name: &str, work: &str, total: i64) {
+    for backend in ["threads", "scheduler"] {
+        let ran = run_std_on(name, &format!("{FAILING}\n{work}"), backend);
+        assert_eq!(ran.code, Some(0), "`{backend}`: {}", ran.stderr);
+        assert_eq!(
+            ran.stdout,
+            format!("{total} 0\n"),
+            "`{backend}`: the first number is the answer, the second the live-object count"
+        );
+        assert!(
+            !ran.stderr.contains(UNOBSERVED),
+            "`{backend}`: a failure `wait` handed back was observed: {:?}",
+            ran.stderr
+        );
+    }
+}
+
+/// A `catch` around `wait` takes the arm for the child's error, an inline
+/// error and a boxed one alike, and a `join` of the same handle afterwards
+/// still finds the error: `wait` took a reference of its own rather than the
+/// fiber's.
+#[test]
+fn a_wait_hands_a_childs_failure_to_its_catch() {
+    waits_cleanly(
+        "fiber_wait_catches",
+        "fn work() -> Int {
+  let f = Fiber::spawn(fn () => fail()!);
+  let mut a = 0;
+  Fiber::wait(f)! catch { Oops::Bad(m, n) => a = n + String::byte_length(m) };
+  let b = Fiber::join(f)! catch { Oops::Bad(m, n) => n };
+  let g = Fiber::spawn(fn () => fail2()!);
+  let mut c = 0;
+  Fiber::wait(g)! catch { Two::Bad2(m, n) => c = 10 * n, Two::Worse(x, y) => c = 0 - 1 };
+  a + b + c
+}",
+        14,
+    );
+}
+
+/// `wait` with a bare `!` re-raises the child's error, and the caller's
+/// `catch` sees it. Nothing after the `wait` runs.
+#[test]
+fn a_wait_propagates_a_childs_failure_to_the_callers_catch() {
+    waits_cleanly(
+        "fiber_wait_propagates",
+        "fn inner() -> Int raises Oops {
+  let f = Fiber::spawn(fn () => fail()!);
+  Fiber::wait(f)!;
+  100
+}
+
+fn work() -> Int {
+  inner()! catch { Oops::Bad(m, n) => n + String::byte_length(m) }
+}",
+        3,
+    );
+}
+
+/// A child that was canceled has no answer and no error: `wait` returns and
+/// the waiter goes on, which is the difference from `join`.
+#[test]
+fn a_wait_on_a_canceled_child_returns() {
+    waits_cleanly(
+        "fiber_wait_canceled",
+        "extern fn khora_cancel();
+fn fine() -> Int raises Oops { 1 }
+fn stopped() -> Int raises Oops {
+  khora_cancel();
+  fine()!;
+  2
+}
+
+fn work() -> Int {
+  let f = Fiber::spawn(fn () => stopped()!);
+  Fiber::wait(f)! catch { Oops::Bad(m, n) => () };
+  if Fiber::canceled(f) { 7 } else { 0 }
+}",
+        7,
+    );
+}
+
+/// A child that answered: `wait` returns, and the answer, which owns a
+/// `String`, is released with the handle rather than leaked by the wait.
+#[test]
+fn a_wait_on_a_child_that_answered_leaks_nothing() {
+    waits_cleanly(
+        "fiber_wait_answered",
+        "fn rec() -> Rec raises Oops { { name: \"r${1}\", n: 2 } }
+
+fn work() -> Int {
+  let f = Fiber::spawn(fn () => rec()!);
+  Fiber::wait(f)!  catch { Oops::Bad(m, n) => () };
+  let g = Fiber::spawn(fn () => { name: \"s${1}\", n: 3 });
+  Fiber::wait(g)! catch { _ => () };
+  5
+}",
+        5,
+    );
+}
+
+/// **A cancel that reaches a child after it failed does not count.** The
+/// child has already failed when `cancel` lands, so `canceled` answers
+/// `false` and `wait` raises the failure. The docs' `cancel` then `wait`
+/// examples catch at the wait for this reason. The second half is that
+/// spelling: `catch { _ => () }` goes on.
+#[test]
+fn a_cancel_after_the_child_failed_leaves_the_failure_to_wait() {
+    waits_cleanly(
+        "fiber_wait_cancel_after_failure",
+        "extern fn khora_sleep(millis: Int) -> ();
+
+fn cancel_then_wait() -> Int raises Oops {
+  let child = Fiber::spawn(fn () => fail()!);
+  khora_sleep(50);
+  Fiber::cancel(child);
+  let k = if Fiber::canceled(child) { 1000 } else { 0 };
+  Fiber::wait(child)!;
+  k + 1
+}
+
+fn cancel_then_go_on() -> Int {
+  let child = Fiber::spawn(fn () => fail()!);
+  khora_sleep(50);
+  Fiber::cancel(child);
+  Fiber::wait(child)! catch { _ => () };
+  20
+}
+
+fn work() -> Int {
+  let raised = cancel_then_wait()! catch { Oops::Bad(m, n) => 100 };
+  raised + cancel_then_go_on()
+}",
+        120,
+    );
+}
+
+/// **A failure that no `wait` handed back is still reported.** The waiter is
+/// canceled while it is parked, so its `wait` gives up before the child
+/// fails; the handle is held elsewhere, released without anybody asking, and
+/// the one line appears. A `wait` that marked the failure observed before
+/// knowing it would deliver it would silence this.
+#[test]
+fn a_failure_only_waited_on_by_a_canceled_waiter_is_still_reported() {
+    let work = "extern fn khora_sleep(millis: Int) -> ();
+fn late() -> Int raises Oops {
+  khora_sleep(300);
+  fail()!
+}
+
+fn work() -> Int {
+  {
+    let c = Fiber::spawn(fn () => late()!);
+    let w = Fiber::spawn(fn () => Fiber::wait(c)!);
+    khora_sleep(50);
+    Fiber::cancel(w);
+    Fiber::wait(w)! catch { _ => () };
+    khora_sleep(400);
+  };
+  1
+}";
+    for backend in ["threads", "scheduler"] {
+        let ran = run_std_on("fiber_wait_canceled_waiter", &format!("{FAILING}\n{work}"), backend);
+        assert_eq!(ran.code, Some(0), "`{backend}`: {}", ran.stderr);
+        assert_eq!(ran.stdout, "1 0\n", "`{backend}`");
+        assert_eq!(
+            ran.stderr.matches(UNOBSERVED).count(),
+            1,
+            "`{backend}`: the waiter gave up, so nobody observed the failure: {:?}",
+            ran.stderr
+        );
+    }
+}
+
 // --- errors whose type has a type parameter ---------------------------------
 //
 // An error's id says how the error is laid out and how it is released, and

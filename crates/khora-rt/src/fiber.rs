@@ -832,30 +832,9 @@ pub unsafe extern "C" fn khora_fiber_join(fiber: *mut u8, out: *mut u64) -> u32 
     outcome.which
 }
 
-/// Waits for a fiber without taking its answer.
+/// Waits for a fiber, and does not give up.
 ///
-/// **What a nursery does, and the difference from `join` is deliberate.** A
-/// nursery waits for its children because it must not outlive them, not
-/// because it wants what they computed -- it could not use it if it had it,
-/// because every child's answer has a type of its own and a nursery holds them
-/// as bare handles. The nursery counts failed children and reports ChildFailed;
-/// their individual errors are released without an unobserved warning.
-///
-/// Answers whether it gave up on a cancellation rather than waited, which is
-/// the one thing a caller with a `raises` row can act on.
-///
-/// # Safety
-///
-/// `fiber` must be a live object from [`khora_fiber_spawn`].
-pub(crate) unsafe fn wait_or_cancel_for(fiber: *mut u8) -> bool {
-    // SAFETY: the caller guarantees a live handle.
-    let Some(state) = (unsafe { fiber_state(fiber) }) else { return false };
-    state.completion.wait_or_canceled()
-}
-
-/// The same, for a waiter that must not give up.
-///
-/// **A nursery's own waits are here rather than above.** A nursery release
+/// **A nursery's own waits are here.** A nursery release
 /// cancels its children and then waits for them, and a release that gave up on
 /// its own cancellation would let a child outlive the binding — which is the
 /// whole of what structured concurrency promises. So the cancellation this
@@ -1056,21 +1035,60 @@ pub unsafe extern "C" fn khora_fiber_outcome(fiber: *mut u8, out: *mut u64) -> u
     outcome.which
 }
 
-/// The same, for a program that wants the ordering and not the answer.
+/// Waits for a fiber without taking its answer, and hands back its failure.
 ///
-/// Answers [`CANCELED_WHICH`] when the *waiter* was asked to stop and 0 when
-/// the fiber finished, which is the shape every fallible call across this
-/// boundary uses. There is no other tag: this never takes the fiber's answer,
-/// so a child that failed is still the child's business.
+/// **What this prevents: a child's error lost at the line that waited for
+/// it.** `wait` carries the child's `raises` row, and a waiter that writes
+/// `!` or a `catch` is promised that error. Answering only "finished" made
+/// the `catch` arm dead code, and the failure surfaced, if at all, as the
+/// unobserved-failure line when the handle went -- a program that exits 0
+/// over an error its types said it handled.
+///
+/// # What comes back
+///
+/// The `which`/`out` shape `join` uses, read differently for two cases:
+///
+/// - `0` — the child answered, *or was stopped*. `out` is zero. An answer
+///   is not taken, so there is no reference here for anybody to release: it
+///   stays with the state and goes when the handle does. A stopped child has
+///   nothing to hand back, and waiting on one is not an error, which is the
+///   difference from `join`.
+/// - [`CANCELED_WHICH`] — the *waiter* was stopped while parked here, and
+///   unwinds. Nothing was observed: a failure the child produces later is
+///   still reported when its handle is let go of unasked.
+/// - anything else — the child's error, as `join` reports it: `out` holds a
+///   reference of the caller's own, and the failure counts as observed.
 ///
 /// # Safety
 ///
-/// `fiber` must be a live object from [`khora_fiber_spawn`].
+/// `fiber` must be a live object from [`khora_fiber_spawn`], and `out` a
+/// writable word.
 #[unsafe(no_mangle)]
-// SHARE: acts on a handle, which is born shared; stores nothing another fiber can reach.
-pub unsafe extern "C" fn khora_fiber_wait(fiber: *mut u8) -> u32 {
+// SHARE: hands out an error the entry that stored it already marked; stores nothing.
+pub unsafe extern "C" fn khora_fiber_wait(fiber: *mut u8, out: *mut u64) -> u32 {
+    // SAFETY: the caller promised a writable word. Written first, so every
+    // early exit below leaves it defined.
+    unsafe { out.write(0) };
     // SAFETY: the caller guarantees a live handle.
-    if unsafe { wait_or_cancel_for(fiber) } { CANCELED_WHICH } else { 0 }
+    let Some(state) = (unsafe { fiber_state(fiber) }) else { return 0 };
+    if state.completion.wait_or_canceled() {
+        return CANCELED_WHICH;
+    }
+    // Decided from the stored tag before anything is taken: `observe` dups
+    // a boxed *answer* too, and on the answered path that reference would
+    // have no owner. Finished, so the outcome is there and stays there.
+    let failed = match state.legacy.outcome.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        Some(outcome) => outcome.which != 0 && outcome.which != CANCELED_WHICH,
+        None => false,
+    };
+    if !failed {
+        return 0;
+    }
+    state.observed.store(true, Ordering::Relaxed);
+    let outcome = state.legacy.observe();
+    // SAFETY: the caller promised a writable word.
+    unsafe { out.write(outcome.payload) };
+    outcome.which
 }
 
 /// Lets go of a fiber without waiting for it.
