@@ -127,7 +127,25 @@ impl<'ctx> Lower<'_, 'ctx> {
     }
 
     /// Wraps a named function in a closure object so it can be passed along.
-    pub(super) fn function_value(&mut self, symbol: &str, range: TextRange) -> Flow<'ctx> {
+    ///
+    /// `at` is the expression naming it, and `resolution` what it named:
+    /// a function with no Khora body is reached through a forwarder built
+    /// from them, see [`Backend::forwarder`].
+    pub(super) fn function_value(
+        &mut self,
+        at: ExprId,
+        resolution: &khora_hir::Resolution,
+        symbol: &str,
+        range: TextRange,
+    ) -> Flow<'ctx> {
+        let forwarded;
+        let symbol = if self.be.is_defined(symbol) {
+            symbol
+        } else {
+            let shape = self.types.of(at).clone();
+            forwarded = self.be.forwarder(symbol, resolution, &shape, range);
+            &forwarded
+        };
         let Some(thunk) = self.be.thunk(symbol) else {
             return self.fail(
                 format!("`{symbol}` has a signature the backend cannot represent"),

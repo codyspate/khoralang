@@ -84,13 +84,21 @@ fn the_message_says_what_to_do_about_text() {
     );
 }
 
-/// A declaration with no body is still an import, checked where it is called.
+/// A declaration with no body is an import. Whether its symbol *exists* is the
+/// linker's question, on the target that makes the call, so a binding to a
+/// symbol some target lacks is not an error here.
 #[test]
 fn a_foreign_import_is_left_alone() {
     assert_clean("module m;\nextern fn getenv(name: Ptr) -> Ptr;\n");
-    // Including one whose signature could not cross: that is the call site's
-    // error to report, on the target that makes the call.
-    assert_clean("module m;\nextern fn odd(s: String) -> Int;\n");
+}
+
+/// **Whether its signature can cross does not depend on the target**, and is
+/// refused where it is written, by `khora check`. It used to wait for a call,
+/// which `khora check` never reaches, so the program checked clean and failed
+/// to build.
+#[test]
+fn a_foreign_import_that_cannot_cross_is_refused_at_its_declaration() {
+    assert_reports("module m;\nextern fn odd(s: String) -> Int;\n", "`String` cannot cross");
 }
 
 #[test]

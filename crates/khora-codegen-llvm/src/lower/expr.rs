@@ -225,7 +225,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             {
                 let symbol =
                     self.mono.callee(&self.owner.clone(), id).unwrap_or_else(|| name.clone());
-                self.function_value(&symbol, range)
+                self.function_value(id, resolution, &symbol, range)
             }
             khora_hir::Resolution::Item { name, .. } => self.fail(
                 format!("`{name}` is not a value; only functions and constructors have one"),
@@ -234,7 +234,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             // `Applicative::pure(x)` in value position: the same wrapper a
             // named function gets, around whichever impl was selected.
             khora_hir::Resolution::TraitItem { .. } => match self.mono.callee(&self.owner.clone(), id) {
-                Some(symbol) => self.function_value(&symbol, range),
+                Some(symbol) => self.function_value(id, resolution, &symbol, range),
                 None => self.fail(
                     "this trait function was not resolved to an impl; that is a compiler bug",
                     range,

@@ -867,6 +867,8 @@ fn covers(declared: &[String], written: &[&str]) -> bool {
 // checked had no way to find it but to read the file. Roadmap 9.6.3.
 mod check;
 mod exports;
+mod imports;
+mod unimplemented;
 mod reporting;
 mod map;
 mod queries;
@@ -874,6 +876,7 @@ mod syntax;
 mod unresolved;
 
 pub use foreign::{can_raise, foreign_obstacle, foreign_signature_obstacle};
+pub use imports::{foreign_symbols, ForeignDecl};
 
 pub use reporting::*;
 pub use map::*;

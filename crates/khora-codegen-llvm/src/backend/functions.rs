@@ -112,7 +112,7 @@ impl<'ctx> Backend<'ctx> {
             if let Some(why) = foreign_signature_obstacle(&signature) {
                 return Err(format!(
                     "`{name}` is `extern`, so it crosses the C ABI, and {why}. \
-                     Only scalars and pointers cross — `docs/design/ffi.md`"
+                     Only scalars and pointers cross"
                 ));
             }
         }

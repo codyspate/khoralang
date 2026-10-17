@@ -140,7 +140,10 @@ pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
     all.extend(row_fields_must_be_effects(db, file));
     all.extend(crate::unresolved::unresolved_type_errors(db, file));
     all.extend(crate::exports::export_errors(db, file));
+    all.extend(crate::imports::foreign_import_errors(db, file));
+    all.extend(crate::unimplemented::unimplemented_function_errors(db, file));
     all.extend(entry_point_shape_errors(db, file));
+    all.extend(unpinned_closure_errors(db, file));
     all.extend(assert_outside_a_test_errors(db, file));
     all.extend(check_file(db, file).iter().cloned());
     all.extend(crate::mono::handoff_errors(db, file));
@@ -163,6 +166,57 @@ pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
         std::collections::HashSet::new();
     all.retain(|e| seen.insert((e.message.clone(), e.range)));
     all
+}
+
+/// A closure whose parameter or result type nothing decided.
+///
+/// **What this prevents: `khora check` passing `let f = fn x => x;` and
+/// `khora build` refusing it.** Inference leaves `x` a variable when nothing
+/// uses `f`, which is no obstacle to type-checking and is to compiling: a
+/// closure is a function with a machine signature, and code generation has no
+/// size to give a variable. It refused the program, correctly and at the right
+/// place, after `khora check` had said there was nothing wrong.
+///
+/// A variable left in a *generic* function's closure is a type parameter by
+/// now, and specialization fills it in; only an unsolved variable is
+/// reported. Cost: one pass over the expressions of each checked body.
+pub(crate) fn unpinned_closure_errors(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
+    use khora_hir::body::Expr;
+
+    let checked = crate::queries::checked(db, file);
+    // A closure the checker already said something about -- inside it, as
+    // `fn q => { ..q, x: 9 }` is told to annotate `q`, or anywhere in a call
+    // it is an argument of, as `List::map(List::range(0, 3), fn i => ..)` is
+    // told `List` has no `range` -- is not told a second, vaguer thing first.
+    // A callee that did not resolve always leaves its closure arguments
+    // unsolved, so the closure is a symptom there and not the cause.
+    let already = |range: TextRange| checked.errors.iter().any(|e| range.contains_range(e.range));
+    let mut found = Vec::new();
+    for (name, body) in khora_hir::body::bodies(db, file) {
+        let Some((_, types)) = checked.bodies.iter().find(|(n, _)| n == name) else { continue };
+        for (id, expr) in body.exprs() {
+            if !matches!(expr, Expr::Lambda { .. }) {
+                continue;
+            }
+            let Type::Fn { params, ret, .. } = types.of(id) else { continue };
+            if params.iter().chain(std::iter::once(&**ret)).any(|t| matches!(t, Type::Var(_)))
+                && !already(body.range(id))
+                && !body.exprs().any(|(call, e)| {
+                    matches!(e, Expr::Call { .. })
+                        && body.range(call).contains_range(body.range(id))
+                        && already(body.range(call))
+                })
+            {
+                found.push(HirError {
+                    message: "the type of this closure was never pinned down; use it somewhere \
+                              that decides its argument and result types"
+                        .to_string(),
+                    range: body.range(id),
+                });
+            }
+        }
+    }
+    found
 }
 
 /// `assert` outside a `test` block.
@@ -221,6 +275,24 @@ pub(crate) fn assert_outside_a_test_errors(db: &dyn Db, file: SourceFile) -> Vec
     found
 }
 
+/// Whether `file`'s `main` is one a build runs: `src/main.kh`, a file in
+/// `src/bin/`, or a file outside any `src` -- a script, run directly. The
+/// same layout rule `misplaced-main` applies, so the warning and this agree
+/// about which `main` is the program.
+fn could_be_entry_point(db: &dyn Db, file: SourceFile) -> bool {
+    let parts: Vec<String> = file
+        .path(db)
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    let Some(src) = parts.iter().rposition(|part| part == "src") else { return true };
+    match &parts[src + 1..] {
+        [only] => only == "main.kh",
+        [folder, _file] => folder == "bin",
+        _ => false,
+    }
+}
+
 /// What a `main` may not be.
 ///
 /// **These were the backend's, and the backend runs after `khora check` has
@@ -246,6 +318,41 @@ pub(crate) fn entry_point_shape_errors(db: &dyn Db, file: SourceFile) -> Vec<Hir
             continue;
         }
 
+        // **Only a `main` that will be run.** A library's `main` -- in
+        // `src/cli.kh`, say -- is an ordinary function that `misplaced-main`
+        // warns about, and `khora build --lib` builds it; refusing what it
+        // returns refused a library that builds.
+        let entry = could_be_entry_point(db, file);
+
+        // `main` is what the program runs, so a `main` with nothing to run is
+        // not a signature written ahead of its body: it is a program that
+        // cannot start. Reported here because code generation reports it as
+        // "this package has no `main` function", which is false, against no
+        // file.
+        if entry && f.body().is_none() {
+            found.push(HirError {
+                message: "`main` is declared without a body, so there is nothing to run"
+                    .to_string(),
+                range: f.syntax().text_range(),
+            });
+        }
+
+        // The exit status is the only thing a returned value can become, and
+        // a process status is a number.
+        if let Some(written) = f.return_type().filter(|_| entry) {
+            let ret = crate::type_map(db, file).signatures.get("main").map(|s| s.ret.clone());
+            // `Unknown` is a type that did not resolve, which is reported
+            // where it is written.
+            if let Some(other) = ret.filter(|t| !matches!(t, Type::Int | Type::Unit | Type::Unknown)) {
+                found.push(HirError {
+                    message: format!(
+                        "`main` returns `{other}`, but an entry point must return `Int` or \
+                         `()`: what `main` returns becomes the process's exit status"
+                    ),
+                    range: written.syntax().text_range(),
+                });
+            }
+        }
         if let Some(params) = f.params() {
             if params.params().next().is_some() {
                 found.push(HirError {

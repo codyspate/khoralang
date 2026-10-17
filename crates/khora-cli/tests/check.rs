@@ -1840,3 +1840,370 @@ fn polymorphic_recursion_that_sends_its_region_is_refused() {
         );
     }
 }
+
+// --- `extern fn` imports: what `khora build` refuses, `khora check` refuses --
+
+/// **One C symbol, two signatures, is refused where it is declared.**
+///
+/// `std::net::socket` declares POSIX's `close(handle: I32) -> I32`, and a
+/// program that declared `close(fd: Int) -> Int` beside it checked clean and
+/// then failed to build -- as invalid LLVM IR, reported as a compiler bug, or
+/// as a body that "does not produce the `Int` its signature promises", because
+/// the call was generated against whichever declaration came first. A Khora
+/// name has a module and a C symbol does not, so the two declarations are one
+/// symbol and only one of them can describe it.
+///
+/// The error is in the program's own file, names both declarations, and says
+/// what to write.
+#[test]
+fn an_extern_fn_that_disagrees_with_another_declaration_of_its_symbol_is_refused() {
+    let (ok, output) = check(
+        "extern_symbol_collision",
+        "module m;\n\
+         extern fn close(fd: Int) -> Int;\n\
+         pub fn main() -> Int { close(-1) }\n",
+    );
+    assert!(!ok, "a second `close` with a different signature must not check:\n{output}");
+    assert!(output.contains("extern_symbol_collision.kh:2"), "at the user's declaration:\n{output}");
+    assert!(
+        output.contains("`close`") && output.contains("std::net::socket"),
+        "naming the symbol and the other declaration's module:\n{output}"
+    );
+    assert!(output.contains("(handle: I32) -> I32"), "and its signature:\n{output}");
+    assert!(!output.contains("compiler bug"), "{output}");
+    // `std`'s declaration is not the reader's to change, so it is not reported.
+    assert!(!output.contains("socket_linux.kh"), "only the program's own line:\n{output}");
+    assert!(output.contains("1 error(s)"), "{output}");
+}
+
+/// Two declarations of one symbol that agree are the same declaration, and
+/// that is not a mistake.
+#[test]
+fn an_extern_fn_that_agrees_with_another_declaration_of_its_symbol_checks() {
+    let (ok, output) = check(
+        "extern_symbol_agrees",
+        "module m;\n\
+         extern fn close(handle: I32) -> I32;\n\
+         pub fn main() -> Int { I32::to_int(close(I32::of(-1))) }\n",
+    );
+    assert!(ok, "the same signature under the same symbol is one function:\n{output}");
+}
+
+/// Two of the program's own modules disagreeing is the same mistake, and each
+/// declaration is told about the other.
+#[test]
+fn two_modules_declaring_one_symbol_differently_are_both_told() {
+    let (ok, output) = check_package(
+        "extern_symbol_two_modules",
+        &[
+            ("khora.toml", MANIFEST),
+            ("src/main.kh", "module main;\nimport main::other::{twice};\nextern fn abs(n: Int) -> Int;\npub fn main() -> Int { abs(twice(-1)) }\n"),
+            ("src/other.kh", "module main::other;\nextern fn abs(n: I32) -> I32;\npub fn twice(n: Int) -> Int { I32::to_int(abs(I32::of(n))) * 2 }\n"),
+        ],
+    );
+    assert!(!ok, "{output}");
+    assert!(output.contains("main.kh:3"), "{output}");
+    assert!(output.contains("other.kh:2"), "{output}");
+}
+
+/// **An `extern fn` import that can raise is refused at its declaration.**
+///
+/// The build refused it already, with the right reason -- a fallible
+/// function returns a tagged pair, and that is the aggregate that must not
+/// cross the C ABI -- but only once something called it, after `khora check`
+/// had passed the program. The reason does not depend on the call, so the
+/// declaration is where it belongs.
+#[test]
+fn an_extern_fn_that_raises_is_refused_by_check() {
+    let (ok, output) = check(
+        "extern_raises",
+        "module m;\n\
+         pub type Err = | Bad;\n\
+         extern fn c_with_err(x: Int) -> Int raises Err;\n\
+         pub fn main() -> Int raises Err { c_with_err(2)! }\n",
+    );
+    assert!(!ok, "{output}");
+    assert!(output.contains("extern_raises.kh:3"), "at the declaration:\n{output}");
+    assert!(output.contains("`c_with_err`") && output.contains("can raise"), "{output}");
+    assert!(output.contains("raise"), "and says what to write instead:\n{output}");
+}
+
+/// The other shapes the boundary refuses, for the same reason: none of them
+/// depends on which target the program is built for.
+#[test]
+fn an_extern_fn_whose_signature_cannot_cross_is_refused_by_check() {
+    for (name, declaration, needle) in [
+        ("extern_string", "extern fn takes(s: String) -> Int;", "`String` cannot cross"),
+        ("extern_closure", "extern fn takes(f: (Int) -> Int) -> Int;", "cannot cross"),
+        ("extern_generic", "extern fn takes<A>(a: A) -> Int;", "generic"),
+        ("extern_record_ret", "pub type P = { a: Int };\nextern fn takes() -> P;", "return type `P` cannot cross"),
+    ] {
+        let source = format!("module m;\n{declaration}\npub fn main() -> Int {{ 0 }}\n");
+        let (ok, output) = check(name, &source);
+        assert!(!ok, "{name}:\n{output}");
+        assert!(output.contains(needle), "{name}: expected {needle:?}:\n{output}");
+    }
+}
+
+/// **A `pub extern fn` that defines a symbol `std` already names is refused
+/// where it is written.** The build refused it already, as "the program
+/// already has a symbol by that name", with no file and no line, after
+/// `khora check` had passed it.
+#[test]
+fn an_export_named_like_a_symbol_std_declares_is_refused_by_check() {
+    let (ok, output) = check(
+        "export_symbol_collision",
+        "module m;\n\
+         pub extern fn close(x: Int) -> Int { x }\n\
+         pub fn main() -> Int { 0 }\n",
+    );
+    assert!(!ok, "{output}");
+    assert!(output.contains("export_symbol_collision.kh:2"), "{output}");
+    assert!(output.contains("Rename the exported function"), "{output}");
+}
+
+/// **A function declared without a body is refused where it is used**, by
+/// `khora check` as well as by the build. Called or taken as a value, which
+/// was invalid LLVM IR before it was a located error.
+#[test]
+fn a_bodiless_function_that_is_used_is_refused_by_check() {
+    for (name, use_it, column) in [
+        ("bodiless_called", "helper(1)", ":3:24"),
+        ("bodiless_value", "{ let f = helper; f(1) }", ":3:34"),
+    ] {
+        let source = format!(
+            "module m;\nfn helper(x: Int) -> Int;\npub fn main() -> Int {{ {use_it} }}\n"
+        );
+        let (ok, output) = check(name, &source);
+        assert!(!ok, "{name}:\n{output}");
+        assert!(output.contains("`helper` has no body"), "{name}:\n{output}");
+        assert!(output.contains(&format!("{name}.kh{column}")), "{name}: at the use:\n{output}");
+    }
+}
+
+/// A signature written ahead of its body is not an error until something
+/// uses it, and a bodiless `print` is the one code generation implements.
+#[test]
+fn a_bodiless_function_nobody_uses_checks() {
+    let (ok, output) = check(
+        "bodiless_unused",
+        "module m;\n\
+         fn print(value: Int);\n\
+         fn helper(x: Int) -> Int;\n\
+         pub fn main() -> Int { print(1); 0 }\n",
+    );
+    assert!(ok, "{output}");
+}
+
+/// **What `main` may return, and that it has a body, are `khora check`'s.**
+/// The build refused both, with no location, and one of them for a reason
+/// that was false: "this package has no `main` function".
+#[test]
+fn a_main_the_build_cannot_run_is_refused_by_check() {
+    for (name, main, needle) in [
+        ("main_returns_string", "pub fn main() -> String { \"no\" }", "`main` returns `String`"),
+        ("main_without_body", "pub fn main() -> Int;", "`main` is declared without a body"),
+    ] {
+        let (ok, output) = check(name, &format!("module m;\n{main}\n"));
+        assert!(!ok, "{name}:\n{output}");
+        assert!(output.contains(needle), "{name}:\n{output}");
+        assert!(output.contains(&format!("{name}.kh:2")), "{name}: located:\n{output}");
+    }
+}
+
+/// **A closure nothing decides the type of is refused by `khora check`.** The
+/// build refused it at the same place, after `check` had passed it.
+#[test]
+fn a_closure_whose_type_nothing_decides_is_refused_by_check() {
+    let (ok, output) = check(
+        "unpinned_closure",
+        "module m;\n\
+         pub fn main() -> Int {\n  let _f = fn x => x;\n  0\n}\n",
+    );
+    assert!(!ok, "{output}");
+    assert!(output.contains("never pinned down"), "{output}");
+    assert!(output.contains("unpinned_closure.kh:3"), "{output}");
+}
+
+/// **A library's `main` is an ordinary function.** Only the `main` a build
+/// runs -- `src/main.kh`'s, or one in `src/bin/` -- has to return what an
+/// exit status can be; a `pub fn main() -> String` in `src/cli.kh` gets the
+/// `misplaced-main` warning and `khora build --lib` builds it.
+#[test]
+fn a_main_that_is_not_an_entry_point_may_return_anything() {
+    let (ok, output) = check_package(
+        "lib_main_string",
+        &[
+            ("khora.toml", MANIFEST),
+            ("src/cli.kh", "module fixture::cli;\npub fn main() -> String { \"usage\" }\n"),
+        ],
+    );
+    assert!(ok, "a library's `main` is not an entry point:\n{output}");
+    assert!(!output.contains("entry point must return"), "{output}");
+
+    let (ok, output) = check_package(
+        "bin_main_string",
+        &[
+            ("khora.toml", MANIFEST),
+            ("src/bin/tool.kh", "module fixture::tool;\npub fn main() -> String { \"no\" }\n"),
+        ],
+    );
+    assert!(!ok, "a `src/bin` program's `main` is an entry point:\n{output}");
+    assert!(output.contains("tool.kh:2"), "{output}");
+}
+
+/// **No message `khora check` gives names a file in this repository.** A
+/// reader cannot open `errata 35` or `docs/design/ffi.md`; the message says
+/// what to do instead.
+#[test]
+fn an_extern_fn_message_names_no_repository_file() {
+    let (ok, output) = check(
+        "extern_raises_wording",
+        "module m;\n\
+         pub type Err = | Bad;\n\
+         extern fn c_with_err(x: Int) -> Int raises Err;\n\
+         extern fn takes(s: String) -> Int;\n\
+         pub fn main() -> Int { 0 }\n",
+    );
+    assert!(!ok, "{output}");
+    for internal in ["errata", "docs/", ".md", "tagged pair", "aggregate"] {
+        assert!(!output.contains(internal), "{internal:?} in a user message:\n{output}");
+    }
+    assert!(output.contains("Declare it without `raises`"), "{output}");
+}
+
+/// Writes each `(path, text)` under one scratch directory, and checks `app`.
+fn check_packages(name: &str, files: &[(&str, &str)]) -> (bool, String) {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&root);
+    for (relative, contents) in files {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("a fixture directory");
+        std::fs::write(&path, contents).expect("a fixture");
+    }
+    let out = Command::new(env!("CARGO_BIN_EXE_khora"))
+        .arg("check")
+        .arg(root.join("app"))
+        .output()
+        .expect("could not run `khora`");
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    (out.status.success(), text)
+}
+
+/// **Two dependencies that disagree about a C symbol are told in the
+/// program's own file**, at its import, naming both packages -- not inside
+/// the dependencies, which the reader cannot edit.
+#[test]
+fn two_dependencies_disagreeing_about_a_c_symbol_are_told_at_the_import() {
+    let dep = |name: &str, ret: &str| {
+        format!("module {name}::lib;\nextern fn getpid() -> {ret};\npub fn pid() -> Int {{ 1 }}\n")
+    };
+    let (la, lc) = (dep("la", "I32"), dep("lc", "Int"));
+    let (ok, output) = check_packages(
+        "dependency_clash",
+        &[
+            ("la/khora.toml", "[package]\nname = \"la\"\nversion = \"0.1.0\"\n"),
+            ("la/src/lib.kh", &la),
+            ("lc/khora.toml", "[package]\nname = \"lc\"\nversion = \"0.1.0\"\n"),
+            ("lc/src/lib.kh", &lc),
+            (
+                "app/khora.toml",
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\n\
+                 la = { path = \"../la\" }\nlc = { path = \"../lc\" }\n",
+            ),
+            (
+                "app/src/main.kh",
+                "module app::main;\nimport la::lib::{pid};\nimport lc::lib::{pid as other};\n\
+                 pub fn main() -> Int { pid() + other() }\n",
+            ),
+        ],
+    );
+    assert!(!ok, "{output}");
+    assert!(output.contains("main.kh:3"), "at the program's second import:\n{output}");
+    assert!(output.contains("`la`") && output.contains("`lc`"), "both packages:\n{output}");
+    assert!(!output.contains("lib.kh"), "not inside a dependency:\n{output}");
+    assert!(output.contains("1 error(s)"), "{output}");
+}
+
+/// **What `khora check` refuses for a missing body is what the build would
+/// reach.** A call in a generic function nothing instantiates is never
+/// compiled, so it is not refused; a bodiless method that is called is; and
+/// a bodiless `print` or `attempt` is lowered by name only for the arguments
+/// code generation handles.
+#[test]
+fn a_bodiless_function_is_refused_exactly_where_the_build_reaches_it() {
+    let (ok, output) = check(
+        "bodiless_generic_dead",
+        "module m;\nfn helper(x: Int) -> Int;\nfn later<A>(a: A) -> Int { helper(1) }\n\
+         pub fn main() -> Int { 0 }\n",
+    );
+    assert!(ok, "an uninstantiated generic is not compiled:\n{output}");
+
+    let (ok, output) = check(
+        "bodiless_generic_live",
+        "module m;\nfn helper(x: Int) -> Int;\nfn later<A>(a: A) -> Int { helper(1) }\n\
+         pub fn main() -> Int { later(true) }\n",
+    );
+    assert!(!ok, "an instantiated one is:\n{output}");
+    assert!(output.contains("bodiless_generic_live.kh:3"), "{output}");
+
+    // The same through a generic impl's method, which is emitted only when
+    // something calls it.
+    let method = |main: &str| {
+        format!(
+            "module m;\nfn helper(x: Int) -> Int;\n/// A box.\npub type Box<A> = {{ value: A }};\n\
+             impl<A> Box<A> {{ /// Pokes.\n pub fn poke(self) -> Int {{ helper(1) }} }}\n{main}\n"
+        )
+    };
+    let (ok, output) = check("bodiless_method_dead", &method("pub fn main() -> Int { 0 }"));
+    assert!(ok, "a generic impl nothing calls is not compiled:\n{output}");
+    let (ok, output) = check(
+        "bodiless_method_live",
+        &method("pub fn main() -> Int { let b: Box<Int> = { value: 3 }; b.poke() }"),
+    );
+    assert!(!ok, "one that is called is:\n{output}");
+    // Lines 3 and 5 are the `///` lines the exported type and method need.
+    assert!(output.contains("bodiless_method_live.kh:6"), "{output}");
+
+    for (name, source, needle) in [
+        (
+            "bodiless_method",
+            "module m;\npub type P = { x: Int };\nimpl P { pub fn twice(self) -> Int; }\n\
+             pub fn main() -> Int { let p: P = { x: 2 }; p.twice() }\n",
+            "`P::twice` has no body",
+        ),
+        (
+            "bodiless_print_list",
+            "module m;\nimport std::core::{List};\nfn print(value: List<Int>);\n\
+             pub fn main() -> Int { print([1, 2]); 0 }\n",
+            "`print` has no body",
+        ),
+        (
+            "bodiless_attempt_int",
+            "module m;\nfn attempt(n: Int) -> Int;\npub fn main() -> Int { attempt(3) }\n",
+            "`attempt` has no body",
+        ),
+    ] {
+        let (ok, output) = check(name, source);
+        assert!(!ok, "{name}:\n{output}");
+        assert!(output.contains(needle), "{name}:\n{output}");
+        assert!(!output.contains('#'), "{name}: no internal names:\n{output}");
+    }
+}
+
+/// **The closure error does not come before the error that caused it.** An
+/// unresolved callee leaves its closure arguments' types unsolved; saying so
+/// first sent the reader to the closure rather than to the name.
+#[test]
+fn an_unresolved_callee_is_reported_without_its_closure() {
+    let (ok, output) = check(
+        "closure_cascade",
+        "module m;\nimport std::core::{List, print};\n\
+         pub fn main() -> Int {\n  let ys = List::map(List::range(0, 3), fn i => \"s${i}\");\n  \
+         print(\"${List::length(ys)}\");\n  0\n}\n",
+    );
+    assert!(!ok, "{output}");
+    assert!(output.contains("`range`"), "{output}");
+    assert!(!output.contains("never pinned down"), "{output}");
+}

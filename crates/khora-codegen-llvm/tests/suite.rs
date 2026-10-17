@@ -57,6 +57,7 @@ mod env;
 mod errors;
 mod exporting;
 mod fibers;
+mod function_values;
 mod files;
 mod fixed;
 mod flow;

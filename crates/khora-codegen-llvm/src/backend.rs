@@ -401,6 +401,8 @@ pub(crate) struct Backend<'ctx> {
     /// Adapters declared but not yet given a body, for the same reason
     /// `pending_glue` exists.
     pending_thunks: Vec<String>,
+    /// Forwarders declared but not yet emitted. See [`Backend::forwarder`].
+    pending_forwarders: Vec<Forwarder>,
     /// Trampolines that take a tagged return apart, by how many arguments the
     /// callee takes. See [`Backend::tagged_trampoline`].
     trampolines: HashMap<usize, FunctionValue<'ctx>>,
@@ -448,6 +450,17 @@ pub(crate) struct Backend<'ctx> {
     /// first use. See [`Backend::take_error`].
     error_taker: Option<FunctionValue<'ctx>>,
     pub errors: Vec<HirError>,
+}
+
+/// A function with no Khora body, taken as a value: the body that forwards
+/// to it, waiting to be emitted. See [`Backend::forwarder`].
+pub(crate) struct Forwarder {
+    /// The forwarder's own symbol.
+    name: String,
+    /// What its one call site calls.
+    target: String,
+    body: khora_hir::body::Body,
+    types: khora_types::BodyTypes,
 }
 
 /// One `(x) => ..` in the program, lifted to a function of its own.
@@ -541,6 +554,7 @@ impl<'ctx> Backend<'ctx> {
             closures_by_owner: HashMap::new(),
             thunks: HashMap::new(),
             pending_thunks: Vec::new(),
+            pending_forwarders: Vec::new(),
             trampolines: HashMap::new(),
             plain_trampolines: HashMap::new(),
             change_shims: HashMap::new(),

@@ -154,6 +154,37 @@ impl BodyTypes {
         self.instantiations.iter()
     }
 
+    /// The types of a [`khora_hir::body::Body::forwarding`] body, given the
+    /// function type it was made for.
+    ///
+    /// Not inferred, because there is nothing to infer: the use site already
+    /// has a concrete `Type::Fn` for the value, and the forwarder's every
+    /// expression is a parameter, the callee, the call or its `!`. So each is
+    /// written down from that type directly. Anything else in `body` is left
+    /// `Unknown`, which code generation refuses rather than guesses at.
+    pub fn forwarding(body: &khora_hir::body::Body, shape: &Type) -> BodyTypes {
+        use khora_hir::body::Expr;
+        let mut out = BodyTypes::default();
+        let Type::Fn { params, ret, .. } = shape else { return out };
+        for (local, _) in body.locals() {
+            if let Some(ty) = params.get(local.index()) {
+                out.locals.insert(local, ty.clone());
+            }
+        }
+        for (id, expr) in body.exprs() {
+            let ty = match expr {
+                Expr::Local(local) => params.get(local.index()).cloned(),
+                Expr::Path(_) => Some(shape.clone()),
+                Expr::Call { .. } | Expr::Try(_) | Expr::Block { .. } => Some((**ret).clone()),
+                _ => None,
+            };
+            if let Some(ty) = ty {
+                out.exprs.insert(id, ty);
+            }
+        }
+        out
+    }
+
     /// This body's types with `mapping` applied, which is one specialization.
     ///
     /// **And projections resolved, which substituting cannot do.** `I := Counted`

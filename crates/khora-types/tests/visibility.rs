@@ -332,7 +332,7 @@ fn a_mismatch_between_two_same_named_types_qualifies_both() {
          import library::{Entry as Theirs};\n\
          pub type Entry = { key: String };\n\
          fn take(entry: Entry) -> String { entry.key }\n\
-         pub fn main() -> String { let mine: Theirs = { key: \"a\" }; take(mine) }\n",
+         pub fn compare() -> String { let mine: Theirs = { key: \"a\" }; take(mine) }\n",
     );
     assert_eq!(found.len(), 1, "one mismatch: {found:?}");
     assert!(

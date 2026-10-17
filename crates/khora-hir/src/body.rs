@@ -667,6 +667,51 @@ impl Body {
     pub fn expr_count(&self) -> usize {
         self.exprs.len()
     }
+
+    /// The body `fn (a, b, ..) => callee(a, b, ..)` would have, with `arity`
+    /// parameters, every range set to `at`.
+    ///
+    /// **What this prevents: a function with no Khora body taken as a value
+    /// becoming invalid IR.** `List::map(xs, String::byte_length)` named a
+    /// function that only exists as something code generation does at a call
+    /// site, so the adapter a function value is made of forwarded to a
+    /// symbol nothing defined, and LLVM refused the module as a compiler bug.
+    /// Code generation compiles this body as a named function instead, so the
+    /// intrinsic is lowered at a call site like any other, and the adapter
+    /// forwards to that.
+    ///
+    /// `fallible` wraps the call in `!`, as the lambda would have to be.
+    ///
+    /// Built here rather than written as source and parsed, because a
+    /// `Resolution` is already the answer and there is no spelling of it that
+    /// is certain to resolve back to the same declaration from every module.
+    pub fn forwarding(callee: crate::Resolution, arity: usize, fallible: bool, at: TextRange) -> Body {
+        let mut body = Body::default();
+        let mut args = Vec::with_capacity(arity);
+        for index in 0..arity {
+            body.locals.push(Local { name: format!("argument {index}"), is_mut: false, range: at });
+            let local = LocalId((body.locals.len() - 1) as u32);
+            body.pats.push(Pat::Bind(local));
+            body.pat_ranges.push(at);
+            body.params.push(PatId((body.pats.len() - 1) as u32));
+            args.push(body.push(Expr::Local(local), at));
+        }
+        let callee = body.push(Expr::Path(callee), at);
+        let mut call = body.push(Expr::Call { callee, args }, at);
+        if fallible {
+            call = body.push(Expr::Try(call), at);
+        }
+        // A block, as every written body is: the reference-counting plan
+        // releases what a function owns where its outermost block ends.
+        body.root = Some(body.push(Expr::Block { stmts: Vec::new(), tail: Some(call) }, at));
+        body
+    }
+
+    fn push(&mut self, expr: Expr, at: TextRange) -> ExprId {
+        self.exprs.push(expr);
+        self.expr_ranges.push(at);
+        ExprId((self.exprs.len() - 1) as u32)
+    }
 }
 
 /// Lowers every function body in a file.

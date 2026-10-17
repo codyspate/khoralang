@@ -155,8 +155,8 @@ fn main() -> Int { 0 }
 ",
     );
     assert!(
-        found.iter().any(|m| m.contains("it can raise") && m.contains("errata 35")),
-        "expected the tagged-return reason, got {found:?}"
+        found.iter().any(|m| m.contains("it can raise") && m.contains("C reports failure")),
+        "expected the reason and what to write instead, got {found:?}"
     );
 }
 

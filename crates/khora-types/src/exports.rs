@@ -71,7 +71,7 @@ pub(crate) fn export_errors(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
                 message: format!(
                     "`{name}` is exported to C and has a `with` clause, so it needs evidence \
                      that C has none of. On a foreign *import* a `with` clause is a \
-                     permission and nothing is passed — `docs/design/ffi.md` §3 — but an \
+                     permission and nothing is passed, but an \
                      export runs Khora code, and a capability is an argument. Take what it \
                      needs as parameters, or wrap it in a function that constructs the \
                      capability itself"
@@ -86,7 +86,7 @@ pub(crate) fn export_errors(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
                 message: format!(
                     "`{name}` is exported to C, and {why}. Only scalars and pointers cross \
                      — for text, take a buffer and a capacity and return the length, the way \
-                     `khora_float_text` does. `docs/design/c-export.md`"
+                     `khora_float_text` does"
                 ),
                 range,
             });

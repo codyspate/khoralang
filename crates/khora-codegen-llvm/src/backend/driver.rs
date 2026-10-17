@@ -358,7 +358,7 @@ pub(super) fn build(
     if entry_point == Entry::Library && exports.is_empty() {
         backend.error(
             "a library has no `pub extern fn`, so nothing could call it. Mark \
-             the functions that are its C interface — `docs/design/c-export.md`",
+             the functions that are its C interface `pub extern fn`, with a body",
             text_size::TextRange::empty(0.into()),
         );
     }
@@ -366,6 +366,12 @@ pub(super) fn build(
     if entry_point == Entry::Library && stop == Stop::AtExecutable {
         write_the_header(&backend, out, &exports);
     }
+
+    // A function with no Khora body taken as a value gets a forwarder, found
+    // while lowering the bodies and closures above, and lowered here as one
+    // more body -- before the error routines, which have to know every error
+    // id a body can raise, and a forwarder's call can raise.
+    backend.emit_pending_forwarders(&defined);
 
     // After every body and every lifted closure, because lowering is what
     // assigns error ids and the last one compiled may add another.

@@ -67,9 +67,9 @@ pub fn foreign_signature_obstacle(signature: &Signature) -> Option<String> {
     }
     if can_raise(signature) {
         return Some(
-            "it can raise, and a fallible function returns a tagged pair — which is exactly \
-             the aggregate that must not cross (errata 35). C reports failure in its return \
-             value, and the wrapper that turns that into a raise belongs in Khora"
+            "it can raise, and a C function cannot: C reports failure in its return value. \
+             Declare it without `raises`, and write a Khora function that calls it, reads \
+             the return value and raises"
                 .to_string(),
         );
     }

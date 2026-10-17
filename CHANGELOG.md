@@ -102,9 +102,46 @@ it will behave differently now.
   one (`e if c => .., _ => ..`) hands what its guard turns away to the arms
   after it. A constructor arm written below a guarded `_` or binding arm is
   refused, since constructor arms are tried first.
+- `khora check` refuses what `khora build` refuses in these cases, at the
+  declaration, use or import in the program's own files:
+  - an `extern fn` naming a C symbol another declaration in the program,
+    `std`'s included, names with a different signature. The message names
+    the other declaration's module and signature. A C symbol has no module,
+    so `extern fn close(fd: Int) -> Int` and `std::net::socket`'s
+    `extern fn close(handle: I32) -> I32` are one function; the build
+    generated calls against whichever it read first and produced invalid
+    LLVM IR, reported as a compiler bug. Declarations in files no single
+    target builds together, such as `sys_linux.kh` and `sys_windows.kh`,
+    may differ;
+  - two dependencies declaring one C symbol with different signatures,
+    reported at the program's `import` of the second and naming both
+    packages. Programs that built with such a pair stop building;
+  - a `pub extern fn` defining a symbol any other declaration names;
+  - an `extern fn` import that can raise, or whose signature has a `String`,
+    a closure, a type parameter or another type that cannot cross the C ABI,
+    whether or not anything calls it. Programs that declared such an import
+    without calling it stop building;
+  - a call to a function or `impl` method declared without a body and
+    without `extern`, where the build compiles the call: not inside a
+    generic function nothing instantiates. A bodiless `print`, `assert`,
+    `assert_that` or `attempt` is lowered by the compiler only for the
+    arguments it can show or run (`print` of an `Int`, `Float`, `Bool` or
+    `String`; `attempt` of a function), and is refused otherwise;
+  - in `src/main.kh` or `src/bin/`, a `main` returning something other than
+    `Int` or `()`, or a `main` with no body. A `main` in a library module
+    is an ordinary function;
+  - a closure whose parameter or result type nothing decides, such as
+    `let f = fn x => x;` with `f` unused. When the closure is an argument to
+    a call that is already an error, only that error is reported.
 
 ### Fixed
 
+- A function with no Khora body can be used as a value: a `std` intrinsic
+  (`xs |> List::map(String::byte_length)`, `Int::xor`, `U8::of`), a
+  runtime operation (`Fiber::wait`, `Shared::get`, `Channel::send`), or an
+  `extern fn`, including one with a `with` clause. These passed
+  `khora check` and failed to build as invalid LLVM IR, reported as a
+  compiler bug.
 - `Fiber::abort` starts every finalizer registered on the way out, and runs
   it until the first loop trip, `!` or blocking call it reaches, in its own
   body or in a function it calls. Calling a function does not stop it before

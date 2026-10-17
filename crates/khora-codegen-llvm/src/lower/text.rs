@@ -198,7 +198,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                         format!(
                             "an `Array<{element}>` holds reference-counted objects, so its \
                              elements cannot be lent across the C ABI — only an array of \
-                             numbers can. `docs/design/ffi.md`"
+                             numbers can, as a pointer and a count"
                         ),
                         range,
                     );

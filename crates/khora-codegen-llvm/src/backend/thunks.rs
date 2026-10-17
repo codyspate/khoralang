@@ -8,6 +8,96 @@
 use super::*;
 
 impl<'ctx> Backend<'ctx> {
+    /// A Khora function that calls `symbol`, for taking a function with no
+    /// Khora body as a value. Returns the forwarder's symbol, which has one,
+    /// so [`Backend::thunk`] can wrap it as it wraps any other.
+    ///
+    /// **What this prevents: `List::map(xs, String::byte_length)` as invalid
+    /// IR.** The adapter a function value is made of forwards to the function
+    /// it names, and an intrinsic is not a function: it is code
+    /// [`crate::lower`] writes at each call site. So the adapter called a
+    /// symbol nothing defined, and LLVM refused the module as "Global is
+    /// external, but doesn't have external or weak linkage", reported as a
+    /// compiler bug, after `khora check` had passed the program. The same was
+    /// true of every bodiless declaration -- `Fiber::wait`, an `extern fn`
+    /// with a `with` clause (whose adapter passed evidence C has no parameter
+    /// for) -- because none of them has a Khora body for the adapter to call.
+    ///
+    /// The forwarder is the body `fn (a, ..) => symbol(a, ..)` would have,
+    /// compiled as a named function at the value's own type. So the call in
+    /// it is an ordinary call site: an intrinsic is lowered as at any other,
+    /// a C function is called as one, and a declaration nobody implemented
+    /// is refused with the sentence a direct call gets, at the place it was
+    /// named.
+    ///
+    /// What it costs: one function per distinct `(symbol, type)` taken as a
+    /// value, and one extra call through it. Nothing for a function with a
+    /// body, which is wrapped directly as before.
+    pub fn forwarder(
+        &mut self,
+        symbol: &str,
+        resolution: &khora_hir::Resolution,
+        shape: &Type,
+        at: TextRange,
+    ) -> String {
+        let name = format!("{symbol}$value${}", super::mangle_type(shape));
+        if self.is_defined(&name) {
+            return name;
+        }
+        let Type::Fn { params, ret, requires, raises } = shape else {
+            // Not a function type: there is nothing to forward, and
+            // `thunk` will say the signature cannot be represented.
+            return name;
+        };
+        let signature = Signature {
+            is_extern: false,
+            generics: Vec::new(),
+            bounds: Vec::new(),
+            requires: (**requires).clone(),
+            raises: (**raises).clone(),
+            params: params.clone(),
+            ret: (**ret).clone(),
+            names: Vec::new(),
+        };
+        let fallible = can_raise(&signature);
+        self.register_instance(&name, signature);
+        self.declare_definition(&name);
+        let body =
+            khora_hir::body::Body::forwarding(resolution.clone(), params.len(), fallible, at);
+        let types = khora_types::BodyTypes::forwarding(&body, shape);
+        self.pending_forwarders.push(Forwarder { name: name.clone(), target: symbol.to_string(), body, types });
+        name
+    }
+
+    /// Emits every forwarder [`Backend::forwarder`] declared.
+    ///
+    /// After every body, because forwarders are found while lowering them,
+    /// and lowering one moves the builder. Before the adapters, which call
+    /// them.
+    ///
+    /// Each is lowered by the same `emit_function` as a body in the source,
+    /// with a call table of one entry saying which symbol its one call site
+    /// names. Its reference-counting plan is made the same way too: the
+    /// parameters are handed to the callee, which owns them from there.
+    pub(super) fn emit_pending_forwarders(&mut self, defined: &khora_perceus::Defined) {
+        while let Some(forwarder) = self.pending_forwarders.pop() {
+            let Forwarder { name, target, body, types } = forwarder;
+            let mut mono = khora_types::mono::Instances::default();
+            for (_, expr) in body.exprs() {
+                if let khora_hir::body::Expr::Call { callee, .. } = expr {
+                    mono.calls.insert((name.clone(), *callee), target.clone());
+                }
+            }
+            // A forwarder can stop wherever its callee can, and saying yes
+            // costs a release of a slot that may be null.
+            let stops = |_| true;
+            let plan = khora_perceus::plan(&body, &types, defined, &self.unboxed.clone(), &stops, false);
+            self.end_debug_scope();
+            self.source = String::new();
+            crate::lower::emit_function(self, &name, &body, Some(&plan), &types, &mono);
+        }
+    }
+
     /// A shim that calls a fallible function and hands back its tag.
     ///
     /// The runtime cannot call a fallible Khora function directly. Its return is

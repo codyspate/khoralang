@@ -666,8 +666,7 @@ fn drive_clang(
             Some(triple) => format!(
                 "\n\nThe object was generated for `{triple}` and this host's linker cannot \
                  read it. Code generation for another target works; linking for one needs a \
-                 linker and a sysroot that this build does not yet fetch — \
-                 `docs/design/targets.md`."
+                 linker and a sysroot that this build does not yet fetch."
             ),
             None => String::new(),
         };
