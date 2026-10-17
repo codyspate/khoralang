@@ -1854,25 +1854,27 @@ fn polymorphic_recursion_that_sends_its_region_is_refused() {
 /// symbol and only one of them can describe it.
 ///
 /// The error is in the program's own file, names both declarations, and says
-/// what to write.
+/// what to write. `listen` is the probe because `std::net::socket` declares it
+/// on every platform (Windows names its `close` `closesocket`).
 #[test]
 fn an_extern_fn_that_disagrees_with_another_declaration_of_its_symbol_is_refused() {
     let (ok, output) = check(
         "extern_symbol_collision",
         "module m;\n\
-         extern fn close(fd: Int) -> Int;\n\
-         pub fn main() -> Int { close(-1) }\n",
+         extern fn listen(fd: Int) -> Int;\n\
+         pub fn main() -> Int { listen(-1) }\n",
     );
-    assert!(!ok, "a second `close` with a different signature must not check:\n{output}");
+    assert!(!ok, "a second `listen` with a different signature must not check:\n{output}");
     assert!(output.contains("extern_symbol_collision.kh:2"), "at the user's declaration:\n{output}");
     assert!(
-        output.contains("`close`") && output.contains("std::net::socket"),
+        output.contains("`listen`") && output.contains("std::net::socket"),
         "naming the symbol and the other declaration's module:\n{output}"
     );
-    assert!(output.contains("(handle: I32) -> I32"), "and its signature:\n{output}");
+    assert!(output.contains("backlog: I32) -> I32"), "and its signature:\n{output}");
     assert!(!output.contains("compiler bug"), "{output}");
     // `std`'s declaration is not the reader's to change, so it is not reported.
     assert!(!output.contains("socket_linux.kh"), "only the program's own line:\n{output}");
+    assert!(!output.contains("socket_windows.kh"), "only the program's own line:\n{output}");
     assert!(output.contains("1 error(s)"), "{output}");
 }
 
@@ -1954,12 +1956,14 @@ fn an_export_named_like_a_symbol_std_declares_is_refused_by_check() {
     let (ok, output) = check(
         "export_symbol_collision",
         "module m;\n\
-         pub extern fn close(x: Int) -> Int { x }\n\
+         /// Doubles nothing; its name is the point.\n\
+         pub extern fn listen(x: Int) -> Int { x }\n\
          pub fn main() -> Int { 0 }\n",
     );
     assert!(!ok, "{output}");
-    assert!(output.contains("export_symbol_collision.kh:2"), "{output}");
+    assert!(output.contains("export_symbol_collision.kh:3"), "{output}");
     assert!(output.contains("Rename the exported function"), "{output}");
+    assert!(!output.contains("undocumented-export"), "only the clash:\n{output}");
 }
 
 /// **A function declared without a body is refused where it is used**, by
