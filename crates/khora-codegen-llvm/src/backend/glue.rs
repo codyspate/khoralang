@@ -101,6 +101,12 @@ impl<'ctx> Backend<'ctx> {
             return self.closure_glue();
         }
 
+        // A failure value releases the error it holds, by its id, and its
+        // note.
+        if is_the_runtimes && khora_types::raised_row(ty).is_some() {
+            return self.raised_glue();
+        }
+
         let key = type_key(ty);
 
         if let Some(cached) = self.drop_glue.get(&key) {

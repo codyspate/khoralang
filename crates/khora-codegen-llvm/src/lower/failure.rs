@@ -8,6 +8,406 @@
 use super::*;
 
 impl<'ctx> Lower<'_, 'ctx> {
+    /// Boxes a failure's `which` and `word` as a `Raised` with no note. The
+    /// word is moved in: whoever held it no longer does.
+    pub(super) fn make_raised(&mut self, which: IntValue<'ctx>, word: IntValue<'ctx>) -> PointerValue<'ctx> {
+        use crate::backend::raised::{RAISED_NOTE, RAISED_WHICH, RAISED_WORD, RAISED_WORDS};
+        let object = self.allocate(RAISED_WORDS, 0, "raised");
+        let which64 = self
+            .be
+            .builder
+            .build_int_z_extend(which, self.be.ctx.i64_type(), "which.64")
+            .expect("widening the id");
+        let slot = runtime::field_pointer(self.be.ctx, &self.be.builder, object, RAISED_WHICH);
+        self.be.builder.build_store(slot, which64).expect("storing the id");
+        let slot = runtime::field_pointer(self.be.ctx, &self.be.builder, object, RAISED_WORD);
+        self.be.builder.build_store(slot, word).expect("storing the word");
+        let slot = runtime::field_pointer(self.be.ctx, &self.be.builder, object, RAISED_NOTE);
+        let none = self.be.null_pointer();
+        self.be.builder.build_store(slot, none).expect("no note yet");
+        object
+    }
+
+    /// The note a `Raised` holds, borrowed: a `String`, or null.
+    fn raised_note(&mut self, object: PointerValue<'ctx>) -> PointerValue<'ctx> {
+        let ptr = self.be.ctx.ptr_type(AddressSpace::default());
+        let slot = runtime::field_pointer(self.be.ctx, &self.be.builder, object, crate::backend::raised::RAISED_NOTE);
+        self.be.builder.build_load(ptr, slot, "raised.note").expect("reading the note").into_pointer_value()
+    }
+
+    /// A reference of this frame's own to the error a borrowed `word`
+    /// carries. `types` are the row's, given ids now so that the copier is
+    /// emitted knowing them.
+    fn copy_error_word(&mut self, which: IntValue<'ctx>, word: IntValue<'ctx>, types: &[Type]) -> IntValue<'ctx> {
+        for ty in types {
+            if matches!(ty, Type::Adt { .. }) && !khora_types::is_std_opaque(ty) {
+                let _ = self.be.error_id(ty);
+            }
+        }
+        let copier = self.be.copy_error();
+        self.be
+            .builder
+            .build_call(copier, &[which.into(), word.into()], "error.copy")
+            .expect("copying an error")
+            .try_as_basic_value()
+            .basic()
+            .expect("a word")
+            .into_int_value()
+    }
+
+    /// Takes the error out of a `Raised` this frame holds a reference to,
+    /// and lets go of that reference: an owned word, and no box any more.
+    ///
+    /// **Moved when the box is unique, copied when it is not.** Whether it
+    /// is unique is read *before* anything is let go of. A box nobody else
+    /// holds cannot gain a holder while this frame has it, so the answer
+    /// stands: its shell is freed with only the note released, and the word
+    /// is this frame's. A box somebody else holds -- a failure two fibers
+    /// joined -- is copied from while this frame's reference still keeps it
+    /// alive, and only then let go of. Decrementing first, as the prototype
+    /// did, let the other holder free the box between the decrement and the
+    /// copy.
+    fn take_raised(
+        &mut self,
+        object: PointerValue<'ctx>,
+        which: IntValue<'ctx>,
+        word: IntValue<'ctx>,
+        types: &[Type],
+    ) -> IntValue<'ctx> {
+        let i64_type = self.be.ctx.i64_type();
+        let header = self
+            .be
+            .builder
+            .build_load(i64_type, object, "raised.rc")
+            .expect("reading a refcount")
+            .into_int_value();
+        let load = header.as_instruction().expect("a load is an instruction");
+        load.set_alignment(8).expect("a count word is 8-aligned");
+        load.set_atomic_ordering(AtomicOrdering::Monotonic).expect("a relaxed load");
+        let count = self
+            .be
+            .builder
+            .build_and(header, i64_type.const_int(khora_rt::KHORA_COUNT_MASK, false), "raised.count")
+            .expect("isolating a refcount");
+        let unique = self
+            .be
+            .builder
+            .build_int_compare(IntPredicate::EQ, count, i64_type.const_int(1, false), "raised.unique")
+            .expect("comparing a refcount");
+        let moved = self.block("raised.moved");
+        let shared = self.block("raised.shared");
+        let join = self.block("raised.taken");
+        self.be.builder.build_conditional_branch(unique, moved, shared).expect("on the count");
+
+        self.at(moved);
+        let note_glue = self.be.raised_note_glue();
+        let previous = self.adjust_count(object, -1);
+        self.be
+            .builder
+            .build_call(self.be.rt.drop_last, &[object.into(), note_glue.into(), previous.into()], "")
+            .expect("freeing the box");
+        let from_moved = self.here();
+        self.br(join);
+
+        self.at(shared);
+        let copied = self.copy_error_word(which, word, types);
+        let raised_ty = khora_types::raised_of(Type::empty_row());
+        self.drop(object.into(), &raised_ty);
+        let from_shared = self.here();
+        self.br(join);
+
+        self.at(join);
+        let phi = self.be.builder.build_phi(i64_type, "raised.word.owned").expect("a phi");
+        phi.add_incoming(&[(&word, from_moved), (&copied, from_shared)]);
+        phi.as_basic_value().into_int_value()
+    }
+
+    /// The failure that arrived at a handler, with the error inside a
+    /// `Raised` box when it came in one: its id, its word (both borrowed
+    /// from the box), and whether it did.
+    ///
+    /// Only asked in a program that attaches context ([`Backend::noted`]);
+    /// elsewhere no failure arrives in a box, and the pair is used as it is.
+    pub(super) fn open_failure(
+        &mut self,
+        which: IntValue<'ctx>,
+        word: IntValue<'ctx>,
+    ) -> (IntValue<'ctx>, IntValue<'ctx>, IntValue<'ctx>) {
+        let noted = self.be.ctx.i32_type().const_int(runtime::NOTED_WHICH, false);
+        let is_noted = self
+            .be
+            .builder
+            .build_int_compare(IntPredicate::EQ, which, noted, "failure.noted")
+            .expect("testing for context");
+        let open = self.block("failure.open");
+        let plain = self.block("failure.plain");
+        let join = self.block("failure.opened");
+        self.be.builder.build_conditional_branch(is_noted, open, plain).expect("on the tag");
+        self.at(open);
+        let ptr = self.be.ctx.ptr_type(AddressSpace::default());
+        let object = self.be.builder.build_int_to_ptr(word, ptr, "failure.box").expect("the box");
+        let (inner_which, inner_word) = self.be.raised_pair(object);
+        let from_open = self.here();
+        self.br(join);
+        self.at(plain);
+        let from_plain = self.here();
+        self.br(join);
+        self.at(join);
+        let w = self.be.builder.build_phi(self.be.ctx.i32_type(), "failure.which").expect("a phi");
+        w.add_incoming(&[(&inner_which, from_open), (&which, from_plain)]);
+        let p = self.be.builder.build_phi(self.be.ctx.i64_type(), "failure.word").expect("a phi");
+        p.add_incoming(&[(&inner_word, from_open), (&word, from_plain)]);
+        (w.as_basic_value().into_int_value(), p.as_basic_value().into_int_value(), is_noted)
+    }
+
+    /// The failure that arrived, owned as a `Raised`: the box it traveled
+    /// in, note and all, or a new box the error is moved into.
+    ///
+    /// Takes over the arrived failure; nothing may read `arrived_word` after.
+    pub(super) fn raised_value(
+        &mut self,
+        arrived: (IntValue<'ctx>, IntValue<'ctx>),
+        opened: (IntValue<'ctx>, IntValue<'ctx>, Option<IntValue<'ctx>>),
+    ) -> PointerValue<'ctx> {
+        let (which, word, is_noted) = opened;
+        let Some(is_noted) = is_noted else { return self.make_raised(which, word) };
+        let kept = self.block("raised.kept");
+        let boxed = self.block("raised.boxed");
+        let join = self.block("raised.value");
+        self.be.builder.build_conditional_branch(is_noted, kept, boxed).expect("on the tag");
+        self.at(kept);
+        let ptr = self.be.ctx.ptr_type(AddressSpace::default());
+        let held = self.be.builder.build_int_to_ptr(arrived.1, ptr, "raised.kept.box").expect("the box");
+        let from_kept = self.here();
+        self.br(join);
+        self.at(boxed);
+        let made = self.make_raised(which, word);
+        let from_boxed = self.here();
+        self.br(join);
+        self.at(join);
+        let phi = self.be.builder.build_phi(ptr, "raised.box").expect("a phi");
+        phi.add_incoming(&[(&held, from_kept), (&made, from_boxed)]);
+        phi.as_basic_value().into_pointer_value()
+    }
+
+    /// The failure that arrived, as a `Raised` of this frame's own, leaving
+    /// the arrived failure where it is: for a guarded binding, whose guard
+    /// may hand the failure on untouched.
+    pub(super) fn raised_copy(
+        &mut self,
+        arrived: (IntValue<'ctx>, IntValue<'ctx>),
+        opened: (IntValue<'ctx>, IntValue<'ctx>, Option<IntValue<'ctx>>),
+        types: &[Type],
+    ) -> PointerValue<'ctx> {
+        let (which, word, is_noted) = opened;
+        let Some(is_noted) = is_noted else {
+            let copy = self.copy_error_word(which, word, types);
+            return self.make_raised(which, copy);
+        };
+        let kept = self.block("raised.shared.kept");
+        let boxed = self.block("raised.shared.boxed");
+        let join = self.block("raised.shared.value");
+        self.be.builder.build_conditional_branch(is_noted, kept, boxed).expect("on the tag");
+        self.at(kept);
+        let ptr = self.be.ctx.ptr_type(AddressSpace::default());
+        let held = self.be.builder.build_int_to_ptr(arrived.1, ptr, "raised.kept.box").expect("the box");
+        self.dup(held.into());
+        let from_kept = self.here();
+        self.br(join);
+        self.at(boxed);
+        let copy = self.copy_error_word(which, word, types);
+        let made = self.make_raised(which, copy);
+        let from_boxed = self.here();
+        self.br(join);
+        self.at(join);
+        let phi = self.be.builder.build_phi(ptr, "raised.box").expect("a phi");
+        phi.add_incoming(&[(&held, from_kept), (&made, from_boxed)]);
+        phi.as_basic_value().into_pointer_value()
+    }
+
+    /// `Raised::type_name`, `describe`, `note`, `with_note`, `forget` and
+    /// `only`: the operations the backend implements on a failure value.
+    pub(super) fn raised_intrinsic(&mut self, name: &str, args: &[ExprId], site: ExprId, range: TextRange) -> Flow<'ctx> {
+        let failure = match (name, args) {
+            ("with_note", [failure, _]) | (_, [failure]) => *failure,
+            _ => return self.fail(format!("`Raised::{name}` takes the failure"), range),
+        };
+        let ty = self.types.of(failure).clone();
+        let Some(row) = khora_types::raised_row(&ty).cloned() else {
+            return self.fail(
+                format!("`Raised::{name}` was given a `{ty}`, which is not a `Raised`; this is a compiler bug"),
+                range,
+            );
+        };
+        let row_types: Vec<Type> = match &row {
+            Type::Row { fields, .. } => fields.iter().map(|(_, t)| t.clone()).collect(),
+            _ => Vec::new(),
+        };
+        // **The failure and the note are operands, held like any others**:
+        // a note that raises, is canceled or diverges leaves with the failure
+        // released by the unwind, rather than leaking it, or releasing it
+        // after the block's terminator (which failed LLVM verification).
+        let values = self.operands(args)?;
+        let object = values[0].into_pointer_value();
+        let (which, word) = self.be.raised_pair(object);
+        let answer: BasicValueEnum<'ctx> = match name {
+            "type_name" => {
+                let namer = self.be.error_type_name();
+                self.be
+                    .builder
+                    .build_call(namer, &[which.into()], "type.name")
+                    .expect("naming the type")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("a string")
+            }
+            "describe" => {
+                let describer = self.be.describe_error();
+                let pair = self
+                    .be
+                    .builder
+                    .build_call(describer, &[which.into(), word.into()], "described")
+                    .expect("describing the error")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("a pair")
+                    .into_struct_value();
+                let tag = self
+                    .be
+                    .builder
+                    .build_extract_value(pair, 0, "described.which")
+                    .expect("the tag")
+                    .into_int_value();
+                let text = self.be.builder.build_extract_value(pair, 1, "described.text").expect("the text");
+                // **A cancellation inside the error's `Show` leaves here**,
+                // with the failure released, before the text -- null on that
+                // path -- is read by anyone (exit 139 otherwise).
+                let stop = self.block("describe.stopped");
+                let go_on = self.block("describe.ok");
+                let stopped = self.raised(tag);
+                self.be.builder.build_conditional_branch(stopped, stop, go_on).expect("on the tag");
+                self.at(stop);
+                self.release_unless_lent(failure, object.into(), &ty);
+                if self.can_leave_on_a_cancel() || !self.catches.is_empty() {
+                    let none = self.be.ctx.i64_type().const_zero();
+                    self.leave_with(tag, none);
+                } else {
+                    self.trap("a cancellation reached a frame that cannot be canceled; this is a compiler bug");
+                }
+                self.at(go_on);
+                text
+            }
+            "note" => {
+                // `""` for none: a static, so it needs no count.
+                let note = self.raised_note(object);
+                let empty = self.be.static_string("");
+                let is_none = self.be.builder.build_is_null(note, "no.note").expect("testing the note");
+                let with = self.block("note.some");
+                let without = self.block("note.none");
+                let join = self.block("note.end");
+                self.be.builder.build_conditional_branch(is_none, without, with).expect("on the note");
+                self.at(with);
+                self.dup(note.into());
+                let from_with = self.here();
+                self.br(join);
+                self.at(without);
+                let from_without = self.here();
+                self.br(join);
+                self.at(join);
+                let ptr = self.be.ctx.ptr_type(AddressSpace::default());
+                let phi = self.be.builder.build_phi(ptr, "note").expect("a phi");
+                phi.add_incoming(&[(&note, from_with), (&empty, from_without)]);
+                phi.as_basic_value()
+            }
+            "only" => {
+                // The checker made the row one closed type, so the word is
+                // that type's: no switch on the id. A lent `Raised` is not
+                // this frame's to empty, and is copied from.
+                let result_ty = self.types.of(site).clone();
+                let owned = if self.plan.borrowed.contains(&failure) {
+                    self.copy_error_word(which, word, &row_types)
+                } else {
+                    self.take_raised(object, which, word, &row_types)
+                };
+                return Some(self.be.word_to_value(owned, &result_ty));
+            }
+            "with_note" | "forget" => {
+                // A new box over a copy of the error: the old one may be
+                // held elsewhere, so its word cannot be moved out of it.
+                let copy = self.copy_error_word(which, word, &row_types);
+                let fresh = self.make_raised(which, copy);
+                let note: PointerValue<'ctx> = match values.get(1) {
+                    Some(given) => given.into_pointer_value(),
+                    None => {
+                        let held = self.raised_note(object);
+                        // `retain` takes a null, which the guard in `dup`
+                        // passes over.
+                        self.dup(held.into());
+                        held
+                    }
+                };
+                let slot = runtime::field_pointer(
+                    self.be.ctx,
+                    &self.be.builder,
+                    fresh,
+                    crate::backend::raised::RAISED_NOTE,
+                );
+                self.be.builder.build_store(slot, note).expect("storing the note");
+                fresh.into()
+            }
+            _ => return self.fail(format!("`Raised::{name}` is not an operation the backend knows"), range),
+        };
+        self.release_unless_lent(failure, object.into(), &ty);
+        Some(answer)
+    }
+
+    /// `raise f` of a failure value: send the error on as the type it is.
+    ///
+    /// **With a note, the box itself travels**, under
+    /// [`runtime::NOTED_WHICH`], so the context reaches whatever handles the
+    /// failure next; this frame's reference goes with it. Without one, the
+    /// error leaves as itself, taken out of the box.
+    fn raise_raised(&mut self, error: ExprId, row: &Type) -> Flow<'ctx> {
+        let object = self.expr(error)?.into_pointer_value();
+        let (which, word) = self.be.raised_pair(object);
+        let types: Vec<Type> = match row {
+            Type::Row { fields, .. } => fields.iter().map(|(_, t)| t.clone()).collect(),
+            _ => Vec::new(),
+        };
+        if self.be.noted() {
+            let note = self.raised_note(object);
+            let has_note = self.be.builder.build_is_not_null(note, "raise.noted").expect("testing the note");
+            let boxed = self.block("raise.boxed");
+            let bare = self.block("raise.bare");
+            self.be.builder.build_conditional_branch(has_note, boxed, bare).expect("on the note");
+            self.at(boxed);
+            let noted = self.be.ctx.i32_type().const_int(runtime::NOTED_WHICH, false);
+            let as_word = self.be.to_word(object.into());
+            self.leave_with(noted, as_word);
+            self.at(bare);
+        }
+        let owned = self.take_raised(object, which, word, &types);
+        self.leave_with(which, owned);
+        None
+    }
+
+    /// Whether a failure can arrive in its `Raised` box here, as the third
+    /// element `open_failure` answers: `None` in a program that attaches no
+    /// context, where none can.
+    pub(super) fn maybe_open(
+        &mut self,
+        which: IntValue<'ctx>,
+        word: IntValue<'ctx>,
+    ) -> (IntValue<'ctx>, IntValue<'ctx>, Option<IntValue<'ctx>>) {
+        if !self.be.noted() {
+            return (which, word, None);
+        }
+        let (w, p, n) = self.open_failure(which, word);
+        (w, p, Some(n))
+    }
+}
+
+impl<'ctx> Lower<'_, 'ctx> {
     /// The `attempt` intrinsic: run a computation and make its failure a value.
     ///
     /// The tagged return is already "an error or a value"; this is the same
@@ -118,7 +518,15 @@ impl<'ctx> Lower<'_, 'ctx> {
         let err_held =
             self.field_types(&result_ty, "Err").unwrap_or_else(|| err_info.fields.clone());
         let err_field = err_held.first().cloned().unwrap_or(Type::Unit);
-        let error = self.be.word_to_value(word, &err_field);
+        // **`attempt` hands back a `Raised`**: whatever the body raised, in
+        // a box that remembers which type it is. A failure that arrived in
+        // its box already, with a note, is handed back as that box.
+        let opened = self.maybe_open(which, word);
+        let error: BasicValueEnum<'ctx> = if khora_types::raised_row(&err_field).is_some() {
+            self.raised_value((which, word), opened).into()
+        } else {
+            self.be.word_to_value(word, &err_field)
+        };
         let (_, err_words) = self.be.field_layout(&err_held);
         let object = self.allocate(err_words, err_tag, &result_name);
         self.store_field(object, 0, error, &err_field);
@@ -290,7 +698,9 @@ impl<'ctx> Lower<'_, 'ctx> {
         // checker has already decided that; this only has to agree.
         if !self.raises && self.catches.is_empty() {
             return self.fail(
-                "this function has no `raises` clause, so it cannot raise",
+                "this function has no `raises` clause, so it cannot raise: add `raises` \
+                 with what this sends -- `raises E`, or `raises 'er` for a failure the caller \
+                 chose -- or catch it here",
                 range,
             );
         }
@@ -298,6 +708,10 @@ impl<'ctx> Lower<'_, 'ctx> {
         // the expression's shape: `raise e` may raise a bound variable whose
         // type only inference knows.
         let which = match self.types.of(error) {
+            ty if khora_types::raised_row(ty).is_some() => {
+                let row = khora_types::raised_row(ty).cloned().expect("tested");
+                return self.raise_raised(error, &row);
+            }
             ty @ Type::Adt { .. } => {
                 let ty = ty.clone();
                 self.be.error_id(&ty)

@@ -56,8 +56,9 @@ enum Source {
 
 /// How one tail [`Checker::settle_raises`] solves is defined.
 enum Def {
-    /// A raise's own leftover.
-    Pending(Vec<Entry>),
+    /// A raise's own leftover: the entries, and, for a failure value raised
+    /// on, the tail its row ends in, which is read like a merged member.
+    Pending(Vec<Entry>, Option<Type>),
     /// The union of several tails.
     Merged(Vec<Type>),
     /// A tail less what a `catch`'s named arms take.
@@ -375,7 +376,7 @@ impl<'a> Checker<'a> {
     /// that is refused at `at` rather than one of them kept.
     ///
     /// Ordinary row variables alone keep the first, as they always have.
-    fn join_tails(&mut self, tails: Vec<(Type, TextRange)>) -> Option<Type> {
+    pub(super) fn join_tails(&mut self, tails: Vec<(Type, TextRange)>) -> Option<Type> {
         let mut distinct: Vec<Type> = Vec::new();
         let mut rigid: Vec<(Type, TextRange)> = Vec::new();
         for (tail, at) in tails {
@@ -455,10 +456,16 @@ impl<'a> Checker<'a> {
         // What each pending raise leaves over once its own body's `catch`es
         // have had their say.
         let mut defs: Vec<(Type, Def)> = Vec::new();
+        // Which definitions are raises of a forgotten row, before any
+        // `catch` takes them: see `forgotten_tails`.
+        let mut forgets: Vec<bool> = Vec::new();
         for pending in std::mem::take(&mut self.pending_raises) {
             let PendingRaise { ty, tail, range, handlers, .. } = pending;
-            let left = self.leftover(&ty, range, &handlers);
-            defs.push((tail, Def::Pending(left)));
+            let zonked = self.unifier.zonk(&ty);
+            forgets.push(matches!(crate::raised_row(&zonked).map(|r| self.unifier.zonk(r)),
+                Some(Type::Row { fields, .. }) if fields.iter().any(|(_, t)| crate::is_std_opaque(t))));
+            let (left, rest) = self.leftover(&ty, range, &handlers);
+            defs.push((tail, Def::Pending(left, rest)));
         }
         for derived in std::mem::take(&mut self.derived_tails) {
             match derived {
@@ -469,6 +476,8 @@ impl<'a> Checker<'a> {
             }
         }
 
+        self.forgotten_tails = self.forgotten_tails_of(&defs, &forgets);
+
         // Every content is read before any tail is solved, so each is read
         // from the state inference left, not from one half settled.
         let contents = self.contents_of(&defs);
@@ -477,18 +486,78 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Refuses an error a binding `catch` arm was not typed for, which
-    /// reached its operand through a tail solved only after the body; and a
-    /// named arm for a type that, once every raise is typed, nothing in its
-    /// operand raises after all.
+    /// The tails that a raise of a forgotten row (`Raised<Opaque>`) reaches,
+    /// whether or not a `catch` on the way takes it.
     ///
-    /// Run after [`Self::settle_raises`], when each such tail stands for the
-    /// errors it carries. An entry of another type is the failure the
-    /// binding would have read at the wrong layout; a rigid `'er` at the end
-    /// is the same failure for whatever type the caller picks. An ordinary
-    /// open rest is room left to widen, not an error, and passes.
-    pub(crate) fn check_bound_tails(&mut self) {
+    /// **What a tail carries is not enough to tell.** A `_` beside named arms
+    /// takes the whole forgotten row, so the tail the operand's demand ends in
+    /// solves to nothing; asked afterwards whether `Opaque` could arrive, it
+    /// said no, and the named arms went unchecked. This asks before any
+    /// subtraction: a raise's own tail is marked when its type is a
+    /// `Raised<Opaque>`, and a merged or caught tail when any tail it reads
+    /// is, to a fixed point.
+    fn forgotten_tails_of(&self, defs: &[(Type, Def)], forgets: &[bool]) -> Vec<Type> {
+        let mut marked: Vec<bool> = (0..defs.len()).map(|i| forgets.get(i).copied().unwrap_or(false)).collect();
+        let reads: Vec<Vec<usize>> = defs
+            .iter()
+            .map(|(_, def)| {
+                let from: Vec<&Type> = match def {
+                    Def::Pending(_, rest) => rest.iter().collect(),
+                    Def::Merged(members) => members.iter().collect(),
+                    Def::Caught(source, _) => vec![source],
+                };
+                from.into_iter()
+                    .flat_map(|t| match self.source_of(defs, t) {
+                        Source::Defs(read) => read,
+                        Source::Rest(_) => Vec::new(),
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for index in 0..defs.len() {
+                if !marked[index] && reads[index].iter().any(|&r| marked[r]) {
+                    marked[index] = true;
+                    changed = true;
+                }
+            }
+        }
+        defs.iter().zip(marked).filter(|(_, m)| *m).map(|((own, _), _)| own.clone()).collect()
+    }
+
+    /// Whether `tail` is one a raise of a forgotten row reaches. Asked of
+    /// the tails a `catch` saw unsettled; see [`Self::forgotten_tails_of`].
+    fn reaches_forgotten(&self, tail: &Type) -> bool {
+        let here = self.unifier.shallow(tail);
+        self.forgotten_tails.iter().any(|f| f == tail || self.unifier.shallow(f) == here)
+    }
+
+    /// Refuses a named `catch` arm for a type that, once every raise is
+    /// typed, nothing in its operand raises after all.
+    ///
+    /// Run after [`Self::settle_raises`], when each tail the arm waited on
+    /// stands for the errors it carries.
+    ///
+    /// **A tail that turns out to carry `Opaque` can carry any type**, as an
+    /// operand known to raise `Opaque` can: the arm is not refused, and a
+    /// generic arm over it goes to the same undecided-instantiation check
+    /// ([`Self::refuse_bare_opaque`]). Settled late, the forgotten row was
+    /// missed both ways -- `Pay::Declined` refused as raised by nothing, and
+    /// `Gx::X(..)` compiled at an instantiation nothing decided, so the `Gx`
+    /// that arrived walked past it.
+    pub(crate) fn check_late_named_arms(&mut self) {
+        let forgotten = |this: &Self, tails: &[Type]| tails.iter().any(|t| this.reaches_forgotten(t));
+        for late in std::mem::take(&mut self.late_arms) {
+            if forgotten(self, &late.tails) {
+                self.opaque_arms.extend(late.arms);
+            }
+        }
         for (owner, tails, range) in std::mem::take(&mut self.named_late) {
+            if forgotten(self, &tails) {
+                continue;
+            }
             let raised = tails.iter().any(|t| {
                 matches!(self.unifier.zonk(t), Type::Row { fields, .. }
                     if fields.iter().any(|(label, _)| *label == owner))
@@ -497,45 +566,34 @@ impl<'a> Checker<'a> {
                 self.error(format!("nothing in this expression raises `{owner}`"), range);
             }
         }
-        for (tail, bound, at) in std::mem::take(&mut self.bound_tails) {
-            let Type::Row { fields, tail: rest } = self.unifier.zonk(&tail) else { continue };
-            let bound = self.unifier.zonk(&bound);
-            let mut others: Vec<String> = Vec::new();
-            for (_, ty) in &fields {
-                if self.unifier.unify(&bound, ty).is_err() {
-                    let shown = format!("`{ty}`");
-                    if !others.contains(&shown) {
-                        others.push(shown);
-                    }
-                }
-            }
-            if let Some(rest) = rest {
-                if let Type::Param(name) = self.unifier.shallow(&rest) {
-                    if name.starts_with('\'') {
-                        others.push(format!("`{name}`, an error type the caller chooses"));
-                    }
-                }
-            }
-            if others.is_empty() {
-                continue;
-            }
-            self.error(
-                format!(
-                    "this `catch` arm binds the failure as `{bound}`, but the operand can \
-                     also raise {}, through a closure it calls, so there is no single type \
-                     to give the binding. Write an arm for each case you handle and let the \
-                     rest pass on, or use `_` to handle every failure without reading it",
-                    others.join(" and ")
-                ),
-                at,
-            );
-        }
     }
 
     /// What one pending raise leaves over: nothing if a `catch` in its own
     /// body took it, else its type under its label.
-    fn leftover(&mut self, ty: &Type, range: TextRange, handlers: &[Handler]) -> Vec<Entry> {
+    fn leftover(
+        &mut self,
+        ty: &Type,
+        range: TextRange,
+        handlers: &[Handler],
+    ) -> (Vec<Entry>, Option<Type>) {
         let ty = self.unifier.zonk(ty);
+        // **A failure value raised on leaves as the row it holds, tail and
+        // all.** A `raise f` whose `f` was typed only later arrives here with
+        // its row; every entry is raised, as `infer` does for an `f` known at
+        // the `raise`, and a `_` takes all of it. The row's tail -- a rigid
+        // `'er`, or a tail still to be settled -- goes too: keeping only the
+        // entries let `fn f => raise f` launder a caller's `'er` out of a
+        // function that declares only `Pay`, and the error reached a `catch`
+        // that had no arm for it (status 134).
+        if let Some(row) = crate::raised_row(&ty) {
+            let row = self.unifier.zonk(row);
+            let Type::Row { fields, tail } = row else { return (Vec::new(), None) };
+            if handlers.iter().any(|h| matches!(h, Handler::Everything)) {
+                return (Vec::new(), None);
+            }
+            let entries = fields.into_iter().map(|(label, ty)| Entry { label, ty, range }).collect();
+            return (entries, tail.map(|t| *t));
+        }
         match &ty {
             Type::Adt { .. } | Type::Param(_) => {}
             Type::Var(_) => {
@@ -545,9 +603,9 @@ impl<'a> Checker<'a> {
                         .to_string(),
                     range,
                 );
-                return Vec::new();
+                return (Vec::new(), None);
             }
-            Type::Unknown | Type::Never => return Vec::new(),
+            Type::Unknown | Type::Never => return (Vec::new(), None),
             Type::Int
             | Type::Fixed(_)
             | Type::Float
@@ -569,13 +627,22 @@ impl<'a> Checker<'a> {
                     ),
                     range,
                 );
-                return Vec::new();
+                return (Vec::new(), None);
             }
         }
         let label = label_of(&ty);
         for handler in handlers {
             match handler {
-                Handler::Everything => return Vec::new(),
+                Handler::Everything => return (Vec::new(), None),
+                // **A failure value carries this raise; it does not swallow
+                // it.** The binding's row ends in this raise's own tail (see
+                // `infer_catch`), so the entry solved here is what the
+                // binding holds, and goes on to wherever its arm sends it.
+                // Answering nothing let `catch { err => raise err }` re-raise
+                // a type the function never declared.
+                Handler::Binds(bound, _) if crate::raised_row(&self.unifier.zonk(bound)).is_some() => {
+                    return (vec![Entry { label, ty, range }], None);
+                }
                 Handler::Binds(bound, at) => {
                     self.require(
                         bound,
@@ -585,7 +652,7 @@ impl<'a> Checker<'a> {
                          in two `catch`es, or with `_`",
                         *at,
                     );
-                    return Vec::new();
+                    return (Vec::new(), None);
                 }
                 Handler::Named(_) => {
                     // Named arms are applied by the `Caught` tail the `catch`
@@ -595,7 +662,7 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        vec![Entry { label, ty, range }]
+        (vec![Entry { label, ty, range }], None)
     }
 
     /// What every tail `defs` defines stands for: the least solution of the
@@ -649,7 +716,7 @@ impl<'a> Checker<'a> {
         let sources: Vec<Vec<Source>> = defs
             .iter()
             .map(|(_, def)| match def {
-                Def::Pending(_) => Vec::new(),
+                Def::Pending(_, rest) => rest.iter().map(|r| self.source_of(defs, r)).collect(),
                 Def::Merged(members) => members.iter().map(|m| self.source_of(defs, m)).collect(),
                 Def::Caught(source, _) => vec![self.source_of(defs, source)],
             })
@@ -677,9 +744,12 @@ impl<'a> Checker<'a> {
         while let Some(index) = queue.pop_front() {
             queued[index] = false;
             let next = match &defs[index].1 {
-                Def::Pending(left) => {
+                Def::Pending(left, _) => {
                     let mut out = Content::default();
                     out.absorb(Content { entries: left.clone(), rest: None });
+                    for source in &sources[index] {
+                        out.absorb(read_source(source, &value));
+                    }
                     out
                 }
                 Def::Merged(_) => {
@@ -724,7 +794,7 @@ impl<'a> Checker<'a> {
         for (index, (_, def)) in defs.iter().enumerate() {
             let arms = match def {
                 Def::Caught(_, arms) => arms,
-                Def::Pending(_) | Def::Merged(_) => continue,
+                Def::Pending(..) | Def::Merged(_) => continue,
             };
             for entry in read_source(&sources[index][0], &value).entries {
                 // Every arm naming the type, not the first: each arm was
@@ -1504,11 +1574,12 @@ fn one_error_type_note(expected: &Type, found: &Type) -> String {
         return String::new();
     }
     let named: Vec<String> = fields.iter().map(|(_, ty)| format!("`{ty}`")).collect();
+    let union: Vec<String> = fields.iter().map(|(_, ty)| ty.to_string()).collect();
     format!(
-        ". This takes one error type and the body raises {}; \
-         there is no type that means \"either of these\", so handle them with \
-         `catch` instead",
-        named.join(" and ")
+        ". This takes one error type and the body raises {}. To take either, \
+         write the type as `Raised<{}>`, or handle them with `catch`",
+        named.join(" and "),
+        union.join(" + ")
     )
 }
 

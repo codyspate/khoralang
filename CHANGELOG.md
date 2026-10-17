@@ -87,14 +87,20 @@ it will behave differently now.
   stopped the program at status 134. Only the closure making both calls
   carries `'er`: closures it calls keep their own rows. One closure that
   raises through two different rigid rows (`'e1` and `'e2`) is refused.
-- A `catch` arm that binds the failure (`e => ..`) is refused when the
-  operand can raise a rigid `'er`, since the caller picks that type; name
-  the constructors to handle, or use `_`. It compiled and read the error
-  at the wrong type, ending in a segmentation fault. It is also refused
-  when a raise typed later in the function -- a closure's `raise e` whose
-  `e` is typed by a call after the `catch` -- gives the operand a type
-  other than the binding's; that compiled and stopped with `Illegal
-  instruction`.
+- A `catch` arm that binds the failure (`e => ..`) is a `Raised` over
+  everything that can reach it whenever that is more than one type: two
+  named types, a rigid `'er`, or a raise typed later in the function -- a
+  closure's `raise e` whose `e` is typed by a call after the `catch`. It
+  compiled and read the error at one type, ending in a segmentation fault
+  or `Illegal instruction`. `match` over such a binding with an error
+  type's constructors is a type error; write `(raise e) catch { .. }`. A
+  binding over exactly one type is that type.
+- `attempt` returns `Result<A, Raised<'er>>` for a body raising any row,
+  one type or several. Code that matched the error directly --
+  `Result::Err(IoError::NotFound(p))` -- takes it out first:
+  `Result::Err(f) => match Raised::only(f) { IoError::NotFound(p) => .. }`.
+  `retry_while` and `retry_counting` hand their predicate a `Raised<'er>`,
+  and `Tried` holds one.
 - An arm after a `catch`'s unguarded `_` or binding arm is refused as
   unreachable, and a guarded `_` or binding arm with no unguarded one after
   it is refused. `_ => .., e if c => ..` compiled and ended in a
@@ -207,6 +213,29 @@ it will behave differently now.
   wasm32-unknown-unknown` succeeds.
 
 ### Added
+
+- `Raised<'er>`, a failure held as a value: one error of one of the types in
+  the row `'er`, which knows which. `attempt`, and a `catch` binding over
+  more than one type, give one. `Raised::type_name`, `describe` and `show`
+  read it; `Raised::only` gives back the error of a one-type `Raised`;
+  `raise f` sends the error on as its own type, so a `catch` after it
+  matches it by type and variant. A function that raises `A + B` can be
+  passed to `attempt`, `retry` and `retry_while`. One allocation per failure
+  bound this way; a `catch` that names its cases allocates nothing.
+- `Raised::context(f, note)` adds a note to a failure without changing what
+  a `catch` sees. The note goes with the failure through `raise`, `retry`,
+  cancellation and fiber joins, and `show` prints it first. A program that
+  attaches no context runs the same failure paths it would without it.
+- `Raised::forget` turns any `Raised` into a `Raised<Opaque>`, one type for
+  failures from many places. The error keeps its type, and a `catch` over
+  `Opaque` matches it by that type beside a `_` or binding arm. `Opaque`
+  exists only inside a `Raised`.
+- A `Raised` stays on the fiber that caught it: a `Handoff`, `Channel`,
+  spawn capture or spawned body's error holding one is refused when the
+  program is checked, naming the field that holds it. Send its text
+  (`show()`) or its error (`Raised::only`) instead.
+- A failure with context that reaches the entry point prints it after the
+  type's name: `failure: processing batch 3: ShipError::Embargo(XX)`.
 
 - `Channel::claim(jobs, abandon)` takes a value off a channel as a `Claim`,
   with `abandon` registered before anything after the take can stop. A claim

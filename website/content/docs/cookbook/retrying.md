@@ -14,7 +14,7 @@ A GET that backs off, gives up after five attempts, and does not waste any of th
 module main;
 
 import std::clock::{Clock};
-import std::core::{Result, attempt, print};
+import std::core::{Raised, Result, attempt, print};
 import std::net::http::{Answer, Call, CallError, HttpClient};
 import std::random::{Random};
 import std::resilience::{Schedule, retry_while};
@@ -33,8 +33,8 @@ fn policy() -> Schedule {
   Schedule::Intersect(Schedule::backoff(100, 30000), Schedule::times(5))
 }
 
-fn worth_retrying(why: CallError) -> Bool {
-  match why {
+fn worth_retrying(failure: Raised<CallError>) -> Bool {
+  match Raised::only(failure) {
     CallError::Denied(_host) => false,
     CallError::BadUrl(_url) => false,
     CallError::Unreachable(_at) => true,
@@ -56,7 +56,7 @@ pub fn main() {
   with { clock: Clock::real(), random: Random::real(), http: HttpClient::real() } {
     match attempt(fn () => quote("https://api.example.com/quote")!) {
       Result::Ok(answer) => print(Int::to_string(answer.status)),
-      Result::Err(_why) => print("the quote service never answered"),
+      Result::Err(why) => print("the quote service never answered: ${why.show()}"),
     }
   }
 }
@@ -98,7 +98,21 @@ A `Schedule` is a description and holds no clock, so it can be compared, printed
 
 `retry` tries again on any failure. `retry_while` takes a predicate, and this is where most of the value is: a request denied by `khora.toml`, a malformed URL, a TLS handshake that failed — none of those get better on the second attempt, and retrying them five times just makes the error arrive later.
 
-The predicate is a closure over your own error type rather than a `Schedule` case, on purpose. *When to try again* is a policy somebody configures. *Whether this failure is worth trying again* is knowledge about the error. Keeping them apart is what lets `Schedule` stay a plain comparable value.
+The predicate is a closure over the failure rather than a `Schedule` case, on purpose. *When to try again* is a policy somebody configures. *Whether this failure is worth trying again* is knowledge about the error. Keeping them apart is what lets `Schedule` stay a plain comparable value.
+
+The predicate is handed the failure as a [`Raised`](/docs/reference/failures/#failures-as-values), so the body may raise more than one type. Over one type, `Raised::only` gives back the error to match on, as above. Over several, raise it into a `catch` and name the cases worth another go:
+
+```khora
+fn worth_retrying(failure: Raised<CallError + DbError>) -> Bool {
+  (raise failure) catch {
+    CallError::Unreachable(_at) => true,
+    DbError::Disconnected(_why) => true,
+    _ => false,
+  }
+}
+```
+
+Context attached inside the body -- `Raised::context(failure, "fetching the quote")` -- goes with the failure through every attempt, so the one `retry_while` finally raises says where it came from.
 
 ## Poll with `repeat`
 

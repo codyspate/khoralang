@@ -290,6 +290,12 @@ enum Cleanup<'ctx> {
     /// than taking it out, so that a case no named arm takes reaches the
     /// catch-all still in its box; this is the release once an arm has run.
     Spilled(PointerValue<'ctx>, Type),
+    /// A failure a `catch` arm reads in place, released by the id it arrived
+    /// under once the arm has run. For a program that attaches context,
+    /// where it may have arrived in its `Raised` box
+    /// ([`runtime::NOTED_WHICH`]): the arm reads the error inside, and this
+    /// lets go of the box, the error and the note together.
+    Failure(IntValue<'ctx>, IntValue<'ctx>),
 }
 
 /// Where [`Lower::make_closure`] puts a closure object.

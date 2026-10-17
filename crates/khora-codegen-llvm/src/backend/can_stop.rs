@@ -160,6 +160,7 @@ fn is_intrinsic_owner(owner: &str) -> bool {
         || owner == crate::runtime::SHARED_TYPE
         || owner == crate::runtime::SHARED_FN_TYPE
         || owner == crate::runtime::ARRAY_TYPE
+        || owner == khora_types::RAISED_TYPE
         || is_int_owner(owner)
         || matches!(owner, "Char" | "String" | "Float" | "Ptr")
 }
@@ -192,6 +193,9 @@ fn stop_free(owner: &str, name: &str) -> bool {
         "String" => matches!(name, "bytes" | "byte" | "byte_length" | "slice" | "find" | "from_bytes"),
         "Float" => name == "to_int",
         "Ptr" => matches!(name, "null" | "is_null"),
+        // `describe` runs the error's own `Show`, which may stop, and is
+        // counted. The others read, move or copy the box.
+        khora_types::RAISED_TYPE => matches!(name, "type_name" | "note" | "with_note" | "forget" | "only"),
         _ => false,
     }
 }

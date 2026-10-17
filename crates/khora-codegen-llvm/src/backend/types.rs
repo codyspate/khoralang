@@ -372,7 +372,7 @@ impl<'ctx> Backend<'ctx> {
     /// is what assigns error ids and one more may be assigned by the last body
     /// compiled.
     pub fn emit_error_releaser(&mut self) {
-        let Some(function) = self.error_releaser else { return };
+        let Some(function) = self.error_releaser.filter(|f| f.count_basic_blocks() == 0) else { return };
         let entry = self.ctx.append_basic_block(function, "entry");
         let done = self.ctx.append_basic_block(function, "done");
 
@@ -421,6 +421,23 @@ impl<'ctx> Backend<'ctx> {
             cases.push((self.ctx.i32_type().const_int(u64::from(*id), false), block));
         }
 
+        // **A failure that carries context is its `Raised` box**, and goes
+        // with the box's glue: the error inside by its own id, and the note.
+        // Only in a program that can make one; elsewhere the case would be
+        // dead, and the glue with it.
+        if self.noted() {
+            let block = self.ctx.append_basic_block(function, "release.noted");
+            let glue = self.raised_glue();
+            self.builder.position_at_end(block);
+            let ptr = self.ctx.ptr_type(AddressSpace::default());
+            let object = self.builder.build_int_to_ptr(word, ptr, "noted").expect("a word as the box");
+            self.builder
+                .build_call(self.rt.drop, &[object.into(), glue.into()], "")
+                .expect("releasing a failure with context");
+            self.builder.build_unconditional_branch(done).expect("leaving a release case");
+            cases.push((self.ctx.i32_type().const_int(crate::runtime::NOTED_WHICH, false), block));
+        }
+
         self.builder.position_at_end(entry);
         self.builder.build_switch(which, done, &cases).expect("dispatching on the error type");
 
@@ -464,7 +481,7 @@ impl<'ctx> Backend<'ctx> {
 
     /// Defines [`Self::take_error`], if anything asked for it.
     pub fn emit_error_taker(&mut self) {
-        let Some(function) = self.error_taker else { return };
+        let Some(function) = self.error_taker.filter(|f| f.count_basic_blocks() == 0) else { return };
         let entry = self.ctx.append_basic_block(function, "entry");
         let unchanged = self.ctx.append_basic_block(function, "unchanged");
 

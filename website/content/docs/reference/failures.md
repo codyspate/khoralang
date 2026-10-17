@@ -12,7 +12,7 @@ The four pieces, at a glance:
 raise E                    create a typed failure
 foo()!                     allow E to propagate out of the current function
 foo()! catch { ... }       handle E here
-attempt(fn () => foo()!)   turn E into a Result<A, E> value
+attempt(fn () => foo()!)   turn E into a Result<A, Raised<E>> value
 ```
 
 ## Declare a failure type
@@ -134,12 +134,12 @@ let user = load_user(id)! catch { trouble => User::unavailable(Show::show(troubl
 
 That arm handles everything the operand can raise, so it needs no companion. It is the form to reach for when the answer does not depend on which variant arrived -- turning a nine-variant error into one `Refused` is one arm this way and nine identical ones by constructor.
 
-The binding is typed by the operand's failure row, so it works when that row names **one** type. Where an operand raises two, there is no single type to give the name, and the compiler says so:
+The binding is typed by what can reach it. When the operand raises **one** type and nothing else, the binding is that type, and its variants can be matched directly. When more than one type can reach it -- two named types, a row variable such as `'er`, a failure raised by a closure whose type is decided later -- the binding is a `Raised` over all of them: a failure held as a value, which knows which type it is. See [Failures as values](#failures-as-values).
 
-```text
-this `catch` arm binds the failure, but the operand can raise more than one
-type (DbError, ModelError), so there is no single type to give the binding.
-Name a constructor, or use `_` to handle them all without looking
+```khora
+let message = sync(order)! catch {
+  err => "sync failed: ${err.show()}",   // err: Raised<DbError + ModelError>
+};
 ```
 
 `_` remains the arm for "handle everything and do not look at it": it binds nothing, and the failure is released without being read.
@@ -189,7 +189,7 @@ let message = checkout(order)! catch {
 };
 ```
 
-A binding arm is refused when the operand can raise a row variable such as `'er`, because the caller chooses that type and the binding has none to be given. Name the variants you handle, or use `_`.
+When named arms take some of the types and a binding takes the rest, the binding is a `Raised` over what the named arms leave, even when that is one type: a failure that carried context keeps it through the narrowing.
 
 Arms are tried in the order they are written, and a guard that is false moves on to the next arm. Arms naming a constructor come before the arms that take every failure. A guarded `_` or binding arm hands what its guard turns away to the arm after it, and needs an unguarded `_` or binding arm somewhere after it to take what every guard refuses:
 
@@ -273,16 +273,16 @@ The function has no `raises ApiError` because the boundary consumes every `ApiEr
 
 ## `attempt`
 
-`attempt` converts a computation's failure channel into `Result<A, E>`:
+`attempt` converts a computation's failure channel into a `Result` whose error is a [`Raised`](#failures-as-values), whatever the body raises -- one type, several, or a row variable:
 
 ```khora
 let result = attempt(fn () => load_user(id)!);
 ```
 
-Conceptual type:
+Its type:
 
 ```khora
-fn attempt<A, E, 'ef>(body: () -> A with 'ef raises E) -> Result<A, E>
+fn attempt<A, 'er, 'ef>(body: () -> A with 'ef raises 'er) -> Result<A, Raised<'er>>
   with 'ef;
 ```
 
@@ -291,36 +291,110 @@ The returned `Result` is ordinary data:
 ```khora
 match result {
   Result::Ok(user) => use_user(user),
-  Result::Err(error) => log_error(error),
+  Result::Err(failure) => log_error(failure.show()),
 }
 ```
 
-### One error type
-
-`E` is a type, not a row, so `attempt` handles a body that raises exactly one thing. A body raising two has nowhere to go through it:
-
-```text
-error: this argument: `Denied` is not accounted for here. This takes one error
-       type and the body raises `Denied` and `IoError`; there is no type that
-       means "either of these", so handle them with `catch` instead
-```
-
-This is a real limit rather than an oversight. `Result<A, E>` needs one `E`, and Khora has no anonymous sum type to name "either of these two" — so there is nothing for a two-type row to collapse into. Naming the union would mean declaring a type for every pair of failures a program happens to combine.
-
-Use [`catch`](#handle-failures-with-catch) for a wider row. It matches per type and never has to name the union:
-
-Here `fetch` raises `std::fs`'s `IoError` and the program's own `Denied`, and
-one `catch` covers both. Every constructor is written with its type in front of
-it, and naming a type commits to all of its variants — `IoError` has three:
+For a body that raises one type, `Raised::only` gives back the error itself, to match on:
 
 ```khora
-let answer = fetch(url)! catch {
-  IoError::NotFound(_path) => fallback(),
-  IoError::Failed(_path) => fallback(),
-  IoError::Denied(_path) => refuse(),
-  Denied::Denied(_path) => refuse(),
-};
+match attempt(fn () => load_user(id)!) {
+  Result::Ok(user) => use_user(user),
+  Result::Err(failure) => match Raised::only(failure) {
+    UserError::NotFound(_) => guest(),
+    UserError::Unavailable(reason) => offline(reason),
+  },
+}
 ```
+
+For a body that raises several, raise the failure into a `catch`, which matches it per type:
+
+```khora
+match attempt(fn () => fetch(url)!) {
+  Result::Ok(answer) => answer,
+  Result::Err(failure) => (raise failure) catch {
+    IoError::NotFound(_path) => fallback(),
+    Denied::Denied(_path) => refuse(),
+    other => give_up(other.show()),
+  },
+}
+```
+
+## Failures as values
+
+`Raised<'er>` is a failure held as a value: one error, of one of the types in the row `'er`, which remembers which. A `catch` binding over more than one type gives one, and so does `attempt`. It is how a failure is stored, logged, passed to a function, or returned in a `Result`, without declaring a type for every combination of failures a program happens to meet.
+
+```khora
+fn describe<'er>(failure: Raised<'er>) -> String {
+  "${Raised::type_name(failure)}: ${Raised::describe(failure)}"
+}
+```
+
+`Raised<A + B>` is written with the row's types, and `Raised<'er>` with a row variable.
+
+What a `Raised` has:
+
+| | |
+| --- | --- |
+| `Raised::type_name(f)` | the declared name of the error's type: `"PaymentError"` |
+| `Raised::describe(f)` | the error by its own type's `Show`, or its type name for a type without one |
+| `f.show()` | the context, then the error: `"charging: PaymentError::Declined(card)"` |
+| `Raised::context(f, note)` | the same failure with `note` added outside its context |
+| `Raised::note(f)` | the context attached so far, outermost first, or `""` |
+| `Raised::forget(f)` | the same failure as a `Raised<Opaque>`, its row forgotten |
+| `Raised::only(f)` | the error itself, for a `Raised` over exactly one type |
+| `raise f` | sends the error on as the type it is, with its context |
+
+**`raise f` is the way back.** It does not raise a value of type `Raised`: it raises the error inside, as its own type, so a `catch` after it matches `PaymentError::Declined` exactly as if the original `raise` had reached it. A function that raises `f: Raised<A + B>` declares `raises A + B`.
+
+### Context
+
+`context` adds a note to a failure without changing what it is:
+
+```khora
+fn sync(id: Int) -> Invoice raises DbError + HttpError {
+  fetch(id)! catch { err => raise Raised::context(err, "syncing invoice ${id}") }
+}
+```
+
+A `catch` after it still matches `DbError::Disconnected` by its type and variant. The note goes with the failure through `raise`, through `retry` and `retry_while`, through cancellation, and out of a fiber to whoever joins it, and `show` prints it first:
+
+```text
+syncing invoice 7: DbError::RowCorrupt(7)
+```
+
+Each `context` costs one allocation for the new failure value, since the one it was given may be held elsewhere and is left as it was, plus whatever building the note's text costs. A literal note costs nothing more, because a literal is not allocated. An interpolated one costs the string it builds: `"charging ${n}"` is three more. A second `context` on a failure that already has a note joins the two as `"outer: inner"`, which is one more string. So per failure, a literal note costs 1 allocation, `"charging ${n}"` costs 4, and two literal notes cost 3. A program that attaches no note pays nothing for the possibility.
+
+### Forgetting the row
+
+A record or a list that keeps outcomes from several places cannot list every error each of them might raise. `Raised::forget` turns any `Raised` into a `Raised<Opaque>`, which is one type for all of them:
+
+```khora
+let outcomes: List<Result<Int, Raised<Opaque>>> = jobs |> List::map(fn job =>
+  attempt(fn () => run(job)!) |> Result::map_err(fn f => Raised::forget(f))
+);
+```
+
+The error inside keeps its type, and a `catch` still matches it by that type. Because any type can arrive, a `catch` over `Opaque` needs a `_` or a binding arm:
+
+```khora
+(raise stored) catch {
+  DbError::Disconnected(_why) => retry_later(),
+  other => log(other.show()),
+}
+```
+
+`Opaque` exists only inside a `Raised`. A value of type `Opaque` on its own, `Raised::only` on a `Raised<Opaque>`, and a `raises Opaque` row are refused, because there is no type to read the error as. A generic type named in a `catch` arm over `Opaque` -- `Gx::X(..)` -- needs its arguments decided by something else in the arm, since nothing in the failure says which `Gx` it is; and all the arms naming one type share one instantiation.
+
+### What a `Raised` cannot do
+
+A `Raised` cannot be compared with `==`, hashed, or sent to another fiber. It stays on the fiber that caught it, because the error and note inside it are counted by that fiber alone. That holds through a `Handoff`, a `Channel`, a capture of `Fiber::spawn` and a spawned body's error, and through any record or list holding one. To send a failure to another fiber, send its text, `failure.show()`, or its error, `Raised::only(failure)`, when that error type is `Share`.
+
+`match` sees a `Raised` as a `Raised`, not as the error inside, so a `Pay::Declined` pattern in a `match` over one is a type error. Raise it into a `catch` to match on the error.
+
+### Cost
+
+A failure becomes a value in a box of three words -- which type, the error, the note -- allocated when it is bound or attempted. A `catch` that names its cases, or binds a failure of one type, allocates nothing, and a program that never attaches context runs the same failure paths it would without `Raised`.
 
 ## Two marks, doing different jobs
 
@@ -443,8 +517,10 @@ pub fn main() -> Int {
   with { reads: FsRead::real() } {
     match attempt(fn () => read_text(path)!) {
       Result::Ok(text) => { print(text); 0 },
-      Result::Err(IoError::NotFound(missing)) => { eprint("no such file: ${missing}"); 1 },
-      Result::Err(other) => { eprint("could not read it"); 1 },
+      Result::Err(failure) => match Raised::only(failure) {
+        IoError::NotFound(missing) => { eprint("no such file: ${missing}"); 1 },
+        _ => { eprint("could not read it"); 1 },
+      },
     }
   }
 }

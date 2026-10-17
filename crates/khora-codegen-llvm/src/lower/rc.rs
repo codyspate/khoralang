@@ -400,6 +400,13 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .build_call(drop, &[object.into(), glue.into()], "")
                     .expect("releasing the box a caught error crossed in");
             }
+            Cleanup::Failure(which, word) => {
+                let releaser = self.be.release_error();
+                self.be
+                    .builder
+                    .build_call(releaser, &[which.into(), word.into()], "")
+                    .expect("releasing a caught failure by its id");
+            }
         }
     }
 }

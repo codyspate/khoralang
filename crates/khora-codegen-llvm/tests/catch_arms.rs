@@ -174,11 +174,11 @@ fn main() -> Int {{
 }
 
 /// The binding arm over a closure whose raise is typed later, where that
-/// raise is the binding's own type: accepted, and each case reaches it.
+/// raise is the binding's own type: the binding is a `Raised` over what can
+/// reach it, raised into named arms, and each case reaches the arm for it.
 ///
-/// With another type it is refused (`khora-types`
-/// `a_binding_arm_over_a_closure_raising_another_type_later_is_refused`);
-/// it ran and stopped with `Illegal instruction` (exit 132).
+/// It ran and stopped with `Illegal instruction` (exit 132) when the binding
+/// was given the one type before the later raise was known.
 #[test]
 fn a_binding_arm_over_a_closure_raising_its_type_later_reads_it() {
     let ran = run_both(
@@ -189,7 +189,7 @@ fn late(which: Int) -> Int {{
   let wrapper = fn e => {{
     let k = fn () => raise e;
     (if which == 0 {{ pay(0)! }} else {{ k()! }}) catch {{
-      err => match err {{ Pay::Declined(r) => String::byte_length(r), Pay::Timeout => 9 }},
+      err => (raise err) catch {{ Pay::Declined(r) => String::byte_length(r), Pay::Timeout => 9 }},
     }}
   }};
   wrapper(Pay::Declined(\"ca\" + \"rd\"))

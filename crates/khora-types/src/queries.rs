@@ -293,6 +293,10 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             unsettled_raises: Vec::new(),
             call_rows: HashMap::new(),
             caught: HashMap::new(),
+            opaque_arms: Vec::new(),
+            late_arms: Vec::new(),
+            forgotten_tails: Vec::new(),
+            raised_raises: HashSet::new(),
             total_catches: HashSet::new(),
             installed: Vec::new(),
             loops: Vec::new(),
@@ -304,7 +308,6 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             pending_raises: Vec::new(),
             derived_tails: Vec::new(),
             owner_rows: Vec::new(),
-            bound_tails: Vec::new(),
             named_late: Vec::new(),
             pending_updates: Vec::new(),
             errors: Vec::new(),
@@ -317,7 +320,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
         // Before the rows are closed: what a raise not yet typed leaves over
         // is a tail of its own, and closing it is what says it left nothing.
         checker.settle_raises();
-        checker.check_bound_tails();
+        checker.check_late_named_arms();
         checker.close_open_rows();
         checker.check_bounds();
         checker.check_unsettled_captures();
@@ -357,6 +360,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
         // one is settled too.
         checker.settle_coverage();
         checker.check_effects();
+        checker.refuse_bare_opaque();
         if parsed {
             checker.check_unknowns();
         }

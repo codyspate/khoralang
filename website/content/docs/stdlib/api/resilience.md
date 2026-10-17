@@ -309,7 +309,7 @@ deciding when to redeliver -- needs the *decision* without the waiting.
 ### retry
 
 ```khora
-pub fn retry<A, E, 'ef>(schedule: Schedule, body: () -> A with 'ef raises E) -> A with { 'ef | clock: Clock, random: Random } raises E
+pub fn retry<A, 'er, 'ef>(schedule: Schedule, body: () -> A with 'ef raises 'er) -> A with { 'ef | clock: Clock, random: Random } raises 'er
 ```
 
 Runs `body` until it succeeds or the schedule runs out.
@@ -349,7 +349,7 @@ clients that failed together do not come back together.
 ### retry_while
 
 ```khora
-pub fn retry_while<A, E, 'ef>(schedule: Schedule, again: (E) -> Bool, body: () -> A with 'ef raises E) -> A with { 'ef | clock: Clock, random: Random } raises E
+pub fn retry_while<A, 'er, 'ef>(schedule: Schedule, again: (Raised<'er>) -> Bool, body: () -> A with 'ef raises 'er) -> A with { 'ef | clock: Clock, random: Random } raises 'er
 ```
 
 `retry`, for a caller that can tell a retryable failure from a permanent one.
@@ -372,7 +372,7 @@ fn load(id: Int) -> Row
   raises DbError
 {
   retry_while(Schedule::times(3), fn problem =>
-    match problem {
+    match Raised::only(problem) {
       DbError::Disconnected(_) => true,
       DbError::Rejected(_) => false,
       DbError::RolledBack(_) => false,
@@ -384,10 +384,17 @@ The predicate is the point: a dropped connection is worth another go and a
 rejected statement is not, and retrying the second one just fails again
 three times more slowly.
 
+**The predicate is handed the failure as a value**, a `Raised` over
+whatever `body` raises, so a body raising two error types can be retried
+too: raise it into a `catch` to ask which it was, as
+`(raise problem) catch { DbError::Disconnected(_) => true, _ => false }`.
+The failure that stops the retrying is raised as itself, with any context
+it carries.
+
 ### retry_counting
 
 ```khora
-pub fn retry_counting<A, E, 'ef>(schedule: Schedule, again: (E) -> Bool, body: () -> A with 'ef raises E) -> Tried<A, E> with { 'ef | clock: Clock, random: Random }
+pub fn retry_counting<A, 'er, 'ef>(schedule: Schedule, again: (Raised<'er>) -> Bool, body: () -> A with 'ef raises 'er) -> Tried<A, Raised<'er>> with { 'ef | clock: Clock, random: Random }
 ```
 
 `retry_while`, reporting how many attempts it took.
@@ -409,7 +416,7 @@ that was already recovered from.
 ```khora
 import std::resilience::{Schedule, Tried, retry_counting};
 
-fn fetch_reporting() -> Tried<String, HttpError>
+fn fetch_reporting() -> Tried<String, Raised<HttpError>>
   with { client: HttpClient, clock: Clock, random: Random }
 {
   retry_counting(Schedule::times(5), fn _e => true, fn () => fetch()!)
@@ -423,7 +430,7 @@ going to look at it.
 ### repeat
 
 ```khora
-pub fn repeat<A, E, 'ef>(schedule: Schedule, body: () -> A with 'ef raises E) -> Int with { 'ef | clock: Clock, random: Random }
+pub fn repeat<A, 'er, 'ef>(schedule: Schedule, body: () -> A with 'ef raises 'er) -> Int with { 'ef | clock: Clock, random: Random }
 ```
 
 Runs `body` on the schedule until it fails or the schedule runs out, and

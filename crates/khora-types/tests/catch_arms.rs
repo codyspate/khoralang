@@ -179,20 +179,25 @@ fn a_rigid_tail_reached_directly_is_required() {
     );
 }
 
-/// A binding arm gives what it caught one type, and `'er` is any type the
-/// caller picks, so there is no one type to give it: the spec's shape,
-/// `err => raise err` over `f()!` and `g()!`, read an `AuditError` as a
-/// `Pay` and crashed.
+/// A binding arm over `'er` and a named type binds a failure value over
+/// both, `Raised<Pay + 'er>`, so `err => raise err` raises `'er` and the
+/// function has to say so. Typed as the one named type, the spec's shape read
+/// an `AuditError` as a `Pay` and crashed.
 #[test]
-fn a_binding_arm_over_a_rigid_tail_is_refused() {
+fn a_binding_arm_over_a_rigid_tail_raises_it_on() {
     assert_reports(
         &format!(
             "{TYPES}fn bound<'er>(g: () -> String raises 'er) -> String raises Pay {{\n\
                (if false {{ pay(1)! }} else {{ g()! }}) catch {{ err => raise err }}\n\
              }}\n"
         ),
-        &["binds the failure", "'er"],
+        &["'er"],
     );
+    assert_clean(&format!(
+        "{TYPES}fn bound<'er>(g: () -> String raises 'er) -> String raises Pay + 'er {{\n\
+           (if false {{ pay(1)! }} else {{ g()! }}) catch {{ err => raise err }}\n\
+         }}\n"
+    ));
 }
 
 /// `_` reads nothing, so it may take `'er` along with everything else.
@@ -268,10 +273,12 @@ fn an_infallible_closure_called_beside_a_rigid_tail_stays_infallible() {
 
 /// The operand calls a closure whose raise is typed by the call after it:
 /// at the `catch` its row was a variable, the binding was typed `Pay`, and
-/// the `Audit` it raised was read as one (exit 132).
+/// the `Audit` it raised was read as one (exit 132). The binding is a
+/// failure value over the tail, so reading it as a `Pay` is refused where
+/// it is read.
 #[test]
-fn a_binding_arm_over_a_closure_raising_another_type_later_is_refused() {
-    assert_one(
+fn a_binding_arm_over_a_closure_raising_later_is_a_failure_value() {
+    assert_reports(
         &format!(
             "{TYPES}pub type Audit = | Tampered(a: String);\n\
              fn use_audit(a: Audit) -> String {{ match a {{ Audit::Tampered(x) => x }} }}\n\
@@ -286,54 +293,52 @@ fn a_binding_arm_over_a_closure_raising_another_type_later_is_refused() {
                wrapper(Audit::Tampered(\"a\"))\n\
              }}\n"
         ),
-        &["binds the failure as `Pay`", "`Audit`"],
+        &["`Pay` case", "`Raised<"],
     );
 }
 
-/// The same closure raising the type the binding was given is accepted.
+/// Read as a failure value, the same binding is accepted whatever the
+/// closure turns out to raise.
 #[test]
-fn a_binding_arm_over_a_closure_raising_the_same_type_later_is_accepted() {
+fn a_binding_arm_over_a_closure_raising_later_can_be_read_as_a_value() {
     assert_clean(&format!(
-        "{TYPES}fn late() -> String {{\n\
+        "{TYPES}pub type Audit = | Tampered(a: String);\n\
+         fn use_audit(a: Audit) -> String {{ match a {{ Audit::Tampered(x) => x }} }}\n\
+         fn late() -> String {{\n\
            let wrapper = fn e => {{\n\
              let k = fn () => raise e;\n\
-             (if false {{ pay(0)! }} else {{ k()! }}) catch {{\n\
-               err => match err {{ Pay::Refused(r) => r, Pay::Timeout => \"t\" }},\n\
-             }}\n\
+             let s = (if false {{ pay(0)! }} else {{ k()! }}) catch {{\n\
+               err => \"caught\",\n\
+             }};\n\
+             s + use_audit(e)\n\
            }};\n\
-           wrapper(Pay::Timeout)\n\
+           wrapper(Audit::Tampered(\"a\"))\n\
          }}\n"
     ));
 }
 
-// ---- The interim refusal says what to write, once.
+// ---- A binding arm over `'er` is a failure value.
 
-/// One error, naming a case to write: refusing the arm left `pay`'s `Pay`
-/// unhandled, and a second error blamed `pay(1)!` in row syntax.
+/// No error: the binding holds `Pay` and whatever `'er` stands for, as a
+/// value, and reading nothing from it needs nothing more.
 #[test]
-fn a_refused_binding_arm_is_the_only_error() {
-    assert_one(
-        &format!(
-            "{TYPES}fn bound<'er>(f: () -> String raises 'er) -> String raises 'er {{\n\
-               (if false {{ pay(1)! }} else {{ f()! }}) catch {{ err => \"caught\" }}\n\
-             }}\n"
-        ),
-        &["binds the failure", "`Pay::Refused(_) => ..`", "use `_`"],
-    );
+fn a_binding_arm_over_a_rigid_tail_is_accepted() {
+    assert_clean(&format!(
+        "{TYPES}fn bound<'er>(f: () -> String raises 'er) -> String raises 'er {{\n\
+           (if false {{ pay(1)! }} else {{ f()! }}) catch {{ err => \"caught\" }}\n\
+         }}\n"
+    ));
 }
 
-/// Where the operand raises nothing but `'er`, the message does not say
-/// "also".
+/// Where the operand raises nothing but `'er`, `err => raise err` raises
+/// `'er` on, which the function declares.
 #[test]
-fn a_binding_arm_over_only_a_rigid_tail_says_so() {
-    assert_one(
-        &format!(
-            "{TYPES}fn only<'er>(g: () -> String raises 'er) -> String raises 'er {{\n\
-               g()! catch {{ err => raise err }}\n\
-             }}\n"
-        ),
-        &["raises only `'er`", "Use `_`"],
-    );
+fn a_binding_arm_over_only_a_rigid_tail_raises_it_on() {
+    assert_clean(&format!(
+        "{TYPES}fn only<'er>(g: () -> String raises 'er) -> String raises 'er {{\n\
+           g()! catch {{ err => raise err }}\n\
+         }}\n"
+    ));
 }
 
 // ---- Rows in messages are written as a `raises` clause writes them.
@@ -487,9 +492,9 @@ fn a_named_arm_after_a_guarded_catch_all_is_refused() {
 }
 
 /// A guarded binding followed by `_` still binds: when the guard holds, the
-/// binding reads the error, so a raise typed later of another type is
-/// refused as it is without the `_`. Taking the `_` as the handler would
-/// accept it, and the binding would read an `Audit` as a `Pay`.
+/// binding reads the error, so over a raise typed later it is a failure
+/// value, as it is without the `_`. Taking the `_` as the handler would type
+/// it `Pay`, and the binding would read an `Audit` as one.
 #[test]
 fn a_guarded_binding_before_a_wildcard_still_types_late_raises() {
     assert_reports(
@@ -508,7 +513,7 @@ fn a_guarded_binding_before_a_wildcard_still_types_late_raises() {
                wrapper(Audit::Tampered(\"a\"))\n\
              }}\n"
         ),
-        &["binds the failure as `Pay`", "`Audit`"],
+        &["`Pay` case", "`Raised<"],
     );
 }
 

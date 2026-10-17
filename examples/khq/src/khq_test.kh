@@ -12,7 +12,7 @@ module khq::khq_test;
 //! mode is producing nothing and looking like it worked, so for every case
 //! that answers there is one that must not.
 
-import std::core::{List, Option, Result, String, assert, attempt};
+import std::core::{List, Option, Raised, Result, String, assert, attempt};
 import std::json::{Json, parse};
 import khq::diag::{Problem, bare};
 import khq::eval::{eval};
@@ -30,7 +30,7 @@ const PEOPLE: String = "{\"users\":["
 fn run_on(document: String, filter: String) -> String {
   match attempt(fn () => answered(document, filter)!) {
     Result::Ok(text) => text,
-    Result::Err(trouble) => "error: ${trouble.message}",
+    Result::Err(trouble) => "error: ${Raised::only(trouble).message}",
   }
 }
 

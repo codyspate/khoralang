@@ -79,7 +79,7 @@ fn failing(code: &str) -> String {
 /// reach the end and print a live-object count whatever happened, so a `main`
 /// with a `raises` row would turn a wrong answer into a crash.
 const HEAD: &str = "module demo::main;
-import std::core::{List, Result, attempt, print};
+import std::core::{List, Raised, Result, attempt, print};
 import std::process::{Completed, Process, ProcessError, checked_output};
 
 extern fn khora_live_count() -> Int;
@@ -108,7 +108,7 @@ fn a_command_that_prints_has_its_output_captured() {
             "{HEAD}
 fn work() -> String with {{ process: Process }} {{
   match attempt(fn () => process.shell(\"echo hello\")!) {{
-    Result::Err(error) => reason(error),
+    Result::Err(error) => reason(Raised::only(error)),
     Result::Ok(done) => \"[\" + done.text + \"] status \" + Int::to_string(done.status),
   }}
 }}
@@ -135,7 +135,7 @@ fn a_non_zero_exit_is_reported_as_a_status() {
             "{HEAD}
 fn work() -> String with {{ process: Process }} {{
   match attempt(fn () => process.shell(\"exit 3\")!) {{
-    Result::Err(error) => reason(error),
+    Result::Err(error) => reason(Raised::only(error)),
     Result::Ok(done) => Int::to_string(done.status),
   }}
 }}
@@ -160,7 +160,7 @@ fn checked_output_turns_a_failing_command_into_an_error() {
             "{HEAD}
 fn work() -> String with {{ process: Process }} {{
   match attempt(fn () => checked_output({failing_seven})!) {{
-    Result::Err(error) => reason(error),
+    Result::Err(error) => reason(Raised::only(error)),
     Result::Ok(text) => \"unexpectedly fine: \" + text,
   }}
 }}
@@ -194,7 +194,7 @@ fn a_large_amount_of_output_neither_truncates_nor_overflows() {
             "{HEAD}
 fn work() -> String with {{ process: Process }} {{
   match attempt(fn () => process.shell(\"{loop_command}\")!) {{
-    Result::Err(error) => reason(error),
+    Result::Err(error) => reason(Raised::only(error)),
     Result::Ok(done) => Int::to_string(String::byte_length(done.text)),
   }}
 }}
@@ -224,11 +224,11 @@ fn running_commands_leaks_nothing() {
             "{HEAD}
 fn work() -> Int with {{ process: Process }} {{
   let captured = match attempt(fn () => process.shell(\"echo one\")!) {{
-    Result::Err(error) => reason(error),
+    Result::Err(error) => reason(Raised::only(error)),
     Result::Ok(done) => done.text,
   }};
   let refused = match attempt(fn () => checked_output({failing_nine})!) {{
-    Result::Err(error) => reason(error),
+    Result::Err(error) => reason(Raised::only(error)),
     Result::Ok(text) => text,
   }};
   String::byte_length(captured) + String::byte_length(refused)
@@ -262,7 +262,7 @@ fn a_test_can_substitute_a_handler_and_start_nothing() {
 /// Ordinary code. It has no idea whether a shell exists.
 fn version() -> String with {{ process: Process }} {{
   match attempt(fn () => checked_output(\"git\", [\"describe\", \"--tags\"])!) {{
-    Result::Err(error) => reason(error),
+    Result::Err(error) => reason(Raised::only(error)),
     Result::Ok(text) => text,
   }}
 }}
@@ -363,13 +363,13 @@ fn work() -> String with {{ process: Process }} {{
   // One argument, whatever is in it.
   let safe = match attempt(fn () =>
     process.output(\"{program}\", {arguments})!) {{
-    Result::Err(error) => reason(error),
+    Result::Err(error) => reason(Raised::only(error)),
     Result::Ok(done) => String::trim(done.text),
   }};
 
   // The same text as part of a *line*, where the shell does read it.
   let through_a_shell = match attempt(fn () => process.shell(\"echo a & echo b\")!) {{
-    Result::Err(error) => reason(error),
+    Result::Err(error) => reason(Raised::only(error)),
     Result::Ok(done) => String::trim(done.text),
   }};
 
@@ -406,7 +406,7 @@ fn a_program_that_does_not_exist_never_started() {
             "{HEAD}
 fn work() -> String with {{ process: Process }} {{
   match attempt(fn () => process.run(\"khora-no-such-program-exists\", [])!) {{
-    Result::Err(error) => reason(error),
+    Result::Err(error) => reason(Raised::only(error)),
     Result::Ok(code) => \"unexpectedly ran: \" + Int::to_string(code),
   }}
 }}
@@ -430,7 +430,7 @@ fn an_exit_status_survives_the_argument_list() {
             "{HEAD}
 fn work() -> String with {{ process: Process }} {{
   match attempt(fn () => process.run({seven})!) {{
-    Result::Err(error) => reason(error),
+    Result::Err(error) => reason(Raised::only(error)),
     Result::Ok(code) => Int::to_string(code),
   }}
 }}

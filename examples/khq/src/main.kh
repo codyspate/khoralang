@@ -28,7 +28,7 @@ module khq::main;
 //! language, except the last, which is absent because `std::json::parse` takes
 //! a `String`.
 
-import std::core::{List, Option, Result, Show, String, Validated, attempt, print};
+import std::core::{List, Option, Raised, Result, Show, String, Validated, attempt, print};
 import std::env::{Env, EnvError};
 import std::fs::{FsRead, IoError, read_text};
 import std::json::{Json, JsonError, parse};
@@ -62,7 +62,7 @@ pub fn main() -> () raises EnvError {
         // a bad query one way, an unreadable file another and a malformed
         // document a third would be three tools. `Problem` is what they all
         // become, and `khq::diag::render` is the only thing that formats one.
-        Result::Err(trouble) => print(render(asked.filter, trouble)),
+        Result::Err(trouble) => print(render(asked.filter, Raised::only(trouble))),
       },
     }
   }

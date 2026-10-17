@@ -41,7 +41,7 @@ fn std_sources(db: &KhoraDatabase) -> Vec<SourceFile> {
 /// A clock that records every wait and never performs one, and a `Random` that
 /// always draws the bottom of its range so a jittered schedule is decidable.
 const HEAD: &str = r#"module demo::main;
-import std::core::{Eq, List, Option, Result, Shared, Show, print};
+import std::core::{Eq, List, Option, Raised, Result, Shared, Show, print};
 import std::clock::{Clock};
 import std::random::{Random};
 import std::resilience::{Schedule, Tried, repeat, retry, retry_counting, retry_while};
@@ -257,7 +257,7 @@ fn a_failure_the_caller_calls_permanent_is_not_retried() {
     let outcome = retry_while(
       Schedule::Times(10),
       // Only `Bad(1)` is worth trying again, and the body never answers it.
-      fn why => match why { Oops::Bad(n) => n == 1 },
+      fn why => match Raised::only(why) { Oops::Bad(n) => n == 1 },
       fn () => {
         Shared::update(tries, fn n => n + 1);
         raise Oops::Bad(99)
@@ -357,13 +357,13 @@ fn a_retry_can_report_how_many_goes_it_took() {
     print(Int::to_string(third.attempts));
     match third.outcome {
       Result::Ok(value) => print("ok " + Int::to_string(value)),
-      Result::Err(Oops::Bad(n)) => print("bad " + Int::to_string(n)),
+      Result::Err(f) => match Raised::only(f) { Oops::Bad(n) => print("bad " + Int::to_string(n)) },
     };
 
     // First go, which is the count that must never be zero.
     // The predicate is annotated because an infallible body leaves the error
     // type with nothing to fix it.
-    let once = retry_counting(Schedule::Times(8), fn (_e: Oops) => true, fn () => 7);
+    let once = retry_counting(Schedule::Times(8), fn (_e: Raised<Oops>) => true, fn () => 7);
     print(Int::to_string(once.attempts));
 
     // And a run that never succeeds: the count survives, and the *last*
@@ -377,7 +377,7 @@ fn a_retry_can_report_how_many_goes_it_took() {
     print(Int::to_string(never.attempts));
     match never.outcome {
       Result::Ok(value) => print("ok " + Int::to_string(value)),
-      Result::Err(Oops::Bad(n)) => print("bad " + Int::to_string(n)),
+      Result::Err(f) => match Raised::only(f) { Oops::Bad(n) => print("bad " + Int::to_string(n)) },
     };
   }
 }"#,

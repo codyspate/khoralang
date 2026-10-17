@@ -243,7 +243,7 @@ fn plain_bytes_on_a_tls_port_are_a_handshake_failure() {
     let program = format!(
         "module main;
 
-import std::core::{{Array, Result, Scope, attempt, print}};
+import std::core::{{Array, Raised, Result, Scope, attempt, print}};
 import std::net::socket::{{accept_on, invalid_handle, listen_on, start}};
 import std::net::tls::{{TlsError, secure, server, shut}};
 
@@ -259,7 +259,7 @@ pub fn main() -> () raises TlsError {{
     let taken = accept_on(listener);
     match attempt(fn () => secure(settings, taken)!) {{
       Result::Ok(connection) => {{ print(\"secured, which is wrong\"); shut(connection) }},
-      Result::Err(why) => match why {{
+      Result::Err(why) => match Raised::only(why) {{
         TlsError::Handshake => print(\"refused the handshake\"),
         TlsError::BadCertificate => print(\"bad certificate, which is wrong\"),
         TlsError::BadKey => print(\"bad key, which is wrong\"),
@@ -298,14 +298,14 @@ pub fn main() -> () raises TlsError {{
 fn a_bad_certificate_is_refused_at_startup() {
     let program = "module main;
 
-import std::core::{Result, Scope, attempt, print};
+import std::core::{Raised, Result, Scope, attempt, print};
 import std::net::tls::{TlsError, server};
 
 pub fn main() -> () {
   with { scope: Scope::root() } {
     match attempt(fn () => server(\"not a certificate\", \"nor is this\")!) {
       Result::Ok(_) => print(\"opened, which is wrong\"),
-      Result::Err(why) => match why {
+      Result::Err(why) => match Raised::only(why) {
         TlsError::BadCertificate => print(\"refused the certificate\"),
         TlsError::BadKey => print(\"bad key\"),
         TlsError::Handshake => print(\"handshake\"),
@@ -328,7 +328,7 @@ pub fn main() -> () {
 
 const BOTH_ENDS: &str = r#"module main;
 
-import std::core::{Array, Fiber, Result, Scope, attempt, print};
+import std::core::{Array, Fiber, Raised, Result, Scope, attempt, print};
 import std::net::socket::{accept_on, invalid_handle, listen_on, start};
 import std::net::tls::{
   TlsClient, TlsError, TlsServer, connect, receive, secure, server, shut, transmit, trusting,
@@ -396,7 +396,7 @@ pub fn main() -> () raises TlsError {
 
 const WRONG_NAME: &str = r#"module main;
 
-import std::core::{Array, Fiber, Result, Scope, attempt, print};
+import std::core::{Array, Fiber, Raised, Result, Scope, attempt, print};
 import std::net::socket::{accept_on, invalid_handle, listen_on, start};
 import std::net::tls::{
   TlsClient, TlsError, TlsServer, connect, secure, server, shut, trusting,
@@ -410,7 +410,7 @@ const authority = CA_PEM;
 fn call(caller: TlsClient) -> () {
   match attempt(fn () => connect(caller, "127.0.0.1", PORT)!) {
     Result::Ok(connection) => { print("connected, which is wrong"); shut(connection) },
-    Result::Err(why) => match why {
+    Result::Err(why) => match Raised::only(why) {
       TlsError::Unreachable(host) => print("refused: " + host),
       TlsError::Handshake => print("handshake"),
       TlsError::BadCertificate => print("bad certificate"),

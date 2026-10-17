@@ -772,6 +772,67 @@ match attempt(fn () => nursery(gather)!) {
 }
 ```
 
+### Raised
+
+```khora
+pub type Raised<'er>;
+```
+
+A failure, as a value: what a body raising the row `'er` failed with.
+
+**One type for any row, and the row is kept.** `attempt` of a body that
+raises `InventoryError + PaymentError` answers
+`Result<A, Raised<InventoryError + PaymentError>>`. The row in the type is
+what lets a `catch` name the cases again, and what refuses an arm for a
+type the body cannot raise:
+
+```khora
+fn classify(failure: Raised<InventoryError + PaymentError>) -> String {
+  (raise failure) catch {
+    PaymentError::Declined(why) => "declined: ${why}",
+    PaymentError::GatewayTimeout => "timeout",
+    InventoryError::OutOfStock(sku) => "out of ${sku}",
+    InventoryError::WarehouseOffline => "offline",
+  }
+}
+```
+
+**Always a `Raised`, even over one type.** `attempt` of a body raising
+only `IoError` answers `Result<A, Raised<IoError>>`, and `Raised::only`
+turns that into the `IoError` itself. The two are kept apart because they
+are laid out differently: a `Raised` is a box that says which error it
+holds, and an `IoError` is an `IoError`.
+
+`raise failure` sends the error on as the type it was, so the next `catch`
+sees an `IoError` as an `IoError`, and with any context attached by
+`context`. A `Raised` cannot be compared, hashed or sent to another fiber:
+its error and note are counted by the fiber that caught it alone. Send
+`failure.show()`, or `Raised::only(failure)` when the error is `Share`.
+
+### Opaque
+
+```khora
+pub type Opaque;
+```
+
+The row of a failure that forgot which types it could be.
+
+`Raised::forget` turns any `Raised` into a `Raised<Opaque>`: what a record
+or a list that keeps outcomes from many places stores, so its type does not
+have to list every error of every caller. The error inside keeps its type,
+and a `catch` still matches it by that type:
+
+```khora
+(raise stored) catch {
+  DbError::Disconnected(_why) => retry_later(),
+  other => log(other.show()),
+}
+```
+
+A `catch` over `Opaque` needs `_` or a binding arm, because any error type
+can arrive. `Opaque` is only ever held inside a `Raised`: there is no value
+of type `Opaque` on its own.
+
 ## Traits
 
 ### Eq
@@ -5301,6 +5362,88 @@ the next. A body that goes on spawning after a failure starts those
 children, so a producer that must stop on a fault checks for one
 itself.
 
+### Raised\<'er>
+
+```khora
+impl<'er> Raised<'er>
+```
+
+#### type_name
+
+```khora
+pub fn type_name(self) -> String
+```
+
+The name of the error type this is, as declared: `"PaymentError"`.
+
+#### describe
+
+```khora
+pub fn describe(self) -> String
+```
+
+The error as text, by its own type's `Show`, without the context. An
+error type with no `Show` is described by its type name.
+
+#### note
+
+```khora
+pub fn note(self) -> String
+```
+
+The context attached so far, outermost first, or `""`.
+
+#### with_note
+
+```khora
+pub fn with_note(self, note: String) -> Raised<'er>
+```
+
+The same failure, with `note` as its whole context.
+
+`context` is the one to call; this is what it is built on.
+
+#### context
+
+```khora
+pub fn context(self, note: String) -> Raised<'er>
+```
+
+The same failure with `note` added outside what it already says:
+`failure.context("while syncing invoice ${id}")`.
+
+The error, its type and what a `catch` sees are unchanged. The context
+goes with the failure through `raise`, through `retry` and
+`retry_while`, and out of a fiber to whoever joins it, and `show` prints
+it first: `while syncing invoice 7: DbError::RowCorrupt(7)`.
+
+#### forget
+
+```khora
+pub fn forget(self) -> Raised<Opaque>
+```
+
+The failure, with its row forgotten. For keeping outcomes from several
+places under one type; see `Opaque`.
+
+### Raised\<E>
+
+```khora
+impl<E> Raised<E>
+```
+
+#### only
+
+```khora
+pub fn only(self) -> E
+```
+
+The error itself, for a failure of exactly one type.
+
+A `Raised` over two types has no one type to answer, and is refused
+here; raise it into a `catch` instead. So is a `Raised<Opaque>`, whose
+type was forgotten.
+
 ## Trait implementations
 
 ### Show for Int
@@ -6409,6 +6552,21 @@ behind, and printing those would be printing the vector's history.
 fn show(self) -> String
 ```
 
+### Show for Raised\<'er>
+
+```khora
+impl<'er> Show for Raised<'er>
+```
+
+#### show
+
+```khora
+fn show(self) -> String
+```
+
+The context, then the error: `"charging: Pay::Declined(card)"`, or the
+error alone when there is no context.
+
 ## Functions
 
 ### assert
@@ -6703,7 +6861,7 @@ cancellation skips.
 ### attempt
 
 ```khora
-pub fn attempt<A, E, 'ef>(body: () -> A with 'ef raises E) -> Result<A, E> with 'ef
+pub fn attempt<A, 'er, 'ef>(body: () -> A with 'ef raises 'er) -> Result<A, Raised<'er>> with 'ef
 ```
 
 Runs `body` and makes its failure a value.
@@ -6717,32 +6875,33 @@ This is also what makes retrying possible: a policy that runs a computation
 a second time has to be able to see that the first time did not work,
 without knowing what it was doing.
 
-**One error type, and that is a real limit.** `E` is a type rather than a
-row, so a body raising `IoError + Denied` has nowhere to go through here:
-
-```text
-error: this argument: `Denied` is not accounted for here. This takes one
-       error type and the body raises `IoError` and `Denied`; there is no
-       type that means "either of these", so handle them with `catch`
-       instead
-```
-
-The limit is not an oversight. `Result<A, E>` needs one `E`, and Khora has
-no anonymous sum to name "either of these two" — so there is nothing for a
-two-type row to collapse into. Naming a union would mean declaring a type
-for every pair of failures a program happens to combine, which is worse
-than the thing it fixes.
-
-`catch` is the answer, because it matches per type and never has to name
-the union:
+**Any row.** `'er` is whatever the body raises, one type or several, and
+the failure comes back as one value of type `Raised<'er>` that keeps the
+error and its type; see `Raised`. Over one type, `Raised::only` is the
+error itself:
 
 ```khora
-let answer = fetch(url)! catch {
-  IoError::NotFound(_p) => fallback(),
-  Denied(_p) => refuse(),
-};
+match attempt(fn () => read_text(path)!) {
+  Result::Ok(text) => text,
+  Result::Err(failure) => fallback(Raised::only(failure)),
+}
 ```
 
-A row of *one* is what `attempt` is for, and it stays the shorter way to
-write it.
+Over two, raise the failure into a `catch`, which names the cases again
+and is checked against the row:
+
+```khora
+match attempt(fn () => checkout(sku, cents)!) {
+  Result::Ok(id) => id,
+  Result::Err(failure) => (raise failure) catch {
+    PaymentError::Declined(_why) => "declined",
+    other => other.show(),
+  },
+}
+```
+
+**What it costs.** A failure that comes back through here is put in a box,
+one allocation per failure. A loop that handles one error type on its hot
+path should use `catch`, which handles the error where it arrives and
+allocates nothing.
 

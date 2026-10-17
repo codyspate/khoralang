@@ -53,7 +53,7 @@ Use the same `catch` or `attempt` that application code uses:
 ```khora
 module users_test;
 
-import std::core::{Result, assert, attempt};
+import std::core::{Raised, Result, assert, attempt};
 
 pub type UserError =
   | NotFound(id: Int)
@@ -68,14 +68,17 @@ test "missing users are reported" {
 
   match result {
     Result::Ok(_) => assert(false),
-    Result::Err(UserError::NotFound(id)) => assert(id == 999),
-    Result::Err(UserError::Unavailable(_)) => assert(false),
+    Result::Err(failure) => match Raised::only(failure) {
+      UserError::NotFound(id) => assert(id == 999),
+      UserError::Unavailable(_) => assert(false),
+    },
   }
 }
 ```
 
-`attempt` and `Result` are `std::core` names like `assert`, so all three are on
-the `import` line. `UserError` and `load_user` are declared here to keep the
+`attempt`, `Raised` and `Result` are `std::core` names like `assert`, so all
+four are on the `import` line. `attempt` hands back the failure as a `Raised`,
+and `Raised::only` is the error inside it, for a body that raises one type. `UserError` and `load_user` are declared here to keep the
 block runnable; in a real test they come from the module under test.
 
 [Failures](./failures/) is the model behind it.

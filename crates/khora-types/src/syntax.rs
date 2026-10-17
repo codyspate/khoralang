@@ -126,6 +126,23 @@ pub(crate) fn row_of_ref(
     }
 }
 
+/// `Raised`'s type argument, read as the row it is.
+///
+/// **`Raised<A + B>` is a row, written as `raises` writes one.** Read as an
+/// ordinary type argument, `A + B` has nothing to mean and `Raised<Pay>` would
+/// be a `Pay` where `attempt`'s `Raised<'er>` holds a row, so the two would
+/// never unify. A `_` or a name that did not resolve stays `Unknown` rather
+/// than becoming a one-entry row of nothing.
+fn raised_argument(written: &khora_hir::body::TypeRef, generics: &[String], homes: &TypeHomes) -> Type {
+    let row = row_of_ref(written, RowClause::Raises, generics, homes);
+    match &row {
+        Type::Row { fields, tail: None } if fields.len() == 1 && matches!(fields[0].1, Type::Unknown) => {
+            Type::Unknown
+        }
+        _ => row,
+    }
+}
+
 /// One entry of an error row, labeled by the error type's own name.
 pub(crate) fn error_label(resolved: &Type) -> (String, Type) {
     let label = match resolved {
@@ -193,9 +210,20 @@ pub(crate) fn type_of_syntax(ty: Option<&ast::Type>, generics: &[String], homes:
                 return Type::Param(row_var.text().to_string());
             }
             let name = p.path().map(|p| p.text_path()).unwrap_or_default();
+            let error_row = name.rsplit("::").next() == Some(RAISED_TYPE);
             let args: Vec<Type> = p
                 .type_args()
-                .map(|a| a.args().map(|t| type_of_syntax(Some(&t), generics, homes)).collect())
+                .map(|a| {
+                    a.args()
+                        .map(|t| {
+                            if error_row {
+                                raised_argument(&khora_hir::body::TypeRef::of_syntax(&t), generics, homes)
+                            } else {
+                                type_of_syntax(Some(&t), generics, homes)
+                            }
+                        })
+                        .collect()
+                })
                 .unwrap_or_default();
             named_type(&name, args, generics, homes)
         }
@@ -373,7 +401,17 @@ pub fn type_of_ref(
             if items.is_empty() { Type::Unit } else { Type::Tuple(items) }
         }
         TypeRef::Named { name, args } => {
-            let args = args.iter().map(|t| type_of_ref(t, generics, homes)).collect();
+            let error_row = name.rsplit("::").next() == Some(RAISED_TYPE);
+            let args = args
+                .iter()
+                .map(|t| {
+                    if error_row {
+                        raised_argument(t, generics, homes)
+                    } else {
+                        type_of_ref(t, generics, homes)
+                    }
+                })
+                .collect();
             named_type(name, args, generics, homes)
         }
         // A row written as a type argument. `Opaque` here made the row slot

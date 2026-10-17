@@ -61,6 +61,8 @@
 `Float::to_int` takes one number
 `Ord::cmp` produces an `Ordering`, which has `Less`, `Equal` and `Greater`
 `Ptr::{name}` takes no arguments but `self`
+`Raised::{name}` is not an operation the backend knows
+`Raised::{name}` takes the failure
 `String::from_bytes` takes an `Array<U8>`
 `String::{name}` takes a string
 `assert` is only allowed inside a `test` block; elsewhere, `raise` says the  same thing and says where it goes
@@ -114,7 +116,7 @@ this closure has no tag, which is a compiler bug
 this closure was never declared, which is a compiler bug
 this expression cannot be assigned to
 this expression did not survive the front end
-this function has no `raises` clause, so it cannot raise
+this function has no `raises` clause, so it cannot raise: add `raises`  with what this sends -- `raises E`, or `raises 'er` for a failure the caller  chose -- or catch it here
 this method call was not resolved to an impl; that is a compiler bug
 this pattern can fail, so it needs a `match` rather than a `let` — a  `let` has nowhere to send a value that does not match
 this pattern does not name a constructor

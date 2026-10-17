@@ -52,6 +52,41 @@ pub unsafe extern "C" fn khora_unhandled(name: *const u8, len: u64) {
     );
 }
 
+/// Says what a failure carrying context was, after
+/// [`khora_unhandled`] has named its type: `"<note>: <error shown>"`, the
+/// failure's `show()`.
+///
+/// **What this prevents: the context dropped where an operator reads it.**
+/// A failure's note -- `processing batch 3: shipping order 42` -- is the
+/// reason to attach one, and the type's name alone lost it and the variant.
+/// Called only for a failure that has a note, so a program that attaches
+/// none prints what it would without one. Costs the error's `Show`, run
+/// once on the way out; an error type without one is described by name.
+///
+/// # Safety
+///
+/// `note` and `what` must each point at their length in bytes, live for
+/// the call: generated code passes the bytes of two strings it holds.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_unhandled_context(note: *const u8, note_len: u64, what: *const u8, what_len: u64) {
+    let read = |ptr: *const u8, len: u64| {
+        if ptr.is_null() || len == 0 {
+            &[][..]
+        } else {
+            // SAFETY: the caller's contract, above.
+            unsafe { std::slice::from_raw_parts(ptr, len as usize) }
+        }
+    };
+    let (note, what) = (read(note, note_len), read(what, what_len));
+    let mut err = std::io::stderr().lock();
+    let _ = writeln!(
+        err,
+        "failure: {}: {}",
+        String::from_utf8_lossy(note),
+        String::from_utf8_lossy(what)
+    );
+}
+
 /// Reports arithmetic that did not fit, and stops.
 ///
 /// Overflow traps in every build. A program that passes its tests and then

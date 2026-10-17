@@ -1160,19 +1160,15 @@ fn the_spelling_the_hint_shows_is_accepted() {
     );
     assert!(found.is_empty(), "the hint's own spelling must type-check: {found:?}");
 }
-/// A callee taking one error type, handed a body that raises two, says why.
+/// A callee taking one error type, handed a body that raises two, says why,
+/// and names the type that holds either.
 ///
-/// **`` `B` is not accounted for here`` is true and is a riddle.** `attempt` is
-/// the callee this is for: `attempt<A, E, 'ef>` takes a single `E`, so a body
-/// raising `HttpError + ChildFailed` cannot go through the documented way to
-/// turn a failure into a value — and the message named a type without saying
-/// what about it was the problem or what to do instead.
-///
-/// The limit is real. `Result<A, E>` needs one `E` and Khora has no anonymous
-/// sum to name "either of these two", so `catch` — which matches per type and
-/// never names the union — is the answer rather than a workaround.
+/// **`` `B` is not accounted for here`` is true and is a riddle.** A
+/// signature written with one `E` cannot take a body raising `A + B`, and the
+/// message named a type without saying what about it was the problem or what
+/// to do instead. `Raised<A + B>` holds either; `catch` handles them per type.
 #[test]
-fn one_error_type_handed_two_says_to_use_catch() {
+fn one_error_type_handed_two_names_raised() {
     assert_reports(
         "module a;\n\
          type A = Int;\n\
@@ -1182,7 +1178,7 @@ fn one_error_type_handed_two_says_to_use_catch() {
            if n == 0 { let a: A = A(1); raise a } else { let b: B = B(2); raise b }\n\
          }\n\
          pub fn go() -> Int raises A + B { one(fn () => both(5)!)! }\n",
-        "handle them with `catch` instead",
+        "write the type as `Raised<A + B>`, or handle them with `catch`",
     );
 }
 

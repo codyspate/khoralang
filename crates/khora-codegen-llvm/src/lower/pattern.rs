@@ -230,9 +230,16 @@ impl<'ctx> Lower<'_, 'ctx> {
         self.at(handler);
         let which = which.as_basic_value().into_int_value();
         let word = word.as_basic_value().into_int_value();
+        // **The arms see the error, the exits see the failure as it came.**
+        // A failure with context arrives in its `Raised` box: the switch and
+        // every arm read the error inside it, while `onward` passes the box
+        // on unopened and the releases let go of the box, note and all. In
+        // a program that attaches no context this is `which` and `word`.
+        let opened = self.maybe_open(which, word);
+        let (seen_which, _, _) = opened;
         self.be
             .builder
-            .build_switch(which, fallthrough, &cases)
+            .build_switch(seen_which, fallthrough, &cases)
             .expect("dispatching on the error type");
 
         // Not ours: release the frame and hand it to whoever is next. Nested
@@ -287,13 +294,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             // see a view into the box, and the box is what this frame
             // releases after them. A boxed error is its own pointer, and the
             // view of it costs nothing.
-            let (error, holding) = match self.be.read_spilled(word, &error_ty) {
-                Some((error, object)) => (error, Cleanup::Spilled(object, error_ty.clone())),
-                None => {
-                    let error = self.be.word_to_value(word, &error_ty);
-                    (error, Cleanup::Temp(error, error_ty.clone()))
-                }
-            };
+            let (error, holding) = self.view_caught(which, word, opened, &error_ty);
 
             // The raising frame moved the error into its return, so this frame
             // owns it. The arms borrow their bindings out of it, exactly as a
@@ -347,20 +348,50 @@ impl<'ctx> Lower<'_, 'ctx> {
             // way to the join.
             if let khora_hir::body::Pat::Bind(local) = self.body.pat(arm.pat) {
                 let error_ty = self.types.local(*local).clone();
-                let (error, holding) = match self.be.read_spilled(word, &error_ty) {
-                    Some((error, object)) => (error, Cleanup::Spilled(object, error_ty.clone())),
+                let (error, holding, unmatched) = match khora_types::raised_row(&error_ty) {
+                    // **A binding over a row holds a `Raised`.** Unguarded, the
+                    // arm commits, so the failure is moved into it. Guarded,
+                    // a false guard must hand the next arm the failure as it
+                    // came, so the binding gets a copy of its own, and the
+                    // turned-away edge lets go of the copy.
+                    Some(row) => {
+                        let types: Vec<Type> = match row {
+                            Type::Row { fields, .. } => fields.iter().map(|(_, t)| t.clone()).collect(),
+                            _ => Vec::new(),
+                        };
+                        match (arm.guard, next) {
+                            (Some(_), Some(next)) => {
+                                let copy = self.raised_copy((which, word), opened, &types);
+                                let turned = self.block("catch.bound.turned");
+                                let here = self.here();
+                                self.at(turned);
+                                self.drop(copy.into(), &error_ty);
+                                self.br(next);
+                                self.at(here);
+                                let holding = vec![
+                                    Cleanup::Failure(which, word),
+                                    Cleanup::Temp(copy.into(), error_ty.clone()),
+                                ];
+                                (copy.into(), holding, Some(turned))
+                            }
+                            _ => {
+                                let value = self.raised_value((which, word), opened);
+                                (value.into(), vec![Cleanup::Temp(value.into(), error_ty.clone())], next)
+                            }
+                        }
+                    }
                     None => {
-                        let error = self.be.word_to_value(word, &error_ty);
-                        (error, Cleanup::Temp(error, error_ty.clone()))
+                        let (error, holding) = self.view_caught(which, word, opened, &error_ty);
+                        (error, vec![holding], next)
                     }
                 };
                 let released = self.block("catch.bound.done");
-                self.scopes.push(vec![holding]);
+                self.scopes.push(holding);
                 let on = Scrutinee {
                     value: error,
                     ty: error_ty,
                     released_by_arms: false,
-                    unmatched: next,
+                    unmatched,
                 };
                 let mine = [arm.clone()];
                 let reached_here = self.emit_arms(&mine, &on, slot, released, range);
@@ -379,9 +410,21 @@ impl<'ctx> Lower<'_, 'ctx> {
             } else {
                 // `_`: the guard first, since it cannot read the error and a
                 // false one hands the error on untouched.
+                //
+                // **The failure is held while the guard runs.** The arm has
+                // not committed, so nothing else owns it, and a guard that
+                // leaves the `catch` -- a `!` that raises, a `return` --
+                // unwinds through this scope and lets it go. Without the
+                // scope it leaked once per guard that left (the error, and a
+                // `Raised` box and its note when it came in one). The scope
+                // is dropped unreleased on both normal edges: a false guard
+                // hands the failure on, a true one releases it below.
                 if let (Some(guard), Some(next)) = (arm.guard, next) {
                     let taken = self.block(&format!("catch.rest{index}.taken"));
-                    match self.expr(guard) {
+                    self.scopes.push(vec![Cleanup::Failure(which, word)]);
+                    let tested = self.expr(guard);
+                    self.scopes.pop();
+                    match tested {
                         Some(test) => {
                             self.be
                                 .builder
@@ -422,6 +465,36 @@ impl<'ctx> Lower<'_, 'ctx> {
         }
 
         self.join(merge, reached, slot, &result_ty)
+    }
+
+    /// The error a `catch` arm reads, as a view, and what releases the
+    /// failure it came in once the arm has run.
+    ///
+    /// **Read in place, never taken before an arm commits.** A case no arm
+    /// takes goes on to the catch-all with the failure as it arrived. In a
+    /// program that attaches context the failure may be a `Raised` box: the
+    /// view is of the error inside, and the release, by the id it arrived
+    /// under, lets go of the box with it.
+    fn view_caught(
+        &mut self,
+        which: IntValue<'ctx>,
+        word: IntValue<'ctx>,
+        opened: (IntValue<'ctx>, IntValue<'ctx>, Option<IntValue<'ctx>>),
+        error_ty: &Type,
+    ) -> (BasicValueEnum<'ctx>, Cleanup<'ctx>) {
+        let (_, seen_word, noted) = opened;
+        match (self.be.read_spilled(seen_word, error_ty), noted) {
+            (Some((error, _)), Some(_)) => (error, Cleanup::Failure(which, word)),
+            (Some((error, object)), None) => (error, Cleanup::Spilled(object, error_ty.clone())),
+            (None, Some(_)) => {
+                let error = self.be.word_to_value(seen_word, error_ty);
+                (error, Cleanup::Failure(which, word))
+            }
+            (None, None) => {
+                let error = self.be.word_to_value(seen_word, error_ty);
+                (error, Cleanup::Temp(error, error_ty.clone()))
+            }
+        }
     }
 
     /// Arrives at a join block, or seals it if nothing reaches it.

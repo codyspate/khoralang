@@ -186,6 +186,11 @@ impl<'ctx> Lower<'_, 'ctx> {
         if owner == runtime::ARRAY_TYPE {
             return Some(self.array_intrinsic(site, name, args, range));
         }
+        if owner == khora_types::RAISED_TYPE
+            && matches!(name, "type_name" | "describe" | "note" | "with_note" | "forget" | "only")
+        {
+            return Some(self.raised_intrinsic(name, args, site, range));
+        }
         if let Some(shape) = int_owner(owner) {
             return Some(self.int_intrinsic(shape, owner, name, args, range));
         }

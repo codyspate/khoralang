@@ -157,10 +157,10 @@ fn rows_written_as_types(node: &SyntaxNode) -> Vec<HirError> {
         match written.kind() {
             // `+` builds a row, and a row is what `raises` and `with` take.
             // Anywhere else there is nothing for it to mean.
-            SyntaxKind::UNION_TYPE if !inside_a_row(&written) => found.push(HirError {
+            SyntaxKind::UNION_TYPE if !inside_a_row(&written) && !raised_argument(&written) => found.push(HirError {
                 message: "`+` builds a `raises` or `with` row, and this is not one. A \
-                          `Result` holds one error type; handle a wider row with `catch`, \
-                          which matches per type"
+                          `Result` holds one error type; to hold either of several, \
+                          write `Raised<A + B>`, or handle them with `catch`"
                     .to_string(),
                 range: written.text_range(),
             }),
@@ -177,6 +177,26 @@ fn rows_written_as_types(node: &SyntaxNode) -> Vec<HirError> {
         }
     }
     found
+}
+
+/// Whether this `+` is the argument of a `Raised<..>`, which takes a row.
+///
+/// `A + B + C` nests one union inside another, so the climb starts above
+/// the outermost of them. Qualified spellings (`std::core::Raised`) are
+/// recognized by their last segment.
+fn raised_argument(node: &SyntaxNode) -> bool {
+    let mut at = node.clone();
+    while let Some(parent) = at.parent().filter(|p| p.kind() == SyntaxKind::UNION_TYPE) {
+        at = parent;
+    }
+    let Some(args) = at.parent().filter(|p| p.kind() == SyntaxKind::TYPE_ARGS) else {
+        return false;
+    };
+    let Some(path_type) = args.parent() else { return false };
+    path_type.children().find(|c| c.kind() == SyntaxKind::PATH).is_some_and(|path| {
+        let text = path.text().to_string();
+        text.trim().rsplit("::").next().map(str::trim) == Some(crate::RAISED_TYPE)
+    })
 }
 
 /// Whether this sits under a `with` or `raises` clause, where a row belongs.

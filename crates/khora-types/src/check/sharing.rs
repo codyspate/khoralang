@@ -115,7 +115,11 @@ impl<'a> Checker<'a> {
         let why = self.types.why_unshareable(ty);
         let at_use = match self.types.fiber_bound_inside(ty) {
             Some((crate::FiberBound::Db, _)) => self.capture_uses.get(&(body, local)).copied(),
-            Some((crate::FiberBound::Region | crate::FiberBound::Scope, _)) | None => None,
+            Some((
+                crate::FiberBound::Region | crate::FiberBound::Scope | crate::FiberBound::Raised,
+                _,
+            ))
+            | None => None,
         };
         match at_use {
             Some(used) => {
@@ -182,6 +186,16 @@ impl<'a> Checker<'a> {
         let Type::Row { fields, .. } = raises else { return };
         for (label, error) in fields {
             if let Some((bound, subject)) = self.types.fiber_bound_inside(error) {
+                // A certified closure's error is raised on the fiber that
+                // calls it, so a `Raised` in it was made there and stays.
+                match (bound, crossing) {
+                    (crate::FiberBound::Raised, Crossing::Certified) => continue,
+                    (crate::FiberBound::Raised, Crossing::Fiber)
+                    | (
+                        crate::FiberBound::Region | crate::FiberBound::Scope | crate::FiberBound::Db,
+                        Crossing::Fiber | Crossing::Certified,
+                    ) => {}
+                }
                 let why = crate::map::stays_on_its_fiber_because(bound, &subject);
                 self.error(
                     format!(
@@ -308,8 +322,8 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Refuses a `Handoff::send` whose value holds a `Region`, a `Scope` or a
-    /// `Db`, once the body's types are settled.
+    /// Refuses a `Handoff::send` whose value holds a `Region`, a `Scope`, a
+    /// `Db` or a `Raised`, once the body's types are settled.
     ///
     /// **What this prevents: a region's finalizers running on the fiber that
     /// received it**, which the runtime traps on with status 134. Asked after
@@ -435,7 +449,7 @@ pub(crate) enum Crossing {
 
 /// The one-based line and column, in characters, where `range` starts in
 /// `source`.
-fn line_and_column(source: &str, range: TextRange) -> (usize, usize) {
+pub(super) fn line_and_column(source: &str, range: TextRange) -> (usize, usize) {
     let at = usize::from(range.start()).min(source.len());
     let before = source.get(..at).unwrap_or("");
     let line_start = before.rfind('\n').map_or(0, |i| i + 1);

@@ -278,21 +278,41 @@ impl TypeMap {
     /// which the rule catches by name. Without the second, the author of a
     /// record called `Region` is told their record stays on a fiber, and has
     /// no way to see why.
+    ///
+    /// **A `Raised` is found here too, and this is what refuses it at a
+    /// `Handoff`.** `Handoff<A>` has no `Share` bound: its send walks the
+    /// value and marks what it finds. A `Raised` has no body to walk, so the
+    /// walk marked the box and stopped, and the error and note inside it
+    /// crossed still counted by the sender: the debug owner check trapped
+    /// (status 134), and a release build let two fibers write one `mut`
+    /// record that the hand-off refuses when it is sent bare. The cost is
+    /// that a failure cannot be handed over as one; its text or its error
+    /// can, and the refusal says how. For a `Raised` the subject names the
+    /// field it sits in, since the record that holds it is what the reader
+    /// is looking at.
     pub fn fiber_bound_inside(&self, ty: &Type) -> Option<(crate::FiberBound, String)> {
-        self.fiber_bound_in(ty, &mut Vec::new())
+        self.fiber_bound_in(ty, &mut Vec::new(), &mut Vec::new())
     }
 
     fn fiber_bound_in(
         &self,
         ty: &Type,
         visiting: &mut Vec<String>,
+        via: &mut Vec<String>,
     ) -> Option<(crate::FiberBound, String)> {
         match ty {
-            Type::Tuple(items) => items.iter().find_map(|t| self.fiber_bound_in(t, visiting)),
+            Type::Tuple(items) => items.iter().find_map(|t| self.fiber_bound_in(t, visiting, via)),
             Type::Applied { head, args } => self
-                .fiber_bound_in(head, visiting)
-                .or_else(|| args.iter().find_map(|t| self.fiber_bound_in(t, visiting))),
+                .fiber_bound_in(head, visiting, via)
+                .or_else(|| args.iter().find_map(|t| self.fiber_bound_in(t, visiting, via))),
             Type::Adt { name, args, home } => {
+                if crate::raised_row(ty).is_some() {
+                    let subject = match via.as_slice() {
+                        [] => "a `Raised`".to_string(),
+                        held => format!("a `Raised` (in {})", held.join(", in ")),
+                    };
+                    return Some((crate::FiberBound::Raised, subject));
+                }
                 if let Some(bound) = crate::FiberBound::of(name) {
                     let stds = home.as_ref().is_none_or(|h| h.segments() == bound.home());
                     let subject = if stds {
@@ -305,16 +325,25 @@ impl TypeMap {
                     };
                     return Some((bound, subject));
                 }
-                if let Some(found) = args.iter().find_map(|t| self.fiber_bound_in(t, visiting)) {
+                if let Some(found) = args.iter().find_map(|t| self.fiber_bound_in(t, visiting, via)) {
                     return Some(found);
                 }
                 if self.effects.contains(name) || visiting.iter().any(|n| n == name) {
                     return None;
                 }
                 visiting.push(name.clone());
-                let found = self
-                    .bodies_of(name)
-                    .find_map(|v| v.fields.iter().find_map(|t| self.fiber_bound_in(t, visiting)));
+                let found = self.bodies_of(name).find_map(|v| {
+                    v.fields.iter().enumerate().find_map(|(i, t)| {
+                        let field = match v.labels.get(i).filter(|l| !l.is_empty()) {
+                            Some(label) => format!("`{name}`'s field `{label}`"),
+                            None => format!("`{name}::{}`'s field {}", v.name, i + 1),
+                        };
+                        via.insert(0, field);
+                        let found = self.fiber_bound_in(t, visiting, via);
+                        via.remove(0);
+                        found
+                    })
+                });
                 visiting.pop();
                 found
             }
@@ -571,6 +600,12 @@ pub fn stays_on_its_fiber_because(bound: crate::FiberBound, subject: &str) -> St
              that fiber writes, and a fiber spawned inside a `with_db` body cannot use that \
              body's `db`: take a lease in the spawned fiber instead, \
              `Fiber::spawn(fn () => with_db(pool, work))`"
+        ),
+        crate::FiberBound::Raised => format!(
+            "{subject} stays on the fiber that caught it, because the error and the note \
+             inside it are counted by that fiber alone. Send what the other fiber needs from \
+             it instead: its text, formatted where it was caught (`failure.show()`, a \
+             `String`), or its error, `Raised::only(failure)`, when that error type is `Share`"
         ),
     }
 }

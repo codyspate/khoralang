@@ -274,6 +274,11 @@ pub(super) fn build(
         .flat_map(|f| khora_hir::body::bodies(db, *f).iter().map(|(n, _)| n.clone()))
         .collect();
     let defined = khora_perceus::Defined::from_body_names(body_names.iter().map(String::as_str));
+    // Before any body is lowered: whether a failure can travel in its
+    // `Raised` box decides the code every handler gets.
+    let emitted: Vec<&khora_hir::body::Body> =
+        mono.instances.iter().filter_map(|(instance, _)| body_of(instance)).collect();
+    backend.find_noted(&emitted);
     for (instance, instance_types) in &mono.instances {
         let Some(body) = body_of(instance) else { continue };
         // Planned per *specialization*: `A` is unboxed in the generic body and
@@ -446,6 +451,23 @@ pub(super) fn build(
     }
     backend.emit_pending_thunks();
     backend.emit_pending_drop_glue();
+    // **The failure routines last, and to a fixed point.** A `Raised`'s glue
+    // calls the releaser, and its first use may be glue emitted just above,
+    // after the releaser's first chance; `describe` asks for the copier,
+    // which asks for the taker. Each of these is emitted once, when first
+    // found empty, so going round until nothing new is asked for leaves no
+    // declaration without a body -- which the linker reported as an
+    // undefined `khora.release_error`.
+    loop {
+        let before = backend.failure_routines_asked();
+        backend.emit_raised_fns();
+        backend.emit_error_releaser();
+        backend.emit_error_taker();
+        backend.emit_pending_drop_glue();
+        if backend.failure_routines_asked() == before {
+            break;
+        }
+    }
     drop(_lowering);
 
     if !backend.errors.is_empty() {

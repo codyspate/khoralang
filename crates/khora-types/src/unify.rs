@@ -843,6 +843,18 @@ pub fn match_params(
                 }
             }
         }
+        // `{ | 'er }` against a whole row: the row variable is the row. What
+        // `impl<'er> Show for Raised<'er>` is selected by.
+        (Type::Row { fields, tail: Some(tail) }, Type::Row { .. }) if fields.is_empty() => {
+            match_params(tail, concrete, params, out)
+        }
+        // `{ E: E }` against `{ Pay: Pay }`, entry by entry, both closed. What
+        // `impl<E> Raised<E>` is selected by; a row of two does not match it.
+        (Type::Row { fields: f1, tail: None }, Type::Row { fields: f2, tail: None })
+            if f1.len() == f2.len() =>
+        {
+            f1.iter().zip(f2).all(|((_, p), (_, c))| match_params(p, c, params, out))
+        }
         (Type::Adt { name: a, home: ha, args: x }, Type::Adt { name: b, home: hb, args: y }) => {
             a == b
                 && ha == hb

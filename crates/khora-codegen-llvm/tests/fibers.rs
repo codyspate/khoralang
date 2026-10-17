@@ -2809,7 +2809,7 @@ fn work() -> Int {
 /// Generic error types held inline (`Ge`, `Gb`), and one instantiated at two
 /// layouts (`Gx<Int>` held inline, `Gx<Big>` boxed).
 const GENERIC_ERRORS: &str = r#"
-import std::core::{attempt, Result, Share};
+import std::core::{attempt, Raised, Result, Share};
 
 type Ge<A> = | GBad(v: A, n: Int);
 type Gb<A> = | B1(v: A, n: Int) | B2(w: A, m: Int);
@@ -2840,7 +2840,7 @@ fn a_generic_error_joined_twice_keeps_what_each_joiner_took() {
 fn get(f: Fiber<Int, {{ Gb: Gb<String> }}>) -> String {{
   let a = attempt(fn () => Fiber::join(f)!);
   match a {{
-    Result::Err(e) => match e {{ Gb::B1(v, n) => v, Gb::B2(w, m) => w }},
+    Result::Err(e) => match Raised::only(e) {{ Gb::B1(v, n) => v, Gb::B2(w, m) => w }},
     Result::Ok(x) => \"none\",
   }}
 }}

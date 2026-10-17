@@ -214,6 +214,7 @@ mod handoff;
 mod inline;
 use inline::Adjust;
 mod header;
+pub(crate) mod raised;
 mod shims;
 mod statics;
 mod thunks;
@@ -449,6 +450,12 @@ pub(crate) struct Backend<'ctx> {
     /// What a joiner calls to own a copy of a fiber's kept error, declared on
     /// first use. See [`Backend::take_error`].
     error_taker: Option<FunctionValue<'ctx>>,
+    /// The routines a `Raised` failure value is built on. See
+    /// `backend/raised.rs`.
+    pub(crate) raised: raised::RaisedFns<'ctx>,
+    /// Whether the program attaches context to a failure anywhere. See
+    /// [`Backend::noted`].
+    attaches_context: bool,
     pub errors: Vec<HirError>,
 }
 
@@ -567,6 +574,8 @@ impl<'ctx> Backend<'ctx> {
             error_ids: HashMap::new(),
             error_releaser: None,
             error_taker: None,
+            raised: raised::RaisedFns::default(),
+            attaches_context: false,
             errors: Vec::new(),
         }
     }

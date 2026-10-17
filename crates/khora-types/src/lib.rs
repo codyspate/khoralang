@@ -229,6 +229,9 @@ impl std::fmt::Display for Type {
             Type::Str => write!(f, "String"),
             Type::Unit => write!(f, "()"),
             Type::Adt { name, args, .. } if args.is_empty() => write!(f, "{name}"),
+            Type::Adt { .. } if raised_row(self).is_some() => {
+                write!(f, "Raised<{}>", raised_written(raised_row(self).expect("guarded")))
+            }
             Type::Adt { name, args, .. } => {
                 let inner: Vec<String> = args.iter().map(|a| a.to_string()).collect();
                 write!(f, "{name}<{}>", inner.join(", "))
@@ -764,6 +767,11 @@ pub enum FiberBound {
     Scope,
     /// [`DB_EFFECT`]: drives a connection its fiber writes.
     Db,
+    /// std's [`RAISED_TYPE`]: holds an error and a note that its fiber
+    /// alone counts. Never answered by [`FiberBound::of`], which goes by
+    /// name: a user's own `Raised` is an ordinary type, and only
+    /// [`raised_row`] tells the two apart.
+    Raised,
 }
 
 impl FiberBound {
@@ -781,7 +789,7 @@ impl FiberBound {
     /// from a user's type of the same name that the rule catches by name.
     pub fn home(self) -> [&'static str; 2] {
         match self {
-            FiberBound::Region | FiberBound::Scope => ["std", "core"],
+            FiberBound::Region | FiberBound::Scope | FiberBound::Raised => ["std", "core"],
             FiberBound::Db => ["std", "db"],
         }
     }
@@ -843,6 +851,76 @@ pub const COMPILER_KNOWN: [&str; 13] = [
 /// against until a package has an identity of its own (roadmap 10.2).
 pub fn collides_with_a_builtin(name: &str) -> bool {
     COMPILER_KNOWN.contains(&name)
+}
+
+/// `std::core`'s failure value, `Raised<'er>`: what a body raising the row
+/// `'er` failed with.
+///
+/// **Always a box, at any row.** `Raised<Pay>` is not `Pay`: one is a box
+/// holding which error it is, the other is laid out as a `Pay`. A rule that
+/// let one stand for the other when a row happened to close chose the layout
+/// after code that read the value was already typed, and read a `Pay`'s fields
+/// as a box (ICEs, misaligned pointers, segfaults). `Raised::only` is the one
+/// place the two meet, and it converts.
+pub const RAISED_TYPE: &str = "Raised";
+
+/// The row entry of a failure that forgot its row; see `Raised::forget`.
+pub const OPAQUE_TYPE: &str = "Opaque";
+
+/// Whether `home` is `std::core`.
+fn is_std_core(home: &khora_hir::ModulePath) -> bool {
+    let s = home.segments();
+    s.len() == 2 && s[0] == "std" && s[1] == "core"
+}
+
+/// Whether `ty` is `std::core`'s `Opaque`, and not a user's type of that name.
+///
+/// **By home, never by name alone.** `Opaque` turns off a `catch`'s
+/// reachability and coverage checks, because any error type can arrive
+/// under it; a program's own `type Opaque` matched by name turned them off for
+/// an ordinary error.
+pub fn is_std_opaque(ty: &Type) -> bool {
+    matches!(ty, Type::Adt { name, home: Some(home), args }
+        if name == OPAQUE_TYPE && args.is_empty() && is_std_core(home))
+}
+
+/// The row of a `Raised<'er>`, if `ty` is one.
+///
+/// A type named `Raised` with no home is taken as std's: a mention inside
+/// `std::core` itself, or a test module standing in for it, is resolved
+/// without one. One with a home elsewhere is a user's own type.
+pub fn raised_row(ty: &Type) -> Option<&Type> {
+    match ty {
+        Type::Adt { name, home, args } if name == RAISED_TYPE && args.len() == 1 => {
+            home.as_ref().is_none_or(is_std_core).then(|| &args[0])
+        }
+        _ => None,
+    }
+}
+
+/// A `Raised` over `row`, as `std::core` declares it.
+pub fn raised_of(row: Type) -> Type {
+    Type::Adt {
+        name: RAISED_TYPE.to_string(),
+        home: Some(khora_hir::ModulePath::new(vec!["std".into(), "core".into()])),
+        args: vec![row],
+    }
+}
+
+/// A `Raised`'s row as a `raises` clause writes it: `A + B`, `A + 'er`, with
+/// `..` for a rest not decided yet.
+///
+/// **What a message prints.** The row's own `Display` is the checker's
+/// notation, `{ Pay: Pay, | _ }`, which no program contains.
+pub fn raised_written(row: &Type) -> String {
+    let Type::Row { fields, tail } = row else { return row.to_string() };
+    let mut parts: Vec<String> = fields.iter().map(|(_, t)| t.to_string()).collect();
+    match tail.as_deref() {
+        None => {}
+        Some(Type::Param(name)) => parts.push(name.clone()),
+        Some(_) => parts.push("..".to_string()),
+    }
+    if parts.is_empty() { "{}".to_string() } else { parts.join(" + ") }
 }
 
 /// The error a failed assertion is.

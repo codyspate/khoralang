@@ -1,6 +1,6 @@
 module std::net::http;
 
-import std::core::{Array, ChildFailed, Eq, List, Map, Nursery, Option, Result, Scope, SharedFn, Show, Split, acquire, attempt, bounded_nursery, scoped};
+import std::core::{Array, ChildFailed, Eq, List, Map, Nursery, Option, Raised, Result, Scope, SharedFn, Show, Split, acquire, attempt, bounded_nursery, scoped};
 import std::permissions::{granted_host};
 import std::permissions::grants::{network};
 import std::net::socket::{accept_on, connect_to, invalid_handle, listen_on, receive, set_receive_timeout, shut, start, transmit};
@@ -2450,7 +2450,7 @@ fn dial(url: Url) -> Result<Transport, CallError>
 {
   if url.secure {
     match attempt(fn () => tls_connect(tls_client()!, url.host, url.port)!) {
-      Result::Err(why) => Result::Err(CallError::Insecure(tls_reason(why))),
+      Result::Err(why) => Result::Err(CallError::Insecure(tls_reason(Raised::only(why)))),
       Result::Ok(session) => {
         // The same deadline the plain path gets, and for the same reason: a
         // peer that accepts and then says nothing must not hold this fiber

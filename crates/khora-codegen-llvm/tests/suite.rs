@@ -92,6 +92,7 @@ mod process;
 mod profiles;
 mod random;
 mod raw_catch;
+mod raised;
 mod records;
 mod redaction;
 mod reference;

@@ -59,6 +59,21 @@ pub const FAILED_WHICH: u64 = khora_rt::FAILED_WHICH as u64;
 /// must agree are one number.
 pub const STOPPED_WHICH: u64 = khora_rt::STOPPED_WHICH as u64;
 
+/// The `which` a failure travels under when it carries context.
+///
+/// **What it prevents: context lost on `raise`.** A `Raised` with a note that
+/// is raised on travels as itself -- the box, error and note together --
+/// under this tag, so the note reaches whatever handles the failure next.
+/// Every place that takes a failure apart (a `catch`, `attempt`, the entry
+/// point) opens the box first and sees the error's own id; a `!` that only
+/// passes a failure on passes the box on unopened. A failure with no note
+/// travels as its own id and word, so code that attaches no context pays
+/// nothing for this.
+///
+/// Reserved beside the other tags, outside the range error ids come from,
+/// and defined from the runtime's constant, which reads it at a fiber join.
+pub const NOTED_WHICH: u64 = khora_rt::NOTED_WHICH as u64;
+
 /// The global every loop back-edge and every `!` loads before asking the
 /// runtime anything. `khora_rt::poll` says what is in it.
 pub const POLL_WORD: &str = "khora_poll";
@@ -368,6 +383,10 @@ pub struct Runtime<'ctx> {
     /// error left `main`. Returns, unlike its neighbors here: the program is
     /// ending correctly and this only says why.
     pub unhandled: FunctionValue<'ctx>,
+    /// `void khora_unhandled_context(const uint8_t *note, size_t, const
+    /// uint8_t *what, size_t)` -- what a failure with context that left
+    /// `main` was, after [`Runtime::unhandled`] has named its type.
+    pub unhandled_context: FunctionValue<'ctx>,
     /// `void khora_assert_failed(uint32_t ordinal, uint32_t line)` — says which
     /// `assert` in the running test did not hold, and where it was written.
     pub assert_failed: FunctionValue<'ctx>,
@@ -648,6 +667,10 @@ impl<'ctx> Runtime<'ctx> {
             unhandled: declare(
                 "khora_unhandled",
                 void.fn_type(&[ptr.into(), i64t.into()], false),
+            ),
+            unhandled_context: declare(
+                "khora_unhandled_context",
+                void.fn_type(&[ptr.into(), i64t.into(), ptr.into(), i64t.into()], false),
             ),
             assert_failed: declare(
                 "khora_assert_failed",

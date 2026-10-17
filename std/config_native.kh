@@ -1,6 +1,6 @@
 module std::config;
 
-import std::core::{List, Option, Pair, Result, Validated, attempt};
+import std::core::{List, Option, Pair, Raised, Result, Validated, attempt};
 import std::env::{Env, EnvError};
 import std::schema::{Alternative, Named, Problem, Raw, Rejection, Schema, Segment, Shape};
 
@@ -140,9 +140,9 @@ fn variable_of(path: List<Segment>) -> String {
 /// `Option` would have thrown that away one line before the distinction is
 /// used.
 fn fetch(name: String) -> Raw with { env: Env } {
-  let read: Result<Option<String>, EnvError> = attempt(fn () => env.variable(name)!);
+  let read: Result<Option<String>, Raised<EnvError>> = attempt(fn () => env.variable(name)!);
   match read {
-    Result::Err(EnvError::Denied(_denied)) => Raw::Denied,
+    Result::Err(failure) => match Raised::only(failure) { EnvError::Denied(_denied) => Raw::Denied },
     Result::Ok(Option::Some(text)) => Raw::Untyped(text),
     Result::Ok(Option::None) => Raw::Absent,
   }

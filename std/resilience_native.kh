@@ -1,6 +1,6 @@
 module std::resilience;
 
-import std::core::{Eq, Option, Result, Show, attempt};
+import std::core::{Eq, Option, Raised, Result, Show, attempt};
 import std::clock::{Clock};
 import std::random::{Random};
 
@@ -315,9 +315,9 @@ fn fib(n: Int) -> Int {
 /// have latency invisible in its type, and a test could not make it instant --
 /// and the jitter is drawn from `random` rather than invented, so a thousand
 /// clients that failed together do not come back together.
-pub fn retry<A, E, 'ef>(schedule: Schedule, body: () -> A with 'ef raises E) -> A
+pub fn retry<A, 'er, 'ef>(schedule: Schedule, body: () -> A with 'ef raises 'er) -> A
   with { 'ef | clock: Clock, random: Random }
-  raises E
+  raises 'er
 {
   retry_while(schedule, fn _e => true, body)!
 }
@@ -358,7 +358,7 @@ pub type Tried<A, E> = {
 ///   raises DbError
 /// {
 ///   retry_while(Schedule::times(3), fn problem =>
-///     match problem {
+///     match Raised::only(problem) {
 ///       DbError::Disconnected(_) => true,
 ///       DbError::Rejected(_) => false,
 ///       DbError::RolledBack(_) => false,
@@ -369,17 +369,48 @@ pub type Tried<A, E> = {
 /// The predicate is the point: a dropped connection is worth another go and a
 /// rejected statement is not, and retrying the second one just fails again
 /// three times more slowly.
-pub fn retry_while<A, E, 'ef>(
+///
+/// **The predicate is handed the failure as a value**, a `Raised` over
+/// whatever `body` raises, so a body raising two error types can be retried
+/// too: raise it into a `catch` to ask which it was, as
+/// `(raise problem) catch { DbError::Disconnected(_) => true, _ => false }`.
+/// The failure that stops the retrying is raised as itself, with any context
+/// it carries.
+pub fn retry_while<A, 'er, 'ef>(
   schedule: Schedule,
-  again: (E) -> Bool,
-  body: () -> A with 'ef raises E,
+  again: (Raised<'er>) -> Bool,
+  body: () -> A with 'ef raises 'er,
 ) -> A
   with { 'ef | clock: Clock, random: Random }
-  raises E
+  raises 'er
 {
-  match retry_counting(schedule, again, body).outcome {
-    Result::Ok(value) => value,
-    Result::Err(error) => raise error,
+  // A loop over a `catch` rather than `retry_counting`, whose `Result` and
+  // `Tried` per attempt this would only take apart again: one box per failed
+  // attempt, made by the binding, and nothing per success.
+  let began = clock.monotonic_millis();
+  let mut made = 1;
+  loop {
+    let tried = Option::Some(body()!) catch {
+      problem => if again(problem) {
+        match Schedule::next_after(schedule, made, clock.monotonic_millis() - began) {
+          Option::None => raise problem,
+          Option::Some(at) => {
+            // Only the difference is waited for. The schedule answered an
+            // instant, and some of it has already gone by.
+            let now = clock.monotonic_millis() - began;
+            if at > now { clock.sleep(at - now) };
+            made = made + 1;
+            Option::None
+          }
+        }
+      } else {
+        raise problem
+      },
+    };
+    match tried {
+      Option::Some(value) => break value,
+      Option::None => (),
+    }
   }
 }
 
@@ -402,7 +433,7 @@ pub fn retry_while<A, E, 'ef>(
 /// ```khora
 /// import std::resilience::{Schedule, Tried, retry_counting};
 ///
-/// fn fetch_reporting() -> Tried<String, HttpError>
+/// fn fetch_reporting() -> Tried<String, Raised<HttpError>>
 ///   with { client: HttpClient, clock: Clock, random: Random }
 /// {
 ///   retry_counting(Schedule::times(5), fn _e => true, fn () => fetch()!)
@@ -412,11 +443,11 @@ pub fn retry_while<A, E, 'ef>(
 /// The count comes back with the answer, which is what a caller logs or turns
 /// into a metric. `retry` throws it away, which is right when nobody was
 /// going to look at it.
-pub fn retry_counting<A, E, 'ef>(
+pub fn retry_counting<A, 'er, 'ef>(
   schedule: Schedule,
-  again: (E) -> Bool,
-  body: () -> A with 'ef raises E,
-) -> Tried<A, E>
+  again: (Raised<'er>) -> Bool,
+  body: () -> A with 'ef raises 'er,
+) -> Tried<A, Raised<'er>>
   with { 'ef | clock: Clock, random: Random }
 {
   let began = clock.monotonic_millis();
@@ -471,7 +502,7 @@ pub fn retry_counting<A, E, 'ef>(
 /// The mirror of `retry`: it runs the body again while it *succeeds* and stops
 /// at the first failure, answering how many times it ran. `Spaced` rather than
 /// `Exponential` because a poller wants a grid it does not drift off.
-pub fn repeat<A, E, 'ef>(schedule: Schedule, body: () -> A with 'ef raises E) -> Int
+pub fn repeat<A, 'er, 'ef>(schedule: Schedule, body: () -> A with 'ef raises 'er) -> Int
   with { 'ef | clock: Clock, random: Random }
 {
   let began = clock.monotonic_millis();

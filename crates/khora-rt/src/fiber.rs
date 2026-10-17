@@ -96,6 +96,15 @@ pub const CANCELED_WHICH: u32 = u32::MAX;
 /// every reader already interprets is how a reserved range stops being one.
 pub const STOPPED_WHICH: u32 = u32::MAX - 2;
 
+/// The `which` a failure that carries context travels under: its word is the
+/// `Raised` box, which holds the error's own id, the error, and the note.
+///
+/// Reserved beside the other three, outside the range error-type ids come
+/// from, so no `catch` can name it. The runtime never opens the box: a
+/// fiber's kept error is released, marked shared and handed to joiners
+/// through the compiler's routines, which know this tag.
+pub const NOTED_WHICH: u32 = u32::MAX - 3;
+
 /// Whether fibers are coroutines on the scheduler rather than threads.
 ///
 /// Read once. A program that changed its mind halfway would have handles of

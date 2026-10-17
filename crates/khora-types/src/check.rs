@@ -100,6 +100,15 @@ pub(crate) struct Demand {
     site: Option<ExprId>,
 }
 
+/// A `catch` whose operand had raises not typed yet, and its generic named
+/// arms. See [`Checker::late_arms`].
+pub(crate) struct LateArms {
+    /// Each generic named arm's type, as it was bound, and where it is.
+    pub(crate) arms: Vec<(Type, TextRange)>,
+    /// The operand's tails that were still to be settled.
+    pub(crate) tails: Vec<Type>,
+}
+
 pub(crate) struct Checker<'a> {
     pub(crate) types: &'a TypeMap,
     pub(crate) body: &'a Body,
@@ -194,6 +203,15 @@ pub(crate) struct Checker<'a> {
     /// The error type each named `catch` arm handles, published as
     /// [`crate::BodyTypes::caught`].
     pub(crate) caught: HashMap<PatId, Type>,
+    /// Named `catch` arms over a row holding `Opaque`, at a generic type:
+    /// nothing in the operand says which instantiation arrives, so after
+    /// inference something else must have decided every argument. See
+    /// [`Checker::refuse_bare_opaque`].
+    pub(crate) opaque_arms: Vec<(Type, TextRange)>,
+    /// Where a `raise` sends on a failure value (`raise f` with `f` a
+    /// `Raised`). A `catch` whose operand has one binds a `Raised` even over
+    /// one type, so that the context the value carries reaches the binding.
+    pub(crate) raised_raises: HashSet<TextRange>,
     /// The operands of the `catch`es whose named arms handle everything the
     /// operand raises, published as [`crate::BodyTypes::is_total_catch`].
     pub(crate) total_catches: HashSet<ExprId>,
@@ -283,15 +301,22 @@ pub(crate) struct Checker<'a> {
     /// the row said it carried when it was built. See
     /// [`Checker::settle_raises`] for why a closed tail is not the whole row.
     pub(crate) owner_rows: Vec<(Type, Vec<(String, Type)>)>,
-    /// Tails a binding `catch` arm subtracted before they were solved, with
-    /// the type the binding was given and where. See
-    /// [`Checker::check_bound_tails`].
-    pub(crate) bound_tails: Vec<(Type, Type, TextRange)>,
     /// Error types a `catch` arm names that nothing in its operand was
     /// known to raise when it was checked, beside tails not solved yet:
     /// the type, those tails, and the `catch`. See
-    /// [`Checker::check_bound_tails`].
+    /// [`Checker::check_late_named_arms`].
     pub(crate) named_late: Vec<(String, Vec<Type>, TextRange)>,
+    /// The named arms of a `catch` whose operand has tails not solved yet,
+    /// with those tails.
+    ///
+    /// A tail that turns out to carry `Opaque` makes the `catch` one over a
+    /// forgotten row after all, and its arms are then checked as
+    /// [`Checker::refuse_bare_opaque`] checks the arms of one known to be.
+    /// See [`Checker::check_late_named_arms`].
+    pub(crate) late_arms: Vec<LateArms>,
+    /// The tails a raise of a forgotten row reaches, found when raises are
+    /// settled. See [`Checker::forgotten_tails_of`].
+    pub(crate) forgotten_tails: Vec<Type>,
     /// Record updates whose base was a variable when they were reached. See
     /// [`Checker::settle_updates`].
     pub(crate) pending_updates: Vec<PendingUpdate>,
@@ -594,6 +619,121 @@ impl<'a> Checker<'a> {
              the only thing that would -- so there is no impl to call. Annotate it: \
              `let value: TheType = {name}(..)`, or say it at the call"
         )
+    }
+
+    /// Refuses `Opaque` anywhere but inside a `Raised`, and a named `catch`
+    /// arm over `Opaque` at a generic type nothing decided.
+    ///
+    /// **`Opaque` has no cases and so no drop glue.** A bare value of it
+    /// freed the error it carried without releasing what that error owned (a
+    /// leak per failure), and raising it said `Opaque` where the error was an
+    /// `InventoryError`, so every `catch` after it missed. So a type with
+    /// `Opaque` in it anywhere but a `Raised`'s row is refused: an
+    /// expression's type, or a generic's type argument -- `Raised::only` at
+    /// `E := Opaque`, or `fn f<E>(.. raises E)` handed a `raises Opaque` body.
+    ///
+    /// **A generic arm must be decided all the way down.** An arm such as
+    /// `Gx::X(Option::Some(_))` over a forgotten row is typed only by its
+    /// pattern; an argument left a variable anywhere inside it, `Gx<Option<?>>`,
+    /// gave the arm an error id of its own, and the `Gx<Option<Int>>` that
+    /// arrived went past it to the catch-all.
+    ///
+    /// The first offending expression in the source is the one reported,
+    /// which is where the bare `Opaque` was made.
+    pub(crate) fn refuse_bare_opaque(&mut self) {
+        fn bare(ty: &Type) -> bool {
+            match ty {
+                Type::Adt { .. } if crate::is_std_opaque(ty) => true,
+                Type::Adt { .. } if crate::raised_row(ty).is_some() => false,
+                Type::Adt { args, .. } => args.iter().any(bare),
+                Type::Fn { params, ret, .. } => params.iter().any(bare) || bare(ret),
+                Type::Tuple(items) => items.iter().any(bare),
+                Type::Applied { head, args } => bare(head) || args.iter().any(bare),
+                Type::Int
+                | Type::Fixed(_)
+                | Type::Float
+                | Type::Bool
+                | Type::Char
+                | Type::Str
+                | Type::Unit
+                | Type::Ptr
+                | Type::Never
+                | Type::Param(_)
+                | Type::Var(_)
+                | Type::Const(_)
+                | Type::Assoc { .. }
+                | Type::Row { .. }
+                | Type::Unknown => false,
+            }
+        }
+        fn undecided(ty: &Type) -> bool {
+            match ty {
+                Type::Var(_) | Type::Unknown => true,
+                Type::Adt { args, .. } => args.iter().any(undecided),
+                Type::Tuple(items) => items.iter().any(undecided),
+                Type::Fn { params, ret, .. } => params.iter().any(undecided) || undecided(ret),
+                Type::Applied { head, args } => undecided(head) || args.iter().any(undecided),
+                Type::Int
+                | Type::Fixed(_)
+                | Type::Float
+                | Type::Bool
+                | Type::Char
+                | Type::Str
+                | Type::Unit
+                | Type::Ptr
+                | Type::Never
+                | Type::Param(_)
+                | Type::Const(_)
+                | Type::Assoc { .. }
+                | Type::Row { .. } => false,
+            }
+        }
+        let undecided_arms: Vec<(String, TextRange)> = self
+            .opaque_arms
+            .iter()
+            .filter_map(|(ty, range)| {
+                let ty = self.unifier.zonk(ty);
+                match &ty {
+                    Type::Adt { name, args, .. } if args.iter().any(undecided) => Some((name.clone(), *range)),
+                    _ => None,
+                }
+            })
+            .collect();
+        for (name, range) in undecided_arms {
+            self.error(
+                format!(
+                    "this arm catches `{name}` from a failure that forgot its row, and \
+                     nothing says which `{name}` it is. An error is matched by its exact \
+                     type, so an arm here could miss the one that arrives: bind a field \
+                     whose type decides it, or catch `{name}` before the row is forgotten"
+                ),
+                range,
+            );
+        }
+        let mut at: Vec<TextRange> = Vec::new();
+        for (id, ty) in &self.exprs {
+            if bare(&self.unifier.zonk(ty)) {
+                at.push(self.body.range(*id));
+            }
+        }
+        for (id, (_, args)) in &self.instantiations {
+            if args.iter().any(|a| {
+                let a = self.unifier.zonk(a);
+                !matches!(a, Type::Row { .. }) && bare(&a)
+            }) {
+                at.push(self.body.range(*id));
+            }
+        }
+        at.sort_by_key(|r| (r.start(), r.len()));
+        if let Some(range) = at.first().copied() {
+            self.error(
+                "`Opaque` is only ever held inside a `Raised`: a failure that forgot its \
+                 row has no type of its own to be used at. Keep it as `Raised<Opaque>`, \
+                 and raise that into a `catch` to get at the error"
+                    .to_string(),
+                range,
+            );
+        }
     }
 
     pub(crate) fn check_unknowns(&mut self) {

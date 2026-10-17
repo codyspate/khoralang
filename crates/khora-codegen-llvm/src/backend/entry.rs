@@ -81,6 +81,127 @@ impl<'ctx> Backend<'ctx> {
         self.builder.position_at_end(quiet);
     }
 
+    /// The id of a failure that reached the entry point, read from inside
+    /// the `Raised` box of one that carried context
+    /// ([`runtime::NOTED_WHICH`]).
+    ///
+    /// **Prevents a failure with context escaping unnamed**: its tag is
+    /// reserved, so [`Backend::say_what_escaped`] would print nothing for
+    /// it. A program that attaches no context gets `which` back unchanged
+    /// and no code.
+    fn opened_escape(
+        &mut self,
+        which: inkwell::values::IntValue<'ctx>,
+        word: inkwell::values::IntValue<'ctx>,
+    ) -> inkwell::values::IntValue<'ctx> {
+        if !self.noted() {
+            return which;
+        }
+        let i32_type = self.ctx.i32_type();
+        let noted = i32_type.const_int(runtime::NOTED_WHICH, false);
+        let is_noted = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, which, noted, "escaped.noted")
+            .expect("testing for context");
+        let main = self.builder.get_insert_block().and_then(|b| b.get_parent()).expect("main");
+        let open = self.ctx.append_basic_block(main, "escaped.open");
+        let join = self.ctx.append_basic_block(main, "escaped.opened");
+        let from = self.builder.get_insert_block().expect("a block");
+        self.builder.build_conditional_branch(is_noted, open, join).expect("on the tag");
+        self.builder.position_at_end(open);
+        let ptr = self.ctx.ptr_type(AddressSpace::default());
+        let object = self.builder.build_int_to_ptr(word, ptr, "escaped.box").expect("the box");
+        let (inner, _) = self.raised_pair(object);
+        self.builder.build_unconditional_branch(join).expect("on");
+        self.builder.position_at_end(join);
+        let phi = self.builder.build_phi(i32_type, "escaped.which").expect("a phi");
+        phi.add_incoming(&[(&inner, open), (&which, from)]);
+        phi.as_basic_value().into_int_value()
+    }
+
+    /// Prints what a failure with context that reached the entry point
+    /// was: its note and its error shown, the failure's `show()`, after
+    /// [`Backend::say_what_escaped`] has named the type.
+    ///
+    /// **Prevents the context being dropped where an operator reads it**
+    /// (`processing batch 3: shipping order 42: ShipError::Embargo(XX)`
+    /// printed as `ShipError`). Only a noted failure has a box to open; a
+    /// program that attaches no context gets no code, and the error and note
+    /// are left for the exit to reclaim, as an escaping error always is.
+    fn say_its_context(&mut self, which: inkwell::values::IntValue<'ctx>, word: inkwell::values::IntValue<'ctx>) {
+        if !self.noted() {
+            return;
+        }
+        let i32_type = self.ctx.i32_type();
+        let i64_type = self.ctx.i64_type();
+        let ptr = self.ctx.ptr_type(AddressSpace::default());
+        let noted = i32_type.const_int(runtime::NOTED_WHICH, false);
+        let is_noted = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, which, noted, "escaped.has.context")
+            .expect("testing for context");
+        let main = self.builder.get_insert_block().and_then(|b| b.get_parent()).expect("main");
+        let open = self.ctx.append_basic_block(main, "escaped.context");
+        let join = self.ctx.append_basic_block(main, "escaped.context.done");
+        self.builder.build_conditional_branch(is_noted, open, join).expect("on the tag");
+        self.builder.position_at_end(open);
+        let object = self.builder.build_int_to_ptr(word, ptr, "escaped.box").expect("the box");
+        let (inner, inner_word) = self.raised_pair(object);
+        let slot = runtime::field_pointer(self.ctx, &self.builder, object, raised::RAISED_NOTE);
+        let note = self.builder.build_load(ptr, slot, "escaped.note").expect("the note").into_pointer_value();
+        // A box made for a failure that has no note yet carries none; there
+        // is nothing to add to the type's name then.
+        let has_note = self.ctx.append_basic_block(main, "escaped.has.note");
+        let no_note = self.builder.build_is_null(note, "escaped.no.note").expect("testing the note");
+        self.builder.build_conditional_branch(no_note, join, has_note).expect("on the note");
+        self.builder.position_at_end(has_note);
+        let describer = self.describe_error();
+        let described = self
+            .builder
+            .build_call(describer, &[inner.into(), inner_word.into()], "escaped.described")
+            .expect("describing the error")
+            .try_as_basic_value()
+            .basic()
+            .expect("a pair")
+            .into_struct_value();
+        let tag = self
+            .builder
+            .build_extract_value(described, 0, "escaped.described.which")
+            .expect("the tag")
+            .into_int_value();
+        // A `Show` canceled on the way out has no text: the type's name has
+        // been said, and that is all there is to say.
+        let shown = self.ctx.append_basic_block(main, "escaped.shown");
+        let stopped = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::NE, tag, i32_type.const_zero(), "escaped.stopped")
+            .expect("testing the tag");
+        self.builder.build_conditional_branch(stopped, join, shown).expect("on the tag");
+        self.builder.position_at_end(shown);
+        let what = self
+            .builder
+            .build_extract_value(described, 1, "escaped.text")
+            .expect("the text")
+            .into_pointer_value();
+        let bytes_of = |this: &Self, s: inkwell::values::PointerValue<'ctx>, name: &str| {
+            let len_slot = runtime::field_pointer(this.ctx, &this.builder, s, runtime::STRING_LEN_FIELD);
+            let len = this.builder.build_load(i64_type, len_slot, name).expect("a length").into_int_value();
+            let bytes = runtime::byte_offset(this.ctx, &this.builder, s, runtime::STRING_BYTES_OFFSET, name);
+            (bytes, len)
+        };
+        let (note_bytes, note_len) = bytes_of(self, note, "escaped.note.bytes");
+        let (what_bytes, what_len) = bytes_of(self, what, "escaped.what.bytes");
+        self.builder
+            .build_call(
+                self.rt.unhandled_context,
+                &[note_bytes.into(), note_len.into(), what_bytes.into(), what_len.into()],
+                "",
+            )
+            .expect("saying what the failure was");
+        self.builder.build_unconditional_branch(join).expect("on");
+        self.builder.position_at_end(join);
+    }
+
     /// Emits a `main` that hands every test to the runner.
     ///
     /// `int main(int argc, char **argv)`, and the call that keeps them.
@@ -380,7 +501,9 @@ impl<'ctx> Backend<'ctx> {
             self.builder.build_conditional_branch(flag, failed, ok).expect("branching on the tag");
 
             self.builder.position_at_end(failed);
-            self.say_what_escaped(main, which);
+            let escaped = self.opened_escape(which, word);
+            self.say_what_escaped(main, escaped);
+            self.say_its_context(which, word);
             self.close_root_region();
             // A cancellation that reached the entry point and an error that
             // did are different outcomes, and worth telling apart from

@@ -17,7 +17,7 @@ module std_suite::combinators;
 //! the failure system declining to compose, and it is the largest gap an agent
 //! writing a real program hit. Roadmap #136.
 
-import std::core::{Iterator, List, Option, Range, Result, assert_that, attempt};
+import std::core::{Iterator, List, Option, Raised, Range, Result, assert_that, attempt};
 
 pub type UserError = | NotFound(id: Int);
 
@@ -55,8 +55,9 @@ test "a fallible step maps over a list" {
 test "a failing step stops the walk" {
   match attempt(fn () => load_all([1, -5, 3])!) {
     Result::Ok(_xs) => assert_that(false, "a bad id was accepted"),
-    Result::Err(UserError::NotFound(id)) =>
-      assert_that(id == -5, "stopped at ${id} rather than at -5"),
+    Result::Err(failure) => match Raised::only(failure) {
+      UserError::NotFound(id) => assert_that(id == -5, "stopped at ${id} rather than at -5"),
+    },
   }
 }
 

@@ -198,12 +198,36 @@ impl<'a> Checker<'a> {
             return true;
         }
         let found = self.unifier.zonk(&settled);
+        // **A failure held as a value is not its error.** A `Raised` binding
+        // matched with an error type's cases is the one mistake this message
+        // meets often, and the form that works is not a `match` at all.
+        let advice = match crate::raised_row(&found) {
+            Some(_) => format!(
+                ". A `Raised` is matched on the error types by raising it into a `catch`: for \
+                 a failure `err`, `(raise err) catch {{ {owner}::{case} => .., _ => .. }}`",
+                case = self.pattern_case_name(pat),
+            ),
+            None => String::new(),
+        };
         self.error(
-            format!("this pattern is a `{owner}` case, and the value here is a `{found}`"),
+            format!("this pattern is a `{owner}` case, and the value here is a `{found}`{advice}"),
             self.body.pat_range(pat),
         );
         self.broken_pats.insert(pat);
         false
+    }
+
+    /// The case a constructor pattern names, `Declined` for
+    /// `Pay::Declined(r)`, for a message to repeat; `..` for any other pattern.
+    fn pattern_case_name(&self, pat: PatId) -> String {
+        let resolution = match self.body.pat(pat) {
+            Pat::Path(r) | Pat::TupleStruct { resolution: r, .. } | Pat::Record { resolution: r, .. } => r,
+            _ => return "..".to_string(),
+        };
+        match variant_case(resolution) {
+            Some((_, _, name)) => name,
+            None => "..".to_string(),
+        }
     }
 
     /// A bare name in a pattern that is the name of one of its value's cases.
