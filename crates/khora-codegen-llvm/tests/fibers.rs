@@ -2731,15 +2731,24 @@ fn work() -> Int {
 /// `false` and `wait` raises the failure. The docs' `cancel` then `wait`
 /// examples catch at the wait for this reason. The second half is that
 /// spelling: `catch { _ => () }` goes on.
+///
+/// The cancel waits on `Fiber::finished`, not on a fixed sleep: a 50 ms sleep
+/// was too short on a loaded Windows runner, the cancel landed before the
+/// failure, and `canceled` answered `true` (`21`, not `120`).
 #[test]
 fn a_cancel_after_the_child_failed_leaves_the_failure_to_wait() {
     waits_cleanly(
         "fiber_wait_cancel_after_failure",
         "extern fn khora_sleep(millis: Int) -> ();
 
+fn until_finished(f: Fiber<Int, { Oops: Oops }>) -> () {
+  let mut tries = 0;
+  while !Fiber::finished(f) && tries < 2000 { khora_sleep(5); tries = tries + 1 };
+}
+
 fn cancel_then_wait() -> Int raises Oops {
   let child = Fiber::spawn(fn () => fail()!);
-  khora_sleep(50);
+  until_finished(child);
   Fiber::cancel(child);
   let k = if Fiber::canceled(child) { 1000 } else { 0 };
   Fiber::wait(child)!;
@@ -2748,7 +2757,7 @@ fn cancel_then_wait() -> Int raises Oops {
 
 fn cancel_then_go_on() -> Int {
   let child = Fiber::spawn(fn () => fail()!);
-  khora_sleep(50);
+  until_finished(child);
   Fiber::cancel(child);
   Fiber::wait(child)! catch { _ => () };
   20
