@@ -81,6 +81,7 @@ mod main_overflow;
 mod matching;
 mod modules;
 mod mutation;
+mod namesakes;
 mod net_cancel;
 mod newtypes;
 mod nursery_bound;

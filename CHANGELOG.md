@@ -160,6 +160,18 @@ it will behave differently now.
 
 ### Fixed
 
+- A program may name a function like a C function `std` declares --
+  `bind`, `listen`, `socket`, `close`, `getenv`, `strlen`, `system`, a
+  runtime export such as `khora_sleep` -- with any signature. Every program
+  compiles `std`'s socket, file and process code,
+  so the name alone was enough to break it: a namesake that could raise
+  crashed the compiler ("expected the StructValue variant"), one returning
+  `()` where C returns a value was refused with a message about a body the
+  program did not write, and a `khora_sleep` of the program's own let a
+  canceled `clock.sleep` return early and run the statement after it. The
+  same held for a program's own `extern fn` and a Khora function of the
+  same name in another of its modules. Each call reaches the function it
+  names: the program's own, or the C one.
 - A function with no Khora body can be used as a value: a `std` intrinsic
   (`xs |> List::map(String::byte_length)`, `Int::xor`, `U8::of`), a
   runtime operation (`Fiber::wait`, `Shared::get`, `Channel::send`), or an

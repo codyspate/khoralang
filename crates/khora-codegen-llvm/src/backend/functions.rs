@@ -32,6 +32,38 @@ impl<'ctx> Backend<'ctx> {
         self.foreign_signatures.get(name).cloned().or_else(|| self.signature_of(name))
     }
 
+    /// The signature a call to `name` is compiled against: its own if a Khora
+    /// body defines it, the C declaration's if not.
+    ///
+    /// **What this prevents: a program's `fn bind() -> Int raises E` taking
+    /// over std's call to C's `bind`.** [`Self::signature_of`] falls back to a
+    /// map keyed by bare name across the whole program, where the first file
+    /// in path order wins, so a Khora `bind` in a file that sorts before
+    /// `std::net::socket` -- a program's or a dependency's -- was found
+    /// instead of std's `extern fn bind`. The call instruction was declared
+    /// from the C signature and its
+    /// result taken apart by the Khora one, so a fallible namesake crashed the
+    /// compiler on an `i32` it expected to be a tagged pair, and a namesake of
+    /// another shape was refused, or answered with a value of the wrong type.
+    /// Every program compiles std's socket code, so naming a function `bind`
+    /// or `listen` was enough.
+    ///
+    /// The same question [`Self::callee`] asks before it declares the
+    /// function, so the instruction and what reads its result cannot disagree.
+    ///
+    /// The fallback is not airtight on its own: for a name that is neither
+    /// defined nor `extern` -- a bodiless declaration nobody implemented --
+    /// [`Self::foreign_signature_of`] still falls through to the bare-name
+    /// map, and [`Self::callee`] refuses that case ("has no body") before a
+    /// call is built, so nothing compiles against the answer.
+    pub fn call_signature(&self, name: &str) -> Option<khora_types::Signature> {
+        if self.is_defined(name) {
+            self.signature_of(name)
+        } else {
+            self.foreign_signature_of(name)
+        }
+    }
+
     pub(super) fn register_foreign(&mut self, name: &str, signature: khora_types::Signature) {
         self.foreign_signatures.insert(name.to_string(), signature);
     }
@@ -80,12 +112,9 @@ impl<'ctx> Backend<'ctx> {
         // Which map to ask depends on what kind of thing this is, and
         // `is_defined` is that question: a name no Khora body defines is a C
         // symbol, whatever else in the program happens to share its spelling.
-        let signature = if self.is_defined(name) {
-            self.signature_of(name)
-        } else {
-            self.foreign_signature_of(name)
-        }
-        .ok_or_else(|| format!("`{name}` has no signature to call through"))?;
+        let signature = self
+            .call_signature(name)
+            .ok_or_else(|| format!("`{name}` has no signature to call through"))?;
         // Three kinds of function reach this point, and only one of them is a
         // call to somewhere else.
         //

@@ -341,7 +341,10 @@ impl<'ctx> Lower<'_, 'ctx> {
         args: &[ExprId],
         range: TextRange,
     ) -> Flow<'ctx> {
-        let Some(signature) = self.be.signature_of(name) else {
+        // The signature `callee` declared the function from. Asking
+        // `signature_of` instead read a same-named Khora function's for a C
+        // call. `Backend::call_signature`.
+        let Some(signature) = self.be.call_signature(name) else {
             return self.fail(format!("`{name}` has no signature to call through"), range);
         };
         let function = match self.be.callee(name) {
