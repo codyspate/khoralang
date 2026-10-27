@@ -8,9 +8,10 @@ and `tests/targets.rs` proves an object comes out for the machine that was
 asked for — a WebAssembly module, an aarch64 ELF and an x86-64 ELF, all from a
 Windows host.
 
-Steps two to four are not, so a cross build stops at the link with a message
-that says which target its object was for and that a linker and sysroot are
-what is missing. Nothing here yet *runs* on another machine.
+Steps two to four are not done for every target. Where they are -- wasm
+libraries and static musl executables -- a cross build links; elsewhere it
+stops at the link with a message that says which target its object was for
+and that a linker and sysroot are what is missing.
 
 That is a smaller problem than it looks for correctness and a large one for
 adoption: `docs/positioning.md` puts Khora where a team is choosing Go, and
@@ -48,8 +49,9 @@ target that works, not the first exception:
    selects actually reach;
 3. ~~a linker and sysroot for the target~~ — **done for wasm**, which needs no
    sysroot: there is no libc to find and no CRT to link, so `wasm-ld` plus the
-   runtime archive is the whole of it. Still open for `aarch64-unknown-linux-gnu`
-   and the musl targets, which do need one;
+   runtime archive is the whole of it. **Done for the two musl targets**, below.
+   Not done for `aarch64-unknown-linux-gnu` *from another machine*: that needs
+   arm64 glibc, and the supported path is a native arm64 toolchain instead;
 4. the toolchain able to *fetch* a target's runtime and sysroot, which is
    roadmap 10.6's version-management machinery pointed at a second axis. Still
    open, and now the only thing between here and a `.wasm` that builds on a
@@ -258,11 +260,80 @@ would put back the mistake this fixed in a subtler place.
 
 ## Other targets the same mechanism buys
 
-- **`x86_64-unknown-linux-musl`**, for a static binary in a `scratch` image.
-  Go's deployment story in one line, and mostly a linking question.
-- **`aarch64-unknown-linux-gnu`**, for Graviton and for arm64 containers.
+- **`x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`** — **done**,
+  as static executables. See below.
+- **`aarch64-unknown-linux-gnu`** — **done as a native toolchain**, built and
+  tested on GitHub's `ubuntu-24.04-arm` runner. Not as a cross target.
 - **`aarch64-apple-darwin` from Linux CI**, which removes the ten-times billing
-  multiplier that `.github/workflows/runtime.yml` exists to avoid.
+  multiplier that `.github/workflows/runtime.yml` exists to avoid. Open.
+
+## Static musl executables — **implemented**
+
+`khora build --target <arch>-unknown-linux-musl` from either Linux toolchain.
+
+**Where the C library comes from: Rust's musl target.** `rustup target add`
+installs `lib/rustlib/<triple>/lib/self-contained/` with musl 1.2.5's `libc.a`
+and start files and LLVM's `libunwind.a`. The runtime is compiled against that
+same Rust toolchain, so the two cannot disagree about the libc. The release
+copies seven of those files into `targets/<triple>/sysroot/` beside the
+target's `libkhora_rt.a`; a source build finds them through `rustc --print
+sysroot`. **`crtbegin.o` and `crtend.o` are LLVM compiler-rt's**
+`crtbegin.c`/`crtend.c` (their symbols are `__do_init`, `__EH_FRAME_LIST__`,
+not libgcc's `frame_dummy`; the `GCC: 9.4.0` in `.comment` names the compiler
+Rust built them with), so they are under Apache-2.0 WITH LLVM-exception like
+`libunwind.a`, whose license text ships in `licenses/`. The
+link needs `crtend.o`'s zero word ending `.eh_frame`: lld writes one of its
+own, GNU ld does not, and a bfd-linked program without it segfaulted inside
+its trap report under `KHORA_BACKTRACE=1`. The link also passes
+`--eh-frame-hdr`, because gcc's `-static` spec does not and the unwinder finds
+`.eh_frame` through the `PT_GNU_EH_FRAME` it produces.
+
+**Native libraries** (`[build] link`) are looked up by the compiler in
+`[build] link-search` and passed to the linker by path, never as `-l`: the
+driver's default search path survives `-nostdlib` and found the host's
+glibc-built `libz.a` and `libm.a`. Names musl folds into `libc.a` (`m`,
+`pthread`, `dl`, `rt`, `util`, ...) are satisfied by it and dropped. Every
+runtime archive carries a `khora_rt_built_for_<triple>` symbol, and an archive
+built for another target is refused before the link.
+
+**What the runtime needed: nothing in its source.** Every dependency builds
+for both musl triples and for `aarch64-unknown-linux-gnu`, including `ring`,
+mimalloc, the setjmp shim and corosensei's aarch64 stack switching. What
+`cargo build --target` lacked was a C compiler for musl — the `cc` crate asks
+for `x86_64-linux-musl-gcc` — so `scripts/build-musl-runtime.sh` supplies
+musl's headers (from the matching release tarball, `make install-headers`,
+pinned by SHA-256) and clang pointed at them. The headers are build-time only.
+
+**The link** (`toolchain::drive_static_musl`):
+
+    <driver> [--target=<triple> -fuse-ld=<ld.lld>] -static -nostdlib
+             -Wl,--eh-frame-hdr crt1.o crti.o crtbegin.o <objects>
+             libkhora_rt.a [natives] libunwind.a libc.a crtend.o crtn.o
+
+`-nostdlib`, so nothing from a glibc host leaks in. `--target` and lld only
+when the driver is clang: gcc refuses `--target=`, works for its own
+architecture without it, and is refused with a message naming clang for the
+other one. lld is required only for the other architecture.
+
+**`--lib` is refused** for a musl target: a shared library carrying its own
+static musl into a glibc host process is two C libraries in one process.
+
+**Verified** (x86-64 Linux host): hello world, `examples/khq`, the std-suite
+(71/71) and the `fibers`, `tls` and `cancel*` suite modules on both
+`KHORA_FIBERS` backends, all as static musl programs; they run in an empty
+root holding only `/etc/hosts`. Every `std` function links for both musl
+triples. aarch64 musl programs link static from x86-64; running them needs an
+arm64 runner.
+
+## `aarch64-unknown-linux-gnu`
+
+A native toolchain rather than a cross target: the `ubuntu-24.04-arm` runner
+builds, tests and packages it, the same way `ubuntu-latest` does for x86-64.
+Both are Ubuntu 24.04, so one `MIN_GLIBC` (2.39) in `install.sh` holds for
+both. Nothing in the compiler or runtime is arm64-specific beyond what macOS
+on Apple silicon already exercised: corosensei's aarch64 backend is the same
+code, and the platform register (`x18`) is reserved on Darwin and free on
+Linux, which only makes Linux the easier case.
 
 ## What this document does not decide
 

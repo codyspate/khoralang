@@ -151,6 +151,10 @@
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+// `khora_rt_built_for_<target>`, the mark the linker driver checks a runtime
+// archive against; `build.rs` says why.
+include!(concat!(env!("OUT_DIR"), "/built_for.rs"));
+
 #[cfg(not(target_family = "wasm"))]
 mod args;
 mod array;

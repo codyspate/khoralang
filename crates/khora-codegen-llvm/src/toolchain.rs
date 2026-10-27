@@ -180,6 +180,7 @@ pub fn runtime_archive() -> Option<PathBuf> {
     }
 
     let mut candidates: Vec<PathBuf> = Vec::new();
+    let triple = khora_db::target_triple();
 
     // **A cross build's archive is looked for first, before anything sitting
     // next to the compiler.** The probes below find the *host* archive — it is
@@ -190,13 +191,22 @@ pub fn runtime_archive() -> Option<PathBuf> {
     // member. Worse, with `--allow-undefined` it had said nothing at all and
     // turned every runtime symbol into a host import.
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    if let (Some(triple), Some(workspace)) =
-        (khora_db::target_triple(), manifest_dir.parent().and_then(|c| c.parent()))
-    {
-        for profile in ["debug", "release"] {
-            candidates.push(
-                workspace.join("target").join(&triple).join(profile).join(cross_archive()),
-            );
+    if let Some(triple) = &triple {
+        candidates.extend(cross_archive_candidates(triple));
+        if let Some(workspace) = manifest_dir.parent().and_then(|c| c.parent()) {
+            for profile in ["debug", "release"] {
+                candidates.push(
+                    workspace.join("target").join(triple).join(profile).join(cross_archive()),
+                );
+            }
+        }
+        // **A musl build never falls back to the host's archive.** The host's
+        // is built against glibc, and linked statically against musl's `libc.a`
+        // it either fails on a glibc-only symbol or, worse, links -- a program
+        // carrying two C libraries' assumptions about one process. "Not found,
+        // build it with this" is the better message by a distance.
+        if is_musl(triple) {
+            return candidates.into_iter().find(|p| p.is_file());
         }
     }
 
@@ -232,6 +242,87 @@ fn cross_archive() -> &'static str {
         Some(triple) if triple.contains("windows") => "khora_rt.lib",
         _ => "libkhora_rt.a",
     }
+}
+
+/// Whether `triple` names a musl target, which links statically.
+pub fn is_musl(triple: &str) -> bool {
+    triple.ends_with("-musl")
+}
+
+/// Where a target's runtime archive can be, relative to the running compiler.
+///
+/// Two layouts, both found without configuration:
+///
+/// - **A packaged toolchain** carries other targets' runtimes in
+///   `targets/<triple>/` beside `bin/`, so `khora` at `<prefix>/bin/khora`
+///   looks in `<prefix>/targets/<triple>/`.
+/// - **A cargo build** puts `cargo build -p khora-rt --target <triple>` in
+///   `<target-dir>/<triple>/<profile>/`, and the compiler (or a test binary in
+///   `deps/`) is under `<target-dir>/<profile>/`. The workspace probe in
+///   [`runtime_archive`] covers only `<workspace>/target`, so a build with
+///   `CARGO_TARGET_DIR` set elsewhere -- every CI cache, and every agent
+///   worktree -- built the archive and then could not find it.
+fn cross_archive_candidates(triple: &str) -> Vec<PathBuf> {
+    let Ok(exe) = std::env::current_exe() else { return Vec::new() };
+    let mut candidates = Vec::new();
+    for dir in exe.ancestors().skip(1).take(3) {
+        candidates.push(dir.join("targets").join(triple).join(cross_archive()));
+        for profile in ["debug", "release"] {
+            candidates.push(dir.join(triple).join(profile).join(cross_archive()));
+        }
+    }
+    candidates
+}
+
+/// The files a static musl executable is linked from, besides its own objects
+/// and the runtime archive.
+///
+/// They are Rust's: `rustup target add <triple>` installs musl's `libc.a`,
+/// its start files, and LLVM's `libunwind.a` in
+/// `lib/rustlib/<triple>/lib/self-contained/`, and that is the C library the
+/// runtime archive was built against. Taking them from there means the two
+/// cannot disagree about the libc.
+///
+/// **And `crtbegin.o` and `crtend.o`** from the same directory, which are
+/// LLVM compiler-rt's `crtbegin.c`/`crtend.c` (Apache-2.0 WITH LLVM-exception,
+/// like `libunwind.a`; Rust compiles them with a gcc, which is all the
+/// `GCC: 9.4.0` in their `.comment` says). `crtend.o` holds
+/// the zero word that ends `.eh_frame`. lld writes one of its own and GNU ld
+/// does not, so without it a static program linked by bfd segfaults inside
+/// its own trap report when `KHORA_BACKTRACE=1` walks the frames. Rust links
+/// the same pair for the same target.
+const MUSL_START: &[&str] = &["crt1.o", "crti.o", "crtbegin.o"];
+/// What closes a static musl link, in this order: the unwinder and the C
+/// library after everything that calls them, then the end files.
+const MUSL_END: &[&str] = &["libunwind.a", "libc.a", "crtend.o", "crtn.o"];
+
+/// Where the musl start files and C library are for `triple`.
+///
+/// **Beside the runtime archive first**, as `sysroot/`, which is how a
+/// packaged toolchain carries them: one directory per target holding both, so
+/// the libc that ships is the one the runtime it ships beside was built
+/// against. Then the Rust toolchain's own, for a build from source.
+fn musl_sysroot(triple: &str, runtime: &Path) -> Result<PathBuf, String> {
+    let complete = |dir: &Path| MUSL_START.iter().chain(MUSL_END).all(|f| dir.join(f).is_file());
+    if let Some(beside) = runtime.parent().map(|dir| dir.join("sysroot")) {
+        if complete(&beside) {
+            return Ok(beside);
+        }
+    }
+    let rustc = std::process::Command::new("rustc").args(["--print", "sysroot"]).output();
+    if let Ok(out) = rustc {
+        let root = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let dir =
+            Path::new(&root).join("lib").join("rustlib").join(triple).join("lib").join("self-contained");
+        if out.status.success() && complete(&dir) {
+            return Ok(dir);
+        }
+    }
+    Err(format!(
+        "no musl C library was found for `{triple}`. A packaged toolchain carries one beside the \
+         target's runtime archive, in `sysroot/`; from a source build, run `rustup target add \
+         {triple}`, which installs musl's `libc.a` and start files with the Rust toolchain."
+    ))
 }
 
 /// Runtime symbols a shared library publishes alongside its own exports.
@@ -418,6 +509,10 @@ pub fn link_with_runtime(
     let wasm = khora_db::target_triple().is_some_and(|t| t.contains("wasm"));
     let runtime = runtime_archive().ok_or_else(|| {
         let (archive, how) = match khora_db::target_triple() {
+            Some(triple) if is_musl(&triple) => (
+                cross_archive().to_string(),
+                format!("sh scripts/build-musl-runtime.sh {triple}"),
+            ),
             Some(triple) => (
                 cross_archive().to_string(),
                 format!("cargo build -p khora-rt --target {triple}"),
@@ -429,6 +524,7 @@ pub fn link_with_runtime(
              with `{how}`, or point KHORA_RT_LIB at it."
         )
     })?;
+    check_archive_target(&runtime)?;
     if wasm {
         if !natives.is_empty() {
             return Err("linking a native library is not supported for wasm: the module's \
@@ -438,7 +534,73 @@ pub fn link_with_runtime(
         }
         return drive_wasm_ld(objects, runtime.as_path(), out, exports);
     }
+    if let Some(triple) = khora_db::target_triple().filter(|t| is_musl(t)) {
+        if library {
+            return Err(format!(
+                "`{triple}` builds a static executable, and a shared library cannot be one: \
+                 the library would carry its own copy of musl's `libc.a` into a host process \
+                 that already has a C library. Build the library for `{}` instead.",
+                triple.replace("-musl", "-gnu")
+            ));
+        }
+        let sysroot = musl_sysroot(&triple, &runtime)?;
+        return drive_static_musl(&triple, objects, &runtime, &sysroot, out, profile, &natives);
+    }
     drive_clang(objects, &[runtime.as_path()], out, library, profile, &natives)
+}
+
+/// Links a static executable against musl, naming every input.
+///
+/// **`-nostdlib`, so that nothing comes from the machine.** Without it the
+/// driver adds the host's start files and `-lc`, which on a glibc host are
+/// glibc's: the link succeeds, and the result is a static executable carrying
+/// glibc's `crt1.o` on top of musl's `libc.a`. Every file here is named, in
+/// the order a static link needs -- start files, the program, the runtime,
+/// what the program asked to link, the unwinder and the C library after all of
+/// their callers, end files.
+///
+/// **`ld.lld` when there is one**, and it is required for another
+/// architecture: the host's `ld` reads only its own machine's objects, and
+/// said `file in wrong format` about an aarch64 one. For the host's own
+/// architecture the default linker works too, so its absence is not an error
+/// there.
+///
+/// **What it costs:** the whole of musl and Rust's standard library are in
+/// every executable -- a debug hello world is tens of megabytes, almost all of
+/// it debug information that `--release` drops. And musl's `malloc` is not in
+/// play, because the runtime brings mimalloc, so the throughput gap between
+/// glibc and musl allocators that `khora-rt`'s manifest records does not apply.
+fn drive_static_musl(
+    triple: &str,
+    objects: &[&Path],
+    runtime: &Path,
+    sysroot: &Path,
+    out: &Path,
+    profile: Profile,
+    natives: &Natives,
+) -> Result<(), String> {
+    let clang = linker().ok_or_else(no_linker)?;
+    let lld = tool("ld.lld").or_else(|| which("ld.lld"));
+    let mut cmd = std::process::Command::new(&clang);
+    cmd.args(static_musl_flags(triple, &clang, lld.as_deref(), std::env::consts::ARCH)?);
+    cmd.args(MUSL_START.iter().map(|f| sysroot.join(f)));
+    cmd.args(objects).arg(runtime);
+    cmd.args(musl_natives(triple, natives)?);
+    cmd.args(MUSL_END.iter().map(|f| sysroot.join(f)));
+    if profile.debug_info() {
+        cmd.arg("-g");
+    }
+    cmd.arg("-o").arg(out);
+
+    let output = cmd.output().map_err(|e| format!("running {}: {e}", clang.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "static link for `{triple}` failed ({}):\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
 }
 
 /// Links a WebAssembly module with `wasm-ld`.
@@ -686,4 +848,225 @@ fn drive_clang(
         let _ = std::fs::remove_dir(&dir);
     }
     Ok(())
+}
+
+/// The prefix of the symbol `khora-rt`'s build script defines, followed by
+/// its target triple with `-` (and `.`) written `__`.
+const BUILT_FOR: &str = "khora_rt_built_for_";
+
+/// The target a runtime archive says it was built for, read from its symbol
+/// table.
+///
+/// `None` for an archive that carries no mark -- one built before the mark
+/// existed, or a format whose table this does not read (only the System V /
+/// GNU `/` member, which every archive cargo writes for an ELF or wasm target
+/// has). The check is a refusal of a known mismatch, never a requirement, so
+/// an unreadable archive links as it always did.
+pub fn archive_target(archive: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(archive).ok()?;
+    let mut header = [0u8; 68];
+    file.read_exact(&mut header).ok()?;
+    if &header[..8] != b"!<arch>\n" || header[8] != b'/' || header[9] != b' ' {
+        return None;
+    }
+    let size: usize = std::str::from_utf8(&header[56..66]).ok()?.trim().parse().ok()?;
+    let mut table = vec![0u8; size];
+    file.read_exact(&mut table).ok()?;
+    let at = table.windows(BUILT_FOR.len()).position(|w| w == BUILT_FOR.as_bytes())?;
+    let rest = &table[at + BUILT_FOR.len()..];
+    let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
+    Some(std::str::from_utf8(&rest[..end]).ok()?.replace("__", "-"))
+}
+
+/// Refuses a runtime archive that says it was built for another target.
+///
+/// What it prevents: `KHORA_RT_LIB` -- one variable for every target -- naming
+/// a musl runtime in a glibc build, which linked silently and ran a glibc
+/// program carrying a musl-built Rust standard library; and a glibc runtime in
+/// a musl build, which failed on `undefined symbol: fstat64` and named no
+/// file. Costs one read of the archive's symbol table per link, about 2 MB.
+fn check_archive_target(archive: &Path) -> Result<(), String> {
+    let Some(built_for) = archive_target(archive) else { return Ok(()) };
+    let Some(wanted) = khora_db::target_triple().or_else(host_linux_triple) else {
+        return Ok(());
+    };
+    if built_for == wanted {
+        return Ok(());
+    }
+    let named = if std::env::var_os("KHORA_RT_LIB").is_some() {
+        " It is the one `KHORA_RT_LIB` names; unset it, or point it at that target's archive."
+    } else {
+        ""
+    };
+    Err(format!(
+        "the Khora runtime archive {} was built for `{built_for}`, and this build is for \
+         `{wanted}`: a program is linked against the runtime built for its own target.{named}",
+        archive.display()
+    ))
+}
+
+/// The triple a build with no `KHORA_TARGET` is for, where this can say it
+/// without a build script: a Linux compiler is always built for the glibc
+/// triple of its architecture, which is the only Linux toolchain published.
+/// Elsewhere `None`, and a host build is not checked -- the mismatch this
+/// guards against is a musl archive, and only Linux has one.
+fn host_linux_triple() -> Option<String> {
+    cfg!(all(target_os = "linux", target_env = "gnu"))
+        .then(|| format!("{}-unknown-linux-gnu", std::env::consts::ARCH))
+}
+
+/// Native libraries for a musl link, each one named by its path.
+///
+/// **Resolved here rather than by the linker**, because `-nostdlib` drops the
+/// driver's start files and default libraries but *not* its default search
+/// path: `-lz` found the host's glibc-built `/usr/lib/x86_64-linux-gnu/libz.a`
+/// and linked it into a "musl" executable, `-lm` found glibc's `libm-2.41.a`
+/// and failed on `_dl_x86_cpu_features`, and an aarch64 build of the same
+/// manifest failed because that directory holds no arm64 files. A `.a`
+/// looked up in `[build] link-search` and passed by path cannot come from
+/// anywhere else, under clang, gcc, lld or bfd alike, and needs no `--sysroot`
+/// that the gcc fallback would read differently. Static archives only: a
+/// static executable has nothing to load a `.so` with.
+///
+/// The libraries musl folds into `libc.a` -- `m`, `pthread`, `dl`, `rt`,
+/// `util`, `crypt`, `resolv`, `xnet` -- are dropped, since asking for them is
+/// what every C build recipe does and musl satisfies them already.
+fn musl_natives(triple: &str, natives: &Natives) -> Result<Vec<PathBuf>, String> {
+    const IN_LIBC: &[&str] = &["c", "m", "pthread", "dl", "rt", "util", "crypt", "resolv", "xnet"];
+    let mut found = Vec::new();
+    for name in natives.link.iter().filter(|name| !IN_LIBC.contains(&name.as_str())) {
+        let file = format!("lib{name}.a");
+        match natives.search.iter().map(|dir| dir.join(&file)).find(|path| path.is_file()) {
+            Some(path) => found.push(path),
+            None => {
+                return Err(format!(
+                    "`[build] link` names `{name}`, and no `{file}` is in a `[build] link-search` \
+                     directory. A `{triple}` build uses no system libraries -- the machine's own \
+                     are built against its C library, not musl -- so build `{name}` for \
+                     `{triple}` (a musl toolchain, or `CC=\"clang --target={triple}\"`) and put \
+                     its `{file}` in a directory `link-search` names."
+                ))
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// The driver flags for a static musl link: everything before the inputs.
+///
+/// **gcc is not told the target**, because it refuses `--target=` outright
+/// (`unrecognized command-line option`) and [`linker`] falls back to it on a
+/// machine without clang. For the machine's own architecture it needs nothing
+/// else: every input is named and `-nostdlib` keeps the host's away. For
+/// another architecture gcc cannot be told the target at all, so that is
+/// refused with the driver that can, rather than with gcc's message about a
+/// flag the reader never wrote.
+fn static_musl_flags(
+    triple: &str,
+    driver: &Path,
+    lld: Option<&Path>,
+    host_arch: &str,
+) -> Result<Vec<String>, String> {
+    let foreign = !triple.starts_with(host_arch);
+    let clang = driver.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.contains("clang"));
+    if foreign && !clang {
+        return Err(format!(
+            "linking for `{triple}` from this {host_arch} machine needs clang, which can be \
+             told another target; the C compiler found here is {}, which cannot. Install \
+             `clang` and `lld` from your package manager.",
+            driver.display()
+        ));
+    }
+    if foreign && lld.is_none() {
+        return Err(format!(
+            "linking for `{triple}` from this {host_arch} machine needs `ld.lld`, which reads \
+             every architecture's objects; this machine's own linker reads only its own. \
+             Install `lld` from your package manager, or put LLVM's `ld.lld` on PATH."
+        ));
+    }
+    let mut flags = Vec::new();
+    if clang {
+        flags.push(format!("--target={triple}"));
+        if let Some(lld) = lld {
+            flags.push(format!("-fuse-ld={}", lld.display()));
+        }
+    }
+    flags.extend(["-static".to_string(), "-nostdlib".to_string()]);
+    // The unwinder finds `.eh_frame` through `PT_GNU_EH_FRAME`, and gcc's
+    // `-static` spec does not ask the linker for one (clang's does). Without
+    // it, `KHORA_BACKTRACE=1` on a trap prints `unsupported backtrace`.
+    flags.push("-Wl,--eh-frame-hdr".to_string());
+    Ok(flags)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// gcc is a driver [`linker`] accepts on Linux, and it refuses `--target=`
+    /// outright: `unrecognized command-line option`. A machine with gcc and no
+    /// clang could not build a musl program even for its own architecture,
+    /// which needs nothing gcc lacks.
+    #[test]
+    fn a_gcc_driver_links_musl_for_its_own_architecture() {
+        let flags = static_musl_flags(
+            "x86_64-unknown-linux-musl",
+            Path::new("/usr/bin/gcc"),
+            None,
+            "x86_64",
+        )
+        .expect("gcc links for its own architecture");
+        assert!(
+            flags.iter().all(|f| !f.starts_with("--target")),
+            "gcc does not take --target: {flags:?}"
+        );
+        assert!(flags.iter().any(|f| f == "-static") && flags.iter().any(|f| f == "-nostdlib"));
+        assert!(
+            flags.iter().any(|f| f == "-Wl,--eh-frame-hdr"),
+            "gcc's -static spec omits PT_GNU_EH_FRAME, so the link must ask: {flags:?}"
+        );
+    }
+
+    /// gcc cannot be told the target, and reads `-fuse-ld=` as a linker name
+    /// rather than a path, so it cannot produce another architecture's
+    /// executable. The refusal has to name clang, which can.
+    #[test]
+    fn a_gcc_driver_refuses_another_architecture_by_naming_clang() {
+        let refused = static_musl_flags(
+            "aarch64-unknown-linux-musl",
+            Path::new("/usr/bin/gcc"),
+            Some(Path::new("/usr/bin/ld.lld")),
+            "x86_64",
+        )
+        .expect_err("gcc cannot cross-link");
+        assert!(refused.contains("clang"), "{refused}");
+    }
+
+    /// **`crtend.o` closes the link.** It holds the zero word that ends
+    /// `.eh_frame`; GNU ld does not write one, and a backtrace walking a list
+    /// with no end runs off it: `KHORA_BACKTRACE=1` on a trapping static
+    /// program linked by bfd segfaulted inside the trap report. lld writes its
+    /// own terminator, which is why the suite -- linked by lld -- did not see
+    /// it. The link must not depend on which linker the machine has.
+    #[test]
+    fn a_static_musl_link_ends_eh_frame_whichever_linker_runs() {
+        assert!(MUSL_START.contains(&"crtbegin.o"), "{MUSL_START:?}");
+        assert!(MUSL_END.contains(&"crtend.o"), "{MUSL_END:?}");
+        assert_eq!(MUSL_END.last(), Some(&"crtn.o"), "crtn.o is last: {MUSL_END:?}");
+    }
+
+    /// clang is told the triple, and given lld by path.
+    #[test]
+    fn a_clang_driver_is_told_the_target_and_the_linker() {
+        let flags = static_musl_flags(
+            "aarch64-unknown-linux-musl",
+            Path::new("/opt/llvm/bin/clang"),
+            Some(Path::new("/opt/llvm/bin/ld.lld")),
+            "x86_64",
+        )
+        .expect("clang cross-links with lld");
+        assert!(flags.contains(&"--target=aarch64-unknown-linux-musl".to_string()), "{flags:?}");
+        assert!(flags.contains(&"-fuse-ld=/opt/llvm/bin/ld.lld".to_string()), "{flags:?}");
+    }
 }

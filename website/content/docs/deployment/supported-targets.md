@@ -14,28 +14,89 @@ The website must never describe emission-only support as deployable platform sup
 
 ## What is supported
 
-Three triples, and they are exactly the ones the release workflow builds, packages, and then uses to compile a program before publishing:
+Four toolchains, and they are exactly the ones the release workflow builds, packages, and then uses to compile a program before publishing:
 
 | triple | state | |
 | --- | --- | --- |
 | `x86_64-unknown-linux-gnu` | supported | on glibc 2.39 or newer — [see below](#the-linux-build-needs-glibc-239) |
+| `aarch64-unknown-linux-gnu` | supported | on glibc 2.39 or newer — Graviton, Ampere, arm64 containers |
 | `x86_64-pc-windows-msvc` | supported | |
 | `aarch64-apple-darwin` | supported | |
 
 A release is not published unless each of them has produced an artifact, unpacked it somewhere else, and built and run a program with it. That test is the reason this list is short: it is what has actually been done, not what is expected to work.
 
+Both Linux toolchains also build **static executables** for two more targets, which are targets for your programs rather than places the toolchain itself runs:
+
+| triple | state | |
+| --- | --- | --- |
+| `x86_64-unknown-linux-musl` | supported | `khora build --target x86_64-unknown-linux-musl` |
+| `aarch64-unknown-linux-musl` | supported | `khora build --target aarch64-unknown-linux-musl` |
+
+[Static executables](#static-executables-musl) below says what one is and what it costs.
+
 **Everything else is out of scope for this release**, which is a statement about what is promised rather than a prediction about what would happen if you tried:
 
-- **Linux arm64** is not built or tested by CI, so it is not listed. The compiler may well produce a working binary there; nobody has checked, and an unchecked platform in a supported table is the claim this page exists to prevent.
-- **Cross-compilation** — building a Linux artifact on a Mac, say — is not supported. The compiler can emit for another target, and `KHORA_TARGET` will verify its code generation, but the linker and sysroot story is unfinished, so a deployable artifact still means building on the platform it runs on.
-- **Static and musl builds** are not produced or tested. The published Linux artifact is dynamically linked against the system C library, which is what [Containers](/docs/deployment/containers/) assumes.
+- **The toolchain itself on Alpine or another musl system.** Programs built for musl run there; the compiler does not, because it carries LLVM linked against glibc. Build on a glibc machine or image and copy the executable.
+- **Windows on arm64**, and **Linux on arm64 from a Windows or macOS toolchain**, are not built or tested.
+- **Cross-compiling a dynamically linked program** — `aarch64-unknown-linux-gnu` from an x86-64 machine, or anything for Linux from a Mac — is not supported. The compiler can emit for another target, and `KHORA_TARGET` will verify its code generation, but the link needs that target's glibc and nothing supplies it. Static musl executables are the exception: either Linux toolchain builds them for either architecture.
 - **WebAssembly, and Cloudflare Workers with it**, are not a target of this release. See below.
+
+## Static executables (musl)
+
+`khora build --target <arch>-unknown-linux-musl` links the program, the Khora
+runtime and the musl C library into one statically linked executable. It has
+no dynamic loader and needs no C library on the machine that runs it, so it
+runs on any Linux kernel of that architecture: Alpine, a distroless `static`
+image, or an empty `scratch` container — [Containers](/docs/deployment/containers/#a-static-binary-in-a-scratch-image)
+has a Dockerfile.
+
+What a build needs:
+
+- **A Linux toolchain.** It carries the musl runtime and C library for both
+  architectures in its `targets/` directory, so nothing is downloaded.
+- **A C compiler driver**, as for any build. For the machine's own
+  architecture `clang` or `gcc` will do.
+- **For the other architecture, `clang` and `ld.lld`** (`apt install clang
+  lld`): gcc cannot be told another target, and the system linker reads only
+  its own machine's objects. Without them the build stops and says which is
+  missing.
+
+What it costs and what it excludes:
+
+- **Size.** Everything the program uses is inside it. A release hello world
+  is about 9 MB static against about 10 MB dynamic; the runtime both carry is
+  most of either.
+- **No `--lib`.** A shared library is loaded into a process that already has
+  a C library, and a musl one inside a glibc process is two C libraries with
+  different ideas of the same state. The build refuses and says so.
+- **Name resolution** is musl's: `/etc/hosts`, then the servers in
+  `/etc/resolv.conf`. There is no NSS, so an `nsswitch.conf` module (LDAP,
+  mDNS, `systemd-resolved` over D-Bus) is not consulted. Docker writes both
+  files into every container.
+- **Outbound TLS** verifies against the trust store at the usual paths, as
+  the dynamic build does. In an image with none — `scratch` — `client()`
+  raises `TlsError::BadCertificate` before it connects; copy in a CA bundle
+  (`/etc/ssl/certs/ca-certificates.crt`) or name one with `SSL_CERT_FILE`.
+- **Other programs.** `std::process` runs programs that are in the image. In
+  `scratch` there are none and no `/bin/sh`, so `run`, `output` and
+  `checked_output` raise `ProcessError` for anything not copied in, and
+  `shell` always does. A program that shells out needs a base that has the
+  programs: `gcr.io/distroless/static` plus them, or `busybox`.
+- **Native libraries** in `[build] link` come only from `[build]
+  link-search`, as `lib<name>.a` built for musl. The machine's own library
+  directories are not searched — their archives are built against its glibc
+  — and a name found nowhere stops the build saying so. `m`, `pthread`, `dl`,
+  `rt` and `util` are part of musl's C library and need no file.
+
+Fibers on both backends, sockets, TLS client and server, and the standard
+library's own test suite run in a static build, and the release workflow
+builds and runs one with each packaged Linux toolchain before publishing.
 
 ## The Linux build needs glibc 2.39
 
-**`x86_64-unknown-linux-gnu` means a recent one.** The published Linux
-toolchain is compiled on GitHub's `ubuntu-latest` runner, which is Ubuntu
-24.04, and a glibc program carries the symbol versions of the machine that
+**Both Linux triples mean a recent one.** The published Linux
+toolchains are compiled on GitHub's Ubuntu 24.04 runners, x86-64 and arm64,
+and a glibc program carries the symbol versions of the machine that
 built it. The published binary asks for `GLIBC_2.39` and will not start against
 anything older — not with a degraded feature, but with
 `libc.so.6: version 'GLIBC_2.39' not found` on every command.
@@ -70,7 +131,7 @@ that makes it unusable on half of today's Linux machines to be found at runtime.
 Nothing here applies to the programs *you* compile. A Khora executable links
 against the machine that built it, so its floor is that machine's glibc —
 which is why [Containers](/docs/deployment/containers/) builds and runs in the
-same base image.
+same base image. A [static executable](#static-executables-musl) has no floor.
 
 ## The artifacts, and checking one
 
@@ -101,7 +162,9 @@ tar xzf "khora-$version-$triple.tar.gz" -C /opt
 
 Windows ships the same layout as a `.zip` rather than a `.tar.gz`.
 The archive unpacks to `khora-<version>-<triple>/` holding `bin/khora`, the
-runtime archive beside it, `std/` as source, and the licenses. Nothing needs
+runtime archive beside it, `std/` as source, and the licenses. A Linux
+archive also holds `targets/`, with the runtime and musl C library for each
+[static target](#static-executables-musl). Nothing needs
 configuring after unpacking: the compiler finds `std/` and the runtime beside
 its own binary, and `KHORA_STD` and `KHORA_RT_LIB` exist only as overrides for
 an unusual layout.

@@ -12,6 +12,9 @@
 #       bin/khora            the compiler, with LLVM linked into it
 #       bin/khora_rt.lib     the runtime every generated program links against
 #       std/                 the standard library, as source
+#       targets/<triple>/    Linux only: the runtime and musl C library for
+#                            each static musl target (see below)
+#       licenses/            Linux only: what those carry
 #       LICENSE-MIT LICENSE-APACHE README
 #
 # is found without `KHORA_STD` or `KHORA_RT_LIB` being set. Those variables
@@ -84,6 +87,45 @@ cp "$built/$archive" "$stage/bin/"
 cp -r std "$stage/std"
 cp LICENSE-MIT LICENSE-APACHE "$stage/"
 
+# **Static musl programs, from a Linux toolchain.** Each musl target gets its
+# runtime and the C library a static link needs, in one directory:
+#
+#     targets/<triple>/libkhora_rt.a
+#     targets/<triple>/sysroot/   crt1.o crti.o crtn.o crtbegin.o crtend.o
+#                                 libc.a libunwind.a
+#
+# which is where `khora build --target <triple>` looks, beside its own `bin/`.
+# Both architectures on both Linux runners: a musl link is the same files
+# whichever machine runs it, so an x86-64 toolchain builds arm64 static
+# programs and the other way round.
+#
+# The sysroot is Rust's own -- `rustup target add` installs musl's `libc.a`
+# and start files and LLVM's `libunwind.a` under `self-contained/` -- so the
+# runtime and the libc it is linked with come from one Rust toolchain. Their
+# licenses go in `licenses/`: musl's `crt1.o crti.o crtn.o libc.a` are MIT;
+# `libunwind.a`, `crtbegin.o` and `crtend.o` are LLVM's (compiler-rt's
+# `crtbegin.c`/`crtend.c`, which Rust builds with a gcc -- the `GCC: 9.4.0`
+# in their `.comment` names that compiler, not their source), all three under
+# Apache-2.0 with the LLVM exception.
+case "$triple" in
+    *-linux-gnu)
+        mkdir -p "$stage/licenses"
+        for musl in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            headers=$(sh scripts/build-musl-runtime.sh "$musl" --release --print-headers)
+            self=$(rustc --print sysroot)/lib/rustlib/$musl/lib/self-contained
+            mkdir -p "$stage/targets/$musl/sysroot"
+            cp "${CARGO_TARGET_DIR:-target}/$musl/release/libkhora_rt.a" "$stage/targets/$musl/"
+            for f in crt1.o crti.o crtn.o crtbegin.o crtend.o libc.a libunwind.a; do
+                cp "$self/$f" "$stage/targets/$musl/sysroot/"
+            done
+        done
+        # Kept beside the headers by the script, so a cache that restored the
+        # headers and not the unpacked source still has it.
+        cp "$headers/COPYRIGHT" "$stage/licenses/musl-COPYRIGHT"
+        cp scripts/licenses/LLVM-LICENSE.TXT "$stage/licenses/LLVM-LICENSE.TXT"
+        ;;
+esac
+
 # Written rather than copied: the repository's README is about building the
 # compiler, and somebody who has just unpacked one wants the other half.
 cat > "$stage/README" <<EOF
@@ -104,7 +146,10 @@ object and needs a C driver to link it against this platform's runtime.
   macOS    xcode-select --install
   Linux    clang or gcc from your package manager
 
-Licensed MIT OR Apache-2.0. See LICENSE-MIT and LICENSE-APACHE.
+Licensed MIT OR Apache-2.0. See LICENSE-MIT and LICENSE-APACHE. On Linux,
+targets/ also holds what a static musl program links: musl's libc and start
+files (MIT, licenses/musl-COPYRIGHT), and LLVM's libunwind.a, crtbegin.o and
+crtend.o (Apache-2.0 WITH LLVM-exception, licenses/LLVM-LICENSE.TXT).
 EOF
 
 # One archive per platform convention, so that whatever unpacks it on the other

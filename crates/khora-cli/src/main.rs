@@ -176,6 +176,13 @@ enum Command {
         /// says why doubting it should be answerable by rebuilding.
         #[arg(long)]
         no_cache: bool,
+        /// The target triple to build for, such as `x86_64-unknown-linux-musl`.
+        ///
+        /// The host's own when absent. A musl triple produces a static
+        /// executable that needs no C library on the machine it runs on. The
+        /// same as setting `KHORA_TARGET`, which this overrides.
+        #[arg(long, value_name = "TRIPLE")]
+        target: Option<String>,
     },
     /// Write a software bill of materials for a package's dependencies.
     ///
@@ -515,7 +522,10 @@ fn dispatch() -> Result<ExitCode> {
         Command::Fmt { paths, check, since } => fmt(&paths, check, since.as_deref()),
         Command::Lex { path } => lex(&path).map(|()| true),
         Command::Parse { path, no_trivia } => parse_cmd(&path, no_trivia),
-        Command::Build { path, out, lib, release, no_cache } => {
+        Command::Build { path, out, lib, release, no_cache, target } => {
+            if let Some(triple) = target {
+                select_target(&triple)?;
+            }
             if out.is_some() {
                 report_programs_out_leaves_out(&path, lib);
             }
@@ -2027,6 +2037,32 @@ fn build(
         }
     }
     build_one(path, out, lib, release, no_cache)
+}
+
+/// Makes `--target` the triple this whole process builds for.
+///
+/// **By setting `KHORA_TARGET`, which is the one place the answer lives.**
+/// Which `std` files are read, which machine code is emitted for, which
+/// runtime archive is linked and what the cache key says are all read from
+/// that variable, deep inside the build; a flag threaded through to each of
+/// them would be a second source that could disagree with the first, and the
+/// failure is a program compiled against one platform's bindings and linked
+/// for another. Set before anything else runs, from the main thread, and never
+/// changed afterward.
+///
+/// A name without a hyphen is refused here rather than accepted: the variable
+/// also takes `linux`, `macos` and `windows`, which select `std` files for the
+/// host's own architecture, and `--target linux` meaning "this machine" would
+/// be a flag that does not do what it says.
+fn select_target(triple: &str) -> Result<()> {
+    if !triple.contains('-') {
+        anyhow::bail!(
+            "`--target {triple}` is not a target triple. Name one in full, such as \
+             `x86_64-unknown-linux-musl` or `aarch64-unknown-linux-gnu`"
+        );
+    }
+    std::env::set_var("KHORA_TARGET", triple);
+    Ok(())
 }
 
 /// Says what `--out` left out.

@@ -58,6 +58,8 @@ The runtime archive that generated executables are linked against.
 
 The same caveat applies, and more sharply: the runtime archive and the compiler agree about object layout, so an archive from a different version produces a program that links and then misbehaves.
 
+It names one archive for every build, so it has to be the one for the build's target. An archive records the target it was built for, and a build for another target — a musl archive in a glibc build, or the reverse — stops before linking and names both.
+
 ## Choosing what gets built
 
 ### `KHORA_PROFILE`
@@ -96,9 +98,9 @@ What to generate code for, instead of the machine you are on.
 
 **Default:** unset — the host.
 
-**Values:** one of `linux`, `macos`, `windows`, `wasm`, or a full target triple such as `aarch64-unknown-linux-gnu`. A triple selects its own family, so one setting moves both halves of a cross build: which platform's `std` files are read, and which target the code generator emits for. Any other value is rejected with a message naming what is accepted.
+**Values:** one of `linux`, `macos`, `windows`, `wasm`, or a full target triple such as `aarch64-unknown-linux-gnu`. A triple selects its own family, so one setting moves both halves of a cross build: which platform's `std` files are read, and which target the code generator emits for. Any other value is rejected with a message naming what is accepted. `khora build --target <triple>` sets it for one build.
 
-**What it costs.** For every target but one, this does not produce a runnable program for another platform: there is no cross linking. What it is for is checking that a combination *compiles* — a `std` surface that only one platform selects, a calling convention only one platform uses — from whichever machine you have. Running the result still needs the real platform.
+**What it links.** A **static musl executable** — `x86_64-unknown-linux-musl` or `aarch64-unknown-linux-musl`, from a Linux toolchain — links and runs anywhere that architecture's Linux kernel does; [Static executables](/docs/deployment/supported-targets/#static-executables-musl) has what it needs. For any other triple but one, this does not produce a runnable program for another platform, because the link needs that platform's C library and nothing supplies it. What it is for there is checking that a combination *compiles* — a `std` surface that only one platform selects, a calling convention only one platform uses — from whichever machine you have.
 
 **The exception is a WebAssembly library**: `KHORA_TARGET=wasm32-unknown-unknown` with `khora build --lib` links a module with `wasm-ld`, which needs no sysroot. It also needs the Khora runtime built for WebAssembly, and **release archives do not include one**. Build it from a source checkout of the same version with `cargo build -p khora-rt --target wasm32-unknown-unknown`, and name the resulting `libkhora_rt.a` in [`KHORA_RT_LIB`](#khora_rt_lib). Without it the link fails with one "neither Wasm object file nor LLVM bitcode" line per member of the native runtime it found instead. The bare family name `wasm` selects WebAssembly's `std` files but generates for the host, so it checks a build and does not produce a module.
 

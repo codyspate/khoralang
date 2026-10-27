@@ -506,6 +506,8 @@ import std::net::http::{{
   Answer, Call, CallError, HttpClient, HttpError, Params, Request, Response, Router
 }};
 
+extern fn khora_sleep(millis: Int) -> ();
+
 fn greet(request: Request) -> Response {{
   Response::text(200, "hello " + match Params::get(request.params, "name") {{
     Option::Some(name) => name,
@@ -548,7 +550,9 @@ fn main() -> () {{
 
   // The server prints "listening on ..." before it accepts, and a call that
   // arrives first would be refused — so the first call is retried rather than
-  // the test being a race about scheduling order.
+  // the test being a race about scheduling order. With a pause between tries:
+  // 200 refusals back to back took less time than the server needs to start
+  // on an arm64 runner, which printed "never came up" and then "listening".
   let client = HttpClient::real();
   let mut tries = 0;
   let mut going = true;
@@ -562,7 +566,7 @@ fn main() -> () {{
         }},
         Result::Err(_) => {{
           tries = tries + 1;
-          if tries > 200 {{ print("never came up"); going = false }}
+          if tries > 500 {{ print("never came up"); going = false }} else {{ khora_sleep(10) }}
         }},
       }}
     }}

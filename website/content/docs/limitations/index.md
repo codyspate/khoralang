@@ -53,13 +53,23 @@ A target is only called supported when the compiler, runtime, linker/sysroot,
 packaging, CI and deployment path work end to end. [Supported
 targets](/docs/deployment/supported-targets/) lists the ones that do.
 
-There are three: `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc` and
-`aarch64-apple-darwin`. **Linux on arm64 and Windows on arm64 are not among
-them** — the compiler can emit an object for `aarch64-unknown-linux-gnu`, but
-no toolchain is published for it and a build for it stops at the link. **There
-is no static or musl build**: the Linux toolchain and the programs it builds
-link dynamically against glibc, so Alpine and other musl distributions cannot
-run them, and a `scratch` container image is not an option.
+The toolchain runs on four: `x86_64-unknown-linux-gnu`,
+`aarch64-unknown-linux-gnu`, `x86_64-pc-windows-msvc` and
+`aarch64-apple-darwin`. The two Linux toolchains also build static executables
+for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`, which run on
+Alpine and in a `scratch` image. What is not covered:
+
+- **The toolchain itself on Alpine or another musl system.** It carries LLVM
+  linked against glibc. Build elsewhere and copy the executable in.
+- **Windows on arm64**, and **Linux on arm64 from a Windows or macOS
+  toolchain.**
+- **A dynamically linked program for another architecture** —
+  `aarch64-unknown-linux-gnu` from an x86-64 machine, say — because the link
+  needs that architecture's glibc. Build it on an arm64 machine, or build a
+  static musl executable, which either Linux toolchain does for either
+  architecture.
+- **A musl shared library** (`--lib` with a musl target), which the build
+  refuses: it would carry a second C library into the process that loads it.
 
 ## Recursion depth and very large lists
 

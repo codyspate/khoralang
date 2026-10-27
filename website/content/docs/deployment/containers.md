@@ -62,9 +62,8 @@ docker run --rm -p 8080:8080 myservice:1
 
 ## Why both stages are the same base image
 
-The published Linux artifact is dynamically linked against the system C
-library, and static and musl builds are not produced or tested
-([Supported targets](/docs/deployment/supported-targets/)). So the runtime image
+A Khora executable built for the default target is dynamically linked against
+the system C library. So the runtime image
 has to supply a glibc at least as new as the one the binary was linked against.
 Same distribution and same release in both stages is the way to stop thinking
 about it, and **which** release is not free to choose: the published toolchain
@@ -72,24 +71,120 @@ needs glibc 2.39 or newer, so `bookworm` cannot run it and `trixie` can. That
 is why both stages above are trixie and not the more familiar bookworm; the
 table on [Supported targets](/docs/deployment/supported-targets/) is the list.
 A distroless runtime image works for the same reason and is smaller, as long as
-it is the Debian 13 variant; Alpine does not, because it is musl.
+it is the Debian 13 variant. For Alpine, or for an image with no C library at
+all, build a static executable instead — the next section.
 
 Nothing else from the build stage is copied. There is no `std/`, no compiler,
 and no toolchain in the final image: the executable carries the Khora runtime
 inside it, which the release workflow checks on every release by running a
 packaged toolchain's output with nothing else on the path.
 
+## A static binary in a `scratch` image
+
+`khora build --target x86_64-unknown-linux-musl` (or
+`aarch64-unknown-linux-musl`) produces a **statically linked** executable: the
+Khora runtime and the musl C library are inside it, it asks for no dynamic
+loader, and it runs on any Linux kernel of that architecture — Alpine, a
+distroless `static` image, or `scratch`, which has nothing in it at all. The
+Linux toolchain carries the musl runtime and C library; the build needs only
+the C compiler driver any build needs.
+
+```dockerfile
+# --- build ------------------------------------------------------------------
+# On the machine doing the build, whatever the image is for: the toolchain
+# links either architecture's static executable, so `docker buildx build
+# --platform linux/amd64,linux/arm64` needs no emulator.
+FROM --platform=$BUILDPLATFORM debian:trixie-slim AS build
+
+# clang drives the link. lld is needed only to build for the other
+# architecture (an arm64 binary from an x86-64 machine, or the reverse).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates clang lld curl git tar \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG KHORA_VERSION=0.5.0
+RUN curl -fsSL https://raw.githubusercontent.com/codyspate/khoralang/main/install.sh \
+      | sh -s -- --version "${KHORA_VERSION}" --to /opt/khora --no-modify-path
+ENV PATH="/opt/khora/bin:${PATH}"
+
+WORKDIR /src
+COPY . .
+# The architecture of the image being built, which BuildKit sets: `amd64` or
+# `arm64`. A plain `docker build` sets it to the machine's own.
+ARG TARGETARCH
+RUN case "${TARGETARCH}" in \
+      amd64) arch=x86_64 ;; \
+      arm64) arch=aarch64 ;; \
+      *) echo "no static Khora target for ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && khora install \
+    && khora build . --release --target "${arch}-unknown-linux-musl" --out /out/myservice
+
+# --- run --------------------------------------------------------------------
+FROM scratch
+
+# Only if the service opens outbound TLS: a TlsClient verifies against a
+# trust store, and `scratch` has none. Without this line `client()` raises
+# `TlsError::BadCertificate` before it connects.
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /out/myservice /myservice
+
+USER 10001
+EXPOSE 8080
+ENTRYPOINT ["/myservice"]
+```
+
+What the image contains is the one file, plus the certificates if you copied
+them. Docker writes `/etc/hosts` and `/etc/resolv.conf` into every container,
+`scratch` included, so `localhost` and DNS names resolve without anything else
+in the image. `USER 10001` needs no `/etc/passwd` entry; a numeric user is
+enough.
+
+**What an empty image cannot do:**
+
+- **Run other programs.** `std::process` starts programs that are in the
+  image, and `scratch` has none: `run`, `output` and `checked_output` raise
+  `ProcessError` for any program you did not copy in, and `shell` raises it
+  always, because there is no `/bin/sh`. A service that shells out — a
+  `git` call, a health hook — needs a base image that has them:
+  `gcr.io/distroless/static` plus the programs, or `busybox` for a shell and
+  the usual tools.
+- **Verify TLS without a trust store.** A `TlsClient` with no certificates to
+  verify against fails every handshake with `TlsError::BadCertificate`,
+  naming no certificate you supplied. The `ca-certificates.crt` line above is
+  the fix, and `SSL_CERT_FILE` names a bundle elsewhere.
+
+Fibers on both backends, sockets, TLS client and server, and the standard
+library's own test suite all run in a static build. Its costs: the executable
+is self-contained and therefore not small (a release hello world is about 9 MB,
+against about 10 MB for the dynamic build, most of it the runtime both carry),
+and `--lib` is refused for a musl target, because a shared library is loaded
+into a process that already has a C library.
+
+**Native libraries** named in `[build] link` must be built for musl and placed
+in a `[build] link-search` directory: a static musl build takes nothing from
+the machine's own library directories, whose archives are built against its
+glibc. `m`, `pthread`, `dl`, `rt` and `util` need nothing — musl's C library
+already holds them.
+
 ## Cross-building
 
-**There is none, and this is the part to plan around.** Cross-compilation is
-not supported: the compiler can emit for another triple under `KHORA_TARGET`,
-which checks code generation, but the linker and sysroot story is unfinished,
-so a deployable artifact means building on the platform it runs on. `linux/arm64`
-is not built or tested by CI at all.
+**Linux programs can be built for the other Linux architecture**, as static
+musl executables: from an x86-64 machine, `khora build --target
+aarch64-unknown-linux-musl` gives an arm64 binary for an arm64 `scratch` image,
+and the reverse works the same way. This needs `ld.lld` (`apt install lld`),
+because the system linker reads only its own machine's objects.
 
-In practice that means `docker build` on an `x86_64` Linux machine or runner —
-`--platform linux/amd64` if your daemon would otherwise pick something else —
-and not `docker buildx` fan-out across architectures.
+A **dynamically linked** program for another architecture is not supported:
+`aarch64-unknown-linux-gnu` from an x86-64 machine needs that architecture's
+glibc, which the toolchain does not carry. Build those on the architecture
+they run on — the toolchain is published for both `x86_64-unknown-linux-gnu`
+and `aarch64-unknown-linux-gnu`. Building for Linux from a macOS or Windows
+toolchain is not supported either.
+
+For a multi-architecture image, the Dockerfile above builds both from one
+machine: `docker buildx build --platform linux/amd64,linux/arm64 .` runs its
+build stage natively and picks the target from `TARGETARCH`.
 
 ## Health and shutdown
 

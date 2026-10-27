@@ -5,9 +5,9 @@ sidebar:
 ---
 
 Linux is a primary native deployment target for Khora services.
-`x86_64-unknown-linux-gnu` is one of the three triples the release workflow
-builds, packages, and then uses to compile and run a program before publishing
-— see [Supported targets](/docs/deployment/supported-targets/) for the whole
+`x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` are two of the
+triples the release workflow builds, packages, and then uses to compile and run
+a program before publishing — see [Supported targets](/docs/deployment/supported-targets/) for the whole
 list and for what is deliberately not on it.
 
 ## Install the toolchain on the build machine
@@ -60,11 +60,12 @@ The executable is `build/<package>`. Run it:
 
 Nothing else is copied to the target host. The binary carries the Khora runtime
 and does not need `std/`, the compiler, or a language VM beside it. What it does
-need is the system C library it was linked against — the published Linux
-artifact is dynamically linked against glibc, and static and musl builds are not
-produced or tested — and `ca-certificates`, if the service opens outbound TLS
+need is the system C library it was linked against — a default build is
+dynamically linked against glibc — and `ca-certificates`, if the service opens outbound TLS
 connections, because a `TlsClient` verifies against the machine's own trust
-store.
+store. To need no C library at all, build a static executable with
+`--target x86_64-unknown-linux-musl` (or `aarch64-unknown-linux-musl`); see
+[Static executables](/docs/deployment/supported-targets/#static-executables-musl).
 
 **Strip the debug information before you ship it.** A release build emits none
 for your Khora code, but the runtime linked into every program carries its own
@@ -80,9 +81,11 @@ A bare `strip` saves a little more by removing the symbol table too, and then
 every backtrace frame reads `<unknown>`. Keep an unstripped copy if you want a
 debugger to see the runtime's frames.
 
-**Build on the machine family you deploy to.** Cross-compilation is not
-supported: `KHORA_TARGET` makes the compiler emit for another triple, which
-checks code generation and does not produce a runnable artifact.
+**Build on the architecture you deploy to, or build static.** A dynamically
+linked program for another architecture is not supported: `KHORA_TARGET` makes
+the compiler emit for another triple, but the link needs that triple's glibc.
+A static musl executable is the exception — either Linux toolchain builds one
+for either architecture, given `clang` and `ld.lld`.
 
 ## Running it under systemd
 

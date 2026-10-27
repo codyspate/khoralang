@@ -507,6 +507,353 @@ fn a_wasm_library_links_and_exports_what_it_should() {
     assert!(imports.is_empty(), "a self-contained module imports nothing, got {imports:?}");
 }
 
+// --- a static executable, for musl ---------------------------------------
+
+/// The musl triple for this machine's architecture.
+#[cfg(target_os = "linux")]
+fn host_musl() -> String {
+    format!("{}-unknown-linux-musl", std::env::consts::ARCH)
+}
+
+/// A musl runtime archive, if somebody has built one for `triple`.
+///
+/// Only asks whether it exists: the build itself must find it without being
+/// told, which is the claim. Built by `scripts/build-musl-runtime.sh`, which
+/// is what `ci.yml` runs before these on both Linux runners.
+#[cfg(target_os = "linux")]
+fn musl_runtime_built(triple: &str) -> bool {
+    let target = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let Some(target) = target.parent() else { return false };
+    target.join(triple).join("debug").join("libkhora_rt.a").is_file()
+}
+
+/// Builds `source` as an executable for `triple` into `dir`, and returns it.
+///
+/// No `KHORA_RT_LIB` and no sysroot named: finding the target's runtime
+/// archive and C library is part of what is being tested.
+#[cfg(target_os = "linux")]
+fn static_program(dir: &std::path::Path, triple: &str, source: &str) -> PathBuf {
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(dir).expect("a workspace");
+    let exe = dir.join("program");
+
+    let db = KhoraDatabase::new();
+    let files = vec![SourceFile::new(&db, dir.join("main.kh"), source.to_string())];
+    let root = SourceRoot::new(&db, files);
+
+    // SAFETY-of-a-sort: process-wide, and held by the caller's lock.
+    unsafe { std::env::set_var("KHORA_TARGET", triple) };
+    let outcome = khora_codegen_llvm::compile(&db, root, &exe);
+    unsafe { std::env::remove_var("KHORA_TARGET") };
+
+    if let Err(errors) = outcome {
+        let said = errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("\n");
+        panic!("a {triple} program should build and link:\n{said}");
+    }
+    exe
+}
+
+/// What an ELF executable's program headers say about how it starts.
+///
+/// `(machine, interpreter, dynamic)`: the `e_machine` field, whether there is a
+/// `PT_INTERP` naming a dynamic loader, and whether there is a `PT_DYNAMIC`
+/// segment for one to process. A static executable has neither, and that is
+/// the whole of what lets it run in an image with no loader and no libc.
+///
+/// Read from the file rather than from `file(1)`, which is not on every
+/// runner and whose wording varies between versions.
+#[cfg(target_os = "linux")]
+fn elf_linkage(bytes: &[u8]) -> (u16, bool, bool) {
+    assert!(bytes.starts_with(b"\x7fELF") && bytes[4] == 2, "a 64-bit ELF");
+    let u16_at = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]);
+    let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+    let u64_at = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
+    let machine = u16_at(18);
+    let (offset, size, count) = (u64_at(32) as usize, u16_at(54) as usize, u16_at(56) as usize);
+    let kinds: Vec<u32> = (0..count).map(|i| u32_at(offset + i * size)).collect();
+    // PT_INTERP is 3, PT_DYNAMIC is 2.
+    (machine, kinds.contains(&3), kinds.contains(&2))
+}
+
+/// **A musl program is one file that needs nothing from the machine.**
+///
+/// What this prevents: a `--target ...-musl` build that links, runs on the
+/// machine that built it, and fails in a `scratch` image. Running it here
+/// proves only the first two, because this machine has a loader and a libc;
+/// a dynamically linked executable runs here too. So the program headers are
+/// read as well: no `PT_INTERP` (no loader is asked for) and no `PT_DYNAMIC`
+/// (nothing is left for one to resolve). Linux only: musl is a Linux C
+/// library, and the program is run.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_musl_program_is_static_and_runs() {
+    let triple = host_musl();
+    if !musl_runtime_built(&triple) {
+        skip(&format!("no {triple} khora-rt; build it with `sh scripts/build-musl-runtime.sh {triple}`"));
+        return;
+    }
+    let _held = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("musl_static");
+    let exe = static_program(
+        &dir,
+        &triple,
+        "module demo::main;\nfn print(value: String);\nfn main() -> Int { print(\"static\"); 0 }\n",
+    );
+
+    let (_, interpreter, dynamic) = elf_linkage(&std::fs::read(&exe).expect("the executable"));
+    assert!(!interpreter, "a static executable names no dynamic loader");
+    assert!(!dynamic, "a static executable has nothing left to resolve at load time");
+
+    // With an empty environment, so nothing from this process -- a
+    // `LD_LIBRARY_PATH`, a preload -- can be what made it work.
+    let ran = std::process::Command::new(&exe).env_clear().output().expect("running it");
+    assert_eq!(String::from_utf8_lossy(&ran.stdout), "static\n", "{}", String::from_utf8_lossy(&ran.stderr));
+    assert!(ran.status.success());
+}
+
+/// **A fiber, on both backends, in a static musl program.**
+///
+/// The context switch and the thread-local current fiber are where a static
+/// libc could differ -- `static` TLS is laid out by the linker rather than by
+/// the loader -- and a program whose fibers fail there passes the test above.
+/// Linux only, for the reason that one gives.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_musl_program_runs_fibers_on_both_backends() {
+    let triple = host_musl();
+    if !musl_runtime_built(&triple) {
+        skip(&format!("no {triple} khora-rt; build it with `sh scripts/build-musl-runtime.sh {triple}`"));
+        return;
+    }
+    let _held = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("musl_fibers");
+    let source = "module demo::main;\n\
+                  import std::core::{Fiber, print};\n\
+                  fn main() -> Int {\n  \
+                    let a = Fiber::spawn(fn () => 20);\n  \
+                    let b = Fiber::spawn(fn () => 22);\n  \
+                    print((Fiber::join(a)! + Fiber::join(b)!).show());\n  \
+                    0\n\
+                  }\n";
+    let db = KhoraDatabase::new();
+    let root = with_std(&db, &dir, source);
+    let exe = dir.join("program");
+    // SAFETY-of-a-sort: process-wide, and held by the lock above.
+    unsafe { std::env::set_var("KHORA_TARGET", &triple) };
+    let outcome = khora_codegen_llvm::compile(&db, root, &exe);
+    unsafe { std::env::remove_var("KHORA_TARGET") };
+    if let Err(errors) = outcome {
+        let said = errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("\n");
+        panic!("a {triple} program with fibers should build:\n{said}");
+    }
+    // Static, or this is a test of the glibc build that every other suite
+    // already runs.
+    let (_, interpreter, dynamic) = elf_linkage(&std::fs::read(&exe).expect("the executable"));
+    assert!(!interpreter && !dynamic, "a static executable, or this tests nothing new");
+
+    for backend in ["threads", "scheduler"] {
+        let ran = std::process::Command::new(&exe)
+            .env_clear()
+            .env("KHORA_FIBERS", backend)
+            .output()
+            .expect("running it");
+        assert_eq!(
+            String::from_utf8_lossy(&ran.stdout),
+            "42\n",
+            "{backend}: {}",
+            String::from_utf8_lossy(&ran.stderr)
+        );
+    }
+}
+
+/// **An arm64 static executable, linked on an x86-64 machine.**
+///
+/// What this prevents: the musl link working only for the architecture the
+/// compiler runs on -- a host linker, or a host `crt1.o`, would do that and
+/// still pass every other test here. It cannot be run on this machine, so it
+/// is checked as far as reading it goes: an aarch64 ELF, with no loader asked
+/// for. `ci.yml`'s arm64 runner runs the native build of the same thing.
+/// x86-64 Linux only, because that is the machine this is a *cross* build
+/// from.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn an_arm64_musl_program_links_from_x86_64() {
+    let triple = "aarch64-unknown-linux-musl";
+    if !musl_runtime_built(triple) {
+        skip(&format!("no {triple} khora-rt; build it with `sh scripts/build-musl-runtime.sh {triple}`"));
+        return;
+    }
+    let _held = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("musl_arm64");
+    let exe = static_program(
+        &dir,
+        triple,
+        "module demo::main;\nfn print(value: String);\nfn main() -> Int { print(\"arm\"); 0 }\n",
+    );
+    let (machine, interpreter, dynamic) = elf_linkage(&std::fs::read(&exe).expect("the executable"));
+    assert_eq!(machine, 0xb7, "an aarch64 executable");
+    assert!(!interpreter && !dynamic, "and a static one");
+}
+
+/// **A shared library for musl is refused, by name.**
+///
+/// What this prevents: `--lib` with a musl triple producing something that
+/// looks like a library and is not one a musl host can load. The target exists
+/// for a static executable, and a static `libc.a` cannot be put inside a shared
+/// object, so this says so rather than handing the linker a contradiction.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_musl_shared_library_is_refused() {
+    let triple = host_musl();
+    if !musl_runtime_built(&triple) {
+        skip(&format!("no {triple} khora-rt; build it with `sh scripts/build-musl-runtime.sh {triple}`"));
+        return;
+    }
+    let _held = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("musl_library");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    let db = KhoraDatabase::new();
+    let source = "module w;\npub extern fn price(units: Int) -> Int { units * 2 }\n";
+    let files = vec![SourceFile::new(&db, dir.join("lib.kh"), source.to_string())];
+    let root = SourceRoot::new(&db, files);
+    // SAFETY-of-a-sort: process-wide, and held by the lock above.
+    unsafe { std::env::set_var("KHORA_TARGET", &triple) };
+    let outcome = khora_codegen_llvm::compile_library(&db, root, &dir.join("lib.so"));
+    unsafe { std::env::remove_var("KHORA_TARGET") };
+    let errors = outcome.expect_err("a musl shared library should be refused");
+    let said = errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("\n");
+    assert!(said.contains("musl") && said.contains("static"), "the refusal should say why: {said}");
+}
+
+/// **A TLS round trip inside one static musl program.**
+///
+/// What this prevents: TLS that works dynamically and not statically.
+/// `rustls` and `ring` carry their own assembly and C, compiled for this
+/// target by `build-musl-runtime.sh`, and the client reads the machine's
+/// trust store through `rustls-native-certs`, which on Linux opens files a
+/// `scratch` image may not have. The server presents the test chain in
+/// `tests/fixtures`; the client trusts the test CA explicitly and checks the
+/// name, so this is the same verification a real client does. Both ends are
+/// Khora, so it shows the static build is coherent; that `rustls` agrees with
+/// OpenSSL is `tls.rs`'s claim, made against the ordinary build. Linux only,
+/// for the reason [`a_musl_program_is_static_and_runs`] gives.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_musl_program_speaks_tls_to_itself() {
+    let triple = host_musl();
+    if !musl_runtime_built(&triple) {
+        skip(&format!("no {triple} khora-rt; build it with `sh scripts/build-musl-runtime.sh {triple}`"));
+        return;
+    }
+    let _held = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+
+    let fixture = |name: &str| {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join(name);
+        format!("{:?}", std::fs::read_to_string(path).expect("the test chain is in tests/fixtures"))
+    };
+    let source = r#"module main;
+
+import std::core::{Array, Fiber, Result, Scope, attempt, print};
+import std::net::socket::{accept_on, invalid_handle, listen_on, start};
+import std::net::tls::{TlsClient, TlsError, TlsServer, connect, receive, secure, server, shut, transmit, trusting};
+
+const certificate = CERT_PEM;
+const key = KEY_PEM;
+const authority = CA_PEM;
+
+fn call(caller: TlsClient) -> () {
+  match attempt(fn () => connect(caller, "localhost", 18991)!) {
+    Result::Err(_) => print("the client could not connect"),
+    Result::Ok(connection) => {
+      transmit(connection, "static");
+      let buffer: Array<U8> = Array::new(4096, 0);
+      let read = receive(connection, buffer);
+      if read > 0 { print(String::from_bytes(Array::prefix(buffer, read))); } else { print("nothing"); };
+      shut(connection)
+    },
+  }
+}
+
+fn answer(settings: TlsServer, socket: Int) -> () raises TlsError {
+  let connection = secure(settings, socket)!;
+  let buffer: Array<U8> = Array::new(4096, 0);
+  let read = receive(connection, buffer);
+  if read > 0 { transmit(connection, "you said: " + String::from_bytes(Array::prefix(buffer, read))); } else { };
+  shut(connection)
+}
+
+pub fn main() -> () raises TlsError {
+  with { scope: Scope::root() } {
+    start();
+    let settings = server(certificate, key)!;
+    let listener = listen_on(18991);
+    let caller = trusting(authority)!;
+    let calling = Fiber::spawn(fn () => call(caller));
+    let taken = accept_on(listener);
+    if taken == invalid_handle() { } else { answer(settings, taken)! };
+    Fiber::join(calling)!
+  }
+}
+"#
+    .replace("CERT_PEM", &fixture("localhost.cert.pem"))
+    .replace("KEY_PEM", &fixture("localhost.key.pem"))
+    .replace("CA_PEM", &fixture("ca.cert.pem"));
+
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("musl_tls");
+    let db = KhoraDatabase::new();
+    let root = with_std(&db, &dir, &source);
+    let exe = dir.join("program");
+    // SAFETY-of-a-sort: process-wide, and held by the lock above.
+    unsafe { std::env::set_var("KHORA_TARGET", &triple) };
+    let outcome = khora_codegen_llvm::compile(&db, root, &exe);
+    unsafe { std::env::remove_var("KHORA_TARGET") };
+    if let Err(errors) = outcome {
+        let said = errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("\n");
+        panic!("a {triple} TLS program should build:\n{said}");
+    }
+    let (_, interpreter, dynamic) = elf_linkage(&std::fs::read(&exe).expect("the executable"));
+    assert!(!interpreter && !dynamic, "a static executable, or this tests nothing new");
+
+    let ran = std::process::Command::new(&exe).env_clear().output().expect("running it");
+    assert_eq!(
+        String::from_utf8_lossy(&ran.stdout),
+        "you said: static\n",
+        "{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+}
+
+/// A workspace holding `source` as its `main` module, with the `std` files
+/// the target in `KHORA_TARGET` (or the host) selects, as `emission.rs` does.
+#[cfg(target_os = "linux")]
+fn with_std(db: &KhoraDatabase, dir: &std::path::Path, source: &str) -> SourceRoot {
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(dir).expect("a workspace");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("std");
+    let mut files = Vec::new();
+    let mut stack = vec![root];
+    while let Some(here) = stack.pop() {
+        for entry in std::fs::read_dir(&here).expect("a readable std") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "kh")
+                && khora_db::selected_for_target(&path, khora_db::host_target())
+            {
+                let text = std::fs::read_to_string(&path).expect("readable");
+                files.push(SourceFile::new(db, path, text));
+            }
+        }
+    }
+    files.push(SourceFile::new(db, dir.join("main.kh"), source.to_string()));
+    SourceRoot::new(db, files)
+}
+
 /// The export and import names in a wasm module.
 fn sections_of(bytes: &[u8]) -> (Vec<String>, Vec<String>) {
     fn uleb(b: &[u8], i: &mut usize) -> u64 {

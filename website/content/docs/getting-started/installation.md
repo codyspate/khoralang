@@ -99,7 +99,8 @@ lockfile instead of absorbing the difference.
 The published Linux build is dynamically linked against glibc, and a glibc
 program cannot run against a library older than the one it was compiled
 against. The release is built on Ubuntu 24.04, so the published
-`x86_64-unknown-linux-gnu` build requires **glibc 2.39 or newer**.
+`x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` builds require
+**glibc 2.39 or newer**.
 
 That is a real constraint and not a rounding error. Distributions in wide use
 today are on both sides of it:
@@ -119,6 +120,10 @@ distribution below the line, the options are a newer distribution — including
 a container built on one — or [building from
 source](#build-the-compiler-from-source), which links the compiler against the
 glibc you have.
+
+This is about the toolchain. The programs it builds can avoid the question
+entirely: a [static executable](/docs/deployment/supported-targets/#static-executables-musl)
+runs on Alpine and older distributions alike.
 
 Check yours with:
 

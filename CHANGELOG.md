@@ -226,6 +226,25 @@ it will behave differently now.
 
 ### Added
 
+- **`aarch64-unknown-linux-gnu`** is a supported toolchain: built, released
+  and tested on GitHub's `ubuntu-24.04-arm` runner, needing glibc 2.39 like
+  the x86-64 one. `install.sh` on an arm64 Linux machine installs it.
+- **Static executables**: `khora build --target x86_64-unknown-linux-musl`
+  (or `aarch64-unknown-linux-musl`) links the program, the runtime and musl
+  into one statically linked file that runs on Alpine and in a `scratch`
+  image. Both Linux toolchains carry both architectures' musl runtime and C
+  library, so an x86-64 machine builds arm64 static programs, given `clang`
+  and `ld.lld`. `--lib` is refused for a musl target. A release hello world
+  is about 9 MB static, against about 10 MB dynamic. Native libraries in
+  `[build] link` come from `[build] link-search` only, never the machine's
+  glibc-built ones; `m`, `pthread`, `dl`, `rt` and `util` are musl's `libc.a`.
+- A runtime archive built for one target is refused, by name, in a build for
+  another (a stale `KHORA_RT_LIB`), instead of linking a program that mixes
+  two C libraries.
+- `khora build --target <triple>`, which sets `KHORA_TARGET` for the build. A
+  bare family name (`linux`) is refused rather than meaning the host.
+- `scripts/build-musl-runtime.sh <triple>` builds the runtime for a musl
+  target from a source checkout.
 - `Raised<'er>`, a failure held as a value: one error of one of the types in
   the row `'er`, which knows which. `attempt`, and a `catch` binding over
   more than one type, give one. `Raised::type_name`, `describe` and `show`

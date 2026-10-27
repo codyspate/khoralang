@@ -187,16 +187,16 @@ static BUILD: Schema = Schema::Fields(&[
 /// **The reference documents it as "the triple to compile for" and nothing
 /// reads it**, so `target = "totally-not-a-real-triple"` built a host binary
 /// and said nothing -- which is worse than the key not existing, because
-/// somebody cross-compiling believes they did. Wiring it to `KHORA_TARGET`
-/// would be worse again: that variable changes *code generation* to check it,
-/// and `deployment/supported-targets` is explicit that the linker and sysroot
-/// story is unfinished, so it cannot produce a runnable artifact and is not
-/// meant to. Promising a deployable cross build through a manifest key is the
-/// promise this project is least able to keep. Roadmap 16.
+/// somebody cross-compiling believes they did. The target is chosen per build,
+/// with `khora build --target`, and only some cross builds link (static musl
+/// ones do; a glibc program for another architecture does not). A manifest key
+/// would fix one target for every build of the package, including the
+/// `khora test` and `khora run` that must run on this machine. Whether it
+/// should exist is a decision, not a wiring job. Roadmap 16.
 static BUILD_TARGET: Schema = Schema::Inert(
-    "cross-compilation is not supported yet, so the build is for the host either way. \
-     `KHORA_TARGET` exercises code generation for another triple, which is a check rather \
-     than a deployable artifact -- see the supported-targets page",
+    "the target is chosen per build, with `khora build --target <triple>`, and this key \
+     selects nothing: the build is for the host unless the command line says otherwise \
+     -- see the supported-targets page for which triples link",
 );
 
 /// `[build] plugin` names a sandboxed WASM build plugin, and there are none.

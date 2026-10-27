@@ -322,14 +322,15 @@ recognized, both are documented here because the decisions behind them are
 made, and setting either gets you a warning rather than silence:
 
 ```
-warning: khora.toml: 6:1: nothing reads `build.target`: cross-compilation is
-not supported yet, so the build is for the host either way.
+warning: khora.toml: 6:1: nothing reads `build.target`: the target is chosen
+per build, with `khora build --target <triple>`, and this key selects nothing
 ```
 
-`target` waits on cross-compilation, which needs a linker and sysroot story
-rather than code generation — see [Supported targets](/docs/deployment/supported-targets/).
-`KHORA_TARGET` makes the compiler *emit* for another triple, which checks code
-generation and does not produce a runnable artifact. `plugin` waits on the
+`target` selects nothing because the target is a property of one build rather
+than of the package: `khora test` and `khora run` have to build for the machine
+they run on whatever a manifest says. Choose it on the command line with
+`khora build --target`, and see [Supported targets](/docs/deployment/supported-targets/)
+for which triples link. `plugin` waits on the
 sandboxed WASM plugin mechanism; until it exists, [`[tasks]`](#tasks--project-commands)
 is the thing that runs commands, and it runs only what you wrote in a manifest
 you are standing in.

@@ -11,6 +11,25 @@
 fn main() {
     println!("cargo:rerun-if-changed=csrc/guard.c");
 
+    // **A mark naming the target this archive was built for**, read back by
+    // `khora-codegen-llvm`'s `toolchain::archive_target` from the archive's
+    // symbol table. Without it a runtime for the wrong C library is found out
+    // only by the linker, if at all: a musl archive linked silently into a
+    // glibc program, and a glibc one in a musl build failed on `fstat64`. The
+    // triple's hyphens become `__`, because `x86_64` already holds a `_`.
+    let target = std::env::var("TARGET").expect("cargo sets TARGET");
+    let mark = target.replace(['-', '.'], "__");
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
+    std::fs::write(
+        out.join("built_for.rs"),
+        format!(
+            "/// The target this archive was built for; see `build.rs`.\n\
+             #[no_mangle]\n#[used]\n#[allow(non_upper_case_globals)]\n\
+             pub static khora_rt_built_for_{mark}: u8 = 0;\n"
+        ),
+    )
+    .expect("writing built_for.rs");
+
     // **Not on WebAssembly, which has no `setjmp` to bind.** A non-local exit
     // needs either the exception-handling proposal or Emscripten's emulation,
     // and `wasm32-unknown-unknown` has neither.

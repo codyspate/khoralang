@@ -154,7 +154,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # `ubuntu-24.04-arm` is `aarch64-unknown-linux-gnu`, which is a
+        # supported target only because this job runs the whole baseline on
+        # it. Free for public repositories, and Ubuntu 24.04 like
+        # `ubuntu-latest`, so glibc 2.39 on both.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -266,7 +270,21 @@ jobs:
         run: |
           rustup target add wasm32-unknown-unknown
           cargo build -p khora-rt --target wasm32-unknown-unknown
-          cargo nextest run -p khora-codegen-llvm --features llvm --test targets
+          cargo nextest run -p khora-codegen-llvm --features llvm --test targets -E 'not test(/musl/)'
+
+      # **Static musl programs, built so their tests cannot skip.** Both musl
+      # runtimes on both Linux runners: the host's architecture is built and
+      # run -- a static program, fibers on both backends, a TLS round trip --
+      # and on x86-64 the arm64 one is linked from here as well, which is what
+      # proves the cross link uses no host file. Under `CI` the tests fail
+      # rather than skip without an archive, as the wasm ones do.
+      - name: Build the musl runtimes and run the static-program tests
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sh scripts/build-musl-runtime.sh x86_64-unknown-linux-musl
+          sh scripts/build-musl-runtime.sh aarch64-unknown-linux-musl
+          cargo nextest run -p khora-codegen-llvm --features llvm --test targets -E 'test(/musl/)'
 
       # The whole baseline: the suite, clippy, the corpus check and formatter
       # over `std`, every reference application built, and twelve HTTP

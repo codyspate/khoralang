@@ -90,7 +90,12 @@ jobs:
         # label, which GitHub retires. That is its own change, with its own CI
         # evidence, and it does not belong in a commit that fixes an installer
         # which was lying about the result.
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # **And `ubuntu-24.04-arm` for `aarch64-unknown-linux-gnu`**, on the
+        # same Ubuntu 24.04 and so the same glibc 2.39: one `MIN_GLIBC` holds
+        # for both Linux archives. GitHub's arm64 Linux runners are free for
+        # public repositories. `install.sh` already maps `aarch64` to this
+        # triple; this is what makes the asset it asks for exist.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
     steps:
       # The tag is pushed before the draft is created. Both draft-release
       # events and manual dispatches must build that immutable ref, never the
@@ -213,6 +218,37 @@ jobs:
           if [ "$said" != "a packaged toolchain works" ]; then
             echo "The program ran, and said something else."
             exit 1
+          fi
+
+          # **And a static one, on each Linux runner.** What this proves is
+          # the *package's* half: `--target <arch>-unknown-linux-musl` must
+          # find the runtime and the C library in the archive's `targets/`,
+          # not in the Rust toolchain this runner has, so `PATH` is cut down to
+          # the system's and `rustc` is not on it. What it does **not** prove
+          # is the link tools: the compiler bakes in the `LLVM_SYS_221_PREFIX`
+          # it was built with and looks there for clang and `ld.lld` first,
+          # and on this runner that prefix exists, so the pinned LLVM drives
+          # the link rather than whatever a user's machine has. The
+          # cross-architecture link, the one that needs `ld.lld`, is not run
+          # here at all. The result is run with an empty environment, and
+          # checked for the two program headers a dynamic executable has and
+          # a static one does not.
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            musl="$(uname -m)-unknown-linux-musl"
+            PATH=/usr/bin:/bin "$GITHUB_WORKSPACE/dist/$name/bin/khora" build . \
+              --target "$musl" -o static-first
+            file static-first
+            if readelf -l static-first | grep -qE 'INTERP|DYNAMIC'; then
+              echo "The $musl build is not static:"
+              readelf -l static-first
+              exit 1
+            fi
+            said=$(env -i ./static-first)
+            if [ "$said" != "a packaged toolchain works" ]; then
+              echo "The static program ran, and said: $said"
+              exit 1
+            fi
+            echo "static $musl: $said"
           fi
 
       # **One platform, because the answer is the same on all of them.** The
