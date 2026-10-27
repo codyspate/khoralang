@@ -160,6 +160,46 @@ fn what_new_writes_checks_and_is_already_formatted() {
     assert!(ok, "{output}");
 }
 
+/// **A dropped `Result` is a failure nobody hears about, so a new project
+/// refuses one.** It has twice reported success against a database that had
+/// aborted the transaction. `warn` is the right default for code that
+/// predates the lint; a project started today has no such code, and the
+/// scaffold is the one place to set the level before there is.
+#[test]
+fn new_denies_a_discarded_result() {
+    let root = scratch("new_denies_discard");
+    let (ok, output) = run(&root, &["new", "strict"]);
+    assert!(ok, "{output}");
+    let manifest = std::fs::read_to_string(root.join("strict").join("khora.toml"))
+        .expect("the new manifest");
+    assert!(manifest.contains("[lints]\ndiscarded-result = \"deny\""), "{manifest}");
+
+    std::fs::write(
+        root.join("strict").join("src").join("main.kh"),
+        "module strict::main;\nimport std::core::{Result};\n\n\
+         fn half(n: Int) -> Result<Int, String> {\n  \
+         if n % 2 == 0 { Result::Ok(n / 2) } else { Result::Err(\"odd\") }\n}\n\n\
+         pub fn main() -> Int {\n  half(3);\n  0\n}\n",
+    )
+    .expect("a program that drops a Result");
+    let (ok, output) = run(&root.join("strict"), &["check", "."]);
+    assert!(!ok, "a dropped `Result` should fail the check: {output}");
+    assert!(output.contains("[discarded-result]"), "{output}");
+}
+
+/// Inside a workspace that shares its lints, the member inherits them and
+/// says nothing of its own: the root decides, the same as for the pin.
+#[test]
+fn new_inside_a_workspace_sharing_lints_leaves_the_level_to_it() {
+    let root = workspace("new_lints_shared", "\n[workspace.lints]\nunused-import = \"warn\"\n");
+    let (ok, output) = run(&root, &["new", "packages/member"]);
+    assert!(ok, "{output}");
+    let manifest = std::fs::read_to_string(root.join("packages").join("member").join("khora.toml"))
+        .expect("the new manifest");
+    assert!(manifest.contains("[lints]\nworkspace = true"), "{manifest}");
+    assert!(!manifest.contains("discarded-result"), "{manifest}");
+}
+
 #[test]
 fn new_refuses_a_name_that_is_not_an_identifier() {
     let root = scratch("new_bad_name");

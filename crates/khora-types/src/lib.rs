@@ -590,6 +590,15 @@ pub struct TypeHomes {
     /// fields themselves, because a row is structural and there is nothing to
     /// point at. So this holds the expansion rather than the home.
     rows: HashMap<String, Vec<(String, Type)>>,
+    /// The local spellings in `by_name` that name a trait.
+    ///
+    /// **A trait is in `by_name` so that a bound can find its home, and that
+    /// let it be written as a type.** `fn render_one(item: Show)` made `item`
+    /// a nominal `Show` that implements nothing, and the reader was told
+    /// ``Show` does not implement `Show``. Knowing which names are traits is
+    /// what lets `named_type` refuse to make a type of one, and
+    /// `crate::unresolved` say what was meant instead.
+    traits: HashSet<String>,
 }
 
 impl TypeHomes {
@@ -605,6 +614,11 @@ impl TypeHomes {
     /// The capabilities a `row` names, or `None` for anything else.
     pub fn row(&self, local: &str) -> Option<&[(String, Type)]> {
         self.rows.get(local).map(Vec::as_slice)
+    }
+
+    /// Whether `local` names a trait here, rather than a type or an effect.
+    pub fn is_trait(&self, local: &str) -> bool {
+        self.traits.contains(local)
     }
 
     /// Records a declaration this file makes itself.
@@ -624,16 +638,23 @@ pub fn type_homes(db: &dyn Db, file: SourceFile) -> TypeHomes {
         for item in &items.items {
             if is_a_type(item.kind) {
                 homes.declares(&item.name, home);
+                if item.kind == khora_hir::ItemKind::Trait {
+                    homes.traits.insert(item.name.clone());
+                }
             }
         }
     }
 
     for origin in &khora_hir::file_scope(db, file).origins {
-        if is_a_type(origin.kind) {
+        // Only the import that wins the spelling says whether it is a trait:
+        // a type declared here under the same name shadows it.
+        if is_a_type(origin.kind) && !homes.by_name.contains_key(&origin.local) {
             homes
                 .by_name
-                .entry(origin.local.clone())
-                .or_insert_with(|| (origin.module.clone(), origin.name.clone()));
+                .insert(origin.local.clone(), (origin.module.clone(), origin.name.clone()));
+            if origin.kind == khora_hir::ItemKind::Trait {
+                homes.traits.insert(origin.local.clone());
+            }
         }
     }
 

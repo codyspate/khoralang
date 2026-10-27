@@ -20,7 +20,10 @@
 //! [`Resolution::Unsupported`] rather than being guessed at.
 
 pub mod body;
+mod capabilities;
 pub mod derive;
+
+pub use capabilities::{missing_capability, Site};
 
 use khora_db::{Db, SourceFile};
 use khora_syntax::ast::{self, AstNode};

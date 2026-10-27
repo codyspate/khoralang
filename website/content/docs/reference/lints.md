@@ -13,7 +13,7 @@ sidebar:
 | `bool-comparison` | `allow` | `b == true` or `b == false`, which are `b` and `!b`. In the `idiomatic` group. |
 | `concatenated-string` | `allow` | `"a " + x + "!"`, which is `"a ${x}!"`. In the `idiomatic` group. |
 | `dangling-expression` | `warn` | A statement that computes something and does nothing with it. |
-| `discarded-result` | `warn` | A statement that produces a `Result` and drops it on the floor. |
+| `discarded-result` | `warn` | A statement that produces a `Result` and drops it on the floor. `khora new` writes `discarded-result = "deny"` into a new project's manifest. |
 | `inconsistent-constructor` | `warn` | A constructor whose name disagrees with what it takes — `new`, `empty`, `root` and `of` follow a rule `std` keeps. |
 | `method-call` | `allow` | `x.m(a)`, which is `T::m(x, a)`. In the `idiomatic` group. |
 | `misplaced-main` | `warn` | A `main` in a file that is not an entry point. |

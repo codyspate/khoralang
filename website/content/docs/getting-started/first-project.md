@@ -61,12 +61,17 @@ version = "0.1.0"
 # Which Khora builds this project. Required.
 [toolchain]
 version = "0.4.0"
+
+# A `Result` nobody looks at hides its failure. `let _ =` says it was considered.
+[lints]
+discarded-result = "deny"
 ```
 
 The `[toolchain]` version is required, and it is what makes a project build the
 same way on the next machine: run any command here with a different Khora on
-your path and it hands the command over to the one this project asks for. Every
-key is in [the manifest reference](/docs/reference/manifest/).
+your path and it hands the command over to the one this project asks for.
+`[lints]` makes a statement that drops a `Result` an error rather than a
+warning. Every key is in [the manifest reference](/docs/reference/manifest/).
 
 ## Write some Khora
 

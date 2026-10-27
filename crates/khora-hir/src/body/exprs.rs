@@ -437,8 +437,14 @@ impl<'a> Ctx<'a> {
         if let Some(local) = known {
             return self.add_expr(Expr::Local(local), range);
         }
+        // Asked before the binding exists, so the name does not suggest
+        // itself. Only a local counts, as at the top level.
+        let near = self.nearest_name(label).filter(|n| self.is_local(n));
         let local = self.declare(label.to_string(), false, range);
         let pat = self.add_pat(Pat::Bind(local), range);
+        if let Some(near) = near {
+            self.body.near_names.insert(pat, near);
+        }
         if let Some(open) = self.lambda_evidence.last_mut() {
             open.push((label.to_string(), pat));
         }
@@ -589,12 +595,23 @@ impl<'a> Ctx<'a> {
             if !self.lambdas.is_empty() {
                 return self.invented_capability(only, range);
             }
-            let message = match self.nearest_name(only) {
+            let near = self.nearest_name(only);
+            let message = match &near {
                 Some(near) => {
                     format!("cannot find `{only}` in this scope; did you mean `{near}`?")
                 }
                 None => format!("cannot find `{only}` in this scope"),
             };
+            // A name with a close *local* in reach is a typo of it first:
+            // `log` beside a local `logs` meant `logs`, and calling it a
+            // capability would throw the right answer away. A close function
+            // or type is not -- `clock` beside the type `Clock` is the case
+            // that was always wrong -- so only a local keeps "did you mean".
+            let typo = near.as_deref().is_some_and(|n| self.is_local(n));
+            if only.starts_with(|c: char| c.is_lowercase()) && !typo {
+                let site = self.site;
+                self.body.unresolved.push((only.clone(), self.body.errors.len(), site));
+            }
             self.error(message, range);
             return self.add_expr(Expr::Unresolved(only.clone()), range);
         }

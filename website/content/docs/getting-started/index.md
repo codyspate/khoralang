@@ -81,18 +81,27 @@ hello_khora/
 name = "hello_khora"
 version = "0.1.0"
 
+# Which Khora builds this project. Required.
 [toolchain]
 version = "0.4.0"
+
+# A `Result` nobody looks at hides its failure. `let _ =` says it was considered.
+[lints]
+discarded-result = "deny"
 ```
 
 The example pin is for the stable 0.4.0 release. On the candidate path above,
 `khora new` writes `version = "0.4.0-rc.2"` instead; keep it, and use a
 package dependency tagged `v0.4.0-rc.2` if the project adds one.
 
-Both tables are required. `[toolchain]` is what makes "this project builds the
+`[package]` and `[toolchain]` are required. `[toolchain]` is what makes "this project builds the
 same way on your machine" true by default rather than by convention, so a
 project without one stops with the two lines to add. `khora new` writes it for
 you with the version you are running.
+
+`[lints]` is optional. The scaffold turns a dropped `Result` into an error, because a failure
+nobody looks at is a failure nobody hears about; [Lints](/docs/reference/lints/)
+lists the others and their levels.
 
 and `src/main.kh` is a program that compiles:
 

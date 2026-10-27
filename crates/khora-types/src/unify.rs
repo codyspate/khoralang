@@ -192,7 +192,7 @@ fn row_as_written(row: &Type) -> RowWords {
 /// Both homeless is not this case -- two unresolved names are equal, so they
 /// unify -- and both resolved is the genuine two-modules-one-name mismatch
 /// that [`Type::qualified`] exists for.
-fn unresolved_against_resolved<'t>(
+pub(crate) fn unresolved_against_resolved<'t>(
     expected: &'t Type,
     found: &'t Type,
 ) -> Option<(&'t str, &'t Type)> {

@@ -990,14 +990,37 @@ fn discarded_results(body: &Body, types: &BodyTypes, out: &mut Vec<Finding>) {
         let Expr::Block { stmts, .. } = expr else { continue };
         for stmt in stmts {
             let Stmt::Expr(id) = stmt else { continue };
-            let Type::Adt { name, .. } = types.of(*id) else { continue };
+            let Type::Adt { name, args, .. } = types.of(*id) else { continue };
             if name != "Result" {
                 continue;
             }
+            // **The advice has to be advice that works.** It used to end
+            // "mark it with `!` in a function that can raise", and `!` passes
+            // on what a call *raises*: a `Result` is a value, so the same
+            // warning came back on the same line. What turns a `Result`'s
+            // error into a raise is a `match` with `raise` in the `Err` arm --
+            // offered only when the error is a declared type, because nothing
+            // else can be raised. Where the `!` is already there, the message
+            // says why it was not enough, because that reader believes it was.
+            let marked = matches!(body.expr(*id), Expr::Try(_));
+            let head = if marked {
+                "this produces a `Result` and nothing looks at it, so a failure here is \
+                 silent: `!` passes on what the call raises, not the `Result` it returns. "
+            } else {
+                "this produces a `Result` and nothing looks at it, so a failure here is \
+                 silent. "
+            };
+            let raisable = matches!(args.get(1), Some(Type::Adt { .. } | Type::Param(_)));
+            let how = if raisable {
+                "`match` it -- in a function that raises the error type, \
+                 `Result::Err(e) => raise e` passes the failure on -- or write `let _ =` \
+                 to say the answer was considered"
+            } else {
+                "`match` it, or write `let _ =` to say the answer was considered"
+            };
             out.push(Finding {
                 lint: DISCARDED_RESULT,
-                message: "this produces a `Result` and nothing looks at it, so a failure here is silent. `match` it, mark it with `!` in a function that can raise, or write `let _ =` to say the answer was considered"
-                    .to_string(),
+                message: format!("{head}{how}"),
                 range: body.range(*id),
                 fix: None,
             });

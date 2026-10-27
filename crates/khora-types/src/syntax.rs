@@ -347,6 +347,13 @@ pub(crate) fn named_type(
         // file's `tests` module, which asserts on the type rather than on a
         // diagnostic so it cannot be satisfied by a reworded message.
         other if other.starts_with('\'') => Type::Param(other.to_string()),
+        // **A trait is not a type, and making one of it reported the mistake
+        // as its own consequences.** `item: Show` became a nominal `Show`
+        // with no impls, so the body was told ``Show` does not implement
+        // `Show`` and every caller ``expected `Show`, found `String``.
+        // `crate::unresolved` reports the name where it was written, with
+        // the generic spelling; `Unknown` keeps both follow-ons quiet.
+        other if homes.is_trait(other) => Type::Unknown,
         other => match homes.of(other) {
             // The declared name, not the local spelling. An alias renames a
             // mention and not a type: `import other::{Point as Other}` used to

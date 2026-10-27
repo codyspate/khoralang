@@ -104,6 +104,17 @@ pub(crate) fn unresolved_type_errors(db: &dyn Db, file: SourceFile) -> Vec<HirEr
                 continue;
             }
             let Some(name) = path_type.path().map(|p| p.text_path()) else { continue };
+            // A trait where a trait belongs -- a bound, a supertrait, the
+            // trait an `impl` is for -- is a trait mention, not a type one.
+            if homes.is_trait(&name) && !in_scope.contains(&name) {
+                if !names_a_trait_here(&path) {
+                    found.push(HirError {
+                        message: trait_as_type(&name, &path, homes, &in_scope),
+                        range: path.text_range(),
+                    });
+                }
+                continue;
+            }
             if resolves(&name, &in_scope, homes) {
                 continue;
             }
@@ -203,6 +214,192 @@ fn raised_argument(node: &SyntaxNode) -> bool {
 fn inside_a_row(node: &SyntaxNode) -> bool {
     node.ancestors()
         .any(|a| matches!(a.kind(), SyntaxKind::WITH_CLAUSE | SyntaxKind::RAISES_CLAUSE))
+}
+
+/// Whether a written name is in one of the places a trait belongs: a bound
+/// (`<A: Show>`, `trait Ord: Eq`, `type Key: Eq`), or the trait an `impl` is
+/// for.
+fn names_a_trait_here(path: &SyntaxNode) -> bool {
+    let Some(parent) = path.parent() else { return false };
+    match parent.kind() {
+        SyntaxKind::TYPE_BOUNDS => true,
+        SyntaxKind::IMPL_DECL => ast::ImplDecl::cast(parent)
+            .and_then(|i| i.trait_())
+            .is_some_and(|t| t.syntax() == path),
+        _ => false,
+    }
+}
+
+/// What to say about a trait written where a type goes.
+///
+/// **Rust says `impl Show` or `dyn Show`; Khora has neither**, so the only
+/// spelling is a type parameter bounded by the trait. Where the mention is a
+/// function's parameter, the message is that function's signature rewritten,
+/// one fresh parameter per trait mention, so it can be copied as it stands --
+/// two mentions of `Show` are two parameters, because two arguments may be
+/// two different types. Anywhere else there is no signature to rewrite, and
+/// the shape is given instead.
+fn trait_as_type(
+    name: &str,
+    path: &SyntaxNode,
+    homes: &crate::TypeHomes,
+    in_scope: &HashSet<String>,
+) -> String {
+    let head = format!(
+        "`{name}` is a trait, not a type: it says what a type can do, and a value has to \
+         have one particular type"
+    );
+    match generic_signature(path, homes, in_scope) {
+        Some(signature) => format!(
+            "{head}. A function over any `{name}` takes a type parameter bounded by it: \
+             `{signature}`"
+        ),
+        None => match placement(path) {
+            // **Not `fn f<A: Eq>() -> A`**, which reads as the fix and does
+            // not compile: the caller chooses `A`, and the body cannot make
+            // a value of a type it did not choose.
+            Placement::Return => format!(
+                "{head}. A function cannot return \"any `{name}`\": whoever calls it would \
+                 choose which, and the body cannot make a value of a type it did not choose. \
+                 Name the type it returns"
+            ),
+            Placement::Field(Some(shape)) => format!(
+                "{head}. A record that holds any `{name}` takes a type parameter bounded by \
+                 it: `{shape}`"
+            ),
+            Placement::Field(None) | Placement::Elsewhere => format!(
+                "{head}. Write the type itself here, or make it a type parameter bounded by \
+                 `{name}`, as `fn f<A: {name}>(value: A)`"
+            ),
+        },
+    }
+}
+
+/// Where a trait-as-type that is not in a parameter list was written.
+enum Placement {
+    /// In a function's return type.
+    Return,
+    /// In a field of a `type` declaration: the declaration rewritten with a
+    /// bounded parameter, when it could be rewritten.
+    Field(Option<String>),
+    /// A `let`, an alias, a type argument outside either: no one shape fits.
+    Elsewhere,
+}
+
+/// Which of [`Placement`] the mention at `path` is.
+fn placement(path: &SyntaxNode) -> Placement {
+    for node in path.ancestors() {
+        if let Some(decl) = ast::FnDecl::cast(node.clone()) {
+            let in_return = decl
+                .return_type()
+                .is_some_and(|ret| ret.syntax().text_range().contains_range(path.text_range()));
+            return if in_return { Placement::Return } else { Placement::Elsewhere };
+        }
+        if let Some(decl) = ast::TypeDecl::cast(node.clone()) {
+            return Placement::Field(bounded_type_decl(&decl, path));
+        }
+    }
+    Placement::Elsewhere
+}
+
+/// `type Box<A: Show> = { item: A }`, for a `Show` written as `item`'s type.
+///
+/// Only where the declaration has no type parameters yet and this is the one
+/// path type in it naming the trait: the shape that is certainly right.
+/// Anything else gets `None` and the general advice.
+fn bounded_type_decl(decl: &ast::TypeDecl, path: &SyntaxNode) -> Option<String> {
+    if decl.type_params().is_some() {
+        return None;
+    }
+    let name = decl.name()?.ident()?;
+    let definition = decl.definition()?;
+    let trait_name = ast::PathType::cast(path.clone())?.path()?.text_path();
+    let mentions = definition
+        .syntax()
+        .descendants()
+        .filter_map(ast::PathType::cast)
+        .filter(|p| p.path().is_some_and(|p| p.text_path() == trait_name))
+        .count();
+    if mentions != 1 {
+        return None;
+    }
+    let start = definition.syntax().text_range().start();
+    let text = definition.syntax().text().to_string();
+    let from = usize::from(path.text_range().start() - start);
+    let to = usize::from(path.text_range().end() - start);
+    let body = format!("{}A{}", &text[..from], &text[to..]);
+    let body = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    Some(format!("type {name}<A: {trait_name}> = {body}"))
+}
+
+/// `fn render_one<A: Show>(item: A)`, for a `Show` written in `item`'s type.
+///
+/// `None` when the mention is not in a function's parameter list: a return
+/// type of `Show` is not fixed by a type parameter, which the caller would
+/// choose, and a field or a `let` has no parameter list to add one to.
+fn generic_signature(
+    path: &SyntaxNode,
+    homes: &crate::TypeHomes,
+    in_scope: &HashSet<String>,
+) -> Option<String> {
+    let param_list = path.ancestors().find(|a| a.kind() == SyntaxKind::PARAM_LIST)?;
+    let decl = ast::FnDecl::cast(param_list.parent()?)?;
+    let name = decl.name()?.ident()?;
+
+    // Fresh names, skipping every parameter the declaration already has.
+    let mut fresh = ('A'..='Z').map(String::from).filter(|n| !in_scope.contains(n));
+    let mut added: Vec<String> = Vec::new();
+    let mut params: Vec<String> = Vec::new();
+    for param in param_list.children().filter(|n| n.kind() == SyntaxKind::PARAM) {
+        let start = param.text_range().start();
+        let text = param.text().to_string();
+        // In source order, which `descendants` already is.
+        let mentions: Vec<(SyntaxNode, String)> = param
+            .descendants()
+            .filter_map(|n| written_trait(&n, homes, in_scope).map(|t| (n, t)))
+            .collect();
+        let mut rewritten = String::new();
+        let mut at = 0usize;
+        for (mention, trait_name) in mentions {
+            let letter = fresh.next()?;
+            let from = usize::from(mention.text_range().start() - start);
+            let to = usize::from(mention.text_range().end() - start);
+            rewritten.push_str(&text[at..from]);
+            rewritten.push_str(&letter);
+            added.push(format!("{letter}: {trait_name}"));
+            at = to;
+        }
+        rewritten.push_str(&text[at..]);
+        params.push(rewritten.split_whitespace().collect::<Vec<_>>().join(" "));
+    }
+
+    // The new parameters go after the existing type parameters and before any
+    // row variable, which is where a list written by hand has them.
+    let existing: Vec<String> = decl
+        .type_params()
+        .map(|tp| {
+            tp.params()
+                .map(|p| p.syntax().text().to_string().split_whitespace().collect::<Vec<_>>().join(" "))
+                .collect()
+        })
+        .unwrap_or_default();
+    let (rows, types): (Vec<String>, Vec<String>) =
+        existing.into_iter().partition(|p| p.starts_with('\''));
+    let generics: Vec<String> = types.into_iter().chain(added).chain(rows).collect();
+    Some(format!("fn {name}<{}>({})", generics.join(", "), params.join(", ")))
+}
+
+/// The trait a `PATH_TYPE` names in a type position, if it names one: the
+/// same test the walk applies, so every mention the rewritten signature
+/// replaces is one the walk would report.
+fn written_trait(
+    node: &SyntaxNode,
+    homes: &crate::TypeHomes,
+    in_scope: &HashSet<String>,
+) -> Option<String> {
+    let name = ast::PathType::cast(node.clone())?.path()?.text_path();
+    (homes.is_trait(&name) && !in_scope.contains(&name) && !names_a_trait_here(node))
+        .then_some(name)
 }
 
 /// Whether this is the definition of a `type` declaration, where a variant is

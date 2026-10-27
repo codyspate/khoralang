@@ -103,6 +103,16 @@ pub fn new(directory: &Path, library: bool) -> Result<()> {
     }
     if shared.lints {
         manifest.push_str("\n[lints]\nworkspace = true\n");
+    } else {
+        // **A dropped `Result` is a failure nobody hears about, so a new
+        // project refuses one.** `warn` is the default for code that predates
+        // the lint; a project started here has none, and this is the one
+        // place to set the level before there is. Not written where the
+        // workspace decides the lints, for the reason the pin is not.
+        manifest.push_str(
+            "\n# A `Result` nobody looks at hides its failure. `let _ =` says it was \
+             considered.\n[lints]\ndiscarded-result = \"deny\"\n",
+        );
     }
     std::fs::write(directory.join("khora.toml"), manifest)
         .with_context(|| format!("writing {}", directory.join("khora.toml").display()))?;

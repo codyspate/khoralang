@@ -415,11 +415,72 @@ impl<'a> Checker<'a> {
         // whoever wrote the annotation is about to be told about it by the
         // `require` that asked for the hint, and reporting it twice, once here
         // against the wrong range, is worse than not reporting it at all.
-        if let Some(hint) = hint {
-            self.hint_at(&hint, &ret, range);
+        //
+        // **But when the hint is a closure's expected result, an argument
+        // that is a plain local goes first.** That hint is inferred from the
+        // function the closure was passed to, not written by anybody, and
+        // what a local says about the parameters is a fact next to it. Hint
+        // first, `Region::defer(r, fn () => Shared::update(state, fn s => ..))`
+        // let `defer`'s `()` decide `update`'s `A`, and then told `state` --
+        // the one thing on the line that was right -- that it should have
+        // been a `Shared<()>`, and `s` that `()` has no `Show`. With `state`
+        // first, `A` is `String`, the hint simply does not fit, and the
+        // closure's result is what gets reported, by the closure (see
+        // `closure_for`).
+        //
+        // **A hint somebody wrote keeps its place.** In
+        // `let total: Int = first(names, 0)` the annotation is the intent and
+        // `names` the mistake; locals first blamed the `0`, which was right,
+        // and then the annotation. Whether the hint came from a closure is
+        // read off its identity: a closure body is checked against the fresh
+        // result variable of the innermost lambda, and nothing else is.
+        //
+        // Only a local: its type is what it is whenever it is read, so moving
+        // it changes nothing when the program is right. A field read is not
+        // moved, because it needs its base's type known at the moment it is
+        // read, and an earlier argument may be what decides that.
+        //
+        // **A local that does not fit is reported after the hint, not
+        // before.** The hint is still information for the message: in
+        // `matmul(a, b)` returning `Matrix<2, 5>`, the declared result is what
+        // says `N` is 5, and the reader is better served by ``expected
+        // `Matrix<3, 5>``` than by `Matrix<3, _>`. So the first pass only
+        // decides types; a mismatch it finds is dropped and asked again once
+        // the hint is in, where it fails the same way and says more.
+        let inferred_hint = match (&hint, self.lambdas.last()) {
+            (Some(hint), Some(Type::Fn { ret, .. })) => **ret == *hint,
+            _ => false,
+        };
+        let pairs: Vec<(ExprId, Type, bool)> = args
+            .iter()
+            .zip(&params)
+            .map(|(arg, expected)| {
+                let settled = inferred_hint && matches!(self.body.expr(*arg), Expr::Local(_));
+                (*arg, expected.clone(), settled)
+            })
+            .collect();
+        let mut again: Vec<(ExprId, Type, Type)> = Vec::new();
+        for (arg, expected, _) in pairs.iter().filter(|(_, _, settled)| *settled) {
+            let before = self.errors.len();
+            let actual = self.expect(*arg, expected, "this argument");
+            if self.errors.len() > before {
+                self.errors.truncate(before);
+                again.push((*arg, expected.clone(), actual));
+            }
+        }
+        if let Some(hint) = &hint {
+            self.hint_at(hint, &ret, range);
+        }
+        for (arg, expected, actual) in again {
+            let at = self.body.range(arg);
+            self.require(&expected, &actual, "this argument", at);
         }
 
-        for (arg, expected) in args.iter().zip(&params) {
+        let label = callee.map(|c| self.callee_label(c));
+        for (arg, expected, _) in pairs.iter().filter(|(_, _, settled)| !*settled) {
+            if matches!(self.body.expr(*arg), Expr::Lambda { .. }) {
+                self.closure_for = label.clone();
+            }
             self.expect(*arg, expected, "this argument");
         }
 
@@ -777,10 +838,20 @@ impl<'a> Checker<'a> {
         if let Some(receiver) = params.first() {
             if let Err(mismatch) = self.unifier.unify(receiver, self_ty) {
                 let shown = self.unifier.zonk(self_ty);
-                self.error(
-                    format!("`{shown}` cannot be the receiver of `{key}`: {mismatch}"),
-                    range,
-                );
+                // **A receiver whose type never resolved is the missing
+                // import again, once per call.** `counts: Map<String, Int>`
+                // in a file that never imported `Map` is a `Map` with no
+                // home, and every `counts.len()` met the real one here: about
+                // sixty ``cannot be the receiver of `#Map::len`: expected
+                // `Map<_, _>`, found `Map<String, Int>`` in one program, each
+                // reading as two real types disagreeing. The name is reported
+                // where it is written; nothing here is new.
+                if !is_an_unimported_name(&mismatch) {
+                    self.error(
+                        format!("`{shown}` cannot be the receiver of `{key}`: {mismatch}"),
+                        range,
+                    );
+                }
                 return Type::Unknown;
             }
         }
@@ -1095,5 +1166,20 @@ fn lowercase_start(name: &str) -> String {
     match chars.next() {
         Some(first) => first.to_lowercase().collect::<String>() + chars.as_str(),
         None => String::new(),
+    }
+}
+
+/// Whether a receiver mismatch is a name that never resolved meeting the
+/// declaration it was meant to name: the same spelling, one side with no home.
+///
+/// Narrower than "the type mentions an unresolved name", on purpose: a file
+/// with no `module` line declares homeless types of its own, and a genuine
+/// mismatch between two of them must still be reported.
+fn is_an_unimported_name(mismatch: &crate::unify::Mismatch) -> bool {
+    match mismatch {
+        crate::unify::Mismatch::Types { expected, found } => {
+            crate::unify::unresolved_against_resolved(expected, found).is_some()
+        }
+        _ => false,
     }
 }

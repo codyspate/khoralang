@@ -261,6 +261,73 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
     // that nothing in *this* pass reported. The syntax error is the message
     // worth reading; see `Checker::check_unknowns`.
     let parsed = khora_db::parse(db, file).errors().is_empty();
+    // **A written type that names no type is a hole of the same kind, in the
+    // one function that wrote it.** A trait in a parameter's type, or a `+`
+    // union outside a row, becomes `Unknown` so that it says nothing at its
+    // uses, and `crate::unresolved` has already said what is wrong with it
+    // where it was written; auditing that function would report its first use
+    // again as a type "never worked out". Per function, not per file: a file
+    // gate hid a genuine "never worked out" in an unrelated function until
+    // the trait was fixed.
+    //
+    // **The hole travels with the name of what holds it.** `fn mk() -> Map<..>`
+    // with `Map` unresolved hands its caller an `Unknown`, and auditing the
+    // caller blamed a method call on it for something only `mk` got wrong. So
+    // a body that mentions a declaration with a hole in it is skipped too: by
+    // name, which over-skips a body that merely shares a spelling, and that is
+    // the cheap side to be wrong on -- the hole's own error is still reported.
+    let unnamed: Vec<TextRange> =
+        crate::unresolved::unresolved_type_errors(db, file).iter().map(|e| e.range).collect();
+    let syntax = khora_db::parse(db, file).syntax();
+    let holds_a_hole =
+        |node: &khora_syntax::SyntaxNode| unnamed.iter().any(|r| node.text_range().contains_range(*r));
+    let holed: HashSet<String> = if unnamed.is_empty() {
+        HashSet::new()
+    } else {
+        syntax
+            .children()
+            .filter(|decl| holds_a_hole(decl))
+            .filter_map(|decl| {
+                decl.children()
+                    .find(|n| n.kind() == khora_syntax::SyntaxKind::NAME)?
+                    .first_token()
+                    .map(|t| t.text().to_string())
+            })
+            .collect()
+    };
+    let writes_a_hole = |body: &khora_hir::body::Body| -> bool {
+        if unnamed.is_empty() {
+            return false;
+        }
+        let Some(root) = body.root else { return false };
+        let at = body.range(root);
+        // The declaration whose body this is: the innermost function, test
+        // or bench around the root block. Its signature is where a hole
+        // would have been written.
+        let start = match syntax.covering_element(at) {
+            khora_syntax::SyntaxElement::Node(node) => node,
+            khora_syntax::SyntaxElement::Token(token) => match token.parent() {
+                Some(parent) => parent,
+                None => return false,
+            },
+        };
+        let Some(decl) = start.ancestors().find(|n| {
+            matches!(
+                n.kind(),
+                khora_syntax::SyntaxKind::FN_DECL
+                    | khora_syntax::SyntaxKind::TEST_DECL
+                    | khora_syntax::SyntaxKind::BENCH_DECL
+            )
+        }) else {
+            // No declaration to blame it on (a derived body, whose ranges
+            // all point at its `derive`): keep the cautious file-wide answer.
+            return true;
+        };
+        holds_a_hole(&decl)
+            || decl.descendants_with_tokens().filter_map(|e| e.into_token()).any(|t| {
+                t.kind() == khora_syntax::SyntaxKind::IDENT && holed.contains(t.text())
+            })
+    };
 
     for (name, body) in khora_hir::body::bodies(db, file) {
         let mut signature = types.signatures.get(name).cloned().unwrap_or(Signature {
@@ -314,6 +381,8 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             loops: Vec::new(),
             open_raises: Vec::new(),
             open_requires: Vec::new(),
+            missing_labels: Vec::new(),
+            closure_for: None,
             hint: None,
             marked: Vec::new(),
             catching: 0,
@@ -373,10 +442,22 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
         checker.settle_coverage();
         checker.check_effects();
         checker.refuse_bare_opaque();
-        if parsed {
+        if parsed && !writes_a_hole(body) {
             checker.check_unknowns();
         }
-        let reported = std::mem::take(&mut checker.errors);
+        let mut reported = std::mem::take(&mut checker.errors);
+        // A label a lambda named and nothing offers, which lowering deferred
+        // to the checker (`invented_capability`). Said the way lowering says
+        // it outside a lambda, when the program knows it as a capability.
+        for (label, at) in std::mem::take(&mut checker.missing_labels) {
+            let site = match (name.as_str(), name.starts_with(khora_hir::TEST_PREFIX)) {
+                ("main", _) | (_, true) => khora_hir::Site::EntryPoint,
+                _ => khora_hir::Site::Function,
+            };
+            if let Some(better) = khora_hir::missing_capability(db, file, &label, site) {
+                reported[at].message = better;
+            }
+        }
         if !refused.contains(name) {
             out.errors.extend(reported);
         }

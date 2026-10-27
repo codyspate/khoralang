@@ -261,6 +261,22 @@ pub(crate) struct Checker<'a> {
     /// by [`Checker::close_open_rows`]: what a body needs is a *lower* bound,
     /// and a tail nothing ever widened is empty.
     pub(crate) open_requires: Vec<Type>,
+    /// Each label a lambda named and nothing offered it, with the index of
+    /// its "cannot find" in `errors`.
+    ///
+    /// The checker has no database, and saying that a name is a capability
+    /// needs one, to find the label in the program's `with` clauses. So the
+    /// query that owns this checker rewrites these afterwards, the way
+    /// lowering rewrites its own: see `khora_hir::missing_capability`.
+    pub(crate) missing_labels: Vec<(String, usize)>,
+    /// The function a closure literal is being passed to, set just before it
+    /// is checked as an argument and taken by the closure as it starts.
+    ///
+    /// A closure whose result is wrong is reported by the closure, and "this
+    /// closure's body: expected `()`" does not say who expected it -- the
+    /// reader of `Region::defer(r, fn () => ..)` needs `defer`'s name, and
+    /// what `defer` wants of a closure, to know what to change.
+    pub(crate) closure_for: Option<String>,
     /// The type the surrounding expression is asking for, when there is one.
     ///
     /// Three things read it. An integer literal, to decide which integer it

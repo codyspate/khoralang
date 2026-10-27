@@ -135,6 +135,22 @@ fn a_nested_mismatch_names_the_whole_type_first() {
     );
 }
 
+/// The same, where the expected result is a closure's, decided by the
+/// function it is passed to. Its locals are checked before that result, and
+/// one that does not fit is still reported after it, so the message keeps
+/// what the result says about `N`.
+#[test]
+fn a_nested_mismatch_in_a_closure_names_the_whole_type_first() {
+    assert_reports(
+        &format!(
+            "{MATRIX}fn run(f: () -> Matrix<2, 5>) -> Matrix<2, 5> {{ f() }}
+fn g(a: Matrix<2, 3>, b: Matrix<4, 5>) -> Matrix<2, 5> {{ run(fn () => matmul(a, b)) }}
+"
+        ),
+        "expected `Matrix<3, 5>`, found `Matrix<4, 5>`; dimension `3` does not match `4`",
+    );
+}
+
 /// An argument the checker has not pinned down reads as `_`, which is what a
 /// Rust or TypeScript developer already understands. `?7` is compiler trivia.
 #[test]

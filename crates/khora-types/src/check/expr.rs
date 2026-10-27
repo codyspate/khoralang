@@ -314,6 +314,9 @@ impl<'a> Checker<'a> {
             }
             Expr::Catch { inner, arms } => self.infer_catch(inner, &arms, range),
             Expr::Lambda { evidence, params, param_types, body, .. } => {
+                // Taken first, so a closure nested inside this one's body is
+                // not credited to the same call.
+                let passed_to = self.closure_for.take();
                 // A parameter with no annotation gets a variable, so its type
                 // is settled by how the lambda is used: `map(xs, (x) => x + 1)`
                 // learns `x: Int` from `map`'s signature.
@@ -399,10 +402,21 @@ impl<'a> Checker<'a> {
                             }
                         }
                         None => {
-                            self.error(
-                                format!("cannot find `{label}` in this scope"),
-                                self.body.pat_range(*pat),
-                            );
+                            // A close name in reach is what was meant: say
+                            // so, and do not offer it as a capability.
+                            let message = match self.body.near_name(*pat) {
+                                Some(near) => format!(
+                                    "cannot find `{label}` in this scope; did you mean `{near}`?"
+                                ),
+                                None => {
+                                    // Index first: `missing_labels` points into
+                                    // `errors`, and nothing removes an error
+                                    // that was there before this one.
+                                    self.missing_labels.push((label.clone(), self.errors.len()));
+                                    format!("cannot find `{label}` in this scope")
+                                }
+                            };
+                            self.error(message, self.body.pat_range(*pat));
                             self.bind_pattern(*pat, &Type::Unknown);
                         }
                     }
@@ -497,7 +511,31 @@ impl<'a> Checker<'a> {
                 }
                 self.lambdas.pop();
 
-                self.require(&result, &ret, "this closure's body", range);
+                // **Said as the callee's demand, at the body.** The plain
+                // "this closure's body: expected `()`, found `String`" was
+                // right, but pointed at the whole closure and named nobody.
+                // When the closure is an argument the reader needs whose rule
+                // it is, the part they can change, and -- for a closure that
+                // must return `()` -- how to throw a value away.
+                match &passed_to {
+                    None => {
+                        self.require(&result, &ret, "this closure's body", range);
+                    }
+                    Some(callee) => {
+                        let context = format!("what the closure passed to `{callee}` returns");
+                        let at = self.body.range(body);
+                        if !self.require(&result, &ret, &context, at)
+                            && matches!(self.unifier.zonk(&result), Type::Unit)
+                        {
+                            if let Some(said) = self.errors.last_mut() {
+                                said.message.push_str(
+                                    "; to call something for its effect and drop its value, \
+                                     write the body as a block: `fn () => { let _ = ..; }`",
+                                );
+                            }
+                        }
+                    }
+                }
                 whole
             }
             // Inside its own body, a closure's name is the closure.

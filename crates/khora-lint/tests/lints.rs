@@ -568,6 +568,76 @@ fn a_discarded_unit_is_not_reported() {
     assert!(found.is_empty(), "{found:?}");
 }
 
+/// **"Mark it with `!`" was advice that did not work.** `!` passes on what a
+/// call *raises*, and a `Result` is a value, so following it left the same
+/// warning on the same line. The advice names what does work -- `match` it
+/// and `raise` the error, or `let _ =` -- and mentions `!` only to say why it
+/// was not enough.
+#[test]
+fn the_advice_does_not_send_a_result_to_bang() {
+    let db = KhoraDatabase::new();
+    let found = lint(&db, &format!("{RESULTS}\nfn f() -> Int {{ work(); 0 }}\n"));
+    let said = &found[0].message;
+    assert!(!said.contains("mark it with `!`"), "{said}");
+    assert!(!said.contains('!'), "a call with no `!` hears nothing about `!`: {said}");
+    assert!(said.contains("Result::Err(e) => raise e"), "{said}");
+    assert!(said.contains("let _ ="), "{said}");
+}
+
+/// The shape that shipped: somebody wrote the `!` believing it handled the
+/// `Result`. Here the message says why it did not.
+#[test]
+fn a_marked_call_is_told_what_the_bang_does() {
+    let db = KhoraDatabase::new();
+    let found = lint(
+        &db,
+        &format!(
+            "{RESULTS}\nfn g() -> Result<Int, Oops> raises Oops {{ work() }}\n\
+             fn f() -> Int raises Oops {{ g()!; 0 }}\n"
+        ),
+    );
+    let said = &found[0].message;
+    assert!(said.contains("`!` passes on what the call raises, not the `Result` it returns"), "{said}");
+    assert!(said.contains("Result::Err(e) => raise e"), "{said}");
+}
+
+/// Each spelling the message offers is quiet, and checks.
+#[test]
+fn the_spellings_the_advice_offers_are_quiet() {
+    for body in [
+        "match work() { Result::Ok(_n) => (), Result::Err(e) => raise e };",
+        "let _ = work();",
+    ] {
+        let db = KhoraDatabase::new();
+        let text = format!("{RESULTS}\nfn f() -> Int raises Oops {{ {body} 0 }}\n");
+        let found = lint(&db, &text);
+        assert!(found.is_empty(), "{body}: {found:?}");
+        let file = SourceFile::new(&db, "b.kh".into(), text.clone());
+        let errors = khora_types::diagnostics(&db, file);
+        assert!(errors.is_empty(), "{body}: {errors:?}");
+    }
+}
+
+/// **`raise` is offered only for an error that can be raised.** Only a type
+/// a `type` declaration names can be; `Result<Int, String>` cannot pass its
+/// `String` on with `raise`, and offering it would be the old mistake again,
+/// one step later.
+#[test]
+fn a_string_error_is_not_offered_raise() {
+    let db = KhoraDatabase::new();
+    let found = lint(
+        &db,
+        &format!(
+            "{RESULTS}\nfn text() -> Result<Int, String> {{ Result::Err(\"no\") }}\n\
+             fn f() -> Int {{ text(); 0 }}\n"
+        ),
+    );
+    let said = &found[0].message;
+    assert!(!said.contains("raise"), "{said}");
+    assert!(said.contains("`match` it"), "{said}");
+    assert!(said.contains("let _ ="), "{said}");
+}
+
 /// **`type Port = pub Int;` is not an export.** The `pub` after `=` opens the
 /// wrapper's value; only the one before `type` exports it. Reading the second
 /// as the first asked for documentation of a type nobody outside can name.

@@ -317,6 +317,44 @@ it will behave differently now.
   to see a cached program's IR.
 - `packages/postgres` draws its SCRAM client nonce from the operating
   system's cryptographic generator.
+- A trait written where a type goes -- `fn render_one(item: Show)`, or
+  `List<Show>` -- is one error at the trait's name, saying it is a trait and
+  giving the signature with a type parameter in its place:
+  `fn render_one<A: Show>(item: A)`. In a record field it gives the
+  declaration with a bounded parameter, `type Box<A: Show> = { item: A }`; as
+  a return type it says to name the type, because the caller would choose a
+  type parameter there. It was reported as ``Show` does not implement
+  `Show``, plus a mismatch at every caller, and `List<Show>` in a function
+  that did not call through it was accepted. Other functions in the file are
+  still checked in full.
+- A capability used in a function that has no `with` clause for it --
+  `clock.monotonic_millis()` -- is reported as a capability, with the
+  `with { clock: Clock }` and `clock: Clock` spellings and the import when the
+  effect is not in scope. In `main`, a `test` or a `bench`, which nothing
+  calls to supply one, it gives `with { clock: Clock::real() } { .. }`. It was
+  reported as ``cannot find `clock`; did you mean `Clock`?``. A label counts
+  as a capability when a `with` clause or a `row` anywhere in the program,
+  `std` included, gives it an effect, and no local or parameter with a close
+  name is in scope: `log` beside a local `logs` is still
+  ``did you mean `logs`?``.
+- A closure passed to a function that wants a different result is blamed for
+  its result, at its body, naming the function:
+  ``what the closure passed to `Region::defer` returns: expected `()`, found
+  `String` ``. Inside such a closure, a plain local argument of a call is
+  checked before the result the closure is expected to have, and keeps its
+  own type; in `Region::defer(r, fn () => Shared::update(state, ..))` the
+  error was ``expected `Shared<()>`, found `Shared<String>` `` on `state`. A
+  result somebody wrote, such as `let total: Int = first(names, 0)`, is
+  applied first, as before, so the mismatch is reported at `names`.
+- `discarded-result` advises `match` and `let _ =`, and offers `raise` in the
+  `Err` arm only when the error type can be raised. It advised marking the
+  call with `!`, which passes on what a call raises and leaves the `Result`
+  unread. On a call already marked with `!` it says so.
+- `khora new` writes `discarded-result = "deny"` into the new manifest's
+  `[lints]` table, except inside a workspace that shares its lints.
+- A method call on a value whose type was never imported adds no error of its
+  own: ``cannot be the receiver of `#Map::len` `` was printed once per call,
+  beside the one error about the unimported name.
 
 ## 0.4.0 — 2026-10-09
 

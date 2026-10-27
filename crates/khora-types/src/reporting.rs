@@ -184,6 +184,11 @@ pub(crate) fn unpinned_closure_errors(db: &dyn Db, file: SourceFile) -> Vec<HirE
     use khora_hir::body::Expr;
 
     let checked = crate::queries::checked(db, file);
+    // A closure whose own annotation names no type -- `fn (s: Show) => ..` --
+    // is unsolved for that reason alone, and the name has been reported
+    // where it is written.
+    let unnamed = crate::unresolved::unresolved_type_errors(db, file);
+    let names_nothing = |range: TextRange| unnamed.iter().any(|e| range.contains_range(e.range));
     // A closure the checker already said something about -- inside it, as
     // `fn q => { ..q, x: 9 }` is told to annotate `q`, or anywhere in a call
     // it is an argument of, as `List::map(List::range(0, 3), fn i => ..)` is
@@ -201,6 +206,7 @@ pub(crate) fn unpinned_closure_errors(db: &dyn Db, file: SourceFile) -> Vec<HirE
             let Type::Fn { params, ret, .. } = types.of(id) else { continue };
             if params.iter().chain(std::iter::once(&**ret)).any(|t| matches!(t, Type::Var(_)))
                 && !already(body.range(id))
+                && !names_nothing(body.range(id))
                 && !body.exprs().any(|(call, e)| {
                     matches!(e, Expr::Call { .. })
                         && body.range(call).contains_range(body.range(id))

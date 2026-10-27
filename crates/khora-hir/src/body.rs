@@ -590,6 +590,21 @@ pub struct Body {
     pub by_type: Vec<LocalId>,
     pub root: Option<ExprId>,
     pub errors: Vec<HirError>,
+    /// The lower-case names this body could not resolve and had no close
+    /// local for, each with the index of its "cannot find" in
+    /// [`Body::errors`] and whether the body is an entry point's.
+    ///
+    /// Kept so that [`bodies`] can tell a missing `with` from a typo once it
+    /// knows the program's capability labels, which it reads only when one of
+    /// these exists.
+    unresolved: Vec<(String, usize, crate::Site)>,
+    /// For a capability a lambda named and could not resolve (`evidence`),
+    /// the name in reach it is probably a misspelling of.
+    ///
+    /// Lowering defers that name's error to the checker, which has no scope
+    /// to search; without this, `fn x => log + x` beside a local `logs` lost
+    /// the "did you mean `logs`?" an unresolved name gets anywhere else.
+    near_names: std::collections::HashMap<PatId, String>,
 }
 
 impl Body {
@@ -654,6 +669,12 @@ impl Body {
     /// Where a pattern was written.
     pub fn pat_range(&self, id: PatId) -> TextRange {
         self.pat_ranges[id.index()]
+    }
+
+    /// The name in reach that an invented capability binding is probably a
+    /// misspelling of; see the `near_names` field.
+    pub fn near_name(&self, id: PatId) -> Option<&str> {
+        self.near_names.get(&id).map(String::as_str)
     }
 
     pub fn exprs(&self) -> impl Iterator<Item = (ExprId, &Expr)> {
@@ -767,7 +788,12 @@ pub fn bodies(db: &dyn Db, file: SourceFile) -> Vec<(String, Body)> {
                 let lowered = (|| {
                     let name = f.name()?.ident()?;
                     let body = f.body()?;
-                    Some((name, lower_function(map, scope, &contexts, &constants, &rows, &f, &body)))
+                    let site = match name.as_str() {
+                        "main" => crate::Site::EntryPoint,
+                        _ => crate::Site::Function,
+                    };
+                    let lowered = lower_function(map, scope, &contexts, &constants, &rows, &f, &body, site);
+                    Some((name, lowered))
                 })();
                 lowered.into_iter().collect::<Vec<_>>()
             }
@@ -817,6 +843,18 @@ pub fn bodies(db: &dyn Db, file: SourceFile) -> Vec<(String, Body)> {
         let Some(block) = body else { continue };
         out.push((crate::test_key(index), lower_test(map, scope, &contexts, &constants, &block)));
     }
+
+    // A lower-case name nothing resolved may be a capability this function
+    // never asked for. Decided here, once the whole file is lowered, because
+    // it reads other files, and only for the names that need it.
+    for (_, body) in &mut out {
+        for (label, at, site) in std::mem::take(&mut body.unresolved) {
+            let said = crate::capabilities::missing_capability(db, file, &label, site);
+            if let Some(message) = said {
+                body.errors[at].message = message;
+            }
+        }
+    }
     out
 }
 
@@ -844,6 +882,7 @@ fn lower_test(
         lambdas: Vec::new(),
         lambda_names: Vec::new(),
         lambda_evidence: Vec::new(),
+        site: crate::Site::EntryPoint,
     };
     let root = ctx.lower_expr(&ast::Expr::Block(block.clone()));
     ctx.body.root = Some(root);
@@ -915,12 +954,15 @@ fn methods(
             let body = f.body()?;
             Some((
                 format!("{owner}::{name}"),
-                lower_function(map, scope, contexts, constants, rows, &f, &body),
+                lower_function(map, scope, contexts, constants, rows, &f, &body, crate::Site::Function),
             ))
         })
         .collect()
 }
 
+/// Lowers one function body. `site` is [`crate::Site::EntryPoint`] for a
+/// top-level `main`, the only function nothing in the program calls.
+#[allow(clippy::too_many_arguments)]
 fn lower_function(
     map: &crate::ItemMap,
     scope: &crate::FileScope,
@@ -929,6 +971,7 @@ fn lower_function(
     rows: &[(String, Vec<String>)],
     decl: &ast::FnDecl,
     block: &ast::Block,
+    site: crate::Site,
 ) -> Body {
     let mut generics: Vec<String> = vec!["Self".to_string()];
     if let Some(params) = decl.type_params() {
@@ -950,6 +993,7 @@ fn lower_function(
         lambdas: Vec::new(),
         lambda_names: Vec::new(),
         lambda_evidence: Vec::new(),
+        site,
     };
 
     if let Some(params) = decl.params() {
@@ -1101,6 +1145,9 @@ struct Ctx<'a> {
     /// The capability labels each open lambda has named and could not resolve,
     /// one list per lambda on the stack. See `Expr::Lambda`'s `evidence`.
     lambda_evidence: Vec<Vec<(String, PatId)>>,
+    /// Whether this is an entry point's body, which installs a capability
+    /// rather than asking for one.
+    site: crate::Site,
 }
 
 /// What a `break` or `continue` at the current point would leave.
@@ -1272,6 +1319,12 @@ impl<'a> Ctx<'a> {
             wanted,
             locals.chain(items).chain(constants).chain(imported).chain(variants),
         )
+    }
+
+    /// Whether `name` is a local or parameter in scope here: a value, so a
+    /// near-miss of it is a typo of something the body really holds.
+    fn is_local(&self, name: &str) -> bool {
+        self.scopes.iter().flatten().any(|(local, _)| local == name)
     }
 
     fn error(&mut self, message: impl Into<String>, range: TextRange) {
