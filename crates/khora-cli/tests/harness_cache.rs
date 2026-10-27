@@ -220,7 +220,12 @@ fn the_target_is_in_the_key() {
 /// is built, so its default is the archive's `fiber::on_the_scheduler` and
 /// nothing in generated code. The archive is hashed into the key whole; this
 /// changes it by one appended archive member and requires a rebuild.
+///
+/// Not on macOS: its linker refuses an archive member that is not a Mach-O
+/// object, and there is no member every linker ignores. The key is the same
+/// code on every platform.
 #[test]
+#[cfg(not(target_os = "macos"))]
 fn a_different_runtime_archive_is_rebuilt() {
     let Some(pinned) = pinned::runtime() else {
         panic!("no runtime archive beside the compiler to test against");
@@ -369,7 +374,10 @@ fn manifest(w: &World, pin: &str, extra: &str) {
 /// the line must each rebuild; a key holding only the archives found reused
 /// the runner across both. With a library whose symbols the program uses
 /// (zlib), that reuse is a runner that only links while the stale entry lasts.
+///
+/// Unix only: Windows has no `m` library to link.
 #[test]
+#[cfg(unix)]
 fn a_build_link_name_is_in_the_key() {
     let w = world(&package(41, 41));
     warmed(&w);
@@ -401,8 +409,9 @@ fn a_build_link_search_directory_is_in_the_key() {
 }
 
 /// `khora build` is keyed on `[build] link` the same way, through the same
-/// `cache::Inputs`.
+/// `cache::Inputs`. Unix only, like the test above.
 #[test]
+#[cfg(unix)]
 fn a_build_link_name_is_in_the_programs_key_too() {
     let w = world(&package(41, 41));
     let (ok, first) = run_with(&w, &compiler(), &[], &["build", "."]);
@@ -521,6 +530,7 @@ fn a_toolchain_pin_to_another_compiler_is_rebuilt() {
 }
 
 /// An `ar` member that links as nothing: a header naming a two-byte text file.
+#[cfg(not(target_os = "macos"))]
 fn padding_member() -> Vec<u8> {
     let mut header = format!("{:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n", "khora-pad/", 0, 0, 0, 644, 2);
     assert_eq!(header.len(), 60, "an ar member header is sixty bytes");

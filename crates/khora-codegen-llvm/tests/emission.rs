@@ -137,8 +137,9 @@ fn a_programs_export_survives_though_main_never_calls_it() {
         .unwrap_or_else(|e| panic!("it should build: {:?}", e.iter().map(|e| &e.message).collect::<Vec<_>>()));
     let object = PathBuf::from(format!("{}.o", exe.display()));
     let names = defined_functions(&object);
+    // Mach-O prefixes C symbols with `_`.
     assert!(
-        names.iter().any(|n| n == "price"),
+        names.iter().any(|n| n == "price" || n == "_price"),
         "the published `price` is in the program's object: {names:?}"
     );
 }
