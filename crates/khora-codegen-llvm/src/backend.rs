@@ -146,6 +146,23 @@ pub fn verify_for_target(db: &dyn Db, root: SourceRoot) -> Result<(), Vec<HirErr
     build(db, root, Path::new("verify-only"), Entry::Main, Stop::AtVerification, Profile::from_env())
 }
 
+/// Compiles and links every concrete function in the program, whether or not
+/// `main` reaches it.
+///
+/// **What this prevents: a `std` function that cannot link going unnoticed.**
+/// A build emits only what its entry points reach, so an `extern fn` in `std`
+/// naming a symbol the runtime archive lacks fails only a program that calls
+/// it, and none of the suite may. This links all of `std` against the runtime
+/// the way every build did when every concrete function was a root, so the
+/// suite fails at once instead.
+///
+/// For the host only: linking needs the target's libraries. Debug profile,
+/// because what is checked is that each symbol resolves, not how fast the
+/// result runs.
+pub fn link_everything(db: &dyn Db, root: SourceRoot, out: &Path) -> Result<(), Vec<HirError>> {
+    build(db, root, out, Entry::Main, Stop::EverythingLinked, Profile::Debug)
+}
+
 /// Compiles the program's *tests* to an executable that runs them.
 ///
 /// The same program, with a different entry point: instead of calling `main`,
@@ -178,6 +195,9 @@ pub(crate) enum Stop {
     AtExecutable,
     /// Verify the module and stop. See [`crate::verify_for_target`].
     AtVerification,
+    /// Link an executable of every concrete function, reached or not. See
+    /// [`crate::link_everything`].
+    EverythingLinked,
 }
 
 /// Which entry point an executable gets.

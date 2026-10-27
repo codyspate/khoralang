@@ -277,7 +277,7 @@ impl Unit<'_> {
 /// through [`program_instances`], which is the same walk over every module.
 #[salsa::tracked(returns(ref))]
 pub fn instances(db: &dyn Db, file: SourceFile) -> Instances {
-    walk(db, &[file])
+    walk(db, &[file], Roots::Every)
 }
 
 /// Computes the specializations a whole program needs.
@@ -289,12 +289,94 @@ pub fn instances(db: &dyn Db, file: SourceFile) -> Instances {
 /// That is the constraint C++ templates and Rust generics have too, and it is
 /// why a symbol carries the module that *defines* it: two importers of one
 /// instantiation must agree on a symbol so it is emitted once.
+///
+/// Seeded from [`Roots::Every`]: every concrete function in every module,
+/// which is what checking that code generation works for all of `std` needs.
+/// A build that produces a program asks [`reached_instances`] instead.
 #[salsa::tracked(returns(ref))]
 pub fn program_instances(db: &dyn Db, root: SourceRoot) -> Instances {
-    walk(db, root.files(db))
+    walk(db, root.files(db), Roots::Every)
 }
 
-fn walk(db: &dyn Db, files: &[SourceFile]) -> Instances {
+/// The functions a walk starts from, and so the only ones emitted along with
+/// everything they reach.
+///
+/// **What this prevents: every build compiling all of `std`.** Seeding from
+/// every concrete function made a three-line hello world emit 1178 functions,
+/// 1029 of them `std`'s, and call two; monomorphizing and encoding the rest was
+/// over 80% of its build time. A root here is a function something outside the
+/// program's own call graph enters by name:
+///
+/// - the entry point a build was asked for (`main`, the `test` or `bench`
+///   blocks), which the generated C `main` calls;
+/// - every `pub extern fn` with a body, in every build, because its address is
+///   published and a C caller -- a linked library, a host loading the shared
+///   object -- reaches it with no Khora call in between;
+/// - in a program that has a `Raised` anywhere, the `Show` of each
+///   non-generic error type it can raise, which code generation's describer
+///   calls by symbol and otherwise silently replaces with the type's name.
+///   `walk` adds these in rounds after the others, since which errors can be
+///   raised is known only from what was reached.
+///
+/// Nothing else is. The runtime archive calls no Khora symbol by name: the
+/// archive's undefined symbols are all libc's, and every Khora function the
+/// runtime does call (a test body, a fiber's body, a finalizer, drop glue) is
+/// handed to it as a pointer from generated code, which is a reference the walk
+/// follows.
+///
+/// **What it costs: code generation never sees unreachable code, so it cannot
+/// refuse it.** A concrete function nothing reaches, written with something the
+/// backend cannot lower, builds clean. The checker's refusals run over every
+/// body whatever the roots, so this narrows only what the backend alone
+/// refuses, and `khora check` already does not run the backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Roots {
+    /// Every concrete function in every module.
+    Every,
+    /// `main`, and the published symbols.
+    Main,
+    /// The `test` blocks, and the published symbols.
+    Tests,
+    /// The `bench` blocks, and the published symbols.
+    Benches,
+    /// The published symbols alone.
+    Library,
+}
+
+/// Computes the specializations a build reachable from `roots` needs.
+///
+/// Not a salsa query: each command builds once per database, so a memo would
+/// never be read, and an enum argument would have to be interned for nothing.
+pub fn reached_instances(db: &dyn Db, root: SourceRoot, roots: Roots) -> Instances {
+    walk(db, root.files(db), roots)
+}
+
+/// Whether the concrete function `name`, a body in `unit`, starts a walk.
+fn is_root(db: &dyn Db, unit: &Unit<'_>, name: &str, roots: Roots) -> bool {
+    // Published, in every build: see `Roots`. An `extern fn` without a body is
+    // an import and has nothing to emit.
+    let published = unit.types.signatures.get(name).is_some_and(|s| s.is_extern)
+        && khora_hir::body::bodies(db, unit.file)
+            .iter()
+            .any(|(n, body)| n == name && body.root.is_some());
+    if published {
+        return true;
+    }
+    let block = |kind: khora_hir::TestKind| {
+        khora_hir::item_map(db, unit.file).tests.iter().any(|t| t.kind == kind && t.key == name)
+    };
+    match roots {
+        Roots::Every => true,
+        // Every `main`, not the first: two of them is an error the backend
+        // reports, and it can only see the second if it was emitted.
+        Roots::Main => name == "main",
+        Roots::Tests => block(khora_hir::TestKind::Test),
+        Roots::Benches => block(khora_hir::TestKind::Bench),
+        Roots::Library => false,
+    }
+}
+
+fn walk(db: &dyn Db, files: &[SourceFile], roots: Roots) -> Instances {
     let units: Vec<Unit<'_>> = files
         .iter()
         .map(|f| Unit {
@@ -330,9 +412,9 @@ fn walk(db: &dyn Db, files: &[SourceFile]) -> Instances {
     let mut out = Instances::default();
     let mut seen: HashSet<Instance> = HashSet::new();
 
-    // Roots: every function that is already concrete, in every module. A
-    // generic function with no use has no instances, which is the right answer
-    // — there is nothing to emit for a shape nobody asked for.
+    // Roots: the concrete functions `roots` names, in every module. A function
+    // nothing reaches from one has no instance, generic or not -- there is
+    // nothing to emit for a function nobody calls.
     let mut queue: Vec<(Instance, usize, usize)> = Vec::new();
     for (index, unit) in units.iter().enumerate() {
         for (name, _) in &unit.checked.bodies {
@@ -340,6 +422,9 @@ fn walk(db: &dyn Db, files: &[SourceFile]) -> Instances {
                 continue;
             }
             if unit.types.signatures.get(name.as_str()).is_some_and(|s| !s.generics.is_empty()) {
+                continue;
+            }
+            if !is_root(db, unit, name, roots) {
                 continue;
             }
             queue.push((
@@ -354,6 +439,8 @@ fn walk(db: &dyn Db, files: &[SourceFile]) -> Instances {
         }
     }
 
+    let mut raised = RaisedErrors::default();
+    loop {
     while let Some((instance, index, depth)) = queue.pop() {
         if !seen.insert(instance.clone()) {
             continue;
@@ -433,12 +520,154 @@ fn walk(db: &dyn Db, files: &[SourceFile]) -> Instances {
         }
 
         out.home.insert(owner, unit.file);
+        if let Some(hir) = khora_hir::body::bodies(db, unit.file)
+            .iter()
+            .find(|(n, _)| n == &instance.function)
+            .map(|(_, b)| b)
+        {
+            errors_of(hir, &specialized, &mut raised);
+        }
         out.instances.push((instance, specialized));
+        }
+
+        // **The `Show` of every error a `Raised` can carry is a root**, once
+        // something in the program is a `Raised`. Code generation's describer
+        // (`describe_error`, which prints a failure's context and answers
+        // `Raised::describe`) calls each error type's `Show::show` by symbol,
+        // after this walk, and only if the walk emitted it: nothing else in
+        // the program calls it. Missed, the describer falls back to the
+        // type's name, and `syncing 0: Inv::Out(sku-0)` prints as
+        // `syncing 0: Inv` with no error anywhere. The set is a superset of
+        // the describer's -- every raised operand, every `Raised` row field
+        // and every `catch` arm's type -- and costs one `show` per error type
+        // a program that uses `Raised` raises. Looped, because a `show` can
+        // itself raise a type not yet seen.
+        if !raised.uses_raised {
+            break;
+        }
+        let before = queue.len();
+        for ty in std::mem::take(&mut raised.pending) {
+            if !raised.seeded.insert(ty.clone()) {
+                continue;
+            }
+            if let Some(target) = show_of(&units, &ty) {
+                queue.push(target);
+            }
+        }
+        if queue.len() == before {
+            break;
+        }
     }
 
     // Deterministic order: the same source must produce the same object file.
     out.instances.sort_by_key(|(i, _)| i.symbol());
     out
+}
+
+/// The error types the emitted bodies can hand a `Raised`, gathered for
+/// `walk`'s second round. See the comment there.
+#[derive(Default)]
+struct RaisedErrors {
+    /// Whether any emitted body has a `Raised` in a type at all. A program
+    /// without one has no describer, and pays nothing.
+    uses_raised: bool,
+    /// Seen, and not yet seeded.
+    pending: Vec<Type>,
+    /// Already seeded, or already pending.
+    seeded: HashSet<Type>,
+}
+
+impl RaisedErrors {
+    fn note(&mut self, ty: &Type) {
+        if let Type::Adt { args, .. } = ty {
+            // The describer shows a non-generic type through its own `Show`,
+            // and a generic one by name; see `emit_describe_error`.
+            if args.is_empty() && !self.seeded.contains(ty) && !self.pending.contains(ty) {
+                self.pending.push(ty.clone());
+            }
+        }
+    }
+}
+
+/// Every error type in one emitted body that code generation can give an
+/// id: a `raise`'s operand, a `catch` arm's type, and each field of a
+/// `Raised` row anywhere in the body's types.
+fn errors_of(hir: &khora_hir::body::Body, types: &BodyTypes, into: &mut RaisedErrors) {
+    for (_, expr) in hir.exprs() {
+        if let khora_hir::body::Expr::Raise(operand) = expr {
+            into.note(types.of(*operand));
+        }
+    }
+    for ty in types.caught_types() {
+        into.note(ty);
+    }
+    for ty in types.all_types() {
+        raised_rows_in(ty, into);
+    }
+}
+
+/// Notes the fields of every `Raised` row inside `ty`, at any depth: a
+/// `Result<Int, Raised<'er>>` carries one as surely as a `Raised` does.
+///
+/// Exhaustive, so a new type form has to say whether it can hold one.
+fn raised_rows_in(ty: &Type, into: &mut RaisedErrors) {
+    if let Some(row) = crate::raised_row(ty) {
+        into.uses_raised = true;
+        if let Type::Row { fields, .. } = row {
+            for (_, field) in fields {
+                into.note(field);
+            }
+        }
+    }
+    match ty {
+        Type::Adt { args, .. } => args.iter().for_each(|a| raised_rows_in(a, into)),
+        Type::Tuple(items) => items.iter().for_each(|a| raised_rows_in(a, into)),
+        Type::Fn { params, ret, requires, raises } => {
+            params.iter().for_each(|a| raised_rows_in(a, into));
+            raised_rows_in(ret, into);
+            raised_rows_in(requires, into);
+            raised_rows_in(raises, into);
+        }
+        Type::Applied { head, args } => {
+            raised_rows_in(head, into);
+            args.iter().for_each(|a| raised_rows_in(a, into));
+        }
+        Type::Row { fields, tail } => {
+            fields.iter().for_each(|(_, a)| raised_rows_in(a, into));
+            if let Some(tail) = tail {
+                raised_rows_in(tail, into);
+            }
+        }
+        Type::Assoc { owner, .. } => raised_rows_in(owner, into),
+        Type::Int
+        | Type::Fixed(_)
+        | Type::Float
+        | Type::Bool
+        | Type::Str
+        | Type::Unit
+        | Type::Ptr
+        | Type::Char
+        | Type::Var(_)
+        | Type::Param(_)
+        | Type::Const(_)
+        | Type::Never
+        | Type::Unknown => {}
+    }
+}
+
+/// The instance `emit_describe_error` calls for a non-generic error type:
+/// `Show#Name::show` in the type's own module, with its unit, as a root.
+///
+/// The type's home first, because that is the symbol the describer forms;
+/// any unit with the body when the home is unknown, which emits at worst a
+/// `show` nothing calls.
+fn show_of(units: &[Unit<'_>], ty: &Type) -> Option<(Instance, usize, usize)> {
+    let Type::Adt { name, home, .. } = ty else { return None };
+    let function = crate::traits::method_key("Show", name, "show");
+    let index = units.iter().position(|u| {
+        home.as_ref().is_none_or(|h| &u.module == h) && u.body(&function).is_some()
+    })?;
+    Some((Instance { module: units[index].module.clone(), function, args: Vec::new() }, index, 0))
 }
 
 /// The calls in `file` that hand a `Region`, a `Scope` or a `Db` to a generic

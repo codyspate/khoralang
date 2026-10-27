@@ -283,6 +283,38 @@ it will behave differently now.
 
 ### Changed
 
+- A build compiles only what its entry points reach: `main`, the `test` or
+  `bench` blocks, and every `pub extern fn`, plus the `Show` of each error
+  type a `Raised` can carry, which describes it. A hello world compiles 2
+  functions instead of 1178, and `examples/khq` 694 instead of 1617. On a
+  debug build (medians of three, release compiler, same machine and load):
+
+  | | before | after |
+  | --- | --- | --- |
+  | hello world, clean | 8.69 s | 0.63 s |
+  | hello world, after a one-line edit | 8.50 s | 0.77 s |
+  | `examples/khq`, clean | 15.20 s | 7.68 s |
+  | `examples/khq`, after a one-line edit | 13.84 s | 7.81 s |
+
+  A function nothing reaches is still type-checked, and generates no code. So
+  an error only code generation reports is reported only for code something
+  reaches. A program whose only call to a generic function that calls itself
+  at an ever larger type (`grow(Option::Some(a), n - 1)` inside `grow<A>`)
+  is in a function nothing calls builds; before this change it was refused
+  with "needs endlessly many specializations". The same holds for
+  `khora test` when no test reaches the call. No program that built before
+  is refused after.
+- `khora test` and `khora bench` reuse a cached test or bench runner when
+  nothing that goes into it has changed, keyed as `khora build` is: the
+  sources and `std`, the compiler, linker and runtime archive, the target,
+  the profile and debug information. A program, its test runner and its
+  bench runner are cached apart. One cached runner serves every `--filter`
+  and both `KHORA_FIBERS` backends. A second `khora test` of a two-test
+  package with nothing changed: 8.12 s before, 0.04 s after. `khora test
+  --no-cache` and `khora bench --no-cache` build without asking the cache,
+  as `khora build --no-cache` does. `KHORA_EMIT_LLVM` is not part of the
+  key, so a build served from the cache writes no `.ll`: pass `--no-cache`
+  to see a cached program's IR.
 - `packages/postgres` draws its SCRAM client nonce from the operating
   system's cryptographic generator.
 

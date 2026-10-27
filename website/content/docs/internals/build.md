@@ -20,6 +20,21 @@ and why an error's tag can be a program-wide id assigned once. It is also the
 trade: compile time grows with the program, and there is no separate
 compilation of a generic across package boundaries.
 
+### Only what is reached is compiled
+
+The walk starts from the build's entry points and compiles what they reach,
+generic or not. The entry points are:
+
+- `main` for `khora build` and `khora run`, the `test` blocks for `khora test`,
+  and the `bench` blocks for `khora bench`;
+- every `pub extern fn`, in every build, because C can call one by name with
+  no Khora call leading to it.
+
+So a program pays to compile the parts of `std` it uses, not all of it: a
+hello world compiles two functions. A function nothing reaches is still
+type-checked, and `khora check` refuses the same programs whether or not
+anything calls the function at fault, but no machine code is generated for it.
+
 ## LLVM is inside the compiler; the linker is not
 
 The `khora` binary carries LLVM within it, and finds `std/` and the runtime
@@ -63,7 +78,8 @@ the input:
 
 ## The build cache
 
-A build is cached under a key covering everything that can change the output:
+`khora build`, `khora run`, `khora test` and `khora bench` share one cache. A
+build is cached under a key covering everything that can change the output:
 
 | in the key | why |
 | --- | --- |
@@ -73,8 +89,20 @@ A build is cached under a key covering everything that can change the output:
 | the runtime archive | every executable links it statically |
 | the target triple | a different target produces different code |
 | the profile, and whether debug information is on | the environment can override the profile in both directions |
-| executable or library | the two emit different artifacts |
+| executable, library, test runner or bench runner | one package's sources build all four, and each is a different artifact |
+| the `[build]` table's `link` names and `link-search` directories, and each archive found there by content | the linker is told them; a library found in a system directory is known only by its name |
 | the source *paths*, when debug information is on | because a debug build embeds them |
+
+Two things that change how a test run behaves are deliberately *not* in it.
+`--filter` is passed to the test runner when it starts, so one cached runner
+serves every filter. `KHORA_FIBERS` is read by the runtime when the program
+starts, so one artifact runs on either fiber backend; which one it gets by
+default is decided by the runtime archive, which is in the key.
+
+`--no-cache` on `khora build`, `khora run`, `khora test` and `khora bench`
+builds without asking the cache, and files the result. It is how to see the
+IR of a cached program, because `KHORA_EMIT_LLVM` is not in the key and a
+build served from the cache writes no `.ll`.
 
 Fields are length-prefixed before hashing, so two adjacent ones cannot be run
 together into a different key with the same bytes. Sources are sorted by

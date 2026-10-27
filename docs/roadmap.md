@@ -4193,7 +4193,7 @@ tidy without anybody deciding to tidy it.
 | 14.26 | ✅ **`undocumented-export`** | Done. A `pub` function, type, trait, effect or constant with no `///` above it. **Off by default**, for the reason Rust’s `missing_docs` is: forty warnings on a young package’s first build is not a prompt to write forty doc comments. `std` keeps its Rust test, because `std` is found beside the compiler and has no manifest to switch anything on in. Read from the CST, since the HIR drops `///` and `khora_doc::Item` has the text but no range. `main` is exempt — its `pub` is what the language requires of an entry point, not a promise to anybody. Building it also fixed a scoping bug every lint had: `collect_sources` hands a compilation the package, its dependencies **and all of `std`**, so a package’s `[lints]` were being applied to the standard library. Lints now only run on files the command was pointed at |
 | 14.27 | ✅ **Sharpen `unused-capability`** | Done, and it cost nothing: `BodyTypes::call_rows` was already there, added for 14.6 and inlay hints. “Used” is now **read outright, or required by something this body calls**, so a body containing a call is no longer beyond reach — which was almost every real function. It still gives up on a call whose required row is *open*, since a generic row could require anything and a wrong report here costs a caller a signature change. The test that asserted the old restriction is inverted; its own comment had said “proving that needs the callee’s row”, and the row is recorded now |
 
-#### Where a trivial build's two seconds go
+#### Where a trivial build's two seconds go (✅ done in 0.5, see the end)
 
 `crates/khora-codegen-llvm/tests/phases.rs` measures it, and the answer is not
 where 14.28 assumed. For a four-line `main` plus the fifteen `std` modules this
@@ -4238,6 +4238,19 @@ enumerated. So `main` reaching nothing still emits `std::json`, `std::db`,
 
 The payoff is large and user-facing — a 250x smaller object for a trivial
 program, most of a second of IR emission, and a shorter link on every build.
+
+**✅ Done (0.5, item 21).** `khora_types::mono::Roots` seeds the walk from the
+build's entry point — `main`, the `test` blocks or the `bench` blocks — plus
+every `pub extern fn`; `verify_for_target` and `link_everything` still walk
+every concrete function. Each objection above has its answer in a test:
+the root set comes from `Entry` in `backend/driver.rs`; a function named only
+as a value (a handler's operation, a `List::map` argument, a finalizer) is
+emitted (`emission::a_function_named_only_as_a_value_is_emitted`); and all of
+`std` is still linked against the runtime by
+`emission::every_std_function_links_against_the_runtime`, so a `std` symbol
+the runtime lacks fails the suite rather than only its first caller. A hello
+world emits 2 functions instead of 1178, and builds in 0.63 s instead of
+8.69 s (release compiler, debug build); the CHANGELOG has the table.
 
 #### The escape hatch has to come before the lints do
 

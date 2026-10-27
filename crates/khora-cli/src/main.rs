@@ -123,6 +123,13 @@ enum Command {
         /// Run only the tests whose name contains this.
         #[arg(short, long)]
         filter: Option<String>,
+        /// Compile even if the cache already has this exact build.
+        ///
+        /// The output still goes into the cache. For measuring how long a
+        /// build takes, and for doubting the cache -- `docs/design/cache.md`
+        /// says why doubting it should be answerable by rebuilding.
+        #[arg(long)]
+        no_cache: bool,
     },
     /// Compile and time the program's `bench` blocks.
     Bench {
@@ -132,6 +139,13 @@ enum Command {
         /// Run only the benchmarks whose name contains this.
         #[arg(short, long)]
         filter: Option<String>,
+        /// Compile even if the cache already has this exact build.
+        ///
+        /// The output still goes into the cache. For measuring how long a
+        /// build takes, and for doubting the cache -- `docs/design/cache.md`
+        /// says why doubting it should be answerable by rebuilding.
+        #[arg(long)]
+        no_cache: bool,
     },
     /// Compile to a native executable.
     Build {
@@ -564,8 +578,8 @@ fn dispatch() -> Result<ExitCode> {
             workspace_cmds::graph(&path, members.as_deref(), dot).map(|()| true)
         }
         Command::Update { pre } => update(pre),
-        Command::Test { path, filter } => test(&path, filter.as_deref()),
-        Command::Bench { path, filter } => bench(&path, filter.as_deref()),
+        Command::Test { path, filter, no_cache } => test(&path, filter.as_deref(), no_cache),
+        Command::Bench { path, filter, no_cache } => bench(&path, filter.as_deref(), no_cache),
     }?;
     Ok(if worked { ExitCode::SUCCESS } else { ExitCode::FAILURE })
 }
@@ -1808,14 +1822,14 @@ fn fmt_one(paths: &[PathBuf], check: bool) -> Result<bool> {
 /// the CI recipe means. And each member's tests are their own compilation for
 /// the same reason `check`'s are -- a member's dependencies come from *its*
 /// manifest.
-fn test(path: &Path, filter: Option<&str>) -> Result<bool> {
-    over_workspace(path, "test", |directory| test_one(directory, filter))
+fn test(path: &Path, filter: Option<&str>, no_cache: bool) -> Result<bool> {
+    over_workspace(path, "test", |directory| test_one(directory, filter, no_cache))
 }
 
 /// Runs the benchmarks of everything `path` names, fanning out for the reason
 /// [`test`] does.
-fn bench(path: &Path, filter: Option<&str>) -> Result<bool> {
-    over_workspace(path, "bench", |directory| bench_one(directory, filter))
+fn bench(path: &Path, filter: Option<&str>, no_cache: bool) -> Result<bool> {
+    over_workspace(path, "bench", |directory| bench_one(directory, filter, no_cache))
 }
 
 /// `each` over the members when `path` is a workspace root, and over `path`
@@ -1841,13 +1855,13 @@ fn over_workspace(
 /// so that a failing test can be run again under a debugger without rebuilding
 /// — which is the first thing anyone wants and would otherwise need a flag.
 #[cfg(feature = "llvm")]
-fn test_one(path: &Path, filter: Option<&str>) -> Result<bool> {
-    harness(path, filter, "khora-tests", khora_codegen_llvm::compile_tests)
+fn test_one(path: &Path, filter: Option<&str>, no_cache: bool) -> Result<bool> {
+    harness(path, filter, no_cache, "khora-tests", cache::Kind::Tests, khora_codegen_llvm::compile_tests)
 }
 
 /// Compiles one package's `bench` blocks and times them.
 #[cfg(feature = "llvm")]
-fn bench_one(path: &Path, filter: Option<&str>) -> Result<bool> {
+fn bench_one(path: &Path, filter: Option<&str>, no_cache: bool) -> Result<bool> {
     // **Which profile these numbers came from, before any of them.** There is
     // no `--release` here on purpose -- `khora test` and `khora bench` read
     // `KHORA_PROFILE`, and `docs/design/profiles.md` argues that a flag on
@@ -1863,7 +1877,7 @@ fn bench_one(path: &Path, filter: Option<&str>) -> Result<bool> {
     if profile == khora_codegen_llvm::Profile::Debug {
         println!("note: unoptimized. `KHORA_PROFILE=release khora bench` for the other number");
     }
-    harness(path, filter, "khora-benches", khora_codegen_llvm::compile_benches)
+    harness(path, filter, no_cache, "khora-benches", cache::Kind::Benches, khora_codegen_llvm::compile_benches)
 }
 
 /// The signature `compile_tests` and `compile_benches` share.
@@ -1878,22 +1892,27 @@ type CompileHarness =
 ///
 /// **The filter is passed on the command line rather than through the
 /// environment**, so the executable left behind behaves the same when somebody
-/// runs it directly.
+/// runs it directly -- and so that a filter is not an input to the build, and
+/// a cached harness serves every filter.
+///
+/// **Through the build cache, keyed as `build` keys a program**, with `kind`
+/// keeping the test runner and the bench runner apart from each other and from
+/// the program. `KHORA_FIBERS` is not in the key and must not be: the runtime
+/// reads it when the harness starts, so one artifact serves both backends, and
+/// its default is in the runtime archive, which is.
 #[cfg(feature = "llvm")]
 fn harness(
     path: &Path,
     filter: Option<&str>,
+    no_cache: bool,
     name: &str,
+    kind: cache::Kind,
     compile: CompileHarness,
 ) -> Result<bool> {
     // `test` and `bench` both arrive here, and both compile a program from the
     // same manifest `build` would have read. See the note in `build`.
     report_manifest_warnings(Some(path))?;
-    // `natives` is deliberately unused here: the harness does not consult the
-    // build cache, so there is no key for an archive to be part of. The linked
-    // library still reaches the test binary, because `record_natives` told the
-    // backend on the way through `load`.
-    let (db, inputs, root, _natives) = load(path)?;
+    let (db, inputs, root, natives) = load(path)?;
     // The *package's* first source, not the program's: `inputs` carries the
     // standard library too, and `inputs.first()` is whichever of everything
     // sorts earliest. Outside a package that put `khora-tests` in the
@@ -1914,9 +1933,23 @@ fn harness(
     let target = artifact(&output_dir(path, entry), name, std::env::consts::EXE_EXTENSION);
     make_room_for(&target)?;
 
-    if let Err(errors) = compile(&db as &dyn khora_db::Db, root, &target) {
-        report_build_errors(&db, &inputs, &errors);
-        return Ok(false);
+    // The profile `compile_tests` and `compile_benches` read for themselves.
+    let profile = khora_codegen_llvm::Profile::from_env();
+    let sources = cache_sources(&inputs);
+    let wanted = cache::Inputs {
+        sources: &sources,
+        profile: profile.name(),
+        debug_info: profile.debug_info(),
+        kind,
+        natives,
+    };
+    let (slot, reused) = cache_lookup(&wanted, &target, no_cache);
+    if !reused {
+        if let Err(errors) = compile(&db as &dyn khora_db::Db, root, &target) {
+            report_build_errors(&db, &inputs, &errors);
+            return Ok(false);
+        }
+        cache_record(&slot, &target, None);
     }
 
     let mut command = std::process::Command::new(&target);
@@ -1930,7 +1963,7 @@ fn harness(
 }
 
 #[cfg(not(feature = "llvm"))]
-fn test_one(_path: &Path, _filter: Option<&str>) -> Result<bool> {
+fn test_one(_path: &Path, _filter: Option<&str>, _no_cache: bool) -> Result<bool> {
     anyhow::bail!(
         "this `khora` was built without the LLVM backend. \
          Rebuild with `--features llvm`; see docs/llvm-setup.md."
@@ -1938,7 +1971,7 @@ fn test_one(_path: &Path, _filter: Option<&str>) -> Result<bool> {
 }
 
 #[cfg(not(feature = "llvm"))]
-fn bench_one(_path: &Path, _filter: Option<&str>) -> Result<bool> {
+fn bench_one(_path: &Path, _filter: Option<&str>, _no_cache: bool) -> Result<bool> {
     anyhow::bail!(
         "this `khora` was built without the LLVM backend. \
          Rebuild with `--features llvm`; see docs/llvm-setup.md."
@@ -2105,8 +2138,7 @@ fn build_one(
     // toolchain that turns it into bytes. `cache::Cache` is where the argument
     // for each field is; the short version is that a cache whose key is only
     // the source is a cache that hands you last week's compiler's answer.
-    let sources: Vec<(PathBuf, String)> =
-        inputs.iter().map(|(path, text, _)| (path.clone(), text.clone())).collect();
+    let sources = cache_sources(&inputs);
     let wanted = cache::Inputs {
         sources: &sources,
         profile: profile.name(),
@@ -2114,10 +2146,67 @@ fn build_one(
         kind: if lib { cache::Kind::Library } else { cache::Kind::Executable },
         natives,
     };
+    let (slot, reused) = cache_lookup(&wanted, &target, no_cache);
+    if reused {
+        return Ok(true);
+    }
+
+    let outcome = if lib {
+        khora_codegen_llvm::compile_library_with(&db, root, &target, profile)
+    } else {
+        khora_codegen_llvm::compile_with(&db, root, &target, profile)
+    };
+    match outcome {
+        Ok(()) => {
+            let what = if lib { "library" } else { "built" };
+            // Stderr, for the reason on the cache-hit line above.
+            eprintln!(
+                "{what} {} from {} module(s) [{}]",
+                target.display(),
+                inputs.len(),
+                profile.name()
+            );
+            if lib {
+                eprintln!("header {}", target.with_extension("h").display());
+            }
+            let header = lib.then(|| target.with_extension("h"));
+            cache_record(&slot, &target, header.as_deref());
+            Ok(true)
+        }
+        Err(errors) => {
+            report_build_errors(&db, &inputs, &errors);
+            Ok(false)
+        }
+    }
+}
+
+/// The cache entry a build is filed under once it has built: empty when the
+/// cache could not be opened or the toolchain identified, and after a hit,
+/// which has nothing left to file.
+#[cfg(feature = "llvm")]
+struct CacheSlot {
+    store: Option<cache::Cache>,
+    key: Option<String>,
+}
+
+/// The inputs `cache::Cache::key` reads, for one loaded program.
+#[cfg(feature = "llvm")]
+fn cache_sources(inputs: &[(PathBuf, String, SourceFile)]) -> Vec<(PathBuf, String)> {
+    inputs.iter().map(|(path, text, _)| (path.clone(), text.clone())).collect()
+}
+
+/// Puts the cached artifact for `wanted` at `target`, if there is one.
+///
+/// True when it did, and the build has nothing left to do. Shared by `build`,
+/// `test` and `bench`, which is what makes their keying rules one set: the
+/// caller says which artifact it is through `wanted.kind`, and nothing else
+/// about the lookup differs.
+#[cfg(feature = "llvm")]
+fn cache_lookup(wanted: &cache::Inputs<'_>, target: &Path, no_cache: bool) -> (CacheSlot, bool) {
     // A cache that cannot be opened is a cache that is not used. Never fatal:
     // see the module comment.
     let store = cache::Cache::open().ok();
-    let key = store.as_ref().and_then(|store| store.key(&wanted));
+    let key = store.as_ref().and_then(|store| store.key(wanted));
     // **A build that is not cached says so.** The key needs the compiler, the
     // linker and the runtime archive to be identifiable, and if one of them is
     // not this build silently becomes uncacheable -- and so does the next one,
@@ -2144,8 +2233,8 @@ fn build_one(
     }
     if !no_cache {
         if let (Some(store), Some(key)) = (&store, &key) {
-            match store.lookup(key, &target) {
-                Ok(hit) => match cache::Cache::place(&hit, &target) {
+            match store.lookup(key, target) {
+                Ok(hit) => match cache::Cache::place(&hit, target) {
                     Ok(()) => {
                         // **Stderr, like every other line this command
                         // prints.** `khora run` claims to be usable in a
@@ -2160,12 +2249,12 @@ fn build_one(
                             "reused {} from the cache [{}, {}]",
                             target.display(),
                             &hit.key[..12],
-                            profile.name()
+                            wanted.profile
                         );
-                        if lib {
+                        if wanted.kind == cache::Kind::Library {
                             eprintln!("header {}", target.with_extension("h").display());
                         }
-                        return Ok(true);
+                        return (CacheSlot { store: None, key: None }, true);
                     }
                     // The entry was there and could not be put where it was
                     // wanted. Falling through to a real build is the answer a
@@ -2240,40 +2329,19 @@ fn build_one(
             }
         }
     }
+    (CacheSlot { store, key }, false)
+}
 
-    let outcome = if lib {
-        khora_codegen_llvm::compile_library_with(&db, root, &target, profile)
-    } else {
-        khora_codegen_llvm::compile_with(&db, root, &target, profile)
-    };
-    match outcome {
-        Ok(()) => {
-            let what = if lib { "library" } else { "built" };
-            // Stderr, for the reason on the cache-hit line above.
-            eprintln!(
-                "{what} {} from {} module(s) [{}]",
-                target.display(),
-                inputs.len(),
-                profile.name()
-            );
-            if lib {
-                eprintln!("header {}", target.with_extension("h").display());
-            }
-            if let (Some(store), Some(key)) = (&store, &key) {
-                let header = lib.then(|| target.with_extension("h"));
-                // Before the store, and unconditionally: a target that
-                // built is a target that has a key, whether or not the
-                // artifact could be copied into the cache afterwards.
-                store.remember(&target, key);
-                if let Err(why) = store.store(key, &target, header.as_deref()) {
-                    eprintln!("khora: the build worked and did not go into the cache: {why:#}");
-                }
-            }
-            Ok(true)
-        }
-        Err(errors) => {
-            report_build_errors(&db, &inputs, &errors);
-            Ok(false)
+/// Files a freshly built `target` under the key [`cache_lookup`] computed.
+#[cfg(feature = "llvm")]
+fn cache_record(slot: &CacheSlot, target: &Path, header: Option<&Path>) {
+    if let (Some(store), Some(key)) = (&slot.store, &slot.key) {
+        // Before the store, and unconditionally: a target that built is a
+        // target that has a key, whether or not the artifact could be copied
+        // into the cache afterwards.
+        store.remember(target, key);
+        if let Err(why) = store.store(key, target, header) {
+            eprintln!("khora: the build worked and did not go into the cache: {why:#}");
         }
     }
 }
@@ -2616,8 +2684,8 @@ type Loaded = (
     KhoraDatabase,
     Vec<(PathBuf, String, SourceFile)>,
     SourceRoot,
-    // The native archives `build.link` resolved to, for the cache key.
-    Vec<PathBuf>,
+    // What `[build]` links, for the cache key.
+    cache::Natives,
 );
 
 /// Tells the backend which native libraries the root package asked to link.
@@ -2630,23 +2698,23 @@ type Loaded = (
 /// place that would have to consent, so the consent is one line in the manifest
 /// you own, and every native library a build links can be read off that file.
 ///
-/// Returns the archives it resolved, which the build cache hashes: a `-l`
-/// archive is linked into the artifact, so a changed one is a changed program
-/// even when every source file is identical.
+/// Returns what the build cache keys on: the archives it resolved, hashed by
+/// content, and the names and search directories it passed on, which are all
+/// that is known of a system library. `cache::Natives` has why both.
 #[cfg(feature = "llvm")]
-fn record_natives(target: &Path) -> Result<Vec<PathBuf>> {
+fn record_natives(target: &Path) -> Result<cache::Natives> {
     let Some(manifest_path) = nearest_manifest(target) else {
-        return Ok(Vec::new());
+        return Ok(cache::Natives::default());
     };
     let Ok(parsed) = khora_manifest::Manifest::load(&manifest_path) else {
         // Not ours to report: `load` is called again with a real error channel.
-        return Ok(Vec::new());
+        return Ok(cache::Natives::default());
     };
     let Some(build) = parsed.manifest.build.as_ref() else {
-        return Ok(Vec::new());
+        return Ok(cache::Natives::default());
     };
     if build.link.is_empty() && build.link_search.is_empty() {
-        return Ok(Vec::new());
+        return Ok(cache::Natives::default());
     }
 
     let root = manifest_path.parent().unwrap_or(Path::new("."));
@@ -2684,7 +2752,11 @@ fn record_natives(target: &Path) -> Result<Vec<PathBuf>> {
         link: build.link.clone(),
         search,
     });
-    Ok(archives)
+    Ok(cache::Natives {
+        archives,
+        link: build.link.clone(),
+        search: build.link_search.clone(),
+    })
 }
 
 /// Whether this is the file holding the compiled-in permission grants.

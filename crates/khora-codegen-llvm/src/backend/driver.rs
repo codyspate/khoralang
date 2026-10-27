@@ -127,9 +127,33 @@ pub(super) fn build(
     // body, so every module's source has to be present at once. There is no
     // separate compilation to be had until D12 says what a compiled artifact
     // even is.
+    //
+    // **Seeded from what this build enters, not from every function.** A build
+    // that stops at verification is checking that `std` generates at all, for
+    // a target this host may not be able to link for, so it walks everything,
+    // and `link_everything` walks everything to link it; one that produces an
+    // ordinary artifact emits only what its entry points reach.
+    // `khora_types::mono::Roots` says what is a root and why.
+    let roots = match (stop, entry_point) {
+        (Stop::AtVerification | Stop::EverythingLinked, _) => khora_types::mono::Roots::Every,
+        (Stop::AtExecutable, Entry::Main) => khora_types::mono::Roots::Main,
+        (Stop::AtExecutable, Entry::Tests) => khora_types::mono::Roots::Tests,
+        (Stop::AtExecutable, Entry::Benches) => khora_types::mono::Roots::Benches,
+        (Stop::AtExecutable, Entry::Library) => khora_types::mono::Roots::Library,
+    };
+    let reached;
     let mono = {
         let _phase = crate::timings::Phase::start("monomorphize");
-        khora_types::mono::program_instances(db, root)
+        match roots {
+            khora_types::mono::Roots::Every => khora_types::mono::program_instances(db, root),
+            khora_types::mono::Roots::Main
+            | khora_types::mono::Roots::Tests
+            | khora_types::mono::Roots::Benches
+            | khora_types::mono::Roots::Library => {
+                reached = khora_types::mono::reached_instances(db, root, roots);
+                &reached
+            }
+        }
     };
     if !mono.errors.is_empty() {
         return Err(mono.errors.clone());

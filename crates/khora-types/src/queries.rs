@@ -144,6 +144,12 @@ impl BodyTypes {
         self.caught.get(&arm)
     }
 
+    /// Every error type a named `catch` arm in this body handles, in no
+    /// particular order.
+    pub fn caught_types(&self) -> impl Iterator<Item = &Type> {
+        self.caught.values()
+    }
+
     /// Whether the `catch` over `operand` handles, by named arms alone,
     /// everything the operand raises. See the field.
     pub fn is_total_catch(&self, operand: ExprId) -> bool {
@@ -152,6 +158,12 @@ impl BodyTypes {
 
     pub fn instantiations(&self) -> impl Iterator<Item = (&ExprId, &(String, Vec<Type>))> {
         self.instantiations.iter()
+    }
+
+    /// Every type an expression or a binding in this body has, in no
+    /// particular order and with repeats.
+    pub fn all_types(&self) -> impl Iterator<Item = &Type> {
+        self.exprs.values().chain(self.locals.values())
     }
 
     /// The types of a [`khora_hir::body::Body::forwarding`] body, given the

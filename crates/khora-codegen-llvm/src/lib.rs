@@ -133,7 +133,7 @@ pub(crate) fn plain_counts_forced() -> bool {
 #[cfg(feature = "llvm")]
 pub use backend::{
     compile, compile_benches, compile_library, compile_library_with, compile_tests, compile_with,
-    verify_for_target,
+    link_everything, verify_for_target,
 };
 pub use toolchain::Profile;
 pub use toolchain::{set_natives, Natives};

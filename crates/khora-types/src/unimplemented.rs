@@ -8,13 +8,16 @@
 //! but `khora check` stops before code generation, so the program checked
 //! clean, the editor stayed green, and the build failed.
 //!
-//! **The uses the build reaches, by the build's own rule.** Code generation
-//! emits every concrete function and a generic one only when something
-//! reaches it ([`crate::mono`]'s roots). So a use in a concrete body is
-//! refused, and a use in a generic body only when a chain of calls from a
-//! concrete body reaches that generic -- `fn later<A>(a: A) -> Int {
-//! helper(1) }` with nothing calling `later` builds and runs, and is not
-//! refused. Methods count: `impl P { fn twice(self) -> Int; }` called as
+//! **The uses a build of everything would reach.** Code generation emits what
+//! a build's entry points reach ([`crate::mono::Roots`]); this asks the wider
+//! question of what any concrete body reaches, so a use in a concrete body is
+//! refused whether or not `main` calls that body, and a use in a generic body
+//! only when a chain of calls from a concrete body reaches that generic --
+//! `fn later<A>(a: A) -> Int { helper(1) }` with nothing calling `later`
+//! builds and runs, and is not refused. Refusing a concrete body nothing calls
+//! is stricter than the build, which compiles no code for it: the program is
+//! wrong as written, and becomes a failed build the moment something calls
+//! it. Methods count: `impl P { fn twice(self) -> Int; }` called as
 //! `p.twice()` fails to build the same way.
 //!
 //! Not the specialization walk itself, though it would be exact: it made

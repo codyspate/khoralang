@@ -94,12 +94,21 @@ use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
 /// What a build is, for the purpose of naming its output.
+///
+/// **In the key, so that one package's program and its test binary are two
+/// entries.** All three are built from the same sources by the same toolchain
+/// and differ only in the entry point, so a key without this would hand
+/// `khora test` the program and `khora build` the test runner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     /// An executable.
     Executable,
     /// A shared library, which also has a C header beside it.
     Library,
+    /// The executable `khora test` builds, which runs the `test` blocks.
+    Tests,
+    /// The executable `khora bench` builds, which times the `bench` blocks.
+    Benches,
 }
 
 impl Kind {
@@ -107,6 +116,8 @@ impl Kind {
         match self {
             Kind::Executable => "exe",
             Kind::Library => "lib",
+            Kind::Tests => "tests",
+            Kind::Benches => "benches",
         }
     }
 }
@@ -121,11 +132,36 @@ pub struct Inputs<'a> {
     pub debug_info: bool,
     /// Executable or library.
     pub kind: Kind,
-    /// Native library archives this build links, resolved to real paths.
-    ///
-    /// Hashed by content: they are part of the artifact, so a changed archive
-    /// is a changed program even when every source is identical.
-    pub natives: Vec<PathBuf>,
+    /// What `[build]` asks the linker for.
+    pub natives: Natives,
+}
+
+/// The native libraries a build links, as the key needs to see them.
+///
+/// **What this prevents: a cached artifact served after `[build] link`
+/// changed.** Only an archive found under `link-search` can be hashed, so a
+/// name the linker satisfies from a system directory (`link = ["z"]` for
+/// zlib) was in no part of the key: removing it reused the artifact that had
+/// linked it, and the next uncached build failed with an undefined
+/// `zlibVersion`. The names and the search directories are part of what the
+/// linker is told, so they are part of the key, whether or not anything was
+/// found for them.
+///
+/// What it costs: a system library that changes on disk is still not seen.
+/// The key holds its name, not its bytes, because which file the system
+/// linker would pick is the linker's question and not answered here.
+#[derive(Debug, Clone, Default)]
+pub struct Natives {
+    /// The archives found under `link-search`, resolved to real paths and
+    /// hashed by content: a changed archive is a changed program even when
+    /// every source is identical.
+    pub archives: Vec<PathBuf>,
+    /// `build.link`, in the order written.
+    pub link: Vec<String>,
+    /// `build.link-search` as written, in the order written. As written
+    /// rather than resolved, so two checkouts of one package share a key, as
+    /// they do for sources; what was found there is in `archives` by content.
+    pub search: Vec<String>,
 }
 
 /// The cache directory, and the questions asked of it.
@@ -279,12 +315,23 @@ impl Cache {
         // key that ignored it would serve the previous build's behavior with
         // no way to tell. Rebuilding the C library and getting the old answer
         // is the exact failure this prevents.
-        for archive in inputs.natives.iter() {
+        for archive in inputs.natives.archives.iter() {
             // `?` rather than a match: an archive that is named and not found
             // means the link is about to fail, so miss and let the linker
             // explain rather than caching a key built from a hole.
             let digest = self.identity(archive)?;
             field(digest.as_bytes());
+        }
+        // **And what the linker is told, by name**, which is the only part of
+        // a system library this can see. `Natives` has the failure. Counted,
+        // so that a name cannot slide from one list into the other.
+        field(&(inputs.natives.link.len() as u64).to_le_bytes());
+        for name in &inputs.natives.link {
+            field(name.as_bytes());
+        }
+        field(&(inputs.natives.search.len() as u64).to_le_bytes());
+        for dir in &inputs.natives.search {
+            field(dir.as_bytes());
         }
         // **The representation, because it is not in the sources.**
         // `KHORA_UNBOXED` decides whether a small record is a heap object or a

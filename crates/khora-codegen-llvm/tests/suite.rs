@@ -53,6 +53,7 @@ mod db;
 mod decimal;
 mod derive;
 mod effects;
+mod emission;
 mod env;
 mod errors;
 mod exporting;
