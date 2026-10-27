@@ -63,6 +63,9 @@ fn defined_functions(object: &Path) -> Vec<String> {
 }
 
 /// Links `body` against `library` with clang and runs it from beside it.
+///
+/// Unix only, like the one test that calls it.
+#[cfg(unix)]
 fn run_c(library: &Path, extra: &[&Path], body: &str) -> String {
     let clang = khora_codegen_llvm::toolchain::tool("clang").expect("clang in the LLVM toolchain");
     let dir = library.parent().expect("a directory").to_path_buf();
