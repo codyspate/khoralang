@@ -201,6 +201,8 @@ const HARNESS: &str = r#"module main;
 
 import std::core::{Channel, Claim, Fiber, Option, Region, Shared, print};
 
+extern fn khora_sleep(millis: Int) -> ();
+
 pub type Halt = | Now;
 
 fn spin(n: Int) -> Int {
@@ -210,8 +212,18 @@ fn spin(n: Int) -> Int {
   acc
 }
 
-fn serve(job: Int) -> () raises Halt {
-  let _ = spin(20000 + job);
+// `busy` says a job has been taken and is being served. In a holding round
+// the job then waits, one back-edge per millisecond, until the cancel stops
+// it there: a cut mid-job in every holding round, however slowly this fiber
+// was scheduled. The other rounds keep the jittered cancel.
+fn serve(job: Int, busy: Shared<Int>, hold: Bool) -> () raises Halt {
+  Shared::set(busy, 1);
+  if hold {
+    let mut i = 0;
+    while i < 5000 { khora_sleep(1); i = i + 1; };
+  } else {
+    let _ = spin(20000 + job);
+  };
 }
 
 fn bump(cell: Shared<Int>) -> () {
@@ -219,26 +231,26 @@ fn bump(cell: Shared<Int>) -> () {
 }
 
 // The control: the loop the cookbook warns about.
-fn plain(jobs: Channel<Int>, ready: Channel<Int>, served: Shared<Int>, abandoned: Shared<Int>) -> () raises Halt {
+fn plain(jobs: Channel<Int>, ready: Channel<Int>, served: Shared<Int>, abandoned: Shared<Int>, busy: Shared<Int>, hold: Bool) -> () raises Halt {
   let _ = Channel::send(ready, 1);
   loop {
     match Channel::receive(jobs) {
       Option::None => break,
       Option::Some(job) => {
-        serve(job)!;
+        serve(job, busy, hold)!;
         bump(served);
       },
     }
   }
 }
 
-fn claimed(jobs: Channel<Int>, ready: Channel<Int>, served: Shared<Int>, abandoned: Shared<Int>) -> () raises Halt {
+fn claimed(jobs: Channel<Int>, ready: Channel<Int>, served: Shared<Int>, abandoned: Shared<Int>, busy: Shared<Int>, hold: Bool) -> () raises Halt {
   let _ = Channel::send(ready, 1);
   loop {
     match Channel::claim(jobs, fn _ => bump(abandoned)) {
       Option::None => break,
       Option::Some(c) => {
-        serve(c.value)!;
+        serve(c.value, busy, hold)!;
         c.done();
         bump(served);
       },
@@ -248,7 +260,7 @@ fn claimed(jobs: Channel<Int>, ready: Channel<Int>, served: Shared<Int>, abandon
 
 // The cookbook's hand-written pattern, for code that cannot use `claim`:
 // nothing at all between the receive and the defer.
-fn manual(jobs: Channel<Int>, ready: Channel<Int>, served: Shared<Int>, abandoned: Shared<Int>) -> () raises Halt {
+fn manual(jobs: Channel<Int>, ready: Channel<Int>, served: Shared<Int>, abandoned: Shared<Int>, busy: Shared<Int>, hold: Bool) -> () raises Halt {
   let _ = Channel::send(ready, 1);
   loop {
     match Channel::receive(jobs) {
@@ -259,7 +271,7 @@ fn manual(jobs: Channel<Int>, ready: Channel<Int>, served: Shared<Int>, abandone
         Region::defer(region, fn () => {
           if !Shared::get(settled) { bump(abandoned); };
         });
-        serve(job)!;
+        serve(job, busy, hold)!;
         Shared::set(settled, true);
         bump(served);
       },
@@ -291,18 +303,25 @@ fn series(name: String, which: Int) -> () {
     let ready: Channel<Int> = Channel::bounded(1);
     let served = Shared::of(0);
     let abandoned = Shared::of(0);
+    let busy = Shared::of(0);
+    let hold = r % 2 == 0;
     let hand = if which == 0 {
-      Fiber::spawn(fn () => plain(jobs, ready, served, abandoned)!)
+      Fiber::spawn(fn () => plain(jobs, ready, served, abandoned, busy, hold)!)
     } else if which == 1 {
-      Fiber::spawn(fn () => claimed(jobs, ready, served, abandoned)!)
+      Fiber::spawn(fn () => claimed(jobs, ready, served, abandoned, busy, hold)!)
     } else {
-      Fiber::spawn(fn () => manual(jobs, ready, served, abandoned)!)
+      Fiber::spawn(fn () => manual(jobs, ready, served, abandoned, busy, hold)!)
     };
     let _ = Channel::receive(ready);
     let mut k = 0;
     while k < 4 { let _ = Channel::send(jobs, k); k = k + 1; }
     seed = (seed * 1103515245 + 12345) % 2147483648;
-    let _ = spin(seed % 60000);
+    if hold {
+      let mut waited = 0;
+      while Shared::get(busy) == 0 && waited < 5000 { khora_sleep(1); waited = waited + 1; };
+    } else {
+      let _ = spin(seed % 60000);
+    };
     Fiber::cancel(hand);
     Fiber::wait(hand)! catch { _ => () };
     let t = 4 - drain(jobs);
