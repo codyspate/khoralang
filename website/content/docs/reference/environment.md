@@ -242,6 +242,16 @@ How many threads the pool that runs blocking work may hold.
 
 Blocking work — anything that would otherwise stall a worker — goes to this pool. The bound exists so the pool does not become one thread per fiber. When a program wants more concurrent blocking work than the pool has room for, the extra waits rather than growing the pool, and the runtime counts how often that happened; a count that climbs with load is what says this is the number to raise. The default is a starting point, not a measurement.
 
+### `KHORA_LOOKUP_THREADS`
+
+How many host-name lookups may run at once.
+
+**Default:** four.
+
+**Value:** a positive integer. A value that is not an integer is ignored and the default stands.
+
+`connect_to`, `std::net::tls::connect` and the HTTP client resolve a name on a pool of their own, apart from `KHORA_BLOCKING_THREADS`, so that lookups against a resolver that never answers hold up only other lookups and never a file read or a process wait. A lookup cannot be interrupted once it starts. A canceled caller stops waiting for it at once, but the thread stays busy until the resolver gives up, which takes seconds. A lookup canceled before a thread reaches it does not run. With every thread waiting on a dead resolver, the next lookup waits for one of them to finish, and it can be canceled or reach its deadline while it waits.
+
 ### `KHORA_SCHEDULER_REPORT`
 
 Print the scheduler's counters to standard error on an interval.

@@ -52,13 +52,30 @@ pub extern "C" fn khora_unix_millis() -> i64 {
 /// backwards even where the underlying counter misbehaves across cores.
 #[unsafe(no_mangle)]
 pub extern "C" fn khora_monotonic_millis() -> i64 {
-    /// Written once, by whichever fiber reads the clock first. `OnceLock`
-    /// rather than a `static mut` because fibers are threads and the first
-    /// read can genuinely be a race between two of them; they then agree on
-    /// the winner's origin, which is the whole point of a shared timeline.
+    origin().elapsed().as_millis().min(i64::MAX as u128) as i64
+}
+
+/// The instant [`khora_monotonic_millis`] calls zero.
+///
+/// Written once, by whichever fiber reads the clock first. `OnceLock` rather
+/// than a `static mut` because fibers are threads and the first read can
+/// genuinely be a race between two of them; they then agree on the winner's
+/// origin, which is the whole point of a shared timeline.
+fn origin() -> Instant {
     static ORIGIN: OnceLock<Instant> = OnceLock::new();
-    let origin = *ORIGIN.get_or_init(Instant::now);
-    origin.elapsed().as_millis().min(i64::MAX as u128) as i64
+    *ORIGIN.get_or_init(Instant::now)
+}
+
+/// A reading of [`khora_monotonic_millis`] as an `Instant`.
+///
+/// **What this prevents: a deadline that moves.** A Khora caller that wants
+/// one bound over several calls computes it once, as a reading of the
+/// monotonic clock plus a budget, and hands that same number to each of them.
+/// Turning it into a relative timeout at every call would grant each call the
+/// whole budget again. Negative readings are before the origin and so already
+/// past.
+pub(crate) fn instant_of(millis: i64) -> Instant {
+    origin() + Duration::from_millis(millis.max(0) as u64)
 }
 
 /// Waits `millis` before going on, giving the worker back while it waits.

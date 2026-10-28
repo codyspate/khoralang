@@ -33,11 +33,13 @@ extern fn khora_tls_close(connection: Ptr) -> ();
 extern fn khora_tls_set_timeout(connection: Ptr, millis: Int) -> I32;
 extern fn khora_tls_client_open(extra: Ptr, extra_len: Int) -> Ptr;
 extern fn khora_tls_client_close(client: Ptr) -> ();
-extern fn khora_tls_connect(client: Ptr, host: Ptr, host_len: Int, port: Int) -> Ptr;
+extern fn khora_tls_connect(client: Ptr, host: Ptr, host_len: Int, port: Int, deadline: Int, why: Ptr) -> Ptr;
+extern fn khora_tls_expired(connection: Ptr) -> I32;
+extern fn khora_tls_set_deadline(connection: Ptr, deadline: Int) -> I32;
 
 /// Why a TLS server could not start, or a connection could not be secured.
 ///
-/// Four cases, and only the last carries anything. A `rustls` diagnostic is
+/// Five cases, and only `Unreachable` carries anything. A `rustls` diagnostic is
 /// written for somebody debugging a handshake; what a Khora program can *do*
 /// about a failure is fix the certificate, fix the key, drop the client, or
 /// give up on the host -- and only that last one needs to say which host.
@@ -52,12 +54,18 @@ pub type TlsError =
   /// A connection could not be made, or the server it reached did not present
   /// a certificate this client trusts for that name.
   ///
-  /// One case rather than four. "Could not resolve", "refused", "expired" and
-  /// "wrong name" are different to somebody debugging and identical to a
-  /// program: it does not have the connection, and what it does next is retry
-  /// or give up. Telling them apart wants an error that carries text, which is
-  /// a separate piece of work.
-  | Unreachable(host: String);
+  /// One case rather than three. "Could not resolve", "refused" and "wrong
+  /// name" are different to somebody debugging and identical to a program: it
+  /// does not have the connection, and what it does next is retry or give up.
+  /// Telling them apart wants an error that carries text, which is a separate
+  /// piece of work.
+  | Unreachable(host: String)
+  /// The deadline given to [`connect_by`] passed before the session was up.
+  ///
+  /// Separate from `Unreachable` because it is the one a caller acts on
+  /// differently: a host that refused may refuse again, while a call that ran
+  /// out of time mostly wants a longer budget.
+  | TimedOut;
 
 /// A configured server, ready to secure accepted sockets.
 ///
@@ -182,6 +190,21 @@ pub fn set_receive_timeout(connection: TlsConnection, millis: Int) -> Bool {
   khora_tls_set_timeout(connection.session, millis) == I32::of(0)
 }
 
+/// Holds every later read and write on this connection to
+/// `clock.monotonic_millis()` reaching `deadline`. Negative clears it.
+///
+/// `std::net::socket::set_deadline`, for a session: one bound for a whole
+/// exchange, beside [`set_receive_timeout`]'s bound on each read.
+pub fn set_deadline(connection: TlsConnection, deadline: Int) -> Bool {
+  khora_tls_set_deadline(connection.session, deadline) == I32::of(0)
+}
+
+/// Whether the deadline from [`set_deadline`] is what ended a read or write
+/// on this connection: `std::net::socket::expired`, for a session.
+pub fn expired(connection: TlsConnection) -> Bool {
+  khora_tls_expired(connection.session) == I32::of(1)
+}
+
 /// Says goodbye properly, then closes the socket.
 ///
 /// The `close_notify` is not politeness. Without it a peer cannot tell a closed
@@ -287,10 +310,35 @@ pub fn trusting(extra: String) -> TlsClient
 /// The socket is made here rather than passed in, because resolving a name
 /// needs `getaddrinfo` and a `struct addrinfo` cannot cross the C ABI. The
 /// runtime already has a resolver worth using.
+///
+/// A cancellation point, from the lookup to the end of the handshake, as
+/// `std::net::socket::connect_to` is.
 pub fn connect(client: TlsClient, host: String, port: Int) -> TlsConnection
   raises TlsError
 {
-  let handle = String::with_data(host, fn (name, n) =>
-    khora_tls_connect(client.trust, name, n, port));
-  if Ptr::is_null(handle) { raise TlsError::Unreachable(host) } else { { session: handle } }
+  connect_by(client, host, port, -1)!
+}
+
+/// [`connect`], giving up once `clock.monotonic_millis()` reaches
+/// `deadline`. Negative means none.
+///
+/// The deadline covers the lookup, the TCP connect and the handshake, and
+/// expiring is `TlsError::TimedOut`: only when the deadline was what ended
+/// it, so a refusal that arrives in its last millisecond is still
+/// `Unreachable`. The session that comes back carries no deadline;
+/// [`set_deadline`] puts one on it.
+pub fn connect_by(client: TlsClient, host: String, port: Int, deadline: Int) -> TlsConnection
+  raises TlsError
+{
+  let why: Array<Int> = Array::new(1, 0);
+  let handle = Array::with_data(why, fn (cause, _n) =>
+    String::with_data(host, fn (name, n) =>
+      khora_tls_connect(client.trust, name, n, port, deadline, cause)));
+  if !Ptr::is_null(handle) {
+    { session: handle }
+  } else if Array::get(why, 0) == 1 {
+    raise TlsError::TimedOut
+  } else {
+    raise TlsError::Unreachable(host)
+  }
 }

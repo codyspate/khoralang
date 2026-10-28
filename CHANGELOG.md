@@ -28,6 +28,19 @@ it will behave differently now.
   parameters and headers reach a schema -- sorts by key, so a closed schema's
   "is not expected" rejections and `Raw::json_text` come out in the same order
   every run.
+- `CallError` has a case `TimedOut(Int)`: an HTTP call's deadline passed,
+  in milliseconds. A `match` over `CallError` without a `_` arm has to add
+  it. Every `HttpClient::real()` and `HttpClient::bounded(..)` call is given
+  `default_call_deadline()`, thirty seconds, from the lookup to the last byte
+  of the answer; a call that takes longer is `TimedOut(30000)` and its
+  connection is closed. See Changed.
+- `std::net::tls::TlsError` has a case `TimedOut`, raised by
+  `tls::connect_by` when its deadline ended the connect or the handshake. It
+  was `Unreachable`. A `match` over `TlsError` without a `_` arm has to add
+  it.
+- An HTTP call whose deadline ends while the answer is arriving is
+  `CallError::TimedOut`. It was `Closed("the deadline passed while the
+  answer was arriving")`.
 - A failure in a nursery child cancels its siblings at the moment the child
   fails, and every failure does. The nursery noticed a failure only when it
   reached that child's handle, oldest first, so a failing child spawned after
@@ -183,6 +196,40 @@ it will behave differently now.
   `String::length` in `fold_lines`'s example (it is `byte_length`), and the
   TLS and `serve_forever` examples in `std::net::http`, which left out the
   capabilities and errors their calls need.
+- A fiber canceled inside `connect_to` or `std::net::tls::connect` stops at
+  once, on both fiber backends, and closes the socket it was opening. Against
+  a host that never answers, it stopped only when the operating system gave
+  up on the connect, about two minutes on Linux, so a nursery whose child
+  failed beside one, a server shutting down and a deadline around an
+  outbound call all waited that long. A fiber canceled while the name is
+  being looked up stops waiting for the lookup, which finishes on its own on
+  the blocking pool and is thrown away.
+- Name lookups run on a pool of their own, four threads
+  (`KHORA_LOOKUP_THREADS`), so lookups against a resolver that never answers
+  delay only other lookups. On the shared blocking pool, 100 canceled lookups
+  held a later file read for 29.7 s. A lookup canceled before a thread
+  reached it does not run at all. With four lookups waiting on a dead
+  resolver, the next waits for one of them to time out; it can be canceled
+  or reach its deadline while it waits, and is never refused.
+- A canceled HTTP call closes its connection wherever the cancel lands. One
+  that landed just after the connect returned left the socket open, 35 to 47
+  per thousand canceled calls on the scheduler backend.
+- A refused connection under an HTTP deadline is `CallError::Unreachable`
+  however close to the deadline the refusal arrives. About 2% of refusals
+  under `HttpClient::within(1)` came back `TimedOut`. Generally,
+  `CallError::TimedOut` means the deadline ended the call, and a failure that
+  only happened late is reported as what it was.
+- On Windows, a refused `connect_to` fails rather than waiting forever on
+  Windows 10 before version 2004 and Server 2019 and earlier, whose `WSAPoll`
+  does not report a failed connect. The connect checks the socket's error
+  every 100 ms.
+- On Windows, a connect fails cleanly when Winsock cannot be started, and
+  works on systems that refuse the no-inherit socket flag.
+- A connect waits on the reactor, so a fiber dialing a slow host gives its
+  worker to other fibers for the wait. It held the worker.
+- An HTTP call to a server that sends its answer a byte at a time ends at
+  the call's deadline. Each byte renewed the thirty-second read limit, so it
+  ran for as long as the server kept sending.
 - A program may name a function like a C function `std` declares --
   `bind`, `listen`, `socket`, `close`, `getenv`, `strlen`, `system`, a
   runtime export such as `khora_sleep` -- with any signature. Every program
@@ -249,6 +296,15 @@ it will behave differently now.
 
 ### Added
 
+- `std::net::socket::expired(handle)` and `std::net::tls::expired(connection)`
+  say whether a connection's deadline is what ended a read or write on it,
+  rather than the peer.
+- `std::net::socket::connect_by(host, port, deadline)` and
+  `std::net::tls::connect_by(client, host, port, deadline)`, which give up
+  once `clock.monotonic_millis()` reaches `deadline`; and
+  `std::net::socket::set_deadline` and `std::net::tls::set_deadline`, which
+  hold every later read and write on a connection to one instant, beside the
+  per-read limit `set_receive_timeout` sets.
 - **`aarch64-unknown-linux-gnu`** is a supported toolchain: built, released
   and tested on GitHub's `ubuntu-24.04-arm` runner, needing glibc 2.39 like
   the x86-64 one. `install.sh` on an arm64 Linux machine installs it.
@@ -325,6 +381,21 @@ it will behave differently now.
 
 ### Changed
 
+- `HttpClient` calls have a deadline over the whole call: the lookup, the
+  connect, the TLS handshake, writing the request and reading the headers and
+  body. `HttpClient::within(millis)` and `HttpClient::bounded_within(limit,
+  millis)` choose it; `real()` and `bounded(..)` give thirty seconds
+  (`default_call_deadline()`), the same as the read limit. A call whose
+  connect and reads together take longer is cut off where each step's own
+  limit alone would have let it finish. Zero or less means none.
+  With a deadline, the deadline alone bounds every read, so a
+  `within(60000)` call waits up to a minute for a slow first byte; the
+  thirty-second read limit applies to a call with no deadline.
+  A call that runs out is `CallError::TimedOut`, and whatever it had opened is
+  closed. A refused connection is `CallError::Unreachable`, with or without a
+  deadline.
+- `connect_to` and `std::net::tls::connect` are cancellation points, and
+  every address a name resolves to is tried in order.
 - A build compiles only what its entry points reach: `main`, the `test` or
   `bench` blocks, and every `pub extern fn`, plus the `Show` of each error
   type a `Raised` can carry, which describes it. A hello world compiles 2

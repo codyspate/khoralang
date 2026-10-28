@@ -264,6 +264,7 @@ pub fn main() -> () raises TlsError {{
         TlsError::BadCertificate => print(\"bad certificate, which is wrong\"),
         TlsError::BadKey => print(\"bad key, which is wrong\"),
         TlsError::Unreachable(_) => print(\"unreachable, which is wrong\"),
+        TlsError::TimedOut => print(\"timed out, which is wrong\"),
       }},
     }}
   }}
@@ -310,6 +311,7 @@ pub fn main() -> () {
         TlsError::BadKey => print(\"bad key\"),
         TlsError::Handshake => print(\"handshake\"),
         TlsError::Unreachable(_) => print(\"unreachable\"),
+        TlsError::TimedOut => print(\"timed out\"),
       },
     }
   }
@@ -412,6 +414,7 @@ fn call(caller: TlsClient) -> () {
     Result::Ok(connection) => { print("connected, which is wrong"); shut(connection) },
     Result::Err(why) => match Raised::only(why) {
       TlsError::Unreachable(host) => print("refused: " + host),
+      TlsError::TimedOut => print("timed out"),
       TlsError::Handshake => print("handshake"),
       TlsError::BadCertificate => print("bad certificate"),
       TlsError::BadKey => print("bad key"),

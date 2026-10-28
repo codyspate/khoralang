@@ -331,11 +331,13 @@ Cancellation is observed at cancellation points rather than between arbitrary so
 - a **loop back-edge** — the point where `loop` or `while` goes round again;
 - a **call** to a function that can itself reach a cancellation point; and
 - a **blocking operation**: `Channel::send`, `Channel::receive`,
-  `Fiber::wait`, `Fiber::join`, `clock.sleep`, and accepting, reading and
-  writing on a network connection. A canceled read, write or accept gives up
-  and the fiber stops there; it does not come back to the caller as a failed
-  read. Opening a connection and waiting for a child process are not
-  cancellation points: a fiber stops after the call returns.
+  `Fiber::wait`, `Fiber::join`, `clock.sleep`, and opening, accepting,
+  reading and writing on a network connection, TLS included. A canceled
+  connect, read, write or accept gives up and the fiber stops there; it does
+  not come back to the caller as a failed one. A connect that is resolving a
+  name stops waiting for the lookup, which finishes on its own in the
+  background and is thrown away. Waiting for a child process is not a
+  cancellation point: a fiber stops after the call returns.
 
 Every function has them, whatever its `raises` row says. A cancellation leaves
 a function on a return of its own, not on the error channel.

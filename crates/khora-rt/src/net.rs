@@ -110,12 +110,35 @@ fn would_block() -> bool {
     }
 }
 
+/// How a [`wait`] ended.
+///
+/// **Three answers rather than a `bool`, so the cause travels with the
+/// failure.** With only "not ready", a caller that wanted to say *why* read
+/// the clock afterwards, and a refused connect that happened to finish in the
+/// deadline's last millisecond was reported as the deadline: about 2% of
+/// refusals under a 1 ms budget came back `TimedOut`, misleading exactly the
+/// retry logic that tells the two apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Woke {
+    /// Worth trying the operation again.
+    Ready,
+    /// The calling fiber was asked to stop.
+    Stopped,
+    /// The deadline passed with nothing to report.
+    TimedOut,
+}
+
 /// Waits for a socket, by suspending the fiber or blocking the thread.
 ///
 /// The choice is not the caller's and is not visible to it: on a worker the
 /// fiber is parked and the worker goes on to something else, and off one the
 /// thread waits. Both come back when it is worth trying again.
-fn wait(socket: Socket, interest: Interest, deadline: Option<std::time::Instant>) -> bool {
+///
+/// A `TimedOut` is the wait's account and not the operation's: the socket may
+/// have become ready in the same instant. A caller that reports a deadline
+/// tries the operation once more first, so that an answer that is there wins.
+fn wait(socket: Socket, interest: Interest, deadline: Option<std::time::Instant>) -> Woke {
+    let stopped = || crate::current::current(|f| f.gives_up_waiting());
     match crate::scheduler::wait_until_ready_by(socket, interest, deadline) {
         // **A wake is not readiness when it came from a cancellation.**
         // `cancel_fiber` flags and then wakes, which is how a parked fiber gets
@@ -123,30 +146,61 @@ fn wait(socket: Socket, interest: Interest, deadline: Option<std::time::Instant>
         // notice at, so it would retry, block, and park again. The scheduler
         // backend reached here; the thread backend never did, because
         // `block_until_ready` had no exit at all. Both halves are needed.
-        crate::scheduler::Waited::Ready => !crate::current::current(|f| f.gives_up_waiting()),
-        crate::scheduler::Waited::TimedOut => false,
+        crate::scheduler::Waited::Ready if stopped() => Woke::Stopped,
+        crate::scheduler::Waited::Ready => Woke::Ready,
+        crate::scheduler::Waited::TimedOut if stopped() => Woke::Stopped,
+        crate::scheduler::Waited::TimedOut => Woke::TimedOut,
         // No worker to give back, so this thread does the waiting — and has to
         // honor the same deadline, because a program with no scheduler is
-        // still a program that asked for one.
+        // still a program that asked for one. It answers false for a cancel
+        // and for the deadline, and checks the cancel first, so the same
+        // order here tells them apart.
         crate::scheduler::Waited::Unscheduled => {
-            crate::reactor::block_until_ready(socket, interest, deadline)
+            if crate::reactor::block_until_ready(socket, interest, deadline) {
+                Woke::Ready
+            } else if stopped() {
+                Woke::Stopped
+            } else {
+                Woke::TimedOut
+            }
         }
     }
 }
 
-/// Receive deadlines, by socket, in milliseconds.
+/// What the runtime holds a socket to, by handle: how long one read may wait,
+/// and when everything on the socket must be over.
 ///
-/// **This is `SO_RCVTIMEO` moved somewhere it can still work.** The kernel's
-/// receive timeout applies only to a call that would have blocked, and a socket
-/// the reactor drives never has one — so the option goes silently inert the
-/// moment `khora_net_prepare` touches the socket, and a server using it to shed
-/// a slow client parks a fiber on that client for ever instead.
+/// **The per-read limit is `SO_RCVTIMEO` moved somewhere it can still work.**
+/// The kernel's receive timeout applies only to a call that would have
+/// blocked, and a socket the reactor drives never has one -- so the option
+/// goes silently inert the moment `khora_net_prepare` touches the socket, and
+/// a server using it to shed a slow client parks a fiber on that client for
+/// ever instead.
+///
+/// **The deadline is the other kind of bound, and neither replaces the
+/// other.** A per-read limit is renewed by every byte, so a peer that sends
+/// one byte a second holds a reader for ever without tripping it. A deadline
+/// is one instant, fixed when it is set, which every later read and write on
+/// the socket answers to.
+#[derive(Clone, Copy, Default)]
+struct Limits {
+    /// Milliseconds one read may wait.
+    per_read: Option<u64>,
+    /// When every read and write must be done.
+    by: Option<std::time::Instant>,
+    /// A read or write gave up because `by` passed. Kept until the socket is
+    /// forgotten, so a caller can say the deadline ended the exchange rather
+    /// than the peer.
+    expired: bool,
+}
+
+/// [`Limits`], by socket.
 ///
 /// Keyed by the raw handle, which is sound only because the entry is removed
-/// when the socket closes: handles are reused, and a stale deadline would
+/// when the socket closes: handles are reused, and a stale limit would
 /// otherwise be inherited by whatever opened next. `khora_net_forget` is that
 /// removal, and `std::net` calls it from `shut`.
-static TIMEOUTS: std::sync::Mutex<Option<std::collections::HashMap<usize, u64>>> =
+static LIMITS: std::sync::Mutex<Option<std::collections::HashMap<usize, Limits>>> =
     std::sync::Mutex::new(None);
 
 /// A socket as a table key.
@@ -159,34 +213,103 @@ fn key(socket: Socket) -> usize {
     socket as usize
 }
 
-fn deadline_for(socket: Socket) -> Option<std::time::Instant> {
-    let guard = TIMEOUTS.lock().expect("the receive deadlines");
-    let millis = guard.as_ref()?.get(&key(socket)).copied()?;
-    Some(std::time::Instant::now() + std::time::Duration::from_millis(millis))
+fn limits_of(socket: Socket) -> Limits {
+    let guard = LIMITS.lock().expect("the socket limits");
+    guard.as_ref().and_then(|table| table.get(&key(socket)).copied()).unwrap_or_default()
 }
 
-/// Opens an outbound connection, resolving `host` first.
+/// Changes what `socket` is held to, and drops the entry once it holds
+/// nothing.
+fn change_limits(socket: Socket, change: impl FnOnce(&mut Limits)) {
+    let mut guard = LIMITS.lock().expect("the socket limits");
+    let table = guard.get_or_insert_with(std::collections::HashMap::new);
+    let limits = table.entry(key(socket)).or_default();
+    change(limits);
+    if limits.per_read.is_none() && limits.by.is_none() && !limits.expired {
+        table.remove(&key(socket));
+    }
+}
+
+/// When a read starting now must give up: the sooner of its own limit and
+/// the socket's deadline.
+fn deadline_for(socket: Socket) -> Option<std::time::Instant> {
+    let limits = limits_of(socket);
+    let per_read =
+        limits.per_read.map(|millis| std::time::Instant::now() + std::time::Duration::from_millis(millis));
+    match (per_read, limits.by) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// When a write on `socket` must give up: its deadline, if it has one.
+fn send_deadline_for(socket: Socket) -> Option<std::time::Instant> {
+    limits_of(socket).by
+}
+
+/// Records that `socket`'s own deadline ended an operation, if it did: the
+/// wait timed out and the deadline is behind us. A per-read limit that ran
+/// out first is not the deadline, and is left unrecorded.
+fn note_if_expired(socket: Socket) {
+    if limits_of(socket).by.is_some_and(|by| std::time::Instant::now() >= by) {
+        change_limits(socket, |limits| limits.expired = true);
+    }
+}
+
+/// Whether a read or write on `socket` gave up because the deadline set by
+/// [`khora_net_set_deadline`] passed: 1 if so, 0 if not.
 ///
-/// **The one place a Khora program dials out.** Written in Khora over
-/// `connect(2)` it would mean `getaddrinfo`, `sockaddr` for two address
-/// families, and one copy per platform of struct arithmetic that has no
-/// business being in a standard library. Here it is once, in Rust:
-/// `TcpStream::connect` brings DNS, IPv6 and the platform's resolver, and what
-/// comes back is a handle the reactor takes over like an accepted one.
+/// **What this prevents: a deadline reported as a peer that went quiet, and
+/// the reverse.** Both are a -1 from the read. A caller that told them apart
+/// by the clock afterwards called a reset that arrived in the deadline's last
+/// millisecond a timeout; this is the read's own account.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_net_expired(socket: Socket) -> i32 {
+    i32::from(limits_of(socket).expired)
+}
+
+/// Opens an outbound connection, resolving `host` first, and gives up when
+/// the calling fiber is canceled or the monotonic clock reaches `at`.
 ///
-/// **It blocks the worker while it connects.** A DNS lookup is not something
-/// the reactor can wait on, and `crate::blocking` is not reachable from a plain
-/// `extern fn` yet. A connect happens once per connection where a query happens
-/// many times, so this is the right thing to get wrong first — `docs/roadmap.md`
-/// Phase 13.
+/// **What this prevents: a connect nobody can stop.** A blocking `connect(2)`
+/// to a host that drops SYNs holds its fiber until the kernel gives up, about
+/// two minutes on Linux, and a canceled fiber inside one reached no
+/// cancellation point for that long. So a nursery could not stop its
+/// siblings, a server could not shut down, and no deadline around an outbound
+/// call could fire. Here the socket is non-blocking from the start and the
+/// fiber waits on the reactor for it to become writable, which is the wait a
+/// cancel wakes. Off a scheduler the thread waits the way `accept` does, in
+/// slices that look for a cancel between them.
 ///
-/// Returns the handle, or -1.
+/// **The name is resolved on the blocking pool, and abandoned on a stop.**
+/// `getaddrinfo` cannot be waited on or interrupted, so a canceled caller
+/// stops waiting for it and the lookup finishes alone on a pool thread; its
+/// answer is dropped there. An address written as one (`127.0.0.1`, `::1`)
+/// is not looked up at all.
+///
+/// Every resolved address is tried in the order the resolver gave, and the
+/// first that connects wins, as `TcpStream::connect` does. A cancel or the
+/// deadline ends the whole attempt, not just the address in hand.
+///
+/// `at` is a reading of `khora_monotonic_millis`, or negative for no deadline.
+/// The deadline bounds connecting only: the socket that comes back carries
+/// none, and `khora_net_set_deadline` is how a caller puts one on it.
+///
+/// Returns the handle, prepared as `khora_net_prepare` would and with Nagle
+/// off; -2 if the deadline ended it; or -1: the name did not resolve, nothing
+/// accepted, or the fiber was canceled. Whatever was opened is closed first,
+/// including a connection that succeeded for a fiber already canceled.
 ///
 /// # Safety
 ///
 /// `host` must point at `host_len` bytes of UTF-8.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn khora_net_connect(host: *const u8, host_len: u64, port: i64) -> isize {
+pub unsafe extern "C" fn khora_net_connect(
+    host: *const u8,
+    host_len: u64,
+    port: i64,
+    at: i64,
+) -> isize {
     // `isize` with -1 for failure, matching `raw_accept`. A `Socket` is a
     // `usize` on Windows and cannot carry the -1 that `invalid_handle` is on
     // both sides of the boundary.
@@ -196,30 +319,483 @@ pub unsafe extern "C" fn khora_net_connect(host: *const u8, host_len: u64, port:
     // SAFETY: the caller guarantees `host_len` readable bytes.
     let bytes = unsafe { std::slice::from_raw_parts(host, host_len as usize) };
     let Ok(name) = std::str::from_utf8(bytes) else { return -1 };
-
-    let Ok(stream) = std::net::TcpStream::connect((name, port as u16)) else {
-        return -1;
-    };
-    // Nagle off: a wire protocol writes a small message and waits for the
-    // answer, which is the exact shape Nagle delays for no gain.
-    let _ = stream.set_nodelay(true);
-
-    // Handed to the reactor, so the descriptor must outlive this `TcpStream`.
-    #[cfg(windows)]
-    let handle = {
-        use std::os::windows::io::IntoRawSocket;
-        stream.into_raw_socket() as Socket
-    };
-    #[cfg(not(windows))]
-    let handle = {
-        use std::os::fd::IntoRawFd;
-        stream.into_raw_fd() as Socket
-    };
-
-    if khora_net_prepare(handle) != 0 {
-        return -1;
+    let deadline = (at >= 0).then(|| crate::time::instant_of(at));
+    match connect_by(name, port as u16, deadline) {
+        Ok(socket) => socket as isize,
+        Err(Gave::Up | Gave::Stopped) => -1,
+        Err(Gave::TimedOut) => -2,
     }
-    handle as isize
+}
+
+/// Holds every later read and write on `socket` to the monotonic clock
+/// reaching `at`, or clears that with a negative `at`. Either way
+/// [`khora_net_expired`] answers about this deadline from here on.
+///
+/// For a caller with one budget for a whole exchange: an HTTP call's
+/// request, headers and body. Reads still answer to their own limit as well,
+/// whichever comes first. A read or write that runs out returns -1, which is
+/// what a caller already treats as a connection to give up on.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_net_set_deadline(socket: Socket, at: i64) -> i32 {
+    let by = (at >= 0).then(|| crate::time::instant_of(at));
+    change_limits(socket, |limits| {
+        limits.by = by;
+        limits.expired = false;
+    });
+    0
+}
+
+/// Why [`connect_by`] has no socket to give.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Gave {
+    /// The name did not resolve, or no address accepted.
+    Up,
+    /// The calling fiber was asked to stop.
+    Stopped,
+    /// The deadline passed.
+    TimedOut,
+}
+
+/// [`khora_net_connect`], for Rust callers: the TLS client dials through this.
+pub(crate) fn connect_by(
+    name: &str,
+    port: u16,
+    deadline: Option<std::time::Instant>,
+) -> Result<Socket, Gave> {
+    let addresses = resolve(name, port, deadline)?;
+    for address in &addresses {
+        match connect_one(address, deadline) {
+            // **A connection made for a fiber that was canceled meanwhile is
+            // closed here.** Its caller will stop at its next cancellation
+            // point holding a plain handle nothing has registered, and the
+            // socket leaks: a loopback connect completes without waiting, so
+            // no wait was there to see the cancel.
+            Ok(socket) if crate::current::current(|f| f.gives_up_waiting()) => {
+                raw_close(socket);
+                return Err(Gave::Stopped);
+            }
+            Ok(socket) => return Ok(socket),
+            // The next address, as `TcpStream::connect` would.
+            Err(Gave::Up) => continue,
+            Err(stopped @ (Gave::Stopped | Gave::TimedOut)) => return Err(stopped),
+        }
+    }
+    Err(Gave::Up)
+}
+
+/// The addresses `name` stands for, in the resolver's order.
+fn resolve(
+    name: &str,
+    port: u16,
+    deadline: Option<std::time::Instant>,
+) -> Result<Vec<std::net::SocketAddr>, Gave> {
+    // An address needs no lookup, and is the common case for a service
+    // talking to a sidecar or a database by IP.
+    if let Ok(ip) = name.parse::<std::net::IpAddr>() {
+        return Ok(vec![std::net::SocketAddr::new(ip, port)]);
+    }
+    let owned = name.to_string();
+    let looked_up = crate::blocking::abandonable_on(
+        crate::blocking::lookups(),
+        move || {
+            use std::net::ToSocketAddrs;
+            (owned.as_str(), port).to_socket_addrs().map(|found| found.collect::<Vec<_>>())
+        },
+        deadline,
+    );
+    match looked_up {
+        Ok(Ok(found)) => Ok(found),
+        Ok(Err(_)) => Err(Gave::Up),
+        Err(crate::blocking::Abandoned::Stopped) => Err(Gave::Stopped),
+        Err(crate::blocking::Abandoned::TimedOut) => Err(Gave::TimedOut),
+    }
+}
+
+/// One address: a non-blocking socket, `connect`, and a wait for the answer.
+///
+/// The socket is closed on every path that does not return it.
+fn connect_one(address: &std::net::SocketAddr, deadline: Option<std::time::Instant>) -> Result<Socket, Gave> {
+    let Some(socket) = raw_socket(address) else { return Err(Gave::Up) };
+    match connecting(socket, address, deadline) {
+        Ok(()) => {
+            // Nagle off: a wire protocol writes a small message and waits for
+            // the answer, which is the exact shape Nagle delays for no gain.
+            no_delay(socket);
+            Ok(socket)
+        }
+        Err(why) => {
+            raw_close(socket);
+            Err(why)
+        }
+    }
+}
+
+/// Drives `connect` on a prepared socket to an answer.
+fn connecting(socket: Socket, address: &std::net::SocketAddr, deadline: Option<std::time::Instant>) -> Result<(), Gave> {
+    if khora_net_prepare(socket) != 0 {
+        return Err(Gave::Up);
+    }
+    match start_connect(socket, address) {
+        Started::Connected => return Ok(()),
+        Started::Failed => return Err(Gave::Up),
+        Started::Pending => {}
+    }
+    loop {
+        let woke = wait(socket, Interest::Writable, slice_until(deadline));
+        // Writable is the hint; `SO_ERROR` is the answer. It is asked however
+        // the wait ended, so an answer that arrived with the deadline or a
+        // slice's end is the answer, and a refusal is never a timeout.
+        match (connect_state(socket), woke) {
+            (Started::Connected, _) => return Ok(()),
+            (Started::Failed, _) => return Err(Gave::Up),
+            (Started::Pending, Woke::Stopped) => return Err(Gave::Stopped),
+            (Started::Pending, Woke::Ready | Woke::TimedOut) => {
+                if deadline.is_some_and(|at| std::time::Instant::now() >= at) {
+                    return Err(Gave::TimedOut);
+                }
+            }
+        }
+    }
+}
+
+/// How long one wait in [`connecting`] may last.
+///
+/// **On Windows, a tenth of a second at most, because `WSAPoll` may never
+/// report a failed connect.** Before Windows 10 2004 (Server 2019 and
+/// earlier) a refused non-blocking connect raises no `POLLERR`, no `POLLHUP`
+/// and no `POLLWRNORM`: a wait for it ends only at the deadline, and with none
+/// -- `connect_to` -- never. So the wait is cut into slices and `SO_ERROR` is
+/// read after each, which is right on every version. What it costs: a pending
+/// connect wakes ten times a second. `select` reports the failure, and is not
+/// used because the reactor is built on `WSAPoll`.
+///
+/// Elsewhere the reactor reports a failed connect, and the wait is the
+/// caller's deadline.
+fn slice_until(deadline: Option<std::time::Instant>) -> Option<std::time::Instant> {
+    #[cfg(windows)]
+    {
+        let slice = std::time::Instant::now() + std::time::Duration::from_millis(100);
+        Some(deadline.map_or(slice, |at| at.min(slice)))
+    }
+    #[cfg(not(windows))]
+    {
+        deadline
+    }
+}
+
+/// Where a non-blocking connect stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Started {
+    Connected,
+    Pending,
+    Failed,
+}
+
+#[cfg(not(windows))]
+fn raw_socket(address: &std::net::SocketAddr) -> Option<Socket> {
+    let family = match address {
+        std::net::SocketAddr::V4(_) => libc::AF_INET,
+        std::net::SocketAddr::V6(_) => libc::AF_INET6,
+    };
+    #[cfg(not(target_vendor = "apple"))]
+    let kind = libc::SOCK_STREAM | libc::SOCK_CLOEXEC;
+    #[cfg(target_vendor = "apple")]
+    let kind = libc::SOCK_STREAM;
+    // SAFETY: `socket` takes three integers and touches no memory.
+    let socket = unsafe { libc::socket(family, kind, 0) };
+    if socket < 0 {
+        return None;
+    }
+    // Apple has no `SOCK_CLOEXEC`. Without the flag a `process.run` child
+    // inherits the descriptor and holds the connection open after this side
+    // closes it.
+    #[cfg(target_vendor = "apple")]
+    // SAFETY: an ordinary `fcntl` on the descriptor just opened.
+    unsafe {
+        libc::fcntl(socket, libc::F_SETFD, libc::FD_CLOEXEC);
+    }
+    Some(socket)
+}
+
+#[cfg(windows)]
+fn raw_socket(address: &std::net::SocketAddr) -> Option<Socket> {
+    use windows_sys::Win32::Networking::WinSock::{
+        AF_INET, AF_INET6, INVALID_SOCKET, IPPROTO_TCP, SOCK_STREAM, WSASocketW,
+        WSA_FLAG_NO_HANDLE_INHERIT, WSA_FLAG_OVERLAPPED,
+    };
+    use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT};
+    use windows_sys::Win32::Networking::WinSock::{WSAGetLastError, WSAEINVAL};
+    if !winsock_started() {
+        return None;
+    }
+    let family = match address {
+        std::net::SocketAddr::V4(_) => AF_INET,
+        std::net::SocketAddr::V6(_) => AF_INET6,
+    };
+    let open = |flags| {
+        // SAFETY: no protocol-info pointer, and integers otherwise.
+        unsafe { WSASocketW(i32::from(family), SOCK_STREAM, IPPROTO_TCP, std::ptr::null(), 0, flags) }
+    };
+    // The flags `std::net` passes: overlapped so the handle could ever be
+    // used with IOCP, and not inherited by a child process.
+    let socket = open(WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
+    if socket != INVALID_SOCKET {
+        return Some(socket);
+    }
+    // **Windows 7 without SP1 refuses the no-inherit flag** with
+    // `WSAEINVAL`, and without this every connect there failed as
+    // unreachable. The fallback is `std::net`'s: open without it, then clear
+    // inheritance on the handle, which leaves a window in which a child
+    // started by another thread inherits the socket.
+    // SAFETY: no arguments; it reads this thread's last winsock error.
+    if unsafe { WSAGetLastError() } != WSAEINVAL {
+        return None;
+    }
+    let socket = open(WSA_FLAG_OVERLAPPED);
+    if socket == INVALID_SOCKET {
+        return None;
+    }
+    // SAFETY: `socket` is a live handle just opened, and a socket is a
+    // kernel handle `SetHandleInformation` accepts.
+    if unsafe { SetHandleInformation(socket as HANDLE, HANDLE_FLAG_INHERIT, 0) } == 0 {
+        raw_close(socket);
+        return None;
+    }
+    Some(socket)
+}
+
+/// Winsock started, once per process, whoever else did or did not.
+///
+/// **What this prevents: a connect that fails only on Windows.** Every socket
+/// call there fails with `WSANOTINITIALISED` until `WSAStartup` has run.
+/// `std::net::socket::start` does it, and `TcpStream::connect` does it
+/// lazily for a program that forgot to. The socket here is opened directly,
+/// so it does the same. `WSAStartup` counts, so a second start is harmless.
+///
+/// Answers whether Winsock is usable. A refusal is remembered rather than
+/// retried: it means the system has no usable Winsock 2.2, which a second
+/// call does not change, and the connect then fails as unreachable.
+#[cfg(windows)]
+fn winsock_started() -> bool {
+    use windows_sys::Win32::Networking::WinSock::{WSAStartup, WSADATA};
+    static STARTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *STARTED.get_or_init(|| {
+        // SAFETY: `WSADATA` is plain data that the call fills in.
+        let mut data: WSADATA = unsafe { std::mem::zeroed() };
+        // SAFETY: `data` is a live `WSADATA`; 0x0202 asks for version 2.2.
+        unsafe { WSAStartup(0x0202, &raw mut data) == 0 }
+    })
+}
+
+#[cfg(not(windows))]
+fn raw_close(socket: Socket) {
+    // SAFETY: `socket` was opened by `raw_socket` and nothing else holds it.
+    unsafe { libc::close(socket) };
+}
+
+#[cfg(windows)]
+fn raw_close(socket: Socket) {
+    use windows_sys::Win32::Networking::WinSock::closesocket;
+    // SAFETY: `socket` was opened by `raw_socket` and nothing else holds it.
+    unsafe { closesocket(socket) };
+}
+
+/// Starts a connect and says how it went.
+///
+/// **`#[inline(never)]` for the reason [`would_block`] is**: the error is
+/// read from this thread's `errno` with no suspension between the call and
+/// the read.
+#[cfg(not(windows))]
+#[inline(never)]
+fn start_connect(socket: Socket, address: &std::net::SocketAddr) -> Started {
+    let (storage, length) = sockaddr_of(address);
+    // SAFETY: `storage` holds a `sockaddr` of `length` bytes for the address's
+    // family, live for the call.
+    let done = unsafe { libc::connect(socket, (&raw const storage).cast(), length) };
+    if done == 0 {
+        return Started::Connected;
+    }
+    let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    // `EINTR` leaves the connect going on in the background, as
+    // `EINPROGRESS` does; POSIX says so, and a signal must not lose it.
+    if errno == libc::EINPROGRESS || errno == libc::EINTR {
+        Started::Pending
+    } else {
+        Started::Failed
+    }
+}
+
+#[cfg(windows)]
+#[inline(never)]
+fn start_connect(socket: Socket, address: &std::net::SocketAddr) -> Started {
+    use windows_sys::Win32::Networking::WinSock::{connect, WSAGetLastError, WSAEWOULDBLOCK};
+    let (storage, length) = sockaddr_of(address);
+    // SAFETY: `storage` holds a `SOCKADDR` of `length` bytes for the address's
+    // family, live for the call.
+    let done = unsafe { connect(socket, (&raw const storage).cast(), length) };
+    if done == 0 {
+        return Started::Connected;
+    }
+    // SAFETY: no arguments; it reads this thread's last winsock error.
+    if unsafe { WSAGetLastError() } == WSAEWOULDBLOCK {
+        Started::Pending
+    } else {
+        Started::Failed
+    }
+}
+
+/// Where a pending connect stands now: the socket's own error if it has
+/// one, then whether it has a peer.
+///
+/// `#[inline(never)]` for the reason [`start_connect`] is.
+#[cfg(not(windows))]
+#[inline(never)]
+fn connect_state(socket: Socket) -> Started {
+    let mut error: libc::c_int = 0;
+    let mut length = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: `error` is a live `c_int` and `length` its size.
+    let read = unsafe {
+        libc::getsockopt(socket, libc::SOL_SOCKET, libc::SO_ERROR, (&raw mut error).cast(), &raw mut length)
+    };
+    if read != 0 || error != 0 {
+        return Started::Failed;
+    }
+    // SAFETY: `peer` is zeroed storage large enough for any address, and
+    // `length` says so.
+    let mut peer: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut length = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+    // SAFETY: as above.
+    if unsafe { libc::getpeername(socket, (&raw mut peer).cast(), &raw mut length) } == 0 {
+        return Started::Connected;
+    }
+    let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    if errno == libc::ENOTCONN { Started::Pending } else { Started::Failed }
+}
+
+#[cfg(windows)]
+#[inline(never)]
+fn connect_state(socket: Socket) -> Started {
+    use windows_sys::Win32::Networking::WinSock::{
+        getpeername, getsockopt, WSAGetLastError, SOCKADDR_STORAGE, SOL_SOCKET, SO_ERROR, WSAENOTCONN,
+    };
+    let mut error: i32 = 0;
+    let mut length = std::mem::size_of::<i32>() as i32;
+    // SAFETY: `error` is a live `i32` and `length` its size.
+    let read = unsafe { getsockopt(socket, SOL_SOCKET, SO_ERROR, (&raw mut error).cast(), &raw mut length) };
+    if read != 0 || error != 0 {
+        return Started::Failed;
+    }
+    // SAFETY: plain data, filled in by the call below.
+    let mut peer: SOCKADDR_STORAGE = unsafe { std::mem::zeroed() };
+    let mut length = std::mem::size_of::<SOCKADDR_STORAGE>() as i32;
+    // SAFETY: `peer` is live storage of `length` bytes.
+    if unsafe { getpeername(socket, (&raw mut peer).cast(), &raw mut length) } == 0 {
+        return Started::Connected;
+    }
+    // SAFETY: no arguments; it reads this thread's last winsock error.
+    if unsafe { WSAGetLastError() } == WSAENOTCONN { Started::Pending } else { Started::Failed }
+}
+
+/// An address as the bytes `connect` takes, and how many of them count.
+#[cfg(not(windows))]
+fn sockaddr_of(address: &std::net::SocketAddr) -> (libc::sockaddr_storage, libc::socklen_t) {
+    // SAFETY: `sockaddr_storage` is plain data; zero is a valid value of it,
+    // and every field the call reads is set below.
+    let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let length = match address {
+        std::net::SocketAddr::V4(v4) => {
+            // SAFETY: `sockaddr_storage` is larger than and aligned for any
+            // `sockaddr_*`, which is what it exists for.
+            let into = unsafe { &mut *(&raw mut storage).cast::<libc::sockaddr_in>() };
+            into.sin_family = libc::AF_INET as libc::sa_family_t;
+            into.sin_port = v4.port().to_be();
+            into.sin_addr = libc::in_addr { s_addr: u32::from_ne_bytes(v4.ip().octets()) };
+            #[cfg(target_vendor = "apple")]
+            {
+                into.sin_len = std::mem::size_of::<libc::sockaddr_in>() as u8;
+            }
+            std::mem::size_of::<libc::sockaddr_in>()
+        }
+        std::net::SocketAddr::V6(v6) => {
+            // SAFETY: as above.
+            let into = unsafe { &mut *(&raw mut storage).cast::<libc::sockaddr_in6>() };
+            into.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+            into.sin6_port = v6.port().to_be();
+            into.sin6_flowinfo = v6.flowinfo();
+            into.sin6_addr = libc::in6_addr { s6_addr: v6.ip().octets() };
+            into.sin6_scope_id = v6.scope_id();
+            #[cfg(target_vendor = "apple")]
+            {
+                into.sin6_len = std::mem::size_of::<libc::sockaddr_in6>() as u8;
+            }
+            std::mem::size_of::<libc::sockaddr_in6>()
+        }
+    };
+    (storage, length as libc::socklen_t)
+}
+
+#[cfg(windows)]
+fn sockaddr_of(
+    address: &std::net::SocketAddr,
+) -> (windows_sys::Win32::Networking::WinSock::SOCKADDR_STORAGE, i32) {
+    use windows_sys::Win32::Networking::WinSock::{
+        AF_INET, AF_INET6, IN6_ADDR, IN6_ADDR_0, IN_ADDR, IN_ADDR_0, SOCKADDR_IN, SOCKADDR_IN6,
+        SOCKADDR_IN6_0, SOCKADDR_STORAGE,
+    };
+    // SAFETY: plain data; zero is a valid value, and the part the call reads
+    // is written below.
+    let mut storage: SOCKADDR_STORAGE = unsafe { std::mem::zeroed() };
+    let length = match address {
+        std::net::SocketAddr::V4(v4) => {
+            let value = SOCKADDR_IN {
+                sin_family: AF_INET,
+                sin_port: v4.port().to_be(),
+                sin_addr: IN_ADDR { S_un: IN_ADDR_0 { S_addr: u32::from_ne_bytes(v4.ip().octets()) } },
+                sin_zero: [0; 8],
+            };
+            // SAFETY: `SOCKADDR_STORAGE` is larger than and aligned for any
+            // `SOCKADDR_*`, which is what it exists for.
+            unsafe { (&raw mut storage).cast::<SOCKADDR_IN>().write(value) };
+            std::mem::size_of::<SOCKADDR_IN>()
+        }
+        std::net::SocketAddr::V6(v6) => {
+            let value = SOCKADDR_IN6 {
+                sin6_family: AF_INET6,
+                sin6_port: v6.port().to_be(),
+                sin6_flowinfo: v6.flowinfo(),
+                sin6_addr: IN6_ADDR { u: IN6_ADDR_0 { Byte: v6.ip().octets() } },
+                Anonymous: SOCKADDR_IN6_0 { sin6_scope_id: v6.scope_id() },
+            };
+            // SAFETY: as above.
+            unsafe { (&raw mut storage).cast::<SOCKADDR_IN6>().write(value) };
+            std::mem::size_of::<SOCKADDR_IN6>()
+        }
+    };
+    (storage, length as i32)
+}
+
+/// Turns Nagle off. Best effort: a socket that refuses still works.
+#[cfg(not(windows))]
+fn no_delay(socket: Socket) {
+    let on: libc::c_int = 1;
+    // SAFETY: `on` is a live `c_int` and the length is its size.
+    unsafe {
+        libc::setsockopt(
+            socket,
+            libc::IPPROTO_TCP,
+            libc::TCP_NODELAY,
+            (&raw const on).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+}
+
+#[cfg(windows)]
+fn no_delay(socket: Socket) {
+    use windows_sys::Win32::Networking::WinSock::{setsockopt, IPPROTO_TCP, TCP_NODELAY};
+    let on: i32 = 1;
+    // SAFETY: `on` is a live `i32` and the length is its size.
+    unsafe { setsockopt(socket, IPPROTO_TCP, TCP_NODELAY, (&raw const on).cast(), 4) };
 }
 
 #[unsafe(no_mangle)]
@@ -228,13 +804,7 @@ pub unsafe extern "C" fn khora_net_connect(host: *const u8, host_len: u64, port:
 /// Replaces `setsockopt(SO_RCVTIMEO)`, which cannot fire on a socket the
 /// reactor drives. Zero clears it.
 pub extern "C" fn khora_net_set_timeout(socket: Socket, millis: i64) -> i32 {
-    let mut guard = TIMEOUTS.lock().expect("the receive deadlines");
-    let table = guard.get_or_insert_with(std::collections::HashMap::new);
-    if millis <= 0 {
-        table.remove(&key(socket));
-    } else {
-        table.insert(key(socket), millis as u64);
-    }
+    change_limits(socket, |limits| limits.per_read = (millis > 0).then_some(millis as u64));
     0
 }
 
@@ -244,7 +814,7 @@ pub extern "C" fn khora_net_set_timeout(socket: Socket, millis: i64) -> i32 {
 /// next connection to be handed this number would inherit the deadline.
 #[unsafe(no_mangle)]
 pub extern "C" fn khora_net_forget(socket: Socket) {
-    if let Some(table) = TIMEOUTS.lock().expect("the receive deadlines").as_mut() {
+    if let Some(table) = LIMITS.lock().expect("the socket limits").as_mut() {
         table.remove(&key(socket));
     }
 }
@@ -312,22 +882,34 @@ pub unsafe extern "C" fn khora_net_recv(socket: Socket, into: *mut u8, length: i
         if read >= 0 || !would_block() {
             return read;
         }
-        if !wait(socket, Interest::Readable, deadline) {
-            // **A negative return, and nothing else** — no `EAGAIN` to
-            // imitate `SO_RCVTIMEO` down to the error number.
-            //
-            // Unnecessary: no Khora reads it. `std::net` looks at the sign, and
-            // `std::fs` says outright that C's error numbers are a table it
-            // declines to know.
-            //
-            // And unsound, because `errno` is thread-local and a fiber is not.
-            // It would be set on whichever worker is running, and a fiber that
-            // suspends before its caller looks — at any safepoint, which is
-            // every loop back-edge — reads it off a thread that never made the
-            // call. Any shim tempted to report through `errno` has the same
-            // problem.
-            return -1;
+        let woke = wait(socket, Interest::Readable, deadline);
+        if woke == Woke::Ready {
+            continue;
         }
+        // One more look, so bytes or a close that came with the deadline are
+        // the answer rather than the deadline.
+        // SAFETY: as above.
+        let read = unsafe { raw_recv(socket, into, length) };
+        if read >= 0 || !would_block() {
+            return read;
+        }
+        if woke == Woke::TimedOut {
+            note_if_expired(socket);
+        }
+        // **A negative return, and nothing else** — no `EAGAIN` to
+        // imitate `SO_RCVTIMEO` down to the error number.
+        //
+        // Unnecessary: no Khora reads it. `std::net` looks at the sign, and
+        // `std::fs` says outright that C's error numbers are a table it
+        // declines to know.
+        //
+        // And unsound, because `errno` is thread-local and a fiber is not.
+        // It would be set on whichever worker is running, and a fiber that
+        // suspends before its caller looks — at any safepoint, which is
+        // every loop back-edge — reads it off a thread that never made the
+        // call. Any shim tempted to report through `errno` has the same
+        // problem.
+        return -1;
     }
 }
 
@@ -369,13 +951,19 @@ pub unsafe extern "C" fn khora_net_send(socket: Socket, from: *const u8, length:
         if written == 0 || !would_block() {
             return -1;
         }
-        // A write that cannot proceed is back-pressure from the peer, and the
-        // deadline `std::net` sets is a *receive* timeout. Left alone until
-        // something asks for a send deadline by name.
+        // A write that cannot proceed is back-pressure from the peer. The
+        // per-read timeout is about a peer that stopped talking and does not
+        // apply; a deadline over the whole connection does, because a caller
+        // that set one meant every operation on it.
         //
-        // Canceled stops here too, for the reason `accept` does above.
-        if !wait(socket, Interest::Writable, None) {
-            return -1;
+        // Canceled stops here too, for the reason `accept` does below.
+        match wait(socket, Interest::Writable, send_deadline_for(socket)) {
+            Woke::Ready => {}
+            Woke::Stopped => return -1,
+            Woke::TimedOut => {
+                note_if_expired(socket);
+                return -1;
+            }
         }
     }
     sent
@@ -415,8 +1003,9 @@ pub unsafe extern "C" fn khora_net_accept(
         // will never be ready — which is the shape that hung a canceled
         // listener for ever. A negative return is what every other failure
         // here gives back; `std::net` reads the sign.
-        if !wait(socket, Interest::Readable, None) {
-            return -1;
+        match wait(socket, Interest::Readable, None) {
+            Woke::Ready => {}
+            Woke::Stopped | Woke::TimedOut => return -1,
         }
     }
 }
@@ -1167,5 +1756,305 @@ mod tests {
             seen.forced
         );
         assert_eq!(seen.failed, 0, "reads of a live stream failed: {seen:?}");
+    }
+
+    /// Runs `body` on a thread of its own and fails, naming `what`, if it has
+    /// not finished within ten seconds.
+    ///
+    /// **What it prevents: a test that hangs instead of failing.** Every test
+    /// below is about a wait that must end; with the fix broken, the wait is
+    /// the kernel's two minutes or for ever. The thread is left behind when
+    /// it overruns, which costs nothing once the test has failed.
+    fn within_ten_seconds<T: Send + 'static>(what: &str, body: impl FnOnce() -> T + Send + 'static) -> T {
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(body());
+        });
+        finished
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap_or_else(|_| panic!("{what} was still waiting after ten seconds"))
+    }
+
+    /// A listener whose next connect hangs: its accept queue is full, so the
+    /// kernel drops the next SYN. See `tests/connect_cancel.rs` in the LLVM
+    /// crate, which uses the same trick against a Khora program. Not on
+    /// Windows, which refuses a connect to a full queue instead.
+    #[cfg(not(windows))]
+    fn never_answering() -> (std::net::TcpListener, Vec<std::net::TcpStream>, std::net::SocketAddr) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+        let address = listener.local_addr().expect("an address");
+        let mut filled = Vec::new();
+        for _ in 0..1000 {
+            match std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(300)) {
+                Ok(stream) => filled.push(stream),
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return (listener, filled, address),
+                Err(e) => panic!("a full backlog answered {e}, so nothing here can hang"),
+            }
+        }
+        panic!("the backlog never filled");
+    }
+
+    /// **A connect to a listening port succeeds and hands back a socket the
+    /// peer sees**; one to a closed port fails at once. The plain cases of
+    /// [`connect_by`], off a scheduler and on one.
+    #[test]
+    fn a_connect_reaches_a_listener_and_a_closed_port_is_refused() {
+        use crate::coro::Task;
+        use crate::scheduler::Scheduler;
+        use std::sync::{Arc, Mutex};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+        let port = listener.local_addr().expect("an address").port();
+        let closed = {
+            let gone = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+            gone.local_addr().expect("an address").port()
+        };
+
+        let off = connect_by("127.0.0.1", port, None).expect("a connect off a scheduler");
+        let (_peer, _) = listener.accept().expect("the peer sees it");
+        raw_close(off);
+        assert_eq!(connect_by("127.0.0.1", closed, None), Err(Gave::Up));
+        assert_eq!(connect_by("localhost", port, None).map(raw_close), Ok(()), "by name");
+        let _ = listener.accept();
+
+        let seen = Arc::new(Mutex::new(None));
+        let said = seen.clone();
+        let pool = Scheduler::new(2);
+        pool.spawn(Task::new(move || {
+            let on = connect_by("127.0.0.1", port, None);
+            let refused = connect_by("127.0.0.1", closed, None);
+            *said.lock().expect("the outcome") = Some((on.map(raw_close), refused));
+        }));
+        let (_peer, _) = listener.accept().expect("the peer sees the fiber's connect");
+        pool.drain();
+        assert_eq!(*seen.lock().expect("the outcome"), Some((Ok(()), Err(Gave::Up))));
+    }
+
+    /// **A deadline ends a connect nobody answers**, on a worker and off one,
+    /// and well before the kernel would.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_connect_nobody_answers_gives_up_at_its_deadline() {
+        use crate::coro::Task;
+        use crate::scheduler::Scheduler;
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        let (_listener, _filled, address) = never_answering();
+        let port = address.port();
+
+        let off = within_ten_seconds("a connect off a scheduler with a 100 ms deadline", move || {
+            connect_by("127.0.0.1", port, Some(Instant::now() + Duration::from_millis(100)))
+        });
+        assert_eq!(off, Err(Gave::TimedOut), "off a scheduler");
+
+        let seen = Arc::new(Mutex::new(None));
+        let said = seen.clone();
+        within_ten_seconds("a connect on a worker with a 100 ms deadline", move || {
+            let pool = Scheduler::new(2);
+            pool.spawn(Task::new(move || {
+                let began = Instant::now();
+                let on = connect_by("127.0.0.1", port, Some(Instant::now() + Duration::from_millis(100)));
+                *said.lock().expect("the outcome") = Some((on, began.elapsed()));
+            }));
+            pool.drain();
+        });
+        let (on, took) = seen.lock().expect("the outcome").expect("it ran");
+        assert_eq!(on, Err(Gave::TimedOut), "on a worker");
+        assert!(took < Duration::from_secs(5), "on a worker it took {took:?}");
+    }
+
+    /// **A cancel ends a connect nobody answers, off a scheduler**: the
+    /// thread backend's path, where the thread waits in slices and looks for
+    /// the cancel between them.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_canceled_connect_off_a_scheduler_gives_up() {
+        use crate::current::{enter, Fiber};
+        use std::time::{Duration, Instant};
+
+        let (_listener, _filled, address) = never_answering();
+        let port = address.port();
+        let fiber = Fiber::spawned();
+        let dialer = {
+            let fiber = std::sync::Arc::clone(&fiber);
+            std::thread::spawn(move || {
+                let _in = enter(fiber);
+                connect_by("127.0.0.1", port, None)
+            })
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        let canceled = Instant::now();
+        fiber.cancel();
+        let answer = within_ten_seconds("a canceled connect", move || dialer.join().expect("the dialer"));
+        let took = canceled.elapsed();
+        assert_eq!(answer, Err(Gave::Stopped));
+        assert!(took < Duration::from_secs(2), "the cancel took {took:?} to land");
+    }
+
+    /// **A lookup that never comes back is abandoned on a cancel and on a
+    /// deadline**, and its value goes nowhere. The work here stands in for a
+    /// resolver that hangs: it blocks until the test lets it go.
+    #[test]
+    fn an_abandonable_call_gives_up_on_a_cancel_and_on_a_deadline() {
+        use crate::blocking::{abandonable_on, pool, Abandoned};
+        let abandonable = |work, by| abandonable_on(pool(), work, by);
+        use crate::current::{enter, Fiber};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let release = Arc::new(AtomicBool::new(false));
+        let hang = |release: Arc<AtomicBool>| {
+            move || {
+                while !release.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                7
+            }
+        };
+
+        let began = Instant::now();
+        let work = hang(release.clone());
+        let timed = within_ten_seconds("an abandonable call with a 50 ms deadline", move || {
+            abandonable(work, Some(Instant::now() + Duration::from_millis(50)))
+        });
+        assert_eq!(timed, Err(Abandoned::TimedOut));
+        assert!(began.elapsed() < Duration::from_secs(2), "{:?}", began.elapsed());
+
+        let fiber = Fiber::spawned();
+        let waiter = {
+            let fiber = Arc::clone(&fiber);
+            let work = hang(release.clone());
+            std::thread::spawn(move || {
+                let _in = enter(fiber);
+                abandonable(work, None)
+            })
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        let canceled = Instant::now();
+        fiber.cancel();
+        let answer = within_ten_seconds("a canceled abandonable call", move || waiter.join().expect("the waiter"));
+        assert_eq!(answer, Err(Abandoned::Stopped));
+        assert!(canceled.elapsed() < Duration::from_secs(2), "{:?}", canceled.elapsed());
+
+        // And one that is allowed to finish gives its value.
+        release.store(true, Ordering::SeqCst);
+        assert_eq!(abandonable_on(pool(), || 9, None), Ok(9));
+    }
+
+    /// **A deadline set on a socket ends a read that would otherwise wait, and
+    /// a write to a peer that never reads.** The receive limit alone renews
+    /// per read; this one is fixed.
+    #[test]
+    fn a_socket_deadline_ends_reads_and_writes() {
+        let (client, _peer) = a_connected_pair();
+        let socket = socket_of(&client);
+        assert_eq!(khora_net_prepare(socket), 0);
+        let at = crate::time::khora_monotonic_millis() + 100;
+        khora_net_set_deadline(socket, at);
+
+        let read = within_ten_seconds("a read past the socket's deadline", move || {
+            let mut buffer = [0u8; 4];
+            // SAFETY: four writable bytes.
+            unsafe { khora_net_recv(socket, buffer.as_mut_ptr(), 4) }
+        });
+        assert_eq!(read, -1);
+        let sent = within_ten_seconds("a write past the socket's deadline", move || {
+            let bytes = vec![0u8; 64 << 20];
+            // SAFETY: `bytes.len()` readable bytes.
+            unsafe { khora_net_send(socket, bytes.as_ptr(), bytes.len() as isize) }
+        });
+        assert_eq!(sent, -1);
+
+        khora_net_forget(socket);
+        assert!(deadline_for(socket).is_none() && send_deadline_for(socket).is_none());
+    }
+
+    /// **A refused connect is a refusal however late it arrives.** The cause
+    /// used to be read off the clock after the wait: a refusal that came back
+    /// at or past the deadline was reported as the deadline, about 2% of
+    /// refusals under a 1 ms budget. A deadline that has already passed when
+    /// the refusal is in makes that every time, so this asks two hundred
+    /// times and wants a refusal from each.
+    #[test]
+    fn a_refused_connect_is_not_reported_as_the_deadline() {
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+            listener.local_addr().expect("an address").port()
+        };
+        let mut timed_out = 0;
+        for _ in 0..200 {
+            match connect_by("127.0.0.1", port, Some(std::time::Instant::now())) {
+                Err(Gave::Up) => {}
+                Err(Gave::TimedOut) => timed_out += 1,
+                Ok(socket) => {
+                    raw_close(socket);
+                    panic!("a closed port accepted");
+                }
+                Err(Gave::Stopped) => panic!("nothing canceled this"),
+            }
+        }
+        assert_eq!(timed_out, 0, "{timed_out} of 200 refusals were reported as the deadline");
+    }
+
+    /// **A connection made for a fiber that was canceled meanwhile is closed,
+    /// not handed back.** Its caller stops at its next cancellation point
+    /// holding a plain handle nothing has registered, which is the socket a
+    /// canceled HTTP call leaked.
+    #[test]
+    fn a_connect_that_succeeds_for_a_canceled_fiber_closes_what_it_opened() {
+        use crate::current::{enter, Fiber};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+        let port = listener.local_addr().expect("an address").port();
+        let fiber = Fiber::spawned();
+        fiber.cancel();
+        let answer = {
+            let _in = enter(fiber);
+            connect_by("127.0.0.1", port, None)
+        };
+        assert_eq!(answer, Err(Gave::Stopped));
+        // The connection was made and then closed, so the listener has it
+        // queued and reading from it finds the end at once.
+        listener.set_nonblocking(false).expect("blocking");
+        let (mut accepted, _) = listener.accept().expect("the connection that was made");
+        accepted.set_read_timeout(Some(std::time::Duration::from_secs(5))).expect("a timeout");
+        let mut byte = [0u8; 1];
+        use std::io::Read;
+        assert_eq!(accepted.read(&mut byte).expect("a read that sees the close"), 0);
+    }
+
+    /// **A read the deadline ended says so, and one the per-read limit ended
+    /// does not.** Both come back -1, and the caller reports the first as
+    /// the call running out of time and the second as a peer that went
+    /// quiet. Told apart by the clock afterwards, a reset in the deadline's
+    /// last millisecond was a timeout.
+    #[test]
+    fn a_read_says_whether_the_deadline_ended_it() {
+        let (client, _peer) = a_connected_pair();
+        let socket = socket_of(&client);
+        assert_eq!(khora_net_prepare(socket), 0);
+        let read = move || {
+            let mut buffer = [0u8; 4];
+            // SAFETY: four writable bytes.
+            unsafe { khora_net_recv(socket, buffer.as_mut_ptr(), 4) }
+        };
+
+        // The per-read limit runs out long before the deadline.
+        khora_net_set_timeout(socket, 50);
+        khora_net_set_deadline(socket, crate::time::khora_monotonic_millis() + 60_000);
+        assert_eq!(within_ten_seconds("a read past its own limit", read), -1);
+        assert_eq!(khora_net_expired(socket), 0, "the per-read limit was taken for the deadline");
+
+        // Now the deadline comes first.
+        khora_net_set_timeout(socket, 0);
+        khora_net_set_deadline(socket, crate::time::khora_monotonic_millis() + 50);
+        assert_eq!(within_ten_seconds("a read past the deadline", read), -1);
+        assert_eq!(khora_net_expired(socket), 1, "the deadline ended the read and nothing says so");
+
+        // Setting the deadline again starts the account again.
+        khora_net_set_deadline(socket, -1);
+        assert_eq!(khora_net_expired(socket), 0);
+        khora_net_forget(socket);
     }
 }

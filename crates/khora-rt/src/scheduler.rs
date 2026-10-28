@@ -964,6 +964,31 @@ pub(crate) fn park_current_for(why: Why, on: usize) -> bool {
     true
 }
 
+/// [`park_current_for`], and woken at `at` as well if nothing else wakes it
+/// first.
+///
+/// **For a wait on something that cannot be asked to hurry**: a blocking-pool
+/// job whose caller has a deadline. The timer is left in the heap when
+/// something else wakes the fiber first, as [`sleep_until`]'s is: removing
+/// it is a linear walk of the heap, and when it fires later it leaves a
+/// notification that makes the fiber's next park return at once. Every park
+/// in the runtime is in a loop that looks again, so that costs one turn of
+/// some later loop.
+pub(crate) fn park_current_until(why: Why, on: usize, at: Option<std::time::Instant>) -> bool {
+    let Some(shared) = shared_pool() else { return false };
+    if let Some(at) = at {
+        let id = crate::current::current(|fiber| fiber.id());
+        let mut timers = shared.timers.lock().expect("the timers");
+        let first = timers.len() == 0;
+        timers.add(at, id);
+        // Under the lock, for the reason in `sleep_until`.
+        if first {
+            shared.timer_added.notify_one();
+        }
+    }
+    park_current_for(why, on)
+}
+
 /// Suspends the running fiber until `at`, or until it gives up on a stop.
 ///
 /// A wake belongs to the fiber, not to a particular wait: a cell or channel

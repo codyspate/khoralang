@@ -101,6 +101,36 @@ ever. The runtime keeps the deadline and a scheduler timer enforces it. A
 read that runs out still comes back negative, which is what every caller
 here already treats as a connection to give up on.
 
+### set_deadline
+
+```khora
+pub fn set_deadline(handle: Int, deadline: Int) -> Bool
+```
+
+Holds every later read and write on `handle` to `clock.monotonic_millis()`
+reaching `deadline`. Negative clears it.
+
+**One bound for a whole exchange**, where [`set_receive_timeout`](#set_receive_timeout) bounds
+each read on its own and is renewed by every byte, so a peer that sends
+one byte a second never trips it. Both apply when both are set: a read
+gives up at whichever comes first, and comes back negative.
+
+### expired
+
+```khora
+pub fn expired(handle: Int) -> Bool
+```
+
+Whether the deadline from [`set_deadline`](#set_deadline) is what ended a read or write
+on this connection.
+
+**The read's own account, not the clock's.** A read that came back
+negative just after the deadline may have failed for another reason --
+the peer reset the connection in the last millisecond -- and a caller
+telling a timeout from a broken peer by the time would call that a
+timeout. This says what the read itself gave up on. It stays true until
+the deadline is set again.
+
 ### receive
 
 ```khora
@@ -142,12 +172,30 @@ A database driver is the first caller that needs the other direction.
 platform's own resolver are the runtime's, which is why this is one extern
 rather than `getaddrinfo` and two `sockaddr` layouts written three times.
 [The ffi design note](https://github.com/codyspate/khoralang/blob/main/docs/design/ffi.md) is the boundary and `khora_net_connect` is on the far
-side of it.
+side of it. Every address the name resolves to is tried in turn, and the
+first that accepts is the connection.
 
-**It blocks the fiber's worker while it connects.** A DNS lookup is not
-something the reactor can wait on. That is once per connection against many
-queries, which is the right thing to get wrong first — a known cost rather
-than one left to be found.
+**A cancellation point, and it costs the fiber's worker nothing while it
+waits.** The connect waits on the reactor, as `accept_on` does, so a fiber
+canceled while dialing a host that never answers stops at once rather
+than when the operating system gives up, which can be minutes. A name
+lookup cannot be waited on that way; it runs on the blocking pool, and a
+canceled caller stops waiting for it and leaves it to finish alone.
+
+### connect_by
+
+```khora
+pub fn connect_by(host: String, port: Int, deadline: Int) -> Int
+```
+
+[`connect_to`](#connect_to), giving up once `clock.monotonic_millis()` reaches
+`deadline`. Every way of not connecting, the deadline included, is
+[`invalid_handle`](#invalid_handle).
+
+The deadline covers the lookup and the connect. It is an instant rather
+than a length, so that a caller with one budget for several steps hands
+each the same number. Negative means none. The connection that comes back
+carries no deadline; [`set_deadline`](#set_deadline) puts one on it.
 
 ### transmit_bytes
 

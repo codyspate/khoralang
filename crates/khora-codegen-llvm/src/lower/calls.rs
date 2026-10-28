@@ -428,14 +428,15 @@ pub(super) enum GaveUp {
 /// **A list, and deliberately short.** Every other `khora_` export either does
 /// not block -- `khora_print`, and `khora_cancel` itself: checking after those
 /// would make every `print` a cancellation point -- or does not give up on a
-/// cancel: `khora_net_connect` is a blocking `connect(2)`, and process wait is
-/// a blocking `wait`, both stated limits. TLS reads and writes go through
-/// `khora_net_recv` and `khora_net_send`, so they give up the same way.
+/// cancel: process wait is a blocking `wait`, a stated limit. TLS reads and
+/// writes go through `khora_net_recv` and `khora_net_send`, so they give up the
+/// same way, and both connects wait on the reactor for the socket to become
+/// writable.
 fn gives_up_on_cancel(name: &str) -> Option<GaveUp> {
     match name {
         "khora_sleep" => Some(GaveUp::Always),
-        "khora_net_accept" | "khora_net_recv" | "khora_net_send" | "khora_tls_read"
-        | "khora_tls_write" => Some(GaveUp::Negative),
+        "khora_net_accept" | "khora_net_recv" | "khora_net_send" | "khora_net_connect"
+        | "khora_tls_read" | "khora_tls_write" => Some(GaveUp::Negative),
         "khora_tls_accept" | "khora_tls_connect" => Some(GaveUp::Null),
         _ => None,
     }

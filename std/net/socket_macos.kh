@@ -43,7 +43,9 @@ extern fn khora_net_send(handle: I32, from: Ptr, length: Int) -> Int;
 extern fn khora_net_accept(handle: I32, address: Ptr, length: Ptr) -> I32;
 extern fn khora_net_set_timeout(handle: I32, millis: Int) -> I32;
 extern fn khora_net_forget(handle: I32) -> ();
-extern fn khora_net_connect(host: Ptr, host_len: Int, port: Int) -> Int;
+extern fn khora_net_connect(host: Ptr, host_len: Int, port: Int, deadline: Int) -> Int;
+extern fn khora_net_set_deadline(handle: I32, deadline: Int) -> I32;
+extern fn khora_net_expired(handle: I32) -> I32;
 
 /// A failed call returns -1, and a handle is never negative.
 pub fn invalid_handle() -> Int { -1 }
@@ -159,6 +161,30 @@ pub fn set_receive_timeout(handle: Int, millis: Int) -> Bool {
   khora_net_set_timeout(I32::of(handle), millis) == I32::of(0)
 }
 
+/// Holds every later read and write on `handle` to `clock.monotonic_millis()`
+/// reaching `deadline`. Negative clears it.
+///
+/// **One bound for a whole exchange**, where [`set_receive_timeout`] bounds
+/// each read on its own and is renewed by every byte, so a peer that sends
+/// one byte a second never trips it. Both apply when both are set: a read
+/// gives up at whichever comes first, and comes back negative.
+pub fn set_deadline(handle: Int, deadline: Int) -> Bool {
+  khora_net_set_deadline(I32::of(handle), deadline) == I32::of(0)
+}
+
+/// Whether the deadline from [`set_deadline`] is what ended a read or write
+/// on this connection.
+///
+/// **The read's own account, not the clock's.** A read that came back
+/// negative just after the deadline may have failed for another reason --
+/// the peer reset the connection in the last millisecond -- and a caller
+/// telling a timeout from a broken peer by the time would call that a
+/// timeout. This says what the read itself gave up on. It stays true until
+/// the deadline is set again.
+pub fn expired(handle: Int) -> Bool {
+  khora_net_expired(I32::of(handle)) == I32::of(1)
+}
+
 /// Reads what has arrived into `buffer`, and says how many bytes that was.
 ///
 /// Zero means the other end closed; negative means the read failed.
@@ -188,14 +214,35 @@ pub fn transmit(connection: Int, text: String) -> Int {
 /// platform's own resolver are the runtime's, which is why this is one extern
 /// rather than `getaddrinfo` and two `sockaddr` layouts written three times.
 /// [The ffi design note](https://github.com/codyspate/khoralang/blob/main/docs/design/ffi.md) is the boundary and `khora_net_connect` is on the far
-/// side of it.
+/// side of it. Every address the name resolves to is tried in turn, and the
+/// first that accepts is the connection.
 ///
-/// **It blocks the fiber's worker while it connects.** A DNS lookup is not
-/// something the reactor can wait on. That is once per connection against many
-/// queries, which is the right thing to get wrong first — a known cost rather
-/// than one left to be found.
+/// **A cancellation point, and it costs the fiber's worker nothing while it
+/// waits.** The connect waits on the reactor, as `accept_on` does, so a fiber
+/// canceled while dialing a host that never answers stops at once rather
+/// than when the operating system gives up, which can be minutes. A name
+/// lookup cannot be waited on that way; it runs on the blocking pool, and a
+/// canceled caller stops waiting for it and leaves it to finish alone.
 pub fn connect_to(host: String, port: Int) -> Int {
-  String::with_data(host, fn (from, n) => khora_net_connect(from, n, port))
+  // The extern itself rather than `connect_by`, so that the compiler sees a
+  // runtime export called right here and checks for a cancel at this call.
+  String::with_data(host, fn (from, n) => khora_net_connect(from, n, port, -1))
+}
+
+/// [`connect_to`], giving up once `clock.monotonic_millis()` reaches
+/// `deadline`. Every way of not connecting, the deadline included, is
+/// [`invalid_handle`].
+///
+/// The deadline covers the lookup and the connect. It is an instant rather
+/// than a length, so that a caller with one budget for several steps hands
+/// each the same number. Negative means none. The connection that comes back
+/// carries no deadline; [`set_deadline`] puts one on it.
+pub fn connect_by(host: String, port: Int, deadline: Int) -> Int {
+  // The runtime answers -2 when the deadline was the cause, for
+  // `std::net::http`, which reports that differently. Here it is a failure
+  // like the others.
+  let handle = String::with_data(host, fn (from, n) => khora_net_connect(from, n, port, deadline));
+  if handle < 0 { invalid_handle() } else { handle }
 }
 
 /// Writes all of `bytes`, and says how many went: every one of them, or a

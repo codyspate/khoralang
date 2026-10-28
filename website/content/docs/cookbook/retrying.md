@@ -42,6 +42,7 @@ fn worth_retrying(failure: Raised<CallError>) -> Bool {
     CallError::Closed(_why) => true,
     CallError::Malformed(_why) => false,
     CallError::TooLarge(_limit) => false,
+    CallError::TimedOut(_millis) => true,
   }
 }
 

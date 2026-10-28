@@ -549,7 +549,8 @@ pub type CallError =
   | Closed(String)
   | Malformed(String)
   | TooLarge(Int)
-  | Denied(String);
+  | Denied(String)
+  | TimedOut(Int);
 ```
 
 What can go wrong reaching somebody else.
@@ -619,6 +620,21 @@ places: `Unreachable` is DNS, a firewall, a service that is down, and
 `Denied` is `[permissions] network` in `khora.toml`. Reported as
 `host:port` so the line that would allow it can be copied out of the
 message.
+
+#### TimedOut
+
+```khora
+| TimedOut(Int)
+```
+
+The call's whole deadline passed, in milliseconds, before the answer
+was whole: the lookup, the connect, the handshake, the request or the
+answer, whichever it was in.
+
+**Its own case, not `Closed`**, because the two want different things
+from a caller. A peer that hung up may answer the next call; a call that
+ran out of time against a slow service mostly wants a longer budget or
+fewer retries, and a retry loop that cannot tell them apart retries both.
 
 ## Effects
 
@@ -1447,7 +1463,8 @@ impl HttpClient
 pub fn real() -> HttpClient
 ```
 
-A client that really connects, holding up to `default_answer_limit`.
+A client that really connects, holding up to `default_answer_limit`
+and giving each call `default_call_deadline`.
 
 #### bounded
 
@@ -1456,6 +1473,51 @@ pub fn bounded(limit: Int) -> HttpClient
 ```
 
 The same, holding up to `limit` bytes of answer.
+
+#### within
+
+```khora
+pub fn within(millis: Int) -> HttpClient
+```
+
+A client giving each call `millis` milliseconds from start to finish,
+and holding up to `default_answer_limit`.
+
+The budget covers everything the call does: resolving the name,
+connecting, the TLS handshake, writing the request, and reading the
+headers and the body. A call that runs out is `CallError::TimedOut`,
+and whatever it had opened is closed.
+
+**Which limit wins:** with a deadline, every read waits for as long as
+the deadline leaves, however long that is, and `default_answer_timeout`
+does not apply. Zero or less means no deadline, which leaves only
+`default_answer_timeout` on each read, renewed by every byte.
+
+`TimedOut` means the deadline ended the call. A failure that merely
+happened late -- a refusal, a reset, a bad certificate arriving in the
+last millisecond -- is reported as what it was.
+
+```khora
+import std::net::http::{Call, HttpClient};
+
+fn health(url: String) -> Bool {
+  with { http: HttpClient::within(2000) } {
+    match http.send(Call::get(url)) {
+      Result::Ok(answer) => answer.ok(),
+      Result::Err(_) => false,
+    }
+  }
+}
+```
+
+#### bounded_within
+
+```khora
+pub fn bounded_within(limit: Int, millis: Int) -> HttpClient
+```
+
+A client holding up to `limit` bytes of answer and giving each call
+`millis` milliseconds, as `HttpClient::within` does.
 
 ## Functions
 
@@ -1585,14 +1647,38 @@ a caller who knows they are fetching something bigger.
 pub fn default_answer_timeout() -> Int
 ```
 
-How long to wait for bytes that are not arriving, in milliseconds.
+How long to wait for bytes that are not arriving, in milliseconds, on a
+call with no deadline.
 
-**On both paths now.** It was the plain one only, because
-`set_receive_timeout` takes a socket and a TLS session owns its socket
-rather than handing it back -- so a TLS server that accepted the connection
-and then said nothing held the fiber until the process ended.
-`std::net::tls` sets the deadline on the socket underneath, and `dial` uses
-it for `https` exactly as it does for `http`.
+On both paths: `std::net::tls` sets it on the socket underneath, and
+`dial` uses it for `https` exactly as it does for `http`. A TLS server that
+accepts the connection and then says nothing is the case it is for.
+
+**A call with a deadline is bounded by the deadline alone.** So
+`HttpClient::within(60000)` against a server slow to its first byte waits
+up to a minute for it, and a call that runs out is `CallError::TimedOut`.
+
+### default_call_deadline
+
+```khora
+pub fn default_call_deadline() -> Int
+```
+
+How long a whole call may take when nobody says otherwise, in
+milliseconds: thirty seconds.
+
+**A bound on the call, where `default_answer_timeout` is a bound on one
+read.** A read limit is renewed by every byte, so a server that trickles an
+answer a byte at a time holds the calling fiber for as long as it likes
+without tripping it, and a lookup or a connect is not a read at all. This
+is the one that ends both.
+
+Thirty seconds, the same as the read limit, so a default call can never
+take longer than one silent read could already hold it. What it costs: a
+call whose separate steps each took most of the read limit -- a slow
+connect, then a slow first byte -- is cut off where the read limit alone
+would have let it finish, and so is a large download over a slow link.
+`HttpClient::within` is how a caller who expects that says so.
 
 ### parse_url
 

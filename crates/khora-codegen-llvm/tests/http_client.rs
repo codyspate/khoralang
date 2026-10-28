@@ -60,6 +60,7 @@ fn said(why: CallError) -> String {{
     CallError::Malformed(m) => "malformed: " + m,
     CallError::TooLarge(n) => "too large: " + Int::to_string(n),
     CallError::Denied(m) => "denied: " + m,
+    CallError::TimedOut(n) => "timed out: " + Int::to_string(n),
   }}
 }}
 

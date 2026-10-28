@@ -174,19 +174,6 @@ fn adopt(handle: i64) -> Wire {
     Wire(as_socket(handle))
 }
 
-/// Takes the handle out of a `TcpStream`, so that closing becomes ours.
-#[cfg(windows)]
-fn surrender(stream: TcpStream) -> Socket {
-    use std::os::windows::io::IntoRawSocket;
-    stream.into_raw_socket() as Socket
-}
-
-#[cfg(not(windows))]
-fn surrender(stream: TcpStream) -> Socket {
-    use std::os::fd::IntoRawFd;
-    stream.into_raw_fd()
-}
-
 /// A server's certificate chain and key, ready to accept connections.
 ///
 /// PEM in both cases, because that is what a certificate arrives as: from a
@@ -355,22 +342,32 @@ pub unsafe extern "C" fn khora_tls_client_close(client: *mut u8) {
 }
 
 /// Connects to `host:port` and handshakes, verifying the certificate names
-/// `host`.
+/// `host`, giving up when the fiber is canceled or the monotonic clock
+/// reaches `at` (negative for never).
 ///
 /// **The TCP connection is made here too**, which is not scope creep: it needs
 /// a name resolved, and `getaddrinfo` across `extern fn` would be a `struct
 /// addrinfo` crossing the ABI — which errata 35 forbids, and which nobody
-/// should hand-roll twice. `TcpStream::connect` takes a name and a port.
+/// should hand-roll twice. It goes through the same reactor-driven connect as
+/// `khora_net_connect`, so a canceled fiber inside it stops at once rather
+/// than when the kernel gives up on a host that never answers.
 ///
-/// Null if the name does not resolve, the connection is refused, or the
-/// certificate does not verify. **There is no argument that turns verification
-/// off.** A caller who must trust something unusual adds it as a root when the
-/// client is built, where a reviewer can see which certificate and why.
+/// **`at` bounds the handshake as well**, by holding the socket to it while
+/// the handshake runs; it is cleared once the session is up, and
+/// [`khora_tls_set_deadline`] is how a caller keeps one on the session.
+///
+/// Null if the name does not resolve, the connection is refused, the
+/// certificate does not verify, the deadline passes or the fiber is
+/// canceled; `why` is set to 1 when the deadline was the cause and 0
+/// otherwise, so the caller need not guess it from the clock. **There is no argument that turns verification off.** A caller
+/// who must trust something unusual adds it as a root when the client is
+/// built, where a reviewer can see which certificate and why.
 ///
 /// # Safety
 ///
-/// `client` must have come from [`khora_tls_client_open`], and `host` must
-/// address `host_len` readable bytes.
+/// `client` must have come from [`khora_tls_client_open`], `host` must
+/// address `host_len` readable bytes, and `why` must be null or address one
+/// writable `i64`.
 #[unsafe(no_mangle)]
 // SHARE: a runtime-owned TLS object, not a Khora value.
 pub unsafe extern "C" fn khora_tls_connect(
@@ -378,12 +375,23 @@ pub unsafe extern "C" fn khora_tls_connect(
     host: *const u8,
     host_len: usize,
     port: i64,
+    at: i64,
+    why: *mut i64,
 ) -> *mut u8 {
+    let say = |deadline: bool| {
+        if !why.is_null() {
+            // SAFETY: the caller guarantees `why` is null or one writable
+            // `i64`, and it is not null here.
+            unsafe { why.write(i64::from(deadline)) };
+        }
+    };
+    say(false);
     if client.is_null() || host.is_null() || !(1..=65535).contains(&port) {
         return std::ptr::null_mut();
     }
     // SAFETY: per the contract above.
     let config = unsafe { &*client.cast::<Arc<ClientConfig>>() };
+    // SAFETY: per the contract above.
     let bytes = unsafe { std::slice::from_raw_parts(host, host_len) };
     let Ok(host) = std::str::from_utf8(bytes) else { return std::ptr::null_mut() };
 
@@ -393,22 +401,72 @@ pub unsafe extern "C" fn khora_tls_connect(
     let Ok(mut connection) = ClientConnection::new(Arc::clone(config), name) else {
         return std::ptr::null_mut();
     };
-    // **Still a blocking connect**, and that is a gap rather than a decision:
-    // resolving a name and completing a three-way handshake both hold the
-    // worker. It belongs in the blocking pool that 11E built, and wants a
-    // caller that has noticed it before it is worth the churn.
-    let Ok(connected) = TcpStream::connect((host, port as u16)) else {
-        return std::ptr::null_mut();
+    let deadline = (at >= 0).then(|| crate::time::instant_of(at));
+    let socket = match crate::net::connect_by(host, port as u16, deadline) {
+        Ok(socket) => socket,
+        Err(crate::net::Gave::TimedOut) => {
+            say(true);
+            return std::ptr::null_mut();
+        }
+        Err(crate::net::Gave::Up | crate::net::Gave::Stopped) => return std::ptr::null_mut(),
     };
-    // The handle is taken out of the `TcpStream` so that `Wire` owns it and
-    // closes it, and prepared so that the handshake and everything after it
-    // suspend the fiber rather than the worker.
-    let mut stream = Wire(surrender(connected));
-    crate::net::khora_net_prepare(stream.0);
+    // `Wire` owns the handle from here and closes it on every path out,
+    // the failed handshake included.
+    let mut stream = Wire(socket);
+    crate::net::khora_net_set_deadline(stream.0, at);
     if connection.complete_io(&mut stream).is_err() {
+        say(crate::net::khora_net_expired(stream.0) != 0);
         return std::ptr::null_mut();
     }
+    // A session finished for a fiber canceled meanwhile goes the way a bare
+    // connection does in `connect_by`: closed here, because its caller stops
+    // before it can register it.
+    if crate::current::current(|f| f.gives_up_waiting()) {
+        return std::ptr::null_mut();
+    }
+    crate::net::khora_net_set_deadline(stream.0, -1);
     Box::into_raw(Box::new(Secured::Calling(StreamOwned::new(connection, stream)))).cast()
+}
+
+/// Holds every later read and write on this session to the monotonic clock
+/// reaching `at`, or clears that with a negative `at`.
+///
+/// The session's half of `khora_net_set_deadline`, set on the socket
+/// underneath for the reason [`khora_tls_set_timeout`] is. Answers 0, or -1
+/// if the connection is null.
+///
+/// # Safety
+///
+/// `connection` must be null or have come from [`khora_tls_accept`] or
+/// [`khora_tls_connect`].
+#[unsafe(no_mangle)]
+// SHARE: a runtime-owned TLS object, not a Khora value.
+pub unsafe extern "C" fn khora_tls_set_deadline(connection: *mut u8, at: i64) -> i32 {
+    if connection.is_null() {
+        return -1;
+    }
+    // SAFETY: per the contract above.
+    let secured = unsafe { &*connection.cast::<Secured>() };
+    crate::net::khora_net_set_deadline(secured.socket(), at)
+}
+
+/// Whether a read or write on this session gave up because the deadline set
+/// by [`khora_tls_set_deadline`] passed: 1 if so, 0 if not, or for a null
+/// connection.
+///
+/// # Safety
+///
+/// `connection` must be null or have come from [`khora_tls_accept`] or
+/// [`khora_tls_connect`].
+#[unsafe(no_mangle)]
+// SHARE: a runtime-owned TLS object, not a Khora value.
+pub unsafe extern "C" fn khora_tls_expired(connection: *mut u8) -> i32 {
+    if connection.is_null() {
+        return 0;
+    }
+    // SAFETY: per the contract above.
+    let secured = unsafe { &*connection.cast::<Secured>() };
+    crate::net::khora_net_expired(secured.socket())
 }
 
 /// How long a read on this session may wait before it reports a timeout.

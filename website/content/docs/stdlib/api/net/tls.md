@@ -36,12 +36,13 @@ pub type TlsError =
   | BadCertificate
   | BadKey
   | Handshake
-  | Unreachable(host: String);
+  | Unreachable(host: String)
+  | TimedOut;
 ```
 
 Why a TLS server could not start, or a connection could not be secured.
 
-Four cases, and only the last carries anything. A `rustls` diagnostic is
+Five cases, and only `Unreachable` carries anything. A `rustls` diagnostic is
 written for somebody debugging a handshake; what a Khora program can *do*
 about a failure is fix the certificate, fix the key, drop the client, or
 give up on the host -- and only that last one needs to say which host.
@@ -80,11 +81,23 @@ request to an HTTPS port, or a client with no cipher in common.
 A connection could not be made, or the server it reached did not present
 a certificate this client trusts for that name.
 
-One case rather than four. "Could not resolve", "refused", "expired" and
-"wrong name" are different to somebody debugging and identical to a
-program: it does not have the connection, and what it does next is retry
-or give up. Telling them apart wants an error that carries text, which is
-a separate piece of work.
+One case rather than three. "Could not resolve", "refused" and "wrong
+name" are different to somebody debugging and identical to a program: it
+does not have the connection, and what it does next is retry or give up.
+Telling them apart wants an error that carries text, which is a separate
+piece of work.
+
+#### TimedOut
+
+```khora
+| TimedOut
+```
+
+The deadline given to [`connect_by`](#connect_by) passed before the session was up.
+
+Separate from `Unreachable` because it is the one a caller acts on
+differently: a host that refused may refuse again, while a call that ran
+out of time mostly wants a longer budget.
 
 ### TlsServer
 
@@ -220,6 +233,27 @@ It is set on the socket underneath, where the reactor's timer lives; TLS
 never learns about it. A read that runs out fails, which every caller here
 already treats as a connection to give up on.
 
+### set_deadline
+
+```khora
+pub fn set_deadline(connection: TlsConnection, deadline: Int) -> Bool
+```
+
+Holds every later read and write on this connection to
+`clock.monotonic_millis()` reaching `deadline`. Negative clears it.
+
+`std::net::socket::set_deadline`, for a session: one bound for a whole
+exchange, beside [`set_receive_timeout`](#set_receive_timeout)'s bound on each read.
+
+### expired
+
+```khora
+pub fn expired(connection: TlsConnection) -> Bool
+```
+
+Whether the deadline from [`set_deadline`](#set_deadline) is what ended a read or write
+on this connection: `std::net::socket::expired`, for a session.
+
 ### shut
 
 ```khora
@@ -308,4 +342,22 @@ takes one.
 The socket is made here rather than passed in, because resolving a name
 needs `getaddrinfo` and a `struct addrinfo` cannot cross the C ABI. The
 runtime already has a resolver worth using.
+
+A cancellation point, from the lookup to the end of the handshake, as
+`std::net::socket::connect_to` is.
+
+### connect_by
+
+```khora
+pub fn connect_by(client: TlsClient, host: String, port: Int, deadline: Int) -> TlsConnection raises TlsError
+```
+
+[`connect`](#connect), giving up once `clock.monotonic_millis()` reaches
+`deadline`. Negative means none.
+
+The deadline covers the lookup, the TCP connect and the handshake, and
+expiring is `TlsError::TimedOut`: only when the deadline was what ended
+it, so a refusal that arrives in its last millisecond is still
+`Unreachable`. The session that comes back carries no deadline;
+[`set_deadline`](#set_deadline) puts one on it.
 

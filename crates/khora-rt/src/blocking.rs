@@ -44,8 +44,10 @@ const IDLE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Everything the pool guards with one lock.
 struct Queue {
-    /// Work waiting for a thread, each with the fiber to hand back to.
-    jobs: VecDeque<(Job, Waker)>,
+    /// Work waiting for a thread, each with the fiber to hand back to, if a
+    /// fiber is waiting for it. [`abandonable`] off a fiber has none: its
+    /// job says it is done by itself.
+    jobs: VecDeque<(Job, Option<Waker>)>,
     /// Threads that exist right now.
     started: usize,
     /// Threads inside a job right now.
@@ -67,6 +69,12 @@ pub(crate) struct Pool {
     threads: usize,
     /// The most jobs that may be queued before submitters start waiting.
     depth: usize,
+    /// Notified when a job finishes and its slot frees, for an
+    /// [`abandonable_on`] caller off a fiber that is waiting for room. Fibers
+    /// wait in `blocked` instead.
+    freed: Condvar,
+    /// What the pool's threads are called, which is what a hang names.
+    name: &'static str,
 }
 
 /// What the pool is doing, for `docs/design/scheduler.md` §14.
@@ -81,6 +89,10 @@ pub(crate) struct Stats {
 
 impl Pool {
     pub(crate) fn new(threads: usize, depth: usize) -> Pool {
+        Pool::named("khora-blocking", threads, depth)
+    }
+
+    fn named(name: &'static str, threads: usize, depth: usize) -> Pool {
         Pool {
             queue: Mutex::new(Queue {
                 jobs: VecDeque::new(),
@@ -93,6 +105,8 @@ impl Pool {
             arrived: Condvar::new(),
             threads: threads.max(1),
             depth: depth.max(1),
+            freed: Condvar::new(),
+            name,
         }
     }
 
@@ -124,6 +138,29 @@ impl Pool {
     /// `blocked` per wake of a fiber that enrolled, which is short, because
     /// it only holds fibers that are waiting now.
     fn submit(&'static self, job: Job, done: Waker) {
+        self.offer(job, Some(done), None);
+    }
+
+    /// [`Pool::submit`], and given `give_up`, stops waiting for room once it
+    /// answers `Some`, and hands that back. `None` means the job was queued.
+    ///
+    /// **What `give_up` prevents: a cancel that waits for strangers' work.**
+    /// Without it a canceled fiber woken while it waits for room finds the
+    /// queue still full and parks again, so its cancel lands only once
+    /// somebody else's job finishes -- and if those jobs are lookups against
+    /// a dead name server, that is their timeout, not this fiber's.
+    ///
+    /// Without `give_up`, a caller off a fiber that finds the queue full
+    /// queues anyway: there is nothing to suspend, and exceeding the depth
+    /// beats deadlocking. With it, that caller waits on [`Pool::freed`] in
+    /// slices that ask `give_up` between them, because a caller that can give
+    /// up has no reason to exceed a bound it was given to respect.
+    fn offer(
+        &'static self,
+        job: Job,
+        done: Option<Waker>,
+        give_up: Option<&dyn Fn() -> Option<Abandoned>>,
+    ) -> Option<Abandoned> {
         let mut enrolled: Option<usize> = None;
         let mut queue = self.queue.lock().expect("the blocking queue");
         loop {
@@ -135,15 +172,28 @@ impl Pool {
             if queue.jobs.len() < self.depth {
                 break;
             }
-            // Only a fiber can wait without costing a thread. Off one there is
-            // nothing to suspend, and exceeding the depth beats deadlocking.
-            let Some(room) = waker_for_current() else { break };
-            queue.waited += 1;
-            enrolled = Some(room.fiber());
-            queue.blocked.push_back(room);
-            drop(queue);
-            park_current_for(Why::BlockingRoom, 0);
-            queue = self.queue.lock().expect("the blocking queue");
+            if let Some(why) = give_up.and_then(|asks| asks()) {
+                return Some(why);
+            }
+            match (waker_for_current(), give_up) {
+                (Some(room), _) => {
+                    queue.waited += 1;
+                    enrolled = Some(room.fiber());
+                    queue.blocked.push_back(room);
+                    drop(queue);
+                    park_current_for(Why::BlockingRoom, 0);
+                    queue = self.queue.lock().expect("the blocking queue");
+                }
+                (None, Some(_)) => {
+                    queue.waited += 1;
+                    queue = self
+                        .freed
+                        .wait_timeout(queue, ROOM_SLICE)
+                        .expect("the blocking queue")
+                        .0;
+                }
+                (None, None) => break,
+            }
         }
 
         queue.jobs.push_back((job, done));
@@ -162,12 +212,13 @@ impl Pool {
         }
         drop(queue);
         self.arrived.notify_one();
+        None
     }
 
     /// Starts one thread. The caller has already counted it in `started`.
     fn start(&'static self) {
         let started = crate::stack::spawn_thread(
-            std::thread::Builder::new().name("khora-blocking".to_string()),
+            std::thread::Builder::new().name(self.name.to_string()),
             move || self.serve(),
         );
         if started.is_err() {
@@ -212,6 +263,7 @@ impl Pool {
             // gets told, under the same lock that freed it.
             let room = queue.blocked.pop_front();
             drop(queue);
+            self.freed.notify_one();
             if let Some(room) = room {
                 room.wake();
             }
@@ -225,10 +277,16 @@ impl Pool {
             // with `active: 1, ran: 39` after everything had finished. Waking
             // here means a fiber back from a blocking call is proof that the
             // call is accounted for.
-            done.wake();
+            if let Some(done) = done {
+                done.wake();
+            }
         }
     }
 }
+
+/// How often a caller off a fiber that is waiting for room in a full pool
+/// looks again for a stop or its deadline. A finished job also wakes it.
+const ROOM_SLICE: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// The pool every Khora program shares, started the first time it is needed.
 pub(crate) fn pool() -> &'static Pool {
@@ -300,6 +358,172 @@ where
             return value;
         }
         park_current_for(Why::BlockingResult, std::sync::Arc::as_ptr(&slot) as usize);
+    }
+}
+
+/// The pool name lookups run on, and only they.
+///
+/// **What this prevents: a dead name server stalling the program's file
+/// reads.** An abandoned lookup cannot be interrupted: `getaddrinfo` runs to
+/// the resolver's own timeout, seconds per lookup. On the shared pool, a
+/// burst of abandoned lookups held every thread, and every later file read,
+/// process wait and migration queued behind them: 100 canceled lookups
+/// against a resolver that never answers held a file read on a fiber for
+/// 29.7 s. Here they can only hold each other up.
+///
+/// **What it costs: four lookups at a time, program-wide.** With four
+/// lookups in flight against a resolver that does not answer, the next one
+/// waits for one of them to time out, giving up on a stop or its deadline;
+/// it is never refused. A lookup abandoned before a thread reached it costs
+/// nothing more: [`abandonable_on`] skips its work. `KHORA_LOOKUP_THREADS`
+/// sets the number.
+pub(crate) fn lookups() -> &'static Pool {
+    static LOOKUPS: OnceLock<Pool> = OnceLock::new();
+    LOOKUPS.get_or_init(|| {
+        let threads = std::env::var("KHORA_LOOKUP_THREADS")
+            .ok()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(4);
+        Pool::named("khora-lookup", threads, threads * 8)
+    })
+}
+
+/// How an [`abandonable_on`] call ended without its value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Abandoned {
+    /// The calling fiber was asked to stop.
+    Stopped,
+    /// The deadline passed first.
+    TimedOut,
+}
+
+/// Runs `work` on `pool` and waits for it, giving up when the calling fiber
+/// is asked to stop or `deadline` passes.
+///
+/// **What this prevents: a cancel, or a deadline, that waits for a call
+/// nobody can interrupt.** [`blocking`] waits for the value however long it
+/// takes, which is right for a call holding the caller's buffer. A call that
+/// owns everything it touches -- a name lookup, which takes a name and
+/// answers addresses -- can be left to finish alone, and then a canceled
+/// fiber need not wait for a resolver that is timing out.
+///
+/// **A call abandoned before a thread picks it up does not run.** One that a
+/// thread had already started still runs to its end there, and its value is
+/// dropped. So abandoning many calls to a resolver that never answers costs
+/// one resolver timeout per thread, not one per call. While the pool's
+/// threads are all held that way, the next caller waits for room, which it
+/// also gives up on a stop or a deadline.
+///
+/// **Always on the pool, fiber or not**, unlike [`blocking`]: off a fiber the
+/// caller waits on a condition variable a cancel notifies, the way a sleep on
+/// the thread backend does, because the point is that the wait can end
+/// before the work does.
+pub(crate) fn abandonable_on<T, F>(
+    pool: &'static Pool,
+    work: F,
+    deadline: Option<std::time::Instant>,
+) -> Result<T, Abandoned>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let slot: std::sync::Arc<Answer<T>> = std::sync::Arc::new(Answer {
+        value: Mutex::new(None),
+        arrived: std::sync::Arc::new(Condvar::new()),
+        abandoned: std::sync::atomic::AtomicBool::new(false),
+    });
+    // Whichever way this returns without the value, the job is told, so a
+    // thread that has not reached it yet skips it.
+    let _abandon = Abandon(&slot.abandoned);
+    let into = slot.clone();
+    let job: Job = Box::new(move || {
+        if into.abandoned.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        let value = work();
+        *into.value.lock().expect("the result slot") = Some(value);
+        into.arrived.notify_all();
+    });
+    let gave_up = || {
+        if crate::current::current(|f| f.gives_up_waiting()) {
+            Some(Abandoned::Stopped)
+        } else if deadline.is_some_and(|at| std::time::Instant::now() >= at) {
+            Some(Abandoned::TimedOut)
+        } else {
+            None
+        }
+    };
+    if let Some(why) = gave_up() {
+        return Err(why);
+    }
+
+    match waker_for_current() {
+        Some(done) => {
+            if let Some(why) = pool.offer(job, Some(done), Some(&gave_up)) {
+                return Err(why);
+            }
+            loop {
+                // Into a local first, for the reason `blocking_on` gives.
+                let arrived = slot.value.lock().expect("the result slot").take();
+                if let Some(value) = arrived {
+                    return Ok(value);
+                }
+                if let Some(why) = gave_up() {
+                    return Err(why);
+                }
+                crate::scheduler::park_current_until(
+                    Why::BlockingResult,
+                    std::sync::Arc::as_ptr(&slot) as usize,
+                    deadline,
+                );
+            }
+        }
+        None => {
+            if let Some(why) = pool.offer(job, None, Some(&gave_up)) {
+                return Err(why);
+            }
+            let mut value = slot.value.lock().expect("the result slot");
+            crate::current::current(|fiber| fiber.park_on(&slot.arrived));
+            let answer = loop {
+                if let Some(got) = value.take() {
+                    break Ok(got);
+                }
+                if let Some(why) = gave_up() {
+                    break Err(why);
+                }
+                // A cancel that lands between the look and the wait is seen
+                // within one slice, as a parked `receive`'s is.
+                let mut slice = crate::channel::LOOK_AGAIN;
+                if let Some(at) = deadline {
+                    slice = slice.min(at.saturating_duration_since(std::time::Instant::now()));
+                }
+                value = slot.arrived.wait_timeout(value, slice).expect("the result slot").0;
+            };
+            drop(value);
+            crate::current::current(|fiber| fiber.unpark_from());
+            answer
+        }
+    }
+}
+
+/// Where an [`abandonable_on`] call leaves its value, and what tells the
+/// waiter off a fiber that it is there.
+struct Answer<T> {
+    value: Mutex<Option<T>>,
+    arrived: std::sync::Arc<Condvar>,
+    /// Set once nobody wants the value, so a thread that reaches the job
+    /// later skips the work.
+    abandoned: std::sync::atomic::AtomicBool,
+}
+
+/// Marks a job abandoned when its caller leaves, by any path.
+///
+/// Also set after the value arrived, which is harmless: the job has run.
+struct Abandon<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for Abandon<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -582,5 +806,102 @@ mod tests {
             both,
             "{done} of 2 submitters finished; the other waits for room in an empty queue: {stats:?}"
         );
+    }
+
+    /// Work that blocks until `release` is set, and counts how often it
+    /// started: a resolver that never answers, standing in for `getaddrinfo`
+    /// against a dead name server.
+    fn hanging(release: Arc<std::sync::atomic::AtomicBool>, started: Arc<AtomicUsize>) -> impl FnOnce() + Send + 'static {
+        move || {
+            started.fetch_add(1, Ordering::SeqCst);
+            while !release.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+    }
+
+    /// **Abandoned lookups do not hold up a file read.** A lookup against a
+    /// dead resolver is abandoned by its caller and still runs to the
+    /// resolver's timeout. On the shared pool, enough of them held every
+    /// thread, and a plain `blocking` call -- a file read, a process wait --
+    /// queued behind them for as long: 29.7 s after 100 canceled lookups.
+    ///
+    /// More hanging lookups than the shared pool has threads, each abandoned
+    /// by its deadline; then a `blocking` call on a fiber must come straight
+    /// back.
+    #[test]
+    fn abandoned_lookups_leave_the_shared_pool_free() {
+        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let started = Arc::new(AtomicUsize::new(0));
+        let callers: Vec<_> = (0..pool().threads + 4)
+            .map(|_| {
+                let work = hanging(release.clone(), started.clone());
+                std::thread::spawn(move || {
+                    let by = std::time::Instant::now() + std::time::Duration::from_millis(300);
+                    abandonable_on(lookups(), work, Some(by))
+                })
+            })
+            .collect();
+        for caller in callers {
+            assert_eq!(caller.join().expect("a lookup caller"), Err(Abandoned::TimedOut));
+        }
+        assert!(started.load(Ordering::SeqCst) > 0, "no lookup ever started");
+
+        let answered = Arc::new(AtomicUsize::new(0));
+        let scheduler = Scheduler::new(1);
+        let into = answered.clone();
+        let began = std::time::Instant::now();
+        scheduler.spawn(Task::new(move || {
+            into.store(blocking(|| 7), Ordering::SeqCst);
+        }));
+        let came = within_ten_seconds(|| answered.load(Ordering::SeqCst) == 7);
+        let took = began.elapsed();
+        // Let the hung lookups go either way, so the scheduler can drain.
+        release.store(true, Ordering::SeqCst);
+        assert!(came, "a blocking call waited more than 10 s behind abandoned lookups");
+        scheduler.drain();
+        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+    }
+
+    /// **A call abandoned before a thread reaches it does not run.** Without
+    /// that, every abandoned lookup costs a resolver timeout whenever it is
+    /// reached, long after its caller left, and a burst of them holds the
+    /// threads for one timeout per call rather than one per thread.
+    #[test]
+    fn an_abandoned_call_that_never_started_is_skipped() {
+        let pool = a_pool(1, 8);
+        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let started = Arc::new(AtomicUsize::new(0));
+        let soon = || Some(std::time::Instant::now() + std::time::Duration::from_millis(50));
+
+        // The one thread, held.
+        let held = hanging(release.clone(), started.clone());
+        assert_eq!(abandonable_on(pool, held, soon()), Err(Abandoned::TimedOut));
+        assert!(within_ten_seconds(|| started.load(Ordering::SeqCst) == 1), "the first job never started");
+        // Queued behind it, and given up on before the thread is free.
+        let queued = hanging(release.clone(), started.clone());
+        assert_eq!(abandonable_on(pool, queued, soon()), Err(Abandoned::TimedOut));
+
+        release.store(true, Ordering::SeqCst);
+        assert!(within_ten_seconds(|| pool.stats().ran == 2), "{:?}", pool.stats());
+        assert_eq!(started.load(Ordering::SeqCst), 1, "the abandoned job ran anyway");
+    }
+
+    /// **Off a fiber, a caller that can give up does not overfill the pool.**
+    /// It waits for room, and leaves at its deadline.
+    #[test]
+    fn a_caller_off_a_fiber_waits_for_room_and_gives_up_at_its_deadline() {
+        let pool = a_pool(1, 1);
+        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let started = Arc::new(AtomicUsize::new(0));
+        let soon = || Some(std::time::Instant::now() + std::time::Duration::from_millis(100));
+        assert_eq!(abandonable_on(pool, hanging(release.clone(), started.clone()), soon()), Err(Abandoned::TimedOut));
+        assert!(within_ten_seconds(|| started.load(Ordering::SeqCst) == 1), "the first job never started");
+        assert_eq!(abandonable_on(pool, hanging(release.clone(), started.clone()), soon()), Err(Abandoned::TimedOut));
+        let began = std::time::Instant::now();
+        assert_eq!(abandonable_on(pool, || (), soon()), Err(Abandoned::TimedOut));
+        assert!(began.elapsed() < std::time::Duration::from_secs(2), "{:?}", began.elapsed());
+        assert_eq!(pool.stats().queued, 1, "{:?}", pool.stats());
+        release.store(true, Ordering::SeqCst);
     }
 }

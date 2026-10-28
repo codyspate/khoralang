@@ -11,8 +11,8 @@ language rule, a supported feature, and unfinished work.
 
 - [What a signal does](#what-a-signal-does-and-the-three-shapes-it-does-not-reach)
   — `SIGTERM` and `SIGINT` unwind the program and run its finalizers, but a
-  `main` with no cancellation point, a blocking `connect_to` and Windows are
-  not covered.
+  `main` with no cancellation point, a wait for a child process and Windows
+  are not covered.
 - [Nursery cancellation is cooperative](#nursery-cancellation-is-cooperative):
   a failing child cancels its siblings when it fails, but a sibling with no
   cancellation point runs on, and a body that keeps spawning keeps starting
@@ -327,13 +327,6 @@ takes the graceful path, whatever its `raises` row.
 asked to stop at a cancellation point, and a single C call already in progress
 is not one: it finishes first. The status is the truth about the outcome and
 not about the latency.
-
-**A blocking `connect_to` is not a cancellation point.** `connect_to` is a
-blocking `connect(2)` on the worker, so a fiber inside one reaches no
-cancellation point until the kernel gives up — minutes, on an unroutable host.
-`accept` and `recv` are fine: they are reactor-driven, and an idle
-`Router::listen` server stops in about ten milliseconds. A non-blocking connect
-driven by the reactor would make it one, and it is not built.
 
 **Waiting for a child process is not a cancellation point.** `process.run`,
 `process.output` and `process.shell` wait for the program they started in one
