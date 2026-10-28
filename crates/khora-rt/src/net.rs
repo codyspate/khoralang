@@ -676,7 +676,7 @@ fn connect_state(socket: Socket) -> Started {
 #[inline(never)]
 fn connect_state(socket: Socket) -> Started {
     use windows_sys::Win32::Networking::WinSock::{
-        getpeername, getsockopt, WSAGetLastError, SOCKADDR_STORAGE, SOL_SOCKET, SO_ERROR, WSAENOTCONN,
+        getsockopt, WSAPoll, POLLERR, POLLHUP, POLLWRNORM, SOL_SOCKET, SO_ERROR, WSAPOLLFD,
     };
     let mut error: i32 = 0;
     let mut length = std::mem::size_of::<i32>() as i32;
@@ -685,15 +685,21 @@ fn connect_state(socket: Socket) -> Started {
     if read != 0 || error != 0 {
         return Started::Failed;
     }
-    // SAFETY: plain data, filled in by the call below.
-    let mut peer: SOCKADDR_STORAGE = unsafe { std::mem::zeroed() };
-    let mut length = std::mem::size_of::<SOCKADDR_STORAGE>() as i32;
-    // SAFETY: `peer` is live storage of `length` bytes.
-    if unsafe { getpeername(socket, (&raw mut peer).cast(), &raw mut length) } == 0 {
-        return Started::Connected;
+    // **Not `getpeername`, as elsewhere: on Windows it answers for a connect
+    // still in progress**, because the peer's address is recorded when the
+    // connect starts. A refused connect is retried for about two seconds
+    // before `SO_ERROR` says so, and `getpeername` called it connected. A
+    // socket is connected once it is writable, so ask that, without waiting.
+    let mut fd = WSAPOLLFD { fd: socket, events: POLLWRNORM, revents: 0 };
+    // SAFETY: `fd` is one live entry, and a zero timeout returns at once.
+    let ready = unsafe { WSAPoll(&raw mut fd, 1, 0) };
+    if ready < 0 || fd.revents & (POLLERR | POLLHUP) != 0 {
+        Started::Failed
+    } else if fd.revents & POLLWRNORM != 0 {
+        Started::Connected
+    } else {
+        Started::Pending
     }
-    // SAFETY: no arguments; it reads this thread's last winsock error.
-    if unsafe { WSAGetLastError() } == WSAENOTCONN { Started::Pending } else { Started::Failed }
 }
 
 /// An address as the bytes `connect` takes, and how many of them count.
@@ -1960,10 +1966,22 @@ mod tests {
             unsafe { khora_net_recv(socket, buffer.as_mut_ptr(), 4) }
         });
         assert_eq!(read, -1);
+        // A write big enough that no send buffer takes it whole. Windows
+        // accepts tens of megabytes on loopback before a send waits, so one
+        // 64 MiB write can succeed outright there; keep writing until a write
+        // gives up, and bound the total so a deadline that never lands fails
+        // rather than filling memory.
         let sent = within_ten_seconds("a write past the socket's deadline", move || {
-            let bytes = vec![0u8; 64 << 20];
-            // SAFETY: `bytes.len()` readable bytes.
-            unsafe { khora_net_send(socket, bytes.as_ptr(), bytes.len() as isize) }
+            let bytes = vec![0u8; 8 << 20];
+            let mut total: usize = 0;
+            loop {
+                // SAFETY: `bytes.len()` readable bytes.
+                let wrote = unsafe { khora_net_send(socket, bytes.as_ptr(), bytes.len() as isize) };
+                if wrote < 0 || total > 2 << 30 {
+                    return wrote;
+                }
+                total += wrote as usize;
+            }
         });
         assert_eq!(sent, -1);
 
@@ -1977,12 +1995,24 @@ mod tests {
     /// refusals under a 1 ms budget. A deadline that has already passed when
     /// the refusal is in makes that every time, so this asks two hundred
     /// times and wants a refusal from each.
+    ///
+    /// Only on Linux, where a refused loopback connect fails inside `connect`
+    /// itself. Windows retries a refusal for about two seconds, and macOS
+    /// reports it a moment after `connect` returns, so with a deadline
+    /// already passed the connect really is still pending and `TimedOut` is
+    /// right. There a refusal well inside its deadline must still be a
+    /// refusal.
     #[test]
     fn a_refused_connect_is_not_reported_as_the_deadline() {
         let port = {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
             listener.local_addr().expect("an address").port()
         };
+        if !cfg!(target_os = "linux") {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            assert_eq!(connect_by("127.0.0.1", port, Some(deadline)).map(raw_close), Err(Gave::Up));
+            return;
+        }
         let mut timed_out = 0;
         for _ in 0..200 {
             match connect_by("127.0.0.1", port, Some(std::time::Instant::now())) {
@@ -2014,14 +2044,36 @@ mod tests {
             connect_by("127.0.0.1", port, None)
         };
         assert_eq!(answer, Err(Gave::Stopped));
-        // The connection was made and then closed, so the listener has it
-        // queued and reading from it finds the end at once.
-        listener.set_nonblocking(false).expect("blocking");
-        let (mut accepted, _) = listener.accept().expect("the connection that was made");
-        accepted.set_read_timeout(Some(std::time::Duration::from_secs(5))).expect("a timeout");
-        let mut byte = [0u8; 1];
-        use std::io::Read;
-        assert_eq!(accepted.read(&mut byte).expect("a read that sees the close"), 0);
+        // On Linux a loopback connect completes at once, so the connection
+        // was made and then closed: the listener has it queued and reading
+        // from it finds the end. Elsewhere (macOS) the connect can still be in
+        // progress when the cancel closes it, and nothing ever reaches the
+        // listener, which is as good. So: whatever arrives within two seconds
+        // must already be closed, and nothing arriving is fine.
+        listener.set_nonblocking(true).expect("non-blocking");
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let accepted = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break Some(stream),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && std::time::Instant::now() < until => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(_) => break None,
+            }
+        };
+        if cfg!(target_os = "linux") {
+            assert!(accepted.is_some(), "on Linux the connection is made before the cancel is seen");
+        }
+        if let Some(mut accepted) = accepted {
+            accepted.set_nonblocking(false).expect("blocking");
+            accepted.set_read_timeout(Some(std::time::Duration::from_secs(5))).expect("a timeout");
+            let mut byte = [0u8; 1];
+            use std::io::Read;
+            match accepted.read(&mut byte) {
+                Ok(n) => assert_eq!(n, 0, "the connection was left open"),
+                Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::ConnectionReset, "{e}"),
+            }
+        }
     }
 
     /// **A read the deadline ended says so, and one the per-read limit ended
