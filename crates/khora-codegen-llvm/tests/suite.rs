@@ -104,6 +104,7 @@ mod resilience;
 mod reuse;
 mod schedules;
 mod schema;
+mod string_hash;
 mod shared;
 mod sharing;
 mod sleeping;

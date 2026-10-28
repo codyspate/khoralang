@@ -617,7 +617,7 @@ string through untouched.
 ```khora
 import std::db::{Cell, Db, DbError, transaction};
 
-fn transfer(from: Int, to: Int, amount: Int) -> Result<(), DbError>
+fn transfer(from: Int, to: Int, amount: Int) -> Result<Int, DbError>
   with { db: Db }
 {
   transaction(fn () =>

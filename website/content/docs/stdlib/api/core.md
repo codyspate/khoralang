@@ -156,10 +156,12 @@ written: *"`Option` gives up if either is `None`, and a validation type
 would collect both failures."*
 
 ```khora
-let settings = Validated::map2(
+type Settings = { port: Int, host: String };
+
+let settings: Validated<Settings, String> = Validated::map2(
   integer("PORT"),
   string("HOST"),
-  fn (port, host) => Settings { port: port, host: host },
+  fn (port, host) => { port: port, host: host },
 );
 ```
 
@@ -463,7 +465,9 @@ cannot go into a `Shared` and cannot cross into a fiber, and a `Dict` can.
 
 Keys need `Hash`, and `Hash` requires `Eq` because the two have to agree —
 see the trait. Entries come back in no particular order, and not even a
-stable one: growing rehashes everything.
+stable one: growing rehashes everything, and a `String` hashes under a key
+drawn fresh for each run, so a map keyed by text reports its entries in a
+different order every time the program runs.
 
 ### Vector
 
@@ -766,9 +770,8 @@ cancellation is what a nursery does to its children on the way out, and
 counting it would make every early exit look like a fault.
 
 ```khora
-match attempt(fn () => nursery(gather)!) {
-  Result::Ok(answer) => answer,
-  Result::Err(failure) => retry_smaller(failure.children)!,
+nursery(gather)! catch {
+  failure => retry_smaller(failure.children)!,
 }
 ```
 
@@ -2502,7 +2505,7 @@ in the program says otherwise, and this is that something.
 
 ```khora
 Fiber::cancel_within(server, 5000);
-Fiber::wait(server);   // at most five seconds of cleanup, then abort
+Fiber::wait(server)!;  // at most five seconds of cleanup, then abort
 ```
 
 Returns at once. A fiber that finishes before the deadline is not
@@ -4604,7 +4607,9 @@ Every entry, as a list.
 **In no particular order.** A hash table forgets the order its keys
 arrived in, and the order this does report is not even stable across
 inserts: growing rehashes everything into twice as many buckets and moves
-roughly half of it. A caller that wants an order sorts what comes back,
+roughly half of it. Nor across runs, for text keys: a `String`'s hash is
+keyed per process, so the same inserts report a different order in the
+next run. A caller that wants an order sorts what comes back,
 or uses `Dict`, whose `entries` is in key order because the tree already
 is.
 
@@ -5649,9 +5654,17 @@ fn hash(self) -> Int
 impl Hash for String
 ```
 
-FNV-1a over the bytes, which is one multiply and one xor each and is what a
-string hash is supposed to look like. Wrapping on purpose: the overflow is
-where the mixing comes from.
+The runtime's keyed hash of the bytes, under a key drawn once per process.
+
+**What this prevents: a client choosing keys that collide.** An unkeyed
+hash is a public function, so a set of strings that all land in one bucket
+can be worked out offline, and a `Map` built from them -- a JSON object, a
+query string, a header map -- takes time in the square of its size. Keyed,
+a set that collides in one run is ordinary keys in the next.
+
+What it costs: the answer differs from run to run, so the order a `Map`
+keyed by text reports its entries in does too. Within one process it is a
+function, which is all `Hash` asks.
 
 #### hash
 
@@ -6721,7 +6734,7 @@ its `with` clause names as evidence parameters, so it can be handed here
 directly and called with the nursery this function installs:
 
 ```khora
-fn serve<'ef>() -> () with { 'ef | nursery: Nursery } { .. }
+fn serve<'ef>() -> () with { 'ef | nursery: Nursery } { todo() }
 nursery(serve)!
 ```
 

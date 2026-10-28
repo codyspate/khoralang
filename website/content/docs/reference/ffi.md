@@ -150,13 +150,13 @@ When C needs temporary access to bytes owned by Khora, lend them for the duratio
 For strings, the standard forms are:
 
 ```khora
-String::with_c_string(text, body)
+String::with_c_string(text, body)!
 ```
 
 where `body` receives a temporary `Ptr` to NUL-terminated bytes, and:
 
 ```khora
-String::with_data(text, body)
+String::with_data(text, body)!
 ```
 
 where `body` receives `(Ptr, Int)` for the bytes and their length.
@@ -194,6 +194,7 @@ A fiber may resume on a different operating-system thread after a Khora suspensi
 
 Potentially blocking native work must run on a fiber of its own rather than on the one that needs the answer:
 
+<!-- unchecked: a `Ptr` cannot be handed to another fiber, so this does not compile as written -->
 ```khora
 extern fn slow_native_thing(handle: Ptr) -> Int;
 

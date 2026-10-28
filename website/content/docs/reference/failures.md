@@ -467,7 +467,9 @@ to be told five things it knew the first time.
 when both sides succeeded, and otherwise carries every error from both:
 
 ```khora
-let settings = Validated::map2(
+type Settings = { port: Int, host: String };
+
+let settings: Validated<Settings, String> = Validated::map2(
   integer("PORT"),
   string("HOST"),
   fn (port, host) => { port: port, host: host },

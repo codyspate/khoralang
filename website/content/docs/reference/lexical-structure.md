@@ -152,6 +152,7 @@ reports the same "has no `Show`" error even though `List` implements it.
 **A quote inside a hole is written unescaped.** `${...}` is scanned as source,
 not as string content, so the inner literal's quotes stand as they are:
 
+<!-- unchecked: the second line is the one the compiler refuses -->
 ```khora
 "len = ${String::byte_length("abc")}"     // correct
 "len = ${String::byte_length(\"abc\")}"   // refused
@@ -275,14 +276,14 @@ handler in capability row test bench derive extern
 Examples of their keyword positions:
 
 ```khora
-handler for Clock { now: fn () => fixed_instant }
+handler for Clock { unix_seconds: fn () => 0, unix_millis: fn () => 0, monotonic_millis: fn () => 0, sleep: fn _ms => () }
 for item in items { process(item); }
 context Production { clock: live_clock }
 test "works" { assert(true); }
 bench "parse" { parse(fixture); }
 derive(Eq, Show)
 type Point = { x: Int, y: Int };
-extern fn strlen(ptr: Ptr) -> U64;
+extern fn strlen(text: Ptr) -> Int;
 ```
 
 `in` is contextual in the `for pattern in expression` form.

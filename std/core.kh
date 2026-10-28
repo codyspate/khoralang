@@ -304,29 +304,25 @@ impl Hash for Bool {
   fn hash(self) -> Int { if self { 1 } else { 0 } }
 }
 
-/// FNV-1a over the bytes, which is one multiply and one xor each and is what a
-/// string hash is supposed to look like. Wrapping on purpose: the overflow is
-/// where the mixing comes from.
+/// The runtime's keyed hash of the bytes, under a key drawn once per process.
+///
+/// **What this prevents: a client choosing keys that collide.** An unkeyed
+/// hash is a public function, so a set of strings that all land in one bucket
+/// can be worked out offline, and a `Map` built from them -- a JSON object, a
+/// query string, a header map -- takes time in the square of its size. Keyed,
+/// a set that collides in one run is ordinary keys in the next.
+///
+/// What it costs: the answer differs from run to run, so the order a `Map`
+/// keyed by text reports its entries in does too. Within one process it is a
+/// function, which is all `Hash` asks.
 impl Hash for String {
   fn hash(self) -> Int {
-    U32::to_int(String::fold(self, 0, U32::of(2166136261)))
+    String::with_data(self, fn (at, length) => khora_hash_bytes(at, length))
   }
 }
 
-impl String {
-  /// FNV-1a over the bytes from `from` on.
-  fn fold(self, from: Int, seed: U32) -> U32 {
-    let count = String::byte_length(self);
-    let mut at = from;
-    let mut hash = seed;
-    while at < count {
-      let mixed = U32::xor(hash, U32::of(U8::to_int(String::byte(self, at))));
-      hash = U32::wrapping_mul(mixed, 16777619);
-      at = at + 1;
-    }
-    hash
-  }
-}
+/// The keyed hash of `length` bytes at `at`.
+extern fn khora_hash_bytes(at: Ptr, length: Int) -> Int;
 
 /// Byte order, which is what `<` on a `String` means here.
 ///
@@ -724,10 +720,12 @@ impl<A> Show for Redacted<A> {
 /// would collect both failures."*
 ///
 /// ```khora
-/// let settings = Validated::map2(
+/// type Settings = { port: Int, host: String };
+///
+/// let settings: Validated<Settings, String> = Validated::map2(
 ///   integer("PORT"),
 ///   string("HOST"),
-///   fn (port, host) => Settings { port: port, host: host },
+///   fn (port, host) => { port: port, host: host },
 /// );
 /// ```
 ///
@@ -2497,7 +2495,7 @@ impl<A: Share, 'er> Fiber<A, 'er> {
   ///
   /// ```khora
   /// Fiber::cancel_within(server, 5000);
-  /// Fiber::wait(server);   // at most five seconds of cleanup, then abort
+  /// Fiber::wait(server)!;  // at most five seconds of cleanup, then abort
   /// ```
   ///
   /// Returns at once. A fiber that finishes before the deadline is not
@@ -4870,7 +4868,9 @@ fn entries_shown<K: Show, V: Show>(entries: List<Pair<K, V>>) -> String {
 ///
 /// Keys need `Hash`, and `Hash` requires `Eq` because the two have to agree —
 /// see the trait. Entries come back in no particular order, and not even a
-/// stable one: growing rehashes everything.
+/// stable one: growing rehashes everything, and a `String` hashes under a key
+/// drawn fresh for each run, so a map keyed by text reports its entries in a
+/// different order every time the program runs.
 pub type Map<K, V> = {
   mut buckets: Array<Chain<K, V>>,
   mut count: Int,
@@ -4983,7 +4983,9 @@ impl<K: Hash, V> Map<K, V> {
   /// **In no particular order.** A hash table forgets the order its keys
   /// arrived in, and the order this does report is not even stable across
   /// inserts: growing rehashes everything into twice as many buckets and moves
-  /// roughly half of it. A caller that wants an order sorts what comes back,
+  /// roughly half of it. Nor across runs, for text keys: a `String`'s hash is
+  /// keyed per process, so the same inserts report a different order in the
+  /// next run. A caller that wants an order sorts what comes back,
   /// or uses `Dict`, whose `entries` is in key order because the tree already
   /// is.
   ///
@@ -6038,9 +6040,8 @@ impl Fibers {
 /// counting it would make every early exit look like a fault.
 ///
 /// ```khora
-/// match attempt(fn () => nursery(gather)!) {
-///   Result::Ok(answer) => answer,
-///   Result::Err(failure) => retry_smaller(failure.children)!,
+/// nursery(gather)! catch {
+///   failure => retry_smaller(failure.children)!,
 /// }
 /// ```
 pub type ChildFailed = { pub children: Int };
@@ -6147,7 +6148,7 @@ pub effect Nursery {
 /// directly and called with the nursery this function installs:
 ///
 /// ```khora
-/// fn serve<'ef>() -> () with { 'ef | nursery: Nursery } { .. }
+/// fn serve<'ef>() -> () with { 'ef | nursery: Nursery } { todo() }
 /// nursery(serve)!
 /// ```
 ///

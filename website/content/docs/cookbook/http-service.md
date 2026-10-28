@@ -360,7 +360,7 @@ port once after spawning works too and proves a little more — that the socket
 answers, not just that the fiber is alive:
 
 ```khora
-match HttpClient::send(client, Request::get("http://127.0.0.1:${port}/health")) {
+match client.send(Request::get("http://127.0.0.1:${port}/health")) {
   Result::Err(_) => {
     eprint("could not bind ${port}");
     Fiber::detach(server);

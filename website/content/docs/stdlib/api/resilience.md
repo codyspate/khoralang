@@ -330,7 +330,7 @@ import std::clock::{Clock};
 import std::random::{Random};
 import std::resilience::{Schedule, retry};
 
-fn fetch() -> String with { client: HttpClient } raises HttpError { .. }
+fn fetch() -> String with { client: HttpClient } raises HttpError { todo() }
 
 fn fetch_hard() -> String
   with { client: HttpClient, clock: Clock, random: Random }

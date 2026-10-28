@@ -149,7 +149,7 @@ test "a large charge is warned about" {
   let said = Shared::of(List::Nil);
   let collecting = handler for Log {
     record: fn (level, message, _attributes) =>
-      Shared::update(said, fn lines => List::Cons(message, lines)),
+      { Shared::update(said, fn lines => List::Cons(message, lines)); () },
   };
   with { log: collecting } { charge(1200) };
   assert(List::length(Shared::get(said)) == 2);

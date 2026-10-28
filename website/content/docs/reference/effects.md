@@ -170,7 +170,10 @@ Clauses belong to the function arrow they follow.
 
 ```khora
 handler for Clock {
-  now: fn () => fixed_instant,
+  unix_seconds: fn () => 1700000000,
+  unix_millis: fn () => 1700000000000,
+  monotonic_millis: fn () => 0,
+  sleep: fn _millis => (),
 }
 ```
 

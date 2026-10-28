@@ -1051,3 +1051,58 @@ fn main() -> Int {{
          {\"format\":\"Level\",\"type\":\"string\"}\n"
     );
 }
+
+/// A query string's unexpected keys are reported in key order, on every run.
+///
+/// **What this prevents: an error body that changes from run to run.** A
+/// `Map<String, String>` is a hash table whose string hash is keyed per
+/// process, so its entries come back in a different order each run, and
+/// `Raw::of_map` is how a query string, path parameters and headers reach a
+/// schema. A closed schema's "x is not expected" rejections and
+/// `Raw::json_text` followed the bucket order. A dozen keys inserted out of
+/// order, because with three they can land sorted by luck.
+#[test]
+fn a_query_maps_rejections_come_in_key_order_every_run() {
+    let main = "module main;
+import std::core::{List, Map, Result, Validated, print};
+import std::schema::{Decode, Raw, Rejection, Schema};
+
+derive(Decode)
+pub type Settings = { pub port: Int };
+
+pub fn main() -> () {
+  let q: Map<String, String> = Map::new();
+  Map::insert(q, \"port\", \"8080\");
+  for key in [\"lima\", \"delta\", \"kilo\", \"alpha\", \"juliet\", \"echo\",
+              \"hotel\", \"bravo\", \"golf\", \"charlie\", \"india\", \"foxtrot\"] {
+    Map::insert(q, key, \"1\");
+  };
+  let raw = Raw::of_map(q);
+  match Validated::to_result(Schema::decode(Schema::closed(Settings::schema()), raw)) {
+    Result::Ok(_s) => print(\"accepted\"),
+    Result::Err(problems) =>
+      print(String::join(List::map(problems, fn p => Rejection::describe(p)), \"; \")),
+  };
+  print(Raw::json_text(Raw::of_map(q)));
+}
+";
+    let main = main.replace("import std::core::{List,", "import std::core::{Iterator, Step, List,");
+    let first = run("schema_of_map_order_1", &main);
+    let second = run("schema_of_map_order_2", &main);
+    assert_eq!(first, second, "two runs reported a query map in different orders");
+    let lines: Vec<&str> = first.lines().collect();
+    assert_eq!(lines.len(), 2, "{first}");
+    let keys = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel",
+                "india", "juliet", "kilo", "lima"];
+    let mut at = 0;
+    for key in keys {
+        let found = lines[0][at..].find(key).unwrap_or_else(|| panic!("`{key}` out of order: {}", lines[0]));
+        at += found + key.len();
+    }
+    let mut at = 0;
+    for key in keys.iter().chain(std::iter::once(&"port")) {
+        let quoted = format!("\"{key}\"");
+        let found = lines[1][at..].find(&quoted).unwrap_or_else(|| panic!("`{key}` out of order: {}", lines[1]));
+        at += found + quoted.len();
+    }
+}

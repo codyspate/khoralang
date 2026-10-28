@@ -44,8 +44,8 @@ const loadUser = (id: Id) =>
 
 ```khora
 // Khora
-fn load_user(id: Id) -> User with { db: Db } raises UserError {
-  User::of(db.query(id)!)
+fn load_user(id: Id) -> User with { users: Users } raises UserError {
+  User::of(users.row(id)!)
 }
 ```
 

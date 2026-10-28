@@ -1217,15 +1217,17 @@ The configuration is released when the caller's scope ends, which for a
 server is usually the program's.
 
 ```khora
-import std::core::{SharedFn};
-import std::fs::{FsRead, read_text};
-import std::net::http::{Response, Router};
+import std::core::{ChildFailed, SharedFn, scoped};
+import std::fs::{FsRead, IoError, read_text};
+import std::net::http::{HttpError, Response, Router};
+import std::net::tls::{TlsError};
 
-pub fn main() -> Int {
+pub fn main() -> Int raises IoError + HttpError + TlsError + ChildFailed {
   with { reads: FsRead::real() } {
-    Router::new()
-      |> Router::get("/health", SharedFn::of(fn _ => Response::text(200, "ok")))
-      |> Router::listen_tls(8443, read_text("cert.pem")!, read_text("key.pem")!)
+    scoped(fn () =>
+      Router::new()
+        |> Router::get("/health", SharedFn::of(fn _ => Response::text(200, "ok")))
+        |> Router::listen_tls(8443, read_text("cert.pem")!, read_text("key.pem")!)!)!
   };
   0
 }
@@ -1258,9 +1260,12 @@ public port it is the ordinary case, not an incident.
 import std::net::socket::{listen_on};
 import std::net::tls::{server};
 
-fn serve(router: Router<'er>) -> () with { scope: Scope } raises TlsError {
+fn serve<'er>(router: Router<'er>, certificate: String, key: String) -> ()
+  with { scope: Scope, nursery: Nursery }
+  raises 'er + TlsError + HttpError
+{
   let settings = server(certificate, key)!;
-  Router::serve_secured(router, listen_on(8443), settings)
+  Router::serve_secured(router, listen_on(8443), settings)!
 }
 ```
 
@@ -1284,14 +1289,15 @@ already-bound socket is for a caller that wants to bind it themselves —
 a test on port zero, a socket inherited from a supervisor.
 
 ```khora
-import std::core::{SharedFn};
-import std::net::http::{Response, Router};
+import std::core::{ChildFailed, SharedFn, nursery};
+import std::net::http::{HttpError, Response, Router};
 import std::net::socket::{listen_on};
 
-pub fn main() -> Int {
-  Router::new()
-    |> Router::get("/health", SharedFn::of(fn _ => Response::text(200, "ok")))
-    |> Router::serve_forever(listen_on(8080));
+pub fn main() -> Int raises HttpError + ChildFailed {
+  nursery(fn () =>
+    Router::new()
+      |> Router::get("/health", SharedFn::of(fn _ => Response::text(200, "ok")))
+      |> Router::serve_forever(listen_on(8080))!)!;
   0
 }
 ```

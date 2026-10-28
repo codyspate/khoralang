@@ -420,7 +420,7 @@ start: fn (name, _attributes) => match current() {
     parent: inside.span,
     name: name,
   },
-  Option::None => { ... a new trace ... },
+  Option::None => a_new_trace(name),
 }
 ```
 

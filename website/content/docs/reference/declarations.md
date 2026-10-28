@@ -229,7 +229,7 @@ wrote one into.
 Declare a C symbol with contextual `extern` before `fn`:
 
 ```khora
-extern fn strlen(ptr: Ptr) -> U64;
+extern fn strlen(text: Ptr) -> Int;
 ```
 
 A public external function can form part of a generated C-compatible library surface:

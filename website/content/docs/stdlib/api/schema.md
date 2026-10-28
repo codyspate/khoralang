@@ -474,6 +474,11 @@ pub fn of_map(text: Map<String, String>) -> Raw
 A record of text nobody labeled: a query string, the path parameters,
 the headers.
 
+**Sorted by key**, because a `Map` keyed by text reports its entries in a
+different order on every run, and this order reaches the user: a closed
+schema's "is not expected" rejections come out in it, and so does
+`json_text`. The sort is the one `Encode for Map` pays for the same reason.
+
 #### of_arguments
 
 ```khora

@@ -232,10 +232,15 @@ impl Raw {
 
   /// A record of text nobody labeled: a query string, the path parameters,
   /// the headers.
+  ///
+  /// **Sorted by key**, because a `Map` keyed by text reports its entries in a
+  /// different order on every run, and this order reaches the user: a closed
+  /// schema's "is not expected" rejections come out in it, and so does
+  /// `json_text`. The sort is the one `Encode for Map` pays for the same reason.
   pub fn of_map(text: Map<String, String>) -> Raw {
     let converted = List::fold(Map::entries(text), List::Nil, fn (acc, field) =>
       List::Cons(Raw::entry(field.key, Raw::Untyped(field.value)), acc));
-    Raw::Record(List::reverse(converted))
+    Raw::Record(List::sort_by(converted, fn (l, r) => Ord::cmp(l.key, r.key)))
   }
 
   /// Command-line arguments as a record.

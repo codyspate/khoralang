@@ -51,13 +51,23 @@ reached it: the cancellation came too late to count, and the failure stands.
 `join` waits and answers what the body answered. If the body raised, `join` re-raises with the same type, so the caller catches by name:
 
 ```khora
+module example;
+
+import std::core::{Fiber, print};
+
+type LoadError = | Timeout | Missing(id: Int);
+
+fn load(id: Int) -> Int raises LoadError {
+  if id < 0 { raise LoadError::Missing(id) } else { id * 10 }
+}
+
 fn run(id: Int) -> () {
   let child = Fiber::spawn(fn () => load(id)!);
-  let row = Fiber::join(child)! catch {
-    DbError::Timeout => Row::empty(),
-    DbError::Missing(_id) => Row::empty(),
+  let total = Fiber::join(child)! catch {
+    LoadError::Timeout => 0,
+    LoadError::Missing(_id) => 0,
   };
-  print(Int::to_string(row.total))
+  print(Int::to_string(total))
 }
 ```
 
@@ -140,7 +150,7 @@ When the body completes normally, `nursery` waits until every child is finished.
 A child that acquires something is given a scope of its own, because a `Scope` stays on the fiber that opened it and a child cannot be handed its parent's. Open it in the child:
 
 ```khora
-fn accept_loop(connection: Connection) -> ()
+fn accept_loop(connection: Int) -> ()
   with { scope: Scope, nursery: Nursery }
 {
   nursery.spawn(fn () => scoped(fn () => serve(connection)));
@@ -230,7 +240,7 @@ fn serve() -> ()
   }
 }
 
-bounded_nursery(128, serve)
+bounded_nursery(128, serve)!
 ```
 
 **At most `limit` children run at once, exactly.** Spawning into a full bounded nursery waits for its oldest running child to finish, and only then starts the new one; `bounded_nursery(128, serve)` above never has a 129th request in flight. Use this for work whose arrival rate is controlled externally so overload becomes backpressure instead of unbounded growth.
@@ -278,7 +288,7 @@ operations end that:
 ```khora
 Fiber::abort(child);              // stop now, even inside cleanup
 Fiber::cancel_within(child, 5000); // cancel now; abort if still running in 5 s
-Fiber::wait(child);
+Fiber::wait(child)!;
 ```
 
 `abort` stops the fiber at its next cancellation point **including inside a

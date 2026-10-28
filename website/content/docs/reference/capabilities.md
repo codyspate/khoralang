@@ -47,7 +47,7 @@ fn create_session(id: Id) -> Session
   raises StoreError
 {
   let user = store.load(id)!;
-  Session::new(user, clock.now())
+  Session::new(user, clock.unix_seconds())
 }
 ```
 
@@ -73,7 +73,10 @@ fn run<A, 'ef>(body: () -> A with 'ef) -> A
 
 ```khora
 let fixed_clock = handler for Clock {
-  now: fn () => fixed_instant,
+  unix_seconds: fn () => 1700000000,
+  unix_millis: fn () => 1700000000000,
+  monotonic_millis: fn () => 0,
+  sleep: fn _millis => (),
 };
 ```
 

@@ -77,7 +77,7 @@ import std::env::{Env};
 import std::schema::{Decode};
 
 derive(Decode)
-pub type Settings = { listen_port: Int, database_url: String };
+pub type Settings = { pub listen_port: Int, pub database_url: String };
 
 pub fn main() -> Int {
   with { env: Env::real() } {

@@ -179,6 +179,62 @@ pub unsafe extern "C" fn khora_str_cmp(a: *const u8, a_len: i64, b: *const u8, b
     }
 }
 
+/// The process's key for hashing text, drawn from the operating system once.
+///
+/// **What this prevents: a client choosing `Map` keys that all collide.** An
+/// unkeyed string hash is a public function, so anybody can work out offline a
+/// set of strings that share one bucket, and a map built from them -- a JSON
+/// object's members, a query string, a header map -- costs time in the square
+/// of its size. With a key nobody outside the process knows, a set that
+/// collides in one run is ordinary keys in the next.
+///
+/// `RandomState` is the door Rust's standard library already opens onto the
+/// operating system's random source for exactly this job, so this adds no
+/// dependency. One `RandomState` for the whole process, because a hash must be
+/// the same function in every fiber or a map could not find its own keys.
+///
+/// What it costs: the iteration order of a `Map` keyed by text differs from
+/// run to run, which the type's documentation says. On a target with no
+/// entropy source (`wasm32-unknown-unknown`), Rust keys it from two addresses,
+/// which is weaker and says so in Rust's own source.
+fn text_hash_key() -> &'static std::collections::hash_map::RandomState {
+    static KEY: std::sync::OnceLock<std::collections::hash_map::RandomState> =
+        std::sync::OnceLock::new();
+    KEY.get_or_init(std::collections::hash_map::RandomState::new)
+}
+
+/// Draws the text-hash key now, so the read happens at startup rather than on
+/// whichever request first hashes a string.
+pub(crate) fn draw_text_hash_key() {
+    let _ = text_hash_key();
+}
+
+/// The keyed hash of `len` bytes: Rust's default hasher, SipHash, under the
+/// process's key.
+///
+/// The hash `impl Hash for String` answers, and so the one `Map` buckets text
+/// by. SipHash is what Rust's own `HashMap` uses for the same reason: without
+/// its key it cannot be predicted, and FNV-1a, which this replaced, has no key.
+/// It costs a runtime call per hash, where FNV-1a was a loop in Khora.
+///
+/// # Safety
+///
+/// As [`khora_str_eq`]: the pointer must be null with a zero length, or
+/// address `len` initialized bytes that stay live and unmodified for the call.
+#[unsafe(no_mangle)]
+// SHARE: reads a lent byte buffer; takes no Khora object.
+pub unsafe extern "C" fn khora_hash_bytes(data: *const u8, len: i64) -> i64 {
+    use std::hash::{BuildHasher, Hasher};
+
+    // SAFETY: a length of zero never reads its pointer, which may be null for
+    // an empty string; any other length is the caller's guarantee of that many
+    // live bytes.
+    let bytes: &[u8] = if len <= 0 { &[] } else { unsafe { std::slice::from_raw_parts(data, len as usize) } };
+    let mut hasher = text_hash_key().build_hasher();
+    hasher.write(bytes);
+    hasher.finish() as i64
+}
+
 /// Writes `value` into `into` as text, and says how many bytes that took.
 ///
 /// The shortest form that reads back as the same number, which is Rust's

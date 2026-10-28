@@ -73,7 +73,7 @@ cannot end while a child is still running.
 nursery(fn () => {
   nursery.spawn(fn () => serve(first));
   nursery.spawn(fn () => serve(second));
-})   // both have finished by here, whichever way the block ended
+})!  // both have finished by here, whichever way the block ended
 ```
 
 ### Ending normally and ending badly

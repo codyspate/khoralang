@@ -14,6 +14,20 @@ it will behave differently now.
 
 ### Breaking
 
+- A `String` hashes under a key the program draws from the operating system
+  once per run, so `Hash::hash` of a string differs from one run to the next
+  and a `Map` keyed by text reports its entries in a different order on every
+  run. A set of strings chosen to collide in one bucket, which made a `Map`
+  built from a client's JSON object or headers take time in the square of its
+  size, is a set of ordinary keys. `Map` has never promised an order; a program
+  that printed or compared a text-keyed map's `entries`, `keys`, `values` or
+  `show` relied on one, and sorts them or uses `Dict`. `Int` keys are still
+  bucketed by a fixed function. On WebAssembly the key is the same in every
+  run, so text keys there are not protected; a wasm program building a map
+  from a client's keys uses `Dict`. `Raw::of_map` -- how a query string, path
+  parameters and headers reach a schema -- sorts by key, so a closed schema's
+  "is not expected" rejections and `Raw::json_text` come out in the same order
+  every run.
 - A failure in a nursery child cancels its siblings at the moment the child
   fails, and every failure does. The nursery noticed a failure only when it
   reached that child's handle, oldest first, so a failing child spawned after
@@ -160,6 +174,15 @@ it will behave differently now.
 
 ### Fixed
 
+- Documentation examples that did not compile: a `handler for Clock` written
+  with a `now` operation `Clock` does not have (Reference: capabilities,
+  effects, expressions), a `Fiber::join` caught on `DbError` cases that do not
+  exist (Reference: concurrency), `extern fn strlen(ptr: Ptr) -> U64`, which
+  disagrees with the `strlen` `std` declares (Reference: declarations, lexical
+  structure), `Fiber::wait` and `nursery` calls written without their `!`,
+  `String::length` in `fold_lines`'s example (it is `byte_length`), and the
+  TLS and `serve_forever` examples in `std::net::http`, which left out the
+  capabilities and errors their calls need.
 - A program may name a function like a C function `std` declares --
   `bind`, `listen`, `socket`, `close`, `getenv`, `strlen`, `system`, a
   runtime export such as `khora_sleep` -- with any signature. Every program

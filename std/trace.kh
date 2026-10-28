@@ -297,7 +297,7 @@ fn reported<A, E: Show, 'ef, 'er>(
 ///     parent: inside.span,
 ///     name: name,
 ///   },
-///   Option::None => { ... a new trace ... },
+///   Option::None => a_new_trace(name),
 /// }
 /// ```
 ///

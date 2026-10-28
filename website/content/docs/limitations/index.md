@@ -32,9 +32,10 @@ language rule, a supported feature, and unfinished work.
 - [On one CPU, the scheduler can hang](#the-fiber-scheduler) a program in
   which a fiber blocks inside `Shared::update` on something another fiber
   must do. The default thread backend does not.
-- [A `Map` whose keys a client chooses can be made slow](#maps-keyed-by-untrusted-input):
-  the string hash takes no secret, so colliding keys can be computed ahead of
-  time, and a JSON object built from them costs time in the square of its size.
+- [A `Map` whose numeric keys a client chooses can be made slow](#maps-keyed-by-untrusted-input):
+  an `Int` key is bucketed by a fixed function, so colliding numbers can be
+  computed ahead of time. Text keys hash under a per-run secret, except on
+  WebAssembly, where the secret is the same in every run.
 - [The `postgres` package does not speak TLS](#package-ecosystem), so rows
   cross the network in the clear.
 - [Database queries trail Go's](#performance-against-other-servers) on the
@@ -426,28 +427,31 @@ The character predicates — `Char::is_digit`, `is_alpha`, `is_whitespace`, `to_
 
 ## Maps keyed by untrusted input
 
-**A `Map` whose keys come from a client can be made to take time in the square
-of its size.** `Map` is a hash table, and the hash of a `String` is FNV-1a
-with no per-process secret, so anybody can compute in advance a set of keys
-that all land in one bucket. Each insert or lookup then walks a chain as long
-as the map. Measured in a release build on x86-64 Linux: 8,192 colliding keys
-took 249 ms to insert against 10 ms for ordinary ones, and 16,384 took 1,032
-ms against 17 — twice the keys, four times the time.
+**A `Map` whose keys come from a client is protected when the keys are
+text, and not when they are numbers.** `Map` is a hash table, and if a client
+can predict which bucket a key lands in, it can send a set of keys that all
+land in one. Each insert or lookup then walks a chain as long as the map, so
+the map takes time in the square of its size.
 
-The path a server meets it on is JSON: `std::json::parse` builds every object
-as a `Map<String, Json>`, so a request body whose member names were chosen to
-collide costs the server that time while it parses. A 1.7 MB object of 16,384
-colliding names took 1.2 s to parse, against 25 ms for the same size with
-ordinary names. The default request limit of 8 KB keeps a body far below that.
-The [JSON API recipe](/docs/cookbook/json-api/) raises it to 1 MB with
-`Router::holding(1048576)`; at that limit a 786 KB body of 8,192 colliding
-names took 299 ms to parse, against 15 ms for ordinary ones, on every request
-that sends it.
+A `String` hashes under a key drawn from the operating system once per run,
+so a set of strings that collides in one run is a set of ordinary keys in the
+next. That covers a JSON object's members, which `std::json::parse` stores in a
+`Map<String, Json>`, and query strings, path parameters and headers. It also
+means a `Map` keyed by text reports its entries in a different order on every
+run.
 
-What to do about it: keep `Router::holding` as low as the application allows,
-and for a structure keyed by client-chosen strings that can grow large, use
-`Dict`, which is ordered by comparison rather than by hash and has no worst
-case of this shape.
+**On WebAssembly, text keys are not protected.** A program built for `wasm32`
+has no operating-system randomness to draw the key from, and its key is the
+same in every run, so a set of colliding strings can be computed once and sent
+to every instance. A wasm program that builds a map from a client's keys should
+use `Dict` for it.
+
+An `Int` is its own hash, and the map spreads it over buckets with a fixed
+multiplication anybody can repeat, so a client that chooses numeric keys can
+still make them collide. So can a client choosing any key whose `Hash` is
+built only from numbers, including a derived one. For a structure keyed by
+client-chosen numbers that can grow large, use `Dict`, which is ordered by
+comparison rather than by hash and has no worst case of this shape.
 
 ## Anonymous union types
 

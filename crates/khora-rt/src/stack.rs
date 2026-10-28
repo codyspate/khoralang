@@ -117,6 +117,7 @@ pub extern "C" fn khora_begin() {
     ONCE.call_once(install);
     static SIGNALS: std::sync::Once = std::sync::Once::new();
     SIGNALS.call_once(crate::signals::install);
+    crate::text::draw_text_hash_key();
 }
 
 /// Writes `MESSAGE` to standard error with the smallest call that will do it.

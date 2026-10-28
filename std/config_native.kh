@@ -68,7 +68,7 @@ import std::schema::{Alternative, Named, Problem, Raw, Rejection, Schema, Segmen
 /// import std::schema::{Decode};
 ///
 /// derive(Decode)
-/// pub type Settings = { listen_port: Int, database_url: String };
+/// pub type Settings = { pub listen_port: Int, pub database_url: String };
 ///
 /// pub fn main() -> Int {
 ///   with { env: Env::real() } {

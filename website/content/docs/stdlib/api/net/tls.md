@@ -152,7 +152,7 @@ import std::net::tls::{server};
 
 fn settings() -> TlsServer
   with { scope: Scope, reads: FsRead }
-  raises TlsError
+  raises TlsError + IoError
 {
   server(read_text("cert.pem")!, read_text("key.pem")!)!
 }
@@ -282,7 +282,7 @@ import std::net::tls::{trusting};
 
 fn internal() -> TlsClient
   with { scope: Scope, reads: FsRead }
-  raises TlsError
+  raises TlsError + IoError
 {
   trusting(read_text("internal-ca.pem")!)!
 }

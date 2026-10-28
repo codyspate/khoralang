@@ -453,7 +453,7 @@ import std::fs::{FsRead, fold_lines};
 
 fn longest(path: String) -> Int with { reads: FsRead } raises IoError {
   fold_lines(path, 0, fn (so_far, line) =>
-    if String::length(line) > so_far { String::length(line) } else { so_far })!
+    if String::byte_length(line) > so_far { String::byte_length(line) } else { so_far })!
 }
 ```
 
