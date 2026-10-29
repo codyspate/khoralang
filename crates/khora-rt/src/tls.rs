@@ -948,9 +948,12 @@ mod tests {
                     let _ = conn.complete_io(&mut stream);
                 }
                 Then::SayStillOpen => {
-                    // The server's whole first flight, then the clear text at
-                    // once: the client refuses the certificate in that flight,
-                    // and this does not wait to hear how.
+                    // The server's whole first flight. Then it waits for the
+                    // client to speak in the clear on the same socket, after
+                    // its refusal, and only then answers. Writing straight
+                    // after the flight let the clear text arrive in the same
+                    // read as the flight on macOS, where rustls took it into
+                    // its own buffer and the caller never saw it.
                     let mut conn = ServerConnection::new(config).expect("a session");
                     while !conn.wants_write() {
                         conn.read_tls(&mut stream).expect("the client's hello");
@@ -958,6 +961,14 @@ mod tests {
                     }
                     while conn.wants_write() {
                         conn.write_tls(&mut stream).expect("the server's flight");
+                    }
+                    let mut heard = Vec::new();
+                    let mut chunk = [0u8; 512];
+                    while !heard.windows(4).any(|w| w == b"ping") {
+                        match stream.read(&mut chunk) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => heard.extend_from_slice(&chunk[..n]),
+                        }
                     }
                     let _ = stream.write_all(b"still open");
                     let mut rest = Vec::new();
@@ -1116,6 +1127,10 @@ mod tests {
         let (session, why) = upgrade(&client, socket, "127.0.0.1", -1);
         assert!(session.is_null(), "a certificate for `localhost` must not do for 127.0.0.1");
         assert_eq!(why, 3, "a refusal for the name, said to be the name");
+        // Speak first, in the clear, on the socket handed back: only an open
+        // socket can send this, and the server answers only once it arrives.
+        // SAFETY: four readable bytes.
+        assert_eq!(unsafe { crate::net::khora_net_send(socket, b"ping".as_ptr(), 4) }, 4);
         let got = read_until(socket, b"still open");
         assert!(
             got.windows(10).any(|w| w == b"still open"),
