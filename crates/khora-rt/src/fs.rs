@@ -128,7 +128,33 @@ pub unsafe extern "C" fn khora_fs_open_why(
         // SAFETY: the caller promised a writable word.
         unsafe { why.write(reason) };
     }
+    if file != 0 {
+        count_handle(1);
+    }
     file as *mut c_void
+}
+
+/// How many file and directory handles `std::fs` holds: opened here and not
+/// yet closed.
+static HANDLES_OPEN: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// Counts one handle as open (`by` = 1) or closed (`by` = -1).
+fn count_handle(by: i64) {
+    HANDLES_OPEN.fetch_add(by, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// How many file and directory handles are open: made by [`khora_fs_open_why`]
+/// or [`khora_fs_dir_open_why`] and not yet closed.
+///
+/// **For a leak test that `khora_live_count` cannot be.** A `FILE *` and a
+/// directory handle live outside the Khora heap, so one whose close was never
+/// registered shows only in the process's descriptor table, which is
+/// `/proc/self/fd` on Linux and something else on every other system. This
+/// is exact and works everywhere. What it costs: one relaxed atomic add per
+/// open and per close.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_fs_handles_open() -> i64 {
+    HANDLES_OPEN.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Which of the four an `errno` is.
@@ -242,6 +268,9 @@ pub unsafe extern "C" fn khora_fs_write(
 #[unsafe(no_mangle)]
 // SHARE: a C `FILE *` or `DIR *` and byte buffers; takes no Khora object.
 pub unsafe extern "C" fn khora_fs_close(file: *mut c_void) -> i32 {
+    if !file.is_null() {
+        count_handle(-1);
+    }
     let file = file as usize;
     // SAFETY: the handle belongs to a suspended fiber and is not closed twice
     // — `std::fs` checks for null and drops its reference after this returns.
@@ -429,14 +458,18 @@ pub unsafe extern "C" fn khora_fs_is_dir(path: *const u8) -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn khora_fs_dir_open(path: *const u8) -> *mut c_void {
     let path = path as usize;
-    blocking(move || {
+    let dir = blocking(move || {
         // SAFETY: as above.
         let Some(path) = (unsafe { path_of(path as *const u8) }) else { return 0 };
         match std::fs::read_dir(path) {
             Ok(entries) => Box::into_raw(Box::new(entries)) as usize,
             Err(_) => 0,
         }
-    }) as *mut c_void
+    });
+    if dir != 0 {
+        count_handle(1);
+    }
+    dir as *mut c_void
 }
 
 /// The same, reporting why it failed.
@@ -470,6 +503,9 @@ pub unsafe extern "C" fn khora_fs_dir_open_why(path: *const u8, why: *mut i64) -
     if !why.is_null() {
         // SAFETY: the caller promised a writable word.
         unsafe { why.write(reason) };
+    }
+    if dir != 0 {
+        count_handle(1);
     }
     dir as *mut c_void
 }
@@ -529,6 +565,7 @@ pub unsafe extern "C" fn khora_fs_dir_close(dir: *mut c_void) {
     if dir.is_null() {
         return;
     }
+    count_handle(-1);
     // SAFETY: the handle came from `dir_open`, which boxed it, and the caller
     // promises this is its only close.
     drop(unsafe { Box::from_raw(dir as *mut std::fs::ReadDir) });

@@ -52,6 +52,15 @@ pub extern "C" fn khora_entry_canceled() -> u8 {
     0
 }
 
+/// `acquire`'s hold on the next entry poll: nothing to hold, as there is
+/// nothing to cancel.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_acquire_begin() {}
+
+/// The end of that hold.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_acquire_end() {}
+
 /// One deferred finalizer: the closure, its glue, and how to call it. The
 /// same three the native `region` keeps, for the same reasons.
 struct Finalizer {

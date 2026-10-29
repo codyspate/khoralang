@@ -342,6 +342,12 @@ pub(crate) struct Backend<'ctx> {
     /// `!` or blocking wait in the code it runs. Outside a finalizer the
     /// entry poll stops a canceled fiber as any cancellation point does.
     pub(crate) lambdas_poll_in: HashSet<String>,
+    /// The specializations of `std::core::acquire`, entered with no poll. Each
+    /// takes the hold on the `Scope` handler's entry poll when it is entered
+    /// and gives it back on every way out (`Cleanup::AcquireHold`), so a
+    /// handler unwound by a stop cannot leave the hold standing behind it.
+    /// Never one that polls on entry: its own poll would take its hold.
+    pub(crate) acquire_holds: HashSet<String>,
     /// Which types are held inline rather than behind a header.
     ///
     /// Whole-program, because it is a property of a type's declaration and
@@ -560,6 +566,7 @@ impl<'ctx> Backend<'ctx> {
             untagged: HashSet::new(),
             poll_at_entry: HashSet::new(),
             lambdas_poll_in: HashSet::new(),
+            acquire_holds: HashSet::new(),
             unboxed: std::rc::Rc::new(khora_types::unboxed::Unboxed::default()),
             ctx,
             module,

@@ -6597,9 +6597,31 @@ pub fn scoped<A, 'ef, 'er>(body: () -> A with { 'ef | scope: Scope } raises 'er)
 /// acquisition and the release are one expression. Written as two statements
 /// -- take it, then remember to close it -- the second is the one a
 /// cancellation skips.
+///
+/// **Nothing between the argument and the registration can stop**, so a
+/// fiber canceled while it opens the resource still closes it. `acquire`
+/// has no entry check for a cancellation, and the one in the `Scope`
+/// handler's `defer` is held off for this call. In
+/// `acquire(connect_to(host, 80), fn c => shut(c))`, a cancel that lands
+/// once `connect_to` has returned a socket is acted on after the release is
+/// registered, and the release runs.
+///
+/// **What it cannot cover is the code that runs before it.** The value
+/// must reach `acquire` straight from whatever made it. A resource held in a
+/// binding while other work runs -- a loop, a `!`, a blocking call, a call
+/// through a function value, or a function that makes one -- is lost if the
+/// fiber is canceled there, because no release is registered for it yet.
+/// Write the call that makes it as the argument. The call itself must end
+/// with the resource made, as `connect_to` and `listen_on` do: a function
+/// that opens a file and then does more that can stop needs the same care
+/// inside it. A `Scope` handler of your own must register before it does
+/// anything that can stop; the ones `scoped` and `Scope::root` install
+/// register and do nothing else.
 pub fn acquire<A, 'ef>(value: A, release: (A) -> ()) -> A
   with { 'ef | scope: Scope }
 {
+  // The compiler takes the hold on the handler's entry check when this is
+  // entered and gives it back on every way out, an unwind included.
   scope.defer(fn () => release(value));
   value
 }

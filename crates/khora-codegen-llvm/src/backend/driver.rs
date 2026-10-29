@@ -268,6 +268,24 @@ pub(super) fn build(
     backend.untagged = can_stop.keeps_a_plain_return();
     backend.lambdas_poll_in = can_stop.calls_through_values();
     backend.poll_at_entry = can_stop.cyclic.union(&backend.lambdas_poll_in).cloned().collect();
+    // **`std::core::acquire` is entered without a poll.** It is handed a
+    // resource that already exists and registers its release, and a stop at
+    // its entry unwound with the release registered nowhere: for a `Ptr` or
+    // an `Int` handle there is nothing a frame could release in its place,
+    // so the file or socket was lost for good. The poll this removes is the
+    // one every function that calls through a function value gets, there to
+    // break a cycle the call graph cannot see. `acquire` calls no named
+    // function, so it is in no named cycle, and that is checked rather than
+    // assumed. A `Scope` handler whose `defer` calls `acquire` again is still
+    // stopped: only the outermost `acquire` on a fiber holds the handler's
+    // poll, and a force is never held (`khora_acquire_begin`).
+    for (instance, _) in &mono.instances {
+        let symbol = instance.symbol();
+        if is_std_acquire(instance) && !can_stop.cyclic.contains(&symbol) {
+            backend.poll_at_entry.remove(&symbol);
+            backend.acquire_holds.insert(symbol);
+        }
+    }
 
     // Declare every definition before lowering any of them: a call site does
     // not know whether its callee has been emitted yet, and mutual recursion
@@ -550,6 +568,17 @@ fn can_stop_at(
         Expr::Shown(_) => mono.callee(owner, site).is_some_and(|symbol| leaves_from(&symbol)),
         _ => true,
     }
+}
+
+/// Whether `instance` is a specialization of `std::core::acquire`, the one
+/// function entered without a poll whatever it calls (see where the entry
+/// polls are decided).
+///
+/// **By home, never by name alone**: a program's own `acquire` is an
+/// ordinary function and polls like one.
+fn is_std_acquire(instance: &khora_types::mono::Instance) -> bool {
+    let home = instance.module.segments();
+    instance.function == "acquire" && home.len() == 2 && home[0] == "std" && home[1] == "core"
 }
 
 /// The text of the file a symbol's body came from.

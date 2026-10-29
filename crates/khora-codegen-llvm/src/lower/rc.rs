@@ -407,6 +407,10 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .build_call(releaser, &[which.into(), word.into()], "")
                     .expect("releasing a caught failure by its id");
             }
+            Cleanup::AcquireHold => {
+                let end = self.be.rt.acquire_end;
+                self.be.builder.build_call(end, &[], "").expect("ending acquire's hold");
+            }
         }
     }
 }

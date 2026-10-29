@@ -93,6 +93,17 @@ pub(crate) fn emit_function<'ctx>(
     lower.allocate_slots();
     lower.take_evidence(&signature);
     lower.bind_parameters();
+    // `std::core::acquire`: the hold on the `Scope` handler's entry poll,
+    // taken here and given back by a cleanup of the outermost scope, so the
+    // normal return, an unwind from the handler and every other way out end
+    // it. `Backend::acquire_holds`.
+    if lower.be.acquire_holds.contains(name) {
+        let begin = lower.be.rt.acquire_begin;
+        lower.be.builder.build_call(begin, &[], "").expect("taking acquire's hold");
+        if let Some(outermost) = lower.scopes.last_mut() {
+            outermost.push(Cleanup::AcquireHold);
+        }
+    }
     // A body that is not a block has no scope of its own to poll inside, and
     // owns no binding the poll's unwind would have to release but the
     // parameters, which `take_evidence`'s scope and the plan cover.
@@ -296,6 +307,16 @@ enum Cleanup<'ctx> {
     /// ([`runtime::NOTED_WHICH`]): the arm reads the error inside, and this
     /// lets go of the box, the error and the note together.
     Failure(IntValue<'ctx>, IntValue<'ctx>),
+    /// `std::core::acquire`'s hold on the `Scope` handler's entry poll,
+    /// given back with `khora_acquire_end`.
+    ///
+    /// **A cleanup rather than a call before the return, so it runs on every
+    /// way out.** Ended only on the normal return, a handler unwound by a
+    /// stop that never asked `khora_canceled` (a `Fiber::wait` that gave up,
+    /// a `!` whose fast path ran before the cancel landed) left the hold
+    /// standing, and the next unrelated function's entry poll was let past a
+    /// pending cancel.
+    AcquireHold,
 }
 
 /// Where [`Lower::make_closure`] puts a closure object.

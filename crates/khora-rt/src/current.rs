@@ -110,6 +110,10 @@ pub(crate) struct Fiber {
     /// [`ENTRY_ONCE`]. [`Fiber::hold_entry_polls`]. Only the running fiber
     /// touches this.
     entry_held: std::sync::atomic::AtomicU8,
+    /// How many `std::core::acquire` calls this fiber is inside, so a nested
+    /// one takes no hold: [`Fiber::hold_next_entry_poll`]. Only the running
+    /// fiber touches this.
+    acquiring: AtomicUsize,
     /// The `timeout` scopes this fiber is inside, outermost first.
     /// [`crate::timeout`] has the protocol; the lock is what orders a
     /// deadline firing against the scope it belongs to ending.
@@ -201,6 +205,11 @@ const ENTRY_HELD: u8 = 1;
 /// The value is taken: the next entry poll, the branch's own, does not
 /// count, and the ones after it do.
 const ENTRY_ONCE: u8 = 2;
+/// `std::core::acquire` is registering: the next entry poll, the `Scope`
+/// handler's, does not count unless the fiber is forced. Its own state rather
+/// than [`ENTRY_ONCE`], so `acquire`'s end cannot clear a select's hold and
+/// a force is honored here and not there.
+const ENTRY_ACQUIRE: u8 = 3;
 
 /// One `timeout` scope on a fiber: which one, when its deadline is, whether
 /// it has passed while the scope was open, and how deep in cleanup it was
@@ -262,6 +271,7 @@ impl Fiber {
             finalizer_starting: std::sync::atomic::AtomicBool::new(false),
             pinned: AtomicUsize::new(0),
             entry_held: std::sync::atomic::AtomicU8::new(ENTRY_FREE),
+            acquiring: AtomicUsize::new(0),
             deadlines: Mutex::new(Vec::new()),
             fired_scopes: AtomicUsize::new(0),
             #[cfg(any(debug_assertions, feature = "fiber-audit"))]
@@ -305,6 +315,7 @@ impl Fiber {
             finalizer_starting: std::sync::atomic::AtomicBool::new(false),
             pinned: AtomicUsize::new(0),
             entry_held: std::sync::atomic::AtomicU8::new(ENTRY_FREE),
+            acquiring: AtomicUsize::new(0),
             deadlines: Mutex::new(Vec::new()),
             fired_scopes: AtomicUsize::new(0),
             #[cfg(any(debug_assertions, feature = "fiber-audit"))]
@@ -635,6 +646,37 @@ impl Fiber {
         self.entry_held.store(ENTRY_FREE, Ordering::Relaxed);
     }
 
+    /// Holds the next entry poll off, for `std::core::acquire`'s
+    /// registration: [`crate::cancel::khora_acquire_begin`].
+    ///
+    /// **Only the outermost `acquire` on this fiber holds.** A `Scope`
+    /// handler that reaches `acquire` again from its own `defer`, through
+    /// itself and nothing else, is a cycle whose only polls are the
+    /// handler's entry, and holding at every level left it with none: it
+    /// ran to the end of its recursion, or out of stack, under `cancel` and
+    /// `abort` alike. The depth is counted on every way out by
+    /// [`Fiber::end_next_entry_poll_hold`], which generated code runs as a
+    /// cleanup of `acquire`'s frame. A select's hold, if one is standing, is
+    /// left as it is: it is already at least this strong.
+    pub(crate) fn hold_next_entry_poll(&self) {
+        let outer = self.acquiring.fetch_add(1, Ordering::Relaxed);
+        if outer == 0 && self.entry_held.load(Ordering::Relaxed) == ENTRY_FREE {
+            self.entry_held.store(ENTRY_ACQUIRE, Ordering::Relaxed);
+        }
+    }
+
+    /// Ends [`Fiber::hold_next_entry_poll`]'s hold if no entry poll took it,
+    /// so a `Scope` handler with no entry poll of its own does not pass the
+    /// hold on to whatever the caller runs next. Only `acquire`'s own state
+    /// is cleared, never a select's.
+    pub(crate) fn end_next_entry_poll_hold(&self) {
+        let depth = self.acquiring.load(Ordering::Relaxed);
+        self.acquiring.store(depth.saturating_sub(1), Ordering::Relaxed);
+        if depth <= 1 && self.entry_held.load(Ordering::Relaxed) == ENTRY_ACQUIRE {
+            self.entry_held.store(ENTRY_FREE, Ordering::Relaxed);
+        }
+    }
+
     /// Whether [`Fiber::force`] has been called on this fiber.
     pub(crate) fn is_forced(&self) -> bool {
         self.state.load(Ordering::Acquire) & FORCED != 0
@@ -806,6 +848,28 @@ impl Fiber {
             ENTRY_ONCE => {
                 self.entry_held.store(ENTRY_FREE, Ordering::Relaxed);
                 return false;
+            }
+            // **A force is not held.** `abort` is the way to end a fiber
+            // that does not answer a cancel, and `acquire`'s hold is the one
+            // a cycle through a `Scope` handler can stand behind; a force
+            // that loses the registration loses a resource, which is what
+            // `abort` already says about cleanup it cuts short.
+            //
+            // **One held poll may miss a force that has just landed**, and
+            // that is all it may miss. `set_bits` raises `khora_poll`
+            // (relaxed) before its CAS writes the bits, so this thread can
+            // see the count and not yet FORCED, and let the outer level
+            // through. The count stays raised while the fiber runs, and the
+            // nested level's entry poll is never held (only the outermost
+            // `acquire` holds), so the next level stops once the bits are
+            // visible: no ordering here can carry the cycle past that.
+            // `entry_held` and `acquiring` are this fiber's alone, which is
+            // why they are `Relaxed`.
+            ENTRY_ACQUIRE => {
+                self.entry_held.store(ENTRY_FREE, Ordering::Relaxed);
+                if !self.is_forced() {
+                    return false;
+                }
             }
             _ => return false,
         }
@@ -1598,6 +1662,169 @@ mod tests {
         assert_eq!(crate::cancel::khora_entry_canceled(), 1);
         assert_eq!(crate::cancel::khora_canceled(), 1);
         crate::cancel::khora_cancel_reset();
+    }
+
+    /// **`acquire`'s hold lets exactly one entry poll through, and no other
+    /// kind of point.** The one it lets through is the `Scope` handler's,
+    /// between a resource being made and its release registered. The poll
+    /// after it stops the fiber, and so does any back-edge or `!` inside the
+    /// hold.
+    #[test]
+    fn acquires_hold_lets_one_entry_poll_through() {
+        let fiber = Fiber::spawned_counting_in(word());
+        let _entered = enter(fiber.clone());
+        fiber.cancel();
+        crate::cancel::khora_acquire_begin();
+        assert_eq!(crate::cancel::khora_entry_canceled(), 0, "the handler's entry poll");
+        assert_eq!(crate::cancel::khora_entry_canceled(), 1, "the one after it");
+        crate::cancel::khora_acquire_end();
+        assert_eq!(crate::cancel::khora_entry_canceled(), 1);
+
+        crate::cancel::khora_acquire_begin();
+        assert_eq!(crate::cancel::khora_canceled(), 1, "a point in the handler's own code stops it");
+        crate::cancel::khora_acquire_end();
+        crate::cancel::khora_cancel_reset();
+    }
+
+    /// **A hold no entry poll took is ended by `acquire`, not passed on.** A
+    /// `Scope` handler whose lambda has no entry poll of its own leaves the
+    /// hold standing, and without the end the caller's next function would
+    /// have been entered past a cancel.
+    #[test]
+    fn an_unused_acquire_hold_ends_with_acquire() {
+        let fiber = Fiber::spawned_counting_in(word());
+        let _entered = enter(fiber.clone());
+        fiber.cancel();
+        crate::cancel::khora_acquire_begin();
+        crate::cancel::khora_acquire_end();
+        assert_eq!(crate::cancel::khora_entry_canceled(), 1, "the next entry poll counts");
+        crate::cancel::khora_cancel_reset();
+    }
+
+    /// `acquire` inside a select's hold leaves that hold as it was: the
+    /// select's is the stronger, held until its value is taken.
+    #[test]
+    fn an_acquire_hold_does_not_weaken_a_select_hold() {
+        let fiber = Fiber::spawned_counting_in(word());
+        let _entered = enter(fiber.clone());
+        fiber.cancel();
+        fiber.hold_entry_polls();
+        crate::cancel::khora_acquire_begin();
+        assert_eq!(crate::cancel::khora_entry_canceled(), 0);
+        crate::cancel::khora_acquire_end();
+        assert_eq!(crate::cancel::khora_entry_canceled(), 0, "the select's hold still stands");
+        fiber.release_entry_polls();
+        assert_eq!(crate::cancel::khora_entry_canceled(), 1);
+        crate::cancel::khora_cancel_reset();
+    }
+
+    /// **A force is not held by `acquire`.** `abort` is what ends a fiber
+    /// that does not answer a cancel, and a cycle through a `Scope` handler
+    /// stands behind `acquire`'s hold; a select's hold is unchanged.
+    #[test]
+    fn an_acquire_hold_does_not_hold_a_force() {
+        let fiber = Fiber::spawned_counting_in(word());
+        let _entered = enter(fiber.clone());
+        fiber.force();
+        crate::cancel::khora_acquire_begin();
+        assert_eq!(crate::cancel::khora_entry_canceled(), 1, "the force stops at the handler's entry");
+        crate::cancel::khora_acquire_end();
+    }
+
+    /// **Only the outermost `acquire` holds.** An `acquire` reached from the
+    /// handler of another, still registering, polls normally, so a handler
+    /// that calls `acquire` through itself is stopped one level in.
+    #[test]
+    fn a_nested_acquire_takes_no_hold() {
+        let fiber = Fiber::spawned_counting_in(word());
+        let _entered = enter(fiber.clone());
+        fiber.cancel();
+        crate::cancel::khora_acquire_begin();
+        assert_eq!(crate::cancel::khora_entry_canceled(), 0, "the outer handler's entry");
+        crate::cancel::khora_acquire_begin();
+        assert_eq!(crate::cancel::khora_entry_canceled(), 1, "the inner handler's entry");
+        crate::cancel::khora_acquire_end();
+        crate::cancel::khora_acquire_end();
+        crate::cancel::khora_acquire_begin();
+        assert_eq!(crate::cancel::khora_entry_canceled(), 0, "the depth went back to zero");
+        crate::cancel::khora_acquire_end();
+        crate::cancel::khora_cancel_reset();
+    }
+
+    /// **An `abort` from another thread is seen by the first unheld entry
+    /// poll after the target learns of it, however the hold and the depth
+    /// are interleaved with it.** The target runs `acquire`'s own sequence,
+    /// two levels deep (begin, the handler's entry poll, a nested begin, its
+    /// entry poll, two ends), while the other thread forces it and then
+    /// publishes that it has, with `Release`. A target that reads the
+    /// publication with `Acquire` has the force's state write before it, so
+    /// the next entry poll it reaches that is not held must answer "stop":
+    /// every one, on every round. 10,000 rounds, a fresh fiber each.
+    ///
+    /// The ordering this leans on is the state word's own: `set_bits` writes
+    /// with `AcqRel` and `stops_here`/`is_forced` read with `Acquire`, while
+    /// `entry_held` and `acquiring` are only ever touched by the running
+    /// fiber. A weakly ordered CPU is where a missing edge would show; on
+    /// x86-64 every store is a release and every load an acquire.
+    #[test]
+    fn an_abort_from_another_thread_is_seen_at_the_next_unheld_entry_poll() {
+        use std::sync::atomic::AtomicUsize as Gen;
+        const ROUNDS: usize = 10_000;
+        let target: Arc<std::sync::Mutex<Option<Arc<Fiber>>>> = Arc::new(Mutex::new(None));
+        let go = Arc::new(Gen::new(0));
+        let forced = Arc::new(Gen::new(0));
+        let (slot, go2, forced2) = (target.clone(), go.clone(), forced.clone());
+        let forcer = std::thread::spawn(move || {
+            for round in 1..=ROUNDS {
+                while go2.load(Ordering::Acquire) < round {
+                    std::hint::spin_loop();
+                }
+                let fiber = slot.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                if let Some(fiber) = fiber {
+                    fiber.force();
+                }
+                forced2.store(round, Ordering::Release);
+            }
+        });
+        let mut missed = 0usize;
+        let mut first_miss = None;
+        for round in 1..=ROUNDS {
+            let fiber = Fiber::spawned_counting_in(word());
+            *target.lock().unwrap_or_else(|e| e.into_inner()) = Some(fiber.clone());
+            let _entered = enter(fiber.clone());
+            go.store(round, Ordering::Release);
+            let mut knew = false;
+            let mut stopped = false;
+            // Cycle `acquire`'s sequence until the force has been published
+            // and one more cycle has run after this thread read it.
+            for _ in 0..1_000_000 {
+                let knew_before = knew || forced.load(Ordering::Acquire) >= round;
+                crate::cancel::khora_acquire_begin();
+                let outer = crate::cancel::khora_entry_canceled() != 0;
+                crate::cancel::khora_acquire_begin();
+                let inner = crate::cancel::khora_entry_canceled() != 0;
+                crate::cancel::khora_acquire_end();
+                crate::cancel::khora_acquire_end();
+                if outer || inner {
+                    stopped = true;
+                    break;
+                }
+                if knew_before {
+                    // The force was visible before this cycle began, and the
+                    // inner entry poll is never held: it had to stop.
+                    break;
+                }
+                knew = knew_before;
+            }
+            if !stopped {
+                missed += 1;
+                first_miss.get_or_insert(round);
+            }
+            assert!(fiber.is_forced(), "round {round}: the forcer did not run");
+            drop(_entered);
+        }
+        forcer.join().expect("the forcer");
+        assert_eq!(missed, 0, "rounds where a published force was not seen, first {first_miss:?}");
     }
 
     /// Cancelers and forcers of one set of fibers at once: each fiber is

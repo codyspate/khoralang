@@ -75,6 +75,13 @@ pub fn listen_on(port: Int) -> Int
 
 A socket listening on `port`, or [`invalid_handle`](#invalid_handle).
 
+**Nothing that can stop runs after the socket is made**, so a fiber
+canceled inside this call either has no socket yet or gets it back, and
+`acquire(listen_on(port), fn s => shut(s))` always closes what it opened.
+The socket is made last, inside the lambdas that lend the two buffers it
+needs, because each of those lambdas checks for a cancellation when it
+is entered.
+
 ### accept_on
 
 ```khora

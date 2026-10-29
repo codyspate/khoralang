@@ -300,6 +300,11 @@ pub struct Runtime<'ctx> {
     pub select_wait: FunctionValue<'ctx>,
     /// `void khora_select_settled(void)`
     pub select_settled: FunctionValue<'ctx>,
+    /// `void khora_acquire_begin(void)` and `void khora_acquire_end(void)`:
+    /// the hold on the `Scope` handler's entry poll that `std::core::acquire`
+    /// takes at its entry and gives back on every way out of it.
+    pub acquire_begin: FunctionValue<'ctx>,
+    pub acquire_end: FunctionValue<'ctx>,
     /// `bool khora_channel_take_selected(void *channel, uint64_t *out)`
     pub channel_take_selected: FunctionValue<'ctx>,
     /// `void khora_selection_release(void *selection)`, a `drop_fields`
@@ -594,6 +599,8 @@ impl<'ctx> Runtime<'ctx> {
             ),
             select_wait: declare("khora_select_wait", i64t.fn_type(&[ptr.into()], false)),
             select_settled: declare("khora_select_settled", void.fn_type(&[], false)),
+            acquire_begin: declare("khora_acquire_begin", void.fn_type(&[], false)),
+            acquire_end: declare("khora_acquire_end", void.fn_type(&[], false)),
             channel_take_selected: declare(
                 "khora_channel_take_selected",
                 ctx.bool_type().fn_type(&[ptr.into(), ptr.into()], false),

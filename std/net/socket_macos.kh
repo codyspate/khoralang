@@ -54,7 +54,24 @@ pub fn invalid_handle() -> Int { -1 }
 pub fn start() -> Bool { true }
 
 /// A socket listening on `port`, or [`invalid_handle`].
+///
+/// **Nothing that can stop runs after the socket is made**, so a fiber
+/// canceled inside this call either has no socket yet or gets it back, and
+/// `acquire(listen_on(port), fn s => shut(s))` always closes what it opened.
+/// The socket is made last, inside the lambdas that lend the two buffers it
+/// needs, because each of those lambdas checks for a cancellation when it
+/// is entered.
 pub fn listen_on(port: Int) -> Int {
+  let address = sockaddr_in(port);
+  let on: Array<U8> = Array::new(4, 0);
+  Array::set(on, 0, 1);
+  Array::with_data(on, fn (flag, _n) =>
+    Array::with_data(address, fn (bytes, _m) => listening(flag, bytes)))
+}
+
+/// [`listen_on`]'s calls, with the option value and the address already
+/// lent. Calls no function value, so nothing in it can stop.
+fn listening(flag: Ptr, address: Ptr) -> Int {
   // AF_INET, SOCK_STREAM, IPPROTO_TCP — 2, 1 and 6 here as on Linux.
   let handle = socket(I32::of(2), I32::of(1), I32::of(6));
   // Non-blocking from here on, so that a fiber waiting for a connection gives
@@ -65,7 +82,6 @@ pub fn listen_on(port: Int) -> Int {
   if I32::to_int(handle) < 0 {
     invalid_handle()
   } else {
-    let address = sockaddr_in(port);
     // **`SO_REUSEADDR` before the bind, or a restart within a minute fails.**
     //
     // See the note in `socket_linux.kh`: a closed listener leaves the port in
@@ -80,11 +96,8 @@ pub fn listen_on(port: Int) -> Int {
     //
     // Not `SO_REUSEPORT`, which on the BSDs really does let two live listeners
     // share a port.
-    let on: Array<U8> = Array::new(4, 0);
-    Array::set(on, 0, 1);
-    Array::with_data(on, fn (bytes, _n) =>
-      setsockopt(handle, I32::of(65535), I32::of(4), bytes, I32::of(4)));
-    let bound = Array::with_data(address, fn (bytes, n) => bind(handle, bytes, I32::of(16)));
+    setsockopt(handle, I32::of(65535), I32::of(4), flag, I32::of(4));
+    let bound = bind(handle, address, I32::of(16));
     // **511, not 16.** The backlog is the queue of connections the kernel has
     // accepted and this program has not yet taken, which is to say it *is* the
     // buffer `bounded_nursery` means when it says overload "becomes latency

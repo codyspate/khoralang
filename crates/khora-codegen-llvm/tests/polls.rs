@@ -690,3 +690,96 @@ pub fn main() -> () {
         }
     }
 }
+
+/// The `entry:` block of a function's IR: the lines after its label, up to
+/// the next label.
+fn entry_block(body: &str) -> Vec<&str> {
+    body.lines()
+        .skip_while(|l| !l.starts_with("entry:"))
+        .skip(1)
+        .take_while(|l| !l.starts_with(|c: char| c.is_ascii_alphabetic()))
+        .collect()
+}
+
+/// **`acquire` has no cancellation point between its entry and the `Scope`
+/// handler's registration.** It is handed a resource that already exists,
+/// so a stop there loses it: for a `Ptr` or an `Int` handle no frame has
+/// anything to release in its place. Its own entry is not polled, and the
+/// handler's entry poll, reached through `scope.defer`, is held off by
+/// `khora_acquire_begin` before the call and the hold ended after it.
+///
+/// Read from the IR because the window is two polls wide: the 1,000-fiber
+/// leak tests in `acquire_cancel.rs` find it as a count, and this says
+/// where. A program's own `acquire` is an ordinary function and still
+/// polls, which the second half checks.
+#[test]
+fn acquire_has_no_cancellation_point_before_it_registers() {
+    let main = "module main;
+import std::core::{Scope, acquire, print, scoped};
+
+fn take() -> Int with { scope: Scope } {
+  acquire(7, fn v => print(\"${v}\"))
+}
+
+pub fn main() -> () {
+  print(\"${scoped(fn () => take())}\");
+}
+";
+    let body = std_function_ir("polls_acquire", main, "std$core$acquire$Int$_{}");
+    let entry = entry_block(&body);
+    assert!(!entry.is_empty(), "no `entry:` block found:\n{body}");
+    assert!(
+        !entry.iter().any(|l| l.contains("@khora_poll") || l.contains("@khora_entry_canceled")),
+        "`acquire` polls when it is entered:\n{body}"
+    );
+    let lines: Vec<&str> = body.lines().collect();
+    let begin = lines.iter().position(|l| l.contains("@khora_acquire_begin("));
+    let call = lines.iter().position(|l| l.contains(" call ") && !l.contains('@'));
+    match (begin, call) {
+        (Some(b), Some(c)) => assert!(b < c, "the hold is taken after the handler's call:\n{body}"),
+        _ => panic!("`acquire` should hold the handler's entry poll around its call:\n{body}"),
+    }
+    // **Every way out gives the hold back**, the unwind from the handler as
+    // well as the return: each `ret` has a `khora_acquire_end` before it and
+    // after the call. A hold left standing past an unwind let the next
+    // unrelated entry poll through a pending cancel.
+    let call = call.unwrap_or(0);
+    let mut last_end = None;
+    let mut rets = 0;
+    for (at, line) in lines.iter().enumerate() {
+        if line.contains("@khora_acquire_end(") {
+            last_end = Some(at);
+        }
+        if line.trim_start().starts_with("ret ") && at > call {
+            rets += 1;
+            assert!(
+                last_end.is_some_and(|e| e > call),
+                "a way out of `acquire` that does not end its hold:\n{line}\n\n{body}"
+            );
+            last_end = None;
+        }
+    }
+    assert!(rets >= 2, "the normal return and the unwind, at least:\n{body}");
+    assert!(
+        !lines[..call].iter().any(|l| l.contains("@khora_canceled") || l.contains("@khora_poll")),
+        "a cancellation check before the registration:\n{body}"
+    );
+
+    let own = "module main;
+import std::core::{Scope, print, scoped};
+
+fn acquire(value: Int, release: (Int) -> ()) -> Int with { scope: Scope } {
+  scope.defer(fn () => release(value));
+  value
+}
+
+pub fn main() -> () {
+  print(\"${scoped(fn () => acquire(7, fn v => print(\"${v}\")))}\");
+}
+";
+    let body = std_function_ir("polls_own_acquire", own, "main$acquire");
+    assert!(
+        entry_block(&body).iter().any(|l| l.contains("@khora_poll")),
+        "a program's own `acquire` lost its entry poll:\n{body}"
+    );
+}

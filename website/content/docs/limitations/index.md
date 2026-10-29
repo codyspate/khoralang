@@ -254,6 +254,27 @@ server rather than of the `Router` type, so it does not appear in the generated
 [`std::net::http` pages](/docs/stdlib/api/net/http/); [Serve HTTP
 requests](/docs/cookbook/http-service/) is where it is discussed.
 
+**A canceled server can leave connections and its TLS listener open.** Two
+known issues, both in the reference server rather than in the language:
+
+- Connections the server had accepted when it was canceled may stay open.
+  An accepted socket reaches the code that closes it only once its
+  connection fiber has started, and a cancel that lands before then drops
+  the socket with nothing holding it. The cost is bounded by the
+  connections in flight at the cancel, not by the requests served: in a
+  test that started a server, connected and canceled it 1,000 times, 423 to
+  667 sockets stayed open on the thread backend and 16 to 28 on the
+  scheduler, each the server's end of a connection in `CLOSE-WAIT`. A
+  server canceled once, at shutdown, loses at most what it was answering
+  then.
+- `Router::listen_tls` does not close its listening socket when it is
+  canceled, so the port stays bound for the rest of the process.
+  `Router::listen` and `listen_quietly` do close theirs.
+
+A process that starts and cancels many servers, a test suite for example,
+accumulates those sockets until it runs out of descriptors; give each
+server its own process.
+
 ## Performance against other servers
 
 On the TechEmpower read tests, run against PostgreSQL on one machine with

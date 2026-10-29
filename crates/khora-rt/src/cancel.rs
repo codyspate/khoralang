@@ -49,6 +49,42 @@ pub extern "C" fn khora_entry_canceled() -> u8 {
     u8::from(current(|fiber| fiber.stops_at_entry()))
 }
 
+/// Holds the next entry poll off, until [`khora_acquire_end`]: the one
+/// `std::core::acquire`'s registration passes through.
+///
+/// **What this prevents: a resource opened and its release registered
+/// nowhere.** `acquire` registers through `scope.defer`, a call through a
+/// function value, and the `Scope` handler's lambda polls on entry. A cancel
+/// landing there unwound with the release never registered and the value
+/// already made: a file descriptor or a TLS store per canceled open, for
+/// good, which a server canceling its handlers runs into as `EMFILE`. The
+/// handler's entry is the only stop between `acquire`'s entry and the
+/// registration, so one held poll closes it.
+///
+/// **One poll, not the handler's whole body.** A handler that runs code with
+/// a loop, `!` or wait before it registers stops at that point, as anywhere
+/// else, and the release is lost; the `Scope` handlers `std` installs
+/// (`scoped`, `Scope::root`) are `Region::defer` and nothing else.
+///
+/// **Never a force, and never a nested `acquire`.** A forced fiber stops at
+/// the held poll anyway, and only the outermost `acquire` on a fiber holds:
+/// a handler that calls `acquire` again through itself would otherwise be a
+/// cycle with no poll that `Fiber::abort` could not end. Generated code calls
+/// this at `acquire`'s entry and [`khora_acquire_end`] on every way out of
+/// it, so the depth cannot drift. Costs four relaxed atomic operations per
+/// `acquire`.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_acquire_begin() {
+    current(|fiber| fiber.hold_next_entry_poll());
+}
+
+/// Ends [`khora_acquire_begin`]'s hold, if the handler had no entry poll to
+/// take it, and counts the `acquire` as left.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_acquire_end() {
+    current(|fiber| fiber.end_next_entry_poll_hold());
+}
+
 /// Marks a finalizer that starts on an already-forced fiber as starting, for
 /// as long as this lives or until the finalizer reaches a cancellation point
 /// in the code it runs, whichever is first. While it is starting, no entry

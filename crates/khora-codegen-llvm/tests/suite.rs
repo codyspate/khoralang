@@ -31,6 +31,7 @@
 #[cfg(feature = "llvm")]
 mod harness;
 
+mod acquire_cancel;
 mod agreement;
 mod argleak;
 mod arithmetic;

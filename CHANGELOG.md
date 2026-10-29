@@ -205,6 +205,32 @@ it will behave differently now.
   without bound. Its close is registered before anything that can stop the
   fiber. The machine's roots are read once per process, so building a
   client no longer reads the certificate store each time.
+- A fiber canceled while it opens a resource and hands it to `acquire`
+  closes the resource. `acquire` and the `Scope` handler's `defer` it calls
+  each checked for a cancellation when entered, before the release was
+  registered, so the value was made and nothing held it: 1,000 fibers
+  canceled while looping `std::fs::read_text` left 291 files open on the
+  thread backend and 305 on the scheduler, and a server canceling its
+  handlers ran into `EMFILE`. `acquire` is entered with no check and holds
+  the handler's off. The same window closed in `std`: `listen_on` makes its
+  socket after every check, and `Router::listen` and `listen_quietly` bind
+  the port in the call that registers its close (121 listening ports left
+  bound in 1,000 canceled `listen_quietly` loops). Every `acquire` in `std`
+  -- `read_text` and the other file functions, `read_dir`, `tls::server`,
+  `tls::trusting`, `std::trace` spans and the HTTP server's sockets -- hands
+  it the resource straight from the call that made it. `acquire`'s
+  documentation says what user code must do: write the call that makes the
+  resource as `acquire`'s argument, and keep a `Scope` handler of its own
+  free of anything that can stop before it registers. A new runtime
+  export, `khora_fs_handles_open`, counts the file and directory handles
+  open, for a leak test that `khora_live_count` cannot see. The hold covers
+  only the outermost `acquire` on a fiber and is never a force's, so a
+  `Scope` handler that calls `acquire` again through itself still stops at
+  a cancel or `Fiber::abort`, and it ends on every way out of `acquire`.
+  Two leaks on cancel remain in the HTTP server, and the
+  [limitations page](/docs/limitations/#http-surface) states them: accepted
+  connections a canceled server had not started serving stay open, and
+  `Router::listen_tls` does not close its listener.
 - Documentation examples that did not compile: a `handler for Clock` written
   with a `now` operation `Clock` does not have (Reference: capabilities,
   effects, expressions), a `Fiber::join` caught on `DbError` cases that do not

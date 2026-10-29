@@ -53,7 +53,20 @@ pub fn start() -> Bool {
 }
 
 /// A socket listening on `port`, or [`invalid_handle`].
+///
+/// **Nothing that can stop runs after the socket is made**, so a fiber
+/// canceled inside this call either has no socket yet or gets it back, and
+/// `acquire(listen_on(port), fn s => shut(s))` always closes what it opened.
+/// The socket is made last, inside the lambda that lends the address,
+/// because that lambda checks for a cancellation when it is entered.
 pub fn listen_on(port: Int) -> Int {
+  let address = sockaddr_in(port);
+  Array::with_data(address, fn (bytes, _n) => listening(bytes))
+}
+
+/// [`listen_on`]'s calls, with the address already lent. Calls no function
+/// value, so nothing in it can stop.
+fn listening(address: Ptr) -> Int {
   // AF_INET, SOCK_STREAM, IPPROTO_TCP.
   let handle = socket(I32::of(2), I32::of(1), I32::of(6));
   // Non-blocking from here on, so that a fiber waiting for a connection gives
@@ -64,7 +77,6 @@ pub fn listen_on(port: Int) -> Int {
   if handle == invalid_handle() {
     handle
   } else {
-    let address = sockaddr_in(port);
     // **No `SO_REUSEADDR` here, deliberately, unlike Linux and macOS.**
     //
     // The other two set it so that restarting a service inside the `TIME_WAIT`
@@ -78,7 +90,7 @@ pub fn listen_on(port: Int) -> Int {
     // and it is a separate decision from this one: it would make two Khora
     // services on one port fail earlier and more clearly rather than changing
     // what works today.
-    let bound = Array::with_data(address, fn (bytes, _n) => bind(handle, bytes, I32::of(16)));
+    let bound = bind(handle, address, I32::of(16));
     // **511, not 16.** The backlog is the queue of connections the kernel has
     // accepted and this program has not yet taken, which is to say it *is* the
     // buffer `bounded_nursery` means when it says overload "becomes latency
