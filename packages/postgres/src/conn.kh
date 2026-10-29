@@ -1,10 +1,11 @@
 module postgres::conn;
 
-import std::core::{Array, Fiber, Iterator, List, Map, Option, Pair, Result, Step, Vector, assert, assert_that};
+import std::core::{Array, Fiber, Iterator, List, Map, Option, Pair, Raised, Region, Result, Split, Step, Vector, assert, assert_that, attempt, scoped};
 import std::db::{Cell, DbError, Row};
 import std::decimal::{Decimal};
 import std::net::socket::{accept_on, connect_to, invalid_handle, listen_on, nothing_yet, receive, receive_now, set_receive_timeout, shut, start, transmit_bytes};
-import postgres::wire::{Message, Reader, Writer, framed, message_at, message_width, password, payload_width, prepare_and_run, query, run_prepared, run_prepared_each, sasl_initial, sasl_response, startup, terminate};
+import std::net::tls::{Refusal, TlsConnection, TlsError, receive as tls_receive, receive_now as tls_receive_now, set_receive_timeout as tls_set_receive_timeout, shut as tls_shut, transmit_bytes as tls_transmit_bytes, trusting, upgrade_saying};
+import postgres::wire::{Message, Reader, Writer, framed, message_at, message_width, password, payload_width, prepare_and_run, query, run_prepared, run_prepared_each, sasl_initial, sasl_response, ssl_request, startup, terminate};
 import std::crypto::{Base64, SecureRandom};
 import postgres::scram::{Opening, ScramError, Session, begin, finish, verify};
 
@@ -41,8 +42,25 @@ extern fn khora_monotonic_millis() -> Int;
 /// `scram-sha-256` — the default on PostgreSQL 14 and later — **is** spoken,
 /// and the server is made to prove itself too. See `src/scram.kh`.
 ///
-/// **TLS.** `SSLRequest` is one message and `std::net::tls` exists, so this is
-/// closer than it sounds; it is not here yet.
+/// # TLS
+///
+/// **Asked for in the clear, then spoken on the same socket**, which is how
+/// PostgreSQL does it: the client sends `SSLRequest`, the server answers one
+/// byte, `S` to go ahead or `N` to refuse, and on `S` the TLS handshake runs
+/// on that connection and the startup message goes over it. A connection
+/// opened with a `Tls` other than `Off` that is answered `N` is refused,
+/// naming the setting; it never falls back to cleartext. See `Tls` for the
+/// settings and for what each of libpq's `sslmode` names means here.
+///
+/// The certificate is always verified, and so is the host name:
+/// `std::net::tls` has no way to turn either off. A server whose certificate
+/// a public authority did not sign is reached by trusting its authority as
+/// well (`Tls::Verify(pem)`), which is what a managed provider's CA bundle
+/// is for.
+///
+/// Direct TLS (PostgreSQL 17's `sslnegotiation=direct`, a handshake from the
+/// first byte) is not spoken: every server that speaks it also answers
+/// `SSLRequest`, and the round trip it saves is one per connection.
 
 /// What went wrong, before it becomes a `DbError`.
 ///
@@ -75,9 +93,275 @@ impl PgError {
   }
 }
 
+/// How a connection is secured: libpq's `sslmode`, in the two cases this
+/// driver has.
+///
+/// **There is no TLS without verification.** `std::net::tls` has no way to
+/// skip checking a certificate, so every mode that asks for TLS checks the
+/// certificate chain and that the certificate names the host connected to.
+/// `Tls::sslmode` maps libpq's names onto these two cases and says how.
+pub type Tls =
+  /// Plain TCP, and no `SSLRequest`: `sslmode=disable`. Every query and every
+  /// row crosses the network in the clear, and a server that admits only
+  /// `hostssl` connections refuses it.
+  | Off
+  /// TLS, or no connection. The certificate must chain to a root the machine
+  /// trusts or to one in `roots`, and must name the host. `roots` is PEM text,
+  /// empty for the machine's store alone: what a managed provider hands out
+  /// as its CA bundle, read by the caller. A server that answers `SSLRequest`
+  /// with `N` is refused, never retried in the clear.
+  | Verify(roots: String);
+
+impl Tls {
+  /// The default for `host`: `Off` for a loopback address, and `Verify("")`
+  /// for every other host.
+  ///
+  /// **Why loopback is not verified by default.** A server on this machine
+  /// is reached without crossing a network, and a development server or a
+  /// test one rarely has a certificate: a default that refused every local
+  /// setup would be turned off everywhere, including where it matters.
+  /// Loopback means `localhost`, `::1`, and any address in `127.0.0.0/8`.
+  /// Every other host is reached over a network and gets TLS with full
+  /// verification unless the caller says `Off`.
+  pub fn for_host(host: String) -> Tls {
+    if loopback(host) { Tls::Off } else { Tls::Verify("") }
+  }
+
+  /// libpq's `sslmode`, with `rootcert` as the PEM text of `sslrootcert`
+  /// (empty for none).
+  ///
+  /// - `disable` is `Off`.
+  /// - `require`, `verify-ca` and `verify-full` are all `Verify(rootcert)`:
+  ///   **the certificate and the host name are always checked.** libpq's
+  ///   `require` checks neither and `verify-ca` does not check the name;
+  ///   here both check more than they do in libpq, never less.
+  /// - `prefer` and `allow` are `Verify(rootcert)` too. In libpq they fall
+  ///   back to cleartext, or start there, when the server does not offer
+  ///   TLS, which lets anybody on the path turn TLS off by answering `N`.
+  ///   Here a server that does not offer TLS is refused.
+  ///
+  /// Anything else is `Unsupported`, naming the value.
+  ///
+  /// **`rootcert` is the certificate, not a path to it.** Reading a file
+  /// needs `FsRead`, and a database driver that read files would need it in
+  /// every caller's row; the caller reads the file and passes the text.
+  /// libpq's `sslrootcert=system` is `rootcert` empty.
+  pub fn sslmode(mode: String, rootcert: String) -> Result<Tls, PgError> {
+    // Trimmed: a value read from an environment file often ends in a
+    // newline, and `"verify-full\n"` refused by name hides the newline.
+    let m = String::lower(String::trim(mode));
+    if m == "disable" {
+      Result::Ok(Tls::Off)
+    } else if m == "allow" || m == "prefer" || m == "require" || m == "verify-ca" || m == "verify-full" {
+      Result::Ok(Tls::Verify(rootcert))
+    } else {
+      Result::Err(PgError::Unsupported(
+          "sslmode=${mode} is not a mode this driver knows: use disable, require, verify-ca or verify-full",
+        ))
+    }
+  }
+}
+
+/// Whether `host` names this machine, by its spelling alone: `localhost`
+/// (any case, optionally with the root's trailing `.`), an IPv4 address
+/// written as four decimal octets of which the first is 127, or the IPv6
+/// loopback `::1` in any of its spellings, bracketed or not, including
+/// `::ffff:127.x.y.z`. See `Tls::for_host`.
+///
+/// **What this prevents: a public name that starts like a loopback address
+/// getting plain TCP.** `127.0.0.1.nip.io` is a host name that wildcard DNS
+/// resolves to whatever its owner likes; a prefix test on the text sent the
+/// startup message and the password in the clear to it. So nothing here
+/// matches a prefix: the text is parsed as an address, all of it, or it is
+/// a name. Anything a resolver might read differently from how it looks --
+/// a short form like `127.1`, a leading zero that `inet_aton` reads as
+/// octal, a zone or a port -- is not loopback, which errs toward TLS.
+fn loopback(host: String) -> Bool {
+  let h = String::lower(host);
+  if h == "localhost" || h == "localhost." {
+    true
+  } else if String::starts_with(h, "[") && String::ends_with(h, "]") {
+    ipv6_loopback(String::slice(h, 1, String::byte_length(h) - 1))
+  } else {
+    ipv4_loopback(h) || ipv6_loopback(h)
+  }
+}
+
+/// Four decimal octets, the first 127, nothing before or after.
+fn ipv4_loopback(h: String) -> Bool {
+  match ipv4(h) {
+    Option::Some(octets) => match octets { List::Cons(first, _) => first == 127, List::Nil => false },
+    Option::None => false,
+  }
+}
+
+/// `h` as four decimal octets 0-255, without leading zeros, or `None`.
+fn ipv4(h: String) -> Option<List<Int>> {
+  let parts = String::split(h, ".");
+  if List::length(parts) != 4 {
+    Option::None
+  } else {
+    let mut octets: List<Int> = List::Nil;
+    let mut fine = true;
+    let mut rest = parts;
+    let mut walking = true;
+    while walking {
+      match rest {
+        List::Nil => walking = false,
+        List::Cons(part, more) => {
+          match octet(part) {
+            Option::Some(n) => octets = List::Cons(n, octets),
+            Option::None => fine = false,
+          };
+          rest = more
+        },
+      }
+    };
+    if fine { Option::Some(List::reverse(octets)) } else { Option::None }
+  }
+}
+
+/// One to three decimal digits, 0-255, and no leading zero unless it is `0`.
+fn octet(part: String) -> Option<Int> {
+  let n = String::byte_length(part);
+  if n < 1 || n > 3 || (n > 1 && U8::to_int(String::byte(part, 0)) == 48) || !all_digits(part, 10) {
+    Option::None
+  } else {
+    match Int::of_string(part) {
+      Option::Some(v) => if v <= 255 { Option::Some(v) } else { Option::None },
+      Option::None => Option::None,
+    }
+  }
+}
+
+/// Every byte of `text` is a digit in `base` (10 or 16, lower case).
+fn all_digits(text: String, base: Int) -> Bool {
+  let mut i = 0;
+  let mut fine = true;
+  while i < String::byte_length(text) {
+    let b = U8::to_int(String::byte(text, i));
+    let decimal = b >= 48 && b <= 57;
+    let hex = base == 16 && b >= 97 && b <= 102;
+    if !decimal && !hex { fine = false };
+    i = i + 1
+  };
+  fine
+}
+
+/// The value of one to four lower-case hex digits, or `None`.
+fn hex_group(part: String) -> Option<Int> {
+  let n = String::byte_length(part);
+  if n < 1 || n > 4 || !all_digits(part, 16) {
+    Option::None
+  } else {
+    let mut value = 0;
+    let mut i = 0;
+    while i < n {
+      let b = U8::to_int(String::byte(part, i));
+      value = value * 16 + (if b <= 57 { b - 48 } else { b - 87 });
+      i = i + 1
+    };
+    Option::Some(value)
+  }
+}
+
+/// The 16-bit groups of `side`, one side of an IPv6 address's `::` (or the
+/// whole of one without it), a trailing dotted quad counted as two groups
+/// when `quad` allows it. `None` when any piece is not a group.
+fn groups(side: String, quad: Bool) -> Option<List<Int>> {
+  if String::is_empty(side) {
+    Option::Some(List::Nil)
+  } else {
+    let parts = String::split(side, ":");
+    let count = List::length(parts);
+    let mut out: List<Int> = List::Nil;
+    let mut fine = true;
+    let mut at = 0;
+    let mut rest = parts;
+    let mut walking = true;
+    while walking {
+      match rest {
+        List::Nil => walking = false,
+        List::Cons(part, more) => {
+          if quad && at == count - 1 && String::contains(part, ".") {
+            match ipv4(part) {
+              Option::Some(List::Cons(a, List::Cons(b, List::Cons(c, List::Cons(d, List::Nil))))) => {
+                out = List::Cons(c * 256 + d, List::Cons(a * 256 + b, out))
+              },
+              _ => fine = false,
+            }
+          } else {
+            match hex_group(part) {
+              Option::Some(g) => out = List::Cons(g, out),
+              Option::None => fine = false,
+            }
+          };
+          at = at + 1;
+          rest = more
+        },
+      }
+    };
+    if fine { Option::Some(List::reverse(out)) } else { Option::None }
+  }
+}
+
+/// `h` as the eight 16-bit groups of an IPv6 address, or `None`.
+fn ipv6(h: String) -> Option<List<Int>> {
+  match String::split_once(h, "::") {
+    Option::None => match groups(h, true) {
+      Option::Some(all) => if List::length(all) == 8 { Option::Some(all) } else { Option::None },
+      Option::None => Option::None,
+    },
+    Option::Some(halves) =>
+      if String::contains(halves.rest, "::") {
+        Option::None
+      } else {
+        match groups(halves.head, false) {
+          Option::None => Option::None,
+          Option::Some(front) => match groups(halves.rest, true) {
+            Option::None => Option::None,
+            Option::Some(back) => {
+              let have = List::length(front) + List::length(back);
+              if have > 7 {
+                Option::None
+              } else {
+                Option::Some(List::concat(front, List::concat(zeros(8 - have), back)))
+              }
+            },
+          },
+        }
+      },
+  }
+}
+
+fn zeros(n: Int) -> List<Int> {
+  let mut out: List<Int> = List::Nil;
+  let mut i = 0;
+  while i < n { out = List::Cons(0, out); i = i + 1 };
+  out
+}
+
+/// `::1`, or `::ffff:` followed by an address in `127.0.0.0/8`.
+fn ipv6_loopback(h: String) -> Bool {
+  match ipv6(h) {
+    Option::Some(List::Cons(0, List::Cons(0, List::Cons(0, List::Cons(0, List::Cons(0, List::Cons(x, List::Cons(y, List::Cons(z, List::Nil))))))))) =>
+      (x == 0 && y == 0 && z == 1) || (x == 65535 && y / 256 == 127),
+    _ => false,
+  }
+}
+
 /// An open connection.
 pub type Connection = {
   handle: Int,
+  /// The TLS session over `handle`, when the connection is secured.
+  ///
+  /// **Every read and write goes through it once it is there, and `handle`
+  /// is then never read, written or closed directly**: the session owns
+  /// the socket, and `close` closes the session, which closes the socket. A
+  /// byte sent past it would be cleartext on a connection the caller was
+  /// told is encrypted, and a second close would land on a descriptor the
+  /// system may already have reissued.
+  tls: Option<TlsConnection>,
   /// Bytes that have arrived and not yet been consumed as messages.
   ///
   /// A server may put several messages in one packet and split one across two,
@@ -259,6 +543,46 @@ fn extend(head: Array<U8>, from: Int, tail: Array<U8>, tail_len: Int) -> Array<U
   out
 }
 
+// --- the transport -----------------------------------------------------------
+//
+// Every byte the connection reads or writes goes through these three and
+// `hang_up_socket`, which pick the TLS session when there is one. Reading or
+// writing `handle` anywhere else would send cleartext past the session.
+
+/// `bytes` written whole, as `std::net::socket::transmit_bytes` answers: the
+/// count, or a negative number.
+fn send(c: Connection, bytes: Array<U8>) -> Int {
+  match c.tls {
+    Option::None => transmit_bytes(c.handle, bytes),
+    Option::Some(session) => tls_transmit_bytes(session, bytes),
+  }
+}
+
+/// A read into `inbox` that waits: the count, 0 at the end, or negative.
+fn read_in(c: Connection) -> Int {
+  match c.tls {
+    Option::None => receive(c.handle, c.inbox),
+    Option::Some(session) => tls_receive(session, c.inbox),
+  }
+}
+
+/// A read into `inbox` that does not wait, with `receive_now`'s answers.
+fn read_now(c: Connection) -> Int {
+  match c.tls {
+    Option::None => receive_now(c.handle, c.inbox),
+    Option::Some(session) => tls_receive_now(session, c.inbox),
+  }
+}
+
+/// Closes the session if there is one, which closes the socket, and the
+/// socket otherwise: one close either way.
+fn hang_up_socket(c: Connection) -> () {
+  match c.tls {
+    Option::None => shut(c.handle),
+    Option::Some(session) => tls_shut(session),
+  }
+}
+
 /// One message, reading from the socket until a whole one has arrived.
 pub fn next_message(c: Connection) -> Result<Message, PgError> {
   let mut answer: Result<Message, PgError> = Result::Err(PgError::Closed("no message"));
@@ -286,7 +610,7 @@ pub fn next_message(c: Connection) -> Result<Message, PgError> {
         going = false
       },
       Option::None => {
-        let read = receive(c.handle, c.inbox);
+        let read = read_in(c);
         if read <= 0 {
           c.broken = true;
           answer = Result::Err(PgError::Closed(
@@ -354,19 +678,14 @@ fn error_text(m: Message) -> String {
 
 // --- connecting ------------------------------------------------------------
 
-/// Opens a connection and completes the handshake.
+/// Opens a connection and completes the handshake, secured as
+/// `Tls::for_host(host)` says: plain to a loopback address, and TLS with
+/// full verification to anything else.
 ///
-/// **There is no connect timeout, and a fiber blocked here cannot be
-/// canceled.** The runtime's connect is a blocking call on the worker — it
-/// resolves the name and waits for the kernel — so a host that is unroutable
-/// rather than refusing takes the operating system's own connect timeout,
-/// which is minutes on Linux. `Fiber::cancel` does not shorten it: the fiber
-/// is inside `connect(2)` and reaches no cancellation point until it returns.
-///
-/// A deadline around this call reports on time but does not free the fiber, so
-/// a program that has given up must `Fiber::detach` the handle as well as
-/// canceling it, or its own exit will wait for the connect to finish. Guard a
-/// user-supplied address before reaching here if a prompt answer matters.
+/// **There is no connect timeout.** A host that is unroutable rather than
+/// refusing takes the operating system's own connect timeout, which is
+/// minutes on Linux. The connect is a cancellation point, so a fiber that
+/// gives up can cancel it; `open_within` bounds what follows it.
 pub fn open(
   host: String,
   port: Int,
@@ -374,7 +693,7 @@ pub fn open(
   database: String,
   secret: String,
 ) -> Result<Connection, PgError> {
-  open_within(host, port, user, database, secret, 0)
+  open_tls(host, port, user, database, secret, Tls::for_host(host), 0)
 }
 
 /// `open`, with the handshake bounded: a server that has not finished it
@@ -388,11 +707,11 @@ pub fn open(
 /// the callers waiting on the slot, and `close`, which waits for the slot.
 ///
 /// The bound is on each read of the handshake, not on the whole of it, so a
-/// server that answers each message just inside it can take longer in all. It
-/// does not bound the TCP connect before it, for the reason `open` gives: an
-/// unroutable host still takes the operating system's connect timeout. Once
-/// the handshake is over the bound is lifted, and statements wait for their
-/// replies as long as they take.
+/// server that answers each message just inside it can take longer in all;
+/// the TLS handshake, when there is one, is bounded by `millis` as a whole.
+/// It does not bound the TCP connect before it, for the reason `open` gives.
+/// Once the handshake is over the bound is lifted, and statements wait for
+/// their replies as long as they take.
 pub fn open_within(
   host: String,
   port: Int,
@@ -401,40 +720,248 @@ pub fn open_within(
   secret: String,
   millis: Int,
 ) -> Result<Connection, PgError> {
+  open_tls(host, port, user, database, secret, Tls::for_host(host), millis)
+}
+
+/// `open_within`, secured as `tls` says rather than by the host's default.
+///
+/// With `Tls::Verify`, the connection asks for TLS before anything else is
+/// sent, and the startup message, the password exchange and everything after
+/// go over the session. A server that will not speak TLS is refused, and
+/// nothing past the 8-byte `SSLRequest` is sent to it.
+///
+/// **A fiber stopped anywhere in here leaves nothing open**: the socket, and
+/// the session once there is one, are registered to be closed as soon as the
+/// socket exists, and that is called off only once the connection is handed
+/// back.
+pub fn open_tls(
+  host: String,
+  port: Int,
+  user: String,
+  database: String,
+  secret: String,
+  tls: Tls,
+  millis: Int,
+) -> Result<Connection, PgError> {
+  match dial_tls(host, port, user, database, secret, tls, millis) {
+    Result::Ok(c) => Result::Ok(c),
+    Result::Err(failed) => Result::Err(failed.why),
+  }
+}
+
+/// A failed open, and whether trying again could change it.
+///
+/// **What `lasting` prevents: a pool retrying a refusal that cannot
+/// change.** A server that answers `N` to TLS, or a certificate that does
+/// not verify, says the same on every attempt; a pool that treated it as a
+/// lost connection made every caller wait out its whole fast schedule
+/// (28.6 s by default) to hear why. A lost connection, a timeout and a
+/// server that is starting up are not lasting.
+pub type Failed = {
+  pub why: PgError,
+  pub lasting: Bool,
+};
+
+fn passing(why: PgError) -> Failed { { why: why, lasting: false } }
+
+fn lasting(why: PgError) -> Failed { { why: why, lasting: true } }
+
+/// `open_tls`, saying whether the failure is one a retry could change. For
+/// a pool, which retries.
+pub fn dial_tls(
+  host: String,
+  port: Int,
+  user: String,
+  database: String,
+  secret: String,
+  tls: Tls,
+  millis: Int,
+) -> Result<Connection, Failed> {
   if !start() {
-    Result::Err(PgError::Unreachable("the socket layer would not start"))
+    Result::Err(passing(PgError::Unreachable("the socket layer would not start")))
   } else {
     let handle = connect_to(host, port);
     if handle == invalid_handle() {
-      Result::Err(PgError::Unreachable(
-          "could not reach ${host}:${Int::to_string(port)}",
-        ))
+      Result::Err(passing(PgError::Unreachable(
+            "could not reach ${host}:${Int::to_string(port)}",
+          )))
     } else {
-      let empty: Array<U8> = Array::new(0, 0);
-      let c: Connection = {
-        handle: handle, pending: empty, start: 0, scram: Option::None, broken: false,
-        replying: 0, arrived: 0, open_transaction: false, depth: 0, after: 0 - 1, refused: false, inbox: Array::new(read_size(), 0),
-        prepared: Map::new(), named: 0, uses: 0, closing: List::Nil,
-      };
-      let hello = startup(user, database);
+      // **Registered before anything that can stop the fiber**: neither
+      // `Region::open` nor `Region::defer` is a cancellation point, and
+      // `opening` calls no function value, so its closure has no entry poll.
+      // A cancel in the TLS handshake or the password exchange then closes
+      // the socket, and the session if there is one, rather than leaking it.
+      let held: Dialing = { socket: handle, session: Option::None, armed: true };
+      let guard = Region::open();
+      Region::defer(guard, opening(held));
       let began = khora_monotonic_millis();
       if millis > 0 { let _ = set_receive_timeout(handle, millis); () };
-      if transmit_bytes(handle, hello) < 0 {
-        shut(handle);
-        Result::Err(PgError::Closed("the startup message could not be sent"))
-      } else {
-        match handshake(c, secret) {
-          Result::Ok(_) => {
-            if millis > 0 { let _ = set_receive_timeout(handle, 0); () };
-            Result::Ok(c)
-          },
-          Result::Err(why) => {
-            shut(handle);
-            Result::Err(if millis > 0 { unanswered(why, millis, khora_monotonic_millis() - began) } else { why })
-          },
-        }
+      let secured = secure(handle, host, port, tls, if millis > 0 { began + millis } else { 0 - 1 });
+      match secured {
+        // Closed by `guard`'s finalizer, which is still armed, when this
+        // function returns: one close, on every way out.
+        Result::Err(failed) => Result::Err({
+            why: if millis > 0 { unanswered(failed.why, millis, khora_monotonic_millis() - began) } else { failed.why },
+            lasting: failed.lasting,
+          }),
+        Result::Ok(session) => {
+          held.session = session;
+          let c = connection(handle, session);
+          let answer = greet(c, user, database, secret, millis, began);
+          // Only a connection handed back is kept open.
+          held.armed = is_err(answer);
+          match answer {
+            Result::Ok(c) => Result::Ok(c),
+            Result::Err(why) => Result::Err(passing(why)),
+          }
+        },
       }
     }
+  }
+}
+
+/// What a connection being opened holds, for the close `open_tls` registers.
+/// See `opening`.
+type Dialing = { socket: Int, mut session: Option<TlsConnection>, mut armed: Bool };
+
+/// The close `open_tls` registers: the session if there is one, which closes
+/// the socket under it, and the socket otherwise, unless the open finished.
+///
+/// Built here, in a function that calls no function value, so the closure
+/// it returns has no entry poll for a cancellation to stop it at.
+fn opening(held: Dialing) -> () -> () {
+  fn () => if held.armed {
+    match held.session {
+      Option::None => shut(held.socket),
+      Option::Some(session) => tls_shut(session),
+    }
+  }
+}
+
+/// A connection over `handle`, and `session` when it is secured.
+fn connection(handle: Int, session: Option<TlsConnection>) -> Connection {
+  {
+    handle: handle, tls: session, pending: Array::new(0, 0), start: 0, scram: Option::None, broken: false,
+    replying: 0, arrived: 0, open_transaction: false, depth: 0, after: 0 - 1, refused: false, inbox: Array::new(read_size(), 0),
+    prepared: Map::new(), named: 0, uses: 0, closing: List::Nil,
+  }
+}
+
+/// The startup message, and everything up to the first `ReadyForQuery`. A
+/// connection that fails here is closed by `open_tls`'s guard.
+fn greet(c: Connection, user: String, database: String, secret: String, millis: Int, began: Int) -> Result<Connection, PgError> {
+  if send(c, startup(user, database)) < 0 {
+    Result::Err(PgError::Closed("the startup message could not be sent"))
+  } else {
+    match handshake(c, secret) {
+      Result::Ok(_) => {
+        if millis > 0 { clear_timeout(c) };
+        Result::Ok(c)
+      },
+      Result::Err(why) =>
+        Result::Err(if millis > 0 { unanswered(why, millis, khora_monotonic_millis() - began) } else { why }),
+    }
+  }
+}
+
+fn is_err<A, E>(r: Result<A, E>) -> Bool {
+  match r { Result::Ok(_) => false, Result::Err(_) => true }
+}
+
+/// Lifts the per-read bound `open_tls` put on the handshake.
+fn clear_timeout(c: Connection) -> () {
+  match c.tls {
+    Option::None => { let _ = set_receive_timeout(c.handle, 0); () },
+    Option::Some(session) => { let _ = tls_set_receive_timeout(session, 0); () },
+  }
+}
+
+/// Secures `handle` as `tls` says, before the startup message: nothing for
+/// `Off`, and for `Verify`, `SSLRequest` and then a TLS handshake verified
+/// against `host`. `deadline` bounds the TLS handshake; negative is none.
+///
+/// The socket stays the caller's on every failure, open; see `open_tls`.
+fn secure(handle: Int, host: String, port: Int, tls: Tls, deadline: Int) -> Result<Option<TlsConnection>, Failed> {
+  let at = "${host}:${Int::to_string(port)}";
+  match tls {
+    Tls::Off => Result::Ok(Option::None),
+    Tls::Verify(roots) =>
+      if transmit_bytes(handle, ssl_request()) < 0 {
+        Result::Err(passing(PgError::Closed("the TLS request could not be sent")))
+      } else {
+        // **One byte, read into a buffer of one.** Whatever else is waiting
+        // after the answer is left on the socket for the TLS handshake, which
+        // refuses bytes that are not a record. A larger read would take bytes
+        // that somebody on the path put after the `S` as if they had come
+        // over TLS, which is CVE-2021-23222 in libpq.
+        let answer: Array<U8> = Array::new(1, 0);
+        let read = receive(handle, answer);
+        let said = if read == 1 { U8::to_int(Array::get(answer, 0)) } else { 0 };
+        if said == 83 {
+          upgraded(handle, host, port, roots, deadline)
+        } else if said == 78 {
+          Result::Err(lasting(PgError::Refused(
+                "the server at ${at} does not offer TLS. TLS with verification is the default for a host that is not loopback, and nothing past the request was sent. For a server reached only over a network you trust, connect without it: conn::open_tls(.., Tls::Off, ..) or pool::open_tls(.., Tls::Off, ..), which is Tls::sslmode(\"disable\", \"\")",
+              )))
+        } else if read <= 0 {
+          Result::Err(passing(PgError::Closed(
+                "the server at ${at} closed the connection instead of answering the TLS request",
+              )))
+        } else if said == 69 {
+          // An `ErrorResponse`, which a server sends when it cannot take the
+          // connection at all (too many clients, say). Not read: it arrived
+          // in the clear, before anything was verified, so its text is
+          // whatever somebody on the path chose.
+          Result::Err(passing(PgError::Refused(
+                "the server at ${at} answered the TLS request with an error message (not shown: it arrived before TLS, unauthenticated)",
+              )))
+        } else {
+          Result::Err(passing(PgError::Refused(
+                "the server at ${at} answered the TLS request with byte ${Int::to_string(said)}, which is neither yes nor no",
+              )))
+        }
+      },
+  }
+}
+
+/// The TLS handshake over `handle`, trusting the machine's roots and `roots`.
+///
+/// The client is built per connection and let go of once the handshake is
+/// done: the session keeps its own reference to the configuration. The
+/// machine's roots are read once per process by the runtime, so what a
+/// connection pays for its client is an allocation, or a copy of the roots
+/// when `roots` adds to them.
+fn upgraded(handle: Int, host: String, port: Int, roots: String, deadline: Int) -> Result<Option<TlsConnection>, Failed> {
+  let why: Array<Int> = Array::new(1, 0);
+  match attempt(fn () => scoped(fn () => upgrade_saying(trusting(roots)!, handle, host, deadline, why))!) {
+    Result::Ok(Option::Some(session)) => Result::Ok(Option::Some(session)),
+    Result::Ok(Option::None) => Result::Err(tls_refusal(Refusal::of(why), host, port)),
+    // `trusting` raises only `BadCertificate`.
+    Result::Err(_) => Result::Err(lasting(PgError::Unsupported(
+          "the roots given to Tls::Verify are not readable PEM certificates (pass the file's contents, not its path)",
+        ))),
+  }
+}
+
+/// A failed TLS handshake, as a `PgError` that says which of the ways it
+/// fails it was and what to change.
+///
+/// A certificate that does not verify is lasting: the next attempt meets
+/// the same certificate. A handshake the peer broke off, or one that ran
+/// out of time, may go through next time.
+fn tls_refusal(why: Refusal, host: String, port: Int) -> Failed {
+  let at = "${host}:${Int::to_string(port)}";
+  match why {
+    Refusal::Untrusted => lasting(PgError::Refused(
+        "the TLS handshake with ${at} failed: its certificate is not signed by an authority this client trusts. Trust a private authority with Tls::Verify(pem), as sslrootcert does",
+      )),
+    Refusal::WrongName => lasting(PgError::Refused(
+        "the TLS handshake with ${at} failed: its certificate does not name ${host}. Connect by a name the certificate names; the host name is always checked",
+      )),
+    Refusal::RanOut => passing(PgError::Closed("the server at ${at} did not finish the TLS handshake in time")),
+    Refusal::Failed => passing(PgError::Refused(
+        "the TLS handshake with ${at} failed: the server broke it off, or is not speaking TLS",
+      )),
   }
 }
 
@@ -524,10 +1051,12 @@ fn authenticate(c: Connection, m: Message, secret: String) -> Result<Bool, PgErr
     // AuthenticationOk. Nothing to send.
     Result::Ok(true)
   } else if method == 3 {
-    // Cleartext. Only reasonable over a unix socket or TLS, and this driver
-    // has neither yet — which is the caller's decision to make, not this
-    // function's, so it is sent rather than refused.
-    if transmit_bytes(c.handle, password(secret)) < 0 {
+    // Cleartext. Reasonable over TLS, where the password crosses the
+    // network encrypted, and over loopback, where it does not cross one.
+    // Over plain TCP to another host it is readable by anybody on the path;
+    // that is the caller's `Tls::Off`, said in so many words, so it is sent
+    // rather than refused.
+    if send(c, password(secret)) < 0 {
       Result::Err(PgError::Closed("the password could not be sent"))
     } else {
       Result::Ok(true)
@@ -550,7 +1079,7 @@ fn authenticate(c: Connection, m: Message, secret: String) -> Result<Bool, PgErr
     let nonce = Base64::encode(nonce_bytes());
     let opening = begin(nonce);
     c.scram = Option::Some(opening.session);
-    if transmit_bytes(c.handle, sasl_initial("SCRAM-SHA-256", opening.message)) < 0 {
+    if send(c, sasl_initial("SCRAM-SHA-256", opening.message)) < 0 {
       Result::Err(PgError::Closed("the SASL handshake could not be started"))
     } else {
       Result::Ok(true)
@@ -569,7 +1098,7 @@ fn authenticate(c: Connection, m: Message, secret: String) -> Result<Bool, PgErr
                 ScramError::Rejected(m) => m,
               })),
           Result::Ok(final) =>
-            if transmit_bytes(c.handle, sasl_response(final)) < 0 {
+            if send(c, sasl_response(final)) < 0 {
               Result::Err(PgError::Closed("the SASL proof could not be sent"))
             } else {
               Result::Ok(true)
@@ -613,8 +1142,8 @@ fn authenticate(c: Connection, m: Message, secret: String) -> Result<Bool, PgErr
 /// went away, so the one write this saves is the one most likely to land on a
 /// reset socket.
 pub fn close(c: Connection) -> () {
-  if !c.broken { transmit_bytes(c.handle, terminate()); () };
-  shut(c.handle);
+  if !c.broken { send(c, terminate()); () };
+  hang_up_socket(c);
 }
 
 // --- querying --------------------------------------------------------------
@@ -672,7 +1201,7 @@ pub fn still_open(c: Connection) -> Bool {
     let mut rounds = 16;
     absorb(c);
     while reading && rounds > 0 {
-      let read = receive_now(c.handle, c.inbox);
+      let read = read_now(c);
       if nothing_yet(read) {
         reading = false
       } else if read <= 0 {
@@ -792,7 +1321,7 @@ fn send_owed(c: Connection, frames: Array<U8>, after: Int, replies: Int) -> Bool
     // sent nothing, and a mark made first would have `settle` wait for a
     // reply to a request that never went. Nothing between the write's
     // return and the mark can stop the fiber.
-    let sent = transmit_bytes(c.handle, frames) == Array::length(frames);
+    let sent = send(c, frames) == Array::length(frames);
     if sent {
       c.replying = replies;
       c.after = after;
@@ -1354,7 +1883,7 @@ fn to_list<A>(v: Vector<A>) -> List<A> {
 /// from it without reading the socket.
 fn holding(bytes: Array<U8>) -> Connection {
   {
-    handle: invalid_handle(), pending: bytes, start: 0, scram: Option::None, broken: false,
+    handle: invalid_handle(), tls: Option::None, pending: bytes, start: 0, scram: Option::None, broken: false,
     replying: 0, arrived: 0, open_transaction: false, depth: 0, after: 0 - 1, refused: false, inbox: Array::new(read_size(), 0),
     prepared: Map::new(), named: 0, uses: 0, closing: List::Nil,
   }
@@ -1416,7 +1945,7 @@ fn wire() -> Wire {
   // carried stale inbox bytes past what arrived shows as garbage rather
   // than as zeros.
   let c: Connection = {
-    handle: handle, pending: Array::new(0, 0), start: 0, scram: Option::None, broken: false,
+    handle: handle, tls: Option::None, pending: Array::new(0, 0), start: 0, scram: Option::None, broken: false,
     replying: 0, arrived: 0, open_transaction: false, depth: 0, after: 0 - 1, refused: false, inbox: Array::new(read_size(), 255),
     prepared: Map::new(), named: 0, uses: 0, closing: List::Nil,
   };
@@ -1431,6 +1960,102 @@ fn piece(bytes: Array<U8>, from: Int, to: Int) -> Array<U8> {
 }
 
 fn unwire(w: Wire) -> () {
+  shut(w.client.handle);
+  shut(w.server);
+  shut(w.listener)
+}
+
+/// Whether `a` and `b` hold the same bytes.
+fn same_bytes(a: Array<U8>, b: Array<U8>) -> Bool {
+  let n = Array::length(a);
+  let mut same = n == Array::length(b);
+  let mut i = 0;
+  while same && i < n {
+    same = U8::to_int(Array::get(a, i)) == U8::to_int(Array::get(b, i));
+    i = i + 1
+  };
+  same
+}
+
+/// **A server that answers `N` when TLS was asked for is refused, and is
+/// sent nothing past the request.** Falling back to cleartext there is
+/// libpq's `prefer`, and it lets anybody on the path switch TLS off by
+/// answering `N`. The refusal names the setting, and the server's end reads
+/// the 8-byte `SSLRequest` and then nothing: no startup message, no user
+/// name, no password exchange.
+test "a server that answers N is refused, and hears nothing after the request" {
+  let w = server_wire();
+  assert(w.listener != invalid_handle() && w.server != invalid_handle() && w.client.handle != invalid_handle());
+  transmit_bytes(w.server, Array::new(1, 78));
+  let got = secure(w.client.handle, "db.example.com", 5432, Tls::Verify(""), 0 - 1);
+  let said = match got {
+    Result::Err(failed) => match failed.why {
+      PgError::Refused(why) => if failed.lasting { why } else { "NOT LASTING" },
+      _ => "not a refusal",
+    },
+    Result::Ok(_) => "secured",
+  };
+  // Lasting: a pool must not retry it on its fast schedule.
+  assert_that(said != "NOT LASTING", "an N was not marked as a refusal a retry cannot change");
+  // What the reader needs: that this was the default, and the exact call
+  // that turns it off.
+  assert_that(String::contains(said, "does not offer TLS"), said);
+  assert_that(String::contains(said, "the default for a host that is not loopback"), said);
+  assert_that(String::contains(said, "conn::open_tls(.., Tls::Off, ..)"), said);
+  assert_that(String::contains(said, "pool::open_tls(.., Tls::Off, ..)"), said);
+  assert_that(String::contains(said, "Tls::sslmode(\"disable\", \"\")"), said);
+  assert_that(!String::contains(said, "this connection requires it"), said);
+  let heard: Array<U8> = Array::new(64, 0);
+  let read = receive(w.server, heard);
+  assert_that(read == 8, "the server heard ${Int::to_string(read)} bytes, not the 8 of an SSLRequest");
+  assert_that(same_bytes(piece(heard, 0, 8), ssl_request()), "the 8 bytes were not an SSLRequest");
+  // Nothing more: the client has written all it is going to.
+  shut(w.client.handle);
+  assert_that(receive(w.server, heard) == 0, "the client sent more after the N");
+  shut(w.server);
+  shut(w.listener)
+}
+
+/// **An `ErrorResponse` before TLS is named as one, and not read.** A server
+/// that cannot take the connection at all answers the `SSLRequest` with `E`
+/// and a message. That message came in the clear before anything was
+/// verified, so somebody on the path could have written it; it is neither
+/// shown nor read, and nothing more is sent. "Byte 69" is what it used to
+/// say, which is the ASCII of `E` and told the reader nothing.
+test "an error message before TLS is named and not shown" {
+  let w = server_wire();
+  assert(w.listener != invalid_handle() && w.server != invalid_handle() && w.client.handle != invalid_handle());
+  transmit_bytes(w.server, Array::new(1, 69));
+  let got = secure(w.client.handle, "db.example.com", 5432, Tls::Verify(""), 0 - 1);
+  let said = match got {
+    Result::Err(failed) => match failed.why { PgError::Refused(why) => why, _ => "not a refusal" },
+    Result::Ok(_) => "secured",
+  };
+  assert_that(String::contains(said, "answered the TLS request with an error message"), said);
+  assert_that(String::contains(said, "not shown: it arrived before TLS, unauthenticated"), said);
+  assert_that(!String::contains(said, "byte 69"), said);
+  shut(w.client.handle);
+  shut(w.server);
+  shut(w.listener)
+}
+
+/// **A `rootcert` that is not PEM is refused saying to pass the contents**,
+/// and the refusal is lasting. libpq takes `sslrootcert` as a path, so a
+/// path is what somebody copying a connection string passes; without the
+/// hint the message only says "not readable", and the path looks right.
+test "roots that are a path are refused saying to pass the contents" {
+  let w = server_wire();
+  assert(w.listener != invalid_handle() && w.server != invalid_handle() && w.client.handle != invalid_handle());
+  let got = upgraded(w.client.handle, "db.example.com", 5432, "/etc/ssl/certs/global-bundle.pem", 0 - 1);
+  let said = match got {
+    Result::Err(failed) => match failed.why {
+      PgError::Unsupported(why) => if failed.lasting { why } else { "NOT LASTING" },
+      _ => "not unsupported",
+    },
+    Result::Ok(_) => "secured",
+  };
+  assert_that(String::contains(said, "not readable PEM certificates"), said);
+  assert_that(String::contains(said, "pass the file's contents, not its path"), said);
   shut(w.client.handle);
   shut(w.server);
   shut(w.listener)

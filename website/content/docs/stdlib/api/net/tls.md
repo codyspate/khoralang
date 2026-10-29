@@ -139,6 +139,71 @@ without an annotation — and an annotation on the `let` would not have,
 because a type hint does not currently reach inside the branches of an
 `if`.
 
+### Refusal
+
+```khora
+pub type Refusal =
+  | Failed
+  | RanOut
+  | Untrusted
+  | WrongName;
+```
+
+Which of the ways [`upgrade_saying`](#upgrade_saying) can fail it was.
+
+**For the message a person reads**, which is where the cases differ:
+an authority to trust, a name to connect by, a budget to raise. A
+program decides the same thing for all of them, which is why
+`TlsError` does not split `Unreachable`.
+
+#### Failed
+
+```khora
+| Failed
+```
+
+The peer did not complete a TLS handshake, or the fiber was canceled.
+
+#### RanOut
+
+```khora
+| RanOut
+```
+
+The deadline passed first.
+
+#### Untrusted
+
+```khora
+| Untrusted
+```
+
+The certificate does not chain to any root the client trusts.
+
+#### WrongName
+
+```khora
+| WrongName
+```
+
+The certificate is not for the host name given.
+
+## Methods
+
+### Refusal
+
+```khora
+impl Refusal
+```
+
+#### of
+
+```khora
+pub fn of(why: Array<Int>) -> Refusal
+```
+
+The refusal `why`, as `upgrade_saying` filled it, says.
+
 ## Functions
 
 ### server
@@ -202,6 +267,22 @@ Plaintext bytes into `into`: how many, 0 when the peer has closed, or -1.
 The same three answers `receive` gives on a plain socket, so a reader that
 already handles a socket handles this.
 
+### receive_now
+
+```khora
+pub fn receive_now(connection: TlsConnection, into: Array<U8>) -> Int
+```
+
+Plaintext that has already arrived, into `into`, without waiting: how
+many bytes, 0 when the peer has closed, -1 when nothing has arrived yet,
+or -2 when the read failed. `std::net::socket::receive_now`, for a
+session.
+
+**For a check that must not wait**, such as a pool asking whether an idle
+connection is still open. Records the peer sends that carry no plaintext
+-- the session tickets a TLS 1.3 server sends after the handshake -- are
+taken in here and answer -1, so a quiet session reads as quiet.
+
 ### transmit
 
 ```khora
@@ -213,6 +294,15 @@ Sends `text`, all of it, or -1.
 All or nothing, unlike `socket::transmit`, which answers how many bytes
 went: a partial write of an encrypted record is not something a caller can
 resume, so the runtime finishes it or fails.
+
+### transmit_bytes
+
+```khora
+pub fn transmit_bytes(connection: TlsConnection, bytes: Array<U8>) -> Int
+```
+
+Sends `bytes`, all of them, or -1: [`transmit`](#transmit) for a protocol framed in
+bytes rather than text, as `std::net::socket::transmit_bytes` is.
 
 ### set_receive_timeout
 
@@ -360,4 +450,55 @@ expiring is `TlsError::TimedOut`: only when the deadline was what ended
 it, so a refusal that arrives in its last millisecond is still
 `Unreachable`. The session that comes back carries no deadline;
 [`set_deadline`](#set_deadline) puts one on it.
+
+### upgrade
+
+```khora
+pub fn upgrade(client: TlsClient, socket: Int, host: String) -> TlsConnection raises TlsError
+```
+
+Completes a client handshake over `socket`, a connection already open,
+verifying that the certificate is for `host`.
+
+**For a protocol that agrees to TLS in the clear first**: PostgreSQL's
+`SSLRequest`, SMTP's and IMAP's `STARTTLS`. The plain exchange happens on
+the socket, and this secures the same socket where it left off. Trust and
+verification are [`connect`](#connect)'s: the client's roots, and a certificate
+that must name `host`. `host` is not resolved; it is only what the
+certificate has to say.
+
+**Who closes the socket.** Once this returns a session, the session owns
+the socket: [`shut`](#shut) closes it, and the caller must not. When it raises,
+the socket is still the caller's, open, with whatever deadline the caller
+had put on it, so a caller that arranged to close it closes it exactly
+once. A canceled caller gets no session either, and keeps the socket.
+
+A cancellation point, for the whole of the handshake. Raises
+`Unreachable(host)` when the certificate does not verify or the peer does
+not complete a handshake.
+
+### upgrade_by
+
+```khora
+pub fn upgrade_by(client: TlsClient, socket: Int, host: String, deadline: Int) -> TlsConnection raises TlsError
+```
+
+[`upgrade`](#upgrade), giving up once `clock.monotonic_millis()` reaches
+`deadline`. Negative means none.
+
+Expiring is `TlsError::TimedOut`, and only when the deadline is what
+ended the handshake, as for [`connect_by`](#connect_by). The session that comes back
+carries no deadline; [`set_deadline`](#set_deadline) puts one on it.
+
+### upgrade_saying
+
+```khora
+pub fn upgrade_saying(client: TlsClient, socket: Int, host: String, deadline: Int, why: Array<Int>) -> Option<TlsConnection>
+```
+
+[`upgrade_by`](#upgrade_by), answering `None` rather than raising, with the cause left
+in `why`'s one element for [`Refusal::of`](#of).
+
+The same handshake and the same rule about who closes the socket. A
+cancellation point for the whole of the handshake.
 

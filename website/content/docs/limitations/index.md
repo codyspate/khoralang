@@ -37,8 +37,6 @@ language rule, a supported feature, and unfinished work.
   an `Int` key is bucketed by a fixed function, so colliding numbers can be
   computed ahead of time. Text keys hash under a per-run secret, except on
   WebAssembly, where the secret is the same in every run.
-- [The `postgres` package does not speak TLS](#package-ecosystem), so rows
-  cross the network in the clear.
 - [Database queries trail Go's](#performance-against-other-servers) on the
   TechEmpower query tests; JSON and fortunes do not.
 - [Inbound connections are not permissioned](#inbound-connections-are-not-permissioned) —
@@ -140,12 +138,16 @@ Dependencies can be pinned reproducibly to git revisions, but there is not yet a
 
 **One database driver is published: `postgres`.** `std::db` defines `Db`, transaction semantics and cancellation behavior, and [`packages/postgres`](/docs/packages/postgres/) satisfies that interface — it speaks the wire protocol directly, authenticates with `scram-sha-256`, and supplies the `Db` handler. Depend on it with a git revision and a `subdir`; there is no registry yet. **SQLite and D1 have no driver**, and a program that needs one writes its own handler — `Db` is a record of closures, so that is a day's work and a test double is a few lines — over a native client it links with [`build.link`](/docs/reference/manifest/#build--what-to-produce).
 
-**`postgres` does not speak TLS.** It authenticates with `scram-sha-256`, so
-the password itself never crosses the network, but every query and every row
-read back travel in the clear. Connect over a loopback address or a network
-you already trust — a private network or a tunnel — and do not point it at a
-managed database across the public internet. A server whose `pg_hba.conf`
-admits only `hostssl` connections refuses it.
+**`postgres` connects to a remote host over TLS, verified.** A connection
+to anything but a loopback address asks the server for TLS before it sends
+anything else, checks the certificate and the host name, and is refused by a
+server that does not offer TLS: there is no cleartext fallback, and libpq's
+`sslmode=prefer` and `allow` mean the same as `require`. Connections to
+`localhost` and to a loopback address written out in full (`127.0.0.1`,
+`::1`) are plain TCP unless TLS is asked for; a name that only starts like
+one, such as `127.0.0.1.nip.io`, gets TLS. **Client
+certificates and `SCRAM-SHA-256-PLUS` channel binding are not offered**, so a
+server that requires either refuses this driver. See [the package page](/docs/packages/postgres/#tls).
 
 **A dependency cannot link a native library on your behalf.** `build.link` is read from the root package's manifest and nowhere else, so a package that ships an archive and declares `extern fn` against it cannot put a flag on your link line — a transitive package adding a native library to your build would be a supply-chain change with no signal at the place that would have to consent. The package does the work and documents one line for you to add, which means every native library a program links can be read off its own manifest. [Foreign function interface](/docs/reference/ffi/#link-against-a-native-library) has the shape.
 

@@ -14,6 +14,18 @@ it will behave differently now.
 
 ### Breaking
 
+- A `postgres` connection to a host that is not a loopback address asks for
+  TLS and verifies the server's certificate and host name, through
+  `conn::open`, `conn::open_within`, `pool::open`, `pool::open_with` and
+  `db::serve`. Loopback is `localhost`, an IPv4 address written as four
+  decimal octets starting `127`, or `::1` in any spelling; the host is
+  parsed, so a name such as `127.0.0.1.nip.io` gets TLS. A remote server
+  that does not offer TLS, or whose certificate is not signed by an
+  authority the machine trusts, refuses to connect. To keep plain TCP to
+  such a host, pass `Tls::Off` to `open_tls`; to trust a private authority,
+  pass `Tls::Verify(pem)`. `postgres::db::connect` takes a `Tls` before the
+  handshake bound and answers a `conn::Failed`, which says whether a retry
+  could change the failure.
 - A `String` hashes under a key the program draws from the operating system
   once per run, so `Hash::hash` of a string differs from one run to the next
   and a `Map` keyed by text reports its entries in a different order on every
@@ -187,6 +199,12 @@ it will behave differently now.
 
 ### Fixed
 
+- A fiber canceled while `std::net::tls::trusting` (or `client`) built its
+  configuration left that configuration, a whole copy of the machine's
+  trust store, allocated for the rest of the run: about 80 KB per cancel,
+  without bound. Its close is registered before anything that can stop the
+  fiber. The machine's roots are read once per process, so building a
+  client no longer reads the certificate store each time.
 - Documentation examples that did not compile: a `handler for Clock` written
   with a `now` operation `Clock` does not have (Reference: capabilities,
   effects, expressions), a `Fiber::join` caught on `DbError` cases that do not
@@ -313,6 +331,36 @@ it will behave differently now.
   answers `Selected::Got`, `Closed` once every channel is closed and drained,
   or `TimedOut`. One value from one channel per wait, fair when several are
   ready, canceled empty-handed as `receive` is, and receives only.
+- The `postgres` package speaks TLS. It sends `SSLRequest` and runs the TLS
+  handshake on the same connection before the startup message, checking the
+  certificate chain and that the certificate names the host. A server that
+  answers no is refused with `PgError::Refused` naming the setting; nothing
+  past the 8-byte request is sent to it. `postgres::conn::Tls` is `Off` or
+  `Verify(roots)`, where `roots` is the PEM text of an extra authority to
+  trust (a provider's CA bundle). `Tls::sslmode(mode, rootcert)` reads
+  libpq's `sslmode` names: `disable` is `Off`, and `allow`, `prefer`,
+  `require`, `verify-ca` and `verify-full` are all `Verify`, so `require` and
+  `verify-ca` check the certificate and the host name, and `prefer` and
+  `allow` do not fall back to cleartext. `conn::open_tls`, `pool::open_tls`
+  and `db::serve_tls` take a `Tls`; `open`, `open_within`, `pool::open`,
+  `pool::open_with` and `db::serve` use `Tls::for_host(host)`. Each pooled
+  connection carries its own session, closed with it. A refusal names its
+  cause: no TLS offered (naming the call that connects without it), a
+  certificate no trusted authority signed, one that does not name the host,
+  or a handshake that broke off or ran out of time. A pool answers its
+  callers with the first three at once rather than retrying them on its
+  fast schedule. `SCRAM-SHA-256-PLUS` and client certificates are not
+  offered.
+- `std::net::tls::upgrade(client, socket, host)` and `upgrade_by(.., deadline)`
+  run a client handshake on a socket already open, for a protocol that agrees
+  to TLS in the clear first (PostgreSQL's `SSLRequest`, `STARTTLS`). They
+  verify as `connect` does. The session owns the socket once it is returned;
+  on a raise, including a cancel, the socket is the caller's and open.
+  `std::net::tls::upgrade_saying` is the same handshake answering an
+  `Option`, with the cause of a failure readable as a `tls::Refusal`
+  (`Failed`, `RanOut`, `Untrusted`, `WrongName`).
+  `std::net::tls::receive_now` reads what has arrived on a session without
+  waiting, and `std::net::tls::transmit_bytes` writes an `Array<U8>`.
 - `std::net::socket::expired(handle)` and `std::net::tls::expired(connection)`
   say whether a connection's deadline is what ended a read or write on it,
   rather than the peer.

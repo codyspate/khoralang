@@ -1,0 +1,95 @@
+module postgres::tls_test;
+
+// **What a pasted `sslmode` turns into, and what a host defaults to.**
+//
+// The failure these prevent is a connection that is less secure than the
+// setting it was given says: a `prefer` that falls back to cleartext when the
+// server answers `N`, or a non-loopback host that defaults to plain TCP. Both
+// are pure functions of their text, so none of this needs a server.
+
+import std::core::{Iterator, List, Result, Step, assert_that};
+import postgres::conn::{PgError, Tls};
+
+/// The mode a `Tls` is, for a failure message.
+fn named(tls: Result<Tls, PgError>) -> String {
+  match tls {
+    Result::Ok(Tls::Off) => "Off",
+    Result::Ok(Tls::Verify(roots)) => "Verify(${roots})",
+    Result::Err(PgError::Unsupported(why)) => "Unsupported: ${why}",
+    Result::Err(PgError::Refused(why)) => "Refused: ${why}",
+    Result::Err(PgError::Closed(why)) => "Closed: ${why}",
+    Result::Err(PgError::Unreachable(why)) => "Unreachable: ${why}",
+  }
+}
+
+/// **Every libpq mode that asks for TLS verifies, and `disable` is the only
+/// way to plain TCP.** `require` and `verify-ca` check the name here as
+/// well, and `prefer` and `allow` refuse a server that answers `N` rather
+/// than falling back. The CA travels with every verifying mode.
+test "every sslmode but disable verifies the certificate and the name" {
+  assert_that(named(Tls::sslmode("disable", "CA")) == "Off", named(Tls::sslmode("disable", "CA")));
+  for mode in ["allow", "prefer", "require", "verify-ca", "verify-full", "VERIFY-FULL"] {
+    let got = named(Tls::sslmode(mode, "CA"));
+    assert_that(got == "Verify(CA)", "sslmode=${mode} gave ${got}");
+  };
+}
+
+/// An `sslmode` nobody defined is refused by name, not guessed at: a typo
+/// that came out as `Off` would be cleartext the caller never asked for.
+test "an unknown sslmode is refused, naming it" {
+  let got = named(Tls::sslmode("verify_full", ""));
+  assert_that(got == "Unsupported: sslmode=verify_full is not a mode this driver knows: use disable, require, verify-ca or verify-full", got);
+}
+
+/// **A mode read from an environment file is read without its whitespace.**
+/// Such values often end in a newline, and `"verify-full\n"` refused by name
+/// shows the reader a value that looks right.
+test "an sslmode is trimmed before it is read" {
+  for mode in [" disable", "disable ", "disable\n", "\tDisable\r\n"] {
+    let got = named(Tls::sslmode(mode, "CA"));
+    assert_that(got == "Off", "[${mode}] gave ${got}");
+  };
+  for mode in [" require", "verify-full\n", "  verify-ca  "] {
+    let got = named(Tls::sslmode(mode, "CA"));
+    assert_that(got == "Verify(CA)", "[${mode}] gave ${got}");
+  };
+}
+
+/// **Loopback defaults to plain TCP, everything else to verified TLS.** A
+/// managed database's host name, an IP on another machine, and a name that
+/// only looks local all get TLS.
+test "a loopback host defaults to Off and any other host to Verify" {
+  for host in [
+    "localhost", "LocalHost", "localhost.", "LOCALHOST.", "127.0.0.1", "127.1.2.3", "127.255.255.255",
+    "::1", "[::1]", "0:0:0:0:0:0:0:1", "0000:0000:0000:0000:0000:0000:0000:0001", "0::1", "::0:1",
+    "[0:0:0:0:0:0:0:1]", "::ffff:127.0.0.1", "::FFFF:127.9.8.7", "::ffff:7f00:1",
+  ] {
+    let got = named(Result::Ok(Tls::for_host(host)));
+    assert_that(got == "Off", "${host} defaulted to ${got}");
+  };
+  for host in ["db.example.com", "10.0.0.5", "192.168.1.20", "localhost.example.com", "128.0.0.1", "::2"] {
+    let got = named(Result::Ok(Tls::for_host(host)));
+    assert_that(got == "Verify()", "${host} defaulted to ${got}");
+  };
+}
+
+/// **A name that only starts like a loopback address is a name, and gets
+/// TLS.** Public wildcard DNS (`127.0.0.1.nip.io`, `127.x.sslip.io`)
+/// resolves a name whose first label is `127` to any address its owner
+/// likes, so a prefix test sent the password in the clear to another
+/// machine. Only an address written out in full is loopback; a short or
+/// octal-looking form a resolver might read differently errs toward TLS.
+test "a name that starts like a loopback address gets TLS" {
+  for host in [
+    "127.0.0.1.nip.io", "127.192-168-68-131.sslip.io", "127.attacker.example", "127.evil.com",
+    "127.", "127", "127.1", "127.0.0", "127.0.0.1.", "127.0.0.1:5432", "127.999.999.999",
+    "127.0.0.256", "0127.0.0.1", "127.00.0.1", "127.0.0.1 ", " 127.0.0.1", "127.0.0.x",
+    "localhost..", "localhost.example", "db.localhost", "localhostx", "xlocalhost", "",
+    "::1%lo", "[::1]:5432", "[::1", "::1]", "::11", "1::1", "::1:0", ":::1", "::1::",
+    "0:0:0:0:0:0:0:0:1", "0:0:0:0:0:0:1", "::ffff:128.0.0.1", "::fffe:127.0.0.1", "::ffff:127.0.0",
+    "0.0.0.0", "::", "::ffff:7f00:1:2", "00000::1",
+  ] {
+    let got = named(Result::Ok(Tls::for_host(host)));
+    assert_that(got == "Verify()", "[${host}] defaulted to ${got}");
+  };
+}

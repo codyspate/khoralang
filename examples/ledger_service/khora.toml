@@ -10,7 +10,7 @@ version.workspace = true
 # PostgreSQL on. `docs/design/permissions.md`.
 [permissions]
 network = ["0.0.0.0:8080", "127.0.0.1:5433"]
-env = ["PORT", "PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGPASSWORD", "POOL"]
+env = ["PORT", "PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGPASSWORD", "PGSSLMODE", "PGSSLROOTCERT", "POOL"]
 
 [dependencies]
 postgres = { path = "../../packages/postgres" }

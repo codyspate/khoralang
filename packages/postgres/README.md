@@ -117,6 +117,7 @@ transaction failed, is reported as `RolledBack`, and so is an inner body whose
 The lower-level connection API is available when writing database
 infrastructure or when the portable `Db` contract is not enough:
 
+<!-- unchecked: needs the postgres package -->
 ```khora
 import std::core::{List, Result, print};
 import std::db::{Cell, Row};
@@ -148,6 +149,7 @@ has to be written with — a signature guessed from the module name
 (`postgres::conn::Conn`) does not resolve, and the diagnostic for it names the
 import rather than the type. Anything taking a connection is written:
 
+<!-- unchecked: needs the postgres package -->
 ```khora
 fn one_row(c: Connection, sql: String) -> Result<Answer, PgError> {
   ask(c, sql, List::Nil)
@@ -213,6 +215,117 @@ lost precision.
 
 Going the other way, `ask` accepts all five `Cell` kinds including `Money`.
 
+## TLS
+
+A connection to any host but this machine is encrypted and verified unless
+you say otherwise. The driver sends PostgreSQL's `SSLRequest`, and when the
+server agrees it runs a TLS handshake on the same connection before the
+startup message, so the user name, the password exchange and every row go
+over TLS.
+
+| How you open it | Secured as |
+| --- | --- |
+| `open`, `open_within`, `pool::open`, `pool::open_with`, `db::serve` | `Tls::for_host(host)` |
+| `open_tls`, `pool::open_tls`, `db::serve_tls` | the `Tls` you pass |
+
+`Tls` has two cases:
+
+- **`Tls::Verify(roots)`**: TLS or no connection. The server's certificate
+  must chain to a root the machine trusts or to one in `roots`, and must name
+  the host you connected to. `roots` is PEM text; `""` means the machine's
+  store alone.
+- **`Tls::Off`**: plain TCP, and no `SSLRequest`.
+
+**The default** (`Tls::for_host`) is `Off` for a loopback host and
+`Verify("")` for every other host. Loopback means `localhost` (or
+`localhost.`), an IPv4 address written as four decimal octets starting
+`127`, or `::1` in any spelling (bracketed, written out, or as
+`::ffff:127.x.y.z`). The host is parsed, not prefix-matched: `127.0.0.1.nip.io`
+is a public name and gets TLS, and so does anything a resolver might read
+differently from how it looks, such as `127.1`. Local development servers
+rarely have certificates, and traffic to them does not cross a network. A
+remote server reached in plain text needs `Tls::Off` said in so many words;
+without it, a server that does not offer TLS is refused.
+
+### Settings from a provider: `sslmode` and `sslrootcert`
+
+`Tls::sslmode(mode, rootcert)` takes libpq's names, so the values a
+provider's connection string gives can be used as they are:
+
+| `sslmode` | Here | In libpq |
+| --- | --- | --- |
+| `disable` | `Off` | the same |
+| `allow`, `prefer` | `Verify(rootcert)` | try TLS, carry on in the clear if the server says no |
+| `require` | `Verify(rootcert)` | TLS, but no certificate check |
+| `verify-ca` | `Verify(rootcert)` | checks the chain, not the host name |
+| `verify-full` | `Verify(rootcert)` | the same |
+
+**Every mode that asks for TLS checks the certificate and the host name.**
+`std::net::tls` has no way to turn verification off, so `require` and
+`verify-ca` check more here than they do in libpq, never less. `prefer` and
+`allow` do not fall back to cleartext: a server that answers `SSLRequest`
+with no is refused, because a fallback lets anybody on the network path turn
+TLS off by answering no on the server's behalf.
+
+`rootcert` is the **text** of the `sslrootcert` file, not its path. A driver
+that read files would need `FsRead` in every caller's capability row, so the
+caller reads it:
+
+```khora
+import std::core::{Fibers};
+import std::fs::{FsRead, IoError, read_text};
+import postgres::conn::{Tls};
+import postgres::db::{Settings};
+import postgres::pool::{Pool, Reconnect, open_tls};
+
+fn managed(crew: Fibers, settings: Settings) -> Pool
+  with { reads: FsRead }
+  raises IoError
+{
+  // RDS: https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
+  let bundle = read_text("global-bundle.pem")!;
+  open_tls(crew, settings, Tls::Verify(bundle), 8, Reconnect::default())
+}
+```
+
+- **Amazon RDS and Aurora**: `sslmode=verify-full` with RDS's global CA
+  bundle as `sslrootcert`, and the instance's endpoint name as `host`.
+- **Google Cloud SQL**: it depends on the instance's server CA mode. With
+  the **shared CA** or a **customer-managed CA**, pass the server CA as
+  `sslrootcert` and connect by the instance's DNS name (`dnsNames` in
+  `gcloud sql instances describe`), which must resolve. With the
+  **per-instance CA**, the certificate names no host reachable over a public
+  IP (only Private Service Connect instances get a DNS name), and this
+  driver always checks the name, so it cannot connect directly: switch the
+  instance to a shared or customer-managed CA, or connect through the Cloud
+  SQL Auth Proxy on `127.0.0.1`, which does the TLS itself.
+- **Neon and Azure Database for PostgreSQL**: their certificates are signed
+  by public authorities, so `Tls::Verify("")` (`sslmode=verify-full`,
+  `sslrootcert=system`) is enough on a machine with an ordinary trust store.
+  Azure's chain to DigiCert Global Root G2 or Microsoft RSA Root CA 2017;
+  Microsoft is moving servers off DigiCert Global Root G1 (CA) in 2026, so a
+  machine whose store has only G1 needs G2 added.
+- **Supabase**: download `prod-supabase.cer` from the project's Database
+  Settings and pass its contents as `sslrootcert`. It must be PEM text
+  (`-----BEGIN CERTIFICATE-----`); a DER file is converted with
+  `openssl x509 -inform der -in prod-supabase.cer -out prod-supabase.pem`.
+- **Any other provider**: if it hands out a CA certificate to download, pass
+  its PEM text as `sslrootcert`; if not, its certificate is publicly signed
+  and `Tls::Verify("")` is the setting.
+
+Each refusal says which it was: the server answered no (and the message
+names `open_tls(.., Tls::Off, ..)` for a server on a network you trust), the
+certificate is not signed by a trusted authority, the certificate does not
+name the host, or the handshake broke off or ran out of time. All are
+`PgError::Refused` or `Closed`; through a pool they are `Disconnected` with
+the same reason. The first three are the same on every attempt, so a pool
+answers its callers with them at once instead of retrying on its fast
+schedule. A `rootcert` that is not PEM, such as a path, is `Unsupported`,
+saying to pass the file's contents.
+
+Direct TLS (PostgreSQL 17's `sslnegotiation=direct`) is not spoken; every
+server that offers it also answers `SSLRequest`.
+
 ## What it does not do yet
 
 - **MD5 authentication.** The runtime exposes SHA-256, HMAC and PBKDF2 — what
@@ -220,14 +333,13 @@ Going the other way, `ask` accepts all five `Cell` kinds including `Money`.
   nothing new should be using it. A server set to `md5` is refused *by name*
   rather than hung. SCRAM-SHA-256 is the default on PostgreSQL 14 and later and
   works.
-- **TLS.** `SSLRequest` is one message and `std::net::tls` exists, so this is
-  closer than it sounds. **Until then a password does not cross the network in
-  the clear under SCRAM** — the exchange proves knowledge without sending it —
-  but everything else, including every row you read, does.
 - **`SCRAM-SHA-256-PLUS`.** The channel-binding variant, deliberately not
   offered rather than claimed and faked: its whole purpose is that a client
   refuses to authenticate through a proxy it cannot see, and a client that
-  advertises it without binding to the channel has thrown that away.
+  advertises it without binding to the channel has thrown that away. Binding
+  needs a hash of the server's certificate from the TLS layer, which
+  `std::net::tls` does not hand out.
+- **Client certificates**, which `std::net::tls` does not offer.
 - **Binary result format**, **`COPY`**, **notifications**, **cursors**.
 
 ## Authentication
@@ -258,3 +370,13 @@ KHORA_POSTGRES=1 cargo test -p khora-codegen-llvm --features llvm --test suite -
 
 `docker-compose.yml` brings a server up on **5433**, deliberately not 5432, so
 a database somebody already runs cannot be used by accident.
+
+The TLS tests need a second server that admits only `hostssl` connections,
+with a certificate for `localhost` (and not for `127.0.0.1`) and user,
+password and database `khora`; they also use the plain one on 5433 as a
+server that refuses TLS. Name its port and CA:
+
+```
+KHORA_POSTGRES=1 KHORA_POSTGRES_TLS=<port>:<path to its CA .pem> \
+  cargo test -p khora-codegen-llvm --features llvm --test suite -- postgres::
+```

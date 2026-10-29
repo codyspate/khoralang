@@ -5,11 +5,13 @@ import std::db::{Cell, Db, DbError, Row, transaction};
 import std::schema::{Decode, Rejection, Schema, list};
 import std::clock::{Clock};
 import std::env::{Env, EnvError, variable_or};
+import std::fs::{FsRead, IoError, read_text};
 import std::json::{Json, JsonError, parse};
 import std::net::http::{HttpError, Params, Request, Response, Router};
 import std::trace::{Tracer, around_result, text};
+import postgres::conn::{Tls};
 import postgres::db::{Settings};
-import postgres::pool::{Pool, open as open_pool, with_db};
+import postgres::pool::{Pool, Reconnect, open_tls as open_pool, with_db};
 
 // A ledger, and the third program here meant to be *run* rather than to
 // demonstrate a feature. Roadmap 13.18.
@@ -399,8 +401,35 @@ fn number_setting(name: String, fallback: Int) -> Int with { env: Env } raises E
   }
 }
 
-pub fn main() raises HttpError + EnvError + ChildFailed {
-  with { env: Env::real(), clock: Clock::real() } {
+/// How the pool secures its connections: libpq's `PGSSLMODE`, and
+/// `PGSSLROOTCERT` as the path of a PEM file to trust, read here.
+///
+/// **Unset, it is the driver's default for the host**: plain TCP to a
+/// loopback address and verified TLS to anything else. A database reached
+/// by a service name on a private network (a compose service, say) that
+/// does not offer TLS refuses that default; `PGSSLMODE=disable` is the
+/// setting for it, and a managed database's CA file is `PGSSLROOTCERT`.
+fn tls_setting(host: String) -> Tls with { env: Env, reads: FsRead } raises EnvError + IoError + Unusable {
+  let mode = setting("PGSSLMODE", "")!;
+  if String::is_empty(String::trim(mode)) {
+    Tls::for_host(host)
+  } else {
+    let path = setting("PGSSLROOTCERT", "")!;
+    let roots = if String::is_empty(path) || path == "system" { "" } else { read_text(path)! };
+    match Tls::sslmode(mode, roots) {
+      Result::Ok(tls) => tls,
+      Result::Err(_) => raise Unusable::SslMode(mode),
+    }
+  }
+}
+
+/// A setting that names nothing this program can do.
+pub type Unusable =
+  /// `PGSSLMODE` is not one of libpq's modes.
+  | SslMode(String);
+
+pub fn main() raises HttpError + EnvError + IoError + Unusable + ChildFailed {
+  with { env: Env::real(), clock: Clock::real(), reads: FsRead::real() } {
     let settings: Settings = {
       host: setting("PGHOST", "127.0.0.1")!,
       port: number_setting("PGPORT", 5433)!,
@@ -413,7 +442,7 @@ pub fn main() raises HttpError + EnvError + ChildFailed {
     // here and never waited on: a pool that outlives `main` is not a thing,
     // and `Router::listen` does not return.
     let crew = Fibers::open();
-    let pool = open_pool(crew, settings, number_setting("POOL", 4)!);
+    let pool = open_pool(crew, settings, tls_setting(settings.host)!, number_setting("POOL", 4)!, Reconnect::default());
     let tracer = Tracer::none();
 
     // **Both results, and the inner one is the statement's.** `with_db` answers

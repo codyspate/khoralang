@@ -137,6 +137,97 @@ until one does. A pool whose server is unreachable answers its first callers
   lease costs on top of its statements is taking the connection, the check
   (one non-blocking read), and giving it back.
 
+## TLS
+
+A connection to any host but this machine is encrypted, and the server's
+certificate and host name are checked, unless you say otherwise. The driver
+asks with PostgreSQL's `SSLRequest` and runs the TLS handshake on the same
+connection, so the user name, the password exchange and every row go over
+TLS. A server that does not offer TLS is refused, never retried in the clear.
+
+- **The default** is plain TCP for `localhost` and for a loopback address
+  written out in full (`127.0.0.1` to `127.255.255.255`, `::1`), and TLS
+  with full verification for every other host, including a name that only
+  starts like a loopback address (`127.0.0.1.nip.io` is a public name).
+  `open`, `open_within`, `pool::open` and `pool::open_with` all use it.
+- **Choosing** is `Tls::Off` or `Tls::Verify(roots)`, passed to
+  `conn::open_tls`, `pool::open_tls` or `db::serve_tls`. `roots` is the PEM
+  text of a certificate authority to trust besides the machine's own store,
+  or `""` for none.
+- **libpq's settings** go through `Tls::sslmode(mode, rootcert)`, so a
+  provider's connection string can be used as it is. The mode is trimmed
+  first, so a value read from a file with its newline still reads.
+
+```khora
+import postgres::conn::{Tls};
+import postgres::pool::{Reconnect, open_tls};
+
+// `bundle` is the text of the provider's CA file, read by the caller.
+let tls = match Tls::sslmode("verify-full", bundle) {
+  Result::Ok(t) => t,
+  Result::Err(_) => Tls::Verify(bundle),
+};
+let pool = open_tls(crew, settings, tls, 8, Reconnect::default());
+```
+
+**`require` and `verify-ca` check more here than in libpq, never less.**
+There is no TLS without verification: every mode that asks for TLS checks
+the certificate chain and that the certificate names the host.
+
+| `sslmode` | Here | In libpq |
+| --- | --- | --- |
+| `disable` | plain TCP | the same |
+| `allow`, `prefer` | TLS, verified, or refused | falls back to cleartext when the server says no |
+| `require` | TLS, verified, or refused | no certificate check |
+| `verify-ca` | TLS, verified, or refused | no host name check |
+| `verify-full` | TLS, verified, or refused | the same |
+
+`prefer` refuses rather than falls back because a fallback lets anybody on
+the network path switch TLS off, by answering no on the server's behalf.
+
+**`sslrootcert` is the certificate's text, not a path**: the driver reads no
+files, so it needs no file capability. Read the file and pass what it holds.
+A path passed by mistake is refused as not PEM, and the message says to pass
+the contents.
+
+- **Amazon RDS and Aurora**: `verify-full`, with RDS's global CA bundle
+  ([download](https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem))
+  as `sslrootcert`, and the endpoint name as the host.
+- **Google Cloud SQL**: depends on the instance's server CA mode. With the
+  **shared CA** or a **customer-managed CA**, pass the server CA as
+  `sslrootcert` and connect by the instance's DNS name (`dnsNames` in
+  `gcloud sql instances describe`), which needs that name to resolve. With
+  the **per-instance CA** (the older default), the certificate names no host
+  you can connect by over a public IP, unless the instance uses Private
+  Service Connect, and this driver always checks the name, so it cannot
+  connect directly. Switch the instance to a shared or customer-managed CA,
+  or connect through the Cloud SQL Auth Proxy on `127.0.0.1`, which does the
+  TLS itself.
+- **Neon and Azure Database for PostgreSQL**: publicly signed certificates,
+  so `Tls::Verify("")` on a machine with an ordinary trust store. Azure's
+  certificates chain to DigiCert Global Root G2 or Microsoft RSA Root CA
+  2017; Microsoft is moving servers off the older DigiCert Global Root G1
+  (CA) in 2026, so a machine whose store has only G1 needs G2 added.
+- **Supabase**: download the certificate from the project's Database
+  Settings (`prod-supabase.cer`) and pass its contents as `sslrootcert`. It
+  must be PEM text (`-----BEGIN CERTIFICATE-----`); if the file is DER,
+  convert it first with `openssl x509 -inform der -in prod-supabase.cer
+  -out prod-supabase.pem`.
+- **A provider that hands out a CA file to download**: that file, as PEM, as
+  `sslrootcert`.
+
+A refusal says which it was: the server does not offer TLS, its certificate
+is not signed by a trusted authority, the certificate does not name the
+host, or the handshake broke off or ran out of time. An answer of `N`
+names the call that connects without TLS, for a server on a network you
+trust. Through a pool the refusal is the `Disconnected` reason, and the
+first two are answered at once: a pool does not retry, on its fast
+schedule, a refusal that will be the same next time.
+
+Not offered: client certificates, direct TLS (PostgreSQL 17's
+`sslnegotiation=direct`; servers that offer it also answer `SSLRequest`),
+and `SCRAM-SHA-256-PLUS`, below.
+
 ## Authentication
 
 `scram-sha-256` is the default on PostgreSQL 14 and later, and it is what this
@@ -148,9 +239,15 @@ be replayed into another. **The server is made to prove itself too**: its
 `ServerSignature` is checked rather than accepted, because a client that skips
 that has proved itself to a peer it never made prove anything back.
 
+A server that asks for a cleartext password gets one. Over TLS or to a
+loopback address that is reasonable; to a remote host with `Tls::Off` it
+crosses the network readable.
+
 `SCRAM-SHA-256-PLUS` is deliberately **not** offered. The channel-binding
 variant exists so that a client refuses to authenticate through a proxy it
-cannot see, and advertising it without binding to the channel throws that away.
+cannot see, and advertising it without binding to the channel throws that
+away. Binding needs a hash of the server's certificate from the TLS session,
+which `std::net::tls` does not hand out.
 
 ## Prepared statements
 
@@ -212,12 +309,10 @@ fn users(ids: List<Int>) -> List<Result<List<Row>, DbError>> with { db: Db } {
 
 Named here because a driver's gaps decide whether it fits a service:
 
-- **TLS.** `SSLRequest` is one message and `std::net::tls` exists, so this is
-  closer than it sounds. Until then, a password does not cross the network in
-  the clear under SCRAM — but **every row you read does**. On an untrusted
-  network, this is not ready.
 - **MD5 authentication.** Refused by name rather than hung. `ring` does not
   carry MD5, deliberately.
+- **Client certificates and `SCRAM-SHA-256-PLUS`.** A server that requires
+  either refuses this driver.
 - **Binary result format, `COPY`, notifications, cursors.**
 
 ## Status
@@ -225,5 +320,5 @@ Named here because a driver's gaps decide whether it fits a service:
 Versioned with the compiler for convenience, not as a promise — see
 [Packages](/docs/packages/) on what the compatibility statement does and does
 not cover. It is tested against a real PostgreSQL 17 in the repository's own
-suite, and the SCRAM implementation is checked against the RFC 7677 worked
-example as well as against a live server.
+suite, over TLS and without it, and the SCRAM implementation is checked
+against the RFC 7677 worked example as well as against a live server.

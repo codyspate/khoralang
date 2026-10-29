@@ -39,7 +39,7 @@ module postgres::db;
 
 import std::core::{Channel, List, Option, Result};
 import std::db::{Cell, Db, DbError, Row};
-import postgres::conn::{Answer, Connection, PgError, ask, ask_many, close, forsake, in_transaction, open, open_within, run, run_moving, set_transaction_depth, settle, transaction_depth, usable};
+import postgres::conn::{Answer, Connection, Failed, PgError, Tls, ask, ask_many, close, dial_tls, forsake, in_transaction, open_tls, run, run_moving, set_transaction_depth, settle, transaction_depth, usable};
 
 /// What a caller of `over` wants done.
 pub type Work =
@@ -95,6 +95,9 @@ pub type Request = {
 ///
 /// A record rather than five arguments because it crosses into the serving
 /// fiber, and one shareable value is easier to reason about than five.
+///
+/// How the connection is secured is not in here: it is `Tls::for_host(host)`
+/// unless a `*_tls` function is given a `Tls`. See `postgres::conn::Tls`.
 pub type Settings = {
   pub host: String,
   pub port: Int,
@@ -113,8 +116,15 @@ pub type Settings = {
 /// A connection that will not open is not a failure a caller has to remember
 /// to check: every request is answered with the reason, in the terms
 /// `std::db` speaks, until somebody closes the channel.
+///
+/// Secured as `Tls::for_host(settings.host)` says; `serve_tls` takes a `Tls`.
 pub fn serve(settings: Settings, requests: Channel<Request>) -> () {
-  match open(settings.host, settings.port, settings.user, settings.database, settings.secret) {
+  serve_tls(settings, Tls::for_host(settings.host), requests)
+}
+
+/// `serve`, secured as `tls` says.
+pub fn serve_tls(settings: Settings, tls: Tls, requests: Channel<Request>) -> () {
+  match open_tls(settings.host, settings.port, settings.user, settings.database, settings.secret, tls, 0) {
     Result::Err(why) => refuse(requests, PgError::to_db(why)),
     Result::Ok(c) => {
       answer_all(c, requests);
@@ -358,13 +368,11 @@ pub fn over(requests: Channel<Request>) -> Db {
   }
 }
 
-/// Opens a connection for a pool, in `std::db`'s terms. The handshake is
-/// bounded by `within` ms; see `open_within`.
-pub fn connect(settings: Settings, within: Int) -> Result<Connection, DbError> {
-  match open_within(settings.host, settings.port, settings.user, settings.database, settings.secret, within) {
-    Result::Err(why) => Result::Err(PgError::to_db(why)),
-    Result::Ok(c) => Result::Ok(c),
-  }
+/// Opens a connection for a pool, secured as `tls` says. The handshake is
+/// bounded by `within` ms; see `open_within`. The failure says whether a
+/// retry could change it; see `Failed`.
+pub fn connect(settings: Settings, tls: Tls, within: Int) -> Result<Connection, Failed> {
+  dial_tls(settings.host, settings.port, settings.user, settings.database, settings.secret, tls, within)
 }
 
 /// Closes a pool's connection. Nothing still on its way is read.

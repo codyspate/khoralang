@@ -3,11 +3,13 @@ module techempower::main;
 import std::core::{ChildFailed, Fibers, Iterator, List, Option, Ord, Result, SharedFn, Step};
 import std::db::{Cell, Db, DbError, Row};
 import std::env::{Env, EnvError, variable_or};
+import std::fs::{FsRead, IoError, read_text};
 import std::net::http::{HttpError, Request, Response, Router};
 import std::random::{Random};
 import std::schema::{Encode};
+import postgres::conn::{Tls};
 import postgres::db::{Settings};
-import postgres::pool::{Pool, open as open_pool, with_db};
+import postgres::pool::{Pool, Reconnect, open_tls as open_pool, with_db};
 
 // The four TechEmpower read tests -- JSON serialization, single query,
 // multiple queries, Fortunes -- written the way a Khora service would be:
@@ -281,8 +283,35 @@ fn number_setting(name: String, fallback: Int) -> Int with { env: Env } raises E
   }
 }
 
-pub fn main() raises HttpError + EnvError + ChildFailed {
-  with { env: Env::real(), rng: Random::real() } {
+/// How the pool secures its connections: libpq's `PGSSLMODE`, and
+/// `PGSSLROOTCERT` as the path of a PEM file to trust, read here.
+///
+/// **Unset, it is the driver's default for the host**: plain TCP to a
+/// loopback address and verified TLS to anything else. The TechEmpower
+/// harness reaches its database by a service name (`tfb-database`) on a
+/// private network, where that default asks a plain server for TLS and is
+/// refused; `PGSSLMODE=disable` is the setting for it.
+fn tls_setting(host: String) -> Tls with { env: Env, reads: FsRead } raises EnvError + IoError + Unusable {
+  let mode = setting("PGSSLMODE", "")!;
+  if String::is_empty(String::trim(mode)) {
+    Tls::for_host(host)
+  } else {
+    let path = setting("PGSSLROOTCERT", "")!;
+    let roots = if String::is_empty(path) || path == "system" { "" } else { read_text(path)! };
+    match Tls::sslmode(mode, roots) {
+      Result::Ok(tls) => tls,
+      Result::Err(_) => raise Unusable::SslMode(mode),
+    }
+  }
+}
+
+/// A setting that names nothing this program can do.
+pub type Unusable =
+  /// `PGSSLMODE` is not one of libpq's modes.
+  | SslMode(String);
+
+pub fn main() raises HttpError + EnvError + IoError + Unusable + ChildFailed {
+  with { env: Env::real(), rng: Random::real(), reads: FsRead::real() } {
     let settings: Settings = {
       host: setting("PGHOST", "127.0.0.1")!,
       port: number_setting("PGPORT", 5432)!,
@@ -291,7 +320,7 @@ pub fn main() raises HttpError + EnvError + ChildFailed {
       secret: setting("PGPASSWORD", "benchmarkdbpass")!,
     };
     let crew = Fibers::open();
-    let pool = open_pool(crew, settings, number_setting("POOL", 16)!);
+    let pool = open_pool(crew, settings, tls_setting(settings.host)!, number_setting("POOL", 16)!, Reconnect::default());
 
     Router::new()
       |> Router::get("/json", SharedFn::of(fn request => stamped(json(request))))

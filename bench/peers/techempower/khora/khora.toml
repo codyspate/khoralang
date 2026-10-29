@@ -10,7 +10,7 @@ version = "0.4.0"
 # The port it answers on and the database it dials. Nothing else.
 [permissions]
 network = ["0.0.0.0:8080", "127.0.0.1:5432"]
-env = ["PORT", "PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGPASSWORD", "POOL"]
+env = ["PORT", "PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGPASSWORD", "PGSSLMODE", "PGSSLROOTCERT", "POOL"]
 
 [dependencies]
 postgres = { path = "../../../../packages/postgres" }

@@ -195,6 +195,18 @@ pub fn startup(user: String, database: String) -> Array<U8> {
   Writer::finish(out)
 }
 
+/// `SSLRequest`: asks the server, in the clear, whether it will speak TLS
+/// on this connection. Eight bytes, no type byte, like the startup message:
+/// a length of 8 and the code 80877103 (1234 in the high half, 5679 in the
+/// low), which no protocol version will ever be. The server answers one
+/// byte, `S` or `N`.
+pub fn ssl_request() -> Array<U8> {
+  let out = Writer::new();
+  Writer::i32(out, 8);
+  Writer::i32(out, 80877103);
+  Writer::finish(out)
+}
+
 /// A simple query: everything in one string, results in one round trip.
 pub fn query(sql: String) -> Array<U8> {
   let body = Writer::new();

@@ -345,6 +345,24 @@ pub extern "C" fn khora_net_set_deadline(socket: Socket, at: i64) -> i32 {
     0
 }
 
+/// `socket`'s deadline and whether it has expired, as they stand.
+///
+/// For a caller that holds a socket it does not own to a deadline of its own
+/// for a while: [`put_deadline`] gives the owner back what it had. A TLS
+/// upgrade over a caller's socket is the one.
+pub(crate) fn deadline_of(socket: Socket) -> (Option<std::time::Instant>, bool) {
+    let limits = limits_of(socket);
+    (limits.by, limits.expired)
+}
+
+/// Puts back what [`deadline_of`] read.
+pub(crate) fn put_deadline(socket: Socket, by: Option<std::time::Instant>, expired: bool) {
+    change_limits(socket, |limits| {
+        limits.by = by;
+        limits.expired = expired;
+    });
+}
+
 /// Why [`connect_by`] has no socket to give.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Gave {

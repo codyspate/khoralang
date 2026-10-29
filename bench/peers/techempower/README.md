@@ -133,6 +133,15 @@ same way.
 
 Bun needs nothing beyond `bun` on the machine.
 
+**TLS to the database.** The Khora server reads `PGSSLMODE` (libpq's names)
+and `PGSSLROOTCERT` (a path to a PEM file). Unset, it uses the `postgres`
+driver's default: plain TCP to a loopback address, verified TLS to any other
+host. The local setup above is on 127.0.0.1 and needs nothing. Under
+TechEmpower's own harness the database is `tfb-database`, a plain server on
+a private network, so set `PGSSLMODE=disable` there, or every request fails
+with "does not offer TLS". The Go, Node and Bun peers set no TLS option and
+run on their drivers' defaults.
+
 ## Verifying
 
     sh bench/peers/techempower/verify.sh

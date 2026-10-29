@@ -121,7 +121,7 @@ import std::clock::{Clock};
 import std::db::{Db, DbError};
 import std::random::{Random};
 import std::resilience::{Schedule};
-import postgres::conn::{Connection, forsake, in_transaction, mid_reply, settle, still_open, usable};
+import postgres::conn::{Connection, Failed, PgError, Tls, forsake, in_transaction, mid_reply, settle, still_open, usable};
 import postgres::db::{Settings, connect, direct, hang_up};
 
 /// A set of connections, each with a slot that opens and reopens it.
@@ -311,21 +311,36 @@ type Tried<A> =
   | Refused(DbError);
 
 /// Opens a pool of `count` connections that reconnects with
-/// `Reconnect::default()`.
+/// `Reconnect::default()`, secured as `Tls::for_host(settings.host)` says.
 pub fn open(crew: Fibers, settings: Settings, count: Int) -> Pool {
   open_with(crew, settings, count, Reconnect::default())
 }
 
-/// Opens `count` slots and spawns a fiber for each into `crew`.
+/// `open_with`, secured as `Tls::for_host(settings.host)` says: plain to a
+/// loopback address, TLS with full verification to any other host.
+pub fn open_with(crew: Fibers, settings: Settings, count: Int, plan: Reconnect) -> Pool {
+  open_tls(crew, settings, Tls::for_host(settings.host), count, plan)
+}
+
+/// Opens `count` slots and spawns a fiber for each into `crew`, each
+/// connection secured as `tls` says.
 ///
 /// **Returns before any of them has connected.** A slot's fiber opens its
 /// own connection, so this is a spawn and not a round trip. `with_db` waits
 /// for the first connection to open; a pool that cannot connect at all
 /// answers `Disconnected` with the reason once every slot's fast schedule has
-/// given up.
+/// given up. A refusal no retry can change skips the fast schedule, and
+/// callers hear it at once: a server that will not speak TLS when `tls`
+/// asks for it, or a certificate that does not verify. The slot still tries
+/// again on the slow interval, if the plan has one.
+///
+/// **Each connection carries its own TLS session**, opened by its slot and
+/// closed with it. A session that fails -- a read or a write that does not
+/// decrypt, a `close_notify`, a reset -- breaks the connection, and a broken
+/// connection is closed by its slot and opened afresh, never lent again.
 ///
 /// Below one connection is one.
-pub fn open_with(crew: Fibers, settings: Settings, count: Int, plan: Reconnect) -> Pool {
+pub fn open_tls(crew: Fibers, settings: Settings, tls: Tls, count: Int, plan: Reconnect) -> Pool {
   let wanted = if count < 1 { 1 } else { count };
   // One more than the slots, for the down token: there is never more than
   // one connection per slot and one token, so a send here never waits.
@@ -340,7 +355,7 @@ pub fn open_with(crew: Fibers, settings: Settings, count: Int, plan: Reconnect) 
   while made < wanted {
     let here = Shared::of(false);
     slots = List::Cons(here, slots);
-    Fibers::spawn(crew, fn () => slot(settings, plan, idle, token_idle, here, tally));
+    Fibers::spawn(crew, fn () => slot(settings, tls, plan, idle, token_idle, here, tally));
     made = made + 1
   };
   { idle: idle, token_idle: token_idle, slots: slots, crew: crew, tally: tally }
@@ -698,6 +713,7 @@ fn home_of(offer: Lendable) -> Option<Handoff<Lendable>> {
 /// One slot, for the pool's whole life: connect, lend, reconnect.
 fn slot(
   settings: Settings,
+  tls: Tls,
   plan: Reconnect,
   idle: Handoff<Lendable>,
   token_idle: Shared<Bool>,
@@ -714,7 +730,7 @@ fn slot(
     let tries: Tries = { began: clock.monotonic_millis(), attempts: 0, phase: Phase::Reconnecting };
     let mut going = true;
     while going {
-      let got = reconnect(settings, plan, idle, token_idle, tally, tries);
+      let got = reconnect(settings, tls, plan, idle, token_idle, tally, tries);
       if is_none(got) {
         going = false
       } else {
@@ -852,6 +868,7 @@ fn hang_up_offer(got: Option<Lendable>) -> () {
 /// pool closes first, or when the slot shrinks for good.
 fn reconnect(
   settings: Settings,
+  tls: Tls,
   plan: Reconnect,
   idle: Handoff<Lendable>,
   token_idle: Shared<Bool>,
@@ -866,7 +883,7 @@ fn reconnect(
     if closing(tally) {
       going = false
     } else {
-      match connect(settings, plan.handshake) {
+      match connect(settings, tls, plan.handshake) {
         Result::Ok(c) => {
           if closing(tally) {
             // Opened just as the pool closed: nobody will lend it.
@@ -876,8 +893,12 @@ fn reconnect(
           };
           going = false
         },
-        Result::Err(why) => {
-          remember(tally, why);
+        Result::Err(failed) => {
+          remember(tally, PgError::to_db(failed.why));
+          // A refusal no retry can change is not waited out on the fast
+          // schedule: callers hear it at once, and the slot tries again
+          // on the slow interval, in case the server is reconfigured.
+          if failed.lasting { give_up_fast(idle, token_idle, tally, tries) };
           if !back_off(plan, idle, token_idle, tally, tries) { going = false }
         },
       }
@@ -929,6 +950,20 @@ fn back_off(
   match wait {
     Option::None => false,
     Option::Some(millis) => pause(tally, millis),
+  }
+}
+
+/// Moves a slot still on its fast schedule to `down`, as though the schedule
+/// had run out. For a refusal that would be the same on every attempt.
+fn give_up_fast(idle: Handoff<Lendable>, token_idle: Shared<Bool>, tally: Shared<Tally>, tries: Tries) -> () {
+  match tries.phase {
+    Phase::Reconnecting => {
+      tries.phase = Phase::Down;
+      moved(tally, idle, token_idle, Phase::Reconnecting, Phase::Down)
+    },
+    Phase::Down => (),
+    // Not reached: a slot connecting is not live.
+    Phase::Live => (),
   }
 }
 

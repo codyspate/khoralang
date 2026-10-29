@@ -5567,3 +5567,574 @@ fn query_each_against_a_real_server() {
         );
     }
 }
+
+// --- over TLS ----------------------------------------------------------------
+//
+// Against a server that speaks only TLS, named by `KHORA_POSTGRES_TLS` as
+// `port:path-to-its-CA.pem` beside `KHORA_POSTGRES`. Its certificate must be
+// for `localhost` and not for `127.0.0.1`, its `pg_hba.conf` must admit only
+// `hostssl`, and user, password and database are all `khora`. The dev
+// server on 5433, which does not speak TLS, is the one that answers `N`.
+// `/general/khora-tmp/pgtls/probes/pg-tls.sh` in the agents' tree is one;
+// any PostgreSQL configured that way will do.
+
+/// The TLS server's port and its CA's PEM text, or `None` to skip.
+fn tls_server() -> Option<(u16, String)> {
+    let named = std::env::var("KHORA_POSTGRES_TLS").ok();
+    let (Some(_), Some(named)) = (std::env::var_os("KHORA_POSTGRES"), named) else {
+        eprintln!(
+            "skipping: set KHORA_POSTGRES=1 and KHORA_POSTGRES_TLS=<port>:<CA pem path> \
+             for a PostgreSQL that admits only hostssl, to run this"
+        );
+        return None;
+    };
+    let (port, path) = named.split_once(':').expect("KHORA_POSTGRES_TLS is <port>:<CA pem path>");
+    let port: u16 = port.parse().expect("a port number before the colon");
+    let pem = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("the CA at {path}: {e}"));
+    Some((port, pem))
+}
+
+/// Opens one connection with `tls`, then asks whether it is encrypted and
+/// for a sum, and prints what came back or why it did not.
+const TLS_ONE: &str = r#"module demo::main;
+import std::core::{List, Option, Result, print};
+import std::db::{Cell, Row};
+import postgres::conn::{Answer, PgError, Tls, close, open_tls, run};
+
+const authority = CA_PEM;
+
+fn shown(c: Cell) -> String {
+  match c {
+    Cell::Null => "null",
+    Cell::Text(t) => t,
+    Cell::Number(n) => Int::to_string(n),
+    Cell::Flag(b) => if b { "true" } else { "false" },
+    Cell::Money(_) => "money",
+  }
+}
+
+fn failed(why: PgError) -> String {
+  match why {
+    PgError::Unreachable(m) => "unreachable: " + m,
+    PgError::Refused(m) => "refused: " + m,
+    PgError::Closed(m) => "closed: " + m,
+    PgError::Unsupported(m) => "unsupported: " + m,
+  }
+}
+
+fn main() -> Int {
+  match open_tls(HOST, PORT, "khora", "khora", "khora", TLS_EXPR, 10000) {
+    Result::Err(why) => { print(failed(why)); 1 },
+    Result::Ok(c) => {
+      match run(c, "select ssl, 20 + 22 from pg_stat_ssl where pid = pg_backend_pid()") {
+        Result::Err(why) => print(failed(why)),
+        Result::Ok(answer) => match answer.rows {
+          List::Cons(row, _) => match row.cells {
+            List::Cons(ssl, List::Cons(sum, _)) => print("ssl " + shown(ssl) + ", sum " + shown(sum)),
+            _ => print("a row of another shape"),
+          },
+          List::Nil => print("no rows"),
+        },
+      };
+      close(c);
+      0
+    },
+  }
+}
+"#;
+
+/// `TLS_ONE` connecting to `host:port` with `tls`, built and run.
+fn run_tls_one(name: &str, host: &str, port: u16, tls: &str, pem: &str) -> Watched {
+    // The CA last: base64 could spell a placeholder.
+    let source = TLS_ONE
+        .replace("TLS_EXPR", tls)
+        .replace("HOST", &format!("{host:?}"))
+        .replace("PORT", &port.to_string())
+        .replace("CA_PEM", &format!("{pem:?}"));
+    let exe = build(name, &source);
+    let ran = run_watched(&exe, "threads", std::time::Duration::from_secs(30));
+    assert!(!ran.hung, "{name}: the program hung: {:?} {:?}", ran.stdout, ran.stderr);
+    ran
+}
+
+/// **`verify-full` with the server's CA: connected, encrypted, answered.**
+/// The server itself says the session is TLS (`pg_stat_ssl`), which is the
+/// one witness that cannot be the client agreeing with itself.
+#[test]
+fn verify_full_with_the_ca_connects_and_queries_over_tls() {
+    let Some((port, pem)) = tls_server() else { return };
+    let ran = run_tls_one("pg_tls_verify_full", "localhost", port, "Tls::Verify(authority)", &pem);
+    assert_eq!(ran.stdout, "ssl true, sum 42\n", "stderr {}", ran.stderr);
+    // The same through the libpq spelling a provider's docs give.
+    let ran = run_tls_one(
+        "pg_tls_sslmode_require",
+        "localhost",
+        port,
+        "match Tls::sslmode(\"require\", authority) { Result::Ok(t) => t, Result::Err(_) => Tls::Off }",
+        &pem,
+    );
+    assert_eq!(ran.stdout, "ssl true, sum 42\n", "stderr {}", ran.stderr);
+}
+
+/// **A name the certificate does not cover is refused**, though it reaches
+/// the same server and the CA is trusted: `127.0.0.1` against a certificate
+/// for `localhost`. `sslmode=require`, which in libpq checks no name.
+#[test]
+fn a_host_the_certificate_does_not_name_is_refused() {
+    let Some((port, pem)) = tls_server() else { return };
+    let ran = run_tls_one("pg_tls_wrong_name", "127.0.0.1", port, "Tls::Verify(authority)", &pem);
+    assert_eq!(ran.code, Some(1), "{:?}", ran.stdout);
+    assert!(
+        ran.stdout.starts_with("refused: the TLS handshake with 127.0.0.1:")
+            && ran.stdout.contains("its certificate does not name 127.0.0.1")
+            && !ran.stdout.contains("not signed"),
+        "the refusal should say it was the name, and only the name: {:?}",
+        ran.stdout
+    );
+}
+
+/// **A certificate no trusted authority signed is refused**: the test CA is
+/// not in the machine's store, and without `sslrootcert` nothing else is
+/// trusted.
+#[test]
+fn a_server_signed_by_an_untrusted_authority_is_refused() {
+    let Some((port, pem)) = tls_server() else { return };
+    let ran = run_tls_one("pg_tls_untrusted", "localhost", port, "Tls::Verify(\"\")", &pem);
+    assert_eq!(ran.code, Some(1), "{:?}", ran.stdout);
+    assert!(
+        ran.stdout.starts_with("refused: the TLS handshake with localhost:")
+            && ran.stdout.contains("its certificate is not signed by an authority this client trusts")
+            && !ran.stdout.contains("does not name"),
+        "the refusal should say it was the authority, and only the authority: {:?}",
+        ran.stdout
+    );
+}
+
+/// **`sslmode=disable` against a `hostssl`-only server is refused, with the
+/// server's own words.** The default for `localhost` is plain TCP too, so
+/// `open` gets the same answer.
+#[test]
+fn plain_tcp_to_a_hostssl_only_server_is_refused_by_the_server() {
+    let Some((port, pem)) = tls_server() else { return };
+    let ran = run_tls_one("pg_tls_disable", "localhost", port, "Tls::Off", &pem);
+    assert_eq!(ran.code, Some(1), "{:?}", ran.stdout);
+    assert!(
+        ran.stdout.starts_with("refused: ") && ran.stdout.contains("no encryption"),
+        "the server's pg_hba refusal: {:?}",
+        ran.stdout
+    );
+    let ran = run_tls_one("pg_tls_default", "localhost", port, "Tls::for_host(\"localhost\")", &pem);
+    assert!(ran.stdout.contains("no encryption"), "{:?}", ran.stdout);
+}
+
+/// A relay to `upstream` on a port of its own, recording what the client
+/// sent: one connection, both directions, until either side closes.
+fn recording_relay(upstream: u16) -> (u16, std::thread::JoinHandle<Vec<u8>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
+    let port = listener.local_addr().expect("an address").port();
+    let relay = std::thread::spawn(move || {
+        let (mut client, _) = listener.accept().expect("the client");
+        let mut server = TcpStream::connect(("127.0.0.1", upstream)).expect("the dev server");
+        let mut back = server.try_clone().expect("a second handle");
+        let mut to_client = client.try_clone().expect("a second handle");
+        let down = std::thread::spawn(move || {
+            let _ = std::io::copy(&mut back, &mut to_client);
+            let _ = to_client.shutdown(std::net::Shutdown::Both);
+        });
+        let mut heard = Vec::new();
+        let mut buffer = [0u8; 4096];
+        loop {
+            match client.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    heard.extend_from_slice(&buffer[..n]);
+                    if server.write_all(&buffer[..n]).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = server.shutdown(std::net::Shutdown::Both);
+        let _ = down.join();
+        heard
+    });
+    (port, relay)
+}
+
+/// **A server that does not speak TLS, asked for it, is refused, and hears
+/// nothing past the `SSLRequest`.** The dev server on 5433 answers `N`. In
+/// libpq's `prefer` that is where the connection carries on in the clear;
+/// here a relay between the two records every byte the client sent, and it
+/// is the eight bytes of the request and nothing else: no user name, no
+/// startup message, no password exchange.
+#[test]
+fn a_server_without_tls_is_refused_and_hears_only_the_request() {
+    let Some((_, pem)) = tls_server() else { return };
+    let (port, relay) = recording_relay(5433);
+    let ran = run_tls_one("pg_tls_answered_n", "127.0.0.1", port, "Tls::Verify(authority)", &pem);
+    let heard = relay.join().expect("the relay");
+    assert_eq!(ran.code, Some(1), "{:?}", ran.stdout);
+    assert!(
+        ran.stdout.starts_with("refused: the server at 127.0.0.1:")
+            && ran.stdout.contains("does not offer TLS")
+            && ran.stdout.contains("Tls::Off"),
+        "{:?}",
+        ran.stdout
+    );
+    assert_eq!(heard, [0, 0, 0, 8, 4, 210, 22, 47], "the client sent more than an SSLRequest");
+}
+
+/// A pool asking for TLS from `127.0.0.1:PORT`, with the default plan, and a
+/// caller that times how long `with_db` takes to answer.
+const TLS_POOL_REFUSED: &str = r#"module demo::main;
+import std::core::{Fibers, List, Result, print};
+import std::db::{Db, DbError};
+import postgres::db::{Settings};
+import postgres::pool::{Reconnect, close, open_tls, with_db};
+import postgres::conn::{Tls};
+
+extern fn khora_monotonic_millis() -> Int;
+
+fn main() -> Int {
+  let settings: Settings = { host: "127.0.0.1", port: PORT, user: "khora", database: "khora", secret: "khora" };
+  let pool = open_tls(Fibers::open(), settings, Tls::Verify(""), 1, Reconnect::default());
+  let began = khora_monotonic_millis();
+  let said = match with_db(pool, fn () => db.query("select 1", List::Nil)) {
+    Result::Ok(_) => "answered",
+    Result::Err(DbError::Disconnected(m)) => "disconnected: " + m,
+    Result::Err(DbError::Rejected(m)) => "rejected: " + m,
+    Result::Err(DbError::RolledBack(m)) => "rolled back: " + m,
+  };
+  let took = khora_monotonic_millis() - began;
+  print(said);
+  print(if took < 5000 { "at once" } else { "after ${Int::to_string(took)} ms" });
+  close(pool);
+  0
+}
+"#;
+
+/// **A pool whose server will not speak TLS answers its callers at once.**
+/// An `N` is the same on every attempt, so waiting out the default fast
+/// schedule (28.6 s) only delayed the same answer. A relay to the dev server
+/// on 5433, which answers `N`, stands in for a plain server on a private
+/// network; the pool asks for TLS, and `with_db` must say why within 5 s.
+#[test]
+fn a_pool_refused_tls_answers_its_callers_at_once() {
+    let Some(_) = tls_server() else { return };
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
+    let port = listener.local_addr().expect("an address").port();
+    // Every connection the pool makes is relayed to 5433; the pool stops
+    // dialing once it is closed, and the thread ends with the test.
+    std::thread::spawn(move || {
+        for client in listener.incoming() {
+            let Ok(mut client) = client else { break };
+            let Ok(mut server) = TcpStream::connect(("127.0.0.1", 5433)) else { break };
+            let (Ok(mut back), Ok(mut to_client)) = (server.try_clone(), client.try_clone()) else { break };
+            std::thread::spawn(move || {
+                let _ = std::io::copy(&mut back, &mut to_client);
+            });
+            std::thread::spawn(move || {
+                let _ = std::io::copy(&mut client, &mut server);
+            });
+        }
+    });
+    let source = TLS_POOL_REFUSED.replace("PORT", &port.to_string());
+    let exe = build("pg_tls_pool_refused", &source);
+    let ran = run_watched(&exe, "threads", std::time::Duration::from_secs(60));
+    assert!(!ran.hung, "the pool hung: {:?}", ran.stdout);
+    assert!(
+        ran.stdout.starts_with("disconnected: the server at 127.0.0.1:") && ran.stdout.contains("does not offer TLS"),
+        "{:?} {:?}",
+        ran.stdout,
+        ran.stderr
+    );
+    assert!(ran.stdout.ends_with("at once\n"), "the refusal waited out the schedule: {:?}", ran.stdout);
+}
+
+/// Eight fibers, two hundred queries, a pool of four, every one of them over
+/// TLS: each statement asks the server whether its own session is
+/// encrypted and which backend it is. Every lease comes back; at most four
+/// backends served all two hundred, so no session was dropped and reopened;
+/// and once the pool is closed the server has no backend of the pool's left,
+/// so every session was closed with its connection.
+const TLS_POOL: &str = r#"module demo::main;
+import std::core::{Fibers, Iterator, List, Map, Option, Result, Shared, Step, print};
+import std::db::{Cell, Db, DbError, Row};
+import postgres::conn::{Answer, Tls, close as hang_up, open_tls as dial, run};
+import postgres::db::{Settings};
+import postgres::pool::{Pool, Reconnect, close, idle_count, open_tls, with_db};
+
+extern fn khora_sleep(millis: Int) -> ();
+extern fn khora_monotonic_millis() -> Int;
+
+const authority = CA_PEM;
+
+/// The backend's pid if the session is encrypted, or why not.
+fn asked() -> Int with { db: Db } {
+  match db.query("select pg_backend_pid(), ssl from pg_stat_ssl where pid = pg_backend_pid()", List::Nil) {
+    Result::Ok(List::Cons(row, _)) => match row.cells {
+      List::Cons(Cell::Number(pid), List::Cons(Cell::Flag(true), _)) => pid,
+      _ => 0 - 2,
+    },
+    Result::Ok(List::Nil) => 0 - 3,
+    Result::Err(_) => 0 - 1,
+  }
+}
+
+fn worker(pool: Pool, seen: Shared<List<Int>>) -> () {
+  let mut i = 0;
+  while i < 25 {
+    let pid = match with_db(pool, asked) { Result::Ok(p) => p, Result::Err(_) => 0 - 4 };
+    Shared::update(seen, fn l => List::Cons(pid, l));
+    i = i + 1
+  };
+}
+
+/// How many client backends the server has for `khora`, asked on a
+/// connection of its own: 1 once every pooled session has been closed.
+fn backends() -> Int {
+  match dial("localhost", PORT, "khora", "khora", "khora", Tls::Verify(authority), 10000) {
+    Result::Err(_) => 0 - 1,
+    Result::Ok(c) => {
+      let n = match run(c, "select count(*)::int4 from pg_stat_activity where usename = 'khora' and backend_type = 'client backend'") {
+        Result::Ok(answer) => match answer.rows {
+          List::Cons(row, _) => match row.cells { List::Cons(Cell::Number(k), _) => k, _ => 0 - 2 },
+          List::Nil => 0 - 3,
+        },
+        Result::Err(_) => 0 - 4,
+      };
+      hang_up(c);
+      n
+    },
+  }
+}
+
+fn main() -> Int {
+  let settings: Settings = { host: "localhost", port: PORT, user: "khora", database: "khora", secret: "khora" };
+  let crew = Fibers::open();
+  let pool = open_tls(crew, settings, Tls::Verify(authority), 4, Reconnect::default());
+  let seen: Shared<List<Int>> = Shared::of(List::Nil);
+  let workers = Fibers::open();
+  let mut n = 0;
+  while n < 8 {
+    Fibers::spawn(workers, fn () => worker(pool, seen));
+    n = n + 1
+  };
+  let _failed = Fibers::wait(workers);
+  let pids = Shared::get(seen);
+  let distinct: Map<Int, Bool> = Map::new();
+  let mut bad = 0;
+  for pid in pids {
+    if pid > 0 { Map::insert(distinct, pid, true) } else { bad = bad + 1 }
+  };
+  let deadline = khora_monotonic_millis() + 5000;
+  while idle_count(pool) != 4 && khora_monotonic_millis() < deadline { khora_sleep(5) };
+  let kept = if Map::len(distinct) <= 4 { "at most 4" } else { Int::to_string(Map::len(distinct)) };
+  print("answered " + Int::to_string(List::length(pids)) + ", not over tls " + Int::to_string(bad)
+    + ", backends " + kept + ", idle " + Int::to_string(idle_count(pool)));
+  close(pool);
+  let _stopped = Fibers::wait(crew);
+  // The server ends a backend a moment after its client hangs up.
+  let after = khora_monotonic_millis() + 5000;
+  let mut left = backends();
+  while left != 1 && khora_monotonic_millis() < after { khora_sleep(20); left = backends() };
+  print("left open after close " + Int::to_string(left - 1));
+  0
+}
+"#;
+
+#[test]
+fn a_pool_over_tls_serves_eight_fibers_and_keeps_its_sessions() {
+    let Some((port, pem)) = tls_server() else { return };
+    let source = TLS_POOL.replace("PORT", &port.to_string()).replace("CA_PEM", &format!("{pem:?}"));
+    for backend in ["threads", "scheduler"] {
+        let exe = build(&format!("pg_tls_pool_{backend}"), &source);
+        let ran = run_watched(&exe, backend, std::time::Duration::from_secs(60));
+        assert!(!ran.hung, "{backend}: the program hung: {:?}", ran.stdout);
+        assert_eq!(
+            ran.stdout,
+            "answered 200, not over tls 0, backends at most 4, idle 4\nleft open after close 0\n",
+            "{backend}: stderr {}",
+            ran.stderr
+        );
+    }
+}
+
+/// A server that answers `S` and then never speaks TLS, and a line to the
+/// program under test: one byte once the client's `ClientHello` has
+/// arrived, so the program cancels while the handshake is waiting; then
+/// whether, and how soon, the client's socket closed; then one more byte to
+/// let the program end. The program's own exit would close every socket it
+/// held, so the close has to be seen while it is still running.
+fn a_server_that_stalls_the_handshake() -> (u16, u16, std::thread::JoinHandle<(bool, std::time::Duration)>) {
+    let server = TcpListener::bind("127.0.0.1:0").expect("a port");
+    let line = TcpListener::bind("127.0.0.1:0").expect("a port");
+    let server_port = server.local_addr().expect("an address").port();
+    let line_port = line.local_addr().expect("an address").port();
+    let watcher = std::thread::spawn(move || {
+        let (mut signal, _) = line.accept().expect("the program's line");
+        let (mut client, _) = server.accept().expect("the client");
+        client.set_read_timeout(Some(std::time::Duration::from_secs(20))).expect("a timeout");
+        let mut request = [0u8; 8];
+        client.read_exact(&mut request).expect("the SSLRequest");
+        client.write_all(b"S").expect("the answer");
+        // A TLS record's header: type 22 is a handshake.
+        let mut header = [0u8; 5];
+        client.read_exact(&mut header).expect("the ClientHello");
+        assert_eq!(header[0], 22, "the client should have started a TLS handshake");
+        let told = std::time::Instant::now();
+        signal.write_all(b"c").expect("telling the program to cancel");
+        // Drain until the client closes, or give up.
+        client.set_read_timeout(Some(std::time::Duration::from_secs(10))).expect("a timeout");
+        let mut rest = [0u8; 4096];
+        let closed = loop {
+            match client.read(&mut rest) {
+                Ok(0) => break true,
+                Ok(_) => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => break true,
+                Err(_) => break false,
+            }
+        };
+        let took = told.elapsed();
+        let _ = signal.write_all(b"x");
+        (closed, took)
+    });
+    (server_port, line_port, watcher)
+}
+
+const TLS_CANCEL: &str = r#"module demo::main;
+import std::core::{Array, Fiber, Result, print};
+import std::net::socket::{connect_to, invalid_handle, receive, shut, start};
+import postgres::conn::{PgError, Tls, close, open_tls};
+
+extern fn khora_monotonic_millis() -> Int;
+
+const authority = CA_PEM;
+
+fn dial() -> () {
+  match open_tls("localhost", SERVER, "khora", "khora", "khora", Tls::Verify(authority), 0) {
+    Result::Ok(c) => { print("connected, which is wrong"); close(c) },
+    Result::Err(_) => (),
+  }
+}
+
+fn main() -> Int {
+  let _ = start();
+  let line = connect_to("127.0.0.1", LINE);
+  if line == invalid_handle() { print("no line to the test"); 1 } else {
+    let f = Fiber::spawn(fn () => dial());
+    let byte: Array<U8> = Array::new(1, 0);
+    let _ = receive(line, byte);
+    let began = khora_monotonic_millis();
+    Fiber::cancel(f);
+    Fiber::wait(f)! catch { _ => () };
+    let took = khora_monotonic_millis() - began;
+    print(if took < 2000 { "stopped promptly" } else { "stopped after " + Int::to_string(took) + " ms" });
+    // Held open until the test has seen whether the socket closed.
+    let _ = receive(line, byte);
+    shut(line);
+    0
+  }
+}
+"#;
+
+/// **A cancel in the middle of the TLS handshake stops it at once and
+/// closes the socket.** The server answers `S` and then sends nothing, so
+/// the client waits for the server's half of the handshake; the program is
+/// told when its `ClientHello` has arrived and cancels the fiber there. The
+/// fiber is stopped within two seconds, and the server sees the socket
+/// closed while the program is still running: nothing is left open. No
+/// PostgreSQL is needed, so this runs everywhere.
+#[test]
+fn a_cancel_mid_handshake_stops_at_once_and_closes_the_socket() {
+    let pem = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join("ca.cert.pem"),
+    )
+    .expect("the test CA");
+    for backend in ["threads", "scheduler"] {
+        let (server, line, watcher) = a_server_that_stalls_the_handshake();
+        let source = TLS_CANCEL
+            .replace("SERVER", &server.to_string())
+            .replace("LINE", &line.to_string())
+            .replace("CA_PEM", &format!("{pem:?}"));
+        let exe = build(&format!("pg_tls_cancel_{backend}"), &source);
+        let ran = run_watched(&exe, backend, std::time::Duration::from_secs(40));
+        let (closed, took) = watcher.join().expect("the watcher");
+        assert!(!ran.hung, "{backend}: the program hung: {:?} {:?}", ran.stdout, ran.stderr);
+        assert_eq!(ran.stdout, "stopped promptly\n", "{backend}: stderr {}", ran.stderr);
+        assert!(closed, "{backend}: the client's socket was still open after {took:?}");
+        assert!(took < std::time::Duration::from_secs(5), "{backend}: the socket closed only after {took:?}");
+    }
+}
+
+/// A connection LISTENing, notified by a second one while it sits idle,
+/// then looked at the way a pool looks before a lease, for up to two
+/// seconds or until it is judged broken. Then a statement on it.
+const TLS_IDLE_NOTICE: &str = r#"module demo::main;
+import std::core::{List, Result, print};
+import std::db::{Cell, Row};
+import postgres::conn::{Answer, Connection, PgError, Tls, close, open_tls, run, still_open};
+
+extern fn khora_sleep(millis: Int) -> ();
+extern fn khora_monotonic_millis() -> Int;
+
+const authority = CA_PEM;
+
+fn connect() -> Result<Connection, PgError> {
+  open_tls("localhost", PORT, "khora", "khora", "khora", Tls::Verify(authority), 10000)
+}
+
+fn main() -> Int {
+  match connect() {
+    Result::Err(_) => { print("no listener"); 1 },
+    Result::Ok(listener) => match connect() {
+      Result::Err(_) => { print("no notifier"); 1 },
+      Result::Ok(notifier) => {
+        let listened = run(listener, "LISTEN khora_pgtls");
+        let notified = run(notifier, "NOTIFY khora_pgtls, 'hello'");
+        let ok = match listened { Result::Ok(_) => true, Result::Err(_) => false }
+          && match notified { Result::Ok(_) => true, Result::Err(_) => false };
+        if !ok { print("LISTEN or NOTIFY failed") } else {
+          // The notification is on its way the moment NOTIFY commits; a
+          // healthy check keeps finding the connection open however soon
+          // or late it lands, so this watches for the whole window.
+          let until = khora_monotonic_millis() + 2000;
+          let mut open = true;
+          while open && khora_monotonic_millis() < until {
+            open = still_open(listener);
+            if open { khora_sleep(10) }
+          };
+          let after = match run(listener, "select 7") {
+            Result::Ok(answer) => match answer.rows {
+              List::Cons(row, _) => match row.cells { List::Cons(Cell::Number(n), _) => Int::to_string(n), _ => "?" },
+              List::Nil => "none",
+            },
+            Result::Err(_) => "failed",
+          };
+          print("still open " + (if open { "yes" } else { "no" }) + ", then " + after)
+        };
+        close(notifier);
+        close(listener);
+        0
+      },
+    },
+  }
+}
+"#;
+
+/// **A secured connection the server sends something to while it is idle is
+/// still lent, and its next statement is answered.** A notification lands
+/// on an idle `LISTEN`ing connection as an encrypted record. The check a
+/// pool makes before a lease has to read it through the session: read off
+/// the socket underneath, the record's bytes are not a message the check
+/// knows, the connection is called broken and reconnected, and the bytes
+/// are gone from under the session for good.
+#[test]
+fn an_idle_tls_connection_with_a_notification_waiting_is_still_open() {
+    let Some((port, pem)) = tls_server() else { return };
+    let source = TLS_IDLE_NOTICE.replace("PORT", &port.to_string()).replace("CA_PEM", &format!("{pem:?}"));
+    let exe = build("pg_tls_idle_notice", &source);
+    let ran = run_watched(&exe, "threads", std::time::Duration::from_secs(30));
+    assert!(!ran.hung, "the program hung: {:?}", ran.stdout);
+    assert_eq!(ran.stdout, "still open yes, then 7\n", "stderr {}", ran.stderr);
+}

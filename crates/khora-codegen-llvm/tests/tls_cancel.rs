@@ -341,3 +341,85 @@ fn a_canceled_fiber_releases_the_tls_session() {
          rather than the server releasing anything (whole run {whole:?}). {said}"
     );
 }
+
+/// **A fiber canceled while it builds a TLS client leaves no client
+/// behind.** `trusting` makes the client in the runtime and then registers
+/// its close; when the registration went through `acquire`, which is entered
+/// through a cancellation check, a cancel that arrived while the runtime was
+/// building the client stopped the fiber there, and the client, a whole
+/// trust store, was never closed. A pool reconnecting under cancellation
+/// grew by one per cancel without bound (+84 KB each, measured).
+///
+/// 500 fibers, each building clients in a loop, each canceled at a
+/// different point, on both backends. The runtime's count of open clients
+/// is exact, so the bound is 0, not a resident-size margin. A loop with no
+/// cancel and a loop whose builds all finish are the controls: both must
+/// read 0, or the count proves nothing.
+#[test]
+fn a_canceled_trust_store_build_leaves_no_client_open() {
+    let program = r#"module main;
+
+import std::core::{ChildFailed, Fiber, Result, attempt, print, scoped};
+import std::net::tls::{trusting};
+
+extern fn khora_tls_clients_open() -> Int;
+
+const authority = CA_PEM;
+
+fn once(pem: String) -> Bool {
+  match attempt(fn () => scoped(fn () => { let _c = trusting(pem)!; true })!) {
+    Result::Ok(b) => b,
+    Result::Err(_) => false,
+  }
+}
+
+fn builds(pem: String) -> () {
+  let mut i = 0;
+  while i < 1000000 { let _ = once(pem); i = i + 1 }
+}
+
+fn spin(k: Int) -> Int {
+  let mut i = 0;
+  let mut s = 0;
+  while i < k { s = s + i; i = i + 1 };
+  s
+}
+
+pub fn main() -> Int raises ChildFailed {
+  let mut made = 0;
+  let mut i = 0;
+  while i < 200 { if once(authority) && once("") { made = made + 1 }; i = i + 1 };
+  print("control made ${Int::to_string(made)} open ${Int::to_string(khora_tls_clients_open())}");
+  let mut canceled = 0;
+  let mut n = 0;
+  while n < 500 {
+    let pem = if n % 2 == 0 { authority } else { "" };
+    let f = Fiber::spawn(fn () => builds(pem));
+    let _ = spin((n * 7919) % 300000);
+    Fiber::cancel(f);
+    Fiber::wait(f)! catch { _ => () };
+    if Fiber::canceled(f) { canceled = canceled + 1 };
+    n = n + 1
+  };
+  print("canceled ${Int::to_string(canceled)} open ${Int::to_string(khora_tls_clients_open())}");
+  0
+}
+"#
+    .replace("CA_PEM", &format!("{:?}", fixture("ca.cert.pem")));
+    for (backend, ran) in crate::claims::on_both("tls_trust_cancel", &program, std::time::Duration::from_secs(240)) {
+        assert!(!ran.hung, "{backend}: the program hung: {}", ran.stdout);
+        assert_eq!(ran.code, Some(0), "{backend}: {} {}", ran.stdout, ran.stderr);
+        assert!(
+            ran.stdout.contains("control made 200 open 0"),
+            "{backend}: the control should build and close every client: {}",
+            ran.stdout
+        );
+        let line = ran.stdout.lines().find(|l| l.starts_with("canceled ")).unwrap_or_default();
+        let canceled: i64 = line.split_whitespace().nth(1).and_then(|n| n.parse().ok()).unwrap_or(0);
+        assert!(canceled >= 400, "{backend}: too few fibers were canceled to prove anything: {line}");
+        assert!(
+            line.ends_with(" open 0"),
+            "{backend}: a canceled build left TLS clients open: {line}"
+        );
+    }
+}
