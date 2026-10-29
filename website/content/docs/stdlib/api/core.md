@@ -632,8 +632,7 @@ not this thing; building it here would mean a sender waiting on a receiver
 that is waiting on a sender, and getting that wrong is a hang rather than
 an error.
 
-**No select.** Waiting on the first of several channels wants a primitive
-of its own, and nothing has needed one yet.
+**Waiting on the first of several channels is `Select`**, below.
 
 ### Claim
 
@@ -656,6 +655,95 @@ or traps, which run no cleanup at all.
 
 A claim holds a `Region`, so it stays on the fiber that took it: it cannot
 be sent on a `Channel` or a `Handoff`, or captured by a spawned fiber.
+
+### Select
+
+```khora
+pub type Select<B> = { branches: List<Branch<B>>, millis: Int };
+```
+
+A receive from whichever of several channels has a value first.
+
+```khora
+let next = Select::new()
+  |> Select::on(jobs, fn job => Event::Work(job))
+  |> Select::on(control, fn message => Event::Control(message))
+  |> Select::within(500)
+  |> Select::wait();
+match next {
+  Selected::Got(event) => handle(event),
+  Selected::TimedOut => tick(),
+  Selected::Closed => stop(),
+}
+```
+
+Each `on` names a channel and what to make of a value from it; the
+channels may carry different types, and every branch answers the same
+`B`. `wait` takes **one value from one channel** and hands it to that
+channel's function.
+
+**Fair.** When several channels have a value, each `wait` starts looking
+at a different one, so a channel that is always ready does not starve
+one listed after it.
+
+**No value is lost and none is taken twice.** A value is taken from at
+most one channel per `wait`; one that arrives on another channel while
+the waiter is being woken stays in its channel for the next receive.
+Between fibers, waiting selectors and waiting `receive`s share a
+channel's line: the one that started waiting first is served first. A
+waiter on the thread backend has no place in that line; it is woken with
+the others and the first to look takes the value.
+
+**A cancellation point**, and like `receive`, canceled only
+empty-handed: a value that was found reaches its branch, and the fiber
+stops at the first cancellation point inside the branch, a call the
+branch makes included.
+
+**A closed channel is waited past.** `wait` answers `Closed` only when
+every channel is closed and drained, so a loop over a `Select` ends once
+all its sources have finished.
+
+**Receives only.** There is no branch for a send; a send that must not
+wait is `Channel::offer`.
+
+**What it costs.** A `Select` is a list of closures, and each `wait`
+allocates the runtime's list of channels and one array: a receive with
+a value waiting is several times cheaper. Use `receive` for one channel.
+
+### Selected
+
+```khora
+pub type Selected<B> =
+  | Got(B)
+  | Closed
+  | TimedOut;
+```
+
+How a `Select::wait` ended.
+
+#### Got
+
+```khora
+| Got(B)
+```
+
+A value arrived, and this is what its branch made of it.
+
+#### Closed
+
+```khora
+| Closed
+```
+
+Every channel is closed and drained.
+
+#### TimedOut
+
+```khora
+| TimedOut
+```
+
+The deadline `Select::within` set passed first.
 
 ### Handoff
 
@@ -5068,7 +5156,9 @@ loop {
 ```
 
 **Keep `abandon` to recording or requeuing**, with `offer` and
-`Shared::set`. It runs as cleanup, so it cannot wait, and under
+`Shared::set`. It runs as cleanup, so a cancel does not stop a wait in
+it; a wait that must end is written inside `timeout`, which answers
+`None` at its deadline and lets the handler go on. Under
 `Fiber::abort` it starts and runs until the first loop trip, `!` or
 blocking call it reaches: a handler with a loop or a wait may be cut
 short.
@@ -5126,6 +5216,49 @@ How many values are waiting to be taken.
 
 **Stale the moment it is given**, which is true of every such count. For
 a pool reporting its depth and for tests; nothing should branch on it.
+
+### Select\<B>
+
+```khora
+impl<B> Select<B>
+```
+
+#### new
+
+```khora
+pub fn new() -> Select<B>
+```
+
+A select over no channels yet.
+
+#### on
+
+```khora
+pub fn on<A: Share>(self, channel: Channel<A>, handle: (A) -> B) -> Select<B>
+```
+
+Adds `channel`, and what to make of a value from it.
+
+#### within
+
+```khora
+pub fn within(self, millis: Int) -> Select<B>
+```
+
+Gives up after `millis` milliseconds, answering `TimedOut`.
+
+The deadline is counted from the `wait`, on the runtime's monotonic
+clock. Zero or less is a `wait` that only looks: a value already there
+is taken, and otherwise it answers at once.
+
+#### wait
+
+```khora
+pub fn wait(self) -> Selected<B>
+```
+
+Waits for a value from any of the channels, and answers what its branch
+made of it. A select over no channels answers `Closed`.
 
 ### Handoff\<A>
 
@@ -6716,6 +6849,45 @@ against the requests -- which is nearly everybody -- wanted this.
 `A: Share` is `Fiber::join`'s own bound and not a new one: the answer was
 computed on another fiber and has to be safe to hold from this one.
 
+### race
+
+```khora
+pub fn race<A: Share, 'er>(branches: List<SharedFn<(), A, 'er>>) -> A raises 'er
+```
+
+Runs every branch on a fiber of its own, and answers with the first to
+finish.
+
+```khora
+let page = race([
+  SharedFn::of(fn _ => fetch(primary)!),
+  SharedFn::of(fn _ => fetch(mirror)!),
+])!;
+```
+
+**The first to finish decides, and the rest are stopped before this
+returns.** The others are canceled, each stops at its next cancellation
+point and runs its finalizers, and `race` waits for all of them: no branch
+outlives the call. A loser in a sleep, a channel receive, a socket read or
+a connect is woken by the cancel, so the return follows the winner within
+milliseconds. A loser with no cancellation point runs to its end first.
+
+**A failure is fail-fast, as a nursery's is.** A branch that fails before
+any branch answers fails the race with its error, and the rest are
+stopped. A caller who wants the first *success* -- `Promise.any` --
+catches inside each branch, with `attempt`, and answers a `Result`.
+
+**An empty list stops the program**, with a message: a race with no
+branches has no answer to wait for. Written as `[]`, it is refused at
+compile time.
+
+**Each branch is a `SharedFn`**, because it runs on another fiber: what it
+closes over is checked where `SharedFn::of` is written, exactly as for
+`Fiber::spawn`. Its argument is `()`. The answer is `Share` for the
+reason `Fiber::join`'s is.
+
+**What it costs.** A fiber per branch and one channel.
+
 ### nursery
 
 ```khora
@@ -6917,4 +7089,64 @@ match attempt(fn () => checkout(sku, cents)!) {
 one allocation per failure. A loop that handles one error type on its hot
 path should use `catch`, which handles the error where it arrives and
 allocates nothing.
+
+### timeout
+
+```khora
+pub fn timeout<A, 'er, 'ef>(millis: Int, body: () -> A with 'ef raises 'er) -> Option<A> with 'ef raises 'er
+```
+
+Runs `body`, and gives up on it after `millis` milliseconds.
+
+`Some(answer)` when `body` answers in time. `None` when the deadline
+passes first: `body` is canceled where it is waiting -- a sleep, a
+receive, a read, a connect -- the children of every nursery it opened
+are stopped, and its finalizers run before `timeout` returns. A failure
+raised before the deadline is raised as itself.
+
+**Fibers it did not open a nursery for go on.** A child spawned from
+`body` into a nursery opened *outside* the `timeout` belongs to that
+nursery, and the deadline does not stop it; nor does it stop a fiber
+started with `Fiber::spawn`, which is stopped by its handle.
+
+```khora
+match timeout(500, fn () => fetch(url)!)! {
+  Option::Some(page) => page,
+  Option::None => cached(url),
+}
+```
+
+**On this fiber.** `body` runs where `timeout` was called, so its answer
+needs no `Share`, and it can use the caller's regions, capabilities and
+mutable values. The deadline is a cancellation of this fiber that
+`timeout` takes back when it is the one that fired.
+
+**Nested, the earlier deadline wins, and each `None` is its own.** An
+outer deadline that passes while an inner `timeout` is running stops the
+inner body and is the *outer* call's `None`; the inner call passes it on
+rather than answering. A cancel of the whole fiber -- `Fiber::cancel`, a
+nursery stopping its children, a shutdown -- is never turned into `None`:
+it goes on past every `timeout` to where the fiber stops.
+
+**`millis` below 1 is `None` without running `body`**, the way
+`bounded_nursery` refuses a limit below 1: no time at all is not a
+deadline any body can meet.
+
+**What a deadline reaches** is what a cancel reaches: a `!`, a loop's
+back-edge, and every blocking operation in `std`. A loop with none of
+those in it runs to its end, and a foreign (C) call or a file-system call
+in progress finishes first.
+
+**In cleanup it bounds its own body.** A `timeout` written in a
+finalizer, a `claim` abandon handler or a `Shared::update` change
+function stops its body at the deadline and answers `None`, and the rest
+of that cleanup runs. It never cuts short cleanup it did not open: a
+deadline from a `timeout` outside the cleanup waits for it to finish, and
+a finalizer inside `body` runs to its end before `body` stops. Bounding
+the cleanup itself is `Fiber::cancel_within` on the fiber.
+
+**What it costs.** A deadline is an entry on the runtime's timer list
+and nothing else: no fiber, no allocation in Khora. The deadline is the
+runtime's monotonic clock, not the `Clock` capability, so a fake `Clock`
+does not move it.
 

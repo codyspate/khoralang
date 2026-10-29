@@ -58,6 +58,7 @@ mod emission;
 mod env;
 mod errors;
 mod exporting;
+mod fiber_combinators;
 mod fibers;
 mod function_values;
 mod files;

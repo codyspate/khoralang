@@ -63,6 +63,7 @@
 `Ptr::{name}` takes no arguments but `self`
 `Raised::{name}` is not an operation the backend knows
 `Raised::{name}` takes the failure
+`Selection::{name}` is not an operation the backend knows
 `String::from_bytes` takes an `Array<U8>`
 `String::{name}` takes a string
 `assert` is only allowed inside a `test` block; elsewhere, `raise` says the  same thing and says where it goes
@@ -72,6 +73,7 @@
 `attempt` takes a function to run
 `break` outside a loop
 `continue` outside a loop
+`timeout` takes a function to run
 `with_c_string` takes a body to lend the string to
 `with_c_string` takes a function to run
 `with_data` takes a body to lend the data to

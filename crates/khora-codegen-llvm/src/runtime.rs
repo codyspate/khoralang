@@ -121,6 +121,10 @@ pub const CHANNEL_TYPE: &str = "Channel";
 /// The queue that gives values away. `std::core::Handoff`.
 pub const HANDOFF_TYPE: &str = "Handoff";
 
+/// The channels one `Select::wait` waits on. `std::core`'s private
+/// `Selection`, under `Select`.
+pub const SELECTION_TYPE: &str = "Selection";
+
 /// The certified-closure wrapper, which is a closure and nothing else.
 pub const SHARED_FN_TYPE: &str = khora_types::SHARED_FN_TYPE;
 
@@ -281,6 +285,26 @@ pub struct Runtime<'ctx> {
     pub channel_offer: FunctionValue<'ctx>,
     /// `bool khora_channel_receive(void *channel, uint64_t *out)`
     pub channel_receive: FunctionValue<'ctx>,
+    /// `uint64_t khora_timeout_begin(int64_t millis)`: arms a deadline on the
+    /// running fiber and answers its scope's id.
+    pub timeout_begin: FunctionValue<'ctx>,
+    /// `uint8_t khora_timeout_end(uint64_t scope)`: closes it, and answers 1
+    /// when its own deadline is what canceled the body.
+    pub timeout_end: FunctionValue<'ctx>,
+    /// `void *khora_selection_open(int64_t millis)`
+    pub selection_open: FunctionValue<'ctx>,
+    /// `void khora_selection_add(void *selection, void *channel)`
+    pub selection_add: FunctionValue<'ctx>,
+    /// `int64_t khora_select_wait(void *selection)`: which channel has a
+    /// value, or a negative status. Takes nothing.
+    pub select_wait: FunctionValue<'ctx>,
+    /// `void khora_select_settled(void)`
+    pub select_settled: FunctionValue<'ctx>,
+    /// `bool khora_channel_take_selected(void *channel, uint64_t *out)`
+    pub channel_take_selected: FunctionValue<'ctx>,
+    /// `void khora_selection_release(void *selection)`, a `drop_fields`
+    /// callback.
+    pub selection_release: FunctionValue<'ctx>,
     /// `void khora_channel_close(void *channel)`
     pub channel_close: FunctionValue<'ctx>,
     /// `bool khora_channel_poll(void *channel, uint64_t *out)`
@@ -560,6 +584,23 @@ impl<'ctx> Runtime<'ctx> {
             channel_poll: declare(
                 "khora_channel_poll",
                 ctx.bool_type().fn_type(&[ptr.into(), ptr.into()], false),
+            ),
+            timeout_begin: declare("khora_timeout_begin", i64t.fn_type(&[i64t.into()], false)),
+            timeout_end: declare("khora_timeout_end", i8t.fn_type(&[i64t.into()], false)),
+            selection_open: declare("khora_selection_open", ptr.fn_type(&[i64t.into()], false)),
+            selection_add: declare(
+                "khora_selection_add",
+                void.fn_type(&[ptr.into(), ptr.into()], false),
+            ),
+            select_wait: declare("khora_select_wait", i64t.fn_type(&[ptr.into()], false)),
+            select_settled: declare("khora_select_settled", void.fn_type(&[], false)),
+            channel_take_selected: declare(
+                "khora_channel_take_selected",
+                ctx.bool_type().fn_type(&[ptr.into(), ptr.into()], false),
+            ),
+            selection_release: declare(
+                "khora_selection_release",
+                void.fn_type(&[ptr.into()], false),
             ),
             channel_close: declare("khora_channel_close", void.fn_type(&[ptr.into()], false)),
             channel_depth: declare("khora_channel_depth", i64t.fn_type(&[ptr.into()], false)),

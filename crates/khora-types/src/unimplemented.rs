@@ -221,6 +221,7 @@ fn lowered_by_owner(head: &str) -> bool {
             | "Shared"
             | "Channel"
             | "Handoff"
+            | "Selection"
             | "Array"
             | "Char"
             | "String"
@@ -236,9 +237,10 @@ fn lowered_by_owner(head: &str) -> bool {
 ///
 /// Matches `lower/calls.rs`, `lower/text.rs` and `lower/failure.rs`: `print`
 /// of an `Int`, `Float`, `Bool` or `String`; `assert` of a `Bool`;
-/// `assert_that` of a `Bool` and a `String`; `attempt` of a function.
-/// Anything else with those names is an ordinary call to a function with no
-/// body, which the build refuses.
+/// `assert_that` of a `Bool` and a `String`; `attempt` of a function;
+/// `within_deadline` of an `Int` and a function. Anything else with those
+/// names is an ordinary call to a function with no body, which the build
+/// refuses.
 fn lowered_by_name(body: &Body, types: &BodyTypes, id: ExprId) -> bool {
     let Expr::Path(Resolution::Item { name, .. }) = body.expr(id) else { return false };
     let Some(args) = body.exprs().find_map(|(_, expr)| match expr {
@@ -253,6 +255,7 @@ fn lowered_by_name(body: &Body, types: &BodyTypes, id: ExprId) -> bool {
         ("assert", 1) => matches!(ty(0), Type::Bool),
         ("assert_that", 2) => matches!((ty(0), ty(1)), (Type::Bool, Type::Str)),
         ("attempt", 1) => matches!(ty(0), Type::Fn { .. }),
+        ("within_deadline", 2) => matches!((ty(0), ty(1)), (Type::Int, Type::Fn { .. })),
         _ => false,
     }
 }

@@ -4,48 +4,37 @@ sidebar:
   order: 13
 ---
 
-There is no `timeout` function in the standard library. A deadline is built from
-two things you already have: a fiber, and a clock.
+`timeout` gives a call a deadline. The body runs on the calling fiber; if it
+has not answered when the deadline passes, it is canceled where it is
+waiting, the children of every nursery it opened are stopped, its finalizers
+run, and `timeout` answers `None`.
 
 ```khora
 module deadline::main;
 
-import std::core::{print, Fiber, Nursery, nursery};
+import std::core::{ChildFailed, Nursery, Option, nursery, print, timeout};
 import std::clock::{Clock};
 
-pub type Timeout = | TookTooLong;
-
 /// The work. It never finishes on its own.
-fn worker() -> () with { clock: Clock } raises Timeout {
+fn worker() -> () with { clock: Clock } {
   loop {
-    clock.sleep(50)!;
+    clock.sleep(50);
   }
 }
 
 fn fan_out() -> () with { nursery: Nursery, clock: Clock } {
-  nursery.spawn(fn () => worker()!);
+  nursery.spawn(fn () => with { clock: Clock::real() } { worker() });
   print("  worker spawned");
 }
 
-/// Runs the fan-out in its own fiber, and gives up on it after `millis`.
-fn with_deadline(millis: Int) -> () with { clock: Clock } raises Timeout {
-  let hand = Fiber::spawn(fn () => {
-    nursery(fn () => fan_out())!;
-    ()
-  });
-
-  clock.sleep(millis)!;
-  print("  deadline reached; canceling");
-  Fiber::cancel(hand);
-  Fiber::wait(hand)! catch { _ => () };
-  print("  canceled, and the wait returned");
-  raise Timeout::TookTooLong
-}
-
-pub fn main() -> Int {
+pub fn main() -> Int raises ChildFailed {
   with { clock: Clock::real() } {
     print("starting work with a 300ms deadline");
-    with_deadline(300)! catch { Timeout::TookTooLong => print("gave up: took too long") };
+    let done: Option<()> = timeout(300, fn () => nursery(fn () => fan_out())!)!;
+    match done {
+      Option::Some(_) => print("finished in time"),
+      Option::None => print("gave up: took too long"),
+    };
   };
   0
 }
@@ -54,57 +43,29 @@ pub fn main() -> Int {
 ```text
 starting work with a 300ms deadline
   worker spawned
-  deadline reached; canceling
-  canceled, and the wait returned
 gave up: took too long
 ```
 
-The whole program takes 308 ms for a 300 ms deadline.
+The worker inside the nursery is stopped too: a deadline reaches the
+children of a nursery opened inside the `timeout`, and the nursery waits for
+them before `timeout` returns. A body that finishes early returns at once;
+the deadline costs nothing when it is not reached.
 
-The shape is: put the work in a fiber, sleep for the deadline, cancel the
-handle, `wait` for it, then raise. `wait` rather than `join`, because a
-canceled fiber has no answer to take.
+### A deadline on work that is already running
 
-### When the work finishing early has to be fast
-
-**That recipe always takes the whole deadline.** The timing fiber sleeps the
-full interval whether the work finished in 2 ms or not at all, which is right
-when the deadline is a budget you intend to spend, and wrong for a call that
-usually returns immediately — a five-second guard on a health check would make
-every healthy check take five seconds.
-
-Poll instead, when the common case is early completion:
+`timeout` wraps a call. A fiber somebody else started is given a deadline by
+its handle: `Fiber::cancel` it when the time is up and `Fiber::wait` for it.
 
 ```khora
 let hand = Fiber::spawn(fn () => work());
-let started = clock.monotonic_millis();
-let mut done = false;
-let mut expired = false;
-while !done && !expired {
-  if Fiber::finished(hand) {
-    done = true;
-  } else if clock.monotonic_millis() - started > millis {
-    expired = true;
-  } else {
-    clock.sleep(25)!;
-  }
-};
-if expired {
-  Fiber::cancel(hand);
-  // **Detach as well as cancel.** A fiber blocked in a call with no
-  // cancellation point -- a connect to an unroutable host, say -- is not
-  // freed by the cancel, and releasing its handle waits for it. `detach`
-  // says the program is no longer interested, so its own exit is not held
-  // up by work it has already given up on.
-  Fiber::detach(hand);
-  raise Timeout
-} else {
-  Fiber::join(hand)!
-}
+clock.sleep(millis);
+Fiber::cancel(hand);
+Fiber::wait(hand)! catch { _ => () };
 ```
 
-The poll interval is the cost: 25 ms means up to 25 ms of latency added to a
-fast answer, against a deadline that would otherwise cost its whole length.
+`wait` rather than `join`, because a canceled fiber has no answer to take.
+`Fiber::cancel_within(hand, millis)` goes one step further and aborts the
+fiber's cleanup if it is still running after `millis`.
 
 ## Any work can be interrupted
 
@@ -123,10 +84,8 @@ nursery.spawn(fn () => {
 Canceling the fiber holding that nursery stops this loop at its next trip.
 
 What is not interrupted is a single call into foreign (C) code or a
-file-system call already in progress, and a blocking connect or a wait for a
-child process: the fiber finishes the call and stops at the next cancellation
-point after it. A connect to an unroutable host is the common case, which is
-why the polling recipe above detaches as well as cancels.
+file-system call already in progress, or a wait for a child process: the
+fiber finishes the call and stops at the next cancellation point after it.
 
 ## Canceling a nursery cancels its children
 
@@ -135,8 +94,8 @@ parent cancels every child it is holding, including the ones it is currently
 waiting on, so a fan-out under a deadline stops rather than waiting for workers
 nobody told.
 
-This is what makes the example above work: `with_deadline` cancels one handle,
-and the worker inside the nursery stops.
+This is what stops the worker in the first example: the deadline cancels the
+fiber running the nursery, and the nursery cancels its children.
 
 Canceling through a nursery costs what canceling without one costs —
 measured at 106 ms against 107 ms for the same worker spawned directly.
@@ -153,12 +112,10 @@ joiner along with it, which is why every example here uses `wait`.
 
 ## What this does not give you
 
-- **No `race` and no `select`.** Waiting on the first of several fibers has to
-  be built from a channel the workers send to.
-- **A deadline is a sleep, not a scheduler deadline.** The timing fiber sleeps
-  the whole interval; it does not wake early because the work finished. For a
-  deadline that ends as soon as either side does, have the work signal a channel
-  and read the channel with its own timeout fiber.
+- **The first of several is `race` or `Select`, not `timeout`.** `race` runs
+  branches on fibers of their own and answers with the first to finish;
+  `Select` waits for the first of several channels.
+  [Concurrency](/docs/reference/concurrency/) has both.
 - **A canceled fiber is not stopped at an arbitrary instruction.** It stops at
   its next cancellation point, which is why a worker that spends 200 ms inside
   one infallible call takes up to 200 ms to notice.

@@ -213,7 +213,50 @@ impl<'ctx> Lower<'_, 'ctx> {
         given: Vec<BasicValueEnum<'ctx>>,
         range: TextRange,
     ) -> Option<Invoked<'ctx>> {
-        let FnShape { params, ret, requires, raises } = signature;
+        let (call, fallible) =
+            self.invoke_closure_unsplit(site, callee, closure, signature, given, range)?;
+        // Split here, inside the scope holding the closure, so an unwind on a
+        // cancellation releases it, and every consumer of `Invoked` still sees
+        // the plain answer of an infallible closure.
+        if !fallible {
+            let answer = self.split_canceled(
+                call.expect("a tagged closure returns a pair"),
+                &signature.ret,
+            );
+            return Some(Invoked {
+                raw: Some(answer),
+                fallible,
+            });
+        }
+        Some(Invoked {
+            raw: call,
+            fallible,
+        })
+    }
+
+    /// [`Self::invoke_closure_at`] without the branch on a cancellation: the
+    /// call's own answer, a `{ which, word }` when `fallible` and the
+    /// `{ which, answer }` pair otherwise, with the scope holding the closure
+    /// still open.
+    ///
+    /// For `timeout`, which has to close its deadline before anything leaves:
+    /// a cancellation that unwound past it with the deadline still armed is a
+    /// deadline that fires on whatever the caller does next.
+    pub(super) fn invoke_closure_unsplit(
+        &mut self,
+        site: ExprId,
+        callee: ExprId,
+        closure: PointerValue<'ctx>,
+        signature: &FnShape,
+        given: Vec<BasicValueEnum<'ctx>>,
+        range: TextRange,
+    ) -> Option<(Option<BasicValueEnum<'ctx>>, bool)> {
+        let FnShape {
+            params,
+            ret,
+            requires,
+            raises,
+        } = signature;
 
         if given.len() != params.len() {
             self.fail(
@@ -307,15 +350,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             .build_indirect_call(fn_type, code, &values, "closure.call")
             .expect("calling a closure");
 
-        // Split here, inside the scope holding the closure, so an unwind on a
-        // cancellation releases it, and every consumer of `Invoked` still sees
-        // the plain answer of an infallible closure.
-        if !fallible {
-            let pair = call.try_as_basic_value().basic().expect("a tagged closure returns a pair");
-            let answer = self.split_canceled(pair, ret);
-            return Some(Invoked { raw: Some(answer), fallible });
-        }
-        Some(Invoked { raw: call.try_as_basic_value().basic(), fallible })
+        Some((call.try_as_basic_value().basic(), fallible))
     }
 
     /// Calls a closure and propagates whatever it raised.

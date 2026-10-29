@@ -408,6 +408,181 @@ impl<'ctx> Lower<'_, 'ctx> {
 }
 
 impl<'ctx> Lower<'_, 'ctx> {
+    /// The `within_deadline` intrinsic behind `std::core::timeout`: run a
+    /// computation on this fiber with a deadline armed, and make the deadline
+    /// cutting it short a `None`.
+    ///
+    /// **On the calling fiber**, so the body keeps the caller's regions and
+    /// capabilities and its answer needs no `Share`. The runtime cancels this
+    /// fiber at the deadline (`khora_rt`'s `timeout` module), the body unwinds
+    /// the way any cancellation unwinds it, and the end of the scope says
+    /// whether that cancellation was the deadline's own. Only then is it a
+    /// `None`; any other way the body came back is handed on as itself.
+    ///
+    /// **The scope is closed before anything leaves.** The call's tag is
+    /// taken whole, `khora_timeout_end` runs, and only then is the tag read.
+    /// A cancellation unwinding past an armed deadline would leave a scope
+    /// open on the fiber, which fires on whatever the caller did next.
+    pub(super) fn within_deadline(
+        &mut self,
+        site: ExprId,
+        millis: ExprId,
+        body: ExprId,
+        range: TextRange,
+    ) -> Flow<'ctx> {
+        let Some(shape) = FnShape::of(self.types.of(body)) else {
+            return self.fail("`timeout` takes a function to run", range);
+        };
+        let option_ty = self.types.of(site).clone();
+        let held = shape.ret.clone();
+        let both = self.operands(&[millis, body])?;
+        let (millis, closure) = (both[0], both[1].into_pointer_value());
+
+        let begin = self.be.rt.timeout_begin;
+        let scope = self
+            .be
+            .builder
+            .build_call(begin, &[millis.into()], "deadline")
+            .expect("arming a deadline")
+            .try_as_basic_value()
+            .basic()
+            .expect("a deadline's id")
+            .into_int_value();
+        let (raw, fallible) =
+            self.invoke_closure_unsplit(site, body, closure, &shape, Vec::new(), range)?;
+        let end = self.be.rt.timeout_end;
+        let cut = self
+            .be
+            .builder
+            .build_call(end, &[scope.into()], "deadline.cut")
+            .expect("closing a deadline")
+            .try_as_basic_value()
+            .basic()
+            .expect("whether the deadline cut the body")
+            .into_int_value();
+
+        let pair = raw
+            .expect("a tagged closure returns a pair")
+            .into_struct_value();
+        let which = self
+            .be
+            .builder
+            .build_extract_value(pair, 0, "deadline.which")
+            .expect("reading the tag")
+            .into_int_value();
+        let half = self
+            .be
+            .builder
+            .build_extract_value(pair, 1, "deadline.half")
+            .expect("reading the answer");
+
+        let answered = self.block("deadline.answered");
+        let not = self.block("deadline.not");
+        let none = self.block("deadline.none");
+        let onward = self.block("deadline.onward");
+        let merge = self.block("deadline.end");
+        let ok = self
+            .be
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                which,
+                self.be.ctx.i32_type().const_zero(),
+                "deadline.ok",
+            )
+            .expect("testing the tag");
+        self.be
+            .builder
+            .build_conditional_branch(ok, answered, not)
+            .expect("branching on the tag");
+
+        // An answer, whatever the deadline did: one that came due after the
+        // body's last cancellation point cut nothing.
+        self.at(answered);
+        let word = if fallible {
+            half.into_int_value()
+        } else {
+            match &held {
+                Type::Unit | Type::Never => self.be.ctx.i64_type().const_zero(),
+                _ => self.be.to_word(half),
+            }
+        };
+        let answered_end = self.here();
+        self.br(merge);
+
+        // A cancellation, and this scope's deadline the only one behind it.
+        self.at(not);
+        let canceled = self
+            .be
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                which,
+                self.be
+                    .ctx
+                    .i32_type()
+                    .const_int(runtime::CANCELED_WHICH, false),
+                "deadline.canceled",
+            )
+            .expect("testing for a cancellation");
+        let mine = self
+            .be
+            .builder
+            .build_int_compare(
+                IntPredicate::NE,
+                cut,
+                self.be.ctx.i8_type().const_zero(),
+                "deadline.mine",
+            )
+            .expect("testing whose cancellation");
+        let timed_out = self
+            .be
+            .builder
+            .build_and(canceled, mine, "deadline.timed.out")
+            .expect("both");
+        self.be
+            .builder
+            .build_conditional_branch(timed_out, none, onward)
+            .expect("branching on whose");
+
+        self.at(none);
+        self.br(merge);
+
+        // An error, or somebody else's cancellation: handed on as itself.
+        self.at(onward);
+        let payload = if fallible {
+            half.into_int_value()
+        } else {
+            self.be.ctx.i64_type().const_zero()
+        };
+        self.leave_with(which, payload);
+
+        self.at(merge);
+        let present = self
+            .be
+            .builder
+            .build_phi(self.be.ctx.bool_type(), "deadline.present")
+            .expect("a phi");
+        let yes = self.be.ctx.bool_type().const_int(1, false);
+        let no = self.be.ctx.bool_type().const_zero();
+        present.add_incoming(&[(&yes, answered_end), (&no, none)]);
+        let words = self
+            .be
+            .builder
+            .build_phi(self.be.ctx.i64_type(), "deadline.word")
+            .expect("a phi");
+        let zero = self.be.ctx.i64_type().const_zero();
+        words.add_incoming(&[(&word, answered_end), (&zero, none)]);
+        // The scope `invoke_closure_unsplit` opened for the closure.
+        self.leave_scope();
+        self.option_of_word(
+            present.as_basic_value().into_int_value(),
+            words.as_basic_value().into_int_value(),
+            &held,
+            &option_ty,
+        )
+    }
+
     /// The `attempt` intrinsic: run a computation and make its failure a value.
     ///
     /// The tagged return is already "an error or a value"; this is the same

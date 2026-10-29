@@ -50,6 +50,11 @@
 use super::*;
 use crate::heap::khora_alloc;
 use crate::scheduler::{park_current_for, waker_for_current, Waker, Why};
+
+/// `Select::wait`: the first of several channels. A child of this module
+/// because it reads the queue's waiting lists, which are this module's.
+#[path = "select.rs"]
+pub(crate) mod select;
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -143,8 +148,29 @@ struct Queue {
     /// many wakes were sent -- [`Notified`] says that. Tests only.
     #[cfg(test)]
     woken: usize,
+    /// Threads waiting in a `select` that includes this channel.
+    ///
+    /// **A thread cannot wait on two condition variables**, so a thread in a
+    /// select waits on one of its own and every channel it selects over
+    /// tells it when something changes: a value, or a close. Empty unless a
+    /// thread is selecting, which is what keeps a send that nobody selects on
+    /// at one length check. A fiber on the scheduler selects through
+    /// `receivers` like any receiver. [`select`].
+    watchers: Vec<Arc<select::Watcher>>,
     /// No more values will ever be sent.
     closed: bool,
+}
+
+impl Queue {
+    /// The threads selecting on this channel, to tell once the lock is let
+    /// go. Allocates only when somebody is selecting.
+    fn watching(&self) -> Vec<Arc<select::Watcher>> {
+        if self.watchers.is_empty() {
+            Vec::new()
+        } else {
+            self.watchers.clone()
+        }
+    }
 }
 
 pub(crate) struct Channel {
@@ -349,6 +375,7 @@ pub(crate) fn open(
             threads_receiving: 0,
             #[cfg(test)]
             woken: 0,
+            watchers: Vec::new(),
             closed: false,
         }),
         room: Notified::new(),
@@ -498,9 +525,20 @@ fn take_for(state: &mut Queue, taker: Taker) -> Option<u64> {
             None if state.items.len() <= state.handed.len() => return None,
             None => {}
         },
+        // **A fiber that has not parked in this call may still be owed a
+        // value**: `Select::wait` found this channel because a send promised
+        // it one, and takes it here. Without this the promise would keep the
+        // value from everybody, the selector included.
         Taker::Fresh => {
-            if state.items.len() <= state.handed.len() {
-                return None;
+            let owed = (!state.handed.is_empty())
+                .then(|| crate::current::current(|f| f.id()))
+                .and_then(|me| state.handed.iter().position(|&f| f == me));
+            match owed {
+                Some(at) => {
+                    state.handed.remove(at);
+                }
+                None if state.items.len() <= state.handed.len() => return None,
+                None => {}
             }
         }
         Taker::Thread => {
@@ -570,7 +608,7 @@ pub unsafe extern "C" fn khora_channel_offer(handle: *mut u8, value: u64) -> boo
         // SAFETY: the caller owns the live value and the channel records its glue.
         unsafe { crate::share::khora_share(value as *mut u8, channel.glue) };
     }
-    let (next, threads) = {
+    let (next, threads, watching) = {
         let mut state = channel.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.closed || state.items.len() >= channel.capacity {
             drop(state);
@@ -579,9 +617,10 @@ pub unsafe extern "C" fn khora_channel_offer(handle: *mut u8, value: u64) -> boo
         }
         state.items.push_back(value);
         let next = hand_to_next(&mut state);
-        (next, state.threads_receiving)
+        (next, state.threads_receiving, state.watching())
     };
     channel.a_value_arrived(threads);
+    select::tell(watching);
     if let Some(waker) = next {
         waker.wake();
     }
@@ -605,8 +644,10 @@ pub(crate) fn enqueue(channel: &Channel, value: u64) -> bool {
             state.items.push_back(value);
             let next = hand_to_next(&mut state);
             let threads = state.threads_receiving;
+            let watching = state.watching();
             drop(state);
             channel.a_value_arrived(threads);
+            select::tell(watching);
             if let Some(waker) = next {
                 waker.wake();
             }
@@ -632,7 +673,9 @@ pub(crate) fn enqueue(channel: &Channel, value: u64) -> bool {
                 state.items.push_back(value);
                 let next = hand_to_next(&mut state);
                 let threads = state.threads_receiving;
+                let watching = state.watching();
                 drop(state);
+                select::tell(watching);
                 // After the lock, for the reason `release` gives: a drop
                 // routine may reach a channel of its own.
                 if let Some(old) = evicted {
@@ -760,8 +803,10 @@ pub(crate) unsafe fn dequeue(channel: &Channel, out: *mut u64) -> bool {
 pub unsafe extern "C" fn khora_channel_close(handle: *mut u8) {
     // SAFETY: `handle` is live, which is this function's own documented
     // precondition and the one thing a C caller can get wrong.
-    let Some(channel) = (unsafe { channel_of(handle) }) else { return };
-    let (senders, receivers, sending, receiving) = {
+    let Some(channel) = (unsafe { channel_of(handle) }) else {
+        return;
+    };
+    let (senders, receivers, sending, receiving, watching) = {
         let mut state = channel.state.lock().unwrap_or_else(|e| e.into_inner());
         state.closed = true;
         (
@@ -769,8 +814,10 @@ pub unsafe extern "C" fn khora_channel_close(handle: *mut u8) {
             std::mem::take(&mut state.receivers),
             state.threads_sending,
             state.threads_receiving,
+            state.watching(),
         )
     };
+    select::tell(watching);
     // Everyone, on both sides, whatever the counts say: a closed channel
     // answers every one of them.
     channel.room.notify(Some(Wake::All), sending);

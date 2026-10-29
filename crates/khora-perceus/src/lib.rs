@@ -175,6 +175,7 @@ impl RcPlan {
 /// rather than a table keyed by name.
 pub fn borrowed_arguments(owner: &str, method: &str) -> &'static [usize] {
     const RECEIVER: &[usize] = &[0];
+    const BOTH: &[usize] = &[0, 1];
     const NONE: &[usize] = &[];
     match (owner, method) {
         // The runtime keeps the finalizer and only looks at the region.
@@ -182,7 +183,13 @@ pub fn borrowed_arguments(owner: &str, method: &str) -> &'static [usize] {
         ("Shared", "get" | "set" | "update" | "modify") => RECEIVER,
         // `send` hands over the *value* — the queue owns it — while the handle
         // stays the caller's. A serving fiber sends per reply.
-        ("Channel", "send" | "offer" | "receive" | "poll" | "close" | "depth") => RECEIVER,
+        (
+            "Channel",
+            "send" | "offer" | "receive" | "poll" | "close" | "depth" | "take_selected",
+        ) => RECEIVER,
+        // A selection takes its own reference to each channel it is given.
+        ("Selection", "add") => BOTH,
+        ("Selection", "wait") => RECEIVER,
         // The same for a hand-off: `send` gives the value away, not the handle.
         ("Handoff", "send" | "receive" | "close") => RECEIVER,
         // *Releasing* a handle is what joins; that is the binding's business.

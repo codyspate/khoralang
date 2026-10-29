@@ -72,6 +72,8 @@ impl<'ctx> Lower<'_, 'ctx> {
                     self.assert_that(args[0], args[1], range)
                 } else if is_intrinsic && name == "attempt" {
                     self.attempt(site, args[0], range)
+                } else if is_intrinsic2 && name == "within_deadline" {
+                    self.within_deadline(site, args[0], args[1], range)
                 } else {
                     self.call_named(&symbol, site, args, range)
                 }
@@ -182,6 +184,9 @@ impl<'ctx> Lower<'_, 'ctx> {
         }
         if owner == runtime::HANDOFF_TYPE {
             return Some(self.handoff_intrinsic(site, name, args, range));
+        }
+        if owner == runtime::SELECTION_TYPE {
+            return Some(self.selection_intrinsic(name, args, range));
         }
         if owner == runtime::ARRAY_TYPE {
             return Some(self.array_intrinsic(site, name, args, range));

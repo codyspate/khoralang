@@ -21,10 +21,10 @@ practice, stated here so nobody has to discover it:
   reason 1.0 has not been called.
 - There is **no public package registry** yet; dependencies are paths and
   pinned git revisions.
-- Structured concurrency is the least finished part of the language. There is
-  no `timeout`, no `race` and no `select`, a bounded nursery admits one more
-  child than its limit, and a child's failure does not reliably cancel its
-  siblings. [Known limitations](/docs/limitations/) has the measurements.
+- Structured concurrency is the least finished part of the language.
+  `timeout`, `race` and `Select` stop work only at its next cancellation
+  point, and there is no bounded parallel map. [Known
+  limitations](/docs/limitations/) has the measurements.
 - Nobody who did not write it has shipped with it. If you are evaluating Khora
   for something load-bearing, read [Known limitations](/docs/limitations/) and
   [Performance](/docs/performance/) before anything else on this site; both are

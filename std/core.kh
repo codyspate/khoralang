@@ -5597,8 +5597,7 @@ pub type Changed<A, B> = {
 /// that is waiting on a sender, and getting that wrong is a hang rather than
 /// an error.
 ///
-/// **No select.** Waiting on the first of several channels wants a primitive
-/// of its own, and nothing has needed one yet.
+/// **Waiting on the first of several channels is `Select`**, below.
 pub type Channel<A>;
 
 /// The lock is what makes this true, and every operation takes it.
@@ -5722,7 +5721,9 @@ impl<A: Share> Channel<A> {
   /// ```
   ///
   /// **Keep `abandon` to recording or requeuing**, with `offer` and
-  /// `Shared::set`. It runs as cleanup, so it cannot wait, and under
+  /// `Shared::set`. It runs as cleanup, so a cancel does not stop a wait in
+  /// it; a wait that must end is written inside `timeout`, which answers
+  /// `None` at its deadline and lets the handler go on. Under
   /// `Fiber::abort` it starts and runs until the first loop trip, `!` or
   /// blocking call it reaches: a handler with a loop or a wait may be cut
   /// short.
@@ -5779,6 +5780,173 @@ impl<A: Share> Channel<A> {
   /// **Stale the moment it is given**, which is true of every such count. For
   /// a pool reporting its depth and for tests; nothing should branch on it.
   pub fn depth(self) -> Int;
+
+  /// Takes a value `Selection::wait` found, without waiting. `poll`, except
+  /// that it takes the value promised to this fiber, and leaves entry polls
+  /// held until the branch the value goes to has been entered.
+  fn take_selected(self) -> Option<A>;
+}
+
+/// A receive from whichever of several channels has a value first.
+///
+/// ```khora
+/// let next = Select::new()
+///   |> Select::on(jobs, fn job => Event::Work(job))
+///   |> Select::on(control, fn message => Event::Control(message))
+///   |> Select::within(500)
+///   |> Select::wait();
+/// match next {
+///   Selected::Got(event) => handle(event),
+///   Selected::TimedOut => tick(),
+///   Selected::Closed => stop(),
+/// }
+/// ```
+///
+/// Each `on` names a channel and what to make of a value from it; the
+/// channels may carry different types, and every branch answers the same
+/// `B`. `wait` takes **one value from one channel** and hands it to that
+/// channel's function.
+///
+/// **Fair.** When several channels have a value, each `wait` starts looking
+/// at a different one, so a channel that is always ready does not starve
+/// one listed after it.
+///
+/// **No value is lost and none is taken twice.** A value is taken from at
+/// most one channel per `wait`; one that arrives on another channel while
+/// the waiter is being woken stays in its channel for the next receive.
+/// Between fibers, waiting selectors and waiting `receive`s share a
+/// channel's line: the one that started waiting first is served first. A
+/// waiter on the thread backend has no place in that line; it is woken with
+/// the others and the first to look takes the value.
+///
+/// **A cancellation point**, and like `receive`, canceled only
+/// empty-handed: a value that was found reaches its branch, and the fiber
+/// stops at the first cancellation point inside the branch, a call the
+/// branch makes included.
+///
+/// **A closed channel is waited past.** `wait` answers `Closed` only when
+/// every channel is closed and drained, so a loop over a `Select` ends once
+/// all its sources have finished.
+///
+/// **Receives only.** There is no branch for a send; a send that must not
+/// wait is `Channel::offer`.
+///
+/// **What it costs.** A `Select` is a list of closures, and each `wait`
+/// allocates the runtime's list of channels and one array: a receive with
+/// a value waiting is several times cheaper. Use `receive` for one channel.
+pub type Select<B> = { branches: List<Branch<B>>, millis: Int };
+
+/// One `Select::on`: put the channel on a selection, and take from it.
+///
+/// Two closures over the channel, so that `Select<B>` does not carry the
+/// type each channel holds.
+type Branch<B> = { add: (Selection) -> (), take: () -> Option<B> };
+
+/// How a `Select::wait` ended.
+pub type Selected<B> =
+  /// A value arrived, and this is what its branch made of it.
+  | Got(B)
+  /// Every channel is closed and drained.
+  | Closed
+  /// The deadline `Select::within` set passed first.
+  | TimedOut;
+
+impl<B> Select<B> {
+  /// A select over no channels yet.
+  pub fn new() -> Select<B> { { branches: List::Nil, millis: -1 } }
+
+  /// Adds `channel`, and what to make of a value from it.
+  pub fn on<A: Share>(self, channel: Channel<A>, handle: (A) -> B) -> Select<B> {
+    let branch: Branch<B> = {
+      add: fn selection => Selection::add(selection, channel),
+      take: fn () => match Channel::take_selected(channel) {
+        Option::None => Option::None,
+        Option::Some(value) => Option::Some(handle(value)),
+      },
+    };
+    { branches: List::Cons(branch, self.branches), millis: self.millis }
+  }
+
+  /// Gives up after `millis` milliseconds, answering `TimedOut`.
+  ///
+  /// The deadline is counted from the `wait`, on the runtime's monotonic
+  /// clock. Zero or less is a `wait` that only looks: a value already there
+  /// is taken, and otherwise it answers at once.
+  pub fn within(self, millis: Int) -> Select<B> {
+    { branches: self.branches, millis: if millis < 0 { 0 } else { millis } }
+  }
+
+  /// Waits for a value from any of the channels, and answers what its branch
+  /// made of it. A select over no channels answers `Closed`.
+  pub fn wait(self) -> Selected<B> {
+    match self.branches {
+      List::Nil => Selected::Closed,
+      List::Cons(newest, _) => {
+        // In the order they were added: the list is newest first.
+        let count = List::length(self.branches);
+        let all: Array<Branch<B>> = Array::new(count, newest);
+        let mut at = count - 1;
+        let mut rest = self.branches;
+        while at >= 0 {
+          match rest {
+            List::Nil => (),
+            List::Cons(branch, more) => {
+              Array::set(all, at, branch);
+              rest = more;
+            },
+          };
+          at = at - 1;
+        };
+        let selection = Selection::open(self.millis);
+        let mut i = 0;
+        while i < count {
+          let branch = Array::get(all, i);
+          branch.add(selection);
+          i = i + 1;
+        };
+        Select::pick(selection, all)
+      },
+    }
+  }
+
+  /// Waits on `selection`, and takes from the channel it answers.
+  ///
+  /// **Nothing between the answer and the take can stop.** `Array::get` and
+  /// a field read have no cancellation point, and the runtime holds the
+  /// take's entry poll off. A loop or a `!` there would be a point at which
+  /// a cancel left this fiber owed a value it would never take. Somebody
+  /// else can still take the value first; the take then finds nothing, and
+  /// the wait goes round again.
+  fn pick(selection: Selection, all: Array<Branch<B>>) -> Selected<B> {
+    loop {
+      let at = Selection::wait(selection);
+      if at == -1 { break Selected::Closed };
+      if at < 0 { break Selected::TimedOut };
+      let branch = Array::get(all, at);
+      match branch.take() {
+        Option::Some(made) => {
+          Selection::settled();
+          break Selected::Got(made)
+        },
+        Option::None => (),
+      }
+    }
+  }
+}
+
+/// The channels one `Select::wait` waits on, for the runtime.
+type Selection;
+
+impl Selection {
+  /// A selection whose waits give up `millis` from now; never, below zero.
+  fn open(millis: Int) -> Selection;
+  /// Adds a channel, which the selection holds until it is released.
+  fn add<A>(self, channel: Channel<A>) -> ();
+  /// Which channel has a value for this fiber; -1 when all are closed and
+  /// drained, -2 when the deadline passed, -3 when this fiber was stopped.
+  fn wait(self) -> Int;
+  /// Ends the hold a found value put on entry polls.
+  fn settled() -> ();
 }
 
 /// A queue that gives values away.
@@ -6103,6 +6271,119 @@ pub fn join_all<A: Share, 'er>(fibers: List<Fiber<A, 'er>>) -> List<A> raises 'e
   }
 }
 
+/// Runs every branch on a fiber of its own, and answers with the first to
+/// finish.
+///
+/// ```khora
+/// let page = race([
+///   SharedFn::of(fn _ => fetch(primary)!),
+///   SharedFn::of(fn _ => fetch(mirror)!),
+/// ])!;
+/// ```
+///
+/// **The first to finish decides, and the rest are stopped before this
+/// returns.** The others are canceled, each stops at its next cancellation
+/// point and runs its finalizers, and `race` waits for all of them: no branch
+/// outlives the call. A loser in a sleep, a channel receive, a socket read or
+/// a connect is woken by the cancel, so the return follows the winner within
+/// milliseconds. A loser with no cancellation point runs to its end first.
+///
+/// **A failure is fail-fast, as a nursery's is.** A branch that fails before
+/// any branch answers fails the race with its error, and the rest are
+/// stopped. A caller who wants the first *success* -- `Promise.any` --
+/// catches inside each branch, with `attempt`, and answers a `Result`.
+///
+/// **An empty list stops the program**, with a message: a race with no
+/// branches has no answer to wait for. Written as `[]`, it is refused at
+/// compile time.
+///
+/// **Each branch is a `SharedFn`**, because it runs on another fiber: what it
+/// closes over is checked where `SharedFn::of` is written, exactly as for
+/// `Fiber::spawn`. Its argument is `()`. The answer is `Share` for the
+/// reason `Fiber::join`'s is.
+///
+/// **What it costs.** A fiber per branch and one channel.
+pub fn race<A: Share, 'er>(branches: List<SharedFn<(), A, 'er>>) -> A raises 'er {
+  match branches {
+    List::Nil => khora_race_empty(),
+    List::Cons(_, _) => {
+      let done: Channel<Int> = Channel::bounded(List::length(branches));
+      let fibers = race_start(branches, done, 0);
+      // Nothing closes `done`, so a receive answers a value or is canceled;
+      // a cancel here releases `fibers`, and releasing a handle passes the
+      // stop on to its fiber and waits for it.
+      let winner = match Channel::receive(done) {
+        Option::Some(at) => at,
+        Option::None => 0,
+      };
+      race_cancel_losers(fibers, winner, 0);
+      race_wait_losers(fibers, winner, 0);
+      race_join(fibers, winner, 0)!
+    },
+  }
+}
+
+/// Stops the program: `race` was given no branches.
+extern fn khora_race_empty() -> Never;
+
+/// Starts each branch, numbered from `at`; each says on `done` when it has
+/// finished, whether it answered or failed.
+fn race_start<A: Share, 'er>(
+  branches: List<SharedFn<(), A, 'er>>,
+  done: Channel<Int>,
+  at: Int,
+) -> List<Fiber<A, 'er>> {
+  match branches {
+    List::Nil => List::Nil,
+    List::Cons(branch, rest) => {
+      let fiber = Fiber::spawn(fn () => {
+          // A finalizer, so the branch says it finished on every way out: an
+          // answer, a failure, or a cancel. `offer`, never `send`: there is
+          // room for every branch, and cleanup must not wait.
+          let region = Region::open();
+          Region::defer(region, fn () => { let _ = Channel::offer(done, at); });
+          SharedFn::call(branch, ())!
+        });
+      List::Cons(fiber, race_start(rest, done, at + 1))
+    },
+  }
+}
+
+/// Cancels every fiber but the one numbered `winner`.
+fn race_cancel_losers<A: Share, 'er>(fibers: List<Fiber<A, 'er>>, winner: Int, at: Int) -> () {
+  match fibers {
+    List::Nil => (),
+    List::Cons(fiber, rest) => {
+      if at != winner { Fiber::cancel(fiber) } else {};
+      race_cancel_losers(rest, winner, at + 1)
+    },
+  }
+}
+
+/// Waits for every fiber but the winner. A loser's own failure is not the
+/// race's: the winner had already decided it.
+fn race_wait_losers<A: Share, 'er>(fibers: List<Fiber<A, 'er>>, winner: Int, at: Int) -> () {
+  match fibers {
+    List::Nil => (),
+    List::Cons(fiber, rest) => {
+      if at != winner {
+        let _ = attempt(fn () => Fiber::wait(fiber)!);
+      } else {};
+      race_wait_losers(rest, winner, at + 1)
+    },
+  }
+}
+
+/// The winner's answer, or its failure.
+fn race_join<A: Share, 'er>(fibers: List<Fiber<A, 'er>>, winner: Int, at: Int) -> A raises 'er {
+  match fibers {
+    List::Nil => khora_race_empty(),
+    List::Cons(fiber, rest) => {
+      if at == winner { Fiber::join(fiber)! } else { race_join(rest, winner, at + 1)! }
+    },
+  }
+}
+
 /// Where a spawned fiber goes.
 ///
 /// **The operation takes the body, not a running fiber**, so that the nursery
@@ -6365,6 +6646,73 @@ pub fn acquire<A, 'ef>(value: A, release: (A) -> ()) -> A
 /// allocates nothing.
 pub fn attempt<A, 'er, 'ef>(body: () -> A with 'ef raises 'er) -> Result<A, Raised<'er>>
   with 'ef;
+
+/// The primitive under `timeout`: runs `body` on this fiber with a deadline
+/// `millis` from now, and answers `None` when the deadline stopped it. A
+/// `millis` below one is a deadline already past.
+fn within_deadline<A, 'er, 'ef>(millis: Int, body: () -> A with 'ef raises 'er) -> Option<A>
+  with 'ef
+  raises 'er;
+
+/// Runs `body`, and gives up on it after `millis` milliseconds.
+///
+/// `Some(answer)` when `body` answers in time. `None` when the deadline
+/// passes first: `body` is canceled where it is waiting -- a sleep, a
+/// receive, a read, a connect -- the children of every nursery it opened
+/// are stopped, and its finalizers run before `timeout` returns. A failure
+/// raised before the deadline is raised as itself.
+///
+/// **Fibers it did not open a nursery for go on.** A child spawned from
+/// `body` into a nursery opened *outside* the `timeout` belongs to that
+/// nursery, and the deadline does not stop it; nor does it stop a fiber
+/// started with `Fiber::spawn`, which is stopped by its handle.
+///
+/// ```khora
+/// match timeout(500, fn () => fetch(url)!)! {
+///   Option::Some(page) => page,
+///   Option::None => cached(url),
+/// }
+/// ```
+///
+/// **On this fiber.** `body` runs where `timeout` was called, so its answer
+/// needs no `Share`, and it can use the caller's regions, capabilities and
+/// mutable values. The deadline is a cancellation of this fiber that
+/// `timeout` takes back when it is the one that fired.
+///
+/// **Nested, the earlier deadline wins, and each `None` is its own.** An
+/// outer deadline that passes while an inner `timeout` is running stops the
+/// inner body and is the *outer* call's `None`; the inner call passes it on
+/// rather than answering. A cancel of the whole fiber -- `Fiber::cancel`, a
+/// nursery stopping its children, a shutdown -- is never turned into `None`:
+/// it goes on past every `timeout` to where the fiber stops.
+///
+/// **`millis` below 1 is `None` without running `body`**, the way
+/// `bounded_nursery` refuses a limit below 1: no time at all is not a
+/// deadline any body can meet.
+///
+/// **What a deadline reaches** is what a cancel reaches: a `!`, a loop's
+/// back-edge, and every blocking operation in `std`. A loop with none of
+/// those in it runs to its end, and a foreign (C) call or a file-system call
+/// in progress finishes first.
+///
+/// **In cleanup it bounds its own body.** A `timeout` written in a
+/// finalizer, a `claim` abandon handler or a `Shared::update` change
+/// function stops its body at the deadline and answers `None`, and the rest
+/// of that cleanup runs. It never cuts short cleanup it did not open: a
+/// deadline from a `timeout` outside the cleanup waits for it to finish, and
+/// a finalizer inside `body` runs to its end before `body` stops. Bounding
+/// the cleanup itself is `Fiber::cancel_within` on the fiber.
+///
+/// **What it costs.** A deadline is an entry on the runtime's timer list
+/// and nothing else: no fiber, no allocation in Khora. The deadline is the
+/// runtime's monotonic clock, not the `Clock` capability, so a fake `Clock`
+/// does not move it.
+pub fn timeout<A, 'er, 'ef>(millis: Int, body: () -> A with 'ef raises 'er) -> Option<A>
+  with 'ef
+  raises 'er
+{
+  if millis < 1 { Option::None } else { within_deadline(millis, body)! }
+}
 
 /// A failure, as a value: what a body raising the row `'er` failed with.
 ///

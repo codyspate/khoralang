@@ -116,14 +116,30 @@ impl std::ops::Deref for Crew {
 ///
 /// So the parent-to-child edge has to exist at the moment the cancellation
 /// arrives, and this is it.
-static OPEN: Mutex<Vec<(usize, Arc<Crew>)>> = Mutex::new(Vec::new());
+///
+/// **With the `timeout` scopes the crew was opened inside**, so a deadline
+/// stops the children of a nursery opened under it and no others: a fiber
+/// waiting on a nursery is not at a cancellation point, and a deadline that
+/// does not reach the children does not end the wait. A nursery the fiber
+/// opened before the `timeout` belongs to the code around it.
+static OPEN: Mutex<Vec<Opened>> = Mutex::new(Vec::new());
+
+/// One open nursery: the fiber that opened it, the `timeout` scopes that
+/// fiber was inside when it did, and the crew.
+struct Opened {
+    owner: usize,
+    scopes: Vec<u64>,
+    crew: Arc<Crew>,
+}
 
 /// Notes that the running fiber has opened `crew`.
 fn opened(crew: &Arc<Crew>) {
-    let id = crate::current::current(|fiber| fiber.id());
-    OPEN.lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push((id, crew.clone()));
+    let (owner, scopes) = crate::current::current(|fiber| (fiber.id(), fiber.deadline_ids()));
+    OPEN.lock().unwrap_or_else(|e| e.into_inner()).push(Opened {
+        owner,
+        scopes,
+        crew: crew.clone(),
+    });
 }
 
 /// Forgets one nursery, identified by the crew itself.
@@ -132,10 +148,7 @@ fn opened(crew: &Arc<Crew>) {
 /// so the fiber releasing it need not be the one that opened it.
 fn closed(crew: &Arc<Crew>) {
     let mut open = OPEN.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(at) = open
-        .iter()
-        .position(|(_, held)| Arc::ptr_eq(held, crew))
-    {
+    if let Some(at) = open.iter().position(|held| Arc::ptr_eq(&held.crew, crew)) {
         open.swap_remove(at);
     }
 }
@@ -156,11 +169,25 @@ fn closed(crew: &Arc<Crew>) {
 /// itself — so canceling while holding it is a deadlock that looks exactly like
 /// the hang this exists to fix.
 pub(crate) fn cancel_open_crews(fiber: usize, stop: crate::current::Stop) {
+    stop_crews(|opened| opened.owner == fiber, stop);
+}
+
+/// Cancels every child of every nursery `fiber` opened inside the `timeout`
+/// scope `scope`, for that scope's deadline. See [`OPEN`].
+pub(crate) fn cancel_crews_in_scope(fiber: usize, scope: u64) {
+    stop_crews(
+        |opened| opened.owner == fiber && opened.scopes.contains(&scope),
+        crate::current::Stop::Cancel,
+    );
+}
+
+/// Delivers `stop` to every child of the open nurseries `which` picks.
+fn stop_crews(which: impl Fn(&Opened) -> bool, stop: crate::current::Stop) {
     let crews: Vec<Arc<Crew>> = {
         let open = OPEN.lock().unwrap_or_else(|e| e.into_inner());
         open.iter()
-            .filter(|(owner, _)| *owner == fiber)
-            .map(|(_, crew)| crew.clone())
+            .filter(|opened| which(opened))
+            .map(|opened| opened.crew.clone())
             .collect()
     };
 

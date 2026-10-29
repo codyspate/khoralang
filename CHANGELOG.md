@@ -296,6 +296,23 @@ it will behave differently now.
 
 ### Added
 
+- `std::core::timeout(millis, body)` runs `body` on the calling fiber and
+  answers `None` if `millis` milliseconds pass first. The body is canceled
+  where it waits -- a sleep, a receive, a read, a connect, the children of a
+  nursery it opened -- and its finalizers run before `timeout` returns. Its
+  answer needs no `Share`. Nested, the earlier deadline wins and each `None`
+  is its own call's; a cancel of the whole fiber goes past every `timeout`
+  and is never a `None`. A `millis` below 1 is `None` without running `body`.
+- `std::core::race(branches)` runs each `SharedFn` branch on a fiber of its
+  own, answers with the first to finish, and cancels and waits for the rest.
+  The first branch to finish decides the race, whether it answered or
+  failed. `race([])` is a compile error, and a list that is empty at run time
+  stops the program with a message.
+- `std::core::Select` waits for the first of several channels:
+  `Select::new() |> Select::on(c, f) |> Select::within(millis) |> Select::wait()`
+  answers `Selected::Got`, `Closed` once every channel is closed and drained,
+  or `TimedOut`. One value from one channel per wait, fair when several are
+  ready, canceled empty-handed as `receive` is, and receives only.
 - `std::net::socket::expired(handle)` and `std::net::tls::expired(connection)`
   say whether a connection's deadline is what ended a read or write on it,
   rather than the peer.

@@ -314,16 +314,105 @@ cell unchanged. Inside a finalizer, a plain cancel does not end such a
 `join` or `wait` — it waits for the child, and the rest of the finalizer runs —
 and `abort` does. [Sharing](/docs/reference/sharing/) has the detail.
 
-**There is no `timeout`, no `race` and no `select`.** A deadline can be built by
-hand — [Timeouts and cancellation](/docs/cookbook/timeouts-and-cancellation/)
-has the shape, and it works because canceling a fiber cancels the children of
-any nursery it holds. A race is harder: a parent canceled while it waits stops
-only once the child it waits on has stopped, so a hand-written race is bounded
-by how quickly the losing branch reaches its next cancellation point.
-[Known limitations](/docs/limitations/#concurrency-combinators) has the
-measurements.
+### `timeout`, `race` and `Select`
 
-What does work is waiting on handles: [Take work off a queue safely](/docs/cookbook/taking-work-off-a-queue/) and [Bound concurrent work](/docs/cookbook/bounded-concurrency/) are the nearest recipes, and [known limitations](/docs/limitations/) is the page to check before assuming an operation exists.
+Three calls in `std::core` stop work for you, and each is a cancel underneath
+it, so each reaches what a cancel reaches: a `!`, a loop's back-edge, and
+every blocking operation listed below. What one cannot reach — a loop with
+none of those, a foreign call in progress — runs to its end first.
+
+**`timeout(millis, body)`** runs `body` on the calling fiber and gives up on
+it after `millis` milliseconds:
+
+```khora
+match timeout(500, fn () => fetch(url)!)! {
+  Option::Some(page) => page,
+  Option::None => cached(url),
+}
+```
+
+`Some(answer)` when `body` finishes in time. `None` when the deadline comes
+first: `body` is canceled where it is waiting — a sleep, a receive, a read, a
+connect — the children of every nursery it opened are stopped, and its
+finalizers run before `timeout` returns. A failure raised before the deadline
+is raised as itself. Because `body` runs on the calling fiber, its answer
+needs no `Share`, and it can use the caller's regions, capabilities and
+mutable values.
+
+- **Nested, the earlier deadline wins, and each `None` is its own.** An outer
+  deadline that passes while an inner `timeout` is running stops the inner
+  body and is the *outer* call's `None`.
+- **A cancel of the whole fiber is never a `None`.** `Fiber::cancel`, a
+  nursery stopping its children, or a shutdown goes on past every `timeout`
+  to where the fiber stops.
+- **Fibers it did not open a nursery for go on.** A child that `body`
+  spawns into a nursery opened outside the `timeout` belongs to that nursery
+  and outlives the deadline, as does a fiber started with `Fiber::spawn`.
+- **In cleanup it bounds its own body.** A `timeout` in a finalizer, a
+  `claim` abandon handler or a `Shared::update` change function stops its
+  body at the deadline and answers `None`, and the rest of that cleanup
+  runs. It never cuts short cleanup it did not open; bounding the cleanup
+  itself is `Fiber::cancel_within`.
+- **`millis` below 1 is `None` without running `body`.**
+- The deadline is the runtime's monotonic clock, not the `Clock` capability,
+  so a test handler's `sleep` does not move it.
+
+**`race(branches)`** runs each branch on a fiber of its own and answers with
+the first to finish:
+
+```khora
+let page = race([
+  SharedFn::of(fn _ => fetch(primary)!),
+  SharedFn::of(fn _ => fetch(mirror)!),
+])!;
+```
+
+The others are canceled and `race` waits for them, so no branch outlives the
+call; a loser in a sleep, a receive, a read or a connect is stopped within
+milliseconds of the winner. A branch is a `SharedFn` because it runs on
+another fiber, so what it closes over is checked where `SharedFn::of` is
+written, as it is for `Fiber::spawn`, and the answer is `Share`. **A failure
+is fail-fast**, as a nursery's is: the first branch to finish decides the
+race, whether it answered or failed. For the first *success* instead, catch
+inside each branch with `attempt` and answer a `Result`. A literal `race([])`
+is a compile error; a list that turns out empty at run time stops the program
+with a message.
+
+**`Select`** receives from whichever of several channels has a value first:
+
+```khora
+let next = Select::new()
+  |> Select::on(jobs, fn job => Event::Work(job))
+  |> Select::on(control, fn message => Event::Control(message))
+  |> Select::within(500)
+  |> Select::wait();
+match next {
+  Selected::Got(event) => handle(event),
+  Selected::TimedOut => tick(),
+  Selected::Closed => stop(),
+}
+```
+
+- **One value from one channel per `wait`.** A value that arrives on another
+  channel while the waiter is being woken stays in its channel for the next
+  receive. Between fibers, waiting selectors and waiting `receive`s share a
+  channel's line: the one that started waiting first is served first. A
+  waiter on the thread backend has no place in that line; it is woken with
+  the others and the first to look takes the value.
+- **Fair.** When several channels have a value, each `wait` starts looking at
+  a different one, so a channel that is always ready does not starve one
+  listed after it.
+- **A cancellation point, canceled empty-handed**, as `receive` is: a value
+  that was found reaches its branch, and the fiber stops at the first
+  cancellation point inside the branch, a call the branch makes included.
+- **A closed channel is waited past.** `wait` answers `Closed` only when every
+  channel is closed and drained.
+- **Receives only.** There is no branch for a send.
+
+A `Select` is rebuilt for each `wait`, which allocates; for one channel,
+`receive` is cheaper.
+
+What does work beyond these is waiting on handles: [Take work off a queue safely](/docs/cookbook/taking-work-off-a-queue/) and [Bound concurrent work](/docs/cookbook/bounded-concurrency/) are the nearest recipes, and [known limitations](/docs/limitations/) is the page to check before assuming an operation exists.
 
 Cancellation is observed at cancellation points rather than between arbitrary source instructions. They are:
 

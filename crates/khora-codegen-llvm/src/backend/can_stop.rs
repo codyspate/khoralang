@@ -149,6 +149,7 @@ fn is_blocking_owner(name: &str) -> bool {
         || name == crate::runtime::FIBERS_TYPE
         || name == crate::runtime::CHANNEL_TYPE
         || name == crate::runtime::HANDOFF_TYPE
+        || name == crate::runtime::SELECTION_TYPE
 }
 
 /// Whether `owner` is a type the backend implements operations for, as
@@ -209,7 +210,12 @@ fn stop_free_item(name: &str) -> bool {
 
 /// Why a call to the bodiless type operation `owner::name` can stop, if it can.
 fn operation(owner: &str, name: &str) -> Option<Local> {
-    if owner == crate::runtime::CHANNEL_TYPE && name == "offer" {
+    // A `take_selected` never waits, and of a selection's operations only
+    // `wait` does.
+    let never_waits = (owner == crate::runtime::CHANNEL_TYPE
+        && matches!(name, "offer" | "take_selected"))
+        || (owner == crate::runtime::SELECTION_TYPE && name != "wait");
+    if never_waits {
         None
     } else if is_blocking_owner(owner) {
         Some(Local::Blocking)

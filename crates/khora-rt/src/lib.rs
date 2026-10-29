@@ -223,6 +223,8 @@ mod testing;
 mod text;
 #[cfg(not(target_family = "wasm"))]
 mod time;
+#[cfg(not(target_family = "wasm"))]
+mod timeout;
 mod trap;
 #[cfg(not(target_family = "wasm"))]
 mod wait;
@@ -260,6 +262,8 @@ pub use testing::*;
 pub use text::*;
 #[cfg(not(target_family = "wasm"))]
 pub use time::*;
+#[cfg(not(target_family = "wasm"))]
+pub use timeout::*;
 pub use trap::*;
 
 use std::alloc::Layout;

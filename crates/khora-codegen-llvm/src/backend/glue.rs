@@ -86,6 +86,16 @@ impl<'ctx> Backend<'ctx> {
             return self.rt.channel_release.as_global_value().as_pointer_value();
         }
 
+        // A selection's release lets go of the channels it holds, which are
+        // behind a pointer the runtime owns.
+        if is_the_runtimes && name == runtime::SELECTION_TYPE {
+            return self
+                .rt
+                .selection_release
+                .as_global_value()
+                .as_pointer_value();
+        }
+
         // An array's release loops over its elements. The loop is the
         // runtime's because the length is a run-time value; what to do with
         // one element is generated, and travels in the object.

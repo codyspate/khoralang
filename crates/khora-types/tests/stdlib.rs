@@ -761,6 +761,33 @@ fn a_literal_nursery_limit_below_one_is_a_compile_error() {
     }
 }
 
+/// **`race([])` is refused where it is written.** A race over no branches
+/// has no answer to wait for. A list built at run time compiles; the runtime
+/// traps on an empty one.
+#[test]
+fn a_literal_empty_race_is_a_compile_error() {
+    let found = errors_with_std(
+        "module program;\n\
+         import std::core::{List, SharedFn, race};\n\
+         pub fn main() -> Int {\n  race([])!\n}\n",
+    );
+    assert!(
+        found
+            .iter()
+            .any(|m| m.contains("`race` needs at least one branch, and this list is empty")),
+        "`race([])` should be refused: {found:?}"
+    );
+    for call in ["race([SharedFn::of(fn _ => 1)])!", "race(some())!"] {
+        let found = errors_with_std(&format!(
+            "module program;\n\
+             import std::core::{{List, SharedFn, race}};\n\
+             fn some() -> List<SharedFn<(), Int, {{}}>> {{ List::Nil }}\n\
+             pub fn main() -> Int {{\n  {call}\n}}\n"
+        ));
+        assert!(found.is_empty(), "`{call}` should compile: {found:?}");
+    }
+}
+
 /// **`nursery.spawn` checks its body as `Fiber::spawn` does.** The body is
 /// started on another fiber, so a `mut` record it closes over is a race, and
 /// it is refused at the call that starts it.

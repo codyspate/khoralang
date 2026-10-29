@@ -167,6 +167,30 @@ pub extern "C" fn khora_todo() -> ! {
     stop(contained)
 }
 
+/// Refuses a `race` with no branches, and stops.
+///
+/// A trap for the reason [`nursery_limit_fail`] gives: an empty race has no
+/// answer to wait for, so it would wait forever, and that is a bug where the
+/// list was built rather than a failure every `race(..)!` should carry. A
+/// literal `[]` is refused at compile time; this is the list built at run
+/// time.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_race_empty() -> ! {
+    // The same block, for the same reason as `khora_overflow`.
+    let contained = {
+        let _ = std::io::stdout().flush();
+        let mut err = std::io::stderr().lock();
+        let _ = writeln!(
+            err,
+            "khora: `race` was given no branches, so there is nothing to wait for{}",
+            on_which_fiber()
+        );
+        where_from(&mut err);
+        say_what_happens_next(&mut err)
+    };
+    stop(contained)
+}
+
 /// Refuses a bounded nursery whose limit is below 1, and stops.
 ///
 /// A trap, not a raise: a limit of zero or less is a bug in the program or its

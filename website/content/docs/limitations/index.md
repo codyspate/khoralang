@@ -25,8 +25,9 @@ language rule, a supported feature, and unfinished work.
   it holds the child's last handle.
 - [The two fiber backends behave differently](#the-two-fiber-backends-are-distinguishable)
   in scheduling order.
-- [There is no `timeout` or `race`](#concurrency-combinators) in `std`; a
-  deadline is built from a fiber and a clock.
+- [There is no bounded parallel map, and `Select` has no send
+  branch](#concurrency-combinators); `timeout`, `race` and `Select` reach only
+  what a cancel reaches.
 - [Only Linux has a scalable I/O backend](#io-scaling-on-macos-and-windows)
   for the fiber scheduler; macOS and Windows wait on sockets with `poll`.
 - [On one CPU, the scheduler can hang](#the-fiber-scheduler) a program in
@@ -516,25 +517,31 @@ stop cleanup at all; only `abort` does.
 
 ## Concurrency combinators
 
-A fiber carries its answer and its failure row — `Fiber<A, 'er>`, with `join`
-re-raising what the child raised — and `Clock` can `sleep`. The combinators
-built on top of those do not exist: there is no `timeout`, no `race`, and no
-bounded parallel map.
+`timeout`, `race` and `Select` are in `std::core`
+([Concurrency](/docs/reference/concurrency/) has them). What is still missing:
+
+- **No bounded parallel map.** Mapping a function over a list with at most
+  `n` in flight is written by hand, with `bounded_nursery` and a `Shared` or a
+  `Channel` for the answers.
+- **`Select` receives only.** There is no branch that waits for room to send;
+  a send that must not wait is `Channel::offer`.
+- **Each reaches only what a cancel reaches.** A deadline or a lost race stops
+  work at its next cancellation point, so a loop with no `!`, call or
+  blocking operation in it runs to its end first, and so does a foreign call
+  in progress (see the section above).
+- **`race` branches are `SharedFn`s with a `Share` answer**, because they run
+  on fibers of their own. `timeout` runs on the calling fiber and has neither
+  requirement.
+- **A race loser in a socket read on the thread backend takes up to about
+  50 ms to stop**, the length of the slice its read waits in between looks at
+  the cancel flag. On the scheduler backend, and for a loser in a sleep, a
+  receive or a connect on either, it is a millisecond or less.
 
 **Channel fan-in is concurrent.** Two 2000 ms fibers take about 2.1 seconds
 whether the parent reads their results off a `Channel::bounded(4)`, joins both
 handles, or uses `join_all` — measured three runs per backend on x86_64 Linux,
 and indistinguishable under `KHORA_FIBERS=scheduler`. At 500 ms per fiber over
 25 runs the three are 518, 514 and 516 ms.
-
-**A deadline can be built by hand, and a `race` only partly.** Put the work in
-a fiber, sleep the deadline, `Fiber::cancel` the handle and `Fiber::wait` for
-it; [Give work a deadline](/docs/cookbook/timeouts-and-cancellation/) has the
-program, and it returns within a few milliseconds of its deadline when the work
-has cancellation points. What such a deadline cannot do is stop work that has
-none — see the section above — and a hand-written `race` waiting on several
-fibers still has no way to wait on the *first* of them except through a
-`Channel` the branches send to.
 
 Two smaller things a supervisor meets on the way. `Fiber::wait` tells you
 nothing about how the fiber ended. `Fiber::canceled` answers whether the fiber
@@ -576,7 +583,7 @@ A supervisor that has to notice a failed worker while it runs asks
 `Fiber::finished` and then `Fiber::join` or `Fiber::outcome`; [Serve
 HTTP](/docs/cookbook/http-service/#stopping-a-service) has the loop.
 
-`Channel` also has no `select` (waiting on the first of several) and no zero-capacity rendezvous. `Channel::bounded(0)` gets a capacity of one rather than a rendezvous, deliberately.
+`Channel` has no zero-capacity rendezvous. `Channel::bounded(0)` gets a capacity of one rather than a rendezvous, deliberately.
 
 ## Nursery cancellation is cooperative
 

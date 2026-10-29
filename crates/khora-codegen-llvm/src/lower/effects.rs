@@ -337,8 +337,10 @@ impl<'ctx> Lower<'_, 'ctx> {
             }
             // `receive` waits and `poll` does not; everything else about the
             // two is identical, down to the stack slot, so they share an arm
-            // and differ in which runtime function is called.
-            ("receive", [channel]) | ("poll", [channel]) => {
+            // and differ in which runtime function is called. `take_selected`
+            // is `poll` for a value `Selection::wait` found, and holds entry
+            // polls off for the branch it goes to.
+            ("receive", [channel]) | ("poll", [channel]) | ("take_selected", [channel]) => {
                 let channel_ty = self.types.of(*channel).clone();
                 let held = self.channel_contents(site, &channel_ty, range)?;
                 let handle = self.expr(*channel)?;
@@ -349,10 +351,10 @@ impl<'ctx> Lower<'_, 'ctx> {
                 // sentinel word would be a value some `A` could legitimately
                 // be.
                 let slot = self.entry_slot(self.be.ctx.i64_type().into(), "received");
-                let receive = if name == "poll" {
-                    self.be.rt.channel_poll
-                } else {
-                    self.be.rt.channel_receive
+                let receive = match name {
+                    "poll" => self.be.rt.channel_poll,
+                    "take_selected" => self.be.rt.channel_take_selected,
+                    _ => self.be.rt.channel_receive,
                 };
                 let arrived = self
                     .be
@@ -372,7 +374,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 self.release_unless_lent(*channel, handle, &channel_ty);
                 // `poll` never waits, so it can never be the thing a
                 // cancellation is stuck behind and carries no row.
-                if name != "poll" {
+                if name == "receive" {
                     self.canceled_empty_handed(arrived, range);
                 }
                 let answer_ty = self.types.of(site).clone();
@@ -418,7 +420,7 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// `Option` until now -- `Vector::get`, `String::index_of` -- was written in
     /// Khora over an intrinsic that could not fail, and a channel cannot be:
     /// "closed and drained" is an answer no `A` can stand in for.
-    fn option_of_word(
+    pub(super) fn option_of_word(
         &mut self,
         present: inkwell::values::IntValue<'ctx>,
         word: inkwell::values::IntValue<'ctx>,
@@ -663,6 +665,89 @@ impl<'ctx> Lower<'_, 'ctx> {
         }
         self.fail(format!("`{fiber}` is not a fiber, so it cannot be joined"), range);
         None
+    }
+
+    /// `Selection::open`, `add`, `wait` and `settled`: the runtime half of
+    /// `Select::wait`, which is written in Khora over these.
+    ///
+    /// **`wait` is a cancellation point, and only when it answers
+    /// empty-handed** (a negative status), for the reason
+    /// [`Self::canceled_empty_handed`] gives: an index answered is a value
+    /// this fiber may be owed, and stopping there would leave it owed to a
+    /// fiber that has gone.
+    pub(super) fn selection_intrinsic(
+        &mut self,
+        name: &str,
+        args: &[ExprId],
+        range: TextRange,
+    ) -> Flow<'ctx> {
+        let selection_ty = match args.first() {
+            Some(first) => self.types.of(*first).clone(),
+            None => Type::Unit,
+        };
+        match (name, args) {
+            ("open", [millis]) => {
+                let millis = self.expr(*millis)?;
+                let open = self.be.rt.selection_open;
+                Some(
+                    self.be
+                        .builder
+                        .build_call(open, &[millis.into()], "selection")
+                        .expect("opening a selection")
+                        .try_as_basic_value()
+                        .basic()
+                        .expect("a selection is a value"),
+                )
+            }
+            ("add", [selection, channel]) => {
+                let channel_ty = self.types.of(*channel).clone();
+                let both = self.operands(&[*selection, *channel])?;
+                let add = self.be.rt.selection_add;
+                self.be
+                    .builder
+                    .build_call(add, &[both[0].into(), both[1].into()], "")
+                    .expect("adding a channel to a selection");
+                // The selection took its own reference to the channel.
+                self.release_unless_lent(*selection, both[0], &selection_ty);
+                self.release_unless_lent(*channel, both[1], &channel_ty);
+                Some(self.be.unit_value())
+            }
+            ("wait", [selection]) => {
+                let handle = self.expr(*selection)?;
+                let wait = self.be.rt.select_wait;
+                let at = self
+                    .be
+                    .builder
+                    .build_call(wait, &[handle.into()], "selected")
+                    .expect("waiting on a selection")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("a wait answers")
+                    .into_int_value();
+                self.release_unless_lent(*selection, handle, &selection_ty);
+                let found = self
+                    .be
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::SGE,
+                        at,
+                        self.be.ctx.i64_type().const_zero(),
+                        "found",
+                    )
+                    .expect("testing the answer");
+                self.canceled_empty_handed(found, range);
+                Some(at.into())
+            }
+            ("settled", []) => {
+                let settled = self.be.rt.select_settled;
+                self.be
+                    .builder
+                    .build_call(settled, &[], "")
+                    .expect("ending a select's hold");
+                Some(self.be.unit_value())
+            }
+            _ => self.fail(format!("`Selection::{name}` is not an operation the backend knows"), range),
+        }
     }
 
     /// What a `Channel<A>` carries, at this instantiation. A `Handoff<A>` too:

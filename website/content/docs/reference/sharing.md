@@ -231,7 +231,7 @@ pub fn main() -> () {
 
 `wait` needs no `!` here because neither child can fail. The fiber doing the waiting can itself be canceled while it is parked, and it stops there whatever its own `raises` row.
 
-**This is what a supervisor is made of**, and what a deadline would be made of: there is no `timeout` or `race` in `std` (see [Concurrency](/docs/reference/concurrency/)), so anything of that shape is written from a handle one fiber holds and another cancels.
+**This is what a supervisor is made of**: a handle one fiber holds and another cancels. A deadline or a race is `timeout` or `race` in `std::core` (see [Concurrency](/docs/reference/concurrency/)), which are this shape with the bookkeeping done.
 
 What constrains it is the answer rather than the handle. `A: Share` is on the whole `impl<A: Share, 'er> Fiber<A, 'er>`, because a value computed on one fiber and read on another has to be safe to hold twice — so it is a condition on having a `Fiber<A, 'er>` at all, and `wait` needs it as much as `join` does even though `wait` never hands the answer back.
 

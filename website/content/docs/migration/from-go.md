@@ -88,10 +88,21 @@ authority is checked, so a helper five layers down cannot quietly open a socket.
 The habit to drop: the `context.Context` first parameter. It is carrying three
 different things — cancellation, deadlines and request-scoped values — and each
 of them has its own home here. Values are capabilities in the `with` row.
-Cancellation belongs to the nursery, below. Deadlines are the piece that does
-not exist yet: there is no `timeout`, no `race` and no `select`, and
-[Concurrency](/docs/reference/concurrency/) says so plainly rather than leaving
-you to find out.
+Cancellation belongs to the nursery, below. Deadlines are `timeout`, below.
+
+| Go | Khora |
+| --- | --- |
+| `ctx, cancel := context.WithTimeout(ctx, d)` around a call | `timeout(millis, fn () => call()!)!`, which answers `None` when the deadline came first |
+| `select { case v := <-a: ...; case v := <-b: ... }` | `Select::new() \|> Select::on(a, ..) \|> Select::on(b, ..) \|> Select::wait()` |
+| `select` with `case <-time.After(d):` | the same, with `\|> Select::within(millis)`, answering `Selected::TimedOut` |
+| `errgroup.Group` with `g.Go` and `g.Wait` | `nursery` and `nursery.spawn`; the first failure cancels the rest, and `ChildFailed` is the error |
+| first answer of several goroutines, then cancel the others | `race([SharedFn::of(fn _ => ..), ..])!` |
+
+Two differences to know. A Khora deadline stops the work, not only the
+waiting: the body is canceled where it is and its finalizers run before
+`timeout` returns, where Go's `ctx.Done()` is a signal each callee has to
+check. And `Select` has no send cases; [Concurrency](/docs/reference/concurrency/)
+has the rest.
 
 ## Concurrency: `go f()` always has an owner
 

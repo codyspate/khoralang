@@ -105,6 +105,18 @@ pub(crate) struct Fiber {
     /// How deep this fiber is inside a `Shared::update` or `modify` change
     /// function. [`crate::cancel::Pinned`] says why.
     pinned: AtomicUsize,
+    /// Whether a value `select` found is on its way to its branch, so entry
+    /// polls do not stop this fiber: [`ENTRY_FREE`], [`ENTRY_HELD`] or
+    /// [`ENTRY_ONCE`]. [`Fiber::hold_entry_polls`]. Only the running fiber
+    /// touches this.
+    entry_held: std::sync::atomic::AtomicU8,
+    /// The `timeout` scopes this fiber is inside, outermost first.
+    /// [`crate::timeout`] has the protocol; the lock is what orders a
+    /// deadline firing against the scope it belongs to ending.
+    deadlines: Mutex<Vec<DeadlineScope>>,
+    /// How many of `deadlines` have fired, so the stop predicates skip the
+    /// lock in the common case of none.
+    fired_scopes: AtomicUsize,
     /// Set while a worker is inside this fiber's `resume`. See
     /// `crate::coro::ResumedOnce`; debug builds, and a release build asked for
     /// `fiber-audit`.
@@ -169,6 +181,51 @@ const RETIRED: u8 = 2;
 /// The bit that says a cancellation may interrupt this fiber's cleanup too.
 /// Never cleared. [`Fiber::force`] has the reason for both.
 const FORCED: u8 = 4;
+/// The bit that says somebody *asked* this fiber to stop: a cancel, an
+/// abort, a signal, a nursery, a handle let go of. A `timeout` deadline sets
+/// [`CANCELED`] without it.
+///
+/// **What this prevents: a `timeout` that swallows a cancellation it did not
+/// cause.** One flag cannot say who set it, so a deadline that fired while a
+/// shutdown was also on its way could not tell the two apart, and taking its
+/// own cancellation back would take the shutdown's with it: the program
+/// carries on after a SIGTERM as if a call had merely timed out. Set in the
+/// same compare-and-swap as [`CANCELED`], so the one that takes a deadline's
+/// cancellation back ([`Fiber::end_deadline`]) sees it or loses to it.
+const REQUESTED: u8 = 8;
+
+/// No select value is on its way: entry polls count.
+const ENTRY_FREE: u8 = 0;
+/// A select answered and its value is not taken yet: no entry poll counts.
+const ENTRY_HELD: u8 = 1;
+/// The value is taken: the next entry poll, the branch's own, does not
+/// count, and the ones after it do.
+const ENTRY_ONCE: u8 = 2;
+
+/// One `timeout` scope on a fiber: which one, when its deadline is, whether
+/// it has passed while the scope was open, and how deep in cleanup it was
+/// opened.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DeadlineScope {
+    pub(crate) id: u64,
+    /// `None` for a deadline too far off for the clock to name, which never
+    /// comes due and is on no list.
+    pub(crate) when: Option<std::time::Instant>,
+    pub(crate) fired: bool,
+    /// The fiber's shield and pin depths when the scope opened: the depth its
+    /// own body runs at. [`Fiber::stops_for_own_deadline`] says why.
+    pub(crate) level: (usize, usize),
+}
+
+/// What ending a `timeout` scope found.
+pub(crate) struct Ended {
+    /// The scope's own deadline is what stopped the body, and its
+    /// cancellation has been taken back.
+    pub(crate) cut: bool,
+    /// Where the scope's deadline is on [`crate::fiber::Deadlines`], to take
+    /// it off.
+    pub(crate) when: Option<std::time::Instant>,
+}
 
 /// Which of the two requests to stop is being delivered.
 ///
@@ -204,6 +261,9 @@ impl Fiber {
             shielded: AtomicUsize::new(0),
             finalizer_starting: std::sync::atomic::AtomicBool::new(false),
             pinned: AtomicUsize::new(0),
+            entry_held: std::sync::atomic::AtomicU8::new(ENTRY_FREE),
+            deadlines: Mutex::new(Vec::new()),
+            fired_scopes: AtomicUsize::new(0),
             #[cfg(any(debug_assertions, feature = "fiber-audit"))]
             resuming: std::sync::atomic::AtomicBool::new(false),
             #[cfg(any(debug_assertions, feature = "fiber-audit"))]
@@ -244,6 +304,9 @@ impl Fiber {
             shielded: AtomicUsize::new(0),
             finalizer_starting: std::sync::atomic::AtomicBool::new(false),
             pinned: AtomicUsize::new(0),
+            entry_held: std::sync::atomic::AtomicU8::new(ENTRY_FREE),
+            deadlines: Mutex::new(Vec::new()),
+            fired_scopes: AtomicUsize::new(0),
             #[cfg(any(debug_assertions, feature = "fiber-audit"))]
             resuming: std::sync::atomic::AtomicBool::new(false),
             #[cfg(any(debug_assertions, feature = "fiber-audit"))]
@@ -359,10 +422,16 @@ impl Fiber {
     /// exists for.
     pub(crate) fn stop(&self, stop: Stop) {
         let bits = match stop {
-            Stop::Cancel => CANCELED,
-            Stop::Force => CANCELED | FORCED,
+            Stop::Cancel => CANCELED | REQUESTED,
+            Stop::Force => CANCELED | FORCED | REQUESTED,
         };
         self.set_bits(bits);
+        self.wake_parked();
+    }
+
+    /// Wakes whatever this thread-backed fiber is parked on, so it looks at
+    /// its flag. A fiber on the scheduler is woken through the pool instead.
+    pub(crate) fn wake_parked(&self) {
         let parked = self.parked_on.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(moved) = parked.as_ref() {
             // Every thread on the variable, not one: the others blocked there
@@ -373,6 +442,197 @@ impl Fiber {
             self.stop_wakes.lock().unwrap_or_else(|e| e.into_inner()).push(wake);
             wake.notify(moved);
         }
+    }
+
+    /// Opens a `timeout` scope with this id and deadline, innermost, at the
+    /// shield and pin depth the fiber is at now.
+    pub(crate) fn begin_deadline(&self, id: u64, when: Option<std::time::Instant>) {
+        let level = (
+            self.shielded.load(COUNTER_ORDER),
+            self.pinned.load(COUNTER_ORDER),
+        );
+        let scope = DeadlineScope {
+            id,
+            when,
+            fired: false,
+            level,
+        };
+        self.deadlines
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(scope);
+    }
+
+    /// The ids of the `timeout` scopes this fiber is inside, outermost first.
+    /// A nursery records them when it opens, so a deadline reaches the
+    /// children of nurseries opened inside its scope and no others.
+    pub(crate) fn deadline_ids(&self) -> Vec<u64> {
+        self.deadlines
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|s| s.id)
+            .collect()
+    }
+
+    /// Fires scope `id`'s deadline: cancels this fiber, without
+    /// [`REQUESTED`], if the scope is still open. False when it has ended,
+    /// which is a deadline that lost the race with its body and does nothing.
+    ///
+    /// Under the scopes' lock, so the scope cannot end between being found
+    /// and being marked.
+    pub(crate) fn fire_deadline(&self, id: u64) -> bool {
+        let mut scopes = self.deadlines.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(scope) = scopes.iter_mut().rev().find(|s| s.id == id) else {
+            return false;
+        };
+        if !scope.fired {
+            scope.fired = true;
+            self.fired_scopes.fetch_add(1, Ordering::SeqCst);
+        }
+        self.set_bits(CANCELED);
+        true
+    }
+
+    /// Whether a `timeout` scope opened at exactly this fiber's present
+    /// shield and pin depth has fired: the cancellation is that scope's, and
+    /// the code running is that scope's own body.
+    ///
+    /// **What this prevents: a `timeout` in cleanup that never fires.** A
+    /// deadline is a cancel, and a finalizer, a `claim` abandon handler and a
+    /// change function are shielded from cancels (or pinned), so a
+    /// `timeout(1000, ..)` written there to bound the cleanup waited for its
+    /// body however long it took, for ever on a channel nobody sent to.
+    /// Stopping the scope's own body cuts nothing its author did not ask to
+    /// bound: the body unwinds to the `timeout`, which answers `None`, and
+    /// the cleanup goes on from there.
+    ///
+    /// **Only at the depth it was opened at.** Cleanup *inside* the body --
+    /// a finalizer of a region the body opened -- runs one shield deeper and
+    /// is not cut short; the body stops at its first point after that
+    /// cleanup ends. A cancel that is not a scope's, and a scope opened
+    /// outside the cleanup, are still held off by the shield exactly as
+    /// before.
+    fn stops_for_own_deadline(&self) -> bool {
+        if self.fired_scopes.load(Ordering::SeqCst) == 0 {
+            return false;
+        }
+        let level = (
+            self.shielded.load(COUNTER_ORDER),
+            self.pinned.load(COUNTER_ORDER),
+        );
+        let scopes = self.deadlines.lock().unwrap_or_else(|e| e.into_inner());
+        scopes.iter().any(|s| s.fired && s.level == level)
+    }
+
+    /// Ends scope `id`, and answers whether **its own** deadline is the only
+    /// thing that canceled this fiber -- in which case the cancellation is
+    /// taken back, and the `timeout` answers `None`.
+    ///
+    /// **Anything else and the cancellation stays.** An outer scope that also
+    /// fired, a cancel somebody asked for ([`REQUESTED`]), or a force: each of
+    /// those is somebody else's, and `timeout` swallowing it would turn a
+    /// shutdown into a `None` and carry on. An outer deadline then surfaces
+    /// at the outer `timeout`, which is the one it belongs to.
+    ///
+    /// The flag is cleared by one compare-and-swap that also reads
+    /// [`REQUESTED`] and [`FORCED`], so a request that lands at the same
+    /// instant either is seen here or sets the flag again afterwards.
+    ///
+    /// **A scope opened in cleanup is the cut whenever it fired**, unless a
+    /// force is here or a scope at its own depth fired too. Nothing else can
+    /// have stopped its body: the shield or the pin held every other cancel
+    /// off ([`Fiber::stops_for_own_deadline`]). Any other cancellation --
+    /// the one the finalizer is running because of, an outer deadline -- is
+    /// left set for the cleanup's end.
+    pub(crate) fn end_deadline(&self, id: u64) -> Ended {
+        let mut scopes = self.deadlines.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(at) = scopes.iter().rposition(|s| s.id == id) else {
+            return Ended {
+                cut: false,
+                when: None,
+            };
+        };
+        let mine = scopes.remove(at);
+        let ended = |cut| Ended {
+            cut,
+            when: mine.when,
+        };
+        if !mine.fired {
+            return ended(false);
+        }
+        self.fired_scopes.fetch_sub(1, Ordering::SeqCst);
+        if scopes.iter().any(|s| s.fired && s.level == mine.level) {
+            return ended(false);
+        }
+        let in_cleanup = mine.level != (0, 0);
+        let others = scopes.iter().any(|s| s.fired);
+        let mut seen = self.state.load(Ordering::Acquire);
+        loop {
+            if seen & FORCED != 0 {
+                return ended(false);
+            }
+            if seen & REQUESTED != 0 || others {
+                return ended(in_cleanup);
+            }
+            if seen & CANCELED == 0 {
+                // Fired, and the flag was cleared since by `khora_cancel_reset`:
+                // still this deadline's cut.
+                return ended(true);
+            }
+            match self.state.compare_exchange(
+                seen,
+                seen & !CANCELED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    if is_counted_state(seen) {
+                        crate::poll::uncount_canceled(self.poll);
+                    }
+                    return ended(true);
+                }
+                Err(now) => seen = now,
+            }
+        }
+    }
+
+    /// Holds entry polls off from a select's answer until its value has been
+    /// taken, and then for one more: [`Fiber::hold_one_more_entry_poll`].
+    ///
+    /// **What this prevents: a value `Select::wait` found being lost on the
+    /// way to its branch.** A `receive` written in place hands its value on
+    /// with no poll between the take and the code that uses it. A select's
+    /// value reaches its branch through function values, which poll on
+    /// entry, and a cancel there either left a promise held by a fiber that
+    /// had gone or unwound with the value taken and seen by nobody.
+    /// `crate::channel::select` has the protocol. Cleared by
+    /// [`Fiber::stops_at_point`], the same place a finalizer's start ends,
+    /// or by [`Fiber::release_entry_polls`].
+    pub(crate) fn hold_entry_polls(&self) {
+        self.entry_held.store(ENTRY_HELD, Ordering::Relaxed);
+    }
+
+    /// Narrows [`Fiber::hold_entry_polls`]'s hold to the next entry poll, now
+    /// that the value has been taken.
+    ///
+    /// **What this prevents: a cancel held off for a whole branch.** The
+    /// value is the branch's argument, so the one poll that can lose it is
+    /// the branch's own entry. Every poll after that is a point in the
+    /// branch's code, and a branch made only of calls -- recursion, with no
+    /// loop or `!` -- has no other kind: a hold that lasted until the select
+    /// finished let such a branch run to its end after a cancel. Costs one
+    /// poll: a branch whose entry does not poll gives up the first poll in
+    /// its body instead.
+    pub(crate) fn hold_one_more_entry_poll(&self) {
+        if self.entry_held.load(Ordering::Relaxed) == ENTRY_HELD {
+            self.entry_held.store(ENTRY_ONCE, Ordering::Relaxed);
+        }
+    }
+
+    /// Ends [`Fiber::hold_entry_polls`]'s hold before a point would.
+    pub(crate) fn release_entry_polls(&self) {
+        self.entry_held.store(ENTRY_FREE, Ordering::Relaxed);
     }
 
     /// Whether [`Fiber::force`] has been called on this fiber.
@@ -476,7 +736,7 @@ impl Fiber {
             }
             match self.state.compare_exchange(
                 seen,
-                seen & !CANCELED,
+                seen & !(CANCELED | REQUESTED),
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
@@ -523,11 +783,14 @@ impl Fiber {
     /// **Forced cuts through the shield, and nothing else does.** Both bits
     /// come from one load, so this never pairs a cancellation from before a
     /// force with a force from after it.
+    ///
+    /// **And a `timeout` opened inside the shield or the pin stops its own
+    /// body**: [`Fiber::stops_for_own_deadline`].
     pub(crate) fn stops_here(&self) -> bool {
         let state = self.state.load(Ordering::Acquire);
         state & CANCELED != 0
-            && !self.is_pinned()
-            && (state & FORCED != 0 || !self.is_shielded())
+            && ((!self.is_pinned() && (state & FORCED != 0 || !self.is_shielded()))
+                || self.stops_for_own_deadline())
     }
 
     /// Whether generated code should leave at a function's entry poll.
@@ -538,6 +801,14 @@ impl Fiber {
     /// putting a cancellation point on a cycle it cannot see, and under
     /// `abort` it is what stopped a finalizer before its first line.
     pub(crate) fn stops_at_entry(&self) -> bool {
+        match self.entry_held.load(Ordering::Relaxed) {
+            ENTRY_FREE => {}
+            ENTRY_ONCE => {
+                self.entry_held.store(ENTRY_FREE, Ordering::Relaxed);
+                return false;
+            }
+            _ => return false,
+        }
         !self.finalizer_starting.load(Ordering::Relaxed) && self.stops_here()
     }
 
@@ -549,6 +820,9 @@ impl Fiber {
     pub(crate) fn stops_at_point(&self) -> bool {
         if self.finalizer_starting.load(Ordering::Relaxed) {
             self.finalizer_starting.store(false, Ordering::Relaxed);
+        }
+        if self.entry_held.load(Ordering::Relaxed) != ENTRY_FREE {
+            self.entry_held.store(ENTRY_FREE, Ordering::Relaxed);
         }
         self.stops_here()
     }
@@ -586,7 +860,10 @@ impl Fiber {
     pub(crate) fn gives_up_waiting(&self) -> bool {
         let state = self.state.load(Ordering::Acquire);
         state & CANCELED != 0
-            && (self.is_pinned() || state & FORCED != 0 || !self.is_shielded())
+            && (self.is_pinned()
+                || state & FORCED != 0
+                || !self.is_shielded()
+                || self.stops_for_own_deadline())
     }
 
     /// Whether a `join`, `wait` or `outcome` should stop waiting for another
@@ -605,9 +882,14 @@ impl Fiber {
     /// cell's lock until the child finishes, which is the wait
     /// [`crate::cancel::Pinned`] otherwise bounds. The bound here is the child,
     /// and `abort` ends it.
+    ///
+    /// A `timeout` opened in the cleanup gives up a join in its own body
+    /// ([`Fiber::stops_for_own_deadline`]): the tag goes as far as that
+    /// `timeout`, which answers `None`, and the cleanup goes on.
     pub(crate) fn gives_up_joining(&self) -> bool {
         let state = self.state.load(Ordering::Acquire);
-        state & CANCELED != 0 && (state & FORCED != 0 || !self.is_shielded())
+        state & CANCELED != 0
+            && (state & FORCED != 0 || !self.is_shielded() || self.stops_for_own_deadline())
     }
 
     /// Whether this fiber is inside a change function.
@@ -748,6 +1030,28 @@ pub(crate) fn current<T>(body: impl FnOnce(&Fiber) -> T) -> T {
     let root = root_fiber();
     set_running(Arc::as_ptr(&root));
     body(&root)
+}
+
+/// The running fiber, as something that can be held past this call.
+///
+/// For a `timeout` deadline, which has to reach the fiber from the
+/// deadline thread after the call that armed it has returned.
+pub(crate) fn current_held() -> Arc<Fiber> {
+    let pointer = running();
+    if pointer.is_null() {
+        let root = root_fiber();
+        set_running(Arc::as_ptr(&root));
+        return root;
+    }
+    // SAFETY: every pointer in `CURRENT` came from `Arc::as_ptr` of an `Arc`
+    // that is alive while it is installed -- an `Entered` guard's, or the
+    // thread's `ROOT` -- so the allocation is an `Arc`'s and its count is at
+    // least one here. Adding a count first makes the `from_raw` below own a
+    // reference of its own rather than steal the guard's.
+    unsafe {
+        Arc::increment_strong_count(pointer);
+        Arc::from_raw(pointer)
+    }
 }
 
 /// Makes `fiber` the running one until the guard is dropped.

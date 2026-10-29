@@ -1143,6 +1143,10 @@ mod tests {
     fn a_closed_peer_reads_zero() {
         let (client, server) = a_connected_pair();
         let socket = socket_of(&client);
+        // Handles are reused across the tests in this process, and a limit
+        // another test set on this number would make the read time out
+        // rather than see the end. This test is about the end.
+        khora_net_forget(socket);
         assert_eq!(khora_net_prepare(socket), 0);
         drop(server);
 
@@ -1819,7 +1823,23 @@ mod tests {
         let off = connect_by("127.0.0.1", port, None).expect("a connect off a scheduler");
         let (_peer, _) = listener.accept().expect("the peer sees it");
         raw_close(off);
-        assert_eq!(connect_by("127.0.0.1", closed, None), Err(Gave::Up));
+        // A freed port can be taken again by another test in this process
+        // before the connect reaches it, so a connect that lands is retried
+        // on a fresh freed port; a real refusal is what has to come back.
+        let refused_somewhere = move || {
+            let mut answer = connect_by("127.0.0.1", closed, None);
+            for _ in 0..5 {
+                let Ok(socket) = answer else { break };
+                raw_close(socket);
+                let fresh = {
+                    let gone = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+                    gone.local_addr().expect("an address").port()
+                };
+                answer = connect_by("127.0.0.1", fresh, None);
+            }
+            answer.map(raw_close)
+        };
+        assert_eq!(refused_somewhere(), Err(Gave::Up));
         assert_eq!(connect_by("localhost", port, None).map(raw_close), Ok(()), "by name");
         let _ = listener.accept();
 
@@ -1828,7 +1848,7 @@ mod tests {
         let pool = Scheduler::new(2);
         pool.spawn(Task::new(move || {
             let on = connect_by("127.0.0.1", port, None);
-            let refused = connect_by("127.0.0.1", closed, None);
+            let refused = refused_somewhere();
             *said.lock().expect("the outcome") = Some((on.map(raw_close), refused));
         }));
         let (_peer, _) = listener.accept().expect("the peer sees the fiber's connect");

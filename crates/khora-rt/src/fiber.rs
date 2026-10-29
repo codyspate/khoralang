@@ -564,9 +564,11 @@ const FIBER_TAG: u32 = 0;
 ///
 /// Zero means one worker per core, which is `Scheduler::new`'s reading of it.
 fn fibers() -> &'static Scheduler {
-    static FIBERS: std::sync::OnceLock<Scheduler> = std::sync::OnceLock::new();
     FIBERS.get_or_init(|| Scheduler::new(0))
 }
+
+/// The pool, once [`fibers`] has started it.
+static FIBERS: std::sync::OnceLock<Scheduler> = std::sync::OnceLock::new();
 
 /// Runs `body` on a fiber of its own, returning a handle to it.
 ///
@@ -1255,70 +1257,102 @@ pub unsafe extern "C" fn khora_fiber_cancel_within(fiber: *mut u8, millis: i64) 
     // instant the clock can name never arrives, so it is not recorded: the
     // fiber has its cancel, as with no deadline at all.
     let wait = std::time::Duration::from_millis(millis.max(0) as u64);
-    let Some(when) = std::time::Instant::now().checked_add(wait) else { return };
-    if !Deadlines::add(Deadline { when, target: state.fiber.clone(), done }) {
+    let Some(when) = std::time::Instant::now().checked_add(wait) else {
+        return;
+    };
+    let deadline = Deadline {
+        target: state.fiber.clone(),
+        what: Expiry::Force(done),
+    };
+    if !Deadlines::add(when, Deadlines::next_id(), deadline) {
         deliver_to(state, Stop::Force);
     }
 }
 
-/// One pending `cancel_within`: whom to force, and when, unless it has
-/// finished by then.
+/// One pending deadline: whom it is for, and what reaching it does.
 struct Deadline {
-    when: std::time::Instant,
     target: std::sync::Arc<crate::current::Fiber>,
-    done: std::sync::Arc<Done>,
+    what: Expiry,
+}
+
+/// What a deadline does when it comes due.
+///
+/// **Two kinds on one list, and one thread for both**, for the reason
+/// [`Deadlines`] gives: a thread per pending deadline is a thread per
+/// request.
+enum Expiry {
+    /// `cancel_within`'s: force the fiber unless it has finished.
+    Force(std::sync::Arc<Done>),
+    /// A `timeout` scope's, by the scope's id: cancel the fiber if the scope
+    /// is still open ([`crate::current::Fiber::fire_deadline`]).
+    Scope(u64),
 }
 
 impl Deadline {
     /// Forces the fiber, the same road [`deliver_to`] takes, from the flag and
     /// the id rather than the handle, which the deadline list does not hold.
+    /// Or, for a scope, cancels the fiber the way only a deadline does.
     fn expire(self) {
-        if self.done.finished() {
-            return;
-        }
-        crate::nursery::cancel_open_crews(self.target.id(), Stop::Force);
-        if on_the_scheduler() {
-            fibers().stop_fiber(self.target.id(), Stop::Force);
-        } else {
-            self.target.force();
+        match self.what {
+            Expiry::Force(done) => {
+                if done.finished() {
+                    return;
+                }
+                crate::nursery::cancel_open_crews(self.target.id(), Stop::Force);
+                if on_the_scheduler() {
+                    fibers().stop_fiber(self.target.id(), Stop::Force);
+                } else {
+                    self.target.force();
+                }
+            }
+            Expiry::Scope(id) => crate::timeout::expire(&self.target, id),
         }
     }
 }
 
-impl PartialEq for Deadline {
-    fn eq(&self, other: &Self) -> bool {
-        self.when == other.when
-    }
-}
-impl Eq for Deadline {}
-impl PartialOrd for Deadline {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-impl Ord for Deadline {
-    /// Reversed, so a `BinaryHeap` -- a max-heap -- holds the soonest on top.
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        other.when.cmp(&self.when)
+/// Wakes a fiber so it looks at its flag, without setting anything.
+///
+/// For a `timeout` deadline, which has set the flag itself
+/// ([`crate::current::Fiber::fire_deadline`]) and must not set
+/// [`crate::current::Stop`]'s bits, which say somebody asked. Both wakes,
+/// because a fiber is either on the pool or parked on a condition variable,
+/// and the program's own computation is the second even when there is a pool.
+pub(crate) fn rouse(fiber: &crate::current::Fiber) {
+    fiber.wake_parked();
+    // Only a pool that exists: a fiber on one was spawned, which started it,
+    // and starting one here for the program's own computation would put the
+    // pool half of the poll word up for the rest of the run.
+    if let Some(pool) = FIBERS.get() {
+        pool.wake_fiber(fiber.id());
     }
 }
 
-/// Every pending `cancel_within` in the process, and the one thread that
-/// keeps them.
+/// Every pending deadline in the process -- `cancel_within`'s and
+/// `timeout`'s -- and the one thread that keeps them.
 ///
 /// **What this prevents: a thread per call.** A `cancel_within` per request,
 /// with a deadline of seconds, held one sleeping OS thread per request for the
 /// whole deadline -- three thousand calls, three thousand threads -- and
 /// `std::thread::spawn` panics when the OS refuses the next one. Here the cost
-/// of a pending deadline is one heap entry, and the thread count is one.
+/// of a pending deadline is one map entry, and the thread count is one.
+///
+/// **Keyed, so an entry can be taken back.** A `timeout` whose body answers
+/// in a millisecond would otherwise leave its entry to sit out the whole
+/// deadline: a loop of ten thousand one-second timeouts held ten thousand
+/// entries, each keeping a fiber's identity alive. The key is the instant and
+/// a sequence number, so two deadlines at one instant are two entries.
 ///
 /// The thread sleeps on a condition variable until the soonest deadline or a
 /// new one, whichever comes first. It is started on the first deadline and
 /// never ends, like the reactor.
-struct Deadlines {
-    heap: std::sync::Mutex<std::collections::BinaryHeap<Deadline>>,
+pub(crate) struct Deadlines {
+    pending: std::sync::Mutex<std::collections::BTreeMap<(std::time::Instant, u64), Deadline>>,
     changed: std::sync::Condvar,
 }
+
+/// The sequence half of a [`Deadlines`] key. Never reused, never zero, so a
+/// `timeout` scope can use it as its id and zero can mean "no scope".
+static NEXT_DEADLINE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl Deadlines {
     /// The one list, and whether its thread is running.
@@ -1326,7 +1360,7 @@ impl Deadlines {
         static LIST: std::sync::OnceLock<Option<&'static Deadlines>> = std::sync::OnceLock::new();
         *LIST.get_or_init(|| {
             let list: &'static Deadlines = Box::leak(Box::new(Deadlines {
-                heap: std::sync::Mutex::new(std::collections::BinaryHeap::new()),
+                pending: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 changed: std::sync::Condvar::new(),
             }));
             crate::stack::spawn_thread(
@@ -1338,37 +1372,98 @@ impl Deadlines {
         })
     }
 
-    /// Records `deadline`. False when there is no thread to keep it.
-    fn add(deadline: Deadline) -> bool {
-        let Some(list) = Deadlines::get() else { return false };
-        let mut heap = list.heap.lock().unwrap_or_else(|e| e.into_inner());
-        heap.push(deadline);
+    /// A fresh id for a deadline, from the sequence its key uses.
+    pub(crate) fn next_id() -> u64 {
+        NEXT_DEADLINE.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Records `deadline` at `when`, under `id`. False when there is no
+    /// thread to keep it.
+    fn add(when: std::time::Instant, id: u64, deadline: Deadline) -> bool {
+        let Some(list) = Deadlines::get() else {
+            return false;
+        };
+        let mut pending = list.pending.lock().unwrap_or_else(|e| e.into_inner());
+        pending.insert((when, id), deadline);
         list.changed.notify_one();
         true
     }
 
+    /// Records a `timeout` scope's deadline. False when there is no thread
+    /// to keep it.
+    pub(crate) fn add_scope(
+        when: std::time::Instant,
+        id: u64,
+        target: std::sync::Arc<crate::current::Fiber>,
+    ) -> bool {
+        Deadlines::add(
+            when,
+            id,
+            Deadline {
+                target,
+                what: Expiry::Scope(id),
+            },
+        )
+    }
+
+    /// Takes a deadline back before it comes due. Nothing, if it already has.
+    pub(crate) fn remove(when: std::time::Instant, id: u64) {
+        let Some(list) = Deadlines::get() else { return };
+        let taken = list
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&(when, id));
+        // Outside the lock: the entry holds an `Arc<Fiber>`, and the last
+        // reference to a fiber going away runs its `Drop`.
+        drop(taken);
+    }
+
+    /// How many deadlines are pending. For the leak tests.
+    #[cfg(test)]
+    pub(crate) fn len() -> usize {
+        Deadlines::get().map_or(0, |list| {
+            list.pending.lock().unwrap_or_else(|e| e.into_inner()).len()
+        })
+    }
+
     /// The thread's whole life: wait for the soonest, expire what is due.
     fn keep(&self) {
-        let mut heap = self.heap.lock().unwrap_or_else(|e| e.into_inner());
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         loop {
             let now = std::time::Instant::now();
             let mut due = Vec::new();
-            while heap.peek().is_some_and(|d| d.when <= now) {
-                due.extend(heap.pop());
+            while let Some(entry) = pending.first_entry() {
+                if entry.key().0 > now {
+                    break;
+                }
+                due.push(entry.remove());
             }
             if !due.is_empty() {
                 // Outside the lock: a force reaches the scheduler and the
                 // nursery registry, and neither should wait on this list.
-                drop(heap);
+                drop(pending);
                 for deadline in due {
                     deadline.expire();
                 }
-                heap = self.heap.lock().unwrap_or_else(|e| e.into_inner());
+                pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
                 continue;
             }
-            heap = match heap.peek().map(|d| d.when.saturating_duration_since(now)) {
-                Some(wait) => self.changed.wait_timeout(heap, wait).unwrap_or_else(|e| e.into_inner()).0,
-                None => self.changed.wait(heap).unwrap_or_else(|e| e.into_inner()),
+            pending = match pending
+                .keys()
+                .next()
+                .map(|(when, _)| when.saturating_duration_since(now))
+            {
+                Some(wait) => {
+                    self.changed
+                        .wait_timeout(pending, wait)
+                        .unwrap_or_else(|e| e.into_inner())
+                        .0
+                }
+                None => self
+                    .changed
+                    .wait(pending)
+                    .unwrap_or_else(|e| e.into_inner()),
             };
         }
     }

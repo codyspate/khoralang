@@ -77,27 +77,48 @@ impl<'a> Checker<'a> {
         result
     }
 
-    /// Refuses `bounded_nursery(0, ..)` and `Fibers::bounded(-1)`.
+    /// Refuses `bounded_nursery(0, ..)`, `Fibers::bounded(-1)` and `race([])`.
     ///
     /// **A limit below 1 is a bug where it is written**, so where it is an
     /// integer literal it is refused here rather than at run time. A limit
     /// computed at run time is the runtime's to refuse, with a trap that names
-    /// the value. `nursery` is the unbounded one.
+    /// the value. `nursery` is the unbounded one. A `race` over a literal empty
+    /// list is the same bug: it would wait forever.
     fn refuse_a_literal_limit_below_one(&mut self, callee: ExprId, args: &[ExprId]) {
-        let named = match self.body.expr(callee) {
-            Expr::Path(khora_hir::Resolution::Item { module, name, .. }) => {
-                name == "bounded_nursery" && module.segments() == ["std", "core"]
-            }
+        let in_core = |module: &khora_hir::ModulePath| module.segments() == ["std", "core"];
+        let (named, race) = match self.body.expr(callee) {
+            Expr::Path(khora_hir::Resolution::Item { module, name, .. }) => (
+                name == "bounded_nursery" && in_core(module),
+                name == "race" && in_core(module),
+            ),
             Expr::Path(khora_hir::Resolution::TraitItem { owner, name }) => {
-                owner == FIBERS_TYPE && name == "bounded"
+                (owner == FIBERS_TYPE && name == "bounded", false)
             }
-            _ => false,
+            _ => (false, false),
         };
-        if !named {
+        if !named && !race {
             return;
         }
         let Some(&limit) = args.first() else { return };
-        let Some(value) = self.integer_literal(limit) else { return };
+        if race {
+            // `[]` desugars to the bare `List::Nil` path.
+            if matches!(
+                self.body.expr(limit),
+                Expr::Path(khora_hir::Resolution::Variant { type_name, name, .. })
+                    if type_name == "List" && name == "Nil"
+            ) {
+                self.error(
+                    "`race` needs at least one branch, and this list is empty: a race with \
+                     nothing in it has no answer to wait for"
+                        .to_string(),
+                    self.body.range(limit),
+                );
+            }
+            return;
+        }
+        let Some(value) = self.integer_literal(limit) else {
+            return;
+        };
         if value < 1 {
             self.error(
                 format!(
