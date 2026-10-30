@@ -1796,8 +1796,12 @@ mod tests {
             let mut knew = false;
             let mut stopped = false;
             // Cycle `acquire`'s sequence until the force has been published
-            // and one more cycle has run after this thread read it.
-            for _ in 0..1_000_000 {
+            // and one more cycle has run after this thread read it. Bounded
+            // by time, not by a count of cycles: a million cycles is about
+            // 60 ms, and a busy Windows runner left the forcer thread
+            // unscheduled for longer than that.
+            let give_up = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while std::time::Instant::now() < give_up {
                 let knew_before = knew || forced.load(Ordering::Acquire) >= round;
                 crate::cancel::khora_acquire_begin();
                 let outer = crate::cancel::khora_entry_canceled() != 0;

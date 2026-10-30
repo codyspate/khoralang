@@ -256,6 +256,23 @@ another's bytes. This is why there is no `TlsConnection::socket`.
 A failed handshake has already closed the socket, so a caller that raises
 and moves on has leaked nothing.
 
+### secured
+
+```khora
+pub fn secured(server: TlsServer, socket: Int) -> Option<TlsConnection>
+```
+
+[`secure`](#secure), answering `None` for a failed handshake instead of raising.
+
+**For a caller that registers the session's close itself.** The socket is
+the session's from the moment this is called, so the caller has to stop
+treating it as its own before the call and start holding the session the
+moment it returns, with nothing between that can stop. [`secure`](#secure) cannot
+give it that: the `!` its raise needs is a cancellation check, and a
+fiber canceled there has the socket in neither hand. This has no check
+but the one the handshake makes when a cancel cuts it short, and that
+one answers with no session and the socket already closed.
+
 ### receive
 
 ```khora

@@ -27,7 +27,6 @@
 
 use std::io::{Read, Write};
 use crate::reactor::Socket;
-use std::net::TcpStream;
 use std::sync::Arc;
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
@@ -104,26 +103,6 @@ fn as_socket(handle: i64) -> Socket {
     handle as Socket
 }
 
-/// Puts the handle back into the `TcpStream` that will close it.
-///
-/// The one thing `Wire` still borrows from `std`: closing a socket is spelled
-/// differently on each platform and dropping a `TcpStream` over it is the
-/// version already written.
-#[cfg(windows)]
-fn reclaim(socket: Socket) -> TcpStream {
-    use std::os::windows::io::FromRawSocket;
-    // SAFETY: `Wire` owns the handle and is being dropped, so nothing else
-    // will close it.
-    unsafe { TcpStream::from_raw_socket(socket as u64 as std::os::windows::io::RawSocket) }
-}
-
-#[cfg(not(windows))]
-fn reclaim(socket: Socket) -> TcpStream {
-    use std::os::fd::FromRawFd;
-    // SAFETY: as above.
-    unsafe { TcpStream::from_raw_fd(socket) }
-}
-
 impl Read for Wire {
     fn read(&mut self, into: &mut [u8]) -> std::io::Result<usize> {
         // SAFETY: `into` is a live slice of exactly the length passed.
@@ -165,7 +144,13 @@ impl Drop for Wire {
         // The runtime remembers this socket's receive deadline, and handles
         // are reused.
         crate::net::khora_net_forget(self.0);
-        drop(reclaim(self.0));
+        // **Closed by number and counted, not by dropping a `TcpStream`.**
+        // A socket something else had closed already fails here, and that is
+        // the symptom of two owners closing one socket: counted, a test can
+        // assert there were none. Dropped as a `TcpStream`, a debug runtime
+        // aborted the process on it ("IO Safety violation") and a release one
+        // said nothing.
+        crate::net::close_counted(self.0);
     }
 }
 
@@ -252,21 +237,28 @@ pub unsafe extern "C" fn khora_tls_server_close(server: *mut u8) {
 
 /// Completes a handshake over `socket`, giving a connection to read and write.
 ///
-/// **Takes the socket.** [`khora_tls_close`] closes it, and the caller must
-/// not. Returns null if the handshake fails, having closed the socket itself —
-/// a client that cannot agree on a cipher has already been answered as far as
-/// it is going to be.
+/// **Takes the socket, on every path.** [`khora_tls_close`] closes it, and the
+/// caller must not. Returns null if the handshake fails, or cannot start,
+/// having closed the socket itself — a client that cannot agree on a cipher
+/// has already been answered as far as it is going to be. Closed on every
+/// null, so a caller that hands the socket over before this call never has
+/// to ask which null it got: one that closed it after some nulls and not
+/// others either leaked a socket or closed a handle the system had already
+/// given to somebody else.
 ///
 /// The handshake happens here rather than lazily on the first read, so that a
 /// caller can tell "this is not a TLS client" from "this client sent nothing".
 ///
 /// # Safety
 ///
-/// `server` must have come from [`khora_tls_server_open`], and `socket` must be
-/// an accepted socket that nothing else will close.
+/// `server` must be null or have come from [`khora_tls_server_open`], and
+/// `socket` must be an accepted socket that nothing else will close.
 #[unsafe(no_mangle)]
 // SHARE: a runtime-owned TLS object, not a Khora value.
 pub unsafe extern "C" fn khora_tls_accept(server: *mut u8, socket: i64) -> *mut u8 {
+    // Owned from the first line: every return below that does not hand it
+    // on drops it, and dropping it closes the socket.
+    let mut stream = adopt(socket);
     if server.is_null() {
         return std::ptr::null_mut();
     }
@@ -276,9 +268,7 @@ pub unsafe extern "C" fn khora_tls_accept(server: *mut u8, socket: i64) -> *mut 
     let Ok(mut connection) = ServerConnection::new(Arc::clone(config)) else {
         return std::ptr::null_mut();
     };
-    let mut stream = adopt(socket);
     if connection.complete_io(&mut stream).is_err() {
-        // `stream` owns the socket and closing it is what dropping it does.
         return std::ptr::null_mut();
     }
     Box::into_raw(Box::new(Secured::Serving(StreamOwned::new(connection, stream)))).cast()
@@ -851,7 +841,7 @@ pub unsafe extern "C" fn khora_tls_close(connection: *mut u8) {
     let stream = secured.stream();
     stream.say_goodbye();
     let _ = stream.flush();
-    // Dropping the `TcpStream` inside closes the socket.
+    // Dropping the `Wire` inside closes the socket.
 }
 
 #[cfg(test)]
@@ -1000,7 +990,7 @@ mod tests {
         let stream = TcpStream::connect(address).expect("a connection");
         let socket = socket_of(&stream);
         // The socket is the test's from here, as a Khora program's would be:
-        // closed by the session, or by `reclaim` below when there is none.
+        // closed by the session, or by `close_counted` below when there is none.
         std::mem::forget(stream);
         assert_eq!(crate::net::khora_net_prepare(socket), 0);
         // SAFETY: four readable bytes.
@@ -1136,7 +1126,7 @@ mod tests {
             got.windows(10).any(|w| w == b"still open"),
             "the socket should still be open and readable: {got:?}"
         );
-        drop(reclaim(socket));
+        assert!(crate::net::close_counted(socket), "the socket handed back should still be open");
         server.join().expect("the server");
     }
 
@@ -1151,7 +1141,7 @@ mod tests {
         let (session, why) = upgrade(&client, socket, "localhost", -1);
         assert!(session.is_null(), "an untrusted chain must be refused");
         assert_eq!(why, 2, "a refusal for the authority, said to be the authority");
-        drop(reclaim(socket));
+        assert!(crate::net::close_counted(socket), "the socket handed back should still be open");
         server.join().expect("the server");
     }
 
@@ -1174,7 +1164,7 @@ mod tests {
         assert!(took < Duration::from_secs(5), "the deadline took {took:?} to land");
         assert_eq!(crate::net::deadline_of(socket), before, "the owner's deadline should be back");
         crate::net::khora_net_forget(socket);
-        drop(reclaim(socket));
+        assert!(crate::net::close_counted(socket), "the socket handed back should still be open");
         server.join().expect("the server");
     }
 
@@ -1208,7 +1198,7 @@ mod tests {
         assert!(refused, "a canceled upgrade has no session");
         assert_eq!(why, 0, "a cancel is not the deadline");
         assert!(took < Duration::from_secs(2), "the cancel took {took:?} to land");
-        drop(reclaim(socket));
+        assert!(crate::net::close_counted(socket), "the socket handed back should still be open");
         server.join().expect("the server");
     }
 }

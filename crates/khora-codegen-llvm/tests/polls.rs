@@ -783,3 +783,65 @@ pub fn main() -> () {
         "a program's own `acquire` lost its entry poll:\n{body}"
     );
 }
+
+/// **The HTTP server registers an accepted connection's close with no
+/// cancellation point after the accept.** A stop there dropped a plain
+/// socket: 423 to 667 per 1,000 canceled servers on the thread backend.
+/// `Router::accepting` does `Region::open`, `accept_on`, and
+/// `Region::defer`; between the second and the third there may be no poll,
+/// no call through a function value, and no call to a Khora function that
+/// polls in its own body. `accept_on` itself asks for a cancel only when it
+/// gave up with no socket.
+///
+/// Read from the IR because the window is a few instructions wide;
+/// `server_cancel.rs` finds it as a count of open sockets, and this says
+/// where. Watched red with a call through `Option::map`, which polls on
+/// entry, put between the accept and the registration.
+#[test]
+fn the_http_server_registers_an_accepted_connection_before_any_cancellation_point() {
+    let main = "module main;
+import std::core::{ChildFailed, SharedFn, bounded_nursery};
+import std::net::http::{Response, Router};
+import std::net::socket::{listen_on};
+
+pub fn main() -> () raises ChildFailed {
+  bounded_nursery(4, fn () =>
+    Router::new()
+      |> Router::get(\"/x\", SharedFn::of(fn _ => Response::text(200, \"ok\")))
+      |> Router::serve_forever(listen_on(0))!)! catch { _ => () };
+}
+";
+    let body = std_function_ir("polls_accepting", main, "#Router::accepting$_{}");
+    let lines: Vec<&str> = body.lines().collect();
+    let accept = lines
+        .iter()
+        .position(|l| l.contains("@\"kh$std$net$socket$accept_on\"("))
+        .unwrap_or_else(|| panic!("`Router::accepting` does not accept:\n{body}"));
+    let register = lines
+        .iter()
+        .position(|l| l.contains("@khora_region_defer("))
+        .unwrap_or_else(|| panic!("`Router::accepting` registers no close:\n{body}"));
+    assert!(accept < register, "the close is registered before the accept:\n{body}");
+    for line in &lines[accept + 1..register] {
+        assert!(
+            !line.contains("@khora_poll") && !line.contains("@khora_canceled") && !line.contains("@khora_entry_canceled"),
+            "a cancellation point between the accept and the registration:\n{line}\n\n{body}"
+        );
+        let Some(at) = line.find(" call ") else { continue };
+        let callee = &line[at..];
+        assert!(callee.contains('@'), "a call through a function value before the registration:\n{line}\n\n{body}");
+        let name = callee.split('@').nth(1).unwrap_or("").trim_start_matches('"');
+        let name = name.split(['"', '(']).next().unwrap_or("");
+        // A Khora function polls in its own body or not at all, and the one
+        // this window may call is the builder of the close, checked below.
+        // A value's release routine (`kh$release$..`) runs no Khora code.
+        if name.starts_with("kh$") && !name.starts_with("kh$release$") {
+            assert_eq!(
+                name, "kh$std$net$http$closing_raw",
+                "a Khora call before the registration:\n{line}\n\n{body}"
+            );
+        }
+    }
+    let close = std_function_ir("polls_accepting_close", main, "$http$closing_raw");
+    assert!(!close.contains("@khora_poll"), "the close's builder has a cancellation point:\n{close}");
+}

@@ -1230,7 +1230,9 @@ deployments that matter — a file on disk and a secret handed in by the
 platform — disagree about that.
 
 The configuration is released when the caller's scope ends, which for a
-server is usually the program's.
+server is usually the program's. **So is the listening socket**: the
+port is free again once that scope ends, whether the server was left by
+a raise or by a cancel.
 
 ```khora
 import std::core::{ChildFailed, SharedFn, scoped};
@@ -1255,10 +1257,37 @@ secret store or an ACME client, and only one of those is a path.
 #### bound
 
 ```khora
-pub fn bound<'ef>(port: Int) -> Int raises HttpError
+pub fn bound<'ef>(port: Int) -> Int with { scope: Scope } raises HttpError
 ```
 
-A listening socket on `port`, announced by the caller.
+A socket listening on `port`, closed when the caller's scope ends.
+
+For a caller that binds the port itself and serves it with
+[`Router::serve_forever`](#serve_forever) or [`Router::serve_secured`](#serve_secured): a nursery of
+its own, a backlog of connections it wants open before it serves.
+
+**Registered with the caller's scope by the call that binds it.** The
+socket is handed straight from `listen_on` to `acquire`, so a fiber
+canceled at any point in here or after it leaves no port bound once
+the scope ends. A bare socket would be one the caller had to register
+before its next `!`, and a cancel landing first keeps the port bound
+for the life of the process.
+
+```khora
+import std::core::{ChildFailed, SharedFn, nursery, scoped};
+import std::net::http::{HttpError, Response, Router};
+
+pub fn main() -> Int raises HttpError + ChildFailed {
+  scoped(fn () => {
+    let server = Router::bound(8080)!;
+    nursery(fn () =>
+      Router::new()
+        |> Router::get("/health", SharedFn::of(fn _ => Response::text(200, "ok")))
+        |> Router::serve_forever(server)!)!
+  })!;
+  0
+}
+```
 
 #### serve_secured
 
@@ -1273,7 +1302,6 @@ A failed handshake ends that fiber quietly rather than the loop — on a
 public port it is the ordinary case, not an incident.
 
 ```khora
-import std::net::socket::{listen_on};
 import std::net::tls::{server};
 
 fn serve<'er>(router: Router<'er>, certificate: String, key: String) -> ()
@@ -1281,7 +1309,7 @@ fn serve<'er>(router: Router<'er>, certificate: String, key: String) -> ()
   raises 'er + TlsError + HttpError
 {
   let settings = server(certificate, key)!;
-  Router::serve_secured(router, listen_on(8443), settings)!
+  Router::serve_secured(router, Router::bound(8443)!, settings)!
 }
 ```
 
@@ -1290,7 +1318,9 @@ does not: a caller that wants the port opened on its own terms -- an
 inherited descriptor, a chosen backlog -- hands one over here.
 
 Like `serve_forever`, it accepts any number of connections over its
-life.
+life, and **a cancel leaves no connection open**: each connection is
+accepted by the fiber that serves it, which registers its close before
+anything that can stop.
 
 #### serve_forever
 

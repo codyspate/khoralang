@@ -153,8 +153,25 @@ pub fn server(certificate: String, key: String) -> TlsServer
 pub fn secure(server: TlsServer, socket: Int) -> TlsConnection
   raises TlsError
 {
+  match secured(server, socket) {
+    Option::None => raise TlsError::Handshake,
+    Option::Some(connection) => connection,
+  }
+}
+
+/// [`secure`], answering `None` for a failed handshake instead of raising.
+///
+/// **For a caller that registers the session's close itself.** The socket is
+/// the session's from the moment this is called, so the caller has to stop
+/// treating it as its own before the call and start holding the session the
+/// moment it returns, with nothing between that can stop. [`secure`] cannot
+/// give it that: the `!` its raise needs is a cancellation check, and a
+/// fiber canceled there has the socket in neither hand. This has no check
+/// but the one the handshake makes when a cancel cuts it short, and that
+/// one answers with no session and the socket already closed.
+pub fn secured(server: TlsServer, socket: Int) -> Option<TlsConnection> {
   let handle = khora_tls_accept(server.settings, socket);
-  if Ptr::is_null(handle) { raise TlsError::Handshake } else { { session: handle } }
+  if Ptr::is_null(handle) { Option::None } else { Option::Some({ session: handle }) }
 }
 
 /// Plaintext bytes into `into`: how many, 0 when the peer has closed, or -1.

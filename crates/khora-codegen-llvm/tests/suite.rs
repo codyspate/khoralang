@@ -111,6 +111,7 @@ mod schema;
 mod string_hash;
 mod shared;
 mod sharing;
+mod server_cancel;
 mod sleeping;
 mod sockets;
 mod spike;

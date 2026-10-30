@@ -261,6 +261,22 @@ pub(crate) struct Reactor {
     /// A socket the reactor also watches, so that registering can interrupt a
     /// `poll` already in flight. See [`Reactor::nudge`].
     waker: std::sync::OnceLock<Option<Nudge>>,
+    /// Tests only: what each `poll` asked the kernel for and whether the
+    /// waker ended it, so a test can say *why* a poll returned when it did.
+    /// Wall time cannot: a hosted runner that deschedules the test thread
+    /// for 70 ms looks exactly like a lost nudge.
+    #[cfg(test)]
+    passes: Mutex<Vec<Pass>>,
+}
+
+/// Tests only: one [`Reactor::poll`], as [`Reactor::passes`] records it.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+struct Pass {
+    /// The timeout handed to the kernel, after the soonest deadline cut it.
+    slice: std::time::Duration,
+    /// Whether the waker was among what came back: a registration ended it.
+    nudged: bool,
 }
 
 /// The two ends of a loopback pair used only to make `poll` return.
@@ -461,6 +477,8 @@ impl Reactor {
         };
 
         let mut woken = Vec::new();
+        #[cfg(test)]
+        let mut nudged = false;
 
         if scalable {
             #[cfg(target_os = "linux")]
@@ -473,6 +491,10 @@ impl Reactor {
                 for (socket, events) in ready {
                     if Some(socket) == waker {
                         self.drain();
+                        #[cfg(test)]
+                        {
+                            nudged = true;
+                        }
                         continue;
                     }
                     // **Every watch on the socket that the events answer**,
@@ -494,6 +516,10 @@ impl Reactor {
             for index in ready {
                 if index.fiber == WAKER_FIBER {
                     self.drain();
+                    #[cfg(test)]
+                    {
+                        nudged = true;
+                    }
                     continue;
                 }
                 // At most one: the entry `poll` reported, if nobody took it
@@ -508,6 +534,8 @@ impl Reactor {
             }
         }
         let mut watching = self.watching.lock().expect("the reactor");
+        #[cfg(test)]
+        self.passes.lock().expect("the passes").push(Pass { slice, nudged });
         // Whatever ran out of time leaves by the same door: the fiber retries,
         // finds nothing, and `wait_until_ready_by` sees its deadline has
         // passed. A timeout and a readiness are the same event to everything
@@ -935,7 +963,7 @@ mod tests {
         name: &str,
         reactor: Reactor,
         watch: impl Fn() -> Watch,
-    ) -> (Vec<usize>, Duration) {
+    ) -> (Vec<usize>, Duration, Vec<Pass>) {
         const REGISTER_BY: Duration = Duration::from_millis(10);
         let reactor = std::sync::Arc::new(reactor);
         // Opens the backend and the waker, so the poll below is a real wait
@@ -949,6 +977,7 @@ mod tests {
         });
         let mut late = Vec::new();
         for _ in 0..50 {
+            reactor.passes.lock().expect("the passes").clear();
             let polling = reactor.clone();
             let began = std::time::Instant::now();
             let waiter = std::thread::spawn(move || polling.poll(LONGEST_SLICE));
@@ -966,8 +995,12 @@ mod tests {
                 std::thread::yield_now();
             }
             let watch = watch();
-            let registered = began.elapsed();
             reactor.register(watch);
+            // **Measured once `register` has returned**, not before it: a
+            // round counts only if the whole registration, nudge included,
+            // happened while the poll in flight still had most of its
+            // `LONGEST_SLICE` to run.
+            let registered = began.elapsed();
             let mut woken = waiter.join().expect("the poll");
             // A poll the nudge ended may return before a deadline has passed,
             // and callers go round again; none of them may sleep past it.
@@ -976,7 +1009,8 @@ mod tests {
             }
             let took = began.elapsed();
             if registered <= REGISTER_BY {
-                return (woken, took);
+                let passes = reactor.passes.lock().expect("the passes").clone();
+                return (woken, took, passes);
             }
             // Leave the reactor as the round found it.
             reactor.forget(watch.fiber);
@@ -997,7 +1031,7 @@ mod tests {
         for (name, reactor) in every_backend() {
             let (client, mut server) = a_connected_pair();
             server.write_all(b"x").expect("the write should land");
-            let (woken, took) = register_during_a_poll(name, reactor, || Watch {
+            let (woken, took, _) = register_during_a_poll(name, reactor, || Watch {
                 socket: socket_of(&client),
                 interest: Interest::Readable,
                 fiber: 2,
@@ -1014,20 +1048,36 @@ mod tests {
     /// **A deadline registered during a poll ends that poll.** The kernel
     /// cannot shorten a timeout already computed, so this is the one
     /// registration on `epoll` that still has to nudge.
+    ///
+    /// **Judged by why the polls returned, not by how long they took.** A
+    /// lost nudge leaves the poll in flight to run its whole slice, and so
+    /// does a runner that deschedules this thread for as long; the wall clock
+    /// cannot tell them apart, and a macOS runner once took 69.6 ms with
+    /// nothing wrong. So the test reads what each poll recorded: the poll in
+    /// flight must have been ended by the waker, and every poll after it must
+    /// have asked the kernel for no more than the time left to the deadline.
+    /// Watched red on Linux with `REACTOR_MUTANT=drop-near`, the nudge a near
+    /// deadline needs.
     #[test]
     fn a_deadline_registered_during_a_poll_is_honored_by_that_poll() {
+        const DEADLINE: Duration = Duration::from_millis(5);
         for (name, reactor) in every_backend() {
             let (quiet, _quiet_peer) = a_connected_pair();
-            let (woken, took) = register_during_a_poll(name, reactor, || Watch {
+            let (woken, took, passes) = register_during_a_poll(name, reactor, || Watch {
                 socket: socket_of(&quiet),
                 interest: Interest::Readable,
                 fiber: 3,
-                deadline: Some(std::time::Instant::now() + Duration::from_millis(5)),
+                deadline: Some(std::time::Instant::now() + DEADLINE),
             });
-            assert_eq!(woken, [3], "{name}: the deadline was not reported");
+            assert_eq!(woken, [3], "{name}: the deadline was not reported ({took:?}, {passes:?})");
+            let (in_flight, after) = passes.split_first().expect("the poll in flight recorded itself");
             assert!(
-                took < LONGEST_SLICE - Duration::from_millis(15),
-                "{name}: it slept past the deadline: {took:?}"
+                in_flight.nudged,
+                "{name}: the registration did not end the poll in flight ({took:?}, {passes:?})"
+            );
+            assert!(
+                after.iter().all(|pass| pass.slice <= DEADLINE),
+                "{name}: a later poll would have slept past the deadline ({took:?}, {passes:?})"
             );
         }
     }

@@ -618,6 +618,56 @@ fn raw_close(socket: Socket) {
     unsafe { closesocket(socket) };
 }
 
+/// Closes a socket `std::net` or a TLS session owns, and counts the close if
+/// the system refused it.
+///
+/// **What this makes visible: a socket closed twice.** A close that fails
+/// because the handle is not open (`EBADF`, `WSAENOTSOCK`) means something
+/// closed it already, and if the number had been given to a new socket in
+/// between, the first close shut somebody else's connection. Neither shows
+/// as a leak, and on a release runtime nothing else reports it.
+/// [`khora_net_failed_closes`] is the count, for a test that two owners of
+/// one socket hand it over in the right order. What it costs: a relaxed
+/// atomic add on a failed close, and nothing on one that succeeds.
+///
+/// Returns -1 for a socket that was not open, and 0 otherwise: every other
+/// failure of a close has still released the handle.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_net_close(socket: Socket) -> i32 {
+    if close_counted(socket) { 0 } else { -1 }
+}
+
+/// [`khora_net_close`] for the runtime's own callers: false if the socket
+/// was not open.
+pub(crate) fn close_counted(socket: Socket) -> bool {
+    #[cfg(not(windows))]
+    // SAFETY: closing a descriptor touches no memory; a number that is not
+    // open fails with `EBADF`, which is counted below.
+    let failed = unsafe { libc::close(socket) } != 0
+        && std::io::Error::last_os_error().raw_os_error() == Some(libc::EBADF);
+    #[cfg(windows)]
+    let failed = {
+        use windows_sys::Win32::Networking::WinSock::{closesocket, WSAGetLastError, WSAENOTSOCK};
+        // SAFETY: closing a handle touches no memory; one that is not a
+        // socket fails with `WSAENOTSOCK`, which is counted below.
+        unsafe { closesocket(socket) != 0 && WSAGetLastError() == WSAENOTSOCK }
+    };
+    if failed {
+        FAILED_CLOSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    !failed
+}
+
+/// How many closes [`khora_net_close`] has seen refused.
+static FAILED_CLOSES: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// How many socket closes failed because the socket was not open: each one a
+/// socket something had closed already. [`khora_net_close`].
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_net_failed_closes() -> i64 {
+    FAILED_CLOSES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Starts a connect and says how it went.
 ///
 /// **`#[inline(never)]` for the reason [`would_block`] is**: the error is
@@ -841,6 +891,77 @@ pub extern "C" fn khora_net_forget(socket: Socket) {
     if let Some(table) = LIMITS.lock().expect("the socket limits").as_mut() {
         table.remove(&key(socket));
     }
+    if let Some(open) = ACCEPTED.lock().expect("the accepted sockets").as_mut() {
+        open.remove(&key(socket));
+    }
+}
+
+/// The sockets [`khora_net_accept`] has handed out and nothing has closed
+/// yet, by handle.
+///
+/// A set rather than a count, because the close it is matched with,
+/// [`khora_net_forget`], is called for every kind of socket: a listener's or
+/// a dialed socket's close must not count as an accepted one's. Every close of
+/// an accepted socket reaches `khora_net_forget`: `std::net::socket::shut`
+/// calls it, and so does a TLS session's release of the socket it took.
+static ACCEPTED: std::sync::Mutex<Option<std::collections::HashSet<usize>>> =
+    std::sync::Mutex::new(None);
+
+/// How many accepted sockets are open: handed out by [`khora_net_accept`] and
+/// not yet closed.
+///
+/// **For a leak test that `/dev/fd` cannot be everywhere.** A server whose
+/// connection fiber is canceled before it registers the close drops a plain
+/// handle, which shows only in the process's descriptor table, and Windows
+/// has no listing of it. This is exact on every system. What it costs: a lock
+/// and a set insert per accept and a lock and a set removal per close, beside
+/// the `LIMITS` entry every accepted connection already gets.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_net_accepted_open() -> i64 {
+    ACCEPTED.lock().expect("the accepted sockets").as_ref().map_or(0, |open| open.len() as i64)
+}
+
+/// The port `socket` is bound to, or -1 if it is not bound or not a socket.
+///
+/// **For a test that needs a port no earlier round has used.** A server
+/// that closes connections it accepted leaves them in `TIME_WAIT` on its own
+/// port, and a system that refuses a listener over such a port -- Linux and
+/// macOS without `SO_REUSEADDR`, and a Windows CI runner, where `std` does
+/// not set it -- fails a test that rebinds one port every round on the
+/// second round, before it has counted anything. Bound to port 0, a
+/// listener gets a port the system picked as free, and this says which.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_net_local_port(socket: Socket) -> i64 {
+    #[cfg(not(windows))]
+    {
+        // SAFETY: an all-zero `sockaddr_in` is a valid value of the type.
+        let mut address: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+        let mut length = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+        // SAFETY: `address` is writable for `length` bytes, and `length` says
+        // so; a number that is not an open socket fails with `EBADF` or
+        // `ENOTSOCK` and writes nothing.
+        let got = unsafe { libc::getsockname(socket, (&raw mut address).cast(), &mut length) };
+        if got == 0 && i32::from(address.sin_family) == libc::AF_INET {
+            i64::from(u16::from_be(address.sin_port))
+        } else {
+            -1
+        }
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Networking::WinSock::{getsockname, AF_INET, SOCKADDR_IN};
+        // SAFETY: an all-zero `SOCKADDR_IN` is a valid value of the type.
+        let mut address: SOCKADDR_IN = unsafe { std::mem::zeroed() };
+        let mut length = std::mem::size_of::<SOCKADDR_IN>() as i32;
+        // SAFETY: as above: `address` is writable for `length` bytes, and a
+        // handle that is not a socket fails with `WSAENOTSOCK`.
+        let got = unsafe { getsockname(socket, (&raw mut address).cast(), &mut length) };
+        if got == 0 && address.sin_family == AF_INET {
+            i64::from(u16::from_be(address.sin_port))
+        } else {
+            -1
+        }
+    }
 }
 
 /// Reads whatever has already arrived, and never waits.
@@ -1015,7 +1136,15 @@ pub unsafe extern "C" fn khora_net_accept(
         // SAFETY: the caller guarantees the pair are null or a valid buffer
         // and its length.
         let accepted = unsafe { raw_accept(socket, address, length) };
-        if accepted >= 0 || !would_block() {
+        if accepted >= 0 {
+            ACCEPTED
+                .lock()
+                .expect("the accepted sockets")
+                .get_or_insert_with(std::collections::HashSet::new)
+                .insert(accepted as usize);
+            return accepted;
+        }
+        if !would_block() {
             return accepted;
         }
         // No deadline on `accept`: a listener waiting for the next connection
@@ -1132,6 +1261,28 @@ mod tests {
     use super::*;
     use crate::reactor::{a_connected_pair, socket_of};
     use std::io::Write;
+
+    /// **A close of a socket that is not open is counted, and a good close
+    /// is not.** The count is what makes a socket closed twice visible to a
+    /// test; one that also counted a good close, or missed a bad one, would
+    /// make the TLS server's hand-over test pass or fail at random. The bad
+    /// close is of a number no socket can have, rather than a real one closed
+    /// twice: tests run in parallel, and another one could be given the
+    /// number between the two closes.
+    #[test]
+    fn a_close_of_a_socket_not_open_is_counted_and_a_good_one_is_not() {
+        let (client, _server) = a_connected_pair();
+        let socket = socket_of(&client);
+        // The handle now belongs to the close below, not to `client`.
+        std::mem::forget(client);
+        let before = khora_net_failed_closes();
+        assert_eq!(khora_net_close(socket), 0, "a good close was refused");
+        assert_eq!(khora_net_failed_closes(), before, "a good close was counted");
+        // Above every descriptor limit, and not a handle Windows hands out.
+        let never: Socket = 0x7fff_fff0;
+        assert_eq!(khora_net_close(never), -1, "a close of nothing succeeded");
+        assert!(khora_net_failed_closes() > before, "a close of nothing was not counted");
+    }
 
     /// Off a scheduler this blocks the thread, so the bytes are there when it
     /// returns — which is what a program that never spawns a fiber expects,

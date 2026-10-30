@@ -46,6 +46,7 @@ extern fn khora_net_forget(handle: I32) -> ();
 extern fn khora_net_connect(host: Ptr, host_len: Int, port: Int, deadline: Int) -> Int;
 extern fn khora_net_set_deadline(handle: I32, deadline: Int) -> I32;
 extern fn khora_net_expired(handle: I32) -> I32;
+extern fn khora_net_close(handle: I32) -> I32;
 
 /// A failed call returns -1, and a handle is never negative.
 pub fn invalid_handle() -> Int { -1 }
@@ -286,7 +287,7 @@ pub fn shut(handle: Int) -> () {
   // reused: without this, the next connection handed the same number would
   // inherit it.
   khora_net_forget(I32::of(handle));
-  close(I32::of(handle));
+  khora_net_close(I32::of(handle));
 }
 
 /// Reads what has already arrived, without waiting for more.

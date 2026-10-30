@@ -1,10 +1,10 @@
 module std::net::http;
 
-import std::core::{Array, ChildFailed, Eq, List, Map, Nursery, Option, Ptr, Raised, Region, Result, Scope, SharedFn, Show, Split, acquire, attempt, bounded_nursery, scoped};
+import std::core::{Array, Channel, ChildFailed, Eq, List, Map, Nursery, Option, Ptr, Raised, Region, Result, Scope, SharedFn, Show, Split, acquire, attempt, bounded_nursery, scoped};
 import std::permissions::{granted_host};
 import std::permissions::grants::{network};
 import std::net::socket::{accept_on, expired, invalid_handle, listen_on, receive, set_deadline, set_receive_timeout, shut, start, transmit};
-import std::net::tls::{TlsClient, TlsConnection, TlsError, TlsServer, client as tls_client, connect_by as tls_connect_by, expired as tls_expired, receive as tls_receive, secure, server as tls_server, set_deadline as tls_set_deadline, set_receive_timeout as tls_set_receive_timeout, shut as tls_shut, transmit as tls_transmit};
+import std::net::tls::{TlsClient, TlsConnection, TlsError, TlsServer, client as tls_client, connect_by as tls_connect_by, expired as tls_expired, receive as tls_receive, secured, server as tls_server, set_deadline as tls_set_deadline, set_receive_timeout as tls_set_receive_timeout, shut as tls_shut, transmit as tls_transmit};
 import std::clock::{Clock};
 import std::time::{Date, DateTime, Time};
 import std::schema::{Encode, json_text};
@@ -858,7 +858,7 @@ pub fn over_tls(connection: TlsConnection) -> Transport {
 /// The rule was there for a reason, which is why it survived: `receive` blocks,
 /// so "keep reading until the request is complete" and "keep reading forever"
 /// are the same loop when the client stops talking. What makes the honest
-/// version safe is the deadline `serve_connection` sets before calling this —
+/// version safe is the deadline `Router::accepting` sets before calling this —
 /// a client that goes quiet gets its socket closed instead of parking a fiber
 /// for the life of the process.
 fn read_request(transport: Transport, into: Array<U8>, from: Int, scratch: Array<U8>) -> Int {
@@ -1776,7 +1776,10 @@ impl Router {
     // is a fiber, and that fiber is inside the handler for as long as the
     // handler runs; there is no second, smaller pool that handlers queue
     // for. So `256` is the most connections served at once *and* the most
-    // handlers running at once.
+    // handlers running at once. Up to `acceptors()` of the 256 are fibers
+    // waiting in `accept`, and each serves the connection it takes, so all
+    // 256 can be serving at once; while the server is waiting for more, at
+    // most 256 less the waiting acceptors are being answered.
     //
     // Measured 2026-09-02: the server saturates well below it. Throughput
     // is flat from 16 connections to 128 — 176k, 180k, 177k, 176k requests
@@ -1806,16 +1809,14 @@ impl Router {
   /// canceled `listen` left the port bound for the life of the process, which
   /// is what a test that stops a server and binds the port again sees.
   ///
-  /// **`listen_on`'s answer goes straight into `acquire`**, so nothing that
-  /// can stop runs between the bind and the registration. A refused bind is
-  /// `invalid_handle()`, which the release leaves alone.
+  /// **`listen_on`'s answer goes straight into `acquire`**, in
+  /// [`Router::bound`], so nothing that can stop runs between the bind and
+  /// the registration.
   fn held_open<'er>(router: Router<'er>, port: Int, announce: Bool) -> ()
     with { scope: Scope }
     raises 'er + HttpError + ChildFailed
   {
-    if start() {} else { raise HttpError::BindFailed(port) };
-    let held = acquire(listen_on(port), fn s => if s == invalid_handle() {} else { shut(s) });
-    if held == invalid_handle() { raise HttpError::BindFailed(port) } else {};
+    let held = Router::bound(port)!;
     // Announced before the loop rather than after it, because after never
     // comes: the loop returns when the process stops.
     if announce { print("listening on ${Int::to_string(port)}") } else {};
@@ -1830,7 +1831,9 @@ impl Router {
   /// platform — disagree about that.
   ///
   /// The configuration is released when the caller's scope ends, which for a
-  /// server is usually the program's.
+  /// server is usually the program's. **So is the listening socket**: the
+  /// port is free again once that scope ends, whether the server was left by
+  /// a raise or by a cancel.
   ///
   /// ```khora
   /// import std::core::{ChildFailed, SharedFn, scoped};
@@ -1861,13 +1864,43 @@ impl Router {
     bounded_nursery(256, fn () => Router::serve_secured(router, server, settings)!)!
   }
 
-  /// A listening socket on `port`, announced by the caller.
-  pub fn bound<'ef>(port: Int) -> Int raises HttpError {
+  /// A socket listening on `port`, closed when the caller's scope ends.
+  ///
+  /// For a caller that binds the port itself and serves it with
+  /// [`Router::serve_forever`] or [`Router::serve_secured`]: a nursery of
+  /// its own, a backlog of connections it wants open before it serves.
+  ///
+  /// **Registered with the caller's scope by the call that binds it.** The
+  /// socket is handed straight from `listen_on` to `acquire`, so a fiber
+  /// canceled at any point in here or after it leaves no port bound once
+  /// the scope ends. A bare socket would be one the caller had to register
+  /// before its next `!`, and a cancel landing first keeps the port bound
+  /// for the life of the process.
+  ///
+  /// ```khora
+  /// import std::core::{ChildFailed, SharedFn, nursery, scoped};
+  /// import std::net::http::{HttpError, Response, Router};
+  ///
+  /// pub fn main() -> Int raises HttpError + ChildFailed {
+  ///   scoped(fn () => {
+  ///     let server = Router::bound(8080)!;
+  ///     nursery(fn () =>
+  ///       Router::new()
+  ///         |> Router::get("/health", SharedFn::of(fn _ => Response::text(200, "ok")))
+  ///         |> Router::serve_forever(server)!)!
+  ///   })!;
+  ///   0
+  /// }
+  /// ```
+  pub fn bound<'ef>(port: Int) -> Int
+    with { scope: Scope }
+    raises HttpError
+  {
     if start() {
     } else {
       raise HttpError::BindFailed(port)
     };
-    let server = listen_on(port);
+    let server = acquire(listen_on(port), fn s => if s == invalid_handle() {} else { shut(s) });
     if server == invalid_handle() { raise HttpError::BindFailed(port) } else { server }
   }
 
@@ -1878,7 +1911,6 @@ impl Router {
   /// public port it is the ordinary case, not an incident.
   ///
   /// ```khora
-  /// import std::net::socket::{listen_on};
   /// import std::net::tls::{server};
   ///
   /// fn serve<'er>(router: Router<'er>, certificate: String, key: String) -> ()
@@ -1886,7 +1918,7 @@ impl Router {
   ///   raises 'er + TlsError + HttpError
   /// {
   ///   let settings = server(certificate, key)!;
-  ///   Router::serve_secured(router, listen_on(8443), settings)!
+  ///   Router::serve_secured(router, Router::bound(8443)!, settings)!
   /// }
   /// ```
   ///
@@ -1895,30 +1927,60 @@ impl Router {
   /// inherited descriptor, a chosen backlog -- hands one over here.
   ///
   /// Like `serve_forever`, it accepts any number of connections over its
-  /// life.
+  /// life, and **a cancel leaves no connection open**: each connection is
+  /// accepted by the fiber that serves it, which registers its close before
+  /// anything that can stop.
   pub fn serve_secured<'er>(router: Router<'er>, server: Int, settings: TlsServer) -> ()
     with { nursery: Nursery }
     raises 'er + HttpError
   {
+    // As in `serve_forever`: `acceptors()` waiting, and room for every one
+    // of them to say it has taken a connection.
+    let taken: Channel<Int> = Channel::bounded(Router::acceptors());
+    let mut started = 1;
+    while started < Router::acceptors() {
+      nursery.spawn(fn () => Router::accepting_secured(router, server, settings, taken));
+      started = started + 1
+    };
     loop {
-      let connection = accept_on(server);
-      if connection == invalid_handle() {
-      } else {
-        set_receive_timeout(connection, 10000);
-        nursery.spawn(fn () => Router::secure_and_serve(router, connection, settings));
-      }
+      nursery.spawn(fn () => Router::accepting_secured(router, server, settings, taken));
+      let _ = Channel::receive(taken);
     }
   }
 
-  /// One connection, handshaken and then served.
+  /// One connection over TLS, from the accept to the close, on the fiber
+  /// that serves it: `Router::accepting`, with a handshake between the accept
+  /// and the answers.
   ///
-  /// A failed handshake is the ordinary case on a public port — a scanner, a
-  /// browser sent to `http://` — so it ends this fiber quietly. `secure` has
-  /// already closed the socket.
-  fn secure_and_serve<'er>(router: Router<'er>, connection: Int, settings: TlsServer) -> () {
-    match attempt(fn () => secure(settings, connection)!) {
-      Result::Err(_) => (),
-      Result::Ok(secured) => Router::serve_connection(router, over_tls(secured)),
+  /// **Two closes, one at a time.** The socket is the server's until it is
+  /// handed to `secured`, which owns it from its first instruction and
+  /// closes it on every failure, and the session's after. So the close
+  /// registered first shuts the socket only while `Hand::raw` says it is
+  /// still the server's; `raw` is cleared just before the hand-over, and the
+  /// session's close is registered as soon as there is a session. Nothing
+  /// between clearing `raw` and the hand-over can stop, and nothing between
+  /// `secured` answering and the second registration can. A failed
+  /// handshake is the ordinary case on a public port -- a scanner, a
+  /// browser sent to `http://` -- and ends this fiber quietly.
+  fn accepting_secured<'er>(router: Router<'er>, server: Int, settings: TlsServer, taken: Channel<Int>) -> () {
+    let closes = Region::open();
+    let connection = accept_on(server);
+    let hand: Hand = { raw: true };
+    Region::defer(closes, closing_raw(hand, connection));
+    let _ = Channel::offer(taken, connection);
+    if connection == invalid_handle() {
+    } else {
+      // The deadline goes on the socket before anything wraps it, because a
+      // handshake can hang exactly as a request can.
+      set_receive_timeout(connection, 10000);
+      hand.raw = false;
+      match secured(settings, connection) {
+        Option::None => (),
+        Option::Some(held) => {
+          Region::defer(closes, closing_tls(held));
+          Router::answering(router, over_tls(held))
+        },
+      }
     }
   }
 
@@ -1963,12 +2025,33 @@ impl Router {
     with { nursery: Nursery }
     raises 'er + HttpError
   {
+    // At least as many places as acceptors, so no acceptor's `offer` can
+    // fail: one that did would never be replaced, and the server would run
+    // one acceptor short for the rest of its life.
+    let taken: Channel<Int> = Channel::bounded(Router::acceptors());
+    let mut started = 1;
+    while started < Router::acceptors() {
+      nursery.spawn(fn () => Router::accepting(router, server, taken));
+      started = started + 1
+    };
     loop {
-      Router::serve_once(router, server)!
+      Router::serve_once(router, server, taken)!
     }
   }
 
-  /// Accepts one connection and hands it to a fiber of its own.
+  /// Starts one acceptor, and waits for an acceptor to take a connection.
+  ///
+  /// `serve_forever` starts `acceptors()` fibers that wait in `accept_on`,
+  /// and this keeps that many waiting: each time one takes a connection and
+  /// says so on `taken`, this starts its replacement. Each acceptor serves
+  /// the connection it took on its own fiber, `Router::accepting`, which is
+  /// what keeps a cancel from leaving a connection open.
+  ///
+  /// **The nursery is what makes it structured rather than merely
+  /// concurrent**: a spawned fiber cannot outlive it, so leaving `listen` —
+  /// by a raise, or by cancellation — deals with the connections still being
+  /// answered instead of abandoning them. The acceptors still waiting are
+  /// canceled with them, and an accept that is canceled has taken nothing.
   ///
   /// **This is what `SharedFn` bought.** A closure's captures are not in its
   /// type, so a `Router` holding plain closures could never cross into a fiber
@@ -1976,11 +2059,6 @@ impl Router {
   /// where it is mounted makes the route an ordinary shareable record, and the
   /// thunk below closes over the whole router without anything special being
   /// said about routers.
-  ///
-  /// The nursery is what makes it structured rather than merely concurrent: an
-  /// spawned fiber cannot outlive it, so leaving `listen` — by a raise, or by
-  /// cancellation — deals with the connections still being answered instead of
-  /// abandoning them.
   ///
   /// **A fiber is an operating-system thread today**, so this is
   /// thread-per-connection and should be read as such: fine for a service with
@@ -1990,22 +2068,76 @@ impl Router {
   /// it has — so the ceiling is the runtime's to raise and not this module's.
   /// Until it does, the honest position is a bounded number of connections
   /// rather than an event loop that happens not to be written yet.
-  fn serve_once<'er>(router: Router<'er>, server: Int) -> ()
+  fn serve_once<'er>(router: Router<'er>, server: Int, taken: Channel<Int>) -> ()
     with { nursery: Nursery }
     raises 'er + HttpError
   {
+    nursery.spawn(fn () => Router::accepting(router, server, taken));
+    // An acceptor stopped before it took a connection says nothing, and the
+    // cancel that stopped it is the one this receive gives up on.
+    let _ = Channel::receive(taken);
+  }
+
+  /// How many fibers wait in `accept` at once, in `serve_forever` and
+  /// `serve_secured`.
+  ///
+  /// **What this prevents: accepting at the speed of one fiber start.** With
+  /// one acceptor, every connection waited for the last acceptor to take its
+  /// own and for its replacement to start: on the thread backend, a thread
+  /// start per connection, in series. Connection-per-request throughput fell
+  /// 11 to 21% against a loop that accepted and spawned behind itself. Two
+  /// or more acceptors overlap the start of one with the accept of another.
+  /// Four, because it was the smallest that was level with that loop on
+  /// both backends at 64 and 256 clients, connection per request; two
+  /// recovered about half the loss on the thread backend at 256, and eight
+  /// was no faster than four anywhere and slower in one run.
+  ///
+  /// What it costs: that many fibers waiting while the server is idle, each
+  /// holding one of the nursery's places; under load each serves the
+  /// connection it took, so the most connections served at once is still
+  /// the nursery's bound.
+  fn acceptors() -> Int { 4 }
+
+  /// One connection, from the accept to the close, on the fiber that serves
+  /// it.
+  ///
+  /// **What this prevents: an accepted connection nobody closes.** Accepted
+  /// by the loop and handed to the child as a plain socket, a connection was
+  /// lost to every cancellation point between the two: the spawned lambda's
+  /// entry check, the bounded nursery's wait for room, which lets go of a
+  /// child it had not started, and the checks on the way to `acquire`. 1,000
+  /// servers canceled right after a connect left 423 to 667 connections open
+  /// on the thread backend and 16 to 28 on the scheduler. Accepted here, the
+  /// socket is made after this fiber's last check before the registration:
+  /// `Region::open`, a record and `Region::defer` cannot stop, and
+  /// `accept_on` checks for a cancel only when it gave up without a socket.
+  ///
+  /// **The registration comes before anything that can stop.** This
+  /// function hands a closure to `Region::defer`, so it checks for a cancel
+  /// when it is entered, and that check is before the accept, where there is
+  /// nothing to lose. `closing_raw` builds the close in a function that calls
+  /// no function value, so the close has no entry check of its own: built
+  /// here, it would check for a cancel when it was run, and an `abort` in
+  /// cleanup could stop it before the socket was shut.
+  ///
+  /// What it costs: the accept moves from the loop to the child, and the
+  /// child says on `taken` that it has taken a connection, which is a
+  /// channel hand-off per connection.
+  fn accepting<'er>(router: Router<'er>, server: Int, taken: Channel<Int>) -> () {
+    let closes = Region::open();
     let connection = accept_on(server);
+    let hand: Hand = { raw: true };
+    Region::defer(closes, closing_raw(hand, connection));
+    let _ = Channel::offer(taken, connection);
     if connection == invalid_handle() {
     } else {
-      // The deadline goes on the socket before anything wraps it, because a
-      // handshake can hang exactly as a request can.
       set_receive_timeout(connection, 10000);
-      nursery.spawn(fn () =>
-        Router::serve_connection(router, over_socket(connection)));
+      Router::answering(router, over_socket(connection))
     }
   }
 
-  /// One connection, from the first byte to the close.
+  /// Answers every request on one connection, inside the region that closes
+  /// it.
   ///
   /// What a fiber runs, and it does not fail: a fiber has nobody to hand a
   /// failure to, and a connection nothing closes is a descriptor leaked for the
@@ -2017,28 +2149,18 @@ impl Router {
   /// one thing naming constructors cannot express, and the reason a total
   /// wildcard arm exists at all.
   ///
-  /// **The close is registered rather than written after the catch**, because
-  /// the catch does not cover the third way out. A fiber serving a connection
-  /// can be canceled -- by its nursery ending, or by the server shutting down
-  /// -- and cancellation unwinds without running the line below the block. The
-  /// region runs on every exit, which is the whole reason `Scope` exists.
-  ///
-  /// Registered *instead of*, not as well as: `shut` on a TLS transport frees
-  /// the session, so closing twice is a double free rather than a wasted call.
-  fn serve_connection<'er>(router: Router<'er>, transport: Transport) -> () {
-    scoped(fn () => Router::served(router, transport))
-  }
-
-  /// The body of `serve_connection`, inside the region that closes the socket.
-  fn served<'er>(router: Router<'er>, transport: Transport) -> ()
-    with { scope: Scope }
-  {
-    acquire(transport, fn t => t.shut());
-    // Before anything is read. `read_request` keeps reading until the request
-    // is complete, which is the only correct thing to do and is also how a
-    // fiber gets parked forever by a client that stops talking. Ten seconds is
-    // long enough that no real client notices and short enough that a
-    // half-open connection is not a leak.
+  /// **The close is the caller's, registered before this is called**,
+  /// because the catch does not cover the third way out. A fiber serving a
+  /// connection can be canceled -- by its nursery ending, or by the server
+  /// shutting down -- and cancellation unwinds without running the line below
+  /// the block. The region runs on every exit.
+  fn answering<'er>(router: Router<'er>, transport: Transport) -> () {
+    // `answer_on_holding` sets nothing on the socket: the ten-second read
+    // limit was set by the caller before anything wrapped it. `read_request`
+    // keeps reading until the request is complete, which is the only correct
+    // thing to do and is also how a fiber gets parked forever by a client
+    // that stops talking. Ten seconds is long enough that no real client
+    // notices and short enough that a half-open connection is not a leak.
     Router::answer_on_holding(router, transport, router.limit) catch {
       _ => {
         let failed = Response::text(500, "handler failed");
@@ -2617,6 +2739,19 @@ fn closing(socket: Int) -> () -> () {
 /// The same, for a secured connection.
 fn closing_tls(session: TlsConnection) -> () -> () {
   fn () => tls_shut(session)
+}
+
+/// Whether an accepted socket is still the server's to close: true until
+/// it is handed to the TLS handshake, which owns it from then on.
+type Hand = { mut raw: Bool };
+
+/// The close the HTTP server registers for a socket it has just accepted:
+/// shuts it while `hand` says it is still the server's, and does nothing for
+/// [`invalid_handle`], the answer of an accept that gave up.
+///
+/// Built here for the reason [`closing`] is.
+fn closing_raw(hand: Hand, socket: Int) -> () -> () {
+  fn () => if hand.raw && socket != invalid_handle() { shut(socket) } else {}
 }
 
 /// The `CallError` for a secured connection that was not made.

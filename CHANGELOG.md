@@ -26,6 +26,12 @@ it will behave differently now.
   pass `Tls::Verify(pem)`. `postgres::db::connect` takes a `Tls` before the
   handshake bound and answers a `conn::Failed`, which says whether a retry
   could change the failure.
+- `Router::bound` requires `with { scope: Scope }` and registers the
+  listener's close with it, so the port is free once that scope ends,
+  however it ends. It handed back a bare socket, and a caller canceled
+  before registering one kept the port bound for the life of the process.
+  A caller inside `scoped(..)` or a function that already has a `scope`
+  changes nothing; one that closed the socket itself drops its close.
 - A `String` hashes under a key the program draws from the operating system
   once per run, so `Hash::hash` of a string differs from one run to the next
   and a `Map` keyed by text reports its entries in a different order on every
@@ -227,10 +233,27 @@ it will behave differently now.
   only the outermost `acquire` on a fiber and is never a force's, so a
   `Scope` handler that calls `acquire` again through itself still stops at
   a cancel or `Fiber::abort`, and it ends on every way out of `acquire`.
-  Two leaks on cancel remain in the HTTP server, and the
-  [limitations page](/docs/limitations/#http-surface) states them: accepted
-  connections a canceled server had not started serving stay open, and
-  `Router::listen_tls` does not close its listener.
+- A canceled HTTP server closes every connection it accepted and its
+  listener. The accept loop took a connection and handed the socket to the
+  fiber that would serve it, and a cancel landing first -- at that fiber's
+  entry check, in a full nursery's wait for room, which lets go of a child
+  it has not started, or before the close was registered -- left the
+  socket open with the server's end in `CLOSE-WAIT`: 1,000 servers
+  canceled right after a connect left 423 to 667 open on the thread
+  backend and 16 to 28 on the scheduler. Each connection is accepted on the
+  fiber that serves it, with its close registered before anything that can
+  stop. Four connections are accepted at a time, so connection-per-request
+  throughput is level with the loop it replaces on both backends.
+  `Router::serve_secured` has the same shape, and a connection
+  is closed by the server until the handshake takes it and by the session
+  after. `Router::listen_tls` registers its listener's close, so the port
+  is free once a canceled TLS server's scope ends. `khora_tls_accept`
+  closes the socket on every failure, including the two before the
+  handshake starts. Two new runtime exports serve leak tests:
+  `khora_net_accepted_open` counts the accepted sockets not yet closed,
+  where `/dev/fd` does not work, and `khora_net_failed_closes` counts
+  socket closes refused because the socket was not open, each one a socket
+  closed twice.
 - Documentation examples that did not compile: a `handler for Clock` written
   with a `now` operation `Clock` does not have (Reference: capabilities,
   effects, expressions), a `Fiber::join` caught on `DbError` cases that do not
