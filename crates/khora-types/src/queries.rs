@@ -384,6 +384,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             lambdas: Vec::new(),
             demanded: Vec::new(),
             projections: Vec::new(),
+            literal_pats: Vec::new(),
             coverage: Vec::new(),
             broken_pats: HashSet::new(),
             bare_names: Vec::new(),
@@ -443,6 +444,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
         checker.check_handoff_sends();
         checker.check_unsettled_raises();
         checker.settle_projections();
+        checker.settle_literal_patterns();
         // Before coverage: a bare case name is reported as what it is, and
         // the pattern it sits in is then not asked about coverage. After the
         // projections, for the same reason coverage is.

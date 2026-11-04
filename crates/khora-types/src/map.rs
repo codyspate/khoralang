@@ -243,12 +243,53 @@ impl TypeMap {
                  can be written. Require it: `{name}: Share`"
             );
         }
-        if let Type::Adt { name, .. } = ty {
+        if let Type::Adt { name, home, .. } = ty {
             if self.bodies_of(name).next().is_none() && !self.effects.contains(name) {
+                // **Advice only the declaring module can take is no advice
+                // anywhere else.** `impl Share` is refused outside the module
+                // that declares the type, so telling a program to write
+                // `impl Share for Array` sent it to a fix the orphan rule then
+                // refused. Here the reader can vouch; elsewhere the message
+                // names who can, and a route that works without them.
+                if self.declared_here.contains(name) {
+                    return format!(
+                        "`{ty}` is declared without a body, so nothing here can see whether it \
+                         can be written — and `Array` and `Ptr` both can. A type that is safe \
+                         for two fibers to hold at once says so with `impl Share for {name}`"
+                    );
+                }
+                let owner = home.as_ref().map_or_else(
+                    || "the module that declares it".to_string(),
+                    |home| format!("`{}`", home.segments().join("::")),
+                );
+                let from_std_core =
+                    home.as_ref().is_some_and(|home| home.segments() == ["std", "core"]);
+                // **`Opaque` lives only inside a `Raised`**, so the `Handoff`
+                // route below is itself refused for it, and so is sending the
+                // `Raised`, which stays on the fiber that caught it. Its text
+                // is what crosses: `Raised::only` would hand back the
+                // `Opaque` itself, which is the thing that cannot.
+                if from_std_core && name == "Opaque" {
+                    return format!(
+                        "`{ty}` is declared without a body, so nothing here can see whether it \
+                         can be written, and only {owner} may vouch for it with `impl Share`. An \
+                         `Opaque` is only ever held inside a `Raised`, which stays on the fiber \
+                         that caught it; send its text instead, formatted where it was caught: \
+                         `failure.show()`, a `String`"
+                    );
+                }
+                let copy = if from_std_core && name == "Array" {
+                    "; or copy what the other fiber needs into a value with nothing to write: \
+                     `Array::to_list(a)` for a `List` of the elements or, for bytes that are \
+                     text, a `String`"
+                } else {
+                    ""
+                };
                 return format!(
-                    "`{ty}` is declared without a body, so nothing here can see whether it \
-                     can be written — and `Array` and `Ptr` both can. A type that is safe \
-                     for two fibers to hold at once says so with `impl Share for {name}`"
+                    "`{ty}` is declared without a body, so nothing here can see whether it can \
+                     be written, and only {owner} may vouch for it with `impl Share`. Give it \
+                     away through a `Handoff` instead, which leaves the sender nothing to \
+                     write it with{copy}"
                 );
             }
         }

@@ -39,12 +39,22 @@ A hundred and twenty-eight covers that, `NUMERIC` as real schemas declare
 it, and an eighteen-decimal token balance — where sixty-four bits ran out at
 9.2 whole units.
 
+## Operators
+
+`+`, `-`, `*` and unary `-` on two `Decimal`s are `add`, `sub`, `mul` and
+`negate`, with their answer, scale and stop: `price * quantity + shipping`.
+Both operands are `Decimal`s, and `Decimal::of_int` makes a count into one.
+`/` is refused, because a quotient needs the scale and rounding `divide`
+takes. `==` and `<` compare by value. An operator traps; `checked_*`
+refuses.
+
 ## What it does when it cannot answer
 
 It stops the program, like every other number in Khora. `numbers.md`
 §"Overflow traps, in every build" argues that case and none of the argument
 changes here: a total that silently wrapped is worse than one that never
-arrived. That covers `add`, `sub`, `mul`, `at_scale` and `divide` alike.
+arrived. That covers `+`, `-`, `*`, `add`, `sub`, `mul`, `at_scale` and
+`divide` alike.
 
 Division is not an exception to it. It takes a scale and a rounding because
 a quotient usually has no exact decimal form, and answers `None` when the
@@ -59,6 +69,30 @@ and needs no common scale to exist. Reading text that is not a number —
 including a numeral too long to hold — is what `of_string`'s `Option` is
 for. And `show` is string work, so it prints every scale a `Decimal` can
 carry rather than the first eighteen.
+
+## Arithmetic on amounts you did not choose
+
+A stopped program is right for a bug and wrong for input. An amount that
+arrived in a request can be absurd without anything being wrong with the
+program, and stopping over it stops every other request the program was
+serving. `checked_add`, `checked_sub`, `checked_mul` and `checked_divide`
+answer `None` where their plain forms stop, so the absurd amount becomes a
+refusal of that one request:
+
+```khora
+fn order_total(price: Decimal, quantity: Decimal, shipping: Decimal) -> Result<Decimal, String> {
+  match Decimal::checked_mul(price, quantity) {
+    Option::Some(subtotal) => match Decimal::checked_add(subtotal, shipping) {
+      Option::Some(total) => Result::Ok(total),
+      Option::None => Result::Err("400: the total is too large"),
+    },
+    Option::None => Result::Err("400: the quantity is too large"),
+  }
+}
+```
+
+Use the operators and the plain forms on numbers the program made itself,
+where an overflow is a bug worth stopping for.
 
 ## Types
 
@@ -95,6 +129,13 @@ two scales before it works, so a wide scale is paid for in both. A scale
 arriving from input rather than from a literal is worth a bound of the
 caller's own choosing; there is no obvious one to impose here, and imposing
 a wrong one would silently change values that are correct today.
+
+**On an amount from outside the program, use `checked_add`,
+`checked_sub`, `checked_mul` and `checked_divide`.** The operators and the
+plain forms stop the program when the answer does not fit, which is right
+for a bug and stops every request a server is serving when one request's
+amount is absurd; the checked forms answer `None`, for the caller to turn
+into a refusal of that request. The module documentation has the example.
 
 ### Rounding
 
@@ -219,7 +260,9 @@ The sum. Exact, and stops the program if it does not fit.
 
 Both operands come to the larger of their two scales first, which is the
 step that made sixty-four bits too narrow: the operands fit and their
-aligned forms did not.
+aligned forms did not. **Scales more than 38 apart stop it too**, even
+when the answer would fit, because no significand can be moved more than
+38 places: `Decimal::add(Decimal::zero(), Decimal::scaled(1, 40))` stops.
 
 #### sub
 
@@ -227,7 +270,8 @@ aligned forms did not.
 pub fn sub(self, other: Decimal) -> Decimal
 ```
 
-The difference. Exact, and stops the program if it does not fit.
+The difference. Exact, and stops the program if it does not fit, or if
+the scales are more than 38 apart, as `add` does.
 
 #### mul
 
@@ -266,6 +310,50 @@ is the failure this whole type exists to prevent. `rounded` goes through
 here, so it stops too.
 
 A negative `scale` is clamped to zero, as it is in every constructor.
+
+#### checked_add
+
+```khora
+pub fn checked_add(self, other: Decimal) -> Option<Decimal>
+```
+
+The sum, or `None` if it does not fit. `add` stops the program instead.
+
+**`None` also when the scales are more than 38 apart**, even if the
+answer would fit: `checked_add(Decimal::of_int(2), Decimal::scaled(1, 40))`
+is `None`, because the 2 cannot be written at 40 places. Round the finer
+operand first if that is not what is wanted.
+
+The one to use on an amount you did not choose; see the type's
+documentation for the shape of the refusal.
+
+#### checked_sub
+
+```khora
+pub fn checked_sub(self, other: Decimal) -> Option<Decimal>
+```
+
+The difference, or `None` if it does not fit or the scales are more than
+38 apart, as in `checked_add`. `sub` stops the program instead.
+
+#### checked_mul
+
+```khora
+pub fn checked_mul(self, other: Decimal) -> Option<Decimal>
+```
+
+The product, or `None` if it does not fit. `mul` stops the program
+instead. The scales add, as they do in `mul`.
+
+#### checked_divide
+
+```khora
+pub fn checked_divide(self, other: Decimal, scale: Int, how: Rounding) -> Option<Decimal>
+```
+
+The quotient to `scale` places, rounded as asked, or `None` when
+`other` is zero **or** the answer does not fit. `divide` answers `None`
+only for the zero and stops the program on the rest.
 
 #### rounded
 

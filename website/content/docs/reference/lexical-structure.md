@@ -54,9 +54,32 @@ The spelling after `'` has no built-in semantic meaning.
 0
 42
 1_000_000
+0xFF
+0b1010_0101
+0o17
 ```
 
-Underscores may be used as visual separators.
+Underscores may be used as visual separators, anywhere after the first digit
+or the base prefix.
+
+`0x` writes an integer in hexadecimal, `0b` in binary and `0o` in octal. The
+prefix and the digits may be either case: `0xff`, `0XFF` and `0xFf` are the
+same number. A literal in any base is typed exactly as a decimal one: an
+`Int` unless the context asks for a narrower integer, in which case it must
+fit that type's range.
+
+```khora
+let mask: U8 = 0xFF;      // 255
+let low: I8 = -0x80;      // -128, the same as `-128`
+let round = 0x428A_2F98;  // an `Int`
+```
+
+The value is the number written, not a bit pattern: `let b: I8 = 0xFF;` is
+refused because 255 does not fit an `I8`, and `0xFFFF_FFFF_FFFF_FFFF` does not
+fit an `Int` (write it as a `U64`). A digit the base does not have (`0b12`,
+`0o8`, `0xG`) and a prefix with no digits (`0x`, `0x_`) are errors at the
+literal. A `d` after a hexadecimal number is a digit, so `0x1d` is 29, and the
+`Decimal` suffix below applies only to decimal numerals.
 
 ## Floating-point literals
 

@@ -132,6 +132,15 @@ pub(crate) struct Checker<'a> {
     /// Where each deferred projection was written, in the order the unifier
     /// deferred them, so `settle_projections` can report against the source.
     pub(crate) projections: Vec<(TextRange, String)>,
+    /// Every integer literal pattern, with the type of the value it is
+    /// compared against, for `settle_literal_patterns`.
+    ///
+    /// **Checked after the body, not where the pattern is read**, because
+    /// there a lambda's parameter is still a variable: `fn x => match x {
+    /// 0x100 => .. }` applied to a `U8` passed a check made on the spot, and
+    /// the code generator, which compares at the value's width, would have
+    /// read `0x100` as `0`.
+    pub(crate) literal_pats: Vec<(String, Type, TextRange)>,
     /// Every `match` whose coverage is still to be checked.
     ///
     /// **Collected during inference and checked afterwards**, because whether
@@ -509,10 +518,10 @@ impl<'a> Checker<'a> {
     /// `let b: U8 = 300` is a mistake with one right answer, and truncating it
     /// silently to 44 is the kind of thing that is found in production.
     fn check_literal_fits(&mut self, text: &str, kind: IntKind, range: TextRange) {
-        let cleaned = text.replace('_', "");
-        let Ok(value) = cleaned.parse::<i128>() else {
+        let Ok(value) = khora_syntax::number::int_literal_signed(text) else {
             // Too wide for even an i128, so certainly too wide for this.
-            // [`Self::check_int_literal`] is the `Int` path's version.
+            // [`Self::check_int_literal`] is the `Int` path's version. A
+            // malformed literal never gets here: the parser refused it.
             self.error(format!("`{text}` does not fit in `{}`", kind.name()), range);
             return;
         };
@@ -530,17 +539,20 @@ impl<'a> Checker<'a> {
 
     /// Whether a literal with no fixed-width hint fits in an `Int`.
     ///
-    /// `Int` is 64 bits, so this is `i64::from_str`. Written separately from
-    /// [`Self::check_literal_fits`] because the fixed-width one has a range to
-    /// name and this one does not: every `Int` has the same bounds, and
-    /// printing them is what tells a reader whether their number is close or
-    /// absurd.
+    /// `Int` is 64 bits and signed, in every base: `0xFFFF_FFFF_FFFF_FFFF` is
+    /// eighteen quintillion and does not fit, rather than being read as the
+    /// bit pattern of `-1`. A literal meant as bits says which type it is.
+    /// Written separately from [`Self::check_literal_fits`] because the
+    /// fixed-width one has a range to name and this one does not: every `Int`
+    /// has the same bounds, and printing them is what tells a reader whether
+    /// their number is close or absurd.
     ///
     /// The code generator keeps its own copy, which is now an assertion about
     /// what reaches it rather than the only place the rule lives.
     fn check_int_literal(&mut self, text: &str, range: TextRange) {
-        let cleaned = text.replace('_', "");
-        if cleaned.parse::<i64>().is_err() {
+        let fits = khora_syntax::number::int_literal_signed(text)
+            .is_ok_and(|value| i64::try_from(value).is_ok());
+        if !fits {
             self.error(
                 format!(
                     "`{text}` does not fit in an `Int`, which holds {} to {}",
@@ -1052,6 +1064,22 @@ impl<'a> Checker<'a> {
         for ((_, why), (range, context)) in self.unifier.settle().into_iter().zip(sites) {
             let Some(why) = why else { continue };
             self.error(format!("{context}: {why}"), range);
+        }
+    }
+
+    /// Checks every integer literal pattern against the type its value
+    /// settled to: a `Fixed` against its range, an `Int` -- or a variable
+    /// nothing solved, which is defaulted to `Int` -- against `Int`'s.
+    ///
+    /// Any other type is a mismatch `bind_pattern` has already reported;
+    /// a second message about the width would be noise on top of it.
+    pub(crate) fn settle_literal_patterns(&mut self) {
+        for (text, ty, range) in std::mem::take(&mut self.literal_pats) {
+            match self.unifier.zonk(&ty) {
+                Type::Fixed(kind) => self.check_literal_fits(&text, kind, range),
+                Type::Int | Type::Var(_) => self.check_int_literal(&text, range),
+                _ => {}
+            }
         }
     }
 

@@ -55,7 +55,7 @@ impl<'a> Checker<'a> {
             Expr::Path(resolution) => self.type_of_resolution(id, &resolution),
             Expr::Field { base, name } => self.infer_field(base, &name, range, "read"),
             Expr::Unary { op, operand } => match op {
-                UnOp::Neg => self.infer_negation(operand, hint, range),
+                UnOp::Neg => self.infer_negation(id, operand, hint, range),
                 UnOp::Not => self.expect(operand, &Type::Bool, "`!`"),
             },
             Expr::Binary { op, lhs, rhs } => self.infer_binary(id, op, lhs, rhs, hint),
@@ -552,14 +552,32 @@ impl<'a> Checker<'a> {
     ///
     /// And a negated *literal* is one number rather than a negation applied to
     /// another: `-128` is an `I8` even though `128` is not, and there is no
-    /// other way to write that type's smallest value.
-    pub(super) fn infer_negation(&mut self, operand: ExprId, hint: Option<Type>, range: TextRange) -> Type {
-        if let (Some(Type::Fixed(kind)), Expr::Literal(Literal::Int(text))) =
-            (&hint, self.body.expr(operand).clone())
-        {
-            let kind = *kind;
-            self.check_literal_fits(&format!("-{text}"), kind, range);
-            let ty = Type::Fixed(kind);
+    /// other way to write that type's smallest value. The same holds for
+    /// `Int`: the digits of `-9223372036854775808` are one past `Int::MAX`,
+    /// in either base, and only the whole is an `Int`. The code generator
+    /// emits the folded constant rather than negating it at run time.
+    pub(super) fn infer_negation(
+        &mut self,
+        negation_site: ExprId,
+        operand: ExprId,
+        hint: Option<Type>,
+        range: TextRange,
+    ) -> Type {
+        if let Expr::Literal(Literal::Int(text)) = self.body.expr(operand).clone() {
+            let negated = format!("-{text}");
+            let ty = match hint {
+                Some(Type::Fixed(kind)) => {
+                    self.check_literal_fits(&negated, kind, range);
+                    Type::Fixed(kind)
+                }
+                // Whatever else was hinted, an integer literal with no
+                // fixed width is an `Int`, as it is unnegated; a hint it
+                // cannot meet is reported where the hint came from.
+                _ => {
+                    self.check_int_literal(&negated, range);
+                    Type::Int
+                }
+            };
             self.exprs.insert(operand, ty.clone());
             return ty;
         }
@@ -567,6 +585,11 @@ impl<'a> Checker<'a> {
         self.hint = hint;
         let inner = self.infer(operand);
         let inner = self.unifier.zonk(&inner);
+        // `-amount` is `Decimal::negate(amount)`: see `decimal_arithmetic`.
+        if is_std_decimal(&inner) {
+            self.decimal_method(negation_site, "negate");
+            return inner;
+        }
         // An unsolved variable becomes `Int`, which is what a bare `-x` in a
         // generic position has always meant.
         let expected = match inner {
@@ -611,25 +634,39 @@ impl<'a> Checker<'a> {
                     self.expect(rhs, &Type::Str, "string concatenation");
                     return Type::Str;
                 }
+                if is_std_decimal(&left) {
+                    let right = self.infer(rhs);
+                    return self.decimal_arithmetic(site, op, rhs, right, &left);
+                }
                 // **The left operand decides only when it knows something.**
                 // Where it is still a variable — an unannotated closure
                 // parameter whose call site comes later — the right operand is
-                // the only evidence there is, and a `String` there can only be
+                // the only evidence there is. A `String` there can only be
                 // concatenation, since no `Int + String` exists to be ambiguous
-                // with. Defaulting to `Int` instead blames the string literal
-                // for a line where nothing is wrong.
-                if op == BinOp::Add && matches!(left, Type::Var(_)) {
+                // with; a `Decimal`, a `Float` or a sized integer can only be
+                // that arithmetic, since none mixes with another. Defaulting
+                // to `Int` instead blamed the right operand for a line with
+                // nothing wrong in it: `fn x => x + 1.5d` was "expected `Int`,
+                // found `Decimal`". A right operand that is a variable too, or
+                // an `Int`, leaves the default as it was: `fn x => x + 1` is
+                // an `Int` function.
+                if matches!(left, Type::Var(_)) {
                     let right = self.infer(rhs);
                     let right = self.unifier.zonk(&right);
-                    if matches!(right, Type::Str) {
+                    if op == BinOp::Add && matches!(right, Type::Str) {
                         self.require(&Type::Str, &left, "string concatenation", lhs_range);
                         return Type::Str;
                     }
+                    if is_std_decimal(&right) {
+                        self.require(&right, &left, "`Decimal` arithmetic", lhs_range);
+                        return self.decimal_arithmetic(site, op, rhs, right.clone(), &right);
+                    }
                     // Inferred once and reused: the arithmetic below requires
                     // rather than expects, so `rhs` is not visited twice.
-                    let expected = match self.unifier.zonk(&left) {
-                        Type::Float => Type::Float,
-                        Type::Fixed(kind) => Type::Fixed(kind),
+                    let expected = match (self.unifier.zonk(&left), &right) {
+                        (Type::Float, _) | (_, Type::Float) => Type::Float,
+                        (Type::Fixed(kind), _) => Type::Fixed(kind),
+                        (_, Type::Fixed(kind)) => Type::Fixed(*kind),
                         _ => Type::Int,
                     };
                     self.require(&expected, &left, "arithmetic", lhs_range);
@@ -647,7 +684,18 @@ impl<'a> Checker<'a> {
                     _ => Type::Int,
                 };
                 self.require(&expected, &left, "arithmetic", lhs_range);
-                self.expect(rhs, &expected, "arithmetic");
+                let right = self.expect(rhs, &expected, "arithmetic");
+                // `1 + price`: the left operand chose `Int` arithmetic and the
+                // mismatch above says so, but not how to get the `Decimal`
+                // sum that was meant.
+                if is_std_decimal(&self.unifier.zonk(&right)) {
+                    if let Some(said) = self.errors.last_mut() {
+                        said.message.push_str(
+                            "; to mix a whole number into `Decimal` arithmetic, make it one \
+                             with `Decimal::of_int(n)`",
+                        );
+                    }
+                }
                 expected
             }
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
@@ -679,6 +727,92 @@ impl<'a> Checker<'a> {
                 Type::Bool
             }
         }
+    }
+
+    /// `a + b`, `a - b` and `a * b` on `Decimal`, and the refusal of `/` and
+    /// `%`.
+    ///
+    /// **Special-cased to the methods, not a trait per operator.** A sum and
+    /// a product of amounts were `Decimal::add(Decimal::mul(price, count),
+    /// shipping)`, and an operator spelled the same thing in a third of the
+    /// text with no way to write it wrongly: the operator *is* the method,
+    /// recorded at the operator as the instantiation a written
+    /// `Decimal::add(a, b)` records at its path, so monomorphization emits it
+    /// and the code generator calls it. Same answer, same scale, same trap.
+    ///
+    /// What it costs: `Decimal` is the one library type an operator knows by
+    /// name, which a general `Add` trait would not need. That trait is a
+    /// language change with its own questions -- what `Int + Decimal` means,
+    /// what a generic `T: Add` costs in a monomorphizing compiler -- and one
+    /// type did not justify answering them.
+    ///
+    /// `/` is refused: a quotient usually has no exact decimal form, so it
+    /// needs a scale and a rounding, which an operator has nowhere to write.
+    fn decimal_arithmetic(
+        &mut self,
+        site: ExprId,
+        op: BinOp,
+        rhs: ExprId,
+        right: Type,
+        decimal: &Type,
+    ) -> Type {
+        let method = match op {
+            BinOp::Add => "add",
+            BinOp::Sub => "sub",
+            BinOp::Mul => "mul",
+            BinOp::Div | BinOp::Rem => {
+                let written = if op == BinOp::Div { "/" } else { "%" };
+                self.error(
+                    format!(
+                        "`{written}` is not defined on `Decimal`: a quotient usually has no exact \
+                         decimal form, so it needs the scale to answer at and a rounding for \
+                         what is left over. Write `Decimal::divide(a, b, scale, rounding)`, \
+                         which answers `None` for a zero divisor"
+                    ),
+                    self.body.range(site),
+                );
+                return decimal.clone();
+            }
+            // Not arithmetic: `infer_binary` sends only the five above here.
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::And | BinOp::Or => {
+                unreachable!("`decimal_arithmetic` is called for arithmetic operators")
+            }
+        };
+        let right = self.unifier.zonk(&right);
+        if !matches!(right, Type::Unknown) && self.unifier.unify(decimal, &right).is_err() {
+            let right = self.unifier.zonk(&right);
+            self.error(
+                format!(
+                    "`Decimal` arithmetic takes two `Decimal`s: found `{right}`. Make a whole \
+                     number one with `Decimal::of_int(n)`, or write the literal with a `d`, \
+                     as `2d` or `0.5d`"
+                ),
+                self.body.range(rhs),
+            );
+        }
+        self.decimal_method(site, method);
+        decimal.clone()
+    }
+
+    /// Records `Decimal::{method}` as what the operator at `site` calls.
+    ///
+    /// The same key and the same instantiation a written `Decimal::add`
+    /// records at its path, so nothing downstream can tell the two apart.
+    fn decimal_method(&mut self, site: ExprId, method: &str) {
+        let key = traits::method_key("", "Decimal", method);
+        let Some(signature) = self.types.signatures.get(key.as_str()).cloned() else {
+            // `std::decimal` declares all four, and `is_std_decimal` admits
+            // only that module's type. Reported rather than assumed, so a
+            // `std` that lost one says which.
+            self.error(
+                format!("`Decimal::{method}` is not declared, so the operator has nothing to call"),
+                self.body.range(site),
+            );
+            return;
+        };
+        let (_, type_args) =
+            self.unifier.instantiate_with(&signature.generics, &signature.as_fn());
+        self.instantiations.insert(site, (key, type_args));
     }
 
     /// Resolves the impl that a comparison operator on this type will call.

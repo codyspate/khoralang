@@ -90,6 +90,11 @@
     "numbers": {
       "patterns": [
         {
+          "comment": "`0xFF`, `0b1010`, `0o17`, either case, with `_` separators. First, so that the `d` in `0x1d` is read as the hexadecimal digit it is and never as the decimal suffix.",
+          "name": "constant.numeric.integer.khora",
+          "match": "\\b0([xX][0-9A-Fa-f_]+|[bB][01_]+|[oO][0-7_]+)\\b"
+        },
+        {
           "comment": "`1d` and `0.01d`. The language's only literal suffix, and the two rules below cannot match it: both end in `\\b`, which fails between a digit and the `d`. It gets a scope of its own because an exact decimal is a different kind of number from a float, which is the entire reason the suffix exists.",
           "name": "constant.numeric.decimal.khora",
           "match": "\\b[0-9][0-9_]*(\\.[0-9][0-9_]*)?d\\b"

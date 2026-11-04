@@ -179,3 +179,107 @@ fn coverage_is_still_checked() {
     assert!(found.iter().any(|e| e.contains("not exhaustive")), "{found:?}");
     assert!(!found.iter().any(|e| e.contains(WRONG)), "{found:?}");
 }
+
+/// **A literal pattern must fit the type of the value it is matched
+/// against**, as `let b: U8 = 256;` must. A code generator that compares at
+/// the value's width reads `256` on a `U8` as its low byte, so `0` took the
+/// `256` arm with exit status 0. Every row of the review's `trunc.kh` and
+/// `trunc_int.kh`, every base, inside a tuple, a constructor payload and a
+/// record pattern.
+#[test]
+fn a_literal_pattern_that_does_not_fit_its_value_is_refused() {
+    for (ty, arm, says) in [
+        ("U8", "0x100", "`0x100` does not fit in `U8`, which holds 0 to 255"),
+        ("U8", "256", "`256` does not fit in `U8`, which holds 0 to 255"),
+        ("U8", "0b1_0000_0000", "`0b1_0000_0000` does not fit in `U8`"),
+        ("U8", "0o400", "`0o400` does not fit in `U8`"),
+        ("I8", "0x80", "`0x80` does not fit in `I8`, which holds -128 to 127"),
+        ("I8", "128", "`128` does not fit in `I8`"),
+        ("U16", "65537", "`65537` does not fit in `U16`"),
+        ("I16", "0xFFFF", "`0xFFFF` does not fit in `I16`"),
+        ("U32", "0x1_0000_0005", "`0x1_0000_0005` does not fit in `U32`"),
+        ("I32", "0x8000_0000", "`0x8000_0000` does not fit in `I32`"),
+        ("U64", "0x1_0000_0000_0000_0000", "`0x1_0000_0000_0000_0000` does not fit in `U64`"),
+        ("Int", "18446744073709551615", "`18446744073709551615` does not fit in an `Int`"),
+        ("Int", "0x8000_0000_0000_0000", "`0x8000_0000_0000_0000` does not fit in an `Int`"),
+    ] {
+        assert_reports(
+            &format!(
+                "module m;\nimport std::core::{{U8, I8, U16, I16, U32, I32, U64}};\n\
+                 fn f(x: {ty}) -> Int {{ match x {{ {arm} => 1, _ => 0 }} }}\n"
+            ),
+            says,
+        );
+    }
+}
+
+/// The same refusal below the top of the pattern: in a tuple, a constructor
+/// payload and a record field, each against the component's own type.
+#[test]
+fn a_nested_literal_pattern_that_does_not_fit_is_refused() {
+    let decls = "module m;\nimport std::core::{U8, I8};\n\
+                 pub type Msg = | Pair(a: U8, b: I8) | Other;\n\
+                 pub type Px = { tag: U8, n: Int };\n";
+    for (body, says) in [
+        (
+            "fn f(x: (U8, I8)) -> Int { match x { (0x1FF, 0) => 1, _ => 0 } }",
+            "`0x1FF` does not fit in `U8`",
+        ),
+        (
+            "fn f(x: (U8, I8)) -> Int { match x { (0, 0xFF) => 1, _ => 0 } }",
+            "`0xFF` does not fit in `I8`",
+        ),
+        (
+            "fn f(m: Msg) -> Int { match m { Msg::Pair(0xFE, 0x100) => 1, _ => 0 } }",
+            "`0x100` does not fit in `I8`",
+        ),
+        (
+            "fn f(p: Px) -> Int { match p { Px { tag: 300, n } => n, _ => 0 } }",
+            "`300` does not fit in `U8`",
+        ),
+    ] {
+        assert_reports(&format!("{decls}{body}\n"), says);
+    }
+}
+
+/// And a literal that fits is not refused, at the top, nested, at each
+/// type's edges and in each base.
+#[test]
+fn a_literal_pattern_that_fits_is_accepted() {
+    assert_clean(
+        "module m;\nimport std::core::{U8, I8, U16, I16, U64};\n\
+         pub type Msg = | Pair(a: U8, b: I8) | Other;\n\
+         fn a(x: U8) -> Int { match x { 0xFF => 1, 0 => 2, 0b1010 => 3, 0o17 => 4, _ => 0 } }\n\
+         fn b(x: I8) -> Int { match x { 0x7F => 1, 126 => 2, _ => 0 } }\n\
+         fn c(x: U16) -> Int { match x { 0xFFFF => 1, _ => 0 } }\n\
+         fn d(x: U64) -> Int { match x { 0xFFFF_FFFF_FFFF_FFFF => 1, 18446744073709551614 => 2, _ => 0 } }\n\
+         fn e(x: Int) -> Int { match x { 0x7FFF_FFFF_FFFF_FFFF => 1, 9223372036854775806 => 2, _ => 0 } }\n\
+         fn g(m: Msg) -> Int { match m { Msg::Pair(0xFE, 0x7F) => 1, _ => 0 } }\n\
+         fn h(x: (U8, I16)) -> Int { match x { (0xFF, 0x7FFF) => 1, _ => 0 } }\n",
+    );
+}
+
+/// **A literal pattern is checked against the type the value settles to**,
+/// not the one it has when the `match` is read. A lambda's parameter is a
+/// variable there: the first version of this check skipped it, and
+/// `fn x => match x { 0x100 => .. }` applied to a `U8` reached the code
+/// generator's assertion at `khora build` instead of `khora check`.
+#[test]
+fn a_literal_pattern_is_checked_against_the_settled_type() {
+    for (body, says) in [
+        (
+            "fn f() -> Int { let g = fn x => match x { 0x100 => 1, _ => 0 }; let z: U8 = 0; g(z) }",
+            "`0x100` does not fit in `U8`",
+        ),
+        (
+            "fn f() -> Int { let g = fn x => match x { 18446744073709551615 => 1, _ => 0 }; g(-1) }",
+            "`18446744073709551615` does not fit in an `Int`",
+        ),
+        (
+            "fn f() -> Int { let g = fn p => match p { (0, 0x80) => 1, _ => 0 }; let b: I8 = 0; g((1, b)) }",
+            "`0x80` does not fit in `I8`",
+        ),
+    ] {
+        assert_reports(&format!("module m;\nimport std::core::{{U8, I8}};\n{body}\n"), says);
+    }
+}

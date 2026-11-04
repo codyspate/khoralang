@@ -2714,6 +2714,20 @@ fiber only inside a type that says it is safe.
 
 An index outside the array stops the program, as `get` does.
 
+#### to_list
+
+```khora
+pub fn to_list(self) -> List<A>
+```
+
+The elements, first to last, as a `List`.
+
+**A copy that can cross to another fiber**, which the array cannot: a
+`List` has nothing to write, so a child may read it while the parent
+goes on writing the array. Costs one list cell per element. Backwards
+through the array, prepending, so the list comes out in order with no
+reversing pass and one frame however long it is.
+
 #### from_fn
 
 ```khora
@@ -2916,6 +2930,84 @@ pub fn shr(self, other: Int) -> Int
 
 Arithmetic, so a negative number stays negative. A logical shift is what
 `Int` cannot express and what an unsigned fixed-width type will.
+
+### Int
+
+```khora
+impl Int
+```
+
+Arithmetic that answers `None` instead of stopping the program.
+
+**What these are for: a number you did not choose.** `+`, `-` and `*` stop
+the program when the answer does not fit, and that is right for a bug. An
+amount, a quantity or an offset that arrived in a request is not a bug when
+it is absurd, and stopping the program over one stops every other request
+it was serving. Ask with `checked_*` and the answer is an `Option` to turn
+into a refusal:
+
+```khora
+fn line_total(price: Int, quantity: Int) -> Option<Int> {
+  Int::checked_mul(price, quantity)
+}
+```
+
+Each is one LLVM overflow intrinsic and a test of its flag, the same
+instruction the trapping operator uses; there is no second computation.
+Where the `Option` is not held in registers, building `Some` allocates.
+
+#### checked_add
+
+```khora
+pub fn checked_add(self, other: Int) -> Option<Int>
+```
+
+The sum, or `None` if it does not fit. `+` stops the program instead.
+
+#### checked_sub
+
+```khora
+pub fn checked_sub(self, other: Int) -> Option<Int>
+```
+
+The difference, or `None` if it does not fit. `-` stops the program
+instead.
+
+#### checked_mul
+
+```khora
+pub fn checked_mul(self, other: Int) -> Option<Int>
+```
+
+The product, or `None` if it does not fit. `*` stops the program
+instead.
+
+#### checked_div
+
+```khora
+pub fn checked_div(self, other: Int) -> Option<Int>
+```
+
+The quotient, rounded towards zero as `/` rounds it, or `None` when
+`other` is zero or the answer does not fit -- which is only `Int`'s
+minimum over minus one. `/` stops the program on both.
+
+#### checked_neg
+
+```khora
+pub fn checked_neg(self) -> Option<Int>
+```
+
+The number with the opposite sign, or `None` for `Int`'s minimum, the
+one value with no positive twin.
+
+#### checked_abs
+
+```khora
+pub fn checked_abs(self) -> Option<Int>
+```
+
+The magnitude, or `None` for `Int`'s minimum, for the same reason.
 
 ### String
 
@@ -3827,6 +3919,51 @@ pub fn shr(self, other: U8) -> U8
 Logical, because the type is unsigned: the vacated bits are zeros
 and a large value stays large.
 
+#### checked_add
+
+```khora
+pub fn checked_add(self, other: U8) -> Option<U8>
+```
+
+The sum, or `None` if it does not fit the type. `+` stops the program
+instead. The `checked_*` family is the way to do arithmetic on a
+number you did not choose -- a length in a header, a field in a
+packet -- where an absurd value is input to refuse rather than a bug:
+see `Int::checked_add`.
+
+#### checked_sub
+
+```khora
+pub fn checked_sub(self, other: U8) -> Option<U8>
+```
+
+The difference, or `None` if it does not fit. `-` stops the program.
+
+#### checked_mul
+
+```khora
+pub fn checked_mul(self, other: U8) -> Option<U8>
+```
+
+The product, or `None` if it does not fit. `*` stops the program.
+
+#### checked_div
+
+```khora
+pub fn checked_div(self, other: U8) -> Option<U8>
+```
+
+The quotient, or `None` when `other` is zero. `/` stops the program.
+
+#### checked_neg
+
+```khora
+pub fn checked_neg(self) -> Option<U8>
+```
+
+Zero for zero, and `None` for anything else: no other unsigned value
+has a negative the type can hold.
+
 ### U16
 
 ```khora
@@ -3923,6 +4060,47 @@ pub fn shr(self, other: U16) -> U16
 
 Logical, because the type is unsigned.
 
+#### checked_add
+
+```khora
+pub fn checked_add(self, other: U16) -> Option<U16>
+```
+
+The sum, or `None` if it does not fit. `+` stops the program instead.
+
+#### checked_sub
+
+```khora
+pub fn checked_sub(self, other: U16) -> Option<U16>
+```
+
+The difference, or `None` if it does not fit. `-` stops the program.
+
+#### checked_mul
+
+```khora
+pub fn checked_mul(self, other: U16) -> Option<U16>
+```
+
+The product, or `None` if it does not fit. `*` stops the program.
+
+#### checked_div
+
+```khora
+pub fn checked_div(self, other: U16) -> Option<U16>
+```
+
+The quotient, or `None` when `other` is zero. `/` stops the program.
+
+#### checked_neg
+
+```khora
+pub fn checked_neg(self) -> Option<U16>
+```
+
+Zero for zero, and `None` for anything else: no other unsigned value
+has a negative the type can hold.
+
 ### U32
 
 ```khora
@@ -4018,6 +4196,47 @@ pub fn shr(self, other: U32) -> U32
 ```
 
 Logical, because the type is unsigned.
+
+#### checked_add
+
+```khora
+pub fn checked_add(self, other: U32) -> Option<U32>
+```
+
+The sum, or `None` if it does not fit. `+` stops the program instead.
+
+#### checked_sub
+
+```khora
+pub fn checked_sub(self, other: U32) -> Option<U32>
+```
+
+The difference, or `None` if it does not fit. `-` stops the program.
+
+#### checked_mul
+
+```khora
+pub fn checked_mul(self, other: U32) -> Option<U32>
+```
+
+The product, or `None` if it does not fit. `*` stops the program.
+
+#### checked_div
+
+```khora
+pub fn checked_div(self, other: U32) -> Option<U32>
+```
+
+The quotient, or `None` when `other` is zero. `/` stops the program.
+
+#### checked_neg
+
+```khora
+pub fn checked_neg(self) -> Option<U32>
+```
+
+Zero for zero, and `None` for anything else: no other unsigned value
+has a negative the type can hold.
 
 ### U64
 
@@ -4129,6 +4348,47 @@ pub fn shr(self, other: U64) -> U64
 
 Logical, because the type is unsigned.
 
+#### checked_add
+
+```khora
+pub fn checked_add(self, other: U64) -> Option<U64>
+```
+
+The sum, or `None` if it does not fit. `+` stops the program instead.
+
+#### checked_sub
+
+```khora
+pub fn checked_sub(self, other: U64) -> Option<U64>
+```
+
+The difference, or `None` if it does not fit. `-` stops the program.
+
+#### checked_mul
+
+```khora
+pub fn checked_mul(self, other: U64) -> Option<U64>
+```
+
+The product, or `None` if it does not fit. `*` stops the program.
+
+#### checked_div
+
+```khora
+pub fn checked_div(self, other: U64) -> Option<U64>
+```
+
+The quotient, or `None` when `other` is zero. `/` stops the program.
+
+#### checked_neg
+
+```khora
+pub fn checked_neg(self) -> Option<U64>
+```
+
+Zero for zero, and `None` for anything else: no other unsigned value
+has a negative the type can hold.
+
 ### I8
 
 ```khora
@@ -4225,6 +4485,55 @@ pub fn shr(self, other: I8) -> I8
 
 Arithmetic, because the type is signed.
 
+#### checked_add
+
+```khora
+pub fn checked_add(self, other: I8) -> Option<I8>
+```
+
+The sum, or `None` if it does not fit. `+` stops the program instead.
+
+#### checked_sub
+
+```khora
+pub fn checked_sub(self, other: I8) -> Option<I8>
+```
+
+The difference, or `None` if it does not fit. `-` stops the program.
+
+#### checked_mul
+
+```khora
+pub fn checked_mul(self, other: I8) -> Option<I8>
+```
+
+The product, or `None` if it does not fit. `*` stops the program.
+
+#### checked_div
+
+```khora
+pub fn checked_div(self, other: I8) -> Option<I8>
+```
+
+The quotient towards zero, or `None` when `other` is zero or the
+answer does not fit (the minimum over minus one). `/` stops the program.
+
+#### checked_neg
+
+```khora
+pub fn checked_neg(self) -> Option<I8>
+```
+
+The number with the opposite sign, or `None` for the minimum.
+
+#### checked_abs
+
+```khora
+pub fn checked_abs(self) -> Option<I8>
+```
+
+The magnitude, or `None` for the minimum.
+
 ### I16
 
 ```khora
@@ -4320,6 +4629,55 @@ pub fn shr(self, other: I16) -> I16
 ```
 
 Arithmetic, because the type is signed.
+
+#### checked_add
+
+```khora
+pub fn checked_add(self, other: I16) -> Option<I16>
+```
+
+The sum, or `None` if it does not fit. `+` stops the program instead.
+
+#### checked_sub
+
+```khora
+pub fn checked_sub(self, other: I16) -> Option<I16>
+```
+
+The difference, or `None` if it does not fit. `-` stops the program.
+
+#### checked_mul
+
+```khora
+pub fn checked_mul(self, other: I16) -> Option<I16>
+```
+
+The product, or `None` if it does not fit. `*` stops the program.
+
+#### checked_div
+
+```khora
+pub fn checked_div(self, other: I16) -> Option<I16>
+```
+
+The quotient towards zero, or `None` when `other` is zero or the
+answer does not fit (the minimum over minus one). `/` stops the program.
+
+#### checked_neg
+
+```khora
+pub fn checked_neg(self) -> Option<I16>
+```
+
+The number with the opposite sign, or `None` for the minimum.
+
+#### checked_abs
+
+```khora
+pub fn checked_abs(self) -> Option<I16>
+```
+
+The magnitude, or `None` for the minimum.
 
 ### I32
 
@@ -4418,6 +4776,55 @@ pub fn shr(self, other: I32) -> I32
 ```
 
 Arithmetic, because the type is signed.
+
+#### checked_add
+
+```khora
+pub fn checked_add(self, other: I32) -> Option<I32>
+```
+
+The sum, or `None` if it does not fit. `+` stops the program instead.
+
+#### checked_sub
+
+```khora
+pub fn checked_sub(self, other: I32) -> Option<I32>
+```
+
+The difference, or `None` if it does not fit. `-` stops the program.
+
+#### checked_mul
+
+```khora
+pub fn checked_mul(self, other: I32) -> Option<I32>
+```
+
+The product, or `None` if it does not fit. `*` stops the program.
+
+#### checked_div
+
+```khora
+pub fn checked_div(self, other: I32) -> Option<I32>
+```
+
+The quotient towards zero, or `None` when `other` is zero or the
+answer does not fit (the minimum over minus one). `/` stops the program.
+
+#### checked_neg
+
+```khora
+pub fn checked_neg(self) -> Option<I32>
+```
+
+The number with the opposite sign, or `None` for the minimum.
+
+#### checked_abs
+
+```khora
+pub fn checked_abs(self) -> Option<I32>
+```
+
+The magnitude, or `None` for the minimum.
 
 ### Dict\<K, V>
 
@@ -6453,6 +6860,13 @@ impl Show for U64
 fn show(self) -> String
 ```
 
+The number, in decimal, up to `18446744073709551615`.
+
+**Not through `to_int`**, which stops the program above `Int`'s maximum:
+half the type's values. Unsigned division by ten brings every `U64`
+within `Int`'s range, and the digit it drops is written after. Costs one
+division and one more string than `Int`'s `show`.
+
 ### Hash for U64
 
 ```khora
@@ -6464,6 +6878,9 @@ impl Hash for U64
 ```khora
 fn hash(self) -> Int
 ```
+
+The bits, read as an `Int`. Not `to_int`, which stops the program above
+`Int`'s maximum and made half the type's values unusable as a key.
 
 ### Eq for I8
 

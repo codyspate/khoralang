@@ -41,21 +41,19 @@ enum Tok {
     #[regex(r"[0-9][0-9_]*")]
     IntLit,
 
-    /// `0xFF`, `0b1010`, `0o17` — a base Khora does not have.
+    /// `0xFF`, `0b1010`, `0o17`: an integer in another base.
     ///
-    /// **Matched so that it can be refused by name.** Khora has decimal
-    /// integer literals and `_` as a separator, and nothing else. Without this
-    /// pattern the `0` lexes as an integer and `xFF` as an identifier, and the
-    /// parser reports whatever those two break next: for `{ 0xFF }` that is
-    /// *this `{` is never closed*, pointing at a brace on the line above. An
-    /// editor draws that underline in the wrong place, which is worse than
-    /// drawing none.
+    /// **The digits are matched loosely, as any letter or digit**, so that
+    /// `0b12`, `0xG` and a bare `0x` are each one token, refused at itself by
+    /// the parser. Matched exactly, `0b12` would lex as `0b1` and `2`, and
+    /// `0x` as `0` and the identifier `x`, and the parser would report
+    /// whatever those broke next: for `{ 0x }` that is *this `{` is never
+    /// closed*, pointing at a brace on the line above. An editor draws that
+    /// underline in the wrong place, which is worse than drawing none.
     ///
-    /// The digits are matched loosely — `[0-9A-Fa-f_]` for every base — so
-    /// that `0b12` is one token to complain about rather than a token and a
-    /// half. Nothing here is deciding whether the digits are valid for the
-    /// base; the answer is the same either way.
-    #[regex(r"0[xXbBoO][0-9A-Fa-f_]+")]
+    /// Letters include `d`, so `0x1d` is twenty-nine and never a `Decimal`:
+    /// the suffix belongs to decimal numerals only.
+    #[regex(r"0[xXbBoO][0-9A-Za-z_]*")]
     BasedLit,
     #[token("\"", lex_string)]
     // A backtick literal is the *same token*: a `String` either way, so the
@@ -296,12 +294,12 @@ fn to_kind(tok: Tok, text: &str) -> SyntaxKind {
         Tok::BlockComment => S::BLOCK_COMMENT,
         Tok::FloatLit => S::FLOAT_LIT,
         Tok::IntLit => S::INT_LIT,
-        // **An `INT_LIT`, deliberately.** The whole point of matching `0xFF`
-        // is to say something about it, and the saying happens in the parser
-        // -- but the tree the parser builds is checked against the lexer's own
-        // kinds token for token, so inventing a kind here desynchronizes them.
-        // Lexing it as the thing it was trying to be keeps every later pass
-        // unchanged, and the parser recognizes it by its text.
+        // **An `INT_LIT`, deliberately.** A based literal is an integer with
+        // the typing of a decimal one, so every later pass sees one kind and
+        // reads its value through `crate::number`. The parser checks the
+        // digits against the base, by the text, because the tree it builds is
+        // checked against the lexer's kinds token for token and a kind of its
+        // own here would desynchronize them.
         Tok::BasedLit => S::INT_LIT,
         Tok::DecimalLit => S::DECIMAL_LIT,
         Tok::StringLit => S::STRING_LIT,

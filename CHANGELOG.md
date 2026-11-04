@@ -14,6 +14,15 @@ it will behave differently now.
 
 ### Breaking
 
+- Prefix `-` on an integer stops the program when the answer does not fit,
+  as `+`, `-` and `*` do: `-x` on a signed type's minimum (`Int::MIN`,
+  `-128` as an `I8`, and so on) stops with "Int negation overflowed", the
+  way `x * -1` on the same `x` stops, and `-x` on an unsigned value stops
+  for anything but zero. Each answered a wrong number silently: the minimum
+  itself, and `256 - x` for a `U8`. A negated literal is one number, not a
+  negation, and does not stop. The check costs a branch per negation, as
+  `+` does: in a release-built loop of `wrapping_add(acc, -x)` over an
+  `Array<Int>`, 4 more instructions and about 10% more cycles per element.
 - Every `const` is checked at its declaration, whether or not anything
   names it, for what holds wherever it is named: `const A = UNDEFINED_NAME;`
   passed `khora check` when nothing named `A`, and is an error at the
@@ -214,6 +223,45 @@ it will behave differently now.
 
 ### Fixed
 
+- `-x` on a signed type's minimum answered the minimum, and `-x` on an
+  unsigned value answered `256 - x` (for a `U8`; the type's size for the
+  others), with exit status 0. Both stop the program, as `x * -1` and
+  `0 - x` do. Listed under Breaking too.
+- `-9223372036854775808` and `-0x8000_0000_0000_0000` were refused as an
+  `Int` or `I64` ("does not fit in an `Int`"), so `Int::MIN` could not be
+  written as a literal. A negated literal is checked as one number for
+  `Int` as it is for the fixed-width types, in either base.
+- `"${x}"` and `Show::show` on a `U64` above `Int`'s maximum stopped the
+  program ("this U64 is outside the range of Int"), and so did using such a
+  `U64` as a `Map` key. Both work for every `U64`:
+  `0xFFFF_FFFF_FFFF_FFFF` prints as `18446744073709551615`.
+- A literal pattern on a fixed-width integer, such as
+  `match (b: U8) { 0xFF => .., 10 => .. }`, stopped `khora build` with
+  "the generated module is not valid LLVM IR". It compares at the value's
+  width, in any base. A literal the value's type cannot hold, such as
+  `256 =>` on a `U8` or `18446744073709551615 =>` on an `Int`, is refused
+  at `khora check` as `let b: U8 = 256;` is, at the top of a pattern or
+  inside a tuple, a case's payload or a record.
+- The refusal of a captured `Opaque` across fibers advised a `Handoff`,
+  which `Opaque` cannot go through either. It says to send the failure's
+  text, `failure.show()`.
+- An unannotated operand takes its type from a `Decimal`, `Float` or
+  fixed-width integer on the other side: `fn x => x + 1.5d` is a `Decimal`
+  function, where it was refused as "expected `Int`, found `Decimal`".
+  `fn x => x + 1` is an `Int` function, and so is an operator whose two
+  operands are both still unknown, such as `fn x => fn y => x * y`:
+  annotate one of them to make it anything else.
+- A `U64` literal above `Int`'s maximum, such as
+  `let top: U64 = 18446744073709551615;`, passed `khora check` and was
+  refused by `khora build` as not fitting an `Int`. It builds, and is the
+  number written.
+- The refusal of a captured `Array` (or another type declared without a
+  body in `std`) across fibers told the program to write
+  `impl Share for Array`, which only the declaring module may write. It
+  names the module that may, and the routes that work: give the value away
+  through a `Handoff`, or copy what the other fiber needs into a `List` or a
+  `String`. A type the program declares itself is still told to write
+  `impl Share`.
 - `khora check` crashed with "a scope is always open" on a `const` whose
   initializer names something that does not exist, when the constant was
   named inside a closure. It reports the name, as it does for the same
@@ -395,6 +443,34 @@ it will behave differently now.
 
 ### Added
 
+- Integer literals in hexadecimal, binary and octal: `0xFF`, `0b1010`,
+  `0o17`, with either case for the prefix and the digits and `_` anywhere
+  after the prefix. They are typed as decimal literals are -- an `Int`, or the
+  narrower integer the context asks for, which the value must fit -- and the
+  value is the number written, so `let b: I8 = 0xFF;` is refused and
+  `-0x80` is the same `I8` as `-128`. A digit the base does not have (`0b12`)
+  and a prefix with no digits (`0x`) are errors at the literal. In `0x1d` the
+  `d` is a digit: the `Decimal` suffix applies to decimal numerals only.
+  `khora fmt` keeps the literal as written, and the VS Code grammar colors it.
+- `checked_add`, `checked_sub`, `checked_mul`, `checked_div` and `checked_neg`
+  on `Int` and every fixed-width integer, and `checked_abs` on the signed
+  ones, answering `None` exactly where the operator stops the program:
+  overflow, a zero divisor, and a signed minimum over `-1`, negated or made
+  positive. `Decimal::checked_add`, `checked_sub`, `checked_mul` and
+  `checked_divide` do the same for `Decimal`; `checked_divide` is `None` for a
+  zero divisor and for a quotient that does not fit. They are for arithmetic
+  on a number from outside the program, where an absurd value is a request
+  to refuse rather than a reason to stop a server. The operators and
+  `Decimal::add` and its siblings trap as before.
+- `+`, `-`, `*` and prefix `-` on `Decimal`: `price * quantity + shipping`
+  is `Decimal::add(Decimal::mul(price, quantity), shipping)`, with the same
+  answer, scale and stop. Both operands are `Decimal`s; `price + 1` is
+  refused and names `Decimal::of_int`. `a / b` is refused and names
+  `Decimal::divide(a, b, scale, rounding)`, because a quotient needs a scale
+  and a rounding. No program that compiled before means anything different.
+- `Array::to_list`: the elements, first to last, as a `List` -- a copy that
+  can cross to another fiber, which the array cannot. The refusal of a
+  captured `Array` names it.
 - `std::core::timeout(millis, body)` runs `body` on the calling fiber and
   answers `None` if `millis` milliseconds pass first. The body is canceled
   where it waits -- a sleep, a receive, a read, a connect, the children of a

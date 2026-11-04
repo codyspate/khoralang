@@ -28,7 +28,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             Expr::Path(resolution) => self.path(id, &resolution, range),
             Expr::Call { callee, args } => self.call(id, callee, &args, range),
             Expr::Binary { op, lhs, rhs } => self.binary(id, op, lhs, rhs, range),
-            Expr::Unary { op, operand } => self.unary(op, operand, range),
+            Expr::Unary { op, operand } => self.unary(id, op, operand, range),
             Expr::Assign { target, value } => self.assign(target, value, range),
             Expr::Block { stmts, tail } => self.lower_block(id, &stmts, tail),
             Expr::If { condition, then_branch, else_branch } => {
@@ -106,9 +106,9 @@ impl<'ctx> Lower<'_, 'ctx> {
                     // `sign_extend` is false because `value` is already the
                     // exact bit pattern; LLVM would otherwise re-extend a
                     // negative literal that has none of its bits to spare.
-                    Some(self.be.int_width(bits).const_int(value as u64, false).into())
+                    Some(self.be.int_width(bits).const_int(value, false).into())
                 }
-                None => self.fail(format!("`{text}` does not fit in an `Int`"), range),
+                None => self.fail(format!("`{text}` does not fit in 64 bits"), range),
             },
             Literal::Bool(value) => {
                 Some(self.be.ctx.bool_type().const_int(value as u64, false).into())

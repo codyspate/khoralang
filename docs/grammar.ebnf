@@ -234,11 +234,20 @@ Ident          ::= [A-Za-z_] [A-Za-z0-9_]* ;            (* minus keywords     *)
 RowVar         ::= "'" Ident ;
 Literal        ::= IntLiteral | FloatLiteral | DecimalLiteral | StringLiteral
                  | "true" | "false" ;
-IntLiteral     ::= [0-9] [0-9_]* ;
-FloatLiteral   ::= IntLiteral "." IntLiteral ( ( "e" | "E" ) ( "+" | "-" )? [0-9]+ )? ;
+IntLiteral     ::= DecimalDigits | BasedLiteral ;
+DecimalDigits  ::= [0-9] [0-9_]* ;
+(* The prefix and the digits may be either case. `_` may appear anywhere after
+   the prefix, but at least one digit must. The value is typed as a decimal
+   literal's is. *)
+BasedLiteral   ::= "0" ( "x" | "X" ) [0-9A-Fa-f_]+
+                 | "0" ( "b" | "B" ) [01_]+
+                 | "0" ( "o" | "O" ) [0-7_]+ ;
+FloatLiteral   ::= DecimalDigits "." DecimalDigits ( ( "e" | "E" ) ( "+" | "-" )? [0-9]+ )? ;
 (* The language's only literal suffix. Nothing may lex between the digits and
-   the "d", and the suffix goes after any exponent. docs/design/numbers.md. *)
-DecimalLiteral ::= ( IntLiteral | FloatLiteral ) "d" ;
+   the "d", and the suffix goes after any exponent. It applies to decimal
+   numerals only: in `0x1d` the `d` is a hexadecimal digit.
+   docs/design/numbers.md. *)
+DecimalLiteral ::= ( DecimalDigits | FloatLiteral ) "d" ;
 StringLiteral  ::= QuotedString | BacktickString ;
 (* `${ Expr }` interpolates. The hole calls `Show` unless it already holds a
    `String`, through a compiler-written node rather than a method call, so

@@ -85,11 +85,12 @@ impl<'a> Parser<'a> {
         let mut ranges = Vec::with_capacity(lexed.len());
         // **A token the lexer could not read is reported here, once, where it
         // is.** Left to reach the grammar, it breaks whatever rule was in
-        // progress and that is what gets reported: `1 @ 2` and `0xFF` both
-        // came back as *this `{` is never closed*, naming a brace on the line
-        // above. The parser was not wrong -- by the time it gave up the block
-        // really was unclosed -- but an editor draws that underline where the
-        // message points, and it pointed at the wrong line.
+        // progress and that is what gets reported: `1 @ 2` came back as
+        // *this `{` is never closed*, naming a brace on the line above. The
+        // parser was not wrong -- by the time it gave up the block really was
+        // unclosed -- but an editor draws that underline where the message
+        // points, and it pointed at the wrong line. A based integer literal
+        // with a digit its base does not have is reported the same way.
         //
         // The token is **kept**, not dropped. `event.rs` replays the parser's
         // events against the lexer's own tokens and asserts the two agree one
@@ -112,14 +113,10 @@ impl<'a> Parser<'a> {
                     message: format!("`{written}` is not something Khora reads as a token"),
                     range,
                 });
-            } else if let Some(base) = base_of(written) {
-                errors.push(ParseError {
-                    message: format!(
-                        "`{written}` is {base}, and Khora has no {base} literals: numbers are \
-                         decimal, and `_` may separate their digits"
-                    ),
-                    range,
-                });
+            } else if kind == SyntaxKind::INT_LIT {
+                if let Some(message) = malformed_integer(written) {
+                    errors.push(ParseError { message, range });
+                }
             }
             kinds.push(kind);
             ranges.push(range);
@@ -618,20 +615,23 @@ fn take_unicode(chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>) -> U
     if char::from_u32(value).is_some() { Unicode::Ok } else { Unicode::NotACharacter }
 }
 
-/// The base a literal was written in, when it is one Khora does not have.
+/// What is wrong with an integer literal's digits, if anything.
 ///
-/// The lexer matches `0x..`, `0b..` and `0o..` as integer literals so that
-/// nothing downstream has a new kind to handle; this is what recognizes them
-/// again. Checked on the text rather than the kind for exactly that reason.
-fn base_of(written: &str) -> Option<&'static str> {
-    let mut bytes = written.bytes();
-    if bytes.next() != Some(b'0') {
-        return None;
-    }
-    match bytes.next() {
-        Some(b'x' | b'X') => Some("hexadecimal"),
-        Some(b'o' | b'O') => Some("octal"),
-        Some(b'b' | b'B') => Some("binary"),
-        _ => None,
+/// The lexer takes any letters and digits after `0x`, `0b` or `0o` as one
+/// token so that this can refuse them at the literal. A value too wide for its
+/// type is not refused here: which type it is meant to be is the type
+/// checker's to know, and so is the range to quote.
+fn malformed_integer(written: &str) -> Option<String> {
+    use crate::number::{int_literal_base, int_literal_value, IntLiteralError};
+    let base = int_literal_base(written).with_article();
+    match int_literal_value(written) {
+        Ok(_) | Err(IntLiteralError::TooLarge) => None,
+        Err(IntLiteralError::Digit(digit)) => Some(format!(
+            "`{written}` is not {base} number: `{digit}` is not {base} digit"
+        )),
+        Err(IntLiteralError::Empty) => Some(format!(
+            "`{written}` has no digits after its prefix; zero is `{}0`",
+            &written[..2]
+        )),
     }
 }

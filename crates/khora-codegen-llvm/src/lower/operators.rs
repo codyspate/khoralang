@@ -25,6 +25,17 @@ impl<'ctx> Lower<'_, 'ctx> {
             let values = self.operands(&pieces)?;
             return self.concat_n(&values);
         }
+        // **`+`, `-` and `*` on `Decimal` are calls to its methods**, which the
+        // checker recorded at the operator as it records a written
+        // `Decimal::add` at its path. Lowered as that call, operands and all,
+        // so the answer, the scale and the trap are the method's.
+        if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul)
+            && matches!(operand_ty, Type::Adt { .. })
+        {
+            if let Some(symbol) = self.mono.callee(&self.owner.clone(), site) {
+                return self.call_named(&symbol, site, &[lhs, rhs], range);
+            }
+        }
         let both = self.operands(&[lhs, rhs])?;
         let (left, right) = (both[0], both[1]);
 
@@ -395,8 +406,26 @@ impl<'ctx> Lower<'_, 'ctx> {
         Some(phi.as_basic_value())
     }
 
-    pub(super) fn unary(&mut self, op: UnOp, operand: ExprId, _range: TextRange) -> Flow<'ctx> {
+    pub(super) fn unary(&mut self, site: ExprId, op: UnOp, operand: ExprId, range: TextRange) -> Flow<'ctx> {
         let ty = self.types.of(operand).clone();
+        // `-amount` on `Decimal` is `Decimal::negate(amount)`, recorded by the
+        // checker at the operator: see `binary`.
+        if matches!(op, UnOp::Neg) && matches!(ty, Type::Adt { .. }) {
+            if let Some(symbol) = self.mono.callee(&self.owner.clone(), site) {
+                return self.call_named(&symbol, site, &[operand], range);
+            }
+        }
+        // **A negated literal is one number, not a negation at run time.**
+        // The checker typed `-128` as an `I8` because the minus belongs to the
+        // number, and the `128` beneath it is not an `I8`: read on its own it
+        // is the bit pattern of `-128`, and the checked negation below would
+        // stop the program on the constant the programmer wrote. So the
+        // constant is the signed text, read once.
+        if matches!(op, UnOp::Neg) {
+            if let Expr::Literal(Literal::Int(text)) = self.body.expr(operand).clone() {
+                return self.literal(Literal::Int(format!("-{text}")), &ty, range);
+            }
+        }
         let value = self.expr(operand)?;
         if matches!(op, UnOp::Neg) && matches!(ty, Type::Float) {
             let negated = self
@@ -407,15 +436,32 @@ impl<'ctx> Lower<'_, 'ctx> {
             return Some(negated.into());
         }
         let value = value.into_int_value();
-        let result = match op {
-            // Not checked, unlike `-` the binary operator: the one value that
-            // cannot be negated is the type's minimum, and the only way to
-            // write it is as a negated literal, which the checker folds into
-            // the constant before it ever reaches here.
-            UnOp::Neg => self.be.builder.build_int_neg(value, "neg"),
+        match op {
+            // **Checked, as `0 - x`.** A signed minimum has no positive twin,
+            // and a wrapping `neg` answered the minimum itself where `x * -1`
+            // on the same `x` stopped the program. An unsigned `-x` has no
+            // answer but for zero. One `sub.with.overflow` from zero covers
+            // both, and costs the branch every other arithmetic operator pays.
+            //
+            // **What that costs, measured:** in a release loop of
+            // `wrapping_add(acc, -x)`, 4 instructions and ~10% of the cycles
+            // per negation, because the load can no longer fold into one
+            // `sub`. A plain compare against the minimum instead is turned
+            // back into this by LLVM (`mov; neg; jo`) at the same count: the
+            // value in a register, a flag and a branch is the floor for any
+            // check.
+            UnOp::Neg => {
+                let (bits, signed) = Self::int_shape(&ty).expect("negation of an integer");
+                let sign = if signed { 's' } else { 'u' };
+                let intrinsic = format!("llvm.{sign}sub.with.overflow.i{bits}");
+                let zero = self.be.int_width(bits).const_zero();
+                let what = format!("{ty} negation overflowed");
+                Some(self.checked_arithmetic(&intrinsic, bits, &what, zero, value))
+            }
             // On an `i1`, `not` is `xor 1`, which is exactly logical negation.
-            UnOp::Not => self.be.builder.build_not(value, "not"),
-        };
-        Some(result.expect("a unary operator").into())
+            UnOp::Not => {
+                Some(self.be.builder.build_not(value, "not").expect("a unary operator").into())
+            }
+        }
     }
 }

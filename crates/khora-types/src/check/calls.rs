@@ -134,7 +134,7 @@ impl<'a> Checker<'a> {
     fn integer_literal(&self, expr: ExprId) -> Option<i128> {
         match self.body.expr(expr) {
             Expr::Literal(khora_hir::body::Literal::Int(text)) => {
-                text.replace('_', "").parse::<i128>().ok()
+                khora_syntax::number::int_literal_signed(text).ok()
             }
             Expr::Unary { op: khora_hir::body::UnOp::Neg, operand } => {
                 self.integer_literal(*operand).map(|v| -v)

@@ -900,11 +900,29 @@ impl<'ctx> Lower<'_, 'ctx> {
             Pat::Wildcard | Pat::Bind(_) | Pat::Missing => self.br(success),
             Pat::Literal(Literal::Int(text)) => {
                 let Some(literal) = parse_int(&text) else {
-                    self.fail(format!("`{text}` does not fit in an `Int`"), range);
+                    self.fail(format!("`{text}` does not fit in 64 bits"), range);
                     return;
                 };
-                let expected = self.be.ctx.i64_type().const_int(literal as u64, false);
-                self.branch_on_equal(value.into_int_value(), expected, success, failure);
+                // **At the scrutinee's width**, which the value already has:
+                // a `U8` is an `i8`, and an `i64` constant beside it is IR
+                // the verifier refuses.
+                //
+                // **And never truncated.** `const_int` keeps the low bits, so
+                // a `256` that reached here against a `U8` would match `0`:
+                // a wrong arm taken with exit status 0. The checker refuses
+                // such a literal (`bind_pattern`); one that arrives anyway is
+                // a hole in that rule, and stopping the build says so where
+                // a truncation would have hidden it.
+                if !Self::literal_fits(&text, ty) {
+                    self.fail(format!(
+                        "the pattern `{text}` does not fit `{ty}`, which the type checker \
+                         refuses, so reaching code generation is a compiler bug"
+                    ), range);
+                    return;
+                }
+                let scrutinee = value.into_int_value();
+                let expected = scrutinee.get_type().const_int(literal, false);
+                self.branch_on_equal(scrutinee, expected, success, failure);
             }
             Pat::Literal(Literal::Bool(expected)) => {
                 let expected = self.be.ctx.bool_type().const_int(expected as u64, false);

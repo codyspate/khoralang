@@ -414,6 +414,11 @@ fn every_literal_the_lexer_makes_has_a_rule() {
         matching("\\$\\{"),
         "no rule matches an interpolation hole, so the expression inside one reads as string"
     );
+    assert!(
+        all.iter().any(|(regex, scopes)| regex.contains("[xX]")
+            && scopes.iter().any(|s| s.contains("numeric"))),
+        "no numeric rule accepts `0xFF`, so a hexadecimal literal colors as `0` and a name"
+    );
 }
 
 /// A `${..}` hole is code and is colored as code, in both kinds of string.

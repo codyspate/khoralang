@@ -13,7 +13,13 @@ Checked integer arithmetic traps when the mathematical result does not fit the t
 ```khora
 let total = left + right;
 let product = width * height;
+let opposite = -amount;
 ```
+
+Negation is the same subtraction from zero: `-x` traps on a signed type's
+minimum, which has no positive twin, as `x * -1` does, and on any unsigned
+value but zero. A negated literal is one number rather than a negation, so
+`-128` is an `I8` and `-9223372036854775808` an `Int`, and neither traps.
 
 Integer division and remainder trap when the divisor is zero, and when the quotient does not fit — which for a signed type is the one pair `minimum / -1`:
 
@@ -35,7 +41,7 @@ Other operations trap on a violated invariant, and this is the whole list:
 | `String::from_bytes` | the bytes are not valid UTF-8 |
 | `String::byte` | the offset is outside the string |
 | `Vector::at` | the index is outside the vector |
-| `Decimal` arithmetic | addition, subtraction, multiplication, division, rescaling or truncation overflows |
+| `Decimal` arithmetic | `+`, `-`, `*` or prefix `-`, or the methods they call, overflow — including `+` and `-` on scales more than 38 apart; division, rescaling or truncation overflows |
 | `Shared::update` / `Shared::modify` | the change function re-enters the same cell, which would otherwise deadlock — see [Sharing](./sharing/) |
 
 An assertion that fails in a test is **not** a trap. `assert` reports the
@@ -90,6 +96,38 @@ let mixed = Int::wrapping_add(left, right);
 ```
 
 Checked arithmetic traps in every build; release builds do not silently change to wrapping arithmetic.
+
+## Ask for `None` instead of a trap
+
+When an operand came from outside the program — an amount in a request, a
+length in a header — an answer that does not fit is bad input, not a bug. Each
+integer type and `Decimal` has `checked_*` forms that answer `None` exactly
+where the operator or method would trap, and the same number everywhere else:
+
+```khora
+fn line_total(price: Int, quantity: Int) -> Result<Int, String> {
+  match Int::checked_mul(price, quantity) {
+    Option::Some(total) => Result::Ok(total),
+    Option::None => Result::Err("400: the quantity is too large"),
+  }
+}
+```
+
+| type | checked forms |
+| --- | --- |
+| `Int`, `I8`, `I16`, `I32` | `checked_add`, `checked_sub`, `checked_mul`, `checked_div`, `checked_neg`, `checked_abs` |
+| `U8`, `U16`, `U32`, `U64` | `checked_add`, `checked_sub`, `checked_mul`, `checked_div`, `checked_neg` |
+| `Decimal` | `checked_add`, `checked_sub`, `checked_mul`, `checked_divide` |
+
+`checked_div` is `None` for a zero divisor and for a signed type's minimum over
+`-1`; `checked_neg` and `checked_abs` are `None` for a signed type's minimum;
+an unsigned `checked_neg` is `Some(0)` for zero and `None` for anything else.
+`checked_neg` is `None` exactly where prefix `-` traps.
+`Decimal::checked_divide` is `None` for a zero divisor and for a quotient that
+does not fit, and `Decimal::checked_add` and `checked_sub` for two scales more
+than 38 apart. Each integer form is the same overflow-checking instruction the
+operator uses, with the `Option` built from its flag. An operator traps;
+`checked_*` refuses.
 
 ## Default runtime behavior
 
@@ -217,7 +255,9 @@ Design for it in three places.
 **Validate at the boundary, not in the handler.** An integer that came from a
 request is external input until a schema has read it. `std::schema` rejects a
 port outside 1 to 65535 as a 400; the same value multiplied inside a handler
-traps and takes the process down. This is the reason the standard library's own
+traps and takes the process down. Arithmetic on such a value can use the
+`checked_*` forms above, which answer `None` where `*` would trap. This is the
+reason the standard library's own
 HTTP reader caps a `Content-Length` before multiplying it, answering 413 rather
 than trapping.
 

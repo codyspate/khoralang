@@ -36,9 +36,13 @@ impl<'ctx> Lower<'_, 'ctx> {
         (bits, signed): (u32, bool),
         owner: &str,
         name: &str,
+        site: ExprId,
         args: &[ExprId],
         range: TextRange,
     ) -> Flow<'ctx> {
+        if let Some(operation) = name.strip_prefix("checked_") {
+            return self.checked_intrinsic((bits, signed), owner, operation, site, args, range);
+        }
         // The conversions take one argument; everything else takes two.
         if name == "to_float" {
             let [only] = args else {
@@ -97,6 +101,136 @@ impl<'ctx> Lower<'_, 'ctx> {
             }
         };
         Some(value.expect("an integer operation").into())
+    }
+
+    /// `checked_add` and the rest: the answer as an `Option`, `None` where
+    /// the operator would stop the program.
+    ///
+    /// **The same intrinsic the trapping operator uses, read differently.**
+    /// `+` branches to a trap on the overflow flag; this branches on the same
+    /// flag to build `Some` or `None` instead ([`Self::option_of_word`]). One
+    /// instruction computes both the value and the flag, so nothing is
+    /// computed twice. What it costs over `+` is building the `Option`, which
+    /// is an allocation wherever the `Option` is not held inline.
+    ///
+    /// Division has no overflow intrinsic, and dividing by zero or `MIN` by
+    /// `-1` is undefined in LLVM even when the answer is thrown away -- so the
+    /// divisor is replaced by one where the answer is `None`, and the
+    /// quotient computed from that is never read.
+    fn checked_intrinsic(
+        &mut self,
+        (bits, signed): (u32, bool),
+        owner: &str,
+        operation: &str,
+        site: ExprId,
+        args: &[ExprId],
+        range: TextRange,
+    ) -> Flow<'ctx> {
+        let option_ty = self.types.of(site).clone();
+        let held = match &option_ty {
+            Type::Adt { args: held, .. } if held.len() == 1 => held[0].clone(),
+            _ => return self.fail(format!("`{owner}::checked_{operation}` answers an `Option`"), range),
+        };
+        let width = self.be.int_width(bits);
+        let sign = if signed { 's' } else { 'u' };
+        let (value, present) = match (operation, args) {
+            ("add" | "sub" | "mul", [left, right]) => {
+                let l = self.expr(*left)?.into_int_value();
+                let r = self.expr(*right)?.into_int_value();
+                self.with_overflow(&format!("llvm.{sign}{operation}.with.overflow.i{bits}"), bits, l, r)
+            }
+            ("neg", [only]) => {
+                let x = self.expr(*only)?.into_int_value();
+                self.with_overflow(&format!("llvm.{sign}sub.with.overflow.i{bits}"), bits, width.const_zero(), x)
+            }
+            // Signed only: `std` declares no `checked_abs` on an unsigned type.
+            ("abs", [only]) if signed => {
+                let x = self.expr(*only)?.into_int_value();
+                let (negated, present) =
+                    self.with_overflow(&format!("llvm.ssub.with.overflow.i{bits}"), bits, width.const_zero(), x);
+                let b = &self.be.builder;
+                let below = b
+                    .build_int_compare(IntPredicate::SLT, x, width.const_zero(), "is.negative")
+                    .expect("comparing against zero");
+                let magnitude = b.build_select(below, negated, x, "abs").expect("choosing the magnitude");
+                // Only a negative input can fail to negate; a non-negative one
+                // is its own answer whatever the subtraction said.
+                let fine = b.build_or(present, b.build_not(below, "not.negative").expect("not"), "abs.ok");
+                (magnitude.into_int_value(), fine.expect("combining the flags"))
+            }
+            ("div", [left, right]) => {
+                let l = self.expr(*left)?.into_int_value();
+                let r = self.expr(*right)?.into_int_value();
+                let b = &self.be.builder;
+                let nonzero = b
+                    .build_int_compare(IntPredicate::NE, r, width.const_zero(), "nonzero")
+                    .expect("comparing a divisor against zero");
+                let present = if signed {
+                    let min = width.const_int(1u64 << (bits - 1), false);
+                    let is_min =
+                        b.build_int_compare(IntPredicate::EQ, l, min, "is.min").expect("comparing");
+                    let is_neg_one = b
+                        .build_int_compare(IntPredicate::EQ, r, width.const_all_ones(), "is.neg.one")
+                        .expect("comparing");
+                    let overflows = b.build_and(is_min, is_neg_one, "overflows").expect("both");
+                    let fits = b.build_not(overflows, "fits").expect("negating");
+                    b.build_and(nonzero, fits, "divides").expect("both")
+                } else {
+                    nonzero
+                };
+                let divisor = b
+                    .build_select(present, r, width.const_int(1, false), "divisor")
+                    .expect("choosing a divisor")
+                    .into_int_value();
+                let quotient = if signed {
+                    b.build_int_signed_div(l, divisor, "div")
+                } else {
+                    b.build_int_unsigned_div(l, divisor, "div")
+                };
+                (quotient.expect("integer division"), present)
+            }
+            _ => {
+                return self.fail(
+                    format!("`{owner}::checked_{operation}` is not an integer operation the backend knows"),
+                    range,
+                )
+            }
+        };
+        let word = if bits < 64 {
+            self.be
+                .builder
+                .build_int_z_extend(value, self.be.ctx.i64_type(), "word")
+                .expect("widening to a word")
+        } else {
+            value
+        };
+        self.option_of_word(present, word, &held, &option_ty)
+    }
+
+    /// One `*.with.overflow` call: the value, and whether it fit.
+    fn with_overflow(
+        &mut self,
+        intrinsic: &str,
+        bits: u32,
+        left: IntValue<'ctx>,
+        right: IntValue<'ctx>,
+    ) -> (IntValue<'ctx>, IntValue<'ctx>) {
+        let checked = self.be.overflow_intrinsic(intrinsic, bits);
+        let pair = self
+            .be
+            .builder
+            .build_call(checked, &[left.into(), right.into()], "checked")
+            .expect("checked arithmetic")
+            .try_as_basic_value()
+            .basic()
+            .expect("the intrinsic returns a pair")
+            .into_struct_value();
+        let b = &self.be.builder;
+        let value = b.build_extract_value(pair, 0, "value").expect("reading the result").into_int_value();
+        let overflowed =
+            b.build_extract_value(pair, 1, "overflowed").expect("reading the flag").into_int_value();
+        let fits = b.build_not(overflowed, "fits").expect("negating the flag");
+        (value, fits)
     }
 
     /// One of the four conversions, between `Int` and a fixed-width type.
@@ -343,6 +477,17 @@ impl<'ctx> Lower<'_, 'ctx> {
         }
     }
 
+    /// Whether the integer literal `text` names a value of `ty`.
+    ///
+    /// The code generator's own copy of the checker's range rule, asked
+    /// before a constant is narrowed to `ty`'s width: narrowing keeps the low
+    /// bits, so a literal outside the range would silently become another
+    /// number. A type with no integer shape is not this question's to answer.
+    pub(super) fn literal_fits(text: &str, ty: &Type) -> bool {
+        let Some((bits, signed)) = Self::int_shape(ty) else { return true };
+        literal_fits_width(text, bits, signed)
+    }
+
     /// Stops the program, saying what did not fit.
     ///
     /// The tail of an overflow check and of a narrowing conversion, which want
@@ -414,5 +559,57 @@ impl<'ctx> Lower<'_, 'ctx> {
 
         self.at(good);
         value
+    }
+}
+
+/// Whether the integer literal `text` names a value an integer of `bits`
+/// bits and that signedness can hold: the range the checker enforces, read
+/// through the same `khora_syntax::number` reader.
+fn literal_fits_width(text: &str, bits: u32, signed: bool) -> bool {
+    let Ok(value) = khora_syntax::number::int_literal_signed(text) else { return false };
+    let (lo, hi) = if signed {
+        let half = 1i128 << (bits - 1);
+        (-half, half - 1)
+    } else {
+        (0, (1i128 << bits) - 1)
+    };
+    lo <= value && value <= hi
+}
+
+#[cfg(test)]
+mod tests {
+    use super::literal_fits_width;
+
+    /// **The assertion `test_pattern` makes before narrowing a constant.**
+    /// The checker refuses an out-of-range pattern first, so no program can
+    /// reach this from source; these are the cases the review found matching
+    /// the wrong arm when the narrowing was silent.
+    #[test]
+    fn a_literal_outside_the_width_does_not_fit() {
+        for (text, bits, signed) in [
+            ("256", 8, false),
+            ("0x100", 8, false),
+            ("0x80", 8, true),
+            ("65537", 16, false),
+            ("0xFFFF", 16, true),
+            ("0x1_0000_0005", 32, false),
+            ("18446744073709551615", 64, true),
+            ("0x8000_0000_0000_0000", 64, true),
+            ("-1", 8, false),
+            ("-129", 8, true),
+        ] {
+            assert!(!literal_fits_width(text, bits, signed), "`{text}` in {bits} bits, signed {signed}");
+        }
+        for (text, bits, signed) in [
+            ("255", 8, false),
+            ("0xFF", 8, false),
+            ("0x7F", 8, true),
+            ("-128", 8, true),
+            ("-0x8000_0000_0000_0000", 64, true),
+            ("0xFFFF_FFFF_FFFF_FFFF", 64, false),
+            ("0", 64, false),
+        ] {
+            assert!(literal_fits_width(text, bits, signed), "`{text}` in {bits} bits, signed {signed}");
+        }
     }
 }

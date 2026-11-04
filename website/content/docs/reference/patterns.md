@@ -59,6 +59,23 @@ false
 
 Integer, floating-point, string, and boolean literals can be used as literal patterns.
 
+An integer literal pattern has to fit the type of the value it is matched
+against, as it would in `let b: U8 = 256;`. In any base, at the top of a
+pattern or inside a tuple, a case's payload or a record, a literal the
+type cannot hold is a compile error: `0x100 =>` against a `U8` is refused
+with "`0x100` does not fit in `U8`, which holds 0 to 255" rather than
+read as its low byte.
+
+```khora
+fn kind(b: U8) -> String {
+  match b {
+    0xFF => "all ones",
+    0x7F => "the top bit clear",
+    _ => "other",
+  }
+}
+```
+
 ## Nullary constructor path
 
 ```khora

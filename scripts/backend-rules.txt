@@ -92,10 +92,11 @@
 `{other}` is not an error type, so it cannot be raised
 `{owner}::to_float` takes one number
 `{owner}::{case}` is not a constructor
+`{owner}::checked_{operation}` answers an `Option`
 `{owner}::{name}` takes one argument
 `{owner}::{name}` takes two arguments
 `{owner}` has no fields
-`{text}` does not fit in an `Int`
+`{text}` does not fit in 64 bits
 `{text}` is not a number this target can hold
 `{type_name}` has no field `{label}`
 `{type_name}` is not a record
@@ -119,6 +120,10 @@ this closure was never declared, which is a compiler bug
 this expression cannot be assigned to
 this expression did not survive the front end
 this function has no `raises` clause, so it cannot raise: add `raises`  with what this sends -- `raises E`, or `raises 'er` for a failure the caller  chose -- or catch it here
+# A literal pattern wider than its value: the first kind until the checker
+# refused it (`settle_literal_patterns`); the backend keeps it as the assertion
+# that stands in for a silent truncation, which matched `0` against `256 =>`.
+the pattern `{text}` does not fit `{ty}`, which the type checker  refuses, so reaching code generation is a compiler bug
 this method call was not resolved to an impl; that is a compiler bug
 this pattern can fail, so it needs a `match` rather than a `let` — a  `let` has nowhere to send a value that does not match
 this pattern does not name a constructor

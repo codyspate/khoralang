@@ -845,3 +845,54 @@ pub fn main() -> () raises ChildFailed {
     let close = std_function_ir("polls_accepting_close", main, "$http$closing_raw");
     assert!(!close.contains("@khora_poll"), "the close's builder has a cancellation point:\n{close}");
 }
+
+/// **`Int::checked_add` is the overflow intrinsic, read without the trap.**
+/// The spec of the checked forms is "no second computation": the value and
+/// the flag come out of one `llvm.sadd.with.overflow.i64`, the same call `+`
+/// makes, and nothing in the function recomputes the sum or calls the trap.
+///
+/// A lowering that added the operands and then compared them against the
+/// bounds would pass every run-time test and fail this.
+#[test]
+fn checked_add_is_the_overflow_intrinsic() {
+    let main = "module main;
+import std::core::{print, Option};
+fn sum(a: Int, b: Int) -> Option<Int> { Int::checked_add(a, b) }
+pub fn main() -> () {
+  match sum(1, 2) { Option::Some(n) => print(\"${n}\"), Option::None => print(\"none\") };
+}
+";
+    let body = std_function_ir("polls_checked_add", main, "$main$sum");
+    assert_eq!(
+        body.matches("call { i64, i1 } @llvm.sadd.with.overflow.i64(").count(),
+        1,
+        "one overflow intrinsic:\n{body}"
+    );
+    assert!(!body.contains(" add i64 "), "the sum computed a second time:\n{body}");
+    assert!(!body.contains("@khora_overflow"), "a checked add does not trap:\n{body}");
+}
+
+/// **`-x` is checked: one `ssub.with.overflow` from zero and a trap.** A
+/// plain `sub 0, x` or `neg` passes every run-time test that never reaches
+/// the minimum, and answers the minimum itself when it does.
+#[test]
+fn negation_has_an_overflow_check() {
+    let main = "module main;
+import std::core::{print, I8};
+fn flip(a: Int) -> Int { -a }
+fn flip8(a: I8) -> I8 { -a }
+pub fn main() -> () {
+  let small: I8 = 3;
+  print(\"${flip(1)} ${I8::to_int(flip8(small))}\");
+}
+";
+    for (function, bits) in [("$main$flip", 64), ("$main$flip8", 8)] {
+        let body = std_function_ir(&format!("polls_negation{bits}"), main, function);
+        assert_eq!(
+            body.matches(&format!("@llvm.ssub.with.overflow.i{bits}(i{bits} 0,")).count(),
+            1,
+            "one overflow intrinsic, from zero:\n{body}"
+        );
+        assert!(body.contains("@khora_overflow"), "the negation traps:\n{body}");
+    }
+}

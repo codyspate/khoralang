@@ -693,3 +693,17 @@ pub(crate) fn needs_an_eq_impl(ty: &Type) -> bool {
 pub(crate) fn needs_an_ord_impl(ty: &Type) -> bool {
     matches!(ty, Type::Str) || needs_an_eq_impl(ty)
 }
+
+/// Whether `ty` is `std::decimal`'s `Decimal`, whose `+`, `-` and `*` are its
+/// methods.
+///
+/// **By home, not by name.** A program's own `type Decimal` is a different
+/// type with no promise of an `add`, and an operator on it is the ordinary
+/// "expected `Int`" refusal, as for any other record.
+pub(crate) fn is_std_decimal(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::Adt { name, home: Some(home), args }
+            if name == "Decimal" && args.is_empty() && home.segments() == ["std", "decimal"]
+    )
+}

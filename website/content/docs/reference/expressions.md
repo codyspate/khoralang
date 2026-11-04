@@ -429,6 +429,20 @@ ready && count > 0
 
 Prefix `!value` is boolean negation. Postfix `call()!` marks failure propagation; position disambiguates them.
 
+**What the arithmetic operators take.** Both operands of `+`, `-`, `*`, `/` and
+`%` are one type, and the left one decides which: `Int`, `Float`, a
+fixed-width integer such as `U8`, or `Decimal`. Nothing is converted, so
+`1 + 2.0` is an error. On integers, `+`, `-`, `*` and prefix `-` stop the
+program when the answer does not fit the type — `-x` on `Int::MIN` included,
+as `x * -1` does — and the `checked_*` methods answer `None` instead; see
+[Traps](/docs/reference/traps/).
+
+On `Decimal`, `+`, `-`, `*` and prefix `-` are `Decimal::add`, `sub`, `mul` and
+`negate`, with their answer and scale. `/` and `%` are refused: a decimal
+quotient needs a scale and a rounding, and is written
+`Decimal::divide(a, b, scale, rounding)`. See
+[Decimals](/docs/stdlib/decimal/).
+
 ## Failure postfix `!`
 
 ```khora

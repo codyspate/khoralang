@@ -578,6 +578,96 @@ fn a_show_hole_on_an_unimported_std_type_names_the_import() {
     assert!(imported.is_empty(), "expected no errors once imported, got {imported:?}");
 }
 
+/// **`+`, `-`, `*` and unary `-` on two `Decimal`s check**, and are the
+/// methods: an operator answers a `Decimal`, so it chains and compares.
+#[test]
+fn decimal_arithmetic_operators_check() {
+    let found = errors_with_std(
+        "module program;\n\
+         import std::decimal::{Decimal};\n\
+         pub fn total(price: Decimal, count: Decimal, off: Decimal) -> Decimal {\n\
+           let gross = price * count + 1.50d;\n\
+           let net = gross - off;\n\
+           -(-net)\n\
+         }\n\
+         pub fn over(a: Decimal, b: Decimal) -> Bool { a + b > a * b }\n",
+    );
+    assert!(found.is_empty(), "{found:?}");
+}
+
+/// **Mixing a `Decimal` with an `Int` is refused, and says how to make the
+/// `Int` a `Decimal`.** `price + 1` is not a conversion Khora does silently
+/// for any pair of number types, and the plain mismatch -- "expected
+/// `Decimal`, found `Int`" -- names the problem and not the one-word fix.
+#[test]
+fn decimal_plus_int_names_of_int() {
+    for (written, wrong) in [
+        ("price + 1", "Int"),
+        ("price * count", "Int"),
+        ("price - 1.5", "Float"),
+    ] {
+        let found = errors_with_std(&format!(
+            "module program;\n\
+             import std::decimal::{{Decimal}};\n\
+             pub fn f(price: Decimal, count: Int) -> Decimal {{ {written} }}\n"
+        ));
+        assert!(
+            found.iter().any(|e| e.contains("`Decimal` arithmetic takes two `Decimal`s")
+                && e.contains(&format!("found `{wrong}`"))
+                && e.contains("Decimal::of_int")),
+            "`{written}`: {found:?}"
+        );
+    }
+    // And with the `Int` on the left: the left operand decides the
+    // arithmetic, so this is `Int` arithmetic meeting a `Decimal`.
+    let found = errors_with_std(
+        "module program;\n\
+         import std::decimal::{Decimal};\n\
+         pub fn f(price: Decimal) -> Int { 1 + price }\n",
+    );
+    assert!(
+        found.iter().any(|e| e.contains("Decimal::of_int")),
+        "`1 + price`: {found:?}"
+    );
+}
+
+/// **A program's own `Decimal` is not `std::decimal`'s**, and an operator on
+/// it is refused as on any record: nothing promises it an `add`.
+#[test]
+fn a_local_decimal_has_no_operators() {
+    let found = errors_with_std(
+        "module program;\n\
+         type Decimal = { units: Int };\n\
+         pub fn f(a: Decimal, b: Decimal) -> Decimal { a + b }\n",
+    );
+    assert!(
+        found.iter().any(|e| e.contains("expected `Int`, found `Decimal`")),
+        "{found:?}"
+    );
+    assert!(!found.iter().any(|e| e.contains("Decimal::of_int")), "{found:?}");
+}
+
+/// **`/` on `Decimal` is refused, and names `Decimal::divide` and why.** A
+/// quotient usually has no exact decimal form, so there is no answer for an
+/// operator to give without a scale and a rounding nobody wrote.
+#[test]
+fn decimal_division_operator_names_divide() {
+    for op in ["/", "%"] {
+        let found = errors_with_std(&format!(
+            "module program;\n\
+             import std::decimal::{{Decimal}};\n\
+             pub fn f(a: Decimal, b: Decimal) -> Decimal {{ a {op} b }}\n"
+        ));
+        assert!(
+            found.iter().any(|e| e.contains(&format!("`{op}`"))
+                && e.contains("Decimal::divide(a, b, scale, rounding)")
+                && e.contains("scale")
+                && e.contains("rounding")),
+            "`{op}`: {found:?}"
+        );
+    }
+}
+
 /// A tuple pattern in a `for` reports once, and does not go on to describe the
 /// desugaring.
 ///
@@ -737,6 +827,9 @@ fn a_literal_nursery_limit_below_one_is_a_compile_error() {
     for call in [
         "bounded_nursery(0, fn () => 1)!",
         "bounded_nursery(-1, fn () => 1)!",
+        // In any base: the limit is the number written.
+        "bounded_nursery(0x0, fn () => 1)!",
+        "bounded_nursery(-0b1, fn () => 1)!",
         "{ let _ = Fibers::bounded(0); 1 }",
     ] {
         let found = errors_with_std(&format!(
@@ -750,7 +843,11 @@ fn a_literal_nursery_limit_below_one_is_a_compile_error() {
             "`{call}` should be refused: {found:?}"
         );
     }
-    for call in ["bounded_nursery(1, fn () => 1)!", "bounded_nursery(limit(), fn () => 1)!"] {
+    for call in [
+        "bounded_nursery(1, fn () => 1)!",
+        "bounded_nursery(0x1, fn () => 1)!",
+        "bounded_nursery(limit(), fn () => 1)!",
+    ] {
         let found = errors_with_std(&format!(
             "module program;\n\
              import std::core::{{ChildFailed, bounded_nursery}};\n\
@@ -843,4 +940,44 @@ fn fibers_spawn_refuses_a_closure_value_but_not_a_nursery_handler() {
          }\n",
     );
     assert!(found.is_empty(), "a nursery handler's own forwarding should compile: {found:?}");
+}
+
+/// **A right-hand `Decimal` or `Float` settles an unannotated left
+/// operand**, as a right-hand `String` already settled `+`. In `fn x => x +
+/// 1.5d` nothing has said what `x` is when the `+` is read, and defaulting it
+/// to `Int` refused a line with nothing wrong in it ("expected `Int`, found
+/// `Decimal`"). Curried, the right operand is a variable too, and the
+/// application settles both.
+#[test]
+fn a_right_hand_decimal_or_float_settles_an_unannotated_left() {
+    let found = errors_with_std(
+        "module program;\n\
+         import std::decimal::{Decimal};\n\
+         fn apply(f: (Decimal, Decimal) -> Decimal, a: Decimal, b: Decimal) -> Decimal { f(a, b) }\n\
+         pub fn d1() -> Decimal { let addv = fn x => x + 1.5d; addv(1d) }\n\
+         pub fn d2() -> Decimal { let subv = fn x => x - 0.25d; let mulv = fn x => x * 2d; mulv(subv(1d)) }\n\
+         pub fn d3() -> Decimal { apply(fn (x, y) => x * y, 1.5d, 2.25d) }\n\
+         pub fn f1() -> Float { let addf = fn x => x + 1.5; addf(1.0) }\n\
+         pub fn f2() -> Float { let mulf = fn x => x * 2.0; mulf(3.0) }\n",
+    );
+    assert!(found.is_empty(), "{found:?}");
+}
+
+/// **And a right-hand `Int` still makes it `Int`**: the settling above is
+/// for what the right operand knows, not a change of default.
+#[test]
+fn a_right_hand_int_still_settles_int() {
+    let found = errors_with_std(
+        "module program;\n\
+         pub fn i1() -> Int { let inc = fn x => x + 1; inc(41) }\n",
+    );
+    assert!(found.is_empty(), "{found:?}");
+    let refused = errors_with_std(
+        "module program;\n\
+         pub fn i2() -> Float { let inc = fn x => x + 1; inc(1.5) }\n",
+    );
+    assert!(
+        refused.iter().any(|m| m.contains("`Int`") && m.contains("`Float`")),
+        "`x + 1` made `x` an `Int`, so a `Float` argument is refused: {refused:?}"
+    );
 }

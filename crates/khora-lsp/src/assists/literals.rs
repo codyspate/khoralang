@@ -11,13 +11,12 @@
 //! works on the token's text, and the rules about what may appear inside a
 //! hole are the parser's rather than this file's.
 //!
-//! **There is no "write it as hexadecimal", and there was.** It produced
-//! `0xFF`, which Khora does not lex: the language has decimal integer literals
-//! and an underscore separator, and no other base. The assist was written, it
-//! passed every assertion about the text it emitted, and the check that
-//! compiles the result is what caught it. An assist that writes a language
-//! feature the language does not have is worse than a missing one, because it
-//! looks like the editor knows something.
+//! **There is no "write it as hexadecimal".** One was written before the
+//! language had based literals, and it produced `0xFF`, which Khora did not
+//! then lex; the check that compiles an assist's result is what caught it. An
+//! assist that writes a language feature the language does not have is worse
+//! than a missing one, because it looks like the editor knows something. The
+//! literal exists now, and an assist for it is a separate decision.
 
 use khora_syntax::{SyntaxKind, SyntaxNode};
 use text_size::TextRange;

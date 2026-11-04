@@ -20,6 +20,10 @@ llvm = ["dep:inkwell"]
 [dependencies]
 khora-db.workspace = true
 khora-hir.workspace = true
+# For `khora_syntax::number`, the one reading of an integer literal's text
+# that the checker uses too, so a literal cannot mean one number there and
+# another here.
+khora-syntax.workspace = true
 khora-types.workspace = true
 khora-perceus.workspace = true
 # Depended on for its `pub` layout constants, not for its code: the header

@@ -131,19 +131,50 @@ fn ten_to(power: i64) -> Option<i128> {
 
 /// `value` moved to a scale `by` places larger, or a stopped program.
 fn raised(value: i128, by: i64, what: &str) -> i128 {
-    let step = ten_to(by).unwrap_or_else(|| refuse(what));
-    value.checked_mul(step).unwrap_or_else(|| refuse(what))
+    try_raised(value, by).unwrap_or_else(|| refuse(what))
 }
 
-/// Both operands at the larger of their two scales.
+/// `value` moved to a scale `by` places larger, or `None` if it does not fit.
+fn try_raised(value: i128, by: i64) -> Option<i128> {
+    value.checked_mul(ten_to(by)?)
+}
+
+/// Both operands at the larger of their two scales, or `None` if either does
+/// not fit there.
 ///
 /// The step that made sixty-four bits too narrow, and the reason the width
 /// changed: the operands fit and their aligned forms did not.
-fn aligned(a: i128, a_scale: i64, b: i128, b_scale: i64, what: &str) -> (i128, i128, i64) {
+fn try_aligned(a: i128, a_scale: i64, b: i128, b_scale: i64) -> Option<(i128, i128, i64)> {
     let scale = a_scale.max(b_scale);
-    let a = raised(a, scale - a_scale, what);
-    let b = raised(b, scale - b_scale, what);
-    (a, b, scale)
+    Some((try_raised(a, scale - a_scale)?, try_raised(b, scale - b_scale)?, scale))
+}
+
+/// The sum at the larger scale, or `None`: the one computation both
+/// [`khora_decimal_add`] and [`khora_decimal_checked_add`] make.
+fn sum(a_hi: i64, a_lo: i64, a_scale: i64, b_hi: i64, b_lo: i64, b_scale: i64) -> Option<(i128, i64)> {
+    let (a, b, scale) = try_aligned(wide(a_hi, a_lo), a_scale, wide(b_hi, b_lo), b_scale)?;
+    Some((a.checked_add(b)?, scale))
+}
+
+/// The difference at the larger scale, or `None`.
+fn difference(a_hi: i64, a_lo: i64, a_scale: i64, b_hi: i64, b_lo: i64, b_scale: i64) -> Option<(i128, i64)> {
+    let (a, b, scale) = try_aligned(wide(a_hi, a_lo), a_scale, wide(b_hi, b_lo), b_scale)?;
+    Some((a.checked_sub(b)?, scale))
+}
+
+/// Answers a `checked_*` operation the way [`khora_decimal_parse`] answers:
+/// `1` with the significand left for [`khora_decimal_high`] and
+/// [`khora_decimal_low`], or `0` for `None`.
+///
+/// **Not the low word in the return value, as the trapping ones do**, because
+/// every `i64` is the low word of some significand: there is no value left
+/// over to mean "did not fit", and a sentinel would be a number some sum
+/// legitimately has.
+fn deliver_checked(answer: Option<i128>) -> i64 {
+    let Some(value) = answer else { return 0 };
+    SPARE.with(|spare| spare.set(((value >> 64) as i64, 0)));
+    LOW.with(|low| low.set(value as u64 as i64));
+    1
 }
 
 /// `left + right`, at the larger of their scales.
@@ -156,9 +187,10 @@ pub extern "C" fn khora_decimal_add(
     b_lo: i64,
     b_scale: i64,
 ) -> i64 {
-    const WHAT: &str = "Decimal addition overflowed";
-    let (a, b, scale) = aligned(wide(a_hi, a_lo), a_scale, wide(b_hi, b_lo), b_scale, WHAT);
-    deliver(a.checked_add(b).unwrap_or_else(|| refuse(WHAT)), scale)
+    let Some((value, scale)) = sum(a_hi, a_lo, a_scale, b_hi, b_lo, b_scale) else {
+        refuse("Decimal addition overflowed")
+    };
+    deliver(value, scale)
 }
 
 /// `left - right`, at the larger of their scales.
@@ -171,9 +203,10 @@ pub extern "C" fn khora_decimal_sub(
     b_lo: i64,
     b_scale: i64,
 ) -> i64 {
-    const WHAT: &str = "Decimal subtraction overflowed";
-    let (a, b, scale) = aligned(wide(a_hi, a_lo), a_scale, wide(b_hi, b_lo), b_scale, WHAT);
-    deliver(a.checked_sub(b).unwrap_or_else(|| refuse(WHAT)), scale)
+    let Some((value, scale)) = difference(a_hi, a_lo, a_scale, b_hi, b_lo, b_scale) else {
+        refuse("Decimal subtraction overflowed")
+    };
+    deliver(value, scale)
 }
 
 /// `left * right`. **The scales add**, which the caller works out itself.
@@ -182,6 +215,42 @@ pub extern "C" fn khora_decimal_mul(a_hi: i64, a_lo: i64, b_hi: i64, b_lo: i64) 
     const WHAT: &str = "Decimal multiplication overflowed";
     let (a, b) = (wide(a_hi, a_lo), wide(b_hi, b_lo));
     deliver(a.checked_mul(b).unwrap_or_else(|| refuse(WHAT)), 0)
+}
+
+/// [`khora_decimal_add`], answering `0` where it would stop the program.
+///
+/// **What this prevents: one hostile amount stopping every request a server
+/// is serving.** The sum is the same computation, read without the trap; see
+/// [`deliver_checked`] for how the answer comes back.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_decimal_checked_add(
+    a_hi: i64,
+    a_lo: i64,
+    a_scale: i64,
+    b_hi: i64,
+    b_lo: i64,
+    b_scale: i64,
+) -> i64 {
+    deliver_checked(sum(a_hi, a_lo, a_scale, b_hi, b_lo, b_scale).map(|(value, _)| value))
+}
+
+/// [`khora_decimal_sub`], answering `0` where it would stop the program.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_decimal_checked_sub(
+    a_hi: i64,
+    a_lo: i64,
+    a_scale: i64,
+    b_hi: i64,
+    b_lo: i64,
+    b_scale: i64,
+) -> i64 {
+    deliver_checked(difference(a_hi, a_lo, a_scale, b_hi, b_lo, b_scale).map(|(value, _)| value))
+}
+
+/// [`khora_decimal_mul`], answering `0` where it would stop the program.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_decimal_checked_mul(a_hi: i64, a_lo: i64, b_hi: i64, b_lo: i64) -> i64 {
+    deliver_checked(wide(a_hi, a_lo).checked_mul(wide(b_hi, b_lo)))
 }
 
 /// The same number at a larger scale, exactly, or a stopped program.
@@ -219,7 +288,8 @@ pub extern "C" fn khora_decimal_is_negative(hi: i64, lo: i64) -> i64 {
 /// Where `left` sits relative to `right`: `-1`, `0` or `1`.
 ///
 /// **Comparison must not be able to stop the program**, which is why this does
-/// not go through `aligned`. It used to, so `==` on a hundred million and a
+/// not line both operands up at one scale first. It used to, so `==` on a
+/// hundred million and a
 /// rate to twelve places asked for a multiplication no significand survived —
 /// an equality that traps, in the type sold on the fact that `Float`'s cannot
 /// be trusted.
@@ -357,11 +427,49 @@ pub extern "C" fn khora_decimal_divide(
     scale: i64,
     mode: i64,
 ) -> i64 {
-    const WHAT: &str = "Decimal division overflowed";
-    let (left, right) = (wide(a_hi, a_lo), wide(b_hi, b_lo));
     let scale = scale.max(0);
-    if right == 0 {
+    if wide(b_hi, b_lo) == 0 {
         return deliver(0, scale);
+    }
+    match quotient(a_hi, a_lo, a_scale, b_hi, b_lo, b_scale, scale, mode) {
+        Some(value) => deliver(value, scale),
+        None => refuse("Decimal division overflowed"),
+    }
+}
+
+/// [`khora_decimal_divide`], answering `0` where it would stop the program
+/// **and** where `right` is zero, so `checked_divide` has one `None` for
+/// both and nothing to test first.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_decimal_checked_divide(
+    a_hi: i64,
+    a_lo: i64,
+    a_scale: i64,
+    b_hi: i64,
+    b_lo: i64,
+    b_scale: i64,
+    scale: i64,
+    mode: i64,
+) -> i64 {
+    deliver_checked(quotient(a_hi, a_lo, a_scale, b_hi, b_lo, b_scale, scale.max(0), mode))
+}
+
+/// The quotient at `scale` places, or `None` when `right` is zero or the
+/// answer does not fit: the one computation both divisions make.
+#[allow(clippy::too_many_arguments)]
+fn quotient(
+    a_hi: i64,
+    a_lo: i64,
+    a_scale: i64,
+    b_hi: i64,
+    b_lo: i64,
+    b_scale: i64,
+    scale: i64,
+    mode: i64,
+) -> Option<i128> {
+    let (left, right) = (wide(a_hi, a_lo), wide(b_hi, b_lo));
+    if right == 0 {
+        return None;
     }
 
     // `left / right` already carries a scale of `left_scale - right_scale`, so
@@ -373,17 +481,15 @@ pub extern "C" fn khora_decimal_divide(
     let numerator = left.unsigned_abs();
     let mut denominator = right.unsigned_abs();
     let (high, low) = if wanted >= 0 {
-        let step = ten_to(wanted).unwrap_or_else(|| refuse(WHAT)) as u128;
+        let step = ten_to(wanted)? as u128;
         mul_wide(numerator, step)
     } else {
-        let step = ten_to(-wanted).unwrap_or_else(|| refuse(WHAT)) as u128;
-        denominator = denominator.checked_mul(step).unwrap_or_else(|| refuse(WHAT));
+        let step = ten_to(-wanted)? as u128;
+        denominator = denominator.checked_mul(step)?;
         (0, numerator)
     };
 
-    let Some((quotient, remainder)) = div_wide(high, low, denominator) else {
-        refuse(WHAT)
-    };
+    let (quotient, remainder) = div_wide(high, low, denominator)?;
 
     // Which way a tie goes is the whole of the mode, and the comparison is
     // doubled to avoid a division that would round on its own.
@@ -405,12 +511,8 @@ pub extern "C" fn khora_decimal_divide(
         _ => false,
     };
 
-    let magnitude = if away && remainder != 0 {
-        quotient.checked_add(1).unwrap_or_else(|| refuse(WHAT))
-    } else {
-        quotient
-    };
-    deliver(signed_from(magnitude, negative).unwrap_or_else(|| refuse(WHAT)), scale)
+    let magnitude = if away && remainder != 0 { quotient.checked_add(1)? } else { quotient };
+    signed_from(magnitude, negative)
 }
 
 /// The significand's digits, without a sign or a point, into `into`.
@@ -726,5 +828,56 @@ mod tests {
         assert_eq!(khora_decimal_truncated(hi, lo, 38), 0);
         let (hi, lo) = split(i128::MAX);
         assert_eq!(khora_decimal_truncated(hi, lo, 40), 0);
+    }
+
+    /// A checked answer, read back the way `std::decimal` reads it.
+    fn checked(flag: i64) -> Option<i128> {
+        (flag == 1).then(|| wide(khora_decimal_high(), khora_decimal_low()))
+    }
+
+    /// **The checked forms answer `None` exactly where the plain ones stop
+    /// the program, and the same number everywhere else.** At the 128-bit
+    /// edge: `i128::MAX` at scale 0 is the largest significand, and one more
+    /// unit is past it; the alignment overflows on its own when a whole
+    /// number is raised by thirty-eight places.
+    #[test]
+    fn the_checked_forms_refuse_where_the_plain_ones_stop() {
+        let add = |a: i128, a_s: i64, b: i128, b_s: i64| {
+            let ((a_hi, a_lo), (b_hi, b_lo)) = (split(a), split(b));
+            checked(khora_decimal_checked_add(a_hi, a_lo, a_s, b_hi, b_lo, b_s))
+        };
+        let sub = |a: i128, a_s: i64, b: i128, b_s: i64| {
+            let ((a_hi, a_lo), (b_hi, b_lo)) = (split(a), split(b));
+            checked(khora_decimal_checked_sub(a_hi, a_lo, a_s, b_hi, b_lo, b_s))
+        };
+        let mul = |a: i128, b: i128| {
+            let ((a_hi, a_lo), (b_hi, b_lo)) = (split(a), split(b));
+            checked(khora_decimal_checked_mul(a_hi, a_lo, b_hi, b_lo))
+        };
+        assert_eq!(add(i128::MAX - 1, 0, 1, 0), Some(i128::MAX));
+        assert_eq!(add(i128::MAX, 0, 1, 0), None);
+        assert_eq!(add(10_000_000_000, 2, 1, 12), Some(100_000_000_000_000_000_001));
+        assert_eq!(add(2, 0, 1, 38), None, "two raised by 38 places is past the edge");
+        assert_eq!(sub(i128::MIN + 1, 0, 1, 0), Some(i128::MIN));
+        assert_eq!(sub(i128::MIN, 0, 1, 0), None);
+        assert_eq!(mul(i128::MAX, 1), Some(i128::MAX));
+        assert_eq!(mul(i128::MAX, 2), None);
+        assert_eq!(mul(i128::MIN, -1), None);
+    }
+
+    /// Checked division is `None` for a zero divisor as well as for an answer
+    /// that does not fit, and otherwise rounds as `divide` does.
+    #[test]
+    fn checked_division_refuses_zero_and_overflow() {
+        let divide = |a: i128, a_s: i64, b: i128, b_s: i64, scale: i64, mode: i64| {
+            let ((a_hi, a_lo), (b_hi, b_lo)) = (split(a), split(b));
+            checked(khora_decimal_checked_divide(a_hi, a_lo, a_s, b_hi, b_lo, b_s, scale, mode))
+        };
+        assert_eq!(divide(125, 3, 1, 0, 2, 0), Some(12));
+        assert_eq!(divide(-125, 3, 1, 0, 2, 1), Some(-13));
+        assert_eq!(divide(1, 0, 0, 0, 2, 0), None, "a zero divisor");
+        assert_eq!(divide(i128::MAX, 0, 1, 0, 1, 2), None, "ten times the largest significand");
+        assert_eq!(divide(1, 0, 3, 0, 39, 0), None, "a scale no significand reaches");
+        assert_eq!(divide(i128::MIN, 0, -1, 0, 0, 2), None, "the minimum over minus one");
     }
 }

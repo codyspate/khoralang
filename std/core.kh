@@ -2593,6 +2593,23 @@ impl<A> Array<A> {
   /// An index outside the array stops the program, as `get` does.
   pub fn set(self, index: Int, value: A) -> ();
 
+  /// The elements, first to last, as a `List`.
+  ///
+  /// **A copy that can cross to another fiber**, which the array cannot: a
+  /// `List` has nothing to write, so a child may read it while the parent
+  /// goes on writing the array. Costs one list cell per element. Backwards
+  /// through the array, prepending, so the list comes out in order with no
+  /// reversing pass and one frame however long it is.
+  pub fn to_list(self) -> List<A> {
+    let mut out: List<A> = List::Nil;
+    let mut i = Array::length(self);
+    while i > 0 {
+      i = i - 1;
+      out = List::Cons(Array::get(self, i), out);
+    }
+    out
+  }
+
   /// `count` elements, each one built by calling `make` with its index.
   ///
   /// **The answer when the cells must not be the same object.**
@@ -2851,6 +2868,44 @@ impl Int {
   /// Arithmetic, so a negative number stays negative. A logical shift is what
   /// `Int` cannot express and what an unsigned fixed-width type will.
   pub fn shr(self, other: Int) -> Int;
+}
+
+/// Arithmetic that answers `None` instead of stopping the program.
+///
+/// **What these are for: a number you did not choose.** `+`, `-` and `*` stop
+/// the program when the answer does not fit, and that is right for a bug. An
+/// amount, a quantity or an offset that arrived in a request is not a bug when
+/// it is absurd, and stopping the program over one stops every other request
+/// it was serving. Ask with `checked_*` and the answer is an `Option` to turn
+/// into a refusal:
+///
+/// ```khora
+/// fn line_total(price: Int, quantity: Int) -> Option<Int> {
+///   Int::checked_mul(price, quantity)
+/// }
+/// ```
+///
+/// Each is one LLVM overflow intrinsic and a test of its flag, the same
+/// instruction the trapping operator uses; there is no second computation.
+/// Where the `Option` is not held in registers, building `Some` allocates.
+impl Int {
+  /// The sum, or `None` if it does not fit. `+` stops the program instead.
+  pub fn checked_add(self, other: Int) -> Option<Int>;
+  /// The difference, or `None` if it does not fit. `-` stops the program
+  /// instead.
+  pub fn checked_sub(self, other: Int) -> Option<Int>;
+  /// The product, or `None` if it does not fit. `*` stops the program
+  /// instead.
+  pub fn checked_mul(self, other: Int) -> Option<Int>;
+  /// The quotient, rounded towards zero as `/` rounds it, or `None` when
+  /// `other` is zero or the answer does not fit -- which is only `Int`'s
+  /// minimum over minus one. `/` stops the program on both.
+  pub fn checked_div(self, other: Int) -> Option<Int>;
+  /// The number with the opposite sign, or `None` for `Int`'s minimum, the
+  /// one value with no positive twin.
+  pub fn checked_neg(self) -> Option<Int>;
+  /// The magnitude, or `None` for `Int`'s minimum, for the same reason.
+  pub fn checked_abs(self) -> Option<Int>;
 }
 
 // --- text ------------------------------------------------------------------
@@ -4116,6 +4171,22 @@ impl U8 {
   /// Logical, because the type is unsigned: the vacated bits are zeros
   /// and a large value stays large.
   pub fn shr(self, other: U8) -> U8;
+
+  /// The sum, or `None` if it does not fit the type. `+` stops the program
+  /// instead. The `checked_*` family is the way to do arithmetic on a
+  /// number you did not choose -- a length in a header, a field in a
+  /// packet -- where an absurd value is input to refuse rather than a bug:
+  /// see `Int::checked_add`.
+  pub fn checked_add(self, other: U8) -> Option<U8>;
+  /// The difference, or `None` if it does not fit. `-` stops the program.
+  pub fn checked_sub(self, other: U8) -> Option<U8>;
+  /// The product, or `None` if it does not fit. `*` stops the program.
+  pub fn checked_mul(self, other: U8) -> Option<U8>;
+  /// The quotient, or `None` when `other` is zero. `/` stops the program.
+  pub fn checked_div(self, other: U8) -> Option<U8>;
+  /// Zero for zero, and `None` for anything else: no other unsigned value
+  /// has a negative the type can hold.
+  pub fn checked_neg(self) -> Option<U8>;
 }
 
 /// An unsigned 16-bit integer: 0 to 65,535.
@@ -4145,6 +4216,18 @@ impl U16 {
   pub fn shl(self, other: U16) -> U16;
   /// Logical, because the type is unsigned.
   pub fn shr(self, other: U16) -> U16;
+
+  /// The sum, or `None` if it does not fit. `+` stops the program instead.
+  pub fn checked_add(self, other: U16) -> Option<U16>;
+  /// The difference, or `None` if it does not fit. `-` stops the program.
+  pub fn checked_sub(self, other: U16) -> Option<U16>;
+  /// The product, or `None` if it does not fit. `*` stops the program.
+  pub fn checked_mul(self, other: U16) -> Option<U16>;
+  /// The quotient, or `None` when `other` is zero. `/` stops the program.
+  pub fn checked_div(self, other: U16) -> Option<U16>;
+  /// Zero for zero, and `None` for anything else: no other unsigned value
+  /// has a negative the type can hold.
+  pub fn checked_neg(self) -> Option<U16>;
 }
 
 /// An unsigned 32-bit integer: 0 to 4,294,967,295.
@@ -4174,6 +4257,18 @@ impl U32 {
   pub fn shl(self, other: U32) -> U32;
   /// Logical, because the type is unsigned.
   pub fn shr(self, other: U32) -> U32;
+
+  /// The sum, or `None` if it does not fit. `+` stops the program instead.
+  pub fn checked_add(self, other: U32) -> Option<U32>;
+  /// The difference, or `None` if it does not fit. `-` stops the program.
+  pub fn checked_sub(self, other: U32) -> Option<U32>;
+  /// The product, or `None` if it does not fit. `*` stops the program.
+  pub fn checked_mul(self, other: U32) -> Option<U32>;
+  /// The quotient, or `None` when `other` is zero. `/` stops the program.
+  pub fn checked_div(self, other: U32) -> Option<U32>;
+  /// Zero for zero, and `None` for anything else: no other unsigned value
+  /// has a negative the type can hold.
+  pub fn checked_neg(self) -> Option<U32>;
 }
 
 /// An unsigned 64-bit integer: 0 to 18,446,744,073,709,551,615.
@@ -4212,6 +4307,18 @@ impl U64 {
   pub fn shl(self, other: U64) -> U64;
   /// Logical, because the type is unsigned.
   pub fn shr(self, other: U64) -> U64;
+
+  /// The sum, or `None` if it does not fit. `+` stops the program instead.
+  pub fn checked_add(self, other: U64) -> Option<U64>;
+  /// The difference, or `None` if it does not fit. `-` stops the program.
+  pub fn checked_sub(self, other: U64) -> Option<U64>;
+  /// The product, or `None` if it does not fit. `*` stops the program.
+  pub fn checked_mul(self, other: U64) -> Option<U64>;
+  /// The quotient, or `None` when `other` is zero. `/` stops the program.
+  pub fn checked_div(self, other: U64) -> Option<U64>;
+  /// Zero for zero, and `None` for anything else: no other unsigned value
+  /// has a negative the type can hold.
+  pub fn checked_neg(self) -> Option<U64>;
 }
 
 /// A signed 8-bit integer: -128 to 127.
@@ -4241,6 +4348,20 @@ impl I8 {
   pub fn shl(self, other: I8) -> I8;
   /// Arithmetic, because the type is signed.
   pub fn shr(self, other: I8) -> I8;
+
+  /// The sum, or `None` if it does not fit. `+` stops the program instead.
+  pub fn checked_add(self, other: I8) -> Option<I8>;
+  /// The difference, or `None` if it does not fit. `-` stops the program.
+  pub fn checked_sub(self, other: I8) -> Option<I8>;
+  /// The product, or `None` if it does not fit. `*` stops the program.
+  pub fn checked_mul(self, other: I8) -> Option<I8>;
+  /// The quotient towards zero, or `None` when `other` is zero or the
+  /// answer does not fit (the minimum over minus one). `/` stops the program.
+  pub fn checked_div(self, other: I8) -> Option<I8>;
+  /// The number with the opposite sign, or `None` for the minimum.
+  pub fn checked_neg(self) -> Option<I8>;
+  /// The magnitude, or `None` for the minimum.
+  pub fn checked_abs(self) -> Option<I8>;
 }
 
 /// A signed 16-bit integer: -32,768 to 32,767.
@@ -4270,6 +4391,20 @@ impl I16 {
   pub fn shl(self, other: I16) -> I16;
   /// Arithmetic, because the type is signed.
   pub fn shr(self, other: I16) -> I16;
+
+  /// The sum, or `None` if it does not fit. `+` stops the program instead.
+  pub fn checked_add(self, other: I16) -> Option<I16>;
+  /// The difference, or `None` if it does not fit. `-` stops the program.
+  pub fn checked_sub(self, other: I16) -> Option<I16>;
+  /// The product, or `None` if it does not fit. `*` stops the program.
+  pub fn checked_mul(self, other: I16) -> Option<I16>;
+  /// The quotient towards zero, or `None` when `other` is zero or the
+  /// answer does not fit (the minimum over minus one). `/` stops the program.
+  pub fn checked_div(self, other: I16) -> Option<I16>;
+  /// The number with the opposite sign, or `None` for the minimum.
+  pub fn checked_neg(self) -> Option<I16>;
+  /// The magnitude, or `None` for the minimum.
+  pub fn checked_abs(self) -> Option<I16>;
 }
 
 /// A signed 32-bit integer: -2,147,483,648 to 2,147,483,647.
@@ -4301,6 +4436,20 @@ impl I32 {
   pub fn shl(self, other: I32) -> I32;
   /// Arithmetic, because the type is signed.
   pub fn shr(self, other: I32) -> I32;
+
+  /// The sum, or `None` if it does not fit. `+` stops the program instead.
+  pub fn checked_add(self, other: I32) -> Option<I32>;
+  /// The difference, or `None` if it does not fit. `-` stops the program.
+  pub fn checked_sub(self, other: I32) -> Option<I32>;
+  /// The product, or `None` if it does not fit. `*` stops the program.
+  pub fn checked_mul(self, other: I32) -> Option<I32>;
+  /// The quotient towards zero, or `None` when `other` is zero or the
+  /// answer does not fit (the minimum over minus one). `/` stops the program.
+  pub fn checked_div(self, other: I32) -> Option<I32>;
+  /// The number with the opposite sign, or `None` for the minimum.
+  pub fn checked_neg(self) -> Option<I32>;
+  /// The magnitude, or `None` for the minimum.
+  pub fn checked_abs(self) -> Option<I32>;
 }
 
 // ---------------------------------------------------------------------------
@@ -4387,11 +4536,24 @@ impl Ord for U64 {
 }
 
 impl Show for U64 {
-  fn show(self) -> String { Int::to_string(U64::to_int(self)) }
+  /// The number, in decimal, up to `18446744073709551615`.
+  ///
+  /// **Not through `to_int`**, which stops the program above `Int`'s maximum:
+  /// half the type's values. Unsigned division by ten brings every `U64`
+  /// within `Int`'s range, and the digit it drops is written after. Costs one
+  /// division and one more string than `Int`'s `show`.
+  fn show(self) -> String {
+    let ten: U64 = 10;
+    let rest = U64::to_int(self / ten);
+    let last = U64::to_int(self % ten);
+    if rest == 0 { Int::to_string(last) } else { Int::to_string(rest) + Int::to_string(last) }
+  }
 }
 
 impl Hash for U64 {
-  fn hash(self) -> Int { U64::to_int(self) }
+  /// The bits, read as an `Int`. Not `to_int`, which stops the program above
+  /// `Int`'s maximum and made half the type's values unusable as a key.
+  fn hash(self) -> Int { U64::wrapping_to_int(self) }
 }
 
 impl Eq for I8 {

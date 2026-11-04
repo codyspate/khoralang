@@ -34,12 +34,22 @@ module std::decimal;
 //! it, and an eighteen-decimal token balance — where sixty-four bits ran out at
 //! 9.2 whole units.
 //!
+//! # Operators
+//!
+//! `+`, `-`, `*` and unary `-` on two `Decimal`s are `add`, `sub`, `mul` and
+//! `negate`, with their answer, scale and stop: `price * quantity + shipping`.
+//! Both operands are `Decimal`s, and `Decimal::of_int` makes a count into one.
+//! `/` is refused, because a quotient needs the scale and rounding `divide`
+//! takes. `==` and `<` compare by value. An operator traps; `checked_*`
+//! refuses.
+//!
 //! # What it does when it cannot answer
 //!
 //! It stops the program, like every other number in Khora. `numbers.md`
 //! §"Overflow traps, in every build" argues that case and none of the argument
 //! changes here: a total that silently wrapped is worse than one that never
-//! arrived. That covers `add`, `sub`, `mul`, `at_scale` and `divide` alike.
+//! arrived. That covers `+`, `-`, `*`, `add`, `sub`, `mul`, `at_scale` and
+//! `divide` alike.
 //!
 //! Division is not an exception to it. It takes a scale and a rounding because
 //! a quotient usually has no exact decimal form, and answers `None` when the
@@ -54,6 +64,30 @@ module std::decimal;
 //! including a numeral too long to hold — is what `of_string`'s `Option` is
 //! for. And `show` is string work, so it prints every scale a `Decimal` can
 //! carry rather than the first eighteen.
+//!
+//! # Arithmetic on amounts you did not choose
+//!
+//! A stopped program is right for a bug and wrong for input. An amount that
+//! arrived in a request can be absurd without anything being wrong with the
+//! program, and stopping over it stops every other request the program was
+//! serving. `checked_add`, `checked_sub`, `checked_mul` and `checked_divide`
+//! answer `None` where their plain forms stop, so the absurd amount becomes a
+//! refusal of that one request:
+//!
+//! ```khora
+//! fn order_total(price: Decimal, quantity: Decimal, shipping: Decimal) -> Result<Decimal, String> {
+//!   match Decimal::checked_mul(price, quantity) {
+//!     Option::Some(subtotal) => match Decimal::checked_add(subtotal, shipping) {
+//!       Option::Some(total) => Result::Ok(total),
+//!       Option::None => Result::Err("400: the total is too large"),
+//!     },
+//!     Option::None => Result::Err("400: the quantity is too large"),
+//!   }
+//! }
+//! ```
+//!
+//! Use the operators and the plain forms on numbers the program made itself,
+//! where an overflow is a bug worth stopping for.
 
 import std::core::{Array, Eq, List, Option, Ord, Ordering, Ptr, Show};
 
@@ -80,6 +114,13 @@ import std::core::{Array, Eq, List, Option, Ord, Ordering, Ptr, Show};
 /// arriving from input rather than from a literal is worth a bound of the
 /// caller's own choosing; there is no obvious one to impose here, and imposing
 /// a wrong one would silently change values that are correct today.
+///
+/// **On an amount from outside the program, use `checked_add`,
+/// `checked_sub`, `checked_mul` and `checked_divide`.** The operators and the
+/// plain forms stop the program when the answer does not fit, which is right
+/// for a bug and stops every request a server is serving when one request's
+/// amount is absurd; the checked forms answer `None`, for the caller to turn
+/// into a refusal of that request. The module documentation has the example.
 pub type Decimal = {
   hi: Int,
   lo: Int,
@@ -150,20 +191,23 @@ impl Decimal {
   ///
   /// Both operands come to the larger of their two scales first, which is the
   /// step that made sixty-four bits too narrow: the operands fit and their
-  /// aligned forms did not.
+  /// aligned forms did not. **Scales more than 38 apart stop it too**, even
+  /// when the answer would fit, because no significand can be moved more than
+  /// 38 places: `Decimal::add(Decimal::zero(), Decimal::scaled(1, 40))` stops.
   pub fn add(self, other: Decimal) -> Decimal {
     let lo = khora_decimal_add(
       self.hi, self.lo, self.scale, other.hi, other.lo, other.scale);
     let hi = khora_decimal_high();
-    { hi: hi, lo: lo, scale: larger(self.scale, other.scale) }
+    { hi: hi, lo: lo, scale: sum_scale(self, other) }
   }
 
-  /// The difference. Exact, and stops the program if it does not fit.
+  /// The difference. Exact, and stops the program if it does not fit, or if
+  /// the scales are more than 38 apart, as `add` does.
   pub fn sub(self, other: Decimal) -> Decimal {
     let lo = khora_decimal_sub(
       self.hi, self.lo, self.scale, other.hi, other.lo, other.scale);
     let hi = khora_decimal_high();
-    { hi: hi, lo: lo, scale: larger(self.scale, other.scale) }
+    { hi: hi, lo: lo, scale: sum_scale(self, other) }
   }
 
   /// The product, exactly.
@@ -175,7 +219,7 @@ impl Decimal {
   pub fn mul(self, other: Decimal) -> Decimal {
     let lo = khora_decimal_mul(self.hi, self.lo, other.hi, other.lo);
     let hi = khora_decimal_high();
-    { hi: hi, lo: lo, scale: self.scale + other.scale }
+    { hi: hi, lo: lo, scale: product_scale(self, other) }
   }
 
   /// The quotient, to `scale` decimal places, rounded as asked.
@@ -210,6 +254,79 @@ impl Decimal {
         self.hi, self.lo, self.scale, other.hi, other.lo, other.scale, scale, mode);
       let hi = khora_decimal_high();
       Option::Some({ hi: hi, lo: lo, scale: scale })
+    }
+  }
+
+  /// The sum, or `None` if it does not fit. `add` stops the program instead.
+  ///
+  /// **`None` also when the scales are more than 38 apart**, even if the
+  /// answer would fit: `checked_add(Decimal::of_int(2), Decimal::scaled(1, 40))`
+  /// is `None`, because the 2 cannot be written at 40 places. Round the finer
+  /// operand first if that is not what is wanted.
+  ///
+  /// The one to use on an amount you did not choose; see the type's
+  /// documentation for the shape of the refusal.
+  pub fn checked_add(self, other: Decimal) -> Option<Decimal> {
+    let fits = khora_decimal_checked_add(
+      self.hi, self.lo, self.scale, other.hi, other.lo, other.scale);
+    if fits == 1 {
+      Option::Some({
+          hi: khora_decimal_high(),
+          lo: khora_decimal_low(),
+          scale: sum_scale(self, other),
+        })
+    } else {
+      Option::None
+    }
+  }
+
+  /// The difference, or `None` if it does not fit or the scales are more than
+  /// 38 apart, as in `checked_add`. `sub` stops the program instead.
+  pub fn checked_sub(self, other: Decimal) -> Option<Decimal> {
+    let fits = khora_decimal_checked_sub(
+      self.hi, self.lo, self.scale, other.hi, other.lo, other.scale);
+    if fits == 1 {
+      Option::Some({
+          hi: khora_decimal_high(),
+          lo: khora_decimal_low(),
+          scale: sum_scale(self, other),
+        })
+    } else {
+      Option::None
+    }
+  }
+
+  /// The product, or `None` if it does not fit. `mul` stops the program
+  /// instead. The scales add, as they do in `mul`.
+  pub fn checked_mul(self, other: Decimal) -> Option<Decimal> {
+    let fits = khora_decimal_checked_mul(self.hi, self.lo, other.hi, other.lo);
+    if fits == 1 {
+      Option::Some({
+          hi: khora_decimal_high(),
+          lo: khora_decimal_low(),
+          scale: product_scale(self, other),
+        })
+    } else {
+      Option::None
+    }
+  }
+
+  /// The quotient to `scale` places, rounded as asked, or `None` when
+  /// `other` is zero **or** the answer does not fit. `divide` answers `None`
+  /// only for the zero and stops the program on the rest.
+  pub fn checked_divide(self, other: Decimal, scale: Int, how: Rounding) -> Option<Decimal> {
+    let mode = match how {
+      Rounding::HalfEven => 0,
+      Rounding::HalfUp => 1,
+      Rounding::Towards => 2,
+    };
+    let scale = if scale < 0 { 0 } else { scale };
+    let fits = khora_decimal_checked_divide(
+      self.hi, self.lo, self.scale, other.hi, other.lo, other.scale, scale, mode);
+    if fits == 1 {
+      Option::Some({ hi: khora_decimal_high(), lo: khora_decimal_low(), scale: scale })
+    } else {
+      Option::None
     }
   }
 
@@ -350,8 +467,19 @@ impl Decimal {
 /// The upper half of an `Int` widened to the significand: all ones, or none.
 fn sign_of(units: Int) -> Int { if units < 0 { -1 } else { 0 } }
 
-/// The larger of two scales, which is where a sum or a difference lands.
-fn larger(left: Int, right: Int) -> Int { if left > right { left } else { right } }
+/// Where a sum or a difference lands: the larger of the two scales.
+///
+/// **One function, called by `add`, `sub` and their checked forms**, so the
+/// plain and the checked answer cannot come back at different scales. With a
+/// copy of the rule in each form, a slip in one printed `1.50 - 0.003` as
+/// `14.97` while every other row stayed right.
+fn sum_scale(left: Decimal, right: Decimal) -> Int {
+  if left.scale > right.scale { left.scale } else { right.scale }
+}
+
+/// Where a product lands: the two scales added, which is what makes `mul`
+/// exact. Shared by `mul` and `checked_mul` for the reason `sum_scale` is.
+fn product_scale(left: Decimal, right: Decimal) -> Int { left.scale + right.scale }
 
 impl Eq for Decimal {
   /// **By value, not by representation.** `1.0` and `1.00` are the same number
@@ -477,6 +605,29 @@ extern fn khora_decimal_mul(
   left_hi: Int, left_lo: Int, right_hi: Int, right_lo: Int,
 ) -> Int;
 
+// The `checked_*` forms of `add`, `sub`, `mul` and `divide`. Each answers 1
+// and leaves the significand for `khora_decimal_high` and
+// `khora_decimal_low`, or answers 0 where the plain form stops the program --
+// and, for the division, where the divisor is zero. Not the low word in the
+// return value, because every `Int` is the low word of some significand and
+// none is left over to mean "did not fit".
+extern fn khora_decimal_checked_add(
+  left_hi: Int, left_lo: Int, left_scale: Int,
+  right_hi: Int, right_lo: Int, right_scale: Int,
+) -> Int;
+extern fn khora_decimal_checked_sub(
+  left_hi: Int, left_lo: Int, left_scale: Int,
+  right_hi: Int, right_lo: Int, right_scale: Int,
+) -> Int;
+extern fn khora_decimal_checked_mul(
+  left_hi: Int, left_lo: Int, right_hi: Int, right_lo: Int,
+) -> Int;
+extern fn khora_decimal_checked_divide(
+  left_hi: Int, left_lo: Int, left_scale: Int,
+  right_hi: Int, right_lo: Int, right_scale: Int,
+  scale: Int, mode: Int,
+) -> Int;
+
 // The same number at a larger scale, exactly.
 extern fn khora_decimal_rescale(hi: Int, lo: Int, from: Int, to: Int) -> Int;
 
@@ -525,7 +676,7 @@ extern fn khora_decimal_parse(text: Ptr, length: Int) -> Int;
 // The high half of the last answer.
 extern fn khora_decimal_high() -> Int;
 
-// The low half of the last parse.
+// The low half of the last parse or `checked_*` answer.
 extern fn khora_decimal_low() -> Int;
 
 // The scale of the last parse, the one scale a caller cannot work out itself.

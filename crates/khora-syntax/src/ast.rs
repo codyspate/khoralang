@@ -806,9 +806,11 @@ impl TupleType {
 }
 
 impl LiteralType {
-    /// The integer this const-generic argument names.
+    /// The integer this const-generic argument names, in whichever base it
+    /// was written.
     pub fn value(&self) -> Option<i64> {
-        token(&self.0, INT_LIT)?.text().replace('_', "").parse().ok()
+        let value = crate::number::int_literal_value(token(&self.0, INT_LIT)?.text()).ok()?;
+        i64::try_from(value).ok()
     }
 }
 

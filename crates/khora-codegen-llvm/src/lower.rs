@@ -995,20 +995,23 @@ impl<'ctx> Lower<'_, 'ctx> {
 }
 
 
-/// Parses an integer literal.
+/// The bits of an integer literal, at 64 bits.
 ///
-/// Underscores are stripped and the radix prefixes the lexer admits are
-/// honored. The value is parsed as `i64` because that is what `Int` is; a
-/// literal that does not fit is a diagnostic rather than a wrap.
-fn parse_int(text: &str) -> Option<i64> {
-    let cleaned: String = text.chars().filter(|c| *c != '_').collect();
-    let (radix, digits) = match cleaned.get(..2) {
-        Some("0x") | Some("0X") => (16, &cleaned[2..]),
-        Some("0b") | Some("0B") => (2, &cleaned[2..]),
-        Some("0o") | Some("0O") => (8, &cleaned[2..]),
-        _ => (10, cleaned.as_str()),
-    };
-    i64::from_str_radix(digits, radix).ok()
+/// Read through `khora_syntax::number`, as the checker reads it, so a `0xFF`
+/// cannot be one number there and another here. The answer is the bit
+/// pattern, not a signed value: `U64`'s top half (`0xFFFF_FFFF_FFFF_FFFF`)
+/// is a literal the checker accepts for a `U64`, and an `i64` cannot hold it;
+/// the `-1` a negative `Decimal` literal's high half desugars to is all ones.
+/// The caller truncates to the literal's own width. `None` is outside 64
+/// bits either way, which the checker has already refused against the
+/// literal's type.
+fn parse_int(text: &str) -> Option<u64> {
+    let value = khora_syntax::number::int_literal_signed(text).ok()?;
+    if value < 0 {
+        i64::try_from(value).ok().map(|v| v as u64)
+    } else {
+        u64::try_from(value).ok()
+    }
 }
 
 /// The width and signedness of an integer type named as a path owner.

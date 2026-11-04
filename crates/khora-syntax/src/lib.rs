@@ -15,6 +15,7 @@ pub mod doc;
 mod event;
 mod kind;
 mod lexer;
+pub mod number;
 mod parser;
 
 use rowan::GreenNode;

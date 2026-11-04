@@ -511,6 +511,74 @@ fn a_literal_must_fit_the_type_it_is_asked_to_be() {
     assert_clean("module m;\nfn f() -> Int { let b: U8 = 255; 0 }\n");
 }
 
+/// **A based literal is typed like a decimal one**: an `Int` by default, and
+/// the type asked of it at the mention, where it has to fit. The range is the
+/// type's, not the bit pattern's -- `0xFF` is 255 and not an `I8`'s `-1`.
+#[test]
+fn a_based_literal_fits_the_type_it_is_asked_to_be() {
+    assert_clean("module m;\nfn f() -> Int { let b: U8 = 0xFF; 0 }\n");
+    assert_clean("module m;\nfn f() -> Int { let b: U8 = 0b1111_1111; 0 }\n");
+    assert_clean("module m;\nfn f() -> Int { let b: U64 = 0xFFFF_FFFF_FFFF_FFFF; 0 }\n");
+    assert_clean("module m;\nfn f() -> Int { let b: I8 = -0x80; 0 }\n");
+    assert_clean("module m;\nfn f() -> Int { 0o17 + 0x7FFF_FFFF_FFFF_FFFF - 0x7FFF_FFFF_FFFF_FFFF }\n");
+    assert_reports(
+        "module m;\nfn f() -> Int { let b: U8 = 0x100; 0 }\n",
+        "`0x100` does not fit in `U8`, which holds 0 to 255",
+    );
+    assert_reports(
+        "module m;\nfn f() -> Int { let b: I8 = 0xFF; 0 }\n",
+        "`0xFF` does not fit in `I8`, which holds -128 to 127",
+    );
+    assert_reports(
+        "module m;\nfn f() -> Int { let b: I8 = -0x81; 0 }\n",
+        "`-0x81` does not fit in `I8`",
+    );
+    assert_reports(
+        "module m;\nfn f() -> Int { 0x8000_0000_0000_0000 }\n",
+        "`0x8000_0000_0000_0000` does not fit in an `Int`",
+    );
+}
+
+/// Two arms that name one number in two bases are one arm, and the second is
+/// unreachable.
+#[test]
+fn a_pattern_is_the_number_and_not_its_spelling() {
+    assert_reports(
+        "module m;\nfn f(n: Int) -> Int { match n { 255 => 1, 0xFF => 2, _ => 3 } }\n",
+        "unreachable",
+    );
+}
+
+/// **Every signed type's minimum is a negated literal, in either base**,
+/// `Int`'s included: its digits alone are one past `Int::MAX`, and only the
+/// whole is an `Int`. One past the minimum is still refused, and names the
+/// negated text the reader wrote.
+#[test]
+fn every_signed_minimum_is_a_negated_literal() {
+    for (ty, decimal, based) in [
+        ("Int", "-9223372036854775808", "-0x8000_0000_0000_0000"),
+        ("I64", "-9223372036854775808", "-0x8000_0000_0000_0000"),
+        ("I32", "-2147483648", "-0x8000_0000"),
+        ("I16", "-32768", "-0x8000"),
+        ("I8", "-128", "-0x80"),
+    ] {
+        for written in [decimal, based] {
+            assert_clean(&format!(
+                "module m;\nimport std::core::{{I8, I16, I32, I64}};\nfn f() -> Int {{ let b: {ty} = {written}; 0 }}\n"
+            ));
+        }
+    }
+    assert_clean("module m;\nfn f() -> Int { -9223372036854775808 }\n");
+    assert_reports(
+        "module m;\nfn f() -> Int { -9223372036854775809 }\n",
+        "`-9223372036854775809` does not fit in an `Int`",
+    );
+    assert_reports(
+        "module m;\nfn f() -> Int { -0x8000_0000_0000_0001 }\n",
+        "`-0x8000_0000_0000_0001` does not fit in an `Int`",
+    );
+}
+
 // --- `Unknown` is a silence, not a type ------------------------------------
 
 /// A body the checker finished cleanly must have no `Unknown` left in it.

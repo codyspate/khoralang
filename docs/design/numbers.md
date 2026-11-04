@@ -9,6 +9,13 @@ not.
 `+`, `-` and `*` on `Int` stop the program when the result does not fit. Not
 "in debug", not "unless optimized" — always.
 
+**Unary `-` is the same operation, from zero.** `-x` on a signed type's
+minimum stops the program as `x * -1` does, because the minimum has no
+positive twin, and `-x` on an unsigned value stops for anything but zero. Left
+unchecked, `-x` answered the minimum itself where `x * -1` stopped — two
+spellings of one product disagreeing silently. A negated *literal* is not a
+negation: `-128` is one `I8` and is folded before code generation.
+
 Rust's split (panic in debug, wrap in release) is the one this audience knows,
 and it is the one rejected. A program that passes its tests and then wraps in
 production is the failure worth spending a branch on, and two behaviors put
@@ -41,8 +48,15 @@ divisor that came from a file or a socket is *data*, and the honest answer
 there is the error channel: `raises DivideByZero`, handled where the data came
 in. That would put a row on every function containing a division, which is a
 real cost and not obviously worth paying for the common case. `Int::checked_div`
-returning an `Option` is the middle answer and is probably what phase 8 wants.
-Trapping now is the decision that does not have to be unmade to get there.
+returning an `Option` is the middle answer, and it is the one built: every
+integer type has `checked_add`, `checked_sub`, `checked_mul`, `checked_div` and
+`checked_neg` (and the signed ones `checked_abs`), each `None` exactly where the
+operator traps. They lower to the same `with.overflow` intrinsic as the
+operator, with the flag turned into the `Option`'s tag instead of a branch to
+the trap. `Decimal` has `checked_add`, `checked_sub`, `checked_mul` and
+`checked_divide`, which share their computation with the trapping forms in the
+runtime. The trap stays the default; a number from outside the program is
+the case for asking.
 
 ## Bit operations are methods, for now
 
@@ -135,6 +149,35 @@ not — a negated literal is checked as one number rather than as a negation
 applied to another, and there is no other way to write that type's smallest
 value.
 
+**A based literal is the number it names, not a bit pattern.** `0xFF`, `0b1010`
+and `0o17` take the hint exactly as `255`, `10` and `15` do, so `let b: I8 =
+0xFF` is refused for the reason `let b: I8 = 255` is, and `-0x80` is the same
+`I8` as `-128`. Reading `0xFF` as an `I8`'s `-1` would make a literal's value
+depend on the type it lands in, which is the silent narrowing the rest of this
+section exists to refuse; a program that means the bits writes
+`I8::wrapping(0xFF)`. The one cost is that `Int`'s top bit cannot be written as
+`0x8000_0000_0000_0000`, which is past `Int::MAX`; it is a `U64`, or the
+negated literal `-0x8000_0000_0000_0000`, which is `Int::MIN`. A negated
+literal is one number in every signed type, `Int` included, so each type's
+minimum is written the way it reads, in either base.
+
+The same rule holds for a literal *pattern*, against the type of the value it
+is matched against: `0x100 =>` on a `U8` is refused as `let b: U8 = 0x100` is.
+It is checked once the types settle, because a lambda's parameter is still a
+variable where its `match` is read. The code generator builds the constant at
+the value's width, and that keeps only the low bits, so a literal that
+reached it unchecked would match the wrong value with no error. One once did:
+`0x100 =>` matched a `U8` holding `0`. The code generator therefore checks
+the range again and stops the build instead of narrowing.
+
+**Negation is checked with the same overflow intrinsic as subtraction, and
+that costs about what `+` does:** in a release loop of `wrapping_add(acc, -x)`
+over an `Array<Int>`, 4 instructions and about 10% of the cycles per element
+over an unchecked `neg`. The unchecked form folds the load into the
+accumulating `sub`. The checked form holds `x` in a register, negates it to
+get the flag, branches, then adds. Spelling the check as a compare against the
+minimum compiles to the same `neg; jo`, at the same count.
+
 ### Conversions go through `Int`
 
 `U8::of(n)` traps if `n` does not fit; `U8::wrapping(n)` truncates; `U8::to_int`
@@ -188,6 +231,22 @@ a scale rather than pretending. Half-even is the default because it is what
 accounting standards specify and what every other decimal type defaults to;
 naming the alternatives explicitly is the point.
 
+**Which operators it has — decided.** `+`, `-`, `*` and unary `-` on two
+`Decimal`s are `Decimal::add`, `sub`, `mul` and `negate`: the checker records
+the method at the operator as it records `Eq::eq` at a `==`, so an operator is
+the method's call, with the method's answer, scale and trap. `/` is refused and
+names `Decimal::divide`, because a quotient needs the scale and the rounding an
+operator has nowhere to write. Mixing is refused too: `price + 1` names
+`Decimal::of_int`, for the reason `1 + 2.0` is an error.
+
+It is a special case, not an `Add` trait. A trait answers the same question for
+every type at the cost of three others nobody had asked — whether `Int +
+Decimal` is an impl, whether generic code may bound on `Add`, and what a
+missing impl says on every record — and one library type did not justify
+answering them. The special case can become a trait later without any program
+changing meaning. `checked_add` and its siblings stay the typed refusal: an
+operator traps; `checked_*` refuses.
+
 **How a literal is written — decided.** `0.01` stays a `Float`, and a decimal
 is `0.01d` or `Decimal::of(...)`.
 
@@ -226,9 +285,10 @@ token; nothing may lex between the digits and the `d`, so `1 d` is not a
 decimal; and if hexadecimal literals are ever added, the suffix must apply only
 to decimal numerals, or `0x1d` becomes ambiguous with a decimal `0x1`.
 
-**All three are tests**, in `crates/khora-syntax/tests/decimal_literal.rs`; the
-third is a note to the future rather than a test, since there are no
-hexadecimal literals to conflict with yet.
+**All three are tests.** The first two are in
+`crates/khora-syntax/tests/decimal_literal.rs`; the third is
+`a_d_in_a_hexadecimal_literal_is_a_digit` in `crates/khora-syntax/tests/bases.rs`,
+where `0x1d` is the integer 29 and no `Decimal`.
 
 Two things the implementation had to decide that this section did not.
 
@@ -373,10 +433,7 @@ type exists to prevent. It is a trap now, and there is a test.
 - **`checked_div` and friends.** See above: trapping is right for a bug and
   wrong for untrusted data, and an `Option`-returning form is what closes the
   gap without putting a row on every function that divides.
-- **Negation does not trap.** `-x` where `x` is the type's minimum wraps to
-  itself. It is the one value that cannot be negated, and the only way to
-  *write* it is as a negated literal, which is folded into the constant before
-  code generation sees it — so the gap is narrow, and it is still a gap.
-- **`U64` arithmetic above `Int`'s range is awkward to write**, because a
-  literal that large cannot be spelled: it does not fit the `i128` the range
-  check parses into. `U64::wrapping(-1)` is the way to say "all ones" today.
+- **`U64` arithmetic above `Int`'s range goes through `U64`'s own methods.**
+  A literal up to `0xFFFF_FFFF_FFFF_FFFF` is a `U64`, and it prints and hashes
+  as itself; converting one to `Int` above `Int::MAX` still stops the program,
+  and `U64::wrapping_to_int` reads the bits instead.

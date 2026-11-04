@@ -128,6 +128,21 @@ impl<'a> Checker<'a> {
                 // the `Unknown` audit at the end of checking is what reports
                 // the ones that never do.
                 let settled = self.unifier.shallow(ty);
+                // **A tuple pattern against an unsolved variable makes it a
+                // tuple**, of fresh variables, since nothing else can match.
+                // Without that the components were `Unknown` for good, and
+                // `fn p => match p { (0, 0x80) => .. }` applied to a
+                // `(Int, I8)` never had its `0x80` checked against `I8`.
+                let settled = match settled {
+                    Type::Var(_) => {
+                        let shape = Type::Tuple(fields.iter().map(|_| self.unifier.fresh()).collect());
+                        match self.unifier.unify(&settled, &shape) {
+                            Ok(()) => shape,
+                            Err(_) => settled,
+                        }
+                    }
+                    other => other,
+                };
                 match &settled {
                     Type::Tuple(items) if items.len() == fields.len() => {}
                     Type::Tuple(items) => {
@@ -168,6 +183,14 @@ impl<'a> Checker<'a> {
                 if let Some(owner) = owner {
                     self.pattern_fits(pat, &owner, ty);
                 }
+            }
+            // **A literal must fit the value it is compared with**, as it must
+            // fit a `let`: the code generator compares at the value's width,
+            // so a `256` let through against a `U8` would match `0`. Recorded
+            // here and checked once the types settle (`literal_pats`).
+            Pat::Literal(Literal::Int(text)) => {
+                let range = self.body.pat_range(pat);
+                self.literal_pats.push((text, ty.clone(), range));
             }
             Pat::Wildcard | Pat::Literal(_) | Pat::Missing => {}
         }
@@ -578,7 +601,12 @@ impl<'a> Checker<'a> {
             Pat::Literal(lit) => Pattern::Constructor {
                 ctor: match lit {
                     Literal::Bool(b) => Ctor::Bool(*b),
-                    Literal::Int(n) => Ctor::Literal(n.clone()),
+                    // By value rather than by spelling, so `0xFF` and `255`
+                    // are one constructor and the second arm is redundant.
+                    Literal::Int(n) => Ctor::Literal(
+                        khora_syntax::number::int_literal_signed(n)
+                            .map_or_else(|_| n.clone(), |value| value.to_string()),
+                    ),
                     Literal::Float(n) => Ctor::Literal(n.clone()),
                     Literal::Str(s) => Ctor::Literal(format!("\"{s}\"")),
                     // Quoted the way it was written, so two arms matching the

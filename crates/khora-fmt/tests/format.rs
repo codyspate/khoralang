@@ -639,3 +639,13 @@ fn trailing_commas_are_the_only_tokens_added() {
     assert_eq!(without(src), without(&out), "{out}");
     assert_eq!(tokens(&out).len(), tokens(src).len() + 2, "a comma for the parameters and for the list:\n{out}");
 }
+
+/// **A based literal is kept as written**: case, prefix and separators. The
+/// digits are the reviewable part of `0x428A_2F98`; a formatter that printed
+/// its value would undo the reason it was written that way.
+#[test]
+fn a_based_literal_keeps_its_spelling() {
+    let src = "module m;\n\nfn f() -> Int {\n  let a = 0xFF;\n  let b = 0b1010_0101;\n  let c = 0O17;\n  let d = 0xdead_BEEF;\n  let e: I8 = -0x80;\n  a + b + c + d\n}\n";
+    let out = round_trip(src);
+    assert_eq!(out, src);
+}
