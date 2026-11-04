@@ -103,7 +103,7 @@ pub fn compile_with(
     out: &Path,
     profile: Profile,
 ) -> Result<(), Vec<HirError>> {
-    build(db, root, out, Entry::Main, Stop::AtExecutable, profile)
+    build(db, root, out, Entry::Main, Stop::AtExecutable, profile, None)
 }
 
 /// Compiles the program's `pub extern fn`s into a shared library.
@@ -127,7 +127,7 @@ pub fn compile_library_with(
     out: &Path,
     profile: Profile,
 ) -> Result<(), Vec<HirError>> {
-    build(db, root, out, Entry::Library, Stop::AtExecutable, profile)
+    build(db, root, out, Entry::Library, Stop::AtExecutable, profile, None)
 }
 
 /// Generates and verifies a module, and stops before writing anything.
@@ -143,7 +143,7 @@ pub fn compile_library_with(
 /// portable step: an unresolved symbol or a wrong calling convention still
 /// needs the real platform, and CI still builds on all three.
 pub fn verify_for_target(db: &dyn Db, root: SourceRoot) -> Result<(), Vec<HirError>> {
-    build(db, root, Path::new("verify-only"), Entry::Main, Stop::AtVerification, Profile::from_env())
+    build(db, root, Path::new("verify-only"), Entry::Main, Stop::AtVerification, Profile::from_env(), None)
 }
 
 /// Compiles and links every concrete function in the program, whether or not
@@ -160,7 +160,7 @@ pub fn verify_for_target(db: &dyn Db, root: SourceRoot) -> Result<(), Vec<HirErr
 /// because what is checked is that each symbol resolves, not how fast the
 /// result runs.
 pub fn link_everything(db: &dyn Db, root: SourceRoot, out: &Path) -> Result<(), Vec<HirError>> {
-    build(db, root, out, Entry::Main, Stop::EverythingLinked, Profile::Debug)
+    build(db, root, out, Entry::Main, Stop::EverythingLinked, Profile::Debug, None)
 }
 
 /// Compiles the program's *tests* to an executable that runs them.
@@ -170,7 +170,32 @@ pub fn link_everything(db: &dyn Db, root: SourceRoot, out: &Path) -> Result<(), 
 /// each one a fiber of its own. Everything else — the same monomorphization,
 /// the same lowering — is shared, because a test body is a function body.
 pub fn compile_tests(db: &dyn Db, root: SourceRoot, out: &Path) -> Result<(), Vec<HirError>> {
-    build(db, root, out, Entry::Tests, Stop::AtExecutable, Profile::from_env())
+    build(db, root, out, Entry::Tests, Stop::AtExecutable, Profile::from_env(), None)
+}
+
+/// [`compile_tests`], running only the `test` blocks written in `own`.
+///
+/// **What this prevents: a dependency's tests running under somebody else's
+/// manifest.** A dependency's files are in the compilation because the
+/// package uses its code, and its `test` blocks came along with them. They
+/// then ran with the *dependent's* `[permissions]` compiled in, so whether a
+/// library's suite passed depended on who was testing it: `postgres`'s own
+/// wire tests dial loopback, and under a service granted only its database
+/// port they were refused and then waited for ever on the accept. `khora
+/// test` of a package means that package's tests, as `khora check` lints
+/// only that package's files. The dependency's suite is `khora test` in the
+/// dependency, under its own manifest.
+///
+/// What it costs: nothing a dependent could rely on. A dependency's tests
+/// still run, in their own package; they are no longer also part of every
+/// dependent's run, which made each dependent's suite slower and repeated.
+pub fn compile_tests_of(
+    db: &dyn Db,
+    root: SourceRoot,
+    out: &Path,
+    own: &[SourceFile],
+) -> Result<(), Vec<HirError>> {
+    build(db, root, out, Entry::Tests, Stop::AtExecutable, Profile::from_env(), Some(own))
 }
 
 /// Compiles the program's `bench` blocks to an executable that times them.
@@ -180,7 +205,18 @@ pub fn compile_tests(db: &dyn Db, root: SourceRoot, out: &Path) -> Result<(), Ve
 /// decide which it is — and the decision already exists, in
 /// `khora_hir::TestKind`, at compile time.
 pub fn compile_benches(db: &dyn Db, root: SourceRoot, out: &Path) -> Result<(), Vec<HirError>> {
-    build(db, root, out, Entry::Benches, Stop::AtExecutable, Profile::from_env())
+    build(db, root, out, Entry::Benches, Stop::AtExecutable, Profile::from_env(), None)
+}
+
+/// [`compile_benches`], timing only the `bench` blocks written in `own`, for
+/// the reason [`compile_tests_of`] runs only a package's own tests.
+pub fn compile_benches_of(
+    db: &dyn Db,
+    root: SourceRoot,
+    out: &Path,
+    own: &[SourceFile],
+) -> Result<(), Vec<HirError>> {
+    build(db, root, out, Entry::Benches, Stop::AtExecutable, Profile::from_env(), Some(own))
 }
 
 /// How far to take a build.

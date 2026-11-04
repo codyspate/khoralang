@@ -2,6 +2,7 @@ module std::permissions;
 
 import std::core::{Eq, List, Option, Split};
 import std::permissions::grants::{fs_read, fs_write};
+import std::permissions::separator::{backslash_separates};
 
 //! What the manifest allows, as data the program carries.
 //!
@@ -41,20 +42,29 @@ import std::permissions::grants::{fs_read, fs_write};
 ///   though not `data` itself, which is `.gitignore`'s reading too.
 /// - Everything else matches itself.
 ///
-/// Separators are normalized first, so a grant written with `/` covers a
-/// Windows path spelled with `\\`. `granted_path` in `khora-manifest` answers
+/// On Windows, separators are normalized first, so a grant written with `/`
+/// covers a path spelled with `\\`; elsewhere `\\` is an ordinary byte of a
+/// name. `granted_path` in `khora-manifest` answers
 /// the same question for the compiler and the two have to agree; the tests
 /// name the cases where agreement is not obvious.
 ///
-/// **A path with a `..` segment is refused, whatever the grants say**, and it
-/// is refused here rather than left to the matcher, because the matcher gets
-/// it wrong. `**` spans separators, so the `./logs/**` the capabilities guide
-/// teaches for granting a tree matches `logs/../secret.txt` literally: the
-/// `**` swallows `../secret.txt`, and a grant that reads like one directory
-/// covers the disk. A program that joins a path it was handed -- an argument,
-/// a config entry, a request path -- under a granted prefix was passing that
-/// reach on to whoever handed it the path. `normalized` says why the `..` is
-/// refused rather than resolved away.
+/// **A path with a `..` segment is refused unless a grant is a bare `**`**,
+/// and it is refused here rather than left to the matcher, because the
+/// matcher gets it wrong. `**` spans separators, so the `./logs/**` the
+/// capabilities guide teaches for granting a tree matches `logs/../secret.txt`
+/// literally: the `**` swallows `../secret.txt`, and a grant that reads like
+/// one directory covers the disk. A program that joins a path it was handed
+/// -- an argument, a config entry, a request path -- under a granted prefix
+/// was passing that reach on to whoever handed it the path. `normalized` says
+/// why the `..` is refused rather than resolved away.
+///
+/// A bare `**` is the one grant with no outside for a `..` to reach, so under
+/// it a `..` path is matched like any other. That is the grant a program with
+/// no `[permissions.fs]` gets, and `default = "allow"` too.
+///
+/// **This answers about the text only.** A symlink in the path can lead
+/// somewhere the text does not say; `std::fs` asks [`granted_followed`],
+/// which follows the links as well.
 pub fn granted(grants: List<String>, path: String) -> Bool {
   let wanted = normalized(path);
   if climbs(wanted) && !unrestricted(grants) {
@@ -63,6 +73,183 @@ pub fn granted(grants: List<String>, path: String) -> Bool {
     List::fold(grants, false, fn (found, grant) =>
       found || matches(normalized(grant), wanted, segmented: true))
   }
+}
+
+/// Whether a grant covers `path` **and where `path` really leads.**
+///
+/// [`granted`] reads the path as text, and text says nothing about the links
+/// along it: under `granted/**`, `granted/link.txt -> ../secret.txt` is a
+/// path the text covers and a file outside the tree. So this asks `real` to
+/// follow the links, and matches the answer as well -- against each grant
+/// followed the same way, because a grant is a path too, and one naming a
+/// linked directory grants the tree it leads to.
+///
+/// Both have to agree. The text check is [`granted`] unchanged, `..` refusal
+/// and all, so following links never widens what the text allowed; it can
+/// only refuse a path the text let through.
+///
+/// - `real(p, true)` is the absolute path `p` leads to with every link on it
+///   followed, or `None` when it cannot be followed (a loop, a directory this
+///   process may not search). A name that does not exist yet is kept as
+///   written, so a write to a new file is checked where it will land.
+/// - `follow_last` is `false` for an operation that acts on a link rather
+///   than through it -- removing or renaming one -- which follows only the
+///   directories above the last name.
+///
+/// **A relative grant is a tree under the working directory once links are
+/// followed**, because that is the only directory a relative path can be
+/// followed from. `**/*.txt` covers `.txt` files below the working directory
+/// and not an absolute path elsewhere, even one the text would match.
+///
+/// **A path that cannot be followed is [`Reach::Unfollowable`], not
+/// [`Reach::Outside`].** Nobody can say it is inside a grant, so it is
+/// refused either way; but a loop or a directory without search permission is
+/// the file system's answer, not the manifest's, and `std::fs` reports it as
+/// `IoError::Failed` so that nobody goes looking in `khora.toml` for it.
+///
+/// **What this does not close: a link that changes between the check and the
+/// open.** The check follows the links that are there when it runs; the open
+/// follows the ones that are there when it runs. Something else on the
+/// machine that can replace a link inside a granted tree in between can
+/// redirect one operation. Closing that needs the open itself to refuse to
+/// leave the tree, which `std::fs` does not do.
+///
+/// **Nor a link a grant names.** Grants are followed on every operation, so
+/// a grant like `data/**` where `data` is a link covers wherever `data` leads
+/// at that moment. Whoever can replace that link moves the grant, for as long
+/// as the link stays replaced -- not one operation but all of them.
+///
+/// **Nor a hard link.** A hard link has no "where it leads": it is the file,
+/// under a second name. One inside a granted tree is inside the tree,
+/// whatever other names the same file has.
+///
+/// Costs nothing under a bare `**`, which has no outside to lead to. Under any
+/// other grant it is one `real` for the path and one per grant, each of which
+/// is a walk of the file system.
+pub fn granted_followed(
+  grants: List<String>,
+  path: String,
+  follow_last: Bool,
+  real: (String, Bool) -> Option<String>,
+) -> Bool {
+  match reach(grants, path, follow_last, real) {
+    Reach::Inside => true,
+    Reach::Outside => false,
+    Reach::Unfollowable => false,
+  }
+}
+
+/// What [`reach`] found.
+pub type Reach =
+  /// The text and where it leads are both inside a grant.
+  | Inside
+  /// The text, or where it leads, is outside every grant.
+  | Outside
+  /// The text is inside a grant and the links along it cannot be followed:
+  /// a loop, or a directory this process may not search.
+  | Unfollowable;
+
+/// [`granted_followed`], saying which way a refusal went.
+pub fn reach(
+  grants: List<String>,
+  path: String,
+  follow_last: Bool,
+  real: (String, Bool) -> Option<String>,
+) -> Reach {
+  if !granted(grants, path) {
+    Reach::Outside
+  } else if unrestricted(grants) {
+    Reach::Inside
+  } else {
+    match real(path, follow_last) {
+      Option::None => Reach::Unfollowable,
+      Option::Some(there) => {
+        let wanted = normalized(there);
+        if List::any(grants, fn grant => followed_covers(grant, wanted, follow_last, real)) {
+          Reach::Inside
+        } else {
+          Reach::Outside
+        }
+      },
+    }
+  }
+}
+
+/// Whether one grant, followed, covers `wanted`, a real absolute path.
+///
+/// **The followed part is a place, not a pattern.** `data/**` is `data`
+/// followed -- say to `/home/me/proj*x/data` -- and then `**` below it. Pasting
+/// the two back together into one pattern made every `*` in the directory's
+/// own name a wildcard: from a working directory named `proj*x`, the grant
+/// covered a sibling `projEVILx`, and from `a**z` a whole subtree of the
+/// parent, so a link inside `data` reached either. The place is compared as a
+/// prefix, byte for byte, and only the glob the manifest wrote is matched.
+///
+/// A grant that cannot be followed covers nothing, rather than being matched
+/// as written: written, it is relative text and `wanted` is absolute, so it
+/// would cover nothing anyway, and saying so is the reading that cannot be
+/// wrong in the dangerous direction.
+///
+/// **A grant with no glob is followed the way the path was.** It names the
+/// path itself, so for an operation on a link's own name -- `follow_last`
+/// false, as for `remove` and `rename` -- its last name is not followed
+/// either: grant `ldir` with `ldir -> elsewhere` covers removing `ldir`, as
+/// the path's own parent-only walk says it should. A grant with a glob names
+/// a directory above the path, and directories above a path are always
+/// followed, so its head is followed whatever the operation.
+fn followed_covers(
+  grant: String,
+  wanted: String,
+  follow_last: Bool,
+  real: (String, Bool) -> Option<String>,
+) -> Bool {
+  let parts = literal_part(normalized(grant));
+  let start = if String::byte_length(parts.head) == 0 { "." } else { parts.head };
+  let names_the_path = String::byte_length(parts.rest) == 0;
+  match real(start, follow_last || !names_the_path) {
+    Option::None => false,
+    Option::Some(root) => beneath(normalized(root), parts.rest, wanted),
+  }
+}
+
+/// Whether `wanted` is `place` itself (for a grant with no glob) or a path
+/// below `place` that `glob` covers.
+fn beneath(place: String, glob: String, wanted: String) -> Bool {
+  if String::byte_length(glob) == 0 {
+    Eq::eq(wanted, place)
+  } else {
+    let prefix = if String::ends_with(place, "/") { place } else { "${place}/" };
+    String::starts_with(wanted, prefix)
+    && matches(glob, String::slice(wanted, String::byte_length(prefix), String::byte_length(wanted)), segmented: true)
+  }
+}
+
+/// A grant split before its first segment with a `*` in it.
+///
+/// `head` is a path that can be followed and `rest` is what the glob says
+/// below it: `logs/*.log` is `logs` and `*.log`, `data/**` is `data` and
+/// `**`, a grant with no `*` is all `head`. A grant starting at the root
+/// keeps it, so `/**` is `/` and `**` rather than an empty head that would
+/// read as the working directory.
+fn literal_part(grant: String) -> Split {
+  let mut head: List<String> = List::Nil;
+  let mut rest: List<String> = List::Nil;
+  let mut globbing = false;
+  let mut pieces = String::split(grant, "/");
+  let mut going = true;
+  while going {
+    match pieces {
+      List::Nil => going = false,
+      List::Cons(piece, more) => {
+        globbing = globbing || String::contains(piece, "*");
+        if globbing { rest = List::Cons(piece, rest) } else { head = List::Cons(piece, head) };
+        pieces = more;
+      },
+    }
+  };
+  let joined = String::join(List::reverse(head), "/");
+  let rooted = String::starts_with(grant, "/") && String::byte_length(joined) == 0;
+  { head: if rooted { "/" } else { joined }, rest: String::join(List::reverse(rest), "/") }
 }
 
 /// Whether the grants are the whole filesystem rather than a part of it.
@@ -78,8 +265,16 @@ pub fn granted(grants: List<String>, path: String) -> Bool {
 /// `default = "allow"`, and a manifest with no `[permissions]` table at all,
 /// both compile to exactly this list, so treating `**` as a restriction stops
 /// a program that never mentioned permissions from reading `../anything`.
+/// [`granted_followed`] skips following links under it for the same reason.
+///
+/// **Only `**` as written.** `./**` normalizes to the same text, and treating
+/// it as the whole disk gave a reader who wrote "this directory", in the
+/// `./data/**` spelling the capabilities guide teaches, every file on the
+/// machine. `./**` is the working directory's tree: followed, and refused a
+/// `..`, like any other grant. `granted_path` in `khora-manifest` draws the
+/// same line.
 fn unrestricted(grants: List<String>) -> Bool {
-  List::any(grants, fn grant => Eq::eq(normalized(grant), "**"))
+  List::any(grants, fn grant => Eq::eq(grant, "**"))
 }
 
 /// Whether any grant covers `name`.
@@ -109,6 +304,54 @@ pub fn granted_host(grants: List<String>, host: String) -> Bool {
   List::fold(grants, false, fn (found, grant) => found || host_matches(grant, asked))
 }
 
+/// Whether any grant lets a program dial `host` on `port`: [`granted_host`]
+/// on `host:port`.
+///
+/// `host` may be an IPv6 literal with or without its brackets. Unbracketed is
+/// safe here because the port is always appended and has no colon in it, so
+/// the last colon is always the port's: `::1` on `5432` is asked about as
+/// `::1:5432`, which splits into `::1` and `5432`, and `[::1]:5432`, `[::1]:*`
+/// and `[::1]` in a manifest all cover it. It is a grant that has to be
+/// bracketed, because a grant may have no port at all.
+///
+/// **A host with a bracket in it is refused unless it is exactly `[addr]`.**
+/// `[::1]:5432` handed in as the host made the subject `[::1]:5432:<port>`,
+/// which splits to the name `::1` and the port text `5432:<port>`, so a
+/// grant of `[::1]` with no port covered it and the name went to the resolver
+/// as written. No resolver tried took it, but a check that waves through a
+/// host it cannot read is relying on the resolver to refuse; it refuses here
+/// instead, before anything is looked up.
+pub fn may_dial(grants: List<String>, host: String, port: Int) -> Bool {
+  well_bracketed(host) && granted_host(grants, "${host}:${Int::to_string(port)}")
+}
+
+/// Whether `host` has no bracket in it, or is one `[` at the start, one `]`
+/// at the end, and none between.
+fn well_bracketed(host: String) -> Bool {
+  let opens = List::length(String::split(host, "[")) - 1;
+  let closes = List::length(String::split(host, "]")) - 1;
+  if opens == 0 && closes == 0 {
+    true
+  } else {
+    opens == 1 && closes == 1 && String::starts_with(host, "[") && String::ends_with(host, "]")
+    && String::byte_length(host) > 2
+  }
+}
+
+/// `host` without the brackets an IPv6 literal is written in: `[::1]` is
+/// `::1`, which is what an address parser takes. Anything else is unchanged.
+///
+/// So a program may write `[::1]`, as a URL would, and the connect it hands
+/// that to still reaches the address.
+pub fn unbracketed(host: String) -> String {
+  let length = String::byte_length(host);
+  if length >= 2 && String::starts_with(host, "[") && String::ends_with(host, "]") {
+    String::slice(host, 1, length - 1)
+  } else {
+    host
+  }
+}
+
 /// One grant against one host.
 fn host_matches(grant: String, asked: Split) -> Bool {
   let allowed = split_port(grant);
@@ -121,16 +364,60 @@ fn host_matches(grant: String, asked: Split) -> Bool {
 
 /// `name:port` split at the **last** colon, with an empty `rest` for no port.
 ///
-/// The last rather than the first, so an IPv6 literal keeps its colons in the
-/// name where they belong. `Split` is reused rather than an `Option` because
-/// the absent case is "no port", and an empty string says that without a
-/// second shape to unwrap.
+/// **An IPv6 literal is written in brackets, as in a URL**: `[::1]:5432`,
+/// `[::1]:*`, or `[::1]` for every port. The brackets are the only way to
+/// tell the address's own colons from the port's, and they are kept off the
+/// name, so `[::1]` in a grant and `::1` handed to a connect are the same
+/// host. Without brackets the last colon is the port's, which for a bare IPv6
+/// literal is a name nobody means. `Split` is reused rather than an `Option`
+/// because the absent case is "no port", and an empty string says that
+/// without a second shape to unwrap.
+///
+/// **A `:` with nothing after it is a port nobody grants**, not "no port":
+/// `example.com:` and `[::1]:` say neither. `rest` comes back as `]`, which
+/// no port is, so such a grant covers nothing and such a subject is covered
+/// by nothing but a grant with no port or `:*`. A manifest refuses the
+/// spelling when it loads; this keeps the two matchers agreeing about a list
+/// that reached `std` some other way.
+///
+/// `khora-manifest`'s `split_port` reads brackets the same way; the shared
+/// table holds the cases.
 fn split_port(text: String) -> Split {
+  if String::starts_with(text, "[") {
+    match String::index_of(text, "]") {
+      Option::Some(close) => {
+        let after = String::slice(text, close + 1, String::byte_length(text));
+        let name = String::slice(text, 1, close);
+        if String::byte_length(after) == 0 {
+          { head: name, rest: "" }
+        } else if String::starts_with(after, ":") {
+          { head: name, rest: written_port(String::slice(after, 1, String::byte_length(after))) }
+        } else {
+          // `[::1]x`: not a host and a port. A port nobody grants keeps it
+          // from matching anything.
+          { head: text, rest: "]" }
+        }
+      },
+      Option::None => last_colon(text),
+    }
+  } else {
+    last_colon(text)
+  }
+}
+
+/// `name:port` split at the last colon.
+fn last_colon(text: String) -> Split {
   match last_byte_of(text, String::byte_length(text) - 1, fn b => b == 58) {
     Option::None => { head: text, rest: "" },
     Option::Some(at) =>
-      { head: String::slice(text, 0, at), rest: String::slice(text, at + 1, String::byte_length(text)) },
+      { head: String::slice(text, 0, at), rest: written_port(String::slice(text, at + 1, String::byte_length(text))) },
   }
+}
+
+/// A port as written after a `:`, with an empty one turned into `]`, the
+/// port nobody grants. See [`split_port`].
+fn written_port(port: String) -> String {
+  if String::byte_length(port) == 0 { "]" } else { port }
 }
 
 /// One spelling of a path, so a grant and a request can be compared.
@@ -138,8 +425,11 @@ fn split_port(text: String) -> Split {
 /// Two things are leveled, and both were reported as traps by somebody who
 /// hit them:
 ///
-/// - **`\\` becomes `/`**, so a grant written with forward slashes covers a
-///   path Windows spelled with back ones.
+/// - **On Windows, `\\` becomes `/`**, so a grant written with forward
+///   slashes covers a path spelled with back ones. Only there: on every other
+///   system a backslash is an ordinary byte in a file name, so `granted\evil`
+///   is a directory beside `granted`, and reading it as `granted/evil` let
+///   `granted/**` cover a tree the manifest never named.
 /// - **A `.` segment is dropped**, so `./data/**` grants `data/foo.txt` and
 ///   `data/**` grants `./data/foo.txt`. Before this, the `./` was significant
 ///   on both sides: two readers of `capabilities.md` wrote the example's
@@ -170,7 +460,7 @@ fn split_port(text: String) -> Split {
 /// what its users will type. [The permissions design note](https://github.com/codyspate/khoralang/blob/main/docs/design/permissions.md) records why that is
 /// the boundary and what it costs a CLI.
 pub fn normalized(path: String) -> String {
-  without_dots(String::replace(path, "\\", "/"))
+  without_dots(if backslash_separates() { String::replace(path, "\\", "/") } else { path })
 }
 
 /// `./a` and `a/./b` are `a` and `a/b`.
@@ -182,16 +472,31 @@ pub fn normalized(path: String) -> String {
 /// A path that is nothing but `.` stays `.`: it names the current directory,
 /// and turning it into the empty string would make it match nothing rather
 /// than what it says.
+///
+/// **A trailing `/` is dropped**, so `data/` is `data`. The followed check
+/// sees the directory without it, and the text must not answer differently
+/// from the place it names: `read_dir("data/")` and `read_dir("data")` are one
+/// question. `/` itself stays `/`.
 fn without_dots(path: String) -> String {
   let kept = List::filter(String::split(path, "/"), fn piece => !Eq::eq(piece, "."));
-  if List::is_empty(kept) { path } else { String::join(kept, "/") }
+  without_trailing_slash(if List::is_empty(kept) { path } else { String::join(kept, "/") })
+}
+
+/// `text` with any `/` at its end removed, unless that would leave nothing
+/// of a path that started at the root.
+fn without_trailing_slash(text: String) -> String {
+  let mut end = String::byte_length(text);
+  while end > 1 && String::byte(text, end - 1) == 47 {
+    end = end - 1;
+  };
+  String::slice(text, 0, end)
 }
 
 /// Whether any segment of `path` is `..`.
 ///
 /// By segment rather than by substring, so a file honestly named `..config` is
-/// left alone. `path` has been through `normalized` already, so `\\` is
-/// `/` and there is one spelling of a boundary to split on.
+/// left alone. `path` has been through `normalized` already, so on Windows a
+/// `\\` is `/` and there is one spelling of a boundary to split on.
 fn climbs(path: String) -> Bool {
   List::any(String::split(path, "/"), fn piece => Eq::eq(piece, ".."))
 }

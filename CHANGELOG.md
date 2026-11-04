@@ -32,6 +32,89 @@ it will behave differently now.
   literal is, a `return` -- is decided where the constant is named, as it
   was, because the use may be what makes it right: `const A = 1 + true;`
   named nowhere is not an error.
+- Under `default = "deny"`, a manifest with no `[permissions] extern` key
+  allows `extern fn` in `std` alone, as every other key left out of a `deny`
+  table grants nothing. The root package's own `extern fn` compiled and ran
+  there; `khora check` and `khora build` refuse it, give the declaration's
+  `file:line:column`, and print the `extern = ["<package>"]` line to add. A
+  dependency that declares `extern fn` is refused the same way. With no
+  table, or `default = "allow"`, every package may declare one, as before.
+  Every file the build can compile is scanned: the package's own tree, each
+  program in its `src/bin`, and a file named on the command line. A
+  dependency's `src/bin` programs are not part of the build and are not
+  scanned.
+- `khora test` runs the package's own `test` blocks and no dependency's;
+  `khora bench` times its own `bench` blocks. A path dependency's tests ran
+  in every dependent's suite, compiled under the dependent's
+  `[permissions]`, so the same library test passed in one package and failed
+  or hung in another. Run them with `khora test` in the dependency. A
+  package whose only tests were a dependency's reports `no tests`. A file
+  is a dependency's when the dependency's sources include it, wherever it
+  sits and however it is linked; a file named on the command line is always
+  tested.
+- `[permissions.fs]` is checked against where a path leads once its symbolic
+  links are followed, as well as against the path as written. A link inside a
+  granted tree that leads out of it -- to a file, to a parent directory,
+  through a chain of links or through a linked directory -- is
+  `IoError::Denied` for every `FsRead` and `FsWrite` operation, both paths of
+  a `rename` included. It was followed. `remove`, `rename`, `create_dir` and
+  `remove_dir` act on the last name itself, so removing or renaming a link
+  inside the tree is allowed wherever it points, and so is removing or
+  renaming a link that a grant with no glob names. A grant naming a linked
+  directory grants the tree it leads to. Under the default bare `**` nothing
+  is followed and nothing changes.
+- Under a `[permissions.fs]` grant narrower than `**`, a dangling link inside
+  the grant that points at a missing directory outside it is
+  `IoError::Denied`; it was `NotFound`. The answer is about where the link
+  leads, which is outside the grant whether or not anything is there yet, and
+  a write through it would land outside.
+- A `[permissions.fs]` path or grant with a trailing `/` names the same entry
+  as one without: `data/` is `data`. Under `data/**`, which covers what is
+  inside `data` and not `data` itself, `read_dir("data/")` is
+  `IoError::Denied` as `read_dir("data")` is; it was listed. Under a grant of
+  `data`, both are listed.
+- Only `**` as written is the whole file system. `./**` meant the same, so a
+  manifest saying "this directory" in the `./data/**` spelling granted every
+  file on the machine, `..` and absolute paths included. `./**` is the
+  working directory's tree, followed and refused a `..` like any other
+  narrowed grant.
+- Under a `[permissions.fs]` grant narrower than `**`, a relative grant is a
+  tree under the working directory. `**/*.txt` covered an absolute path
+  ending in `.txt` anywhere on the disk; it covers `.txt` files below the
+  working directory. A grant meant for an absolute location names it:
+  `/srv/data/**`.
+- Under a `[permissions.fs]` grant narrower than `**`, a path inside the
+  grant whose links cannot be followed -- a link loop, a directory the
+  program may not search -- is `IoError::Failed`, the answer it has with no
+  table. `IoError::Denied` is the manifest's refusal and nothing else's.
+  `FsRead::exists` and `FsRead::is_dir` answer `false` for such a path, which
+  is what their `false` means: the operating system would not open it.
+- Off Windows, `\` in a `[permissions.fs]` grant or path is part of a file
+  name, not a separator. `granted\evil/f.txt` names a directory beside
+  `granted`, and `granted/**` covered it. On Windows `\` and `/` are both
+  separators, as before. `std::fs::parent`, `file_name`, `stem`,
+  `extension` and `join` read a path the same way: off Windows
+  `parent("a\\b")` is `None`, not `Some("a")`, and `file_name("a\\b")` is
+  the whole name.
+- A `[permissions] network` entry ending in `:` with no port after it --
+  `example.com:`, `[::1]:` -- is refused when the manifest loads, with the
+  spellings that mean something: `example.com` or `example.com:*` for every
+  port, `example.com:<port>` for one. `std` read the empty port as every port
+  and the compiler as none.
+- `std::net::socket::connect_to` and `connect_by`, and `std::net::tls::connect`
+  and `connect_by`, refuse a host with a `[` or `]` in it unless it is exactly
+  `[address]`, before anything is looked up: `denied_handle()` and
+  `TlsError::Denied`.
+- `std::net::socket::connect_to` and `connect_by` check `[permissions]
+  network` against `host:port` and answer `denied_handle()`, which is -3, for
+  a host it does not grant, before anything is looked up or dialed. They
+  dialed any host. A caller that tested `== invalid_handle()` for failure
+  tests `< 0`; `postgres` does, and reports the refusal as a lasting
+  `PgError::Unreachable` naming the key.
+- `std::net::tls::TlsError` has a case `Denied(host)`, raised by
+  `tls::connect` and `tls::connect_by` for a host `[permissions] network`
+  does not grant, with `host` as `name:port`. They dialed any host. A `match`
+  over `TlsError` without a `_` arm has to add it.
 - A `postgres` connection to a host that is not a loopback address asks for
   TLS and verifies the server's certificate and host name, through
   `conn::open`, `conn::open_within`, `pool::open`, `pool::open_with` and
@@ -285,6 +368,26 @@ it will behave differently now.
 - A `const` that two constants reach through each other is one error, "`a`
   is defined in terms of itself: `a` -> `b` -> `a`", wherever either is
   named.
+- A symbolic link inside a `[permissions.fs]` grant could read or write a
+  file outside it: grants were matched against the path's text, which says
+  nothing about where its links lead. See Breaking.
+- `[permissions] network` was consulted only by `HttpClient::send`, so a
+  raw `std::net::socket::connect_to` or `connect_by`, or a
+  `std::net::tls::connect`, reached a host the manifest did not grant,
+  `default = "deny"` included. See Breaking.
+- `default = "deny"` let the root package and its dependencies declare
+  `extern fn` when the manifest had no `extern` key, which made the strict
+  posture deny the disk, the network and the environment while leaving the
+  door to all three open. See Breaking.
+- A `[permissions.fs]` grant followed from a working directory whose name
+  contained `*` matched that `*` as a wildcard: from `proj*x`, `data/**`
+  covered a sibling `projEVILx/data`, so a link inside `data` reached it.
+  The directory a grant leads to is compared as a path, and only the
+  grant's own glob is matched.
+- `[permissions] network` could not grant an IPv6 literal: `::1` was split
+  at its last colon. Grants write one in brackets, as a URL does --
+  `[::1]:5432`, `[::1]:*`, `[::1]` -- and `socket::connect_to`,
+  `connect_by` and `tls::connect` accept the host with or without them.
 - A fiber canceled while `std::net::tls::trusting` (or `client`) built its
   configuration left that configuration, a whole copy of the machine's
   trust store, allocated for the rest of the run: about 80 KB per cancel,
@@ -690,6 +793,21 @@ it will behave differently now.
 - A method call on a value whose type was never imported adds no error of its
   own: ``cannot be the receiver of `#Map::len` `` was printed once per call,
   beside the one error about the unimported name.
+
+### Documentation
+
+- Capabilities has a section, "What the permission table is, and what it is
+  not": the table limits a program you trust and is not a sandbox for
+  untrusted code. Grants are per program, a dependency's own table is not
+  read, any code can make a real capability and the manifest refuses at run
+  time, and `extern fn` is the door out, governed by the `extern` key. For
+  untrusted code it points at a separate process or a container. The manifest
+  reference links to it.
+- Known limitations lists what the permission model leaves open, the race
+  between following a symbolic link and opening it included, a grant that
+  names a link and moves with it, and hard links, which are not followed.
+- `std::permissions::granted` says that a `..` path is refused unless a grant
+  is a bare `**`, which it was always matched under.
 
 ## 0.4.0 — 2026-10-09
 

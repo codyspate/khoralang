@@ -16,6 +16,7 @@ net/socket.md
 net/tls.md
 permissions.md
 permissions/grants.md
+permissions/separator.md
 process.md
 process/shell.md
 random.md

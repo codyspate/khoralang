@@ -1866,7 +1866,7 @@ fn over_workspace(
 /// — which is the first thing anyone wants and would otherwise need a flag.
 #[cfg(feature = "llvm")]
 fn test_one(path: &Path, filter: Option<&str>, no_cache: bool) -> Result<bool> {
-    harness(path, filter, no_cache, "khora-tests", cache::Kind::Tests, khora_codegen_llvm::compile_tests)
+    harness(path, filter, no_cache, "khora-tests", cache::Kind::Tests, khora_codegen_llvm::compile_tests_of)
 }
 
 /// Compiles one package's `bench` blocks and times them.
@@ -1887,16 +1887,17 @@ fn bench_one(path: &Path, filter: Option<&str>, no_cache: bool) -> Result<bool> 
     if profile == khora_codegen_llvm::Profile::Debug {
         println!("note: unoptimized. `KHORA_PROFILE=release khora bench` for the other number");
     }
-    harness(path, filter, no_cache, "khora-benches", cache::Kind::Benches, khora_codegen_llvm::compile_benches)
+    harness(path, filter, no_cache, "khora-benches", cache::Kind::Benches, khora_codegen_llvm::compile_benches_of)
 }
 
-/// The signature `compile_tests` and `compile_benches` share.
+/// The signature `compile_tests_of` and `compile_benches_of` share: the
+/// last argument is the package's own files, whose blocks are the ones run.
 ///
 /// Named because `harness` takes one of them and clippy is right that the
 /// inline form is unreadable.
 #[cfg(feature = "llvm")]
 type CompileHarness =
-    fn(&dyn khora_db::Db, SourceRoot, &Path) -> Result<(), Vec<khora_hir::HirError>>;
+    fn(&dyn khora_db::Db, SourceRoot, &Path, &[SourceFile]) -> Result<(), Vec<khora_hir::HirError>>;
 
 /// Builds a harness executable and runs it.
 ///
@@ -1928,18 +1929,28 @@ fn harness(
     // sorts earliest. Outside a package that put `khora-tests` in the
     // toolchain's own `std` directory, which is errata 56 one path further
     // over. Roadmap 16.9.
-    let owned = package_of(path);
+    // **The blocks run are this package's, and no dependency's.** A
+    // dependency's suite runs under its own manifest, by `khora test` there:
+    // run here, it was compiled with this package's `[permissions]`, so
+    // whether it passed depended on who tested it. See
+    // `khora_codegen_llvm::compile_tests_of`, and [`own_files`] for which
+    // files are the package's.
+    let mine = own_files(path);
     let real = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-    let asked = real(path);
+    let is_mine = |file: &Path| mine.contains(&real(file));
+    // **Never `std`'s directory.** With nothing of its own found, the entry
+    // used to be whichever input sorted first -- a `std` file -- and a
+    // harness for a named file outside any package was written into the
+    // toolchain's `std`. A named file is its own entry.
+    let named = path.is_file().then(|| path.to_path_buf());
     let entry = inputs
         .iter()
         .map(|(file, _, _)| file)
-        .find(|file| match &owned {
-            Some(root) => real(file).starts_with(real(root)),
-            None if asked.is_dir() => real(file).starts_with(&asked),
-            None => real(file) == asked,
-        })
+        .find(|file| is_mine(file))
+        .or(named.as_ref())
         .unwrap_or_else(|| &inputs.first().expect("at least one source").0);
+    let own: Vec<SourceFile> =
+        inputs.iter().filter(|(file, _, _)| is_mine(file)).map(|(_, _, f)| *f).collect();
     let target = artifact(&output_dir(path, entry), name, std::env::consts::EXE_EXTENSION);
     make_room_for(&target)?;
 
@@ -1952,10 +1963,11 @@ fn harness(
         debug_info: profile.debug_info(),
         kind,
         natives,
+        own: inputs.iter().filter(|(file, _, _)| is_mine(file)).map(|(_, text, _)| text.clone()).collect(),
     };
     let (slot, reused) = cache_lookup(&wanted, &target, no_cache);
     if !reused {
-        if let Err(errors) = compile(&db as &dyn khora_db::Db, root, &target) {
+        if let Err(errors) = compile(&db as &dyn khora_db::Db, root, &target, &own) {
             report_build_errors(&db, &inputs, &errors);
             return Ok(false);
         }
@@ -1970,6 +1982,67 @@ fn harness(
         .status()
         .with_context(|| format!("running {}", target.display()))?;
     Ok(status.success())
+}
+
+/// The files whose `test` and `bench` blocks are the package's own, by
+/// canonical path.
+///
+/// **From the walks, not from the disk.** Own is what this package's source
+/// walk reaches, minus what any dependency's source walk reaches, plus the
+/// file named on the command line. Where a file sits, or how it is linked,
+/// never decides it: a rule that asked which package a file's real location
+/// is in got two link shapes wrong. A dependency whose `src` links into the
+/// app ran its tests in the app's suite, under the app's `[permissions]`, and
+/// printed `no tests` in its own; and a package whose `src` links into some
+/// other package's directory lost every test it had, to a green `no tests`.
+/// The walks are the ones that build the compilation, so the answer is the
+/// compilation's own.
+///
+/// **A file both walks reach is the dependency's.** Its tests run when the
+/// dependency is tested, under the dependency's manifest, and nowhere else.
+///
+/// **The named file is always own**, whatever walk reaches it or none:
+/// `khora test bin/s.kh` asks for that file's tests.
+///
+/// What it costs: the package is walked a second time and every file
+/// canonicalized; no manifest is read per file.
+#[cfg(feature = "llvm")]
+fn own_files(path: &Path) -> std::collections::HashSet<PathBuf> {
+    let real = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let package = package_of(path);
+    let mut walked = Vec::new();
+    // A walk that fails leaves the set short, and the harness then runs
+    // fewer tests than it might; `load` already walked the same tree and
+    // would have failed first, and so would `dependencies_of` below.
+    let _ = gather(package.as_deref().unwrap_or(path), &mut walked);
+    let theirs: std::collections::HashSet<PathBuf> =
+        dependency_files(path).iter().map(|file| real(file)).collect();
+    let mut own: std::collections::HashSet<PathBuf> =
+        walked.iter().map(|file| real(file)).filter(|file| !theirs.contains(file)).collect();
+    if path.is_file() {
+        own.insert(real(path));
+    }
+    own
+}
+
+/// Every file a dependency's source walk reaches, for the manifest nearest
+/// `root`: the resolver's own list, the one the compilation was built from.
+///
+/// [`dependencies_of`] has already resolved this graph and reported what is
+/// wrong with it, and refused what it had to, by the time a harness asks, so
+/// a failure here answers with nothing rather than saying it twice. Nothing
+/// is also the answer outside a package.
+#[cfg(feature = "llvm")]
+fn dependency_files(root: &Path) -> Vec<PathBuf> {
+    let Some(manifest_path) = nearest_manifest(root) else { return Vec::new() };
+    let Ok(store) = khora_pkg::Store::open() else { return Vec::new() };
+    khora_pkg::compilation(
+        &manifest_path,
+        &store,
+        khora_pkg::SourceMode::Build { locked: locked_requested() },
+    )
+    .map(|compilation| compilation.files)
+    .unwrap_or_default()
 }
 
 #[cfg(not(feature = "llvm"))]
@@ -2181,6 +2254,7 @@ fn build_one(
         debug_info: profile.debug_info(),
         kind: if lib { cache::Kind::Library } else { cache::Kind::Executable },
         natives,
+        own: Vec::new(),
     };
     let (slot, reused) = cache_lookup(&wanted, &target, no_cache);
     if reused {
@@ -3323,6 +3397,7 @@ fn dependencies_of(root: &Path) -> Result<Vec<PathBuf>> {
         &parsed.manifest.permissions,
         resolution,
         parsed.manifest.package().map(|p| (p.name.as_str(), manifest_path.parent())),
+        root.is_file().then_some(root),
     )?;
 
     // A workspace has one lockfile, at the root. One left behind in a member
@@ -3360,6 +3435,7 @@ fn check_extern_allowlist(
     permissions: &khora_manifest::Permissions,
     resolution: &khora_pkg::Resolution,
     building: Option<(&str, Option<&Path>)>,
+    named: Option<&Path>,
 ) -> Result<()> {
     let mut refused: Vec<String> = Vec::new();
 
@@ -3375,8 +3451,8 @@ fn check_extern_allowlist(
     // no less itself for being the one at the root of the build.
     if let Some((name, Some(directory))) = building {
         if !permissions.may_declare_extern(name) {
-            for (file, function) in extern_declarations(directory)? {
-                refused.push(format!("  `{function}` in {}", file.display()));
+            for found in own_declarations(directory, named)? {
+                refused.push(format!("  `{}` at {}", found.function, found.place()));
             }
         }
     }
@@ -3385,10 +3461,11 @@ fn check_extern_allowlist(
         if permissions.may_declare_extern(&package.name) {
             continue;
         }
-        for (file, function) in extern_declarations(&package.directory)? {
+        for found in extern_declarations(&package.directory)? {
             refused.push(format!(
-                "  `{function}` in {}, from the package `{}`",
-                file.display(),
+                "  `{}` at {}, from the package `{}`",
+                found.function,
+                found.place(),
                 package.name
             ));
         }
@@ -3397,15 +3474,26 @@ fn check_extern_allowlist(
     if refused.is_empty() {
         return Ok(());
     }
+    // **Which rule refused it**, because the two read alike and are fixed in
+    // the same place for different reasons. A written `extern` list that
+    // leaves a package out is the reader's own line; `default = "deny"` with
+    // no `extern` key refuses every package but `std` without the word
+    // `extern` appearing in the manifest at all, and a message that only said
+    // "the list does not name it" would send the reader looking for a list.
+    let why = if permissions.extern_.is_some() {
+        "this project's `[permissions] extern` does not list the packages they are in"
+    } else {
+        "this project's `[permissions]` says `default = \"deny\"` and has no `extern` \
+         key, so only `std` may declare one"
+    };
     anyhow::bail!(
-        "these declare `extern fn`, and this project's `[permissions] extern` \
-         does not list the packages they are in:\n{}\n\n\
+        "these declare `extern fn`, and {why}:\n{}\n\n\
          An `extern fn` reaches the operating system without appearing in \
          anybody's capability row, so allowing one is a decision about trust \
          rather than about types. Add the package to the list if that is what \
          you mean:\n\n    [permissions]\n    extern = [{}]",
         refused.join("\n"),
-        allow_list_suggestion(permissions, resolution, building)
+        allow_list_suggestion(permissions, resolution, building, named)
     )
 }
 
@@ -3414,6 +3502,7 @@ fn allow_list_suggestion(
     permissions: &khora_manifest::Permissions,
     resolution: &khora_pkg::Resolution,
     building: Option<(&str, Option<&Path>)>,
+    named: Option<&Path>,
 ) -> String {
     let mut names: Vec<String> =
         permissions.extern_.clone().unwrap_or_default().into_iter().collect();
@@ -3426,7 +3515,7 @@ fn allow_list_suggestion(
     // package the reader did not do anything wrong in, next to the one they
     // did.
     if let Some((name, Some(directory))) = building {
-        let declares = extern_declarations(directory).map(|found| !found.is_empty());
+        let declares = own_declarations(directory, named).map(|found| !found.is_empty());
         if !permissions.may_declare_extern(name)
             && declares.unwrap_or(false)
             && !names.iter().any(|n| n == name)
@@ -3443,35 +3532,104 @@ fn allow_list_suggestion(
     names.iter().map(|n| format!("\"{n}\"")).collect::<Vec<_>>().join(", ")
 }
 
-/// Every `extern fn` a package declares, as (file, name).
+/// Every `extern fn` the package being built declares: its tree, its `src/bin`
+/// programs, and the file named on the command line.
+///
+/// **The `src/bin` programs**, which `gather` leaves out so that a build gets
+/// one entry point. A scan that inherited the skip let every one of them
+/// declare an `extern fn` past a `deny` table, and they are this package's
+/// code as much as `src/main.kh` is. `binaries` is the list `build` builds
+/// from. **This package's only**: a dependency's `src/bin` programs are
+/// never built into this one, and refusing them would push the reader to
+/// write `extern = ["dep"]`, which lets the dependency's library declare one
+/// too.
+///
+/// **The named file too**, because it is compiled whether or not the walk
+/// would reach it: `khora check scratch/tool.kh` inside a package compiles
+/// `tool.kh` under this package's manifest, and the walk does not go into
+/// `build`, `target` or a directory with a manifest of its own. A file the
+/// build compiles is a file the rule covers.
+fn own_declarations(directory: &Path, named: Option<&Path>) -> Result<Vec<ExternDeclaration>> {
+    let mut found = extern_declarations(directory)?;
+    let mut more_files = binaries(directory);
+    more_files.extend(named.map(Path::to_path_buf));
+    for more in declarations_in(&more_files) {
+        if !found.iter().any(|f| same_file(&f.file, &more.file) && f.line == more.line) {
+            found.push(more);
+        }
+    }
+    Ok(found)
+}
+
+/// Every `extern fn` in a package's library tree, with where it is: what
+/// `gather` collects, which is what a dependency contributes to a build.
 ///
 /// A syntax question, so it is answered from the tree rather than by
 /// type-checking a package the build may be about to refuse.
-fn extern_declarations(directory: &Path) -> Result<Vec<(PathBuf, String)>> {
-    use khora_syntax::ast;
-
+fn extern_declarations(directory: &Path) -> Result<Vec<ExternDeclaration>> {
     let mut files = Vec::new();
     gather(directory, &mut files)?;
+    Ok(declarations_in(&files))
+}
+
+/// The `extern fn` declarations in `files`. A file that cannot be read is
+/// skipped: the compile that follows reports it.
+fn declarations_in(files: &[PathBuf]) -> Vec<ExternDeclaration> {
+    use khora_syntax::ast::{self, AstNode};
 
     let db = KhoraDatabase::new();
     let mut out = Vec::new();
     for path in files {
-        let Ok(text) = std::fs::read_to_string(&path) else { continue };
-        let file = SourceFile::new(&db, path.clone(), text);
+        let Ok(text) = std::fs::read_to_string(path) else { continue };
+        let file = SourceFile::new(&db, path.clone(), text.clone());
         let parse = khora_db::parse(&db, file);
         for declaration in parse.source_file().decls() {
             if let ast::Decl::Fn(f) = declaration {
                 if f.is_extern() {
-                    let name = f
+                    let function = f
                         .name()
                         .and_then(|n| n.ident())
                         .unwrap_or_else(|| "<unnamed>".to_string());
-                    out.push((path.clone(), name));
+                    // The `extern` keyword rather than the node's start, which
+                    // would be the doc comment above it when there is one.
+                    let at = f
+                        .syntax()
+                        .children_with_tokens()
+                        .filter_map(|it| it.into_token())
+                        .find(|t| t.kind() == khora_syntax::SyntaxKind::EXTERN_KW)
+                        .map_or_else(|| f.syntax().text_range().start(), |t| t.text_range().start());
+                    let (line, column) = line_and_column(&text, usize::from(at));
+                    out.push(ExternDeclaration { file: path.clone(), function, line, column });
                 }
             }
         }
     }
-    Ok(out)
+    out
+}
+
+/// One `extern fn`, found by [`declarations_in`].
+struct ExternDeclaration {
+    file: PathBuf,
+    function: String,
+    /// One-based, as an editor counts.
+    line: usize,
+    /// One-based, in characters.
+    column: usize,
+}
+
+impl ExternDeclaration {
+    /// `file:line:column`, which a terminal or an editor opens at the line.
+    fn place(&self) -> String {
+        format!("{}:{}:{}", self.file.display(), self.line, self.column)
+    }
+}
+
+/// The one-based line and column of byte `offset` in `text`.
+fn line_and_column(text: &str, offset: usize) -> (usize, usize) {
+    let before = &text[..offset.min(text.len())];
+    let line = before.matches('\n').count() + 1;
+    let start = before.rfind('\n').map_or(0, |at| at + 1);
+    (line, before[start..].chars().count() + 1)
 }
 
 /// Whether `--locked` was asked for, by flag or by `KHORA_LOCKED`.

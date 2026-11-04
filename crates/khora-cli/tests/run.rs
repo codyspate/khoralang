@@ -588,3 +588,399 @@ fn a_verdict_belongs_to_the_test_that_earned_it() {
         "the totals should match the bodies:\n{text}"
     );
 }
+
+/// **`khora test` runs the package's own `test` blocks, and no dependency's.**
+///
+/// A dependency's files are in the compilation because the package uses its
+/// code, and its `test` blocks used to come along: they ran under *this*
+/// package's manifest, so a library's suite passed or failed by who tested
+/// it. `postgres`'s wire tests dial loopback, and inside a service granted
+/// only its database port they were refused and then waited for ever. The
+/// dependency's own run is unaffected and is asserted too, so the fix is not
+/// a test that stopped running anywhere.
+///
+/// The dependency's test would also fail if it ran here, which is the half a
+/// count alone cannot show: the dependent's run reporting `1 passed, 0
+/// failed` means the failing block was not in it.
+#[test]
+fn a_dependencys_test_blocks_are_not_this_packages() {
+    let w = world(
+        "module app::main;\n\
+         \n\
+         import std::core::{assert};\n\
+         import greet::lib::{greeting};\n\
+         \n\
+         test \"the app's own test\" { assert(greeting() == 7); }\n\
+         \n\
+         pub fn main() -> Int { greeting() }\n",
+    );
+    let lib = w.project.parent().expect("a parent").join("greet");
+    std::fs::create_dir_all(lib.join("src")).expect("a library");
+    std::fs::write(
+        lib.join("khora.toml"),
+        pinned("[package]\nname = \"greet\"\nversion = \"0.1.0\"\n"),
+    )
+    .expect("a manifest");
+    std::fs::write(
+        lib.join("src").join("lib.kh"),
+        "module greet::lib;\n\
+         \n\
+         import std::core::{assert};\n\
+         \n\
+         pub fn greeting() -> Int { 7 }\n\
+         \n\
+         test \"the library's own test\" { assert(greeting() == 7); }\n\
+         \n\
+         test \"a library test that fails under its dependent\" { assert(greeting() == 8); }\n",
+    )
+    .expect("a library source");
+    std::fs::write(
+        w.project.join("khora.toml"),
+        pinned(
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+             [dependencies]\ngreet = { path = \"../greet\" }\n",
+        ),
+    )
+    .expect("a manifest");
+
+    let (code, text) = khora(&w, &w.project, &["test", "."]);
+    assert!(text.contains("test the app's own test ... ok"), "the app's test should run:\n{text}");
+    assert!(
+        !text.contains("library"),
+        "a dependency's test blocks must not run in its dependent's suite:\n{text}"
+    );
+    assert!(text.contains("1 passed, 0 failed"), "only the app's test:\n{text}");
+    assert_eq!(code, Some(0), "{text}");
+
+    // And the library's suite is still the library's, run where it lives.
+    let (code, text) = khora(&w, &lib, &["test", "."]);
+    assert!(text.contains("test the library's own test ... ok"), "{text}");
+    assert!(text.contains("1 passed, 1 failed"), "the library runs both of its own:\n{text}");
+    assert_eq!(code, Some(1), "{text}");
+}
+
+// ---------------------------------------------------------------------------
+// Which `test` blocks are a package's own, in each layout a package can have.
+//
+// The reviewer's `p1` rows: the dependency vendored inside the package, a
+// link that resolves into it, and a `src` that is itself a link out -- each
+// got the own set wrong when "own" was a path prefix -- and the layouts that
+// were right, which stay right. Every test here runs `khora test` with the
+// cache off, so the set is decided by the source, not by an earlier run.
+
+const OWN_LIB: &str = "module greet::lib;\n\nimport std::core::{assert};\n\npub fn greeting() -> Int { 7 }\n\ntest \"LIB test\" { assert(greeting() == 7); }\n";
+const OWN_APP: &str = "module app::main;\n\nimport std::core::{assert};\nimport greet::lib::{greeting};\n\ntest \"APP test\" { assert(greeting() == 7); }\n\npub fn main() -> Int { greeting() - 7 }\n";
+
+/// A scratch directory for one layout, with `KHORA_HOME` inside it.
+fn layout() -> World {
+    let tmp = tempfile::tempdir().expect("a temporary directory");
+    let home = tmp.path().join("home");
+    let project = tmp.path().join("app");
+    World { _tmp: tmp, home, project }
+}
+
+fn put(path: &Path, text: &str) {
+    std::fs::create_dir_all(path.parent().expect("a parent")).expect("a directory");
+    std::fs::write(path, text).expect("a file");
+}
+
+/// The library `greet` at `dir`.
+fn greet_at(dir: &Path) {
+    put(&dir.join("khora.toml"), &pinned("[package]\nname = \"greet\"\nversion = \"0.1.0\"\n"));
+    put(&dir.join("src").join("lib.kh"), OWN_LIB);
+}
+
+/// The app at `dir`, depending on `greet` at `dependency` (relative).
+fn app_at(dir: &Path, dependency: &str) {
+    put(
+        &dir.join("khora.toml"),
+        &pinned(&format!(
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\ngreet = {{ path = \"{dependency}\" }}\n"
+        )),
+    );
+    put(&dir.join("src").join("main.kh"), OWN_APP);
+}
+
+/// The test names a run printed, sorted.
+fn ran(output: &str) -> Vec<String> {
+    let mut names: Vec<String> = output
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("test "))
+        .filter_map(|line| line.split(" ...").next())
+        .map(str::to_string)
+        .collect();
+    names.sort();
+    names
+}
+
+/// `khora test <args> --no-cache` in `cwd`, and the tests it ran.
+fn tested(w: &World, cwd: &Path, args: &[&str]) -> (Option<i32>, Vec<String>, String) {
+    let mut all = vec!["test"];
+    all.extend_from_slice(args);
+    all.push("--no-cache");
+    let (code, text) = khora(w, cwd, &all);
+    let names = ran(&text);
+    (code, names, text)
+}
+
+/// **M1: a dependency vendored inside the package is still a dependency.**
+/// Its directory is under the package's, and a path-prefix "own" ran its
+/// tests in the dependent's suite under the dependent's manifest -- the
+/// ledger_service hang, reached by vendoring postgres instead of placing it
+/// beside the service. Three spellings of "inside": at the package root, in
+/// `src`, and through a link whose target is inside.
+// Links are made with `std::os::unix::fs::symlink`.
+#[cfg(unix)]
+#[test]
+fn a_dependency_inside_the_package_is_not_its_own() {
+    for (label, dependency, vendored) in [
+        ("vendor", "vendor/greet", "vendor/greet"),
+        ("src/vendor", "src/vendor/greet", "src/vendor/greet"),
+    ] {
+        let w = layout();
+        app_at(&w.project, dependency);
+        greet_at(&w.project.join(vendored));
+        let (code, names, text) = tested(&w, &w.project, &["."]);
+        assert_eq!(names, ["APP test"], "{label}: only the app's own test:\n{text}");
+        assert_eq!(code, Some(0), "{label}: {text}");
+    }
+
+    // `../greet` is a link to a directory inside the app.
+    let w = layout();
+    app_at(&w.project, "../greet");
+    greet_at(&w.project.join("third_party").join("greet"));
+    std::os::unix::fs::symlink(
+        w.project.join("third_party").join("greet"),
+        w.project.parent().expect("a parent").join("greet"),
+    )
+    .expect("a link");
+    let (code, names, text) = tested(&w, &w.project, &["."]);
+    assert_eq!(names, ["APP test"], "a linked dependency resolving into the app:\n{text}");
+    assert_eq!(code, Some(0), "{text}");
+}
+
+/// **M2: a `src` that is a link out of the package keeps its tests.** Its
+/// files resolve outside the package's directory, so a path prefix found
+/// none of them its own and the run was a green `no tests`.
+// Links are made with `std::os::unix::fs::symlink`.
+#[cfg(unix)]
+#[test]
+fn a_linked_src_is_still_the_packages() {
+    let w = layout();
+    let outside = w.project.parent().expect("a parent").join("real");
+    app_at(&outside, "../greet");
+    greet_at(&w.project.parent().expect("a parent").join("greet"));
+    std::fs::create_dir_all(&w.project).expect("the app");
+    std::fs::rename(outside.join("khora.toml"), w.project.join("khora.toml")).expect("the manifest");
+    std::os::unix::fs::symlink(outside.join("src"), w.project.join("src")).expect("a link");
+    let (code, names, text) = tested(&w, &w.project, &["."]);
+    assert_eq!(names, ["APP test"], "the package's own test, through its linked src:\n{text}");
+    assert_eq!(code, Some(0), "{text}");
+}
+
+/// **The layouts that were right stay right.** A sibling dependency; the
+/// package reached through a linked alias, by name and from inside; a named
+/// file; a `tests/` directory beside `src`; a `src/bin` program; a nested
+/// package that is not a dependency, and that package tested by itself.
+// Links are made with `std::os::unix::fs::symlink`.
+#[cfg(unix)]
+#[test]
+fn the_own_set_in_the_layouts_that_were_already_right() {
+    let w = layout();
+    let root = w.project.parent().expect("a parent").to_path_buf();
+    app_at(&w.project, "../greet");
+    greet_at(&root.join("greet"));
+    put(
+        &w.project.join("src").join("other.kh"),
+        "module app::other;\n\nimport std::core::{assert};\n\ntest \"OTHER test\" { assert(1 == 1); }\n",
+    );
+    put(
+        &w.project.join("tests").join("extra.kh"),
+        "module app::extra;\n\nimport std::core::{assert};\nimport greet::lib::{greeting};\n\ntest \"TESTS-DIR test\" { assert(greeting() == 7); }\n",
+    );
+    put(
+        &w.project.join("src").join("bin").join("tool.kh"),
+        "module app::tool;\n\nimport std::core::{assert};\nimport greet::lib::{greeting};\n\ntest \"BIN test\" { assert(greeting() == 7); }\n\npub fn main() -> Int { 0 }\n",
+    );
+    put(&w.project.join("scratch").join("khora.toml"), &pinned("[package]\nname = \"scratch\"\nversion = \"0.1.0\"\n"));
+    put(
+        &w.project.join("scratch").join("src").join("main.kh"),
+        "module scratch::main;\n\nimport std::core::{assert};\n\ntest \"NESTED test\" { assert(true); }\n\npub fn main() -> Int { 0 }\n",
+    );
+    std::os::unix::fs::symlink(&w.project, root.join("alias")).expect("a link");
+
+    let whole = ["APP test", "OTHER test", "TESTS-DIR test"];
+    for (cwd, args) in [
+        (w.project.clone(), vec!["."]),
+        (root.clone(), vec!["alias"]),
+        (root.join("alias"), vec!["."]),
+        (w.project.clone(), vec!["src/main.kh"]),
+    ] {
+        let (code, names, text) = tested(&w, &cwd, &args);
+        assert_eq!(names, whole, "{} {args:?}: the app's own tests, and no LIB, BIN or NESTED:\n{text}", cwd.display());
+        assert_eq!(code, Some(0), "{text}");
+    }
+    let (_, names, text) = tested(&w, &w.project.join("scratch"), &["."]);
+    assert_eq!(names, ["NESTED test"], "the nested package's own:\n{text}");
+}
+
+/// **A workspace root runs each member's own tests once.** The member that
+/// depends on another ran that member's tests a second time, inside its own
+/// suite.
+#[test]
+fn a_workspace_runs_each_members_tests_once() {
+    let w = layout();
+    let root = w.project.parent().expect("a parent").to_path_buf();
+    put(&root.join("khora.toml"), &pinned("[workspace]\nmembers = [\"greet\", \"app\"]\n"));
+    greet_at(&root.join("greet"));
+    app_at(&w.project, "../greet");
+    let (code, names, text) = tested(&w, &root, &["."]);
+    assert_eq!(names, ["APP test", "LIB test"], "each member's own, once:\n{text}");
+    assert_eq!(code, Some(0), "{text}");
+}
+
+/// **M3: which files are the package's is part of the harness's cache key.**
+///
+/// Two packages with identical source texts: A is an app with `greet` beside
+/// it as a dependency, B holds both files itself. In the release profile no
+/// path is in the key, so the texts alone cannot tell them apart -- and B's
+/// own tests include `greet`'s, where A's do not. Without the own set in the
+/// key, B is served A's harness and silently skips a test. A again reuses
+/// its own entry.
+#[test]
+fn the_package_boundary_is_in_the_harness_key() {
+    let w = layout();
+    let root = w.project.parent().expect("a parent").to_path_buf();
+    let a = root.join("A").join("app");
+    app_at(&a, "../greet");
+    greet_at(&root.join("A").join("greet"));
+    let b = root.join("B").join("app");
+    put(&b.join("khora.toml"), &pinned("[package]\nname = \"app\"\nversion = \"0.1.0\"\n"));
+    put(&b.join("src").join("main.kh"), OWN_APP);
+    put(&b.join("src").join("greet").join("lib.kh"), OWN_LIB);
+
+    let release = |cwd: &Path| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_khora"));
+        if let Some(archive) = pinned::runtime() {
+            command.env("KHORA_RT_LIB", archive);
+        }
+        let out = command
+            .args(["test", "."])
+            .current_dir(cwd)
+            .env("KHORA_HOME", &w.home)
+            .env("KHORA_PROFILE", "release")
+            .output()
+            .expect("could not run `khora`");
+        let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+        text.push_str(&String::from_utf8_lossy(&out.stderr));
+        text
+    };
+
+    let first = release(&a);
+    assert_eq!(ran(&first), ["APP test"], "{first}");
+    let second = release(&b);
+    assert!(!second.contains("from the cache"), "B must not be served A's harness:\n{second}");
+    assert_eq!(ran(&second), ["APP test", "LIB test"], "B's own tests include the library's:\n{second}");
+    let third = release(&a);
+    assert!(third.contains("from the cache"), "A's own entry is still there:\n{third}");
+    assert_eq!(ran(&third), ["APP test"], "{third}");
+}
+
+#[cfg(unix)]
+const OWN_SCRIPT: &str = "module script;\n\nimport std::core::{assert};\n\ntest \"SCRIPT test\" { assert(1 == 1); }\n\npub fn main() -> Int { 0 }\n";
+
+/// **A named file is the package's, however it is reached.** `bin/s.kh` is a
+/// link to a file inside the app, and no package encloses `bin`; a rule that
+/// asked where the real file lives found the app's manifest above it and
+/// dropped the file the command named, for a green `no tests`. A
+/// manifest-less directory linked the same way did the same.
+#[cfg(unix)]
+#[test]
+fn a_named_link_into_a_package_keeps_its_tests() {
+    let w = layout();
+    let root = w.project.parent().expect("a parent").to_path_buf();
+    app_at(&w.project, "../greet");
+    greet_at(&root.join("greet"));
+    put(&w.project.join("tools").join("s.kh"), OWN_SCRIPT);
+    std::fs::create_dir_all(root.join("bin")).expect("bin");
+    std::os::unix::fs::symlink(w.project.join("tools").join("s.kh"), root.join("bin").join("s.kh")).expect("a link");
+    std::os::unix::fs::symlink(w.project.join("tools"), root.join("loose")).expect("a link");
+
+    for args in [["bin/s.kh"], ["loose"]] {
+        let (code, names, text) = tested(&w, &root, &args);
+        assert_eq!(names, ["SCRIPT test"], "{args:?}: the named file's own test:\n{text}");
+        assert_eq!(code, Some(0), "{text}");
+    }
+    // And the harness went beside what was named, not into the toolchain's
+    // `std`, which is where the first input sorted.
+    assert!(root.join("bin").join("khora-tests").exists(), "the harness beside the named file");
+}
+
+/// **A dependency whose `src` is a link into the app is still the
+/// dependency.** Its manifest sits beside the app and its sources live in
+/// the app's `third_party`. Both walks reach them, and they are the
+/// dependency's: the app does not run them under its own manifest, and the
+/// dependency, tested by itself, still has them.
+#[cfg(unix)]
+#[test]
+fn a_dependencys_linked_src_stays_the_dependencys() {
+    let w = layout();
+    let root = w.project.parent().expect("a parent").to_path_buf();
+    app_at(&w.project, "../greet");
+    put(&root.join("greet").join("khora.toml"), &pinned("[package]\nname = \"greet\"\nversion = \"0.1.0\"\n"));
+    put(&w.project.join("third_party").join("greet_src").join("lib.kh"), OWN_LIB);
+    std::os::unix::fs::symlink(w.project.join("third_party").join("greet_src"), root.join("greet").join("src"))
+        .expect("a link");
+
+    let (code, names, text) = tested(&w, &w.project, &["."]);
+    assert_eq!(names, ["APP test"], "the app's own, and not the dependency's:\n{text}");
+    assert_eq!(code, Some(0), "{text}");
+    let (code, names, text) = tested(&w, &root.join("greet"), &["."]);
+    assert_eq!(names, ["LIB test"], "the dependency's own, through its linked src:\n{text}");
+    assert_eq!(code, Some(0), "{text}");
+}
+
+/// **A `src` linked into some other package's directory is still this
+/// package's.** The real files sit under `shared`, a package that is not a
+/// dependency, and nothing but the app's walk reaches them.
+#[cfg(unix)]
+#[test]
+fn a_src_linked_into_another_package_is_still_the_packages() {
+    let w = layout();
+    let root = w.project.parent().expect("a parent").to_path_buf();
+    greet_at(&root.join("greet"));
+    put(&root.join("shared").join("khora.toml"), &pinned("[package]\nname = \"shared\"\nversion = \"0.1.0\"\n"));
+    put(&root.join("shared").join("src").join("lib.kh"), "module shared::lib;\n\npub fn s() -> Int { 1 }\n");
+    put(&root.join("shared").join("appsrc_holder").join("src").join("main.kh"), OWN_APP);
+    std::fs::create_dir_all(&w.project).expect("the app");
+    put(
+        &w.project.join("khora.toml"),
+        &pinned("[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\ngreet = { path = \"../greet\" }\n"),
+    );
+    std::os::unix::fs::symlink(root.join("shared").join("appsrc_holder").join("src"), w.project.join("src"))
+        .expect("a link");
+
+    let (code, names, text) = tested(&w, &w.project, &["."]);
+    assert_eq!(names, ["APP test"], "the app's own test, through a src inside another package:\n{text}");
+    assert_eq!(code, Some(0), "{text}");
+}
+
+/// **A workspace member nested in another member and depended on by it runs
+/// its tests once, as itself.** `app/greet` is both a member and `app`'s
+/// path dependency.
+#[test]
+fn a_nested_member_that_is_a_dependency_runs_once() {
+    let w = layout();
+    let root = w.project.parent().expect("a parent").to_path_buf();
+    put(&root.join("khora.toml"), &pinned("[workspace]\nmembers = [\"app\", \"app/greet\"]\n"));
+    app_at(&w.project, "greet");
+    greet_at(&w.project.join("greet"));
+
+    let (code, names, text) = tested(&w, &root, &["."]);
+    assert_eq!(names, ["APP test", "LIB test"], "each member's own, once:\n{text}");
+    assert_eq!(code, Some(0), "{text}");
+    let (_, names, text) = tested(&w, &w.project, &["."]);
+    assert_eq!(names, ["APP test"], "{text}");
+    let (_, names, text) = tested(&w, &w.project.join("greet"), &["."]);
+    assert_eq!(names, ["LIB test"], "{text}");
+}

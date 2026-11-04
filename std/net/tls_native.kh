@@ -1,6 +1,8 @@
 module std::net::tls;
 
 import std::core::{Array, Option, Ptr, Region, Scope, Share, acquire};
+import std::permissions::{may_dial, unbracketed};
+import std::permissions::grants::{network};
 
 //! TLS, over the sockets in `std::net::socket`.
 //!
@@ -67,7 +69,15 @@ pub type TlsError =
   /// Separate from `Unreachable` because it is the one a caller acts on
   /// differently: a host that refused may refuse again, while a call that ran
   /// out of time mostly wants a longer budget.
-  | TimedOut;
+  | TimedOut
+  /// `[permissions] network` does not grant `host` on this port, so nothing
+  /// was looked up or dialed.
+  ///
+  /// **Its own case rather than `Unreachable`**, for the reason
+  /// `IoError::Denied` is: `Unreachable` sends the reader to DNS or a
+  /// firewall, and this one is a line in `khora.toml`. `host` is `name:port`,
+  /// which is what a grant is written against.
+  | Denied(host: String);
 
 /// A configured server, ready to secure accepted sockets.
 ///
@@ -393,19 +403,28 @@ pub fn connect(client: TlsClient, host: String, port: Int) -> TlsConnection
 /// it, so a refusal that arrives in its last millisecond is still
 /// `Unreachable`. The session that comes back carries no deadline;
 /// [`set_deadline`] puts one on it.
+///
+/// **`[permissions] network` is checked first**, against `host:port`, as
+/// `std::net::socket::connect_to` checks it: a host it does not grant is
+/// `TlsError::Denied`, and is neither looked up nor dialed.
 pub fn connect_by(client: TlsClient, host: String, port: Int, deadline: Int) -> TlsConnection
   raises TlsError
 {
-  let why: Array<Int> = Array::new(1, 0);
-  let handle = Array::with_data(why, fn (cause, _n) =>
-    String::with_data(host, fn (name, n) =>
-      khora_tls_connect(client.trust, name, n, port, deadline, cause)));
-  if !Ptr::is_null(handle) {
-    { session: handle }
-  } else if Array::get(why, 0) == 1 {
-    raise TlsError::TimedOut
+  let authority = "${host}:${Int::to_string(port)}";
+  if !may_dial(network(), host, port) {
+    raise TlsError::Denied(authority)
   } else {
-    raise TlsError::Unreachable(host)
+    let why: Array<Int> = Array::new(1, 0);
+    let handle = Array::with_data(why, fn (cause, _n) =>
+      String::with_data(unbracketed(host), fn (name, n) =>
+        khora_tls_connect(client.trust, name, n, port, deadline, cause)));
+    if !Ptr::is_null(handle) {
+      { session: handle }
+    } else if Array::get(why, 0) == 1 {
+      raise TlsError::TimedOut
+    } else {
+      raise TlsError::Unreachable(host)
+    }
   }
 }
 

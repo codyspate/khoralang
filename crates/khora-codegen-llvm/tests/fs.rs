@@ -43,6 +43,7 @@ fn run(name: &str, main: &str) -> Ran {
     let files = vec![
         SourceFile::new(&db, dir.join("core.kh"), std_source("core.kh")),
         SourceFile::new(&db, dir.join("permissions.kh"), std_source("permissions.kh")),
+        { let (name, text) = harness::separator_source(); SourceFile::new(&db, dir.join(name), text) },
         SourceFile::new(&db, dir.join("grants.kh"), std_source("grants.kh")),
         SourceFile::new(&db, dir.join("fs_native.kh"), std_source("fs_native.kh")),
         SourceFile::new(&db, dir.join("main.kh"), main.replace("@DIR@", &here)),
@@ -312,6 +313,7 @@ fn nothing_reaches_a_file_without_the_capability() {
     let files = vec![
         SourceFile::new(&db, dir.join("core.kh"), std_source("core.kh")),
         SourceFile::new(&db, dir.join("permissions.kh"), std_source("permissions.kh")),
+        { let (name, text) = harness::separator_source(); SourceFile::new(&db, dir.join(name), text) },
         SourceFile::new(&db, dir.join("grants.kh"), std_source("grants.kh")),
         SourceFile::new(&db, dir.join("fs_native.kh"), std_source("fs_native.kh")),
         SourceFile::new(
@@ -649,6 +651,7 @@ fn reading_does_not_grant_writing() {
     let files = vec![
         SourceFile::new(&db, dir.join("core.kh"), std_source("core.kh")),
         SourceFile::new(&db, dir.join("permissions.kh"), std_source("permissions.kh")),
+        { let (name, text) = harness::separator_source(); SourceFile::new(&db, dir.join(name), text) },
         SourceFile::new(&db, dir.join("grants.kh"), std_source("grants.kh")),
         SourceFile::new(&db, dir.join("fs_native.kh"), std_source("fs_native.kh")),
         SourceFile::new(
@@ -872,7 +875,8 @@ pub fn main() -> Int {{
   say(\"data/**\", \"./data/foo.txt\");
   say(\"data/**\", \"data/foo.txt\");
   say(\"./data/**\", \"./data/foo.txt\");
-  // Separators still level, which is the half that already worked.
+  // Separators level on Windows, where `\\` is one; elsewhere
+  // `data\\foo.txt` is a single name beside `data`, not in it.
   say(\"data/**\", \"data\\\\foo.txt\");
   // And the two that must still be refused.
   say(\"data/**\", \"a/../data/foo.txt\");
@@ -888,10 +892,13 @@ pub fn main() -> Int {{
         ),
     );
 
+    let backslash = if cfg!(windows) { "granted" } else { "refused" };
     assert_eq!(
         ran.stdout,
-        "granted\ngranted\ngranted\ngranted\ngranted\nrefused\nrefused\n\
-         [a/b]\n[.]\n[/abs/path]\n"
+        format!(
+            "granted\ngranted\ngranted\ngranted\n{backslash}\nrefused\nrefused\n\
+             [a/b]\n[.]\n[/abs/path]\n"
+        )
     );
 }
 

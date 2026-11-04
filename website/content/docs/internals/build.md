@@ -25,8 +25,9 @@ compilation of a generic across package boundaries.
 The walk starts from the build's entry points and compiles what they reach,
 generic or not. The entry points are:
 
-- `main` for `khora build` and `khora run`, the `test` blocks for `khora test`,
-  and the `bench` blocks for `khora bench`;
+- `main` for `khora build` and `khora run`, the `test` blocks of the package's
+  own files for `khora test`, and the `bench` blocks of the package's own
+  files for `khora bench` -- a dependency's blocks run in the dependency;
 - every `pub extern fn`, in every build, because C can call one by name with
   no Khora call leading to it.
 
@@ -90,6 +91,7 @@ build is cached under a key covering everything that can change the output:
 | the target triple | a different target produces different code |
 | the profile, and whether debug information is on | the environment can override the profile in both directions |
 | executable, library, test runner or bench runner | one package's sources build all four, and each is a different artifact |
+| for a test or bench runner, the contents of the package's own files | which blocks run depends on where the package boundary falls, and the same source texts can fall on either side of it |
 | the `[build]` table's `link` names and `link-search` directories, and each archive found there by content | the linker is told them; a library found in a system directory is known only by its name |
 | the source *paths*, when debug information is on | because a debug build embeds them |
 

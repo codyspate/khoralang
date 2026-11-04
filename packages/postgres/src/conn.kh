@@ -1,9 +1,9 @@
 module postgres::conn;
 
-import std::core::{Array, Fiber, Iterator, List, Map, Option, Pair, Raised, Region, Result, Split, Step, Vector, assert, assert_that, attempt, scoped};
+import std::core::{Array, Fiber, Iterator, List, Map, Option, Pair, Raised, Region, Result, Split, Step, Vector, assert, assert_that, attempt, print, scoped, timeout};
 import std::db::{Cell, DbError, Row};
 import std::decimal::{Decimal};
-import std::net::socket::{accept_on, connect_to, invalid_handle, listen_on, nothing_yet, receive, receive_now, set_receive_timeout, shut, start, transmit_bytes};
+import std::net::socket::{accept_on, accepted_open, connect_to, connected_to, denied_handle, invalid_handle, listen_on, nothing_yet, receive, receive_now, set_receive_timeout, shut, start, transmit_bytes};
 import std::net::tls::{Refusal, TlsConnection, TlsError, receive as tls_receive, receive_now as tls_receive_now, set_receive_timeout as tls_set_receive_timeout, shut as tls_shut, transmit_bytes as tls_transmit_bytes, trusting, upgrade_saying};
 import postgres::wire::{Message, Reader, Writer, framed, message_at, message_width, password, payload_width, prepare_and_run, query, run_prepared, run_prepared_each, sasl_initial, sasl_response, ssl_request, startup, terminate};
 import std::crypto::{Base64, SecureRandom};
@@ -781,7 +781,13 @@ pub fn dial_tls(
     Result::Err(passing(PgError::Unreachable("the socket layer would not start")))
   } else {
     let handle = connect_to(host, port);
-    if handle == invalid_handle() {
+    if handle == denied_handle() {
+      // **Lasting**, so a pool does not retry it: the manifest will say the
+      // same thing next time.
+      Result::Err(lasting(PgError::Unreachable(
+            "${host}:${Int::to_string(port)} is not granted by `[permissions] network` in khora.toml",
+          )))
+    } else if handle < 0 {
       Result::Err(passing(PgError::Unreachable(
             "could not reach ${host}:${Int::to_string(port)}",
           )))
@@ -1927,7 +1933,10 @@ type Wire = { client: Connection, server: Int, listener: Int };
 fn wire() -> Wire {
   // Winsock refuses every socket call until it is started; on Linux and
   // macOS this does nothing. `connect` starts it the same way. A start that
-  // failed shows as the invalid handles each test asserts against.
+  // failed shows as the negative handles [`wired`] refuses, each test's first
+  // assertion -- `< 0` rather than `== invalid_handle()`, because a connect
+  // the manifest refuses answers `denied_handle()`, which is negative and not
+  // that.
   let _started = start();
   let mut port = 47100;
   let mut listener = invalid_handle();
@@ -1940,7 +1949,11 @@ fn wire() -> Wire {
   // rather than holding the suite: a parse that went wrong usually looks
   // like a message still arriving.
   set_receive_timeout(handle, 1000);
-  let server = accept_on(listener);
+  // **No accept after a connect that did not happen.** Nothing is coming,
+  // so `accept_on` would wait for ever: a manifest that grants no loopback
+  // port held a whole suite for hours with one listener open and no client.
+  // The negative handle goes back instead, and [`wired`] fails the test.
+  let server = if handle < 0 || listener < 0 { invalid_handle() } else { accepted_from(listener, handle) };
   // The inbox filled with a byte no message here uses, so a read that
   // carried stale inbox bytes past what arrived shows as garbage rather
   // than as zeros.
@@ -1950,6 +1963,143 @@ fn wire() -> Wire {
     prepared: Map::new(), named: 0, uses: 0, closing: List::Nil,
   };
   { client: c, server: server, listener: listener }
+}
+
+/// The other end of `client`'s connection, accepted on `listener`, or
+/// [`stray_handle`] if what arrived was not it.
+///
+/// **What this prevents: a connect that went to somebody else's listener
+/// holding the suite.** Linux refuses a wildcard bind over a port another
+/// program listens on at `127.0.0.1`, so [`wire`] moves on to the next port.
+/// macOS and Windows allow it -- `listen_on` sets `SO_REUSEADDR` -- and the
+/// connect then reaches the other program's listener, so nothing ever
+/// arrives on ours. Two bounds, one for each way that goes:
+///
+/// - **A deadline on the accept**, two seconds, because ours may never wake;
+/// - **the peer's port**, because ours may wake for a client that is not
+///   this one: a connection is this test's when the accepted socket's peer
+///   port is the dialing socket's own port.
+///
+/// What it costs: a loopback accept that takes longer than two seconds fails
+/// the test, and the test says so.
+fn accepted_from(listener: Int, client: Int) -> Int {
+  match timeout(2000, fn () => accept_on(listener)) {
+    Option::None => stray_handle(),
+    Option::Some(server) => if server < 0 {
+      server
+    } else if connected_to(server, client) {
+      server
+    } else {
+      shut(server);
+      stray_handle()
+    },
+  }
+}
+
+/// The server end of a [`Wire`] whose accept never brought this test's own
+/// client: negative, and distinct from every handle `std` answers.
+fn stray_handle() -> Int { -9 }
+
+/// A listener and the port it is on.
+type Listening = { handle: Int, port: Int };
+
+/// A listener on the first port from `from` that binds, below 47400 -- the
+/// range [`wired`] names, so one grant covers every test here -- and the
+/// port it got.
+fn listening_from(from: Int) -> Listening {
+  let mut port = from;
+  let mut listener = invalid_handle();
+  while listener == invalid_handle() && port < 47400 {
+    listener = listen_on(port);
+    if listener == invalid_handle() { port = port + 1 }
+  };
+  { handle: listener, port: port }
+}
+
+/// A [`Wire`] whose server end is whatever [`accepted_from`] answered, so
+/// [`wired`] can say what went wrong with it.
+fn wire_of(client: Int, server: Int, listener: Int) -> Wire {
+  let c: Connection = {
+    handle: client, tls: Option::None, pending: Array::new(0, 0), start: 0, scram: Option::None, broken: false,
+    replying: 0, arrived: 0, open_transaction: false, depth: 0, after: 0 - 1, refused: false, inbox: Array::new(read_size(), 255),
+    prepared: Map::new(), named: 0, uses: 0, closing: List::Nil,
+  };
+  { client: c, server: server, listener: listener }
+}
+
+/// **A connect that reached another listener does not hold the suite.** The
+/// shape macOS and Windows allow, built the way Linux can: this test's
+/// client dials a second listener, so nothing ever arrives on the one
+/// [`accepted_from`] waits on. It gives up at its deadline with
+/// [`stray_handle`], which is the one thing [`wired`] must refuse here.
+test "an accept that never sees its own client gives up" {
+  let _started = start();
+  // The client dials the low end of the range, which the grant has to cover,
+  // and that listener closes at once, so the tests beside this one can have
+  // the port back. Ours waits at the high end, which nothing dials.
+  let theirs = listening_from(47100);
+  let client = connect_to("127.0.0.1", theirs.port);
+  shut(theirs.handle);
+  let ours = listening_from(47390);
+  // Through `wired` first, so a refused connect or a port range with
+  // nothing free fails here, saying which.
+  assert(wired(wire_of(client, 0, theirs.handle)) && ours.handle >= 0);
+  let started = khora_monotonic_millis();
+  let server = accepted_from(ours.handle, client);
+  let waited = khora_monotonic_millis() - started;
+  assert(server == stray_handle());
+  assert_that(waited >= 1900 && waited < 10000, "waited ${Int::to_string(waited)} ms");
+  shut(client);
+  shut(ours.handle)
+}
+
+/// **The other half: a connection that arrives and is not this client's.**
+/// A second socket dials our listener first, so the accept wakes for it; it
+/// is not the client's own connection, so the answer is [`stray_handle`]
+/// rather than a server end wired to a stranger -- and the stranger's
+/// accepted end is closed, not dropped, which the runtime's count of open
+/// accepted connections shows. The client's own connection, still queued,
+/// is accepted next and is its.
+test "an accepted connection from another client is refused" {
+  let _started = start();
+  let ours = listening_from(47100);
+  let stranger = connect_to("127.0.0.1", ours.port);
+  let client = connect_to("127.0.0.1", ours.port);
+  assert(wired(wire_of(client, 0, ours.handle)) && stranger >= 0);
+  let open = accepted_open();
+  assert(accepted_from(ours.handle, client) == stray_handle());
+  assert_that(accepted_open() == open, "a refused connection left ${Int::to_string(accepted_open() - open)} open");
+  let own = accepted_from(ours.handle, client);
+  assert(wired(wire_of(client, own, ours.handle)) && connected_to(own, client));
+  shut(own);
+  shut(client);
+  shut(stranger);
+  shut(ours.handle)
+}
+
+/// Whether `w` is connected at both ends, saying why when it is not.
+///
+/// **What this prevents: a refused loopback connect reading as a hang, or as
+/// an unrelated failure further down.** Each test that takes a [`wire`]
+/// asserts this first, so the run stops at the cause. The sentence names the
+/// manifest keys, because the usual reason is a `[permissions]` table that
+/// does not grant `127.0.0.1` on the test's port -- the tests here dial ports
+/// 47100 to 47399 -- and a table that refuses that can refuse this package's
+/// `extern fn`s too, under `default = "deny"`. Both are named, since only the
+/// first can be seen from here.
+fn wired(w: Wire) -> Bool {
+  if w.client.handle == denied_handle() {
+    print("khora: the manifest refused a loopback connect this test needs. Grant it: [permissions] network = [\"127.0.0.1:*\"], or 127.0.0.1 on ports 47100 to 47399; and under default = \"deny\", also extern = [\"postgres\"] for this package's own extern fns");
+    false
+  } else if w.server == stray_handle() {
+    print("khora: nothing this test's loopback client sent arrived on its listener within two seconds. Another program listening on the same port, between 47100 and 47399, would do that; so would a machine too loaded to accept in two seconds");
+    false
+  } else if w.listener < 0 || w.server < 0 || w.client.handle < 0 {
+    print("khora: no loopback connection: listener ${Int::to_string(w.listener)}, client ${Int::to_string(w.client.handle)}, server ${Int::to_string(w.server)}");
+    false
+  } else {
+    true
+  }
 }
 
 /// `bytes` from `from` up to `to`.
@@ -1985,7 +2135,7 @@ fn same_bytes(a: Array<U8>, b: Array<U8>) -> Bool {
 /// name, no password exchange.
 test "a server that answers N is refused, and hears nothing after the request" {
   let w = server_wire();
-  assert(w.listener != invalid_handle() && w.server != invalid_handle() && w.client.handle != invalid_handle());
+  assert(wired(w));
   transmit_bytes(w.server, Array::new(1, 78));
   let got = secure(w.client.handle, "db.example.com", 5432, Tls::Verify(""), 0 - 1);
   let said = match got {
@@ -2024,7 +2174,7 @@ test "a server that answers N is refused, and hears nothing after the request" {
 /// say, which is the ASCII of `E` and told the reader nothing.
 test "an error message before TLS is named and not shown" {
   let w = server_wire();
-  assert(w.listener != invalid_handle() && w.server != invalid_handle() && w.client.handle != invalid_handle());
+  assert(wired(w));
   transmit_bytes(w.server, Array::new(1, 69));
   let got = secure(w.client.handle, "db.example.com", 5432, Tls::Verify(""), 0 - 1);
   let said = match got {
@@ -2045,7 +2195,7 @@ test "an error message before TLS is named and not shown" {
 /// hint the message only says "not readable", and the path looks right.
 test "roots that are a path are refused saying to pass the contents" {
   let w = server_wire();
-  assert(w.listener != invalid_handle() && w.server != invalid_handle() && w.client.handle != invalid_handle());
+  assert(wired(w));
   let got = upgraded(w.client.handle, "db.example.com", 5432, "/etc/ssl/certs/global-bundle.pem", 0 - 1);
   let said = match got {
     Result::Err(failed) => match failed.why {
@@ -2069,7 +2219,7 @@ test "roots that are a path are refused saying to pass the contents" {
 /// must come out whole and then nothing more.
 test "next_message reads only what arrived, into a reused inbox" {
   let w = wire();
-  assert(w.listener != invalid_handle() && w.server != invalid_handle() && w.client.handle != invalid_handle());
+  assert(wired(w));
   let long = framed(68, Array::new(3000, 120));
   let short = framed(90, Array::new(1, 73));
   transmit_bytes(w.server, long);
@@ -2097,7 +2247,7 @@ test "next_message reads only what arrived, into a reused inbox" {
 /// a healthy connection reported broken.
 test "still_open keeps only what arrived from a reused inbox" {
   let w = wire();
-  assert(w.listener != invalid_handle() && w.server != invalid_handle() && w.client.handle != invalid_handle());
+  assert(wired(w));
   // A long message read first, so the inbox holds 3000 bytes of it.
   transmit_bytes(w.server, framed(68, Array::new(3000, 120)));
   match next_message(w.client) {
@@ -2429,6 +2579,7 @@ fn run_once(w: Wire, sql: String, n: Int, reply: Array<U8>) -> Ran {
 /// columns the first run was told.
 test "a statement's second run sends no Parse" {
   let w = server_wire();
+  assert(wired(w));
   let sql = "select $1::int4 as n";
   let first = run_once(w, sql, 7, first_reply(7));
   assert(answered(first.got, 7));
@@ -2447,6 +2598,7 @@ test "a statement's second run sends no Parse" {
 /// write, and then succeeds.
 test "an error in a prepared statement forgets it, and the next call prepares it again" {
   let w = server_wire();
+  assert(wired(w));
   let sql = "select $1::int4 as n";
   assert(answered(run_once(w, sql, 1, first_reply(1)).got, 1));
   let refused = run_once(w, sql, 2, refusal());
@@ -2475,6 +2627,7 @@ test "an error in a prepared statement forgets it, and the next call prepares it
 /// answered 6.
 test "a reply nobody read is not the next statement's answer" {
   let w = server_wire();
+  assert(wired(w));
   let sql = "select $1::int4 as n";
   assert(answered(run_once(w, sql, 1, first_reply(1)).got, 1));
   // Written, and its reply never read: what a stopped caller leaves.
@@ -2497,6 +2650,7 @@ test "a reply nobody read is not the next statement's answer" {
 /// replies read; the next statement must be answered its own row, 6.
 test "a batch nobody read to the end is not the next statement's answer" {
   let w = server_wire();
+  assert(wired(w));
   let sql = "select $1::int4 as n";
   assert(answered(run_once(w, sql, 1, first_reply(1)).got, 1));
   // Written, and its replies never read: what a stopped borrower leaves.
@@ -2545,6 +2699,7 @@ fn refused_inside() -> Array<U8> {
 /// verb moves nothing.
 test "a transaction verb's reply read by settle still moves the depth" {
   let w = server_wire();
+  assert(wired(w));
   set_transaction_depth(w.client, 2);
   // Written, and its reply never read by its caller.
   assert(send_moving(w.client, query("RELEASE SAVEPOINT khora_sp_1"), 1));
@@ -2565,6 +2720,7 @@ test "a transaction verb's reply read by settle still moves the depth" {
 /// 0 is still prepared, and statement 1 is parsed again when it comes back.
 test "the 513th distinct statement evicts the least recently used one" {
   let w = server_wire();
+  assert(wired(w));
   let mut i = 0;
   let mut fine = true;
   while i < 512 {
@@ -2686,6 +2842,7 @@ fn prepared(w: Wire) -> Bool {
 /// implicit transaction, failing alone.
 test "a batch goes out in one write, each set with its own Sync" {
   let w = server_wire();
+  assert(wired(w));
   assert(prepared(w));
   let handle = w.server;
   let server = Fiber::spawn(fn () =>
@@ -2707,6 +2864,7 @@ test "a batch goes out in one write, each set with its own Sync" {
 /// it has been described; the rest go out together behind the new name.
 test "a batch on a statement not yet prepared prepares it with its first set" {
   let w = server_wire();
+  assert(wired(w));
   let handle = w.server;
   let server = Fiber::spawn(fn () => play(handle, [
         { hear: 1, say: [Said::First(1)] },
@@ -2728,6 +2886,7 @@ test "a batch on a statement not yet prepared prepares it with its first set" {
 /// run binds it without a parse.
 test "a refused set in a batch fails alone" {
   let w = server_wire();
+  assert(wired(w));
   assert(prepared(w));
   let handle = w.server;
   let server = Fiber::spawn(fn () =>
@@ -2755,6 +2914,7 @@ test "a refused set in a batch fails alone" {
 /// statement again and succeed, so a batch answers the same.
 test "a batch refused throughout is asked again after a fresh parse" {
   let w = server_wire();
+  assert(wired(w));
   assert(prepared(w));
   let handle = w.server;
   let server = Fiber::spawn(fn () => play(handle, [
@@ -2788,6 +2948,7 @@ test "a batch refused throughout is asked again after a fresh parse" {
 /// answers to whatever is asked next.
 test "a batch whose reply is cut off answers every later set as out of step" {
   let w = server_wire();
+  assert(wired(w));
   assert(prepared(w));
   let handle = w.server;
   let server = Fiber::spawn(fn () =>
@@ -2837,6 +2998,7 @@ fn spent_asking(w: Wire, sql: String, n: Int) -> Spent {
 /// first run's parse is not in it.
 test "a prepared statement's run allocates a bounded amount" {
   let w = server_wire();
+  assert(wired(w));
   let sql = "select $1::int4 as n";
   assert(answered(run_once(w, sql, 0, first_reply(0)).got, 0));
   let small = spent_asking(w, sql, 16);

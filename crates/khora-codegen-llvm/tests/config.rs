@@ -123,6 +123,7 @@ fn program(name: &str, body: &str) -> (PathBuf, KhoraDatabase, SourceRoot) {
     let files = vec![
         SourceFile::new(&db, dir.join("core.kh"), std_source("core.kh")),
         SourceFile::new(&db, dir.join("permissions.kh"), std_source("permissions.kh")),
+        { let (name, text) = harness::separator_source(); SourceFile::new(&db, dir.join(name), text) },
         SourceFile::new(&db, dir.join("grants.kh"), std_source("grants.kh")),
         SourceFile::new(&db, dir.join("env_native.kh"), std_source("env_native.kh")),
         SourceFile::new(&db, dir.join("decimal.kh"), std_source("decimal.kh")),

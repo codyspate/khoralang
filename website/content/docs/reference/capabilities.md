@@ -350,7 +350,7 @@ A capability may be required by an operation that does not raise a recoverable f
 
 ## Manifest permissions
 
-A capability row says a function reaches outside the program. `[permissions]` in `khora.toml` says how far it may reach, and the standard library's real handlers enforce it:
+A capability row says a function reaches outside the program. `[permissions]` in `khora.toml` says how far it may reach, and the standard library's real handlers enforce it. It limits a program you trust; it is not a sandbox for code you do not, and [what the permission table is, and what it is not](#what-the-permission-table-is-and-what-it-is-not) says where the line is:
 
 ```toml
 [permissions]
@@ -373,15 +373,51 @@ The grants are compiled into the binary rather than read at run time. A file the
 **A missing table grants everything, and each category is independent.** Naming `network` says nothing about `env`. Tightening is opt-in.
 
 **`network` is a list of hosts the program may connect *out* to, and nothing
-else.** It is read in one place — `HttpClient::send`, once the URL is parsed and
-before anything is dialed — and it decides whether that host may be reached.
-Binding a port is the other direction and is not covered: `Router::listen`,
-`Router::listen_quietly` and `Router::listen_tls` never consult it, so a program
-with `default = "deny"` and no hosts granted still serves on any port it asks
+else.** Every way `std` dials out checks it before anything is looked up or
+dialed: `HttpClient::send` once the URL is parsed, `std::net::socket`'s
+`connect_to` and `connect_by`, and `std::net::tls`'s `connect` and
+`connect_by`. Binding a port is the other direction and is not covered:
+`Router::listen`, `Router::listen_quietly`, `Router::listen_tls` and
+`std::net::socket::listen_on` never consult it, so a program with
+`default = "deny"` and no hosts granted still serves on any port it asks
 for. Write `network = ["127.0.0.1:8787"]` expecting it to authorize a listener
 and it will do nothing, in either direction. [Known
 limitations](/docs/limitations/#inbound-connections-are-not-permissioned) has
 the reasoning.
+
+**A path grant is checked against where the path leads.** `std::fs` follows
+the symbolic links on a path and matches the result as well as the path as
+written, so `data/link.txt -> ../secret.txt` is refused under `./data/**` even
+though its text is inside the grant. A link inside a granted tree that points
+inside it works. Removing or renaming a link acts on the link, so only the
+directories above it have to be inside the grant; a grant with no glob that
+names the link itself covers removing it, wherever it points. Under a bare
+`**`, which is what no `[permissions.fs]` table means, nothing is followed and
+nothing is refused. Only `**` written exactly so is the whole file system:
+`./**` is the working directory's tree, checked like `./data/**`.
+
+Three things follow from checking where a path leads:
+
+- **A relative grant is a tree under the working directory.** `**/*.txt`
+  covers `.txt` files below the directory the program runs in, not an
+  absolute path elsewhere that happens to end in `.txt`. A grant meant for an
+  absolute location says so: `/srv/data/**`.
+- **A grant that names a link follows it on every operation.** Under
+  `./data/**` with `data` a link, the grant covers wherever `data` points at
+  that moment. Whoever can replace that link moves the grant, for every
+  operation until it is changed back.
+- **A hard link is not followed, because it leads nowhere.** It is the file
+  itself under a second name, so a hard link inside a granted tree is inside
+  the tree, whatever other directory the same file also appears in. A grant
+  limits which names a program may use, not which files those names are.
+
+A path inside a grant whose links cannot be followed -- a loop, or a
+directory the program has no permission to search -- is refused as
+`IoError::Failed`, not `Denied`: the reason is the file system, and the fix is
+not in the manifest. `FsRead::exists` and `FsRead::is_dir` answer `false` for
+it instead. A link inside a grant that points at something missing outside
+it is `Denied`, not `NotFound`: where it leads is outside, whether or not
+anything is there yet. A trailing `/` changes nothing: `data/` is `data`.
 
 A denial is its own error case, separate from the ordinary failure, because the two send a reader to different files:
 
@@ -389,7 +425,14 @@ A denial is its own error case, separate from the ordinary failure, because the 
 | --- | --- | --- |
 | an environment variable | `EnvError::Denied(name)` | `[permissions] env` |
 | a host over HTTP | `CallError::Denied(host)` | `[permissions] network` |
+| a host over TLS | `TlsError::Denied(host)` | `[permissions] network` |
+| a host over a raw socket | `connect_to` returns `denied_handle()` | `[permissions] network` |
 | a path on disk | `IoError::Denied(path)` | `[permissions.fs]` |
+| a program | `ProcessError::Denied(program)` | `[permissions] process` |
+
+`connect_to` and `connect_by` answer with a handle, so a refusal is a
+negative number of its own, `denied_handle()`, beside `invalid_handle()` for
+a host that could not be reached. Test a handle for failure with `< 0`.
 
 **Including the two probes.** `FsRead::exists` and `FsRead::is_dir` answer a
 `Bool` and raise `IoError` as well, so a path the manifest denies is `Denied`
@@ -405,6 +448,47 @@ an hour, because nothing in a `false` points at a manifest. The remaining
 let port = variable_or("PORT", "8080")!;
 ```
 
-Globbing differs by category, and each one is the reading that costs the least surprise. For a path, `*` stops at a separator and `**` crosses one — and, as in `.gitignore`, **neither covers the directory being described**, which is why the `[permissions.fs]` example above names `./data` as well as `./data/**`. For a name — a variable, a command — there are no segments, so `*` spans everything. For a host, `*` spans dots, so `*.internal` covers `db.eu.internal`, and a grant with no port covers every port.
+Globbing differs by category, and each one is the reading that costs the least surprise. For a path, `*` stops at a separator and `**` crosses one — and, as in `.gitignore`, **neither covers the directory being described**, which is why the `[permissions.fs]` example above names `./data` as well as `./data/**`. `\` is a separator on Windows only; elsewhere it is an ordinary character of a file name, so `data\x` is not inside `data`. For a name — a variable, a command — there are no segments, so `*` spans everything. For a host, `*` spans dots, so `*.internal` covers `db.eu.internal`, and a grant with no port covers every port. An IPv6 address is written in brackets, as in a URL: `[::1]:5432`, `[::1]:*`, or `[::1]` for every port. A grant ending in `:` with no port after it, such as `example.com:`, is refused when the manifest loads. A host handed to a connect may carry brackets only as `[address]`.
 
 See [Effects and rows](./effects/) for effect declarations and [Failures](./failures/) for typed failure.
+
+## What the permission table is, and what it is not
+
+**The permission table is a program limiting itself. It is not a sandbox for
+untrusted code.** It stops a program you trust from doing more than you meant
+it to: a typo'd path, a library that opens a socket you did not expect, a
+request path joined under a directory and walked out of it. It does not stop
+code that is trying to get out:
+
+- **Grants apply to the whole program.** `[permissions]` is read from the
+  manifest of the package being built, and what it grants, every line of code
+  in the program holds, the dependencies included. There is no per-package
+  grant.
+- **A dependency's own `[permissions]` table is ignored.** Only the root
+  package's table is compiled in. A library cannot narrow itself, and cannot
+  widen the program it is part of.
+- **Any code can make a real capability.** `FsRead::real()`, `Env::real()`,
+  `Process::real()` and the rest are ordinary functions, so a function with no
+  `with` row can make one and use it; a signature without `FsRead` is not proof
+  that the function reads no files. What stops it is the manifest, checked at
+  run time inside the real handler: a capability made that way is refused
+  exactly what any other would be.
+- **`extern fn` is the door out.** A foreign function reaches the operating
+  system without any capability, so nothing the table says applies to it. The
+  `extern` key is what governs it: it names the packages that may declare one,
+  `std` always may, and under `default = "deny"` a table with no `extern` key
+  allows `std` alone, so a program that wants its own `extern fn` lists its
+  own package. `khora check` refuses an unlisted declaration and names the line
+  to add.
+- **The checks are made by the program itself, in-process.** A link swapped
+  between the check and the open, a library that writes over memory, or a
+  native library linked in, is not something the table can see.
+- **A grant is about names, not files.** A hard link inside a granted tree
+  reaches the file it names wherever else that file lives, and a grant that
+  names a symbolic link covers whatever the link points at when it is used.
+
+**For code you do not trust, use an operating-system boundary**: run it as a
+separate process under its own user, in a container, or in a virtual machine,
+and give that boundary the files and the network the code may have. A Wasm
+plugin target, where a plugin runs isolated inside the host process with only
+what the host grants it, is planned and not yet available.

@@ -265,6 +265,7 @@ pub fn main() -> () raises TlsError {{
         TlsError::BadKey => print(\"bad key, which is wrong\"),
         TlsError::Unreachable(_) => print(\"unreachable, which is wrong\"),
         TlsError::TimedOut => print(\"timed out, which is wrong\"),
+        TlsError::Denied(_) => print(\"denied, which is wrong\"),
       }},
     }}
   }}
@@ -312,6 +313,7 @@ pub fn main() -> () {
         TlsError::Handshake => print(\"handshake\"),
         TlsError::Unreachable(_) => print(\"unreachable\"),
         TlsError::TimedOut => print(\"timed out\"),
+        TlsError::Denied(_) => print(\"denied\"),
       },
     }
   }
@@ -418,6 +420,7 @@ fn call(caller: TlsClient) -> () {
       TlsError::Handshake => print("handshake"),
       TlsError::BadCertificate => print("bad certificate"),
       TlsError::BadKey => print("bad key"),
+      TlsError::Denied(host) => print("denied " + host),
     },
   }
 }

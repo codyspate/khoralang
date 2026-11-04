@@ -1,7 +1,8 @@
 module std::fs;
 
 import std::core::{Array, Eq, List, Option, Ptr, Region, Scope, Show, acquire};
-import std::permissions::{granted};
+import std::permissions::{Reach, reach};
+import std::permissions::separator::{backslash_separates};
 import std::permissions::grants::{fs_read, fs_write};
 
 //! The file system, over ISO C.
@@ -73,6 +74,11 @@ pub type IoError =
   /// the fix is a line in a file the reader owns. Folding it into `Failed`
   /// would send somebody to look at their file system for a decision their
   /// own manifest made.
+  ///
+  /// Only the manifest says `Denied`. A path inside a grant whose links cannot
+  /// be followed -- a loop, a directory this process may not search -- is
+  /// refused as `Failed`, the answer the operation would have had with no
+  /// `[permissions]` table.
   | Denied(path: String);
 
 /// Reading the file system.
@@ -195,14 +201,14 @@ impl FsRead {
   pub fn real() -> FsRead {
     handler for FsRead {
       read: fn path => { allow_read(path)!; read_whole(path)! },
-      exists: fn path => { allow_read(path)!; can_open(path) },
+      exists: fn path => if probed(path)! { can_open(path) } else { false },
       size: fn path => { allow_read(path)!; size_of_path(path)! },
       read_at: fn (path, offset, want) => {
         allow_read(path)!;
         read_part(path, offset, want)!
       },
       read_dir: fn path => { allow_read(path)!; list_dir(path)! },
-      is_dir: fn path => { allow_read(path)!; is_directory(path) },
+      is_dir: fn path => if probed(path)! { is_directory(path) } else { false },
     }
   }
 }
@@ -211,19 +217,23 @@ impl FsWrite {
   /// The real file system, writing.
   pub fn real() -> FsWrite {
     handler for FsWrite {
-      write: fn (path, bytes) => { allow_write(path)!; write_whole(path, bytes)! },
-      append: fn (path, bytes) => { allow_write(path)!; append_whole(path, bytes)! },
-      remove: fn path => { allow_write(path)!; remove_file(path)! },
+      write: fn (path, bytes) => { allow_write(path, through())!; write_whole(path, bytes)! },
+      append: fn (path, bytes) => { allow_write(path, through())!; append_whole(path, bytes)! },
+      // **The link, not what it leads to.** `remove`, `rename`, `mkdir` and
+      // `rmdir` act on the last name itself, so a link inside a granted tree
+      // can be removed or renamed wherever it points, and only the
+      // directories above it have to stay inside the grant.
+      remove: fn path => { allow_write(path, at_the_name())!; remove_file(path)! },
       // **Both ends.** A rename is a write to two places, and checking only
       // the source would let a granted directory be emptied into an ungranted
       // one -- which is the whole of what the grant was meant to stop.
       rename: fn (from, to) => {
-        allow_write(from)!;
-        allow_write(to)!;
+        allow_write(from, at_the_name())!;
+        allow_write(to, at_the_name())!;
         rename_file(from, to)!
       },
-      create_dir: fn path => { allow_write(path)!; make_dir(path)! },
-      remove_dir: fn path => { allow_write(path)!; unmake_dir(path)! },
+      create_dir: fn path => { allow_write(path, at_the_name())!; make_dir(path)! },
+      remove_dir: fn path => { allow_write(path, at_the_name())!; unmake_dir(path)! },
     }
   }
 }
@@ -317,13 +327,96 @@ pub fn append_text(path: String, text: String) -> ()
 /// program may do to the machine it runs on, and a test double touches no
 /// machine. Putting the check in `real()` rather than in the callers is what
 /// makes that true without anybody having to remember it.
+///
+/// Every read opens, and an open follows every link, so the check follows
+/// them too: see `granted_followed` for what that closes and what it leaves,
+/// and [`allowed`] for which refusal is `Denied` and which `Failed`.
 fn allow_read(path: String) -> () raises IoError {
-  if granted(fs_read(), path) {} else { raise IoError::Denied(path) }
+  allowed(reach(fs_read(), path, through(), real_path), path)!
 }
 
 /// Refuses a path the manifest does not grant for writing.
-fn allow_write(path: String) -> () raises IoError {
-  if granted(fs_write(), path) {} else { raise IoError::Denied(path) }
+///
+/// `follow_last` is [`through`] for an operation that opens the file and
+/// [`at_the_name`] for one that acts on the name itself.
+fn allow_write(path: String, follow_last: Bool) -> () raises IoError {
+  allowed(reach(fs_write(), path, follow_last, real_path), path)!
+}
+
+/// The check's answer as `std::fs` reports it.
+///
+/// **`Denied` is the manifest's word and nothing else's.** A path whose links
+/// cannot be followed -- a loop, a directory this process may not search --
+/// is refused too, because nobody can say it is inside a grant; but the
+/// reason is the file system, so it is `Failed`, as the same path would be
+/// with no `[permissions]` at all. `Denied` sends the reader to `khora.toml`,
+/// and a fix there would not help.
+fn allowed(answer: Reach, path: String) -> () raises IoError {
+  match answer {
+    Reach::Inside => (),
+    Reach::Outside => raise IoError::Denied(path),
+    Reach::Unfollowable => raise IoError::Failed(path),
+  }
+}
+
+/// The check for the two probes, `exists` and `is_dir`: `true` to go on and
+/// ask the file system, `false` to answer `false` without asking.
+///
+/// **A path whose links cannot be followed answers `false`, not `Failed`.**
+/// The probes promise that their `false` means the operating system would
+/// not open the path, and a link loop or an unsearchable directory is
+/// exactly that. Raising instead turned a question with a `Bool` answer into
+/// an error the caller had no reason to expect. A path the manifest does not
+/// grant is still `Denied`.
+fn probed(path: String) -> Bool raises IoError {
+  match reach(fs_read(), path, through(), real_path) {
+    Reach::Inside => true,
+    Reach::Outside => raise IoError::Denied(path),
+    Reach::Unfollowable => false,
+  }
+}
+
+/// For `allow_write`: the operation opens the file, and so follows a link
+/// that is its last name.
+fn through() -> Bool { true }
+
+/// For `allow_write`: the operation acts on the last name itself -- removing,
+/// renaming or making it -- and does not follow a link there.
+fn at_the_name() -> Bool { false }
+
+/// Where `path` leads with its links followed, or `None` when it cannot be
+/// followed. The runtime's `khora_fs_real_path`; `follow_last` is whether a
+/// link that is the last name is followed too.
+///
+/// Asked once into a buffer sized for an ordinary path and, when the answer
+/// is longer, once more into one sized for that answer. The walk is done
+/// twice in that case, which a path longer than 4 KB pays and nothing else.
+fn real_path(path: String, follow_last: Bool) -> Option<String> {
+  let first = real_into(path, follow_last, name_capacity());
+  if first.length < 0 {
+    Option::None
+  } else if first.length <= name_capacity() {
+    Option::Some(String::slice(String::from_bytes(first.bytes), 0, first.length))
+  } else {
+    let again = real_into(path, follow_last, first.length);
+    if again.length < 0 || again.length > first.length {
+      Option::None
+    } else {
+      Option::Some(String::slice(String::from_bytes(again.bytes), 0, again.length))
+    }
+  }
+}
+
+/// What one call to `khora_fs_real_path` wrote, and the length it reported.
+type Followed = { bytes: Array<U8>, length: Int };
+
+/// One call to `khora_fs_real_path`, into a buffer of `room` bytes.
+fn real_into(path: String, follow_last: Bool, room: Int) -> Followed {
+  let bytes: Array<U8> = Array::new(room, 0);
+  let follow = if follow_last { I32::of(1) } else { I32::of(0) };
+  let length = String::with_c_string(path, fn p =>
+    Array::with_data(bytes, fn (into, n) => khora_fs_real_path(p, follow, into, n)));
+  { bytes: bytes, length: length }
 }
 
 /// How much of a file to read at a time.
@@ -537,16 +630,18 @@ pub fn copy(from: String, to: String) -> ()
 // effect: joining two names reaches nothing and a test that installs a mock
 // `Fs` should not have to mock string handling too.
 //
-// **Both separators are separators.** Windows accepts `/` everywhere and
-// splits on either, so reading treats `\\` and `/` alike and writing always
-// emits `/` — one rule, and the one that works on all three platforms.
+// **Both separators are separators on Windows.** Windows accepts `/`
+// everywhere and splits on either, so reading there treats `\\` and `/`
+// alike; elsewhere `\\` is part of a name. Writing always emits `/` — one
+// rule, and the one that works on all three platforms.
 
 /// Joins two path pieces with a single separator.
 ///
-/// **Always `/`, on every platform including Windows.** Reading accepts either
-/// -- a base already ending in `\` is not given a second separator -- but
-/// what is written is `/`, because Windows takes it everywhere and one rule
-/// that works on all three targets beats three rules that each work on one.
+/// **Always `/`, on every platform including Windows.** Reading accepts
+/// either on Windows -- a base already ending in `\` is not given a second
+/// separator there -- but what is written is `/`, because Windows takes it
+/// everywhere and one rule that works on all three targets beats three
+/// rules that each work on one.
 ///
 /// An empty base is `child`, so folding over a list of segments needs no
 /// special first step.
@@ -604,7 +699,7 @@ pub fn stem(path: String) -> String {
   }
 }
 
-/// The index of the last `/` or `\\`.
+/// The index of the last separator: `/`, or on Windows `\\` too.
 fn last_separator(path: String) -> Option<Int> {
   last_byte_of(path, String::byte_length(path) - 1, fn b => is_separator(b))
 }
@@ -628,8 +723,15 @@ fn last_byte_of(text: String, at: Int, wanted: (U8) -> Bool) -> Option<Int> {
   if at < 0 { Option::None } else { Option::Some(at) }
 }
 
+/// Whether `byte` ends a path segment: `/` everywhere, and `\` where the
+/// target says so -- on Windows, and nowhere else.
+///
+/// **The question `std::permissions` asks, asked the same way.** Elsewhere
+/// `granted\evil` is one name beside `granted`; splitting it at the `\` here
+/// while the permission check did not gave `parent` and `file_name` a
+/// different reading of a path from the one the grant was checked against.
 fn is_separator(byte: U8) -> Bool {
-  byte == 47 || byte == 92
+  byte == 47 || (byte == 92 && backslash_separates())
 }
 
 fn ends_with_separator(text: String) -> Bool {
@@ -682,6 +784,10 @@ extern fn khora_fs_dir_open(path: Ptr) -> Ptr;
 extern fn khora_fs_dir_open_why(path: Ptr, why: Ptr) -> Ptr;
 extern fn khora_fs_dir_next(dir: Ptr, into: Ptr, cap: Int) -> Int;
 extern fn khora_fs_dir_close(dir: Ptr) -> ();
+
+// Where a path leads once its links are followed, for the grant check.
+// `crates/khora-rt/src/fs.rs` has why it is not `realpath`.
+extern fn khora_fs_real_path(path: Ptr, follow_last: I32, into: Ptr, cap: Int) -> Int;
 
 // These two stay direct. They adjust a buffer rather than reach a disk in the
 // ordinary case, and both deal in C's `long` — thirty-two bits on Windows and

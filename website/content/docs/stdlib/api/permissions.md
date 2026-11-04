@@ -33,6 +33,44 @@ makes with `unsafe`. The default below is the one a program with no
 manifest, or no `[permissions.fs]`, compiles with, and `khora build`
 narrows it only when the manifest asks.
 
+## Types
+
+### Reach
+
+```khora
+pub type Reach =
+  | Inside
+  | Outside
+  | Unfollowable;
+```
+
+What [`reach`](#reach-1) found.
+
+#### Inside
+
+```khora
+| Inside
+```
+
+The text and where it leads are both inside a grant.
+
+#### Outside
+
+```khora
+| Outside
+```
+
+The text, or where it leads, is outside every grant.
+
+#### Unfollowable
+
+```khora
+| Unfollowable
+```
+
+The text is inside a grant and the links along it cannot be followed:
+a loop, or a directory this process may not search.
+
 ## Functions
 
 ### granted
@@ -51,20 +89,95 @@ has in their fingers:
   though not `data` itself, which is `.gitignore`'s reading too.
 - Everything else matches itself.
 
-Separators are normalized first, so a grant written with `/` covers a
-Windows path spelled with `\\`. `granted_path` in `khora-manifest` answers
+On Windows, separators are normalized first, so a grant written with `/`
+covers a path spelled with `\\`; elsewhere `\\` is an ordinary byte of a
+name. `granted_path` in `khora-manifest` answers
 the same question for the compiler and the two have to agree; the tests
 name the cases where agreement is not obvious.
 
-**A path with a `..` segment is refused, whatever the grants say**, and it
-is refused here rather than left to the matcher, because the matcher gets
-it wrong. `**` spans separators, so the `./logs/**` the capabilities guide
-teaches for granting a tree matches `logs/../secret.txt` literally: the
-`**` swallows `../secret.txt`, and a grant that reads like one directory
-covers the disk. A program that joins a path it was handed -- an argument,
-a config entry, a request path -- under a granted prefix was passing that
-reach on to whoever handed it the path. `normalized` says why the `..` is
-refused rather than resolved away.
+**A path with a `..` segment is refused unless a grant is a bare `**`**,
+and it is refused here rather than left to the matcher, because the
+matcher gets it wrong. `**` spans separators, so the `./logs/**` the
+capabilities guide teaches for granting a tree matches `logs/../secret.txt`
+literally: the `**` swallows `../secret.txt`, and a grant that reads like
+one directory covers the disk. A program that joins a path it was handed
+-- an argument, a config entry, a request path -- under a granted prefix
+was passing that reach on to whoever handed it the path. `normalized` says
+why the `..` is refused rather than resolved away.
+
+A bare `**` is the one grant with no outside for a `..` to reach, so under
+it a `..` path is matched like any other. That is the grant a program with
+no `[permissions.fs]` gets, and `default = "allow"` too.
+
+**This answers about the text only.** A symlink in the path can lead
+somewhere the text does not say; `std::fs` asks [`granted_followed`](#granted_followed),
+which follows the links as well.
+
+### granted_followed
+
+```khora
+pub fn granted_followed(grants: List<String>, path: String, follow_last: Bool, real: (String, Bool) -> Option<String>) -> Bool
+```
+
+Whether a grant covers `path` **and where `path` really leads.**
+
+[`granted`](#granted) reads the path as text, and text says nothing about the links
+along it: under `granted/**`, `granted/link.txt -> ../secret.txt` is a
+path the text covers and a file outside the tree. So this asks `real` to
+follow the links, and matches the answer as well -- against each grant
+followed the same way, because a grant is a path too, and one naming a
+linked directory grants the tree it leads to.
+
+Both have to agree. The text check is [`granted`](#granted) unchanged, `..` refusal
+and all, so following links never widens what the text allowed; it can
+only refuse a path the text let through.
+
+- `real(p, true)` is the absolute path `p` leads to with every link on it
+  followed, or `None` when it cannot be followed (a loop, a directory this
+  process may not search). A name that does not exist yet is kept as
+  written, so a write to a new file is checked where it will land.
+- `follow_last` is `false` for an operation that acts on a link rather
+  than through it -- removing or renaming one -- which follows only the
+  directories above the last name.
+
+**A relative grant is a tree under the working directory once links are
+followed**, because that is the only directory a relative path can be
+followed from. `**/*.txt` covers `.txt` files below the working directory
+and not an absolute path elsewhere, even one the text would match.
+
+**A path that cannot be followed is [`Reach::Unfollowable`](#unfollowable), not
+[`Reach::Outside`](#outside).** Nobody can say it is inside a grant, so it is
+refused either way; but a loop or a directory without search permission is
+the file system's answer, not the manifest's, and `std::fs` reports it as
+`IoError::Failed` so that nobody goes looking in `khora.toml` for it.
+
+**What this does not close: a link that changes between the check and the
+open.** The check follows the links that are there when it runs; the open
+follows the ones that are there when it runs. Something else on the
+machine that can replace a link inside a granted tree in between can
+redirect one operation. Closing that needs the open itself to refuse to
+leave the tree, which `std::fs` does not do.
+
+**Nor a link a grant names.** Grants are followed on every operation, so
+a grant like `data/**` where `data` is a link covers wherever `data` leads
+at that moment. Whoever can replace that link moves the grant, for as long
+as the link stays replaced -- not one operation but all of them.
+
+**Nor a hard link.** A hard link has no "where it leads": it is the file,
+under a second name. One inside a granted tree is inside the tree,
+whatever other names the same file has.
+
+Costs nothing under a bare `**`, which has no outside to lead to. Under any
+other grant it is one `real` for the path and one per grant, each of which
+is a walk of the file system.
+
+### reach
+
+```khora
+pub fn reach(grants: List<String>, path: String, follow_last: Bool, real: (String, Bool) -> Option<String>) -> Reach
+```
+
+[`granted_followed`](#granted_followed), saying which way a refusal went.
 
 ### granted_name
 
@@ -98,6 +211,42 @@ Two rules, and both are the reading that costs a newcomer least:
 - **A grant with no port covers every port**, which is what Deno's
   `--allow-net=example.com` does. `:*` says the same thing explicitly.
 
+### may_dial
+
+```khora
+pub fn may_dial(grants: List<String>, host: String, port: Int) -> Bool
+```
+
+Whether any grant lets a program dial `host` on `port`: [`granted_host`](#granted_host)
+on `host:port`.
+
+`host` may be an IPv6 literal with or without its brackets. Unbracketed is
+safe here because the port is always appended and has no colon in it, so
+the last colon is always the port's: `::1` on `5432` is asked about as
+`::1:5432`, which splits into `::1` and `5432`, and `[::1]:5432`, `[::1]:*`
+and `[::1]` in a manifest all cover it. It is a grant that has to be
+bracketed, because a grant may have no port at all.
+
+**A host with a bracket in it is refused unless it is exactly `[addr]`.**
+`[::1]:5432` handed in as the host made the subject `[::1]:5432:<port>`,
+which splits to the name `::1` and the port text `5432:<port>`, so a
+grant of `[::1]` with no port covered it and the name went to the resolver
+as written. No resolver tried took it, but a check that waves through a
+host it cannot read is relying on the resolver to refuse; it refuses here
+instead, before anything is looked up.
+
+### unbracketed
+
+```khora
+pub fn unbracketed(host: String) -> String
+```
+
+`host` without the brackets an IPv6 literal is written in: `[::1]` is
+`::1`, which is what an address parser takes. Anything else is unchanged.
+
+So a program may write `[::1]`, as a URL would, and the connect it hands
+that to still reaches the address.
+
 ### normalized
 
 ```khora
@@ -109,8 +258,11 @@ One spelling of a path, so a grant and a request can be compared.
 Two things are leveled, and both were reported as traps by somebody who
 hit them:
 
-- **`\\` becomes `/`**, so a grant written with forward slashes covers a
-  path Windows spelled with back ones.
+- **On Windows, `\\` becomes `/`**, so a grant written with forward
+  slashes covers a path spelled with back ones. Only there: on every other
+  system a backslash is an ordinary byte in a file name, so `granted\evil`
+  is a directory beside `granted`, and reading it as `granted/evil` let
+  `granted/**` cover a tree the manifest never named.
 - **A `.` segment is dropped**, so `./data/**` grants `data/foo.txt` and
   `data/**` grants `./data/foo.txt`. Before this, the `./` was significant
   on both sides: two readers of `capabilities.md` wrote the example's

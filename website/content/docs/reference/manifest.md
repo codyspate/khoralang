@@ -187,7 +187,7 @@ does not matter is a build tool that skips the check that would have caught it.
 
 ## `[permissions]` — what the code may reach
 
-Khora has no ambient authority: a function that touches the network says so in its type, and this table is where a package's grants are written down.
+Khora has no ambient authority: a function that touches the network says so in its type, and this table is where a package's grants are written down. Only the root package's table is read, and it limits the whole program; it is not a sandbox for untrusted code. [Capabilities](/docs/reference/capabilities/#what-the-permission-table-is-and-what-it-is-not) says what it does and does not stop.
 
 ```toml
 [permissions]
@@ -206,11 +206,11 @@ write = ["logs/**"]
 | --- | --- |
 | `workspace` | `true` to take the root's table whole. |
 | `default` | What a category nobody wrote down grants: `allow` or `deny`. `allow` is the default, so a program that has never heard of permissions compiles. `deny` is the strict posture: one line, set once, and every capability after it is a deliberate edit. |
-| `network` | Hosts the program may **connect out to**, as `name` or `name:port`. `*` spans dots, so `*.internal` covers `db.eu.internal`; a grant with no port covers every port. **Outbound only**: a port the program *binds* is not a host it reaches, so `Router::listen` and the rest of the server side are not covered by this key, or by any other — see [known limitations](/docs/limitations/#inbound-connections-are-not-permissioned). |
-| `fs` | **A table, not a list**: `[permissions.fs]` with `read` and `write`. `*` stops at a separator and `**` crosses one, and neither covers the directory being described. |
+| `network` | Hosts the program may **connect out to**, as `name` or `name:port`, checked by `HttpClient::send`, `std::net::socket::connect_to` and `connect_by`, and `std::net::tls::connect` and `connect_by`. `*` spans dots, so `*.internal` covers `db.eu.internal`; a grant with no port covers every port. An IPv6 address goes in brackets, as in a URL: `[::1]:5432`, `[::1]:*`, `[::1]`. **Outbound only**: a port the program *binds* is not a host it reaches, so `Router::listen` and the rest of the server side are not covered by this key, or by any other — see [known limitations](/docs/limitations/#inbound-connections-are-not-permissioned). |
+| `fs` | **A table, not a list**: `[permissions.fs]` with `read` and `write`. `*` stops at a separator and `**` crosses one, and neither covers the directory being described. A path is checked where its symbolic links lead as well as as written. |
 | `env` | Environment variable names. `*` spans everything, since a name has no segments. |
 | `process` | Program names, as written at the call: `run("git", ..)` names `git`. `*` spans everything, so `git*` covers `git` and `gitk`. |
-| `extern` | **Package names**, not library names: which packages may declare `extern fn`. `std` always may. |
+| `extern` | **Package names**, not library names: which packages may declare `extern fn`. `std` always may. Left out, it takes `default`: every package under `allow`, `std` alone under `deny`, so a program under `deny` with its own `extern fn` lists its own package. |
 
 **`fs` is the one key that is a table**, because reading and writing are not the
 same grant and a single list cannot say which one it is. The rest are lists. `[workspace.policy]` above takes `fs` as a *list*, because there it names

@@ -86,6 +86,11 @@ the fix is a line in a file the reader owns. Folding it into `Failed`
 would send somebody to look at their file system for a decision their
 own manifest made.
 
+Only the manifest says `Denied`. A path inside a grant whose links cannot
+be followed -- a loop, a directory this process may not search -- is
+refused as `Failed`, the answer the operation would have had with no
+`[permissions]` table.
+
 ## Effects
 
 ### FsRead
@@ -521,10 +526,11 @@ pub fn join(base: String, child: String) -> String
 
 Joins two path pieces with a single separator.
 
-**Always `/`, on every platform including Windows.** Reading accepts either
--- a base already ending in `\` is not given a second separator -- but
-what is written is `/`, because Windows takes it everywhere and one rule
-that works on all three targets beats three rules that each work on one.
+**Always `/`, on every platform including Windows.** Reading accepts
+either on Windows -- a base already ending in `\` is not given a second
+separator there -- but what is written is `/`, because Windows takes it
+everywhere and one rule that works on all three targets beats three
+rules that each work on one.
 
 An empty base is `child`, so folding over a list of segments needs no
 special first step.

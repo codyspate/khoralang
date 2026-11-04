@@ -286,6 +286,9 @@ impl RawManifest {
         } else {
             self.permissions
         };
+        if let Some(why) = permissions.network.as_deref().and_then(empty_port) {
+            return Err(ManifestError::invalid_value("permissions.network", why));
+        }
 
         let fmt = match self.fmt {
             Some(own) if own.workspace => {
@@ -627,9 +630,13 @@ pub struct Permissions {
     /// close yet"; it is a rule about *which package* a declaration is in, and
     /// there were no packages until 10.2.
     ///
-    /// Absent grants every package, like the rest of the table -- tightening is
-    /// opt-in, and a project that has not thought about this is not punished
-    /// for it. `[]` is the interesting value: nothing but `std` may reach out.
+    /// **Absent takes `default`, like the rest of the table.** With no table,
+    /// or `default = "allow"`, every package may: tightening is opt-in, and a
+    /// project that has not thought about this is not punished for it. Under
+    /// `default = "deny"` an absent key is `[]`, so only `std` may reach out
+    /// and a program that wants its own `extern fn` lists itself. It was
+    /// otherwise once, and that made the strict posture deny the disk, the
+    /// network and the environment while leaving the door to all three open.
     #[serde(default, rename = "extern")]
     pub extern_: Option<Vec<String>>,
 }
@@ -697,13 +704,16 @@ impl Permissions {
     /// Khora goes through functions whose signatures carry capability rows, and
     /// the standard library is where those live. A `std` that could not declare
     /// `fopen` could not offer `Fs`.
+    ///
+    /// An absent `extern` key answers with `default`, as every other category
+    /// does: see the field.
     pub fn may_declare_extern(&self, package: &str) -> bool {
         if package == "std" {
             return true;
         }
         match &self.extern_ {
             Some(allowed) => allowed.iter().any(|a| a == package),
-            None => true,
+            None => self.grants_unmentioned(),
         }
     }
 }
@@ -791,9 +801,19 @@ pub fn granted_path(grants: &[String], path: &str) -> bool {
 
 /// One spelling of a path, so a grant and a request can be compared.
 ///
-/// `\\` becomes `/`, so a grant written with forward slashes covers a path
-/// Windows spelled with back ones, and a `.` segment is dropped, so `./data/**`
-/// grants `data/foo.txt` and `data/**` grants `./data/foo.txt`.
+/// **On Windows, `\\` becomes `/`**, so a grant written with forward slashes
+/// covers a path spelled with back ones. Only there: on every other system a
+/// backslash is an ordinary byte in a file name, so `granted\evil` is a
+/// directory beside `granted`, and reading it as `granted/evil` let
+/// `granted/**` cover a tree the manifest never named. A `.` segment is
+/// dropped, so `./data/**` grants `data/foo.txt` and `data/**` grants
+/// `./data/foo.txt`. A trailing `/` is dropped too, so `data/` is `data`:
+/// the followed check sees the directory without it, and the text must not
+/// answer differently from the place it names.
+///
+/// It answers for the system the compiler runs on. A cross-compiled
+/// program's grants are matched by `std::permissions` on the system it
+/// runs on, which is where an `fs` grant is enforced.
 ///
 /// **`..` is neither resolved nor leveled here**; `granted_path` refuses the
 /// path outright. Resolving `a/../b` to `b` is only correct where `a` is a real
@@ -805,20 +825,20 @@ pub fn granted_path(grants: &[String], path: &str) -> bool {
 /// A path that is nothing but `.` stays `.`: it names the current directory,
 /// and the empty string would match nothing rather than what it says.
 fn normalized(path: &str) -> String {
-    let swapped = path.replace('\\', "/");
+    let swapped = if cfg!(windows) { path.replace('\\', "/") } else { path.to_string() };
     let kept: Vec<&str> = swapped.split('/').filter(|piece| *piece != ".").collect();
-    if kept.is_empty() {
-        swapped
-    } else {
-        kept.join("/")
-    }
+    let joined = if kept.is_empty() { swapped } else { kept.join("/") };
+    // A trailing separator names the same entry as none, so `data/` and
+    // `data` are one answer; `/` stays itself.
+    let trimmed = joined.trim_end_matches('/');
+    if trimmed.is_empty() && joined.starts_with('/') { "/".to_string() } else { trimmed.to_string() }
 }
 
 /// Whether any segment of `path` is `..`.
 ///
 /// By segment rather than by substring, so a file honestly named `..config` is
-/// left alone. `path` has been through `normalized`, so `\\` is `/` and there
-/// is one spelling of a boundary to split on.
+/// left alone. `path` has been through `normalized`, so on Windows `\\` is `/`
+/// and there is one spelling of a boundary to split on.
 fn climbs(path: &str) -> bool {
     path.split('/').any(|piece| piece == "..")
 }
@@ -832,8 +852,14 @@ fn climbs(path: &str) -> bool {
 /// That case is the default rather than a corner: `default = "allow"`, and a
 /// manifest with no `[permissions]` table at all, both compile to exactly this
 /// list.
+///
+/// **Only `**` as written.** `./**` normalizes to the same text, and treating
+/// it as the whole disk gave a reader who wrote "this directory", in the
+/// `./data/**` spelling the capabilities guide teaches, every file on the
+/// machine. `./**` is the working directory's tree, and a `..` against it is
+/// refused like any other.
 fn unrestricted(grants: &[String]) -> bool {
-    grants.iter().any(|g| normalized(g) == "**")
+    grants.iter().any(|g| g == "**")
 }
 
 /// Whether any of `grants` covers `host`, which is `name` or `name:port`.
@@ -861,11 +887,49 @@ pub fn granted_host(grants: &[String], host: &str) -> bool {
 }
 
 /// Splits a trailing `:port` off, if there is one.
+///
+/// **An IPv6 literal is written in brackets, as in a URL**: `[::1]:5432`,
+/// `[::1]:*`, or `[::1]` for every port. The brackets are the only way to
+/// tell the address's own colons from the port's, and they are kept off the
+/// name, so `[::1]` in a grant and `::1` handed to a connect are the same
+/// host. An unbracketed name with a colon in it is split at the last colon,
+/// which for a bare IPv6 literal gives a name nobody can mean: write the
+/// brackets.
 fn split_port(text: &str) -> (&str, Option<&str>) {
+    if let Some(inner) = text.strip_prefix('[') {
+        if let Some((name, after)) = inner.split_once(']') {
+            return match after.strip_prefix(':') {
+                Some(port) => (name, Some(port)),
+                None if after.is_empty() => (name, None),
+                // `[::1]x`: not a host and a port. A port nobody grants
+                // keeps it from matching anything.
+                None => (text, Some("]")),
+            };
+        }
+    }
     match text.rsplit_once(':') {
         Some((name, port)) => (name, Some(port)),
         None => (text, None),
     }
+}
+
+/// Why a `network` grant cannot be accepted, if one of them ends in a `:`
+/// with no port after it.
+///
+/// **What it prevents: one grant read two ways.** `example.com:` and
+/// `[::1]:` say neither "every port" nor a port, and the two matchers read
+/// them differently: `std` took the empty port for none written, so every
+/// port, and this crate took it for the port `""`, so none. Refusing the
+/// spelling at load means no grant reaches either matcher that they could
+/// disagree about.
+fn empty_port(grants: &[String]) -> Option<String> {
+    grants.iter().find(|g| matches!(split_port(g), (_, Some("")))).map(|g| {
+        let host = &g[..g.len() - 1];
+        format!(
+            "`{g}` ends in `:` with no port after it, which names no port. Write `{host}` for \
+             every port (`{host}:*` says the same explicitly), or `{host}:<port>` for one"
+        )
+    })
 }
 
 /// Matches `pattern` against `value`.

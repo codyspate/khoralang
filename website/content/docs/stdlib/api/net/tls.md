@@ -37,7 +37,8 @@ pub type TlsError =
   | BadKey
   | Handshake
   | Unreachable(host: String)
-  | TimedOut;
+  | TimedOut
+  | Denied(host: String);
 ```
 
 Why a TLS server could not start, or a connection could not be secured.
@@ -98,6 +99,20 @@ The deadline given to [`connect_by`](#connect_by) passed before the session was 
 Separate from `Unreachable` because it is the one a caller acts on
 differently: a host that refused may refuse again, while a call that ran
 out of time mostly wants a longer budget.
+
+#### Denied
+
+```khora
+| Denied(host: String)
+```
+
+`[permissions] network` does not grant `host` on this port, so nothing
+was looked up or dialed.
+
+**Its own case rather than `Unreachable`**, for the reason
+`IoError::Denied` is: `Unreachable` sends the reader to DNS or a
+firewall, and this one is a line in `khora.toml`. `host` is `name:port`,
+which is what a grant is written against.
 
 ### TlsServer
 
@@ -467,6 +482,10 @@ expiring is `TlsError::TimedOut`: only when the deadline was what ended
 it, so a refusal that arrives in its last millisecond is still
 `Unreachable`. The session that comes back carries no deadline;
 [`set_deadline`](#set_deadline) puts one on it.
+
+**`[permissions] network` is checked first**, against `host:port`, as
+`std::net::socket::connect_to` checks it: a host it does not grant is
+`TlsError::Denied`, and is neither looked up nor dialed.
 
 ### upgrade
 

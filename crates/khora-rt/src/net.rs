@@ -964,6 +964,51 @@ pub extern "C" fn khora_net_local_port(socket: Socket) -> i64 {
     }
 }
 
+/// The port of the peer `socket` is connected to, or -1 if it is not a
+/// connected IPv4 socket.
+///
+/// **For telling one's own client from somebody else's.** A program that
+/// listens and then dials its own listener -- a test wiring both ends of a
+/// connection -- can be handed a connection from another process if a second
+/// listener shares the port, which macOS and Windows allow beside a wildcard
+/// bind. The accepted socket's peer port is the dialing socket's
+/// [`khora_net_local_port`] exactly when the two are the two ends of one
+/// connection. Costs one `getpeername`.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_net_peer_port(socket: Socket) -> i64 {
+    #[cfg(not(windows))]
+    {
+        // SAFETY: an all-zero `sockaddr_in` is a valid value of the type.
+        let mut address: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+        let mut length = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+        // SAFETY: `address` is writable for `length` bytes, and `length` says
+        // so; a number that is not a connected socket fails with `EBADF`,
+        // `ENOTSOCK` or `ENOTCONN` and writes nothing.
+        let got = unsafe { libc::getpeername(socket, (&raw mut address).cast(), &mut length) };
+        if got == 0 && i32::from(address.sin_family) == libc::AF_INET {
+            i64::from(u16::from_be(address.sin_port))
+        } else {
+            -1
+        }
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Networking::WinSock::{getpeername, AF_INET, SOCKADDR_IN};
+        // SAFETY: an all-zero `SOCKADDR_IN` is a valid value of the type.
+        let mut address: SOCKADDR_IN = unsafe { std::mem::zeroed() };
+        let mut length = std::mem::size_of::<SOCKADDR_IN>() as i32;
+        // SAFETY: as above: `address` is writable for `length` bytes, and a
+        // handle that is not a connected socket fails with `WSAENOTSOCK` or
+        // `WSAENOTCONN`.
+        let got = unsafe { getpeername(socket, (&raw mut address).cast(), &mut length) };
+        if got == 0 && address.sin_family == AF_INET {
+            i64::from(u16::from_be(address.sin_port))
+        } else {
+            -1
+        }
+    }
+}
+
 /// Reads whatever has already arrived, and never waits.
 ///
 /// **The read that `shut` needs and `khora_net_recv` cannot be.** A close

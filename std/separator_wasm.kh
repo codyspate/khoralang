@@ -1,0 +1,15 @@
+module std::permissions::separator;
+
+//! Whether `\` separates path segments, which depends on the target: on
+//! Windows it does, as `/` does; on Linux, macOS and WebAssembly it is an
+//! ordinary byte of a file name.
+
+// WebAssembly has no file system of its own; the paths a host hands it are
+// read the way a POSIX system reads them.
+
+/// Whether `\` separates path segments on this target: `true` on Windows,
+/// `false` everywhere else. Where it does not, `granted\evil` is a directory
+/// beside `granted` and not inside it.
+pub fn backslash_separates() -> Bool {
+  false
+}

@@ -571,6 +571,227 @@ pub unsafe extern "C" fn khora_fs_dir_close(dir: *mut c_void) {
     drop(unsafe { Box::from_raw(dir as *mut std::fs::ReadDir) });
 }
 
+// ---------------------------------------------------------------------------
+// Where a path leads
+// ---------------------------------------------------------------------------
+
+/// Where `path` really leads, written into `into`.
+///
+/// **What this prevents: a grant that follows a symlink out of the tree it
+/// names.** `std::fs` matches `[permissions.fs]` against the path a program
+/// passes, and that text says nothing about the links along it:
+/// `granted/link.txt -> ../secret.txt` is a path under `granted/**` that opens
+/// a file outside it. `std::fs` asks this for the real location and matches
+/// that as well.
+///
+/// Returns the length of the answer, which is written only when it fits in
+/// `cap` bytes, so a caller whose buffer was too small calls again with the
+/// length it was told. -1 when the path cannot be followed: a link loop, a
+/// directory this process may not search, a name that is not UTF-8. The
+/// caller refuses those, because a path nobody can follow is not a path
+/// anybody can say is granted.
+///
+/// **`follow_last` is zero for an operation that acts on a link rather than
+/// through it**: `remove`, `rename`, `mkdir` and `rmdir` never follow the last
+/// name, so a link inside a granted tree may be removed or renamed whatever it
+/// points at, and only the directories above it are followed. Every open
+/// follows, and passes one.
+///
+/// **Not `std::fs::canonicalize`**, which fails for a path that does not exist
+/// yet -- every file about to be written -- and so cannot say where a write
+/// lands. [`real_path`] follows each existing component, a dangling link
+/// included, and keeps the rest as written.
+///
+/// What it costs: one `lstat` per component of the working directory and of
+/// `path`, and a `readlink` per link, on the blocking pool. `std::fs` asks
+/// only under a narrowed grant; the default `**` asks nothing.
+///
+/// # Safety
+///
+/// `path` must be NUL-terminated and `into` writable for `cap` bytes, both
+/// valid for the call -- which they are, their owner being suspended.
+#[unsafe(no_mangle)]
+// SHARE: reads a C string and writes bytes into a buffer; takes no Khora object.
+pub unsafe extern "C" fn khora_fs_real_path(
+    path: *const u8,
+    follow_last: i32,
+    into: *mut u8,
+    cap: usize,
+) -> isize {
+    if into.is_null() {
+        return -1;
+    }
+    let (path, into) = (path as usize, into as usize);
+    blocking(move || {
+        // SAFETY: the string belongs to a fiber suspended for the whole call.
+        let Some(path) = (unsafe { path_of(path as *const u8) }) else { return -1 };
+        let real = if follow_last != 0 { real_path(&path) } else { real_parent(&path) };
+        let Ok(real) = real else { return -1 };
+        let Some(text) = real.to_str() else { return -1 };
+        let bytes = text.as_bytes();
+        if bytes.len() <= cap {
+            // SAFETY: the destination is writable for `cap` bytes and `bytes`
+            // is no longer than that, checked above.
+            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), into as *mut u8, bytes.len()) };
+        }
+        bytes.len() as isize
+    })
+}
+
+/// [`real_path`] of the directory `path` is in, and its last name as written.
+///
+/// A path whose last component is not a name -- `..`, a root -- has no name
+/// to leave alone, and is followed whole.
+fn real_parent(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    use std::path::Component;
+    match path.components().next_back() {
+        Some(Component::Normal(name)) => {
+            let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
+            let directory = real_path(parent.unwrap_or(std::path::Path::new(".")))?;
+            Ok(directory.join(name))
+        }
+        _ => real_path(path),
+    }
+}
+
+/// How many links one path may pass through before it is called a loop.
+///
+/// Linux's own limit, `MAXSYMLINKS`. A path that needs more is refused rather
+/// than followed forever.
+const MOST_LINKS: usize = 40;
+
+/// `path` with every link along it followed, as an absolute path.
+///
+/// Component by component from the root, so that each name is looked at
+/// *after* the links before it are followed: `a/../b` with `a` a link is the
+/// parent of what `a` leads to, which is what the kernel opens, not `b`
+/// beside `a`. A component that is not there ends the following; it and the
+/// rest are kept as written, because nothing below a missing name can be a
+/// link yet. A link whose target is missing is followed to that target, which
+/// is where a write through it would create a file.
+///
+/// The working directory comes from the operating system and is followed too,
+/// so a relative path and the grant it is matched against agree on where `.`
+/// is.
+fn real_path(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    use std::collections::VecDeque;
+    use std::path::PathBuf;
+
+    let mut steps: VecDeque<Step> = VecDeque::new();
+    if !path.is_absolute() {
+        steps.extend(steps_of(&std::env::current_dir()?));
+    }
+    steps.extend(steps_of(path));
+
+    let mut real = PathBuf::new();
+    let mut links = 0usize;
+    // Set at the first name that is not there. Below it nothing can be a
+    // link, so the rest is kept as written.
+    let mut gone = false;
+    while let Some(step) = steps.pop_front() {
+        match step {
+            Step::Start(at) => {
+                real = at;
+                gone = false;
+            }
+            // The parent of what is real so far, which is the parent the
+            // kernel would use. Below a missing name there is nothing to
+            // follow, so the same pop is exact there too.
+            Step::Up => {
+                real.pop();
+            }
+            Step::Name(name) => {
+                let here = real.join(&name);
+                if gone {
+                    real = here;
+                    continue;
+                }
+                match std::fs::symlink_metadata(&here) {
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        links += 1;
+                        if links > MOST_LINKS {
+                            return Err(std::io::Error::other("too many links"));
+                        }
+                        // The target is walked next, from the directory the
+                        // link sits in (or from its own root), and then the
+                        // rest of this path.
+                        let target = std::fs::read_link(&here)?;
+                        for step in steps_of(&target).into_iter().rev() {
+                            steps.push_front(step);
+                        }
+                    }
+                    Ok(_) => real = here,
+                    Err(why) => match why.kind() {
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory => {
+                            gone = true;
+                            real = here;
+                        }
+                        _ => return Err(why),
+                    },
+                }
+            }
+        }
+    }
+    Ok(real)
+}
+
+/// One step of [`real_path`]'s walk.
+enum Step {
+    /// Begin again at an absolute root: `/`, or a drive or share on Windows.
+    Start(std::path::PathBuf),
+    /// `..`.
+    Up,
+    /// One name to look at.
+    Name(std::ffi::OsString),
+}
+
+/// `path` as steps. `.` is no step at all.
+fn steps_of(path: &std::path::Path) -> Vec<Step> {
+    use std::path::{Component, PathBuf};
+    let mut out: Vec<Step> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => {
+                out.push(Step::Start(PathBuf::from(prefix_text(prefix.kind(), prefix.as_os_str()))));
+            }
+            Component::RootDir => match out.last_mut() {
+                // A drive's root is `C:\`, one start rather than two.
+                Some(Step::Start(at)) => at.push(std::path::MAIN_SEPARATOR_STR),
+                _ => out.push(Step::Start(PathBuf::from(std::path::MAIN_SEPARATOR_STR))),
+            },
+            Component::CurDir => {}
+            Component::ParentDir => out.push(Step::Up),
+            Component::Normal(name) => out.push(Step::Name(name.to_os_string())),
+        }
+    }
+    out
+}
+
+/// A path prefix, spelled the one way a grant is likely to spell it.
+///
+/// **What this prevents: a grant refused for a spelling.** Windows has several
+/// ways to name one drive -- `C:`, `c:`, `\\?\C:` -- and a link's target can
+/// come back in any of them, while a manifest says `C:/data`. They are leveled
+/// to `C:` and `\\server\share`, so a link inside a granted tree that names its
+/// target absolutely still lands inside the grant. A device namespace is kept
+/// as written; nothing a grant names lives there.
+fn prefix_text(kind: std::path::Prefix<'_>, written: &std::ffi::OsStr) -> std::ffi::OsString {
+    use std::path::Prefix;
+    match kind {
+        Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+            format!("{}:", char::from(letter).to_ascii_uppercase()).into()
+        }
+        Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => {
+            let mut out = std::ffi::OsString::from(r"\\");
+            out.push(server);
+            out.push(r"\");
+            out.push(share);
+            out
+        }
+        Prefix::Verbatim(_) | Prefix::DeviceNS(_) => written.to_os_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,5 +868,93 @@ mod tests {
             "open, read and close should each have gone to the pool"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// A fresh scratch directory, followed so that a temporary directory
+    /// reached through a link (`/tmp` on macOS) does not differ from the
+    /// answers by a prefix.
+    #[cfg(unix)]
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("khora-real-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("granted")).expect("a scratch tree");
+        std::fs::write(dir.join("secret.txt"), "secret").expect("the secret");
+        std::fs::write(dir.join("granted").join("ok.txt"), "ok").expect("a granted file");
+        std::fs::canonicalize(&dir).expect("the scratch directory")
+    }
+
+    /// **Where each kind of link leads.** Unix only: making a symlink on
+    /// Windows needs a privilege a CI runner does not hold.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_is_followed_through_every_link_on_it() {
+        use std::os::unix::fs::symlink;
+        let dir = scratch("follow");
+        let granted = dir.join("granted");
+        symlink("ok.txt", granted.join("inside")).expect("a link");
+        symlink("../secret.txt", granted.join("outside")).expect("a link");
+        symlink("..", granted.join("up")).expect("a link");
+        symlink("second", granted.join("first")).expect("a link");
+        symlink("../secret.txt", granted.join("second")).expect("a link");
+        std::fs::create_dir(dir.join("elsewhere")).expect("a directory");
+        symlink("../elsewhere", granted.join("door")).expect("a link");
+        symlink("../nowhere.txt", granted.join("dangling")).expect("a link");
+
+        let real = |p: &str| real_path(&granted.join(p)).expect("followed");
+        assert_eq!(real("ok.txt"), granted.join("ok.txt"));
+        assert_eq!(real("inside"), granted.join("ok.txt"), "a link that stays in");
+        assert_eq!(real("outside"), dir.join("secret.txt"), "a link that leads out");
+        assert_eq!(real("up/secret.txt"), dir.join("secret.txt"), "a link to the parent");
+        assert_eq!(real("first"), dir.join("secret.txt"), "a chain of two");
+        assert_eq!(real("door/new.txt"), dir.join("elsewhere").join("new.txt"), "a linked directory");
+        assert_eq!(real("dangling"), dir.join("nowhere.txt"), "where a write through it lands");
+        assert_eq!(real("missing/deeper.txt"), granted.join("missing").join("deeper.txt"));
+        // `..` after a link is the parent of what the link leads to.
+        assert_eq!(real("door/../secret.txt"), dir.join("secret.txt"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `remove` and `rename` act on the link, so only the directories above
+    /// it are followed -- and those still are.
+    #[cfg(unix)]
+    #[test]
+    fn the_last_name_is_left_alone_when_asked() {
+        use std::os::unix::fs::symlink;
+        let dir = scratch("parent");
+        let granted = dir.join("granted");
+        symlink("../secret.txt", granted.join("outside")).expect("a link");
+        symlink("..", granted.join("up")).expect("a link");
+        assert_eq!(real_parent(&granted.join("outside")).expect("followed"), granted.join("outside"));
+        assert_eq!(
+            real_parent(&granted.join("up").join("secret.txt")).expect("followed"),
+            dir.join("secret.txt")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A loop is refused rather than followed forever.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_loop_is_an_error() {
+        use std::os::unix::fs::symlink;
+        let dir = scratch("loop");
+        symlink("b", dir.join("a")).expect("a link");
+        symlink("a", dir.join("b")).expect("a link");
+        assert!(real_path(&dir.join("a")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A relative path is followed from the working directory, so it and an
+    /// absolute spelling of the same file agree. The absolute side goes
+    /// through `real_path` too: `canonicalize` spells a Windows path
+    /// `\\?\D:\..`, which no grant is written as.
+    #[test]
+    fn a_relative_path_starts_at_the_working_directory() {
+        let here = std::env::current_dir().expect("the working directory");
+        assert!(here.is_absolute());
+        assert_eq!(
+            real_path(std::path::Path::new("./a/../b")).expect("followed"),
+            real_path(&here.join("b")).expect("followed")
+        );
     }
 }

@@ -60,6 +60,27 @@ pub fn python() -> &'static str {
     })
 }
 
+/// The `std` file that tells `std::permissions` whether `\` separates path
+/// segments, for the host: its name and its text.
+///
+/// **What it prevents: a hand-listed `std` that stops compiling.** A test
+/// that compiles `permissions.kh` from a list rather than by walking `std`
+/// has to bring this module too, and the right one of the three -- picking
+/// it by the same rule the build uses, rather than naming one, keeps the
+/// list right on every runner.
+#[allow(dead_code)]
+pub fn separator_source() -> (&'static str, String) {
+    let std = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("std");
+    for name in ["separator_posix.kh", "separator_windows.kh", "separator_wasm.kh"] {
+        let path = std.join(name);
+        if khora_db::selected_for_target(&path, khora_db::host_target()) {
+            let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+            return (name, text);
+        }
+    }
+    panic!("no `std/separator_*.kh` is selected for `{}`", khora_db::host_target())
+}
+
 /// The `khora` executable cargo built beside this test binary.
 ///
 /// **What it prevents: a test that cannot find the compiler and passes.**

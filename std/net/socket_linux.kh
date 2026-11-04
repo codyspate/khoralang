@@ -1,6 +1,8 @@
 module std::net::socket;
 
 import std::core::{Array, Ptr};
+import std::permissions::{may_dial, unbracketed};
+import std::permissions::grants::{network};
 
 //! Sockets: listening, connecting, and moving bytes.
 //!
@@ -52,6 +54,9 @@ extern fn khora_net_connect(host: Ptr, host_len: Int, port: Int, deadline: Int) 
 extern fn khora_net_set_deadline(handle: I32, deadline: Int) -> I32;
 extern fn khora_net_expired(handle: I32) -> I32;
 extern fn khora_net_close(handle: I32) -> I32;
+extern fn khora_net_local_port(handle: I32) -> Int;
+extern fn khora_net_peer_port(handle: I32) -> Int;
+extern fn khora_net_accepted_open() -> Int;
 
 /// A failed call returns -1, and a handle is never negative.
 pub fn invalid_handle() -> Int { -1 }
@@ -216,13 +221,24 @@ pub fn transmit(connection: Int, text: String) -> Int {
   String::with_data(text, fn (from, n) => khora_net_send(I32::of(connection), from, n))
 }
 
-/// Opens a connection to `host` on `port`, or [`invalid_handle`].
+/// Opens a connection to `host` on `port`, or a negative handle:
+/// [`denied_handle`] when the manifest does not grant the host, and
+/// [`invalid_handle`] for every other way of not connecting. **Test for
+/// failure with `< 0`**, which covers both.
 ///
 /// **The first thing here that starts a conversation.** Everything else in this
 /// module grew from serving: `listen_on`, `accept_on`, and nothing that dials.
 /// A database driver is the first caller that needs the other direction.
 ///
-/// `host` may be a name or an address; resolution, address family and the
+/// **`[permissions] network` is checked first**, against `host:port` as
+/// written, with the rule `HttpClient::send` uses: a grant with no port covers
+/// every port, and `*` spans dots. A refused host is not looked up and not
+/// dialed, so nothing on the network hears what the program wanted.
+///
+/// `host` may be a name or an address, and an IPv6 address may be written in
+/// brackets as a URL writes it -- `[::1]` -- or without; `[::1]:5432` in a
+/// manifest covers both. Resolution,
+/// address family and the
 /// platform's own resolver are the runtime's, which is why this is one extern
 /// rather than `getaddrinfo` and two `sockaddr` layouts written three times.
 /// [The ffi design note](https://github.com/codyspate/khoralang/blob/main/docs/design/ffi.md) is the boundary and `khora_net_connect` is on the far
@@ -236,25 +252,83 @@ pub fn transmit(connection: Int, text: String) -> Int {
 /// lookup cannot be waited on that way; it runs on the blocking pool, and a
 /// canceled caller stops waiting for it and leaves it to finish alone.
 pub fn connect_to(host: String, port: Int) -> Int {
-  // The extern itself rather than `connect_by`, so that the compiler sees a
-  // runtime export called right here and checks for a cancel at this call.
-  String::with_data(host, fn (from, n) => khora_net_connect(from, n, port, -1))
+  if may_reach(host, port) {
+    // The extern itself rather than `connect_by`, so that the compiler sees a
+    // runtime export called right here and checks for a cancel at this call.
+    String::with_data(unbracketed(host), fn (from, n) => khora_net_connect(from, n, port, -1))
+  } else {
+    denied_handle()
+  }
 }
 
 /// [`connect_to`], giving up once `clock.monotonic_millis()` reaches
-/// `deadline`. Every way of not connecting, the deadline included, is
-/// [`invalid_handle`].
+/// `deadline`. [`denied_handle`] for a host the manifest does not grant, and
+/// [`invalid_handle`] for every other way of not connecting, the deadline
+/// included.
 ///
 /// The deadline covers the lookup and the connect. It is an instant rather
 /// than a length, so that a caller with one budget for several steps hands
 /// each the same number. Negative means none. The connection that comes back
 /// carries no deadline; [`set_deadline`] puts one on it.
 pub fn connect_by(host: String, port: Int, deadline: Int) -> Int {
-  // The runtime answers -2 when the deadline was the cause, for
-  // `std::net::http`, which reports that differently. Here it is a failure
-  // like the others.
-  let handle = String::with_data(host, fn (from, n) => khora_net_connect(from, n, port, deadline));
-  if handle < 0 { invalid_handle() } else { handle }
+  if may_reach(host, port) {
+    // The runtime answers -2 when the deadline was the cause, for
+    // `std::net::http`, which reports that differently. Here it is a failure
+    // like the others.
+    let handle = String::with_data(unbracketed(host), fn (from, n) => khora_net_connect(from, n, port, deadline));
+    if handle < 0 { invalid_handle() } else { handle }
+  } else {
+    denied_handle()
+  }
+}
+
+/// What [`connect_to`] and [`connect_by`] answer for a host
+/// `[permissions] network` does not grant.
+///
+/// **A value of its own rather than [`invalid_handle`]**, because the two send
+/// a reader to different places: an unreachable host is DNS or a firewall,
+/// and a denied one is a line in `khora.toml`. Negative, so a caller testing
+/// `< 0` treats it as the failure it is. A caller testing
+/// `== invalid_handle()` does not see it as one, which is why both connect
+/// functions say to test `< 0`.
+pub fn denied_handle() -> Int { -3 }
+
+/// How many connections [`accept_on`] has returned that nothing has closed
+/// yet, across the whole program.
+///
+/// **For a test that a connection it refused was closed.** A handle dropped
+/// without [`shut`] shows only in the process's descriptor table, which
+/// Windows cannot list; this count is kept by the runtime on every system.
+///
+/// What it costs: nothing extra, since the runtime keeps the count for every
+/// accept anyway. It counts every fiber's accepts, so a test reads it where
+/// nothing else is accepting.
+pub fn accepted_open() -> Int {
+  khora_net_accepted_open()
+}
+
+/// Whether `accepted`, a connection [`accept_on`] returned, is the other end
+/// of `dialed`, a connection this program made with [`connect_to`] or
+/// [`connect_by`].
+///
+/// **What this prevents: a program that dials its own listener being handed
+/// somebody else's connection as its own.** macOS and Windows let a wildcard
+/// listener share a port with another program's specific one, so what the
+/// listener accepts need not be what this program dialed. The two are one
+/// connection exactly when the accepted end's peer port is the dialed end's
+/// own port. False for a handle that is not a connected socket.
+///
+/// What it costs: two system calls, `getpeername` and `getsockname`.
+pub fn connected_to(accepted: Int, dialed: Int) -> Bool {
+  let theirs = khora_net_peer_port(I32::of(accepted));
+  theirs >= 0 && theirs == khora_net_local_port(I32::of(dialed))
+}
+
+/// Whether `[permissions] network` lets this program dial `host` on `port`.
+/// `host` may be an IPv6 literal with or without brackets; a host with any
+/// other bracket in it is refused. `std::permissions::may_dial` says why.
+fn may_reach(host: String, port: Int) -> Bool {
+  may_dial(network(), host, port)
 }
 
 /// Writes all of `bytes`, and says how many went: every one of them, or a

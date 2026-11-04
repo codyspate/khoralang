@@ -99,7 +99,7 @@ import std::net::tls::{{server as tls_server, shut as tls_shut, transmit as tls_
 
 extern fn khora_net_accepted_open() -> Int;
 extern fn khora_net_failed_closes() -> Int;
-extern fn khora_net_local_port(socket: Int) -> Int;
+{local_port}
 extern fn khora_monotonic_millis() -> Int;
 
 {serve}
@@ -150,7 +150,7 @@ fn round(n: Int, before: Int, spread: Int) -> Int raises ChildFailed {{
   at(n, "listen");
   let server = listen_on(0);
   if server == invalid_handle() {{ return -1 }} else {{}};
-  let port = khora_net_local_port(server);
+  let port = local_port(server);
   if port <= 0 {{ shut(server); return -1 }} else {{}};
   at(n, "connect early clients");
   let early = clients(port, before, n);
@@ -202,9 +202,19 @@ pub fn main() -> Int raises ChildFailed {{
   print("rounds ${{Int::to_string(n)}} accepted ${{Int::to_string(khora_net_accepted_open() - open)}} fds ${{Int::to_string(fd_delta)}} secured ${{Int::to_string(secured)}} reclosed ${{Int::to_string(khora_net_failed_closes() - refused)}}");
   0
 }}
-"#
+"#,
+        local_port = LOCAL_PORT,
     )
 }
+
+/// The runtime's `khora_net_local_port`, declared exactly as std's socket
+/// module for this OS declares it (`I32` handles on Linux and macOS, `Int` on
+/// Windows): a C symbol has no module, so a program's declaration must agree
+/// with std's, and a wrapper gives the rounds one `Int -> Int` to call.
+#[cfg(not(windows))]
+const LOCAL_PORT: &str = "extern fn khora_net_local_port(handle: I32) -> Int;\nfn local_port(socket: Int) -> Int { khora_net_local_port(I32::of(socket)) }";
+#[cfg(windows)]
+const LOCAL_PORT: &str = "extern fn khora_net_local_port(handle: Int) -> Int;\nfn local_port(socket: Int) -> Int { khora_net_local_port(socket) }";
 
 /// The last lines a run printed: its progress lines say which round and step
 /// it reached, and the tally, and a run of a thousand rounds prints thousands.

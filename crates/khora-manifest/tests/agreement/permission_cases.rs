@@ -55,6 +55,13 @@ pub struct Case {
 
 use Kind::{Host, Name, Path};
 
+/// Whether `\` separates path segments on the platform the tests run on.
+///
+/// Both matchers answer for the platform they run on, so the rows about `\`
+/// have one answer on Windows and another everywhere else, and the table
+/// says which rather than holding only the Windows half.
+const WINDOWS: bool = cfg!(windows);
+
 /// The table.
 ///
 /// Ordinary cases are here to pin the behavior everything relies on; the rest
@@ -154,6 +161,45 @@ pub const CASES: &[Case] = &[
     },
     Case {
         kind: Path,
+        grants: &["./**"],
+        subject: "../secret.txt",
+        granted: false,
+        why: "only `**` as written is the whole disk. `./**` is the working \
+              directory's tree, the `./data/**` spelling the guide teaches, and \
+              a `..` against it is refused as against any other narrow grant",
+    },
+    Case {
+        kind: Path,
+        grants: &["./**"],
+        subject: "data/a.txt",
+        granted: true,
+        why: "and it still covers what is below the working directory",
+    },
+    // -- a trailing `/`, which names the entry it follows -------------------
+    Case {
+        kind: Path,
+        grants: &["data/**"],
+        subject: "data/",
+        granted: false,
+        why: "`data/` is `data`, which `data/**` does not cover; the trailing \
+              `/` must not make the text answer differently from the place",
+    },
+    Case {
+        kind: Path,
+        grants: &["data"],
+        subject: "data/",
+        granted: true,
+        why: "and a grant naming `data` covers `data/`",
+    },
+    Case {
+        kind: Path,
+        grants: &["data/"],
+        subject: "data",
+        granted: true,
+        why: "and the same with the slash on the grant",
+    },
+    Case {
+        kind: Path,
         grants: &["./logs"],
         subject: "logs/../secret.txt",
         granted: false,
@@ -206,28 +252,41 @@ pub const CASES: &[Case] = &[
         why: "a path that is nothing but `.` names the current directory and \
               stays `.`; the empty string would match nothing",
     },
-    // -- separators -----------------------------------------------------------
+    // -- separators: `\` is one only where the operating system says so ------
     Case {
         kind: Path,
         grants: &["data/**"],
         subject: "data\\nested\\a.txt",
-        granted: true,
-        why: "a grant written with `/` covers a path Windows spelled with `\\`",
+        granted: WINDOWS,
+        why: "on Windows, a grant written with `/` covers a path spelled with \
+              `\\`; elsewhere `data\\nested\\a.txt` is one file name in the \
+              working directory, not inside `data`",
     },
     Case {
         kind: Path,
         grants: &["data\\**"],
         subject: "data/nested/a.txt",
-        granted: true,
-        why: "and a grant spelled the Windows way covers a POSIX path",
+        granted: WINDOWS,
+        why: "and a grant spelled the Windows way covers a POSIX path -- on \
+              Windows, where the two spellings are one",
+    },
+    Case {
+        kind: Path,
+        grants: &["granted/**"],
+        subject: "granted\\evil/f.txt",
+        granted: WINDOWS,
+        why: "off Windows `granted\\evil` is a sibling directory of `granted`, \
+              not a child of it: reading `\\` as a separator there granted a \
+              tree the manifest never named",
     },
     Case {
         kind: Path,
         grants: &["./logs/**"],
         subject: "logs\\..\\secret.txt",
         granted: false,
-        why: "separators are leveled before the `..` is looked for, so this is \
-              the escape again in another spelling",
+        why: "on Windows separators are leveled before the `..` is looked for, \
+              so this is the escape again in another spelling; elsewhere it is \
+              one file name beside `logs`, which the grant does not cover either",
     },
     // -- names: a `*` with nothing to stop at ---------------------------------
     Case {
@@ -333,6 +392,88 @@ pub const CASES: &[Case] = &[
         subject: "example.com",
         granted: false,
         why: "no grants is no",
+    },
+    // -- IPv6 literals, which are bracketed so their colons are not the port's
+    Case {
+        kind: Host,
+        grants: &["[::1]:5432"],
+        subject: "[::1]:5432",
+        granted: true,
+        why: "a bracketed IPv6 literal with a port, as a URL writes it",
+    },
+    Case {
+        kind: Host,
+        grants: &["[::1]:*"],
+        subject: "[::1]:8443",
+        granted: true,
+        why: "and `:*` after the brackets is every port",
+    },
+    Case {
+        kind: Host,
+        grants: &["[::1]"],
+        subject: "[::1]:5432",
+        granted: true,
+        why: "brackets with no port after them cover every port, as a bare name does",
+    },
+    Case {
+        kind: Host,
+        grants: &["[::1]:5432"],
+        subject: "[::1]:5433",
+        granted: false,
+        why: "a bracketed grant that names a port means that port",
+    },
+    Case {
+        kind: Host,
+        grants: &["[::1]:5432"],
+        subject: "[::2]:5432",
+        granted: false,
+        why: "and that address",
+    },
+    Case {
+        kind: Host,
+        grants: &["::1"],
+        subject: "[::1]:5432",
+        granted: false,
+        why: "an unbracketed IPv6 literal is split at its last colon, into a \
+              host nobody means -- so it grants nothing rather than the wrong thing",
+    },
+    Case {
+        kind: Host,
+        grants: &["*"],
+        subject: "[::1]:5432",
+        granted: true,
+        why: "`*` covers an IPv6 host as it covers any other",
+    },
+    Case {
+        kind: Host,
+        grants: &["[::1]:5432"],
+        subject: "[::1]x:5432",
+        granted: false,
+        why: "something after the closing bracket other than a port is not a host",
+    },
+    // -- a grant ending in `:`, which the manifest refuses at load -----------
+    Case {
+        kind: Host,
+        grants: &["example.com:"],
+        subject: "example.com:443",
+        granted: false,
+        why: "an empty port is no port anybody dials. A manifest refuses the \
+              spelling; a grant list that reaches either matcher another way \
+              still grants nothing with it, rather than every port",
+    },
+    Case {
+        kind: Host,
+        grants: &["[::1]:"],
+        subject: "[::1]:5432",
+        granted: false,
+        why: "the same after brackets",
+    },
+    Case {
+        kind: Host,
+        grants: &["[::1]:"],
+        subject: "::1:22",
+        granted: false,
+        why: "and for the unbracketed subject a connect builds",
     },
 ];
 

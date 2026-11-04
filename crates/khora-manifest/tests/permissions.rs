@@ -21,6 +21,31 @@ fn owned(patterns: &[&str]) -> Vec<String> {
     patterns.iter().map(|p| p.to_string()).collect()
 }
 
+/// **A `network` grant ending in `:` is refused when the manifest loads.**
+/// `example.com:` and `[::1]:` name no port; `std` read one as every port and
+/// this crate as none, so the same grant meant two things. The refusal names
+/// the entry and the spellings that do mean something.
+#[test]
+fn a_network_grant_with_an_empty_port_is_refused_at_load() {
+    for grant in ["example.com:", "[::1]:"] {
+        let text = format!(
+            "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[permissions]\nnetwork = [\"ok.example\", \"{grant}\"]\n"
+        );
+        let why = Manifest::parse(&text).expect_err(grant).to_string();
+        let host = &grant[..grant.len() - 1];
+        assert!(why.contains("permissions.network"), "{why}");
+        assert!(why.contains(&format!("`{grant}`")), "names the entry: {why}");
+        assert!(why.contains(&format!("`{host}`")) && why.contains(&format!("`{host}:*`")), "{why}");
+    }
+    // The spellings the message offers all load.
+    for grant in ["example.com", "example.com:*", "example.com:443", "[::1]", "[::1]:*", "[::1]:5432"] {
+        let text = format!(
+            "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[permissions]\nnetwork = [\"{grant}\"]\n"
+        );
+        assert!(Manifest::parse(&text).is_ok(), "`{grant}` should load");
+    }
+}
+
 fn host(patterns: &[&str], value: &str) -> bool {
     granted_host(&owned(patterns), value)
 }
@@ -73,6 +98,23 @@ fn default_deny_flips_the_unmentioned_ones() {
     assert!(strict.grants(Category::Network), "what was named is still granted");
     assert!(!strict.grants(Category::Fs));
     assert!(!strict.grants(Category::Env));
+}
+
+/// **`extern` is one of the unmentioned ones.** Under `deny` an absent
+/// `extern` key is `[]`: `std` still may, every other package -- the root
+/// included -- has to be named. With no table, or `allow`, every package may.
+#[test]
+fn default_deny_covers_an_absent_extern_key() {
+    let strict = permissions("[permissions]\ndefault = \"deny\"\n");
+    assert!(strict.may_declare_extern("std"));
+    assert!(!strict.may_declare_extern("app"));
+
+    let listed = permissions("[permissions]\ndefault = \"deny\"\nextern = [\"app\"]\n");
+    assert!(listed.may_declare_extern("app"));
+    assert!(!listed.may_declare_extern("other"));
+
+    assert!(permissions("").may_declare_extern("app"));
+    assert!(permissions("[permissions]\ndefault = \"allow\"\n").may_declare_extern("app"));
 }
 
 /// Reading and writing are not the same grant, and either one alone means the
@@ -172,10 +214,22 @@ fn the_two_wildcards_compose() {
 
 /// A grant is written once and covers a Windows path too. Nobody should have
 /// to write the manifest twice.
+#[cfg(windows)]
 #[test]
 fn a_grant_written_with_slashes_covers_a_windows_path() {
     assert!(path(&["./tmp/**"], ".\\tmp\\a.txt"));
     assert!(path(&["C:/data/*.json"], "C:\\data\\users.json"));
+}
+
+/// **Off Windows a backslash is part of a name, not a separator.**
+/// `granted\evil` is a directory beside `granted`, and reading the `\` as a
+/// `/` let `granted/**` cover a tree the manifest never named.
+#[cfg(not(windows))]
+#[test]
+fn a_backslash_is_part_of_a_name_off_windows() {
+    assert!(!path(&["granted/**"], "granted\\evil/f.txt"));
+    assert!(!path(&["./tmp/**"], ".\\tmp\\a.txt"));
+    assert!(path(&["granted/**"], "granted/a\\b.txt"), "a name with a backslash, inside the grant");
 }
 
 // --- names -----------------------------------------------------------------

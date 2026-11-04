@@ -66,7 +66,7 @@ there are not many:
 | Manifest key | Capability type | State |
 | --- | --- | --- |
 | `fs` | `std::fs::FsRead`, `std::fs::FsWrite` | **enforced** |
-| `network` | `std::net::HttpClient` | **enforced** |
+| `network` | `std::net::HttpClient`; `std::net::socket::connect_to`/`connect_by` and `std::net::tls::connect`/`connect_by` check the same grant before dialing | **enforced** (outbound; `listen_on` is not gated) |
 | `env` | `std::env::Env` | **enforced** |
 | `extern` | — | **enforced**, at build time |
 
@@ -179,6 +179,12 @@ matching so that a grant with no port covers every port, which is what
 
 This is Deno's model, and it is Deno's model for the same reason: the check has
 to be where the value is.
+
+The same check, against the same `host:port`, guards every other way `std`
+dials out: `std::net::socket::connect_to` and `connect_by`, which answer
+`denied_handle()`, and `std::net::tls::connect` and `connect_by`, which raise
+`TlsError::Denied`. Until those three were covered, a program under
+`default = "deny"` could reach any host with a raw socket.
 
 ## Wildcards, and no barrier to entry
 
@@ -301,15 +307,19 @@ root and no package identity. There are packages now, so:
   exists in the resolver and nowhere else — the type checker sees a flat set of
   files. It reads the declarations out of the syntax tree rather than
   type-checking a package the build may be about to refuse.
-- An absent key still grants every package, like everything else in this table.
-  `extern = []` is the interesting value: nothing but `std` may reach out.
+- An absent key answers with `default`, like every other key in this table:
+  with no `default` or `default = "allow"` every package may, and under
+  `default = "deny"` only `std` may. Every file the build can compile is
+  scanned -- the package's tree, its `src/bin` programs, and a file named on
+  the command line. `extern = []` says the strict answer outright.
 
 The refusal names the function, the file and the package, and prints the line
 to add — because the alternative is somebody guessing at TOML.
 
 `crates/khora-cli/tests/permissions.rs` holds it, including the two cases that
 say the hole is no *wider* than documented: `std` is never refused, and a
-project that has never thought about this is not punished for it.
+project that has never thought about this -- no table, or `default = "allow"`
+-- is not punished for it.
 
 Two smaller things also wait for packages:
 

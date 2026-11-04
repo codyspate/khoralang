@@ -1,7 +1,7 @@
 module std::net::http;
 
 import std::core::{Array, Channel, ChildFailed, Eq, List, Map, Nursery, Option, Ptr, Raised, Region, Result, Scope, SharedFn, Show, Split, acquire, attempt, bounded_nursery, scoped};
-import std::permissions::{granted_host};
+import std::permissions::{may_dial};
 import std::permissions::grants::{network};
 import std::net::socket::{accept_on, expired, invalid_handle, listen_on, receive, set_deadline, set_receive_timeout, shut, start, transmit};
 import std::net::tls::{TlsClient, TlsConnection, TlsError, TlsServer, client as tls_client, connect_by as tls_connect_by, expired as tls_expired, receive as tls_receive, secured, server as tls_server, set_deadline as tls_set_deadline, set_receive_timeout as tls_set_receive_timeout, shut as tls_shut, transmit as tls_transmit};
@@ -2623,7 +2623,7 @@ fn perform(call: Call, limit: Int, millis: Int) -> Result<Answer, CallError> {
     // the grant is that no connection is attempted -- a refusal that has
     // already resolved a name and opened a socket has already told the network
     // what this program wanted.
-    Option::Some(url) if !granted_host(network(), authority_of(url)) =>
+    Option::Some(url) if !may_dial(network(), url.host, url.port) =>
       Result::Err(CallError::Denied(authority_of(url))),
     // **A region per call**, because `std::net::tls`'s client is registered
     // with `acquire` and ends with the scope that made it. The whole
@@ -2633,14 +2633,18 @@ fn perform(call: Call, limit: Int, millis: Int) -> Result<Answer, CallError> {
   }
 }
 
-/// `host:port`, which is what a grant is written against.
+/// `host:port`, which is what a refusal names.
 ///
 /// The port is always spelled out even when it is the scheme's default, so
 /// that a grant of `example.com:443` matches a URL written without one. A
 /// grant with no port covers every port, so the ordinary case is unaffected
-/// either way.
+/// either way. An IPv6 host is bracketed, as the URL wrote it.
 fn authority_of(url: Url) -> String {
-  "${url.host}:${Int::to_string(url.port)}"
+  if String::contains(url.host, ":") {
+    "[${url.host}]:${Int::to_string(url.port)}"
+  } else {
+    "${url.host}:${Int::to_string(url.port)}"
+  }
 }
 
 /// One call, with a scope to hold the trust store.
@@ -2758,6 +2762,10 @@ fn closing_raw(hand: Hand, socket: Int) -> () -> () {
 fn refused_tls(why: TlsError, millis: Int) -> CallError {
   match why {
     TlsError::TimedOut => CallError::TimedOut(millis),
+    // `perform` has already checked the same grant against the same
+    // `host:port`, so this is only reached if the two ever disagree -- and
+    // then the answer is still a denial rather than a security failure.
+    TlsError::Denied(host) => CallError::Denied(host),
     TlsError::BadCertificate => CallError::Insecure(tls_reason(why)),
     TlsError::BadKey => CallError::Insecure(tls_reason(why)),
     TlsError::Handshake => CallError::Insecure(tls_reason(why)),
@@ -2773,6 +2781,7 @@ fn tls_reason(why: TlsError) -> String {
     TlsError::Handshake => "the handshake failed",
     TlsError::Unreachable(host) => host,
     TlsError::TimedOut => "the deadline passed",
+    TlsError::Denied(host) => "${host} is not granted by `[permissions] network`",
   }
 }
 

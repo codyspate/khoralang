@@ -11,6 +11,7 @@ version.workspace = true
 publish = true
 
 # A driver reaches the operating system through `std::net::socket`, which is
-# `std`'s to declare. Nothing here declares an `extern fn` of its own, so this
-# package needs no entry in the parent's `[permissions] extern` list -- see
-# `docs/design/permissions.md`.
+# `std`'s to declare. The `extern fn`s this package declares itself are the
+# runtime's clock and counters, used by `conn.kh` and its tests, so a
+# dependent whose `[permissions]` says `default = "deny"` lists this package
+# under `extern` -- see `docs/design/permissions.md`.

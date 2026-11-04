@@ -11,7 +11,10 @@
 //! - a dependency declaring `extern fn` is refused when the list excludes it;
 //! - `std` is never refused, because a `std` that could not declare `fopen`
 //!   could not offer `Fs`;
-//! - an absent key still grants everything, like the rest of the table.
+//! - an absent key answers with `default`: open with no `default` or with
+//!   `default = "allow"`, closed to everything but `std` under
+//!   `default = "deny"` -- including the root package and its `src/bin`
+//!   programs.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -115,12 +118,23 @@ fn a_listed_package_may_declare_extern() {
     assert!(ok, "an allowed package should build:\n{output}");
 }
 
+/// `default = "deny"` with no `extern` key refuses a dependency's `extern fn`
+/// as it refuses every other category the table leaves out.
+#[test]
+fn deny_without_an_extern_key_refuses_a_dependency() {
+    let (ok, output) = check_with("[permissions]\ndefault = \"deny\"\n");
+    assert!(!ok, "`default = \"deny\"` should refuse the dependency:\n{output}");
+    assert!(output.contains("fopen"), "the message should name the declaration:\n{output}");
+    assert!(output.contains("extern = [\"reaching\"]"), "and the line to add:\n{output}");
+}
+
 /// Tightening is opt-in everywhere else in this table, and this key is no
-/// different. A project that has never thought about it is not punished.
+/// different. A project that has never thought about it -- a table with no
+/// `default` -- is not punished.
 #[test]
 fn an_absent_key_grants_every_package() {
     let (ok, output) = check_with("[permissions]\nnetwork = [\"*\"]\n");
-    assert!(ok, "an absent `extern` key should grant everything:\n{output}");
+    assert!(ok, "an absent `extern` key without `deny` should grant everything:\n{output}");
 }
 
 #[test]
@@ -510,6 +524,177 @@ fn a_package_that_lists_itself_may_declare_extern() {
 fn a_package_with_no_permissions_table_may_still_declare_extern() {
     let (ok, output) = build_alone("");
     assert!(ok, "no table should grant everything:\n{output}");
+}
+
+/// **`default = "deny"` covers `extern` too.** Every other category left out
+/// of a `deny` table grants nothing, so an absent `extern` key granting every
+/// package made the strict posture a door with the frame removed: the root
+/// package's own `extern fn getpid` compiled and ran beside a manifest that
+/// denied the network, the disk and the environment.
+#[test]
+fn deny_without_an_extern_key_refuses_the_package_s_own_extern() {
+    let (ok, output) = build_alone("[permissions]\ndefault = \"deny\"\n");
+    assert!(!ok, "`default = \"deny\"` should refuse an unlisted `extern fn`:\n{output}");
+    assert!(
+        output.contains("khora_live_count"),
+        "the message should name the declaration:\n{output}"
+    );
+}
+
+/// The refusal points at the declaration, so the reader opens the right line
+/// rather than searching a package for the word `extern`.
+#[test]
+fn the_deny_refusal_points_at_the_declaration_and_names_the_key() {
+    let (_, output) = build_alone("[permissions]\ndefault = \"deny\"\n");
+    assert!(
+        output.contains("main.kh:3:1"),
+        "the message should give the declaration's line and column:\n{output}"
+    );
+    assert!(
+        output.contains("extern = [\"app\"]"),
+        "the message should name the key to add:\n{output}"
+    );
+}
+
+/// Under `deny`, a program that wants its own `extern fn` lists itself, like
+/// any other package.
+#[test]
+fn deny_with_the_package_listed_may_declare_extern() {
+    let (ok, output) = build_alone("[permissions]\ndefault = \"deny\"\nextern = [\"app\"]\n");
+    assert!(ok, "listing itself should be enough under `deny`:\n{output}");
+}
+
+/// `allow` spelled out is the same as no table: every package may.
+#[test]
+fn allow_without_an_extern_key_grants_every_package() {
+    let (ok, output) = build_alone("[permissions]\ndefault = \"allow\"\n");
+    assert!(ok, "`default = \"allow\"` should leave `extern` open:\n{output}");
+}
+
+/// A package whose only `extern fn` is in a `src/bin` program, under `deny`.
+///
+/// **What this guards: a program the scan never looked at.** The walk that
+/// collects a package's sources skips `src/bin`, because each file there is a
+/// program of its own; the `extern` scan used the same walk, so a
+/// `src/bin/tool.kh` declaring `extern fn getpid` passed `check` and `build`
+/// beside a manifest that allowed `extern fn` in `std` alone.
+fn bin_package(tmp: &Path) -> PathBuf {
+    let app = tmp.join("app");
+    write(
+        &app.join("khora.toml"),
+        &pinned("[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[permissions]\ndefault = \"deny\"\n"),
+    );
+    write(&app.join("src").join("main.kh"), "module app::main;\n\npub fn main() -> Int { 0 }\n");
+    write(
+        &app.join("src").join("bin").join("tool.kh"),
+        "module app::tool;\n\nextern fn getpid() -> I32;\n\npub fn main() -> Int { I32::to_int(getpid()) }\n",
+    );
+    app
+}
+
+/// Runs `khora <args>` in `app`, answering whether it succeeded and what it said.
+fn khora_in(app: &Path, home: &Path, args: &[&str]) -> (bool, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_khora"))
+        .args(args)
+        .current_dir(app)
+        .env("KHORA_HOME", home)
+        .output()
+        .expect("running khora");
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    (out.status.success(), text)
+}
+
+#[test]
+fn deny_refuses_an_extern_in_a_src_bin_program_at_check() {
+    let tmp = tempfile::tempdir().expect("a temporary directory");
+    let app = bin_package(tmp.path());
+    let home = tmp.path().join("home");
+    for args in [&["check"][..], &["check", "."][..], &["check", "src/bin/tool.kh"][..]] {
+        let (ok, output) = khora_in(&app, &home, args);
+        assert!(!ok, "`khora {}` should refuse the `src/bin` extern:\n{output}", args.join(" "));
+        assert!(output.contains("getpid"), "`khora {}` should name it:\n{output}", args.join(" "));
+        assert!(output.contains("tool.kh:3:1"), "`khora {}` should point at it:\n{output}", args.join(" "));
+    }
+}
+
+#[cfg(feature = "llvm")]
+#[test]
+fn deny_refuses_an_extern_in_a_src_bin_program_at_build() {
+    let tmp = tempfile::tempdir().expect("a temporary directory");
+    let app = bin_package(tmp.path());
+    let home = tmp.path().join("home");
+    for args in [&["build"][..], &["build", "."][..], &["build", "src/bin/tool.kh"][..]] {
+        let (ok, output) = khora_in(&app, &home, args);
+        assert!(!ok, "`khora {}` should refuse the `src/bin` extern:\n{output}", args.join(" "));
+        assert!(output.contains("getpid"), "`khora {}` should name it:\n{output}", args.join(" "));
+    }
+    assert!(!app.join("build").join("tool").exists(), "nothing should have been built");
+}
+
+/// A file named on the command line that the package walk would not reach --
+/// here one under `target/`, which the walk skips -- is compiled under the
+/// package's manifest, so the rule covers it too.
+#[test]
+fn deny_refuses_an_extern_in_a_named_file_the_walk_skips() {
+    let tmp = tempfile::tempdir().expect("a temporary directory");
+    let app = bin_package(tmp.path());
+    std::fs::remove_file(app.join("src").join("bin").join("tool.kh")).expect("no bin program");
+    write(
+        &app.join("target").join("scratch.kh"),
+        "module app::scratch;\n\nextern fn getpid() -> I32;\n\npub fn main() -> Int { I32::to_int(getpid()) }\n",
+    );
+    let (ok, output) = khora_in(&app, &tmp.path().join("home"), &["check", "target/scratch.kh"]);
+    assert!(!ok, "a named file should be scanned:\n{output}");
+    assert!(output.contains("scratch.kh:3:1"), "and pointed at:\n{output}");
+}
+
+/// **`khora check` refuses a `network` grant ending in `:`** and says which
+/// entry and what to write instead.
+#[test]
+fn check_refuses_a_network_grant_with_an_empty_port() {
+    let tmp = tempfile::tempdir().expect("a temporary directory");
+    let app = tmp.path().join("app");
+    write(
+        &app.join("khora.toml"),
+        &pinned("[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[permissions]\nnetwork = [\"[::1]:\"]\n"),
+    );
+    write(&app.join("src").join("main.kh"), "module app::main;\n\npub fn main() -> Int { 0 }\n");
+    let (ok, output) = khora_in(&app, &tmp.path().join("home"), &["check"]);
+    assert!(!ok, "`[::1]:` should be refused:\n{output}");
+    assert!(output.contains("`[::1]:`") && output.contains("`[::1]:*`"), "{output}");
+}
+
+/// **A dependency's `src/bin` programs are not this build's code.** They are
+/// never compiled into the program, so an `extern fn` in one is not refused
+/// under `deny`. Refusing it forced `extern = ["dep"]`, which would then have
+/// let the dependency's *library* declare one too.
+#[test]
+fn a_dependencys_src_bin_extern_is_not_this_programs() {
+    let tmp = tempfile::tempdir().expect("a temporary directory");
+    let dep = tmp.path().join("dep");
+    write(
+        &dep.join("khora.toml"),
+        &pinned("[package]\nname = \"dep\"\nversion = \"0.1.0\"\npublish = true\n"),
+    );
+    write(&dep.join("src").join("lib.kh"), "module dep::lib;\n\npub fn seven() -> Int { 7 }\n");
+    write(
+        &dep.join("src").join("bin").join("x.kh"),
+        "module dep::x;\n\nextern fn getpid() -> I32;\n\npub fn main() -> Int { I32::to_int(getpid()) }\n",
+    );
+    let app = tmp.path().join("app");
+    write(
+        &app.join("khora.toml"),
+        &pinned(
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\ndep = { path = \"../dep\" }\n\n\
+             [permissions]\ndefault = \"deny\"\n",
+        ),
+    );
+    write(
+        &app.join("src").join("main.kh"),
+        "module app::main;\n\nimport dep::lib::{seven};\n\npub fn main() -> Int { seven() - 7 }\n",
+    );
+    let (ok, output) = khora_in(&app, &tmp.path().join("home"), &["check"]);
+    assert!(ok, "the dependency's own tool is not part of this program:\n{output}");
 }
 
 /// A manifest with the `[toolchain]` table every project now needs.

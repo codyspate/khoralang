@@ -277,7 +277,7 @@ impl Unit<'_> {
 /// through [`program_instances`], which is the same walk over every module.
 #[salsa::tracked(returns(ref))]
 pub fn instances(db: &dyn Db, file: SourceFile) -> Instances {
-    walk(db, &[file], Roots::Every)
+    walk(db, &[file], Roots::Every, None)
 }
 
 /// Computes the specializations a whole program needs.
@@ -295,7 +295,7 @@ pub fn instances(db: &dyn Db, file: SourceFile) -> Instances {
 /// A build that produces a program asks [`reached_instances`] instead.
 #[salsa::tracked(returns(ref))]
 pub fn program_instances(db: &dyn Db, root: SourceRoot) -> Instances {
-    walk(db, root.files(db), Roots::Every)
+    walk(db, root.files(db), Roots::Every, None)
 }
 
 /// The functions a walk starts from, and so the only ones emitted along with
@@ -348,11 +348,29 @@ pub enum Roots {
 /// Not a salsa query: each command builds once per database, so a memo would
 /// never be read, and an enum argument would have to be interned for nothing.
 pub fn reached_instances(db: &dyn Db, root: SourceRoot, roots: Roots) -> Instances {
-    walk(db, root.files(db), roots)
+    walk(db, root.files(db), roots, None)
+}
+
+/// [`reached_instances`], with the `test` and `bench` roots taken only from
+/// the files in `own`, when it is given.
+///
+/// **What this prevents: a dependency's tests running in its dependent's
+/// suite**, under the dependent's manifest. Every file is still walked, so a
+/// dependency's code is compiled wherever the package's own tests reach it;
+/// only where the walk *starts* is narrowed. `main` and the published symbols
+/// are roots wherever they are written, because a build needs them from
+/// every module.
+pub fn reached_instances_from(
+    db: &dyn Db,
+    root: SourceRoot,
+    roots: Roots,
+    own: Option<&[SourceFile]>,
+) -> Instances {
+    walk(db, root.files(db), roots, own)
 }
 
 /// Whether the concrete function `name`, a body in `unit`, starts a walk.
-fn is_root(db: &dyn Db, unit: &Unit<'_>, name: &str, roots: Roots) -> bool {
+fn is_root(db: &dyn Db, unit: &Unit<'_>, name: &str, roots: Roots, own: Option<&[SourceFile]>) -> bool {
     // Published, in every build: see `Roots`. An `extern fn` without a body is
     // an import and has nothing to emit.
     let published = unit.types.signatures.get(name).is_some_and(|s| s.is_extern)
@@ -363,7 +381,8 @@ fn is_root(db: &dyn Db, unit: &Unit<'_>, name: &str, roots: Roots) -> bool {
         return true;
     }
     let block = |kind: khora_hir::TestKind| {
-        khora_hir::item_map(db, unit.file).tests.iter().any(|t| t.kind == kind && t.key == name)
+        own.is_none_or(|own| own.contains(&unit.file))
+            && khora_hir::item_map(db, unit.file).tests.iter().any(|t| t.kind == kind && t.key == name)
     };
     match roots {
         Roots::Every => true,
@@ -376,7 +395,7 @@ fn is_root(db: &dyn Db, unit: &Unit<'_>, name: &str, roots: Roots) -> bool {
     }
 }
 
-fn walk(db: &dyn Db, files: &[SourceFile], roots: Roots) -> Instances {
+fn walk(db: &dyn Db, files: &[SourceFile], roots: Roots, own: Option<&[SourceFile]>) -> Instances {
     let units: Vec<Unit<'_>> = files
         .iter()
         .map(|f| Unit {
@@ -424,7 +443,7 @@ fn walk(db: &dyn Db, files: &[SourceFile], roots: Roots) -> Instances {
             if unit.types.signatures.get(name.as_str()).is_some_and(|s| !s.generics.is_empty()) {
                 continue;
             }
-            if !is_root(db, unit, name, roots) {
+            if !is_root(db, unit, name, roots, own) {
                 continue;
             }
             queue.push((

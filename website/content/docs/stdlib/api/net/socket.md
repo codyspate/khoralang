@@ -169,13 +169,24 @@ and no `SIGPIPE` stops the program.
 pub fn connect_to(host: String, port: Int) -> Int
 ```
 
-Opens a connection to `host` on `port`, or [`invalid_handle`](#invalid_handle).
+Opens a connection to `host` on `port`, or a negative handle:
+[`denied_handle`](#denied_handle) when the manifest does not grant the host, and
+[`invalid_handle`](#invalid_handle) for every other way of not connecting. **Test for
+failure with `< 0`**, which covers both.
 
 **The first thing here that starts a conversation.** Everything else in this
 module grew from serving: `listen_on`, `accept_on`, and nothing that dials.
 A database driver is the first caller that needs the other direction.
 
-`host` may be a name or an address; resolution, address family and the
+**`[permissions] network` is checked first**, against `host:port` as
+written, with the rule `HttpClient::send` uses: a grant with no port covers
+every port, and `*` spans dots. A refused host is not looked up and not
+dialed, so nothing on the network hears what the program wanted.
+
+`host` may be a name or an address, and an IPv6 address may be written in
+brackets as a URL writes it -- `[::1]` -- or without; `[::1]:5432` in a
+manifest covers both. Resolution,
+address family and the
 platform's own resolver are the runtime's, which is why this is one extern
 rather than `getaddrinfo` and two `sockaddr` layouts written three times.
 [The ffi design note](https://github.com/codyspate/khoralang/blob/main/docs/design/ffi.md) is the boundary and `khora_net_connect` is on the far
@@ -196,13 +207,66 @@ pub fn connect_by(host: String, port: Int, deadline: Int) -> Int
 ```
 
 [`connect_to`](#connect_to), giving up once `clock.monotonic_millis()` reaches
-`deadline`. Every way of not connecting, the deadline included, is
-[`invalid_handle`](#invalid_handle).
+`deadline`. [`denied_handle`](#denied_handle) for a host the manifest does not grant, and
+[`invalid_handle`](#invalid_handle) for every other way of not connecting, the deadline
+included.
 
 The deadline covers the lookup and the connect. It is an instant rather
 than a length, so that a caller with one budget for several steps hands
 each the same number. Negative means none. The connection that comes back
 carries no deadline; [`set_deadline`](#set_deadline) puts one on it.
+
+### denied_handle
+
+```khora
+pub fn denied_handle() -> Int
+```
+
+What [`connect_to`](#connect_to) and [`connect_by`](#connect_by) answer for a host
+`[permissions] network` does not grant.
+
+**A value of its own rather than [`invalid_handle`](#invalid_handle)**, because the two send
+a reader to different places: an unreachable host is DNS or a firewall,
+and a denied one is a line in `khora.toml`. Negative, so a caller testing
+`< 0` treats it as the failure it is. A caller testing
+`== invalid_handle()` does not see it as one, which is why both connect
+functions say to test `< 0`.
+
+### accepted_open
+
+```khora
+pub fn accepted_open() -> Int
+```
+
+How many connections [`accept_on`](#accept_on) has returned that nothing has closed
+yet, across the whole program.
+
+**For a test that a connection it refused was closed.** A handle dropped
+without [`shut`](#shut) shows only in the process's descriptor table, which
+Windows cannot list; this count is kept by the runtime on every system.
+
+What it costs: nothing extra, since the runtime keeps the count for every
+accept anyway. It counts every fiber's accepts, so a test reads it where
+nothing else is accepting.
+
+### connected_to
+
+```khora
+pub fn connected_to(accepted: Int, dialed: Int) -> Bool
+```
+
+Whether `accepted`, a connection [`accept_on`](#accept_on) returned, is the other end
+of `dialed`, a connection this program made with [`connect_to`](#connect_to) or
+[`connect_by`](#connect_by).
+
+**What this prevents: a program that dials its own listener being handed
+somebody else's connection as its own.** macOS and Windows let a wildcard
+listener share a port with another program's specific one, so what the
+listener accepts need not be what this program dialed. The two are one
+connection exactly when the accepted end's peer port is the dialed end's
+own port. False for a handle that is not a connected socket.
+
+What it costs: two system calls, `getpeername` and `getsockname`.
 
 ### transmit_bytes
 

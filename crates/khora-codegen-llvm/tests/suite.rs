@@ -92,6 +92,7 @@ mod net_cancel;
 mod newtypes;
 mod nursery_bound;
 mod packages;
+mod permissions;
 mod phases;
 mod postgres;
 mod process_cancel;

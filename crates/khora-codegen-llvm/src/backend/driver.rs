@@ -103,6 +103,7 @@ pub(super) fn build(
     entry_point: Entry,
     stop: Stop,
     profile: Profile,
+    own: Option<&[SourceFile]>,
 ) -> Result<(), Vec<HirError>> {
     let _whole = crate::timings::Whole::start();
 
@@ -150,7 +151,7 @@ pub(super) fn build(
             | khora_types::mono::Roots::Tests
             | khora_types::mono::Roots::Benches
             | khora_types::mono::Roots::Library => {
-                reached = khora_types::mono::reached_instances(db, root, roots);
+                reached = khora_types::mono::reached_instances_from(db, root, roots, own);
                 &reached
             }
         }
@@ -427,7 +428,11 @@ pub(super) fn build(
                 _ => khora_hir::TestKind::Test,
             };
             let mut blocks: Vec<(String, String)> = Vec::new();
-            for file in files {
+            // Only the blocks `own` was written in, when there is an `own`:
+            // see `compile_tests_of`. The walk above was seeded from the
+            // same files, so a block outside them has no instance anyway;
+            // skipping it here says so rather than relying on the lookup.
+            for file in files.iter().filter(|f| own.is_none_or(|own| own.contains(f))) {
                 let items = khora_hir::item_map(db, *file);
                 for test in &items.tests {
                     if test.kind != wanted {

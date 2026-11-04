@@ -40,6 +40,20 @@ Run a package's tests from its root:
 khora test .
 ```
 
+These are the `test` blocks written in the package, and none of its
+dependencies'. A dependency's tests run where they belong, by `khora test`
+in the dependency, under its own manifest: run from here, they would be
+compiled with this package's `[permissions]`, and a library's suite would
+pass or fail by who was testing it. `khora bench` times a package's own
+`bench` blocks the same way.
+
+Which files are the package's comes from what each package's sources are,
+not from where files sit on disk: a file is the package's when the
+package's source walk reaches it and no dependency's does. A file reached
+by both, through a symbolic link, is the dependency's, and its tests run
+when the dependency is tested. A file named on the command line, as in
+`khora test tools/script.kh`, is always tested.
+
 Filter by a substring of the test name:
 
 ```bash

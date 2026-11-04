@@ -134,6 +134,18 @@ pub struct Inputs<'a> {
     pub kind: Kind,
     /// What `[build]` asks the linker for.
     pub natives: Natives,
+    /// For a test or bench harness, the sources whose blocks it runs, by
+    /// content: the package's own, and no dependency's. Empty otherwise.
+    ///
+    /// **In the key because the sources do not decide it.** Which files are
+    /// the package's is a question of where the package boundary falls, and a
+    /// path joins the key only with debug information on. Without this, two
+    /// packages with the same source texts and a different boundary -- an app
+    /// with a library beside it as a dependency, and one package holding both
+    /// files -- share a release harness, and the second runs the first's set
+    /// of tests. (A harness from a compiler before this field existed is
+    /// already a miss: the compiler binary is in the key.)
+    pub own: Vec<String>,
 }
 
 /// The native libraries a build links, as the key needs to see them.
@@ -349,6 +361,13 @@ impl Cache {
         // object's count is a locked read-modify-write or a plain add in
         // every function emitted, and nothing in the sources says which.
         field(&[u8::from(khora_codegen_llvm::local_counts_enabled())]);
+        // Sorted, so the order files were walked in is not part of it.
+        let mut own: Vec<&String> = inputs.own.iter().collect();
+        own.sort();
+        field(&(own.len() as u64).to_le_bytes());
+        for text in own {
+            field(text.as_bytes());
+        }
 
         // Sorted by content rather than by path, so the order does not depend
         // on where the checkout is. Paths join the key only when debug

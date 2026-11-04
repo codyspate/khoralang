@@ -41,6 +41,10 @@ language rule, a supported feature, and unfinished work.
   TechEmpower query tests; JSON and fortunes do not.
 - [Inbound connections are not permissioned](#inbound-connections-are-not-permissioned) —
   the manifest governs outbound only.
+- [The permission table is not a sandbox](#the-permission-table-is-not-a-sandbox):
+  it limits a program you trust, per program rather than per package; a
+  symbolic link swapped between the check and the open is not caught, a grant
+  that names a link moves with it, and a hard link is not followed.
 
 ## Target coverage
 
@@ -267,12 +271,13 @@ what a figure has to satisfy before it is published, and why.
 
 ## Inbound connections are not permissioned
 
-**`[permissions] network` governs outbound connections only.** The grant list is
-consulted in exactly one place in the standard library — inside
-`HttpClient::send`, after the URL is parsed and before anything is dialed — and
-what it decides is whether that host may be reached. Nothing on the server side
-consults it: `Router::listen`, `Router::listen_quietly`, `Router::listen_tls`
-and the `listen_on` under them bind and serve without asking. A program with
+**`[permissions] network` governs outbound connections only.** Every way the
+standard library dials out consults it before anything is looked up or dialed
+— `HttpClient::send`, `std::net::socket`'s `connect_to` and `connect_by`, and
+`std::net::tls`'s `connect` and `connect_by` — and what it decides is whether
+that host may be reached. Nothing on the server side consults it:
+`Router::listen`, `Router::listen_quietly`, `Router::listen_tls` and the
+`listen_on` under them bind and serve without asking. A program with
 `default = "deny"` and `network = []` opens whatever port it is given and
 answers requests on it.
 
@@ -294,6 +299,46 @@ that grant ranges over — ports, interfaces, both — is an open design questio
 rather than a fix waiting to be typed. Until there is one, a program's ability
 to listen is bounded by the operating system and by whatever runs it, not by its
 manifest.
+
+## The permission table is not a sandbox
+
+`[permissions]` limits a program you trust; it does not contain code you do
+not. [Capabilities](/docs/reference/capabilities/#what-the-permission-table-is-and-what-it-is-not)
+has the whole model. What it leaves open:
+
+- **Grants are per program, not per package.** Every dependency holds what the
+  root package's table grants, and a dependency's own table is not read.
+- **Any function can make a real capability** with `FsRead::real()` and the
+  like, whatever its signature says. The manifest still refuses what it does
+  not grant, at run time.
+- **`extern fn` reaches the operating system with no check at all.** The
+  `extern` key decides which packages may declare one; once declared, nothing
+  the table says applies to what it does.
+- **A symbolic link that changes between the check and the open.** `std::fs`
+  follows the links on a path, checks where they lead, and then opens the path
+  — which follows the links as they are at that moment. Something else on the
+  machine that can replace a link inside a granted tree in that window can
+  send one operation outside it. The open does not itself refuse to leave the
+  granted tree.
+- **A symbolic link that a grant names.** Grants are followed on every
+  operation too, so `./data/**` with `data` a link covers wherever `data`
+  points when each operation runs. Whoever can replace that link moves the
+  grant itself, for every operation until it is changed back — not one
+  window, but all of them.
+- **Hard links.** A hard link is the file under a second name and leads
+  nowhere, so there is nothing to follow: one inside a granted tree reaches
+  the file, wherever else the file appears. A grant limits the names a
+  program may use, not the files behind them.
+- **The check walks the file system** under any grant narrower than `**`: one
+  look per path component, and one per link, for the path and for each grant,
+  on every file operation.
+- **`listen_on` and the server side** are covered by no grant; see
+  [inbound connections](#inbound-connections-are-not-permissioned).
+- **`std::net::tls::upgrade`** secures a socket the program already has, so
+  it dials nothing and checks no grant; the connect that made the socket did.
+
+For code you do not trust, run it in a separate process, a container or a
+virtual machine, and give that boundary only what the code may have.
 
 ## What a signal does, and the three shapes it does not reach
 
