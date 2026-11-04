@@ -83,6 +83,7 @@ impl<'a> Ctx<'a> {
         let id = self
             .add_expr(Expr::Lambda { evidence, params, param_types, body, captures }, range);
         self.body.lambda_marks.insert(id, local_mark);
+        self.body.lambda_starts.insert(id, expr_mark);
         id
     }
 
@@ -157,6 +158,7 @@ impl<'a> Ctx<'a> {
             range,
         );
         self.body.lambda_marks.insert(id, local_mark);
+        self.body.lambda_starts.insert(id, expr_mark);
         id
     }
 

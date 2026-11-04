@@ -396,7 +396,13 @@ impl<'a> Ctx<'a> {
         let nearer = self.lookup(only).is_some()
             || self.is_own_lambda(only)
             || self.is_enclosing_lambda(only)
-            || self.constants.iter().any(|(name, _)| name == only);
+            || self.constants.iter().any(|(name, _)| name == only)
+            // A name a failed import asked for is that import's, not a
+            // capability this closure needs: inventing one made the checker
+            // say it could not find it, after the import had. `lower_expr`
+            // reaches the poison check in `lower_segments`, behind the
+            // file's own declarations, which still win.
+            || self.scope.is_poisoned(only);
         if nearer {
             return self.lower_expr(e);
         }
@@ -568,6 +574,9 @@ impl<'a> Ctx<'a> {
             if let Some(resolution) = self.scope.get(only) {
                 return self.add_expr(Expr::Path(resolution.clone()), range);
             }
+            if self.scope.is_poisoned(only) {
+                return self.add_expr(Expr::Unresolved(only.clone()), range);
+            }
             // **A name a lambda cannot resolve may be a capability it
             // requires.**
             //
@@ -608,7 +617,11 @@ impl<'a> Ctx<'a> {
             // or type is not -- `clock` beside the type `Clock` is the case
             // that was always wrong -- so only a local keeps "did you mean".
             let typo = near.as_deref().is_some_and(|n| self.is_local(n));
-            if only.starts_with(|c: char| c.is_lowercase()) && !typo {
+            // Not inside a constant's initializer: a constant has no `with`
+            // clause to add and is not installed anywhere, so neither spelling
+            // the capability message offers would compile there.
+            let in_constant = !self.expanding.is_empty();
+            if only.starts_with(|c: char| c.is_lowercase()) && !typo && !in_constant {
                 let site = self.site;
                 self.body.unresolved.push((only.clone(), self.body.errors.len(), site));
             }
@@ -693,6 +706,12 @@ impl<'a> Ctx<'a> {
                     range,
                 );
             }
+        }
+
+        // A path through a name an import failed to bring in: the import has
+        // been told, and this has nothing to add. See `FileScope::poisoned`.
+        if segments.first().is_some_and(|first| self.scope.is_poisoned(first)) {
+            return self.add_expr(Expr::Unresolved(segments.join("::")), range);
         }
 
         // Cross-module resolution needs the module graph, which is a source

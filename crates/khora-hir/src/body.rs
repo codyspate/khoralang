@@ -570,6 +570,10 @@ pub struct Body {
     /// needs it too, because a capability used *implicitly* is captured on the
     /// same terms and only the checker knows which labels those are.
     pub lambda_marks: std::collections::HashMap<ExprId, usize>,
+    /// Where each lambda's own expressions start in the arena: everything from
+    /// here up to the lambda itself was lowered inside it, a constant's
+    /// inlined initializer included. See [`Body::lambda_contents`].
+    lambda_starts: std::collections::HashMap<ExprId, usize>,
     /// Which binding supplies each capability label at each call site.
     ///
     /// Recorded here because it can only be answered *while* lowering, when
@@ -681,6 +685,17 @@ impl Body {
         self.exprs.iter().enumerate().map(|(i, e)| (ExprId(i as u32), e))
     }
 
+    /// Every expression lowered inside `lambda`, nested lambdas and inlined
+    /// constants included; nothing for an id that is not a lambda.
+    ///
+    /// By arena position rather than by source range, because an inlined
+    /// constant's expressions point at the constant's declaration, outside
+    /// the closure that named it.
+    pub fn lambda_contents(&self, lambda: ExprId) -> impl Iterator<Item = (ExprId, &Expr)> {
+        let start = self.lambda_starts.get(&lambda).copied().unwrap_or(lambda.index());
+        (start..lambda.index()).map(|i| (ExprId(i as u32), &self.exprs[i]))
+    }
+
     pub fn locals(&self) -> impl Iterator<Item = (LocalId, &Local)> {
         self.locals.iter().enumerate().map(|(i, l)| (LocalId(i as u32), l))
     }
@@ -764,17 +779,7 @@ pub fn bodies(db: &dyn Db, file: SourceFile) -> Vec<(String, Body)> {
     //
     // Collected once here rather than searched for at each mention, exactly as
     // the contexts above are.
-    let constants: Vec<(String, ast::ConstDecl)> = parse
-        .source_file()
-        .decls()
-        .filter_map(|d| match d {
-            ast::Decl::Const(c) => match c.pat()? {
-                ast::Pat::Ident(p) => Some((p.name()?.ident()?, c)),
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect();
+    let constants = file_constants(parse);
 
     // Every `row` this file can name, gathered once. `with Deps` needs its
     // labels at lowering time, before any type is known.
@@ -856,6 +861,96 @@ pub fn bodies(db: &dyn Db, file: SourceFile) -> Vec<(String, Body)> {
         }
     }
     out
+}
+
+/// The `const` declarations of a file, by name, in declaration order.
+fn file_constants(parse: &khora_syntax::Parse) -> Vec<(String, ast::ConstDecl)> {
+    parse
+        .source_file()
+        .decls()
+        .filter_map(|d| match d {
+            ast::Decl::Const(c) => match c.pat()? {
+                ast::Pat::Ident(p) => Some((p.name()?.ident()?, c)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every `const` initializer in a file, lowered once each, at module level.
+///
+/// **What this prevents: a constant nobody names going unchecked.** A
+/// constant is inlined at each mention, so its initializer was lowered only
+/// where it was named, and `const A = UNDEFINED_NAME;` that nothing mentioned
+/// passed `khora check`. These bodies are checked whether or not anything
+/// names the constant.
+///
+/// **Once, not once per mention, and that depends on the mention saying the
+/// same thing.** A mention lowers and checks the same initializer with
+/// nothing of its function visible ([`Ctx::enter_module_level`]), so what it
+/// finds wrong with the initializer is the same message at the same span, and
+/// `khora_types::diagnostics` keeps one of each. A mention can still find
+/// something the declaration cannot -- `const N = 300;` named where a `U8` is
+/// wanted -- and that is reported where it is named.
+///
+/// Each body is `{ let _: <annotation> = <initializer>; }`, so the
+/// annotation, when there is one, is checked against the initializer the way
+/// a `let`'s is. Nothing past the checker reads these: a constant has no
+/// symbol, and code generation still compiles each mention.
+///
+/// **What it costs:** one lowering and one inference per constant per file,
+/// on top of one per mention. Not cached separately from the file's syntax.
+#[salsa::tracked(returns(ref))]
+pub fn const_bodies(db: &dyn Db, file: SourceFile) -> Vec<(String, Body)> {
+    let parse = khora_db::parse(db, file);
+    let map = item_map(db, file);
+    let scope = crate::file_scope(db, file);
+    let contexts: Vec<(String, ast::ContextDecl)> = parse
+        .source_file()
+        .decls()
+        .filter_map(|d| match d {
+            ast::Decl::Context(c) => Some((c.name()?.ident()?, c)),
+            _ => None,
+        })
+        .collect();
+    let constants = file_constants(parse);
+
+    constants
+        .iter()
+        .filter_map(|(name, decl)| {
+            // The parser has said what is wrong with a constant that has no
+            // value, at the place it is missing.
+            let initializer = decl.initializer()?;
+            let mut ctx = Ctx {
+                range_shift: 0,
+                body: Body::default(),
+                scopes: vec![Vec::new()],
+                map,
+                scope,
+                contexts: &contexts,
+                constants: &constants,
+                // On the stack from the start, which is what marks everything
+                // below as an initializer and how a cycle through this
+                // constant is found.
+                expanding: vec![name.clone()],
+                generics: Vec::new(),
+                loop_depth: LoopDepth::default(),
+                in_scope: Vec::new(),
+                lambdas: Vec::new(),
+                lambda_names: Vec::new(),
+                lambda_evidence: Vec::new(),
+                site: crate::Site::Function,
+            };
+            let init = ctx.lower_expr(&initializer);
+            let range = decl.syntax().text_range();
+            let pat = ctx.add_pat(Pat::Wildcard, range);
+            let ty = decl.ty().as_ref().map(TypeRef::of_syntax);
+            let stmts = vec![Stmt::Let { pat, ty, init: Some(init) }];
+            ctx.body.root = Some(ctx.add_expr(Expr::Block { stmts, tail: None }, range));
+            Some((name.clone(), ctx.body))
+        })
+        .collect()
 }
 
 /// Lowers a test's block. It takes no parameters and returns nothing; what it
@@ -1148,6 +1243,20 @@ struct Ctx<'a> {
     /// Whether this is an entry point's body, which installs a capability
     /// rather than asking for one.
     site: crate::Site,
+}
+
+/// What a body being lowered has open, put away while a constant's
+/// initializer is lowered in the middle of it. See
+/// [`Ctx::enter_module_level`]; every field here is one of [`Ctx`]'s.
+struct ModuleLevel {
+    scopes: Vec<Vec<(String, LocalId)>>,
+    in_scope: Vec<(String, LocalId)>,
+    generics: Vec<String>,
+    loop_depth: LoopDepth,
+    lambdas: Vec<usize>,
+    lambda_names: Vec<Option<String>>,
+    lambda_evidence: Vec<Vec<(String, PatId)>>,
+    range_shift: u32,
 }
 
 /// What a `break` or `continue` at the current point would leave.

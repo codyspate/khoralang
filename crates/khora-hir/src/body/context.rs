@@ -67,12 +67,23 @@ impl<'a> Ctx<'a> {
 
         // `const a = b; const b = a;` would otherwise be a stack overflow, and a
         // stack overflow is not a diagnostic.
-        if self.expanding.iter().any(|n| n == name) {
-            let loop_ = self.expanding.join("` -> `");
-            self.error(
-                format!("`{name}` is defined in terms of itself: `{loop_}` -> `{name}`"),
-                range,
-            );
+        //
+        // **One cycle, one error.** Every constant on it reaches it from its
+        // own body, and a constant that merely names one reaches it too, so
+        // the error is given only on entering the loop at the member declared
+        // first; and it names the loop alone, not the path into it, so each
+        // body that finds it says the same thing at the same place.
+        if let Some(at) = self.expanding.iter().position(|n| n == name) {
+            let members = &self.expanding[at..];
+            let declared = |n: &String| self.constants.iter().position(|(c, _)| c == n);
+            let first = members.iter().min_by_key(|n| declared(n));
+            if first.is_some_and(|first| first == name) {
+                let loop_ = members.join("` -> `");
+                self.error(
+                    format!("`{name}` is defined in terms of itself: `{loop_}` -> `{name}`"),
+                    range,
+                );
+            }
             return Some(self.add_expr(Expr::Missing, range));
         }
 
@@ -86,16 +97,75 @@ impl<'a> Ctx<'a> {
             return Some(self.add_expr(Expr::Missing, range));
         };
 
-        // Lowered in the *constant's* scope, not the mention's: a constant
-        // cannot see the locals of whatever function happens to name it.
-        let outer = std::mem::take(&mut self.scopes);
-        let outer_in_scope = std::mem::take(&mut self.in_scope);
+        let outer = self.enter_module_level();
         self.expanding.push(name.to_string());
         let id = self.lower_expr(&initializer);
         self.expanding.pop();
-        self.scopes = outer;
-        self.in_scope = outer_in_scope;
+        self.leave_module_level(outer);
         Some(id)
+    }
+
+    /// Puts away everything the body being lowered has open, so that what is
+    /// lowered next sees only the file it is in.
+    ///
+    /// **What this prevents: a constant meaning something different at each
+    /// mention.** Its initializer is lowered in the middle of whatever names
+    /// it, and every piece of that body's state reached it. The closure around
+    /// a mention made an unresolved name an invented capability, declared into
+    /// a scope stack that had been emptied -- a compiler panic. The loop
+    /// around one let `const X = break;` break out of it, the closure being
+    /// defined around one was what a free name in the initializer resolved
+    /// to, the function's type parameters were in scope, and a mention inside
+    /// `${..}` moved the initializer's ranges by the hole's offset, past the
+    /// end of the file.
+    ///
+    /// [`ModuleLevel`] holds every field of [`Ctx`] that is per-body state.
+    /// Nothing checks that: a field added to `Ctx` for a body has to be added
+    /// there too, or a constant sees it. What stays visible is what a
+    /// module-level declaration can see: the file's items, imports, contexts
+    /// and constants, and the stack of constants being expanded -- which is
+    /// also how lowering knows it is inside an initializer.
+    ///
+    /// The fresh scope stack has one scope open rather than none, so that
+    /// whatever declares a name at the initializer's top level has somewhere
+    /// to put it rather than panicking, as the invented capability did.
+    ///
+    /// `site` stays as it was. It decides how a missing capability is
+    /// explained, and inside an initializer nothing asks:
+    /// `lower_segments` only files a name for that question outside one.
+    pub(super) fn enter_module_level(&mut self) -> ModuleLevel {
+        ModuleLevel {
+            scopes: std::mem::replace(&mut self.scopes, vec![Vec::new()]),
+            in_scope: std::mem::take(&mut self.in_scope),
+            generics: std::mem::take(&mut self.generics),
+            loop_depth: std::mem::take(&mut self.loop_depth),
+            lambdas: std::mem::take(&mut self.lambdas),
+            lambda_names: std::mem::take(&mut self.lambda_names),
+            lambda_evidence: std::mem::take(&mut self.lambda_evidence),
+            range_shift: std::mem::take(&mut self.range_shift),
+        }
+    }
+
+    /// Restores what [`Ctx::enter_module_level`] put away.
+    pub(super) fn leave_module_level(&mut self, outer: ModuleLevel) {
+        let ModuleLevel {
+            scopes,
+            in_scope,
+            generics,
+            loop_depth,
+            lambdas,
+            lambda_names,
+            lambda_evidence,
+            range_shift,
+        } = outer;
+        self.scopes = scopes;
+        self.in_scope = in_scope;
+        self.generics = generics;
+        self.loop_depth = loop_depth;
+        self.lambdas = lambdas;
+        self.lambda_names = lambda_names;
+        self.lambda_evidence = lambda_evidence;
+        self.range_shift = range_shift;
     }
 
     /// `with { ledger: h } { .. }` — the labels bound over a region.

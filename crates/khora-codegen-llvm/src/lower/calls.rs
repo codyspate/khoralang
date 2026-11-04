@@ -346,15 +346,17 @@ impl<'ctx> Lower<'_, 'ctx> {
         args: &[ExprId],
         range: TextRange,
     ) -> Flow<'ctx> {
+        // `callee` first: it refuses a bodiless declaration by name, which
+        // has no signature for the line below to find.
+        let function = match self.be.callee(name) {
+            Ok(function) => function,
+            Err(message) => return self.fail(message, range),
+        };
         // The signature `callee` declared the function from. Asking
         // `signature_of` instead read a same-named Khora function's for a C
         // call. `Backend::call_signature`.
         let Some(signature) = self.be.call_signature(name) else {
             return self.fail(format!("`{name}` has no signature to call through"), range);
-        };
-        let function = match self.be.callee(name) {
-            Ok(function) => function,
-            Err(message) => return self.fail(message, range),
         };
 
         let mut values: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> =

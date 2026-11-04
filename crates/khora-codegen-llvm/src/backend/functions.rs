@@ -13,13 +13,16 @@ impl<'ctx> Backend<'ctx> {
     ///
     /// A specialization is registered under its mangled symbol with its type
     /// arguments already substituted, so the backend never sees a rigid
-    /// parameter. Anything not registered is a plain function under its own
-    /// name.
+    /// parameter. A non-generic function is a specialization with no
+    /// arguments, so it is registered the same way.
+    ///
+    /// **A bare name has no answer.** There is no map keyed by bare name to
+    /// fall back to: one across the whole program kept whichever file came
+    /// first, so a reader that asked for `bind` got a namesake's signature
+    /// instead of `None`. [`Backend::foreign_signatures`] answers for C
+    /// symbols, which is the one place a bare name is the right key.
     pub fn signature_of(&self, name: &str) -> Option<khora_types::Signature> {
-        self.instance_signatures
-            .get(name)
-            .cloned()
-            .or_else(|| self.types.signatures.get(name).cloned())
+        self.instance_signatures.get(name).cloned()
     }
 
     /// The signature to call `name` through, given that nothing in Khora
@@ -29,20 +32,19 @@ impl<'ctx> Backend<'ctx> {
     /// answer even when a Khora function of the same name exists somewhere in
     /// the program — see [`Backend::foreign_signatures`].
     pub fn foreign_signature_of(&self, name: &str) -> Option<khora_types::Signature> {
-        self.foreign_signatures.get(name).cloned().or_else(|| self.signature_of(name))
+        self.foreign_signatures.get(name).cloned()
     }
 
     /// The signature a call to `name` is compiled against: its own if a Khora
     /// body defines it, the C declaration's if not.
     ///
     /// **What this prevents: a program's `fn bind() -> Int raises E` taking
-    /// over std's call to C's `bind`.** [`Self::signature_of`] falls back to a
-    /// map keyed by bare name across the whole program, where the first file
-    /// in path order wins, so a Khora `bind` in a file that sorts before
-    /// `std::net::socket` -- a program's or a dependency's -- was found
-    /// instead of std's `extern fn bind`. The call instruction was declared
-    /// from the C signature and its
-    /// result taken apart by the Khora one, so a fallible namesake crashed the
+    /// over std's call to C's `bind`.** A map keyed by bare name across the
+    /// whole program, where the first file in path order won, found a Khora
+    /// `bind` in a file that sorts before `std::net::socket` -- a program's
+    /// or a dependency's -- instead of std's `extern fn bind`. The call
+    /// instruction was declared from the C signature and its result taken
+    /// apart by the Khora one, so a fallible namesake crashed the
     /// compiler on an `i32` it expected to be a tagged pair, and a namesake of
     /// another shape was refused, or answered with a value of the wrong type.
     /// Every program compiles std's socket code, so naming a function `bind`
@@ -51,11 +53,9 @@ impl<'ctx> Backend<'ctx> {
     /// The same question [`Self::callee`] asks before it declares the
     /// function, so the instruction and what reads its result cannot disagree.
     ///
-    /// The fallback is not airtight on its own: for a name that is neither
-    /// defined nor `extern` -- a bodiless declaration nobody implemented --
-    /// [`Self::foreign_signature_of`] still falls through to the bare-name
-    /// map, and [`Self::callee`] refuses that case ("has no body") before a
-    /// call is built, so nothing compiles against the answer.
+    /// `None` for a name that is neither defined nor `extern`: a bodiless
+    /// declaration nobody implemented, which [`Self::callee`] refuses by
+    /// name ("has no body") before a call is built.
     pub fn call_signature(&self, name: &str) -> Option<khora_types::Signature> {
         if self.is_defined(name) {
             self.signature_of(name)
@@ -112,9 +112,7 @@ impl<'ctx> Backend<'ctx> {
         // Which map to ask depends on what kind of thing this is, and
         // `is_defined` is that question: a name no Khora body defines is a C
         // symbol, whatever else in the program happens to share its spelling.
-        let signature = self
-            .call_signature(name)
-            .ok_or_else(|| format!("`{name}` has no signature to call through"))?;
+        //
         // Three kinds of function reach this point, and only one of them is a
         // call to somewhere else.
         //
@@ -127,16 +125,24 @@ impl<'ctx> Backend<'ctx> {
         // symbol silently, so a misspelled name became `undefined symbol` from
         // the linker rather than a sentence about the program.
         //
+        // The last kind is known by having no signature at all: it is neither
+        // a specialization nor `extern`, and no map keyed by bare name is
+        // there to lend it a namesake's.
+        //
         // Checked where the call is generated rather than at the declaration,
         // so a signature written ahead of its implementation is only an error
         // once something tries to run it.
         let foreign = !self.is_defined(name);
+        let Some(signature) = self.call_signature(name) else {
+            return Err(if foreign {
+                no_body(name)
+            } else {
+                format!("`{name}` has no signature to call through")
+            });
+        };
         if foreign {
             if !signature.is_extern {
-                return Err(format!(
-                    "`{name}` has no body, so there is nothing to call. Give it one, or \
-                     write `extern fn` if it is a C symbol to be found at link time"
-                ));
+                return Err(no_body(name));
             }
             if let Some(why) = foreign_signature_obstacle(&signature) {
                 return Err(format!(
@@ -183,4 +189,16 @@ impl<'ctx> Backend<'ctx> {
     // -----------------------------------------------------------------------
     // Closures
     // -----------------------------------------------------------------------
+}
+
+/// The refusal of a call to a bodiless, non-`extern` declaration.
+///
+/// One sentence for both ways [`Backend::callee`] meets one -- no signature
+/// at all, or a foreign signature that is not `extern` -- so the program is
+/// told the same thing whichever map it missed in.
+fn no_body(name: &str) -> String {
+    format!(
+        "`{name}` has no body, so there is nothing to call. Give it one, or \
+         write `extern fn` if it is a C symbol to be found at link time"
+    )
 }

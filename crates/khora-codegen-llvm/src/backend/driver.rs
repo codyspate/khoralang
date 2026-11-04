@@ -199,20 +199,7 @@ pub(super) fn build(
             Some(crate::debug::Debug::new(&backend.module, &context, &entry_path, is_msvc));
     }
 
-    // Every `extern fn` in the program, under the C symbol it names.
-    //
-    // `merged_types` flattens signatures into one map keyed by a bare name, so
-    // a Khora `close` and POSIX's `close` collide there and the winner is
-    // whichever file was walked first. These are kept apart because they never
-    // shared a namespace to begin with: one is emitted `kh$std$fs$close`, the
-    // other is looked up by the linker. `Backend::foreign_signatures`.
-    for file in files {
-        for (symbol, signature) in &khora_types::type_map(db, *file).signatures {
-            if signature.is_extern {
-                backend.register_foreign(symbol, signature.clone());
-            }
-        }
-    }
+    register_signatures(&mut backend, db, files, mono)?;
     // Tests each get a fiber of their own, so only a `main` build can be
     // single-threaded.
     //
@@ -237,27 +224,6 @@ pub(super) fn build(
     // The local path is for a program with threads: one without has a plain
     // count on every object already.
     backend.local_counts = !backend.single_threaded && crate::local_counts_for_this_build();
-
-    // One emitted function per *specialization*, not per source function: a
-    // generic body has no machine representation until its type arguments are
-    // known, and a generic function nobody calls is not emitted at all.
-    // **Whole-program, because a generic body is specialized at types its own
-    // module never saw.** `Mapped<I, B>`'s `next` lives in `std::core` and is
-    // compiled at an iterator the application declared; resolving `I::Item` and
-    // `I::Effects` needs that application's impl, which `std::core`'s own map
-    // does not contain. Same argument as `mono`'s merged `Traits`.
-    let assoc: Vec<khora_types::unify::AssocBinding> = files
-        .iter()
-        .flat_map(|f| khora_types::type_map(db, *f).traits.assoc_bindings())
-        .collect();
-
-    for (instance, _) in &mono.instances {
-        let home = mono.home(&instance.symbol());
-        let scope = home.map(|h| khora_types::type_map(db, h)).unwrap_or(&types);
-        if let Some(signature) = specialized_signature(scope, instance, &assoc) {
-            backend.register_instance(&instance.symbol(), signature);
-        }
-    }
 
     // **Which functions carry a cancellation tag**, decided before anything is
     // declared, because the answer is each function's machine type. A caller
@@ -652,7 +618,74 @@ fn write_the_header(backend: &Backend<'_>, out: &Path, exports: &[(String, Strin
     }
 }
 
+/// Gives the backend every signature it compiles a call against: each
+/// specialization's under its mangled symbol, and each `extern fn`'s under the
+/// C symbol it names.
+///
+/// **What this prevents: a call compiled against a namesake's signature.**
+/// Both maps are keyed by something that names one declaration. The
+/// alternative, a merged map keyed by bare name across the program, let the
+/// first file in path order win, so a program's own `bind` or `close` was
+/// read for std's call to C's (see [`Backend::call_signature`]). No
+/// bare-name map is built at all; a name in neither map has no signature.
+///
+/// A specialization's signature comes from its home file's own type map,
+/// because that file is the one whose scope its names were resolved in.
+///
+/// The `extern fn`s are kept apart from the instances because they never
+/// shared a namespace: a Khora `close` is emitted `kh$std$fs$close`, and
+/// POSIX's `close` is looked up by the linker.
+fn register_signatures(
+    backend: &mut Backend<'_>,
+    db: &dyn Db,
+    files: &[SourceFile],
+    mono: &khora_types::mono::Instances,
+) -> Result<(), Vec<HirError>> {
+    for file in files {
+        for (symbol, signature) in &khora_types::type_map(db, *file).signatures {
+            if signature.is_extern {
+                backend.register_foreign(symbol, signature.clone());
+            }
+        }
+    }
+
+    // **Whole-program, because a generic body is specialized at types its own
+    // module never saw.** `Mapped<I, B>`'s `next` lives in `std::core` and is
+    // compiled at an iterator the application declared; resolving `I::Item` and
+    // `I::Effects` needs that application's impl, which `std::core`'s own map
+    // does not contain. Same argument as `mono`'s merged `Traits`.
+    let assoc: Vec<khora_types::unify::AssocBinding> = files
+        .iter()
+        .flat_map(|f| khora_types::type_map(db, *f).traits.assoc_bindings())
+        .collect();
+
+    for (instance, _) in &mono.instances {
+        let symbol = instance.symbol();
+        // The walk records a home for every instance before it records the
+        // instance, so a missing one is a broken invariant, not a program
+        // to compile against some other file's signature of the same name.
+        let Some(home) = mono.home(&symbol) else {
+            return Err(vec![backend_error(format!(
+                "`{symbol}` was specialized with no file recorded as its home, \
+                 which is a compiler bug"
+            ))]);
+        };
+        if let Some(signature) =
+            specialized_signature(khora_types::type_map(db, home), instance, &assoc)
+        {
+            backend.register_instance(&symbol, signature);
+        }
+    }
+    Ok(())
+}
+
 /// One view of every type in the program.
+///
+/// **Not its signatures.** Keyed by bare name, two modules' functions of one
+/// name collapse to whichever file comes first, and every reader of such a
+/// map has been a namesake bug waiting for a program to name a function
+/// `bind`. [`register_signatures`] keys them by what they name instead, so
+/// `signatures` here is empty, and stays that way for nobody to read.
 ///
 /// Each file's own map already carries what it imported, so the union repeats
 /// itself. Variants are deduplicated by type and case because a *tag is an
@@ -662,9 +695,6 @@ fn merged_types(db: &dyn Db, files: &[SourceFile]) -> TypeMap {
     let mut out = TypeMap::default();
     for file in files {
         let map = khora_types::type_map(db, *file);
-        for (name, signature) in &map.signatures {
-            out.signatures.entry(name.clone()).or_insert_with(|| signature.clone());
-        }
         for variant in &map.variants {
             // Keyed by the *declaration*, not by the spelling. Deduplicating on
             // `(type_name, name)` alone kept whichever module was merged first
@@ -985,5 +1015,61 @@ pub extern fn price(n: Int) -> Int { n * 2 }
     fn tests_and_benches_never_do_either() {
         assert!(!non_atomic(Entry::Tests, &[PLAIN]));
         assert!(!non_atomic(Entry::Benches, &[PLAIN]));
+    }
+
+    /// **A bare name has no signature.** A program's own `bind` and libc's
+    /// `bind`, in two modules: the backend is given signatures the way
+    /// `build` gives them, and asked by the name both share. A map keyed by
+    /// bare name across the program answered with whichever file came first
+    /// -- here the Khora one, for a call std means to send to C.
+    #[test]
+    fn a_bare_name_two_modules_share_has_no_signature() {
+        let db = KhoraDatabase::new();
+        let sources = [
+            "module main;\nimport net::{listen};\nfn bind() -> Int { 7 }\nfn main() -> Int { bind() + listen() }\n",
+            "module net;\nextern fn bind(handle: Int) -> Int;\npub fn listen() -> Int { bind(3) }\n",
+        ];
+        let files: Vec<SourceFile> = sources
+            .iter()
+            .enumerate()
+            .map(|(i, text)| SourceFile::new(&db, format!("m{i}.kh").into(), (*text).to_string()))
+            .collect();
+        let root = SourceRoot::new(&db, files.clone());
+        let mono = khora_types::mono::program_instances(&db, root);
+        assert!(mono.errors.is_empty(), "the fixture should compile: {:?}", mono.errors);
+
+        let machine = target_machine(Profile::Debug).expect("a host target");
+        let context = Context::create();
+        let mut backend = Backend::new(&context, "t", merged_types(&db, &files), &machine);
+        register_signatures(&mut backend, &db, &files, mono).expect("every instance has a home");
+
+        assert_eq!(backend.signature_of("bind"), None, "a bare name must not find a namesake");
+        let khora = backend.signature_of("main$bind").expect("the Khora `bind`, by its symbol");
+        assert!(!khora.is_extern);
+        let c = backend.foreign_signature_of("bind").expect("C's `bind`, by the symbol it names");
+        assert!(c.is_extern);
+        assert_eq!(c.params, vec![khora_types::Type::Int]);
+    }
+
+    /// An instance with no recorded home is a broken invariant of the
+    /// specialization walk, refused by name rather than compiled against
+    /// whatever another file declares under the same name.
+    #[test]
+    fn an_instance_with_no_home_is_a_compiler_bug() {
+        let db = KhoraDatabase::new();
+        let file = SourceFile::new(&db, "m0.kh".into(), PLAIN.to_string());
+        let files = vec![file];
+        let mut mono = khora_types::mono::program_instances(&db, SourceRoot::new(&db, files.clone())).clone();
+        assert!(!mono.instances.is_empty(), "`main` is an instance");
+        mono.home.clear();
+
+        let machine = target_machine(Profile::Debug).expect("a host target");
+        let context = Context::create();
+        let mut backend = Backend::new(&context, "t", merged_types(&db, &files), &machine);
+        let errors = register_signatures(&mut backend, &db, &files, &mono).expect_err("no home");
+        assert!(
+            errors.iter().any(|e| e.message.contains("no file recorded as its home, which is a compiler bug")),
+            "{errors:?}"
+        );
     }
 }

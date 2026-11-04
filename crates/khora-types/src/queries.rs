@@ -329,18 +329,43 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             })
     };
 
-    for (name, body) in khora_hir::body::bodies(db, file) {
-        let mut signature = types.signatures.get(name).cloned().unwrap_or(Signature {
-            is_extern: false,
-            generics: Vec::new(),
-            bounds: Vec::new(),
-            requires: Type::empty_row(),
-            raises: Type::empty_row(),
-            params: Vec::new(),
-            ret: Type::Unknown,
-            names: Vec::new(),
-        });
+    // **Every constant's initializer, at its declaration**, mentioned or not:
+    // a constant nobody named was never checked. What its declaration may
+    // report is narrow, and `Checker::kept` says what and why; the rest is
+    // the business of each function naming it, which checks the initializer
+    // as part of its own body. See `const_bodies`.
+    //
+    // Its rows are open both ways, as a test's error row is, and its return
+    // type is nobody's: the errors that depend on them are not kept.
+    let constants = khora_hir::body::const_bodies(db, file);
+    let all = khora_hir::body::bodies(db, file)
+        .iter()
+        .map(|b| (b, false))
+        .chain(constants.iter().map(|b| (b, true)));
+    for ((name, body), initializer) in all {
         let mut unifier = Unifier::new().with_assoc(types.traits.assoc_bindings());
+        let mut signature = match initializer {
+            true => Signature {
+                is_extern: false,
+                generics: Vec::new(),
+                bounds: Vec::new(),
+                requires: Type::row(Vec::new(), Some(unifier.fresh())),
+                raises: Type::row(Vec::new(), Some(unifier.fresh())),
+                params: Vec::new(),
+                ret: Type::Unit,
+                names: Vec::new(),
+            },
+            false => types.signatures.get(name).cloned().unwrap_or(Signature {
+                is_extern: false,
+                generics: Vec::new(),
+                bounds: Vec::new(),
+                requires: Type::empty_row(),
+                raises: Type::empty_row(),
+                params: Vec::new(),
+                ret: Type::Unknown,
+                names: Vec::new(),
+            }),
+        };
         // A test's error row is open: an error escaping a test is a *failing
         // test*, not a program that does not compile. Opened here rather than
         // in the signature because only a unifier can make a flexible tail,
@@ -392,6 +417,16 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             named_late: Vec::new(),
             pending_updates: Vec::new(),
             errors: Vec::new(),
+            // The initializer is the root block's one `let`: see
+            // `const_bodies`.
+            initializer: match (initializer, body.root.map(|r| body.expr(r))) {
+                (true, Some(khora_hir::body::Expr::Block { stmts, .. })) => match stmts.as_slice() {
+                    [khora_hir::body::Stmt::Let { init, .. }] => *init,
+                    _ => None,
+                },
+                _ => None,
+            },
+            kept: Vec::new(),
         };
         checker.check_function();
         // First after the body: checking an update's fields constrains their
@@ -442,10 +477,20 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
         checker.settle_coverage();
         checker.check_effects();
         checker.refuse_bare_opaque();
-        if parsed && !writes_a_hole(body) {
+        // Not for a constant: a type nothing in the initializer decides --
+        // an empty list's element, a closure's parameter -- is decided by
+        // each mention, and audited in the function that has one.
+        if parsed && !initializer && !writes_a_hole(body) {
             checker.check_unknowns();
         }
         let mut reported = std::mem::take(&mut checker.errors);
+        // A constant's declaration reports only what `Checker::kept` allows;
+        // everything else is its mention's, and is checked there.
+        if initializer {
+            let kept = std::mem::take(&mut checker.kept);
+            out.errors.extend(kept.into_iter().filter_map(|at| reported.get(at).cloned()));
+            continue;
+        }
         // A label a lambda named and nothing offers, which lowering deferred
         // to the checker (`invented_capability`). Said the way lowering says
         // it outside a lambda, when the program knows it as a capability.
@@ -460,6 +505,11 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
         }
         if !refused.contains(name) {
             out.errors.extend(reported);
+        }
+        // A constant's types are not published: nothing compiles its body,
+        // and its name is not a function's to be looked up under.
+        if initializer {
+            continue;
         }
         // Published types are zonked: a consumer should never see a variable,
         // and code generation cannot do anything with one.

@@ -122,6 +122,11 @@ impl<'a> Ctx<'a> {
             }
         }
 
+        // A constructor of a type an import failed to bring in; the import has
+        // been told. See `FileScope::poisoned`.
+        if segments.first().is_some_and(|first| self.scope.is_poisoned(first)) {
+            return crate::Resolution::Unsupported("unresolved constructor");
+        }
         self.error(self.why_no_constructor(&segments), range);
         crate::Resolution::Unsupported("unresolved constructor")
     }

@@ -31,6 +31,9 @@ use crate::{type_homes, Db, IntKind};
 pub(crate) fn unresolved_type_errors(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
     let homes = type_homes(db, file);
     let parsed = khora_db::parse(db, file);
+    let scope = khora_hir::file_scope(db, file);
+    // By the head of the path: `Thing<Int>` and `Thing` are both `Thing`.
+    let poisoned = |name: &str| scope.is_poisoned(name.split("::").next().unwrap_or(name));
     let mut found = Vec::new();
 
     for decl in parsed.source_file().decls() {
@@ -116,6 +119,11 @@ pub(crate) fn unresolved_type_errors(db: &dyn Db, file: SourceFile) -> Vec<HirEr
                 continue;
             }
             if resolves(&name, &in_scope, homes) {
+                continue;
+            }
+            // A name a failed import asked for: the import has been told, and
+            // this says nothing more. See `khora_hir::FileScope::poisoned`.
+            if poisoned(&name) {
                 continue;
             }
             // A `row` declaration is not a type and so is not in `homes`, but

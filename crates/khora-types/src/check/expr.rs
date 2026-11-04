@@ -808,6 +808,27 @@ impl<'a> Checker<'a> {
                         .as_ref()
                         .map(|t| type_of_ref(t, &self.signature.generics, &self.types.homes));
                     let ty = match (declared, init) {
+                        // A constant's own annotation, the one thing its
+                        // declaration reports from the checker (see
+                        // `Checker::kept`). Inferred under the annotation's
+                        // hint as any `let` is, so `const N: U8 = 200` is a
+                        // `U8`, and required apart from the inference, so
+                        // that what the inference found is not kept with it.
+                        //
+                        // Not against a type that resolves to nothing: that
+                        // is already an error where the type is written, and
+                        // "expected `Nope`, found `Int`" says it a second
+                        // time as though `Nope` were real.
+                        (Some(declared), Some(e)) if self.initializer == Some(*e) => {
+                            self.hint = Some(self.unifier.zonk(&declared));
+                            let actual = self.infer(*e);
+                            if !names_nothing(&declared) {
+                                let before = self.errors.len();
+                                self.require(&declared, &actual, "this binding", self.body.range(*e));
+                                self.kept.extend(before..self.errors.len());
+                            }
+                            declared
+                        }
                         (Some(declared), Some(e)) => {
                             self.expect(*e, &declared, "this binding");
                             declared
@@ -2548,5 +2569,42 @@ fn could_meet(a: &Type, b: &Type) -> bool {
         }
         (Type::Tuple(a1), Type::Tuple(a2)) => both(a1, a2),
         _ => a == b,
+    }
+}
+
+/// Whether a written type holds a name that resolved to nothing.
+///
+/// `named_type` makes such a name an `Adt` with no home, which is already an
+/// error where it was written; a check against it can only repeat that one.
+/// Exhaustive, so a new kind of type is a decision here and not a silent no.
+fn names_nothing(ty: &Type) -> bool {
+    match ty {
+        Type::Adt { home: None, .. } => true,
+        Type::Adt { args, .. } => args.iter().any(names_nothing),
+        Type::Applied { head, args } => names_nothing(head) || args.iter().any(names_nothing),
+        Type::Fn { params, ret, requires, raises } => {
+            params.iter().any(names_nothing)
+                || names_nothing(ret)
+                || names_nothing(requires)
+                || names_nothing(raises)
+        }
+        Type::Row { fields, tail } => {
+            fields.iter().any(|(_, t)| names_nothing(t)) || tail.as_deref().is_some_and(names_nothing)
+        }
+        Type::Tuple(items) => items.iter().any(names_nothing),
+        Type::Assoc { owner, .. } => names_nothing(owner),
+        Type::Int
+        | Type::Fixed(_)
+        | Type::Float
+        | Type::Bool
+        | Type::Str
+        | Type::Unit
+        | Type::Ptr
+        | Type::Char
+        | Type::Var(_)
+        | Type::Param(_)
+        | Type::Const(_)
+        | Type::Never
+        | Type::Unknown => false,
     }
 }

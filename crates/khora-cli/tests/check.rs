@@ -2211,3 +2211,71 @@ fn an_unresolved_callee_is_reported_without_its_closure() {
     assert!(output.contains("`range`"), "{output}");
     assert!(!output.contains("never pinned down"), "{output}");
 }
+
+/// **A constant nobody named passed `khora check`.** Constants are inlined at
+/// each mention, so an initializer was only ever checked where it was
+/// named. One error, at the initializer, through the whole package path.
+#[test]
+fn an_unmentioned_const_is_checked() {
+    let (ok, output) = check_package(
+        "unmentioned_const",
+        &[
+            ("khora.toml", MANIFEST),
+            (
+                "src/main.kh",
+                "module main;\nimport std::core::{print};\n\n\
+                 const A = UNDEFINED_NAME;\n\n\
+                 pub fn main() -> Int {\n  print(\"x\");\n  0\n}\n",
+            ),
+        ],
+    );
+    assert!(!ok, "{output}");
+    assert!(output.contains("cannot find `UNDEFINED_NAME` in this scope"), "{output}");
+    assert!(output.contains("main.kh:4:11"), "at the initializer: {output}");
+    assert!(output.contains("1 error(s)"), "{output}");
+}
+
+/// **A constant with an unresolved name, named inside a closure, crashed the
+/// compiler.** The package that found it, reduced: the error is the one the
+/// same constant gives named anywhere else.
+#[test]
+fn a_const_named_inside_a_closure_does_not_crash_check() {
+    let (ok, output) = check_package(
+        "const_in_closure",
+        &[
+            ("khora.toml", MANIFEST),
+            (
+                "src/main.kh",
+                "module main;\n\nconst CA = CA_PEM;\n\n\
+                 fn round() -> Int {\n  let g = fn () => CA;\n  0\n}\n",
+            ),
+        ],
+    );
+    assert!(!ok, "{output}");
+    assert!(!output.contains("panicked"), "{output}");
+    assert!(output.contains("cannot find `CA_PEM` in this scope"), "{output}");
+    assert!(output.contains("1 error(s)"), "{output}");
+}
+
+/// **A missing import is one error.** The reported package: one import of a
+/// module that is not there and four uses of what it named were six errors,
+/// five of them about uses with nothing to fix.
+#[test]
+fn a_missing_import_is_reported_once() {
+    let (ok, output) = check_package(
+        "missing_import",
+        &[
+            ("khora.toml", MANIFEST),
+            (
+                "src/main.kh",
+                "module main;\nimport std::core::{print, Fiber};\nimport std::nothere::{Thing};\n\n\
+                 pub fn main() -> Int {\n  let t = Thing::new();\n  let u = Thing::make(t);\n  \
+                 print(\"${Thing::show(u)}\");\n  let f = Fiber::spawn(fn () => Thing::go(t));\n  \
+                 Fiber::wait(f);\n  0\n}\n",
+            ),
+        ],
+    );
+    assert!(!ok, "{output}");
+    assert!(output.contains("cannot find module `std.nothere`"), "{output}");
+    assert!(output.contains("1 error(s)"), "{output}");
+}

@@ -337,6 +337,36 @@ pub(crate) struct Checker<'a> {
     /// [`Checker::settle_updates`].
     pub(crate) pending_updates: Vec<PendingUpdate>,
     pub(crate) errors: Vec<HirError>,
+    /// The initializer, when this body is a constant's, checked at its
+    /// declaration with no mention to give it a context. See
+    /// [`Checker::kept`].
+    pub(crate) initializer: Option<ExprId>,
+    /// Of `errors`, the ones a constant's initializer reports from its
+    /// declaration: the indices of each, in order. Only filled when
+    /// [`Checker::initializer`] is set.
+    ///
+    /// **An allow-list, because the default is "the mention decides".** The
+    /// declaration has no expected type, no capabilities in scope, no
+    /// function to return from and no loop, and an error that turns on any of
+    /// those is a guess about a mention that may supply it: a closure naming
+    /// a capability label its mention's row hands it, a record literal two
+    /// types fit that its mention's `let` picks between, a `return` from the
+    /// function it is named in. Each was a correct program refused. So
+    /// nothing is kept unless it is marked here, and a new kind of error is
+    /// left to the mention until somebody shows it holds at every mention.
+    ///
+    /// What is marked: the constant's annotation checked against its
+    /// initializer -- `const A: Int = "s"` -- when the annotation names a
+    /// type that exists. A mention lowers the initializer alone, so this is
+    /// the only place the annotation is checked at all. What lowering finds
+    /// (a name that resolves to nothing, a cycle, `break` outside a loop) is
+    /// not the checker's, and `diagnostics` keeps it.
+    ///
+    /// **What it costs: a type error that holds whatever the mention wants is
+    /// left to the mention too.** `const A = 1 + true;` named nowhere is
+    /// refused nowhere. Telling it apart from the refusals above needs each
+    /// error to say what it depended on, which the checker does not record.
+    pub(crate) kept: Vec<usize>,
 }
 
 /// A record update, `{ ..base, field: value }`, whose base's type was not

@@ -381,6 +381,11 @@ pub(crate) struct Backend<'ctx> {
     /// Empty when nothing is being emitted, and between bodies.
     pub(crate) source: String,
     pub rt: Runtime<'ctx>,
+    /// Every type, variant and trait in the program, merged across files.
+    ///
+    /// Its `signatures` are empty: function signatures are keyed by what they
+    /// name, in `instance_signatures` and `foreign_signatures`, and never by
+    /// bare name. See `merged_types` in the driver.
     pub types: TypeMap,
     /// Khora function name to the LLVM function, whether definition or extern.
     functions: HashMap<String, FunctionValue<'ctx>>,
@@ -391,13 +396,12 @@ pub(crate) struct Backend<'ctx> {
     instance_signatures: HashMap<String, Signature>,
     /// `extern fn` declarations, by the C symbol they name.
     ///
-    /// Separate from `types.signatures` because that map is keyed by a bare
-    /// function name across the whole program, and two modules may legitimately
-    /// use one name for different things. `std::fs` declares a Khora
-    /// `close(file: Ptr)`; `socket_linux.kh` declares `extern fn close(handle:
-    /// I32)`, which is POSIX's. Merged into one map the first one wins by
-    /// accident of file order, and every POSIX build compiled a call to the
-    /// wrong one.
+    /// Kept apart from `instance_signatures` because two modules may
+    /// legitimately use one name for different things. `std::fs` declares a
+    /// Khora `close(file: Ptr)`; `socket_linux.kh` declares `extern fn
+    /// close(handle: I32)`, which is POSIX's. Merged into one map keyed by
+    /// bare name, the first one won by accident of file order, and every
+    /// POSIX build compiled a call to the wrong one.
     ///
     /// They do not really share a namespace: a Khora function is emitted as
     /// `kh$std$fs$close` and a C symbol as `close`. This map is that

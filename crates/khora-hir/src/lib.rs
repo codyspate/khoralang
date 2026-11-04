@@ -677,6 +677,21 @@ pub struct FileScope {
     /// a spelling without conflicting.
     pub variants: Vec<Variant>,
     pub errors: Vec<HirError>,
+    /// Names an import asked for and did not get, because the module is not
+    /// there or does not export them.
+    ///
+    /// **What this prevents: one missing import becoming an error at every
+    /// use.** `import std::nothere::{Thing};` and four uses of `Thing::..`
+    /// were five errors and a closure "never pinned down", and the first --
+    /// the import -- is the only one with anything to fix. A use of one of
+    /// these is lowered as unresolved and said nothing about; its type is
+    /// unknown, which agrees with everything, so nothing downstream of it
+    /// speaks either. The import's own error stays.
+    ///
+    /// Only names an import wrote down. A glob from a module that is not
+    /// there poisons nothing, because it never said which names it meant, and
+    /// a name nobody imported is still reported wherever it is used.
+    pub poisoned: Vec<String>,
 }
 
 /// One imported name, as written here and as written where it is defined.
@@ -696,6 +711,12 @@ impl FileScope {
 
     pub fn get(&self, name: &str) -> Option<&Resolution> {
         self.names.iter().find(|(n, _)| n == name).map(|(_, r)| r)
+    }
+
+    /// Whether `name` is one an import asked for and did not get; see
+    /// [`FileScope::poisoned`].
+    pub fn is_poisoned(&self, name: &str) -> bool {
+        self.poisoned.iter().any(|n| n == name)
     }
 
     pub fn variants_of<'a>(&'a self, type_name: &'a str) -> impl Iterator<Item = &'a Variant> + 'a {
@@ -761,11 +782,18 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
     let cycles = import_cycles(db, root);
 
     for import in &map.imports {
+        // What a failed import asked for, by the name this file uses.
+        let asked_for = |out: &mut FileScope| {
+            if let ImportKind::Named(names) = &import.kind {
+                out.poisoned.extend(names.iter().map(|wanted| wanted.alias.clone()));
+            }
+        };
         let Some(source) = graph.file(&import.path) else {
             out.errors.push(HirError {
                 message: format!("cannot find module `{}`", import.path),
                 range: import.range,
             });
+            asked_for(&mut out);
             continue;
         };
         // **A cycle is refused here, and that is what keeps it from being a
@@ -787,6 +815,7 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
                         ),
                         range: import.range,
                     });
+                    asked_for(&mut out);
                     continue;
                 }
             }
@@ -855,13 +884,16 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
                                     .collect::<Vec<_>>(),
                             );
                         }
-                        Some(_) => out.errors.push(HirError {
-                            message: format!(
-                                "`{}` is not exported from `{}`",
-                                wanted.name, import.path
-                            ),
-                            range: wanted.range,
-                        }),
+                        Some(_) => {
+                            out.errors.push(HirError {
+                                message: format!(
+                                    "`{}` is not exported from `{}`",
+                                    wanted.name, import.path
+                                ),
+                                range: wanted.range,
+                            });
+                            out.poisoned.push(local);
+                        }
                         // **A builtin is already in scope, so importing it
                         // is a harmless no-op rather than a mistake.** The
                         // generated API pages carry `### String` and `### Int`
@@ -873,13 +905,16 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
                         // first program, and nothing anywhere said where the
                         // line between "importable" and "always there" falls.
                         None if is_builtin_type(&wanted.name) => {}
-                        None => out.errors.push(HirError {
-                            message: format!(
-                                "`{}` does not declare `{}`",
-                                import.path, wanted.name
-                            ),
-                            range: wanted.range,
-                        }),
+                        None => {
+                            out.errors.push(HirError {
+                                message: format!(
+                                    "`{}` does not declare `{}`",
+                                    import.path, wanted.name
+                                ),
+                                range: wanted.range,
+                            });
+                            out.poisoned.push(local);
+                        }
                     }
                 }
             }

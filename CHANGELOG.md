@@ -14,6 +14,15 @@ it will behave differently now.
 
 ### Breaking
 
+- Every `const` is checked at its declaration, whether or not anything
+  names it, for what holds wherever it is named: `const A = UNDEFINED_NAME;`
+  passed `khora check` when nothing named `A`, and is an error at the
+  initializer. So is an annotation the initializer does not fit
+  (`const A: Int = "s";`), and a cycle between constants. Everything else
+  -- a type error, a capability a closure names, which record type a
+  literal is, a `return` -- is decided where the constant is named, as it
+  was, because the use may be what makes it right: `const A = 1 + true;`
+  named nowhere is not an error.
 - A `postgres` connection to a host that is not a loopback address asks for
   TLS and verifies the server's certificate and host name, through
   `conn::open`, `conn::open_within`, `pool::open`, `pool::open_with` and
@@ -205,6 +214,29 @@ it will behave differently now.
 
 ### Fixed
 
+- `khora check` crashed with "a scope is always open" on a `const` whose
+  initializer names something that does not exist, when the constant was
+  named inside a closure. It reports the name, as it does for the same
+  constant named anywhere else. A constant's initializer sees nothing of the
+  function that names it: `const X = break;` named inside a `loop` is a
+  `break` outside a loop, a free name in the initializer does not resolve to
+  the closure being defined around the mention, the function's type
+  parameters are not in scope, and an error in a constant named inside
+  `${..}` points at the constant rather than past the end of the file.
+- A program's own `fn assert` or `fn assert_that`, with a body, may be
+  called outside a `test` block. `khora check` refused any call spelled
+  `assert` as the test builtin, while `khora build` compiled a call to the
+  program's function. The builtin -- `std::core`'s, or a program's own
+  bodiless declaration -- is still refused outside a test, by both, and is
+  refused by `check` in an `impl` method too, where only `build` refused it.
+- An import that fails -- a module that is not there, or a name the module
+  does not have or does not export -- is one error. Each use of a name it
+  asked for, as a value, a path, a type or a pattern, was an error of its
+  own, and a closure calling one was "never pinned down" besides. A name
+  nobody imported is reported wherever it is used.
+- A `const` that two constants reach through each other is one error, "`a`
+  is defined in terms of itself: `a` -> `b` -> `a`", wherever either is
+  named.
 - A fiber canceled while `std::net::tls::trusting` (or `client`) built its
   configuration left that configuration, a whole copy of the machine's
   trust store, allocated for the rest of the run: about 80 KB per cancel,

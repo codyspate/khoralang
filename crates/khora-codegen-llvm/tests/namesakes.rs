@@ -448,3 +448,65 @@ pub fn abs() -> Int raises Oops { raise Oops::Bad }
         assert_eq!(run(&exe, backend), "7 4\n", "`{backend}`");
     }
 }
+
+/// **A program's own `assert`, called outside a test, is the program's.**
+/// `khora check` refused it as the test builtin by its name, while code
+/// generation -- which lets a function somebody wrote win over one it
+/// implements -- compiles the call. Built through `compile`, which checks
+/// first, so this goes red if either half refuses it. The second module
+/// holds an `assert_that` reached by import, and the first an `assert`.
+#[test]
+fn a_programs_own_assert_and_assert_that_run_outside_a_test() {
+    check(
+        "namesake_assert",
+        &[
+            (
+                "main.kh",
+                r#"module main;
+import std::core::{print};
+import main::checks::{assert_that};
+type Oops = | Bad;
+fn assert(b: Bool) -> Int raises Oops {
+  if b { 1 } else { raise Oops::Bad }
+}
+pub fn main() -> Int {
+  let held = assert(true)! catch { Oops::Bad => 0 };
+  let broke = assert(false)! catch { Oops::Bad => 2 };
+  print("${held} ${broke} ${assert_that(false, "why")}");
+  0
+}
+"#,
+            ),
+            (
+                "checks.kh",
+                r#"module main::checks;
+/// `why` when `b` is false.
+pub fn assert_that(b: Bool, why: String) -> String {
+  if b { "held" } else { why }
+}
+"#,
+            ),
+        ],
+        "1 2 why\n",
+    );
+}
+
+/// The builtin `assert` outside a test is still refused by a build, as it is
+/// by `check`.
+#[test]
+fn the_builtin_assert_outside_a_test_is_refused_by_a_build() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("namesake_builtin_assert");
+    harness::ensure_runtime();
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    let db = KhoraDatabase::new();
+    let program = "module main;\nimport std::core::{assert, assert_that};\n\
+                   pub fn main() -> Int {\n  assert(1 == 1);\n  assert_that(true, \"x\");\n  0\n}\n";
+    let root = SourceRoot::new(&db, sources(&db, &dir, &[("main.kh", program)]));
+    let errors = khora_codegen_llvm::compile(&db, root, &dir.join("program"))
+        .expect_err("the builtin outside a test should be refused");
+    let messages: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
+    for name in ["assert", "assert_that"] {
+        let refusal = format!("`{name}` is only allowed inside a `test` block");
+        assert!(messages.iter().any(|m| m.contains(&refusal)), "{name}: {messages:?}");
+    }
+}

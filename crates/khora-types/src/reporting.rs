@@ -124,6 +124,12 @@ pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
         }
         all.extend(body.errors.iter().cloned());
     }
+    // What lowering found in each constant's initializer, at the declaration.
+    // A mention finds the same things at the same spans; the de-duplication
+    // below keeps one.
+    for (_, body) in khora_hir::body::const_bodies(db, file) {
+        all.extend(body.errors.iter().cloned());
+    }
     // The same cascade, one pass further on: `traits::check` compares the
     // expansion's signature against the trait's and finds `Ordering` on one
     // side and `Ordering` on the other, because only one of the two names
@@ -196,6 +202,15 @@ pub(crate) fn unpinned_closure_errors(db: &dyn Db, file: SourceFile) -> Vec<HirE
     // A callee that did not resolve always leaves its closure arguments
     // unsolved, so the closure is a symptom there and not the cause.
     let already = |range: TextRange| checked.errors.iter().any(|e| range.contains_range(e.range));
+    // A closure holding a name lowering could not resolve has been told about
+    // that name, and its type is unsolved *because* of it -- the name has no
+    // type to give. Asked by what was lowered inside the closure rather than
+    // by range, so a constant it names counts: an inlined initializer's
+    // expressions point at the constant's declaration, outside the closure.
+    let holds_a_hole = |body: &khora_hir::body::Body, lambda| {
+        body.lambda_contents(lambda)
+            .any(|(_, e)| matches!(e, Expr::Unresolved(_) | Expr::Missing))
+    };
     let mut found = Vec::new();
     for (name, body) in khora_hir::body::bodies(db, file) {
         let Some((_, types)) = checked.bodies.iter().find(|(n, _)| n == name) else { continue };
@@ -207,6 +222,7 @@ pub(crate) fn unpinned_closure_errors(db: &dyn Db, file: SourceFile) -> Vec<HirE
             if params.iter().chain(std::iter::once(&**ret)).any(|t| matches!(t, Type::Var(_)))
                 && !already(body.range(id))
                 && !names_nothing(body.range(id))
+                && !holds_a_hole(body, id)
                 && !body.exprs().any(|(call, e)| {
                     matches!(e, Expr::Call { .. })
                         && body.range(call).contains_range(body.range(id))
@@ -245,28 +261,39 @@ pub(crate) fn unpinned_closure_errors(db: &dyn Db, file: SourceFile) -> Vec<HirE
 /// program passing `khora check` can reach belongs in `khora-types`, where the
 /// editor can show it. It had never been asked, because the check that asks
 /// read `.fail(` calls one line at a time and this message wraps. Roadmap 16.
+///
+/// **The builtin is a call code generation writes itself, and nothing else
+/// named `assert` is.** Deciding by the callee's *text* refused a program's
+/// own `fn assert(b: Bool) -> Int raises Oops` called from `main`, as the test
+/// builtin, while the backend -- which lets a function somebody wrote win over
+/// one it implements -- would have compiled the call. Both ask the same
+/// question: what the call resolves to, and whether that function has a body
+/// ([`is_the_builtin`]). A program's own bodiless `fn assert(condition:
+/// Bool);` is the builtin, here as there.
+///
+/// Every named body is asked, methods included, because the backend refuses
+/// the builtin in a method as it does in a function. A `test` or `bench` body
+/// is not asked: the backend does not refuse it there.
 pub(crate) fn assert_outside_a_test_errors(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
-    use khora_syntax::SyntaxKind;
+    use khora_hir::body::Expr;
 
     let mut found = Vec::new();
-    for decl in khora_db::parse(db, file).source_file().decls() {
-        // A `test` block is where `assert` belongs, and a `bench` block is not
-        // a test: it is timed, it has no runner reading a tag, and an
-        // assertion in one would be measured rather than checked.
-        let ast::Decl::Fn(f) = decl else { continue };
-        let Some(body) = f.body() else { continue };
-
-        for node in body.syntax().descendants() {
-            if node.kind() != SyntaxKind::CALL_EXPR {
+    for (owner, body) in khora_hir::body::bodies(db, file) {
+        if khora_hir::is_test(owner) {
+            continue;
+        }
+        for (call, expr) in body.exprs() {
+            let Expr::Call { callee, args } = expr else { continue };
+            let Expr::Path(khora_hir::Resolution::Item { module, name, kind }) = body.expr(*callee)
+            else {
                 continue;
-            }
-            let Some(call) = ast::CallExpr::cast(node) else { continue };
-            let Some(ast::Expr::Path(path)) = call.callee() else { continue };
-            // The callee's text, trimmed: both are bare names, so anything
-            // qualified (`m::assert`) is somebody else's function.
-            let name = path.syntax().text().to_string();
-            let name = name.trim();
-            if name != "assert" && name != "assert_that" {
+            };
+            let arity = match (kind, name.as_str()) {
+                (khora_hir::ItemKind::Function, "assert") => 1,
+                (khora_hir::ItemKind::Function, "assert_that") => 2,
+                _ => continue,
+            };
+            if args.len() != arity || !is_the_builtin(db, file, module, name) {
                 continue;
             }
             found.push(HirError {
@@ -274,11 +301,40 @@ pub(crate) fn assert_outside_a_test_errors(db: &dyn Db, file: SourceFile) -> Vec
                     "`{name}` is only allowed inside a `test` block; elsewhere, \
                      `raise` says the same thing and says where it goes"
                 ),
-                range: call.syntax().text_range(),
+                range: body.range(call),
             });
         }
     }
     found
+}
+
+/// Whether the function `module::name`, as `file` spells it, is one code
+/// generation lowers itself: one declared without a body.
+///
+/// The backend's test is that no Khora body defines the symbol, so a function
+/// somebody wrote wins over the one it implements. This is the same test read
+/// from the declaration rather than from the emitted functions. An alias is
+/// followed to the name the declaring module gives it.
+fn is_the_builtin(db: &dyn Db, file: SourceFile, module: &khora_hir::ModulePath, name: &str) -> bool {
+    let here = khora_hir::item_map(db, file).module.as_ref() == Some(module);
+    let (home, declared) = if here {
+        (Some(file), name.to_string())
+    } else {
+        let declared = khora_hir::file_scope(db, file)
+            .origin(name)
+            .map_or_else(|| name.to_string(), |o| o.name.clone());
+        let home = khora_db::source_root(db)
+            .and_then(|root| khora_hir::module_graph(db, root).file(module));
+        (home, declared)
+    };
+    // No file is a module that did not resolve, which has been reported.
+    let Some(home) = home else { return false };
+    khora_db::parse(db, home).source_file().decls().any(|decl| match decl {
+        ast::Decl::Fn(f) => {
+            f.body().is_none() && f.name().and_then(|n| n.ident()).is_some_and(|n| n == declared)
+        }
+        _ => false,
+    })
 }
 
 /// Whether `file`'s `main` is one a build runs: `src/main.kh`, a file in
