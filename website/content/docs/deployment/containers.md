@@ -72,7 +72,8 @@ is why both stages above are trixie and not the more familiar bookworm; the
 table on [Supported targets](/docs/deployment/supported-targets/) is the list.
 A distroless runtime image works for the same reason and is smaller, as long as
 it is the Debian 13 variant. For Alpine, or for an image with no C library at
-all, build a static executable instead — the next section.
+all, build a static executable instead — the next section — or [build inside
+Alpine](#building-inside-alpine).
 
 Nothing else from the build stage is copied. There is no `std/`, no compiler,
 and no toolchain in the final image: the executable carries the Khora runtime
@@ -166,6 +167,47 @@ in a `[build] link-search` directory: a static musl build takes nothing from
 the machine's own library directories, whose archives are built against its
 glibc. `m`, `pthread`, `dl`, `rt` and `util` need nothing — musl's C library
 already holds them.
+
+## Building inside Alpine
+
+The toolchain runs on Alpine too, so the build stage can be `alpine` as well.
+There, `khora build` with no `--target` produces the static executable, so the
+Dockerfile names no target and the same file builds an x86-64 or an arm64 image
+on a machine of that architecture:
+
+```dockerfile
+# --- build ------------------------------------------------------------------
+FROM alpine:3.24 AS build
+
+# clang drives the link, and lld is the linker: Alpine's clang package has
+# none of its own.
+RUN apk add --no-cache ca-certificates clang lld curl git
+
+# The Alpine toolchain is published from 0.5.0.
+ARG KHORA_VERSION=0.5.0
+RUN curl -fsSL https://raw.githubusercontent.com/codyspate/khoralang/main/install.sh \
+      | sh -s -- --version "${KHORA_VERSION}" --to /opt/khora --no-modify-path
+ENV PATH="/opt/khora/bin:${PATH}"
+
+WORKDIR /src
+COPY . .
+RUN khora install && khora build . --release --out /out/myservice
+
+# --- run --------------------------------------------------------------------
+FROM alpine:3.24
+
+COPY --from=build /out/myservice /usr/local/bin/myservice
+
+USER 10001
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/myservice"]
+```
+
+`install.sh` sees Alpine's C library and installs the musl toolchain; the
+`--version` is the same as on any other machine. The run stage can be
+`scratch` instead, with the certificate line from the section above, because
+the executable needs nothing from the image. `alpine` is there for a shell and
+`ca-certificates` when you want them.
 
 ## Cross-building
 

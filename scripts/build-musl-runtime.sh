@@ -115,9 +115,17 @@ if command -v rustup > /dev/null 2>&1; then
 fi
 
 # `cc`'s per-target variables use underscores where the triple has hyphens.
+#
+# **`-isystem` as well as `--sysroot`**, because which directories a sysroot
+# implies is the driver's decision and drivers differ: LLVM's own clang
+# searches `<sysroot>/include` for a musl triple, and Alpine's patched clang
+# searched nothing under that sysroot at all (`clang -v` listed only its own
+# resource directory), so on Alpine `ring` failed on `'assert.h' file not
+# found` with the headers sitting in the sysroot. Naming the directory is the
+# same answer from both, in the same order.
 var=$(printf '%s' "$triple" | tr '-' '_')
 env "CC_$var=$clang" "AR_$var=$ar" \
-    "CFLAGS_$var=--target=$triple --sysroot=$headers" \
+    "CFLAGS_$var=--target=$triple --sysroot=$headers -isystem $headers/include" \
     cargo build -p khora-rt --target "$triple" $profile_flag 1>&2
 
 profile=debug

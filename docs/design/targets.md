@@ -277,16 +277,21 @@ and start files and LLVM's `libunwind.a`. The runtime is compiled against that
 same Rust toolchain, so the two cannot disagree about the libc. The release
 copies seven of those files into `targets/<triple>/sysroot/` beside the
 target's `libkhora_rt.a`; a source build finds them through `rustc --print
-sysroot`. **`crtbegin.o` and `crtend.o` are LLVM compiler-rt's**
+sysroot`. The link is `-static-pie`, so the files are the position-independent
+set: `rcrt1.o` (which applies the executable's own relocations before `main`),
+`crti.o`, `crtn.o`, `crtbeginS.o` and `crtendS.o`. **`crtbeginS.o` and
+`crtendS.o` are LLVM compiler-rt's**
 `crtbegin.c`/`crtend.c` (their symbols are `__do_init`, `__EH_FRAME_LIST__`,
 not libgcc's `frame_dummy`; the `GCC: 9.4.0` in `.comment` names the compiler
 Rust built them with), so they are under Apache-2.0 WITH LLVM-exception like
 `libunwind.a`, whose license text ships in `licenses/`. The
-link needs `crtend.o`'s zero word ending `.eh_frame`: lld writes one of its
+link needs `crtendS.o`'s zero word ending `.eh_frame`: lld writes one of its
 own, GNU ld does not, and a bfd-linked program without it segfaulted inside
 its trap report under `KHORA_BACKTRACE=1`. The link also passes
-`--eh-frame-hdr`, because gcc's `-static` spec does not and the unwinder finds
-`.eh_frame` through the `PT_GNU_EH_FRAME` it produces.
+`--eh-frame-hdr`, because gcc's static spec does not and the unwinder finds
+`.eh_frame` through the `PT_GNU_EH_FRAME` it produces. The packaged list in
+`scripts/package.sh` is checked against the link's by a unit test, because a
+source build reads the whole directory and would not notice a missing file.
 
 **Native libraries** (`[build] link`) are looked up by the compiler in
 `[build] link-search` and passed to the linker by path, never as `-l`: the
@@ -306,9 +311,9 @@ pinned by SHA-256) and clang pointed at them. The headers are build-time only.
 
 **The link** (`toolchain::drive_static_musl`):
 
-    <driver> [--target=<triple> -fuse-ld=<ld.lld>] -static -nostdlib
-             -Wl,--eh-frame-hdr crt1.o crti.o crtbegin.o <objects>
-             libkhora_rt.a [natives] libunwind.a libc.a crtend.o crtn.o
+    <driver> [--target=<triple> -fuse-ld=<ld.lld>] -static-pie -nostdlib
+             -Wl,--eh-frame-hdr rcrt1.o crti.o crtbeginS.o <objects>
+             libkhora_rt.a [natives] libunwind.a libc.a crtendS.o crtn.o
 
 `-nostdlib`, so nothing from a glibc host leaks in. `--target` and lld only
 when the driver is clang: gcc refuses `--target=`, works for its own

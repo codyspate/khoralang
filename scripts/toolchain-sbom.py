@@ -25,7 +25,16 @@ Anything else the binary links against is the platform's -- a libc, a Windows
 SDK -- and is named by the target triple rather than listed, because a bill of
 materials that claimed to enumerate an operating system would be wrong in a way
 nobody could check.
+
+**Except where the platform's libraries are inside the binary.** The musl
+toolchain is one static executable built in Alpine, so the C and C++ libraries
+it was linked with ship in it: musl, libstdc++, zlib, zstd, and LLVM itself
+from Alpine's package rather than the pin. `--llvm` names the LLVM that was
+linked, and each `--apk name=version` adds one Alpine package, so those are
+listed as what they are -- `pkg:apk/alpine/...` -- with the versions the build
+read from `apk`. `scripts/build-alpine.sh` passes them.
 """
+import argparse
 import json
 import os
 import re
@@ -83,7 +92,30 @@ def purl(name, version, kind="cargo"):
     return f"pkg:{kind}/{name}@{version}" if version else f"pkg:{kind}/{name}"
 
 
+def arguments():
+    parser = argparse.ArgumentParser(description="A CycloneDX bill of materials for the toolchain.")
+    parser.add_argument(
+        "--llvm", metavar="VERSION",
+        help="the LLVM linked in, where it is not the pinned one (the Alpine build's is Alpine's)",
+    )
+    parser.add_argument(
+        "--apk", metavar="NAME=VERSION", action="append", default=[],
+        help="an Alpine package whose static library is linked into the binary; repeatable",
+    )
+    args = parser.parse_args()
+    packages = []
+    for item in args.apk:
+        name, sep, version = item.partition("=")
+        if not sep or not name or not version:
+            # A component with no version is one nobody can check against an
+            # advisory, which is the only reason to list it.
+            parser.error(f"--apk takes NAME=VERSION, not {item!r}")
+        packages.append((name, version))
+    return args.llvm, sorted(packages)
+
+
 def main():
+    llvm_linked, apk_packages = arguments()
     data = metadata()
     packages = {p["id"]: p for p in data["packages"]}
     workspace = set(data["workspace_members"])
@@ -121,7 +153,7 @@ def main():
             entry["externalReferences"] = [{"type": "vcs", "url": p["repository"]}]
         listed.append(entry)
 
-    llvm = llvm_version()
+    llvm = llvm_linked or llvm_version()
     if llvm:
         listed.append({
             "type": "library",
@@ -129,7 +161,20 @@ def main():
             "name": "llvm",
             "version": llvm,
             "purl": purl("llvm", llvm, kind="generic"),
-            "description": "Linked into the compiler through llvm-sys; the pin is exact.",
+            "description": (
+                "Linked into the compiler through llvm-sys, from the Alpine package named below."
+                if llvm_linked
+                else "Linked into the compiler through llvm-sys; the pin is exact."
+            ),
+        })
+    for name, version in apk_packages:
+        listed.append({
+            "type": "library",
+            "bom-ref": f"apk:{name}@{version}",
+            "name": name,
+            "version": version,
+            "purl": f"pkg:apk/alpine/{name}@{version}",
+            "description": "An Alpine package whose static library is linked into the executable.",
         })
     rust = rust_version()
     if rust:

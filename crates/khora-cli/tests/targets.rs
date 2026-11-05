@@ -83,21 +83,95 @@ fn a_musl_target_builds_a_static_program() {
     let (ok, out) = khora(&project, &["build", ".", "--target", triple]);
     assert!(ok, "{out}");
     let built = project.join("build").join("app");
-    let bytes = std::fs::read(&built).expect("the executable");
-
-    // PT_INTERP (3) and PT_DYNAMIC (2) are what a dynamic executable has.
-    let u16_at = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]) as usize;
-    let phoff = u64::from_le_bytes(bytes[32..40].try_into().unwrap()) as usize;
-    let kinds: Vec<u32> = (0..u16_at(56))
-        .map(|i| {
-            let at = phoff + i * u16_at(54);
-            u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
-        })
-        .collect();
-    assert!(!kinds.contains(&3) && !kinds.contains(&2), "a static executable: {kinds:?}");
+    let (kinds, needed) = linkage(&built);
+    assert!(!kinds.contains(&3) && !needed, "a static executable: {kinds:?}");
 
     let ran = Command::new(&built).env_clear().output().expect("running it");
     assert_eq!(String::from_utf8_lossy(&ran.stdout), "targeted\n");
+}
+
+/// The program header types of a 64-bit little-endian ELF executable, and
+/// whether its dynamic section names a shared library (`DT_NEEDED`).
+/// `PT_INTERP` (3) and a `DT_NEEDED` are what a dynamic one has; a static PIE
+/// has a `PT_DYNAMIC` (2) for its own relocations and neither of those.
+#[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_env = "musl")))]
+fn linkage(path: &std::path::Path) -> (Vec<u32>, bool) {
+    let bytes = std::fs::read(path).expect("the executable");
+    let u16_at = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]) as usize;
+    let u64_at = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap()) as usize;
+    let phoff = u64_at(32);
+    let headers: Vec<usize> = (0..u16_at(56)).map(|i| phoff + i * u16_at(54)).collect();
+    let kind = |h: usize| u32::from_le_bytes(bytes[h..h + 4].try_into().unwrap());
+    let needed = headers.iter().filter(|&&h| kind(h) == 2).any(|&h| {
+        let (at, len) = (u64_at(h + 8), u64_at(h + 32));
+        (at..at + len).step_by(16).map(u64_at).take_while(|&tag| tag != 0).any(|tag| tag == 1)
+    });
+    (headers.into_iter().map(kind).collect(), needed)
+}
+
+/// **On a musl system, `khora build` with no `--target` builds a static
+/// executable.**
+///
+/// What this prevents: a compiler running on Alpine linking its host build
+/// the glibc way, through the driver's own start files and `-lgcc_s`. On an
+/// Alpine with `clang` and `lld` that link fails on `crtbeginS.o` and
+/// `-lgcc_s`, which come from gcc; with gcc installed it succeeds and the
+/// program needs `libgcc_s.so.1` at run time, which a plain `alpine` image
+/// does not have. Runs only where the compiler itself is a musl build.
+#[cfg(all(target_os = "linux", target_env = "musl"))]
+#[test]
+fn a_musl_hosted_compiler_builds_static_by_default() {
+    let (_tmp, project) = project();
+    let (ok, out) = khora(&project, &["build", "."]);
+    assert!(ok, "{out}");
+    let built = project.join("build").join("app");
+    let (kinds, needed) = linkage(&built);
+    assert!(!kinds.contains(&3) && !needed, "a static executable: {kinds:?}");
+    // e_type at 16: a static PIE (ET_DYN, 3), which ASLR can move, as it can
+    // the glibc build -- not a fixed-address ET_EXEC (2).
+    let bytes = std::fs::read(&built).expect("the executable");
+    assert_eq!(u16::from_le_bytes([bytes[16], bytes[17]]), 3, "a static PIE");
+
+    let ran = Command::new(&built).env_clear().output().expect("running it");
+    assert_eq!(String::from_utf8_lossy(&ran.stdout), "targeted\n");
+}
+
+/// **A library built on a musl host can be opened with `dlopen`.**
+///
+/// What this prevents: a `--lib` that links into a C program and that
+/// `dlopen` refuses -- which is how plugin hosts and FFIs load a library --
+/// because musl's loader will not open an object with initial-exec
+/// thread-locals: "initial-exec TLS resolves to dynamic definition". glibc
+/// opens the same library, so only a musl host sees it. Needs a C compiler
+/// (`cc`), which `--lib` on a musl host already does.
+#[cfg(all(target_os = "linux", target_env = "musl"))]
+#[test]
+fn a_musl_hosted_library_opens_with_dlopen() {
+    let (_tmp, project) = project();
+    std::fs::write(
+        project.join("src").join("main.kh"),
+        "module app::main;\npub extern fn khora_answer() -> Int { 42 }\n",
+    )
+    .unwrap();
+    let lib = project.join("libapp.so");
+    let (ok, out) = khora(&project, &["build", ".", "--lib", "-o", lib.to_str().unwrap()]);
+    assert!(ok, "{out}");
+    let source = project.join("opened.c");
+    std::fs::write(
+        &source,
+        "#include <stdio.h>\n#include <stdint.h>\n#include <dlfcn.h>\n\
+         int main(int argc, char **argv) { (void)argc;\n\
+           void *h = dlopen(argv[1], RTLD_NOW);\n\
+           if (!h) { printf(\"dlopen: %s\\n\", dlerror()); return 1; }\n\
+           int64_t (*f)(void) = (int64_t (*)(void))dlsym(h, \"khora_answer\");\n\
+           printf(\"%lld\\n\", (long long)f()); return 0; }\n",
+    )
+    .unwrap();
+    let opener = project.join("opened");
+    let cc = Command::new("cc").arg(&source).arg("-o").arg(&opener).output().expect("cc");
+    assert!(cc.status.success(), "{}", String::from_utf8_lossy(&cc.stderr));
+    let ran = Command::new(&opener).arg(&lib).output().expect("running the opener");
+    assert_eq!(String::from_utf8_lossy(&ran.stdout), "42\n");
 }
 
 // --- native libraries in a musl build -----------------------------------
@@ -223,7 +297,7 @@ fn a_musl_build_finds_libm_in_libc() {
 // --- a runtime archive for the wrong C library ---------------------------
 
 /// `khora` with `KHORA_RT_LIB` set, which [`khora`] removes.
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 fn khora_with_runtime(project: &std::path::Path, archive: &std::path::Path, args: &[&str]) -> (bool, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_khora"))
         .args(args)
@@ -244,7 +318,11 @@ fn khora_with_runtime(project: &std::path::Path, archive: &std::path::Path, args
 /// into a glibc build (it ran, a glibc program carrying a musl-built Rust
 /// standard library), and a glibc archive in a musl build failing on
 /// `undefined symbol: fstat64`, which says nothing about which file is wrong.
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+///
+/// A glibc host only: it needs a host archive that is not musl, and on a musl
+/// host the compiler's own archive is the musl one, so the first half would
+/// be asking the build to refuse what it is meant to use.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[test]
 fn a_runtime_archive_for_another_target_is_refused() {
     if !musl_runtime_ready() {

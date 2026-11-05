@@ -91,31 +91,38 @@ cp LICENSE-MIT LICENSE-APACHE "$stage/"
 # runtime and the C library a static link needs, in one directory:
 #
 #     targets/<triple>/libkhora_rt.a
-#     targets/<triple>/sysroot/   crt1.o crti.o crtn.o crtbegin.o crtend.o
+#     targets/<triple>/sysroot/   rcrt1.o crti.o crtn.o crtbeginS.o crtendS.o
 #                                 libc.a libunwind.a
 #
 # which is where `khora build --target <triple>` looks, beside its own `bin/`.
-# Both architectures on both Linux runners: a musl link is the same files
+# The position-independent start and end files, because a musl program is
+# linked `-static-pie`; the toolchain names exactly these, so a set copied
+# from an older list -- `crt1.o crtbegin.o crtend.o` -- packages a toolchain
+# whose every musl link fails on a missing `rcrt1.o`, and only from the
+# archive: a source build reads Rust's whole `self-contained/` directory.
+# Both architectures on every Linux toolchain: a musl link is the same files
 # whichever machine runs it, so an x86-64 toolchain builds arm64 static
-# programs and the other way round.
+# programs and the other way round. **On a musl toolchain this is also what
+# `khora build` with no `--target` links**, because a musl host builds static
+# executables by default -- so the Alpine archive is not usable without it.
 #
 # The sysroot is Rust's own -- `rustup target add` installs musl's `libc.a`
 # and start files and LLVM's `libunwind.a` under `self-contained/` -- so the
 # runtime and the libc it is linked with come from one Rust toolchain. Their
-# licenses go in `licenses/`: musl's `crt1.o crti.o crtn.o libc.a` are MIT;
-# `libunwind.a`, `crtbegin.o` and `crtend.o` are LLVM's (compiler-rt's
+# licenses go in `licenses/`: musl's `rcrt1.o crti.o crtn.o libc.a` are MIT;
+# `libunwind.a`, `crtbeginS.o` and `crtendS.o` are LLVM's (compiler-rt's
 # `crtbegin.c`/`crtend.c`, which Rust builds with a gcc -- the `GCC: 9.4.0`
 # in their `.comment` names that compiler, not their source), all three under
 # Apache-2.0 with the LLVM exception.
 case "$triple" in
-    *-linux-gnu)
+    *-linux-gnu|*-linux-musl)
         mkdir -p "$stage/licenses"
         for musl in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
             headers=$(sh scripts/build-musl-runtime.sh "$musl" --release --print-headers)
             self=$(rustc --print sysroot)/lib/rustlib/$musl/lib/self-contained
             mkdir -p "$stage/targets/$musl/sysroot"
             cp "${CARGO_TARGET_DIR:-target}/$musl/release/libkhora_rt.a" "$stage/targets/$musl/"
-            for f in crt1.o crti.o crtn.o crtbegin.o crtend.o libc.a libunwind.a; do
+            for f in rcrt1.o crti.o crtn.o crtbeginS.o crtendS.o libc.a libunwind.a; do
                 cp "$self/$f" "$stage/targets/$musl/sysroot/"
             done
         done
@@ -145,11 +152,12 @@ object and needs a C driver to link it against this platform's runtime.
            development with C++" workload alone does not include clang
   macOS    xcode-select --install
   Linux    clang or gcc from your package manager
+  Alpine   apk add clang lld   (clang's package brings no linker)
 
 Licensed MIT OR Apache-2.0. See LICENSE-MIT and LICENSE-APACHE. On Linux,
 targets/ also holds what a static musl program links: musl's libc and start
-files (MIT, licenses/musl-COPYRIGHT), and LLVM's libunwind.a, crtbegin.o and
-crtend.o (Apache-2.0 WITH LLVM-exception, licenses/LLVM-LICENSE.TXT).
+files (MIT, licenses/musl-COPYRIGHT), and LLVM's libunwind.a, crtbeginS.o and
+crtendS.o (Apache-2.0 WITH LLVM-exception, licenses/LLVM-LICENSE.TXT).
 EOF
 
 # One archive per platform convention, so that whatever unpacks it on the other

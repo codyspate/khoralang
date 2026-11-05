@@ -14,18 +14,20 @@ The website must never describe emission-only support as deployable platform sup
 
 ## What is supported
 
-Four toolchains, and they are exactly the ones the release workflow builds, packages, and then uses to compile a program before publishing:
+Six toolchains, and they are exactly the ones the release workflow builds, packages, and then uses to compile a program before publishing:
 
 | triple | state | |
 | --- | --- | --- |
 | `x86_64-unknown-linux-gnu` | supported | on glibc 2.39 or newer — [see below](#the-linux-build-needs-glibc-239) |
 | `aarch64-unknown-linux-gnu` | supported | on glibc 2.39 or newer — Graviton, Ampere, arm64 containers |
+| `x86_64-unknown-linux-musl` | supported | Alpine — [see below](#the-toolchain-on-alpine) |
+| `aarch64-unknown-linux-musl` | supported | Alpine on arm64 |
 | `x86_64-pc-windows-msvc` | supported | |
 | `aarch64-apple-darwin` | supported | |
 
 A release is not published unless each of them has produced an artifact, unpacked it somewhere else, and built and run a program with it. That test is the reason this list is short: it is what has actually been done, not what is expected to work.
 
-Both Linux toolchains also build **static executables** for two more targets, which are targets for your programs rather than places the toolchain itself runs:
+Every Linux toolchain also builds **static executables** for two targets, wherever it runs:
 
 | triple | state | |
 | --- | --- | --- |
@@ -36,7 +38,7 @@ Both Linux toolchains also build **static executables** for two more targets, wh
 
 **Everything else is out of scope for this release**, which is a statement about what is promised rather than a prediction about what would happen if you tried:
 
-- **The toolchain itself on Alpine or another musl system.** Programs built for musl run there; the compiler does not, because it carries LLVM linked against glibc. Build on a glibc machine or image and copy the executable.
+- **A glibc program from the Alpine toolchain** (`--target x86_64-unknown-linux-gnu` on Alpine). The link needs glibc's start files and libraries, and an Alpine machine has none.
 - **Windows on arm64**, and **Linux on arm64 from a Windows or macOS toolchain**, are not built or tested.
 - **Cross-compiling a dynamically linked program** — `aarch64-unknown-linux-gnu` from an x86-64 machine, or anything for Linux from a Mac — is not supported. The compiler can emit for another target, and `KHORA_TARGET` will verify its code generation, but the link needs that target's glibc and nothing supplies it. Static musl executables are the exception: either Linux toolchain builds them for either architecture.
 - **WebAssembly, and Cloudflare Workers with it**, are not a target of this release. See below.
@@ -48,14 +50,17 @@ runtime and the musl C library into one statically linked executable. It has
 no dynamic loader and needs no C library on the machine that runs it, so it
 runs on any Linux kernel of that architecture: Alpine, a distroless `static`
 image, or an empty `scratch` container — [Containers](/docs/deployment/containers/#a-static-binary-in-a-scratch-image)
-has a Dockerfile.
+has a Dockerfile. It is a static PIE: position-independent, and relocated by
+its own start code, so the kernel loads it at a random address as it does a
+dynamically linked program.
 
 What a build needs:
 
 - **A Linux toolchain.** It carries the musl runtime and C library for both
   architectures in its `targets/` directory, so nothing is downloaded.
 - **A C compiler driver**, as for any build. For the machine's own
-  architecture `clang` or `gcc` will do.
+  architecture `clang` or `gcc` will do. On Alpine, `clang` and `lld`: the
+  `clang` package there has no linker of its own.
 - **For the other architecture, `clang` and `ld.lld`** (`apt install clang
   lld`): gcc cannot be told another target, and the system linker reads only
   its own machine's objects. Without them the build stops and says which is
@@ -92,6 +97,33 @@ Fibers on both backends, sockets, TLS client and server, and the standard
 library's own test suite run in a static build, and the release workflow
 builds and runs one with each packaged Linux toolchain before publishing.
 
+## The toolchain on Alpine
+
+The `*-unknown-linux-musl` toolchains run on Alpine, and `install.sh` chooses
+them there. The compiler is one statically linked executable: it needs no C
+library, so it also starts on any other Linux of its architecture.
+
+On Alpine, `khora build` with no `--target` builds a
+[static executable](#static-executables-musl) — that is the program an Alpine
+machine can run with nothing installed, and the one a `FROM alpine` image
+wants. `khora check`, `test`, `run`, `fmt` and the language server behave as on
+any other platform.
+
+What a build needs is `clang` and `lld`:
+
+```bash
+apk add clang lld
+```
+
+Alpine's `clang` package brings the driver and no linker; without `lld` (or
+gcc's `binutils`) the build stops and says to install it.
+
+The compiler walks a program on a 512 MB stack on Alpine as everywhere else.
+Measured with the release compiler on Alpine, a list literal of 100,000
+elements checks and one of 2,000,000 does not: past the limit the compiler
+stops with `thread 'khora' has overflowed its stack` and exit status 134,
+which is what the glibc compiler does with the same file.
+
 ## The Linux build needs glibc 2.39
 
 **Both Linux triples mean a recent one.** The published Linux
@@ -108,7 +140,7 @@ anything older — not with a degraded feature, but with
 | Debian 12 (bookworm), current stable | 2.36 | does not run |
 | Ubuntu 22.04 LTS | 2.35 | does not run |
 | RHEL 9 and rebuilds | 2.34 | does not run |
-| Alpine, and anything on musl | not glibc | does not run |
+| Alpine, and anything on musl | not glibc | runs the [musl toolchain](#the-toolchain-on-alpine) instead |
 
 That table is the honest reading of the release rule at the bottom of this
 page, applied to a detail the rule did not previously ask about: what a fresh
@@ -162,8 +194,8 @@ tar xzf "khora-$version-$triple.tar.gz" -C /opt
 
 Windows ships the same layout as a `.zip` rather than a `.tar.gz`.
 The archive unpacks to `khora-<version>-<triple>/` holding `bin/khora`, the
-runtime archive beside it, `std/` as source, and the licenses. A Linux
-archive also holds `targets/`, with the runtime and musl C library for each
+runtime archive beside it, `std/` as source, and the licenses. Every Linux
+archive, glibc or musl, also holds `targets/`, with the runtime and musl C library for each
 [static target](#static-executables-musl). Nothing needs
 configuring after unpacking: the compiler finds `std/` and the runtime beside
 its own binary, and `KHORA_STD` and `KHORA_RT_LIB` exist only as overrides for

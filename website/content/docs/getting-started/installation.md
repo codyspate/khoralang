@@ -96,9 +96,31 @@ lockfile instead of absorbing the difference.
 
 ## Linux system requirements
 
-The published Linux build is dynamically linked against glibc, and a glibc
-program cannot run against a library older than the one it was compiled
-against. The release is built on Ubuntu 24.04, so the published
+There are two Linux builds, and the installer picks the one for your C
+library:
+
+- **glibc** — Ubuntu, Debian, Fedora, RHEL and most other distributions. This
+  build is dynamically linked against glibc and needs a recent one, below.
+- **musl** — Alpine, and anything else built on musl. This build is a single
+  static executable that needs no C library at all, so it has no version
+  floor.
+
+The installer reads `ldd --version` to tell them apart: glibc's names glibc,
+and musl's names musl. On a machine with no `ldd`, it looks for the C
+library's own loader instead. To choose a build yourself, name it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/codyspate/khoralang/main/install.sh | sh -s -- --target x86_64-unknown-linux-musl
+```
+
+`--target` (or the `KHORA_INSTALL_TARGET` variable) names one of the published
+builds and skips detection; anything else is refused with the list. Run the
+installer with `--print-target` to see what it would choose.
+
+### The glibc build needs glibc 2.39
+
+A glibc program cannot run against a library older than the one it was
+compiled against. The release is built on Ubuntu 24.04, so the published
 `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` builds require
 **glibc 2.39 or newer**.
 
@@ -112,14 +134,22 @@ today are on both sides of it:
 | Debian 12 (bookworm) | 2.36 | does not run |
 | Ubuntu 22.04 LTS | 2.35 | does not run |
 | RHEL 9 and rebuilds | 2.34 | does not run |
-| Alpine, and anything on musl | not glibc | does not run |
+| Alpine, and anything on musl | not glibc | gets the musl build instead |
 
 `install.sh` checks this before it downloads anything, and refuses with the two
 numbers rather than installing a toolchain that cannot start. If you are on a
-distribution below the line, the options are a newer distribution — including
-a container built on one — or [building from
-source](#build-the-compiler-from-source), which links the compiler against the
-glibc you have.
+distribution below the line, there are three ways forward:
+
+- **install the musl build**, with `--target x86_64-unknown-linux-musl` (or
+  `aarch64-…`) as above. It needs no C library, so it runs on any glibc. The
+  programs it builds are static executables linked against musl rather than
+  your glibc, with the [costs and
+  exclusions](/docs/deployment/supported-targets/#static-executables-musl)
+  that brings, and `--lib` is not available from it: a library from the musl
+  build would need a musl machine to be loaded by;
+- a newer distribution, including a container built on one;
+- [building from source](#build-the-compiler-from-source), which links the
+  compiler against the glibc you have.
 
 This is about the toolchain. The programs it builds can avoid the question
 entirely: a [static executable](/docs/deployment/supported-targets/#static-executables-musl)
@@ -137,6 +167,35 @@ building on Ubuntu 24.04 and deploying to Debian 12 has the same problem for
 the same reason. [Containers](/docs/deployment/containers/) says to use the
 same base image in both stages, which is that advice.
 
+### Alpine
+
+The musl toolchain is published from Khora 0.5.0. The same command installs
+it:
+
+```bash
+apk add curl clang lld
+curl -fsSL https://raw.githubusercontent.com/codyspate/khoralang/main/install.sh | sh
+```
+
+`clang` and `lld` are the [linker requirement](#system-linker-requirement);
+Alpine's `clang` package brings no linker of its own, so `lld` is needed too.
+
+On Alpine, **`khora build` with no `--target` produces a static executable**:
+the program, the Khora runtime and musl's C library in one file, which runs in
+a plain `alpine` image or an empty `scratch` one with nothing installed. It is
+position-independent, so the kernel loads it at a random address, as it does a
+glibc program. It is the same build as `--target x86_64-unknown-linux-musl`
+(or `aarch64-…`) from any other Linux toolchain, and it has the same [costs
+and exclusions](/docs/deployment/supported-targets/#static-executables-musl).
+
+`khora build --lib` on Alpine builds a shared library linked against Alpine's
+own musl, for a host process on the same machine: a C program can link it, or
+open it at run time with `dlopen`. That
+link is a dynamic one and needs gcc's start files and `libgcc_s` as well:
+`apk add build-base`, without which the build stops and says so.
+`--target x86_64-unknown-linux-gnu` from Alpine is not supported: that link
+needs glibc's start files and libraries, which an Alpine machine does not have.
+
 ## System linker requirement
 
 Khora compiles to native object code, so producing an executable requires the platform's linker, C runtime, and system libraries. You do **not** need to install LLVM separately; LLVM is linked into the Khora compiler rather than invoked as an external program.
@@ -146,9 +205,10 @@ Khora compiles to native object code, so producing an executable requires the pl
 | macOS | `xcode-select --install` |
 | Debian / Ubuntu | `apt install clang` or `apt install build-essential` |
 | Fedora / RHEL | `dnf install clang` or `dnf install gcc` |
+| Alpine | `apk add clang lld` |
 | Windows | [LLVM](https://releases.llvm.org), or the Visual Studio Build Tools with the **C++ Clang tools for Windows** component |
 
-On Linux and macOS any of `clang`, `cc` or `gcc` will do as the driver. Windows needs `clang` specifically: the **Desktop development with C++** workload does not install it by itself — its **C++ Clang tools for Windows** component is separate — and MSVC's own `cl.exe` is not a substitute, because the driver is what locates the C runtime and system libraries. Installing LLVM is the shorter route.
+On Linux and macOS any of `clang`, `cc` or `gcc` will do as the driver; on Alpine the driver also needs a linker beside it, which `lld` is. Windows needs `clang` specifically: the **Desktop development with C++** workload does not install it by itself — its **C++ Clang tools for Windows** component is separate — and MSVC's own `cl.exe` is not a substitute, because the driver is what locates the C runtime and system libraries. Installing LLVM is the shorter route.
 
 The installer checks for a usable linker and tells you if one is missing.
 

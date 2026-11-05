@@ -60,8 +60,9 @@ The executable is `build/<package>`. Run it:
 
 Nothing else is copied to the target host. The binary carries the Khora runtime
 and does not need `std/`, the compiler, or a language VM beside it. What it does
-need is the system C library it was linked against — a default build is
-dynamically linked against glibc — and `ca-certificates`, if the service opens outbound TLS
+need is the system C library it was linked against — a default build on a
+glibc distribution is dynamically linked against glibc, and one on Alpine is
+static — and `ca-certificates`, if the service opens outbound TLS
 connections, because a `TlsClient` verifies against the machine's own trust
 store. To need no C library at all, build a static executable with
 `--target x86_64-unknown-linux-musl` (or `aarch64-unknown-linux-musl`); see
@@ -84,7 +85,7 @@ debugger to see the runtime's frames.
 **Build on the architecture you deploy to, or build static.** A dynamically
 linked program for another architecture is not supported: `KHORA_TARGET` makes
 the compiler emit for another triple, but the link needs that triple's glibc.
-A static musl executable is the exception — either Linux toolchain builds one
+A static musl executable is the exception — every Linux toolchain builds one
 for either architecture, given `clang` and `ld.lld`.
 
 ## Running it under systemd

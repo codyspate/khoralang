@@ -57,23 +57,33 @@ A target is only called supported when the compiler, runtime, linker/sysroot,
 packaging, CI and deployment path work end to end. [Supported
 targets](/docs/deployment/supported-targets/) lists the ones that do.
 
-The toolchain runs on four: `x86_64-unknown-linux-gnu`,
-`aarch64-unknown-linux-gnu`, `x86_64-pc-windows-msvc` and
-`aarch64-apple-darwin`. The two Linux toolchains also build static executables
+The toolchain runs on six: `x86_64-unknown-linux-gnu`,
+`aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-musl` and
+`aarch64-unknown-linux-musl` (Alpine), `x86_64-pc-windows-msvc` and
+`aarch64-apple-darwin`. Every Linux toolchain also builds static executables
 for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`, which run on
-Alpine and in a `scratch` image. What is not covered:
+Alpine and in a `scratch` image; on Alpine that is what `khora build` produces
+by default. What is not covered:
 
-- **The toolchain itself on Alpine or another musl system.** It carries LLVM
-  linked against glibc. Build elsewhere and copy the executable in.
+- **A glibc program from the Alpine toolchain** (`--target
+  x86_64-unknown-linux-gnu` on Alpine): the link needs glibc, which Alpine
+  does not have.
 - **Windows on arm64**, and **Linux on arm64 from a Windows or macOS
   toolchain.**
 - **A dynamically linked program for another architecture** —
   `aarch64-unknown-linux-gnu` from an x86-64 machine, say — because the link
   needs that architecture's glibc. Build it on an arm64 machine, or build a
-  static musl executable, which either Linux toolchain does for either
+  static musl executable, which every Linux toolchain does for either
   architecture.
-- **A musl shared library** (`--lib` with a musl target), which the build
+- **A musl shared library** (`--lib` with a musl `--target`), which the build
   refuses: it would carry a second C library into the process that loads it.
+  On Alpine, `--lib` without `--target` builds a library linked against
+  Alpine's own musl, which needs `apk add build-base` for gcc's start files;
+  it can be linked into a program or opened with `dlopen`.
+- **A shared library from the musl toolchain on a glibc machine.** The musl
+  toolchain runs anywhere, being static, but a library it built there would
+  be musl's runtime linked to glibc, so `--lib` refuses unless the machine's
+  C library is musl.
 
 ## Recursion depth and very large lists
 

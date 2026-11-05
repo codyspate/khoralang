@@ -64,6 +64,21 @@ rustls-native-certs = "0.8"
 # ours to implement.
 corosensei = "0.3"
 
+# **A musl `--lib` must be loadable with `dlopen`.** mimalloc compiles its
+# thread-locals with the initial-exec model by default, and musl's loader
+# refuses that in a `dlopen`ed object -- "initial-exec TLS resolves to dynamic
+# definition" -- where glibc tolerates it out of its static-TLS surplus. So a
+# library built on Alpine linked into a C program and could not be opened
+# with `dlopen` at all. The rest of the runtime's thread-locals are
+# Rust's, which are already general-dynamic.
+#
+# What it costs: in a shared library each mimalloc thread-local access goes
+# through `__tls_get_addr`. In an executable, which is every other musl build,
+# the linker relaxes the access back to a direct one, so programs pay nothing.
+# Glibc targets keep the faster model, since nothing there refuses it.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { version = "0.1", default-features = false, features = ["local_dynamic_tls"] }
+
 # The reactor's one platform-specific call. Both are already in the tree
 # through `rustls-native-certs`, so naming them here costs no build time and
 # buys not hand-declaring a struct whose width differs per platform.

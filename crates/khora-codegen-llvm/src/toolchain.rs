@@ -205,8 +205,18 @@ pub fn runtime_archive() -> Option<PathBuf> {
         // it either fails on a glibc-only symbol or, worse, links -- a program
         // carrying two C libraries' assumptions about one process. "Not found,
         // build it with this" is the better message by a distance.
-        if is_musl(triple) {
+        if is_musl(triple) && host_musl_triple().as_deref() != Some(triple.as_str()) {
             return candidates.into_iter().find(|p| p.is_file());
+        }
+    }
+    // **A musl host's own build looks where a packaged toolchain keeps the
+    // static runtime first**, `targets/<triple>/`, because that is where the
+    // C library the static link needs sits beside it. A build from source has
+    // no `targets/`, and its host archive is a musl one, so the probes below
+    // are right for it.
+    if triple.is_none() {
+        if let Some(host) = host_musl_triple() {
+            candidates.extend(cross_archive_candidates(&host));
         }
     }
 
@@ -249,6 +259,53 @@ pub fn is_musl(triple: &str) -> bool {
     triple.ends_with("-musl")
 }
 
+/// The musl triple this compiler runs on, when it is a musl build.
+///
+/// **A compiler running on Alpine builds a static executable by default.**
+/// Without this a build with no `--target` took the glibc path: the driver's
+/// own start files and `-lgcc_s`. On an Alpine with `clang` and `lld` that
+/// failed on `crtbeginS.o` and `-lgcc_s`, which only gcc supplies; with gcc
+/// it linked a program needing `libgcc_s.so.1`, which a plain `alpine` image
+/// does not have. The static link needs nothing from the machine but a
+/// linker, so it is the one that works on every Alpine.
+///
+/// `None` on every other host, whose builds are unchanged.
+pub fn host_musl_triple() -> Option<String> {
+    cfg!(all(target_os = "linux", target_env = "musl"))
+        .then(|| format!("{}-unknown-linux-musl", std::env::consts::ARCH))
+}
+
+/// Whether this machine's own C library is musl, which is what a shared
+/// library from a musl toolchain is linked against and loaded by.
+///
+/// What this prevents: the musl toolchain on a glibc machine -- which it runs
+/// on, statically -- building a `--lib` that links the runtime, compiled
+/// against musl's structure layouts and symbols, to glibc's `libc.so.6`. The
+/// link succeeds and the library is wrong. musl's loader alone is not the
+/// test: Debian's `musl` package installs one beside glibc, and `cc` there
+/// still links glibc. So glibc's `libc.so.6` must be absent as well.
+fn host_libc_is_musl() -> bool {
+    let arch = std::env::consts::ARCH;
+    let glibc = [
+        format!("/lib/{arch}-linux-gnu/libc.so.6"),
+        format!("/usr/lib/{arch}-linux-gnu/libc.so.6"),
+        "/lib64/libc.so.6".to_string(),
+        "/usr/lib64/libc.so.6".to_string(),
+        "/lib/libc.so.6".to_string(),
+        "/usr/lib/libc.so.6".to_string(),
+    ];
+    Path::new(&format!("/lib/ld-musl-{arch}.so.1")).exists() && !glibc.iter().any(|p| Path::new(p).exists())
+}
+
+/// The triple a link is for when it is a static musl link: the one
+/// `KHORA_TARGET` names, or a musl host's own when it names none.
+fn musl_link_triple() -> Option<String> {
+    match khora_db::target_triple() {
+        Some(named) => is_musl(&named).then_some(named),
+        None => host_musl_triple(),
+    }
+}
+
 /// Where a target's runtime archive can be, relative to the running compiler.
 ///
 /// Two layouts, both found without configuration:
@@ -283,18 +340,26 @@ fn cross_archive_candidates(triple: &str) -> Vec<PathBuf> {
 /// runtime archive was built against. Taking them from there means the two
 /// cannot disagree about the libc.
 ///
-/// **And `crtbegin.o` and `crtend.o`** from the same directory, which are
+/// **And `crtbeginS.o` and `crtendS.o`** from the same directory, which are
 /// LLVM compiler-rt's `crtbegin.c`/`crtend.c` (Apache-2.0 WITH LLVM-exception,
 /// like `libunwind.a`; Rust compiles them with a gcc, which is all the
-/// `GCC: 9.4.0` in their `.comment` says). `crtend.o` holds
+/// `GCC: 9.4.0` in their `.comment` says). `crtendS.o` holds
 /// the zero word that ends `.eh_frame`. lld writes one of its own and GNU ld
 /// does not, so without it a static program linked by bfd segfaults inside
 /// its own trap report when `KHORA_BACKTRACE=1` walks the frames. Rust links
 /// the same pair for the same target.
-const MUSL_START: &[&str] = &["crt1.o", "crti.o", "crtbegin.o"];
+///
+/// **The position-independent set: `rcrt1.o`, `crtbeginS.o`, `crtendS.o`**,
+/// because the link is `-static-pie`. A static executable at a fixed address
+/// gave every musl program -- and every default build on Alpine -- an image
+/// that ASLR cannot move, where the glibc build has always been a PIE.
+/// `rcrt1.o` relocates the image itself before `main`, so there is still no
+/// loader and no shared library; what it costs is that relocation at start,
+/// a few hundred microseconds at most for the runtime's relocation table.
+const MUSL_START: &[&str] = &["rcrt1.o", "crti.o", "crtbeginS.o"];
 /// What closes a static musl link, in this order: the unwinder and the C
 /// library after everything that calls them, then the end files.
-const MUSL_END: &[&str] = &["libunwind.a", "libc.a", "crtend.o", "crtn.o"];
+const MUSL_END: &[&str] = &["libunwind.a", "libc.a", "crtendS.o", "crtn.o"];
 
 /// Where the musl start files and C library are for `triple`.
 ///
@@ -534,7 +599,13 @@ pub fn link_with_runtime(
         }
         return drive_wasm_ld(objects, runtime.as_path(), out, exports);
     }
-    if let Some(triple) = khora_db::target_triple().filter(|t| is_musl(t)) {
+    // **A shared library on a musl host stays dynamic**, against the machine's
+    // own musl: a static one would carry a second copy of `libc.a` into the
+    // process loading it, which already has the machine's. Only a library for
+    // a musl triple named with `--target` is refused, because then there is no
+    // machine C library to link against.
+    let explicit = khora_db::target_triple().is_some();
+    if let Some(triple) = musl_link_triple().filter(|_| explicit || !library) {
         if library {
             return Err(format!(
                 "`{triple}` builds a static executable, and a shared library cannot be one: \
@@ -545,6 +616,28 @@ pub fn link_with_runtime(
         }
         let sysroot = musl_sysroot(&triple, &runtime)?;
         return drive_static_musl(&triple, objects, &runtime, &sysroot, out, profile, &natives);
+    }
+    // **A shared library from the musl toolchain needs a musl machine.** The
+    // toolchain runs on any Linux, since it is static, and on a glibc one a
+    // `--lib` linked: the musl runtime against `libc.so.6`, which loads and is
+    // wrong. See `host_libc_is_musl`.
+    if library && host_musl_triple().is_some() && !host_libc_is_musl() {
+        return Err("this is the musl toolchain, and this machine's C library is not musl: \
+                    a shared library from it would hold a runtime built for musl linked \
+                    against another C library. Build libraries with the toolchain for \
+                    this machine's C library, or on a musl system such as Alpine."
+            .to_string());
+    }
+    // **A shared library on a musl host is a dynamic link against the machine's
+    // own C runtime**, which on Alpine is gcc's start files and `libgcc_s` and
+    // the `ld` they come with -- `build-base`. With only `clang` and `lld`, the
+    // packages a static build needs, clang failed with `posix_spawn failed: No
+    // such file or directory`, naming neither the program nor the package.
+    if library && host_musl_triple().is_some() && which("ld").is_none() {
+        return Err("building a shared library here needs the system linker `ld` and gcc's \
+                    start files, which a static build does not: on Alpine, \
+                    `apk add build-base`."
+            .to_string());
     }
     drive_clang(objects, &[runtime.as_path()], out, library, profile, &natives)
 }
@@ -581,6 +674,18 @@ fn drive_static_musl(
 ) -> Result<(), String> {
     let clang = linker().ok_or_else(no_linker)?;
     let lld = tool("ld.lld").or_else(|| which("ld.lld"));
+    // **A driver is not a linker.** Alpine's `clang` package brings no linker
+    // at all, and the link then failed with clang's `posix_spawn failed: No
+    // such file or directory`, which names neither the missing program nor
+    // the package that has it.
+    if lld.is_none() && which("ld").is_none() {
+        return Err(format!(
+            "linking for `{triple}` needs a linker, and neither `ld.lld` nor `ld` is on PATH. \
+             {} is a C driver, which runs a linker rather than being one: install `lld` from \
+             your package manager (on Alpine, `apk add lld`).",
+            clang.display()
+        ));
+    }
     let mut cmd = std::process::Command::new(&clang);
     cmd.args(static_musl_flags(triple, &clang, lld.as_deref(), std::env::consts::ARCH)?);
     cmd.args(MUSL_START.iter().map(|f| sysroot.join(f)));
@@ -907,11 +1012,15 @@ fn check_archive_target(archive: &Path) -> Result<(), String> {
 }
 
 /// The triple a build with no `KHORA_TARGET` is for, where this can say it
-/// without a build script: a Linux compiler is always built for the glibc
-/// triple of its architecture, which is the only Linux toolchain published.
+/// without a build script: a Linux compiler is built for the glibc or the musl
+/// triple of its architecture, and those are the Linux toolchains published.
 /// Elsewhere `None`, and a host build is not checked -- the mismatch this
-/// guards against is a musl archive, and only Linux has one.
+/// guards against is between a glibc and a musl archive, and only Linux has
+/// either.
 fn host_linux_triple() -> Option<String> {
+    if let Some(musl) = host_musl_triple() {
+        return Some(musl);
+    }
     cfg!(all(target_os = "linux", target_env = "gnu"))
         .then(|| format!("{}-unknown-linux-gnu", std::env::consts::ARCH))
 }
@@ -992,9 +1101,9 @@ fn static_musl_flags(
             flags.push(format!("-fuse-ld={}", lld.display()));
         }
     }
-    flags.extend(["-static".to_string(), "-nostdlib".to_string()]);
+    flags.extend(["-static-pie".to_string(), "-nostdlib".to_string()]);
     // The unwinder finds `.eh_frame` through `PT_GNU_EH_FRAME`, and gcc's
-    // `-static` spec does not ask the linker for one (clang's does). Without
+    // static spec does not ask the linker for one (clang's does). Without
     // it, `KHORA_BACKTRACE=1` on a trap prints `unsupported backtrace`.
     flags.push("-Wl,--eh-frame-hdr".to_string());
     Ok(flags)
@@ -1021,7 +1130,7 @@ mod tests {
             flags.iter().all(|f| !f.starts_with("--target")),
             "gcc does not take --target: {flags:?}"
         );
-        assert!(flags.iter().any(|f| f == "-static") && flags.iter().any(|f| f == "-nostdlib"));
+        assert!(flags.iter().any(|f| f == "-static-pie") && flags.iter().any(|f| f == "-nostdlib"));
         assert!(
             flags.iter().any(|f| f == "-Wl,--eh-frame-hdr"),
             "gcc's -static spec omits PT_GNU_EH_FRAME, so the link must ask: {flags:?}"
@@ -1043,7 +1152,7 @@ mod tests {
         assert!(refused.contains("clang"), "{refused}");
     }
 
-    /// **`crtend.o` closes the link.** It holds the zero word that ends
+    /// **`crtendS.o` closes the link.** It holds the zero word that ends
     /// `.eh_frame`; GNU ld does not write one, and a backtrace walking a list
     /// with no end runs off it: `KHORA_BACKTRACE=1` on a trapping static
     /// program linked by bfd segfaulted inside the trap report. lld writes its
@@ -1051,9 +1160,55 @@ mod tests {
     /// it. The link must not depend on which linker the machine has.
     #[test]
     fn a_static_musl_link_ends_eh_frame_whichever_linker_runs() {
-        assert!(MUSL_START.contains(&"crtbegin.o"), "{MUSL_START:?}");
-        assert!(MUSL_END.contains(&"crtend.o"), "{MUSL_END:?}");
+        assert!(MUSL_START.contains(&"crtbeginS.o"), "{MUSL_START:?}");
+        assert!(MUSL_END.contains(&"crtendS.o"), "{MUSL_END:?}");
         assert_eq!(MUSL_END.last(), Some(&"crtn.o"), "crtn.o is last: {MUSL_END:?}");
+    }
+
+    /// **A musl executable is a static PIE.** What this prevents: a static
+    /// executable at a fixed address, which ASLR cannot move -- the default
+    /// output on Alpine, where the glibc build is a PIE. `-static-pie` needs
+    /// the self-relocating start file `rcrt1.o`; `crt1.o` in a PIE link
+    /// starts a program whose own relocations were never applied.
+    #[test]
+    fn a_musl_executable_is_a_static_pie() {
+        assert_eq!(MUSL_START.first(), Some(&"rcrt1.o"), "{MUSL_START:?}");
+        for driver in ["/usr/bin/gcc", "/opt/llvm/bin/clang"] {
+            let flags = static_musl_flags(
+                "x86_64-unknown-linux-musl",
+                Path::new(driver),
+                Some(Path::new("/opt/llvm/bin/ld.lld")),
+                "x86_64",
+            )
+            .expect("a link for its own architecture");
+            assert!(flags.iter().any(|f| f == "-static-pie"), "{driver}: {flags:?}");
+            assert!(flags.iter().all(|f| f != "-static"), "{driver}: {flags:?}");
+        }
+    }
+
+    /// **The packaged sysroot holds every file the musl link names.** What
+    /// this prevents: `scripts/package.sh` copying its own list of start files
+    /// into `targets/<triple>/sysroot/`, which the toolchain's list can move
+    /// away from -- it did, when the link became `-static-pie` and the archive
+    /// still carried `crt1.o crtbegin.o crtend.o`. A source build reads Rust's
+    /// whole `self-contained/` directory, so every test here passed and every
+    /// musl build from the packaged toolchain failed on a missing `rcrt1.o`.
+    #[test]
+    fn the_packaged_musl_sysroot_holds_what_the_link_names() {
+        let script = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/package.sh"),
+        )
+        .expect("scripts/package.sh");
+        let copied = script
+            .lines()
+            .map(str::trim)
+            .filter_map(|l| l.strip_prefix("for f in ").and_then(|l| l.strip_suffix("; do")))
+            .find(|l| l.contains("libc.a"))
+            .expect("package.sh's `for f in ... libc.a ...; do` sysroot list");
+        let copied: Vec<&str> = copied.split_whitespace().collect();
+        for file in MUSL_START.iter().chain(MUSL_END) {
+            assert!(copied.contains(file), "package.sh does not package {file}: it copies {copied:?}");
+        }
     }
 
     /// clang is told the triple, and given lld by path.

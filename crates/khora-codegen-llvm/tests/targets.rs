@@ -555,10 +555,16 @@ fn static_program(dir: &std::path::Path, triple: &str, source: &str) -> PathBuf 
 
 /// What an ELF executable's program headers say about how it starts.
 ///
-/// `(machine, interpreter, dynamic)`: the `e_machine` field, whether there is a
-/// `PT_INTERP` naming a dynamic loader, and whether there is a `PT_DYNAMIC`
-/// segment for one to process. A static executable has neither, and that is
-/// the whole of what lets it run in an image with no loader and no libc.
+/// `(machine, interpreter, needs_libraries)`: the `e_machine` field, whether
+/// there is a `PT_INTERP` naming a dynamic loader, and whether its dynamic
+/// section has a `DT_NEEDED` entry naming a shared library. A static
+/// executable has neither, and that is the whole of what lets it run in an
+/// image with no loader and no libc.
+///
+/// **Not "no `PT_DYNAMIC`"**, which is what this checked while musl programs
+/// were linked at a fixed address. A static PIE has a dynamic section -- its
+/// own relocations, which `rcrt1.o` applies before `main` -- and needs nothing
+/// from outside itself.
 ///
 /// Read from the file rather than from `file(1)`, which is not on every
 /// runner and whose wording varies between versions.
@@ -570,9 +576,15 @@ fn elf_linkage(bytes: &[u8]) -> (u16, bool, bool) {
     let u64_at = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
     let machine = u16_at(18);
     let (offset, size, count) = (u64_at(32) as usize, u16_at(54) as usize, u16_at(56) as usize);
-    let kinds: Vec<u32> = (0..count).map(|i| u32_at(offset + i * size)).collect();
-    // PT_INTERP is 3, PT_DYNAMIC is 2.
-    (machine, kinds.contains(&3), kinds.contains(&2))
+    let headers: Vec<usize> = (0..count).map(|i| offset + i * size).collect();
+    // PT_INTERP is 3, PT_DYNAMIC is 2; in the dynamic section DT_NEEDED is 1
+    // and DT_NULL (0) ends it.
+    let interpreter = headers.iter().any(|&h| u32_at(h) == 3);
+    let needs = headers.iter().filter(|&&h| u32_at(h) == 2).any(|&h| {
+        let (at, len) = (u64_at(h + 8) as usize, u64_at(h + 32) as usize);
+        (at..at + len).step_by(16).map(u64_at).take_while(|&tag| tag != 0).any(|tag| tag == 1)
+    });
+    (machine, interpreter, needs)
 }
 
 /// **A musl program is one file that needs nothing from the machine.**
@@ -581,9 +593,10 @@ fn elf_linkage(bytes: &[u8]) -> (u16, bool, bool) {
 /// machine that built it, and fails in a `scratch` image. Running it here
 /// proves only the first two, because this machine has a loader and a libc;
 /// a dynamically linked executable runs here too. So the program headers are
-/// read as well: no `PT_INTERP` (no loader is asked for) and no `PT_DYNAMIC`
-/// (nothing is left for one to resolve). Linux only: musl is a Linux C
-/// library, and the program is run.
+/// read as well: no `PT_INTERP` (no loader is asked for) and no `DT_NEEDED`
+/// (no shared library is asked for). And `ET_DYN`: it is a static PIE, which
+/// ASLR can move, where a fixed-address `ET_EXEC` could not be. Linux only:
+/// musl is a Linux C library, and the program is run.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_musl_program_is_static_and_runs() {
@@ -601,9 +614,12 @@ fn a_musl_program_is_static_and_runs() {
         "module demo::main;\nfn print(value: String);\nfn main() -> Int { print(\"static\"); 0 }\n",
     );
 
-    let (_, interpreter, dynamic) = elf_linkage(&std::fs::read(&exe).expect("the executable"));
+    let bytes = std::fs::read(&exe).expect("the executable");
+    let (_, interpreter, dynamic) = elf_linkage(&bytes);
     assert!(!interpreter, "a static executable names no dynamic loader");
-    assert!(!dynamic, "a static executable has nothing left to resolve at load time");
+    assert!(!dynamic, "a static executable asks for no shared library");
+    // e_type at 16: ET_EXEC is 2, ET_DYN is 3.
+    assert_eq!(u16::from_le_bytes([bytes[16], bytes[17]]), 3, "a static PIE, which ASLR can move");
 
     // With an empty environment, so nothing from this process -- a
     // `LD_LIBRARY_PATH`, a preload -- can be what made it work.

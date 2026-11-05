@@ -560,6 +560,25 @@ it will behave differently now.
 
 ### Added
 
+- The toolchain runs on Alpine: `x86_64-unknown-linux-musl` and
+  `aarch64-unknown-linux-musl` toolchains, each one statically linked
+  executable that needs no C library, and `install.sh` chooses them on a
+  musl system by reading `ldd --version`. On Alpine, `khora build` with no
+  `--target` builds a static executable, which runs in a plain `alpine` or a
+  `scratch` image; `--lib` builds a library against Alpine's own musl, given
+  `build-base`, which a C program can link or open with `dlopen`. A
+  build there needs `apk add clang lld`, and with no linker on `PATH` stops
+  saying to install `lld`. `install.sh --print-target` prints which build a
+  machine gets; `--from DIR` installs an archive already on disk; `--target`
+  (or `KHORA_INSTALL_TARGET`) installs a named build without detection, and a
+  glibc too old for the glibc build is offered the musl one, which runs on
+  it. Each musl archive has a CycloneDX bill of materials naming the Alpine
+  packages linked into it. `--target x86_64-unknown-linux-gnu` from Alpine
+  is not supported.
+- A static musl executable is a static PIE (`ET_DYN`, started by `rcrt1.o`),
+  so the kernel loads it at a random address, as it does a glibc build. This
+  holds for `--target *-musl` from every Linux toolchain as well as for the
+  default build on Alpine.
 - `for` walks a `Vector`, an `Array`, a `Map` and a `Dict`, as it walks a
   `List` and a `Range`, with the same `import std::core::{Iterator, Step}`.
   A `Vector` or `Array` yields its elements in index order; a `Dict` yields a

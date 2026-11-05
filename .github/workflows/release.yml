@@ -45,6 +45,13 @@ on:
       tag:
         description: "The tag of the draft release to attach to, e.g. v0.1.0"
         required: true
+      alpine-only:
+        description: >-
+          Build and smoke-test only the Alpine toolchains, and attach nothing.
+          For trying the Alpine jobs from a branch: the tag is then only the
+          version the archives are named for.
+        type: boolean
+        default: false
 
 # **Read by default, and write only where something is written.** This was
 # `contents: write` for the whole workflow, which handed a token that can push
@@ -63,6 +70,7 @@ env:
 jobs:
   build:
     name: package (${{ matrix.os }})
+    if: ${{ !inputs.alpine-only }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -231,16 +239,18 @@ jobs:
           # the link rather than whatever a user's machine has. The
           # cross-architecture link, the one that needs `ld.lld`, is not run
           # here at all. The result is run with an empty environment, and
-          # checked for the two program headers a dynamic executable has and
-          # a static one does not.
+          # checked for what a dynamic executable has and a static one does
+          # not: a loader (`PT_INTERP`) or a shared library (`NEEDED`). A
+          # static PIE has a dynamic section of its own relocations, so
+          # `DYNAMIC` alone is not the test.
           if [ "$RUNNER_OS" = "Linux" ]; then
             musl="$(uname -m)-unknown-linux-musl"
             PATH=/usr/bin:/bin "$GITHUB_WORKSPACE/dist/$name/bin/khora" build . \
               --target "$musl" -o static-first
             file static-first
-            if readelf -l static-first | grep -qE 'INTERP|DYNAMIC'; then
+            if readelf -l static-first | grep -q INTERP || readelf -d static-first | grep -q NEEDED; then
               echo "The $musl build is not static:"
-              readelf -l static-first
+              readelf -l -d static-first
               exit 1
             fi
             said=$(env -i ./static-first)
@@ -275,6 +285,110 @@ jobs:
             dist/*.cdx.json
           if-no-files-found: error
 
+  # **The toolchain for Alpine, built in Alpine.** A musl `khora` needs LLVM's
+  # libraries built for musl; LLVM publishes none and Alpine ships them, so the
+  # build runs in an `alpine` image (`scripts/build-alpine.sh` says what that
+  # costs). Run with `docker run` rather than `container:` because GitHub's
+  # arm64 runners do not run JavaScript actions inside a job container, and
+  # `checkout` and `upload-artifact` are both JavaScript.
+  #
+  # **Smoke-tested in a second, clean `alpine` container** with nothing in it
+  # but `clang` and `lld`: `install.sh` from the built archive, then `new`,
+  # `build` and run, `check`, `fmt`, `test` on `examples/khq`, `run`, the
+  # language server reporting a type error in a file it is given, and a
+  # `--lib` linked into a C program and opened with `dlopen` --
+  # `scripts/alpine-smoke.sh`.
+  #
+  # `workflow_dispatch` with `alpine-only` runs this and nothing else, from any
+  # branch, so it can be tried before a candidate is tagged.
+  alpine:
+    name: package (alpine, ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    env:
+      # By digest, the multi-architecture index, so each runner pulls its own
+      # architecture's image of exactly this one. A tag moves: `3.24` is
+      # re-pushed for every point release and security rebuild, and a
+      # release's Alpine archive would be built from whichever was current
+      # that day. Moving it is a deliberate edit, with the date it was read.
+      # alpine:3.24, read from Docker Hub on 2026-11-05.
+      ALPINE: alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      # On a dispatch with `alpine-only`, the branch the run was started from;
+      # otherwise the tag, for the reason the `build` job gives.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.alpine-only && github.ref || github.event.release.tag_name || inputs.tag }}
+
+      # Seconds, and before the build: an installer that sends Alpine to the
+      # glibc archive makes everything below unreachable for a user.
+      - name: install.sh picks the build for the C library
+        run: sh scripts/check-install-target.sh
+
+      # Cargo's registry, rustup and the target directory, kept between runs.
+      # They are written by root inside the container, so the cache is taken
+      # from a directory the runner owns rather than from `~/.cargo`.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/alpine-cache
+          key: alpine-3.24-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: alpine-3.24-${{ matrix.arch }}-
+
+      - name: Build and package in Alpine
+        run: |
+          set -eu
+          cache="$RUNNER_TEMP/alpine-cache"
+          mkdir -p "$cache/cargo" "$cache/rustup" "$cache/target"
+          docker run --rm \
+            -v "$PWD:/src" -w /src \
+            -v "$cache/cargo:/cache/cargo" -v "$cache/rustup:/cache/rustup" \
+            -v "$cache/target:/cache/target" \
+            -e CARGO_HOME=/cache/cargo -e RUSTUP_HOME=/cache/rustup \
+            -e CARGO_TARGET_DIR=/cache/target \
+            "$ALPINE" sh scripts/build-alpine.sh "${TAG#v}"
+          # Root wrote these; the runner has to be able to read and cache them.
+          sudo chown -R "$(id -u):$(id -g)" dist "$cache"
+          ls -l dist
+
+      - name: The compiler is one static executable
+        run: |
+          set -eu
+          name="khora-${TAG#v}-${{ matrix.arch }}-unknown-linux-musl"
+          tar xzf "dist/$name.tar.gz" -C "$RUNNER_TEMP"
+          bin="$RUNNER_TEMP/$name/bin/khora"
+          file "$bin"
+          if readelf -d "$bin" | grep -q NEEDED; then
+            echo "The Alpine khora needs shared libraries:"
+            readelf -d "$bin" | grep NEEDED
+            exit 1
+          fi
+          # Outside the checkout: its `khora.toml` pins the version in
+          # `Cargo.toml`, and a candidate's `khora` is stamped with the tag's,
+          # so in the checkout it refuses with "this project pins Khora X".
+          cd "$RUNNER_TEMP"
+          "$bin" --version
+
+      - name: Install and use it in a clean Alpine
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src "$ALPINE" \
+            sh scripts/alpine-smoke.sh "${TAG#v}" dist
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: khora-alpine-${{ matrix.arch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+            dist/*.cdx.json
+          if-no-files-found: error
+
   attach:
     name: attach to ${{ github.event.release.tag_name || inputs.tag }}
     # The one job that writes, and the only one with a token that can.
@@ -289,7 +403,13 @@ jobs:
       # not do.
       id-token: write
       attestations: write
-    needs: build
+    # **Every archive, or none.** The Alpine jobs are as much a gate as the
+    # others: `install.sh` sends every musl machine to the musl archive, so a
+    # release that attached the glibc and macOS ones without it would be one
+    # Alpine cannot install. A red Alpine job stops the release; see README's
+    # "Cutting one".
+    needs: [build, alpine]
+    if: ${{ !inputs.alpine-only }}
     runs-on: ubuntu-latest
     steps:
       # Release notes and attestations must describe the same tagged source
@@ -382,7 +502,7 @@ jobs:
   # branch for an authenticated maintainer to open and merge as a separate step.
   docs:
     name: prepare stable documentation tree
-    if: ${{ !contains(github.event.release.tag_name || inputs.tag, '-rc.') }}
+    if: ${{ !inputs.alpine-only && !contains(github.event.release.tag_name || inputs.tag, '-rc.') }}
     needs: attach
     permissions:
       contents: write

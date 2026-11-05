@@ -18,6 +18,11 @@
 #     --version 0.2.0-rc.1  a particular release, latest or not
 #     --to DIR              somewhere other than ~/.khora
 #     --no-modify-path      never touch a shell profile
+#     --print-target        print which build this machine gets, and stop
+#     --from DIR            install the archive in DIR rather than downloading
+#                           it; needs --version
+#     --target TRIPLE       install this build rather than the one detected;
+#                           KHORA_INSTALL_TARGET says the same
 #
 # **Two channels, and GitHub already had them.** A candidate is published as a
 # *pre-release*, which is installable by name and is excluded from the API's
@@ -48,6 +53,12 @@ Installs the Khora toolchain into ~/.khora.
     --version 0.1.0-rc.2  a particular release, latest or not
     --to DIR              somewhere other than ~/.khora
     --no-modify-path      never touch a shell profile
+    --print-target        print which build this machine gets, and stop
+    --from DIR            install the archive in DIR rather than downloading
+                          it; needs --version
+    --target TRIPLE       install this build rather than the one detected,
+                          such as x86_64-unknown-linux-musl; the environment
+                          variable KHORA_INSTALL_TARGET says the same
 
 Arguments need `sh -s --` when this is piped:
 
@@ -80,6 +91,10 @@ HOME_DIR="${KHORA_HOME:-$HOME/.khora}"
 VERSION=""
 PRERELEASE=0
 MODIFY_PATH=1
+PRINT_TARGET=0
+FROM=""
+# A build named by the caller, which detection then does not overrule.
+TARGET="${KHORA_INSTALL_TARGET:-}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -87,6 +102,9 @@ while [ $# -gt 0 ]; do
         --pre|--prerelease) PRERELEASE=1; shift ;;
         --to) HOME_DIR="$2"; shift 2 ;;
         --no-modify-path) MODIFY_PATH=0; shift ;;
+        --print-target) PRINT_TARGET=1; shift ;;
+        --from) FROM="$2"; shift 2 ;;
+        --target) TARGET="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -98,11 +116,63 @@ need() { command -v "$1" > /dev/null 2>&1 || die "this needs \`$1\` and cannot f
 
 # --- which build ------------------------------------------------------------
 
+# Whether this Linux machine's C library is musl -- Alpine, and anything else
+# built on it -- which takes the musl build: a static `khora` that needs no C
+# library at all. The glibc build cannot start there.
+#
+# **`ldd` decides, because it belongs to the C library.** glibc's prints
+# `ldd (GNU libc) 2.39` and musl's prints `musl libc (x86_64)`, to stderr and
+# with a non-zero exit, so both streams are read and the status is not. The
+# loader file `/lib/ld-musl-*` is not enough on its own: Debian and Ubuntu ship
+# a `musl` package that installs one beside glibc, and that machine is a glibc
+# one. It is the answer only when `ldd` gives none, which is a container that
+# left `ldd` out, and only with no glibc loader beside it.
+is_musl() {
+    if command -v ldd > /dev/null 2>&1; then
+        answer=$(ldd --version 2>&1 || true)
+        case "$answer" in
+            *musl*) return 0 ;;
+            *GNU*|*GLIBC*|*glibc*) return 1 ;;
+        esac
+    fi
+    for glibc in /lib64/ld-linux-*.so.* /lib/ld-linux-*.so.*; do
+        [ -e "$glibc" ] && return 1
+    done
+    for loader in /lib/ld-musl-*; do
+        [ -e "$loader" ] && return 0
+    done
+    return 1
+}
+
 triple() {
+    # **A named build is taken as named**, so a machine detection gets wrong
+    # can still be installed on, and a glibc too old for the glibc build can
+    # take the static musl one. Only the triples a release publishes are
+    # accepted: anything else would download nothing and say so less clearly.
+    if [ -n "$TARGET" ]; then
+        case "$TARGET" in
+            x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu|\
+            x86_64-unknown-linux-musl|aarch64-unknown-linux-musl|\
+            aarch64-apple-darwin)
+                printf '%s' "$TARGET"
+                return 0
+                ;;
+            *) die "--target $TARGET is not a build this installer knows; the Linux and macOS ones are
+  x86_64-unknown-linux-gnu  aarch64-unknown-linux-gnu
+  x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+  aarch64-apple-darwin" ;;
+        esac
+    fi
     os=$(uname -s)
     arch=$(uname -m)
     case "$os" in
-        Linux)  suffix="unknown-linux-gnu" ;;
+        Linux)
+            if is_musl; then
+                suffix="unknown-linux-musl"
+            else
+                suffix="unknown-linux-gnu"
+            fi
+            ;;
         Darwin) suffix="apple-darwin" ;;
         MINGW*|MSYS*|CYGWIN*)
             die "on Windows use PowerShell:
@@ -124,6 +194,9 @@ triple() {
 # rather than a refusal: somebody may be installing on one machine to build on
 # another, and this script does not get to decide that.
 check_linker() {
+    case "$TRIPLE" in
+        *-musl) check_musl_linker; return 0 ;;
+    esac
     if command -v clang > /dev/null 2>&1 || command -v cc > /dev/null 2>&1 \
         || command -v gcc > /dev/null 2>&1; then
         return 0
@@ -139,6 +212,31 @@ check_linker() {
     esac
     say ""
     say "  Installing anyway; \`khora build\` will say the same until one exists."
+    say ""
+}
+
+# **On Alpine, `clang` alone does not link.** Its package brings the driver
+# and no linker -- `clang` then fails with `posix_spawn failed: No such file
+# or directory` -- so the linker is checked for as well, and the advice names
+# both packages. gcc brings its own (`binutils`), which also works.
+check_musl_linker() {
+    driver=0
+    linker=0
+    for tool in clang cc gcc; do
+        command -v "$tool" > /dev/null 2>&1 && driver=1
+    done
+    for tool in ld.lld ld; do
+        command -v "$tool" > /dev/null 2>&1 && linker=1
+    done
+    [ "$driver" = 1 ] && [ "$linker" = 1 ] && return 0
+    say ""
+    say "  No C driver and linker found on PATH."
+    say ""
+    say "  Khora links a static executable, and needs a driver and a linker"
+    say "  to do it:"
+    say "    apk add clang lld"
+    say ""
+    say "  Installing anyway; \`khora build\` will fail until both exist."
     say ""
 }
 
@@ -179,6 +277,10 @@ glibc_older() {
 
 check_glibc() {
     [ "$(uname -s)" = "Linux" ] || return 0
+    # The musl build is static and asks nothing of the C library.
+    case "$TRIPLE" in
+        *-musl) return 0 ;;
+    esac
     HAVE_GLIBC=$(host_glibc)
     [ -n "$HAVE_GLIBC" ] || return 0
     glibc_older "$HAVE_GLIBC" "$MIN_GLIBC" || return 0
@@ -199,8 +301,13 @@ check_glibc() {
     say "  Debian 13. Debian 12 (2.36), Ubuntu 22.04 (2.35) and RHEL 9 (2.34)"
     say "  are older than the release and are not supported by it."
     say ""
-    say "  Two ways forward:"
+    say "  Three ways forward:"
     say ""
+    say "    - install the static build, which needs no C library and runs here."
+    say "      Programs it builds are static too, linked against musl rather"
+    say "      than this machine's glibc, and it builds no --lib:"
+    say "        curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh \\"
+    say "          | sh -s -- --target $(uname -m | sed 's/^arm64$/aarch64/;s/^amd64$/x86_64/')-unknown-linux-musl"
     say "    - install on a newer distribution, or in a container built on one;"
     say "    - build the toolchain from source here, which links it against the"
     say "      glibc you have:"
@@ -212,8 +319,19 @@ check_glibc() {
 # --- fetch ------------------------------------------------------------------
 
 need uname
+# Before anything is fetched, or needed for fetching.
+if [ "$PRINT_TARGET" -eq 1 ]; then
+    triple
+    printf '\n'
+    exit 0
+fi
 need tar
-if command -v curl > /dev/null 2>&1; then
+if [ -n "$FROM" ]; then
+    # An archive already on disk, with the `.sha256` beside it, verified the
+    # same way a download is.
+    [ -n "$VERSION" ] || die "--from needs --version, to name the archive in $FROM"
+    fetch() { cp "$FROM/${1##*/}" "$2"; }
+elif command -v curl > /dev/null 2>&1; then
     fetch() { curl -fsSL "$1" -o "$2"; }
     fetch_stdout() { curl -fsSL "$1"; }
 elif command -v wget > /dev/null 2>&1; then
@@ -368,6 +486,9 @@ tar --no-same-owner -xzf "$WORK/$BUNDLE" -C "$WORK"
 rm -rf "$HOME_DIR"
 mkdir -p "$(dirname "$HOME_DIR")"
 mv "$WORK/$NAME" "$HOME_DIR"
+# Absolute, because the check below runs `khora` from another directory and
+# the PATH line written into a profile has to work from anywhere.
+HOME_DIR=$(cd "$HOME_DIR" && pwd)
 
 # --- PATH -------------------------------------------------------------------
 
@@ -402,7 +523,13 @@ fi
 # So the run is the check now. Its output is kept, failure is not swallowed,
 # and there is no synthesised fallback -- if `khora --version` cannot say what
 # it is, this script has nothing true to print.
-if VERSION_LINE=$("$BIN/khora" --version 2>&1); then
+#
+# **Run from the scratch directory, not from where the installer was run.**
+# `khora` defers to a project's `[toolchain]` pin, so inside a project pinned
+# to another version `--version` answered "this project pins Khora X, which is
+# not installed" -- and this check reported a working toolchain as one that
+# "cannot run on this machine". `curl | sh` from inside a project is ordinary.
+if VERSION_LINE=$(cd "$WORK" && "$BIN/khora" --version 2>&1); then
     say ""
     say "Installed. $VERSION_LINE"
 else

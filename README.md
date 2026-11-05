@@ -125,6 +125,13 @@ something a `curl | sh` can reach. If saving the draft starts no run, start it
 from the Actions tab with the tag as input; the workflow says why that path
 exists.
 
+**A red Alpine job stops the release.** Nothing is attached until every
+archive is built, the two built in Alpine included, because `install.sh` sends
+every musl machine to the musl archive: a release without it is one that
+cannot be installed on Alpine. Fix the job, or cut the next candidate; do not
+publish around it. To try the Alpine jobs from a branch, without a tag and
+without attaching anything, dispatch the workflow with `alpine-only`.
+
 Two profiles: `khora build` is unoptimized with debug information, and
 `khora build --release` runs LLVM's `default<O2>`, drops debug information, and
 is bit-for-bit reproducible — object and executable both.
