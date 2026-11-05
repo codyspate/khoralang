@@ -182,12 +182,12 @@ A pattern used directly by `let` must be valid for the value's type without requ
 ## Patterns in `for`
 
 ```khora
-for entry in Dict::entries(table) {
+for entry in table {
   print("${entry.key}: ${entry.value}");
 }
 ```
 
-The pattern binds each yielded item, under the same rules as `let`: valid for the item's type, and irrefutable. `Dict::entries` yields a `Pair`, which is a record — a tuple pattern such as `(key, value)` is only valid where the item's type is a tuple, and is refused otherwise.
+The pattern binds each yielded item, under the same rules as `let`: valid for the item's type, and irrefutable. A `Dict` or `Map` yields a `Pair`, which is a record — take it apart with `Pair { key, value }`; a tuple pattern such as `(key, value)` is only valid where the item's type is a tuple, and is refused otherwise.
 
 `for` needs `Step` and `Iterator` in scope, and `Pair` too if the body reads the item's fields: `import std::core::{Dict, Iterator, Pair, Step, print};`. See [Control flow](./control-flow/#for).
 

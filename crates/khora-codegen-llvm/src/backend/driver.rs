@@ -536,7 +536,9 @@ fn can_stop_at(
         // instruction.
         Expr::Binary { .. } => mono.callee(owner, site).is_some_and(|symbol| leaves_from(&symbol)),
         // Lowered as the value alone when nothing was resolved.
-        Expr::Shown(_) => mono.callee(owner, site).is_some_and(|symbol| leaves_from(&symbol)),
+        Expr::Shown(_) | Expr::Walked(_) => {
+            mono.callee(owner, site).is_some_and(|symbol| leaves_from(&symbol))
+        }
         _ => true,
     }
 }

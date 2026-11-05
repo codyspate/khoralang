@@ -1528,6 +1528,36 @@ pub trait Iterator {
   }
 }
 
+/// A collection a `for` loop can walk without being an `Iterator` itself.
+///
+/// **What this prevents: a collection that has to be its own cursor.** `next`
+/// hands back a successor of the same type, which a `List` can do for free --
+/// its tail is one -- and a `Vector`, `Array`, `Map` or `Dict` cannot do
+/// without copying what is left on every step or writing a position into the
+/// collection, where a second loop over it would find it. So these hand out a
+/// cursor instead: a small record that holds the collection and where the walk
+/// has got to.
+///
+/// `for x in v` asks for this only when `v` is not an `Iterator`, and finds it
+/// from `v`'s type rather than through the names in scope. A loop over a
+/// `Vector` needs the same `import` as a loop over a `List`, and never this
+/// trait; a program names it only to implement it, or to call `iter` itself
+/// to build a pipeline -- `Iterator::map(Vector::iter(v), f)`.
+///
+/// **A cursor is used up as it goes.** The four in `std::core` advance in
+/// place and hand themselves back as their own successor, which is what keeps
+/// a loop to one allocation however long the collection is. So pulling twice
+/// from one cursor value gives two different items, where pulling twice from
+/// one `List` gives the same item twice. A `for` loop pulls each value once and
+/// cannot tell; code that calls `Iterator::next` by hand should keep the
+/// successor and drop the rest.
+pub trait Iterable {
+  /// What walks it.
+  type Cursor: Iterator;
+  /// A cursor at the first item.
+  fn iter(self) -> Self::Cursor;
+}
+
 /// `Range::Of(from, to)` yields `from` up to but not including `to`.
 pub type Range = | Of(from: Int, to: Int);
 
@@ -4857,6 +4887,97 @@ impl<K, V> Dict<K, V> {
   }
 }
 
+/// Where a `for` loop over a `Dict` has got to: the subtrees still to visit,
+/// nearest last.
+///
+/// **A stack the cursor keeps, rather than a recursion**, because a loop body
+/// runs between two steps and a recursion cannot be paused there. It holds one
+/// subtree per level of the tree, so it is as deep as the tree, which the
+/// balancing keeps logarithmic in the size: a million entries need a stack of
+/// a few dozen.
+///
+/// **An array that only grows, rather than a `Vector`**, because a `Vector`
+/// gives its array back each time it is popped empty and a walk empties its
+/// stack once per step down the right-hand edge: a reallocation per level, so
+/// a loop's cost would grow with the tree's depth. This one is sized once
+/// and doubled if a tree is deeper than that, so a loop costs the cursor and
+/// the array. The price is that a popped cell still holds the subtree it held
+/// until a push overwrites it or the cursor goes, which keeps nothing alive the
+/// loop's own dictionary was not already keeping.
+///
+/// A `Dict` is never written in place, so the loop walks the tree it began
+/// with whatever its body does: an insert or a remove makes a new dictionary
+/// and leaves this one alone.
+pub type DictEntries<K, V> = { mut stack: Array<Dict<K, V>>, mut depth: Int };
+
+impl<K, V> DictEntries<K, V> {
+  /// Pushes `tree` and every left child below it, so the smallest key of
+  /// `tree` ends up on top.
+  fn descend(self, tree: Dict<K, V>) -> () {
+    let mut here = tree;
+    let mut going = true;
+    while going {
+      match here {
+        Dict::Empty => { going = false; },
+        Dict::Node(_n, _k, _v, l, _r) => {
+          DictEntries::push(self, here);
+          here = l;
+        },
+      }
+    }
+  }
+
+  /// `tree` on top of the stack, doubling the array first if it is full.
+  ///
+  /// The tree being pushed is the fill, as it is in `Vector::grow`: it is the
+  /// one value of the element type to hand.
+  fn push(self, tree: Dict<K, V>) -> () {
+    let room = Array::length(self.stack);
+    if self.depth == room {
+      let bigger: Array<Dict<K, V>> = Array::new(if room == 0 { 32 } else { room * 2 }, tree);
+      let mut i = 0;
+      while i < self.depth {
+        Array::set(bigger, i, Array::get(self.stack, i));
+        i = i + 1;
+      };
+      self.stack = bigger;
+    };
+    Array::set(self.stack, self.depth, tree);
+    self.depth = self.depth + 1;
+  }
+}
+
+impl<K, V> Iterator for DictEntries<K, V> {
+  type Item = Pair<K, V>;
+  type Effects = {};
+  fn next(self) -> Step<DictEntries<K, V>, Pair<K, V>> {
+    if self.depth == 0 {
+      Step::Done
+    } else {
+      self.depth = self.depth - 1;
+      match Array::get(self.stack, self.depth) {
+        Dict::Node(_n, k, v, _l, r) => {
+          DictEntries::descend(self, r);
+          Step::Yield(self, { key: k, value: v })
+        },
+        // Only nodes are pushed, so `Empty` never comes off the stack.
+        Dict::Empty => Step::Done,
+      }
+    }
+  }
+}
+
+/// Smallest key first, the order `Dict::entries` reports.
+impl<K, V> Iterable for Dict<K, V> {
+  type Cursor = DictEntries<K, V>;
+  fn iter(self) -> DictEntries<K, V> {
+    let none: Array<Dict<K, V>> = Array::empty();
+    let cursor: DictEntries<K, V> = { stack: none, depth: 0 };
+    DictEntries::descend(cursor, self);
+    cursor
+  }
+}
+
 impl<K: Ord, V> Dict<K, V> {
   /// The value under `key`, if there is one.
   pub fn get(self, key: K) -> Option<V> {
@@ -5668,6 +5789,183 @@ impl<A> Vector<A> {
       }
     }
     out
+  }
+}
+
+/// Where a `for` loop over a `Vector` has got to.
+///
+/// **The rule, exactly: index 0, 1, 2 and on, for as long as the index is
+/// below both the length the loop began with and the length at that step,
+/// each element read when the loop reaches it.** Each bound prevents one
+/// failure. A body that pushes onto the vector it walks would otherwise never
+/// reach the end; one that pops would otherwise read past it and stop the
+/// program.
+///
+/// So a push alone is not visited, and a pop or `clear` alone ends the loop at
+/// the new end. A pop or `clear` *and then* pushes is the case to know: the
+/// pushed elements land at indices the loop has not reached, below the length
+/// it began with, and are visited there. Pop-then-push on each turn of
+/// `[1, 2, 3, 4, 5]` visits `1, 2, 3, 4, 104`; a `clear` and ten pushes on the
+/// first turn visits `1, 901, 902, 903, 904`. Which elements are visited never
+/// depends on the vector's capacity or on whether a push reallocated. An
+/// element is never visited twice and the loop never runs past the length it
+/// began with.
+///
+/// **Read from the vector, never from a copy**: a `Vector` is one object
+/// however many names it has, and a loop that saw the vector as it began
+/// would copy it, which is the allocation per loop this exists to avoid.
+pub type VectorItems<A> = { items: Vector<A>, mut at: Int, end: Int };
+
+impl<A> Iterator for VectorItems<A> {
+  type Item = A;
+  type Effects = {};
+  /// Hands itself back, one place further on. See `Iterable` for what that
+  /// means for a cursor somebody pulls from by hand.
+  fn next(self) -> Step<VectorItems<A>, A> {
+    let i = self.at;
+    if i < self.end && i < self.items.len {
+      self.at = i + 1;
+      Step::Yield(self, Array::get(self.items.items, i))
+    } else {
+      Step::Done
+    }
+  }
+}
+
+/// First to last. See `VectorItems` for what the loop sees of a vector its
+/// body changes.
+impl<A> Iterable for Vector<A> {
+  type Cursor = VectorItems<A>;
+  fn iter(self) -> VectorItems<A> { { items: self, at: 0, end: self.len } }
+}
+
+/// Where a `for` loop over an `Array` has got to.
+///
+/// An array's length never changes, so there is one bound. An element written
+/// with `Array::set` before the loop reaches it is visited with its new value,
+/// for the reason `VectorItems` reads its elements where they are.
+pub type ArrayItems<A> = { items: Array<A>, mut at: Int };
+
+impl<A> Iterator for ArrayItems<A> {
+  type Item = A;
+  type Effects = {};
+  fn next(self) -> Step<ArrayItems<A>, A> {
+    let i = self.at;
+    if i < Array::length(self.items) {
+      self.at = i + 1;
+      Step::Yield(self, Array::get(self.items, i))
+    } else {
+      Step::Done
+    }
+  }
+}
+
+/// First to last.
+impl<A> Iterable for Array<A> {
+  type Cursor = ArrayItems<A>;
+  fn iter(self) -> ArrayItems<A> { { items: self, at: 0 } }
+}
+
+/// Where a `for` loop over a `Map` has got to: a bucket, and what is left of
+/// its chain.
+///
+/// **In `Map::entries`' order exactly**: bucket by bucket, and within a bucket
+/// from the end of its chain to the head, because `entries` builds its list
+/// by prepending. A cursor that walked each chain head first agreed with
+/// `entries` on every map with no two keys in one bucket and disagreed on the
+/// rest, so a program comparing the two passed its small tests.
+///
+/// A chain is a singly linked list, so its last node is reached by walking:
+/// each step walks the bucket's chain again, to the node before the one it
+/// handed out last. That allocates nothing and costs nothing a map with a good
+/// `Hash` notices. A chain of `n` keys costs `n * (n + 1) / 2` steps to walk
+/// out, the same order as the `n` inserts that built it, each of which walked
+/// the chain to see whether its key was there -- so only a bad `Hash`, or
+/// keys chosen to collide, makes it slow, and then building the map was slow
+/// first.
+///
+/// **The buckets are the ones the loop began with.** Growing replaces a map's
+/// bucket array and leaves the old one as it was, so a loop whose body inserts
+/// enough to grow the map goes on through a table nothing writes any more,
+/// rather than through a new one whose entries have all moved -- which would
+/// visit some twice and others never. A chain is never changed in place,
+/// either: an insert or a remove puts a new chain in the bucket. So an entry
+/// that is in the map for the whole loop is visited exactly once. One inserted
+/// or removed while the loop runs may be visited or not, depending on where it
+/// hashed and whether the map grew; one whose value is replaced is visited
+/// once, with the old value or the new.
+///
+/// `left` is how many nodes of `chain`, the current bucket's own chain, are
+/// still to come; zero when the bucket is done.
+pub type MapEntries<K, V> = { buckets: Array<Chain<K, V>>, mut at: Int, mut chain: Chain<K, V>, mut left: Int };
+
+/// How many nodes `chain` has.
+fn chain_length<K, V>(chain: Chain<K, V>) -> Int {
+  let mut here = chain;
+  let mut n = 0;
+  let mut going = true;
+  while going {
+    match here {
+      Chain::Empty => { going = false; },
+      Chain::Node(_k, _v, rest) => { n = n + 1; here = rest; },
+    }
+  };
+  n
+}
+
+/// What is left of `chain` after its first `steps` nodes.
+fn chain_after<K, V>(chain: Chain<K, V>, steps: Int) -> Chain<K, V> {
+  let mut here = chain;
+  let mut i = 0;
+  while i < steps {
+    match here {
+      Chain::Empty => { i = steps; },
+      Chain::Node(_k, _v, rest) => { here = rest; i = i + 1; },
+    }
+  };
+  here
+}
+
+impl<K, V> Iterator for MapEntries<K, V> {
+  type Item = Pair<K, V>;
+  type Effects = {};
+  /// A loop over the empty buckets between two entries, so a sparse table
+  /// costs a walk and not a frame per bucket.
+  fn next(self) -> Step<MapEntries<K, V>, Pair<K, V>> {
+    let mut answer = Option::None;
+    let mut looking = true;
+    while looking {
+      if self.left > 0 {
+        self.left = self.left - 1;
+        match chain_after(self.chain, self.left) {
+          Chain::Node(k, v, _rest) => {
+            answer = Option::Some({ key: k, value: v });
+            looking = false;
+          },
+          // `left` counted this chain, and a chain is never written in place.
+          Chain::Empty => { self.left = 0; },
+        }
+      } else if self.at < Array::length(self.buckets) {
+        self.chain = Array::get(self.buckets, self.at);
+        self.at = self.at + 1;
+        self.left = chain_length(self.chain);
+      } else {
+        looking = false;
+      }
+    };
+    match answer {
+      Option::Some(entry) => Step::Yield(self, entry),
+      Option::None => Step::Done,
+    }
+  }
+}
+
+/// In the order `Map::entries` reports, which is to say in no particular
+/// order -- see `Map` -- but the same one, entry for entry.
+impl<K, V> Iterable for Map<K, V> {
+  type Cursor = MapEntries<K, V>;
+  fn iter(self) -> MapEntries<K, V> {
+    { buckets: self.buckets, at: 0, chain: Chain::Empty, left: 0 }
   }
 }
 

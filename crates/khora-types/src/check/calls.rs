@@ -1026,6 +1026,16 @@ impl<'a> Checker<'a> {
                 let (ty, type_args) =
                     self.unifier.instantiate_with(&signature.generics, &signature.as_fn());
                 self.instantiations.insert(at, (key, type_args));
+                // **And the module of the type the owner names.** The key
+                // names the type by its bare head, and two modules may each
+                // declare a `Vector` with an `impl Show` -- so the key is the
+                // name of two bodies, and code generation took whichever unit
+                // came first. With a project's files ahead of `std`'s,
+                // `Vector::show(v)` on `std`'s `Vector` printed the other
+                // module's answer, and `Vector::iter(v)` was invalid IR.
+                if let Some((home, _)) = self.types.homes.of(owner) {
+                    self.static_homes.insert(at, home);
+                }
                 return ty;
             }
         }

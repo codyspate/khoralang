@@ -447,6 +447,34 @@ Weight-balanced (Adams), so every operation is logarithmic in the size and
 the recursion here is bounded by the depth rather than by the length — the
 distinction that `String::slice` got wrong and paid for.
 
+### DictEntries
+
+```khora
+pub type DictEntries<K, V> = { mut stack: Array<Dict<K, V>>, mut depth: Int };
+```
+
+Where a `for` loop over a `Dict` has got to: the subtrees still to visit,
+nearest last.
+
+**A stack the cursor keeps, rather than a recursion**, because a loop body
+runs between two steps and a recursion cannot be paused there. It holds one
+subtree per level of the tree, so it is as deep as the tree, which the
+balancing keeps logarithmic in the size: a million entries need a stack of
+a few dozen.
+
+**An array that only grows, rather than a `Vector`**, because a `Vector`
+gives its array back each time it is popped empty and a walk empties its
+stack once per step down the right-hand edge: a reallocation per level, so
+a loop's cost would grow with the tree's depth. This one is sized once
+and doubled if a tree is deeper than that, so a loop costs the cursor and
+the array. The price is that a popped cell still holds the subtree it held
+until a push overwrites it or the cursor goes, which keeps nothing alive the
+loop's own dictionary was not already keeping.
+
+A `Dict` is never written in place, so the loop walks the tree it began
+with whatever its body does: an insert or a remove makes a new dictionary
+and leaves this one alone.
+
 ### Map
 
 ```khora
@@ -540,6 +568,85 @@ mut wanted: Int
 ```
 
 How big the first allocation should be. Meaningless once there is one.
+
+### VectorItems
+
+```khora
+pub type VectorItems<A> = { items: Vector<A>, mut at: Int, end: Int };
+```
+
+Where a `for` loop over a `Vector` has got to.
+
+**The rule, exactly: index 0, 1, 2 and on, for as long as the index is
+below both the length the loop began with and the length at that step,
+each element read when the loop reaches it.** Each bound prevents one
+failure. A body that pushes onto the vector it walks would otherwise never
+reach the end; one that pops would otherwise read past it and stop the
+program.
+
+So a push alone is not visited, and a pop or `clear` alone ends the loop at
+the new end. A pop or `clear` *and then* pushes is the case to know: the
+pushed elements land at indices the loop has not reached, below the length
+it began with, and are visited there. Pop-then-push on each turn of
+`[1, 2, 3, 4, 5]` visits `1, 2, 3, 4, 104`; a `clear` and ten pushes on the
+first turn visits `1, 901, 902, 903, 904`. Which elements are visited never
+depends on the vector's capacity or on whether a push reallocated. An
+element is never visited twice and the loop never runs past the length it
+began with.
+
+**Read from the vector, never from a copy**: a `Vector` is one object
+however many names it has, and a loop that saw the vector as it began
+would copy it, which is the allocation per loop this exists to avoid.
+
+### ArrayItems
+
+```khora
+pub type ArrayItems<A> = { items: Array<A>, mut at: Int };
+```
+
+Where a `for` loop over an `Array` has got to.
+
+An array's length never changes, so there is one bound. An element written
+with `Array::set` before the loop reaches it is visited with its new value,
+for the reason `VectorItems` reads its elements where they are.
+
+### MapEntries
+
+```khora
+pub type MapEntries<K, V> = { buckets: Array<Chain<K, V>>, mut at: Int, mut chain: Chain<K, V>, mut left: Int };
+```
+
+Where a `for` loop over a `Map` has got to: a bucket, and what is left of
+its chain.
+
+**In `Map::entries`' order exactly**: bucket by bucket, and within a bucket
+from the end of its chain to the head, because `entries` builds its list
+by prepending. A cursor that walked each chain head first agreed with
+`entries` on every map with no two keys in one bucket and disagreed on the
+rest, so a program comparing the two passed its small tests.
+
+A chain is a singly linked list, so its last node is reached by walking:
+each step walks the bucket's chain again, to the node before the one it
+handed out last. That allocates nothing and costs nothing a map with a good
+`Hash` notices. A chain of `n` keys costs `n * (n + 1) / 2` steps to walk
+out, the same order as the `n` inserts that built it, each of which walked
+the chain to see whether its key was there -- so only a bad `Hash`, or
+keys chosen to collide, makes it slow, and then building the map was slow
+first.
+
+**The buckets are the ones the loop began with.** Growing replaces a map's
+bucket array and leaves the old one as it was, so a loop whose body inserts
+enough to grow the map goes on through a table nothing writes any more,
+rather than through a new one whose entries have all moved -- which would
+visit some twice and others never. A chain is never changed in place,
+either: an insert or a remove puts a new chain in the bucket. So an entry
+that is in the map for the whole loop is visited exactly once. One inserted
+or removed while the loop runs may be visited or not, depending on where it
+hashed and whether the map grew; one whose value is replaced is visited
+once, with the old value or the new.
+
+`left` is how many nodes of `chain`, the current bucket's own chain, are
+still to come; zero when the bucket is done.
 
 ### SharedFn
 
@@ -1149,6 +1256,56 @@ fn count(self) -> Int with Self::Effects
 
 How many items it yields. Walks the whole thing, so it is not free on a
 stream that reads a socket.
+
+### Iterable
+
+```khora
+pub trait Iterable
+```
+
+A collection a `for` loop can walk without being an `Iterator` itself.
+
+**What this prevents: a collection that has to be its own cursor.** `next`
+hands back a successor of the same type, which a `List` can do for free --
+its tail is one -- and a `Vector`, `Array`, `Map` or `Dict` cannot do
+without copying what is left on every step or writing a position into the
+collection, where a second loop over it would find it. So these hand out a
+cursor instead: a small record that holds the collection and where the walk
+has got to.
+
+`for x in v` asks for this only when `v` is not an `Iterator`, and finds it
+from `v`'s type rather than through the names in scope. A loop over a
+`Vector` needs the same `import` as a loop over a `List`, and never this
+trait; a program names it only to implement it, or to call `iter` itself
+to build a pipeline -- `Iterator::map(Vector::iter(v), f)`.
+
+**A cursor is used up as it goes.** The four in `std::core` advance in
+place and hand themselves back as their own successor, which is what keeps
+a loop to one allocation however long the collection is. So pulling twice
+from one cursor value gives two different items, where pulling twice from
+one `List` gives the same item twice. A `for` loop pulls each value once and
+cannot tell; code that calls `Iterator::next` by hand should keep the
+successor and drop the rest.
+
+#### Associated types
+
+##### Cursor
+
+```khora
+type Cursor: Iterator;
+```
+
+What walks it.
+
+#### Functions
+
+##### iter
+
+```khora
+fn iter(self) -> Self::Cursor
+```
+
+A cursor at the first item.
 
 ### Functor
 
@@ -7044,6 +7201,58 @@ No brackets around it. A `Pair` is nearly always inside something that
 has its own -- `Dict` and `Map` both print a list of these -- and a pair
 that brought its own would double them.
 
+### Iterator for DictEntries\<K, V>
+
+```khora
+impl<K, V> Iterator for DictEntries<K, V>
+```
+
+#### Associated types
+
+##### Item
+
+```khora
+type Item = Pair<K, V>;
+```
+
+##### Effects
+
+```khora
+type Effects = {};
+```
+
+#### Functions
+
+##### next
+
+```khora
+fn next(self) -> Step<DictEntries<K, V>, Pair<K, V>>
+```
+
+### Iterable for Dict\<K, V>
+
+```khora
+impl<K, V> Iterable for Dict<K, V>
+```
+
+Smallest key first, the order `Dict::entries` reports.
+
+#### Associated types
+
+##### Cursor
+
+```khora
+type Cursor = DictEntries<K, V>;
+```
+
+#### Functions
+
+##### iter
+
+```khora
+fn iter(self) -> DictEntries<K, V>
+```
+
 ### Show for Dict\<K, V>
 
 ```khora
@@ -7113,6 +7322,170 @@ behind, and printing those would be printing the vector's history.
 
 ```khora
 fn show(self) -> String
+```
+
+### Iterator for VectorItems\<A>
+
+```khora
+impl<A> Iterator for VectorItems<A>
+```
+
+#### Associated types
+
+##### Item
+
+```khora
+type Item = A;
+```
+
+##### Effects
+
+```khora
+type Effects = {};
+```
+
+#### Functions
+
+##### next
+
+```khora
+fn next(self) -> Step<VectorItems<A>, A>
+```
+
+Hands itself back, one place further on. See `Iterable` for what that
+means for a cursor somebody pulls from by hand.
+
+### Iterable for Vector\<A>
+
+```khora
+impl<A> Iterable for Vector<A>
+```
+
+First to last. See `VectorItems` for what the loop sees of a vector its
+body changes.
+
+#### Associated types
+
+##### Cursor
+
+```khora
+type Cursor = VectorItems<A>;
+```
+
+#### Functions
+
+##### iter
+
+```khora
+fn iter(self) -> VectorItems<A>
+```
+
+### Iterator for ArrayItems\<A>
+
+```khora
+impl<A> Iterator for ArrayItems<A>
+```
+
+#### Associated types
+
+##### Item
+
+```khora
+type Item = A;
+```
+
+##### Effects
+
+```khora
+type Effects = {};
+```
+
+#### Functions
+
+##### next
+
+```khora
+fn next(self) -> Step<ArrayItems<A>, A>
+```
+
+### Iterable for Array\<A>
+
+```khora
+impl<A> Iterable for Array<A>
+```
+
+First to last.
+
+#### Associated types
+
+##### Cursor
+
+```khora
+type Cursor = ArrayItems<A>;
+```
+
+#### Functions
+
+##### iter
+
+```khora
+fn iter(self) -> ArrayItems<A>
+```
+
+### Iterator for MapEntries\<K, V>
+
+```khora
+impl<K, V> Iterator for MapEntries<K, V>
+```
+
+#### Associated types
+
+##### Item
+
+```khora
+type Item = Pair<K, V>;
+```
+
+##### Effects
+
+```khora
+type Effects = {};
+```
+
+#### Functions
+
+##### next
+
+```khora
+fn next(self) -> Step<MapEntries<K, V>, Pair<K, V>>
+```
+
+A loop over the empty buckets between two entries, so a sparse table
+costs a walk and not a frame per bucket.
+
+### Iterable for Map\<K, V>
+
+```khora
+impl<K, V> Iterable for Map<K, V>
+```
+
+In the order `Map::entries` reports, which is to say in no particular
+order -- see `Map` -- but the same one, entry for entry.
+
+#### Associated types
+
+##### Cursor
+
+```khora
+type Cursor = MapEntries<K, V>;
+```
+
+#### Functions
+
+##### iter
+
+```khora
+fn iter(self) -> MapEntries<K, V>
 ```
 
 ### Show for Raised\<'er>

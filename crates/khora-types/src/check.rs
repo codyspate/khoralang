@@ -224,6 +224,9 @@ pub(crate) struct Checker<'a> {
     /// The operands of the `catch`es whose named arms handle everything the
     /// operand raises, published as [`crate::BodyTypes::is_total_catch`].
     pub(crate) total_catches: HashSet<ExprId>,
+    /// The module of the type a static `Type::method` call names, per call:
+    /// see [`crate::BodyTypes::static_home`].
+    pub(crate) static_homes: HashMap<ExprId, khora_hir::ModulePath>,
     /// The capabilities in scope from enclosing `with` blocks.
     ///
     /// A call inside one is served by it, so its labels never reach the

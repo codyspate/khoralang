@@ -115,6 +115,16 @@ pub struct TraitDef {
     /// Inferred from how the trait's own signatures use `Self`.
     pub self_kind: Kind,
     pub range: TextRange,
+    /// The module that declares the trait.
+    ///
+    /// **A trait's name is not the trait.** A program may declare its own
+    /// `trait Iterable` beside `std::core`'s, and an impl of one carried into
+    /// a file that holds the other was judged against the wrong declaration:
+    /// eight errors about `std`'s cursors, at the end of a file with no loop
+    /// in it. What travels between files compares this, not the name.
+    ///
+    /// `None` only for a file with no `module` line, which has no importers.
+    pub home: Option<khora_hir::ModulePath>,
 }
 
 impl TraitDef {
@@ -144,6 +154,10 @@ pub struct ImplDef {
     /// bodies under — the two must agree character for character or a method
     /// resolves to a signature with no body.
     pub trait_key: String,
+    /// The module that declares the trait this implements; see
+    /// [`TraitDef::home`]. `None` when the trait's name resolved to nothing
+    /// here, which is an error reported elsewhere.
+    pub trait_home: Option<khora_hir::ModulePath>,
     /// The implementing type, with the impl's own parameters rigid: `Option<A>`
     /// for `impl<A> Eq for Option<A>`.
     pub self_type: Type,
@@ -365,6 +379,16 @@ impl Traits {
             if crate::unify::match_params(&imp.self_type, ty, &imp.generics, &mut solved) {
                 return Some(imp);
             }
+            // **Never an impl for a type known to be another one.** Two homes
+            // that are both recorded and differ are two declarations, and the
+            // impl of one does not answer for the other: a program's own
+            // `impl Iterator for Vector`, for its own `Vector`, made `std`'s
+            // `Vector` an `Iterator` as far as a `for` could tell.
+            if let (Some(theirs), Some(wanted)) = (home_of(&imp.self_type), home_of(ty)) {
+                if theirs != wanted {
+                    continue;
+                }
+            }
             // Kept in case nothing matches. A receiver carrying no home, or a
             // self type this cannot line up with, is the case that resolved by
             // name before and still should: refusing here would turn a working
@@ -524,9 +548,11 @@ pub fn collect(source: &ast::SourceFile, homes: &crate::TypeHomes) -> Traits {
                     .collect();
 
                 let self_kind = self_kind(&methods);
+                let home = homes.of(&name).map(|(module, _)| module);
                 out.traits.insert(
                     name.clone(),
                     TraitDef {
+                        home,
                         name,
                         type_params: own.clone(),
                         supertraits: bound_names(t.supertraits().as_ref()),
@@ -589,6 +615,7 @@ pub fn collect(source: &ast::SourceFile, homes: &crate::TypeHomes) -> Traits {
                     })
                     .collect();
                 out.impls.push(ImplDef {
+                    trait_home: homes.of(&trait_name).map(|(module, _)| module),
                     trait_name,
                     trait_args,
                     trait_key,
@@ -1429,6 +1456,18 @@ fn check_assoc_types(
             });
             continue;
         };
+        // **Judged where the impl is written, and only there.** An impl
+        // reaches another file with its trait or with its type, and the impl
+        // of the bound may not come with it: `Iterable for Array` arrives in
+        // every file that names `Array`, and `Iterator for ArrayItems` only in
+        // those that import `Iterator`. Asked again in such a file the bound
+        // fails, about a `std` impl, in a program that never wrote a loop --
+        // and the error was rendered against whichever of that file's inputs
+        // sorted first. The impl's own file has the bound's impl in scope and
+        // is where it is kept or broken, as `Share` is above.
+        if !imp.local {
+            continue;
+        }
         // The bound is a promise the *trait* made to everything written against
         // it, and this impl is where it is kept or broken. Checking it here
         // rather than at the default body's call means one error naming the

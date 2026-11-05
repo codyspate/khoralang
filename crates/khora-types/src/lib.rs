@@ -567,6 +567,12 @@ pub const SHARE: &str = "Share";
 /// string literal in a checker is a rename waiting to go wrong quietly.
 pub const SHOW: &str = "Show";
 
+/// The trait a `for` loop pulls from, and the one it asks for a cursor when
+/// the loop's operand is not one. See `khora_hir::body::Expr::Walked`.
+pub const ITERATOR: &str = "Iterator";
+/// See [`ITERATOR`].
+pub const ITERABLE: &str = "Iterable";
+
 /// What each type name written in one file actually refers to.
 ///
 /// A name is a spelling and a type is a declaration; this is the map between

@@ -166,6 +166,10 @@ impl<'a> Planner<'a> {
             // cancellation can leave through that call, which the last-use
             // pass settles per binding (`RcPlan::held_across`).
             Expr::Shown(value) => self.walk(value),
+            // The operand goes to `Iterable::iter` as an argument, or stands
+            // as the loop's state when it is already an `Iterator`. Either way
+            // it is moved, the way a call's argument is.
+            Expr::Walked(value) => self.walk(value),
             Expr::Record { fields, base, .. } => {
                 // The base is read for the fields nobody named, so it is used
                 // here as much as any of them.

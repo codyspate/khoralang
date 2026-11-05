@@ -79,7 +79,14 @@ impl<'a> Ctx<'a> {
         lower_body: impl FnOnce(&mut Self) -> ExprId,
     ) -> ExprId {
         let iter = match iterable {
-            Some(i) => self.lower_expr(&i),
+            Some(i) => {
+                let at = i.syntax().text_range();
+                let written = self.lower_expr(&i);
+                // Wrapped, and what the wrapping means is the checker's to
+                // say: see `Expr::Walked`. The span is the iterable's, so a
+                // refusal points at what was written after `in`.
+                self.add_expr(Expr::Walked(written), at)
+            }
             None => self.add_expr(Expr::Missing, range),
         };
 

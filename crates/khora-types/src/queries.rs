@@ -73,6 +73,19 @@ pub struct BodyTypes {
     /// checker called infallible into an unhandled error: status 130 and no
     /// message. Sealed, it stops the program naming the broken rule.
     total_catches: HashSet<ExprId>,
+    /// The module that declares the type a static `Type::method` call names,
+    /// for the calls that go through an impl's key.
+    ///
+    /// **What this prevents: a call by one type's name reaching another
+    /// type's body.** `Show#Vector::show` names the type by its bare head, so
+    /// a program with its own `Vector` and `impl Show` beside `std`'s has two
+    /// bodies under the key, and monomorphization took whichever unit came
+    /// first. That depends on where the project sits on disk: with its files
+    /// ahead of `std`'s, `Vector::show(v)` on `std`'s `Vector` printed the
+    /// other module's answer, and `Vector::iter(v)` was invalid IR. A call
+    /// through a trait key is chosen by the receiver's module already; this
+    /// gives a call through an impl key the same.
+    static_homes: HashMap<ExprId, khora_hir::ModulePath>,
 }
 
 /// The effect rows one call site asked for.
@@ -125,6 +138,12 @@ impl BodyTypes {
     /// The generic function this expression mentions, and at what arguments.
     pub fn instantiation(&self, id: ExprId) -> Option<&(String, Vec<Type>)> {
         self.instantiations.get(&id)
+    }
+
+    /// The module whose impl a static `Type::method` call at `id` means: the
+    /// module that declares `Type`. `None` for any other mention.
+    pub fn static_home(&self, id: ExprId) -> Option<&khora_hir::ModulePath> {
+        self.static_homes.get(&id)
     }
 
     /// Whether the capability `label` at the call `site` is the enclosing
@@ -231,6 +250,7 @@ impl BodyTypes {
             call_rows: self.call_rows.clone(),
             caught: self.caught.iter().map(|(k, v)| (*k, settle(v))).collect(),
             total_catches: self.total_catches.clone(),
+            static_homes: self.static_homes.clone(),
         }
     }
 }
@@ -403,6 +423,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             forgotten_tails: Vec::new(),
             raised_raises: HashSet::new(),
             total_catches: HashSet::new(),
+            static_homes: HashMap::new(),
             installed: Vec::new(),
             loops: Vec::new(),
             open_raises: Vec::new(),
@@ -530,6 +551,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
         let call_rows = std::mem::take(&mut checker.call_rows);
         let caught = checker.caught.iter().map(|(k, v)| (*k, checker.unifier.zonk(v))).collect();
         let total_catches = std::mem::take(&mut checker.total_catches);
+        let static_homes = std::mem::take(&mut checker.static_homes);
         out.bodies.push((
             name.clone(),
             BodyTypes {
@@ -541,6 +563,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
                 call_rows,
                 caught,
                 total_catches,
+                static_homes,
             },
         ));
     }

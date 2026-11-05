@@ -216,6 +216,23 @@ pub enum Expr {
     /// left out, and which the first person to print a table called the single
     /// biggest tax in the language.
     Shown(ExprId),
+    /// What a `for` loop walks: its iterable, or a cursor over it.
+    ///
+    /// **Written by the `for` desugaring and by nothing else**, and a node for
+    /// the reason `Shown` is one: which of the two it means depends on the
+    /// operand's type, and the desugaring runs before there are types. An
+    /// `Iterator` -- `List`, `Range`, an adapter, anybody's own -- is walked as
+    /// it stands and the node is its operand, so those loops compile to what
+    /// they compiled to before the node existed. Anything else that
+    /// implements `Iterable` is walked through `Iterable::iter`, which the
+    /// checker records as this node's callee the way it records `Show::show`
+    /// for a hole.
+    ///
+    /// Resolved against the type rather than through the names in scope, so
+    /// a loop over a `Vector` needs the imports a loop over a `List` needs
+    /// and never `Iterable`: a loop that compiled only once a name it never
+    /// writes was imported would be the trap errata 58 was about.
+    Walked(ExprId),
     /// `raise DbError::Timeout` — leaves the function with an error.
     ///
     /// Type `Never`, so it stands wherever an expression can.

@@ -177,6 +177,9 @@ impl<'a> Checker<'a> {
             // should not require importing the trait that prints it -- see
             // `khora_hir::body::Expr::Shown`.
             Expr::Shown(value) => self.shown(id, value, range),
+            // **What a `for` walks.** Its operand, or a cursor over it, by the
+            // operand's type -- see `khora_hir::body::Expr::Walked`.
+            Expr::Walked(value) => self.walked(id, value, range),
             Expr::Return(value) => {
                 // **A `return` inside a lambda leaves the lambda.** Lowering
                 // and code generation have always treated it so; the checker
@@ -2604,6 +2607,175 @@ impl<'a> Checker<'a> {
         }
 
         Type::Str
+    }
+
+    /// The type of what a `for` loop pulls from: its operand when that is an
+    /// `Iterator`, and otherwise the cursor `Iterable::iter` hands back.
+    ///
+    /// **An `Iterator` first, and untouched.** No instantiation is recorded
+    /// for one, which is what tells code generation to use the operand where
+    /// it stands -- so a loop over a `List` or a `Range` is the code it was
+    /// before `Iterable` existed, call for call.
+    ///
+    /// **Resolved against the type rather than the names in scope**, as a
+    /// hole's `Show` is, and for the same reason: a loop over a `Vector`
+    /// should need the imports a loop over a `List` needs. An impl in this
+    /// file's view is asked first -- one the program wrote for its own type,
+    /// or one it imported with `Iterable` -- and then `std::core`'s, which
+    /// reach a loop and nothing else (`TypeMap::core_iterables`).
+    ///
+    /// Refused here, at the operand, when it is neither. Left to `next`, the
+    /// refusal was "`Int` does not implement `Iterator`, which is where `next`
+    /// comes from" -- about a method nobody wrote, and silent about the second
+    /// way a type can be walked.
+    fn walked(&mut self, site: ExprId, value: ExprId, range: TextRange) -> Type {
+        let ty = self.infer(value);
+        let settled = self.unifier.zonk(&ty);
+
+        // Nothing to decide yet, or already reported: the loop's `next` is
+        // where an open type has always been settled or refused.
+        if matches!(settled, Type::Unknown | Type::Var(_) | Type::Never)
+            || self.unresolved_adt(&settled)
+        {
+            return ty;
+        }
+        // A file that cannot see `Iterator` has been told so by the
+        // desugaring (`for` needs `Step` and `Iterator`): a trait that is not
+        // in this map is not in scope by name either. `Unknown` rather than
+        // the operand's type, or the loop's `next` on a `Vector` -- whose
+        // impls, unlike a `List`'s, do not bring `Iterator` with them -- says
+        // a second thing about the same missing import.
+        if !self.types.traits.traits.contains_key(ITERATOR) {
+            return Type::Unknown;
+        }
+        if self.satisfies(ITERATOR, &settled) {
+            return ty;
+        }
+        if let Some(cursor) = self.cursor_of(site, &settled) {
+            return cursor;
+        }
+
+        let message = match self.undeclared_adt(&settled) {
+            Some(name) => format!(
+                "`{name}` is not in scope here, so nothing is known about whether a `for` \
+                 can walk it -- add it to an `import`"
+            ),
+            None if self.iterable_is_a_namesake() && self.core_cursor(&settled).is_some() => {
+                self.namesake_iterable_refusal(&settled)
+            }
+            None => format!(
+                "a `for` walks an `Iterator` or an `Iterable`, and `{settled}` is neither. \
+                 `List`, `Range`, `Vector`, `Array`, `Map` and `Dict` are, and a type of your \
+                 own is once it implements `Iterator` (it is its own cursor) or `Iterable` \
+                 (it hands out a cursor)"
+            ),
+        };
+        self.error(message, range);
+        Type::Unknown
+    }
+
+    /// Records `Iterable::iter` as `site`'s callee, at `of`, and answers the
+    /// cursor's type; `None` when `of` has no `Iterable` of `std::core`'s.
+    ///
+    /// **The trait's key, with `Self` as its argument, as a hole records
+    /// `Show::show`.** Monomorphization then picks the impl by the type's
+    /// declaring module. The impl's own key, `Iterable#Vector::iter`, names no
+    /// module, and a program with its own `Vector` and its own impl has a body
+    /// under the same key -- which the lookup by key finds first.
+    ///
+    /// **The cursor's type from the impl's signature**, so it arrives as the
+    /// concrete `VectorItems<A>` rather than a projection. A type parameter
+    /// bounded `C: Iterable` has no impl, and gets the trait's signature and
+    /// the projection `C::Cursor`. That loop is still refused, at its `next`,
+    /// for the reason a loop over a bare `I: Iterator` is: `C::Cursor::Effects`
+    /// is the caller's choice, and a pure function cannot assume it empty.
+    fn cursor_of(&mut self, site: ExprId, of: &Type) -> Option<Type> {
+        let key = format!("{ITERABLE}::iter");
+        let signature = match of {
+            Type::Param(_) | Type::Assoc { .. } => {
+                if !self.satisfies(ITERABLE, of) {
+                    return None;
+                }
+                self.types.signatures.get(key.as_str()).cloned()?
+            }
+            // The key below would name this file's own trait, and its
+            // signature and impls are what the call would be checked and
+            // emitted against; `walked` says so.
+            _ if self.iterable_is_a_namesake() => return None,
+            _ => self.core_cursor(of)?,
+        };
+        let (ty, _) = self.unifier.instantiate_with(&signature.generics, &signature.as_fn());
+        let Type::Fn { params, ret, .. } = ty else { return None };
+        let receiver = params.first()?;
+        self.unifier.unify(receiver, of).ok()?;
+        // `Iterable` takes no parameters and `iter` none of its own, so
+        // `Self` is the whole of what the trait's key is instantiated at.
+        self.instantiations.insert(site, (key, vec![of.clone()]));
+        Some(*ret)
+    }
+
+    /// The `iter` signature of the impl of `std::core`'s `Iterable` for `of`,
+    /// matched by the type's declaring module as well as its name.
+    ///
+    /// One in this file's view first -- a program's own impl of `std`'s trait
+    /// for its own type, or one it imported with the trait -- and then the
+    /// ones every loop can reach (`TypeMap::core_iterables`).
+    fn core_cursor(&self, of: &Type) -> Option<Signature> {
+        let core = khora_hir::ModulePath::new(vec!["std".to_string(), "core".to_string()]);
+        let fits = |imp: &traits::ImplDef| {
+            imp.trait_home.as_ref() == Some(&core)
+                && unify::match_params(&imp.self_type, of, &imp.generics, &mut HashMap::new())
+        };
+        let in_view = self
+            .types
+            .traits
+            .impls
+            .iter()
+            .filter(|imp| imp.trait_name == ITERABLE)
+            .find(|imp| fits(imp))
+            .and_then(|imp| {
+                let own = traits::method_key(&imp.trait_key, &imp.head()?, "iter");
+                self.types.signatures.get(own.as_str()).cloned()
+            });
+        in_view.or_else(|| {
+            self.types
+                .core_iterables
+                .iter()
+                .find(|(imp, _)| fits(imp))
+                .map(|(_, signature)| signature.clone())
+        })
+    }
+
+    /// Whether `Iterable` here names a trait other than `std::core`'s.
+    fn iterable_is_a_namesake(&self) -> bool {
+        let core = khora_hir::ModulePath::new(vec!["std".to_string(), "core".to_string()]);
+        self.types.homes.of(ITERABLE).is_some_and(|(home, _)| home != core)
+    }
+
+    /// Why a loop over one of `std`'s collections is refused in a file whose
+    /// `Iterable` is another trait.
+    ///
+    /// **From where the other trait came.** A file that imports another
+    /// module's `Iterable` was told to rename "this file's `Iterable`", which
+    /// it does not have; the fix there is the import line.
+    fn namesake_iterable_refusal(&self, settled: &Type) -> String {
+        let declared_here = match (self.types.homes.of(ITERABLE), &self.types.module) {
+            (Some((home, _)), Some(here)) => &home == here,
+            _ => false,
+        };
+        let walks = format!("a `for` walks `{settled}` through `std::core`'s `Iterable`");
+        match self.types.homes.of(ITERABLE) {
+            Some((home, _)) if !declared_here => format!(
+                "{walks}, and this file imports another `Iterable`, from `{home}`, which the \
+                 loop would call instead. Leave `Iterable` out of that import, or walk \
+                 `{settled}` from a module that does not import it"
+            ),
+            _ => format!(
+                "{walks}, and this file declares an `Iterable` of its own, which the loop \
+                 would call instead. Rename this file's `Iterable`, or walk `{settled}` from a \
+                 module that does not declare one"
+            ),
+        }
     }
 }
 

@@ -896,3 +896,163 @@ pub fn main() -> () {
         assert!(body.contains("@khora_overflow"), "the negation traps:\n{body}");
     }
 }
+
+/// A `for` over an `Iterator`, and the same loop written out as the
+/// desugaring documents it, in one program that has its own `Step`, `List`,
+/// `Range` and `Iterator` and nothing else.
+const WALKED: &str = "module t;
+pub type Step<S, A> = | Yield(state: S, item: A) | Done;
+pub trait Iterator {
+  type Item;
+  type Effects;
+  fn next(self) -> Step<Self, Self::Item> with Self::Effects;
+}
+pub type List<A> = | Nil | Cons(A, List<A>);
+impl<A> Iterator for List<A> {
+  type Item = A;
+  type Effects = {};
+  fn next(self) -> Step<List<A>, A> {
+    match self { List::Nil => Step::Done, List::Cons(h, t) => Step::Yield(t, h) }
+  }
+}
+pub type Range = | Of(from: Int, to: Int);
+impl Iterator for Range {
+  type Item = Int;
+  type Effects = {};
+  fn next(self) -> Step<Range, Int> {
+    match self {
+      Range::Of(from, to) => if from >= to { Step::Done } else { Step::Yield(Range::Of(from + 1, to), from) },
+    }
+  }
+}
+
+fn written_list(xs: List<Int>) -> Int {
+  let mut t = 0;
+  for x in xs { t = t + x; };
+  t
+}
+
+fn expanded_list(xs: List<Int>) -> Int {
+  let mut t = 0;
+  {
+    let mut it = xs;
+    loop {
+      match it.next() {
+        Step::Yield(rest, x) => { it = rest; { t = t + x; } },
+        Step::Done => break,
+      }
+    }
+  };
+  t
+}
+
+fn written_range(n: Int) -> Int {
+  let mut t = 0;
+  for x in Range::Of(0, n) { t = t + x; };
+  t
+}
+
+fn expanded_range(n: Int) -> Int {
+  let mut t = 0;
+  {
+    let mut it = Range::Of(0, n);
+    loop {
+      match it.next() {
+        Step::Yield(rest, x) => { it = rest; { t = t + x; } },
+        Step::Done => break,
+      }
+    }
+  };
+  t
+}
+
+fn main() -> Int {
+  written_list(List::Cons(1, List::Nil)) + expanded_list(List::Nil)
+    + written_range(3) + expanded_range(3)
+}
+";
+
+/// The body of a function's definition with what may differ between two
+/// spellings of one loop taken out: its own name, the debug metadata (which
+/// numbers each function's locations apart), the index of the overflow
+/// message each function's checked `+` points at, and the names of the two
+/// locals the desugaring declares, which a program cannot spell (`$iter`,
+/// `$rest`).
+fn anonymous(body: &str, name: &str) -> String {
+    unquoted(&body.replace(name, "F"))
+        .replace("%$iter", "%it")
+        .replace("%$rest", "%rest")
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("#dbg_"))
+        .map(|l| match l.find(", !dbg") {
+            Some(at) => &l[..at],
+            None => l.split(" !dbg !").next().unwrap_or(l),
+        })
+        .map(|l| match l.find("@overflow.what.") {
+            Some(at) => {
+                let rest = &l[at + "@overflow.what.".len()..];
+                let digits = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+                format!("{}@overflow.what.N{}", &l[..at], &rest[digits..])
+            }
+            None => l.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `%"x"` as `%x`: LLVM quotes a local whose name has a character it does not
+/// allow bare, which the desugaring's `$iter` does and a written `it` does
+/// not, so the same value is spelled two ways.
+fn unquoted(ir: &str) -> String {
+    let mut out = String::with_capacity(ir.len());
+    let mut rest = ir;
+    while let Some(at) = rest.find("%\"") {
+        out.push_str(&rest[..at]);
+        out.push('%');
+        let after = &rest[at + 2..];
+        match after.find('"') {
+            Some(end) => {
+                out.push_str(&after[..end]);
+                rest = &after[end + 1..];
+            }
+            None => {
+                out.push_str(after);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// **A `for` over something that is already an `Iterator` is the loop it was
+/// before collections could be walked**: its IR is the IR of the expansion
+/// written by hand, at both profiles, for a `List` and a `Range`.
+///
+/// The `for` desugaring wraps every iterable in a node that may become a call
+/// to `Iterable::iter`, and the promise is that for an `Iterator` it becomes
+/// nothing -- no call, no copy, no extra count. A difference in one
+/// instruction would show here.
+#[test]
+fn a_for_over_an_iterator_compiles_to_its_expansion() {
+    for profile in [Profile::Debug, Profile::Release] {
+        let ir = module_ir_as(&format!("polls_walked_{profile:?}"), WALKED, profile);
+        let body = |name: &str| {
+            let start = ir
+                .lines()
+                .position(|l| l.starts_with("define") && l.contains(&format!("{name}\"(")))
+                .unwrap_or_else(|| panic!("no function ending `{name}` in the IR"));
+            let text = ir.lines().skip(start).take_while(|l| *l != "}").collect::<Vec<_>>();
+            anonymous(&text.join("\n"), name)
+        };
+        for (written, expanded) in
+            [("written_list", "expanded_list"), ("written_range", "expanded_range")]
+        {
+            assert_eq!(
+                body(written),
+                body(expanded),
+                "{profile:?}: `{written}` and `{expanded}` differ"
+            );
+        }
+    }
+}

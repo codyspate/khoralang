@@ -83,6 +83,19 @@ pub struct TypeMap {
     /// privacy is asked: a private field is visible exactly when this equals
     /// the field's `VariantInfo::home`.
     pub module: Option<khora_hir::ModulePath>,
+    /// `std::core`'s `Iterable` impls, each with its `iter` signature, for
+    /// the `for` loop to read and nothing else.
+    ///
+    /// **Kept apart from [`TypeMap::traits`] so that a loop reaches them and a
+    /// name does not.** A loop over a `Vector` a call handed this file has to
+    /// walk it without `Vector` or `Iterable` imported, as a loop over a
+    /// `List` does. Joined to the file's impls, the same four reached every
+    /// file by bare name: a program's own `type Map = { n: Int }` was told
+    /// "`Map` takes 0 type argument(s), but 2 were given", and `v.iter()` on a
+    /// trait of the program's own became ambiguous with a trait the file never
+    /// imported. Here they are matched by the type's declaring module, in
+    /// [`crate::check`]'s `walked`, and are invisible to every other lookup.
+    pub(crate) core_iterables: Vec<(traits::ImplDef, Signature)>,
 }
 
 impl TypeMap {
@@ -961,6 +974,40 @@ fn is_builtin_head(head: &str) -> bool {
             && head[1..].parse::<u32>().is_ok()
 }
 
+/// Whether an impl from another module may join this file's impls.
+///
+/// **What this prevents: an impl judged against a declaration it was not
+/// written for.** Impls are carried between files by bare name, and a file is
+/// entitled to declare a `Map` or a `trait Iterable` of its own. `std`'s
+/// `impl<K, V> Iterable for Map<K, V>`, carried into a file whose `Map` is
+/// `{ n: Int }`, was checked against that record: "`Map` takes 0 type
+/// argument(s), but 2 were given", at the end of a file with no loop in it.
+/// Carried into a file with its own `trait Iterable`, `std`'s four impls were
+/// checked against that trait instead, eight errors about cursors.
+///
+/// Refused exactly when the name means a different declaration of the same
+/// kind here: its head is a type this file resolves to another module, or its
+/// trait is a trait this file resolves to another module. A name this file
+/// cannot write at all -- `Iterator for MapEntries` -- means nothing else
+/// here and is let through, as it always was; so is a head that is a *trait*
+/// here, which no impl can be for. What it costs: nothing a program could
+/// use, since an impl for somebody else's `Map` cannot apply to this one.
+fn belongs_here(map: &TypeMap, imp: &traits::ImplDef) -> bool {
+    let head_is_another = imp.head().is_some_and(|head| {
+        !map.homes.is_trait(&head)
+            && match (map.homes.of(&head), traits::home_of(&imp.self_type)) {
+                (Some((here, _)), Some(theirs)) => here != theirs,
+                _ => false,
+            }
+    });
+    let trait_is_another = map.homes.is_trait(&imp.trait_name)
+        && match (map.homes.of(&imp.trait_name), &imp.trait_home) {
+            (Some((here, _)), Some(theirs)) => &here != theirs,
+            _ => false,
+        };
+    !head_is_another && !trait_is_another
+}
+
 /// Copies `std::core`'s trait impls **on builtin types** into `map`.
 ///
 /// **The same argument as [`import_inherent`], one level up.** An impl arrives
@@ -1032,6 +1079,47 @@ pub(crate) fn import_builtin_impls(exported: &TypeMap, map: &mut TypeMap) {
     }
 }
 
+/// Whether `imp` is one of `std::core`'s own `Iterable` impls: `std::core`'s
+/// trait, for a type `std::core` declares.
+///
+/// **These four travel with their trait and never with their type.** Every
+/// other impl rides in with either half, so importing `Vector` brought
+/// `Iterable for Vector` and the trait with it -- and a program's own
+/// `trait Mine { fn iter(self) -> Int; }`, implemented for `Vector`, had its
+/// `v.iter()` refused as ambiguous with a trait the file never named. A `for`
+/// does not need them here: it reads [`TypeMap::core_iterables`]. What it
+/// costs: `Vector::iter(v)` and `v.iter()` want `Iterable` imported, as a
+/// trait's methods do whenever the trait is not reached through a type.
+///
+/// **The type's module as well as the trait's.** A program's own
+/// `impl Iterable for Deck` is an ordinary impl and travels with `Deck`, as
+/// `impl Show for Deck` does. Matched on the trait alone it was taken for one
+/// of these four, and `Deck` was walkable in the file that wrote the impl and
+/// nowhere else: "`Deck` is neither", in every module that imported it.
+fn is_core_iterable(imp: &traits::ImplDef) -> bool {
+    let core = khora_hir::ModulePath::new(vec!["std".to_string(), "core".to_string()]);
+    imp.trait_name == crate::ITERABLE
+        && imp.trait_home.as_ref() == Some(&core)
+        && traits::home_of(&imp.self_type).as_ref() == Some(&core)
+}
+
+/// `std::core`'s impls of its own `Iterable`, each with its `iter` signature.
+///
+/// The trait's home as well as its name, because a `std::core` that declared
+/// nothing of the kind -- a test's stub -- may still have a namesake impl.
+/// See [`TypeMap::core_iterables`] for why these do not join the file's impls.
+fn core_iterables(core: &TypeMap) -> Vec<(traits::ImplDef, Signature)> {
+    core.traits
+        .impls
+        .iter()
+        .filter(|i| is_core_iterable(i))
+        .filter_map(|i| {
+            let key = traits::method_key(&i.trait_key, &i.head()?, "iter");
+            Some((i.clone(), core.signatures.get(key.as_str())?.clone()))
+        })
+        .collect()
+}
+
 /// Brings every inherent impl of an imported module into view.
 ///
 /// Every one, not only the ones whose type was named in the import. A value can
@@ -1101,6 +1189,10 @@ pub(crate) fn import_types(
             // written on the function: `impl Ord for String` has no import
             // line that could bring it, because `String` has none.
             import_builtin_impls(core, map);
+            // And the `Iterable` impls, for a `for` alone, so a loop over a
+            // `Vector` that a call handed this file walks it. See
+            // `TypeMap::core_iterables`.
+            map.core_iterables = core_iterables(core);
         }
     }
 
@@ -1182,16 +1274,19 @@ pub(crate) fn import_types(
                     .impls
                     .iter()
                     .filter(|i| i.head().as_deref() == Some(name.as_str()))
+                    .filter(|i| !is_core_iterable(i))
                 {
                     let known = map
                         .traits
                         .impls
                         .iter()
                         .any(|i| i.trait_name == extra.trait_name && i.head() == extra.head());
-                    if known {
+                    if known || !belongs_here(map, extra) {
                         // Imported twice — under two names, or from both sides
                         // at once — is still one impl, and the coherence check
-                        // downstream would call it two.
+                        // downstream would call it two. And an impl of a trait
+                        // this file declares a namesake of is not an impl of
+                        // that trait; see `belongs_here`.
                         continue;
                     }
                     let mut extra = extra.clone();
@@ -1226,7 +1321,7 @@ pub(crate) fn import_types(
                             let known = map.traits.impls.iter().any(|i| {
                                 i.trait_name == sibling.trait_name && i.head() == sibling.head()
                             });
-                            if known {
+                            if known || !belongs_here(map, sibling) {
                                 continue;
                             }
                             let mut sibling = sibling.clone();
@@ -1272,14 +1367,28 @@ pub(crate) fn import_types(
                     let known = map.traits.impls.iter().any(|i| {
                         i.trait_name == imported.trait_name && i.head() == imported.head()
                     });
-                    if known {
+                    if known || !belongs_here(map, imported) {
                         continue;
                     }
                     let mut imported = imported.clone();
                     imported.local = false;
                     map.traits.impls.push(imported);
                 }
+                // An impl refused above leaves its methods behind as well:
+                // `Iterable#Vector::iter` is also the key of this file's own
+                // impl for its own `Vector`, and `std`'s signature written
+                // over it was checked against the program's body.
+                let refused: Vec<String> = exported
+                    .traits
+                    .impls
+                    .iter()
+                    .filter(|i| &i.trait_name == name && !belongs_here(map, i))
+                    .filter_map(|i| Some(format!("{}#{}::", i.trait_key, i.head()?)))
+                    .collect();
                 for (key, signature) in &exported.signatures {
+                    if refused.iter().any(|prefix| key.starts_with(prefix.as_str())) {
+                        continue;
+                    }
                     if key.starts_with(&format!("{name}::"))
                         || key.starts_with(&format!("{name}#"))
                     {

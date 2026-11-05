@@ -306,6 +306,14 @@ it will behave differently now.
 
 ### Fixed
 
+- `Entry::show(e)` -- a call that names a type and a trait method of it --
+  calls the impl for the `Entry` the file means. With two modules that each
+  declare an `Entry` and `impl Show for Entry`, it called whichever module
+  the compiler happened to read first, which depends on where the project
+  sits on disk: `bbb`'s `Entry` printed `aaa`'s answer, while `e.show()` and
+  `"${e}"` were right. The same held for `Vector::iter(v)` and
+  `Vector::show(v)` on `std`'s `Vector` beside a module with a `Vector` of its
+  own, where the wrong body was invalid code.
 - `-x` on a signed type's minimum answered the minimum, and `-x` on an
   unsigned value answered `256 - x` (for a `U8`; the type's size for the
   others), with exit status 0. Both stop the program, as `x * -1` and
@@ -546,6 +554,28 @@ it will behave differently now.
 
 ### Added
 
+- `for` walks a `Vector`, an `Array`, a `Map` and a `Dict`, as it walks a
+  `List` and a `Range`, with the same `import std::core::{Iterator, Step}`.
+  A `Vector` or `Array` yields its elements in index order; a `Dict` yields a
+  `Pair<K, V>` per entry, smallest key first; a `Map` yields a `Pair<K, V>`
+  per entry in the order `Map::entries` reports. The loop walks the
+  collection in place: one allocation for a `Vector`, `Array` or `Map` and
+  three for a `Dict`, however many elements. What it sees when its body
+  changes the collection is defined per type and is in the language
+  reference under `for`: a `Vector` loop stops at the length it began with
+  or the current one, whichever is shorter; a `Map` that grows mid-loop
+  still visits each entry it had once. A new trait, `Iterable`, is what
+  makes these walkable; a type of your own implements it to hand out a
+  cursor, and a loop never needs it imported. Calling `iter` yourself --
+  `Vector::iter(v)` or `v.iter()` -- needs `Iterable` imported. A module that
+  declares or imports a trait named `Iterable` other than `std::core`'s cannot
+  `for` over the four `std` collections, and is told which one is in the way.
+  A type of your own with `impl Iterable` is walkable in every module that
+  imports it, including from a dependency package. Loops over a `List`, a
+  `Range` or any other `Iterator` compile to the same code as before.
+- `for x in e` where `e` is neither an `Iterator` nor an `Iterable` is refused
+  at `e`, with a message naming the types that can be walked and the two
+  traits that make a type walkable.
 - Integer literals in hexadecimal, binary and octal: `0xFF`, `0b1010`,
   `0o17`, with either case for the prefix and the digits and `_` anywhere
   after the prefix. They are typed as decimal literals are -- an `Int`, or the

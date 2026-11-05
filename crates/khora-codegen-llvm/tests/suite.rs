@@ -65,6 +65,7 @@ mod function_values;
 mod files;
 mod fixed;
 mod flow;
+mod for_collections;
 mod foreign;
 mod fs;
 mod handoff;

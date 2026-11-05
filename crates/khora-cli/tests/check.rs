@@ -259,6 +259,67 @@ pub fn main() -> Int { greeting() }
     assert_eq!(count_of(&text), 2 + std_files(), "the app and its dependency:\n{text}");
 }
 
+/// **A dependency's walkable type is walkable in the program that depends on
+/// it.** A library that ships a type with `impl Iterable` is the main use of
+/// the trait; that impl stayed in the library's own files, and every `for`
+/// over the type outside it was refused: "`Deck` is neither".
+#[test]
+fn a_dependencys_iterable_type_is_walked() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("iterable-dep");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("app")).expect("a workspace");
+    std::fs::create_dir_all(root.join("cards")).expect("a workspace");
+
+    std::fs::write(
+        root.join("cards/cards.kh"),
+        "module acme::cards;
+import std::core::{Iterable, Vector, VectorItems, List};
+pub type Deck = { pub cards: Vector<Int> };
+impl Iterable for Deck {
+  type Cursor = VectorItems<Int>;
+  fn iter(self) -> VectorItems<Int> { Vector::iter(self.cards) }
+}
+pub fn deck() -> Deck { { cards: Vector::from_list([7, 8, 9]) } }
+",
+    )
+    .expect("a fixture");
+    std::fs::write(
+        root.join("app/khora.toml"),
+        "[package]
+name = \"app\"
+version = \"0.1.0\"
+
+[dependencies]
+\"acme.cards\" = { path = \"../cards\" }
+",
+    )
+    .expect("a manifest");
+    std::fs::write(
+        root.join("app/main.kh"),
+        "module app::main;
+import std::core::{Iterator, Iterable, Step};
+import acme::cards::{Deck, deck};
+pub fn main() -> Int {
+  let d: Deck = deck();
+  let mut t = 0;
+  for x in d { t = t + x; };
+  for y in d.iter() { t = t + y; };
+  t
+}
+",
+    )
+    .expect("a fixture");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_khora"))
+        .arg("check")
+        .arg(root.join("app"))
+        .output()
+        .expect("could not run `khora`");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned()
+        + &String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "a loop over the dependency's `Deck`:\n{text}");
+}
+
 /// **A dependency's tests are not modules of the program that depends on it.**
 ///
 /// They were, and it went further than a slower build: a library's `test`

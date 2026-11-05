@@ -816,7 +816,7 @@ fn leaves(expr: &Expr) -> Option<&'static str> {
         Expr::Break(_) => Some("break"),
         Expr::Continue => Some("continue"),
         // Not written by anybody, so there is no source construct to name.
-        Expr::Shown(_) => None,
+        Expr::Shown(_) | Expr::Walked(_) => None,
         _ => None,
     }
 }
@@ -1238,7 +1238,7 @@ impl Cycles<'_> {
                     self.expr(inner);
                 }
             }
-            Expr::Try(inner) | Expr::Raise(inner) => self.expr(inner),
+            Expr::Try(inner) | Expr::Raise(inner) | Expr::Walked(inner) => self.expr(inner),
             _ => {}
         }
     }

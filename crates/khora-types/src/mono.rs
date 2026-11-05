@@ -516,7 +516,10 @@ fn walk(db: &dyn Db, files: &[SourceFile], roots: Roots, own: Option<&[SourceFil
             };
             let (name, args, wrote_it) = match select_impl_in(&whole, unit.types, &mention) {
                 Some(chosen) => (chosen.function, chosen.args, Some(chosen.module)),
-                None => (callee.clone(), resolved, None),
+                // A static `Type::method` call names the impl's key already;
+                // the type's module says which impl, as the receiver's does
+                // for a trait call. See `BodyTypes::static_home`.
+                None => (callee.clone(), resolved, specialized.static_home(*site).cloned()),
             };
 
             // Which module defines it decides the symbol, and a name reached

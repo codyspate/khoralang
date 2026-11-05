@@ -103,21 +103,40 @@ for pattern in iterable {
 }
 ```
 
+`for` walks a `List`, a `Range`, a `Vector`, an `Array`, a `Map`, a `Dict`, and
+anything else that implements `Iterator` or `Iterable`:
+
+| Walked | Yields | In this order |
+|---|---|---|
+| `List<A>` | each element | first to last |
+| `Range::Of(from, to)` | each `Int` from `from` up to, not including, `to` | ascending |
+| `Vector<A>`, `Array<A>` | each element | index order |
+| `Dict<K, V>` | a `Pair<K, V>` per entry | smallest key first, as `Dict::entries` |
+| `Map<K, V>` | a `Pair<K, V>` per entry | the order `Map::entries` reports, entry for entry; it follows no rule and can differ between runs |
+
+A loop over a `Vector`, `Array`, `Map` or `Dict` walks it where it is. It does not
+copy it into a `List` first, so it allocates the same small amount however long the
+collection is.
+
 The left side is a pattern. Khora has a tuple literal — see
 [Tuple and unit expressions](/docs/reference/expressions/) — but no standard
-iterator yields one: an iterator over pairs yields a `Pair` record, so the loop
-binds it by name and reads its fields.
+iterator yields one: a map yields a `Pair` record, so the loop binds it by name
+and reads its fields, or takes it apart with a record pattern.
 
 ```khora
-for entry in Dict::entries(table) {
+for entry in table {
   print("${entry.key}: ${entry.value}");
+}
+
+for Pair { key, value } in table {
+  print("${key}: ${value}");
 }
 ```
 
 **`Pair<K, V>` has the fields `key` and `value`**, and `String::split_once`
 answers a `Split` with the fields `head` and `rest`. Both are ordinary records:
 they are read with `.`, and written as record literals — `let p: Pair<String,
-Int> = { key: "a", value: 1 };`.
+Int> = { key: "a", value: 1 };`. Reading `entry.key` needs `Pair` imported.
 
 A tuple pattern — `for (key, value) in ...` — is only valid against a value
 whose type really is a tuple, and is refused against a `Pair`:
@@ -127,11 +146,49 @@ error: this pattern takes a value apart into 2 pieces, but `Pair<String, Int>`
        is not a tuple
 ```
 
-`for` desugars to `Iterator::next`, so both `Iterator` and `Step` must be in scope in the module that writes the loop:
+`for` desugars to `Iterator::next`, so both `Iterator` and `Step` must be in scope in the module that writes the loop, whatever it walks:
 
 ```khora
 import std::core::{Iterator, Step};
 ```
+
+### Changing the collection inside the loop
+
+The loop reads each element when it reaches it, from the collection itself.
+What it sees of changes its own body makes:
+
+- **`Vector`**: the loop visits index 0, 1, 2 and on while the index is below
+  both the length the loop began with and the length at that step, and reads
+  each element when it reaches it. So an element pushed onto the end is not
+  visited and the loop ends, and a `pop` or `clear` ends the loop at the new
+  end. A `pop` or `clear` followed by pushes puts new elements at indices the
+  loop has not reached yet, and those are visited: popping and pushing on each
+  turn of `[1, 2, 3, 4, 5]` visits `1, 2, 3, 4, 104`, and a `clear` then ten
+  pushes on the first turn visits `1, 901, 902, 903, 904`. An element changed
+  with `Vector::set` before the loop reaches it is visited with its new value.
+  What is visited never depends on the vector's capacity.
+- **`Array`**: an element changed with `Array::set` before the loop reaches it
+  is visited with its new value.
+- **`Map`**: every entry that is in the map for the whole loop is visited exactly
+  once, even if the body inserts enough to grow the table. An entry inserted or
+  removed during the loop may or may not be visited; an entry whose value is
+  replaced is visited once, with the old value or the new.
+- **`Dict`**: a `Dict` is never changed in place, so the loop walks the
+  dictionary it started with. `d = d.insert(..)` in the body makes a new one.
+
+None of these stops the program, runs forever, or visits one element twice.
+
+### Something that is not walkable
+
+```
+error: a `for` walks an `Iterator` or an `Iterable`, and `Int` is neither.
+       `List`, `Range`, `Vector`, `Array`, `Map` and `Dict` are, and a type of
+       your own is once it implements `Iterator` (it is its own cursor) or
+       `Iterable` (it hands out a cursor)
+```
+
+A type of your own is walkable once it implements one of those two traits. See
+[Traits](/docs/reference/traits/) for `Iterable`.
 
 A tuple is taken apart by pattern and never by position: there is no `pair.0`.
 Destructure it in the `for`, in a `let`, or in a match arm.

@@ -413,6 +413,15 @@ impl<'a> Planner<'a> {
                 }
                 self.live_before(inner, after)
             }
+            // A one-argument call to `Iterable::iter`, or the operand itself:
+            // the shape of `Shown` above, and missing it would make the read
+            // invisible to liveness for the same reason.
+            Expr::Walked(inner) => {
+                if (self.stops)(id) {
+                    self.holding_at_a_stop(after);
+                }
+                self.live_before(inner, after)
+            }
             // **A `break` leaves for after the loop, not for the next turn.**
             // What is live where it lands is the enclosing loop's own `after`,
             // and reading the ambient set instead would claim everything the

@@ -104,6 +104,44 @@ impl Iterator for Users {
 }
 ```
 
+### `Iterator` and `Iterable`
+
+`for` walks a value of either trait. **An `Iterator` is its own cursor**: `next`
+hands back the item and the iterator that follows it, which is free for a `List`
+(the tail) and a `Range` (one more `from`). **An `Iterable` hands out a cursor**:
+`Vector`, `Array`, `Map` and `Dict` implement it, because each would otherwise
+have to copy what is left of itself on every step.
+
+```khora
+pub trait Iterable {
+  type Cursor: Iterator;
+  fn iter(self) -> Self::Cursor;
+}
+```
+
+A type of your own that holds a collection can lend the collection's cursor:
+
+```khora
+import std::core::{Iterable, Vector, VectorItems};
+
+type Deck = { cards: Vector<Int> };
+
+impl Iterable for Deck {
+  type Cursor = VectorItems<Int>;
+  fn iter(self) -> VectorItems<Int> { Vector::iter(self.cards) }
+}
+```
+
+`for card in deck` then works with only `Iterator` and `Step` imported, as for a
+`List`; a loop never needs `Iterable` in scope.
+
+**The four cursors in `std::core` are used up as they go.** Each advances in
+place and hands itself back as its successor, which is what keeps a loop to one
+allocation. A `for` cannot tell. Code that calls `Iterator::next` by hand on a
+`VectorItems` should keep the successor and drop the value it called `next` on:
+calling `next` twice on the same value gives two different items, where on a
+`List` it gives the same item twice.
+
 ## Trait implementations
 
 ```khora

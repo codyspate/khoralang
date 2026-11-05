@@ -1616,14 +1616,15 @@ fn refusal_of(why: PgError) -> Bool {
 /// Keeps `statement` under `sql`, first letting go of the one used longest
 /// ago if there is no room.
 ///
-/// **Finding it walks every statement kept**, 512 of them and a list of
-/// their entries, which is paid only by a connection that has more distinct
-/// statements than that: once per new statement from then on. A list kept
-/// in order of use would find it at once and cost a relink on every run.
+/// **Finding it walks every statement kept**, 512 of them, which is paid
+/// only by a connection that has more distinct statements than that: once
+/// per new statement from then on. A list kept in order of use would find
+/// it at once and cost a relink on every run. The walk is over the map
+/// itself, so it allocates no list of entries.
 fn keep(c: Connection, sql: String, statement: Prepared) -> () {
   if Map::len(c.prepared) >= most_prepared() {
     let mut oldest: Option<Pair<String, Prepared>> = Option::None;
-    for entry in Map::entries(c.prepared) {
+    for entry in c.prepared {
       let older = match oldest {
         Option::None => true,
         Option::Some(held) => entry.value.used < held.value.used,

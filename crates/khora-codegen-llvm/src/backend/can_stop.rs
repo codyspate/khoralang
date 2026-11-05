@@ -311,6 +311,7 @@ fn callee_reason(
         | Expr::Return(_)
         | Expr::Tuple(_)
         | Expr::Shown(_)
+        | Expr::Walked(_)
         | Expr::Raise(_)
         | Expr::Try(_)
         | Expr::Catch { .. }
@@ -386,6 +387,7 @@ fn scan(
             | Expr::Return(_)
             | Expr::Tuple(_)
             | Expr::Shown(_)
+            | Expr::Walked(_)
             | Expr::Raise(_)
             | Expr::Catch { .. }
             | Expr::LambdaSelf

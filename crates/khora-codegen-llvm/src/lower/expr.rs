@@ -55,6 +55,14 @@ impl<'ctx> Lower<'_, 'ctx> {
                 Some(symbol) => self.call_named(&symbol, id, &[value], range),
                 None => self.expr(value),
             },
+            // **What a `for` walks.** A call to the `Iterable::iter` the
+            // checker resolved, or -- for an operand that is already an
+            // `Iterator`, which records nothing -- the operand itself, which
+            // is what keeps a loop over a `List` or a `Range` the code it was.
+            Expr::Walked(value) => match self.mono.callee(&self.owner.clone(), id) {
+                Some(symbol) => self.call_named(&symbol, id, &[value], range),
+                None => self.expr(value),
+            },
             Expr::Return(value) => self.lower_return(value),
             Expr::Record { fields, base, .. } => {
                 self.build_record(id, &fields, base, range)

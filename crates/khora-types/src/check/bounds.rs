@@ -208,8 +208,32 @@ impl<'a> Checker<'a> {
                 let declared = self.assoc_bounds(owner, name);
                 self.bounds_answer(&declared, wanted, args)
             }
-            other => self.types.traits.satisfies_at(wanted, args, other),
+            other => {
+                self.types.traits.satisfies_at(wanted, args, other)
+                    || wanted == ITERABLE && self.core_iterable_answers(other)
+            }
         }
+    }
+
+    /// Whether one of `std::core`'s own `Iterable` impls covers `ty`, in a
+    /// file where `Iterable` is `std::core`'s.
+    ///
+    /// **What this prevents: a loop over `std`'s `Vector` refused in a file
+    /// with a `Vector` of its own.** `std`'s impl does not join such a file's
+    /// impls -- there, `Vector` is the program's type and the impl would be
+    /// judged against it -- so the bound the loop's `Iterable::iter` carries
+    /// found nothing for the `Vector` a call handed back, and the loop that
+    /// `cursor_of` had just resolved was refused as "`Vector<Int>` does not
+    /// implement `Iterable`". Matched by the type's declaring module, as
+    /// `cursor_of` matches it, so a namesake never qualifies.
+    fn core_iterable_answers(&self, ty: &Type) -> bool {
+        let core = khora_hir::ModulePath::new(vec!["std".to_string(), "core".to_string()]);
+        let iterable_is_cores =
+            self.types.homes.of(ITERABLE).is_none_or(|(home, _)| home == core);
+        iterable_is_cores
+            && self.types.core_iterables.iter().any(|(imp, _)| {
+                crate::unify::match_params(&imp.self_type, ty, &imp.generics, &mut HashMap::new())
+            })
     }
 
     /// Whether a list of declared bounds discharges `wanted` at `args`.

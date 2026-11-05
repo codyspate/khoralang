@@ -106,8 +106,11 @@ impl<A> Iterator for List<A> {
         ("fn f() -> List<Int> { [0, ..5] }", "this argument: expected `List<Int>`, found `Int`", "5"),
         (
             "fn f() -> List<Int> { [for r in 5 => r] }",
-            "`Int` does not implement `Iterator`, which is where `next` comes from",
-            "for r in 5 => r",
+            "a `for` walks an `Iterator` or an `Iterable`, and `Int` is neither. `List`, \
+             `Range`, `Vector`, `Array`, `Map` and `Dict` are, and a type of your own is once \
+             it implements `Iterator` (it is its own cursor) or `Iterable` (it hands out a \
+             cursor)",
+            "5",
         ),
         (
             "fn f(rows: List<Int>) -> List<Int> { [for r in rows => if r > 1 => break] }",
