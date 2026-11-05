@@ -37,6 +37,13 @@ use khora_db::{KhoraDatabase, SourceFile, SourceRoot};
 
 /// Every `.kh` file of `std` and the postgres package, plus the program.
 fn sources(db: &KhoraDatabase, dir: &std::path::Path, main: &str) -> Vec<SourceFile> {
+    sources_granting(db, dir, main, None)
+}
+
+/// [`sources`], with `std::permissions::grants::network` answering `network`
+/// when it is given, as `khora build` writes it from a manifest's
+/// `[permissions] network`.
+fn sources_granting(db: &KhoraDatabase, dir: &std::path::Path, main: &str, network: Option<&[&str]>) -> Vec<SourceFile> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
     let mut out = Vec::new();
     let mut stack = vec![root.join("std"), root.join("packages").join("postgres").join("src")];
@@ -51,7 +58,13 @@ fn sources(db: &KhoraDatabase, dir: &std::path::Path, main: &str) -> Vec<SourceF
                 // build has no entry point for.
                 && !path.ends_with("wire_test.kh")
             {
-                let text = std::fs::read_to_string(&path).expect("readable");
+                let mut text = std::fs::read_to_string(&path).expect("readable");
+                if let (Some(hosts), true) = (network, path.ends_with("grants.kh")) {
+                    let list = hosts.iter().rev().fold("List::Nil".to_string(), |rest, h| format!("List::Cons(\"{h}\", {rest})"));
+                    let open = "pub fn network() -> List<String> {\n  List::Cons(\"*\", List::Nil)\n}";
+                    assert_eq!(text.matches(open).count(), 1, "the default network grant in grants.kh");
+                    text = text.replace(open, &format!("pub fn network() -> List<String> {{\n  {list}\n}}"));
+                }
                 out.push(SourceFile::new(db, path, text));
             }
         }
@@ -61,6 +74,11 @@ fn sources(db: &KhoraDatabase, dir: &std::path::Path, main: &str) -> Vec<SourceF
 }
 
 fn build(name: &str, main: &str) -> PathBuf {
+    build_granting(name, main, None)
+}
+
+/// [`build`] under a `[permissions] network` of `network`, when given.
+fn build_granting(name: &str, main: &str, network: Option<&[&str]>) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     harness::ensure_runtime();
     std::fs::create_dir_all(&dir).expect("a workspace");
@@ -68,7 +86,7 @@ fn build(name: &str, main: &str) -> PathBuf {
     let _ = std::fs::remove_file(&exe);
 
     let db = KhoraDatabase::new();
-    let root = SourceRoot::new(&db, sources(&db, &dir, main));
+    let root = SourceRoot::new(&db, sources_granting(&db, &dir, main, network));
     if let Err(errors) = khora_codegen_llvm::compile(&db, root, &exe) {
         let messages: Vec<String> = errors.into_iter().map(|e| e.message).collect();
         panic!("compiling `{name}` failed:\n  {}\n\n{main}", messages.join("\n  "));
@@ -2182,7 +2200,7 @@ fn main() -> Int {{
   let crew = Fibers::open();
   let pool = open(crew, settings, 1);
   let f = Fiber::spawn(fn () => {{ let _ = with_db(pool, empty); () }});
-  let control = connect_to(\"127.0.0.1\", {told});
+  let control = connect_to(\"127.0.0.1\", {told})! catch {{ _ => -1 }};
   let one: Array<U8> = Array::new(1, 0);
   let _ = receive(control, one);
   Fiber::cancel(f);
@@ -5402,7 +5420,7 @@ fn main() -> Int {{
       Result::Err(_) => print(\"the canceled batch had no lease\"),
     }}
   }});
-  let control = connect_to(\"127.0.0.1\", {told});
+  let control = connect_to(\"127.0.0.1\", {told})! catch {{ _ => -1 }};
   let one: Array<U8> = Array::new(1, 0);
   let _ = receive(control, one);
   Fiber::cancel(f);
@@ -6004,7 +6022,7 @@ fn a_server_that_stalls_the_handshake() -> (u16, u16, std::thread::JoinHandle<(b
 
 const TLS_CANCEL: &str = r#"module demo::main;
 import std::core::{Array, Fiber, Result, print};
-import std::net::socket::{connect_to, invalid_handle, receive, shut, start};
+import std::net::socket::{connect_to, receive, shut, start};
 import postgres::conn::{PgError, Tls, close, open_tls};
 
 extern fn khora_monotonic_millis() -> Int;
@@ -6020,8 +6038,8 @@ fn dial() -> () {
 
 fn main() -> Int {
   let _ = start();
-  let line = connect_to("127.0.0.1", LINE);
-  if line == invalid_handle() { print("no line to the test"); 1 } else {
+  let line = connect_to("127.0.0.1", LINE)! catch { _ => -1 };
+  if line < 0 { print("no line to the test"); 1 } else {
     let f = Fiber::spawn(fn () => dial());
     let byte: Array<U8> = Array::new(1, 0);
     let _ = receive(line, byte);
@@ -6137,4 +6155,56 @@ fn an_idle_tls_connection_with_a_notification_waiting_is_still_open() {
     let ran = run_watched(&exe, "threads", std::time::Duration::from_secs(30));
     assert!(!ran.hung, "the program hung: {:?}", ran.stdout);
     assert_eq!(ran.stdout, "still open yes, then 7\n", "stderr {}", ran.stderr);
+}
+
+// --- a host the manifest does not grant ------------------------------------
+
+/// Opens to a host `[permissions] network` does not grant, for each spelling
+/// of the host, and prints what `dial_tls` said and whether it is lasting.
+const DENIED_DIALS: &str = r#"module demo::main;
+import std::core::{Result, print};
+import postgres::conn::{Failed, PgError, Tls, dial_tls};
+
+fn said(host: String, port: Int) -> () {
+  match dial_tls(host, port, "u", "d", "s", Tls::Off, 2000) {
+    Result::Ok(_) => print("connected"),
+    Result::Err(f) => match f.why {
+      PgError::Unreachable(m) => print("lasting ${f.lasting}: " + m),
+      _ => print("another error"),
+    },
+  }
+}
+
+pub fn main() -> Int {
+  said("::1", 5432);
+  said("[::1]", 5432);
+  said("db.example.com", 6543);
+  0
+}
+"#;
+
+/// **The advice for a refused host is the line a manifest needs.** `dial_tls`
+/// names the host as a grant spells it, so a bare IPv6 address reads
+/// `[::1]:5432` -- `::1:5432` names no port a grant can be written for --
+/// and every refusal is lasting, so a pool does not retry it.
+#[test]
+fn a_denied_dial_names_the_grant_it_needs() {
+    let exe = build_granting("postgres_denied_dials", DENIED_DIALS, Some(&["127.0.0.1"]));
+    let advice = "is not granted by `[permissions] network` in khora.toml";
+    for backend in ["threads", "scheduler"] {
+        let out = std::process::Command::new(&exe)
+            .env("KHORA_FIBERS", backend)
+            .output()
+            .expect("the program should run");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n"),
+            format!(
+                "lasting true: [::1]:5432 {advice}\n\
+                 lasting true: [::1]:5432 {advice}\n\
+                 lasting true: db.example.com:6543 {advice}\n"
+            ),
+            "`{backend}`: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 }

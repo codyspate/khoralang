@@ -18,12 +18,22 @@ fn std_dir() -> PathBuf {
     repo_dir().join("std")
 }
 
+/// Every `.kh` file under `dir` that a build on this host compiles.
+///
+/// **Platform files are filtered as a build filters them**
+/// (`selected_for_target`): `socket_linux.kh`, `socket_macos.kh` and
+/// `socket_windows.kh` each declare `std.net.socket`, and no build compiles
+/// two of them, so one compilation of all three refuses each derive as a
+/// duplicate impl. Each target's files are checked by
+/// `portability.rs::the_standard_library_checks_for_every_target`.
 fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).expect("the source directory should exist").flatten() {
         let path = entry.path();
         if path.is_dir() {
             sources(&path, out);
-        } else if path.extension().is_some_and(|e| e == "kh") {
+        } else if path.extension().is_some_and(|e| e == "kh")
+            && khora_db::selected_for_target(&path, khora_db::host_target())
+        {
             out.push(path);
         }
     }

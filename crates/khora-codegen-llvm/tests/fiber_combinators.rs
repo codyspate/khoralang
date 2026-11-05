@@ -69,7 +69,7 @@ fn crew(count: Shared<Int>) -> () with { clock: Clock } raises ChildFailed {
 }
 
 fn read_silent(port: Int, count: Shared<Int>) -> Int {
-  let c = connect_to("127.0.0.1", port);
+  let c = connect_to("127.0.0.1", port)! catch { _ => -1 };
   let region = Region::open();
   Region::defer(region, fn () => { shut(c); let _ = Shared::update(count, fn n => n + 1); });
   let buffer: Array<U8> = Array::new(16, U8::of(0));
@@ -226,7 +226,7 @@ fn receiver(count: Shared<Int>, ready: Channel<Int>) -> Int {
 }
 
 fn reader(port: Int, count: Shared<Int>, ready: Channel<Int>) -> Int {
-  let c = connect_to("127.0.0.1", port);
+  let c = connect_to("127.0.0.1", port)! catch { _ => -1 };
   let _held = enter(count, ready);
   let buffer: Array<U8> = Array::new(16, U8::of(0));
   let got = receive(c, buffer);
@@ -236,7 +236,7 @@ fn reader(port: Int, count: Shared<Int>, ready: Channel<Int>) -> Int {
 
 fn connector(port: Int, count: Shared<Int>, ready: Channel<Int>) -> Int {
   let _held = enter(count, ready);
-  connect_by("127.0.0.1", port, khora_monotonic_millis() + 60000)
+  connect_by("127.0.0.1", port, khora_monotonic_millis() + 60000)! catch { _ => -1 }
 }
 
 /// Answers once every loser has said it is in, so the measurement is of a

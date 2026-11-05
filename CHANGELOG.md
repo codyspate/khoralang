@@ -103,14 +103,20 @@ it will behave differently now.
   and the compiler as none.
 - `std::net::socket::connect_to` and `connect_by`, and `std::net::tls::connect`
   and `connect_by`, refuse a host with a `[` or `]` in it unless it is exactly
-  `[address]`, before anything is looked up: `denied_handle()` and
+  `[address]`, before anything is looked up: `SocketError::Denied` and
   `TlsError::Denied`.
-- `std::net::socket::connect_to` and `connect_by` check `[permissions]
-  network` against `host:port` and answer `denied_handle()`, which is -3, for
-  a host it does not grant, before anything is looked up or dialed. They
-  dialed any host. A caller that tested `== invalid_handle()` for failure
-  tests `< 0`; `postgres` does, and reports the refusal as a lasting
-  `PgError::Unreachable` naming the key.
+- `std::net::socket::connect_to` raises `SocketError` and answers only a
+  connected socket. It answered an `Int`, with `-1` for every failure.
+  `SocketError` has three cases: `Denied(host)` for a host
+  `[permissions] network` does not grant, raised before anything is looked
+  up or dialed; `Unreachable(host)`; and `TimedOut(host)`, which only
+  `connect_by` raises, when its deadline ended the connect. `host` is
+  `name:port`, with an IPv6 address in brackets. A caller writes
+  `connect_to(host, port)!` in a function that `raises SocketError`, or
+  catches it with `catch` or `attempt`; a caller that tested the handle
+  against `invalid_handle()` drops the test. `connect_to` dialed any host.
+  `postgres` reports a refusal as a lasting `PgError::Unreachable` naming
+  the host as a grant spells it.
 - `std::net::tls::TlsError` has a case `Denied(host)`, raised by
   `tls::connect` and `tls::connect_by` for a host `[permissions] network`
   does not grant, with `host` as `name:port`. They dialed any host. A `match`
@@ -656,7 +662,8 @@ it will behave differently now.
   rather than the peer.
 - `std::net::socket::connect_by(host, port, deadline)` and
   `std::net::tls::connect_by(client, host, port, deadline)`, which give up
-  once `clock.monotonic_millis()` reaches `deadline`; and
+  once `clock.monotonic_millis()` reaches `deadline` and raise `TimedOut`
+  (`SocketError::TimedOut`, `TlsError::TimedOut`); and
   `std::net::socket::set_deadline` and `std::net::tls::set_deadline`, which
   hold every later read and write on a connection to one instant, beside the
   per-read limit `set_receive_timeout` sets.

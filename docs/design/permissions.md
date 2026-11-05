@@ -181,8 +181,8 @@ This is Deno's model, and it is Deno's model for the same reason: the check has
 to be where the value is.
 
 The same check, against the same `host:port`, guards every other way `std`
-dials out: `std::net::socket::connect_to` and `connect_by`, which answer
-`denied_handle()`, and `std::net::tls::connect` and `connect_by`, which raise
+dials out: `std::net::socket::connect_to` and `connect_by`, which raise
+`SocketError::Denied`, and `std::net::tls::connect` and `connect_by`, which raise
 `TlsError::Denied`. Until those three were covered, a program under
 `default = "deny"` could reach any host with a raw socket.
 

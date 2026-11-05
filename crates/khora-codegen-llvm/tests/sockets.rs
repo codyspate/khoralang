@@ -194,15 +194,15 @@ fn khora_can_dial_out_and_send_bytes() {
         &format!(
             "module demo::main;
 import std::core::{{Array, Option}};
-import std::net::socket::{{start, connect_to, transmit_bytes, receive, shut, invalid_handle}};
+import std::net::socket::{{start, connect_to, transmit_bytes, receive, shut}};
 
 fn print(value: String);
 extern fn khora_print_int(value: Int);
 
 fn main() -> Int {{
   if start() {{
-    let connection = connect_to(\"127.0.0.1\", {port});
-    if connection == invalid_handle() {{
+    let connection = connect_to(\"127.0.0.1\", {port})! catch {{ _ => -1 }};
+    if connection < 0 {{
       print(\"could not connect\");
       1
     }} else {{

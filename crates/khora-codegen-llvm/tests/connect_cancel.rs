@@ -174,7 +174,7 @@ extern fn khora_monotonic_millis() -> Int;
 
 fn dial(dialing: Shared<Bool>) -> () {{
   Shared::set(dialing, true);
-  let c = connect_to(\"127.0.0.1\", {port});
+  let c = connect_to(\"127.0.0.1\", {port})! catch {{ _ => -1 }};
   print(\"TAIL connect_to returned ${{c}}\");
 }}
 
@@ -309,7 +309,7 @@ pub type Oops = | Bad;
 
 fn dial(dialing: Shared<Bool>) -> () {{
   Shared::set(dialing, true);
-  let c = connect_to(\"127.0.0.1\", {port});
+  let c = connect_to(\"127.0.0.1\", {port})! catch {{ _ => -1 }};
   print(\"TAIL connect_to returned ${{c}}\");
 }}
 
@@ -359,6 +359,114 @@ pub fn main() -> Int {{
             "`{backend}`: {}",
             ran.stderr
         );
+        assert_eq!(ran.code, Some(0), "`{backend}`: {}", ran.stderr);
+    }
+}
+
+/// **Each way a connect can fail raises its own `SocketError`.** A deadline
+/// that passes while the kernel waits on a host that never answers raises
+/// `TimedOut`, from `connect_by`; a port where nothing listens raises
+/// `Unreachable`, from both connects. No negative handle comes back from
+/// either, and the deadline is kept: the timed-out connect gives up within a
+/// few seconds of it, not at the kernel's two minutes.
+#[test]
+fn a_failed_connect_raises_the_case_for_how_it_failed() {
+    let quiet = never_answering();
+    let closed = {
+        let gone = TcpListener::bind(("127.0.0.1", 0)).expect("a port");
+        gone.local_addr().expect("an address").port()
+    };
+    let source = format!(
+        "module main;
+import std::core::{{print}};
+import std::net::socket::{{SocketError, connect_by, connect_to, shut, start}};
+
+extern fn khora_monotonic_millis() -> Int;
+
+fn why(e: SocketError) -> String {{
+  match e {{
+    SocketError::Denied(host) => \"denied ${{host}}\",
+    SocketError::Unreachable(host) => \"unreachable ${{host}}\",
+    SocketError::TimedOut(host) => \"timed out ${{host}}\",
+  }}
+}}
+
+fn connected(h: Int) -> String {{
+  shut(h);
+  if h >= 0 {{ \"connected\" }} else {{ \"a negative handle ${{h}}\" }}
+}}
+
+fn by(port: Int, within: Int) -> String raises SocketError {{
+  connected(connect_by(\"127.0.0.1\", port, khora_monotonic_millis() + within)!)
+}}
+
+fn to(port: Int) -> String raises SocketError {{
+  connected(connect_to(\"127.0.0.1\", port)!)
+}}
+
+pub fn main() -> Int {{
+  if start() {{}} else {{ print(\"no sockets\") }};
+  let began = khora_monotonic_millis();
+  print(by({quiet}, 300)! catch {{ e => why(e) }});
+  let took = khora_monotonic_millis() - began;
+  print(\"gave up in time ${{took >= 250 && took < 5000}}\");
+  if took < 250 || took >= 5000 {{ print(\"took ${{took}} ms\") }};
+  print(by({closed}, 5000)! catch {{ e => why(e) }});
+  print(to({closed})! catch {{ e => why(e) }});
+  0
+}}
+",
+        quiet = quiet.port
+    );
+    let exe = build("connect_raises", &source);
+    for backend in BACKENDS {
+        let ran = run(&exe, backend, PATIENCE);
+        assert!(!ran.hung, "`{backend}`: still running after {PATIENCE:?}: {}{}", ran.stdout, ran.stderr);
+        assert_eq!(
+            ran.stdout,
+            format!(
+                "timed out 127.0.0.1:{quiet}\ngave up in time true\n\
+                 unreachable 127.0.0.1:{closed}\nunreachable 127.0.0.1:{closed}\n",
+                quiet = quiet.port
+            ),
+            "`{backend}`: {}",
+            ran.stderr
+        );
+        assert_eq!(ran.code, Some(0), "`{backend}`: {}", ran.stderr);
+    }
+}
+
+/// **An HTTP call whose deadline passes in the connect is `TimedOut`, not
+/// `Unreachable`.** The host is one that never answers a SYN, so the call
+/// spends its whole 300 ms budget in the plain dialer's connect, and the
+/// socket's `TimedOut` must reach the caller as `CallError::TimedOut(300)`:
+/// a timeout is the failure a retry with a longer budget can fix, and
+/// `Unreachable` would tell the caller not to bother.
+#[test]
+fn an_http_call_whose_connect_runs_out_of_time_is_timed_out() {
+    let quiet = never_answering();
+    let source = format!(
+        "module main;
+import std::core::{{Result, print}};
+import std::net::http::{{Call, CallError, HttpClient}};
+
+pub fn main() -> Int {{
+  with {{ http: HttpClient::within(300) }} {{
+    match http.send(Call::get(\"http://127.0.0.1:{port}/\")) {{
+      Result::Ok(_) => print(\"answered\"),
+      Result::Err(why) => print(why.show()),
+    }}
+  }};
+  0
+}}
+",
+        port = quiet.port
+    );
+    let exe = build("connect_http_timed_out", &source);
+    for backend in BACKENDS {
+        let ran = run(&exe, backend, PATIENCE);
+        assert!(!ran.hung, "`{backend}`: still running after {PATIENCE:?}: {}{}", ran.stdout, ran.stderr);
+        assert_eq!(ran.stdout, "CallError::TimedOut(300)\n", "`{backend}`: {}", ran.stderr);
         assert_eq!(ran.code, Some(0), "`{backend}`: {}", ran.stderr);
     }
 }

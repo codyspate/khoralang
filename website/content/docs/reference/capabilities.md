@@ -426,13 +426,15 @@ A denial is its own error case, separate from the ordinary failure, because the 
 | an environment variable | `EnvError::Denied(name)` | `[permissions] env` |
 | a host over HTTP | `CallError::Denied(host)` | `[permissions] network` |
 | a host over TLS | `TlsError::Denied(host)` | `[permissions] network` |
-| a host over a raw socket | `connect_to` returns `denied_handle()` | `[permissions] network` |
+| a host over a raw socket | `SocketError::Denied(host)` | `[permissions] network` |
 | a path on disk | `IoError::Denied(path)` | `[permissions.fs]` |
 | a program | `ProcessError::Denied(program)` | `[permissions] process` |
 
-`connect_to` and `connect_by` answer with a handle, so a refusal is a
-negative number of its own, `denied_handle()`, beside `invalid_handle()` for
-a host that could not be reached. Test a handle for failure with `< 0`.
+`std::net::socket`'s `connect_to` and `connect_by` raise `SocketError`, so a
+refused host cannot be mistaken for a connection: `Denied` for a host the
+manifest does not grant, `Unreachable` for one that could not be reached, and
+`TimedOut` for a `connect_by` whose deadline passed. The handle they answer is
+always a connected socket.
 
 **Including the two probes.** `FsRead::exists` and `FsRead::is_dir` answer a
 `Bool` and raise `IoError` as well, so a path the manifest denies is `Denied`

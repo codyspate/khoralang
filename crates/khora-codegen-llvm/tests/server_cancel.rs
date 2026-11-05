@@ -128,7 +128,7 @@ fn clients(port: Int, count: Int, n: Int) -> List<Int> {{
   let mut out = List::Nil;
   let mut k = 0;
   while k < count {{
-    let c = connect_to("127.0.0.1", port);
+    let c = connect_to("127.0.0.1", port)! catch {{ _ => -1 }};
     if c >= 0 && (n + k) % 2 == 0 {{ let _ = transmit(c, "GET /x HTTP/1.1\r\nHost: a\r\n\r\n"); () }} else {{}};
     out = List::Cons(c, out);
     k = k + 1
@@ -340,7 +340,7 @@ fn late(port: Int, n: Int, then: () -> ()) -> Int {{
   at(n, "connect a plain client");
   let plain = clients(port, 1, 1);
   at(n, "tls connect and handshake");
-  let raw = connect_to("127.0.0.1", port);
+  let raw = connect_to("127.0.0.1", port)! catch {{ _ => -1 }};
   let secured = if raw < 0 {{ at(n, "tls connect failed"); then(); 0 }} else {{
     match attempt(fn () => scoped(fn () => {{
       let session = tls_upgrade(trusting("{ca}")!, raw, "localhost")!;
@@ -420,11 +420,11 @@ fn serve(port: Int) -> () {{
 pub fn main() -> Int raises ChildFailed {{
   let port = {port};
   let f = Fiber::spawn(fn () => serve(port));
-  let mut c = connect_to("127.0.0.1", port);
+  let mut c = connect_to("127.0.0.1", port)! catch {{ _ => -1 }};
   let mut tries = 0;
   while c < 0 && tries < 2000 {{
     let _ = spin(100000);
-    c = connect_to("127.0.0.1", port);
+    c = connect_to("127.0.0.1", port)! catch {{ _ => -1 }};
     tries = tries + 1
   }};
   if c < 0 {{ print("the server never listened") }} else {{ shut(c) }};

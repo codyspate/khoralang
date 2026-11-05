@@ -45,6 +45,66 @@ else -- which is what `start` is for, and why it is not a no-op here --
 `closesocket` rather than `close`, and a `SOCKET` that is a pointer-sized
 handle rather than a small `int`.
 
+## Types
+
+### SocketError
+
+```khora
+derive(Show, Eq)
+pub type SocketError =
+  | Denied(host: String)
+  | Unreachable(host: String)
+  | TimedOut(host: String);
+```
+
+Why [`connect_to`](#connect_to) or [`connect_by`](#connect_by) has no connection to give.
+
+**What this prevents: a refusal read as a socket.** A failure answered as
+a negative number is a failure every caller has to remember to test for,
+and one that tests the wrong number carries on with a handle that is not
+one. Raised, it cannot be missed, and the handle that does come back is
+always a connected socket.
+
+`host` is `name:port`, as the caller wrote the name, which is what a grant
+in `[permissions] network` is written against.
+
+#### Denied
+
+```khora
+| Denied(host: String)
+```
+
+`[permissions] network` does not grant `host`, so nothing was looked up
+or dialed.
+
+**Its own case rather than `Unreachable`**, for the reason
+`IoError::Denied` is: `Unreachable` sends the reader to DNS or a
+firewall, and this one is a line in `khora.toml`.
+
+#### Unreachable
+
+```khora
+| Unreachable(host: String)
+```
+
+The name did not resolve, or nothing at any address it resolved to
+accepted the connection.
+
+#### TimedOut
+
+```khora
+| TimedOut(host: String)
+```
+
+The deadline given to [`connect_by`](#connect_by) passed before the connection was
+made.
+
+Only when the deadline is what ended it, as the runtime reports it, so
+a refusal that arrives in the deadline's last millisecond is still
+`Unreachable`. Separate because a caller acts on it differently: a host
+that refused may refuse again, while a call that ran out of time mostly
+wants a longer budget.
+
 ## Functions
 
 ### invalid_handle
@@ -166,13 +226,15 @@ and no `SIGPIPE` stops the program.
 ### connect_to
 
 ```khora
-pub fn connect_to(host: String, port: Int) -> Int
+pub fn connect_to(host: String, port: Int) -> Int raises SocketError
 ```
 
-Opens a connection to `host` on `port`, or a negative handle:
-[`denied_handle`](#denied_handle) when the manifest does not grant the host, and
-[`invalid_handle`](#invalid_handle) for every other way of not connecting. **Test for
-failure with `< 0`**, which covers both.
+Opens a connection to `host` on `port`, and answers the connected socket.
+
+Raises `SocketError::Denied` when the manifest does not grant the host,
+and `SocketError::Unreachable` when the name does not resolve or nothing
+at any of its addresses accepts. Every failure raises, so the handle that
+comes back is always a socket and no caller has a number to test.
 
 **The first thing here that starts a conversation.** Everything else in this
 module grew from serving: `listen_on`, `accept_on`, and nothing that dials.
@@ -203,34 +265,16 @@ canceled caller stops waiting for it and leaves it to finish alone.
 ### connect_by
 
 ```khora
-pub fn connect_by(host: String, port: Int, deadline: Int) -> Int
+pub fn connect_by(host: String, port: Int, deadline: Int) -> Int raises SocketError
 ```
 
 [`connect_to`](#connect_to), giving up once `clock.monotonic_millis()` reaches
-`deadline`. [`denied_handle`](#denied_handle) for a host the manifest does not grant, and
-[`invalid_handle`](#invalid_handle) for every other way of not connecting, the deadline
-included.
+`deadline`, which raises `SocketError::TimedOut`.
 
 The deadline covers the lookup and the connect. It is an instant rather
 than a length, so that a caller with one budget for several steps hands
 each the same number. Negative means none. The connection that comes back
 carries no deadline; [`set_deadline`](#set_deadline) puts one on it.
-
-### denied_handle
-
-```khora
-pub fn denied_handle() -> Int
-```
-
-What [`connect_to`](#connect_to) and [`connect_by`](#connect_by) answer for a host
-`[permissions] network` does not grant.
-
-**A value of its own rather than [`invalid_handle`](#invalid_handle)**, because the two send
-a reader to different places: an unreachable host is DNS or a firewall,
-and a denied one is a line in `khora.toml`. Negative, so a caller testing
-`< 0` treats it as the failure it is. A caller testing
-`== invalid_handle()` does not see it as one, which is why both connect
-functions say to test `< 0`.
 
 ### accepted_open
 

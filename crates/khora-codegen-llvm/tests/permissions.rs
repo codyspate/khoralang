@@ -552,25 +552,33 @@ fn a_path_that_cannot_be_followed_failed_rather_than_denied() {
 // ---------------------------------------------------------------------------
 
 /// Dials `PORT` with both of `std::net::socket`'s connects and says what
-/// each answered.
+/// each did: connected, or which `SocketError` it raised.
 const DIALING: &str = r#"module demo::main;
 
 import std::core::{print};
-import std::net::socket::{connect_by, connect_to, shut, start};
+import std::net::socket::{SocketError, connect_by, connect_to, shut, start};
 
 fn said(handle: Int) -> String {
-  if handle >= 0 {
-    shut(handle);
-    "connected"
-  } else {
-    "refused"
+  shut(handle);
+  if handle >= 0 { "connected" } else { "a negative handle" }
+}
+
+fn why(e: SocketError) -> String {
+  match e {
+    SocketError::Denied(host) => "denied " + host,
+    SocketError::Unreachable(_) => "unreachable",
+    SocketError::TimedOut(_) => "timed out",
   }
 }
 
+fn to() -> String raises SocketError { said(connect_to("127.0.0.1", PORT)!) }
+
+fn by() -> String raises SocketError { said(connect_by("127.0.0.1", PORT, 0 - 1)!) }
+
 pub fn main() -> Int {
   if start() {
-    print("connect_to=" + said(connect_to("127.0.0.1", PORT)));
-    print("connect_by=" + said(connect_by("127.0.0.1", PORT, 0 - 1)));
+    print("connect_to=" + (to()! catch { e => why(e) }));
+    print("connect_by=" + (by()! catch { e => why(e) }));
   } else {
     print("no socket layer");
   };
@@ -592,26 +600,29 @@ fn waiting(listener: &TcpListener) -> usize {
 }
 
 /// **`connect_to` and `connect_by` consult `[permissions] network`.** Under a
-/// grant that does not name the host, neither dials: the listener has nothing
-/// waiting once the program has exited. Under one that does, both connect.
+/// grant that does not name the host, both raise `SocketError::Denied` with
+/// the `host:port` a grant would name, and neither dials: the listener has
+/// nothing waiting once the program has exited. Under one that does, both
+/// connect.
 #[test]
 fn a_raw_connect_is_refused_a_host_the_manifest_does_not_grant() {
     for backend in BACKENDS {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("a port");
         let port = listener.local_addr().expect("an address").port();
         let program = DIALING.replace("PORT", &port.to_string());
+        let refused = format!("connect_to=denied 127.0.0.1:{port}\nconnect_by=denied 127.0.0.1:{port}\n");
 
         let denied = Grants { read: &["**"], write: &["**"], network: &[] };
         let exe = build(&format!("perm_dial_denied_{backend}"), &denied, &program);
         let said = run(&exe, exe.parent().expect("a directory"), backend);
-        assert_eq!(said, "connect_to=refused\nconnect_by=refused\n", "`{backend}`");
+        assert_eq!(said, refused, "`{backend}`");
         assert_eq!(waiting(&listener), 0, "`{backend}`: a refused host must not be dialed");
 
         let other_port = format!("127.0.0.1:{}", port.wrapping_add(1));
         let elsewhere = Grants { read: &["**"], write: &["**"], network: &[&other_port] };
         let exe = build(&format!("perm_dial_other_{backend}"), &elsewhere, &program);
         let said = run(&exe, exe.parent().expect("a directory"), backend);
-        assert_eq!(said, "connect_to=refused\nconnect_by=refused\n", "`{backend}`: another port");
+        assert_eq!(said, refused, "`{backend}`: another port");
         assert_eq!(waiting(&listener), 0, "`{backend}`: another port's grant is not this one's");
 
         let granted = Grants { read: &["**"], write: &["**"], network: &["127.0.0.1"] };
@@ -640,8 +651,8 @@ fn said(handle: Int) -> String {
 
 pub fn main() -> Int {
   if start() {
-    print("bare=" + said(connect_to("::1", PORT)));
-    print("bracketed=" + said(connect_to("[::1]", PORT)));
+    print("bare=" + said(connect_to("::1", PORT)! catch { _ => -1 }));
+    print("bracketed=" + said(connect_to("[::1]", PORT)! catch { _ => -1 }));
   } else {
     print("no socket layer");
   };
@@ -685,18 +696,33 @@ fn an_ipv6_literal_can_be_granted() {
     }
 }
 
-/// **A denial is a value of its own**, so a caller can tell a line in
-/// `khora.toml` from a host that is down.
+/// **A denial is told apart from a failure**, so a caller can tell a line in
+/// `khora.toml` from a host that is down: dialing `PORT`, which the grant
+/// does not name, raises `Denied`, and dialing `CLOSED`, which it names and
+/// where nothing listens, raises `Unreachable`.
 const TELLING: &str = r#"module demo::main;
 
 import std::core::{print};
-import std::net::socket::{connect_to, denied_handle, invalid_handle, start};
+import std::net::socket::{SocketError, connect_to, shut, start};
+
+fn why(e: SocketError) -> String {
+  match e {
+    SocketError::Denied(host) => "denied " + host,
+    SocketError::Unreachable(host) => "unreachable " + host,
+    SocketError::TimedOut(host) => "timed out " + host,
+  }
+}
+
+fn dialed(port: Int) -> String raises SocketError {
+  let h = connect_to("127.0.0.1", port)!;
+  shut(h);
+  if h >= 0 { "connected" } else { "a negative handle" }
+}
 
 pub fn main() -> Int {
   start();
-  let h = connect_to("127.0.0.1", PORT);
-  print(if h == denied_handle() { "denied" } else if h == invalid_handle() { "invalid" } else { "other" });
-  print(if denied_handle() < 0 { "negative" } else { "a handle" });
+  print(dialed(PORT)! catch { e => why(e) });
+  print(dialed(CLOSED)! catch { e => why(e) });
   0
 }
 "#;
@@ -705,12 +731,21 @@ pub fn main() -> Int {
 fn a_denied_connect_is_told_apart_from_a_failed_one() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("a port");
     let port = listener.local_addr().expect("an address").port();
-    let program = TELLING.replace("PORT", &port.to_string());
-    let denied = Grants { read: &["**"], write: &["**"], network: &[] };
-    let exe = build("perm_dial_told", &denied, &program);
+    let closed = {
+        let gone = TcpListener::bind(("127.0.0.1", 0)).expect("a port");
+        gone.local_addr().expect("an address").port()
+    };
+    let program = TELLING.replace("CLOSED", &closed.to_string()).replace("PORT", &port.to_string());
+    let only_closed = format!("127.0.0.1:{closed}");
+    let grants = Grants { read: &["**"], write: &["**"], network: &[&only_closed] };
+    let exe = build("perm_dial_told", &grants, &program);
     for backend in BACKENDS {
         let said = run(&exe, exe.parent().expect("a directory"), backend);
-        assert_eq!(said, "denied\nnegative\n", "`{backend}`");
+        assert_eq!(
+            said,
+            format!("denied 127.0.0.1:{port}\nunreachable 127.0.0.1:{closed}\n"),
+            "`{backend}`"
+        );
     }
     assert_eq!(waiting(&listener), 0);
 }
@@ -1034,19 +1069,28 @@ fn parent_splits_where_the_permission_check_does() {
 const BRACKETED: &str = r#"module demo::main;
 
 import std::core::{print};
-import std::net::socket::{connect_to, denied_handle, shut, start};
+import std::net::socket::{SocketError, connect_to, shut, start};
 
-fn said(h: Int) -> String {
-  if h >= 0 { shut(h); "connected" } else if h == denied_handle() { "denied" } else { "failed" }
+fn said(host: String) -> String {
+  dialed(host)! catch {
+    SocketError::Denied(_) => "denied",
+    SocketError::Unreachable(_) => "failed",
+    SocketError::TimedOut(_) => "failed",
+  }
+}
+
+fn dialed(host: String) -> String raises SocketError {
+  shut(connect_to(host, PORT)!);
+  "connected"
 }
 
 pub fn main() -> Int {
   start();
-  print("junk=" + said(connect_to("[127.0.0.1]:1", PORT)));
-  print("half=" + said(connect_to("[127.0.0.1", PORT)));
-  print("doubled=" + said(connect_to("[[127.0.0.1]]", PORT)));
-  print("empty=" + said(connect_to("[]", PORT)));
-  print("plain=" + said(connect_to("127.0.0.1", PORT)));
+  print("junk=" + said("[127.0.0.1]:1"));
+  print("half=" + said("[127.0.0.1"));
+  print("doubled=" + said("[[127.0.0.1]]"));
+  print("empty=" + said("[]"));
+  print("plain=" + said("127.0.0.1"));
   0
 }
 "#;
@@ -1056,7 +1100,7 @@ pub fn main() -> Int {
 /// host `[127.0.0.1]:1` made the subject `[127.0.0.1]:1:<port>`, which the
 /// bracket parser read as the name `127.0.0.1` with the port text `1:<port>`
 /// -- covered -- and the name went to the resolver as written. Each spelling
-/// here answers `denied_handle()`, and nothing reaches the listener.
+/// here raises `SocketError::Denied`, and nothing reaches the listener.
 #[test]
 fn a_host_with_stray_brackets_is_denied() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("a port");
@@ -1079,7 +1123,7 @@ import std::net::socket::{connect_to, shut, start};
 
 pub fn main() -> Int {
   start();
-  let h = connect_to("::1", OTHER);
+  let h = connect_to("::1", OTHER)! catch { _ => -1 };
   print(if h >= 0 { shut(h); "connected" } else { "refused" });
   0
 }
@@ -1106,5 +1150,62 @@ fn a_grant_with_an_empty_port_covers_no_port() {
     for backend in BACKENDS {
         assert_eq!(run(&exe, exe.parent().expect("a directory"), backend), "refused\n", "`{backend}`");
         assert_eq!(waiting(&listener), 0, "`{backend}`: nothing dialed");
+    }
+}
+
+/// Raises a denial for IPv6 hosts written with and without brackets, a name,
+/// and an IPv4 address, printing each `SocketError` through `${..}`; then
+/// compares cases with `==`.
+const NAMING: &str = r#"module demo::main;
+
+import std::core::{print};
+import std::net::socket::{SocketError, connect_by, connect_to, shut, start};
+
+fn to(host: String) -> String raises SocketError {
+  shut(connect_to(host, 5432)!);
+  "connected"
+}
+
+fn by(host: String) -> String raises SocketError {
+  shut(connect_by(host, 5432, 0 - 1)!);
+  "connected"
+}
+
+pub fn main() -> Int {
+  start();
+  print(to("::1")! catch { e => "${e}" });
+  print(by("::1")! catch { e => "${e}" });
+  print(to("[::1]")! catch { e => "${e}" });
+  print(to("db.internal")! catch { e => "${e}" });
+  print(to("127.0.0.1")! catch { e => "${e}" });
+  let caught = to("::1")! catch { e => if e == SocketError::Denied("[::1]:5432") { "equal" } else { "different" } };
+  print(caught);
+  print(if SocketError::Unreachable("a:1") == SocketError::TimedOut("a:1") { "equal" } else { "different" });
+  print(if SocketError::Unreachable("a:1") == SocketError::Unreachable("a:2") { "equal" } else { "different" });
+  0
+}
+"#;
+
+/// **A `SocketError` names its host as a grant would, prints, and compares.**
+/// A bare IPv6 literal is bracketed -- `[::1]:5432`, the spelling
+/// `[permissions] network` needs -- and a bracketed one is not bracketed
+/// twice; a name and an IPv4 address are `host:port`. Each prints through
+/// `${e}` as its case, and `==` tells cases and hosts apart. Under a grant
+/// of nothing, so every dial is refused before anything is looked up.
+#[test]
+fn a_socket_error_names_its_host_prints_and_compares() {
+    let grants = Grants { read: &["**"], write: &["**"], network: &[] };
+    let exe = build("perm_socket_error_naming", &grants, NAMING);
+    for backend in BACKENDS {
+        assert_eq!(
+            run(&exe, exe.parent().expect("a directory"), backend),
+            "SocketError::Denied([::1]:5432)\n\
+             SocketError::Denied([::1]:5432)\n\
+             SocketError::Denied([::1]:5432)\n\
+             SocketError::Denied(db.internal:5432)\n\
+             SocketError::Denied(127.0.0.1:5432)\n\
+             equal\ndifferent\ndifferent\n",
+            "`{backend}`"
+        );
     }
 }

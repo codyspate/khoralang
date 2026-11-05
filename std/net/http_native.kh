@@ -1,9 +1,9 @@
 module std::net::http;
 
-import std::core::{Array, Channel, ChildFailed, Eq, List, Map, Nursery, Option, Ptr, Raised, Region, Result, Scope, SharedFn, Show, Split, acquire, attempt, bounded_nursery, scoped};
+import std::core::{Array, Channel, ChildFailed, Eq, List, Map, Nursery, Option, Raised, Region, Result, Scope, SharedFn, Show, Split, acquire, attempt, bounded_nursery, scoped};
 import std::permissions::{may_dial};
 import std::permissions::grants::{network};
-import std::net::socket::{accept_on, expired, invalid_handle, listen_on, receive, set_deadline, set_receive_timeout, shut, start, transmit};
+import std::net::socket::{SocketError, accept_on, connect_by, expired, invalid_handle, listen_on, receive, set_deadline, set_receive_timeout, shut, start, transmit};
 import std::net::tls::{TlsClient, TlsConnection, TlsError, TlsServer, client as tls_client, connect_by as tls_connect_by, expired as tls_expired, receive as tls_receive, secured, server as tls_server, set_deadline as tls_set_deadline, set_receive_timeout as tls_set_receive_timeout, shut as tls_shut, transmit as tls_transmit};
 import std::clock::{Clock};
 import std::time::{Date, DateTime, Time};
@@ -2702,27 +2702,38 @@ fn dial(url: Url, deadline: Int, millis: Int) -> Result<Dialed, CallError>
       },
     }
   } else {
-    // The extern rather than `std::net::socket::connect_by`, which folds the
-    // deadline's -2 into every other failure.
-    let socket = String::with_data(url.host, fn (from, n) =>
-      khora_net_connect(from, n, url.port, deadline));
-    if socket >= 0 {
-      let closes = Region::open();
-      Region::defer(closes, closing(socket));
-      set_receive_timeout(socket, read_limit(deadline));
-      set_deadline(socket, deadline);
-      Result::Ok({ transport: over_socket(socket), ran_out: fn () => expired(socket), closes: closes })
-    } else if socket == -2 {
-      Result::Err(CallError::TimedOut(millis))
-    } else {
-      Result::Err(CallError::Unreachable("${url.host}:${Int::to_string(url.port)}"))
+    match dialed_plain(url, deadline) {
+      Result::Ok(socket) => {
+        let closes = Region::open();
+        Region::defer(closes, closing(socket));
+        set_receive_timeout(socket, read_limit(deadline));
+        set_deadline(socket, deadline);
+        Result::Ok({ transport: over_socket(socket), ran_out: fn () => expired(socket), closes: closes })
+      },
+      Result::Err(why) => Result::Err(refused_socket(why, millis)),
     }
   }
 }
 
-/// `std::net::socket`'s connect, whose handle type is `Int` on every
-/// platform: a handle, -2 when the deadline ended it, or -1.
-extern fn khora_net_connect(host: Ptr, host_len: Int, port: Int, deadline: Int) -> Int;
+/// `std::net::socket::connect_by`, with its failure as a value.
+///
+/// Calls no function value, so it has no entry poll: what can stop here is
+/// the connect itself, and a fiber canceled there gets no socket.
+fn dialed_plain(url: Url, deadline: Int) -> Result<Int, SocketError> {
+  Result::Ok(connect_by(url.host, url.port, deadline)!) catch { why => Result::Err(why) }
+}
+
+/// The `CallError` for a plain connection that was not made.
+fn refused_socket(why: SocketError, millis: Int) -> CallError {
+  match why {
+    SocketError::TimedOut(_) => CallError::TimedOut(millis),
+    // `perform` has already checked the same grant against the same
+    // `host:port`, so this is only reached if the two ever disagree -- and
+    // then the answer is still a denial.
+    SocketError::Denied(host) => CallError::Denied(host),
+    SocketError::Unreachable(host) => CallError::Unreachable(host),
+  }
+}
 
 /// The per-read limit for a call: `default_answer_timeout` when it has no
 /// deadline, and none when it has one, which then bounds every read.

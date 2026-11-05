@@ -7820,10 +7820,10 @@ stay a plain closure. `release` is called with `value` when the region ends.
 
 ```khora
 import std::core::{Scope, acquire};
-import std::net::socket::{connect_to, shut, transmit};
+import std::net::socket::{SocketError, connect_to, shut, transmit};
 
-fn ask(host: String) -> Int with { scope: Scope } {
-  let connection = acquire(connect_to(host, 80), fn c => shut(c));
+fn ask(host: String) -> Int with { scope: Scope } raises SocketError {
+  let connection = acquire(connect_to(host, 80)!, fn c => shut(c));
   transmit(connection, "GET / HTTP/1.0\r\n\r\n")
 }
 ```
@@ -7837,7 +7837,7 @@ cancellation skips.
 fiber canceled while it opens the resource still closes it. `acquire`
 has no entry check for a cancellation, and the one in the `Scope`
 handler's `defer` is held off for this call. In
-`acquire(connect_to(host, 80), fn c => shut(c))`, a cancel that lands
+`acquire(connect_to(host, 80)!, fn c => shut(c))`, a cancel that lands
 once `connect_to` has returned a socket is acted on after the release is
 registered, and the release runs.
 

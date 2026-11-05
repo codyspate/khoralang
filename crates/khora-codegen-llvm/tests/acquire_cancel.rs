@@ -209,11 +209,11 @@ impl Drop for Accepting {
 fn a_canceled_acquire_of_a_connect_leaves_no_socket_open() {
     let listener = Accepting::start();
     let program = storm(
-        "import std::core::{Scope, acquire, scoped};\nimport std::net::socket::{connect_to, shut};",
-        "fn ask(port: Int) -> Int with { scope: Scope } {
-  acquire(connect_to(\"127.0.0.1\", port), fn c => shut(c))
+        "import std::core::{Scope, acquire, scoped};\nimport std::net::socket::{SocketError, connect_to, shut};",
+        "fn ask(port: Int) -> Int with { scope: Scope } raises SocketError {
+  acquire(connect_to(\"127.0.0.1\", port)!, fn c => shut(c))
 }",
-        &format!("  let _ = scoped(fn () => ask({}));", listener.port),
+        &format!("  let _ = attempt(fn () => scoped(fn () => ask({})!)!);", listener.port),
         "0",
     );
     for (backend, ran) in on_both("acquire_connect", &program, PATIENCE) {

@@ -3,7 +3,7 @@ module postgres::conn;
 import std::core::{Array, Fiber, Iterator, List, Map, Option, Pair, Raised, Region, Result, Split, Step, Vector, assert, assert_that, attempt, print, scoped, timeout};
 import std::db::{Cell, DbError, Row};
 import std::decimal::{Decimal};
-import std::net::socket::{accept_on, accepted_open, connect_to, connected_to, denied_handle, invalid_handle, listen_on, nothing_yet, receive, receive_now, set_receive_timeout, shut, start, transmit_bytes};
+import std::net::socket::{SocketError, accept_on, accepted_open, connect_to, connected_to, invalid_handle, listen_on, nothing_yet, receive, receive_now, set_receive_timeout, shut, start, transmit_bytes};
 import std::net::tls::{Refusal, TlsConnection, TlsError, receive as tls_receive, receive_now as tls_receive_now, set_receive_timeout as tls_set_receive_timeout, shut as tls_shut, transmit_bytes as tls_transmit_bytes, trusting, upgrade_saying};
 import postgres::wire::{Message, Reader, Writer, framed, message_at, message_width, password, payload_width, prepare_and_run, query, run_prepared, run_prepared_each, sasl_initial, sasl_response, ssl_request, startup, terminate};
 import std::crypto::{Base64, SecureRandom};
@@ -780,50 +780,64 @@ pub fn dial_tls(
   if !start() {
     Result::Err(passing(PgError::Unreachable("the socket layer would not start")))
   } else {
-    let handle = connect_to(host, port);
-    if handle == denied_handle() {
+    match dialed(host, port) {
       // **Lasting**, so a pool does not retry it: the manifest will say the
-      // same thing next time.
-      Result::Err(lasting(PgError::Unreachable(
-            "${host}:${Int::to_string(port)} is not granted by `[permissions] network` in khora.toml",
-          )))
-    } else if handle < 0 {
-      Result::Err(passing(PgError::Unreachable(
+      // same thing next time. `granted` is `host:port` as a grant spells it,
+      // an IPv6 address in brackets.
+      Result::Err(SocketError::Denied(granted)) => Result::Err(lasting(PgError::Unreachable(
+            "${granted} is not granted by `[permissions] network` in khora.toml",
+          ))),
+      Result::Err(SocketError::Unreachable(_)) => Result::Err(passing(PgError::Unreachable(
             "could not reach ${host}:${Int::to_string(port)}",
-          )))
-    } else {
-      // **Registered before anything that can stop the fiber**: neither
-      // `Region::open` nor `Region::defer` is a cancellation point, and
-      // `opening` calls no function value, so its closure has no entry poll.
-      // A cancel in the TLS handshake or the password exchange then closes
-      // the socket, and the session if there is one, rather than leaking it.
-      let held: Dialing = { socket: handle, session: Option::None, armed: true };
-      let guard = Region::open();
-      Region::defer(guard, opening(held));
-      let began = khora_monotonic_millis();
-      if millis > 0 { let _ = set_receive_timeout(handle, millis); () };
-      let secured = secure(handle, host, port, tls, if millis > 0 { began + millis } else { 0 - 1 });
-      match secured {
-        // Closed by `guard`'s finalizer, which is still armed, when this
-        // function returns: one close, on every way out.
-        Result::Err(failed) => Result::Err({
-            why: if millis > 0 { unanswered(failed.why, millis, khora_monotonic_millis() - began) } else { failed.why },
-            lasting: failed.lasting,
-          }),
-        Result::Ok(session) => {
-          held.session = session;
-          let c = connection(handle, session);
-          let answer = greet(c, user, database, secret, millis, began);
-          // Only a connection handed back is kept open.
-          held.armed = is_err(answer);
-          match answer {
-            Result::Ok(c) => Result::Ok(c),
-            Result::Err(why) => Result::Err(passing(why)),
-          }
-        },
-      }
+          ))),
+      // `connect_to` has no deadline, so this does not happen; it is the
+      // same failure to a caller, and a retry could change it.
+      Result::Err(SocketError::TimedOut(_)) => Result::Err(passing(PgError::Unreachable(
+            "could not reach ${host}:${Int::to_string(port)}",
+          ))),
+      Result::Ok(handle) => {
+        // **Registered before anything that can stop the fiber**: neither
+        // `Region::open` nor `Region::defer` is a cancellation point, and
+        // `opening` calls no function value, so its closure has no entry poll.
+        // A cancel in the TLS handshake or the password exchange then closes
+        // the socket, and the session if there is one, rather than leaking it.
+        let held: Dialing = { socket: handle, session: Option::None, armed: true };
+        let guard = Region::open();
+        Region::defer(guard, opening(held));
+        let began = khora_monotonic_millis();
+        if millis > 0 { let _ = set_receive_timeout(handle, millis); () };
+        let secured = secure(handle, host, port, tls, if millis > 0 { began + millis } else { 0 - 1 });
+        match secured {
+          // Closed by `guard`'s finalizer, which is still armed, when this
+          // function returns: one close, on every way out.
+          Result::Err(failed) => Result::Err({
+              why: if millis > 0 { unanswered(failed.why, millis, khora_monotonic_millis() - began) } else { failed.why },
+              lasting: failed.lasting,
+            }),
+          Result::Ok(session) => {
+            held.session = session;
+            let c = connection(handle, session);
+            let answer = greet(c, user, database, secret, millis, began);
+            // Only a connection handed back is kept open.
+            held.armed = is_err(answer);
+            match answer {
+              Result::Ok(c) => Result::Ok(c),
+              Result::Err(why) => Result::Err(passing(why)),
+            }
+          },
+        }
+      },
     }
   }
+}
+
+/// `connect_to`, with its failure as a value.
+///
+/// Calls no function value, so it has no entry poll: what can stop here is
+/// the connect itself, and a fiber canceled there gets no socket, so there
+/// is nothing yet for `dial_tls` to register.
+fn dialed(host: String, port: Int) -> Result<Int, SocketError> {
+  Result::Ok(connect_to(host, port)!) catch { why => Result::Err(why) }
 }
 
 /// What a connection being opened holds, for the close `open_tls` registers.
@@ -1935,9 +1949,7 @@ fn wire() -> Wire {
   // Winsock refuses every socket call until it is started; on Linux and
   // macOS this does nothing. `connect` starts it the same way. A start that
   // failed shows as the negative handles [`wired`] refuses, each test's first
-  // assertion -- `< 0` rather than `== invalid_handle()`, because a connect
-  // the manifest refuses answers `denied_handle()`, which is negative and not
-  // that.
+  // assertion.
   let _started = start();
   let mut port = 47100;
   let mut listener = invalid_handle();
@@ -1945,7 +1957,7 @@ fn wire() -> Wire {
     listener = listen_on(port);
     if listener == invalid_handle() { port = port + 1 }
   };
-  let handle = connect_to("127.0.0.1", port);
+  let handle = local_dial(port);
   // A read that waits for bytes this test never sends fails after a second
   // rather than holding the suite: a parse that went wrong usually looks
   // like a message still arriving.
@@ -2001,6 +2013,24 @@ fn accepted_from(listener: Int, client: Int) -> Int {
 /// client: negative, and distinct from every handle `std` answers.
 fn stray_handle() -> Int { -9 }
 
+/// A connection to this machine's `port`, or a negative number saying why
+/// not: [`refused_handle`] when the manifest does not grant it, and
+/// `invalid_handle()` for every other failure.
+///
+/// **For the tests' [`Wire`]s, which carry a handle either way** so that
+/// [`wired`] can name the cause in its first assertion rather than the test
+/// failing on a raise with no sentence attached.
+fn local_dial(port: Int) -> Int {
+  connect_to("127.0.0.1", port)! catch {
+    SocketError::Denied(_) => refused_handle(),
+    SocketError::Unreachable(_) => invalid_handle(),
+    SocketError::TimedOut(_) => invalid_handle(),
+  }
+}
+
+/// The client end of a [`Wire`] whose connect the manifest refused.
+fn refused_handle() -> Int { -3 }
+
 /// A listener and the port it is on.
 type Listening = { handle: Int, port: Int };
 
@@ -2039,7 +2069,7 @@ test "an accept that never sees its own client gives up" {
   // and that listener closes at once, so the tests beside this one can have
   // the port back. Ours waits at the high end, which nothing dials.
   let theirs = listening_from(47100);
-  let client = connect_to("127.0.0.1", theirs.port);
+  let client = local_dial(theirs.port);
   shut(theirs.handle);
   let ours = listening_from(47390);
   // Through `wired` first, so a refused connect or a port range with
@@ -2064,8 +2094,8 @@ test "an accept that never sees its own client gives up" {
 test "an accepted connection from another client is refused" {
   let _started = start();
   let ours = listening_from(47100);
-  let stranger = connect_to("127.0.0.1", ours.port);
-  let client = connect_to("127.0.0.1", ours.port);
+  let stranger = local_dial(ours.port);
+  let client = local_dial(ours.port);
   assert(wired(wire_of(client, 0, ours.handle)) && stranger >= 0);
   let open = accepted_open();
   assert(accepted_from(ours.handle, client) == stray_handle());
@@ -2089,7 +2119,7 @@ test "an accepted connection from another client is refused" {
 /// `extern fn`s too, under `default = "deny"`. Both are named, since only the
 /// first can be seen from here.
 fn wired(w: Wire) -> Bool {
-  if w.client.handle == denied_handle() {
+  if w.client.handle == refused_handle() {
     print("khora: the manifest refused a loopback connect this test needs. Grant it: [permissions] network = [\"127.0.0.1:*\"], or 127.0.0.1 on ports 47100 to 47399; and under default = \"deny\", also extern = [\"postgres\"] for this package's own extern fns");
     false
   } else if w.server == stray_handle() {
