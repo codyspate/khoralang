@@ -34,9 +34,15 @@ struct Grants<'a> {
     network: &'a [&'a str],
 }
 
-/// `std::permissions::grants`, from `grants`. The same shape as the module
-/// `khora build` generates.
+/// `std::permissions::grants`, from `grants`, with `listen = ["*"]` -- an
+/// absent key with no table -- so a test about something else may listen,
+/// in the same shape as the module `khora build` generates.
 fn grants_module(grants: &Grants) -> String {
+    grants_module_listening(grants, &["*"])
+}
+
+/// [`grants_module`], with `listen` as the `[permissions] listen` list.
+fn grants_module_listening(grants: &Grants, listen: &[&str]) -> String {
     let list = |patterns: &[&str]| {
         patterns
             .iter()
@@ -49,15 +55,18 @@ fn grants_module(grants: &Grants) -> String {
          /// Write.\npub fn fs_write() -> List<String> {{ {} }}\n\
          /// Env.\npub fn env() -> List<String> {{ List::Cons(\"*\", List::Nil) }}\n\
          /// Network.\npub fn network() -> List<String> {{ {} }}\n\
+         /// Listen.\npub fn listen() -> List<String> {{ {} }}\n\
          /// Process.\npub fn process() -> List<String> {{ List::Cons(\"*\", List::Nil) }}\n",
         list(grants.read),
         list(grants.write),
         list(grants.network),
+        list(listen),
     )
 }
 
-/// Every `std` file this host selects, with the grants replaced.
-fn sources(db: &KhoraDatabase, dir: &Path, grants: &Grants, main: &str) -> Vec<SourceFile> {
+/// Every `std` file this host selects, with `grants.kh` replaced by
+/// `module` when one is given and left as it is on disk when not.
+fn sources_with(db: &KhoraDatabase, dir: &Path, module: Option<String>, main: &str) -> Vec<SourceFile> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("std");
     let mut out = Vec::new();
     let mut stack = vec![root];
@@ -69,10 +78,9 @@ fn sources(db: &KhoraDatabase, dir: &Path, grants: &Grants, main: &str) -> Vec<S
             } else if path.extension().is_some_and(|e| e == "kh")
                 && khora_db::selected_for_target(&path, khora_db::host_target())
             {
-                let text = if path.file_name().is_some_and(|n| n == "grants.kh") {
-                    grants_module(grants)
-                } else {
-                    std::fs::read_to_string(&path).expect("readable")
+                let text = match (&module, path.file_name().is_some_and(|n| n == "grants.kh")) {
+                    (Some(generated), true) => generated.clone(),
+                    _ => std::fs::read_to_string(&path).expect("readable"),
                 };
                 out.push(SourceFile::new(db, path, text));
             }
@@ -84,13 +92,19 @@ fn sources(db: &KhoraDatabase, dir: &Path, grants: &Grants, main: &str) -> Vec<S
 
 /// Compiles `main` under `grants` into `CARGO_TARGET_TMPDIR/<name>/program`.
 fn build(name: &str, grants: &Grants, main: &str) -> PathBuf {
+    build_with(name, Some(grants_module(grants)), main)
+}
+
+/// [`build`], with `grants.kh` replaced by `module`, or left as it is on
+/// disk -- what a program with no `[permissions]` table compiles with.
+fn build_with(name: &str, module: Option<String>, main: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     harness::ensure_runtime();
     std::fs::create_dir_all(&dir).expect("a workspace");
     let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
     let _ = std::fs::remove_file(&exe);
     let db = KhoraDatabase::new();
-    let root = SourceRoot::new(&db, sources(&db, &dir, grants, main));
+    let root = SourceRoot::new(&db, sources_with(&db, &dir, module, main));
     if let Err(errors) = khora_codegen_llvm::compile(&db, root, &exe) {
         let messages: Vec<String> = errors.into_iter().map(|e| e.message).collect();
         panic!("compiling `{name}` failed:\n  {}\n\n{main}", messages.join("\n  "));
@@ -1207,5 +1221,382 @@ fn a_socket_error_names_its_host_prints_and_compares() {
              equal\ndifferent\ndifferent\n",
             "`{backend}`"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Listening
+// ---------------------------------------------------------------------------
+
+/// `khora_net_local_port`'s declaration, whose handle is an `I32` off
+/// Windows and an `Int` on it, and a `local_port` over it.
+#[cfg(not(windows))]
+const LOCAL_PORT: &str = "extern fn khora_net_local_port(handle: I32) -> Int;\n\
+                          fn local_port(socket: Int) -> Int { khora_net_local_port(I32::of(socket)) }";
+#[cfg(windows)]
+const LOCAL_PORT: &str = "extern fn khora_net_local_port(handle: Int) -> Int;\n\
+                          fn local_port(socket: Int) -> Int { khora_net_local_port(socket) }";
+
+/// Tries `listen_on` on each of `PORTS` and prints what each did: the port
+/// it got, read back from the socket, or the `SocketError` it raised. Then
+/// it dials `CONTROL` and waits there, holding whatever it bound, until the
+/// test closes that connection -- so the test can look at the ports while
+/// the program is alive.
+const LISTENING: &str = r#"module demo::main;
+
+import std::core::{Array, List, print};
+import std::net::socket::{SocketError, connect_to, listen_on, receive, start};
+
+@LOCAL_PORT@
+
+fn bound(port: Int) -> String raises SocketError {
+  let socket = listen_on(port)!;
+  if socket < 0 { "failed" } else { "listening ${Int::to_string(local_port(socket))}" }
+}
+
+pub fn main() -> Int {
+  start();
+  let mut ports: List<Int> = @PORTS@;
+  let mut going = true;
+  while going {
+    match ports {
+      List::Nil => going = false,
+      List::Cons(port, rest) => {
+        print(bound(port)! catch { e => "${e}" });
+        ports = rest
+      },
+    }
+  };
+  let control = connect_to("127.0.0.1", @CONTROL@)! catch { _ => -1 };
+  let buffer: Array<U8> = Array::new(1, 0);
+  let _ = receive(control, buffer);
+  0
+}
+"#;
+
+/// A port nothing is listening on, found by binding port 0 and letting it
+/// go. A test that loses the race for it to another program fails to bind
+/// it and says so; it does not pass.
+fn free_port() -> u16 {
+    TcpListener::bind(("127.0.0.1", 0))
+        .and_then(|listener| listener.local_addr())
+        .expect("a free port")
+        .port()
+}
+
+/// [`LISTENING`] for `ports`, holding until `CONTROL` closes.
+fn listening(ports: &[u16], control: u16) -> String {
+    let list = ports
+        .iter()
+        .rev()
+        .fold("List::Nil".to_string(), |rest, p| format!("List::Cons({p}, {rest})"));
+    LISTENING
+        .replace("@LOCAL_PORT@", LOCAL_PORT)
+        .replace("@PORTS@", &list)
+        .replace("@CONTROL@", &control.to_string())
+}
+
+/// Whether this process can bind `port` on every interface, which is what
+/// `listen_on` binds. False while a live listener holds it.
+fn can_bind(port: u16) -> bool {
+    TcpListener::bind(("0.0.0.0", port)).is_ok()
+}
+
+/// Runs `exe` on `backend` until it has printed `lines` lines, hands them to
+/// `look` while the program is still holding what it bound, then lets it go
+/// and waits for it. Killed after [`PATIENCE`], which fails the test.
+fn while_held(exe: &Path, backend: &str, control: &TcpListener, lines: usize, look: impl FnOnce(&[String])) {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+    let mut child = Command::new(exe)
+        .current_dir(exe.parent().expect("a directory"))
+        .env("KHORA_FIBERS", backend)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the program should run");
+    let mut stdout = BufReader::new(child.stdout.take().expect("stdout"));
+    let mut said = Vec::new();
+    for _ in 0..lines {
+        let mut line = String::new();
+        if stdout.read_line(&mut line).unwrap_or(0) == 0 {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("`{backend}`: the program stopped after printing {said:?}");
+        }
+        said.push(line.trim_end().to_string());
+    }
+    // The program dials the control port after its last line; until the
+    // test accepts and closes that, everything it bound stays bound.
+    control.set_nonblocking(true).expect("non-blocking");
+    let started = std::time::Instant::now();
+    let held = loop {
+        match control.accept() {
+            Ok((stream, _)) => break stream,
+            Err(e) if e.kind() == ErrorKind::WouldBlock && started.elapsed() < PATIENCE => {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("`{backend}`: the program never dialed back: {e}; it said {said:?}");
+            }
+        }
+    };
+    look(&said);
+    drop(held);
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("waiting") {
+            break status;
+        }
+        if started.elapsed() > PATIENCE {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("`{backend}`: the program did not finish once let go");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert!(status.success(), "`{backend}` exited {:?}: {said:?}", status.code());
+}
+
+/// Grants with every other category open and `listen` as given.
+fn listen_grants(listen: &[&str]) -> String {
+    grants_module_listening(&Grants { read: &["**"], write: &["**"], network: &["*"] }, listen)
+}
+
+/// The port a `listening N` line names, if it names one above zero.
+fn chosen(line: &str) -> Option<u16> {
+    line.strip_prefix("listening ").and_then(|n| n.parse().ok()).filter(|n| *n > 0)
+}
+
+/// **Under `deny` with no `listen` grant, `listen_on` raises `Denied` and
+/// binds nothing.** `SocketError::Denied` names `0.0.0.0:<port>`, the
+/// address as bound, for a port the program names and for port 0 alike;
+/// and while the program is still running, the test binds the same port
+/// itself, which it could not do if anything held it.
+#[test]
+fn listening_without_a_grant_is_denied_and_binds_nothing() {
+    let port = free_port();
+    let control = TcpListener::bind(("127.0.0.1", 0)).expect("a control port");
+    let program = listening(&[port, 0], control.local_addr().expect("an address").port());
+    let exe = build_with("perm_listen_denied", Some(listen_grants(&[])), &program);
+    for backend in BACKENDS {
+        while_held(&exe, backend, &control, 2, |said| {
+            assert_eq!(
+                said,
+                [format!("SocketError::Denied(0.0.0.0:{port})"), "SocketError::Denied(0.0.0.0:0)".to_string()],
+                "`{backend}`"
+            );
+            assert!(can_bind(port), "`{backend}`: a refused listen must leave the port free");
+        });
+    }
+}
+
+/// **A granted port binds, and only that port does.** Under `listen =
+/// ["<port>"]` the port is bound -- the test cannot bind it while the
+/// program holds it, which is what shows the check above means something --
+/// and port 0 is refused: a specific port is not a grant of the one the
+/// operating system would choose.
+#[test]
+fn a_granted_port_binds_and_port_zero_does_not() {
+    let port = free_port();
+    let control = TcpListener::bind(("127.0.0.1", 0)).expect("a control port");
+    let program = listening(&[port, 0], control.local_addr().expect("an address").port());
+    let grant = port.to_string();
+    let exe = build_with("perm_listen_port", Some(listen_grants(&[&grant])), &program);
+    for backend in BACKENDS {
+        while_held(&exe, backend, &control, 2, |said| {
+            assert_eq!(
+                said,
+                [format!("listening {port}"), "SocketError::Denied(0.0.0.0:0)".to_string()],
+                "`{backend}`"
+            );
+            assert!(!can_bind(port), "`{backend}`: the granted port should be held");
+        });
+    }
+}
+
+/// **A range covers what is in it.** `low-high` around the port binds it; a
+/// range that starts just past it does not.
+#[test]
+fn a_range_covers_the_ports_in_it() {
+    let port = free_port();
+    let control = TcpListener::bind(("127.0.0.1", 0)).expect("a control port");
+    let program = listening(&[port], control.local_addr().expect("an address").port());
+    let around = format!("{}-{}", port - 1, port + 1);
+    let past = format!("{}-{}", port + 1, port + 2);
+    for (name, grant, expected) in [
+        ("perm_listen_range_in", &around, format!("listening {port}")),
+        ("perm_listen_range_past", &past, format!("SocketError::Denied(0.0.0.0:{port})")),
+    ] {
+        let exe = build_with(name, Some(listen_grants(&[grant])), &program);
+        for backend in BACKENDS {
+            while_held(&exe, backend, &control, 1, |said| {
+                assert_eq!(said, std::slice::from_ref(&expected), "`{backend}` under `{grant}`");
+            });
+        }
+    }
+}
+
+/// **`0` grants the port the operating system chooses, and nothing else.**
+/// Port 0 binds and reads back as a real port; a port the program names is
+/// refused. `["0", "<port>"]` grants both.
+#[test]
+fn zero_grants_an_os_chosen_port() {
+    let port = free_port();
+    let control = TcpListener::bind(("127.0.0.1", 0)).expect("a control port");
+    let program = listening(&[0, port], control.local_addr().expect("an address").port());
+    let exe = build_with("perm_listen_zero", Some(listen_grants(&["0"])), &program);
+    for backend in BACKENDS {
+        while_held(&exe, backend, &control, 2, |said| {
+            assert!(chosen(&said[0]).is_some(), "`{backend}`: port 0 should bind: {said:?}");
+            assert_eq!(said[1], format!("SocketError::Denied(0.0.0.0:{port})"), "`{backend}`");
+        });
+    }
+    let both = port.to_string();
+    let exe = build_with("perm_listen_zero_and_port", Some(listen_grants(&["0", &both])), &program);
+    for backend in BACKENDS {
+        while_held(&exe, backend, &control, 2, |said| {
+            assert!(chosen(&said[0]).is_some(), "`{backend}`: port 0 should bind: {said:?}");
+            assert_eq!(said[1], format!("listening {port}"), "`{backend}`");
+        });
+    }
+}
+
+/// Tries `listen_on` on ports no socket can have, printing `failed`, the
+/// port it bound, or the refusal.
+const OUT_OF_RANGE: &str = r#"module demo::main;
+
+import std::core::{print};
+import std::net::socket::{SocketError, listen_on, shut, start};
+
+@LOCAL_PORT@
+
+fn bound(port: Int) -> String raises SocketError {
+  let socket = listen_on(port)!;
+  if socket < 0 {
+    "${Int::to_string(port)} failed"
+  } else {
+    let said = "${Int::to_string(port)} bound ${Int::to_string(local_port(socket))}";
+    shut(socket);
+    said
+  }
+}
+
+pub fn main() -> Int {
+  start();
+  print(bound(70000)! catch { e => "${e}" });
+  print(bound(65536)! catch { e => "${e}" });
+  print(bound(-1)! catch { e => "${e}" });
+  0
+}
+"#;
+
+/// **A port outside 0 to 65535 binds nothing, under any grant.** The port
+/// goes into a sixteen-bit field, so `70000` bound 4464 and `65536` bound
+/// the operating system's choice; under `*`, which covers any address, the
+/// program got a port it never asked for. Answered `invalid_handle()`, as a
+/// bind the operating system refuses is, so a caller's existing check for a
+/// failed listen covers it.
+#[test]
+fn a_port_outside_the_range_binds_nothing() {
+    let program = OUT_OF_RANGE.replace("@LOCAL_PORT@", LOCAL_PORT);
+    let exe = build_with("perm_listen_out_of_range", Some(listen_grants(&["*"])), &program);
+    for backend in BACKENDS {
+        assert_eq!(
+            run(&exe, exe.parent().expect("a directory"), backend),
+            "70000 failed\n65536 failed\n-1 failed\n",
+            "`{backend}`"
+        );
+    }
+}
+
+/// **With no `[permissions]` table, or `default = "allow"`, anything may
+/// be bound.** No table compiles with the `grants.kh` on disk; `allow`
+/// with no `listen` key writes `*`, which is what this compiles with.
+#[test]
+fn allow_and_no_table_bind_anything() {
+    let port = free_port();
+    let control = TcpListener::bind(("127.0.0.1", 0)).expect("a control port");
+    let program = listening(&[port, 0], control.local_addr().expect("an address").port());
+    for (name, module) in [("perm_listen_no_table", None), ("perm_listen_allow", Some(listen_grants(&["*"])))] {
+        let exe = build_with(name, module, &program);
+        for backend in BACKENDS {
+            while_held(&exe, backend, &control, 2, |said| {
+                assert_eq!(said[0], format!("listening {port}"), "`{backend}` ({name})");
+                assert!(chosen(&said[1]).is_some(), "`{backend}` ({name}): {said:?}");
+            });
+        }
+    }
+}
+
+/// Starts `Router::listen_quietly`, `Router::listen` and
+/// `Router::listen_tls` on `PORT` in turn and prints how each ended.
+const SERVING: &str = r#"module demo::main;
+
+import std::core::{ChildFailed, SharedFn, print, scoped};
+import std::net::http::{HttpError, Response, Router};
+import std::net::tls::{TlsError};
+
+fn quietly() -> String raises HttpError + ChildFailed {
+  Router::new()
+    |> Router::get("/x", SharedFn::of(fn _ => Response::text(200, "ok")))
+    |> Router::listen_quietly(@PORT@)!;
+  "quietly served"
+}
+
+fn loudly() -> String raises HttpError + ChildFailed {
+  Router::new()
+    |> Router::get("/x", SharedFn::of(fn _ => Response::text(200, "ok")))
+    |> Router::listen(@PORT@)!;
+  "loudly served"
+}
+
+fn secured() -> String raises HttpError + TlsError + ChildFailed {
+  scoped(fn () =>
+    Router::new()
+      |> Router::get("/x", SharedFn::of(fn _ => Response::text(200, "ok")))
+      |> Router::listen_tls(@PORT@, @CERT@, @KEY@)!)!;
+  "tls served"
+}
+
+pub fn main() -> Int {
+  print(quietly()! catch { HttpError::Denied(a) => "quietly denied ${a}", _ => "quietly something else" });
+  print(loudly()! catch { HttpError::Denied(a) => "loudly denied ${a}", _ => "loudly something else" });
+  print(secured()! catch { HttpError::Denied(a) => "tls denied ${a}", _ => "tls something else" });
+  0
+}
+"#;
+
+/// A file in `tests/fixtures`, as a Khora string literal.
+fn fixture_literal(name: &str) -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join(name);
+    let text = std::fs::read_to_string(&path).expect("the test certificate is in tests/fixtures");
+    format!("{:?}", text.replace('\r', ""))
+}
+
+/// **`Router::listen`, `listen_quietly` and a TLS server are refused the
+/// same way**, with `HttpError::Denied` naming the address, and nothing is
+/// bound: each returns at once rather than serving, and the port is free
+/// afterwards.
+#[test]
+fn a_router_and_a_tls_server_are_refused_alike() {
+    let port = free_port();
+    let program = SERVING
+        .replace("@PORT@", &port.to_string())
+        .replace("@CERT@", &fixture_literal("localhost.cert.pem"))
+        .replace("@KEY@", &fixture_literal("localhost.key.pem"));
+    let exe = build_with("perm_listen_router", Some(listen_grants(&[])), &program);
+    for backend in BACKENDS {
+        let said = run(&exe, exe.parent().expect("a directory"), backend);
+        assert_eq!(
+            said,
+            format!(
+                "quietly denied 0.0.0.0:{port}\nloudly denied 0.0.0.0:{port}\ntls denied 0.0.0.0:{port}\n"
+            ),
+            "`{backend}`"
+        );
+        assert!(can_bind(port), "`{backend}`: a refused server must leave the port free");
     }
 }

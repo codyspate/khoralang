@@ -595,7 +595,7 @@ fn serve<'e>(gauge: Shared<Gauge>, server: Int) -> ()
 fn main() -> () raises ChildFailed {{
   let gauge = Shared::of({{ live: 0, peak: 0 }});
   if start() {{ }} else {{ print("no sockets") }};
-  let server = listen_on({port});
+  let server = (listen_on({port})! catch {{ _ => -1 }});
   if server == invalid_handle() {{
     print("could not bind")
   }} else {{

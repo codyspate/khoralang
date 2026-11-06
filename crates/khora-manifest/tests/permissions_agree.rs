@@ -47,11 +47,12 @@ fn the_compilers_matcher_answers_the_shared_table() {
 /// green run that checks nothing. The counts are floors rather than exact, so
 /// adding a case never means editing this test.
 #[test]
-fn the_shared_table_covers_all_three_matchers() {
+fn the_shared_table_covers_all_four_matchers() {
     let count = |kind| CASES.iter().filter(|c| c.kind == kind).count();
     assert!(count(permission_cases::Kind::Path) >= 15, "the path cases are the ones that diverged");
     assert!(count(permission_cases::Kind::Name) >= 5, "names");
     assert!(count(permission_cases::Kind::Host) >= 5, "hosts");
+    assert!(count(permission_cases::Kind::Listen) >= 10, "listening");
     assert!(
         CASES.iter().any(|c| !c.granted),
         "a table of nothing but grants would pass against a matcher that always says yes"

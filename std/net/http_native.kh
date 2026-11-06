@@ -417,11 +417,20 @@ impl Response {
 /// What can go wrong that is the *server's* problem rather than a client's.
 ///
 /// A malformed request from a client is answered with a 400 and never reaches
-/// here — that is a response, not an error. These two are the cases where
-/// there is nobody to answer: the port would not bind, or a request could not
-/// be read at all.
+/// here — that is a response, not an error. These are the cases where there
+/// is nobody to answer: the manifest does not grant the port, the port would
+/// not bind, or a request could not be read at all.
 derive(Show, Eq)
 pub type HttpError =
+  /// `[permissions] listen` does not grant `address`, the
+  /// `<interface>:<port>` the server would have bound, so nothing was bound.
+  /// Only a server raises it, so the key to change is always `listen`: a
+  /// client's refusal is `CallError::Denied`, and `[permissions] network`.
+  ///
+  /// **Its own case rather than `BindFailed`**, as `CallError::Denied` is
+  /// for a client: `BindFailed` sends the reader to whatever else holds the
+  /// port, and this one is a line in `khora.toml`.
+  | Denied(address: String)
   | BindFailed(port: Int)
   | MalformedRequest(details: String);
 
@@ -1726,6 +1735,10 @@ impl Router {
   /// arrives on the same stream in a different format and everything parsing
   /// that stream has to be taught about it. `listen_quietly` is this without
   /// the line.
+  ///
+  /// **`[permissions] listen` governs the port**: one it does not grant is
+  /// `HttpError::Denied`, raised before anything is bound. A port outside 0
+  /// to 65535 is `HttpError::BindFailed`.
   pub fn listen<'er>(router: Router<'er>, port: Int) -> ()
     raises 'er + HttpError + ChildFailed
   {
@@ -1739,6 +1752,8 @@ impl Router {
   /// A caller here announces readiness however the rest of its output does — or
   /// not at all, for a service behind a health check that answers the question
   /// better anyway.
+  ///
+  /// `[permissions] listen` governs the port, as it does [`Router::listen`].
   pub fn listen_quietly<'er>(router: Router<'er>, port: Int) -> ()
     raises 'er + HttpError + ChildFailed
   {
@@ -1854,6 +1869,8 @@ impl Router {
   ///
   /// PEM text rather than paths, because a certificate arrives from a file, a
   /// secret store or an ACME client, and only one of those is a path.
+  ///
+  /// `[permissions] listen` governs the port, as it does [`Router::listen`].
   pub fn listen_tls<'er>(router: Router<'er>, port: Int, certificate: String, key: String) -> ()
     with { scope: Scope }
     raises 'er + HttpError + TlsError + ChildFailed
@@ -1869,6 +1886,12 @@ impl Router {
   /// For a caller that binds the port itself and serves it with
   /// [`Router::serve_forever`] or [`Router::serve_secured`]: a nursery of
   /// its own, a backlog of connections it wants open before it serves.
+  ///
+  /// Raises `HttpError::Denied` when `[permissions] listen` does not grant
+  /// the port, before anything is bound, and `HttpError::BindFailed` when
+  /// the operating system refuses the bind. [`Router::listen`],
+  /// [`Router::listen_quietly`] and [`Router::listen_tls`] all bind through
+  /// here, so all of them are refused the same way.
   ///
   /// **Registered with the caller's scope by the call that binds it.** The
   /// socket is handed straight from `listen_on` to `acquire`, so a fiber
@@ -1900,8 +1923,23 @@ impl Router {
     } else {
       raise HttpError::BindFailed(port)
     };
-    let server = acquire(listen_on(port), fn s => if s == invalid_handle() {} else { shut(s) });
+    let server = acquire(Router::granted_socket(port)!, fn s => if s == invalid_handle() {} else { shut(s) });
     if server == invalid_handle() { raise HttpError::BindFailed(port) } else { server }
+  }
+
+  /// `listen_on(port)`, with its refusal raised as `HttpError::Denied`.
+  ///
+  /// **Calls no function value, so nothing in it can stop** once the socket
+  /// exists: [`Router::bound`] hands what this answers straight to
+  /// `acquire`. `listen_on` raises only `Denied`, and before it makes a
+  /// socket; the other two cases cannot reach here, and are a failed bind
+  /// if they ever do.
+  fn granted_socket(port: Int) -> Int raises HttpError {
+    listen_on(port)! catch {
+      SocketError::Denied(address) => raise HttpError::Denied(address),
+      SocketError::Unreachable(_) => invalid_handle(),
+      SocketError::TimedOut(_) => invalid_handle(),
+    }
   }
 
   /// `serve_forever` over TLS: accepts, handshakes, and serves on a fiber
@@ -1993,13 +2031,13 @@ impl Router {
   /// ```khora
   /// import std::core::{ChildFailed, SharedFn, nursery};
   /// import std::net::http::{HttpError, Response, Router};
-  /// import std::net::socket::{listen_on};
+  /// import std::net::socket::{SocketError, listen_on};
   ///
-  /// pub fn main() -> Int raises HttpError + ChildFailed {
+  /// pub fn main() -> Int raises HttpError + SocketError + ChildFailed {
   ///   nursery(fn () =>
   ///     Router::new()
   ///       |> Router::get("/health", SharedFn::of(fn _ => Response::text(200, "ok")))
-  ///       |> Router::serve_forever(listen_on(8080))!)!;
+  ///       |> Router::serve_forever(listen_on(8080)!)!)!;
   ///   0
   /// }
   /// ```

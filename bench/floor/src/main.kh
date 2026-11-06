@@ -1,7 +1,7 @@
 module floor::main;
 
 import std::core::{Array, ChildFailed, Nursery, bounded_nursery, print};
-import std::net::socket::{accept_on, invalid_handle, listen_on, receive, set_receive_timeout, shut, start, transmit};
+import std::net::socket::{SocketError, accept_on, invalid_handle, listen_on, receive, set_receive_timeout, shut, start, transmit};
 
 // The floor: accept, then answer whatever arrives with a fixed string until the
 // client goes away. No parsing, no routing, no allocation per request — so the
@@ -38,9 +38,9 @@ fn loop_forever(server: Int) -> ()
   loop_forever(server)
 }
 
-pub fn main() raises ChildFailed {
+pub fn main() raises ChildFailed + SocketError {
   start();
-  let server = listen_on(18950);
+  let server = listen_on(18950)!;
   print("listening");
   bounded_nursery(256, fn () => loop_forever(server))!
 }

@@ -1954,10 +1954,11 @@ fn wire() -> Wire {
   let mut port = 47100;
   let mut listener = invalid_handle();
   while listener == invalid_handle() && port < 47400 {
-    listener = listen_on(port);
+    listener = local_listen(port);
     if listener == invalid_handle() { port = port + 1 }
   };
-  let handle = local_dial(port);
+  // A refused listener has no port to dial; [`wired`] names the grant.
+  let handle = if listener == refused_handle() { invalid_handle() } else { local_dial(port) };
   // A read that waits for bytes this test never sends fails after a second
   // rather than holding the suite: a parse that went wrong usually looks
   // like a message still arriving.
@@ -2028,7 +2029,20 @@ fn local_dial(port: Int) -> Int {
   }
 }
 
-/// The client end of a [`Wire`] whose connect the manifest refused.
+/// A listener on `port`, or a negative number saying why not:
+/// [`refused_handle`] when `[permissions] listen` does not grant it, and
+/// `invalid_handle()` when the port will not bind, which [`wire`] takes as
+/// a cue to try the next one.
+fn local_listen(port: Int) -> Int {
+  listen_on(port)! catch {
+    SocketError::Denied(_) => refused_handle(),
+    SocketError::Unreachable(_) => invalid_handle(),
+    SocketError::TimedOut(_) => invalid_handle(),
+  }
+}
+
+/// The client end of a [`Wire`] whose connect the manifest refused, or the
+/// listener of one whose bind it refused.
 fn refused_handle() -> Int { -3 }
 
 /// A listener and the port it is on.
@@ -2041,7 +2055,7 @@ fn listening_from(from: Int) -> Listening {
   let mut port = from;
   let mut listener = invalid_handle();
   while listener == invalid_handle() && port < 47400 {
-    listener = listen_on(port);
+    listener = local_listen(port);
     if listener == invalid_handle() { port = port + 1 }
   };
   { handle: listener, port: port }
@@ -2110,16 +2124,20 @@ test "an accepted connection from another client is refused" {
 
 /// Whether `w` is connected at both ends, saying why when it is not.
 ///
-/// **What this prevents: a refused loopback connect reading as a hang, or as
-/// an unrelated failure further down.** Each test that takes a [`wire`]
-/// asserts this first, so the run stops at the cause. The sentence names the
-/// manifest keys, because the usual reason is a `[permissions]` table that
-/// does not grant `127.0.0.1` on the test's port -- the tests here dial ports
-/// 47100 to 47399 -- and a table that refuses that can refuse this package's
+/// **What this prevents: a refused loopback connect or listener reading as a
+/// hang, or as an unrelated failure further down.** Each test that takes a
+/// [`wire`] asserts this first, so the run stops at the cause. The sentence
+/// names the manifest keys, because the usual reason is a `[permissions]`
+/// table that does not grant `127.0.0.1` on the test's port, or does not
+/// grant listening on it -- the tests here listen on and dial ports 47100 to
+/// 47399 -- and a table that refuses that can refuse this package's
 /// `extern fn`s too, under `default = "deny"`. Both are named, since only the
 /// first can be seen from here.
 fn wired(w: Wire) -> Bool {
-  if w.client.handle == refused_handle() {
+  if w.listener == refused_handle() {
+    print("khora: the manifest refused a loopback listener this test needs. Grant it: [permissions] listen = [\"47100-47399\"]");
+    false
+  } else if w.client.handle == refused_handle() {
     print("khora: the manifest refused a loopback connect this test needs. Grant it: [permissions] network = [\"127.0.0.1:*\"], or 127.0.0.1 on ports 47100 to 47399; and under default = \"deny\", also extern = [\"postgres\"] for this package's own extern fns");
     false
   } else if w.server == stray_handle() {

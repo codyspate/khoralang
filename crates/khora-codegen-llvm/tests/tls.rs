@@ -157,7 +157,7 @@ pub fn main() -> () raises TlsError {{
   with {{ scope: Scope::root() }} {{
     start();
     let settings = server(certificate, key)!;
-    let listener = listen_on({port});
+    let listener = (listen_on({port})! catch {{ _ => -1 }});
     print(\"ready\");
     let taken = accept_on(listener);
     if taken == invalid_handle() {{ }} else {{ answer(settings, taken)! }}
@@ -254,7 +254,7 @@ pub fn main() -> () raises TlsError {{
   with {{ scope: Scope::root() }} {{
     start();
     let settings = server(certificate, key)!;
-    let listener = listen_on({port});
+    let listener = (listen_on({port})! catch {{ _ => -1 }});
     print(\"ready\");
     let taken = accept_on(listener);
     match attempt(fn () => secure(settings, taken)!) {{
@@ -383,7 +383,7 @@ pub fn main() -> () raises TlsError {
   with { scope: Scope::root() } {
     start();
     let settings = server(certificate, key)!;
-    let listener = listen_on(PORT);
+    let listener = (listen_on(PORT)! catch { _ => -1 });
     // The test certificate is not one this machine trusts, so it is handed over
     // as an extra root. That is the whole of the difference from calling a
     // public server, and a great deal better than a switch that stops checking.
@@ -429,7 +429,7 @@ pub fn main() -> () raises TlsError {
   with { scope: Scope::root() } {
     start();
     let settings = server(certificate, key)!;
-    let listener = listen_on(PORT);
+    let listener = (listen_on(PORT)! catch { _ => -1 });
     let caller = trusting(authority)!;
     print("ready");
     let calling = Fiber::spawn(fn () => call(caller));

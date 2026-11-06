@@ -372,18 +372,51 @@ The grants are compiled into the binary rather than read at run time. A file the
 
 **A missing table grants everything, and each category is independent.** Naming `network` says nothing about `env`. Tightening is opt-in.
 
-**`network` is a list of hosts the program may connect *out* to, and nothing
-else.** Every way `std` dials out checks it before anything is looked up or
-dialed: `HttpClient::send` once the URL is parsed, `std::net::socket`'s
-`connect_to` and `connect_by`, and `std::net::tls`'s `connect` and
-`connect_by`. Binding a port is the other direction and is not covered:
+**`network` is a list of hosts the program may connect *out* to.** Every way
+`std` dials out checks it before anything is looked up or dialed:
+`HttpClient::send` once the URL is parsed, `std::net::socket`'s `connect_to`
+and `connect_by`, and `std::net::tls`'s `connect` and `connect_by`.
+
+**`listen` is the other direction: the ports the program may listen on.**
+`std::net::socket::listen_on` checks it before a socket is made, and
 `Router::listen`, `Router::listen_quietly`, `Router::listen_tls` and
-`std::net::socket::listen_on` never consult it, so a program with
-`default = "deny"` and no hosts granted still serves on any port it asks
-for. Write `network = ["127.0.0.1:8787"]` expecting it to authorize a listener
-and it will do nothing, in either direction. [Known
-limitations](/docs/limitations/#inbound-connections-are-not-permissioned) has
-the reasoning.
+`Router::bound` all bind through `listen_on`, so all of them are refused the
+same way and nothing is bound. The two keys do not cover each other: a host in
+`network` is a destination, and a port the program answers on is not one.
+
+```toml
+[permissions]
+default = "deny"
+listen = ["8080"]                    # this port
+# listen = ["8000-8099"]             # a range
+# listen = ["1024-65535"]            # any port an unprivileged process can bind
+# listen = ["0"]                     # a port the operating system chooses
+```
+
+A listening socket binds every IPv4 interface, so a grant names a port and
+nothing else. An entry that names an interface -- `127.0.0.1:9000`,
+`[::1]:9000`, `0.0.0.0:8080` -- is refused when the manifest loads, as is
+`localhost:8080`, and so is anything else that is not a port, a range, `0`
+or `*`; the refusal names the entry and the shapes that work. **Port `0`**
+asks the operating system to choose one, which can be any port, so it is
+granted by `0` or by `*` and never by a specific port or a range. A range
+starts at 1. Under `default = "deny"` a table with no `listen` key grants no
+port; with `default = "allow"`, or no table, any port may be bound.
+
+**A program whose port is the operator's choice** -- read from `PORT`, say
+-- grants the range the operator may choose from, often `1024-65535`, and
+catches the refusal to say which port and which key:
+
+```khora
+Router::listen(router, port)! catch {
+  HttpError::Denied(_) => eprint("port ${Int::to_string(port)} is not in [permissions] listen in khora.toml"),
+  HttpError::BindFailed(p) => raise HttpError::BindFailed(p),
+  HttpError::MalformedRequest(why) => raise HttpError::MalformedRequest(why),
+}
+```
+
+Left uncaught, the refusal ends the program with only the name of the error
+type.
 
 **A path grant is checked against where the path leads.** `std::fs` follows
 the symbolic links on a path and matches the result as well as the path as
@@ -427,6 +460,7 @@ A denial is its own error case, separate from the ordinary failure, because the 
 | a host over HTTP | `CallError::Denied(host)` | `[permissions] network` |
 | a host over TLS | `TlsError::Denied(host)` | `[permissions] network` |
 | a host over a raw socket | `SocketError::Denied(host)` | `[permissions] network` |
+| a port to listen on | `SocketError::Denied(address)`, or `HttpError::Denied(address)` from a `Router` | `[permissions] listen` |
 | a path on disk | `IoError::Denied(path)` | `[permissions.fs]` |
 | a program | `ProcessError::Denied(program)` | `[permissions] process` |
 
@@ -434,7 +468,14 @@ A denial is its own error case, separate from the ordinary failure, because the 
 refused host cannot be mistaken for a connection: `Denied` for a host the
 manifest does not grant, `Unreachable` for one that could not be reached, and
 `TimedOut` for a `connect_by` whose deadline passed. The handle they answer is
-always a connected socket.
+always a connected socket. `listen_on` raises `SocketError::Denied` for a port
+the manifest does not grant; a port the operating system will not bind, or
+one outside 0 to 65535, is answered with `invalid_handle()`.
+
+**`SocketError::Denied` prints the same from a connect and a listen**:
+`Denied(0.0.0.0:8080)` does not say which key refused it. The call does --
+`connect_to` and `connect_by` are `network`, `listen_on` is `listen` -- so
+code that reports one names the key from the call it made.
 
 **Including the two probes.** `FsRead::exists` and `FsRead::is_dir` answer a
 `Bool` and raise `IoError` as well, so a path the manifest denies is `Denied`

@@ -23,11 +23,12 @@
 //! contract with two implementations -- is described in
 //! `scripts/check-agreement.sh`.
 
-/// Which of the three matchers a case is about.
+/// Which of the four matchers a case is about.
 ///
 /// They are not variations of one function: `Path` stops a single `*` at a
-/// separator and refuses a `..` segment, `Name` lets `*` span everything, and
-/// `Host` splits a trailing port off first. A case names the one it means, so
+/// separator and refuses a `..` segment, `Name` lets `*` span everything,
+/// `Host` splits a trailing port off first, and `Listen` reads ports and
+/// ranges rather than globs. A case names the one it means, so
 /// nothing can be silently checked against the wrong matcher.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
@@ -37,6 +38,9 @@ pub enum Kind {
     Name,
     /// `granted_host` on both sides: `name` or `name:port`.
     Host,
+    /// `granted_listen` on both sides: `<interface>:<port>` as a program
+    /// binds it, against `[permissions] listen` entries.
+    Listen,
 }
 
 /// One question, and the answer both implementations owe.
@@ -53,7 +57,7 @@ pub struct Case {
     pub why: &'static str,
 }
 
-use Kind::{Host, Name, Path};
+use Kind::{Host, Listen, Name, Path};
 
 /// Whether `\` separates path segments on the platform the tests run on.
 ///
@@ -475,6 +479,176 @@ pub const CASES: &[Case] = &[
         granted: false,
         why: "and for the unbracketed subject a connect builds",
     },
+    // -- listening: an address as bound, against `[permissions] listen` ----
+    Case {
+        kind: Listen,
+        grants: &["8080"],
+        subject: "0.0.0.0:8080",
+        granted: true,
+        why: "a bare port covers it on any interface, and `listen_on(8080)` binds \
+              every IPv4 interface",
+    },
+    Case {
+        kind: Listen,
+        grants: &["8080"],
+        subject: "0.0.0.0:8081",
+        granted: false,
+        why: "and only that port",
+    },
+    Case {
+        kind: Listen,
+        grants: &["8000-8099"],
+        subject: "0.0.0.0:8000",
+        granted: true,
+        why: "a range includes its low end",
+    },
+    Case {
+        kind: Listen,
+        grants: &["8000-8099"],
+        subject: "0.0.0.0:8099",
+        granted: true,
+        why: "and its high end",
+    },
+    Case {
+        kind: Listen,
+        grants: &["8000-8099"],
+        subject: "0.0.0.0:8100",
+        granted: false,
+        why: "and nothing past it",
+    },
+    Case {
+        kind: Listen,
+        grants: &["127.0.0.1:9000"],
+        subject: "0.0.0.0:9000",
+        granted: false,
+        why: "matched as bound: an interface entry does not cover a bind to every \
+              interface, which is what the program asked for",
+    },
+    Case {
+        kind: Listen,
+        grants: &["127.0.0.1:9000"],
+        subject: "127.0.0.1:9000",
+        granted: true,
+        why: "and covers its own interface",
+    },
+    Case {
+        kind: Listen,
+        grants: &["[::1]:9000"],
+        subject: "[::1]:9000",
+        granted: true,
+        why: "an IPv6 interface is written in brackets, as in a URL",
+    },
+    Case {
+        kind: Listen,
+        grants: &["0.0.0.0:*"],
+        subject: "0.0.0.0:443",
+        granted: true,
+        why: "`*` after an interface is every port on it",
+    },
+    Case {
+        kind: Listen,
+        grants: &["0.0.0.0:*"],
+        subject: "127.0.0.1:443",
+        granted: false,
+        why: "and only on it",
+    },
+    Case {
+        kind: Listen,
+        grants: &["0"],
+        subject: "0.0.0.0:0",
+        granted: true,
+        why: "`0` grants the port the operating system chooses",
+    },
+    Case {
+        kind: Listen,
+        grants: &["0"],
+        subject: "0.0.0.0:8080",
+        granted: false,
+        why: "and is not a wildcard for a port the program names",
+    },
+    Case {
+        kind: Listen,
+        grants: &["8080", "1-65535"],
+        subject: "0.0.0.0:0",
+        granted: false,
+        why: "no port and no range grants port 0: the chosen port can be anything, \
+              so a grant of `8080` that covered it would be a grant of every port",
+    },
+    Case {
+        kind: Listen,
+        grants: &["0.0.0.0:*"],
+        subject: "0.0.0.0:0",
+        granted: true,
+        why: "an interface's `*` covers port 0 on it",
+    },
+    Case {
+        kind: Listen,
+        grants: &["*"],
+        subject: "0.0.0.0:0",
+        granted: true,
+        why: "and `*` alone covers anything",
+    },
+    Case {
+        kind: Listen,
+        grants: &[],
+        subject: "0.0.0.0:8080",
+        granted: false,
+        why: "no grants is no",
+    },
+    Case {
+        kind: Listen,
+        grants: &["localhost:8080", "70000", "9000-8000", "*:8080"],
+        subject: "0.0.0.0:8080",
+        granted: false,
+        why: "entries a manifest refuses at load cover nothing if they reach either \
+              matcher another way: a name for an interface, a port past 65535, a \
+              backwards range, `*` for an interface",
+    },
+    Case {
+        kind: Listen,
+        grants: &["08080"],
+        subject: "0.0.0.0:8080",
+        granted: false,
+        why: "a leading zero is refused, so the two matchers cannot read one entry \
+              as two different numbers",
+    },
+    Case {
+        kind: Listen,
+        grants: &["*"],
+        subject: "0.0.0.0:70000",
+        granted: true,
+        why: "`*` covers even an address that is not a port, so a program with no \
+              table binds what it did without one",
+    },
+    Case {
+        kind: Listen,
+        grants: &["0.0.0.0:*", "1-65535"],
+        subject: "0.0.0.0:70000",
+        granted: false,
+        why: "and nothing narrower than `*` covers it",
+    },
+    Case {
+        kind: Listen,
+        grants: &["[::1]:*"],
+        subject: "[::1]:9000",
+        granted: true,
+        why: "an IPv6 interface with `*` for its ports",
+    },
+    Case {
+        kind: Listen,
+        grants: &["0-100"],
+        subject: "0.0.0.0:0",
+        granted: false,
+        why: "a range that starts at 0 is refused at load, and would otherwise be a \
+              grant of the OS's choice dressed as a list of ports",
+    },
+    Case {
+        kind: Listen,
+        grants: &["0-100"],
+        subject: "0.0.0.0:50",
+        granted: false,
+        why: "and it covers nothing, not even the ports it does name",
+    },
 ];
 
 /// What `khora_manifest` says about one case.
@@ -489,6 +663,7 @@ pub fn rust_answer(case: &Case) -> bool {
         Kind::Path => khora_manifest::granted_path(&grants, case.subject),
         Kind::Name => khora_manifest::granted_name(&grants, case.subject),
         Kind::Host => khora_manifest::granted_host(&grants, case.subject),
+        Kind::Listen => khora_manifest::granted_listen(&grants, case.subject),
     }
 }
 
@@ -498,6 +673,7 @@ pub fn khora_function(kind: Kind) -> &'static str {
         Kind::Path => "granted",
         Kind::Name => "granted_name",
         Kind::Host => "granted_host",
+        Kind::Listen => "granted_listen",
     }
 }
 

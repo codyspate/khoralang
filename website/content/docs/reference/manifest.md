@@ -126,13 +126,15 @@ category at all, not which hosts or paths they may reach:
 ```toml
 [workspace.policy]
 network = ["gateway"]
+listen = ["gateway"]
 fs = ["reports"]
 env = ["gateway", "reports"]
 extern = ["sqlite"]
 ```
 
-Only `gateway` may write a `[permissions] network` entry; only `reports` may
-write `[permissions.fs]`. Neither is told anything about *which* host or path —
+Only `gateway` may write a `[permissions] network` or `listen` entry; only
+`reports` may write `[permissions.fs]`. Neither is told anything about *which*
+host, port or path —
 `network = ["*.internal:5432"]` here is not a narrower cap, it is a member name
 that does not exist, and the root is refused with `` `*.internal:5432` is not a
 member of the workspace ``. A typo in a cap is a cap that does not apply, so it
@@ -152,7 +154,7 @@ workspace overrules a member rather than offering it something.
 **`process` is not one of the categories a policy caps.** The key parses, and a
 name in it that is not a member is refused like any other, so it reads as though
 it works. It does not: the check that refuses a member for granting a capped
-category runs over `network`, `fs`, `env` and `extern`, and never over
+category runs over `network`, `listen`, `fs`, `env` and `extern`, and never over
 `process`. A root that writes
 `process = ["gateway"]` does not stop any other member writing
 `[permissions] process`. Leave it out rather than relying on it, and cap the
@@ -193,6 +195,7 @@ Khora has no ambient authority: a function that touches the network says so in i
 [permissions]
 default = "deny"
 network = ["api.example.com:443", "*.internal:5432"]
+listen = ["8080"]
 env = ["HOME", "DATABASE_URL"]
 process = ["git", "docker"]
 extern = ["sqlite_sys"]
@@ -206,7 +209,8 @@ write = ["logs/**"]
 | --- | --- |
 | `workspace` | `true` to take the root's table whole. |
 | `default` | What a category nobody wrote down grants: `allow` or `deny`. `allow` is the default, so a program that has never heard of permissions compiles. `deny` is the strict posture: one line, set once, and every capability after it is a deliberate edit. |
-| `network` | Hosts the program may **connect out to**, as `name` or `name:port`, checked by `HttpClient::send`, `std::net::socket::connect_to` and `connect_by`, and `std::net::tls::connect` and `connect_by`, each of which refuses a host it does not grant with its own error's `Denied` case: `CallError::Denied`, `SocketError::Denied`, `TlsError::Denied`. `*` spans dots, so `*.internal` covers `db.eu.internal`; a grant with no port covers every port. An IPv6 address goes in brackets, as in a URL: `[::1]:5432`, `[::1]:*`, `[::1]`. **Outbound only**: a port the program *binds* is not a host it reaches, so `Router::listen` and the rest of the server side are not covered by this key, or by any other — see [known limitations](/docs/limitations/#inbound-connections-are-not-permissioned). |
+| `network` | Hosts the program may **connect out to**, as `name` or `name:port`, checked by `HttpClient::send`, `std::net::socket::connect_to` and `connect_by`, and `std::net::tls::connect` and `connect_by`, each of which refuses a host it does not grant with its own error's `Denied` case: `CallError::Denied`, `SocketError::Denied`, `TlsError::Denied`. `*` spans dots, so `*.internal` covers `db.eu.internal`; a grant with no port covers every port. An IPv6 address goes in brackets, as in a URL: `[::1]:5432`, `[::1]:*`, `[::1]`. **Outbound only**: a port the program *binds* is not a host it reaches, and `listen` is that grant. |
+| `listen` | Ports the program may **listen on**, checked by `std::net::socket::listen_on` before anything is bound, and so by `Router::listen`, `Router::listen_quietly`, `Router::listen_tls` and `Router::bound`, which all bind through it. A refusal is `SocketError::Denied` from `listen_on` and `HttpError::Denied` from a `Router`, naming the address, `0.0.0.0:<port>`. An entry is a port (`8080`), a range (`8000-8099`, starting at 1), `0`, or `*`. A listening socket binds every interface, so a grant names a port and nothing else: an entry naming an interface (`127.0.0.1:9000`, `[::1]:9000`, `0.0.0.0:8080`) is refused when the manifest loads, as is any other entry that is none of these shapes, naming it. **Port `0`**, which lets the operating system choose, is granted by `0` or by `*` and never by a specific port or a range. A program whose port is the operator's choice grants the range they may choose from, such as `1024-65535`. |
 | `fs` | **A table, not a list**: `[permissions.fs]` with `read` and `write`. `*` stops at a separator and `**` crosses one, and neither covers the directory being described. A path is checked where its symbolic links lead as well as as written. |
 | `env` | Environment variable names. `*` spans everything, since a name has no segments. |
 | `process` | Program names, as written at the call: `run("git", ..)` names `git`. `*` spans everything, so `git*` covers `git` and `gitk`. |

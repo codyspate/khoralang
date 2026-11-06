@@ -123,6 +123,22 @@ opens is relative to where the process was started, not to where its
 resolved against the manifest — so a service started from `/` and a service
 started from its own directory disagree about which files exist.
 
+**The port is part of the manifest under `default = "deny"`.** A service that
+reads its port from the environment can only bind the ones `[permissions]
+listen` grants, so the port in the unit file and the grant have to agree:
+
+```toml
+[permissions]
+default = "deny"
+listen = ["8080"]          # or a range the operator may choose from: "8000-8099"
+network = ["127.0.0.1:5432"]
+env = ["PORT", "DATABASE_URL"]
+```
+
+A port the grant does not cover is refused before anything is bound, with
+`HttpError::Denied` naming the address, rather than served. `network` is what
+the service dials; it grants no port to listen on.
+
 `std::log` writes one JSON object per line to standard error, which is where
 `journalctl` and every container log collector already look; there is no log
 file to rotate unless you make one.

@@ -8,9 +8,10 @@ description: "What khora.toml granted, as Khora"
 What `khora.toml` granted, as Khora.
 
 **This file is replaced at build time.** `khora build` reads the whole
-`[permissions]` table -- `fs`, `env`, `network` and `process` alike -- and
-writes this module out with the manifest's own patterns in all five
-functions below; what is on disk is the default, which grants everything.
+`[permissions]` table -- `fs`, `env`, `network`, `listen` and `process`
+alike -- and writes this module out with the manifest's own patterns in
+all six functions below; what is on disk is the default, which grants
+everything.
 
 It is a file of its own so that the replacement is a *whole file* rather
 than surgery on one: the matcher in `std::permissions` is real code that
@@ -21,8 +22,8 @@ that breaks the next time somebody reformats it.
 **A missing `[permissions]` table grants everything.** That is opt-in
 tightening rather than a tax on starting, and it is why the defaults here
 are wildcards rather than nothing: `**` for the two path grants, which
-spans separators, and `*` for `env`, `network` and `process`, whose
-subjects are single names.
+spans separators, and `*` for `env`, `network`, `listen` and `process`,
+whose subjects are single names.
 
 ## Functions
 
@@ -57,6 +58,14 @@ pub fn network() -> List<String>
 ```
 
 Hosts this program may reach, as `name` or `name:port`.
+
+### listen
+
+```khora
+pub fn listen() -> List<String>
+```
+
+Ports this program may bind and listen on: a port, a range, `0`, or `*`.
 
 ### process
 

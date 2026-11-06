@@ -7784,14 +7784,14 @@ and the error passes straight through.
 
 ```khora
 import std::core::{Scope, acquire, scoped};
-import std::net::socket::{listen_on, shut};
+import std::net::socket::{SocketError, listen_on, shut};
 
-fn serve() -> () with { scope: Scope } {
-  let server = acquire(listen_on(8080), fn s => shut(s));
+fn serve() -> () with { scope: Scope } raises SocketError {
+  let server = acquire(listen_on(8080)!, fn s => shut(s));
   answer(server)
 }
 
-pub fn main() -> Int { scoped(fn () => serve()); 0 }
+pub fn main() -> Int raises SocketError { scoped(fn () => serve()!)!; 0 }
 ```
 
 `scoped` is where the releases run, and they run on **every** way out --

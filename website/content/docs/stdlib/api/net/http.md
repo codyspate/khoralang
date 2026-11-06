@@ -183,6 +183,7 @@ map would silently keep only the last.
 ```khora
 derive(Show, Eq)
 pub type HttpError =
+  | Denied(address: String)
   | BindFailed(port: Int)
   | MalformedRequest(details: String);
 ```
@@ -190,9 +191,24 @@ pub type HttpError =
 What can go wrong that is the *server's* problem rather than a client's.
 
 A malformed request from a client is answered with a 400 and never reaches
-here — that is a response, not an error. These two are the cases where
-there is nobody to answer: the port would not bind, or a request could not
-be read at all.
+here — that is a response, not an error. These are the cases where there
+is nobody to answer: the manifest does not grant the port, the port would
+not bind, or a request could not be read at all.
+
+#### Denied
+
+```khora
+| Denied(address: String)
+```
+
+`[permissions] listen` does not grant `address`, the
+`<interface>:<port>` the server would have bound, so nothing was bound.
+Only a server raises it, so the key to change is always `listen`: a
+client's refusal is `CallError::Denied`, and `[permissions] network`.
+
+**Its own case rather than `BindFailed`**, as `CallError::Denied` is
+for a client: `BindFailed` sends the reader to whatever else holds the
+port, and this one is a line in `khora.toml`.
 
 ### RequestLine
 
@@ -1202,6 +1218,10 @@ arrives on the same stream in a different format and everything parsing
 that stream has to be taught about it. `listen_quietly` is this without
 the line.
 
+**`[permissions] listen` governs the port**: one it does not grant is
+`HttpError::Denied`, raised before anything is bound. A port outside 0
+to 65535 is `HttpError::BindFailed`.
+
 #### listen_quietly
 
 ```khora
@@ -1215,6 +1235,8 @@ much, but it is on the same stream as the logs and is not in their format.
 A caller here announces readiness however the rest of its output does — or
 not at all, for a service behind a health check that answers the question
 better anyway.
+
+`[permissions] listen` governs the port, as it does [`Router::listen`](#listen).
 
 #### listen_tls
 
@@ -1254,6 +1276,8 @@ pub fn main() -> Int raises IoError + HttpError + TlsError + ChildFailed {
 PEM text rather than paths, because a certificate arrives from a file, a
 secret store or an ACME client, and only one of those is a path.
 
+`[permissions] listen` governs the port, as it does [`Router::listen`](#listen).
+
 #### bound
 
 ```khora
@@ -1265,6 +1289,12 @@ A socket listening on `port`, closed when the caller's scope ends.
 For a caller that binds the port itself and serves it with
 [`Router::serve_forever`](#serve_forever) or [`Router::serve_secured`](#serve_secured): a nursery of
 its own, a backlog of connections it wants open before it serves.
+
+Raises `HttpError::Denied` when `[permissions] listen` does not grant
+the port, before anything is bound, and `HttpError::BindFailed` when
+the operating system refuses the bind. [`Router::listen`](#listen),
+[`Router::listen_quietly`](#listen_quietly) and [`Router::listen_tls`](#listen_tls) all bind through
+here, so all of them are refused the same way.
 
 **Registered with the caller's scope by the call that binds it.** The
 socket is handed straight from `listen_on` to `acquire`, so a fiber
@@ -1337,13 +1367,13 @@ a test on port zero, a socket inherited from a supervisor.
 ```khora
 import std::core::{ChildFailed, SharedFn, nursery};
 import std::net::http::{HttpError, Response, Router};
-import std::net::socket::{listen_on};
+import std::net::socket::{SocketError, listen_on};
 
-pub fn main() -> Int raises HttpError + ChildFailed {
+pub fn main() -> Int raises HttpError + SocketError + ChildFailed {
   nursery(fn () =>
     Router::new()
       |> Router::get("/health", SharedFn::of(fn _ => Response::text(200, "ok")))
-      |> Router::serve_forever(listen_on(8080))!)!;
+      |> Router::serve_forever(listen_on(8080)!)!)!;
   0
 }
 ```

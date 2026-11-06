@@ -807,7 +807,7 @@ pub fn main() -> () raises TlsError {
   with { scope: Scope::root() } {
     start();
     let settings = server(certificate, key)!;
-    let listener = listen_on(18991);
+    let listener = (listen_on(18991)! catch { _ => -1 });
     let caller = trusting(authority)!;
     let calling = Fiber::spawn(fn () => call(caller));
     let taken = accept_on(listener);

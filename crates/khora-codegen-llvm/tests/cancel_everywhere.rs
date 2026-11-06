@@ -1312,7 +1312,7 @@ pub fn main() -> Int {
   with { clock: Clock::real() } {
     let errors = Shared::of(0);
     if start() {} else { print(\"no sockets\") };
-    let server = listen_on(PORT);
+    let server = (listen_on(PORT)! catch { _ => -1 });
     let client = connect_to(\"127.0.0.1\", PORT)! catch { _ => -1 };
     let conn = accept_on(server);
     print(\"setup ${server >= 0} ${client >= 0} ${conn >= 0}\");

@@ -170,8 +170,26 @@ fn parsing_from_text_alone_does_not_enforce_a_cap_it_cannot_find() {
 fn the_policy_table_is_not_an_unknown_key() {
     let parsed = Manifest::parse(
         "[workspace]\nmembers = []\n\n[workspace.policy]\n\
-         network = []\nfs = []\nenv = []\nextern = []\n",
+         network = []\nfs = []\nenv = []\nextern = []\nlisten = []\n",
     )
     .expect("a workspace root");
     assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+}
+
+/// **`listen` is capped like the other keys**, and separately from
+/// `network`: a member the root lets dial out is not thereby let answer on a
+/// port, and the other way round.
+#[test]
+fn the_listen_key_is_capped_on_its_own() {
+    let root = workspace(
+        "listen",
+        "\n[workspace.policy]\nlisten = [\"gateway\"]\nnetwork = [\"worker\"]\n",
+    );
+    let gateway = member(&root, "gateway", "\n[permissions]\nlisten = [\"8080\"]\n");
+    let worker = member(&root, "worker", "\n[permissions]\nlisten = [\"9000\"]\nnetwork = [\"db\"]\n");
+
+    Manifest::load(&gateway).expect("the listed member may listen");
+    let why = failure(&worker);
+    assert!(why.contains("`worker` is not allowed to grant `listen`"), "{why}");
+    assert!(why.contains("[workspace.policy] listen"), "names the key to add it to: {why}");
 }

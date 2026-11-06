@@ -664,6 +664,86 @@ fn check_refuses_a_network_grant_with_an_empty_port() {
     assert!(output.contains("`[::1]:`") && output.contains("`[::1]:*`"), "{output}");
 }
 
+/// **`khora check` refuses a `listen` entry that names an interface, and its
+/// advice is a shape that loads.** The path this closes: `localhost:8080`
+/// was refused with advice to write `127.0.0.1:8080`, which loaded, passed
+/// `khora check`, and was refused at run time, because a listener binds
+/// every interface and so never asks about loopback. Each interface shape
+/// is refused here, under `deny`, and the port the advice offers passes.
+#[test]
+fn check_refuses_a_listen_entry_that_names_an_interface() {
+    let tmp = tempfile::tempdir().expect("a temporary directory");
+    let app = tmp.path().join("app");
+    write(&app.join("src").join("main.kh"), "module app::main;\n\npub fn main() -> Int { 0 }\n");
+    let manifest = |entry: &str| {
+        pinned(&format!(
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[permissions]\ndefault = \"deny\"\nlisten = [\"{entry}\"]\n"
+        ))
+    };
+    for entry in ["localhost:8080", "127.0.0.1:8080", "0.0.0.0:8080", "[::1]:*"] {
+        write(&app.join("khora.toml"), &manifest(entry));
+        let (ok, output) = khora_in(&app, &tmp.path().join("home"), &["check"]);
+        assert!(!ok, "`{entry}` should be refused:\n{output}");
+        assert!(output.contains("permissions.listen"), "{output}");
+        assert!(output.contains(&format!("`{entry}`")), "names the entry:\n{output}");
+        assert!(output.contains("every interface"), "says why:\n{output}");
+        assert!(output.contains("`8080`") && output.contains("`8000-8099`"), "offers the shapes:\n{output}");
+        assert!(!output.contains("`127.0.0.1:9000`"), "offers no interface shape:\n{output}");
+    }
+    write(&app.join("khora.toml"), &manifest("8080"));
+    let (ok, output) = khora_in(&app, &tmp.path().join("home"), &["check"]);
+    assert!(ok, "the advice, `8080`, should load:\n{output}");
+}
+
+/// A program that tries `listen_on` on port 0 and then on port 1 -- which
+/// no test grant names -- and prints what each did.
+#[cfg(feature = "llvm")]
+const LISTENS: &str = "module main;\n\n\
+     import std::core::{print};\n\
+     import std::net::socket::{SocketError, listen_on, shut, start};\n\n\
+     fn tried(port: Int) -> String raises SocketError {\n\
+     \x20 let socket = listen_on(port)!;\n\
+     \x20 shut(socket);\n\
+     \x20 if socket < 0 { \"failed\" } else { \"bound\" }\n\
+     }\n\n\
+     pub fn main() -> Int {\n\
+     \x20 start();\n\
+     \x20 print(\"zero \" + (tried(0)! catch { e => \"${e}\" }));\n\
+     \x20 print(\"one \" + (tried(1)! catch { e => \"${e}\" }));\n\
+     \x20 0\n\
+     }\n";
+
+/// **`khora run` writes `[permissions] listen` into the program.** Under
+/// `deny` with no `listen` key both listens are refused; with `listen =
+/// ["0"]` port 0 binds and port 1 is still refused; with no table both are
+/// attempted, and port 1, which needs privileges this test does not have
+/// or is taken, is at worst a failed bind rather than a refusal.
+#[cfg(feature = "llvm")]
+#[test]
+fn a_listen_grant_reaches_the_built_program() {
+    for (name, table, zero, one) in [
+        ("perm_listen_deny", "\n[permissions]\ndefault = \"deny\"\n", "zero SocketError::Denied(0.0.0.0:0)", "one SocketError::Denied(0.0.0.0:1)"),
+        ("perm_listen_zero", "\n[permissions]\ndefault = \"deny\"\nlisten = [\"0\"]\n", "zero bound", "one SocketError::Denied(0.0.0.0:1)"),
+        ("perm_listen_open", "", "zero bound", "one "),
+    ] {
+        let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).expect("a src directory");
+        std::fs::write(
+            root.join("khora.toml"),
+            pinned(&format!("[package]\nname = \"listens\"\nversion = \"0.1.0\"\n{table}")),
+        )
+        .expect("a manifest");
+        std::fs::write(root.join("src").join("main.kh"), LISTENS).expect("a source file");
+        let text = ran(&root);
+        assert!(text.contains(zero), "{name}: expected {zero:?}:\n{text}");
+        assert!(text.contains(one), "{name}: expected {one:?}:\n{text}");
+        if table.is_empty() {
+            assert!(!text.contains("Denied"), "{name}: no table refuses nothing:\n{text}");
+        }
+    }
+}
+
 /// **A dependency's `src/bin` programs are not this build's code.** They are
 /// never compiled into the program, so an `extern fn` in one is not refused
 /// under `deny`. Refusing it forced `extern = ["dep"]`, which would then have

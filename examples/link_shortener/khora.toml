@@ -8,8 +8,16 @@ version.workspace = true
 # than reaches for, so this table and the signatures agree by construction: a
 # handler it cannot be given is a program that does not compile.
 # `docs/design/permissions.md`.
+#
+# `listen` is every port an unprivileged process can bind, because the port
+# is the operator's choice: `PORT`, 8080 when it is unset, and 18960 where
+# `scripts/http_conformance.sh` runs it. A port outside the grant -- 80 under
+# a root that dropped no privileges, say -- is refused at startup with a line
+# naming it and this key. The shortener dials nothing, so `network` grants
+# nothing.
 [permissions]
-network = ["0.0.0.0:8080"]
+listen = ["1024-65535"]
+network = []
 env = ["PORT", "LINKS_FILE"]
 
 [permissions.fs]

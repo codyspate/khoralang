@@ -50,9 +50,14 @@ fn the_reference_manifest_parses_with_no_warnings() {
 
     assert_eq!(
         manifest.permissions.network.as_deref(),
-        Some(["0.0.0.0:47821".to_string(), "*.internal:5432".to_string()].as_slice()),
+        Some(["*.internal:5432".to_string()].as_slice()),
         "grants survive verbatim: the checker needs the text the author wrote in order \
          to point at the offending one"
+    );
+    assert_eq!(
+        manifest.permissions.listen.as_deref(),
+        Some(["47821".to_string()].as_slice()),
+        "the port it answers on is a `listen` grant, not a `network` one"
     );
     let fs = manifest.permissions.fs.clone().expect("the reference manifest grants file access");
     assert_eq!(fs.read, ["/etc/config", "./data/**"]);

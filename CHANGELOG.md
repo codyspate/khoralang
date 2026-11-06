@@ -14,6 +14,38 @@ it will behave differently now.
 
 ### Breaking
 
+- Listening needs a grant under `default = "deny"`. `std::net::socket::listen_on`
+  checks `[permissions] listen` before it makes a socket and raises
+  `SocketError::Denied("0.0.0.0:<port>")` for a port the manifest does not
+  grant, so `Router::listen`, `listen_quietly`, `listen_tls` and `bound`,
+  which bind through it, raise `HttpError::Denied` for one. A `deny` program
+  that listened bound any port it asked for; it is refused unless it lists
+  the port under `listen`. `network` grants no port to listen on: a
+  manifest that wrote its own port under `network` moves it to `listen`,
+  as a bare port: `listen = ["8080"]`, not `0.0.0.0:8080`. With no table,
+  or `default = "allow"`, any port may be bound, as before. The shipped
+  examples that read their port from `PORT` -- `link_shortener`,
+  `ledger_service` and the TechEmpower peer -- grant `listen =
+  ["1024-65535"]`, every port an unprivileged process can bind, and print
+  `port <p> is not in [permissions] listen in khora.toml` and exit 1 for a
+  port outside it; `risk_analyzer` grants its one port, `47821`.
+- A `[permissions] listen` entry is a port, a range, `0` or `*`. An entry
+  naming an interface -- `127.0.0.1:9000`, `[::1]:*`, `0.0.0.0:8080` -- is
+  refused when the manifest loads, under every `default`: a listening socket
+  binds every interface, so such an entry could only grant nothing. Write
+  the port alone.
+- `std::net::socket::listen_on` is `-> Int raises SocketError`. A caller
+  writes `listen_on(port)!` in a function that `raises SocketError`, or
+  catches it:
+  `listen_on(port)! catch { _ => invalid_handle() }` keeps a caller's
+  existing check for a negative handle working unchanged, though it also
+  hides the refusal.
+  A port the operating system will not bind is still answered with
+  `invalid_handle()`, and so is a port outside 0 to 65535, which bound a
+  different port (`70000` bound 4464). A function value of `listen_on`'s type
+  is `(Int) -> Int raises SocketError`. A `match` over `HttpError`
+  without a `_` arm has to add `Denied`; `Router::listen` and its siblings
+  need no change at the call, since they already raised `HttpError`.
 - Prefix `-` on an integer stops the program when the answer does not fit,
   as `+`, `-` and `*` do: `-x` on a signed type's minimum (`Int::MIN`,
   `-128` as an `I8`, and so on) stops with "Int negation overflowed", the
@@ -567,6 +599,19 @@ it will behave differently now.
 
 ### Added
 
+- `[permissions] listen`: the ports a program may listen on. An entry is a
+  port (`8080`), a range (`8000-8099`, starting at 1), `0` for a port the
+  operating system chooses, or `*`. A listening socket binds every IPv4
+  interface, so `listen_on(8080)` asks for `0.0.0.0:8080`, which `8080`
+  covers, and an entry naming an interface is refused. Port 0 is granted by
+  `0` or a `*` and never by a specific port or a range. An entry that is
+  none of these shapes is refused when the manifest loads, naming it and the
+  shapes that work. `[workspace.policy] listen` caps which members may grant
+  it. `khora_manifest::granted_listen` and `std::permissions::granted_listen`
+  are the two matchers, held to one table.
+- `std::net::http::HttpError` has a case `Denied(address)`, raised by
+  `Router::listen`, `listen_quietly`, `listen_tls` and `bound` for an
+  address `[permissions] listen` does not grant, before anything is bound.
 - The toolchain runs on Alpine: `x86_64-unknown-linux-musl` and
   `aarch64-unknown-linux-musl` toolchains, each one statically linked
   executable that needs no C library, and `install.sh` chooses them on a

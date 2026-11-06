@@ -119,7 +119,7 @@ pub fn main() -> () {
   with { scope: Scope::root() } {
     start();
     let stages = [greet(), measure()];
-    let server = listen_on(@PORT@);
+    let server = (listen_on(@PORT@)! catch { _ => -1 });
     print(\"listening\");
     let mut rounds = 0;
     while rounds < 6 {

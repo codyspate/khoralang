@@ -141,7 +141,7 @@ fn mark() -> Int raises Oops {{ 1 }}
 /// What `Router::held_open` does, written out: take the port, register the
 /// close, then never reach a line that mentions it again.
 fn hold() -> () with {{ scope: Scope }} raises Oops {{
-  let server = acquire(listen_on({LISTENER_PORT}), fn s => shut(s));
+  let server = acquire((listen_on({LISTENER_PORT})! catch {{ _ => -1 }}), fn s => shut(s));
   if server == invalid_handle() {{
     print(\"the fiber could not bind, so this proves nothing\")
   }} else {{
@@ -172,7 +172,7 @@ fn serve(server: Int) -> () with {{ scope: Scope }} raises Oops {{
 fn the_port() -> () {{
   let f = Fiber::spawn(fn () => scoped(fn () => hold()!)!);
   Fiber::wait(f)! catch {{ Oops::Bad => () }};
-  let again = listen_on({LISTENER_PORT});
+  let again = (listen_on({LISTENER_PORT})! catch {{ _ => -1 }});
   if again == invalid_handle() {{
     print(\"the port is still held\")
   }} else {{
@@ -183,7 +183,7 @@ fn the_port() -> () {{
 
 /// Left holding an accepted connection, with a peer watching.
 fn the_connection() -> () {{
-  let server = listen_on({CONNECTION_PORT});
+  let server = (listen_on({CONNECTION_PORT})! catch {{ _ => -1 }});
   if server == invalid_handle() {{
     print(\"could not bind, so this proves nothing\")
   }} else {{

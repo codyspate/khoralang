@@ -1,8 +1,8 @@
 module std::net::socket;
 
 import std::core::{Array, Eq, Ptr, Show};
-import std::permissions::{may_dial, unbracketed};
-import std::permissions::grants::{network};
+import std::permissions::{granted_listen, may_dial, unbracketed};
+import std::permissions::grants::{listen as listen_grants, network};
 
 //! # On macOS
 //!
@@ -59,20 +59,41 @@ pub fn invalid_handle() -> Int { -1 }
 /// Nothing to start. Present so that a caller reads the same on all three targets.
 pub fn start() -> Bool { true }
 
-/// A socket listening on `port`, or [`invalid_handle`].
+/// A socket listening on `port` on every IPv4 interface, or
+/// [`invalid_handle`] when the bind or the listen fails or `port` is not
+/// 0 to 65535.
+///
+/// **`[permissions] listen` governs this**, and is checked before anything
+/// is made, against `0.0.0.0:<port>`: the address as it is bound, every
+/// interface, so `8080` and `8000-8099` in a manifest cover it. Port `0`,
+/// which lets the operating system choose, is covered by `0` or `*` alone. A
+/// refusal raises `SocketError::Denied` with that address -- the same case a
+/// refused connect raises, so the key to change is `listen` because this is
+/// the call that raised it -- and no socket is made, so nothing is bound and
+/// the port stays free.
+///
+/// **A port outside 0 to 65535 binds nothing**, under any grant: it is not a
+/// port, and the sixteen bits a socket address holds would have bound
+/// another one (`70000` is 4464) that `*` then covered.
 ///
 /// **Nothing that can stop runs after the socket is made**, so a fiber
 /// canceled inside this call either has no socket yet or gets it back, and
-/// `acquire(listen_on(port), fn s => shut(s))` always closes what it opened.
+/// `acquire(listen_on(port)!, fn s => shut(s))` always closes what it opened.
 /// The socket is made last, inside the lambdas that lend the two buffers it
 /// needs, because each of those lambdas checks for a cancellation when it
-/// is entered.
-pub fn listen_on(port: Int) -> Int {
-  let address = sockaddr_in(port);
-  let on: Array<U8> = Array::new(4, 0);
-  Array::set(on, 0, 1);
-  Array::with_data(on, fn (flag, _n) =>
-    Array::with_data(address, fn (bytes, _m) => listening(flag, bytes)))
+/// is entered. The check raises before either.
+pub fn listen_on(port: Int) -> Int raises SocketError {
+  if port < 0 || port > 65535 {
+    invalid_handle()
+  } else if !may_listen(port) {
+    raise SocketError::Denied(every_interface(port))
+  } else {
+    let address = sockaddr_in(port);
+    let on: Array<U8> = Array::new(4, 0);
+    Array::set(on, 0, 1);
+    Array::with_data(on, fn (flag, _n) =>
+      Array::with_data(address, fn (bytes, _m) => listening(flag, bytes)))
+  }
 }
 
 /// [`listen_on`]'s calls, with the option value and the address already
@@ -223,20 +244,29 @@ pub fn transmit(connection: Int, text: String) -> Int {
   String::with_data(text, fn (from, n) => khora_net_send(I32::of(connection), from, n))
 }
 
-/// Why [`connect_to`] or [`connect_by`] has no connection to give.
+/// Why [`connect_to`], [`connect_by`] or [`listen_on`] has no socket to give.
 ///
 /// **What this prevents: a refusal read as a socket.** A failure answered as
 /// a negative number is a failure every caller has to remember to test for,
 /// and one that tests the wrong number carries on with a handle that is not
-/// one. Raised, it cannot be missed, and the handle that does come back is
-/// always a connected socket.
+/// one. Raised, it cannot be missed, and the handle a connect does give back
+/// is always a connected socket. [`listen_on`] raises only the refusal: a
+/// bind the operating system refuses is still [`invalid_handle`].
 ///
 /// `host` is `name:port`, as the caller wrote the name, which is what a grant
-/// in `[permissions] network` is written against.
+/// in `[permissions] network` is written against; for [`listen_on`] it is
+/// `0.0.0.0:<port>`, the address a grant in `[permissions] listen` covers.
+///
+/// **The value does not say which key refused it; the call does.** A refused
+/// [`connect_to`] or [`connect_by`] is `[permissions] network`, and a refused
+/// [`listen_on`] is `[permissions] listen`, and `Denied(0.0.0.0:8080)` prints
+/// the same from either. A caller that reports one should name the key from
+/// the call it made.
 derive(Show, Eq)
 pub type SocketError =
-  /// `[permissions] network` does not grant `host`, so nothing was looked up
-  /// or dialed.
+  /// The manifest does not grant this, so nothing was looked up, dialed or
+  /// bound: from a connect, `[permissions] network` does not grant `host`;
+  /// from [`listen_on`], `[permissions] listen` does not grant the address.
   ///
   /// **Its own case rather than `Unreachable`**, for the reason
   /// `IoError::Denied` is: `Unreachable` sends the reader to DNS or a
@@ -257,8 +287,8 @@ pub type SocketError =
 
 /// Opens a connection to `host` on `port`, and answers the connected socket.
 ///
-/// Raises `SocketError::Denied` when the manifest does not grant the host,
-/// and `SocketError::Unreachable` when the name does not resolve or nothing
+/// Raises `SocketError::Denied` when `[permissions] network` does not grant
+/// the host, and `SocketError::Unreachable` when the name does not resolve or nothing
 /// at any of its addresses accepts. Every failure raises, so the handle that
 /// comes back is always a socket and no caller has a number to test.
 ///
@@ -305,6 +335,9 @@ pub fn connect_to(host: String, port: Int) -> Int raises SocketError {
 /// than a length, so that a caller with one budget for several steps hands
 /// each the same number. Negative means none. The connection that comes back
 /// carries no deadline; [`set_deadline`] puts one on it.
+///
+/// `[permissions] network` governs this, as it does [`connect_to`]: a
+/// refusal is `SocketError::Denied` before anything is looked up.
 pub fn connect_by(host: String, port: Int, deadline: Int) -> Int raises SocketError {
   if !may_reach(host, port) {
     raise SocketError::Denied(authority(host, port))
@@ -376,6 +409,18 @@ pub fn connected_to(accepted: Int, dialed: Int) -> Bool {
 /// other bracket in it is refused. `std::permissions::may_dial` says why.
 fn may_reach(host: String, port: Int) -> Bool {
   may_dial(network(), host, port)
+}
+
+/// Whether `[permissions] listen` lets this program bind `port` on every
+/// IPv4 interface, which is what [`listen_on`] binds.
+fn may_listen(port: Int) -> Bool {
+  granted_listen(listen_grants(), every_interface(port))
+}
+
+/// `0.0.0.0:<port>`: the address [`listen_on`] binds, as a grant in
+/// `[permissions] listen` names it.
+fn every_interface(port: Int) -> String {
+  "0.0.0.0:${Int::to_string(port)}"
 }
 
 /// Writes all of `bytes`, and says how many went: every one of them, or a

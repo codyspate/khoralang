@@ -86,6 +86,7 @@ static WORKSPACE: Schema = Schema::Fields(&[
 
 static POLICY: Schema = Schema::Fields(&[
     ("network", &OPEN),
+    ("listen", &OPEN),
     ("fs", &OPEN),
     ("env", &OPEN),
     ("process", &OPEN),
@@ -113,6 +114,7 @@ static PERMISSIONS: Schema = Schema::Fields(&[
     ("workspace", &OPEN),
     ("default", &OPEN),
     ("network", &OPEN),
+    ("listen", &OPEN),
     ("fs", &PERMISSIONS_FS),
     ("env", &OPEN),
     ("process", &OPEN),

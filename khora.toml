@@ -57,9 +57,9 @@ indent-width = 2
 #
 # **Not the same table as `[workspace.permissions]`.** That one is a default a
 # member opts into with `workspace = true`; this is a cap a member cannot opt
-# out of. Only the three examples that answer on a port may reach the network,
-# and a fourth one that decides to is a build failure rather than something a
-# reviewer has to notice.
+# out of. Only the three examples that answer on a port may listen or reach
+# the network, and a fourth one that decides to is a build failure rather
+# than something a reviewer has to notice.
 #
 # `extern = []` is the strict one and the one that matters most: nothing here
 # may declare an `extern fn` or hand that permission to a dependency. `std`
@@ -75,6 +75,7 @@ indent-width = 2
 # package is no less itself for being the one at the root of the build.
 [workspace.policy]
 network = ["ledger_service", "link_shortener", "risk_analyzer"]
+listen = ["ledger_service", "link_shortener", "risk_analyzer"]
 env = ["ledger_service", "link_shortener", "risk_analyzer"]
 fs = ["khq", "link_shortener", "risk_analyzer"]
 extern = []

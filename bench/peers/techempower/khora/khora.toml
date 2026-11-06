@@ -7,9 +7,15 @@ version = "0.3.0"
 [toolchain]
 version = "0.4.0"
 
-# The port it answers on and the database it dials. Nothing else.
+# The port it answers on, and the database it dials. Nothing else.
+#
+# `listen` is every port an unprivileged process can bind, because the port
+# is the operator's choice (`PORT`, 8080 when it is unset; `run.py` and
+# `verify.sh` set it). A port outside it is refused at startup with a line
+# naming the port and this key.
 [permissions]
-network = ["0.0.0.0:8080", "127.0.0.1:5432"]
+listen = ["1024-65535"]
+network = ["127.0.0.1:5432"]
 env = ["PORT", "PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGPASSWORD", "PGSSLMODE", "PGSSLROOTCERT", "POOL"]
 
 [dependencies]

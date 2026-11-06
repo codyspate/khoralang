@@ -148,7 +148,7 @@ fn shut_all(sockets: List<Int>) -> () {{
 
 fn round(n: Int, before: Int, spread: Int) -> Int raises ChildFailed {{
   at(n, "listen");
-  let server = listen_on(0);
+  let server = (listen_on(0)! catch {{ _ => -1 }});
   if server == invalid_handle() {{ return -1 }} else {{}};
   let port = local_port(server);
   if port <= 0 {{ shut(server); return -1 }} else {{}};
@@ -430,7 +430,7 @@ pub fn main() -> Int raises ChildFailed {{
   if c < 0 {{ print("the server never listened") }} else {{ shut(c) }};
   Fiber::cancel(f);
   Fiber::wait(f)! catch {{ _ => () }};
-  let again = listen_on(port);
+  let again = (listen_on(port)! catch {{ _ => -1 }});
   if again == invalid_handle() {{ print("rebinding refused") }} else {{ print("rebinding ok"); shut(again) }};
   0
 }}

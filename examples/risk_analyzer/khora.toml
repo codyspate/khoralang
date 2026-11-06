@@ -11,8 +11,11 @@ authors = ["Engineering Team <dev@khora.internal>"]
 # config file cannot be checked any earlier. `docs/design/permissions.md`.
 #
 # A missing table grants everything: nothing here is a tax on getting started.
+#
+# `listen` is the port it answers on; `network` is only what it dials.
 [permissions]
-network = ["0.0.0.0:47821", "*.internal:5432"]
+listen = ["47821"]
+network = ["*.internal:5432"]
 env = ["DB_*"]
 
 [permissions.fs]

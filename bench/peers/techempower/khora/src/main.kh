@@ -4,6 +4,7 @@ import std::core::{ChildFailed, Fibers, Iterator, List, Option, Ord, Result, Sha
 import std::db::{Cell, Db, DbError, Row};
 import std::env::{Env, EnvError, variable_or};
 import std::fs::{FsRead, IoError, read_text};
+import std::log::{eprint};
 import std::net::http::{HttpError, Request, Response, Router};
 import std::random::{Random};
 import std::schema::{Encode};
@@ -310,7 +311,18 @@ pub type Unusable =
   /// `PGSSLMODE` is not one of libpq's modes.
   | SslMode(String);
 
-pub fn main() raises HttpError + EnvError + IoError + Unusable + ChildFailed {
+/// The line an operator reads when `[permissions] listen` does not grant the
+/// port they chose, and the exit status that goes with it.
+///
+/// **Without it the only output is that an `HttpError` reached the entry
+/// point**: no port, no key. The port is the operator's to choose and the
+/// grant is the program's, so the line names both, and where to change it.
+fn not_granted(port: Int) -> Int {
+  eprint("port ${Int::to_string(port)} is not in [permissions] listen in khora.toml");
+  1
+}
+
+pub fn main() -> Int raises HttpError + EnvError + IoError + Unusable + ChildFailed {
   with { env: Env::real(), rng: Random::real(), reads: FsRead::real() } {
     let settings: Settings = {
       host: setting("PGHOST", "127.0.0.1")!,
@@ -322,12 +334,20 @@ pub fn main() raises HttpError + EnvError + IoError + Unusable + ChildFailed {
     let crew = Fibers::open();
     let pool = open_pool(crew, settings, tls_setting(settings.host)!, number_setting("POOL", 16)!, Reconnect::default());
 
-    Router::new()
+    let chosen = number_setting("PORT", 8080)!;
+    let mut status = 0;
+    let router = Router::new()
       |> Router::get("/json", SharedFn::of(fn request => stamped(json(request))))
       |> Router::get("/db", SharedFn::of(fn _request => stamped(single(pool))))
       |> Router::get("/queries", SharedFn::of(fn request => stamped(multiple(pool, request))))
       |> Router::get("/pipelined-queries", SharedFn::of(fn request => stamped(pipelined(pool, request))))
-      |> Router::get("/fortunes", SharedFn::of(fn _request => stamped(fortunes(pool))))
-      |> Router::listen_quietly(number_setting("PORT", 8080)!)!
+      |> Router::get("/fortunes", SharedFn::of(fn _request => stamped(fortunes(pool))));
+    // Serving does not return; a refusal does, before anything is bound.
+    Router::listen_quietly(router, chosen)! catch {
+      HttpError::Denied(_) => status = not_granted(chosen),
+      HttpError::BindFailed(port) => raise HttpError::BindFailed(port),
+      HttpError::MalformedRequest(why) => raise HttpError::MalformedRequest(why),
+    };
+    status
   }
 }

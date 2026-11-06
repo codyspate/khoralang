@@ -68,7 +68,7 @@ extern fn khora_print_int(value: Int);
 
 fn main() -> Int {
   if start() {
-    let server = listen_on(18711);
+    let server = (listen_on(18711)! catch { _ => -1 });
     if server == invalid_handle() {
       print(\"could not listen\");
       1
@@ -306,7 +306,7 @@ fn serve(connection: Int, n: Int) -> () {{
 
 pub fn main() -> Int {{
   if start() {{}} else {{ print(\"no sockets\") }};
-  let server = listen_on({PORT});
+  let server = (listen_on({PORT})! catch {{ _ => -1 }});
   if server == invalid_handle() {{
     print(\"could not listen\");
     1

@@ -66,7 +66,8 @@ there are not many:
 | Manifest key | Capability type | State |
 | --- | --- | --- |
 | `fs` | `std::fs::FsRead`, `std::fs::FsWrite` | **enforced** |
-| `network` | `std::net::HttpClient`; `std::net::socket::connect_to`/`connect_by` and `std::net::tls::connect`/`connect_by` check the same grant before dialing | **enforced** (outbound; `listen_on` is not gated) |
+| `network` | `std::net::HttpClient`; `std::net::socket::connect_to`/`connect_by` and `std::net::tls::connect`/`connect_by` check the same grant before dialing | **enforced** (outbound) |
+| `listen` | `std::net::socket::listen_on`, and every `Router::listen*` and `Router::bound` through it; checked against `0.0.0.0:<port>` before anything is bound. Entries are ports, ranges, `0` or `*`; an interface entry is refused at load, because std binds every interface | **enforced** (inbound) |
 | `env` | `std::env::Env` | **enforced** |
 | `extern` | — | **enforced**, at build time |
 
@@ -351,6 +352,7 @@ speak for all of them, and that is a different table:
 ```toml
 [workspace.policy]
 network = ["ledger_service", "link_shortener", "risk_analyzer"]
+listen = ["ledger_service", "link_shortener", "risk_analyzer"]
 env = ["ledger_service", "link_shortener", "risk_analyzer"]
 fs = ["link_shortener", "risk_analyzer"]
 extern = []

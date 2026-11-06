@@ -808,7 +808,7 @@ pub fn main() -> () raises ChildFailed {
   bounded_nursery(4, fn () =>
     Router::new()
       |> Router::get(\"/x\", SharedFn::of(fn _ => Response::text(200, \"ok\")))
-      |> Router::serve_forever(listen_on(0))!)! catch { _ => () };
+      |> Router::serve_forever((listen_on(0)! catch { _ => -1 }))!)! catch { _ => () };
 }
 ";
     let body = std_function_ir("polls_accepting", main, "#Router::accepting$_{}");

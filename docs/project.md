@@ -214,7 +214,8 @@ version = "0.2.0"
 # See docs/design/permissions.md, which decides D4 and narrows the claim this
 # section used to make.
 [permissions]
-network = ["0.0.0.0:8080", "*.internal:5432"]
+listen = ["47821"]
+network = ["*.internal:5432"]
 env = ["DB_*"]
 
 [permissions.fs]

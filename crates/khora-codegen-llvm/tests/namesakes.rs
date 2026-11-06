@@ -205,7 +205,7 @@ type Oops = | Bad;
 fn listen() -> Int raises Oops { raise Oops::Bad }
 pub fn main() -> Int {
   if start() {
-    let server = listen_on(0);
+    let server = (listen_on(0)! catch { _ => -1 });
     if server == invalid_handle() { print("could not listen") } else {
       print("listening");
       shut(server);

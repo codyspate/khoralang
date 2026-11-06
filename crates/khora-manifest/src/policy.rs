@@ -55,7 +55,7 @@ pub(crate) fn enforce(
     let Some(package) = manifest.package() else { return Ok(()) };
     let name = &package.name;
 
-    for category in [Category::Network, Category::Fs, Category::Env] {
+    for category in [Category::Network, Category::Listen, Category::Fs, Category::Env] {
         let Some(allowed) = policy.allowed(category) else { continue };
         if !asks_for(manifest, category) {
             continue;
@@ -88,6 +88,7 @@ pub(crate) fn enforce(
 fn asks_for(manifest: &Manifest, category: Category) -> bool {
     match category {
         Category::Network => manifest.permissions.network.as_ref().is_some_and(|g| !g.is_empty()),
+        Category::Listen => manifest.permissions.listen.as_ref().is_some_and(|g| !g.is_empty()),
         Category::Env => manifest.permissions.env.as_ref().is_some_and(|g| !g.is_empty()),
         Category::Process => {
             manifest.permissions.process.as_ref().is_some_and(|g| !g.is_empty())

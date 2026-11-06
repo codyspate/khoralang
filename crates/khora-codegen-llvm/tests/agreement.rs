@@ -69,7 +69,7 @@ fn program() -> String {
     format!(
         "module demo::main;
 import std::core::{{List}};
-import std::permissions::{{granted, granted_host, granted_name}};
+import std::permissions::{{granted, granted_host, granted_listen, granted_name}};
 
 fn print(value: String);
 

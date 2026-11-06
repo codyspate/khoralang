@@ -289,6 +289,9 @@ impl RawManifest {
         if let Some(why) = permissions.network.as_deref().and_then(empty_port) {
             return Err(ManifestError::invalid_value("permissions.network", why));
         }
+        if let Some(why) = permissions.listen.as_deref().and_then(unreadable_listen_entry) {
+            return Err(ManifestError::invalid_value("permissions.listen", why));
+        }
 
         let fmt = match self.fmt {
             Some(own) if own.workspace => {
@@ -473,6 +476,9 @@ pub struct Policy {
     /// Members that may grant `network`.
     #[serde(default)]
     pub network: Option<Vec<String>>,
+    /// Members that may grant `listen`.
+    #[serde(default)]
+    pub listen: Option<Vec<String>>,
     /// Members that may grant `fs`.
     #[serde(default)]
     pub fs: Option<Vec<String>>,
@@ -492,6 +498,7 @@ impl Policy {
     pub fn allowed(&self, category: Category) -> Option<&[String]> {
         match category {
             Category::Network => self.network.as_deref(),
+            Category::Listen => self.listen.as_deref(),
             Category::Fs => self.fs.as_deref(),
             Category::Env => self.env.as_deref(),
             Category::Process => self.process.as_deref(),
@@ -500,7 +507,7 @@ impl Policy {
 
     /// Every name the policy mentions, for checking them against the members.
     pub fn names(&self) -> impl Iterator<Item = &String> {
-        [&self.network, &self.fs, &self.env, &self.process, &self.extern_]
+        [&self.network, &self.listen, &self.fs, &self.env, &self.process, &self.extern_]
             .into_iter()
             .flatten()
             .flatten()
@@ -596,8 +603,28 @@ pub struct Permissions {
     #[serde(default)]
     pub default: Default_,
     /// Hosts that may be reached, as `host:port`. `["*"]` is any.
+    ///
+    /// **Outbound only.** A port this program binds is not a host it reaches;
+    /// [`Self::listen`] is that grant.
     #[serde(default)]
     pub network: Option<Vec<String>>,
+    /// Addresses this program may bind and listen on.
+    ///
+    /// **What it prevents: a program under `default = "deny"` answering on
+    /// any port it is handed.** `network` names destinations, and a bound
+    /// port is not one, so without this key nothing in the table said
+    /// anything about the server side.
+    ///
+    /// Entries are a port (`8080`), a range (`8000-8099`), an interface and
+    /// either of those (`127.0.0.1:9000`, `[::1]:9000`), an interface and `*`
+    /// (`0.0.0.0:*`), or `*`. Port `0`, which asks the operating system to
+    /// choose, is covered by `0` or by a `*` and never by a number or a
+    /// range: a grant of `8080` that also let the program take whatever port
+    /// it was handed would not be a grant of `8080`. [`granted_listen`] is
+    /// the matcher. An entry that is none of these is refused when the
+    /// manifest loads.
+    #[serde(default)]
+    pub listen: Option<Vec<String>>,
     /// Paths that may be read and written.
     #[serde(default)]
     pub fs: Option<FsGrants>,
@@ -660,6 +687,7 @@ impl Permissions {
     pub(crate) fn is_only_the_flag(&self) -> bool {
         matches!(self.default, Default_::Allow)
             && self.network.is_none()
+            && self.listen.is_none()
             && self.fs.is_none()
             && self.env.is_none()
             && self.process.is_none()
@@ -685,6 +713,7 @@ impl Permissions {
     pub fn grants(&self, category: Category) -> bool {
         let listed = match category {
             Category::Network => self.network.as_ref().map(|g| !g.is_empty()),
+            Category::Listen => self.listen.as_ref().map(|g| !g.is_empty()),
             Category::Env => self.env.as_ref().map(|g| !g.is_empty()),
             Category::Process => self.process.as_ref().map(|g| !g.is_empty()),
             Category::Fs => {
@@ -728,8 +757,10 @@ impl Permissions {
 pub enum Category {
     /// The file system.
     Fs,
-    /// Outbound and inbound sockets.
+    /// Outbound sockets: the hosts a program may dial.
     Network,
+    /// Inbound sockets: the addresses a program may bind and listen on.
+    Listen,
     /// The process environment.
     Env,
     /// Running another program.
@@ -738,10 +769,14 @@ pub enum Category {
 
 impl Category {
     /// The capability type this category governs.
+    ///
+    /// `Listen` shares `Net` with `Network`: there is one capability for the
+    /// network and two keys for its two directions.
     pub fn capability(self) -> &'static str {
         match self {
             Category::Fs => "Fs",
             Category::Network => "Net",
+            Category::Listen => "Net",
             Category::Env => "Env",
             Category::Process => "Process",
         }
@@ -752,6 +787,7 @@ impl Category {
         match self {
             Category::Fs => "fs",
             Category::Network => "network",
+            Category::Listen => "listen",
             Category::Env => "env",
             Category::Process => "process",
         }
@@ -929,6 +965,186 @@ fn empty_port(grants: &[String]) -> Option<String> {
             "`{g}` ends in `:` with no port after it, which names no port. Write `{host}` for \
              every port (`{host}:*` says the same explicitly), or `{host}:<port>` for one"
         )
+    })
+}
+
+/// Whether any of `grants` lets a program bind `address`, which is
+/// `<interface>:<port>` as the program binds it: `0.0.0.0:8080`, or
+/// `[::1]:9000` for an IPv6 interface, with port `0` for one the operating
+/// system chooses.
+///
+/// **Matched as bound, not as meant.** `std::net::socket::listen_on(8080)`
+/// binds every IPv4 interface, so it asks about `0.0.0.0:8080`, which `8080`
+/// covers.
+///
+/// **Port `0` is covered by `0` or a `*` alone.** Not by `8080`, and not by
+/// `1-65535`: the port the operating system picks can be any of them, so a
+/// grant of one port that also covered port 0 would let the program listen
+/// wherever it was handed.
+///
+/// An entry that is not a port, a range, an interface and ports, or `*`
+/// covers nothing, so a list that reached this some other way than a
+/// manifest is not read more widely than it says. An interface entry is read
+/// -- `127.0.0.1:9000` covers that address -- though no manifest can hold one
+/// ([`unreadable_listen_entry`] refuses it, because `std` binds every
+/// interface); the shape stays read so that `std` and this crate agree about
+/// it for the day a program can bind one. An interface is compared as
+/// written: `[::1]` and `[0:0::1]` are the same address and different
+/// entries. **`*` covers any
+/// address, even one that is not a port on an interface** -- `0.0.0.0:70000`
+/// -- so a program with no table binds exactly what it did without one.
+///
+/// `granted_listen` in `std::permissions` answers the same question for the
+/// running program; the shared agreement table holds the two to one answer.
+pub fn granted_listen(grants: &[String], address: &str) -> bool {
+    let bound = bound_address(address);
+    grants.iter().any(|grant| match (listen_entry(grant), bound) {
+        (Some(ListenEntry::Anything), _) => true,
+        (Some(ListenEntry::On { interface: wanted, ports }), Some((interface, port))) => {
+            wanted.is_none_or(|w| w == interface) && ports.covers(port)
+        }
+        (Some(ListenEntry::On { .. }), None) | (None, _) => false,
+    })
+}
+
+/// One `listen` entry, read.
+enum ListenEntry<'a> {
+    /// `*`: any interface, any port, port 0 included.
+    Anything,
+    /// A port or ports, on one interface or (`None`) on any.
+    On { interface: Option<&'a str>, ports: ListenPorts },
+}
+
+/// The ports half of a `listen` entry.
+enum ListenPorts {
+    /// `*` after an interface: every port, and port 0.
+    Every,
+    /// One port. `0` is the operating system's choice, and only this covers it.
+    One(u32),
+    /// `low-high`, both included. `low` is at least 1, so no range covers port 0.
+    Between(u32, u32),
+}
+
+impl ListenPorts {
+    fn covers(&self, port: u32) -> bool {
+        match *self {
+            ListenPorts::Every => true,
+            ListenPorts::One(only) => only == port,
+            ListenPorts::Between(low, high) => low <= port && port <= high,
+        }
+    }
+}
+
+/// A `listen` entry read, or `None` for one that is none of the shapes.
+fn listen_entry(text: &str) -> Option<ListenEntry<'_>> {
+    if text == "*" {
+        return Some(ListenEntry::Anything);
+    }
+    let (interface, ports) = match split_interface(text) {
+        Some((interface, ports)) => (Some(interface), ports),
+        None if text.contains([':', '[', ']']) => return None,
+        None => (None, text),
+    };
+    if interface.is_some_and(|i| !is_interface(i)) {
+        return None;
+    }
+    let ports = if ports == "*" && interface.is_some() {
+        ListenPorts::Every
+    } else if let Some((low, high)) = ports.split_once('-') {
+        let (low, high) = (port_number(low)?, port_number(high)?);
+        if low == 0 || low > high {
+            return None;
+        }
+        ListenPorts::Between(low, high)
+    } else {
+        ListenPorts::One(port_number(ports)?)
+    };
+    Some(ListenEntry::On { interface, ports })
+}
+
+/// `address` as `(interface, port)`, if it is `<interface>:<port>`.
+fn bound_address(address: &str) -> Option<(&str, u32)> {
+    let (interface, port) = split_interface(address)?;
+    if !is_interface(interface) {
+        return None;
+    }
+    Some((interface, port_number(port)?))
+}
+
+/// `text` split into the interface before its port and what follows the
+/// colon: after the `]` of a bracketed IPv6 address, or at the last colon.
+fn split_interface(text: &str) -> Option<(&str, &str)> {
+    if text.starts_with('[') {
+        let close = text.find(']')?;
+        let ports = text[close + 1..].strip_prefix(':')?;
+        Some((&text[..=close], ports))
+    } else {
+        text.rsplit_once(':')
+    }
+}
+
+/// Whether `text` is an interface a `listen` entry may name: a dotted IPv4
+/// address, each of its four parts 0 to 255 with no leading zero, or an IPv6
+/// address in brackets. A name is not one: a listener binds an address, and
+/// what a name resolves to is a question for whoever answers it.
+fn is_interface(text: &str) -> bool {
+    if let Some(inner) = text.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
+        return inner.contains(':')
+            && inner.chars().all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.');
+    }
+    let parts: Vec<&str> = text.split('.').collect();
+    parts.len() == 4
+        && parts.iter().all(|part| {
+            part.len() <= 3 && decimal(part).is_some_and(|value| value <= 255)
+        })
+}
+
+/// A port, 0 to 65535, written in decimal with no sign and no leading zero.
+fn port_number(text: &str) -> Option<u32> {
+    decimal(text).filter(|port| *port <= 65535)
+}
+
+/// `text` as a number if it is decimal digits with no leading zero, short
+/// enough that no port-sized question can overflow it.
+fn decimal(text: &str) -> Option<u32> {
+    let digits = !text.is_empty() && text.len() <= 5 && text.bytes().all(|b| b.is_ascii_digit());
+    if !digits || (text.len() > 1 && text.starts_with('0')) {
+        return None;
+    }
+    text.parse().ok()
+}
+
+/// Why a `listen` entry cannot be accepted, if one of them is not a port, a
+/// range, `0` or `*`.
+///
+/// **What it prevents: a grant that grants nothing, silently.** `8000-80` and
+/// `70000` say a port nobody has. An entry naming an interface --
+/// `127.0.0.1:9000`, `[::1]:*`, and `0.0.0.0:8080` too -- is refused as well,
+/// though [`granted_listen`] can read one: `std` binds every IPv4 interface,
+/// so every listener asks about `0.0.0.0:<port>`, and `127.0.0.1:9000` would
+/// load, pass `khora check` and match nothing the program does. `0.0.0.0:`
+/// would match, and says only what the bare port says in a shape that invites
+/// writing another address. Refusing these costs nothing a program can do
+/// today; when one interface can be bound, accepting them breaks no manifest.
+///
+/// Refused when the manifest loads, under `allow` as under `deny`, naming the
+/// entry and the shapes that work, the same way a `network` grant with an
+/// empty port is.
+fn unreadable_listen_entry(grants: &[String]) -> Option<String> {
+    const SHAPES: &str = "Write a port (`8080`), a range (`8000-8099`), `0` for a port the operating \
+                          system chooses, or `*` for any port. A port is 0 to 65535, and a range starts \
+                          at 1";
+    grants.iter().find_map(|g| {
+        if g.contains([':', '[', ']']) {
+            Some(format!(
+                "`{g}` names an interface. A listening socket binds every interface, so a grant \
+                 names a port and nothing else. {SHAPES}"
+            ))
+        } else if listen_entry(g).is_none() {
+            Some(format!("`{g}` is not a port this program may listen on. {SHAPES}"))
+        } else {
+            None
+        }
     })
 }
 

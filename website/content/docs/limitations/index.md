@@ -39,12 +39,11 @@ language rule, a supported feature, and unfinished work.
   WebAssembly, where the secret is the same in every run.
 - [Database queries trail Go's](#performance-against-other-servers) on the
   TechEmpower query tests; JSON and fortunes do not.
-- [Inbound connections are not permissioned](#inbound-connections-are-not-permissioned) —
-  the manifest governs outbound only.
 - [The permission table is not a sandbox](#the-permission-table-is-not-a-sandbox):
   it limits a program you trust, per program rather than per package; a
   symbolic link swapped between the check and the open is not caught, a grant
-  that names a link moves with it, and a hard link is not followed.
+  that names a link moves with it, a hard link is not followed, and a
+  listening socket binds every interface, so `listen` grants ports only.
 
 ## Target coverage
 
@@ -298,37 +297,6 @@ the 99th percentile was 6.7 ms against Go's 6.4 ms. These are one run on one
 machine, not a published benchmark; [Performance](/docs/performance/) says
 what a figure has to satisfy before it is published, and why.
 
-## Inbound connections are not permissioned
-
-**`[permissions] network` governs outbound connections only.** Every way the
-standard library dials out consults it before anything is looked up or dialed
-— `HttpClient::send`, `std::net::socket`'s `connect_to` and `connect_by`, and
-`std::net::tls`'s `connect` and `connect_by` — and what it decides is whether
-that host may be reached. Nothing on the server side consults it:
-`Router::listen`, `Router::listen_quietly`, `Router::listen_tls` and the
-`listen_on` under them bind and serve without asking. A program with
-`default = "deny"` and `network = []` opens whatever port it is given and
-answers requests on it.
-
-So do not read a `network` grant as an authorization to listen, and do not read
-its absence as a refusal to. `network = ["127.0.0.1:8787"]` written to allow a
-server to bind 8787 does nothing at all — it neither permits the bind, which
-needed no permission, nor restricts it. The mistake is easy to make and leaves
-no trace: the program works, and the line that was supposed to be holding it
-back is not.
-
-The reason it is this way rather than fixed is that the two directions do not
-share a vocabulary. `network` is a list of hosts a program may *reach*. A port
-it may *bind* is not a host it reaches, so extending the same list to cover
-listening would produce a control whose meaning could not be written down —
-`api.example.com:443` would have to mean one thing as a destination and another
-as a local port, and a permission that cannot be stated is a permission nobody
-can audit. Naming inbound authority properly needs a grant of its own, and what
-that grant ranges over — ports, interfaces, both — is an open design question
-rather than a fix waiting to be typed. Until there is one, a program's ability
-to listen is bounded by the operating system and by whatever runs it, not by its
-manifest.
-
 ## The permission table is not a sandbox
 
 `[permissions]` limits a program you trust; it does not contain code you do
@@ -361,10 +329,13 @@ has the whole model. What it leaves open:
 - **The check walks the file system** under any grant narrower than `**`: one
   look per path component, and one per link, for the path and for each grant,
   on every file operation.
-- **`listen_on` and the server side** are covered by no grant; see
-  [inbound connections](#inbound-connections-are-not-permissioned).
 - **`std::net::tls::upgrade`** secures a socket the program already has, so
   it dials nothing and checks no grant; the connect that made the socket did.
+- **A listening socket binds every IPv4 interface**, and `[permissions]
+  listen` names ports only. A program cannot bind one interface -- loopback
+  alone, say -- so a grant cannot be narrowed to one either; an entry naming
+  an interface is refused when the manifest loads. Binding one interface,
+  and granting it, is planned.
 
 For code you do not trust, run it in a separate process, a container or a
 virtual machine, and give that boundary only what the code may have.

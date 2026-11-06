@@ -2,7 +2,7 @@ module render::main;
 
 import std::core::{Array, ChildFailed, Nursery, bounded_nursery, print};
 import std::net::http::{Response};
-import std::net::socket::{accept_on, invalid_handle, listen_on, receive, set_receive_timeout, shut, start, transmit};
+import std::net::socket::{SocketError, accept_on, invalid_handle, listen_on, receive, set_receive_timeout, shut, start, transmit};
 
 // The floor plus *only* response building: no parsing, no routing. Against the
 // bare floor this says what `Response::rendered_keeping` costs, and against the
@@ -35,9 +35,9 @@ fn loop_forever(server: Int) -> ()
   loop_forever(server)
 }
 
-pub fn main() raises ChildFailed {
+pub fn main() raises ChildFailed + SocketError {
   start();
-  let server = listen_on(18951);
+  let server = listen_on(18951)!;
   print("listening");
   bounded_nursery(256, fn () => loop_forever(server))!
 }

@@ -247,6 +247,43 @@ pub fn unbracketed(host: String) -> String
 So a program may write `[::1]`, as a URL would, and the connect it hands
 that to still reaches the address.
 
+### granted_listen
+
+```khora
+pub fn granted_listen(grants: List<String>, address: String) -> Bool
+```
+
+Whether any grant in `[permissions] listen` lets this program bind
+`address`, which is `<interface>:<port>` as the program binds it:
+`0.0.0.0:8080`, or `[::1]:9000` for an IPv6 interface, with port `0` for
+one the operating system chooses.
+
+**Matched as bound, not as meant.** `std::net::socket::listen_on(8080)`
+binds every IPv4 interface, so it asks about `0.0.0.0:8080`, which `8080`
+covers.
+
+A manifest entry is a port (`8080`), a range (`8000-8099`), `0`, or `*`.
+**Port `0` is covered by `0` or a `*` alone**,
+never by a number or a range: the port the operating system picks can be
+any of them, so a grant of `8080` that also covered port 0 would let the
+program listen wherever it was handed.
+
+An entry naming an interface (`127.0.0.1:9000`, `[::1]:*`) is read here
+-- it covers that interface's address -- but no manifest can hold one: a
+listener binds every interface, so one would grant nothing, and a manifest
+refuses it when it loads. The shape is read so that this and the compiler
+agree about it for when one interface can be bound.
+
+An entry that is none of those shapes covers nothing. A manifest refuses
+one when it loads, so this only matters for a list that reached `std`
+some other way. An interface is compared as written: `[::1]` and
+`[0:0::1]` are one address and two different entries. **`*` covers any
+address, even one that is not a port on an interface** -- `0.0.0.0:70000`
+-- so a program with no table binds exactly what it did without one.
+
+`granted_listen` in `khora-manifest` answers the same question for the
+compiler, and the two are tested against one table.
+
 ### normalized
 
 ```khora

@@ -9,7 +9,9 @@
 //! not have the same structure and one rule for both would be surprising in
 //! whichever direction it was bent.
 
-use khora_manifest::{granted_host, granted_name, granted_path, Category, Manifest, Permissions};
+use khora_manifest::{
+    granted_host, granted_listen, granted_name, granted_path, Category, Manifest, Permissions,
+};
 
 fn permissions(table: &str) -> Permissions {
     let text =
@@ -44,6 +46,172 @@ fn a_network_grant_with_an_empty_port_is_refused_at_load() {
         );
         assert!(Manifest::parse(&text).is_ok(), "`{grant}` should load");
     }
+}
+
+fn listen_manifest(entries: &str, default: &str) -> Result<Manifest, String> {
+    let text = format!(
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[permissions]\n{default}listen = [{entries}]\n"
+    );
+    Manifest::parse(&text).map(|parsed| parsed.manifest).map_err(|why| why.to_string())
+}
+
+/// **Every shape a `listen` entry may take loads**, and each is kept as
+/// written: a port, a range, `0` for a port the operating system chooses,
+/// and `*`.
+#[test]
+fn every_listen_entry_shape_loads() {
+    for entry in ["8080", "8000-8099", "0", "*", "65535", "1-65535", "1024-65535"] {
+        let manifest = listen_manifest(&format!("\"{entry}\""), "default = \"deny\"\n")
+            .unwrap_or_else(|why| panic!("`{entry}` should load: {why}"));
+        assert_eq!(
+            manifest.permissions.listen.as_deref(),
+            Some([entry.to_string()].as_slice()),
+            "`{entry}` is kept as written"
+        );
+    }
+}
+
+/// The shapes a refusal offers, and the interface shapes it must not: an
+/// entry naming an interface loads nowhere, so advice to write one would
+/// send the reader from one refusal to the next.
+fn assert_offers_only_ports(entry: &str, why: &str) {
+    let advice = why.replacen(&format!("`{entry}`"), "", 1);
+    for shape in ["`8080`", "`8000-8099`", "`0`", "`*`"] {
+        assert!(advice.contains(shape), "`{entry}`: offers {shape}: {why}");
+    }
+    for shape in ["`127.0.0.1:9000`", "`[::1]:9000`", "`0.0.0.0:*`"] {
+        assert!(!advice.contains(shape), "`{entry}`: does not offer {shape}: {why}");
+    }
+}
+
+/// **An entry naming an interface is refused when the manifest loads**,
+/// `0.0.0.0` included, under `allow` as under `deny`.
+///
+/// What it prevents: a grant that loads, passes `khora check`, and can never
+/// grant anything. `std` binds every interface, so a listener asks about
+/// `0.0.0.0:<port>` whatever the program meant, and `127.0.0.1:9000` would
+/// match nothing it does. `0.0.0.0:9000` would match, and is refused too: it
+/// says the same as `9000` in a shape that invites writing another address.
+#[test]
+fn an_interface_entry_is_refused_at_load() {
+    for entry in [
+        "127.0.0.1:9000",
+        "127.0.0.1:*",
+        "127.0.0.1:0",
+        "127.0.0.1:8000-8099",
+        "0.0.0.0:8080",
+        "0.0.0.0:*",
+        "0.0.0.0:0",
+        "[::1]:9000",
+        "[::1]:*",
+        "[::]:*",
+        "[::1]:80-90",
+    ] {
+        for default in ["default = \"deny\"\n", "default = \"allow\"\n", ""] {
+            let why = listen_manifest(&format!("\"8080\", \"{entry}\""), default)
+                .err()
+                .unwrap_or_else(|| panic!("`{entry}` should be refused under `{default}`"));
+            assert!(why.contains("permissions.listen"), "`{entry}`: {why}");
+            assert!(why.contains(&format!("`{entry}`")), "`{entry}`: names the entry: {why}");
+            assert!(why.contains("every interface"), "`{entry}`: says why: {why}");
+            assert_offers_only_ports(entry, &why);
+        }
+    }
+}
+
+/// **An entry that does not parse is refused when the manifest loads**,
+/// naming the entry and the shapes that work. Under `allow` as under
+/// `deny`: an entry nobody can read is a mistake whatever the default is.
+///
+/// Each of these is a different way to be wrong: a host name where an
+/// interface goes, a port past 65535, a range written backwards or one that
+/// takes in port 0 (which is the operating system's choice, not a port), a
+/// sign, an IPv6 address without its brackets, a `:` with nothing after it,
+/// and `*` standing in for an interface.
+#[test]
+fn a_malformed_listen_entry_is_refused_at_load() {
+    for entry in [
+        "localhost:8080",
+        "example.com",
+        "65536",
+        "99999",
+        "9000-8000",
+        "0-100",
+        "+80",
+        "-80",
+        "::1:9000",
+        "[::1]",
+        "127.0.0.1:",
+        "*:8080",
+        "",
+        "8080-",
+        "1.2.3:80",
+        "256.0.0.1:80",
+        "01.2.3.4:80",
+        "[]:80",
+        "[::1]x:80",
+        "80 ",
+    ] {
+        for default in ["default = \"deny\"\n", ""] {
+            let why = listen_manifest(&format!("\"8080\", \"{entry}\""), default)
+                .err()
+                .unwrap_or_else(|| panic!("`{entry}` should be refused"));
+            assert!(why.contains("permissions.listen"), "`{entry}`: {why}");
+            assert!(why.contains(&format!("`{entry}`")), "`{entry}`: names the entry: {why}");
+            assert_offers_only_ports(entry, &why);
+        }
+    }
+}
+
+/// **`listen` follows the rest of the table's defaults.** Under `deny` an
+/// absent key grants nothing; with `allow`, or no table at all, it grants
+/// everything; an empty list grants nothing under either.
+#[test]
+fn listen_takes_default_like_every_other_key() {
+    assert!(permissions("").grants(Category::Listen), "no table grants everything");
+    assert!(permissions("[permissions]\ndefault = \"allow\"\n").grants(Category::Listen));
+    assert!(!permissions("[permissions]\ndefault = \"deny\"\n").grants(Category::Listen));
+    assert!(!permissions("[permissions]\nlisten = []\n").grants(Category::Listen));
+    assert!(permissions("[permissions]\ndefault = \"deny\"\nlisten = [\"8080\"]\n").grants(Category::Listen));
+    assert!(
+        !permissions("[permissions]\ndefault = \"deny\"\nnetwork = [\"*\"]\n").grants(Category::Listen),
+        "`network` grants no listening"
+    );
+    assert!(
+        permissions("[permissions]\ndefault = \"deny\"\nlisten = [\"*\"]\n").grants(Category::Listen)
+            && !permissions("[permissions]\ndefault = \"deny\"\nlisten = [\"*\"]\n").grants(Category::Network),
+        "and `listen` grants no dialing"
+    );
+    assert_eq!(Category::Listen.key(), "listen");
+}
+
+/// What `granted_listen` says about the address a program binds.
+fn binds(patterns: &[&str], address: &str) -> bool {
+    granted_listen(&owned(patterns), address)
+}
+
+/// **Matched as bound.** `listen_on(port)` binds every IPv4 interface, so
+/// the address asked about is `0.0.0.0:<port>`: a bare port covers it, an
+/// interface entry covers only its own interface, and port 0 -- a port the
+/// operating system chooses -- is covered by `0` or a `*` and never by a
+/// specific port or a range.
+#[test]
+fn a_listen_grant_is_matched_against_the_address_as_bound() {
+    assert!(binds(&["8080"], "0.0.0.0:8080"));
+    assert!(!binds(&["8080"], "0.0.0.0:8081"));
+    assert!(binds(&["8000-8099"], "0.0.0.0:8000"));
+    assert!(binds(&["8000-8099"], "0.0.0.0:8099"));
+    assert!(!binds(&["8000-8099"], "0.0.0.0:8100"));
+    assert!(binds(&["0.0.0.0:*"], "0.0.0.0:443"));
+    assert!(!binds(&["127.0.0.1:9000"], "0.0.0.0:9000"), "another interface");
+    assert!(binds(&["127.0.0.1:9000"], "127.0.0.1:9000"));
+    assert!(binds(&["0"], "0.0.0.0:0"));
+    assert!(!binds(&["0"], "0.0.0.0:8080"), "`0` is the OS's choice, not every port");
+    assert!(!binds(&["8080", "1-65535"], "0.0.0.0:0"), "no port and no range grants port 0");
+    assert!(binds(&["0.0.0.0:*"], "0.0.0.0:0"));
+    assert!(binds(&["*"], "0.0.0.0:0"));
+    assert!(binds(&["*"], "[::1]:9000"));
+    assert!(!binds(&[], "0.0.0.0:8080"));
 }
 
 fn host(patterns: &[&str], value: &str) -> bool {

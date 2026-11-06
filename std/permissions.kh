@@ -362,6 +362,184 @@ fn host_matches(grant: String, asked: Split) -> Bool {
   port_ok && matches(allowed.head, asked.head, segmented: false)
 }
 
+/// Whether any grant in `[permissions] listen` lets this program bind
+/// `address`, which is `<interface>:<port>` as the program binds it:
+/// `0.0.0.0:8080`, or `[::1]:9000` for an IPv6 interface, with port `0` for
+/// one the operating system chooses.
+///
+/// **Matched as bound, not as meant.** `std::net::socket::listen_on(8080)`
+/// binds every IPv4 interface, so it asks about `0.0.0.0:8080`, which `8080`
+/// covers.
+///
+/// A manifest entry is a port (`8080`), a range (`8000-8099`), `0`, or `*`.
+/// **Port `0` is covered by `0` or a `*` alone**,
+/// never by a number or a range: the port the operating system picks can be
+/// any of them, so a grant of `8080` that also covered port 0 would let the
+/// program listen wherever it was handed.
+///
+/// An entry naming an interface (`127.0.0.1:9000`, `[::1]:*`) is read here
+/// -- it covers that interface's address -- but no manifest can hold one: a
+/// listener binds every interface, so one would grant nothing, and a manifest
+/// refuses it when it loads. The shape is read so that this and the compiler
+/// agree about it for when one interface can be bound.
+///
+/// An entry that is none of those shapes covers nothing. A manifest refuses
+/// one when it loads, so this only matters for a list that reached `std`
+/// some other way. An interface is compared as written: `[::1]` and
+/// `[0:0::1]` are one address and two different entries. **`*` covers any
+/// address, even one that is not a port on an interface** -- `0.0.0.0:70000`
+/// -- so a program with no table binds exactly what it did without one.
+///
+/// `granted_listen` in `khora-manifest` answers the same question for the
+/// compiler, and the two are tested against one table.
+pub fn granted_listen(grants: List<String>, address: String) -> Bool {
+  match bound_address(address) {
+    Option::None => List::any(grants, fn grant => grant == "*"),
+    Option::Some(bound) => List::any(grants, fn grant => listen_matches(grant, bound)),
+  }
+}
+
+/// An address split into the interface and the port, both read.
+type Bound = { interface: String, port: Int };
+
+/// `address` as an interface and a port, if it is `<interface>:<port>`.
+fn bound_address(address: String) -> Option<Bound> {
+  match split_interface(address) {
+    Option::None => Option::None,
+    Option::Some(parts) =>
+      if !is_interface(parts.head) {
+        Option::None
+      } else {
+        match port_number(parts.rest) {
+          Option::None => Option::None,
+          Option::Some(port) => Option::Some({ interface: parts.head, port: port }),
+        }
+      },
+  }
+}
+
+/// One `listen` entry against one bound address.
+fn listen_matches(grant: String, bound: Bound) -> Bool {
+  if grant == "*" {
+    true
+  } else {
+    match split_interface(grant) {
+      Option::Some(parts) =>
+        is_interface(parts.head) && parts.head == bound.interface
+        && (parts.rest == "*" || ports_cover(parts.rest, bound.port)),
+      Option::None =>
+        !has_any(grant, ":[]") && ports_cover(grant, bound.port),
+    }
+  }
+}
+
+/// Whether `ports` -- a port or `low-high` -- covers `port`.
+///
+/// A range starts at 1 and does not run backwards, so no range covers port
+/// 0 and a backwards one covers nothing.
+fn ports_cover(ports: String, port: Int) -> Bool {
+  match String::split_once(ports, "-") {
+    Option::Some(range) => {
+      let low = match port_number(range.head) { Option::Some(n) => n, Option::None => -1 };
+      let high = match port_number(range.rest) { Option::Some(n) => n, Option::None => -1 };
+      low >= 1 && low <= high && low <= port && port <= high
+    },
+    Option::None =>
+      match port_number(ports) {
+        Option::Some(only) => only == port,
+        Option::None => false,
+      },
+  }
+}
+
+/// `text` split into the interface before its port and what follows the
+/// colon: after the `]` of a bracketed IPv6 address, or at the last colon.
+fn split_interface(text: String) -> Option<Split> {
+  let length = String::byte_length(text);
+  if String::starts_with(text, "[") {
+    match String::index_of(text, "]") {
+      Option::None => Option::None,
+      Option::Some(close) =>
+        if close + 1 < length && String::byte(text, close + 1) == 58 {
+          Option::Some({ head: String::slice(text, 0, close + 1), rest: String::slice(text, close + 2, length) })
+        } else {
+          Option::None
+        },
+    }
+  } else {
+    match last_byte_of(text, length - 1, fn b => b == 58) {
+      Option::None => Option::None,
+      Option::Some(at) => Option::Some({ head: String::slice(text, 0, at), rest: String::slice(text, at + 1, length) }),
+    }
+  }
+}
+
+/// Whether `text` is an interface a `listen` entry may name: a dotted IPv4
+/// address, four parts each 0 to 255 with no leading zero, or an IPv6
+/// address in brackets. A name is not one: a listener binds an address.
+fn is_interface(text: String) -> Bool {
+  let length = String::byte_length(text);
+  if String::starts_with(text, "[") {
+    length > 2 && String::ends_with(text, "]")
+    && String::contains(String::slice(text, 1, length - 1), ":")
+    && all_bytes(String::slice(text, 1, length - 1), fn b => is_hex(b) || b == 58 || b == 46)
+  } else {
+    let parts = String::split(text, ".");
+    List::length(parts) == 4 && List::all(parts, fn part => is_octet(part))
+  }
+}
+
+/// Whether `part` is one part of a dotted IPv4 address: 0 to 255, with no
+/// leading zero.
+fn is_octet(part: String) -> Bool {
+  match decimal(part) {
+    Option::Some(value) => value <= 255,
+    Option::None => false,
+  }
+}
+
+/// A port, 0 to 65535, written in decimal with no sign and no leading zero.
+fn port_number(text: String) -> Option<Int> {
+  match decimal(text) {
+    Option::Some(port) => if port <= 65535 { Option::Some(port) } else { Option::None },
+    Option::None => Option::None,
+  }
+}
+
+/// `text` as a number, if it is one to five decimal digits with no leading
+/// zero. **No leading zero, so the two matchers cannot read one entry as two
+/// numbers**: `08080` is refused here as it is in `khora-manifest`.
+fn decimal(text: String) -> Option<Int> {
+  let length = String::byte_length(text);
+  if length == 0 || length > 5 || !all_bytes(text, fn b => b >= 48 && b <= 57) {
+    Option::None
+  } else if length > 1 && String::byte(text, 0) == 48 {
+    Option::None
+  } else {
+    Int::of_string(text)
+  }
+}
+
+/// Whether `text` has any of the bytes in `bytes`.
+fn has_any(text: String, bytes: String) -> Bool {
+  !all_bytes(text, fn b => all_bytes(bytes, fn c => c != b))
+}
+
+/// Whether every byte of `text` passes `wanted`.
+fn all_bytes(text: String, wanted: (U8) -> Bool) -> Bool {
+  let length = String::byte_length(text);
+  let mut at = 0;
+  while at < length && wanted(String::byte(text, at)) {
+    at = at + 1;
+  };
+  at == length
+}
+
+/// Whether `b` is a hexadecimal digit.
+fn is_hex(b: U8) -> Bool {
+  (b >= 48 && b <= 57) || (b >= 65 && b <= 70) || (b >= 97 && b <= 102)
+}
+
 /// `name:port` split at the **last** colon, with an empty `rest` for no port.
 ///
 /// **An IPv6 literal is written in brackets, as in a URL**: `[::1]:5432`,

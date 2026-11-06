@@ -6,10 +6,15 @@ version.workspace = true
 #
 # The database is a *package*, not `std`, so nothing here declares an
 # `extern fn` and there is no `[permissions] extern` entry. What it does need
-# is the network — for the port it answers on and for the one it dials
-# PostgreSQL on. `docs/design/permissions.md`.
+# is the network — for the port it answers on, which is `listen`, and for the
+# one it dials PostgreSQL on, which is `network`. `docs/design/permissions.md`.
+#
+# `listen` is every port an unprivileged process can bind, because the port
+# is the operator's choice (`PORT`, 8080 when it is unset). A port outside it
+# is refused at startup with a line naming the port and this key.
 [permissions]
-network = ["0.0.0.0:8080", "127.0.0.1:5433"]
+listen = ["1024-65535"]
+network = ["127.0.0.1:5433"]
 env = ["PORT", "PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGPASSWORD", "PGSSLMODE", "PGSSLROOTCERT", "POOL"]
 
 [dependencies]

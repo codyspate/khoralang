@@ -144,7 +144,7 @@ fn hold() -> () with {{ scope: Scope }} raises Oops {{
   match settings {{
     Result::Err(_) => print(\"the certificate was refused, so this proves nothing\"),
     Result::Ok(ready) => {{
-      let listener = listen_on({PORT});
+      let listener = (listen_on({PORT})! catch {{ _ => -1 }});
       if listener == invalid_handle() {{
         print(\"the port could not be bound, so this proves nothing\")
       }} else {{
