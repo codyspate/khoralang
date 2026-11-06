@@ -2388,7 +2388,7 @@ pub type Answer = {
 /// Separate from `HttpError`, which is what goes wrong *being* a server —
 /// a port that would not bind, a request that could not be read. Nothing that
 /// matches one has any use for the cases of the other.
-derive(Show, Eq)
+derive(Eq)
 pub type CallError =
   /// The URL could not be read.
   | BadUrl(String)
@@ -2419,6 +2419,41 @@ pub type CallError =
   /// ran out of time against a slow service mostly wants a longer budget or
   /// fewer retries, and a retry loop that cannot tell them apart retries both.
   | TimedOut(Int);
+
+impl Show for CallError {
+  /// The case and what it carries, as a derived `Show` writes them, and for
+  /// `TimedOut` a sentence after it saying which deadline ran out and what
+  /// sets another.
+  ///
+  /// **What this prevents: a timeout nobody can trace to a setting.**
+  /// `CallError::TimedOut(30000)` names a number, and a reader whose client
+  /// is `HttpClient::real()` never wrote that number down; nothing in the
+  /// line says it was a default or that `HttpClient::within` changes it.
+  ///
+  /// Written out rather than derived for that one case, so every arm is here
+  /// and a case added later has to say how it reads. The number alone does
+  /// not say whether the caller chose it -- `within(30000)` ends at 30000
+  /// too -- so the text says only what is true for every one of them: that
+  /// 30000 ms is the default `real()` and `bounded` give. It names
+  /// `bounded_within` beside `within` because a `bounded` client that
+  /// switched to `within` would lose its answer limit.
+  fn show(self) -> String {
+    match self {
+      CallError::BadUrl(url) => "CallError::BadUrl(${url})",
+      CallError::Unreachable(at) => "CallError::Unreachable(${at})",
+      CallError::Insecure(why) => "CallError::Insecure(${why})",
+      CallError::Closed(why) => "CallError::Closed(${why})",
+      CallError::Malformed(why) => "CallError::Malformed(${why})",
+      CallError::TooLarge(limit) => "CallError::TooLarge(${Int::to_string(limit)})",
+      CallError::Denied(at) => "CallError::Denied(${at})",
+      CallError::TimedOut(millis) => {
+        let shown = Int::to_string(millis);
+        let whose = if millis == default_call_deadline() { " (${shown} ms is the default that `HttpClient::real()` and `HttpClient::bounded` give)" } else { "" };
+        "CallError::TimedOut(${shown}): the call took longer than its ${shown} ms deadline${whose}; `HttpClient::within(ms)` or `HttpClient::bounded_within(limit, ms)` sets a different one"
+      },
+    }
+  }
+}
 
 /// Making requests, as a capability.
 ///
@@ -2542,6 +2577,10 @@ pub fn default_call_deadline() -> Int { 30000 }
 impl HttpClient {
   /// A client that really connects, holding up to `default_answer_limit`
   /// and giving each call `default_call_deadline`.
+  ///
+  /// Each call has thirty seconds from start to finish, and a call that runs
+  /// out is `CallError::TimedOut(30000)`. `HttpClient::within(millis)` gives
+  /// a client with a different deadline.
   pub fn real() -> HttpClient {
     HttpClient::bounded(default_answer_limit())
   }

@@ -28,7 +28,7 @@
 //! holds the caller's buffer. The cancellation is observed at the next `!`,
 //! which is the same rule safepoints follow — `docs/design/scheduler.md` §1.
 
-use crate::scheduler::{park_current_for, waker_for_current, Waker, Why};
+use crate::scheduler::{park_current_for, park_current_until, waker_for_current, Waker, Why};
 use std::collections::VecDeque;
 use std::sync::{Condvar, Mutex, OnceLock};
 
@@ -138,7 +138,7 @@ impl Pool {
     /// `blocked` per wake of a fiber that enrolled, which is short, because
     /// it only holds fibers that are waiting now.
     fn submit(&'static self, job: Job, done: Waker) {
-        self.offer(job, Some(done), None);
+        self.offer(job, Some(done), None, None);
     }
 
     /// [`Pool::submit`], and given `give_up`, stops waiting for room once it
@@ -155,11 +155,21 @@ impl Pool {
     /// beats deadlocking. With it, that caller waits on [`Pool::freed`] in
     /// slices that ask `give_up` between them, because a caller that can give
     /// up has no reason to exceed a bound it was given to respect.
+    ///
+    /// **A fiber waiting for room is also woken at `by`**, the instant after
+    /// which `give_up` answers `TimedOut`. A cancel wakes a parked fiber and
+    /// a deadline does not: parked for room with no timer, a fiber was next
+    /// asked whether to give up when somebody's job finished, which for a
+    /// pool full of lookups against a dead resolver is the resolver's
+    /// timeout -- 800 ms lookups took 10 s once the queue was full. What it
+    /// costs: one timer per park for room, left in the heap if room comes
+    /// first, as [`crate::scheduler::park_current_until`] describes.
     fn offer(
         &'static self,
         job: Job,
         done: Option<Waker>,
         give_up: Option<&dyn Fn() -> Option<Abandoned>>,
+        by: Option<std::time::Instant>,
     ) -> Option<Abandoned> {
         let mut enrolled: Option<usize> = None;
         let mut queue = self.queue.lock().expect("the blocking queue");
@@ -181,7 +191,7 @@ impl Pool {
                     enrolled = Some(room.fiber());
                     queue.blocked.push_back(room);
                     drop(queue);
-                    park_current_for(Why::BlockingRoom, 0);
+                    park_current_until(Why::BlockingRoom, 0, by);
                     queue = self.queue.lock().expect("the blocking queue");
                 }
                 (None, Some(_)) => {
@@ -371,21 +381,66 @@ where
 /// against a resolver that never answers held a file read on a fiber for
 /// 29.7 s. Here they can only hold each other up.
 ///
-/// **What it costs: four lookups at a time, program-wide.** With four
-/// lookups in flight against a resolver that does not answer, the next one
-/// waits for one of them to time out, giving up on a stop or its deadline;
-/// it is never refused. A lookup abandoned before a thread reached it costs
-/// nothing more: [`abandonable_on`] skips its work. `KHORA_LOOKUP_THREADS`
-/// sets the number.
+/// **What it costs: 32 lookups at a time, program-wide.** With 32 lookups in
+/// flight against a resolver that does not answer, the next one waits for
+/// one of them to time out, giving up on a stop or its deadline; it is never
+/// refused. That holds past the queue's 256 as well: a lookup waiting for
+/// room in a full queue leaves at its deadline, as one in the queue does. A
+/// lookup abandoned before a thread reached it costs nothing more:
+/// [`abandonable_on`] skips its work. `KHORA_LOOKUP_THREADS` sets the
+/// number.
+///
+/// The threads are started as lookups arrive, one for each lookup that finds
+/// no idle thread, and each retires after [`IDLE`] without work. So 32 is the
+/// most there can be, not what a program carries: one that never resolves a
+/// name starts none, and one that resolves a name now and then holds one or
+/// two. 32 stuck threads reserve 32 stacks, 2 MiB of address space each,
+/// of which only what the resolver touched is resident. Measured on Linux, a
+/// pool that started all 32 up front added 32 threads and about 0.5 MB
+/// resident to a program that never resolved a name (7.1 MB to 7.6 MB),
+/// which is what starting them on demand saves.
 pub(crate) fn lookups() -> &'static Pool {
     static LOOKUPS: OnceLock<Pool> = OnceLock::new();
-    LOOKUPS.get_or_init(|| {
-        let threads = std::env::var("KHORA_LOOKUP_THREADS")
-            .ok()
-            .and_then(|n| n.parse().ok())
-            .unwrap_or(4);
-        Pool::named("khora-lookup", threads, threads * 8)
-    })
+    LOOKUPS.get_or_init(|| lookup_pool(std::env::var("KHORA_LOOKUP_THREADS").ok().as_deref()))
+}
+
+/// How many lookups may run at once when `KHORA_LOOKUP_THREADS` does not say.
+const LOOKUP_THREADS: usize = 32;
+
+/// The most lookup threads `KHORA_LOOKUP_THREADS` can ask for; a larger
+/// number is held to this.
+///
+/// **What it prevents: a setting that stops the program.** The queue is
+/// eight jobs per thread, and `threads * 8` on a number near 2^61 overflowed,
+/// which a debug runtime stops on at the first lookup. 1024 is well past any
+/// number of lookups a program could want in flight against one resolver,
+/// and well under what a machine runs out of: each thread reserves a 2 MiB
+/// stack, so 1024 stuck lookups are 2 GiB of address space.
+const MOST_LOOKUP_THREADS: usize = 1024;
+
+/// The lookup pool, sized by `setting`, the text of `KHORA_LOOKUP_THREADS`.
+///
+/// Digits only, and not zero, because the environment reference promises "a
+/// positive integer", and anything else -- `0`, `-1`, `+4`, padding, text --
+/// leaves [`LOOKUP_THREADS`], as a value that is not a number always has.
+/// Rust's `parse` alone took `+4` as 4 and `0` as a request the pool then
+/// raised to one thread. A number past [`MOST_LOOKUP_THREADS`], however
+/// many digits, is held to it.
+fn lookup_pool(setting: Option<&str>) -> Pool {
+    let threads = setting.and_then(lookup_threads).unwrap_or(LOOKUP_THREADS);
+    Pool::named("khora-lookup", threads, threads.saturating_mul(8))
+}
+
+/// `setting` as a positive count of threads, at most [`MOST_LOOKUP_THREADS`],
+/// or `None` if it is not one.
+fn lookup_threads(setting: &str) -> Option<usize> {
+    if setting.is_empty() || !setting.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    match setting.trim_start_matches('0') {
+        "" => None,
+        digits => Some(digits.parse::<usize>().map_or(MOST_LOOKUP_THREADS, |n| n.min(MOST_LOOKUP_THREADS))),
+    }
 }
 
 /// How an [`abandonable_on`] call ended without its value.
@@ -459,7 +514,7 @@ where
 
     match waker_for_current() {
         Some(done) => {
-            if let Some(why) = pool.offer(job, Some(done), Some(&gave_up)) {
+            if let Some(why) = pool.offer(job, Some(done), Some(&gave_up), deadline) {
                 return Err(why);
             }
             loop {
@@ -479,7 +534,7 @@ where
             }
         }
         None => {
-            if let Some(why) = pool.offer(job, None, Some(&gave_up)) {
+            if let Some(why) = pool.offer(job, None, Some(&gave_up), deadline) {
                 return Err(why);
             }
             let mut value = slot.value.lock().expect("the result slot");
@@ -828,9 +883,12 @@ mod tests {
     ///
     /// More hanging lookups than the shared pool has threads, each abandoned
     /// by its deadline; then a `blocking` call on a fiber must come straight
-    /// back.
+    /// back. The lookup pool is four threads, as `KHORA_LOOKUP_THREADS=4`
+    /// makes it, so the lookups also queue behind each other and the shared
+    /// pool is tested while the lookup pool is full rather than merely busy.
     #[test]
     fn abandoned_lookups_leave_the_shared_pool_free() {
+        let lookups: &'static Pool = Box::leak(Box::new(lookup_pool(Some("4"))));
         let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let started = Arc::new(AtomicUsize::new(0));
         let callers: Vec<_> = (0..pool().threads + 4)
@@ -838,7 +896,7 @@ mod tests {
                 let work = hanging(release.clone(), started.clone());
                 std::thread::spawn(move || {
                     let by = std::time::Instant::now() + std::time::Duration::from_millis(300);
-                    abandonable_on(lookups(), work, Some(by))
+                    abandonable_on(lookups, work, Some(by))
                 })
             })
             .collect();
@@ -903,5 +961,171 @@ mod tests {
         assert!(began.elapsed() < std::time::Duration::from_secs(2), "{:?}", began.elapsed());
         assert_eq!(pool.stats().queued, 1, "{:?}", pool.stats());
         release.store(true, Ordering::SeqCst);
+    }
+
+    /// **32 lookups against a dead resolver run at once, and the 33rd
+    /// waits.** With four, a program resolving names behind one stuck
+    /// resolver -- five services at startup, a handful of webhooks -- had
+    /// its fifth lookup queued for a resolver timeout, seconds, behind four
+    /// that were never going to answer.
+    ///
+    /// A pool of its own built the way [`lookups`] builds it, so the test does
+    /// not depend on what else in this process has resolved a name.
+    #[test]
+    fn the_lookup_pool_runs_32_stuck_lookups_before_one_waits() {
+        let pool: &'static Pool = Box::leak(Box::new(lookup_pool(None)));
+        assert_eq!(pool.stats().threads, 0, "a pool nobody has used started threads");
+        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let started = Arc::new(AtomicUsize::new(0));
+        let callers: Vec<_> = (0..33)
+            .map(|_| {
+                let work = hanging(release.clone(), started.clone());
+                std::thread::spawn(move || {
+                    let by = std::time::Instant::now() + std::time::Duration::from_secs(20);
+                    abandonable_on(pool, work, Some(by))
+                })
+            })
+            .collect();
+        let all_ran = within_ten_seconds(|| {
+            let stats = pool.stats();
+            stats.active == 32 && stats.queued == 1
+        });
+        let (stats, ran) = (pool.stats(), started.load(Ordering::SeqCst));
+        release.store(true, Ordering::SeqCst);
+        for caller in callers {
+            assert_eq!(caller.join().expect("a lookup caller"), Ok(()));
+        }
+        assert!(all_ran, "{ran} lookups started, not 32 with one waiting: {stats:?}");
+        assert_eq!(ran, 32, "{stats:?}");
+        assert_eq!(stats.threads, 32, "{stats:?}");
+    }
+
+    /// **A fiber waiting for room in a full lookup queue leaves at its own
+    /// deadline.** It parked for room with no timer, so only a finished job
+    /// woke it to ask, and with every thread held by a resolver that does
+    /// not answer that is the resolver's timeout: lookups with 800 ms
+    /// overran to 10 s on the scheduler once the queue was full. The caller
+    /// off a fiber never did, because it waits in slices.
+    ///
+    /// Two threads, so room for 2 x 9 = 18 lookups running or queued, and 24
+    /// fibers on the scheduler, each looking up against a resolver that never
+    /// answers with a 300 ms deadline: six of them must wait for room. Each
+    /// records how long it took.
+    #[test]
+    fn a_fiber_waiting_for_room_leaves_at_its_deadline() {
+        let pool: &'static Pool = Box::leak(Box::new(lookup_pool(Some("2"))));
+        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let started = Arc::new(AtomicUsize::new(0));
+        let took = Arc::new(Mutex::new(Vec::new()));
+        let scheduler = Scheduler::new(2);
+        for _ in 0..24 {
+            let took = took.clone();
+            let work = hanging(release.clone(), started.clone());
+            scheduler.spawn(Task::new(move || {
+                let began = std::time::Instant::now();
+                let by = began + std::time::Duration::from_millis(300);
+                let answer = abandonable_on(pool, work, Some(by));
+                took.lock().expect("took").push((answer, began.elapsed()));
+            }));
+        }
+        let all_left = within_ten_seconds(|| took.lock().expect("took").len() == 24);
+        let seen = took.lock().expect("took").clone();
+        let (stats, waited) = (pool.stats(), pool.stats().waited);
+        release.store(true, Ordering::SeqCst);
+        scheduler.drain();
+        assert!(waited > 0, "no lookup ever waited for room, so this proves nothing: {stats:?}");
+        assert!(
+            all_left,
+            "{} of 24 lookups left; the rest waited for room past their deadline: {stats:?}",
+            seen.len()
+        );
+        for (answer, after) in seen {
+            assert_eq!(answer, Err(Abandoned::TimedOut));
+            assert!(after < std::time::Duration::from_secs(2), "left after {after:?}, not at 300 ms");
+        }
+    }
+
+    /// **A fiber waiting for room in a full queue leaves when it is
+    /// canceled.** The same full pool, with no deadline at all, so only the
+    /// cancel can end the wait. A cancel wakes a parked fiber, so this held
+    /// before a deadline did; it is here so the published sentence "its own
+    /// cancel or deadline ends the wait" is tested in both halves.
+    #[test]
+    fn a_fiber_waiting_for_room_leaves_when_canceled() {
+        let pool = a_pool(1, 1);
+        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let started = Arc::new(AtomicUsize::new(0));
+        let holders: Vec<_> = (0..2)
+            .map(|_| {
+                let work = hanging(release.clone(), started.clone());
+                std::thread::spawn(move || abandonable_on(pool, work, None))
+            })
+            .collect();
+        assert!(
+            within_ten_seconds(|| pool.stats().active == 1 && pool.stats().queued == 1),
+            "the pool never filled: {:?}",
+            pool.stats()
+        );
+
+        let answer = Arc::new(Mutex::new(None));
+        let scheduler = Scheduler::new(2);
+        let into = answer.clone();
+        let work = hanging(release.clone(), started.clone());
+        let task = Task::new(move || {
+            *into.lock().expect("answer") = Some(abandonable_on(pool, work, None));
+        });
+        let id = task.fiber().id();
+        scheduler.spawn(task);
+        assert!(within_ten_seconds(|| pool.stats().waited >= 1), "it never waited for room: {:?}", pool.stats());
+        scheduler.cancel_fiber(id);
+        let left = within_ten_seconds(|| answer.lock().expect("answer").is_some());
+        release.store(true, Ordering::SeqCst);
+        scheduler.drain();
+        for holder in holders {
+            let _ = holder.join();
+        }
+        assert!(left, "a canceled fiber kept waiting for room");
+        assert_eq!(*answer.lock().expect("answer"), Some(Err(Abandoned::Stopped)));
+    }
+
+    /// `KHORA_LOOKUP_THREADS` still sets the number, and text that is not
+    /// one leaves the default.
+    #[test]
+    fn the_lookup_setting_overrides_the_default() {
+        assert_eq!(lookup_pool(Some("3")).threads, 3);
+        assert_eq!(lookup_pool(Some("many")).threads, 32);
+        assert_eq!(lookup_pool(None).threads, 32);
+    }
+
+    /// **Every `KHORA_LOOKUP_THREADS` is a pool, and only a positive integer
+    /// changes it.** 2^61 overflowed the queue depth and stopped the program
+    /// at its first lookup; `0` and `+4` were taken although the reference
+    /// says a positive integer. Each value here builds a pool, which is where
+    /// the overflow was.
+    #[test]
+    fn every_lookup_setting_builds_a_pool_and_only_a_positive_integer_counts() {
+        let cases: [(&str, usize); 16] = [
+            ("1", 1),
+            ("4", 4),
+            ("007", 7),
+            ("1024", 1024),
+            ("1025", 1024),
+            ("2305843009213693952", 1024),
+            ("18446744073709551615", 1024),
+            ("18446744073709551616", 1024),
+            ("0", 32),
+            ("000", 32),
+            ("-1", 32),
+            ("+4", 32),
+            (" 4", 32),
+            ("4 ", 32),
+            ("", 32),
+            ("4.0", 32),
+        ];
+        for (setting, want) in cases {
+            let pool = lookup_pool(Some(setting));
+            assert_eq!(pool.threads, want, "KHORA_LOOKUP_THREADS={setting:?}");
+            assert_eq!(pool.depth, want * 8, "KHORA_LOOKUP_THREADS={setting:?}");
+        }
     }
 }

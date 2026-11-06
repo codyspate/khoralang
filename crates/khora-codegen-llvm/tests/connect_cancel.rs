@@ -466,7 +466,79 @@ pub fn main() -> Int {{
     for backend in BACKENDS {
         let ran = run(&exe, backend, PATIENCE);
         assert!(!ran.hung, "`{backend}`: still running after {PATIENCE:?}: {}{}", ran.stdout, ran.stderr);
-        assert_eq!(ran.stdout, "CallError::TimedOut(300)\n", "`{backend}`: {}", ran.stderr);
+        assert_eq!(
+            ran.stdout,
+            "CallError::TimedOut(300): the call took longer than its 300 ms deadline; \
+             `HttpClient::within(ms)` or `HttpClient::bounded_within(limit, ms)` sets a different one\n",
+            "`{backend}`: {}",
+            ran.stderr
+        );
         assert_eq!(ran.code, Some(0), "`{backend}`: {}", ran.stderr);
+    }
+}
+
+/// The threads named `khora-lookup` in process `pid` right now.
+#[cfg(target_os = "linux")]
+fn lookup_threads(pid: u32) -> usize {
+    let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else { return 0 };
+    tasks
+        .filter_map(|task| std::fs::read_to_string(task.ok()?.path().join("comm")).ok())
+        .filter(|name| name.trim_end() == "khora-lookup")
+        .count()
+}
+
+/// **The lookup pool's 32 threads are a bound, not a cost every program
+/// pays.** A program that resolves no name starts no lookup thread, and one
+/// that resolves one name starts one. A pool that started its threads up
+/// front would hold 32 stacks in every program that links the runtime,
+/// whether or not it ever looked anything up.
+///
+/// Counted from outside, in `/proc/<pid>/task`, while each program waits
+/// after its work, on both backends. The program that connects by address
+/// never reaches the resolver; the one that connects to `localhost` does,
+/// and is the control that shows the count can see a lookup thread at all.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_program_starts_lookup_threads_only_for_its_lookups() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("a port");
+    let port = listener.local_addr().expect("an address").port();
+    let program = |host: &str| {
+        format!(
+            r#"module main;
+import std::core::{{print}};
+import std::clock::{{Clock}};
+import std::net::socket::{{SocketError, connect_to, shut, start}};
+
+pub fn main() -> Int {{
+  if start() {{}} else {{ print("no sockets") }};
+  let handle = connect_to("{host}", {port})! catch {{ _ => -1 }};
+  if handle >= 0 {{ shut(handle) }};
+  print("ready");
+  with {{ clock: Clock::real() }} {{ clock.sleep(5000) }};
+  0
+}}
+"#
+        )
+    };
+    let by_address = build("lookup_threads_none", &program("127.0.0.1"));
+    let by_name = build("lookup_threads_one", &program("localhost"));
+    for backend in BACKENDS {
+        for (exe, want) in [(&by_address, 0), (&by_name, 1)] {
+            let mut child = Command::new(exe)
+                .env("KHORA_FIBERS", backend)
+                .env_remove("KHORA_LOOKUP_THREADS")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("the program should run");
+            let mut stdout = child.stdout.take().expect("piped");
+            let mut said = [0u8; 6];
+            let ready = stdout.read_exact(&mut said).is_ok() && &said == b"ready\n";
+            let counted = lookup_threads(child.id());
+            let _ = child.kill();
+            let _ = child.wait();
+            assert!(ready, "`{backend}` {}: never said it was ready", exe.display());
+            assert_eq!(counted, want, "`{backend}` {}: lookup threads", exe.display());
+        }
     }
 }

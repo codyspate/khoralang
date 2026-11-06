@@ -468,13 +468,20 @@ it will behave differently now.
   outbound call all waited that long. A fiber canceled while the name is
   being looked up stops waiting for the lookup, which finishes on its own on
   the blocking pool and is thrown away.
-- Name lookups run on a pool of their own, four threads
+- Name lookups run on a pool of their own, up to 32 threads at once
   (`KHORA_LOOKUP_THREADS`), so lookups against a resolver that never answers
   delay only other lookups. On the shared blocking pool, 100 canceled lookups
-  held a later file read for 29.7 s. A lookup canceled before a thread
-  reached it does not run at all. With four lookups waiting on a dead
-  resolver, the next waits for one of them to time out; it can be canceled
-  or reach its deadline while it waits, and is never refused.
+  held a later file read for 29.7 s. The threads are started as lookups need
+  them and stop after ten seconds without work, so a program that resolves
+  no name starts none; measured on Linux, starting all 32 up front would
+  have cost an idle program 32 threads and about 0.5 MB resident. A lookup
+  canceled before a thread reached it does not run at all. With 32 lookups
+  waiting on a dead resolver, the next waits for one of them to time out; it
+  can be canceled or reach its deadline while it waits, on both fiber
+  backends and however many lookups are queued ahead of it, and is never
+  refused. `KHORA_LOOKUP_THREADS` takes a positive integer, at most 1024
+  (a larger one is held to 1024); anything else, `0`, `-1` and `+4`
+  included, leaves 32.
 - A canceled HTTP call closes its connection wherever the cancel lands. One
   that landed just after the connect returned left the socket open, 35 to 47
   per thousand canceled calls on the scheduler backend.
@@ -849,9 +856,21 @@ it will behave differently now.
 - A method call on a value whose type was never imported adds no error of its
   own: ``cannot be the receiver of `#Map::len` `` was printed once per call,
   beside the one error about the unimported name.
+- `CallError::TimedOut(millis)` shows as the case followed by what ran out
+  and what changes it: ``CallError::TimedOut(200): the call took longer than
+  its 200 ms deadline; `HttpClient::within(ms)` or
+  `HttpClient::bounded_within(limit, ms)` sets a different one``. At 30000 it
+  adds that 30000 ms is the default `HttpClient::real()` and
+  `HttpClient::bounded` give. Every other `CallError` case shows as before.
 
 ### Documentation
 
+- `HttpClient::real`, the retrying cookbook page and the error a timed-out
+  call shows each state that `HttpClient::real()` gives a call thirty
+  seconds and that `HttpClient::within(millis)` sets another deadline.
+- Known limitations has a section on name lookups: how many run at once, what
+  a resolver that does not answer costs, `KHORA_LOOKUP_THREADS`, and that an
+  asynchronous resolver is planned with no version promised.
 - Capabilities has a section, "What the permission table is, and what it is
   not": the table limits a program you trust and is not a sandbox for
   untrusted code. Grants are per program, a dependency's own table is not

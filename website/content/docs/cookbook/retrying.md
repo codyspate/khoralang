@@ -65,6 +65,8 @@ pub fn main() {
 
 The row says what retrying costs: `clock` because it waits, `random` because the schedule is jittered. Neither is hidden, and neither is ambient — which is what makes the test below possible.
 
+`HttpClient::real()` gives every call a deadline of thirty seconds, start to finish, and a call that runs out is `CallError::TimedOut(30000)`, which `worth_retrying` above retries. `HttpClient::within(millis)` is the same client with a different deadline: `HttpClient::within(2000)` gives up on each attempt after two seconds.
+
 ## Say what the policy is
 
 `Schedule::backoff(100, 30000)` is the one to reach for: wait 100ms, then 200, 400, 800, capped at thirty seconds, each delay scaled by a random 50–100%.

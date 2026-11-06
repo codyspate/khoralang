@@ -215,6 +215,49 @@ pub fn main() -> Int {{
     }
 }
 
+/// **A timed-out call says which deadline ran out and how to set another.**
+/// `CallError::TimedOut(200)` alone names a number and not what it measured,
+/// and a reader meeting it in a log from a client built with
+/// `HttpClient::real()` has no way to learn that thirty seconds was a default
+/// they never chose, or which call changes it.
+///
+/// The server accepts and never answers, so the 200 ms run out in the read.
+#[test]
+fn a_timed_out_call_names_its_deadline_and_within() {
+    for backend in ["threads", "scheduler"] {
+        let (silent, _closed) = slow_server(None);
+        let exe = build(
+            &format!("http_deadline_shown_{backend}"),
+            &format!(
+                r#"module main;
+import std::core::{{Result, print}};
+import std::net::http::{{Call, CallError, HttpClient}};
+
+pub fn main() -> Int {{
+  with {{ http: HttpClient::within(200) }} {{
+    match http.send(Call::get("http://127.0.0.1:{silent}/")) {{
+      Result::Ok(_) => print("answered"),
+      Result::Err(CallError::TimedOut(millis)) => print("timed out ${{millis}}: ${{CallError::TimedOut(millis).show()}}"),
+      Result::Err(why) => print("failed ${{why.show()}}"),
+    }}
+  }};
+  print("done");
+  0
+}}
+"#
+            ),
+        );
+        let (said, mut child) = heard_until(&exe, backend, "done", Duration::from_secs(30));
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(said.starts_with("timed out 200: "), "`{backend}`: {said:?}");
+        assert!(said.contains("200 ms deadline"), "`{backend}`: the shown text does not name 200 ms: {said:?}");
+        assert!(said.contains("HttpClient::within"), "`{backend}`: the shown text does not name `within`: {said:?}");
+        assert!(!said.contains("default"), "`{backend}`: 200 ms is not the default: {said:?}");
+        assert!(said.ends_with("done\n"), "`{backend}`: {said:?}");
+    }
+}
+
 /// **A refused connection is `Unreachable` with a deadline set, as without
 /// one.** The deadline turns only running out of time into `TimedOut`; a
 /// port with nothing on it fails at once and says where.

@@ -246,11 +246,11 @@ Blocking work — anything that would otherwise stall a worker — goes to this 
 
 How many host-name lookups may run at once.
 
-**Default:** four.
+**Default:** 32.
 
-**Value:** a positive integer. A value that is not an integer is ignored and the default stands.
+**Value:** a positive integer, written as digits only. Anything else, `0`, `-1` and `+4` included, is ignored and the default stands. A number above 1024 is taken as 1024.
 
-`connect_to`, `std::net::tls::connect` and the HTTP client resolve a name on a pool of their own, apart from `KHORA_BLOCKING_THREADS`, so that lookups against a resolver that never answers hold up only other lookups and never a file read or a process wait. A lookup cannot be interrupted once it starts. A canceled caller stops waiting for it at once, but the thread stays busy until the resolver gives up, which takes seconds. A lookup canceled before a thread reaches it does not run. With every thread waiting on a dead resolver, the next lookup waits for one of them to finish, and it can be canceled or reach its deadline while it waits.
+`connect_to`, `std::net::tls::connect` and the HTTP client resolve a name on a pool of their own, apart from `KHORA_BLOCKING_THREADS`, so that lookups against a resolver that never answers hold up only other lookups and never a file read or a process wait. The threads are started as lookups need them and stop after ten seconds without work, so a program that never resolves a name has none, and the number is the most there can be at once. A lookup cannot be interrupted once it starts. A canceled caller stops waiting for it at once, but the thread stays busy until the resolver gives up, which takes seconds. A lookup canceled before a thread reaches it does not run. With every thread waiting on a dead resolver, the next lookup waits for one of them to finish, and its own cancel or deadline ends that wait, however many other lookups are waiting with it.
 
 ### `KHORA_SCHEDULER_REPORT`
 

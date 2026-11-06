@@ -541,7 +541,7 @@ same reason: HTTP header names are case-insensitive and a map is not.
 ### CallError
 
 ```khora
-derive(Show, Eq)
+derive(Eq)
 pub type CallError =
   | BadUrl(String)
   | Unreachable(String)
@@ -1496,6 +1496,10 @@ pub fn real() -> HttpClient
 A client that really connects, holding up to `default_answer_limit`
 and giving each call `default_call_deadline`.
 
+Each call has thirty seconds from start to finish, and a call that runs
+out is `CallError::TimedOut(30000)`. `HttpClient::within(millis)` gives
+a client with a different deadline.
+
 #### bounded
 
 ```khora
@@ -1548,6 +1552,37 @@ pub fn bounded_within(limit: Int, millis: Int) -> HttpClient
 
 A client holding up to `limit` bytes of answer and giving each call
 `millis` milliseconds, as `HttpClient::within` does.
+
+## Trait implementations
+
+### Show for CallError
+
+```khora
+impl Show for CallError
+```
+
+#### show
+
+```khora
+fn show(self) -> String
+```
+
+The case and what it carries, as a derived `Show` writes them, and for
+`TimedOut` a sentence after it saying which deadline ran out and what
+sets another.
+
+**What this prevents: a timeout nobody can trace to a setting.**
+`CallError::TimedOut(30000)` names a number, and a reader whose client
+is `HttpClient::real()` never wrote that number down; nothing in the
+line says it was a default or that `HttpClient::within` changes it.
+
+Written out rather than derived for that one case, so every arm is here
+and a case added later has to say how it reads. The number alone does
+not say whether the caller chose it -- `within(30000)` ends at 30000
+too -- so the text says only what is true for every one of them: that
+30000 ms is the default `real()` and `bounded` give. It names
+`bounded_within` beside `within` because a `bounded` client that
+switched to `within` would lose its answer limit.
 
 ## Functions
 

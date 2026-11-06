@@ -268,6 +268,25 @@ server rather than of the `Router` type, so it does not appear in the generated
 [`std::net::http` pages](/docs/stdlib/api/net/http/); [Serve HTTP
 requests](/docs/cookbook/http-service/) is where it is discussed.
 
+## Name lookups hold a thread each
+
+**A host name is resolved by the operating system's resolver, on a thread
+that waits for it, and at most 32 run at once.** `connect_to`,
+`std::net::tls::connect` and the HTTP client each look a name up this way; an
+IP address needs no lookup. The threads are started only as lookups need them,
+so a program that never resolves a name has none. `KHORA_LOOKUP_THREADS` sets
+the number, up to 1024.
+
+A resolver that does not answer holds its thread until it gives up, which
+takes seconds, and a canceled caller or one past its deadline cannot shorten
+that: the caller stops waiting at once, and the thread does not. With 32
+lookups stuck that way, the next one waits for a thread to come free, and its
+own cancel or deadline ends the wait, however many lookups are waiting ahead
+of it. File reads and process waits run
+on a separate pool and are not held up. An asynchronous resolver, which would
+let a lookup be abandoned without holding a thread, is planned; no version is
+promised for it.
+
 ## Performance against other servers
 
 On the TechEmpower read tests, run against PostgreSQL on one machine with

@@ -92,7 +92,8 @@ fn main() -> () {{
 /// Derived, so the case name is there — which is what a reader of a log needs
 /// to tell `Unreachable` (DNS, a firewall, a service that is down) from
 /// `Denied` (a line in `khora.toml`), the distinction `CallError`'s own doc
-/// comment exists to draw.
+/// comment exists to draw. `CallError`'s is written out, to say more about a
+/// `TimedOut`, and must print every other case exactly as the derive did.
 #[test]
 fn every_std_error_can_say_what_it_is() {
     let out = run(
@@ -118,6 +119,30 @@ fn every_std_error_can_say_what_it_is() {
          IoError::NotFound(data/rates.csv)\n\
          IoError::Denied(/etc/shadow)\n\
          call failed: CallError::Closed(api.example.com)\n"
+    );
+}
+
+/// **A `CallError::TimedOut` at the default deadline says what that number
+/// is, in words true for whoever reads it.** 30000 comes from `real()`, from
+/// `bounded(limit)`, and from a caller who wrote `within(30000)`, and the
+/// value cannot say which. So the line says 30000 ms is the default those
+/// two give, which is true for all three, and names both ways to set
+/// another. Any other number is the caller's own and gets no parenthesis.
+#[test]
+fn a_timeout_at_the_default_deadline_says_so() {
+    let out = run(
+        "errors_timed_out_show",
+        r#"  print(CallError::TimedOut(30000).show());
+  print(CallError::TimedOut(1500).show());"#,
+    );
+
+    assert_eq!(
+        out,
+        "CallError::TimedOut(30000): the call took longer than its 30000 ms deadline \
+         (30000 ms is the default that `HttpClient::real()` and `HttpClient::bounded` give); \
+         `HttpClient::within(ms)` or `HttpClient::bounded_within(limit, ms)` sets a different one\n\
+         CallError::TimedOut(1500): the call took longer than its 1500 ms deadline; \
+         `HttpClient::within(ms)` or `HttpClient::bounded_within(limit, ms)` sets a different one\n"
     );
 }
 
