@@ -842,6 +842,95 @@ fn a_workspace_member_reads_the_roots_shared_lock() {
     );
 }
 
+// --- a dependency making a capability --------------------------------------
+
+/// A package `dep` whose `lib.kh` makes a clock with no row, and an `app` that
+/// depends on it by path. Laid out under `top` as `app/` and `dep/`; with
+/// `workspace`, `top` is a workspace root listing both.
+fn forging_project(top: &Path, workspace: bool) -> (std::path::PathBuf, std::path::PathBuf, String) {
+    let member = if workspace { "workspace = true\n" } else { "" };
+    let write = |path: std::path::PathBuf, text: &str| {
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("a directory");
+        std::fs::write(path, text).expect("writing");
+    };
+    if workspace {
+        write(top.join("khora.toml"), "[workspace]\nmembers = [\"app\", \"dep\"]\n");
+    }
+    write(top.join("dep/khora.toml"), &format!("[package]\nname = \"dep\"\nversion = \"0.1.0\"\n{member}"));
+    let dep = top.join("dep/src/lib.kh");
+    let dep_text = "module dep::lib;\n\nimport std::clock::{Clock};\n\npub fn sneak() -> Int {\n  with { clock: Clock::real() } { clock.unix_millis() }\n}\n";
+    write(dep.clone(), dep_text);
+    write(
+        top.join("app/khora.toml"),
+        &format!("[package]\nname = \"app\"\nversion = \"0.1.0\"\n{member}\n[dependencies]\ndep = {{ path = \"../dep\" }}\n"),
+    );
+    let app = top.join("app/src/main.kh");
+    write(app.clone(), "module app::main;\n\nimport dep::lib::{sneak};\n\npub fn go() -> Int { sneak() }\n");
+    (app, dep, dep_text.to_string())
+}
+
+fn refuses_the_clock(replies: &[Value], dep: &Path) -> bool {
+    replies.iter().any(|r| {
+        r["method"] == "textDocument/publishDiagnostics"
+            && r["params"]["uri"] == url_of(dep)
+            && r["params"]["diagnostics"].as_array().is_some_and(|d| {
+                d.iter().any(|d| d["message"].as_str().is_some_and(|m| m.contains("makes a real `Clock`")))
+            })
+    })
+}
+
+/// **The editor refuses what `khora check` refuses, for a dependency beside
+/// the app.** Opened at the folder holding both, the folder has no manifest of
+/// its own; `app`'s manifest is what says `dep` is a dependency, as it is when
+/// `khora check` runs in `app`.
+#[test]
+fn a_sibling_path_dependency_making_a_clock_is_refused_in_the_editor() {
+    let tmp = tempfile::tempdir().expect("a project");
+    let top = tmp.path().join("project");
+    let (app, dep, dep_text) = forging_project(&top, false);
+    let store = khora_pkg::Store::at(tmp.path().join("store")).expect("store");
+    khora_pkg::resolve(&top.join("app/khora.toml"), &store, false).expect("lock the app");
+    let mut server = khora_lsp::Server::with_store(store);
+    batch(&mut server, &[initialize(&top)]);
+    batch(&mut server, &[did_open(&app, &std::fs::read_to_string(&app).expect("app"))]);
+    let replies = batch(&mut server, &[did_open(&dep, &dep_text)]);
+    assert!(refuses_the_clock(&replies, &dep), "{replies:#?}");
+}
+
+/// The same, with the two packages members of one workspace, opened at its
+/// root: a member another member depends on is a dependency there.
+#[test]
+fn a_workspace_member_making_a_clock_is_refused_in_the_editor() {
+    let tmp = tempfile::tempdir().expect("a workspace");
+    let top = tmp.path().join("project");
+    let (app, dep, dep_text) = forging_project(&top, true);
+    let store = khora_pkg::Store::at(tmp.path().join("store")).expect("store");
+    khora_pkg::resolve(&top.join("app/khora.toml"), &store, false).expect("lock the workspace");
+    let mut server = khora_lsp::Server::with_store(store);
+    batch(&mut server, &[initialize(&top)]);
+    batch(&mut server, &[did_open(&app, &std::fs::read_to_string(&app).expect("app"))]);
+    let replies = batch(&mut server, &[did_open(&dep, &dep_text)]);
+    assert!(refuses_the_clock(&replies, &dep), "{replies:#?}");
+}
+
+/// **And not what it allows**: the package opened on its own is the package
+/// being built, and may make one.
+#[test]
+fn a_package_opened_on_its_own_may_make_a_clock_in_the_editor() {
+    let tmp = tempfile::tempdir().expect("a project");
+    let top = tmp.path().join("project");
+    let (_, dep, dep_text) = forging_project(&top, false);
+    let store = khora_pkg::Store::at(tmp.path().join("store")).expect("store");
+    let mut server = khora_lsp::Server::with_store(store);
+    batch(&mut server, &[initialize(&top.join("dep"))]);
+    let replies = batch(&mut server, &[did_open(&dep, &dep_text)]);
+    assert!(
+        replies.iter().any(|r| r["method"] == "textDocument/publishDiagnostics" && r["params"]["uri"] == url_of(&dep)),
+        "published: {replies:#?}"
+    );
+    assert!(!refuses_the_clock(&replies, &dep), "{replies:#?}");
+}
+
 #[test]
 fn a_bad_lockfile_shows_a_notice_without_losing_other_diagnostics() {
     let (w, store, _) = git_project();

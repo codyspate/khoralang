@@ -147,6 +147,8 @@ pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
     all.extend(crate::unresolved::unresolved_type_errors(db, file));
     all.extend(crate::exports::export_errors(db, file));
     all.extend(crate::imports::foreign_import_errors(db, file));
+    all.extend(crate::forging::forged_capability_errors(db, file));
+    all.extend(crate::forging::internal_module_errors(db, file));
     all.extend(crate::unimplemented::unimplemented_function_errors(db, file));
     all.extend(entry_point_shape_errors(db, file));
     all.extend(unpinned_closure_errors(db, file));

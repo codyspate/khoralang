@@ -14,6 +14,57 @@ it will behave differently now.
 
 ### Breaking
 
+- Only the package being built may make a real capability. In a package that
+  is a dependency of the build, naming `Clock::real`, `SecureRandom::real`,
+  `Random::real`, `Env::real`, `FsRead::real`, `FsWrite::real`,
+  `Process::real`, or `HttpClient::real`, `within`, `bounded` or
+  `bounded_within` is an error at `khora check` and every command that
+  compiles, naming the capability and the `with` row to take instead. A
+  dependency takes the capability through its signature. Any module of the
+  package being built may make one, and so may a dependency's own tests, which
+  run only when that package is the one being tested. Which files are a
+  dependency's is the package resolver's answer, not the `module` line: a
+  dependency named `std`, or named like the package that depends on it, is
+  still a dependency. Only code inside a `test` block is exempt: a helper
+  function the tests call is checked like any other function. The advice
+  names `nonces` as `SecureRandom`'s label, since `random` is `Random`'s.
+  `Random::seeded`, `Log::plain`, `Log::json_using`, `Log::none`, the
+  `Tracer` constructors and `Scope::root` are open to every package.
+- `Log::json(minimum)` requires `with { clock: Clock }` and stamps each line
+  from that clock; it read `Clock::real()` itself. Build it where a clock is
+  in scope, for instance after `clock` in the same row:
+  `with { log: Log::json(Severity::Info) }` becomes
+  `with { clock: Clock::real(), log: Log::json(Severity::Info) }`.
+  `Log::json_using(minimum, clock)` is unchanged.
+- `std::process::shell` and `std::permissions::separator`, the per-target
+  halves of `std::process` and `std::permissions`, may be named only inside
+  `std`. Importing either, or a qualified path into it, is an error in every
+  package, the one being built included, naming the module to use instead
+  (`std::process` with a `Process` capability).
+- `postgres`: the functions that open a connection take its SCRAM nonce
+  source from the caller, and the pool takes its clock and jitter the same
+  way; they made their own. `conn::open`, `open_within`, `open_tls`,
+  `dial_tls`, `db::serve`, `serve_tls` and `connect`, which had no row,
+  require `with { nonces: SecureRandom }`. `pool::open`, `open_with` and
+  `open_tls`, which had no row, require
+  `with { clock: Clock, random: Random, nonces: SecureRandom }`, which the
+  pool's fibers keep for the pool's life, and `pool::close` requires
+  `with { clock: Clock }`. Before:
+
+  ```khora
+  let pool = open(crew, settings, 4);
+  ```
+
+  After:
+
+  ```khora
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } {
+    let pool = open(crew, settings, 4);
+    serve(pool)
+  }
+  ```
+
+  `examples/ledger_service` and the TechEmpower peer do this in `main`.
 - Listening needs a grant under `default = "deny"`. `std::net::socket::listen_on`
   checks `[permissions] listen` before it makes a socket and raises
   `SocketError::Denied("0.0.0.0:<port>")` for a port the manifest does not
@@ -341,6 +392,28 @@ it will behave differently now.
   waits on a failed worker with a bare `!` while it holds a listener it
   meant to detach afterwards waits for that listener for ever. Catch the
   error at the wait, or detach the listener first.
+
+### Security
+
+- A function in a dependency could call `FsRead::real()`, or any other
+  capability's constructor, with no `with` row, and read files, take the time
+  or draw randomness while its signature said it did nothing; under
+  `read = ["**"]` the read succeeded. It is refused at check (see Breaking):
+  every capability a dependency holds was handed to it by a caller. **That is
+  a rule about capability constructors, and a dependency's signature is still
+  not a full account of what it reaches.** Raw sockets and TLS
+  (`std::net::socket`, `std::net::tls`) need no row and are limited only by
+  `[permissions] network` and `listen`, at run time. `extern fn` needs no row
+  either, and under the default `allow` every package may declare one, so a
+  dependency can reach anything through one `extern fn`: use
+  `default = "deny"`, and list the packages you trust under `extern`, to make
+  signatures binding. And `std::net::http`'s `Connection::over` and
+  `Connection::holding` read the real clock for each `Date` header, so the
+  time of day to the second is not guarded.
+- `std::process::shell::run` and `open_pipe` ran a shell from any package with
+  no `Process` row and no `[permissions] process` check, under every
+  `default`. The module is `std`'s own per-target half of `std::process`, and
+  naming it outside `std` is an error (see Breaking).
 
 ### Fixed
 

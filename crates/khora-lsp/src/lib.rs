@@ -606,15 +606,18 @@ impl Server {
                 None
             }
         };
+        let mut theirs: HashSet<PathBuf> = HashSet::new();
         if loaded.is_some() {
-            let resolved = store.and_then(|store| {
-                khora_pkg::compilation(&manifest, &store, khora_pkg::SourceMode::Cached)
-            });
+            let resolved = match &store {
+                Ok(store) => khora_pkg::compilation(&manifest, store, khora_pkg::SourceMode::Cached),
+                Err(why) => Err(anyhow::anyhow!("{why:#}")),
+            };
             match resolved {
                 Ok(compilation) => {
                     self.dependency_roots.extend(compilation.resolution.packages.iter().map(|package| {
                         package.directory.canonicalize().unwrap_or_else(|_| package.directory.clone())
                     }));
+                    theirs.extend(compilation.files.iter().map(|p| p.canonicalize().unwrap_or_else(|_| p.clone())));
                     paths.extend(compilation.files);
                 }
                 Err(why) => {
@@ -634,6 +637,38 @@ impl Server {
                 }
             }
         }
+        // **Every package in the opened folder, resolved as `khora check`
+        // resolves it**, for which files are a dependency's. The folder's own
+        // manifest is one package at most, and often none: a workspace root
+        // lists members, and a folder holding an app beside the path
+        // dependency it uses has no manifest at all. Read from that manifest
+        // alone, every member was its own root, and a member's forged
+        // capability that `khora check` refuses -- because another member
+        // depends on it -- showed nothing in the editor. A file a package in
+        // the folder depends on is a dependency's here, as it is in the
+        // workspace's `khora check`.
+        //
+        // Quietly: the opened folder's manifest is the one whose failure is
+        // worth a notice, and a nested package that does not resolve is
+        // `khora check`'s to report when somebody runs it there. Costs one
+        // cached resolution per package, at startup.
+        if let Ok(store) = &store {
+            for nested in packages_under(root, &paths) {
+                if nested == root.join("khora.toml") {
+                    continue;
+                }
+                let Ok(compilation) =
+                    khora_pkg::compilation(&nested, store, khora_pkg::SourceMode::Cached)
+                else {
+                    continue;
+                };
+                self.dependency_roots.extend(compilation.resolution.packages.iter().map(|package| {
+                    package.directory.canonicalize().unwrap_or_else(|_| package.directory.clone())
+                }));
+                theirs.extend(compilation.files.iter().map(|p| p.canonicalize().unwrap_or_else(|_| p.clone())));
+                paths.extend(compilation.files);
+            }
+        }
         let mut files = Vec::new();
         let mut seen = HashSet::new();
         for path in paths {
@@ -650,7 +685,20 @@ impl Server {
             self.files.insert(path, file);
             files.push(file);
         }
-        SourceRoot::new(&self.db, files);
+        SourceRoot::new(&self.db, files.clone());
+        // Which of them a dependency contributed, so the editor refuses a
+        // dependency's forged capability where `khora check` does and a root
+        // file's not at all. A file opened later is the project's own: one of
+        // a dependency's is never added (see `edit`).
+        let dependencies: Vec<SourceFile> = files
+            .iter()
+            .copied()
+            .filter(|f| {
+                let path = f.path(&self.db);
+                theirs.contains(&path.canonicalize().unwrap_or_else(|_| path.clone()))
+            })
+            .collect();
+        khora_db::DependencyFiles::new(&self.db, dependencies);
         // The groups are read even without a manifest: a broken built-in
         // group file is the toolchain's mistake and every project should hear
         // of it, the way `khora check` refuses to run.
@@ -1378,6 +1426,14 @@ impl Server {
             .map(|(path, open)| SourceFile::new(&copy, path.clone(), open.text(&self.db).to_string()))
             .collect();
         SourceRoot::new(&copy, files.clone());
+        // The same files are a dependency's in the copy as here, so a fix is
+        // verified against the rule this server reports, not against the
+        // imports' guess at which package is the root.
+        if let Some(declared) = khora_db::dependency_files(&self.db) {
+            let theirs: HashSet<&PathBuf> = declared.files(&self.db).iter().map(|f| f.path(&self.db)).collect();
+            let copied = files.iter().copied().filter(|f| theirs.contains(f.path(&copy))).collect();
+            khora_db::DependencyFiles::new(&copy, copied);
+        }
         if files.iter().any(|open| !khora_db::parse(&copy, *open).errors().is_empty()) {
             return None;
         }
@@ -2243,6 +2299,31 @@ fn canonical_with_missing_tail(path: &Path) -> PathBuf {
         | Some(std::path::Component::Prefix(_)) | None => {}
     }
     base
+}
+
+/// The manifest of each package in `root` that owns one of `paths`: the
+/// nearest `khora.toml` above the file, without leaving `root`.
+///
+/// From the files rather than by searching for manifests, so a package is
+/// found exactly when it has a source the editor loaded, and a `target` or
+/// store directory the scan skipped contributes nothing.
+fn packages_under(root: &Path, paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = Vec::new();
+    for path in paths.iter().filter(|p| p.starts_with(root)) {
+        let mut at = path.parent();
+        while let Some(dir) = at.filter(|d| d.starts_with(root)) {
+            let manifest = dir.join("khora.toml");
+            if manifest.is_file() {
+                if !found.contains(&manifest) {
+                    found.push(manifest);
+                }
+                break;
+            }
+            at = dir.parent();
+        }
+    }
+    found.sort();
+    found
 }
 
 /// Every `.kh` file under a directory, skipping what a build skips and the

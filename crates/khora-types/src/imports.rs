@@ -225,7 +225,7 @@ fn dependency_clash_errors(
 
 /// The package a file belongs to: the first segment of its module path, or
 /// its path for a file that declares no module.
-fn package_of(db: &dyn Db, file: SourceFile) -> String {
+pub(crate) fn package_of(db: &dyn Db, file: SourceFile) -> String {
     match khora_hir::item_map(db, file).module.as_ref() {
         Some(module) => module.segments().first().cloned().unwrap_or_default(),
         None => file.path(db).display().to_string(),

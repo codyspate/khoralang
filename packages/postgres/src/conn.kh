@@ -682,6 +682,9 @@ fn error_text(m: Message) -> String {
 /// `Tls::for_host(host)` says: plain to a loopback address, and TLS with
 /// full verification to anything else.
 ///
+/// **`nonces` is where the SCRAM nonce comes from**, so a program passes
+/// `SecureRandom::real()`: `with { nonces: SecureRandom::real() } { .. }`.
+///
 /// **There is no connect timeout.** A host that is unroutable rather than
 /// refusing takes the operating system's own connect timeout, which is
 /// minutes on Linux. The connect is a cancellation point, so a fiber that
@@ -692,7 +695,9 @@ pub fn open(
   user: String,
   database: String,
   secret: String,
-) -> Result<Connection, PgError> {
+) -> Result<Connection, PgError>
+  with { nonces: SecureRandom }
+{
   open_tls(host, port, user, database, secret, Tls::for_host(host), 0)
 }
 
@@ -719,7 +724,9 @@ pub fn open_within(
   database: String,
   secret: String,
   millis: Int,
-) -> Result<Connection, PgError> {
+) -> Result<Connection, PgError>
+  with { nonces: SecureRandom }
+{
   open_tls(host, port, user, database, secret, Tls::for_host(host), millis)
 }
 
@@ -742,7 +749,9 @@ pub fn open_tls(
   secret: String,
   tls: Tls,
   millis: Int,
-) -> Result<Connection, PgError> {
+) -> Result<Connection, PgError>
+  with { nonces: SecureRandom }
+{
   match dial_tls(host, port, user, database, secret, tls, millis) {
     Result::Ok(c) => Result::Ok(c),
     Result::Err(failed) => Result::Err(failed.why),
@@ -776,7 +785,9 @@ pub fn dial_tls(
   secret: String,
   tls: Tls,
   millis: Int,
-) -> Result<Connection, Failed> {
+) -> Result<Connection, Failed>
+  with { nonces: SecureRandom }
+{
   if !start() {
     Result::Err(passing(PgError::Unreachable("the socket layer would not start")))
   } else {
@@ -869,7 +880,7 @@ fn connection(handle: Int, session: Option<TlsConnection>) -> Connection {
 
 /// The startup message, and everything up to the first `ReadyForQuery`. A
 /// connection that fails here is closed by `open_tls`'s guard.
-fn greet(c: Connection, user: String, database: String, secret: String, millis: Int, began: Int) -> Result<Connection, PgError> {
+fn greet(c: Connection, user: String, database: String, secret: String, millis: Int, began: Int) -> Result<Connection, PgError> with { nonces: SecureRandom } {
   if send(c, startup(user, database)) < 0 {
     Result::Err(PgError::Closed("the startup message could not be sent"))
   } else {
@@ -1008,7 +1019,7 @@ fn unanswered(why: PgError, millis: Int, took: Int) -> PgError {
 }
 
 /// Everything between the startup message and the first `ReadyForQuery`.
-fn handshake(c: Connection, secret: String) -> Result<Bool, PgError> {
+fn handshake(c: Connection, secret: String) -> Result<Bool, PgError> with { nonces: SecureRandom } {
   let mut outcome: Result<Bool, PgError> = Result::Ok(true);
   let mut going = true;
   while going {
@@ -1050,21 +1061,21 @@ fn handshake(c: Connection, secret: String) -> Result<Bool, PgError> {
 ///
 /// **A nonce must not repeat across connections or be predictable**, because
 /// the proof is signed over it and a repeated or guessed one makes a recorded
-/// exchange replayable. Eighteen bytes from the operating system's
-/// cryptographic generator.
+/// exchange replayable. Eighteen bytes from whatever `nonces` is: the
+/// operating system's cryptographic generator, when the program passed
+/// `SecureRandom::real()`.
 ///
-/// `SecureRandom::real()` is supplied here rather than taken as a capability,
-/// because `open` has no capability row and adding one to it would change
-/// every caller for a value no caller should be choosing. A nonce the
-/// application could pin is a nonce an application will eventually pin.
-fn nonce_bytes() -> Array<U8> {
+/// **Taken as a capability, so every function that opens a connection says
+/// it draws randomness.** A test can pass a generator of its own; a nonce it
+/// pins is then pinned in plain sight, in the test.
+fn nonce_bytes() -> Array<U8> with { nonces: SecureRandom } {
   let out: Array<U8> = Array::new(18, 0);
-  with { random: SecureRandom::real() } { random.bytes(out) };
+  nonces.bytes(out);
   out
 }
 
 /// Answers whichever authentication the server asked for, if it can.
-fn authenticate(c: Connection, m: Message, secret: String) -> Result<Bool, PgError> {
+fn authenticate(c: Connection, m: Message, secret: String) -> Result<Bool, PgError> with { nonces: SecureRandom } {
   let read = Reader::over(m);
   let method = Reader::i32(read);
   if method == 0 {

@@ -118,6 +118,7 @@ module postgres::pool;
 
 import std::core::{Changed, Fibers, Handoff, List, Option, Region, Result, Shared};
 import std::clock::{Clock};
+import std::crypto::{SecureRandom};
 import std::db::{Db, DbError};
 import std::random::{Random};
 import std::resilience::{Schedule};
@@ -312,13 +313,23 @@ type Tried<A> =
 
 /// Opens a pool of `count` connections that reconnects with
 /// `Reconnect::default()`, secured as `Tls::for_host(settings.host)` says.
-pub fn open(crew: Fibers, settings: Settings, count: Int) -> Pool {
+///
+/// **The pool's fibers use the capabilities this call is given, for the
+/// pool's whole life**: `clock` times the reconnect schedule, `random`
+/// jitters the slow interval, and `nonces` makes each connection's SCRAM
+/// nonce. A program passes the real ones:
+/// `with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { .. }`.
+pub fn open(crew: Fibers, settings: Settings, count: Int) -> Pool
+  with { clock: Clock, random: Random, nonces: SecureRandom }
+{
   open_with(crew, settings, count, Reconnect::default())
 }
 
 /// `open_with`, secured as `Tls::for_host(settings.host)` says: plain to a
 /// loopback address, TLS with full verification to any other host.
-pub fn open_with(crew: Fibers, settings: Settings, count: Int, plan: Reconnect) -> Pool {
+pub fn open_with(crew: Fibers, settings: Settings, count: Int, plan: Reconnect) -> Pool
+  with { clock: Clock, random: Random, nonces: SecureRandom }
+{
   open_tls(crew, settings, Tls::for_host(settings.host), count, plan)
 }
 
@@ -340,7 +351,9 @@ pub fn open_with(crew: Fibers, settings: Settings, count: Int, plan: Reconnect) 
 /// connection is closed by its slot and opened afresh, never lent again.
 ///
 /// Below one connection is one.
-pub fn open_tls(crew: Fibers, settings: Settings, tls: Tls, count: Int, plan: Reconnect) -> Pool {
+pub fn open_tls(crew: Fibers, settings: Settings, tls: Tls, count: Int, plan: Reconnect) -> Pool
+  with { clock: Clock, random: Random, nonces: SecureRandom }
+{
   let wanted = if count < 1 { 1 } else { count };
   // One more than the slots, for the down token: there is never more than
   // one connection per slot and one token, so a send here never waits.
@@ -719,45 +732,45 @@ fn slot(
   token_idle: Shared<Bool>,
   here: Shared<Bool>,
   tally: Shared<Tally>,
-) -> () {
+) -> ()
+  with { clock: Clock, random: Random, nonces: SecureRandom }
+{
   // Room for the one connection this slot owns.
   let home: Handoff<Lendable> = Handoff::bounded(1);
   // **Counted out however this fiber ends**, so a slot stopped by its crew
   // still lets `close` see it has finished.
   let done = Region::open();
   Region::defer(done, finisher(tally));
-  with { clock: Clock::real(), random: Random::real() } {
-    let tries: Tries = { began: clock.monotonic_millis(), attempts: 0, phase: Phase::Reconnecting };
-    let mut going = true;
-    while going {
-      let got = reconnect(settings, tls, plan, idle, token_idle, tally, tries);
-      if is_none(got) {
-        going = false
-      } else {
-        let opened = clock.monotonic_millis();
-        // Taken out of its `Option` by a call, so nothing in this frame
-        // still holds the connection when `lend` gives it away.
-        match lend(offer_of(got, home, here), home, here, idle, tally) {
-          Ended::Closing => going = false,
-          Ended::Served => {
-            moved(tally, idle, token_idle, Phase::Live, Phase::Reconnecting);
-            tries.began = clock.monotonic_millis();
-            tries.attempts = 0;
-            tries.phase = Phase::Reconnecting
-          },
-          Ended::Spoiled => {
-            // **The time it sat open is not time spent reconnecting.** A
-            // connection nobody leased for longer than the fast phase, then
-            // closed by a server restart, would otherwise find the phase
-            // already over and take its slot straight to `down`.
-            tries.began = tries.began + (clock.monotonic_millis() - opened);
-            moved(tally, idle, token_idle, Phase::Live, tries.phase);
-            remember(tally, spoiled());
-            if !back_off(plan, idle, token_idle, tally, tries) { going = false }
-          },
-        }
+  let tries: Tries = { began: clock.monotonic_millis(), attempts: 0, phase: Phase::Reconnecting };
+  let mut going = true;
+  while going {
+    let got = reconnect(settings, tls, plan, idle, token_idle, tally, tries);
+    if is_none(got) {
+      going = false
+    } else {
+      let opened = clock.monotonic_millis();
+      // Taken out of its `Option` by a call, so nothing in this frame
+      // still holds the connection when `lend` gives it away.
+      match lend(offer_of(got, home, here), home, here, idle, tally) {
+        Ended::Closing => going = false,
+        Ended::Served => {
+          moved(tally, idle, token_idle, Phase::Live, Phase::Reconnecting);
+          tries.began = clock.monotonic_millis();
+          tries.attempts = 0;
+          tries.phase = Phase::Reconnecting
+        },
+        Ended::Spoiled => {
+          // **The time it sat open is not time spent reconnecting.** A
+          // connection nobody leased for longer than the fast phase, then
+          // closed by a server restart, would otherwise find the phase
+          // already over and take its slot straight to `down`.
+          tries.began = tries.began + (clock.monotonic_millis() - opened);
+          moved(tally, idle, token_idle, Phase::Live, tries.phase);
+          remember(tally, spoiled());
+          if !back_off(plan, idle, token_idle, tally, tries) { going = false }
+        },
       }
-    };
+    }
   };
 }
 
@@ -875,7 +888,7 @@ fn reconnect(
   tally: Shared<Tally>,
   tries: Tries,
 ) -> Option<Connection>
-  with { clock: Clock, random: Random }
+  with { clock: Clock, random: Random, nonces: SecureRandom }
 {
   let mut outcome: Option<Connection> = Option::None;
   let mut going = true;
@@ -1069,13 +1082,13 @@ fn same(a: Phase, b: Phase) -> Bool {
 /// sees the close within one `slice`. A connection somebody is using is not
 /// closed underneath them: its lease ends when their `with_db` returns.
 ///
-/// What it costs while a lease is out: a turn of the token every `slice`.
-/// What it cannot cut short: a connection attempt already under way. One in
-/// the startup exchange ends within the plan's `handshake` bound, when its
-/// read gives up; one still inside the operating system's TCP `connect` ends
-/// when that does, which for an address that drops packets is the system's
-/// connect timeout -- minutes on Linux.
-pub fn close(pool: Pool) -> () {
+/// What it costs while a lease is out: a turn of the token every `slice`,
+/// slept on `clock`. What it cannot cut short: a connection attempt already
+/// under way. One in the startup exchange ends within the plan's `handshake`
+/// bound, when its read gives up; one still inside the operating system's TCP
+/// `connect` ends when that does, which for an address that drops packets is
+/// the system's connect timeout -- minutes on Linux.
+pub fn close(pool: Pool) -> () with { clock: Clock } {
   let put = Shared::modify(pool.tally, fn t => {
       state: { live: t.live, reconnecting: t.reconnecting, down: t.down, last: t.last,
         closing: true, token: true, running: t.running },
@@ -1086,19 +1099,17 @@ pub fn close(pool: Pool) -> () {
     Handoff::send(pool.idle, Lendable::Down);
     ()
   };
-  with { clock: Clock::real() } {
-    while Shared::get(pool.tally).running > 0 {
-      let held = holding(Handoff::receive(pool.idle));
-      match what(held, pool.token_idle) {
-        // Not reached: `idle` is never closed.
-        Offered::Nothing => clock.sleep(slice()),
-        Offered::Token => {
-          put_token_back(pool, held);
-          clock.sleep(slice())
-        },
-        Offered::Lent => send_home(the_offer(take_out(held))),
-      }
-    };
+  while Shared::get(pool.tally).running > 0 {
+    let held = holding(Handoff::receive(pool.idle));
+    match what(held, pool.token_idle) {
+      // Not reached: `idle` is never closed.
+      Offered::Nothing => clock.sleep(slice()),
+      Offered::Token => {
+        put_token_back(pool, held);
+        clock.sleep(slice())
+      },
+      Offered::Lent => send_home(the_offer(take_out(held))),
+    }
   };
   // **The count is discarded here, and only here.** `Fibers::wait` answers
   // how many children ended with an error, and this is a shutdown: the slots

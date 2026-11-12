@@ -31,6 +31,12 @@ pub fn main() -> Int raises HttpError + ChildFailed {
 `endpoint` is the collector's base URL with no path; `/v1/traces` is appended,
 which is where the specification puts it. The default OTLP/HTTP port is 4318.
 
+**The program supplies the clock, the randomness and the HTTP client.** The
+exporter takes them as arguments and a `with` row rather than making them,
+so its signature says it reads the clock, draws span ids and sends requests.
+Only the package being built may call `Clock::real()` and the rest; a library
+that made its own would be refused at `khora check`.
+
 ## What it does when the collector is down
 
 **Drops spans, and keeps serving.** The queue is `dropping`, so a service whose

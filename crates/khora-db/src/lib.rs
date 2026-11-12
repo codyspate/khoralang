@@ -68,6 +68,35 @@ pub fn source_root(db: &dyn Db) -> Option<SourceRoot> {
     SourceRoot::try_get(db)
 }
 
+/// The files that belong to a package this compilation depends on, as the
+/// package resolver chose them.
+///
+/// **What this prevents: a dependency passing itself off as the package being
+/// built.** Which package a file is in can otherwise only be read from its
+/// `module` line, and a dependency chooses its own: one named `std`, or named
+/// like the package that depends on it, was accepted by the resolver and wrote
+/// `module std::..` or `module app::..` like any other. The resolver is the one
+/// place that knows which directory each file came from, so the driver that
+/// ran it says so here, and a rule about the root package asks this rather than
+/// the module path.
+///
+/// Optional, like [`SourceRoot`]: a driver that never resolved anything -- a
+/// test handing the database its own sources -- does not create it, and
+/// [`dependency_files`] answers `None` so the asker can fall back on what the
+/// imports say.
+#[salsa::input(debug, singleton)]
+pub struct DependencyFiles {
+    /// Every file a dependency's source walk reached. A file the package's own
+    /// walk reaches too is still listed: it is the dependency's.
+    #[returns(deref)]
+    pub files: Vec<SourceFile>,
+}
+
+/// The dependency files the driver declared, if it declared them.
+pub fn dependency_files(db: &dyn Db) -> Option<DependencyFiles> {
+    DependencyFiles::try_get(db)
+}
+
 /// The database interface queries are written against.
 ///
 /// Queries take `&dyn Db` rather than the concrete database so that tests and

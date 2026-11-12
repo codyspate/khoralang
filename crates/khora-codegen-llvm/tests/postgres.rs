@@ -218,6 +218,9 @@ fn program(port: u16, sql: &str, secret: &str) -> String {
 import std::core::{{List, Option, Result, print}};
 import std::db::{{Cell, Row}};
 import postgres::conn::{{Answer, PgError, close, open, run}};
+import std::clock::{{Clock}};
+import std::random::{{Random}};
+import std::crypto::{{SecureRandom}};
 
 fn show_cell(c: Cell) -> String {{
   match c {{
@@ -240,6 +243,10 @@ fn show_row(cells: List<Cell>) -> String {{
 }}
 
 fn main() -> Int {{
+  with {{ clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() }} {{ pooled_main() }}
+}}
+
+fn pooled_main() -> Int with {{ clock: Clock, random: Random, nonces: SecureRandom }} {{
   match open(\"127.0.0.1\", {port}, \"bob\", \"shop\", \"{secret}\") {{
     Result::Err(why) => {{
       match why {{
@@ -412,6 +419,9 @@ fn against_a_real_server() {
 import std::core::{List, Option, Result, print};
 import std::db::{Cell, Row};
 import postgres::conn::{Answer, PgError, close, open, run};
+import std::clock::{Clock};
+import std::random::{Random};
+import std::crypto::{SecureRandom};
 
 fn show_cell(c: Cell) -> String {
   match c {
@@ -434,6 +444,10 @@ fn show_row(cells: List<Cell>) -> String {
 }
 
 fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   match open(\"127.0.0.1\", 5433, \"khora\", \"khora\", \"khora\") {
     Result::Err(why) => {
       match why {
@@ -526,6 +540,9 @@ fn bound_parameters_against_a_real_server() {
 import std::core::{List, Option, Result, print};
 import std::db::{Cell, Row};
 import postgres::conn::{Answer, Connection, PgError, ask, close, open};
+import std::clock::{Clock};
+import std::random::{Random};
+import std::crypto::{SecureRandom};
 
 fn show_cell(c: Cell) -> String {
   match c {
@@ -569,6 +586,10 @@ fn say(c: Connection, sql: String, values: List<Cell>) -> () {
 }
 
 fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   match open(\"127.0.0.1\", 5433, \"khora\", \"khora\", \"khora\") {
     Result::Err(_) => 1,
     Result::Ok(c) => {
@@ -642,6 +663,9 @@ fn the_db_capability_against_a_real_server() {
 import std::core::{Channel, Fiber, Fibers, List, Option, Result, print};
 import std::db::{Cell, Db, DbError, Row, transaction};
 import postgres::db::{Request, Settings, over, serve};
+import std::clock::{Clock};
+import std::random::{Random};
+import std::crypto::{SecureRandom};
 
 fn one(c: Cell) -> List<Cell> { List::Cons(c, List::Nil) }
 
@@ -729,6 +753,10 @@ fn work(requests: Channel<Request>) -> () {
 }
 
 fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   let settings: Settings = {
     host: \"127.0.0.1\",
     port: 5433,
@@ -780,6 +808,9 @@ import std::core::{Channel, Fibers, List, Result, print};
 import std::db::{Cell, Db, DbError, Row};
 import postgres::db::{Settings};
 import postgres::pool::{Pool, close, open, with_db, idle_count};
+import std::clock::{Clock};
+import std::random::{Random};
+import std::crypto::{SecureRandom};
 
 extern fn khora_sleep(millis: Int) -> ();
 extern fn khora_monotonic_millis() -> Int;
@@ -842,6 +873,10 @@ fn catch_bad(pool: Pool) -> () {
 }
 
 fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   let settings: Settings = {
     host: \"127.0.0.1\",
     port: 5433,
@@ -891,6 +926,9 @@ import std::core::{Fiber, Fibers, List, Option, Result, Show, print};
 import std::db::{Cell, Db, DbError, Row, transaction};
 import postgres::db::{Settings};
 import postgres::pool::{Pool, close as close_pool, open as open_pool, with_db};
+import std::clock::{Clock};
+import std::random::{Random};
+import std::crypto::{SecureRandom};
 
 extern fn khora_cancel();
 
@@ -985,6 +1023,10 @@ fn schema(pool: Pool) -> () {
 }
 
 fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   let crew = Fibers::open();
   let pool = open_pool(crew, settings(), 2);
   schema(pool);
@@ -1109,6 +1151,9 @@ import std::core::{{Channel, Fiber, Fibers, List, Option, Result, print}};
 import std::db::{{Db, DbError, Row}};
 import postgres::db::{{Settings}};
 import postgres::pool::{{Pool, close, open, with_db, idle_count}};
+import std::clock::{{Clock}};
+import std::random::{{Random}};
+import std::crypto::{{SecureRandom}};
 
 extern fn khora_sleep(millis: Int) -> ();
 
@@ -1149,6 +1194,10 @@ fn hold(pool: Pool, holding: Channel<Int>, go: Channel<Int>) -> () {{
 }}
 
 fn main() -> Int {{
+  with {{ clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() }} {{ pooled_main() }}
+}}
+
+fn pooled_main() -> Int with {{ clock: Clock, random: Random, nonces: SecureRandom }} {{
   let settings: Settings = {settings};
   let crew = Fibers::open();
   let pool = open(crew, settings, 1);
@@ -1261,6 +1310,9 @@ import std::core::{{Channel, Fiber, Fibers, Option, Result, print}};
 import std::db::{{Db}};
 import postgres::db::{{Settings}};
 import postgres::pool::{{Pool, close, open, with_db, idle_count}};
+import std::clock::{{Clock}};
+import std::random::{{Random}};
+import std::crypto::{{SecureRandom}};
 
 extern fn khora_sleep(millis: Int) -> ();
 
@@ -1390,6 +1442,10 @@ fn shared_out(pool: Pool) -> () {{
 }}
 
 fn main() -> Int {{
+  with {{ clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() }} {{ pooled_main() }}
+}}
+
+fn pooled_main() -> Int with {{ clock: Clock, random: Random, nonces: SecureRandom }} {{
   let settings: Settings = {quiet};
   let crew = Fibers::open();
   let pool = open(crew, settings, 2);
@@ -1440,6 +1496,9 @@ import std::core::{{Channel, Fiber, Fibers, Option, print}};
 import std::db::{{Db}};
 import postgres::db::{{Settings}};
 import postgres::pool::{{Pool, close, open, idle_count, with_db}};
+import std::clock::{{Clock}};
+import std::random::{{Random}};
+import std::crypto::{{SecureRandom}};
 
 extern fn khora_sleep(millis: Int) -> ();
 
@@ -1465,6 +1524,10 @@ fn hold(pool: Pool, holding: Channel<Int>, go: Channel<Int>) -> () {{
 }}
 
 fn main() -> Int {{
+  with {{ clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() }} {{ pooled_main() }}
+}}
+
+fn pooled_main() -> Int with {{ clock: Clock, random: Random, nonces: SecureRandom }} {{
   let settings: Settings = {quiet};
   let a = open(Fibers::open(), settings, 1);
   print(\"before: \" + Int::to_string(settled(a, 1)));
@@ -1712,6 +1775,9 @@ import std::core::{{Fibers, List, Result, print}};
 import std::db::{{Cell, Db, DbError, Row}};
 import postgres::db::{{Settings}};
 import postgres::pool::{{Pool, Reconnect, close, open_with, with_db}};
+import std::clock::{{Clock}};
+import std::random::{{Random}};
+import std::crypto::{{SecureRandom}};
 
 extern fn khora_net_set_timeout(handle: I32, millis: Int) -> I32;
 extern fn khora_sleep(millis: Int) -> ();
@@ -1741,6 +1807,10 @@ fn ask(pool: Pool, n: Int) -> () {{
 }}
 
 fn main() -> Int {{
+  with {{ clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() }} {{ pooled_main() }}
+}}
+
+fn pooled_main() -> Int with {{ clock: Clock, random: Random, nonces: SecureRandom }} {{
   let mut fd = 3;
   while fd < 4096 {{
     khora_net_set_timeout(I32::of(fd), {DEADLINE_MS});
@@ -1932,6 +2002,9 @@ import std::core::{Fibers, List, Result, print};
 import std::db::{Cell, Db, DbError, Row};
 import postgres::db::{Settings};
 import postgres::pool::{Pool, close, open, with_db};
+import std::clock::{Clock};
+import std::random::{Random};
+import std::crypto::{SecureRandom};
 
 fn said(r: Result<Result<List<Row>, DbError>, DbError>) -> String {
   match r {
@@ -1960,6 +2033,10 @@ fn big(n: Int) -> String {
 }
 
 fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   let settings: Settings = {
     host: \"127.0.0.1\", port: PORT, user: \"khora\", database: \"khora\", secret: \"\",
   };
@@ -2189,12 +2266,19 @@ import std::db::{{Db, DbError, transaction}};
 import std::net::socket::{{start, connect_to, receive, transmit, shut}};
 import postgres::db::{{Settings}};
 import postgres::pool::{{Pool, close, open, with_db}};
+import std::clock::{{Clock}};
+import std::random::{{Random}};
+import std::crypto::{{SecureRandom}};
 
 fn empty() -> Result<Int, DbError> with {{ db: Db }} {{
   transaction(fn () => Result::Ok(1))
 }}
 
 fn main() -> Int {{
+  with {{ clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() }} {{ pooled_main() }}
+}}
+
+fn pooled_main() -> Int with {{ clock: Clock, random: Random, nonces: SecureRandom }} {{
   let settings: Settings = {{ host: \"127.0.0.1\", port: {port}, user: \"khora\", database: \"khora\", secret: \"\" }};
   if start() {{}} else {{ print(\"no sockets\") }};
   let crew = Fibers::open();
@@ -2235,6 +2319,9 @@ import std::core::{Fiber, Fibers, List, Result, print};
 import std::db::{Cell, Db, DbError, Row, transaction};
 import postgres::db::{Settings};
 import postgres::pool::{Pool, close, open, with_db};
+import std::clock::{Clock};
+import std::random::{Random};
+import std::crypto::{SecureRandom};
 
 extern fn khora_sleep(millis: Int) -> ();
 
@@ -2291,6 +2378,10 @@ fn counted() -> Int with { db: Db } {
 }
 
 fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   let settings: Settings = { host: "127.0.0.1", port: 5433, user: "khora", database: "khora", secret: "khora" };
   let crew = Fibers::open();
   let pool = open(crew, settings, 1);
@@ -2387,6 +2478,9 @@ import std::core::{{Fibers, List, Result, print}};
 import std::db::{{Db, DbError}};
 import postgres::db::{{Settings}};
 import postgres::pool::{{close, open, with_db}};
+import std::clock::{{Clock}};
+import std::random::{{Random}};
+import std::crypto::{{SecureRandom}};
 
 fn said(answer: Result<(), DbError>) -> String {{
   match answer {{
@@ -2405,6 +2499,10 @@ fn stray() -> () with {{ db: Db }} {{
 }}
 
 fn main() -> Int {{
+  with {{ clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() }} {{ pooled_main() }}
+}}
+
+fn pooled_main() -> Int with {{ clock: Clock, random: Random, nonces: SecureRandom }} {{
   let settings: Settings = {REAL};
   let crew = Fibers::open();
   let pool = open(crew, settings, 1);
@@ -2818,6 +2916,9 @@ import std::db::{Cell, Db, DbError, Row};
 import std::resilience::{Schedule};
 import postgres::db::{Settings};
 import postgres::pool::{Health, Pool, Reconnect, close, health, open, open_with, with_db, idle_count};
+import std::clock::{Clock};
+import std::random::{Random};
+import std::crypto::{SecureRandom};
 
 extern fn khora_sleep(millis: Int) -> ();
 extern fn khora_monotonic_millis() -> Int;
@@ -3036,6 +3137,10 @@ fn report(point: String, lost: Int, pool: Pool) -> () {
 }
 
 fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   let settings: Settings = SETTINGS;
   let plan: Reconnect = { fast: Schedule::UpTo(Schedule::backoff(10, 60), 2000), slow: Option::Some(100), handshake: 10000 };
   let pool = open_with(Fibers::open(), settings, 1, plan);
@@ -3088,6 +3193,10 @@ fn main() -> Int {
 #[test]
 fn an_idle_connection_closed_by_the_server_is_retried_on_the_fast_phase() {
     let body = r#"fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   let settings: Settings = SETTINGS;
   let plan: Reconnect = {
     fast: Schedule::UpTo(Schedule::backoff(50, 5000), 2000), slow: Option::Some(30000), handshake: 10000,
@@ -3148,6 +3257,10 @@ fn a_connection_that_fails_its_first_check_is_backed_off() {
 }
 
 fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   let settings: Settings = SETTINGS;
   let pool = open(Fibers::open(), settings, 1);
   print("start: " + until(pool, 1, 0, 0, 5000));
@@ -3222,6 +3335,10 @@ fn a_half_arrived_error_fails_the_check() {
 }
 
 fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   let settings: Settings = SETTINGS;
   let pool = open(Fibers::open(), settings, 2);
   print("start: " + until(pool, 2, 0, 0, 5000));
@@ -3269,6 +3386,10 @@ fn a_caller_outlasts_any_number_of_failed_checks() {
 }
 
 fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   let settings: Settings = SETTINGS;
   let pool = open(Fibers::open(), settings, 1);
   print("start: " + until(pool, 1, 0, 0, 5000));
@@ -3353,6 +3474,10 @@ fn report(how: String, hung: Int) -> () {
 }
 
 fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   let settings: Settings = SETTINGS;
   let plan: Reconnect = { fast: Schedule::UpTo(Schedule::backoff(10, 20), 60), slow: Option::None, handshake: 10000 };
   let pool = open_with(Fibers::open(), settings, 1, plan);
@@ -3412,6 +3537,10 @@ fn an_idle_connection_that_was_sent_a_notification_is_lent() {
 }
 
 fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   let settings: Settings = SETTINGS;
   let pool = open(Fibers::open(), settings, 2);
   print("start: " + until(pool, 2, 0, 0, 5000));
@@ -3455,6 +3584,10 @@ fn main() -> Int {
 #[test]
 fn a_connection_reset_while_idle_is_not_lent() {
     let body = r#"fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   let settings: Settings = SETTINGS;
   let pool = open(Fibers::open(), settings, 2);
   print("start: " + until(pool, 2, 0, 0, 5000));
@@ -3506,6 +3639,10 @@ fn a_server_that_never_answers_the_handshake_is_given_up_on() {
         }
     });
     let body = r#"fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   let settings: Settings = SETTINGS;
   let plan: Reconnect = {
     fast: Schedule::UpTo(Schedule::backoff(20, 40), 1000), slow: Option::Some(60000), handshake: 300,
@@ -3560,6 +3697,10 @@ fn a_server_that_never_answers_the_handshake_is_given_up_on() {
 #[test]
 fn a_pool_of_two_that_loses_one_answers_every_caller() {
     let body = "fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   let settings: Settings = SETTINGS;
   let pool = open(Fibers::open(), settings, 2);
   print(\"start: \" + until(pool, 2, 0, 0, 5000));
@@ -3610,6 +3751,10 @@ fn a_pool_that_cannot_reconnect_fails_its_waiters_with_the_reason() {
 }
 
 fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   let settings: Settings = SETTINGS;
   let plan: Reconnect = { fast: Schedule::UpTo(Schedule::backoff(20, 100), 500), slow: Option::None, handshake: 10000 };
   let pool = open_with(Fibers::open(), settings, 1, plan);
@@ -3665,6 +3810,10 @@ fn main() -> Int {
 #[test]
 fn reconnect_attempts_back_off_up_to_the_cap() {
     let body = "fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   let settings: Settings = SETTINGS;
   let plan: Reconnect = { fast: Schedule::UpTo(Schedule::backoff(40, 320), 20000), slow: Option::None, handshake: 10000 };
   let pool = open_with(Fibers::open(), settings, 1, plan);
@@ -3716,6 +3865,10 @@ fn reconnect_attempts_back_off_up_to_the_cap() {
 #[test]
 fn close_during_a_reconnect_wait_returns_promptly() {
     let body = "fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   let settings: Settings = SETTINGS;
   let plan: Reconnect = { fast: Schedule::UpTo(Schedule::backoff(3000, 3000), 60000), slow: Option::Some(30000), handshake: 10000 };
   let pool = open_with(Fibers::open(), settings, 1, plan);
@@ -3766,6 +3919,10 @@ fn canceled_borrowers_never_lose_a_slot_while_reconnecting() {
 }
 
 fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   let settings: Settings = SETTINGS;
   let plan: Reconnect = { fast: Schedule::UpTo(Schedule::backoff(5, 50), 10000), slow: Option::Some(200), handshake: 10000 };
   let pool = open_with(Fibers::open(), settings, 2, plan);
@@ -3813,6 +3970,10 @@ fn main() -> Int {
 #[test]
 fn a_pool_shrunk_to_nothing_grows_back_when_the_server_returns() {
     let body = "fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   let settings: Settings = SETTINGS;
   let plan: Reconnect = { fast: Schedule::UpTo(Schedule::backoff(20, 100), 300), slow: Option::Some(500), handshake: 10000 };
   let pool = open_with(Fibers::open(), settings, 2, plan);
@@ -3857,6 +4018,9 @@ import std::core::{Fiber, Fibers, Result, print};
 import std::db::{Db, DbError, transaction};
 import postgres::db::{Settings};
 import postgres::pool::{Pool, close, open, with_db};
+import std::clock::{Clock};
+import std::random::{Random};
+import std::crypto::{SecureRandom};
 
 extern fn khora_sleep(millis: Int) -> ();
 
@@ -3873,6 +4037,10 @@ fn empty() -> Result<Int, DbError> with { db: Db } {
 }
 
 fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   let settings: Settings = { host: \"127.0.0.1\", port: PORT, user: \"khora\", database: \"khora\", secret: \"\" };
   let pool = open(Fibers::open(), settings, 1);
   let f = Fiber::spawn(fn () => { let _ = with_db(pool, spinning); () });
@@ -3945,6 +4113,10 @@ fn a_pool_rides_out_a_real_server_restart() {
 }
 
 fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   let settings: Settings = SETTINGS;
   let pool = open(Fibers::open(), settings, 4);
   print(\"start: \" + until(pool, 4, 0, 0, 10000));
@@ -4048,6 +4220,9 @@ import std::core::{Channel, Fiber, Fibers, List, Option, Result, Shared, Show, p
 import std::db::{Cell, Db, DbError, Row, transaction};
 import postgres::db::{Settings};
 import postgres::pool::{Pool, close as close_pool, open as open_pool, with_db};
+import std::clock::{Clock};
+import std::random::{Random};
+import std::crypto::{SecureRandom};
 
 fn settings() -> Settings {
   { host: "127.0.0.1", port: 5433, user: "khora", database: "khora", secret: "khora" }
@@ -4212,6 +4387,10 @@ fn two_connections(pool: Pool) -> () {
 }
 
 fn main() -> () {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { nested() }
+}
+
+fn nested() -> () with { clock: Clock, random: Random, nonces: SecureRandom } {
   let crew = Fibers::open();
   let pool = open_pool(crew, settings(), 2);
   run(pool, "inner Ok, outer Ok", fn () => inner_ok(pool));
@@ -4275,6 +4454,9 @@ import std::core::{Fiber, Fibers, List, Result, Shared, Show, print};
 import std::db::{Cell, Db, DbError, Row, transaction};
 import postgres::db::{Settings};
 import postgres::pool::{Pool, close, open, with_db};
+import std::clock::{Clock};
+import std::random::{Random};
+import std::crypto::{SecureRandom};
 
 extern fn khora_monotonic_millis() -> Int;
 extern fn khora_sleep(millis: Int) -> ();
@@ -4355,6 +4537,10 @@ fn one_number(sql: String) -> Int with { db: Db } {
 }
 
 fn main() -> () {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { storm() }
+}
+
+fn storm() -> () with { clock: Clock, random: Random, nonces: SecureRandom } {
   let crew = Fibers::open();
   let pool = open(crew, settings(), 1);
   let _ = with_db(pool, fresh);
@@ -4476,6 +4662,10 @@ fn fanout() -> Int with { db: Db } {
 }
 
 fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   let settings: Settings = SETTINGS;
   let pool = open(Fibers::open(), settings, 1);
   let _ = with_db(pool, fanout);
@@ -4563,6 +4753,9 @@ import std::core::{Fibers};
 import std::db::{Cell, Db, DbError, Row, transaction};
 import postgres::db::{Settings};
 import postgres::pool::{Pool, close as close_pool, open as open_pool, with_db};
+import std::clock::{Clock};
+import std::random::{Random};
+import std::crypto::{SecureRandom};
 
 fn settings() -> Settings {
   { host: "127.0.0.1", port: 5433, user: "khora", database: "khora", secret: "khora" }
@@ -4761,12 +4954,14 @@ fn case_c(pool: Pool) -> () {
 }
 
 fn main() -> () {
-  let crew = Fibers::open();
-  let pool = open_pool(crew, settings(), 1);
-  case_a(pool);
-  case_b(pool);
-  case_c(pool);
-  close_pool(pool);
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } {
+    let crew = Fibers::open();
+    let pool = open_pool(crew, settings(), 1);
+    case_a(pool);
+    case_b(pool);
+    case_c(pool);
+    close_pool(pool);
+  }
 }
 "##;
 
@@ -5059,6 +5254,9 @@ const TWO_FIBERS_OVER_ONE_CONNECTION: &str = r##"module demo::main;
 import std::core::{Channel, Fiber, Iterator, List, Option, Result, Shared, Step, print};
 import std::db::{Cell, Db, DbError, Row, transaction};
 import postgres::db::{Request, Settings, over, serve};
+import std::clock::{Clock};
+import std::random::{Random};
+import std::crypto::{SecureRandom};
 
 fn settings() -> Settings {
   { host: "127.0.0.1", port: 5433, user: "khora", database: "khora", secret: "khora" }
@@ -5246,7 +5444,7 @@ fn case_c(requests: Channel<Request>) -> () {
 
 fn main() -> () {
   let requests: Channel<Request> = Channel::bounded(8);
-  let server = Fiber::spawn(fn () => serve(settings(), requests));
+  let server = with { nonces: SecureRandom::real() } { Fiber::spawn(fn () => serve(settings(), requests)) };
   case_a(requests);
   case_b(requests);
   case_c(requests);
@@ -5374,6 +5572,9 @@ import std::db::{{Cell, Db, DbError, Row}};
 import std::net::socket::{{start, connect_to, receive, transmit, shut}};
 import postgres::db::{{Settings}};
 import postgres::pool::{{close, open, with_db}};
+import std::clock::{{Clock}};
+import std::random::{{Random}};
+import std::crypto::{{SecureRandom}};
 
 fn sets(from: Int, count: Int) -> List<List<Cell>> {{
   let mut out: List<List<Cell>> = List::Nil;
@@ -5410,6 +5611,10 @@ fn after() -> String with {{ db: Db }} {{
 }}
 
 fn main() -> Int {{
+  with {{ clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() }} {{ pooled_main() }}
+}}
+
+fn pooled_main() -> Int with {{ clock: Clock, random: Random, nonces: SecureRandom }} {{
   let settings: Settings = {{ host: \"127.0.0.1\", port: {port}, user: \"khora\", database: \"khora\", secret: \"\" }};
   if start() {{}} else {{ print(\"no sockets\") }};
   let crew = Fibers::open();
@@ -5490,6 +5695,9 @@ import std::core::{Fibers, List, Result, String, print};
 import std::db::{Cell, Db, DbError, Row, transaction};
 import postgres::db::{Settings};
 import postgres::pool::{close, open, with_db};
+import std::clock::{Clock};
+import std::random::{Random};
+import std::crypto::{SecureRandom};
 
 fn sets(values: List<Int>) -> List<List<Cell>> {
   List::map(values, fn n => List::Cons(Cell::Number(n), List::Nil))
@@ -5542,6 +5750,10 @@ fn batches() -> () with { db: Db } {
 }
 
 fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   let settings: Settings = { host: "127.0.0.1", port: 5433, user: "khora", database: "khora", secret: "khora" };
   let crew = Fibers::open();
   let pool = open(crew, settings, 1);
@@ -5618,6 +5830,9 @@ const TLS_ONE: &str = r#"module demo::main;
 import std::core::{List, Option, Result, print};
 import std::db::{Cell, Row};
 import postgres::conn::{Answer, PgError, Tls, close, open_tls, run};
+import std::clock::{Clock};
+import std::random::{Random};
+import std::crypto::{SecureRandom};
 
 const authority = CA_PEM;
 
@@ -5641,6 +5856,10 @@ fn failed(why: PgError) -> String {
 }
 
 fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   match open_tls(HOST, PORT, "khora", "khora", "khora", TLS_EXPR, 10000) {
     Result::Err(why) => { print(failed(why)); 1 },
     Result::Ok(c) => {
@@ -5810,10 +6029,17 @@ import std::db::{Db, DbError};
 import postgres::db::{Settings};
 import postgres::pool::{Reconnect, close, open_tls, with_db};
 import postgres::conn::{Tls};
+import std::clock::{Clock};
+import std::random::{Random};
+import std::crypto::{SecureRandom};
 
 extern fn khora_monotonic_millis() -> Int;
 
 fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   let settings: Settings = { host: "127.0.0.1", port: PORT, user: "khora", database: "khora", secret: "khora" };
   let pool = open_tls(Fibers::open(), settings, Tls::Verify(""), 1, Reconnect::default());
   let began = khora_monotonic_millis();
@@ -5881,6 +6107,9 @@ import std::db::{Cell, Db, DbError, Row};
 import postgres::conn::{Answer, Tls, close as hang_up, open_tls as dial, run};
 import postgres::db::{Settings};
 import postgres::pool::{Pool, Reconnect, close, idle_count, open_tls, with_db};
+import std::clock::{Clock};
+import std::random::{Random};
+import std::crypto::{SecureRandom};
 
 extern fn khora_sleep(millis: Int) -> ();
 extern fn khora_monotonic_millis() -> Int;
@@ -5910,7 +6139,7 @@ fn worker(pool: Pool, seen: Shared<List<Int>>) -> () {
 
 /// How many client backends the server has for `khora`, asked on a
 /// connection of its own: 1 once every pooled session has been closed.
-fn backends() -> Int {
+fn backends() -> Int with { nonces: SecureRandom } {
   match dial("localhost", PORT, "khora", "khora", "khora", Tls::Verify(authority), 10000) {
     Result::Err(_) => 0 - 1,
     Result::Ok(c) => {
@@ -5928,6 +6157,10 @@ fn backends() -> Int {
 }
 
 fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   let settings: Settings = { host: "localhost", port: PORT, user: "khora", database: "khora", secret: "khora" };
   let crew = Fibers::open();
   let pool = open_tls(crew, settings, Tls::Verify(authority), 4, Reconnect::default());
@@ -6024,12 +6257,15 @@ const TLS_CANCEL: &str = r#"module demo::main;
 import std::core::{Array, Fiber, Result, print};
 import std::net::socket::{connect_to, receive, shut, start};
 import postgres::conn::{PgError, Tls, close, open_tls};
+import std::clock::{Clock};
+import std::random::{Random};
+import std::crypto::{SecureRandom};
 
 extern fn khora_monotonic_millis() -> Int;
 
 const authority = CA_PEM;
 
-fn dial() -> () {
+fn dial() -> () with { nonces: SecureRandom } {
   match open_tls("localhost", SERVER, "khora", "khora", "khora", Tls::Verify(authority), 0) {
     Result::Ok(c) => { print("connected, which is wrong"); close(c) },
     Result::Err(_) => (),
@@ -6037,6 +6273,10 @@ fn dial() -> () {
 }
 
 fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   let _ = start();
   let line = connect_to("127.0.0.1", LINE)! catch { _ => -1 };
   if line < 0 { print("no line to the test"); 1 } else {
@@ -6092,17 +6332,24 @@ const TLS_IDLE_NOTICE: &str = r#"module demo::main;
 import std::core::{List, Result, print};
 import std::db::{Cell, Row};
 import postgres::conn::{Answer, Connection, PgError, Tls, close, open_tls, run, still_open};
+import std::clock::{Clock};
+import std::random::{Random};
+import std::crypto::{SecureRandom};
 
 extern fn khora_sleep(millis: Int) -> ();
 extern fn khora_monotonic_millis() -> Int;
 
 const authority = CA_PEM;
 
-fn connect() -> Result<Connection, PgError> {
+fn connect() -> Result<Connection, PgError> with { nonces: SecureRandom } {
   open_tls("localhost", PORT, "khora", "khora", "khora", Tls::Verify(authority), 10000)
 }
 
 fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   match connect() {
     Result::Err(_) => { print("no listener"); 1 },
     Result::Ok(listener) => match connect() {
@@ -6164,8 +6411,11 @@ fn an_idle_tls_connection_with_a_notification_waiting_is_still_open() {
 const DENIED_DIALS: &str = r#"module demo::main;
 import std::core::{Result, print};
 import postgres::conn::{Failed, PgError, Tls, dial_tls};
+import std::clock::{Clock};
+import std::random::{Random};
+import std::crypto::{SecureRandom};
 
-fn said(host: String, port: Int) -> () {
+fn said(host: String, port: Int) -> () with { nonces: SecureRandom } {
   match dial_tls(host, port, "u", "d", "s", Tls::Off, 2000) {
     Result::Ok(_) => print("connected"),
     Result::Err(f) => match f.why {
@@ -6176,6 +6426,10 @@ fn said(host: String, port: Int) -> () {
 }
 
 pub fn main() -> Int {
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } { pooled_main() }
+}
+
+fn pooled_main() -> Int with { clock: Clock, random: Random, nonces: SecureRandom } {
   said("::1", 5432);
   said("[::1]", 5432);
   said("db.example.com", 6543);

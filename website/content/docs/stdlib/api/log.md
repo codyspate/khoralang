@@ -274,16 +274,30 @@ released at the call.
 #### json
 
 ```khora
-pub fn json(minimum: Severity) -> Log
+pub fn json(minimum: Severity) -> Log with { clock: Clock }
 ```
 
 A logger that writes one JSON object per line to standard error, at
-`minimum` and above.
+`minimum` and above, stamped from the clock the caller holds.
 
-Stamped from the real clock. `Log::json_using` takes one instead, which is
+**The clock is asked for here**, because every line carries the time:
+a function that logs through this reads the wall clock, and its signature
+says so. `Log::json_using` takes the clock as a value instead, which is
 what a test wants: a fixed clock makes the output byte-for-byte
 predictable, and a log line with a real timestamp in it cannot be
 compared against anything.
+
+```khora
+import std::clock::{Clock};
+import std::log::{Log, Severity, info};
+
+pub fn main() -> Int {
+  with { clock: Clock::real(), log: Log::json(Severity::Info) } {
+    info("started")
+  };
+  0
+}
+```
 
 #### json_using
 

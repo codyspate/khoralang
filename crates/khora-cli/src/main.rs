@@ -737,7 +737,7 @@ fn write_pass(changed: &[khora_lint::fixing::Changed]) -> std::result::Result<()
 /// verified as a set: a fix in one file can depend on one in another.
 fn fix_all(paths: &[PathBuf]) -> Result<()> {
     const PASSES: usize = 8;
-    let files = check_files(paths)?;
+    let (files, dependencies) = check_files(paths)?;
     let levels = lint_levels(paths.first().map(PathBuf::as_path))?;
     let mut fixed: Vec<(PathBuf, usize)> = Vec::new();
     let mut refused: Vec<khora_lint::fixing::Refused> = Vec::new();
@@ -747,7 +747,7 @@ fn fix_all(paths: &[PathBuf]) -> Result<()> {
         for path in &files {
             inputs.push(SourceFile::new(&db, path.clone(), read(path)?));
         }
-        SourceRoot::new(&db, inputs.clone());
+        dependencies.root(&db, inputs.clone());
         let unparsed: Vec<String> = inputs
             .iter()
             .filter(|file| !khora_db::parse(&db, **file).errors().is_empty())
@@ -936,8 +936,8 @@ fn over_members(
 /// The files `khora check` compiles: the sources, and the programs in
 /// `src/bin`. One function, so `--fix` rewrites exactly the files the check
 /// that follows it reads.
-fn check_files(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
-    let mut files = collect_sources(paths)?;
+fn check_files(paths: &[PathBuf]) -> Result<(Vec<PathBuf>, Dependencies)> {
+    let (mut files, dependencies) = collect_program(paths)?;
 
     // **And the programs in `src/bin`, which the walk leaves out.**
     //
@@ -964,13 +964,13 @@ fn check_files(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     if files.is_empty() {
         anyhow::bail!("no `.kh` files found");
     }
-    Ok(files)
+    Ok((files, dependencies))
 }
 
 fn check_one(paths: &[PathBuf]) -> Result<bool> {
     report_manifest_warnings(paths.first().map(PathBuf::as_path))?;
 
-    let files = check_files(paths)?;
+    let (files, dependencies) = check_files(paths)?;
 
     // Through the query database even for a one-shot run, so there is no
     // second code path to drift from the one the language server uses.
@@ -980,7 +980,7 @@ fn check_one(paths: &[PathBuf]) -> Result<bool> {
         let text = read(path)?;
         inputs.push((path, SourceFile::new(&db, path.clone(), text)));
     }
-    SourceRoot::new(&db, inputs.iter().map(|(_, f)| *f).collect());
+    dependencies.root(&db, inputs.iter().map(|(_, f)| *f).collect());
 
     // Read once. A file outside any package gets the defaults, so `khora check
     // scratch.kh` works without a manifest.
@@ -3024,7 +3024,7 @@ fn package_of(path: &Path) -> Option<PathBuf> {
 
 #[cfg(feature = "llvm")]
 fn load(path: &Path) -> Result<Loaded> {
-    let files = collect_sources(std::slice::from_ref(&path.to_path_buf()))?;
+    let (files, dependencies) = collect_program(std::slice::from_ref(&path.to_path_buf()))?;
     if files.is_empty() {
         anyhow::bail!("no `.kh` files found");
     }
@@ -3043,7 +3043,7 @@ fn load(path: &Path) -> Result<Loaded> {
         };
         inputs.push((path.clone(), text.clone(), SourceFile::new(&db, path.clone(), text)));
     }
-    let root = SourceRoot::new(&db, inputs.iter().map(|(_, _, f)| *f).collect());
+    let root = dependencies.root(&db, inputs.iter().map(|(_, _, f)| *f).collect());
 
     let mut clean = true;
     for (path, text, input) in &inputs {
@@ -3264,7 +3264,53 @@ fn read(path: &Path) -> Result<String> {
 ///
 /// Deduplicated by canonical path, so naming something the manifest already
 /// pulls in is harmless rather than a duplicate-module error.
+#[cfg(feature = "llvm")]
 fn collect_sources(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    collect_program(paths).map(|(files, _)| files)
+}
+
+/// The files a dependency contributed to a compilation, by canonical path.
+///
+/// What [`khora_db::DependencyFiles`] is made from: the resolver's own list,
+/// so that "is this file a dependency's" is answered by where the file came
+/// from rather than by the `module` line it chose for itself.
+#[derive(Debug, Default)]
+struct Dependencies(std::collections::HashSet<PathBuf>);
+
+impl Dependencies {
+    /// The compilation's file set, with which of it is a dependency's.
+    ///
+    /// **One call for both, so no driver makes the one without the other.**
+    /// A database with a `SourceRoot` and no declaration falls back on the
+    /// imports to find the package being built, and the imports count a
+    /// dependency named after the root, or `std`, as the root: it would be
+    /// let make capabilities. `check`, `check --fix` and every command that
+    /// builds go through here. For `--fix` nothing else could have caught a
+    /// missing declaration: the fix pass compares error counts per file and
+    /// never writes a dependency's, so the same count either way is all it
+    /// would see.
+    fn root(&self, db: &KhoraDatabase, inputs: Vec<SourceFile>) -> SourceRoot {
+        let root = SourceRoot::new(db, inputs.clone());
+        self.declare(db, inputs.into_iter());
+        root
+    }
+
+    /// Tells the database which of `inputs` are a dependency's.
+    ///
+    /// **Declared even when there are none**, because an absent declaration
+    /// means "nobody resolved anything" and the checker then guesses from the
+    /// imports. A program with no dependencies has an answer, and it is
+    /// "none of these".
+    fn declare(&self, db: &KhoraDatabase, inputs: impl Iterator<Item = SourceFile>) {
+        let real = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        let theirs = inputs.filter(|file| self.0.contains(&real(file.path(db)))).collect();
+        khora_db::DependencyFiles::new(db, theirs);
+    }
+}
+
+/// Every source file of the program rooted at `paths` (see `collect_sources`),
+/// and which of them are a dependency's.
+fn collect_program(paths: &[PathBuf]) -> Result<(Vec<PathBuf>, Dependencies)> {
     let roots: Vec<PathBuf> =
         if paths.is_empty() { vec![PathBuf::from(".")] } else { paths.to_vec() };
 
@@ -3288,8 +3334,13 @@ fn collect_sources(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
         }
     }
 
+    let mut dependencies = Dependencies::default();
     for root in &roots {
-        out.extend(dependencies_of(root)?);
+        let theirs = dependencies_of(root)?;
+        dependencies
+            .0
+            .extend(theirs.iter().map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())));
+        out.extend(theirs);
     }
 
     if let Some(std_dir) = khora_db::standard_library() {
@@ -3353,7 +3404,7 @@ fn collect_sources(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
         .collect();
     keyed.sort();
     keyed.dedup_by(|a, b| a.0 == b.0);
-    Ok(keyed.into_iter().map(|(_, path)| path).collect())
+    Ok((keyed.into_iter().map(|(_, path)| path).collect(), dependencies))
 }
 
 /// Adds a file, or everything under a directory.

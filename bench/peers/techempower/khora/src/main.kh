@@ -1,6 +1,8 @@
 module techempower::main;
 
 import std::core::{ChildFailed, Fibers, Iterator, List, Option, Ord, Result, SharedFn, Step};
+import std::clock::{Clock};
+import std::crypto::{SecureRandom};
 import std::db::{Cell, Db, DbError, Row};
 import std::env::{Env, EnvError, variable_or};
 import std::fs::{FsRead, IoError, read_text};
@@ -323,7 +325,16 @@ fn not_granted(port: Int) -> Int {
 }
 
 pub fn main() -> Int raises HttpError + EnvError + IoError + Unusable + ChildFailed {
-  with { env: Env::real(), rng: Random::real(), reads: FsRead::real() } {
+  // `random` and `nonces` are the pool's: its reconnect jitter, and the
+  // SCRAM nonce of each connection it opens. `rng` is the handlers' own.
+  with {
+    env: Env::real(),
+    rng: Random::real(),
+    reads: FsRead::real(),
+    clock: Clock::real(),
+    random: Random::real(),
+    nonces: SecureRandom::real(),
+  } {
     let settings: Settings = {
       host: setting("PGHOST", "127.0.0.1")!,
       port: number_setting("PGPORT", 5432)!,

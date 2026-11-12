@@ -32,8 +32,11 @@ connection value. The pool owns the concrete connections and `with_db` installs
 a leased connection as the `db: Db` capability for the callback:
 
 ```khora
+import std::clock::{Clock};
 import std::core::{Fibers, List, Result, print};
+import std::crypto::{SecureRandom};
 import std::db::{Cell, Db, DbError, transaction};
+import std::random::{Random};
 import postgres::db::{Settings};
 import postgres::pool::{close, open, with_db};
 
@@ -61,19 +64,24 @@ fn main() -> Int {
     secret: "secret",
   };
 
-  let crew = Fibers::open();
-  let pool = open(crew, settings, 4);
+  // What the pool's fibers use for as long as the pool lives: the clock for
+  // the reconnect schedule, randomness for its jitter, and a secure source
+  // for each connection's SCRAM nonce.
+  with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() } {
+    let crew = Fibers::open();
+    let pool = open(crew, settings, 4);
 
-  let result = with_db(pool, fn () => store_person("Ada"));
-  match result {
-    Result::Err(_) => print("the pool is closed"),
-    Result::Ok(inner) => match inner {
-      Result::Err(why) => print("insert failed: ${why}"),
-      Result::Ok(_) => print("stored"),
-    },
+    let result = with_db(pool, fn () => store_person("Ada"));
+    match result {
+      Result::Err(_) => print("the pool is closed"),
+      Result::Ok(inner) => match inner {
+        Result::Err(why) => print("insert failed: ${why}"),
+        Result::Ok(_) => print("stored"),
+      },
+    };
+
+    close(pool);
   };
-
-  close(pool);
   0
 }
 ```
@@ -82,6 +90,13 @@ The application functions have no `db: Db` parameter. Their external authority
 is part of their type via `with { db: Db }`. `with_db` is the composition
 boundary that satisfies that requirement for the duration of a connection
 lease.
+
+**The pool takes its clock and randomness from the program.** `open`,
+`open_with` and `open_tls` require `clock: Clock`, `random: Random` and
+`nonces: SecureRandom`, and `close` requires `clock: Clock`, so a function that
+opens a pool says so in its signature. A library cannot make these for itself:
+only the package being built may call `Clock::real()` and the other
+constructors of real capabilities.
 
 **A lease hands you the connection itself.** Your fiber writes the socket and
 reads the reply; no other fiber sits between you and the server. The `db` a
@@ -120,11 +135,13 @@ infrastructure or when the portable `Db` contract is not enough:
 <!-- unchecked: needs the postgres package -->
 ```khora
 import std::core::{List, Result, print};
+import std::crypto::{SecureRandom};
 import std::db::{Cell, Row};
 import postgres::conn::{Answer, Connection, PgError, ask, close, open};
 
 fn main() -> Int {
-  match open("127.0.0.1", 5432, "user", "database", "secret") {
+  // `open` takes the source of its SCRAM nonce from the caller.
+  match with { nonces: SecureRandom::real() } { open("127.0.0.1", 5432, "user", "database", "secret") } {
     Result::Err(_) => 1,
     Result::Ok(c) => {
       let values = List::Cons(Cell::Number(42), List::Nil);
@@ -272,14 +289,17 @@ that read files would need `FsRead` in every caller's capability row, so the
 caller reads it:
 
 ```khora
+import std::clock::{Clock};
 import std::core::{Fibers};
+import std::crypto::{SecureRandom};
 import std::fs::{FsRead, IoError, read_text};
+import std::random::{Random};
 import postgres::conn::{Tls};
 import postgres::db::{Settings};
 import postgres::pool::{Pool, Reconnect, open_tls};
 
 fn managed(crew: Fibers, settings: Settings) -> Pool
-  with { reads: FsRead }
+  with { reads: FsRead, clock: Clock, random: Random, nonces: SecureRandom }
   raises IoError
 {
   // RDS: https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem

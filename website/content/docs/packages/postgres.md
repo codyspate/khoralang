@@ -36,6 +36,14 @@ with_db(pool, fn () =>
 )
 ```
 
+`open` runs inside the program's
+`with { clock: Clock::real(), random: Random::real(), nonces: SecureRandom::real() }`,
+or in a function whose `with` row passes those three along. The pool's fibers
+use them for as long as it lives: the clock for the reconnect schedule, the
+randomness for its jitter, and the secure source for each connection's SCRAM
+nonce. `close` takes the clock. A library cannot make them itself; see
+[Capabilities](/docs/reference/capabilities/#only-the-program-makes-a-real-capability).
+
 A `transaction` inside another one on the same lease is a savepoint on that
 connection (`SAVEPOINT khora_sp_1`, `khora_sp_2`, and so on, one per level),
 released when the inner body answers `Ok` and rolled back to when it does

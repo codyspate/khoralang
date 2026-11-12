@@ -4,11 +4,13 @@ import std::core::{ChildFailed, Fibers, List, Map, Option, Result, SharedFn, Sho
 import std::db::{Cell, Db, DbError, Row, transaction};
 import std::schema::{Decode, Rejection, Schema, list};
 import std::clock::{Clock};
+import std::crypto::{SecureRandom};
 import std::env::{Env, EnvError, variable_or};
 import std::fs::{FsRead, IoError, read_text};
 import std::json::{Json, JsonError, parse};
 import std::log::{eprint};
 import std::net::http::{HttpError, Params, Request, Response, Router};
+import std::random::{Random};
 import std::trace::{Tracer, around_result, text};
 import postgres::conn::{Tls};
 import postgres::db::{Settings};
@@ -441,7 +443,13 @@ fn not_granted(port: Int) -> Int {
 }
 
 pub fn main() -> Int raises HttpError + EnvError + IoError + Unusable + ChildFailed {
-  with { env: Env::real(), clock: Clock::real(), reads: FsRead::real() } {
+  with {
+    env: Env::real(),
+    clock: Clock::real(),
+    reads: FsRead::real(),
+    random: Random::real(),
+    nonces: SecureRandom::real(),
+  } {
     let settings: Settings = {
       host: setting("PGHOST", "127.0.0.1")!,
       port: number_setting("PGPORT", 5433)!,

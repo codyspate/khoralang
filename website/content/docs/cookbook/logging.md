@@ -11,6 +11,7 @@ there. So `std::log` emits one JSON object per line, on standard error.
 ```khora
 module orders::main;
 
+import std::clock::{Clock};
 import std::log::{Severity, Log, info, warn};
 
 fn charge(amount: Int) -> Int with { log: Log } {
@@ -20,7 +21,7 @@ fn charge(amount: Int) -> Int with { log: Log } {
 }
 
 pub fn main() -> Int {
-  with { log: Log::json(Severity::Info) } {
+  with { clock: Clock::real(), log: Log::json(Severity::Info) } {
     charge(1200)
   }
 }
@@ -30,6 +31,9 @@ pub fn main() -> Int {
 {"timestamp":1757021376817,"level":"info","message":"charging"}
 {"timestamp":1757021376819,"level":"warn","message":"unusually large"}
 ```
+
+`Log::json` stamps each line from the `clock` it is given, so it is built
+where a clock is in scope: here, after `clock` in the same row.
 
 ## Why it is a capability
 

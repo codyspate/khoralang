@@ -120,7 +120,7 @@ of `std`'s public API:
 | `FsWrite` | `writes` | [`std::fs`](/docs/stdlib/api/fs/) |
 | `Clock` | `clock` | [`std::clock`](/docs/stdlib/api/clock/) |
 | `Random` | `random` | [`std::random`](/docs/stdlib/api/random/) |
-| `SecureRandom` | `random` | [`std::crypto`](/docs/stdlib/api/crypto/) |
+| `SecureRandom` | `nonces` | [`std::crypto`](/docs/stdlib/api/crypto/) |
 | `Log` | `log` | [`std::log`](/docs/stdlib/api/log/) |
 | `Tracer` | `tracer` | [`std::trace`](/docs/stdlib/api/trace/) |
 | `Db` | `db` | [`std::db`](/docs/stdlib/api/db/) |
@@ -132,6 +132,92 @@ of `std`'s public API:
 Every `real()` reaches the actual machine. A test installs a handler of its own
 instead — see [Testing capabilities](/docs/cookbook/testing-capabilities/),
 which is what the seam is for.
+
+## Only the program makes a real capability
+
+`Clock::real()`, `SecureRandom::real()`, `Random::real()`, `Env::real()`,
+`FsRead::real()`, `FsWrite::real()`, `Process::real()`, and `HttpClient::real()`
+with its variants `within`, `bounded` and `bounded_within`, may be named only in
+the **package being built**: the one `khora build`, `run`, `test` or `check`
+is pointed at. Any module of it may, and so may its tests. In a package that is
+a dependency of the build, naming one is an error:
+
+```text
+error: `Clock::real` makes a real `Clock`, and only the package being built may make
+one; `dep` is a dependency here. Take it from the caller instead, so this function's
+signature says it uses it: `with { clock: Clock }` after the return type, or
+`clock: Clock` among the parameters. Only code inside a `test` block is exempt; a
+helper the tests call takes it the same way
+```
+
+**Why:** a capability row is how a reader knows what a function touches. A
+handler made out of nothing needs no row, so a library function written
+`fn parse(text: String) -> Doc` could build a real `FsRead` and read your files
+while its signature said it read nothing. With the rule, every capability a
+dependency holds came from a caller, and the caller's signature shows that
+too.
+
+**What a library writes instead** is the row, and leaves the handler to the
+program:
+
+```khora
+import std::clock::{Clock};
+
+/// Seconds since `started`, by whatever clock the caller installed.
+pub fn elapsed(started: Int) -> Int with { clock: Clock } {
+  clock.unix_seconds() - started
+}
+```
+
+The program installs the real one once, at its entry point, and a test
+installs a fixed one. A capability that a library's fibers keep using after the
+call returns is taken the same way: a fiber spawned inside a function with
+`with { clock: Clock }` keeps the clock it was spawned with. Use the labels in
+the table above, which are the ones the error suggests: `SecureRandom`'s is
+`nonces` rather than `random`, which is `Random`'s, because a function may
+need both and a row cannot hold one label twice.
+
+The rule is on the name, wherever it is written: an alias
+(`import std::clock::{Clock as C}`), a function value (`let f = Clock::real`),
+a `const` and a trait impl in the dependency are all refused.
+`Random::seeded`, `Log::plain` and the other constructors that do not reach the
+machine are open to everyone. `Log::json` reads the clock for each line's
+timestamp, and takes it from a `with { clock: Clock }` row like any other
+function that does.
+
+**Tests.** Code inside a dependency's `test` block is exempt: it runs only
+when that package is the one being tested, which makes it the package being
+built. Only the block is: a helper function the tests call, in the same file
+or in a `_test.kh` module, is a function the package's own code could call
+too, so it is checked like one. Give the helper the capability as a parameter
+or a row, and make it in the test.
+
+### What the rule does not cover
+
+The rule is about **capability constructors**: no package but the one being
+built can make a capability out of nothing. It does not make every
+dependency's signature a complete account of what it reaches. Three things
+reach the machine with no capability row, and the manifest, not the type
+checker, is what limits them:
+
+- **Raw sockets and TLS.** `std::net::socket` (`connect_to`, `connect_by`,
+  `listen_on`) and `std::net::tls` take no capability, so a dependency can dial
+  out or listen from a function with no row. `[permissions] network` and
+  `listen` are checked when they are called, so under `default = "deny"` a host
+  the program did not grant is refused at run time; under the default `allow`,
+  every host is granted. The `postgres` package dials its server this way.
+- **`extern fn`.** A foreign function reaches the operating system without any
+  capability, and that includes the runtime's own clock, file and process
+  functions. `[permissions] extern` names the packages that may declare one.
+  **Under the default `allow`, every package may**, so a dependency can reach
+  anything through one `extern fn`; set `default = "deny"` and list the
+  packages you trust with `extern = [..]` to make signatures binding.
+- **The time of day, to the second.** `Connection::over` and
+  `Connection::holding` in `std::net::http`, which every server's `Router`
+  uses, read the real clock for the `Date` header of each response they write
+  (`Connection::timed` takes the clock instead). A dependency that drives a
+  `Connection` over a `Transport` of its own can read the time back from those
+  headers. Knowing the current time to the second is not guarded.
 
 ## Postfix `with`
 
@@ -510,19 +596,29 @@ code that is trying to get out:
 - **A dependency's own `[permissions]` table is ignored.** Only the root
   package's table is compiled in. A library cannot narrow itself, and cannot
   widen the program it is part of.
-- **Any code can make a real capability.** `FsRead::real()`, `Env::real()`,
-  `Process::real()` and the rest are ordinary functions, so a function with no
-  `with` row can make one and use it; a signature without `FsRead` is not proof
-  that the function reads no files. What stops it is the manifest, checked at
-  run time inside the real handler: a capability made that way is refused
-  exactly what any other would be.
+- **Only the package being built makes a real capability.** A dependency that
+  calls `FsRead::real()`, `Env::real()`, `Process::real()` or any of the
+  others is refused at `khora check`, so every capability a dependency holds
+  was handed to it by a caller. That is a rule about capabilities, not about
+  everything a dependency can reach: raw sockets, `extern fn` and the time of
+  day reach the machine with no row ([What the rule does not
+  cover](#what-the-rule-does-not-cover)). The package being built may make
+  them in any module, and is still held to the table at run time: a grant it
+  does not have is refused inside the real handler.
+- **`std`'s own implementation modules are closed to every package.**
+  `std::process::shell`, the half of `std::process` each target writes for
+  itself, would run a shell with no `Process` capability and no `process`
+  grant; naming it outside `std` is an error, in the package being built as
+  much as in a dependency. Use `std::process`.
 - **`extern fn` is the door out.** A foreign function reaches the operating
   system without any capability, so nothing the table says applies to it. The
   `extern` key is what governs it: it names the packages that may declare one,
   `std` always may, and under `default = "deny"` a table with no `extern` key
   allows `std` alone, so a program that wants its own `extern fn` lists its
   own package. `khora check` refuses an unlisted declaration and names the line
-  to add.
+  to add. **Under the default `allow`, every package may declare one**, and a
+  dependency can reach anything through it: use `deny` if a dependency's
+  signature is meant to bind it.
 - **The checks are made by the program itself, in-process.** A link swapped
   between the check and the open, a library that writes over memory, or a
   native library linked in, is not something the table can see.

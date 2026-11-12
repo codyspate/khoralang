@@ -304,13 +304,22 @@ not. [Capabilities](/docs/reference/capabilities/#what-the-permission-table-is-a
 has the whole model. What it leaves open:
 
 - **Grants are per program, not per package.** Every dependency holds what the
-  root package's table grants, and a dependency's own table is not read.
-- **Any function can make a real capability** with `FsRead::real()` and the
-  like, whatever its signature says. The manifest still refuses what it does
-  not grant, at run time.
+  root package's table grants, and a dependency's own table is not read. A
+  dependency cannot make a real capability for itself (only the package being
+  built may call `FsRead::real()` and the like), so every capability it holds
+  was handed to it; within that, it holds the whole program's grants.
+- **A dependency's signature is not a full account of what it reaches.** Raw
+  sockets (`std::net::socket`, `std::net::tls`) need no capability row, and
+  are limited only by `[permissions] network` and `listen` at run time; under
+  the default `allow`, every host is granted. Reading the time of day to the
+  second is not guarded either: `std::net::http`'s `Connection` writes it into
+  every `Date` header.
 - **`extern fn` reaches the operating system with no check at all.** The
   `extern` key decides which packages may declare one; once declared, nothing
-  the table says applies to what it does.
+  the table says applies to what it does. Under the default `allow` every
+  package may, so a dependency can reach anything through one: use
+  `default = "deny"` and an `extern` list to hold dependencies to their
+  signatures.
 - **A symbolic link that changes between the check and the open.** `std::fs`
   follows the links on a path, checks where they lead, and then opens the path
   — which follows the links as they are at that moment. Something else on the
