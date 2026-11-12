@@ -68,7 +68,7 @@ Linker symbols carry the module that defines them and a `kh$` prefix — `kh$mya
 
 **What is not verified.** Nothing in CI drives a debugger, so stepping, frame inspection and variable display are not covered by any test. Line tables are emitted and the linker is told about them; whether every Khora construct produces a frame a debugger renders usefully is unmeasured. Treat this section as a starting point rather than a supported workflow, and prefer a backtrace or a `print` when you need an answer you can rely on.
 
-This is [release-gate item §9](https://github.com/codyspate/khoralang/blob/main/docs/release-readiness.md) and it is not ticked.
+This is [release-gate item §9](https://github.com/codyspate/khoralang/blob/v0.1.0/docs/release-readiness.md) and it is not ticked.
 
 ## Printing
 

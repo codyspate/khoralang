@@ -324,6 +324,21 @@ step 'a released documentation tree is the tag it says it is'
 # a tag that does not exist is not.
 bash scripts/check-released-docs.sh
 
+step 'cutting a version from a tag produces no link back to main'
+# The gate above checks the trees already cut; this exercises `cut-docs.sh`
+# itself, end to end, in a scratch clone -- including from a directory other
+# than the repository root, which is the shape that once left the rewrite
+# call unreachable and a half-made tree behind.
+bash scripts/test-cut-docs-no-main-links.sh v0.4.0
+
+step 'the gate catches every spelling main can show up as'
+# One case at a time: `blob/main`, `tree/main`, `raw/main`, `edit/main`,
+# `commits/main`, `blame/main`, `blob/HEAD`, `blob/refs/heads/main`,
+# `raw.githubusercontent.com/.../main/`, the same in an `.mdx` file, and the
+# controls -- a correctly pinned link, and the two kinds of link that
+# correctly stay on `main`.
+bash scripts/plant-main-link-cases.sh
+
 step 'every member passes its own tests'
 # A package whose tests nobody runs is a package with no tests. `khora test`
 # compiles the `test` blocks into their own executable and runs it — the same

@@ -13,7 +13,7 @@ generate randomness" is worth seeing *and* worth pinning, because a function
 that draws is a function whose test passes ninety-nine runs in a hundred.
 `Random::seeded` is the whole payoff: the same seed gives the same sequence,
 so a failure is reproducible and a fixture is a fixture rather than a coin
-flip. [The permissions design note](https://github.com/codyspate/khoralang/blob/main/docs/design/permissions.md) draws this line — the time, the
+flip. [The permissions design note](https://github.com/codyspate/khoralang/blob/v0.4.0/docs/design/permissions.md) draws this line — the time, the
 environment and the dice are three different things to deny a dependency.
 
 The generator is splitmix64, and it lives half here and half in the runtime:

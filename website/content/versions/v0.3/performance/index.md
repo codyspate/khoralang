@@ -120,7 +120,7 @@ spread between sittings looked like 1.85x -- process startup time was what
 varied.
 
 A server that counts what it answers settled it in twenty lines. The full
-account is in [the errata](https://github.com/codyspate/khoralang/blob/main/docs/errata.md).
+account is in [the errata](https://github.com/codyspate/khoralang/blob/v0.3.0/docs/errata.md).
 
 The replacement is `bench/loadgen.rs`: a few threads each driving many
 non-blocking connections, rather than a thread or a process per connection. The

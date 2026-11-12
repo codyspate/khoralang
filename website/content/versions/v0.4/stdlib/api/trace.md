@@ -14,7 +14,7 @@ this module.
 
 ## Why this is `std`'s and the exporter is not
 
-[The observability design note](https://github.com/codyspate/khoralang/blob/main/docs/design/observability.md) argues it in full and the short version is
+[The observability design note](https://github.com/codyspate/khoralang/blob/v0.4.0/docs/design/observability.md) argues it in full and the short version is
 `ecosystem.md`'s rule: what belongs here is the layer everyone would
 otherwise re-derive subtly wrong, and for tracing that is two things.
 

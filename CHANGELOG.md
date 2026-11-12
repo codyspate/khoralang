@@ -1001,6 +1001,20 @@ it will behave differently now.
   names a link and moves with it, and hard links, which are not followed.
 - `std::permissions::granted` says that a `..` path is refused unless a grant
   is a bare `**`, which it was always matched under.
+- A page under `website/content/versions/<id>/` links repository files at
+  the tag it was cut from, not at `main`, so a reader of a past release's
+  documentation lands on the file that release published. 131 links in
+  `v0.1`-`v0.4` were pinned this way; links that mean a living document --
+  the changelog, the contributing guide, the `curl | sh` installer -- stay
+  on `main`, since a reader following one of those wants today's, not the
+  tag's. `scripts/cut-docs.sh` rewrites the links when it cuts a version,
+  from a directory other than the repository root too, and refuses to cut a
+  pre-release candidate; `scripts/check-released-docs.sh` refuses a
+  main-pointing repository link in a cut tree outside that exception
+  (`blob`, `tree`, `raw`, `edit`, `commits`, `blame`, `HEAD`,
+  `refs/heads/main`, and `raw.githubusercontent.com`, in `.md` and `.mdx`
+  pages), a `cutFrom` naming a pre-release tag, and a pinned link to a path
+  the tag doesn't have.
 
 ## 0.4.0 — 2026-10-09
 

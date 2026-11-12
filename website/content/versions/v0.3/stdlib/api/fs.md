@@ -39,9 +39,9 @@ single capability made the finer half unexpressible: a function allowed
 only to read still received the authority to delete. `copy` is the one
 helper here that needs both, and it says so.
 
-[The permissions design note](https://github.com/codyspate/khoralang/blob/main/docs/design/permissions.md) for the manifest half.
+[The permissions design note](https://github.com/codyspate/khoralang/blob/v0.3.0/docs/design/permissions.md) for the manifest half.
 
-[The ffi design note](https://github.com/codyspate/khoralang/blob/main/docs/design/ffi.md) for the boundary rules this obeys.
+[The ffi design note](https://github.com/codyspate/khoralang/blob/v0.3.0/docs/design/ffi.md) for the boundary rules this obeys.
 
 ## Types
 

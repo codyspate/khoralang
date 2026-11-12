@@ -18,7 +18,7 @@ the type and `matmul` unifies the shared dimension.
 ## What this is not
 
 **Not an implementation of anything.** There is no HTTP here, no tokenizer,
-no BLAS. [The ecosystem design note](https://github.com/codyspate/khoralang/blob/main/docs/design/ecosystem.md) puts numeric kernels and vendor clients
+no BLAS. [The ecosystem design note](https://github.com/codyspate/khoralang/blob/v0.1.0/docs/design/ecosystem.md) puts numeric kernels and vendor clients
 in packages for the reason it puts database drivers there: what belongs in
 `std` is the vocabulary two packages must agree on to exchange a value, and
 the effect declaration that lets a caller say what it needs without naming
@@ -306,7 +306,7 @@ The matrix product, with the shared dimension checked by the type system.
 
 `K` appears in both arguments, so it has to unify: an `(M, K)` times a
 `(J, N)` does not compile, and no assertion runs to discover it. Declared
-rather than implemented — [the ecosystem design note](https://github.com/codyspate/khoralang/blob/main/docs/design/ecosystem.md) puts the kernel in a
+rather than implemented — [the ecosystem design note](https://github.com/codyspate/khoralang/blob/v0.1.0/docs/design/ecosystem.md) puts the kernel in a
 package.
 
 ### extract

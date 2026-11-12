@@ -445,7 +445,7 @@ What is missing is the anonymous form. Declaring `Answer` is the cost, and the c
 
 The practical consequence is that `attempt` handles a body raising exactly one type. Use [`catch`](/docs/reference/failures/#handle-failures-with-catch) for a wider row — it matches per type and never has to name a combined type.
 
-[The unions design note](https://github.com/codyspate/khoralang/blob/main/docs/design/unions.md) records what an anonymous union would mean, what it would cost, and why existentials are not part of the same question.
+[The unions design note](https://github.com/codyspate/khoralang/blob/v0.4.0/docs/design/unions.md) records what an anonymous union would mean, what it would cost, and why existentials are not part of the same question.
 
 ## A canceled fiber waiting on a child stops when the child does
 

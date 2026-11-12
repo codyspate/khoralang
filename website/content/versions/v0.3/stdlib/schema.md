@@ -65,7 +65,7 @@ print("it needs: ${Shape::keys(schema().shape)}");
 ```
 
 A record of two closures would have lost the shape. A bare description tree
-would have lost the decoder. [the schema design note](https://github.com/codyspate/khoralang/blob/main/docs/design/schema.md) has the argument in full.
+would have lost the decoder. [the schema design note](https://github.com/codyspate/khoralang/blob/v0.3.0/docs/design/schema.md) has the argument in full.
 
 ## The vocabulary
 

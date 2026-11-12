@@ -10,7 +10,7 @@ protocol is versioned by somebody else and a release schedule that is not
 Khora's should not be able to hold up a compiler release.
 
 That split is settled in [the ecosystem design
-note](https://github.com/codyspate/khoralang/blob/main/docs/design/ecosystem.md),
+note](https://github.com/codyspate/khoralang/blob/v0.3.0/docs/design/ecosystem.md),
 and it means a real program reaches for packages early. These pages document
 the ones maintained in the Khora repository.
 
@@ -43,11 +43,11 @@ whole mechanism, and a monorepo of packages works because `subdir` exists.
   provider stays the caller's choice. It declares `LLMService` and `extract`
   and implements no provider: there is no HTTP and no tokenizer in it, and a
   handler supplies those. **No page here yet** — read
-  [`packages/ai/src/llm.kh`](https://github.com/codyspate/khoralang/blob/main/packages/ai/src/llm.kh),
+  [`packages/ai/src/llm.kh`](https://github.com/codyspate/khoralang/blob/v0.3.0/packages/ai/src/llm.kh),
   whose module comment is the documentation.
 - **`otlp`** — an exporter for the trace vocabulary in `std::trace`, over
   OTLP/HTTP JSON. **No page here yet** — read
-  [`packages/otlp/README.md`](https://github.com/codyspate/khoralang/blob/main/packages/otlp/README.md).
+  [`packages/otlp/README.md`](https://github.com/codyspate/khoralang/blob/v0.3.0/packages/otlp/README.md).
 
 Each of the three is depended on the same way, with `git` and `subdir`; not
 having a page here is a gap in this section rather than a difference in how the

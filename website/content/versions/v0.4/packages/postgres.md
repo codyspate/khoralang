@@ -16,7 +16,7 @@ postgres = { git = "https://github.com/codyspate/khoralang", rev = "v0.4.0", sub
 Use `v0.4.0-rc.2` instead when testing that published candidate with a
 `0.4.0-rc.2` toolchain; the stable tag is available only after publication.
 
-**[`packages/postgres/README.md`](https://github.com/codyspate/khoralang/blob/main/packages/postgres/README.md)
+**[`packages/postgres/README.md`](https://github.com/codyspate/khoralang/blob/v0.4.0/packages/postgres/README.md)
 is the reference** — every function, both usage styles, and the honest list of
 what is missing. This page is the overview.
 

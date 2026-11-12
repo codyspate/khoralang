@@ -69,7 +69,7 @@ export const versions = [
     id: 'v0.4',
     label: 'v0.4',
     stable: true,
-    /// The tag this tree was cut from, byte for byte.
+    /// The tag this tree was cut from, with its repository links pinned to it.
     cutFrom: 'v0.4.0',
     from: 'content/versions/v0.4',
   },
@@ -77,7 +77,7 @@ export const versions = [
     id: 'v0.3',
     label: 'v0.3',
     stable: true,
-    /// The tag this tree was cut from, byte for byte.
+    /// The tag this tree was cut from, with its repository links pinned to it.
     cutFrom: 'v0.3.0',
     from: 'content/versions/v0.3',
   },
@@ -85,7 +85,7 @@ export const versions = [
     id: 'v0.2',
     label: 'v0.2',
     stable: true,
-    /// The tag this tree was cut from, byte for byte.
+    /// The tag this tree was cut from, with its repository links pinned to it.
     cutFrom: 'v0.2.0',
     from: 'content/versions/v0.2',
   },
@@ -93,7 +93,7 @@ export const versions = [
     id: 'v0.1',
     label: 'v0.1',
     stable: true,
-    /// The tag this tree was cut from, byte for byte.
+    /// The tag this tree was cut from, with its repository links pinned to it.
     ///
     /// Recorded rather than assumed: the claim `/docs/v0.1/` makes is that it
     /// documents the compiler `v0.1.0` publishes, and a tree copied from

@@ -13,7 +13,7 @@ is written against.
 postgres = { git = "https://github.com/codyspate/khoralang", rev = "v0.3.0", subdir = "packages/postgres" }
 ```
 
-**[`packages/postgres/README.md`](https://github.com/codyspate/khoralang/blob/main/packages/postgres/README.md)
+**[`packages/postgres/README.md`](https://github.com/codyspate/khoralang/blob/v0.3.0/packages/postgres/README.md)
 is the reference** — every function, both usage styles, and the honest list of
 what is missing. This page is the overview.
 

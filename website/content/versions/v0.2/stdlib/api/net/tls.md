@@ -7,7 +7,7 @@ description: "TLS, over the sockets in std::net::socket"
 
 TLS, over the sockets in `std::net::socket`.
 
-**Bound, not written.** [the ecosystem design note](https://github.com/codyspate/khoralang/blob/main/docs/design/ecosystem.md) puts TLS in the short list
+**Bound, not written.** [the ecosystem design note](https://github.com/codyspate/khoralang/blob/v0.2.0/docs/design/ecosystem.md) puts TLS in the short list
 of things Khora does not implement — "correctness is a specialist matter and
 a bug is a breach" — so this is `rustls`, reached through the runtime that
 every Khora executable already links. Nothing here is cryptography; it is a

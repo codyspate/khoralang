@@ -241,7 +241,7 @@ parse that performs several hundred reference-count operations. It did not
 move the benchmark.
 
 A record of closures is what an `effect` compiles to anyway
-([the effect-runtime design note](https://github.com/codyspate/khoralang/blob/main/docs/design/effect-runtime.md) §2), and this is not one only because a
+([the effect-runtime design note](https://github.com/codyspate/khoralang/blob/v0.2.0/docs/design/effect-runtime.md) §2), and this is not one only because a
 transport belongs to a connection rather than to a computation: two fibers
 serve two clients at once, and a capability installed by `with` would be
 one of them.
@@ -574,7 +574,7 @@ Making requests, as a capability.
 one. A program that says `with { http: HttpClient }` can be handed a
 recording double in a test, a client that only reaches one host, or one
 wrapped for tracing — and every caller above is unchanged, because a
-capability *is* an interception point. [The observability design note](https://github.com/codyspate/khoralang/blob/main/docs/design/observability.md) shows
+capability *is* an interception point. [The observability design note](https://github.com/codyspate/khoralang/blob/v0.2.0/docs/design/observability.md) shows
 the wrapper.
 
 One operation. `Call` carries everything a request is, so a second would

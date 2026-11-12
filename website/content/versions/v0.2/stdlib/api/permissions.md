@@ -138,6 +138,6 @@ question only the filesystem can answer.
 **Nor is anything resolved against a working directory or a package root.**
 A grant is matched against the path the program passes, so a program that
 builds its paths from its own arguments needs a grant wide enough to cover
-what its users will type. [The permissions design note](https://github.com/codyspate/khoralang/blob/main/docs/design/permissions.md) records why that is
+what its users will type. [The permissions design note](https://github.com/codyspate/khoralang/blob/v0.2.0/docs/design/permissions.md) records why that is
 the boundary and what it costs a CLI.
 

@@ -7,7 +7,7 @@ description: "Talking to a database, as a capability rather than a library"
 
 Talking to a database, as a capability rather than a library.
 
-[The ecosystem design note](https://github.com/codyspate/khoralang/blob/main/docs/design/ecosystem.md) §"Applying the rule" settles what belongs here
+[The ecosystem design note](https://github.com/codyspate/khoralang/blob/v0.4.0/docs/design/ecosystem.md) §"Applying the rule" settles what belongs here
 and it is not an engine. SQLite has no middle layer at all — no framing, no
 handshake, nothing that fails at a packet boundary — so putting it in `std`
 would be the mistake `std::net::http` avoided, all top layer plus a quarter
@@ -83,7 +83,7 @@ A value in a column, or bound to a parameter.
 
 **`Decimal` is here and `Float` is not, for money.** A database `NUMERIC`
 read through a float is a number that has already lost, and
-[The numbers design note](https://github.com/codyspate/khoralang/blob/main/docs/design/numbers.md) is the long version. Floats can be added when
+[The numbers design note](https://github.com/codyspate/khoralang/blob/v0.4.0/docs/design/numbers.md) is the long version. Floats can be added when
 something that is genuinely a measurement needs one.
 
 **A `numeric` column arrives as [`Text`](#cell), not as [`Money`](#cell), and the

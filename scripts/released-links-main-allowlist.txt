@@ -1,0 +1,28 @@
+# Repository paths that a cut tree's `blob/main`/`tree/main` link (or an
+# equivalent spelling -- `raw`, `edit`, `commits`, `blame`, `raw.githubusercontent.com`)
+# is left pointing at `main`, rather than being pinned to the tag -- because
+# the sentence linking it is about the living document, not about what the
+# tag published.
+#
+# `reference/compatibility.md` on every cut tree links `CHANGELOG.md`
+# ("every breaking change is in the changelog") and `CONTRIBUTING.md`
+# ("CONTRIBUTING has the process"); a reader upgrading *from* that release, or
+# contributing against today's `main`, wants the current one, not the one the
+# tag had.
+#
+# `install.sh`, `install.ps1`, `installrc.sh` and `installrc.ps1` are the
+# installer the Getting Started page's `curl | sh` names
+# (`raw.githubusercontent.com/.../main/install.sh`). It picks its own release
+# by flag (`--version`, `--pre`) and gets fixes after a tag ships that an old
+# reader should have too -- pinning it hands out a known-broken installer
+# instead.
+#
+# Read by both `rewrite-released-links.sh` (skips a line naming one of these)
+# and `check-released-docs.sh` (does not fail on a `main` link to one). One
+# list, so adding or removing an exception changes what both do, together.
+CHANGELOG.md
+CONTRIBUTING.md
+install.sh
+install.ps1
+installrc.sh
+installrc.ps1

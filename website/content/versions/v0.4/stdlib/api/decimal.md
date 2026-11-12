@@ -10,7 +10,7 @@ measured.
 
 `docs/positioning.md` opens by saying Khora is well suited to financial
 reconciliation, and until this module there was no way to write ten pence.
-`Float` is IEEE and [the numbers design note](https://github.com/codyspate/khoralang/blob/main/docs/design/numbers.md) explains at length why it
+`Float` is IEEE and [the numbers design note](https://github.com/codyspate/khoralang/blob/v0.4.0/docs/design/numbers.md) explains at length why it
 implements neither `Eq` nor `Ord`: `0.1 + 0.2` is not `0.3` and never was.
 A ledger cannot be built on a type whose equality is a trap.
 
@@ -77,7 +77,7 @@ A number counted in steps of `10^-scale`.
 **`hi` and `lo` are one number in two halves**, the upper and lower
 sixty-four bits of a signed hundred-and-twenty-eight bit significand. They
 are two fields because only scalars cross into the runtime — see
-[The ffi design note](https://github.com/codyspate/khoralang/blob/main/docs/design/ffi.md) — and they are never taken apart anywhere else.
+[The ffi design note](https://github.com/codyspate/khoralang/blob/v0.4.0/docs/design/ffi.md) — and they are never taken apart anywhere else.
 
 **The fields are private, and that is what makes `scale` never negative.**
 The constructors clamp it, because a negative scale is a large number

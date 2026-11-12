@@ -715,7 +715,7 @@ get right, and the negation is the negation.
 
 **`Float` is not an instance**, because `NaN == NaN` is false and a type
 whose values are not equal to themselves breaks every container built on
-this one. [The numbers design note](https://github.com/codyspate/khoralang/blob/main/docs/design/numbers.md) has the argument.
+this one. [The numbers design note](https://github.com/codyspate/khoralang/blob/v0.3.0/docs/design/numbers.md) has the argument.
 
 #### eq
 
@@ -784,7 +784,7 @@ A value rendered for a person to read.
 **Not a serialization format.** `show` is for a log line, an error message
 and a test's failure output; `std::json` is for something that has to be
 read back. Nothing promises that `show` round-trips, and `Float` is the one
-place it happens to — see [the compatibility design note](https://github.com/codyspate/khoralang/blob/main/docs/design/compatibility.md), which makes that
+place it happens to — see [the compatibility design note](https://github.com/codyspate/khoralang/blob/v0.3.0/docs/design/compatibility.md), which makes that
 a promise about `Float` rather than about `Show`.
 
 #### show
@@ -2096,7 +2096,7 @@ let row = Fiber::join(worker)! catch {
 
 An erased handle would have needed a `!` on every join — including on a
 fiber that provably cannot fail — and `catch { _ => .. }` as the only
-arm. [The effect-survey design note](https://github.com/codyspate/khoralang/blob/main/docs/design/effect-survey.md) §3.1 records what that cost and why
+arm. [The effect-survey design note](https://github.com/codyspate/khoralang/blob/v0.3.0/docs/design/effect-survey.md) §3.1 records what that cost and why
 the row is on the type instead.
 
 #### wait
@@ -2310,7 +2310,7 @@ Stops waiting for the fiber, and asks it to stop.
 waits: `join` waits, and so does letting the binding go, which is where
 structured concurrency comes from. That is right, and it is also how a
 program hangs — one finalizer that never returns holds its nursery, which
-holds its parent, up to `main`. [The scheduler design note](https://github.com/codyspate/khoralang/blob/main/docs/design/scheduler.md) promises both
+holds its parent, up to `main`. [The scheduler design note](https://github.com/codyspate/khoralang/blob/v0.3.0/docs/design/scheduler.md) promises both
 bounded cancellation latency and that a nursery exit leaves every child
 stopped or joined, and those two are in tension exactly here.
 
@@ -2376,7 +2376,7 @@ means "an empty one of something that grows", and an array does
 neither -- `Array::empty` sits above this for the empty case.
 `Array::filled(length, fill)` is what the rule asks for, and
 renaming a published `std` signature is a compatibility decision
-rather than a style one. [The naming design note](https://github.com/codyspate/khoralang/blob/main/docs/design/naming.md) records it.
+rather than a style one. [The naming design note](https://github.com/codyspate/khoralang/blob/v0.3.0/docs/design/naming.md) records it.
 
 #### length
 
@@ -3339,7 +3339,7 @@ a string are all made of these.
 
 **The seven bitwise and wrapping operations mean the same thing in every
 one of these blocks**, so they are argued for here and only named in the
-other six. `+`, `-` and `*` trap on overflow — [The numbers design note](https://github.com/codyspate/khoralang/blob/main/docs/design/numbers.md)
+other six. `+`, `-` and `*` trap on overflow — [The numbers design note](https://github.com/codyspate/khoralang/blob/v0.3.0/docs/design/numbers.md)
 §"Overflow traps, in every build" argues that at length — and
 `wrapping_add`, `wrapping_sub` and `wrapping_mul` are how a program asks
 for the other behaviour *by name*. That is what a hash, a checksum and a
@@ -6185,7 +6185,7 @@ nursery(serve)!
 capability lexically where it can and *requires* it where it cannot, so
 this one's type becomes `() -> () with { nursery: Nursery }` and the
 `body()!` below supplies it from the handler just installed. That is the
-rule in [the capability-passing design note](https://github.com/codyspate/khoralang/blob/main/docs/design/capability-passing.md), and the reason for it is that
+rule in [the capability-passing design note](https://github.com/codyspate/khoralang/blob/v0.3.0/docs/design/capability-passing.md), and the reason for it is that
 eta-expansion must not alter what a program means.
 
 **And the body may name the nursery**:
