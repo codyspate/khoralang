@@ -52,19 +52,25 @@ fn forever() -> Int with { clock: Clock } {
   0
 }
 
-fn counted(count: Shared<Int>) -> () with { clock: Clock } {
+fn counted(count: Shared<Int>, ready: Channel<Int>) -> () with { clock: Clock } {
   let region = Region::open();
   Region::defer(region, fn () => { let _ = Shared::update(count, fn n => n + 1); });
+  Channel::send(ready, 1);
   loop { clock.sleep(10); }
 }
 
-fn crew(count: Shared<Int>) -> () with { clock: Clock } raises ChildFailed {
-  // The body returns at once, so the deadline finds this fiber in the
-  // nursery's wait for its children, which is not a cancellation point.
+fn crew(count: Shared<Int>, ready: Channel<Int>, all_in: Shared<Int>) -> () with { clock: Clock } raises ChildFailed {
+  // The body waits until every child holds its finalizer, then returns, so
+  // the deadline finds this fiber in the nursery's wait for its children,
+  // which is not a cancellation point.
   nursery(fn () => {
-    nursery.spawn(fn () => with { clock: Clock::real() } { counted(count) });
-    nursery.spawn(fn () => with { clock: Clock::real() } { counted(count) });
-    nursery.spawn(fn () => with { clock: Clock::real() } { counted(count) });
+    nursery.spawn(fn () => with { clock: Clock::real() } { counted(count, ready) });
+    nursery.spawn(fn () => with { clock: Clock::real() } { counted(count, ready) });
+    nursery.spawn(fn () => with { clock: Clock::real() } { counted(count, ready) });
+    let _ = Channel::receive(ready);
+    let _ = Channel::receive(ready);
+    let _ = Channel::receive(ready);
+    Shared::set(all_in, 1);
   })!
 }
 
@@ -100,11 +106,26 @@ fn run(port: Int) -> () with { clock: Clock } raises ChildFailed {
   say("socket read", timeout(100, fn () => read_silent(port, reads)), t);
   print("socket read finalizers ${Shared::get(reads)}");
 
-  let count = Shared::of(0);
-  let t = khora_monotonic_millis();
-  let r: Option<Int> = timeout(50, fn () => { crew(count)!; 0 })!;
-  say("nursery", r, t);
-  print("nursery finalizers ${Shared::get(count)}");
+  // A child the deadline reaches before its first turn never registers its
+  // finalizer, and a slow runner gets there before all three have: that
+  // printed `nursery finalizers 0`. So a round whose deadline came before
+  // every child signaled says nothing about finalizers, and is run again.
+  let mut tries = 0;
+  let mut judged = false;
+  while !judged && tries < 50 {
+    let count = Shared::of(0);
+    let all_in = Shared::of(0);
+    let ready: Channel<Int> = Channel::bounded(3);
+    let t = khora_monotonic_millis();
+    let r: Option<Int> = timeout(50, fn () => { crew(count, ready, all_in)!; 0 })!;
+    if Shared::get(all_in) == 1 {
+      judged = true;
+      say("nursery", r, t);
+      print("nursery finalizers ${Shared::get(count)}");
+    } else {};
+    tries = tries + 1;
+  };
+  if judged {} else { print("nursery children never all started in 50 tries") };
 
   match timeout(5000, fn () => timeout(30, fn () => forever())) {
     Option::Some(Option::None) => print("nested inner Some(None)"),
@@ -160,7 +181,10 @@ pub fn main() -> Int raises ChildFailed {
 /// In a sleep, a channel receive, a read from a server that never writes, and
 /// a nursery whose three children each hold a finalizer: each answers `None`
 /// within two seconds of a deadline in the tens of milliseconds, and every
-/// finalizer has run by the time it does. Nested, the earlier deadline wins
+/// finalizer has run by the time it does. The nursery's children say when
+/// they hold theirs, and a round whose deadline came first is run again
+/// rather than read: a child stopped before its first turn never had one.
+/// Nested, the earlier deadline wins
 /// and each `None` belongs to its own call; a cancel from outside is not a
 /// `None` and the code after the `timeout` does not run; a failure before
 /// the deadline is raised as itself; `timeout(0, ..)` is `None`.

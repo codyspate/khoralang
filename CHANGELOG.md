@@ -682,6 +682,23 @@ it will behave differently now.
   traps when the function is called.
 - The WebAssembly runtime builds: `cargo build -p khora-rt --target
   wasm32-unknown-unknown` succeeds.
+- Two tests are free of the race that failed them intermittently. The runtime's
+  `timeout` scope test asks for its own deadline by id instead of counting a
+  list other tests share, and the `timeout` over a nursery reads its three
+  finalizers only in a round where all three children registered theirs
+  before the deadline.
+- An `HttpClient::within(0)` call, or any with no deadline, that a server
+  holds past `default_answer_timeout` ends as `CallError::TimedOut(30000)`,
+  naming the limit that ended it; it was `CallError::Closed(nothing came
+  back)`. Its connect and TLS handshake are bounded by that limit too: an
+  https call to a server that accepted and never answered waited forever.
+- Building the musl runtime (`scripts/build-musl-runtime.sh`, which CI,
+  `package.sh` and the Alpine release builds use) does not depend on
+  musl.libc.org alone: when it fails or stalls, the same tarball comes from
+  Alpine's distfiles mirror, checked against the same SHA-256, and CI caches
+  it under that hash. An unreachable host is given up after 10 s, and one
+  that accepts and then sends less than 1 KB/s after 30 s, instead of
+  holding the build.
 
 ### Added
 
@@ -919,6 +936,15 @@ it will behave differently now.
   WebAssembly.
 - Cookbook: "Sign and verify a webhook", which signs a timestamp with the body
   and refuses deliveries more than five minutes old.
+- `std::net::tls::TlsError` derives `Show` and `Eq`, as `SocketError` does:
+  `"${e}"` prints a case such as `TlsError::Unreachable(example.com)`, and
+  `==` compares two errors, case and contents.
+- `scripts/cfg-callers.py`, run by `scripts/baseline.sh`, reports a test
+  helper whose `#[cfg(..)]` admits a configuration none of its callers'
+  does: dead code there, and a `clippy -D warnings` failure on the runner
+  that builds it. It reports the two that reached CI, a Linux-only helper
+  with x86-64-or-musl callers and an ungated constant with an `llvm`-only
+  caller.
 
 ### Fixed
 
@@ -930,6 +956,15 @@ it will behave differently now.
 
 ### Changed
 
+- An error that reaches `main` uncaught is named, and when its type has
+  `Show`, its value follows on a line of its own:
+  `` khora: `SocketError` reached the entry point and nothing handled it ``,
+  then `  value: SocketError::Denied(0.0.0.0:80)`. The value is whatever the
+  type's `Show` returns, so a `Show` that writes a secret out prints it; it
+  is one line, with control characters escaped, and cut at 4096 bytes. The
+  name is printed before the `Show` runs, so a `Show` that traps or never
+  returns still leaves it. A type with no `Show` is named alone, and a
+  failure with context prints its `show()` on the `failure:` line.
 - `HttpClient` calls have a deadline over the whole call: the lookup, the
   connect, the TLS handshake, writing the request and reading the headers and
   body. `HttpClient::within(millis)` and `HttpClient::bounded_within(limit,
@@ -1018,11 +1053,14 @@ it will behave differently now.
   own: ``cannot be the receiver of `#Map::len` `` was printed once per call,
   beside the one error about the unimported name.
 - `CallError::TimedOut(millis)` shows as the case followed by what ran out
-  and what changes it: ``CallError::TimedOut(200): the call took longer than
-  its 200 ms deadline; `HttpClient::within(ms)` or
-  `HttpClient::bounded_within(limit, ms)` sets a different one``. At 30000 it
-  adds that 30000 ms is the default `HttpClient::real()` and
-  `HttpClient::bounded` give. Every other `CallError` case shows as before.
+  and what sets it: ``CallError::TimedOut(200): no answer within 200 ms.
+  That is the call's deadline, or, for a client with no deadline
+  (`HttpClient::within(0)`), the limit on silence between reads;
+  `HttpClient::within(ms)` or `HttpClient::bounded_within(limit, ms)` sets
+  the deadline``. At 30000 it adds that 30000 ms is the default deadline
+  `HttpClient::real()` and `HttpClient::bounded` give, and what
+  `default_answer_timeout` returns. Every other `CallError` case shows as
+  before.
 
 ### Documentation
 

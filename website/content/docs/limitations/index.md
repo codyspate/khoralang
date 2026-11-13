@@ -268,6 +268,16 @@ server rather than of the `Router` type, so it does not appear in the generated
 [`std::net::http` pages](/docs/stdlib/api/net/http/); [Serve HTTP
 requests](/docs/cookbook/http-service/) is where it is discussed.
 
+**An `HttpClient` call with no deadline can wait forever on a peer that
+stops reading.** `HttpClient::within(0)` (or any value of zero or less) sets
+no deadline over the call. What bounds it then is `default_answer_timeout`:
+thirty seconds on the connect plus the TLS handshake together, and thirty
+seconds of silence on each read, renewed by every byte. Writing the request
+is not bounded. A `POST` whose body is larger than the socket buffers, sent
+to a server that accepts and never reads, waits until the server goes away.
+A client with a deadline -- `HttpClient::real()` or `within` with a positive
+value -- ends such a call when the deadline passes.
+
 ## Name lookups hold a thread each
 
 **A host name is resolved by the operating system's resolver, on a thread

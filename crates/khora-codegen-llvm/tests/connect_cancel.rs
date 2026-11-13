@@ -468,8 +468,9 @@ pub fn main() -> Int {{
         assert!(!ran.hung, "`{backend}`: still running after {PATIENCE:?}: {}{}", ran.stdout, ran.stderr);
         assert_eq!(
             ran.stdout,
-            "CallError::TimedOut(300): the call took longer than its 300 ms deadline; \
-             `HttpClient::within(ms)` or `HttpClient::bounded_within(limit, ms)` sets a different one\n",
+            "CallError::TimedOut(300): no answer within 300 ms. That is the call's deadline, or, \
+             for a client with no deadline (`HttpClient::within(0)`), the limit on silence between \
+             reads; `HttpClient::within(ms)` or `HttpClient::bounded_within(limit, ms)` sets the deadline\n",
             "`{backend}`: {}",
             ran.stderr
         );

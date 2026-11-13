@@ -251,7 +251,7 @@ pub fn main() -> Int {{
         let _ = child.kill();
         let _ = child.wait();
         assert!(said.starts_with("timed out 200: "), "`{backend}`: {said:?}");
-        assert!(said.contains("200 ms deadline"), "`{backend}`: the shown text does not name 200 ms: {said:?}");
+        assert!(said.contains("no answer within 200 ms"), "`{backend}`: the shown text does not name 200 ms: {said:?}");
         assert!(said.contains("HttpClient::within"), "`{backend}`: the shown text does not name `within`: {said:?}");
         assert!(!said.contains("default"), "`{backend}`: 200 ms is not the default: {said:?}");
         assert!(said.ends_with("done\n"), "`{backend}`: {said:?}");
@@ -382,6 +382,114 @@ pub fn main() -> Int {{
     for run in runs {
         let (backend, said) = run.join().expect("a run");
         assert_eq!(said, "answered 200\ndone\n", "`{backend}`");
+    }
+}
+
+/// **A call with no deadline that a server never answers ends as
+/// `TimedOut`, naming the limit that ended it, over `http` and `https`.**
+///
+/// `within(0)` and `within(-5)` mean no deadline over the call, so each step
+/// is held to `default_answer_timeout` (30 s) instead. Before, the plain
+/// call ran out of that read limit and was reported as
+/// `Closed(nothing came back)`, a timeout that named nothing, and the `https`
+/// one never ended at all: the handshake ran with no limit of any kind.
+///
+/// Thirty seconds, because the limit is thirty. All eight runs (two values,
+/// two schemes, two backends) go at once against one silent server, so the
+/// test takes that long once. Two `real()` runs go beside them, against a
+/// server that drips a byte a second: each byte renews the read limit, so
+/// what ends those is the 30 s deadline. **All ten show the same sentence**,
+/// because the two are the same value, `TimedOut(30000)`, and the text has to
+/// be true of a deadline and of a silence limit alike.
+#[test]
+fn a_call_with_no_deadline_times_out_naming_its_limit() {
+    let sentence = "CallError::TimedOut(30000): no answer within 30000 ms \
+                    (30000 ms is the default deadline `HttpClient::real()` and `HttpClient::bounded` give, \
+                    and what `default_answer_timeout` returns). That is the call's deadline, or, for a client \
+                    with no deadline (`HttpClient::within(0)`), the limit on silence between reads; \
+                    `HttpClient::within(ms)` or `HttpClient::bounded_within(limit, ms)` sets the deadline";
+    // Accepts every connection and never writes, for all eight runs.
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("a port");
+    let port = listener.local_addr().expect("an address").port();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for socket in listener.incoming().flatten() {
+            held.push(socket);
+        }
+    });
+    let mut runs = Vec::new();
+    let mut cases: Vec<(String, String, u16)> = Vec::new();
+    for millis in ["0", "-5"] {
+        for scheme in ["http", "https"] {
+            cases.push((format!("HttpClient::within({millis})"), scheme.to_string(), port));
+        }
+    }
+    for (n, (client, scheme, port)) in cases.into_iter().enumerate() {
+        let exe = build(
+            &format!("http_no_deadline_{n}"),
+            &format!(
+                r#"module main;
+import std::core::{{Result, print}};
+import std::net::http::{{Call, CallError, HttpClient}};
+
+pub fn main() -> Int {{
+  with {{ http: {client} }} {{
+    match http.send(Call::get("{scheme}://127.0.0.1:{port}/")) {{
+      Result::Ok(_) => print("answered"),
+      Result::Err(CallError::TimedOut(limit)) => print("timed out ${{limit}}: ${{CallError::TimedOut(limit).show()}}"),
+      Result::Err(why) => print("failed ${{why.show()}}"),
+    }}
+  }};
+  print("done");
+  0
+}}
+"#
+            ),
+        );
+        for backend in ["threads", "scheduler"] {
+            let (exe, client, scheme) = (exe.clone(), client.clone(), scheme.clone());
+            runs.push(std::thread::spawn(move || {
+                let (said, mut child) = heard_until(&exe, backend, "done", Duration::from_secs(60));
+                let _ = child.kill();
+                let _ = child.wait();
+                (client, scheme, backend, said)
+            }));
+        }
+    }
+    // `slow_server` serves one connection, so a dripping server per run.
+    for backend in ["threads", "scheduler"] {
+        let (dripping, _closed) = slow_server(Some(Duration::from_secs(1)));
+        let exe = build(
+            &format!("http_real_slow_{backend}"),
+            &format!(
+                r#"module main;
+import std::core::{{Result, print}};
+import std::net::http::{{Call, CallError, HttpClient}};
+
+pub fn main() -> Int {{
+  with {{ http: HttpClient::real() }} {{
+    match http.send(Call::get("http://127.0.0.1:{dripping}/")) {{
+      Result::Ok(_) => print("answered"),
+      Result::Err(CallError::TimedOut(limit)) => print("timed out ${{limit}}: ${{CallError::TimedOut(limit).show()}}"),
+      Result::Err(why) => print("failed ${{why.show()}}"),
+    }}
+  }};
+  print("done");
+  0
+}}
+"#
+            ),
+        );
+        runs.push(std::thread::spawn(move || {
+            let (said, mut child) = heard_until(&exe, backend, "done", Duration::from_secs(60));
+            let _ = child.kill();
+            let _ = child.wait();
+            ("HttpClient::real()".to_string(), "http (dripping)".to_string(), backend, said)
+        }));
+    }
+    for run in runs {
+        let (client, scheme, backend, said) = run.join().expect("a run");
+        assert_eq!(said, format!("timed out 30000: {sentence}\ndone\n"), "`{client}` over {scheme} on `{backend}`");
     }
 }
 

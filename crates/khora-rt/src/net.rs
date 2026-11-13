@@ -192,6 +192,15 @@ struct Limits {
     /// forgotten, so a caller can say the deadline ended the exchange rather
     /// than the peer.
     expired: bool,
+    /// A read or write gave up because a limit passed: `per_read` or `by`.
+    /// Kept as `expired` is, and cleared with it.
+    ///
+    /// **What this prevents: a read that ran out of its own limit reported
+    /// as a peer that hung up.** An HTTP call with no deadline is held to
+    /// `per_read` alone, and `expired` is false when that runs out, so the
+    /// call came back as `Closed(nothing came back)` after thirty seconds --
+    /// a timeout that named no limit.
+    ran_out: bool,
 }
 
 /// [`Limits`], by socket.
@@ -225,7 +234,7 @@ fn change_limits(socket: Socket, change: impl FnOnce(&mut Limits)) {
     let table = guard.get_or_insert_with(std::collections::HashMap::new);
     let limits = table.entry(key(socket)).or_default();
     change(limits);
-    if limits.per_read.is_none() && limits.by.is_none() && !limits.expired {
+    if limits.per_read.is_none() && limits.by.is_none() && !limits.expired && !limits.ran_out {
         table.remove(&key(socket));
     }
 }
@@ -247,13 +256,16 @@ fn send_deadline_for(socket: Socket) -> Option<std::time::Instant> {
     limits_of(socket).by
 }
 
-/// Records that `socket`'s own deadline ended an operation, if it did: the
-/// wait timed out and the deadline is behind us. A per-read limit that ran
-/// out first is not the deadline, and is left unrecorded.
+/// Records that a limit ended an operation on `socket`, and whether that
+/// limit was the socket's own deadline: the wait timed out, and the deadline
+/// is behind us. A per-read limit that ran out first is a limit, not the
+/// deadline.
 fn note_if_expired(socket: Socket) {
-    if limits_of(socket).by.is_some_and(|by| std::time::Instant::now() >= by) {
-        change_limits(socket, |limits| limits.expired = true);
-    }
+    let deadline_passed = limits_of(socket).by.is_some_and(|by| std::time::Instant::now() >= by);
+    change_limits(socket, |limits| {
+        limits.ran_out = true;
+        limits.expired |= deadline_passed;
+    });
 }
 
 /// Whether a read or write on `socket` gave up because the deadline set by
@@ -266,6 +278,19 @@ fn note_if_expired(socket: Socket) {
 #[unsafe(no_mangle)]
 pub extern "C" fn khora_net_expired(socket: Socket) -> i32 {
     i32::from(limits_of(socket).expired)
+}
+
+/// Whether a read or write on `socket` gave up because a limit passed --
+/// the per-read limit from [`khora_net_set_timeout`] or the deadline from
+/// [`khora_net_set_deadline`] -- 1 if so, 0 if not.
+///
+/// [`khora_net_expired`] answers for the deadline alone. This is for a caller
+/// that holds a connection to a per-read limit and nothing else, and has to
+/// tell that limit running out from a peer that closed or reset: both are a
+/// -1 from the read. Cleared, as `expired` is, by setting either limit again.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_net_timed_out(socket: Socket) -> i32 {
+    i32::from(limits_of(socket).ran_out)
 }
 
 /// Opens an outbound connection, resolving `host` first, and gives up when
@@ -341,25 +366,28 @@ pub extern "C" fn khora_net_set_deadline(socket: Socket, at: i64) -> i32 {
     change_limits(socket, |limits| {
         limits.by = by;
         limits.expired = false;
+        limits.ran_out = false;
     });
     0
 }
 
-/// `socket`'s deadline and whether it has expired, as they stand.
+/// `socket`'s deadline, whether it has expired, and whether any limit has
+/// run out, as they stand.
 ///
 /// For a caller that holds a socket it does not own to a deadline of its own
 /// for a while: [`put_deadline`] gives the owner back what it had. A TLS
 /// upgrade over a caller's socket is the one.
-pub(crate) fn deadline_of(socket: Socket) -> (Option<std::time::Instant>, bool) {
+pub(crate) fn deadline_of(socket: Socket) -> (Option<std::time::Instant>, bool, bool) {
     let limits = limits_of(socket);
-    (limits.by, limits.expired)
+    (limits.by, limits.expired, limits.ran_out)
 }
 
 /// Puts back what [`deadline_of`] read.
-pub(crate) fn put_deadline(socket: Socket, by: Option<std::time::Instant>, expired: bool) {
+pub(crate) fn put_deadline(socket: Socket, by: Option<std::time::Instant>, expired: bool, ran_out: bool) {
     change_limits(socket, |limits| {
         limits.by = by;
         limits.expired = expired;
+        limits.ran_out = ran_out;
     });
 }
 
@@ -876,9 +904,13 @@ fn no_delay(socket: Socket) {
 /// How long a receive on `socket` may wait before it reports a timeout.
 ///
 /// Replaces `setsockopt(SO_RCVTIMEO)`, which cannot fire on a socket the
-/// reactor drives. Zero clears it.
+/// reactor drives. Zero clears it. Either way [`khora_net_timed_out`]
+/// answers about this limit from here on.
 pub extern "C" fn khora_net_set_timeout(socket: Socket, millis: i64) -> i32 {
-    change_limits(socket, |limits| limits.per_read = (millis > 0).then_some(millis as u64));
+    change_limits(socket, |limits| {
+        limits.per_read = (millis > 0).then_some(millis as u64);
+        limits.ran_out = false;
+    });
     0
 }
 
@@ -2341,6 +2373,31 @@ mod tests {
         // Setting the deadline again starts the account again.
         khora_net_set_deadline(socket, -1);
         assert_eq!(khora_net_expired(socket), 0);
+        khora_net_forget(socket);
+    }
+
+    /// **A read its own per-read limit ended says a limit ended it**, with
+    /// no deadline set at all. An HTTP call with no deadline is held to that
+    /// limit alone, and with only the deadline's account to ask it reported
+    /// the limit running out as `Closed(nothing came back)`. Setting the
+    /// limit again starts the account again.
+    #[test]
+    fn a_read_says_whether_its_own_limit_ended_it() {
+        let (client, _peer) = a_connected_pair();
+        let socket = socket_of(&client);
+        assert_eq!(khora_net_prepare(socket), 0);
+        let read = move || {
+            let mut buffer = [0u8; 4];
+            // SAFETY: four writable bytes.
+            unsafe { khora_net_recv(socket, buffer.as_mut_ptr(), 4) }
+        };
+        khora_net_set_timeout(socket, 50);
+        assert_eq!(khora_net_timed_out(socket), 0, "nothing has run out yet");
+        assert_eq!(within_ten_seconds("a read past its own limit", read), -1);
+        assert_eq!(khora_net_timed_out(socket), 1, "the limit ended the read and nothing says so");
+        assert_eq!(khora_net_expired(socket), 0, "and it was not the deadline");
+        khora_net_set_timeout(socket, 50);
+        assert_eq!(khora_net_timed_out(socket), 0, "a new limit starts a new account");
         khora_net_forget(socket);
     }
 }

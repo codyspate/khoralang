@@ -504,15 +504,29 @@ This maps `Result<A, E>` to `Result<A, F>`. By contrast, `catch { ... raise F ..
 
 `main` is not called by anything, so there is nowhere to hand a failure that
 gets that far. A program whose entry point raises and does not handle it ends
-with **exit status 1**, and prints the error type's name to standard error:
+with **exit status 1**, and says so on standard error: first the error type's
+name, then, when the type has `Show`, the value as that `Show` prints it.
 
 ```
 khora: `IoError` reached the entry point and nothing handled it
+  value: IoError::NotFound(settings.toml)
 note: `main` has nowhere to hand an error, so the program ends here with status 1. Catch it in `main`, or return a `Result`
 ```
 
-The *type* is named, not the value. Handle it where the program can say
-something better:
+The `value:` line is whatever the type's `Show` returns, so a `Show` that
+writes a secret out prints it there; a `Redacted` field shows as
+`<redacted>`. It is always one line: control characters in it are written as
+escapes (`\n`, `\r`, `\u{1b}`; a tab is kept), and a value longer than 4096
+bytes is cut, ending `… (N bytes more)`. An error type with no `Show` is
+named alone, with no `value:` line.
+
+The name is written before the type's `Show` runs, because a `Show` is
+ordinary code. One that traps ends the program with that trap's own message
+and status, after the name line; one that never returns leaves the program
+running, after the name line.
+
+This is a diagnostic for whoever runs the program, not a message written for
+them; handle the error where the program can say something better:
 
 ```khora
 pub fn main() -> Int {

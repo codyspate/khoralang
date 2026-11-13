@@ -39,7 +39,26 @@ impl<'ctx> Backend<'ctx> {
     /// to every shell there is; a line of prose about it would be noise on the
     /// ordinary path of stopping a program with a keystroke. It falls through
     /// to the default and prints nothing.
-    fn say_what_escaped(&mut self, main: FunctionValue<'ctx>, which: inkwell::values::IntValue<'ctx>) {
+    ///
+    /// **With the value, for a type whose `Show` the build compiled**, shown
+    /// by the describer a failure with context already uses
+    /// ([`Backend::describe_error`]), on a line after the name: the name
+    /// alone printed one line for a refused port, a host that did not
+    /// resolve and a denied grant. **The name is written before the `Show`
+    /// runs**, because the `Show` is user code and can trap or never return;
+    /// either way the line saying which error nobody handled is already out.
+    /// Not for a failure with context, whose error is inside the box `word`
+    /// points at and whose `show()` [`Backend::say_its_context`] prints
+    /// next; nor when the `Show` itself was canceled, which has no text.
+    ///
+    /// Both are named alone, as a type with no `Show` is.
+    fn say_what_escaped(
+        &mut self,
+        main: FunctionValue<'ctx>,
+        escaped: inkwell::values::IntValue<'ctx>,
+        which: inkwell::values::IntValue<'ctx>,
+        word: inkwell::values::IntValue<'ctx>,
+    ) {
         let known = self.known_errors();
         if known.is_empty() {
             return;
@@ -53,12 +72,14 @@ impl<'ctx> Backend<'ctx> {
         let from = self.builder.get_insert_block().expect("a block to switch from");
 
         let quiet = self.ctx.append_basic_block(main, "escaped.unnamed");
+        let i32_type = self.ctx.i32_type();
         let mut cases = Vec::with_capacity(known.len());
         for (ty, id) in &known {
             // With its arguments: two instantiations of one type are two ids,
             // and `Gx<Int>` says which one escaped where `Gx` would not.
             let name = ty.to_string();
             let block = self.ctx.append_basic_block(main, &format!("escaped.{name}"));
+            let note_line = self.ctx.append_basic_block(main, &format!("escaped.{name}.note"));
             self.builder.position_at_end(block);
             let text = self
                 .builder
@@ -66,19 +87,80 @@ impl<'ctx> Backend<'ctx> {
                 .expect("naming the error type")
                 .as_pointer_value();
             let len = self.ctx.i64_type().const_int(name.len() as u64, false);
-            let report = self.rt.unhandled;
+            let id_value = i32_type.const_int(u64::from(*id), false);
             self.builder
-                .build_call(report, &[text.into(), len.into()], "")
+                .build_call(self.rt.unhandled, &[text.into(), len.into()], "")
                 .expect("reporting an unhandled error");
+            if self.compiled_show(ty).is_some() {
+                let show = self.ctx.append_basic_block(main, &format!("escaped.{name}.show"));
+                if self.noted() {
+                    let noted = i32_type.const_int(runtime::NOTED_WHICH, false);
+                    let is_noted = self
+                        .builder
+                        .build_int_compare(inkwell::IntPredicate::EQ, which, noted, "escaped.boxed")
+                        .expect("testing for context");
+                    self.builder
+                        .build_conditional_branch(is_noted, note_line, show)
+                        .expect("on the tag");
+                } else {
+                    self.builder.build_unconditional_branch(show).expect("on");
+                }
+                self.builder.position_at_end(show);
+                let describer = self.describe_error();
+                let described = self
+                    .builder
+                    .build_call(describer, &[id_value.into(), word.into()], "escaped.described")
+                    .expect("describing the error")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("a pair")
+                    .into_struct_value();
+                let tag = self
+                    .builder
+                    .build_extract_value(described, 0, "escaped.described.which")
+                    .expect("the tag")
+                    .into_int_value();
+                let shown = self.ctx.append_basic_block(main, &format!("escaped.{name}.shown"));
+                let stopped = self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::NE, tag, i32_type.const_zero(), "escaped.stopped")
+                    .expect("testing the tag");
+                self.builder.build_conditional_branch(stopped, note_line, shown).expect("on the tag");
+                self.builder.position_at_end(shown);
+                let what = self
+                    .builder
+                    .build_extract_value(described, 1, "escaped.text")
+                    .expect("the text")
+                    .into_pointer_value();
+                let (what_bytes, what_len) = self.string_bytes(what, "escaped.what.bytes");
+                self.builder
+                    .build_call(self.rt.unhandled_value, &[what_bytes.into(), what_len.into()], "")
+                    .expect("showing an unhandled error");
+            }
+            self.builder.build_unconditional_branch(note_line).expect("on");
+            self.builder.position_at_end(note_line);
+            self.builder.build_call(self.rt.unhandled_note, &[], "").expect("ending the report");
             self.builder.build_unconditional_branch(quiet).expect("leaving a report case");
-            cases.push((self.ctx.i32_type().const_int(u64::from(*id), false), block));
+            cases.push((id_value, block));
         }
 
         // Back where we started, so the switch ends that block; everything
         // after continues from `quiet`.
         self.builder.position_at_end(from);
-        self.builder.build_switch(which, quiet, &cases).expect("dispatching on the error type");
+        self.builder.build_switch(escaped, quiet, &cases).expect("dispatching on the error type");
         self.builder.position_at_end(quiet);
+    }
+
+    /// A `String`'s bytes and length, for a runtime call that takes both.
+    fn string_bytes(
+        &self,
+        s: inkwell::values::PointerValue<'ctx>,
+        name: &str,
+    ) -> (inkwell::values::PointerValue<'ctx>, inkwell::values::IntValue<'ctx>) {
+        let len_slot = runtime::field_pointer(self.ctx, &self.builder, s, runtime::STRING_LEN_FIELD);
+        let len = self.builder.build_load(self.ctx.i64_type(), len_slot, name).expect("a length").into_int_value();
+        let bytes = runtime::byte_offset(self.ctx, &self.builder, s, runtime::STRING_BYTES_OFFSET, name);
+        (bytes, len)
     }
 
     /// The id of a failure that reached the entry point, read from inside
@@ -133,7 +215,6 @@ impl<'ctx> Backend<'ctx> {
             return;
         }
         let i32_type = self.ctx.i32_type();
-        let i64_type = self.ctx.i64_type();
         let ptr = self.ctx.ptr_type(AddressSpace::default());
         let noted = i32_type.const_int(runtime::NOTED_WHICH, false);
         let is_noted = self
@@ -183,14 +264,8 @@ impl<'ctx> Backend<'ctx> {
             .build_extract_value(described, 1, "escaped.text")
             .expect("the text")
             .into_pointer_value();
-        let bytes_of = |this: &Self, s: inkwell::values::PointerValue<'ctx>, name: &str| {
-            let len_slot = runtime::field_pointer(this.ctx, &this.builder, s, runtime::STRING_LEN_FIELD);
-            let len = this.builder.build_load(i64_type, len_slot, name).expect("a length").into_int_value();
-            let bytes = runtime::byte_offset(this.ctx, &this.builder, s, runtime::STRING_BYTES_OFFSET, name);
-            (bytes, len)
-        };
-        let (note_bytes, note_len) = bytes_of(self, note, "escaped.note.bytes");
-        let (what_bytes, what_len) = bytes_of(self, what, "escaped.what.bytes");
+        let (note_bytes, note_len) = self.string_bytes(note, "escaped.note.bytes");
+        let (what_bytes, what_len) = self.string_bytes(what, "escaped.what.bytes");
         self.builder
             .build_call(
                 self.rt.unhandled_context,
@@ -502,7 +577,7 @@ impl<'ctx> Backend<'ctx> {
 
             self.builder.position_at_end(failed);
             let escaped = self.opened_escape(which, word);
-            self.say_what_escaped(main, escaped);
+            self.say_what_escaped(main, escaped, which, word);
             self.say_its_context(which, word);
             self.close_root_region();
             // A cancellation that reached the entry point and an error that

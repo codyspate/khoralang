@@ -32,6 +32,7 @@ knob that lets somebody pick worse ones is not a feature.
 ### TlsError
 
 ```khora
+derive(Show, Eq)
 pub type TlsError =
   | BadCertificate
   | BadKey
@@ -47,6 +48,9 @@ Five cases, and only `Unreachable` carries anything. A `rustls` diagnostic is
 written for somebody debugging a handshake; what a Khora program can *do*
 about a failure is fix the certificate, fix the key, drop the client, or
 give up on the host -- and only that last one needs to say which host.
+
+`${e}` prints a case as `TlsError::Unreachable(example.com)`, and `==`
+compares cases and what they carry.
 
 #### BadCertificate
 
@@ -375,6 +379,16 @@ pub fn expired(connection: TlsConnection) -> Bool
 
 Whether the deadline from [`set_deadline`](#set_deadline) is what ended a read or write
 on this connection: `std::net::socket::expired`, for a session.
+
+### timed_out
+
+```khora
+pub fn timed_out(connection: TlsConnection) -> Bool
+```
+
+Whether a limit is what ended a read or write on this connection, the
+per-read limit from [`set_receive_timeout`](#set_receive_timeout) or the deadline from
+[`set_deadline`](#set_deadline): `std::net::socket::timed_out`, for a session.
 
 ### shut
 

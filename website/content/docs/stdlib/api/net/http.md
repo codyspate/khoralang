@@ -660,7 +660,8 @@ message.
 
 The call's whole deadline passed, in milliseconds, before the answer
 was whole: the lookup, the connect, the handshake, the request or the
-answer, whichever it was in.
+answer, whichever it was in. A call with no deadline carries the limit
+that ended it instead, `default_answer_timeout`.
 
 **Its own case, not `Closed`**, because the two want different things
 from a caller. A peer that hung up may answer the next call; a call that
@@ -1587,10 +1588,17 @@ and whatever it had opened is closed.
 
 **Which limit wins:** with a deadline, every read waits for as long as
 the deadline leaves, however long that is, and `default_answer_timeout`
-does not apply. Zero or less means no deadline, which leaves only
-`default_answer_timeout` on each read, renewed by every byte.
+does not apply. Zero or less means no deadline, which leaves
+`default_answer_timeout` on the connect and the TLS handshake together,
+and on each read, renewed by every byte. **Writing the request has no
+bound then**: a body larger than the socket buffers, sent to a server
+that never reads, waits until the server goes away.
 
-`TimedOut` means the deadline ended the call. A failure that merely
+Either way a call that runs out is `CallError::TimedOut(millis)`,
+carrying the limit that ended it: the deadline, or with none,
+`default_answer_timeout` (`TimedOut(30000)`, the same value a `real()`
+call that ran out of its deadline gives). Its `show()` says so in
+those words, true of either. A failure that merely
 happened late -- a refusal, a reset, a bad certificate arriving in the
 last millisecond -- is reported as what it was.
 
@@ -1631,8 +1639,8 @@ fn show(self) -> String
 ```
 
 The case and what it carries, as a derived `Show` writes them, and for
-`TimedOut` a sentence after it saying which deadline ran out and what
-sets another.
+`TimedOut` a sentence after it saying what the number can be and what
+sets the deadline.
 
 **What this prevents: a timeout nobody can trace to a setting.**
 `CallError::TimedOut(30000)` names a number, and a reader whose client
@@ -1640,10 +1648,15 @@ is `HttpClient::real()` never wrote that number down; nothing in the
 line says it was a default or that `HttpClient::within` changes it.
 
 Written out rather than derived for that one case, so every arm is here
-and a case added later has to say how it reads. The number alone does
-not say whether the caller chose it -- `within(30000)` ends at 30000
-too -- so the text says only what is true for every one of them: that
-30000 ms is the default `real()` and `bounded` give. It names
+and a case added later has to say how it reads. **The number alone does
+not say what it measured**: a client with a deadline ends at it, and a
+`within(0)` client, which has none, ends at `default_answer_timeout` of
+silence between reads -- and at the defaults both are 30000, the same
+value. So the text says only what is true of every one of them: that
+the number is the deadline, or for a client with none, the silence
+limit; and at 30000, that it is the default for each. The note is
+given only while the two defaults are the same number, so changing one
+drops it rather than leaving it wrong. It names
 `bounded_within` beside `within` because a `bounded` client that
 switched to `within` would lose its answer limit.
 
@@ -1780,7 +1793,9 @@ call with no deadline.
 
 On both paths: `std::net::tls` sets it on the socket underneath, and
 `dial` uses it for `https` exactly as it does for `http`. A TLS server that
-accepts the connection and then says nothing is the case it is for.
+accepts the connection and then says nothing is the case it is for. It
+bounds the connect and the TLS handshake of such a call too, and a call it
+ends is `CallError::TimedOut(30000)`.
 
 **A call with a deadline is bounded by the deadline alone.** So
 `HttpClient::within(60000)` against a server slow to its first byte waits

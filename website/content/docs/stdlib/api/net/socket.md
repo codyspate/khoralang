@@ -222,6 +222,21 @@ telling a timeout from a broken peer by the time would call that a
 timeout. This says what the read itself gave up on. It stays true until
 the deadline is set again.
 
+### timed_out
+
+```khora
+pub fn timed_out(handle: Int) -> Bool
+```
+
+Whether a limit is what ended a read or write on this connection: the
+per-read limit from [`set_receive_timeout`](#set_receive_timeout) or the deadline from
+[`set_deadline`](#set_deadline).
+
+[`expired`](#expired) answers for the deadline alone. A connection held to a
+per-read limit and nothing else needs this one to tell that limit running
+out from a peer that closed or reset, which are a negative read too.
+Setting either limit again starts the account again.
+
 ### receive
 
 ```khora

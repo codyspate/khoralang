@@ -139,14 +139,13 @@ mod tests {
         std::thread::spawn(|| {
             let fiber = Fiber::spawned();
             let _entered = enter(fiber.clone());
-            let before = Deadlines::len();
-            let id = khora_timeout_begin(60_000);
-            assert_eq!(Deadlines::len(), before + 1, "the deadline is on the list");
-            assert_eq!(khora_timeout_end(id), 0, "nothing cut the body");
-            assert!(!fiber.is_canceled());
             // Other tests' scopes come and go on the same list, so this one
             // asks for its own entry rather than for a count.
-            assert!(Deadlines::len() <= before, "the entry went with the scope");
+            let id = khora_timeout_begin(60_000);
+            assert!(Deadlines::contains(id), "the deadline is on the list");
+            assert_eq!(khora_timeout_end(id), 0, "nothing cut the body");
+            assert!(!fiber.is_canceled());
+            assert!(!Deadlines::contains(id), "the entry went with the scope");
         })
         .join()
         .expect("the test thread");

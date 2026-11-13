@@ -3,8 +3,8 @@ module std::net::http;
 import std::core::{Array, Channel, ChildFailed, Eq, List, Map, Nursery, Option, Raised, Region, Result, Scope, SharedFn, Show, Split, acquire, attempt, bounded_nursery, contain_with, scoped};
 import std::permissions::{may_dial};
 import std::permissions::grants::{network};
-import std::net::socket::{SocketError, accept_on, connect_by, expired, invalid_handle, listen_on, receive, set_deadline, set_receive_timeout, shut, start, transmit};
-import std::net::tls::{TlsClient, TlsConnection, TlsError, TlsServer, client as tls_client, connect_by as tls_connect_by, expired as tls_expired, receive as tls_receive, secured, server as tls_server, set_deadline as tls_set_deadline, set_receive_timeout as tls_set_receive_timeout, shut as tls_shut, transmit as tls_transmit};
+import std::net::socket::{SocketError, accept_on, connect_by, invalid_handle, listen_on, receive, set_deadline, set_receive_timeout, shut, start, timed_out, transmit};
+import std::net::tls::{TlsClient, TlsConnection, TlsError, TlsServer, client as tls_client, connect_by as tls_connect_by, receive as tls_receive, secured, server as tls_server, set_deadline as tls_set_deadline, set_receive_timeout as tls_set_receive_timeout, shut as tls_shut, timed_out as tls_timed_out, transmit as tls_transmit};
 import std::clock::{Clock};
 import std::time::{Date, DateTime, Time};
 import std::schema::{Encode, json_text};
@@ -2503,7 +2503,8 @@ pub type CallError =
   | Denied(String)
   /// The call's whole deadline passed, in milliseconds, before the answer
   /// was whole: the lookup, the connect, the handshake, the request or the
-  /// answer, whichever it was in.
+  /// answer, whichever it was in. A call with no deadline carries the limit
+  /// that ended it instead, `default_answer_timeout`.
   ///
   /// **Its own case, not `Closed`**, because the two want different things
   /// from a caller. A peer that hung up may answer the next call; a call that
@@ -2513,8 +2514,8 @@ pub type CallError =
 
 impl Show for CallError {
   /// The case and what it carries, as a derived `Show` writes them, and for
-  /// `TimedOut` a sentence after it saying which deadline ran out and what
-  /// sets another.
+  /// `TimedOut` a sentence after it saying what the number can be and what
+  /// sets the deadline.
   ///
   /// **What this prevents: a timeout nobody can trace to a setting.**
   /// `CallError::TimedOut(30000)` names a number, and a reader whose client
@@ -2522,10 +2523,15 @@ impl Show for CallError {
   /// line says it was a default or that `HttpClient::within` changes it.
   ///
   /// Written out rather than derived for that one case, so every arm is here
-  /// and a case added later has to say how it reads. The number alone does
-  /// not say whether the caller chose it -- `within(30000)` ends at 30000
-  /// too -- so the text says only what is true for every one of them: that
-  /// 30000 ms is the default `real()` and `bounded` give. It names
+  /// and a case added later has to say how it reads. **The number alone does
+  /// not say what it measured**: a client with a deadline ends at it, and a
+  /// `within(0)` client, which has none, ends at `default_answer_timeout` of
+  /// silence between reads -- and at the defaults both are 30000, the same
+  /// value. So the text says only what is true of every one of them: that
+  /// the number is the deadline, or for a client with none, the silence
+  /// limit; and at 30000, that it is the default for each. The note is
+  /// given only while the two defaults are the same number, so changing one
+  /// drops it rather than leaving it wrong. It names
   /// `bounded_within` beside `within` because a `bounded` client that
   /// switched to `within` would lose its answer limit.
   fn show(self) -> String {
@@ -2539,8 +2545,10 @@ impl Show for CallError {
       CallError::Denied(at) => "CallError::Denied(${at})",
       CallError::TimedOut(millis) => {
         let shown = Int::to_string(millis);
-        let whose = if millis == default_call_deadline() { " (${shown} ms is the default that `HttpClient::real()` and `HttpClient::bounded` give)" } else { "" };
-        "CallError::TimedOut(${shown}): the call took longer than its ${shown} ms deadline${whose}; `HttpClient::within(ms)` or `HttpClient::bounded_within(limit, ms)` sets a different one"
+        let whose = if millis == default_call_deadline() && millis == default_answer_timeout() {
+          " (${shown} ms is the default deadline `HttpClient::real()` and `HttpClient::bounded` give, and what `default_answer_timeout` returns)"
+        } else { "" };
+        "CallError::TimedOut(${shown}): no answer within ${shown} ms${whose}. That is the call's deadline, or, for a client with no deadline (`HttpClient::within(0)`), the limit on silence between reads; `HttpClient::within(ms)` or `HttpClient::bounded_within(limit, ms)` sets the deadline"
       },
     }
   }
@@ -2641,7 +2649,9 @@ pub fn default_answer_limit() -> Int { 65536 }
 ///
 /// On both paths: `std::net::tls` sets it on the socket underneath, and
 /// `dial` uses it for `https` exactly as it does for `http`. A TLS server that
-/// accepts the connection and then says nothing is the case it is for.
+/// accepts the connection and then says nothing is the case it is for. It
+/// bounds the connect and the TLS handshake of such a call too, and a call it
+/// ends is `CallError::TimedOut(30000)`.
 ///
 /// **A call with a deadline is bounded by the deadline alone.** So
 /// `HttpClient::within(60000)` against a server slow to its first byte waits
@@ -2691,10 +2701,17 @@ impl HttpClient {
   ///
   /// **Which limit wins:** with a deadline, every read waits for as long as
   /// the deadline leaves, however long that is, and `default_answer_timeout`
-  /// does not apply. Zero or less means no deadline, which leaves only
-  /// `default_answer_timeout` on each read, renewed by every byte.
+  /// does not apply. Zero or less means no deadline, which leaves
+  /// `default_answer_timeout` on the connect and the TLS handshake together,
+  /// and on each read, renewed by every byte. **Writing the request has no
+  /// bound then**: a body larger than the socket buffers, sent to a server
+  /// that never reads, waits until the server goes away.
   ///
-  /// `TimedOut` means the deadline ended the call. A failure that merely
+  /// Either way a call that runs out is `CallError::TimedOut(millis)`,
+  /// carrying the limit that ended it: the deadline, or with none,
+  /// `default_answer_timeout` (`TimedOut(30000)`, the same value a `real()`
+  /// call that ran out of its deadline gives). Its `show()` says so in
+  /// those words, true of either. A failure that merely
   /// happened late -- a refusal, a reset, a bad certificate arriving in the
   /// last millisecond -- is reported as what it was.
   ///
@@ -2745,6 +2762,9 @@ fn deadline_after(millis: Int) -> Int {
 fn perform(call: Call, limit: Int, millis: Int) -> Result<Answer, CallError> {
   // From the moment the call is made, so the budget is what the caller sees.
   let deadline = deadline_after(millis);
+  // The limit a `TimedOut` names: the deadline, or with none, the limit on
+  // each step that holds the call instead.
+  let named = if millis > 0 { millis } else { default_answer_timeout() };
   match parse_url(call.url) {
     Option::None => Result::Err(CallError::BadUrl(call.url)),
     // **Checked after the URL is parsed and before anything is dialed.**
@@ -2759,7 +2779,7 @@ fn perform(call: Call, limit: Int, millis: Int) -> Result<Answer, CallError> {
     // with `acquire` and ends with the scope that made it. The whole
     // conversation happens inside it, so the trust store outlives the session
     // that was opened from it.
-    Option::Some(url) => scoped(fn () => attempted(url, call, limit, deadline, millis)),
+    Option::Some(url) => scoped(fn () => attempted(url, call, limit, deadline, named)),
   }
 }
 
@@ -2811,14 +2831,23 @@ type Dialed = { transport: Transport, ran_out: () -> Bool, closes: Region };
 ///
 /// `deadline` bounds the connect and the handshake, and is then set on the
 /// transport, so that every read and write after it answers to the same
-/// instant. The connection's close is deferred to a region of its own
-/// straight after the connect returns, with nothing that can stop the call
-/// between, and the region goes back in the `Dialed`.
+/// instant. **A call with no deadline gives the connect and the handshake
+/// `default_answer_timeout`**, the limit each of its reads gets: without it
+/// a TLS server that accepted and never answered held the handshake, and the
+/// calling fiber, for as long as the process ran. The connection's close is
+/// deferred to a region of its own straight after the connect returns, with
+/// nothing that can stop the call between, and the region goes back in the
+/// `Dialed`.
+///
+/// `ran_out` asks whether either limit ended a read or write, the deadline
+/// or the per-read one, so a call with no deadline that a server held to
+/// that limit is `TimedOut` rather than `Closed`.
 fn dial(url: Url, deadline: Int, millis: Int) -> Result<Dialed, CallError>
   with { scope: Scope }
 {
+  let connect_by_at = if deadline < 0 { deadline_after(default_answer_timeout()) } else { deadline };
   if url.secure {
-    match attempt(fn () => tls_connect_by(tls_client()!, url.host, url.port, deadline)!) {
+    match attempt(fn () => tls_connect_by(tls_client()!, url.host, url.port, connect_by_at)!) {
       Result::Err(why) => Result::Err(refused_tls(Raised::only(why), millis)),
       Result::Ok(session) => {
         let closes = Region::open();
@@ -2828,17 +2857,17 @@ fn dial(url: Url, deadline: Int, millis: Int) -> Result<Dialed, CallError>
         // for the life of the process.
         tls_set_receive_timeout(session, read_limit(deadline));
         tls_set_deadline(session, deadline);
-        Result::Ok({ transport: over_tls(session), ran_out: fn () => tls_expired(session), closes: closes })
+        Result::Ok({ transport: over_tls(session), ran_out: fn () => tls_timed_out(session), closes: closes })
       },
     }
   } else {
-    match dialed_plain(url, deadline) {
+    match dialed_plain(url, connect_by_at) {
       Result::Ok(socket) => {
         let closes = Region::open();
         Region::defer(closes, closing(socket));
         set_receive_timeout(socket, read_limit(deadline));
         set_deadline(socket, deadline);
-        Result::Ok({ transport: over_socket(socket), ran_out: fn () => expired(socket), closes: closes })
+        Result::Ok({ transport: over_socket(socket), ran_out: fn () => timed_out(socket), closes: closes })
       },
       Result::Err(why) => Result::Err(refused_socket(why, millis)),
     }

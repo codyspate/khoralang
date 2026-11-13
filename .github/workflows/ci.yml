@@ -281,6 +281,26 @@ jobs:
           cargo build -p khora-rt --target wasm32-unknown-unknown
           cargo nextest run -p khora-codegen-llvm --features llvm --test targets -E 'not test(/musl/)'
 
+      # **The musl tarball, cached under its version and hash**, so the musl
+      # job does not depend on musl.libc.org, or any download, once one fetch
+      # has succeeded. The key is read from the script, so a new pin is a new
+      # cache rather than an old tarball the script then refuses. The script
+      # checks a cached tarball's hash again before it uses it.
+      - name: Read the musl pin
+        if: runner.os == 'Linux'
+        id: musl
+        shell: bash
+        run: |
+          version=$(sed -n 's/^MUSL_VERSION=//p' scripts/build-musl-runtime.sh)
+          sha=$(sed -n 's/^MUSL_SHA256=//p' scripts/build-musl-runtime.sh)
+          echo "key=musl-$version-$sha" >> "$GITHUB_OUTPUT"
+      - name: Cache the musl source tarball
+        if: runner.os == 'Linux'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/musl-headers/src/*.tar.gz
+          key: ${{ steps.musl.outputs.key }}
+
       # **Static musl programs, built so their tests cannot skip.** Both musl
       # runtimes on both Linux runners: the host's architecture is built and
       # run -- a static program, fibers on both backends, a TLS round trip --

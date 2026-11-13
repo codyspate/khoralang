@@ -327,22 +327,7 @@ impl<'ctx> Backend<'ctx> {
         let namer = self.error_type_name();
         let mut cases = Vec::new();
         for (ty, id) in known {
-            // **The impl the program already compiled.** A non-generic type's
-            // `Show` is one concrete function; a generic type's at this
-            // argument may not have been emitted, and is described by name.
-            let Type::Adt { name, home: Some(home), args } = ty else { continue };
-            if !args.is_empty() {
-                continue;
-            }
-            let symbol = khora_types::mono::Instance {
-                module: home.clone(),
-                function: khora_types::traits::method_key("Show", name, "show"),
-                args: Vec::new(),
-            }
-            .symbol();
-            if !self.is_defined(&symbol) {
-                continue;
-            }
+            let Some(symbol) = self.compiled_show(ty) else { continue };
             let Ok(show) = self.callee(&symbol) else { continue };
             let block = self.ctx.append_basic_block(f, &format!("show.{ty}"));
             self.builder.position_at_end(block);
@@ -390,6 +375,26 @@ impl<'ctx> Backend<'ctx> {
         self.builder.build_return(Some(&pair)).expect("the name");
         self.builder.position_at_end(entry);
         self.builder.build_switch(which, fallback, &cases).expect("dispatching on the id");
+    }
+
+    /// The symbol of `ty`'s `Show::show`, when this build compiled one.
+    ///
+    /// **The impl the program already compiled.** A non-generic type's
+    /// `Show` is one concrete function; a generic type's at this argument
+    /// may not have been emitted, and is described by name. So is a type
+    /// with no `Show` at all.
+    pub(crate) fn compiled_show(&self, ty: &Type) -> Option<String> {
+        let Type::Adt { name, home: Some(home), args } = ty else { return None };
+        if !args.is_empty() {
+            return None;
+        }
+        let symbol = khora_types::mono::Instance {
+            module: home.clone(),
+            function: khora_types::traits::method_key("Show", name, "show"),
+            args: Vec::new(),
+        }
+        .symbol();
+        self.is_defined(&symbol).then_some(symbol)
     }
 
     /// The `{ which, String }` `describe_error` answers.

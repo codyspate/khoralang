@@ -459,6 +459,28 @@ fn walk(db: &dyn Db, files: &[SourceFile], roots: Roots, own: Option<&[SourceFil
     }
 
     let mut raised = RaisedErrors::default();
+    // **The `Show` of each error `main` says it raises is a root**, in a
+    // build whose entry is `main`. The entry point prints an error that
+    // reaches it through that `Show` (`Backend::say_what_escaped`), by
+    // symbol and only if the walk emitted it, and a program that never
+    // shows its own error never calls it. Missed, the line names the type
+    // and not the value: `SocketError` for a refused port, a host that did
+    // not resolve and a denied grant alike. Costs one `show` per error type
+    // in `main`'s `raises` row; a `main` that raises nothing costs nothing.
+    if roots == Roots::Main {
+        for unit in &units {
+            if !is_root(db, unit, "main", roots, own) {
+                continue;
+            }
+            if let Some(Type::Row { fields, .. }) =
+                unit.types.signatures.get("main").map(|s| &s.raises)
+            {
+                for (_, ty) in fields {
+                    raised.note_entry(ty);
+                }
+            }
+        }
+    }
     loop {
     while let Some((instance, index, depth)) = queue.pop() {
         if !seen.insert(instance.clone()) {
@@ -563,12 +585,17 @@ fn walk(db: &dyn Db, files: &[SourceFile], roots: Roots, own: Option<&[SourceFil
         // the describer's -- every raised operand, every `Raised` row field
         // and every `catch` arm's type -- and costs one `show` per error type
         // a program that uses `Raised` raises. Looped, because a `show` can
-        // itself raise a type not yet seen.
-        if !raised.uses_raised {
-            break;
-        }
+        // itself raise a type not yet seen. The error types `main` raises
+        // are seeded once whether or not anything is a `Raised`; see above.
+        let wanted: Vec<Type> = if raised.uses_raised {
+            let mut all = std::mem::take(&mut raised.pending);
+            all.append(&mut raised.entry);
+            all
+        } else {
+            std::mem::take(&mut raised.entry)
+        };
         let before = queue.len();
-        for ty in std::mem::take(&mut raised.pending) {
+        for ty in wanted {
             if !raised.seeded.insert(ty.clone()) {
                 continue;
             }
@@ -595,11 +622,24 @@ struct RaisedErrors {
     uses_raised: bool,
     /// Seen, and not yet seeded.
     pending: Vec<Type>,
+    /// The error types `main` raises, not yet seeded. Apart from `pending`
+    /// because these are seeded in a program with no `Raised` as well.
+    entry: Vec<Type>,
     /// Already seeded, or already pending.
     seeded: HashSet<Type>,
 }
 
 impl RaisedErrors {
+    /// Notes an error type `main` raises, for the entry point's report.
+    ///
+    /// A generic one is described by name, as in [`RaisedErrors::note`].
+    fn note_entry(&mut self, ty: &Type) {
+        if let Type::Adt { args, .. } = ty {
+            if args.is_empty() && !self.entry.contains(ty) {
+                self.entry.push(ty.clone());
+            }
+        }
+    }
     fn note(&mut self, ty: &Type) {
         if let Type::Adt { args, .. } = ty {
             // The describer shows a non-generic type through its own `Show`,

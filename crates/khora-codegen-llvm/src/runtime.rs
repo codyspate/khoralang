@@ -439,9 +439,16 @@ pub struct Runtime<'ctx> {
     /// See [`Runtime::contain_enter`].
     pub contain_exit: FunctionValue<'ctx>,
     /// `void khora_unhandled(const uint8_t *name, size_t len)` — says which
-    /// error left `main`. Returns, unlike its neighbors here: the program is
-    /// ending correctly and this only says why.
+    /// error left `main`, flushed before anything runs its `Show`. Returns,
+    /// unlike its neighbors here: the program is ending correctly and this
+    /// only says why.
     pub unhandled: FunctionValue<'ctx>,
+    /// `void khora_unhandled_value(const uint8_t *what, size_t)` -- the
+    /// shown value of what [`Runtime::unhandled`] named, escaped and cut.
+    pub unhandled_value: FunctionValue<'ctx>,
+    /// `void khora_unhandled_note(void)` -- the line that ends the account
+    /// of an error at `main`.
+    pub unhandled_note: FunctionValue<'ctx>,
     /// `void khora_unhandled_context(const uint8_t *note, size_t, const
     /// uint8_t *what, size_t)` -- what a failure with context that left
     /// `main` was, after [`Runtime::unhandled`] has named its type.
@@ -759,6 +766,8 @@ impl<'ctx> Runtime<'ctx> {
                 "khora_unhandled",
                 void.fn_type(&[ptr.into(), i64t.into()], false),
             ),
+            unhandled_value: declare("khora_unhandled_value", void.fn_type(&[ptr.into(), i64t.into()], false)),
+            unhandled_note: declare("khora_unhandled_note", void.fn_type(&[], false)),
             unhandled_context: declare(
                 "khora_unhandled_context",
                 void.fn_type(&[ptr.into(), i64t.into(), ptr.into(), i64t.into()], false),

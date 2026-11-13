@@ -21,11 +21,16 @@ use std::io::Write;
 /// bug, because neither is true -- an error nobody handled is a program
 /// behaving as written.
 ///
-/// The type's name rather than the value. Generated code knows which error
-/// type the tag stands for and could reach a `Show` for it, but only if one
-/// exists and only by forcing an instance nothing else asked for; the name is
-/// always available and answers the question that was actually being asked,
-/// which is what happened rather than to what.
+/// The type's name only. An error whose type has `Show` is shown next, by
+/// [`khora_unhandled_value`], after this line is out.
+///
+/// **Written and flushed before the value is computed**, because the value
+/// is the type's `Show`, which is user code: one that trapped ended the
+/// program with only the trap's own line, and one that looped held it
+/// forever, and either way the line saying which error nobody handled was
+/// never printed. The name needs nothing but a string literal. Standard
+/// error is unbuffered in Rust, so the `flush` is a statement of intent
+/// rather than a second write.
 ///
 /// # Safety
 ///
@@ -45,6 +50,79 @@ pub unsafe extern "C" fn khora_unhandled(name: *const u8, len: u64) {
         "khora: `{}` reached the entry point and nothing handled it",
         String::from_utf8_lossy(bytes)
     );
+    let _ = err.flush();
+}
+
+/// Says what the error [`khora_unhandled`] just named was: `  value: `
+/// and its `Show`, on one line of its own.
+///
+/// **What the value prevents: one line for every way a call fails.**
+/// `SocketError` named a refused port, a host that did not resolve and a
+/// denied grant alike; `SocketError::Denied(0.0.0.0:80)` says which, and
+/// what to change.
+///
+/// **Escaped and cut, because the text is the program's data.** A host out
+/// of a request with a newline in it forged a second `khora:` line in a log
+/// collector, an escape sequence drove the terminal, and a 4 MB body was
+/// printed whole. See [`one_bounded_line`]. It is still whatever the type's
+/// `Show` says: a `Show` that writes a secret out prints it here.
+///
+/// # Safety
+///
+/// `what` must point at `what_len` bytes, live for the call: generated code
+/// passes the bytes of the string the `Show` returned.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_unhandled_value(what: *const u8, what_len: u64) {
+    let bytes = if what.is_null() || what_len == 0 {
+        &[][..]
+    } else {
+        // SAFETY: the caller's contract, above.
+        unsafe { std::slice::from_raw_parts(what, what_len as usize) }
+    };
+    let mut err = std::io::stderr().lock();
+    let _ = writeln!(err, "  value: {}", one_bounded_line(&String::from_utf8_lossy(bytes)));
+}
+
+/// The most of a shown value [`one_bounded_line`] keeps, in bytes.
+const SHOWN_LIMIT: usize = 4096;
+
+/// `text` as one line of at most [`SHOWN_LIMIT`] bytes before escaping.
+///
+/// **Control characters are written as escapes** -- `\n`, `\r` and
+/// `\u{1b}` and the like, everything below 0x20 but a tab, and 0x7f -- so a
+/// value cannot end the line it is on or drive a terminal. Tab is kept: it
+/// moves nothing but the column. **The cut is on a character boundary**, at
+/// or before the limit, and says how many bytes were left out, so a reader
+/// knows the value is not whole. Costs nothing on a short plain value but
+/// the scan.
+fn one_bounded_line(text: &str) -> String {
+    let mut cut = text.len().min(SHOWN_LIMIT);
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let mut line = String::with_capacity(cut + 16);
+    for c in text[..cut].chars() {
+        match c {
+            '\n' => line.push_str("\\n"),
+            '\r' => line.push_str("\\r"),
+            '\t' => line.push('\t'),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                line.push_str(&format!("\\u{{{:x}}}", c as u32));
+            }
+            c => line.push(c),
+        }
+    }
+    if cut < text.len() {
+        line.push_str(&format!("… ({} bytes more)", text.len() - cut));
+    }
+    line
+}
+
+/// Ends the account [`khora_unhandled`] began: what the program does with
+/// an error at `main`, and how to keep one from getting there.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_unhandled_note() {
+    let mut err = std::io::stderr().lock();
     let _ = writeln!(
         err,
         "note: `main` has nowhere to hand an error, so the program ends here \
@@ -477,6 +555,26 @@ fn opens_a_frame(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::from_khora_down;
+
+    /// **A shown value is one line, and a bounded one**: no control
+    /// character survives to end the line or drive a terminal, a tab is
+    /// kept, and a cut never splits a character and says how much is gone.
+    #[test]
+    fn a_shown_value_is_one_bounded_line() {
+        use super::{one_bounded_line, SHOWN_LIMIT};
+        assert_eq!(
+            one_bounded_line("a\nb\rc\u{1b}[2J\u{7f}\u{0}\td"),
+            "a\\nb\\rc\\u{1b}[2J\\u{7f}\\u{0}\td"
+        );
+        assert_eq!(one_bounded_line("plain"), "plain");
+        let whole = "x".repeat(SHOWN_LIMIT);
+        assert_eq!(one_bounded_line(&whole), whole, "exactly the limit is not cut");
+        let long = format!("x{}", "é".repeat(SHOWN_LIMIT));
+        let line = one_bounded_line(&long);
+        let kept = line.split('…').next().unwrap();
+        assert_eq!(kept.len(), SHOWN_LIMIT - 1, "the cut steps back off the middle of `é`");
+        assert!(line.ends_with(&format!("… ({} bytes more)", long.len() - kept.len())), "{line:?}");
+    }
 
     /// A capture with the shape the real one has: the runtime's frames, the
     /// trap handler, then the Khora frames that are the whole point.

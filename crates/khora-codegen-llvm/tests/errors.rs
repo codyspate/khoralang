@@ -122,12 +122,13 @@ fn every_std_error_can_say_what_it_is() {
     );
 }
 
-/// **A `CallError::TimedOut` at the default deadline says what that number
-/// is, in words true for whoever reads it.** 30000 comes from `real()`, from
-/// `bounded(limit)`, and from a caller who wrote `within(30000)`, and the
-/// value cannot say which. So the line says 30000 ms is the default those
-/// two give, which is true for all three, and names both ways to set
-/// another. Any other number is the caller's own and gets no parenthesis.
+/// **A `CallError::TimedOut` says what its number can be, in words true for
+/// whoever reads it.** The value cannot say whether the call had a deadline:
+/// `real()`, `bounded(limit)` and `within(30000)` end at a 30000 ms deadline,
+/// and a `within(0)` client, which has none, ends at 30000 ms of silence
+/// between reads, and all four are `TimedOut(30000)`. So the line names both
+/// readings, and at 30000 says that number is the default for each. Any
+/// other number is the caller's own deadline and gets no parenthesis.
 #[test]
 fn a_timeout_at_the_default_deadline_says_so() {
     let out = run(
@@ -138,11 +139,14 @@ fn a_timeout_at_the_default_deadline_says_so() {
 
     assert_eq!(
         out,
-        "CallError::TimedOut(30000): the call took longer than its 30000 ms deadline \
-         (30000 ms is the default that `HttpClient::real()` and `HttpClient::bounded` give); \
-         `HttpClient::within(ms)` or `HttpClient::bounded_within(limit, ms)` sets a different one\n\
-         CallError::TimedOut(1500): the call took longer than its 1500 ms deadline; \
-         `HttpClient::within(ms)` or `HttpClient::bounded_within(limit, ms)` sets a different one\n"
+        "CallError::TimedOut(30000): no answer within 30000 ms \
+         (30000 ms is the default deadline `HttpClient::real()` and `HttpClient::bounded` give, \
+         and what `default_answer_timeout` returns). That is the call's deadline, or, for a client \
+         with no deadline (`HttpClient::within(0)`), the limit on silence between reads; \
+         `HttpClient::within(ms)` or `HttpClient::bounded_within(limit, ms)` sets the deadline\n\
+         CallError::TimedOut(1500): no answer within 1500 ms. That is the call's deadline, or, for \
+         a client with no deadline (`HttpClient::within(0)`), the limit on silence between reads; \
+         `HttpClient::within(ms)` or `HttpClient::bounded_within(limit, ms)` sets the deadline\n"
     );
 }
 
@@ -250,4 +254,218 @@ fn every_status_a_service_sends_has_a_phrase() {
          Payload Too Large\n\
          Unknown\n"
     );
+}
+
+/// Compiles `program` whole, runs it on both fiber backends, and gives back
+/// each backend's exit status and standard error.
+fn escaped(name: &str, program: &str) -> Vec<(&'static str, Option<i32>, String)> {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    harness::ensure_runtime();
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
+    let _ = std::fs::remove_file(&exe);
+    let db = KhoraDatabase::new();
+    let root = SourceRoot::new(&db, sources(&db, &dir, program));
+    if let Err(errors) = khora_codegen_llvm::compile(&db, root, &exe) {
+        let messages: Vec<String> = errors.into_iter().map(|e| e.message).collect();
+        panic!("compiling `{name}` failed:\n  {}", messages.join("\n  "));
+    }
+    ["threads", "scheduler"]
+        .into_iter()
+        .map(|backend| {
+            let out = Command::new(&exe)
+                .env("KHORA_FIBERS", backend)
+                .output()
+                .expect("the program should run");
+            (backend, out.status.code(), String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n"))
+        })
+        .collect()
+}
+
+/// **An error that reaches `main` is named, then printed with its value when
+/// its type has `Show`**, and named alone when it has none.
+///
+/// The name alone (`SocketError`) said what kind of thing went wrong and not
+/// which: a refused port, a host that did not resolve and a denied grant all
+/// printed the same line. The value is the type's own `Show`, the one `${e}`
+/// prints, on a line of its own after the name.
+///
+/// A failure with context prints its `show()` on the `failure:` line, and its
+/// first line stays the name.
+#[test]
+fn an_error_that_reaches_main_prints_its_value() {
+    let note = "note: `main` has nowhere to hand an error, so the program ends here with \
+                status 1. Catch it in `main`, or return a `Result`\n";
+
+    let shown = escaped(
+        "escaped_shown",
+        r#"module demo::main;
+import std::net::socket::{SocketError};
+
+pub fn main() -> () raises SocketError {
+  raise SocketError::Denied("0.0.0.0:80")
+}
+"#,
+    );
+    for (backend, code, err) in shown {
+        assert_eq!(code, Some(1), "`{backend}`: {err}");
+        assert_eq!(
+            err,
+            format!(
+                "khora: `SocketError` reached the entry point and nothing handled it\n  \
+                 value: SocketError::Denied(0.0.0.0:80)\n{note}"
+            ),
+            "`{backend}`"
+        );
+    }
+
+    let bare = escaped(
+        "escaped_bare",
+        r#"module demo::main;
+
+pub type Bare = | Oops;
+
+pub fn main() -> () raises Bare {
+  raise Bare::Oops
+}
+"#,
+    );
+    for (backend, code, err) in bare {
+        assert_eq!(code, Some(1), "`{backend}`: {err}");
+        assert_eq!(
+            err,
+            format!("khora: `Bare` reached the entry point and nothing handled it\n{note}"),
+            "`{backend}`"
+        );
+    }
+
+    let noted = escaped(
+        "escaped_noted",
+        r#"module demo::main;
+import std::core::{Raised, Result, Show, attempt};
+
+derive(Show)
+pub type ShipError = | Embargo(country: String);
+
+fn step() -> Int raises ShipError { raise ShipError::Embargo("XX") }
+
+pub fn main() -> () raises ShipError {
+  match attempt(fn () => step()!) {
+    Result::Ok(_) => (),
+    Result::Err(e) => raise Raised::context(e, "shipping order 42"),
+  }
+}
+"#,
+    );
+    for (backend, code, err) in noted {
+        assert_eq!(code, Some(1), "`{backend}`: {err}");
+        assert_eq!(
+            err,
+            format!(
+                "khora: `ShipError` reached the entry point and nothing handled it\n\
+                 {note}failure: shipping order 42: ShipError::Embargo(XX)\n"
+            ),
+            "`{backend}`"
+        );
+    }
+}
+
+/// **A `Show` that traps still leaves the name of what reached `main`.**
+///
+/// The name is written, and flushed, before the type's `Show` runs. A `Show`
+/// is user code: one that overflowed ended the program with only the trap's
+/// own line, and the fact that mattered -- which error nobody handled -- was
+/// never printed. The trap's exit status is the trap's; the line before it is
+/// the one this guards.
+#[test]
+fn an_error_whose_show_traps_is_still_named() {
+    let out = escaped(
+        "escaped_show_traps",
+        r#"module demo::main;
+import std::core::{Show};
+
+pub type Boom = | Bang(n: Int);
+
+impl Show for Boom {
+  fn show(self) -> String { match self { Boom::Bang(n) => "${n + 9223372036854775800}" } }
+}
+
+pub fn main() -> () raises Boom { raise Boom::Bang(100) }
+"#,
+    );
+    for (backend, code, err) in out {
+        assert_ne!(code, Some(0), "`{backend}`: {err}");
+        assert!(
+            err.starts_with("khora: `Boom` reached the entry point and nothing handled it\n"),
+            "`{backend}`: the name line first, before the `Show` ran:\n{err}"
+        );
+        assert!(err.contains("overflowed"), "`{backend}`: the trap's own line too:\n{err}");
+    }
+}
+
+/// **The value is one line, however its `Show` reads, and a bounded one.**
+///
+/// The value comes from user data -- a host out of a request, a body -- and
+/// went to standard error as written: a newline in it forged a second
+/// `khora:` line in a log, an escape sequence drove the terminal, and a
+/// 4 MB value was printed whole. Control characters are written as escapes
+/// and the value is cut at 4096 bytes, saying how much more there was.
+#[test]
+fn an_escaped_value_is_one_bounded_line() {
+    let note = "note: `main` has nowhere to hand an error, so the program ends here with \
+                status 1. Catch it in `main`, or return a `Result`\n";
+
+    let controls = escaped(
+        "escaped_controls",
+        r#"module demo::main;
+import std::core::{Show};
+
+derive(Show)
+pub type HostError = | Unresolved(host: String);
+
+pub fn main() -> () raises HostError {
+  raise HostError::Unresolved("evil.example\nkhora: all good\r\u{1b}[2J\u{7f}\tend")
+}
+"#,
+    );
+    for (backend, code, err) in controls {
+        assert_eq!(code, Some(1), "`{backend}`: {err}");
+        assert_eq!(
+            err,
+            format!(
+                "khora: `HostError` reached the entry point and nothing handled it\n  \
+                 value: HostError::Unresolved(evil.example\\nkhora: all good\\r\\u{{1b}}[2J\\u{{7f}}\tend)\n{note}"
+            ),
+            "`{backend}`"
+        );
+    }
+
+    let huge = escaped(
+        "escaped_huge",
+        r#"module demo::main;
+import std::core::{Show};
+
+derive(Show)
+pub type Huge = | Body(text: String);
+
+fn grow(s: String, n: Int) -> String { if n == 0 { s } else { grow("${s}${s}", n - 1) } }
+
+pub fn main() -> () raises Huge { raise Huge::Body(grow("é", 19)) }
+"#,
+    );
+    // `Huge::Body(` is 11 bytes, then 524288 two-byte characters and `)`:
+    // 1048588 bytes. Byte 4096 is the first half of a character, so the cut
+    // is made one byte earlier, at 4095 (11 + 2042 characters), and says
+    // 1048588 - 4095 bytes more.
+    let kept = format!("Huge::Body({}", "é".repeat(2042));
+    assert_eq!(kept.len(), 4095);
+    for (backend, code, err) in huge {
+        assert_eq!(code, Some(1), "`{backend}`: {} bytes", err.len());
+        let expected = format!(
+            "khora: `Huge` reached the entry point and nothing handled it\n  \
+             value: {kept}… ({} bytes more)\n{note}",
+            1_048_588 - 4095
+        );
+        assert!(err == expected, "`{backend}`: {} bytes of stderr, expected {}", err.len(), expected.len());
+    }
 }

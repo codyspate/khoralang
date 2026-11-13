@@ -1,6 +1,6 @@
 module std::net::tls;
 
-import std::core::{Array, Option, Ptr, Region, Scope, Share, acquire};
+import std::core::{Array, Eq, Option, Ptr, Region, Scope, Share, Show, acquire};
 import std::permissions::{may_dial, unbracketed};
 import std::permissions::grants::{network};
 
@@ -37,6 +37,7 @@ extern fn khora_tls_client_open(extra: Ptr, extra_len: Int) -> Ptr;
 extern fn khora_tls_client_close(client: Ptr) -> ();
 extern fn khora_tls_connect(client: Ptr, host: Ptr, host_len: Int, port: Int, deadline: Int, why: Ptr) -> Ptr;
 extern fn khora_tls_expired(connection: Ptr) -> I32;
+extern fn khora_tls_timed_out(connection: Ptr) -> I32;
 extern fn khora_tls_set_deadline(connection: Ptr, deadline: Int) -> I32;
 extern fn khora_tls_connect_over(client: Ptr, socket: Int, host: Ptr, host_len: Int, deadline: Int, why: Ptr) -> Ptr;
 extern fn khora_tls_read_now(connection: Ptr, into: Ptr, length: Int) -> Int;
@@ -47,6 +48,10 @@ extern fn khora_tls_read_now(connection: Ptr, into: Ptr, length: Int) -> Int;
 /// written for somebody debugging a handshake; what a Khora program can *do*
 /// about a failure is fix the certificate, fix the key, drop the client, or
 /// give up on the host -- and only that last one needs to say which host.
+///
+/// `${e}` prints a case as `TlsError::Unreachable(example.com)`, and `==`
+/// compares cases and what they carry.
+derive(Show, Eq)
 pub type TlsError =
   /// The certificate chain was not readable PEM, or was empty.
   | BadCertificate
@@ -253,6 +258,13 @@ pub fn set_deadline(connection: TlsConnection, deadline: Int) -> Bool {
 /// on this connection: `std::net::socket::expired`, for a session.
 pub fn expired(connection: TlsConnection) -> Bool {
   khora_tls_expired(connection.session) == I32::of(1)
+}
+
+/// Whether a limit is what ended a read or write on this connection, the
+/// per-read limit from [`set_receive_timeout`] or the deadline from
+/// [`set_deadline`]: `std::net::socket::timed_out`, for a session.
+pub fn timed_out(connection: TlsConnection) -> Bool {
+  khora_tls_timed_out(connection.session) == I32::of(1)
 }
 
 /// Says goodbye properly, then closes the socket.

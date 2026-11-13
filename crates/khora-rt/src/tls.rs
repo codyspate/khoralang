@@ -552,11 +552,11 @@ pub unsafe extern "C" fn khora_tls_connect_over(
     };
 
     let mut stream = adopt(socket);
-    let (was_by, was_expired) = crate::net::deadline_of(stream.0);
+    let (was_by, was_expired, was_ran_out) = crate::net::deadline_of(stream.0);
     crate::net::khora_net_set_deadline(stream.0, at);
     let shook = connection.complete_io(&mut stream);
     let ran_out = crate::net::khora_net_expired(stream.0) != 0;
-    crate::net::put_deadline(stream.0, was_by, was_expired);
+    crate::net::put_deadline(stream.0, was_by, was_expired, was_ran_out);
     if shook.is_err() || crate::current::current(|f| f.gives_up_waiting()) {
         if !why.is_null() {
             let cause = match &shook {
@@ -642,6 +642,26 @@ pub unsafe extern "C" fn khora_tls_expired(connection: *mut u8) -> i32 {
     // SAFETY: per the contract above.
     let secured = unsafe { &*connection.cast::<Secured>() };
     crate::net::khora_net_expired(secured.socket())
+}
+
+/// Whether a read or write on this session gave up because a limit passed
+/// -- the per-read limit from [`khora_tls_set_timeout`] or the deadline from
+/// [`khora_tls_set_deadline`] -- 1 if so, 0 if not, or for a null
+/// connection: `crate::net::khora_net_timed_out`, for a session.
+///
+/// # Safety
+///
+/// `connection` must be null or have come from [`khora_tls_accept`] or
+/// [`khora_tls_connect`].
+#[unsafe(no_mangle)]
+// SHARE: a runtime-owned TLS object, not a Khora value.
+pub unsafe extern "C" fn khora_tls_timed_out(connection: *mut u8) -> i32 {
+    if connection.is_null() {
+        return 0;
+    }
+    // SAFETY: per the contract above.
+    let secured = unsafe { &*connection.cast::<Secured>() };
+    crate::net::khora_net_timed_out(secured.socket())
 }
 
 /// How long a read on this session may wait before it reports a timeout.

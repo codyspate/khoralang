@@ -53,6 +53,7 @@ extern fn khora_net_forget(handle: I32) -> ();
 extern fn khora_net_connect(host: Ptr, host_len: Int, port: Int, deadline: Int) -> Int;
 extern fn khora_net_set_deadline(handle: I32, deadline: Int) -> I32;
 extern fn khora_net_expired(handle: I32) -> I32;
+extern fn khora_net_timed_out(handle: I32) -> I32;
 extern fn khora_net_close(handle: I32) -> I32;
 extern fn khora_net_local_port(handle: I32) -> Int;
 extern fn khora_net_peer_port(handle: I32) -> Int;
@@ -221,6 +222,18 @@ pub fn set_deadline(handle: Int, deadline: Int) -> Bool {
 /// the deadline is set again.
 pub fn expired(handle: Int) -> Bool {
   khora_net_expired(I32::of(handle)) == I32::of(1)
+}
+
+/// Whether a limit is what ended a read or write on this connection: the
+/// per-read limit from [`set_receive_timeout`] or the deadline from
+/// [`set_deadline`].
+///
+/// [`expired`] answers for the deadline alone. A connection held to a
+/// per-read limit and nothing else needs this one to tell that limit running
+/// out from a peer that closed or reset, which are a negative read too.
+/// Setting either limit again starts the account again.
+pub fn timed_out(handle: Int) -> Bool {
+  khora_net_timed_out(I32::of(handle)) == I32::of(1)
 }
 
 /// Reads what has arrived into `buffer`, and says how many bytes that was.

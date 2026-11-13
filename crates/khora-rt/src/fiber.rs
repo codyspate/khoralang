@@ -1433,11 +1433,22 @@ impl Deadlines {
         drop(taken);
     }
 
-    /// How many deadlines are pending. For the leak tests.
+    /// Whether the deadline recorded under `id` is still pending.
+    ///
+    /// **What a test asks instead of a count.** The list is one per process,
+    /// and every other test running at the same moment adds to it and takes
+    /// from it, so `len() == before + 1` fails whenever a neighbor's scope
+    /// opens or closes in between: `left: 2, right: 3` on arm64 CI. An id is
+    /// never reused, so this answer is about this test's entry alone. A walk
+    /// of the whole list, which a test can afford.
     #[cfg(test)]
-    pub(crate) fn len() -> usize {
-        Deadlines::get().map_or(0, |list| {
-            list.pending.lock().unwrap_or_else(|e| e.into_inner()).len()
+    pub(crate) fn contains(id: u64) -> bool {
+        Deadlines::get().is_some_and(|list| {
+            list.pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .keys()
+                .any(|&(_, held)| held == id)
         })
     }
 

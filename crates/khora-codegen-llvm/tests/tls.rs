@@ -330,6 +330,53 @@ pub fn main() -> () {
     assert!(said.contains("refused the certificate"), "the program said: {said}");
 }
 
+/// **A `TlsError` can be printed and compared**, every case of it.
+///
+/// Without `Show` a program that caught one could not log it -- a `${e}`
+/// hole was a compile error -- and without `Eq` it could not ask whether it
+/// was `TimedOut` except by writing a `match`. `SocketError`, which a
+/// `TlsError` usually stands in front of, has both.
+#[test]
+fn a_tls_error_is_shown_and_compared() {
+    let program = r#"module main;
+
+import std::core::{print};
+import std::net::tls::{TlsError};
+
+fn say(e: TlsError) -> () {
+  print("${e} ${e == e} ${e == TlsError::Handshake} ${e != TlsError::Denied("h:1")}");
+}
+
+pub fn main() -> () {
+  say(TlsError::BadCertificate);
+  say(TlsError::BadKey);
+  say(TlsError::Handshake);
+  say(TlsError::Unreachable("example.com"));
+  say(TlsError::TimedOut);
+  say(TlsError::Denied("h:1"));
+  print("${TlsError::Unreachable("a") == TlsError::Unreachable("a")} ${TlsError::Unreachable("a") == TlsError::Unreachable("b")}");
+}
+"#;
+    let mut child = start("tls_error_show_eq", program);
+    let stdout = child.stdout.take().expect("a piped stdout");
+    let mut said = String::new();
+    for line in BufReader::new(stdout).lines() {
+        said.push_str(&line.expect("a line"));
+        said.push('\n');
+    }
+    let _ = child.wait();
+    assert_eq!(
+        said,
+        "TlsError::BadCertificate true false true\n\
+         TlsError::BadKey true false true\n\
+         TlsError::Handshake true true true\n\
+         TlsError::Unreachable(example.com) true false true\n\
+         TlsError::TimedOut true false true\n\
+         TlsError::Denied(h:1) true false false\n\
+         true false\n"
+    );
+}
+
 const BOTH_ENDS: &str = r#"module main;
 
 import std::core::{Array, Fiber, Raised, Result, Scope, attempt, print};

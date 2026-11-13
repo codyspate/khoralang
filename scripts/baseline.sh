@@ -108,6 +108,10 @@ sh "$root/scripts/no-bare-unsafe.sh"
 sh "$root/scripts/check-share.sh"
 sh "$root/scripts/check-readiness.sh"
 sh "$root/scripts/check-claims.sh"
+# A test helper compiled where none of its callers is: dead code there, and a
+# clippy failure on the one runner that builds that configuration.
+python3 "$root/scripts/cfg-callers.py" --self-test
+python3 "$root/scripts/cfg-callers.py"
 
 step 'the runtime archive the suite links against'
 # **The gate could not run on a clean clone, and said the opposite.** The note
